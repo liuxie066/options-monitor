@@ -1,16 +1,12 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
+from collections import Counter
 from datetime import date, datetime, timezone
 import json
+import multiprocessing
 from pathlib import Path
 import time
-from typing import Any, Iterator
-
-try:
-    import fcntl
-except Exception:  # pragma: no cover - non-POSIX fallback
-    fcntl = None
+from typing import Any, Callable
 
 from domain.domain.tool_boundary import SCHEMA_VERSION_V1, normalize_tool_execution_payload
 from domain.services import (
@@ -26,6 +22,7 @@ from src.application.config_sections import (
     resolve_watchlist_config,
 )
 from src.application.config_profiles import apply_profiles
+from src.application.account_run import build_account_runtime_config
 from src.application.earnings_calendar import (
     earnings_calendar_scan_date,
     prefetch_market_earnings_calendars,
@@ -62,18 +59,25 @@ from src.application.required_data_plan_identity import (
     build_required_data_expected_fetch_contract,
 )
 from src.application.required_data_prefetch_planning import (
+    build_cross_account_prefetch_config,
     build_prefetch_budget_plan,
     build_prefetch_symbol_plan,
     estimate_prefetch_option_chain_calls,
     required_data_plan_id,
+)
+from src.application.option_chain_fetching import (
+    OptionChainFetchRequest,
+    fetch_option_chains,
 )
 from src.application.combo_yield_config import (
     derive_combo_yield_policy,
     resolve_combo_yield_cfg,
 )
 from src.infrastructure.futu_gateway_pool import ThreadLocalFutuGatewayPool
+from src.infrastructure.futu_gateway import retry_futu_gateway_call
 from src.infrastructure.io_utils import has_shared_required_data as _has_shared_required_data
 from src.infrastructure.opend_retcodes import classify_opend_error
+from src.infrastructure.private_storage import exclusive_private_file_lock
 
 
 _gateway_pool = ThreadLocalFutuGatewayPool()
@@ -1184,18 +1188,408 @@ def _has_option_chain_rate_limit(items: list[dict[str, Any]]) -> bool:
     return False
 
 
-@contextmanager
-def _required_data_prefetch_file_lock(base: Path) -> Iterator[None]:
-    lock_path = Path(base) / "output_shared" / "state" / "required_data_prefetch.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+", encoding="utf-8") as lock_fp:
-        if fcntl is not None:
-            fcntl.flock(lock_fp.fileno(), fcntl.LOCK_EX)
+def _opening_chain_warmup_summary(
+    *,
+    next_formal_target_utc: str,
+    worker_stop_at_utc: str,
+    lock_release_by_utc: str,
+) -> dict[str, Any]:
+    return {
+        "status": "not_applicable",
+        "next_formal_target_utc": next_formal_target_utc,
+        "worker_stop_at_utc": worker_stop_at_utc,
+        "lock_release_by_utc": lock_release_by_utc,
+        "planned_shards": 0,
+        "cache_hit_shards": 0,
+        "fetched_shards": 0,
+        "failed_shards": 0,
+        "deadline_skipped_shards": 0,
+        "planned_symbols": 0,
+        "completed_symbols": 0,
+        "option_chain_opend_calls": 0,
+        "option_chain_rate_gate_wait_ms": 0,
+        "option_contract_snapshot_requested_codes": 0,
+        "child_terminated": False,
+        "duration_ms": 0,
+        "reason_codes": [],
+    }
+
+
+def _warm_required_data_chain_cache_inprocess(
+    *,
+    base: Path,
+    base_cfg: dict[str, Any],
+    cfg_path: Path,
+    accounts: list[str],
+    markets_to_run: list[str],
+    symbols_arg: str | None,
+    next_formal_target_utc: str,
+    worker_stop_at_utc: str,
+    lock_release_by_utc: str,
+    progress_fn: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    started = time.monotonic()
+    summary = _opening_chain_warmup_summary(
+        next_formal_target_utc=next_formal_target_utc,
+        worker_stop_at_utc=worker_stop_at_utc,
+        lock_release_by_utc=lock_release_by_utc,
+    )
+    try:
+        stop_at = datetime.fromisoformat(worker_stop_at_utc.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        stop_at = None
+    if stop_at is None or stop_at.tzinfo is None:
+        summary["status"] = "degraded"
+        summary["reason_codes"] = ["invalid_worker_deadline"]
+        return summary
+    remaining_at_start = max(
+        0.0,
+        (stop_at - datetime.now(timezone.utc)).total_seconds(),
+    )
+    stop_monotonic = started + remaining_at_start
+
+    def publish_progress() -> None:
+        summary["duration_ms"] = max(0, int((time.monotonic() - started) * 1000))
+        if progress_fn is not None:
+            progress_fn(dict(summary))
+
+    def add_reason(code: str) -> None:
+        reasons = summary["reason_codes"]
+        if code not in reasons and len(reasons) < 8:
+            reasons.append(code)
+
+    account_ids = list(
+        dict.fromkeys(
+            str(account or "").strip().lower()
+            for account in accounts
+            if str(account or "").strip()
+        )
+    )
+    if not account_ids:
+        add_reason("invalid_account_scope")
+        summary["status"] = "degraded"
+        publish_progress()
+        return summary
+
+    try:
+        account_configs = {
+            account: build_account_runtime_config(
+                base_cfg=base_cfg,
+                cfg_path=cfg_path,
+                account=account,
+                markets_to_run=markets_to_run,
+                symbols_arg=symbols_arg,
+            )
+            for account in account_ids
+        }
+        union_cfg = build_cross_account_prefetch_config(
+            base_config=base_cfg,
+            account_configs=account_configs,
+            prepared_portfolio_contexts={},
+        )
+        profiles = resolve_templates_config(union_cfg)
+        symbol_plan = build_prefetch_symbol_plan(
+            [
+                apply_profiles(item, profiles)
+                for item in resolve_watchlist_config(union_cfg)
+                if isinstance(item, dict) and item.get("symbol")
+            ]
+        )
+        opend_fetch_cfg = _resolve_opend_fetch_cfg(union_cfg)
+        flat_opend_cfg = _flat_opend_fetch_config(opend_fetch_cfg)
+        expiration_discovery_cache: dict[tuple[Any, ...], Any] = {}
+        spot_observation_cache: dict[tuple[Any, ...], Any] = {}
+        shared_required = Path(base) / "output_shared" / "required_data"
+        tasks: list[tuple[str, Any, Any, str]] = []
+        for symbol_cfg in symbol_plan.symbol_cfgs:
+            fetch_plan = _build_prefetch_fetch_plan(
+                symbol_cfg,
+                base=base,
+                shared_required=shared_required,
+                opend_fetch_cfg=opend_fetch_cfg,
+                expiration_discovery_cache=expiration_discovery_cache,
+                spot_observation_cache=spot_observation_cache,
+            )
+            if fetch_plan.projection_outcome == "success_empty":
+                continue
+            if fetch_plan.projection_outcome != "success_rows":
+                raise RuntimeError(
+                    f"plan_projection_{fetch_plan.projection_outcome or 'invalid'}"
+                )
+            identity = resolve_symbol_identity(fetch_plan.symbol)
+            if identity is None:
+                raise RuntimeError("symbol_identity_unavailable")
+            for spec in fetch_plan.merged_specs:
+                request = build_fetch_request_from_spec(
+                    spec=spec,
+                    chain_cache=True,
+                    chain_cache_force_refresh=False,
+                    opend_fetch_config=flat_opend_cfg,
+                    spot_override=fetch_plan.spot_reference,
+                    underlier_observation=(
+                        fetch_plan.underlier_observation.to_dict()
+                        if fetch_plan.underlier_observation is not None
+                        else None
+                    ),
+                    fetch_spot_if_missing=False,
+                )
+                for expiration in request.explicit_expirations or []:
+                    tasks.append((fetch_plan.symbol, request, identity, expiration))
+    except Exception as exc:
+        code = str(exc).strip()
+        add_reason(code if code.startswith("plan_") or code == "symbol_identity_unavailable" else "plan_error")
+        summary["status"] = "degraded"
+        publish_progress()
+        return summary
+
+    planned_symbols = {symbol for symbol, _request, _identity, _expiration in tasks}
+    remaining_by_symbol = Counter(task[0] for task in tasks)
+    completed_symbols: set[str] = set()
+    summary["planned_shards"] = len(tasks)
+    summary["planned_symbols"] = len(planned_symbols)
+    publish_progress()
+    if not tasks:
+        return summary
+
+    gateway_pool = ThreadLocalFutuGatewayPool()
+    try:
+        for index, (symbol, request, identity, expiration) in enumerate(tasks):
+            remaining = stop_monotonic - time.monotonic()
+            if remaining <= 0:
+                summary["deadline_skipped_shards"] = len(tasks) - index
+                summary["status"] = "deadline_reached"
+                add_reason("worker_deadline_reached")
+                publish_progress()
+                break
+            try:
+                gateway = gateway_pool.get_gateway(
+                    host=request.host,
+                    port=request.port,
+                    chain_cache=True,
+                )
+                result = fetch_option_chains(
+                    gateway=gateway,
+                    request=OptionChainFetchRequest(
+                        symbol=request.symbol,
+                        underlier_code=identity.futu_code,
+                        expirations=[expiration],
+                        host=request.host,
+                        port=request.port,
+                        option_types=request.option_types,
+                        strike_windows=request.side_strike_windows,
+                        base_dir=base,
+                        asof_date=request.trading_date,
+                        freshness_policy="cache_first",
+                        chain_cache=True,
+                        max_wait_sec=min(float(request.max_wait_sec), max(0.0, remaining)),
+                        window_sec=float(request.option_chain_window_sec),
+                        max_calls=int(request.option_chain_max_calls),
+                        no_retry=True,
+                    ),
+                    retry_call=retry_futu_gateway_call,
+                )
+                summary["option_chain_opend_calls"] += int(result.opend_call_count)
+                summary["option_chain_rate_gate_wait_ms"] += max(
+                    0,
+                    int(float(result.rate_gate_wait_sec) * 1000),
+                )
+                shard_status = str(result.expiration_statuses.get(expiration) or "")
+                if shard_status == "cache":
+                    summary["cache_hit_shards"] += 1
+                elif shard_status == "fetched":
+                    summary["fetched_shards"] += 1
+                else:
+                    summary["failed_shards"] += 1
+                    add_reason(
+                        "chain_stale_cache"
+                        if shard_status == "stale_cache"
+                        else "chain_empty"
+                        if shard_status == "empty"
+                        else f"chain_{str(result.error_code or 'failed').strip().lower()}"
+                    )
+                if result.opend_call_count:
+                    if result.source_outcome in {"success_rows", "success_empty"}:
+                        gateway_pool.mark_success()
+                    elif result.errors:
+                        gateway_pool.mark_failure(result.to_meta())
+            except Exception as exc:
+                summary["failed_shards"] += 1
+                add_reason("chain_fetch_failed")
+                gateway_pool.mark_failure(exc)
+            remaining_by_symbol[symbol] -= 1
+            if remaining_by_symbol[symbol] == 0:
+                completed_symbols.add(symbol)
+                summary["completed_symbols"] = len(completed_symbols)
+            publish_progress()
+    finally:
+        gateway_pool.close_registered()
+
+    if summary["status"] != "deadline_reached":
+        summary["status"] = "degraded" if summary["failed_shards"] else "ready"
+    publish_progress()
+    return summary
+
+
+def _warm_required_data_chain_cache_child(
+    send_conn: Any,
+    kwargs: dict[str, Any],
+) -> None:
+    def send(summary: dict[str, Any], *, final: bool = False) -> None:
         try:
-            yield
-        finally:
-            if fcntl is not None:
-                fcntl.flock(lock_fp.fileno(), fcntl.LOCK_UN)
+            send_conn.send({"summary": summary, "final": final})
+        except Exception:
+            pass
+
+    try:
+        with exclusive_private_file_lock(
+            Path(kwargs["base"])
+            / "output_shared"
+            / "state"
+            / "required_data_prefetch.lock"
+        ):
+            summary = _warm_required_data_chain_cache_inprocess(
+                **kwargs,
+                progress_fn=send,
+            )
+        send(summary, final=True)
+    except BaseException as exc:
+        summary = _opening_chain_warmup_summary(
+            next_formal_target_utc=str(kwargs["next_formal_target_utc"]),
+            worker_stop_at_utc=str(kwargs["worker_stop_at_utc"]),
+            lock_release_by_utc=str(kwargs["lock_release_by_utc"]),
+        )
+        summary["status"] = "degraded"
+        summary["reason_codes"] = [f"child_{type(exc).__name__.lower()}"]
+        send(summary, final=True)
+    finally:
+        try:
+            send_conn.close()
+        except Exception:
+            pass
+
+
+def warm_required_data_chain_cache(
+    *,
+    base: Path,
+    base_cfg: dict[str, Any],
+    cfg_path: Path,
+    accounts: list[str],
+    markets_to_run: list[str],
+    symbols_arg: str | None,
+    next_formal_target_utc: str,
+    worker_stop_at_utc: str,
+    lock_release_by_utc: str,
+) -> dict[str, Any]:
+    started = time.monotonic()
+    summary = _opening_chain_warmup_summary(
+        next_formal_target_utc=next_formal_target_utc,
+        worker_stop_at_utc=worker_stop_at_utc,
+        lock_release_by_utc=lock_release_by_utc,
+    )
+    try:
+        stop_at = datetime.fromisoformat(worker_stop_at_utc.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        stop_at = None
+    if stop_at is None or stop_at.tzinfo is None:
+        summary["status"] = "degraded"
+        summary["reason_codes"] = ["invalid_worker_deadline"]
+        return summary
+    wait_sec = max(0.0, (stop_at - datetime.now(timezone.utc)).total_seconds())
+    if wait_sec <= 0:
+        summary["status"] = "deadline_reached"
+        summary["reason_codes"] = ["worker_deadline_reached"]
+        return summary
+
+    ctx = multiprocessing.get_context("spawn")
+    recv_conn, send_conn = ctx.Pipe(duplex=False)
+    process = ctx.Process(
+        target=_warm_required_data_chain_cache_child,
+        args=(
+            send_conn,
+            {
+                "base": Path(base),
+                "base_cfg": dict(base_cfg),
+                "cfg_path": Path(cfg_path),
+                "accounts": list(accounts),
+                "markets_to_run": list(markets_to_run),
+                "symbols_arg": symbols_arg,
+                "next_formal_target_utc": next_formal_target_utc,
+                "worker_stop_at_utc": worker_stop_at_utc,
+                "lock_release_by_utc": lock_release_by_utc,
+            },
+        ),
+        daemon=True,
+    )
+    stop_monotonic = started + wait_sec
+    try:
+        process.start()
+    except Exception as exc:
+        recv_conn.close()
+        send_conn.close()
+        summary["status"] = "degraded"
+        summary["reason_codes"] = [f"child_start_{type(exc).__name__.lower()}"]
+        summary["duration_ms"] = max(0, int((time.monotonic() - started) * 1000))
+        return summary
+    send_conn.close()
+    final_received = False
+
+    def unfinished_shard_count() -> int:
+        return max(
+            0,
+            int(summary.get("planned_shards") or 0)
+            - int(summary.get("cache_hit_shards") or 0)
+            - int(summary.get("fetched_shards") or 0)
+            - int(summary.get("failed_shards") or 0)
+            - int(summary.get("deadline_skipped_shards") or 0),
+        )
+
+    child_survived_kill = False
+    try:
+        while process.is_alive():
+            remaining = stop_monotonic - time.monotonic()
+            if remaining <= 0:
+                break
+            if recv_conn.poll(min(0.2, remaining)):
+                envelope = recv_conn.recv()
+                if isinstance(envelope, dict) and isinstance(envelope.get("summary"), dict):
+                    summary = dict(envelope["summary"])
+                    final_received = bool(envelope.get("final"))
+        while recv_conn.poll():
+            envelope = recv_conn.recv()
+            if isinstance(envelope, dict) and isinstance(envelope.get("summary"), dict):
+                summary = dict(envelope["summary"])
+                final_received = bool(envelope.get("final"))
+    except (EOFError, OSError):
+        pass
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=2.0)
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=2.0)
+                child_survived_kill = process.is_alive()
+            summary["child_terminated"] = True
+            summary["status"] = "deadline_reached"
+            summary["deadline_skipped_shards"] += unfinished_shard_count()
+            reasons = list(summary.get("reason_codes") or [])
+            if "worker_deadline_reached" not in reasons:
+                reasons.append("worker_deadline_reached")
+            summary["reason_codes"] = reasons[:8]
+        else:
+            process.join(timeout=0.2)
+            if not final_received:
+                summary["status"] = "degraded"
+                summary["failed_shards"] += unfinished_shard_count()
+                reasons = list(summary.get("reason_codes") or [])
+                if "child_failed" not in reasons:
+                    reasons.append("child_failed")
+                summary["reason_codes"] = reasons[:8]
+        recv_conn.close()
+    if child_survived_kill:
+        raise RuntimeError("opening chain warm-up child survived kill")
+    summary["duration_ms"] = max(0, int((time.monotonic() - started) * 1000))
+    return summary
 
 
 def prefetch_required_data(
@@ -1209,7 +1603,9 @@ def prefetch_required_data(
     producer_run_id: str | None = None,
     scan_at_utc: datetime | None = None,
 ) -> dict[str, Any]:
-    with _required_data_prefetch_file_lock(base):
+    with exclusive_private_file_lock(
+        Path(base) / "output_shared" / "state" / "required_data_prefetch.lock"
+    ):
         return _prefetch_required_data_unlocked(
             vpy=vpy,
             base=base,

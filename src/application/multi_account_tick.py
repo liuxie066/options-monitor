@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 import json
 import os
 import sys
@@ -29,6 +30,9 @@ from src.application.multi_tick.project_guard import (
     apply_project_load_shed,
     record_project_failure,
     record_project_success,
+)
+from src.application.multi_tick.required_data_prefetch import (
+    warm_required_data_chain_cache,
 )
 from src.application.multi_tick.misc import (
     set_debug,
@@ -122,6 +126,80 @@ def _is_trading_day_guard_for_market(cfg: dict[str, Any], market: str) -> tuple[
         port=int(route.port),
         market=market_used,
     )
+
+
+def _opening_chain_warmup_context(
+    *,
+    trigger_kind: str,
+    scheduler_markets: list[str],
+    base_cfg: dict[str, Any],
+    scheduler_schedule_key: str,
+    account_ids: list[str],
+    scheduler_decisions_by_account: dict[str, dict[str, Any]],
+) -> dict[str, str] | None:
+    if trigger_kind != "scheduled" or scheduler_markets != ["US"]:
+        return None
+    schedule = base_cfg.get(scheduler_schedule_key)
+    if not isinstance(schedule, dict):
+        return None
+    try:
+        interval = int(schedule.get("cron_interval_min") or 10)
+    except (TypeError, ValueError):
+        return None
+    if interval <= 0:
+        return None
+
+    def aware(value: Any) -> datetime | None:
+        if not isinstance(value, str) or not value or value != value.strip():
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo is not None else None
+
+    targets: set[datetime] = set()
+    now_values: list[datetime] = []
+    for account in account_ids:
+        decision = scheduler_decisions_by_account.get(str(account).strip().lower())
+        if (
+            not isinstance(decision, dict)
+            or decision.get("in_run_window") is not True
+            or decision.get("should_run_scan") is not False
+        ):
+            return None
+        now_beijing = aware(decision.get("now_beijing"))
+        run_start = aware(decision.get("run_window_start_beijing"))
+        next_target = aware(decision.get("next_run_market"))
+        if (
+            now_beijing is None
+            or run_start is None
+            or next_target is None
+            or now_beijing < run_start
+            or now_beijing >= run_start + timedelta(minutes=interval)
+            or next_target <= now_beijing
+        ):
+            return None
+        now_values.append(now_beijing.astimezone(timezone.utc))
+        targets.add(next_target.astimezone(timezone.utc))
+    if len(targets) != 1:
+        return None
+
+    target = next(iter(targets))
+    lock_release_by = target - timedelta(seconds=120)
+    worker_stop_at = lock_release_by - timedelta(seconds=10)
+    now_utc = max(now_values)
+    if now_utc >= worker_stop_at:
+        return None
+
+    def canonical(value: datetime) -> str:
+        return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    return {
+        "next_formal_target_utc": canonical(target),
+        "worker_stop_at_utc": canonical(worker_stop_at),
+        "lock_release_by_utc": canonical(lock_release_by),
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -482,7 +560,15 @@ def main(argv: list[str] | None = None) -> int:
             )
             complete_tick_idempotency(status='skipped', message=str(reason_global or 'scheduler_skip_no_scan'))
             return 0
-        return run_tick_notification_flow(
+        warmup_context = _opening_chain_warmup_context(
+            trigger_kind=trigger_kind,
+            scheduler_markets=scheduler_markets,
+            base_cfg=base_cfg,
+            scheduler_schedule_key=str(scheduler_schedule_key),
+            account_ids=account_ids,
+            scheduler_decisions_by_account=scheduler_decisions_by_account,
+        )
+        notification_rc = run_tick_notification_flow(
             TickNotificationRequest(
                 base=base,
                 repo_root=repo_root,
@@ -508,6 +594,54 @@ def main(argv: list[str] | None = None) -> int:
                 trigger_kind=trigger_kind,
             )
         )
+        if notification_rc != 0 or warmup_context is None or smoke:
+            return notification_rc
+        try:
+            warmup_summary = warm_required_data_chain_cache(
+                base=base,
+                base_cfg=base_cfg,
+                cfg_path=cfg_path,
+                accounts=account_ids,
+                markets_to_run=markets_to_run,
+                symbols_arg=symbols_arg,
+                **warmup_context,
+            )
+        except Exception as exc:
+            warmup_summary = {
+                **warmup_context,
+                "status": "degraded",
+                "reason_codes": [f"supervisor_{type(exc).__name__.lower()}"],
+                "planned_shards": 0,
+                "cache_hit_shards": 0,
+                "fetched_shards": 0,
+                "failed_shards": 0,
+                "deadline_skipped_shards": 0,
+                "planned_symbols": 0,
+                "completed_symbols": 0,
+                "option_chain_opend_calls": 0,
+                "option_chain_rate_gate_wait_ms": 0,
+                "option_contract_snapshot_requested_codes": 0,
+                "child_terminated": False,
+                "duration_ms": 0,
+            }
+        observation_status = (
+            "ok"
+            if warmup_summary.get("status") in {"ready", "not_applicable"}
+            else "degraded"
+        )
+        runlog.safe_event(
+            "opening_chain_warmup",
+            observation_status,
+            data=_safe_runlog_data(warmup_summary),
+        )
+        audit_helper.audit(
+            "prefetch",
+            "opening_chain_warmup",
+            run_id=run_id,
+            status=observation_status,
+            extra=warmup_summary,
+        )
+        return notification_rc
 
     workspace = prepare_tick_run_workspace(
         base=base,

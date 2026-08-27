@@ -1,15 +1,18 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
 import time
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
 from src.application.multi_tick import required_data_prefetch as mod
 from src.application.required_data_prefetch_planning import strategy_prefetch_kwargs
+from src.infrastructure.private_storage import exclusive_private_file_lock
 
 
 class _Gateway:
@@ -2550,3 +2553,272 @@ def test_strategy_prefetch_kwargs_requests_combo_put_and_call_when_sell_put_disa
     assert out["side_strike_windows"]["put"]["min_strike"] == 90.0
     assert out["side_strike_windows"]["put"]["max_strike"] == 96.0
     assert out["include_realized_volatility"] is True
+
+
+def test_opening_chain_warmup_reuses_exact_plan_and_accounts_for_each_shard(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    expirations = ["2026-09-18", "2026-10-16", "2026-11-20"]
+    requests = []
+
+    monkeypatch.setattr(mod, "build_account_runtime_config", lambda **kwargs: {"account": kwargs["account"]})
+    monkeypatch.setattr(
+        mod,
+        "build_cross_account_prefetch_config",
+        lambda **_kwargs: {"symbols": [{"symbol": "NVDA"}]},
+    )
+    monkeypatch.setattr(mod, "resolve_templates_config", lambda _cfg: {})
+    monkeypatch.setattr(mod, "resolve_watchlist_config", lambda cfg: cfg["symbols"])
+    monkeypatch.setattr(mod, "apply_profiles", lambda item, _profiles: item)
+    monkeypatch.setattr(
+        mod,
+        "build_prefetch_symbol_plan",
+        lambda _items: SimpleNamespace(symbol_cfgs=[{"symbol": "NVDA"}]),
+    )
+    monkeypatch.setattr(mod, "_resolve_opend_fetch_cfg", lambda _cfg: {})
+    monkeypatch.setattr(mod, "_flat_opend_fetch_config", lambda _cfg: {})
+    monkeypatch.setattr(
+        mod,
+        "_build_prefetch_fetch_plan",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            symbol="NVDA",
+            projection_outcome="success_rows",
+            merged_specs=[object()],
+            spot_reference=100.0,
+            underlier_observation=None,
+        ),
+    )
+    monkeypatch.setattr(
+        mod,
+        "build_fetch_request_from_spec",
+        lambda **_kwargs: SimpleNamespace(
+            symbol="NVDA",
+            host="127.0.0.1",
+            port=11111,
+            option_types="put,call",
+            side_strike_windows={"put": {"max_strike": 100.0}},
+            trading_date="2026-08-27",
+            max_wait_sec=30.0,
+            option_chain_window_sec=30.0,
+            option_chain_max_calls=10,
+            explicit_expirations=expirations,
+        ),
+    )
+    monkeypatch.setattr(
+        mod,
+        "resolve_symbol_identity",
+        lambda _symbol: SimpleNamespace(futu_code="US.NVDA"),
+    )
+
+    class Pool:
+        def get_gateway(self, **_kwargs):
+            return object()
+
+        def mark_success(self):
+            pass
+
+        def mark_failure(self, _error):
+            pass
+
+        def close_registered(self):
+            pass
+
+    monkeypatch.setattr(mod, "ThreadLocalFutuGatewayPool", Pool)
+
+    statuses = ["cache", "fetched", "stale_cache"]
+
+    def fetch_option_chains(*, request, **_kwargs):
+        requests.append(request)
+        expiration = request.expirations[0]
+        status = statuses[len(requests) - 1]
+        return SimpleNamespace(
+            opend_call_count=0 if status == "cache" else 1,
+            rate_gate_wait_sec=0.25 if status == "fetched" else 0.0,
+            expiration_statuses={expiration: status},
+            error_code="provider_error" if status == "stale_cache" else None,
+            source_outcome="provider_error" if status == "stale_cache" else "success_rows",
+            errors=[{"error_code": "provider_error"}] if status == "stale_cache" else [],
+            to_meta=lambda: {"status": status},
+        )
+
+    monkeypatch.setattr(mod, "fetch_option_chains", fetch_option_chains)
+    stop = (datetime.now(timezone.utc) + timedelta(seconds=30)).isoformat().replace("+00:00", "Z")
+
+    summary = mod._warm_required_data_chain_cache_inprocess(
+        base=tmp_path,
+        base_cfg={},
+        cfg_path=tmp_path / "config.us.json",
+        accounts=["lx", "sy"],
+        markets_to_run=["US"],
+        symbols_arg=None,
+        next_formal_target_utc=stop,
+        worker_stop_at_utc=stop,
+        lock_release_by_utc=stop,
+    )
+
+    assert [request.expirations for request in requests] == [[item] for item in expirations]
+    assert summary["status"] == "degraded"
+    assert summary["planned_shards"] == 3
+    assert summary["cache_hit_shards"] == 1
+    assert summary["fetched_shards"] == 1
+    assert summary["failed_shards"] == 1
+    assert summary["deadline_skipped_shards"] == 0
+    assert summary["option_contract_snapshot_requested_codes"] == 0
+    assert sum(summary[key] for key in (
+        "cache_hit_shards",
+        "fetched_shards",
+        "failed_shards",
+        "deadline_skipped_shards",
+    )) == summary["planned_shards"]
+
+
+def test_opening_chain_warmup_supervisor_stops_child_waiting_on_prefetch_lock(
+    tmp_path: Path,
+) -> None:
+    now = datetime.now(timezone.utc)
+    worker_stop = (now + timedelta(seconds=0.25)).isoformat().replace("+00:00", "Z")
+    target = (now + timedelta(seconds=130)).isoformat().replace("+00:00", "Z")
+    lock_release = (now + timedelta(seconds=120)).isoformat().replace("+00:00", "Z")
+    kwargs = {
+        "base": tmp_path,
+        "base_cfg": {"symbols": []},
+        "cfg_path": tmp_path / "config.us.json",
+        "accounts": ["lx"],
+        "markets_to_run": ["US"],
+        "symbols_arg": None,
+        "next_formal_target_utc": target,
+        "worker_stop_at_utc": worker_stop,
+        "lock_release_by_utc": lock_release,
+    }
+
+    lock_path = tmp_path / "output_shared" / "state" / "required_data_prefetch.lock"
+    with exclusive_private_file_lock(lock_path):
+        summary = mod.warm_required_data_chain_cache(**kwargs)
+
+    assert summary["status"] == "deadline_reached"
+    assert summary["child_terminated"] is True
+    assert "worker_deadline_reached" in summary["reason_codes"]
+    with exclusive_private_file_lock(lock_path):
+        pass
+
+
+def test_opening_chain_warmup_supervisor_collects_normal_child_final(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    stop = (datetime.now(timezone.utc) + timedelta(seconds=30)).isoformat().replace("+00:00", "Z")
+    final = mod._opening_chain_warmup_summary(
+        next_formal_target_utc=stop,
+        worker_stop_at_utc=stop,
+        lock_release_by_utc=stop,
+    )
+
+    messages = [{"summary": final, "final": True}]
+    receive = Mock()
+    receive.poll.side_effect = lambda *_args: bool(messages)
+    receive.recv.side_effect = lambda: messages.pop(0)
+    process = Mock()
+    process.is_alive.side_effect = [True, False, False]
+    context = SimpleNamespace(
+        Pipe=Mock(return_value=(receive, Mock())),
+        Process=Mock(return_value=process),
+    )
+    monkeypatch.setattr(mod.multiprocessing, "get_context", lambda _mode: context)
+
+    summary = mod.warm_required_data_chain_cache(
+        base=tmp_path,
+        base_cfg={"symbols": []},
+        cfg_path=tmp_path / "config.us.json",
+        accounts=["lx"],
+        markets_to_run=["US"],
+        symbols_arg=None,
+        next_formal_target_utc=stop,
+        worker_stop_at_utc=stop,
+        lock_release_by_utc=stop,
+    )
+
+    assert summary["status"] == "not_applicable"
+    assert summary["child_terminated"] is False
+    assert summary["reason_codes"] == []
+
+
+def test_opening_chain_warmup_supervisor_accounts_for_child_crash(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    progress = mod._opening_chain_warmup_summary(
+        next_formal_target_utc="2026-08-27T14:40:00Z",
+        worker_stop_at_utc="2026-08-27T14:37:50Z",
+        lock_release_by_utc="2026-08-27T14:38:00Z",
+    )
+    progress.update({
+        "planned_shards": 4,
+        "cache_hit_shards": 1,
+        "deadline_skipped_shards": 1,
+    })
+
+    messages = [{"summary": progress, "final": False}]
+    receive = Mock()
+    receive.poll.side_effect = lambda *_args: bool(messages)
+    receive.recv.side_effect = lambda: messages.pop(0)
+    process = Mock()
+    process.is_alive.side_effect = [True, False, False]
+    context = SimpleNamespace(
+        Pipe=Mock(return_value=(receive, Mock())),
+        Process=Mock(return_value=process),
+    )
+    monkeypatch.setattr(mod.multiprocessing, "get_context", lambda _mode: context)
+    stop = (datetime.now(timezone.utc) + timedelta(seconds=30)).isoformat().replace("+00:00", "Z")
+
+    summary = mod.warm_required_data_chain_cache(
+        base=tmp_path,
+        base_cfg={"symbols": []},
+        cfg_path=tmp_path / "config.us.json",
+        accounts=["lx"],
+        markets_to_run=["US"],
+        symbols_arg=None,
+        next_formal_target_utc=stop,
+        worker_stop_at_utc=stop,
+        lock_release_by_utc=stop,
+    )
+
+    assert summary["status"] == "degraded"
+    assert summary["failed_shards"] == 2
+    assert summary["deadline_skipped_shards"] == 1
+    assert "child_failed" in summary["reason_codes"]
+    assert sum(summary[key] for key in (
+        "cache_hit_shards",
+        "fetched_shards",
+        "failed_shards",
+        "deadline_skipped_shards",
+    )) == summary["planned_shards"]
+
+
+def test_opening_chain_warmup_supervisor_rejects_child_that_survives_kill(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    receive = Mock()
+    receive.poll.return_value = False
+    process = Mock()
+    process.is_alive.return_value = True
+    context = SimpleNamespace(
+        Pipe=Mock(return_value=(receive, Mock())),
+        Process=Mock(return_value=process),
+    )
+    monkeypatch.setattr(mod.multiprocessing, "get_context", lambda _mode: context)
+    stop = (datetime.now(timezone.utc) + timedelta(seconds=0.01)).isoformat().replace("+00:00", "Z")
+
+    with pytest.raises(RuntimeError, match="child survived kill"):
+        mod.warm_required_data_chain_cache(
+            base=tmp_path,
+            base_cfg={"symbols": []},
+            cfg_path=tmp_path / "config.us.json",
+            accounts=["lx"],
+            markets_to_run=["US"],
+            symbols_arg=None,
+            next_formal_target_utc=stop,
+            worker_stop_at_utc=stop,
+            lock_release_by_utc=stop,
+        )
