@@ -374,7 +374,7 @@ def build_formal_point_time_coherence(
         normalized = row.get("normalized_input") if isinstance(row, Mapping) else None
         try:
             timestamps.append(
-                _strict_timestamp(
+                _canonical_timestamp(
                     normalized.get("snapshot_received_at_utc")
                     if isinstance(normalized, Mapping)
                     else None,

@@ -25,6 +25,7 @@ from src.application.recommendation_point import (
     RECOMMENDATION_POINT_SCHEMA_V2,
     RECOMMENDATION_POINT_SCHEMA_V3,
     RecommendationPointError,
+    build_formal_point_time_coherence,
     build_recommendation_point,
     build_recommendation_point_id,
     capture_scheduled_recommendation_point,
@@ -128,6 +129,83 @@ def _prepared_option_receipt(
         "manifest_bytes": _canonical_bytes(manifest),
         "payload_bytes": payload_bytes,
     }
+
+
+def test_formal_point_time_coherence_canonicalizes_aware_candidate_timestamp() -> None:
+    opening = {
+        "candidate_decisions": [
+            {
+                "normalized_input": {
+                    "snapshot_received_at_utc": "2026-07-21T10:00:00-04:00",
+                }
+            }
+        ]
+    }
+    required_data = {
+        "symbols": {
+            "NVDA": {
+                "status": "ready",
+                "source_observed_at": "2026-07-21T14:00:00Z",
+            }
+        }
+    }
+    prepared = {
+        "payload": {
+            "strategy_lab_option_market_evidence": {
+                "valuation_mark_facts": [
+                    {
+                        "effective_at_ms": 1_784_642_400_000,
+                        "observed_at_ms": 1_784_642_400_000,
+                    }
+                ]
+            }
+        }
+    }
+
+    coherence = build_formal_point_time_coherence(opening, required_data, prepared)
+
+    assert coherence["status"] == "ready"
+    assert coherence["minimum_observed_at_utc"] == "2026-07-21T14:00:00Z"
+    assert coherence["maximum_observed_at_utc"] == "2026-07-21T14:00:00Z"
+    assert coherence["observation_count"] == 4
+
+
+@pytest.mark.parametrize(
+    "candidate_timestamp",
+    [None, "2026-07-21T14:00:00", "not-a-timestamp"],
+)
+def test_formal_point_time_coherence_rejects_non_aware_candidate_timestamp(
+    candidate_timestamp: str | None,
+) -> None:
+    coherence = build_formal_point_time_coherence(
+        {
+            "candidate_decisions": [
+                {
+                    "normalized_input": {
+                        "snapshot_received_at_utc": candidate_timestamp,
+                    }
+                }
+            ]
+        },
+        {
+            "symbols": {
+                "NVDA": {
+                    "status": "ready",
+                    "source_observed_at": "2026-07-21T14:00:00Z",
+                }
+            }
+        },
+        {
+            "payload": {
+                "strategy_lab_option_market_evidence": {
+                    "valuation_mark_facts": []
+                }
+            }
+        },
+    )
+
+    assert coherence["status"] == "not_evaluable"
+    assert coherence["reason_code"] == "formal_point_time_skew"
 
 
 def _build_from_bundle(

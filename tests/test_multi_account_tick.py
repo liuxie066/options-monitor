@@ -760,7 +760,16 @@ def test_daily_brief_trigger_kind_distinguishes_schedule_manual_and_force() -> N
     )
 
 
-def test_main_scheduler_no_scan_enters_daily_brief_delivery_only_without_workspace(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize(
+    ("notification_rc", "smoke"),
+    [(0, False), (1, False), (0, True)],
+)
+def test_main_scheduler_no_scan_warms_only_after_successful_delivery(
+    monkeypatch,
+    tmp_path,
+    notification_rc: int,
+    smoke: bool,
+) -> None:
     import json
     from zoneinfo import ZoneInfo
 
@@ -776,7 +785,7 @@ def test_main_scheduler_no_scan_enters_daily_brief_delivery_only_without_workspa
                 "_generated": {"schema_version": "1.0", "generator": "options-monitor", "source_format": "yaml", "market": "us"},
                 "accounts": ["lx"],
                 "symbols": [{"symbol": "NVDA", "broker": "US"}],
-                "schedule": {"enabled": True},
+                "schedule": {"enabled": True, "cron_interval_min": 10},
                 "notifications": {"daily_brief": {"enabled": True}},
                 "portfolio": {},
             }
@@ -785,13 +794,14 @@ def test_main_scheduler_no_scan_enters_daily_brief_delivery_only_without_workspa
     )
     runtime_root = tmp_path / "runtime"
     captured = {}
+    order: list[str] = []
 
     class _RunLogger:
         def __init__(self, _base):
             self.run_id = "run-delivery-only"
 
-        def safe_event(self, *_args, **_kwargs):
-            pass
+        def safe_event(self, step, *_args, **_kwargs):
+            order.append(step)
 
     def guard(request):
         return TickGuardOutcome(True, 0, request.base_cfg, request.accounts, request.default_account, ZoneInfo("Asia/Shanghai"))
@@ -802,7 +812,10 @@ def test_main_scheduler_no_scan_enters_daily_brief_delivery_only_without_workspa
         "should_run_scan": False,
         "is_notify_window_open": False,
         "in_run_window": True,
-        "now_market": "2026-07-21T14:10:00-04:00",
+        "now_market": "2026-07-21T09:30:05-04:00",
+        "now_beijing": "2026-07-21T21:30:05+08:00",
+        "run_window_start_beijing": "2026-07-21T21:30:00+08:00",
+        "next_run_market": "2026-07-21T09:40:00-04:00",
         "reason": "当前没有待执行运行点。",
     }
 
@@ -839,14 +852,82 @@ def test_main_scheduler_no_scan_enters_daily_brief_delivery_only_without_workspa
     monkeypatch.setattr(mod, "run_tick_account_execution", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("no pipeline")))
 
     def notification(request):
+        order.append("notification")
         captured["request"] = request
-        return 0
+        return notification_rc
 
     monkeypatch.setattr(mod, "run_tick_notification_flow", notification)
-    assert mod.main(["--config", str(cfg), "--accounts", "lx"]) == 0
+
+    def warmup(**kwargs):
+        order.append("warmup")
+        captured["warmup"] = kwargs
+        return {
+            "status": "ready",
+            "planned_shards": 1,
+            "cache_hit_shards": 1,
+            "fetched_shards": 0,
+            "failed_shards": 0,
+            "deadline_skipped_shards": 0,
+            "option_contract_snapshot_requested_codes": 0,
+        }
+
+    monkeypatch.setattr(mod, "warm_required_data_chain_cache", warmup)
+    argv = ["--config", str(cfg), "--accounts", "lx"]
+    if smoke:
+        argv.append("--smoke")
+    assert mod.main(argv) == notification_rc
     assert captured["request"].delivery_only is True
     assert captured["request"].account_ids == ("lx",)
+    if notification_rc == 0 and not smoke:
+        assert order.index("notification") < order.index("warmup")
+        assert order.index("warmup") < order.index("opening_chain_warmup")
+        assert captured["warmup"]["next_formal_target_utc"] == "2026-07-21T13:40:00Z"
+    else:
+        assert "warmup" not in order
     assert not (runtime_root / "output_runs").exists()
+
+
+def test_opening_chain_warmup_context_requires_first_us_no_scan_window() -> None:
+    from src.application import multi_account_tick as mod
+
+    decision = {
+        "in_run_window": True,
+        "should_run_scan": False,
+        "now_beijing": "2026-12-21T22:30:05+08:00",
+        "run_window_start_beijing": "2026-12-21T22:30:00+08:00",
+        "next_run_market": "2026-12-21T09:40:00-05:00",
+    }
+
+    context = mod._opening_chain_warmup_context(
+        trigger_kind="scheduled",
+        scheduler_markets=["US"],
+        base_cfg={"schedule": {"cron_interval_min": 10}},
+        scheduler_schedule_key="schedule",
+        account_ids=["lx", "sy"],
+        scheduler_decisions_by_account={"lx": decision, "sy": dict(decision)},
+    )
+
+    assert context == {
+        "next_formal_target_utc": "2026-12-21T14:40:00Z",
+        "worker_stop_at_utc": "2026-12-21T14:37:50Z",
+        "lock_release_by_utc": "2026-12-21T14:38:00Z",
+    }
+    assert (
+        mod._opening_chain_warmup_context(
+            trigger_kind="scheduled",
+            scheduler_markets=["US"],
+            base_cfg={"schedule": {"cron_interval_min": 10}},
+            scheduler_schedule_key="schedule",
+            account_ids=["lx"],
+            scheduler_decisions_by_account={
+                "lx": {
+                    **decision,
+                    "now_beijing": "2026-12-21T22:50:00+08:00",
+                }
+            },
+        )
+        is None
+    )
 
 
 def test_duplicate_unsupported_tick_failure_returns_nonzero_without_rerun(monkeypatch, tmp_path) -> None:
