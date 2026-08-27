@@ -81,6 +81,7 @@ def test_candidate_producers_have_no_csv_output_adapter_parameters() -> None:
             "reject_log",
             "reject_log_output",
             "reject_log_path",
+            "shares_available_for_cover",
         },
         run_sell_put_scan_and_summarize: {
             "base",
@@ -120,6 +121,10 @@ def test_candidate_producers_have_no_csv_output_adapter_parameters() -> None:
                 "100",
                 "--shares",
                 "100",
+                "--shares-can-sell",
+                "100",
+                "--shares-locked",
+                "0",
                 "--min-annualized-net-return",
                 "0.1",
             ],

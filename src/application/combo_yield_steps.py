@@ -18,7 +18,7 @@ from domain.domain.candidate_defaults import (
 )
 from domain.domain.combo_candidate_evidence import build_combo_candidate_occurrence
 from domain.domain.sell_put_config import resolve_min_annualized_net_return
-from domain.domain.symbol_identity import symbol_market
+from domain.domain.symbol_identity import canonical_symbol, symbol_market
 from src.application.cc_lp_steps import (
     CC_LP_FAMILY,
     run_cc_lp_scan,
@@ -399,6 +399,7 @@ def run_combo_yield_for_symbol_and_summarize(
     is_scheduled: bool,
     exchange_rate_converter: CurrencyConverter,
     portfolio_ctx: dict[str, Any] | None,
+    stock: dict[str, Any] | None = None,
     global_sell_put_liquidity: dict[str, Any] | None = None,
     cash_filter_put_candidates_fn: Callable[..., pd.DataFrame] | None = enrich_combo_funding_cash,
     combo_evidence_sink_fn: Callable[[dict[str, Any]], None] | None = None,
@@ -420,6 +421,7 @@ def run_combo_yield_for_symbol_and_summarize(
             required_data_dir=required_data_dir,
             exchange_rate_converter=exchange_rate_converter,
             portfolio_ctx=portfolio_ctx,
+            stock=stock,
             combo_evidence_sink_fn=combo_evidence_sink_fn,
             required_data_frame=required_data_frame,
         )
@@ -459,26 +461,100 @@ def run_cc_lp_variant(
     required_data_dir: Path,
     exchange_rate_converter: CurrencyConverter,
     portfolio_ctx: dict[str, Any] | None,
+    stock: dict[str, Any] | None,
     run_cc_lp_scan_fn: Callable[..., pd.DataFrame] = run_cc_lp_scan,
     combo_evidence_sink_fn: Callable[[dict[str, Any]], None] | None = None,
     required_data_frame: pd.DataFrame | None = None,
 ) -> dict[str, Any] | None:
     """Run the CC+LP variant of Combo Yield for one symbol."""
 
-    stock = (portfolio_ctx or {}).get("stock") if isinstance(portfolio_ctx, dict) else None
     sell_call_cfg = dict(symbol_cfg.get("sell_call") or {})
     global_sell_call_liquidity = symbol_cfg.get("_global_sell_call_liquidity") or {}
-    df = run_cc_lp_scan_fn(
-        symbol=symbol,
-        required_data_dir=required_data_dir,
-        sell_call_cfg=sell_call_cfg,
-        exchange_rate_converter=exchange_rate_converter,
-        portfolio_ctx=portfolio_ctx,
-        stock=stock,
-        global_sell_call_liquidity=global_sell_call_liquidity,
-        strategy_profile="cc_lp_funding_call",
-        required_data_frame=required_data_frame,
+    unavailable_reason = ""
+    prepared_stock: dict[str, Any] | None = None
+    authority = (
+        portfolio_ctx.get("capacity_authority")
+        if isinstance(portfolio_ctx, dict)
+        and isinstance(portfolio_ctx.get("capacity_authority"), dict)
+        else {}
     )
+    if (
+        not isinstance(portfolio_ctx, dict)
+        or str(portfolio_ctx.get("portfolio_source_name") or "").strip().lower()
+        != "futu"
+        or str(authority.get("status") or "").strip().lower() != "available"
+    ):
+        unavailable_reason = "physical_account_capacity_authority_unavailable"
+    elif not stock:
+        unavailable_reason = "stock_context_missing"
+    else:
+        option_ctx = portfolio_ctx.get("option_ctx")
+        locked_by_symbol = (
+            option_ctx.get("locked_shares_by_symbol")
+            if isinstance(option_ctx, dict)
+            else None
+        )
+        unavailable_by_symbol = (
+            option_ctx.get("locked_shares_unavailable_by_symbol")
+            if isinstance(option_ctx, dict)
+            else None
+        )
+        symbol_key = canonical_symbol(symbol) or str(symbol).upper()
+        if (
+            not isinstance(option_ctx, dict)
+            or str(option_ctx.get("locked_shares_status") or "").strip().lower()
+            != "available"
+            or not isinstance(locked_by_symbol, dict)
+            or not isinstance(unavailable_by_symbol, dict)
+        ):
+            unavailable_reason = str(
+                (
+                    option_ctx.get("locked_shares_unavailable_reason")
+                    if isinstance(option_ctx, dict)
+                    else None
+                )
+                or ""
+            ).strip() or "option_positions_context_unavailable"
+        elif symbol_key in unavailable_by_symbol:
+            unavailable_reason = str(
+                unavailable_by_symbol.get(symbol_key)
+                or "locked_shares_unavailable"
+            )
+        else:
+            locked = locked_by_symbol.get(symbol_key, 0)
+            if (
+                isinstance(locked, bool)
+                or not isinstance(locked, int)
+                or locked < 0
+            ):
+                unavailable_reason = "share_coverage_calc_failed"
+            else:
+                try:
+                    shares_total = int(stock["shares"])
+                    shares_can_sell = int(stock["can_sell_qty"])
+                except (KeyError, TypeError, ValueError):
+                    unavailable_reason = "stock_context_invalid"
+                else:
+                    if locked > min(shares_total, shares_can_sell):
+                        unavailable_reason = (
+                            "locked_shares_exceed_eligible_underlying"
+                        )
+                    else:
+                        prepared_stock = {**stock, "shares_locked": locked}
+
+    df = pd.DataFrame()
+    if prepared_stock is not None:
+        df = run_cc_lp_scan_fn(
+            symbol=symbol,
+            required_data_dir=required_data_dir,
+            sell_call_cfg=sell_call_cfg,
+            exchange_rate_converter=exchange_rate_converter,
+            portfolio_ctx=portfolio_ctx,
+            stock=prepared_stock,
+            global_sell_call_liquidity=global_sell_call_liquidity,
+            strategy_profile="cc_lp_funding_call",
+            required_data_frame=required_data_frame,
+        )
     if combo_evidence_sink_fn is not None:
         combo_evidence_sink_fn(
             {
@@ -489,11 +565,18 @@ def run_cc_lp_variant(
             }
         )
     if df.empty:
+        status = "no_candidate"
+        if unavailable_reason:
+            status = (
+                "not_applicable"
+                if unavailable_reason == "stock_context_missing"
+                else "unavailable"
+            )
         summary = summarize_cc_lp_result(
             df=df,
             symbol=symbol,
-            status="no_candidate" if stock else "not_applicable",
-            reason="" if stock else "stock_context_missing",
+            status=status,
+            reason=unavailable_reason,
         )
         return summary
     return summarize_cc_lp_result(

@@ -214,6 +214,8 @@ def test_hk_covered_call_non_positive_net_premium_is_a_definitive_reject(tmp_pat
         input_root=root,
         avg_cost=90.0,
         shares=100,
+        shares_can_sell=100,
+        shares_locked=0,
         min_net_income=0,
         min_annualized_net_return=0,
         calculation_decision_sink_fn=captured.extend,

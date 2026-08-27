@@ -121,6 +121,14 @@ def run_symbol_monitoring(
     sp: dict[str, Any] = dict(symbol_cfg.get("sell_put", {}) or {})
     cc: dict[str, Any] = dict(symbol_cfg.get("sell_call", {}) or {})
     combo_yield_cfg = resolve_combo_yield_cfg(symbol_cfg)
+    initial_combo_policy = derive_combo_yield_policy(combo_yield_cfg)
+    combo_requires_stock = bool(
+        initial_combo_policy.enabled
+        and str(
+            (initial_combo_policy.config or {}).get("variant") or "sp_lc"
+        ).strip().lower()
+        == "cc_lp"
+    )
     configured_put = bool(sp.get("enabled", False))
     configured_call = bool(cc.get("enabled", False))
     want_put = configured_put
@@ -137,11 +145,11 @@ def run_symbol_monitoring(
         sp=sp,
         cc=cc,
         want_put=want_put,
-        want_call=want_call,
+        want_call=bool(want_call or combo_requires_stock),
         portfolio_ctx=inputs.portfolio_ctx,
     )
     want_put = bool(prefilters.want_put)
-    want_call = bool(prefilters.want_call)
+    want_call = bool(configured_call and prefilters.want_call)
     sp = dict(prefilters.sp)
     cc = dict(prefilters.cc)
     symbol_cfg["sell_put"] = sp
@@ -156,7 +164,7 @@ def run_symbol_monitoring(
     stock = prefilters.stock
     call_skip_reason = str(
         getattr(prefilters, "call_skip_reason", None) or ""
-    ).strip() or None
+    ).strip() or None if configured_call else None
     if want_call and isinstance(stock, dict):
         effective_min_strike = resolve_effective_sell_call_min_strike(
             min_strike=cc.get("min_strike"),
@@ -226,6 +234,36 @@ def run_symbol_monitoring(
                 symbol,
                 family,
             )
+
+    call_prefiltered = bool(configured_call and call_skip_reason)
+    if call_prefiltered and not inputs.fetch_only:
+        _publish_status(
+            family="covered_call",
+            status="not_applicable",
+            reason=call_skip_reason,
+            candidate_count=0,
+        )
+        if inputs.candidate_capture_status_sink_fn is not None:
+            inputs.candidate_capture_status_sink_fn(
+                {
+                    "symbol": symbol.upper(),
+                    "strategy_mode": "call",
+                    "status": "not_applicable",
+                    "reason": call_skip_reason,
+                    "quote_snapshot_id": None,
+                    "quote_receipt_relpath": None,
+                }
+            )
+
+    if call_prefiltered and not fetch_want_put and not fetch_want_call:
+        if inputs.fetch_only:
+            return []
+        summary_rows: list[dict[str, Any]] = []
+        _append_summary_result(
+            summary_rows,
+            deps.empty_sell_call_summary_fn(symbol, symbol_cfg=symbol_cfg),
+        )
+        return summary_rows
 
     frozen_required_data = inputs.required_data_snapshot_manifest is not None
     required_data_frame: pd.DataFrame | None = None
@@ -355,6 +393,11 @@ def run_symbol_monitoring(
         if want_combo_yield:
             _unavailable_summary(
                 deps.empty_combo_yield_summary_fn(symbol, symbol_cfg=symbol_cfg)
+            )
+        if call_prefiltered:
+            _append_summary_result(
+                summary_rows,
+                deps.empty_sell_call_summary_fn(symbol, symbol_cfg=symbol_cfg),
             )
         if want_call:
             _unavailable_summary(
@@ -597,6 +640,7 @@ def run_symbol_monitoring(
                 is_scheduled=bool(inputs.is_scheduled),
                 exchange_rate_converter=exchange_rate_converter,
                 portfolio_ctx=inputs.portfolio_ctx,
+                stock=stock,
                 global_sell_put_liquidity=(symbol_cfg.get("_global_sell_put_liquidity") or {}),
                 combo_evidence_sink_fn=inputs.combo_evidence_sink_fn,
                 **frozen_frame_kwargs,
@@ -622,6 +666,11 @@ def run_symbol_monitoring(
                     combo_capture_status = "not_applicable"
                     combo_capture_reason = str(
                         combo_result.get("reason") or "cc_lp_not_applicable"
+                    ).strip()
+                elif cc_lp_status == "unavailable":
+                    combo_capture_status = "unavailable"
+                    combo_capture_reason = str(
+                        combo_result.get("reason") or "cc_lp_data_unavailable"
                     ).strip()
                 else:
                     raise ValueError(

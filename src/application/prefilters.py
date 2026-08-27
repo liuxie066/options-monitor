@@ -39,24 +39,35 @@ def apply_prefilters(
             call_skip_reason = "covered_call_portfolio_context_unavailable"
         else:
             try:
-                stocks_by_symbol = portfolio_ctx.get("stocks_by_symbol")
-                if not isinstance(stocks_by_symbol, dict):
+                authority = portfolio_ctx.get("capacity_authority")
+                portfolio_source = str(
+                    portfolio_ctx.get("portfolio_source_name") or ""
+                ).strip().lower()
+                authority_status = str(
+                    authority.get("status") if isinstance(authority, dict) else ""
+                ).strip().lower()
+                if (
+                    portfolio_source != "futu"
+                    or not isinstance(authority, dict)
+                    or authority_status != "available"
+                ):
                     want_call = False
-                    call_skip_reason = (
-                        "covered_call_portfolio_context_unavailable"
-                    )
-                elif symbol not in stocks_by_symbol:
+                    call_skip_reason = "covered_call_portfolio_context_unavailable"
+                elif not isinstance(portfolio_ctx.get("stocks_by_symbol"), dict):
                     want_call = False
-                    call_skip_reason = "covered_call_underlying_not_held"
+                    call_skip_reason = "covered_call_portfolio_context_unavailable"
                 else:
-                    raw_stock = stocks_by_symbol.get(symbol)
-                    if isinstance(raw_stock, dict) and raw_stock:
-                        stock = raw_stock
-                    else:
+                    stocks_by_symbol = portfolio_ctx["stocks_by_symbol"]
+                    if symbol not in stocks_by_symbol:
                         want_call = False
-                        call_skip_reason = (
-                            "covered_call_portfolio_context_unavailable"
-                        )
+                        call_skip_reason = "covered_call_underlying_not_held"
+                    else:
+                        raw_stock = stocks_by_symbol.get(symbol)
+                        if isinstance(raw_stock, dict) and raw_stock:
+                            stock = raw_stock
+                        else:
+                            want_call = False
+                            call_skip_reason = "covered_call_portfolio_context_unavailable"
             except Exception:
                 want_call = False
                 call_skip_reason = "covered_call_portfolio_context_unavailable"

@@ -384,6 +384,8 @@ def _run_full_symbol_capture(
     variant: str,
     opening_mode: str,
     scenario: str,
+    account_holds_symbol: bool = True,
+    combo_enabled: bool | None = None,
 ) -> dict[str, list[str] | int]:
     """Run the real watchlist/symbol/status/sealing chain with frozen adapters."""
 
@@ -422,14 +424,18 @@ def _run_full_symbol_capture(
             "market": market,
             "source": "opend",
         },
-        "stocks_by_symbol": {
-            symbol: {
-                "symbol": symbol,
-                "shares": 1_000,
-                "can_sell_qty": 1_000,
-                "avg_cost": 100.0,
+        "stocks_by_symbol": (
+            {
+                symbol: {
+                    "symbol": symbol,
+                    "shares": 1_000,
+                    "can_sell_qty": 1_000,
+                    "avg_cost": 100.0,
+                }
             }
-        },
+            if account_holds_symbol
+            else {}
+        ),
         "exchange_rates": {},
     }
     option_ctx = {
@@ -495,6 +501,8 @@ def _run_full_symbol_capture(
         combo_calls = observed["combo_scans"]
         assert isinstance(combo_calls, list)
         combo_calls.append(variant)
+        if variant == "cc_lp":
+            assert kwargs["stock"] == portfolio_ctx["stocks_by_symbol"][symbol]
         if scenario == "failure":
             raise RuntimeError("combo scan failed for test")
 
@@ -639,7 +647,9 @@ def _run_full_symbol_capture(
                     market=market,
                     sell_put_enabled=active and opening_mode == "put",
                     sell_call_enabled=active and opening_mode == "call",
-                    combo_enabled=active,
+                    combo_enabled=(
+                        active if combo_enabled is None else combo_enabled
+                    ),
                 )
             ],
         },
@@ -663,6 +673,62 @@ def _run_full_symbol_capture(
         account_config_sha256=ACCOUNT_CONFIG_SHA256,
     )
     return observed
+
+
+def test_full_capture_preserves_unheld_covered_call_scope(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from src.application.opening_candidate_snapshot import (
+        load_opening_candidate_snapshot,
+    )
+    from src.application.strategy_scan_status import (
+        STRATEGY_SCAN_STATUS_INDEX_V2_FILE,
+        load_strategy_scan_status_index_v2,
+    )
+
+    observed = _run_full_symbol_capture(
+        monkeypatch,
+        tmp_path,
+        market="US",
+        symbol="NVDA",
+        variant="cc_lp",
+        opening_mode="call",
+        scenario="empty",
+        account_holds_symbol=False,
+        combo_enabled=False,
+    )
+
+    assert observed["opening_scans"] == []
+    assert observed["required_data"] == []
+    account_dir = tmp_path / "output_runs" / RUN_ID / "accounts" / "lx"
+    status_index = load_strategy_scan_status_index_v2(
+        account_dir / STRATEGY_SCAN_STATUS_INDEX_V2_FILE,
+        expected_run_id=RUN_ID,
+        expected_account="lx",
+        expected_account_config_sha256=ACCOUNT_CONFIG_SHA256,
+    )
+    call_status = next(
+        item
+        for item in status_index["items"]
+        if item["strategy_family"] == "covered_call"
+    )
+    assert call_status["status"] == "not_applicable"
+    assert call_status["reason"] == "covered_call_underlying_not_held"
+
+    opening = load_opening_candidate_snapshot(
+        base=tmp_path,
+        run_id=RUN_ID,
+        account="lx",
+    )
+    assert opening["opening_status"] == "no_candidate"
+    call_scope = next(
+        row
+        for row in opening["scope_results"]
+        if row["strategy_mode"] == "call"
+    )
+    assert call_scope["status"] == "not_applicable"
+    assert call_scope["reason_code"] == "covered_call_underlying_not_held"
 
 
 @pytest.mark.parametrize(
