@@ -1,0 +1,25 @@
+{
+  "schema_version": "release_delta_coverage.v1",
+  "target_version": "2.1.2",
+  "base": {
+    "tag": "v2.1.1",
+    "commit": "072fa4b54e4a850b1cbe83a3934e9c5329867ff8"
+  },
+  "reviewed_head": "aea01f77664fddc3320060e2b256f576e0506a35",
+  "commits": [
+    {
+      "sha": "aea01f77664fddc3320060e2b256f576e0506a35",
+      "subject": "fix(performance): classify lifecycle option fees"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Treated confirmed option assignments and no-execution expiries as actual zero-fee lifecycle events, while preserving real executed-order fees and fail-closed evidence handling.",
+      "commits": [
+        "aea01f77664fddc3320060e2b256f576e0506a35"
+      ]
+    }
+  ],
+  "no_release_note": []
+}
