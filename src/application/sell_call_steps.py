@@ -32,7 +32,6 @@ from src.application.candidate_scanning import (
 from domain.domain.sell_call_config import (
     resolve_effective_sell_call_min_strike,
 )
-from domain.domain.risk_capacity import compute_sell_call_share_capacity
 
 
 def _optional_float(mapping: dict[str, Any], key: str) -> float | None:
@@ -88,8 +87,9 @@ def run_sell_call_scan_and_summarize(
         and isinstance(portfolio_ctx.get("capacity_authority"), dict)
         else {}
     )
-    if portfolio_source and (
-        portfolio_source != "futu" or authority.get("status") != "available"
+    if (
+        portfolio_source != "futu"
+        or str(authority.get("status") or "").strip().lower() != "available"
     ):
         return _empty_sell_call_result(
             symbol=symbol,
@@ -133,7 +133,11 @@ def run_sell_call_scan_and_summarize(
     locked = 0
     try:
         symbol_key = canonical_symbol(symbol) or str(symbol).upper()
-        if str(locked_shares_status or "available").strip().lower() != "available":
+        if (
+            str(locked_shares_status or "").strip().lower() != "available"
+            or not isinstance(locked_shares_by_symbol, dict)
+            or not isinstance(locked_shares_unavailable_by_symbol, dict)
+        ):
             reason = str(
                 locked_shares_unavailable_reason
                 or "option_positions_context_unavailable"
@@ -161,20 +165,20 @@ def run_sell_call_scan_and_summarize(
             status="unavailable",
             reason="share_coverage_calc_failed",
         )
-    share_facts = compute_sell_call_share_capacity(
-        shares_total=shares_total,
-        shares_can_sell=shares_can_sell,
-        shares_locked=locked,
-        multiplier=1,
-    )
-    if share_facts.reason == "locked_shares_exceed_eligible_underlying":
+    if locked < 0:
         return _empty_sell_call_result(
             symbol=symbol,
             symbol_cfg=symbol_cfg,
             status="unavailable",
-            reason=share_facts.reason,
+            reason="share_coverage_calc_failed",
         )
-    shares_available_for_cover = int(share_facts.shares_available_for_cover)
+    if locked > min(shares_total, shares_can_sell):
+        return _empty_sell_call_result(
+            symbol=symbol,
+            symbol_cfg=symbol_cfg,
+            status="unavailable",
+            reason="locked_shares_exceed_eligible_underlying",
+        )
     candidate_decisions: list[dict[str, Any]] = []
 
     liquidity = resolve_candidate_liquidity(global_sell_call_liquidity)
@@ -186,7 +190,6 @@ def run_sell_call_scan_and_summarize(
         shares=int(shares_total),
         shares_can_sell=int(shares_can_sell),
         shares_locked=int(locked),
-        shares_available_for_cover=int(shares_available_for_cover),
         capacity_facts={
             "capacity_identity_hash": stock.get("capacity_identity_hash"),
             "futu_account_id": stock.get("futu_account_id"),

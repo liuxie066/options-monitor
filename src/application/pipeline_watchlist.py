@@ -615,6 +615,9 @@ def run_watchlist_pipeline(
                 profiles=profiles,
                 apply_profiles_fn=apply_profiles_fn,
             )
+            configured_call = bool(
+                (resolved.get("sell_call") or {}).get("enabled", False)
+            )
             symbol = normalize_symbol_read(resolved.get("symbol"))
             sp = dict(resolved.get("sell_put") or {})
             cc = dict(resolved.get("sell_call") or {})
@@ -661,7 +664,7 @@ def run_watchlist_pipeline(
                         "account_config_sha256": str(account_config_sha256 or ""),
                     }
                 )
-            if filtered.want_call:
+            if configured_call:
                 expected_strategy_statuses.append(
                     {
                         "market": market,

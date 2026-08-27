@@ -92,8 +92,16 @@ def test_cross_account_prefetch_union_is_order_independent_and_covers_call_costs
         ]
     }
     contexts = {
-        "lx": {"stocks_by_symbol": {"NVDA": {"avg_cost": 100}}},
-        "sy": {"stocks_by_symbol": {"NVDA": {"avg_cost": 120}}},
+        "lx": {
+            "portfolio_source_name": "futu",
+            "capacity_authority": {"status": "available"},
+            "stocks_by_symbol": {"NVDA": {"avg_cost": 100}},
+        },
+        "sy": {
+            "portfolio_source_name": "futu",
+            "capacity_authority": {"status": "available"},
+            "stocks_by_symbol": {"NVDA": {"avg_cost": 120}},
+        },
     }
 
     forward = build_cross_account_prefetch_config(
@@ -174,7 +182,11 @@ def test_cross_account_prefetch_keeps_put_when_one_context_is_unavailable() -> N
         base_config=config,
         account_configs={"lx": config, "sy": config},
         prepared_portfolio_contexts={
-            "lx": {"stocks_by_symbol": {"NVDA": {"avg_cost": 100}}},
+            "lx": {
+                "portfolio_source_name": "futu",
+                "capacity_authority": {"status": "available"},
+                "stocks_by_symbol": {"NVDA": {"avg_cost": 100}},
+            },
             "sy": None,
         },
     )

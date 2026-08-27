@@ -94,15 +94,22 @@ def run_cc_lp_scan(
     try:
         shares_raw = stock.get("shares")
         shares_can_sell_raw = stock.get("can_sell_qty")
+        shares_locked_raw = stock.get("shares_locked")
         avg_cost_raw = stock.get("avg_cost")
-        if shares_raw is None or shares_can_sell_raw is None or avg_cost_raw is None:
+        if (
+            shares_raw is None
+            or shares_can_sell_raw is None
+            or shares_locked_raw is None
+            or avg_cost_raw is None
+        ):
             return pd.DataFrame()
         shares_total = int(shares_raw)
         shares_can_sell = int(shares_can_sell_raw)
+        shares_locked = int(shares_locked_raw)
         avg_cost = float(avg_cost_raw)
     except Exception:
         return pd.DataFrame()
-    if shares_total <= 0 or shares_can_sell < 0 or avg_cost <= 0:
+    if shares_total <= 0 or shares_can_sell < 0 or shares_locked < 0 or avg_cost <= 0:
         return pd.DataFrame()
 
     liquidity = resolve_candidate_liquidity(global_sell_call_liquidity)
@@ -118,8 +125,15 @@ def run_cc_lp_scan(
         avg_cost=float(avg_cost),
         shares=int(shares_total),
         shares_can_sell=int(shares_can_sell),
-        shares_locked=int(stock.get("shares_locked") or 0),
-        shares_available_for_cover=int(stock.get("shares_available_for_cover") or 0),
+        shares_locked=int(shares_locked),
+        capacity_facts={
+            "capacity_identity_hash": stock.get("capacity_identity_hash"),
+            "futu_account_id": stock.get("futu_account_id"),
+            "capacity_trd_env": stock.get("trd_env"),
+            "capacity_market": stock.get("market"),
+            "capacity_source_observed_at": stock.get("source_observed_at"),
+            "capacity_authority_status": stock.get("capacity_authority_status"),
+        },
         min_dte=window.min_dte,
         max_dte=window.max_dte,
         min_strike=effective_min_strike,

@@ -270,10 +270,11 @@ def test_frozen_symbol_failure_emits_typed_artifacts_and_capture_status(
             (),
             {
                 "want_put": kwargs["want_put"],
-                "want_call": kwargs["want_call"],
+                "want_call": False,
                 "sp": kwargs["sp"],
                 "cc": kwargs["cc"],
                 "stock": None,
+                "call_skip_reason": "covered_call_underlying_not_held",
             },
         )(),
         apply_multiplier_cache_fn=lambda **_kwargs: (_ for _ in ()).throw(
@@ -295,7 +296,11 @@ def test_frozen_symbol_failure_emits_typed_artifacts_and_capture_status(
             "strategy": "sell_put",
         },
         run_sell_call_scan_fn=lambda **_kwargs: {},
-        empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {},
+        empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {
+            "symbol": symbol,
+            "strategy": "sell_call",
+            "candidate_count": 0,
+        },
         run_combo_yield_scan_fn=lambda **_kwargs: None,
         empty_combo_yield_summary_fn=lambda symbol, symbol_cfg: {
             "symbol": symbol,
@@ -311,7 +316,7 @@ def test_frozen_symbol_failure_emits_typed_artifacts_and_capture_status(
                 "symbol": "NVDA",
                 "sell_put": {"enabled": True},
                 "combo_yield": {"enabled": True, "variant": "sp_lc"},
-                "sell_call": {"enabled": False},
+                "sell_call": {"enabled": True},
             },
             top_n=3,
             portfolio_ctx=None,
@@ -345,8 +350,21 @@ def test_frozen_symbol_failure_emits_typed_artifacts_and_capture_status(
             "candidate_count": 0,
             "note": "行情快照不可用",
         },
+        {
+            "symbol": "NVDA",
+            "strategy": "sell_call",
+            "candidate_count": 0,
+        },
     ]
     assert capture_statuses == [
+        {
+            "symbol": "NVDA",
+            "strategy_mode": "call",
+            "status": "not_applicable",
+            "reason": "covered_call_underlying_not_held",
+            "quote_snapshot_id": None,
+            "quote_receipt_relpath": None,
+        },
         {
             "symbol": "NVDA",
             "strategy_mode": "put",
@@ -373,6 +391,14 @@ def test_frozen_symbol_failure_emits_typed_artifacts_and_capture_status(
     assert status["status"] == "unavailable"
     assert status["snapshot_id"] == "snapshot-failed"
     assert status["receipt_relpath"] == "quotes/receipt.json"
+    call_status = json.loads(
+        (report_dir / "nvda_covered_call_scan_status.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert call_status["status"] == "not_applicable"
+    assert call_status["reason"] == "covered_call_underlying_not_held"
+    assert "snapshot_id" not in call_status
 
 
 @pytest.mark.parametrize(
@@ -1288,7 +1314,7 @@ def test_sell_call_not_applicable_does_not_touch_historical_call_artifacts(
     assert out[-1]["strategy"] == "sell_call"
 
 
-def test_sell_call_shared_symbol_without_holding_is_outside_candidate_capture_scope(
+def test_sell_call_shared_symbol_without_holding_preserves_not_applicable_scope(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -1344,6 +1370,7 @@ def test_sell_call_shared_symbol_without_holding_is_outside_candidate_capture_sc
             top_n=3,
             portfolio_ctx={
                 "portfolio_source_name": "futu",
+                "capacity_authority": {"status": "available"},
                 "stocks_by_symbol": {
                     "0700.HK": {
                         "symbol": "0700.HK",
@@ -1365,4 +1392,13 @@ def test_sell_call_shared_symbol_without_holding_is_outside_candidate_capture_sc
         deps=deps,
     )
 
-    assert capture_statuses == []
+    assert capture_statuses == [
+        {
+            "symbol": "3690.HK",
+            "strategy_mode": "call",
+            "status": "not_applicable",
+            "reason": "covered_call_underlying_not_held",
+            "quote_snapshot_id": None,
+            "quote_receipt_relpath": None,
+        }
+    ]

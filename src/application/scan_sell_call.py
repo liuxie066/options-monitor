@@ -111,13 +111,11 @@ def _resolve_sell_call_contract_capacity(
     shares: int,
     shares_can_sell: int,
     shares_locked: int,
-    shares_available_for_cover: int | None,
 ) -> tuple[int, int, bool]:
     capacity = compute_sell_call_share_capacity(
         shares_total=shares,
         shares_can_sell=shares_can_sell,
         shares_locked=shares_locked,
-        shares_available_for_cover=shares_available_for_cover,
         multiplier=multiplier,
     )
     return (
@@ -133,7 +131,6 @@ def _build_candidate_row_factory(
     shares: int,
     shares_can_sell: int,
     shares_locked: int,
-    shares_available_for_cover: int | None,
     capacity_facts: Mapping[str, Any] | None,
 ) -> Callable[[CandidateContractInput, CandidateBaseValues, dict[str, Any]], dict[str, Any] | None]:
     def _build(
@@ -146,10 +143,9 @@ def _build_candidate_row_factory(
             shares=shares,
             shares_can_sell=shares_can_sell,
             shares_locked=shares_locked,
-            shares_available_for_cover=shares_available_for_cover,
         )
         shares_total = int(shares)
-        shares_locked_value = int(shares_locked or 0)
+        shares_locked_value = int(shares_locked)
         payload = contract.to_gate_payload()
         payload.pop("mode", None)
         payload.update(
@@ -182,10 +178,9 @@ def run_sell_call_scan(
     symbols: list[str],
     input_root: Path,
     avg_cost: float,
-    shares: int = 100,
-    shares_can_sell: int | None = None,
-    shares_locked: int = 0,
-    shares_available_for_cover: int | None = None,
+    shares: int,
+    shares_can_sell: int,
+    shares_locked: int,
     capacity_facts: Mapping[str, Any] | None = None,
     min_dte: int = DEFAULT_SELL_CALL_WINDOW.min_dte,
     max_dte: int = DEFAULT_SELL_CALL_WINDOW.max_dte,
@@ -208,6 +203,22 @@ def run_sell_call_scan(
     """计算 Covered Call 候选，并返回类型化内存结果。"""
     # OI is a formal tie-break only; volume and delta remain display evidence.
     del min_open_interest, min_volume
+    share_facts = {
+        "shares": shares,
+        "shares_can_sell": shares_can_sell,
+        "shares_locked": shares_locked,
+    }
+    invalid_share_facts = [
+        name
+        for name, value in share_facts.items()
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0
+    ]
+    if invalid_share_facts:
+        raise ValueError(
+            f"{', '.join(invalid_share_facts)} must be non-negative integers"
+        )
+    if shares_locked > min(shares, shares_can_sell):
+        raise ValueError("shares_locked exceeds eligible underlying shares")
     threshold = validate_min_annualized_net_premium_return(
         min_annualized_net_return,
         source="--min-annualized-net-return",
@@ -221,8 +232,6 @@ def run_sell_call_scan(
         avg_cost=avg_cost,
         cost_multiplier=cost_multiplier,
     )
-    declared_can_sell = int(shares if shares_can_sell is None else shares_can_sell)
-
     scan_now_utc = quote_freshness_now_utc or datetime.now(timezone.utc)
     return run_candidate_scan(
         config=CandidateScanConfig(
@@ -247,9 +256,8 @@ def run_sell_call_scan(
             build_row_fn=_build_candidate_row_factory(
                 avg_cost=avg_cost,
                 shares=shares,
-                shares_can_sell=declared_can_sell,
+                shares_can_sell=shares_can_sell,
                 shares_locked=shares_locked,
-                shares_available_for_cover=shares_available_for_cover,
                 capacity_facts=capacity_facts,
             ),
             metric_reject_reason_fn=_make_explain_metrics_rejection(avg_cost, now_utc=scan_now_utc),
@@ -262,10 +270,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=f"Run {COVERED_CALL_DISPLAY} scan on required_data CSV files")
     parser.add_argument("--symbols", nargs="+", required=True)
     parser.add_argument("--avg-cost", type=float, required=True, help="Average holding cost per share")
-    parser.add_argument("--shares", type=int, default=100)
-    parser.add_argument("--shares-can-sell", type=int, default=None)
-    parser.add_argument("--shares-locked", type=int, default=0)
-    parser.add_argument("--shares-available-for-cover", type=int, default=None)
+    parser.add_argument("--shares", type=int, required=True, help="Observed holding shares")
+    parser.add_argument("--shares-can-sell", type=int, required=True, help="Observed shares available to sell")
+    parser.add_argument("--shares-locked", type=int, required=True, help="Shares already reserved by open calls")
     parser.add_argument("--min-dte", type=int, default=DEFAULT_SELL_CALL_WINDOW.min_dte)
     parser.add_argument("--max-dte", type=int, default=DEFAULT_SELL_CALL_WINDOW.max_dte)
     parser.add_argument("--min-strike", type=float, default=None)
@@ -293,7 +300,6 @@ def main(argv: list[str] | None = None) -> int:
             shares=args.shares,
             shares_can_sell=args.shares_can_sell,
             shares_locked=args.shares_locked,
-            shares_available_for_cover=args.shares_available_for_cover,
             min_dte=args.min_dte,
             max_dte=args.max_dte,
             min_strike=args.min_strike,

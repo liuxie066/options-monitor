@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import pytest
@@ -150,20 +151,38 @@ def _converter() -> CurrencyConverter:
     return CurrencyConverter(ExchangeRates(usd_per_cny=0.14))
 
 
+def _available_cc_lp_context() -> dict[str, Any]:
+    return {
+        "portfolio_source_name": "futu",
+        "capacity_authority": {"status": "available"},
+        "option_ctx": {
+            "locked_shares_status": "available",
+            "locked_shares_by_symbol": {},
+            "locked_shares_unavailable_by_symbol": {},
+        },
+    }
+
+
 def test_run_cc_lp_scan_produces_candidates(tmp_path: Path) -> None:
     required_data = _write_required_data(
         tmp_path,
         call_rows=[_call_row()],
         put_rows=[_put_row()],
     )
+    captured: dict[str, Any] = {}
+
+    def _scan(**kwargs: Any) -> pd.DataFrame:
+        captured.update(kwargs)
+        return pd.DataFrame([_scan_call_row()])
+
     df = run_cc_lp_scan(
         symbol="NVDA",
         required_data_dir=required_data,
         sell_call_cfg={"enabled": True},
         exchange_rate_converter=_converter(),
         portfolio_ctx=None,
-        stock={"shares": 100, "can_sell_qty": 100, "avg_cost": 90.0},
-        run_sell_call_scan_fn=lambda **kwargs: pd.DataFrame([_scan_call_row()]),
+        stock={"shares": 100, "can_sell_qty": 100, "shares_locked": 0, "avg_cost": 90.0},
+        run_sell_call_scan_fn=_scan,
     )
     assert not df.empty
     row = df.iloc[0]
@@ -174,6 +193,10 @@ def test_run_cc_lp_scan_produces_candidates(tmp_path: Path) -> None:
     assert abs(row["put_delta"]) >= 0.10
     assert row["covered_notional"] == pytest.approx(100.0 * 100.0)
     assert abs(float(row["net_return"]) - float(row["net_credit"]) / (100.0 * 100.0)) < 1e-5
+    assert captured["shares"] == 100
+    assert captured["shares_can_sell"] == 100
+    assert captured["shares_locked"] == 0
+    assert "shares_available_for_cover" not in captured
 
 
 def test_run_cc_lp_scan_skips_without_stock(tmp_path: Path) -> None:
@@ -207,7 +230,7 @@ def test_run_cc_lp_scan_rejects_retention_below_floor(tmp_path: Path) -> None:
         sell_call_cfg={"enabled": True},
         exchange_rate_converter=_converter(),
         portfolio_ctx=None,
-        stock={"shares": 100, "can_sell_qty": 100, "avg_cost": 90.0},
+        stock={"shares": 100, "can_sell_qty": 100, "shares_locked": 0, "avg_cost": 90.0},
         run_sell_call_scan_fn=lambda **kwargs: pd.DataFrame([_scan_call_row(bid=4.0)]),
     )
     assert df.empty
@@ -236,7 +259,7 @@ def test_run_cc_lp_scan_inherits_sell_call_underwriting_gate(tmp_path: Path) -> 
         },
         exchange_rate_converter=_converter(),
         portfolio_ctx=None,
-        stock={"shares": 100, "can_sell_qty": 100, "avg_cost": 90.0},
+        stock={"shares": 100, "can_sell_qty": 100, "shares_locked": 0, "avg_cost": 90.0},
         run_sell_call_scan_fn=lambda **kwargs: pd.DataFrame([call]),
     )
     assert df.empty
@@ -263,7 +286,8 @@ def test_run_cc_lp_variant_returns_summary(tmp_path: Path) -> None:
         ),
         required_data_dir=required_data,
         exchange_rate_converter=_converter(),
-        portfolio_ctx={"stock": {"shares": 100, "can_sell_qty": 100, "avg_cost": 90.0}},
+        portfolio_ctx=_available_cc_lp_context(),
+        stock={"shares": 100, "can_sell_qty": 100, "avg_cost": 90.0},
         run_cc_lp_scan_fn=lambda **kwargs: pd.DataFrame(
             [
                 {
@@ -304,7 +328,8 @@ def test_run_cc_lp_variant_forwards_pairs_to_sink(tmp_path: Path) -> None:
         ),
         required_data_dir=required_data,
         exchange_rate_converter=_converter(),
-        portfolio_ctx={"stock": {"shares": 100, "can_sell_qty": 100, "avg_cost": 90.0}},
+        portfolio_ctx=_available_cc_lp_context(),
+        stock={"shares": 100, "can_sell_qty": 100, "avg_cost": 90.0},
         run_cc_lp_scan_fn=lambda **kwargs: pd.DataFrame(
             [
                 {
@@ -347,12 +372,44 @@ def test_run_cc_lp_variant_not_applicable_without_stock(tmp_path: Path) -> None:
         ),
         required_data_dir=required_data,
         exchange_rate_converter=_converter(),
-        portfolio_ctx=None,
+        portfolio_ctx=_available_cc_lp_context(),
+        stock=None,
         run_cc_lp_scan_fn=lambda **kwargs: pd.DataFrame(),
     )
     assert summary is not None
     assert summary["status"] == "not_applicable"
     assert summary["reason"] == "stock_context_missing"
+
+
+def test_run_cc_lp_variant_fails_closed_without_locked_share_context(
+    tmp_path: Path,
+) -> None:
+    symbol_cfg = {
+        "symbol": "NVDA",
+        "combo_yield": {"enabled": True, "variant": "cc_lp"},
+        "sell_call": {"enabled": True},
+    }
+    context = _available_cc_lp_context()
+    context["option_ctx"]["locked_shares_status"] = "unavailable"
+    calls: list[dict[str, Any]] = []
+
+    summary = run_cc_lp_variant(
+        symbol="NVDA",
+        symbol_cfg=symbol_cfg,
+        policy=derive_combo_yield_policy(
+            resolve_combo_yield_cfg(symbol_cfg),
+            market="us",
+        ),
+        required_data_dir=tmp_path / "required_data",
+        exchange_rate_converter=_converter(),
+        portfolio_ctx=context,
+        stock={"shares": 100, "can_sell_qty": 100, "avg_cost": 90.0},
+        run_cc_lp_scan_fn=lambda **kwargs: calls.append(kwargs) or pd.DataFrame(),
+    )
+
+    assert summary["status"] == "unavailable"
+    assert summary["reason"] == "option_positions_context_unavailable"
+    assert calls == []
 
 
 def test_variant_config_parses() -> None:
