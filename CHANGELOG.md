@@ -2,8 +2,17 @@
 
 ## Unreleased
 
+## 2.2.0 - 2026-08-27
+
+### New Features
+- Added a manual Futu simulated-account experience scan for Sell Put, Covered Call, and Combo Yield that uses explicit one-contract demonstration capacity, skips account cash and holdings reads, never sends notifications, and marks every result as non-executable.
+
 ### Improvements
 - Required every release-delta commit to reference a tracked design document or GitHub Pull Request so reviewers can recover the decisions behind the change before publication.
+- Warmed required US option chains before the opening scan so the first candidate pass can reuse complete quote evidence without changing scheduled-trigger or notification semantics.
+
+### Bug Fixes
+- Derived Covered Call and Combo Yield capacity from each option contract's authoritative multiplier, removing the fixed 100-share assumption and failing closed when multiplier evidence is missing or conflicting.
 
 ## 2.1.3 - 2026-08-27
 

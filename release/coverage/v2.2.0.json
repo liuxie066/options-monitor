@@ -1,0 +1,87 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "2.2.0",
+  "base": {
+    "tag": "v2.1.3",
+    "commit": "0a965c3a96791b8d70306daf9da2d81a99cb895a"
+  },
+  "reviewed_head": "b45f992886ad65d51e5d4ea631cea0665482f852",
+  "commits": [
+    {
+      "sha": "08ed5dc1ac8588c92542897731a06ad63d300d00",
+      "subject": "fix(scanning): derive call capacity from contract multiplier"
+    },
+    {
+      "sha": "78bbb19aabcd7c08edad58ac6169b25a0d549dcd",
+      "subject": "feat(release): require per-commit design evidence"
+    },
+    {
+      "sha": "ee6e79c598f366923845a3c07fa5a96a2a683aa8",
+      "subject": "feat(tick): warm US chains before opening scan"
+    },
+    {
+      "sha": "b45f992886ad65d51e5d4ea631cea0665482f852",
+      "subject": "feat(tick): add simulated account experience scan"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "Added a manual Futu simulated-account experience scan for Sell Put, Covered Call, and Combo Yield that uses explicit one-contract demonstration capacity, skips account cash and holdings reads, never sends notifications, and marks every result as non-executable.",
+      "commits": [
+        "b45f992886ad65d51e5d4ea631cea0665482f852"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Required every release-delta commit to reference a tracked design document or GitHub Pull Request so reviewers can recover the decisions behind the change before publication.",
+      "commits": [
+        "78bbb19aabcd7c08edad58ac6169b25a0d549dcd"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Warmed required US option chains before the opening scan so the first candidate pass can reuse complete quote evidence without changing scheduled-trigger or notification semantics.",
+      "commits": [
+        "ee6e79c598f366923845a3c07fa5a96a2a683aa8"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Derived Covered Call and Combo Yield capacity from each option contract's authoritative multiplier, removing the fixed 100-share assumption and failing closed when multiplier evidence is missing or conflicting.",
+      "commits": [
+        "08ed5dc1ac8588c92542897731a06ad63d300d00"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "08ed5dc1ac8588c92542897731a06ad63d300d00",
+      "references": [
+        "docs/candidate_strategy.md#33-合约身份与交割物",
+        "docs/candidate_strategy.md#63-覆盖能力"
+      ]
+    },
+    {
+      "commit": "78bbb19aabcd7c08edad58ac6169b25a0d549dcd",
+      "references": [
+        "docs/RELEASE_PROCESS.md#design-evidence"
+      ]
+    },
+    {
+      "commit": "ee6e79c598f366923845a3c07fa5a96a2a683aa8",
+      "references": [
+        "docs/AGENT_WIKI.md#tick-runtime",
+        "docs/FUTU_SIMULATE_ACCOUNT_EXPERIENCE_SYSTEM_DESIGN.md#2-当前实现约束"
+      ]
+    },
+    {
+      "commit": "b45f992886ad65d51e5d4ea631cea0665482f852",
+      "references": [
+        "docs/FUTU_SIMULATE_ACCOUNT_EXPERIENCE_PRD.md",
+        "docs/FUTU_SIMULATE_ACCOUNT_EXPERIENCE_SYSTEM_DESIGN.md"
+      ]
+    }
+  ]
+}
