@@ -9,8 +9,9 @@ from pathlib import Path
 import pytest
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
-from src.application import opend_symbol_outputs
 from src.application.opend_symbol_outputs import (
+    _csv_roundtrip_frame,
+    _validate_consumer_csv_projection,
     publish_required_data_quote_snapshot,
     save_outputs,
 )
@@ -42,14 +43,13 @@ def test_consumer_csv_projection_equal_frame_skips_cell_fallback(
     monkeypatch,
 ) -> None:
     rows = [{"symbol": "NVDA"}]
-    frame = opend_symbol_outputs._csv_roundtrip_frame(rows)
+    frame = _csv_roundtrip_frame(rows)
     monkeypatch.setattr(
-        opend_symbol_outputs,
-        "_canonical_csv_value",
+        "src.application.opend_symbol_outputs._canonical_csv_value",
         lambda _value: pytest.fail("equal frame entered cell fallback"),
     )
 
-    opend_symbol_outputs._validate_consumer_csv_projection(
+    _validate_consumer_csv_projection(
         rows=rows,
         frame=frame,
         csv=None,
