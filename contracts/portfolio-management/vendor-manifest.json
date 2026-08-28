@@ -3,7 +3,7 @@
   "upstream_repository": "portfolio-management",
   "upstream_release_state": "unpublished",
   "planned_upstream_contract_release": "pm-api-v1.0.0",
-  "upstream_commit": "7c406e5f70e7b10e17d74b1f1ed242b4262e8ca3",
+  "upstream_commit": "ab1f1f3b333e4d33663d87beb5dda3eced671c04",
   "contract_path": "contracts/portfolio-management/v1.openapi.json",
-  "sha256": "c9fe8b95d4fce0dc1632a5cb903e87fa1170895453be95af047fdef53513f871"
+  "sha256": "73b416b0d6b5d74bb5dacbf4f13c4dc44f68d5163f127ba027e7ce309f2be63a"
 }

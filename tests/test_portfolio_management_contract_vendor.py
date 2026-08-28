@@ -17,32 +17,44 @@ def test_vendored_pm_openapi_matches_manifest_and_client_operations() -> None:
     assert manifest["api_version"] == "portfolio.api.v1"
     assert manifest["upstream_release_state"] == "unpublished"
     assert manifest["planned_upstream_contract_release"] == "pm-api-v1.0.0"
-    assert manifest["upstream_commit"] == "7c406e5f70e7b10e17d74b1f1ed242b4262e8ca3"
+    assert manifest["upstream_commit"] == "ab1f1f3b333e4d33663d87beb5dda3eced671c04"
     assert len(manifest["upstream_commit"]) == 40
     assert all(character in "0123456789abcdef" for character in manifest["upstream_commit"])
     assert hashlib.sha256(contract_path.read_bytes()).hexdigest() == manifest["sha256"]
 
     document = json.loads(contract_path.read_text(encoding="utf-8"))
+    assert set(document["components"]["schemas"]["PublicErrorResponse"]["required"]) == {
+        "success",
+        "error_code",
+        "message",
+        "request_id",
+        "details",
+    }
     operations = {
         (method.upper(), path)
         for path, path_item in document["paths"].items()
         for method in path_item
         if method.lower() in {"get", "post", "put", "patch", "delete"}
     }
-    assert operations == CONTRACT_OPERATIONS
-    assert "/api/v1/analysis/cash-facts" not in document["paths"]
+    assert set(CONTRACT_OPERATIONS) <= operations
+    assert ("GET", "/api/v1/analysis/cash-facts") not in CONTRACT_OPERATIONS
 
 
 def test_vendored_pm_openapi_declares_version_and_error_contracts() -> None:
     manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
     document = json.loads((ROOT / manifest["contract_path"]).read_text(encoding="utf-8"))
-    for method, path in CONTRACT_OPERATIONS:
+    for (method, path), success_status in CONTRACT_OPERATIONS.items():
         operation = document["paths"][path][method.lower()]
         assert (
-            operation["responses"]["200"]["headers"]["X-PM-API-Version"]["schema"]["const"]
+            operation["responses"][str(success_status)]["headers"]["X-PM-API-Version"]["schema"]["const"]
             == "portfolio.api.v1"
         )
-        assert operation["responses"]["503"]["content"]["application/json"]["schema"]
+        for status, response in operation["responses"].items():
+            if status != str(success_status):
+                assert response["headers"]["X-PM-API-Version"]["schema"]["const"] == "portfolio.api.v1"
+                assert response["content"]["application/json"]["schema"] == {
+                    "$ref": "#/components/schemas/PublicErrorResponse"
+                }
 
 
 def test_vendored_pm_openapi_requires_core_success_and_freshness_fields() -> None:

@@ -27,7 +27,6 @@
 | `OM-LCY-001` | `src/application/quality/lifecycle_checks.py::build_lifecycle_datasets` | 周末/假日 deadline；11 条 stale 固定回归 | `lifecycle`、`close_advice` |
 | `OM-LCY-002` | 同上 | external adjustment 与 legacy gap 分离回归 | 受影响的 `lifecycle`、`close_advice` |
 | `OM-LCY-003` | 同上 | legacy history 独立 dataset 回归 | 受影响历史报告 |
-| `OM-HSYNC-001` | `src/application/quality/service.py::_holdings_sync_dataset` | service fixture 覆盖 disabled/intent result facade | 仅正股刷新时效视图；不替 PM 判定数据可信度 |
 
 ## 发布、读取和门禁边界
 

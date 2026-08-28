@@ -69,9 +69,11 @@ from src.application.trades.receipt_compensation import (
     compensate_trade_intake_receipts,
 )
 from src.application.trades.inbox import (
+    claim_trade_payload_refresh_intent,
     enqueue_trade_payload,
     list_retryable_trade_payloads,
     mark_trade_payload_retryable,
+    record_trade_payload_refresh_intent,
     settle_trade_payload_result,
     trade_inbox_revision,
     trade_inbox_summary,
@@ -83,16 +85,20 @@ from src.application.ledger.api import (
     record_trade_event_with_wheel_intent,
 )
 from src.application.runtime_paths import resolve_runtime_root
+from src.application.portfolio_management import (
+    PORTFOLIO_MANAGEMENT_DISABLED,
+    portfolio_management_enabled as is_portfolio_management_enabled,
+    portfolio_management_failure_code,
+    resolve_portfolio_management_client,
+)
 from src.application.trades.intake import (
     TRADE_INTAKE_SOURCE_CONTEXT_KEY,
     TRADE_INTAKE_SOURCE_CONTEXT_SCHEMA,
     process_trade_payload,
 )
-from src.application.trades.stock_holdings_sync import StockHoldingsSyncDispatcher
 from src.application.write_contract import attach_write_contract, write_control
 from src.application.wheel.capacity import load_shared_coverage_fact
 from src.infrastructure.io_utils import atomic_write_json, utc_now
-from src.infrastructure.portfolio_holdings_sync_client import sync_portfolio_holdings
 from src.infrastructure.futu_gateway import build_futu_gateway
 
 
@@ -164,6 +170,65 @@ def _log(message: str) -> None:
     print(message, flush=True)
 
 
+def _dispatch_portfolio_refresh_intent(
+    intent: dict[str, str] | None,
+    *,
+    config: dict[str, Any],
+    audit_path: Path,
+    client: Any | None = None,
+    append_audit_fn: Callable[[Path, dict[str, Any]], Any] = append_trade_intake_audit,
+    log_fn: Callable[[str], Any] = _log,
+) -> None:
+    if not isinstance(intent, dict):
+        return
+    account = str(intent.get("account") or "").strip().lower()
+    request_id = str(intent.get("request_id") or "").strip()
+    event: dict[str, Any]
+    try:
+        resolved_client = resolve_portfolio_management_client(
+            config,
+            client=client,
+        )
+        if resolved_client == PORTFOLIO_MANAGEMENT_DISABLED:
+            event = {
+                "phase": "portfolio_refresh_hint_failed",
+                "account": account,
+                "request_id": request_id,
+                "failure_code": PORTFOLIO_MANAGEMENT_DISABLED,
+            }
+        else:
+            resolved_client.request_holdings_refresh(
+                account=account,
+                request_id=request_id,
+                timeout=2.0,
+            )
+            event = {
+                "phase": "portfolio_refresh_hint_accepted",
+                "account": account,
+                "request_id": request_id,
+            }
+    except Exception as exc:
+        event = {
+            "phase": "portfolio_refresh_hint_failed",
+            "account": account,
+            "request_id": request_id,
+            "failure_code": (
+                "CONFIG_ERROR"
+                if isinstance(exc, ValueError)
+                else portfolio_management_failure_code(exc)
+            ),
+            "error_type": type(exc).__name__,
+        }
+    event["observed_at_utc"] = utc_now()
+    try:
+        append_audit_fn(audit_path, event)
+    except Exception as exc:
+        log_fn(
+            "[WARN] portfolio refresh hint audit failed "
+            f"phase={event['phase']} error_type={type(exc).__name__}"
+        )
+
+
 def _attach_combo_reconciliation_after_open(
     result: dict[str, Any],
     *,
@@ -208,7 +273,6 @@ def _process_payload(
     config_path: Path | None = None,
     runtime_root: Path | None = None,
     on_result_fn: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
-    on_stock_holdings_sync_fn: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
     retry_failed_deal: bool = False,
     source: str = "push",
     allow_external_lookup: bool = True,
@@ -292,7 +356,7 @@ def _process_payload(
         normalize_trade_deal_fn=normalize_fn,
         resolve_trade_deal_fn=_resolve_with_wheel_intent,
         on_result_fn=on_result_fn,
-        on_stock_holdings_sync_fn=on_stock_holdings_sync_fn,
+        portfolio_management_enabled=is_portfolio_management_enabled(config),
         retry_failed_deal=retry_failed_deal,
         source=source,
     )
@@ -633,8 +697,8 @@ def main(argv: list[str] | None = None) -> int:
                     "status_path": str(status_path),
                     "receipt": dict(intake_cfg["receipt"]),
                     "backfill": dict(intake_cfg["backfill"]),
-                    "holdings_sync": _holdings_sync_status_payload(
-                        intake_cfg.get("holdings_sync")
+                    "portfolio_management": dict(
+                        cfg.get("portfolio_management") or {}
                     ),
                     "mapped_accounts": sorted(intake_cfg["account_mapping"].values()),
                     "sources": [_source_status_payload(source) for source in sources],
@@ -653,22 +717,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     if apply_changes and control["confirmation_required"]:
         print(
-            "trade-intake apply mode writes trade_events, may sync PM holdings, "
+            "trade-intake apply mode writes trade_events, may request a PM holdings refresh, "
             "and may send receipts; use --confirm or --yes"
         )
         return 2
     if args.deal_json:
-        holdings_sync_dispatcher = _build_stock_holdings_sync_dispatcher(
-            intake_cfg=intake_cfg,
-            sources=sources,
-            runtime_root=runtime_root,
-            apply_changes=apply_changes,
-        )
-        holdings_sync_callback = (
-            holdings_sync_dispatcher.handle_normalized_deal
-            if holdings_sync_dispatcher is not None
-            else None
-        )
         payload = json.loads(Path(args.deal_json).read_text(encoding="utf-8"))
         manual_source = _select_source_for_payload(
             sources,
@@ -683,62 +736,57 @@ def main(argv: list[str] | None = None) -> int:
         manual_state_path = Path(manual_source.get("state_path") or state_path)
         manual_audit_path = Path(manual_source.get("audit_path") or audit_path)
         manual_status_path = Path(manual_source.get("status_path") or status_path)
-        try:
-            with contextlib.redirect_stdout(sys.stderr):
-                if apply_changes:
-                    _data_config, repo = open_position_ledger_from_runtime_config(base=runtime_root, cfg=cfg, data_config=args.data_config)
-                else:
-                    repo = _ReplayRepo()
-                receipt_callback = _build_receipt_callback(
-                    base=base,
-                    cfg=cfg,
-                    receipt_config=intake_cfg["receipt"],
+        with contextlib.redirect_stdout(sys.stderr):
+            if apply_changes:
+                _data_config, repo = open_position_ledger_from_runtime_config(base=runtime_root, cfg=cfg, data_config=args.data_config)
+            else:
+                repo = _ReplayRepo()
+            receipt_callback = _build_receipt_callback(
+                base=base,
+                cfg=cfg,
+                receipt_config=intake_cfg["receipt"],
+                repo=repo,
+            )
+            result = _process_payload(
+                payload,
+                repo=repo,
+                state_path=manual_state_path,
+                audit_path=manual_audit_path,
+                account_mapping=manual_account_mapping,
+                futu_account_ids=manual_futu_account_ids,
+                apply_changes=apply_changes,
+                host=manual_host,
+                port=manual_port,
+                config=cfg,
+                config_path=cfg_path,
+                runtime_root=runtime_root,
+                on_result_fn=receipt_callback,
+                retry_failed_deal=bool(args.retry_failed),
+                source="manual",
+                allow_external_lookup=bool(apply_changes),
+            )
+            combo_mode = str(
+                manual_source.get("combo_reconciliation_mode") or "off"
+            ).strip().lower()
+            _attach_combo_reconciliation_after_open(
+                result,
+                apply_changes=apply_changes,
+                mode=combo_mode,
+                reconcile_fn=lambda: reconcile_account_post_trade_combos(
                     repo=repo,
-                )
-                result = _process_payload(
-                    payload,
-                    repo=repo,
-                    state_path=manual_state_path,
-                    audit_path=manual_audit_path,
-                    account_mapping=manual_account_mapping,
-                    futu_account_ids=manual_futu_account_ids,
-                    apply_changes=apply_changes,
-                    host=manual_host,
-                    port=manual_port,
-                    config=cfg,
-                    config_path=cfg_path,
                     runtime_root=runtime_root,
-                    on_result_fn=receipt_callback,
-                    on_stock_holdings_sync_fn=holdings_sync_callback,
-                    retry_failed_deal=bool(args.retry_failed),
-                    source="manual",
-                    allow_external_lookup=bool(apply_changes),
-                )
-                combo_mode = str(
-                    manual_source.get("combo_reconciliation_mode") or "off"
-                ).strip().lower()
-                _attach_combo_reconciliation_after_open(
-                    result,
-                    apply_changes=apply_changes,
-                    mode=combo_mode,
-                    reconcile_fn=lambda: reconcile_account_post_trade_combos(
-                        repo=repo,
-                        runtime_root=runtime_root,
-                        account=str(
-                            result.get("account")
-                            or manual_source.get("account")
-                            or ""
-                        ),
-                        runtime_environment=trade_combo_runtime_environment(
-                            host=manual_host,
-                            port=manual_port,
-                        ),
-                        mode=combo_mode,
+                    account=str(
+                        result.get("account")
+                        or manual_source.get("account")
+                        or ""
                     ),
-                )
-        finally:
-            if holdings_sync_dispatcher is not None:
-                holdings_sync_dispatcher.close()
+                    runtime_environment=trade_combo_runtime_environment(
+                        host=manual_host,
+                        port=manual_port,
+                    ),
+                    mode=combo_mode,
+                ),
+            )
         if apply_changes:
             _write_listener_status(
                 manual_status_path,
@@ -782,17 +830,6 @@ def main(argv: list[str] | None = None) -> int:
             )
         raise SystemExit("trade_intake.enabled=false; refusing to start listener")
 
-    holdings_sync_dispatcher = _build_stock_holdings_sync_dispatcher(
-        intake_cfg=intake_cfg,
-        sources=sources,
-        runtime_root=runtime_root,
-        apply_changes=apply_changes,
-    )
-    holdings_sync_callback = (
-        holdings_sync_dispatcher.handle_normalized_deal
-        if holdings_sync_dispatcher is not None
-        else None
-    )
     process_lock = threading.RLock()
     lifecycle_receipt_dispatcher: (
         LifecycleReceiptBatchDispatcher | None
@@ -821,7 +858,6 @@ def main(argv: list[str] | None = None) -> int:
                 intake_cfg=intake_cfg,
                 apply_changes=apply_changes,
                 receipt_callback=receipt_callback,
-                stock_holdings_sync_callback=holdings_sync_callback,
                 process_lock=process_lock,
                 lifecycle_dispatcher_status_fn=(
                     lifecycle_dispatcher_status_fn
@@ -840,7 +876,6 @@ def main(argv: list[str] | None = None) -> int:
                 intake_cfg=intake_cfg,
                 apply_changes=apply_changes,
                 receipt_callback=receipt_callback,
-                stock_holdings_sync_callback=holdings_sync_callback,
                 process_lock=process_lock,
                 stop_event=stop_event,
                 lifecycle_dispatcher_status_fn=(
@@ -849,12 +884,8 @@ def main(argv: list[str] | None = None) -> int:
             ),
         )
     finally:
-        try:
-            if lifecycle_receipt_dispatcher is not None:
-                lifecycle_receipt_dispatcher.close()
-        finally:
-            if holdings_sync_dispatcher is not None:
-                holdings_sync_dispatcher.close()
+        if lifecycle_receipt_dispatcher is not None:
+            lifecycle_receipt_dispatcher.close()
 
 
 def _build_receipt_callback(
@@ -1112,50 +1143,6 @@ def _build_lifecycle_receipt_batch_dispatcher(
     return dispatcher, dispatcher.snapshot
 
 
-def _build_stock_holdings_sync_dispatcher(
-    *,
-    intake_cfg: dict[str, Any],
-    sources: list[dict[str, Any]],
-    runtime_root: Path,
-    apply_changes: bool,
-) -> StockHoldingsSyncDispatcher | None:
-    sync_cfg = dict(intake_cfg.get("holdings_sync") or {})
-    if not apply_changes or not bool(sync_cfg.get("enabled")):
-        return None
-    accounts = sorted(
-        {
-            str(account or "").strip().lower()
-            for source in sources
-            for account in dict(source.get("account_mapping") or {}).values()
-            if str(account or "").strip()
-        }
-    )
-    if not accounts:
-        raise ValueError(
-            "trade_intake.holdings_sync.enabled=true requires mapped Futu accounts"
-        )
-    state_dir = Path(
-        sync_cfg.get("state_dir")
-        or "output_shared/state/trade_intake/stock_holdings_sync"
-    )
-    if not state_dir.is_absolute():
-        state_dir = (runtime_root / state_dir).resolve()
-    timeout_sec = float(sync_cfg.get("request_timeout_sec") or 120.0)
-    return StockHoldingsSyncDispatcher(
-        accounts=accounts,
-        state_dir=state_dir,
-        sync_fn=lambda account: sync_portfolio_holdings(
-            account,
-            timeout_sec=timeout_sec,
-        ),
-        debounce_sec=float(sync_cfg.get("debounce_sec") or 0.0),
-        max_attempts=int(sync_cfg.get("max_attempts") or 1),
-        retry_backoff_sec=float(sync_cfg.get("retry_backoff_sec") or 0.0),
-        queue_capacity=int(sync_cfg.get("queue_capacity") or 100),
-        recent_deal_limit=int(sync_cfg.get("recent_deal_limit") or 2000),
-    )
-
-
 def _select_source_for_payload(
     sources: list[dict[str, Any]],
     *,
@@ -1408,7 +1395,6 @@ def _run_listener_source_loop(
     apply_changes: bool,
     receipt_callback: Callable[[dict[str, Any]], dict[str, Any]],
     process_lock: threading.RLock,
-    stock_holdings_sync_callback: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
     stop_event: threading.Event | None = None,
     lifecycle_dispatcher_status_fn: (
         Callable[[], dict[str, Any]] | None
@@ -1624,7 +1610,6 @@ def _run_listener_source_loop(
                     config_path=cfg_path,
                     runtime_root=runtime_root,
                     on_result_fn=receipt_callback,
-                    on_stock_holdings_sync_fn=stock_holdings_sync_callback,
                     source=intake_source,
                 )
         except Exception as exc:
@@ -1635,11 +1620,27 @@ def _run_listener_source_loop(
                 error=error,
             )
             raise
+        intent = result.get("portfolio_refresh_intent")
+        if apply_changes and isinstance(intent, dict):
+            record_trade_payload_refresh_intent(
+                inbox_path,
+                inbox_id=inbox_id,
+                intent=intent,
+            )
         settle_trade_payload_result(
             inbox_path,
             inbox_id=inbox_id,
             result=result,
         )
+        if apply_changes:
+            _dispatch_portfolio_refresh_intent(
+                claim_trade_payload_refresh_intent(
+                    inbox_path,
+                    inbox_id=inbox_id,
+                ),
+                config=cfg,
+                audit_path=audit_path,
+            )
         return result
 
     def _on_deal(payload: dict[str, Any]) -> None:
@@ -1762,11 +1763,6 @@ def _run_listener_source_loop(
                 "last_push_deal_id": result.get("deal_id") or payload_deal_id(payload) or None,
                 "last_deal_result": _result_summary(result),
                 "last_receipt_result": _receipt_summary(result.get("receipt")),
-                "last_stock_holdings_sync_intent": (
-                    dict(result.get("stock_holdings_sync"))
-                    if isinstance(result.get("stock_holdings_sync"), dict)
-                    else None
-                ),
                 "inbox": current_inbox_summary(),
                 "last_combo_reconciliation": (
                     dict(result.get("combo_reconciliation"))
@@ -1835,7 +1831,7 @@ def _run_listener_source_loop(
                             _process_inbox_payload(
                                 dict(retry_row["payload"]),
                                 inbox_id=str(retry_row["inbox_id"]),
-                                intake_source="inbox_retry",
+                                intake_source=str(retry_row.get("source") or "inbox_retry"),
                             )
                         except Exception as exc:
                             status_state["last_inbox_retry_error"] = (
@@ -1974,7 +1970,13 @@ def _run_listener_source_loop(
                                 process_payload_fn=(
                                     _process_payload_with_lifecycle_runtime
                                 ),
-                                on_stock_holdings_sync_fn=stock_holdings_sync_callback,
+                                dispatch_portfolio_refresh_fn=lambda intent: (
+                                    _dispatch_portfolio_refresh_intent(
+                                        intent,
+                                        config=cfg,
+                                        audit_path=audit_path,
+                                    )
+                                ),
                                 process_lock=process_lock,
                                 inbox_path=inbox_path,
                                 checkpoint_path=backfill_checkpoint_path,
@@ -2132,9 +2134,6 @@ def _status_base_payload(
         "backfill": dict(intake_cfg.get("backfill") or {}),
         "settlement_observation": dict(
             intake_cfg.get("settlement_observation") or {}
-        ),
-        "holdings_sync": _holdings_sync_status_payload(
-            intake_cfg.get("holdings_sync")
         ),
         "combo_reconciliation": dict(
             intake_cfg.get("combo_reconciliation") or {}
@@ -2709,14 +2708,6 @@ def _is_canonical_broker_source_key(value: str) -> bool:
         and parts[0].lower() == "futu"
         and all(parts[1:])
     )
-
-
-def _holdings_sync_status_payload(value: object) -> dict[str, Any]:
-    src = dict(value) if isinstance(value, dict) else {}
-    out = dict(src)
-    if "state_dir" in out:
-        out["state_dir"] = str(out["state_dir"])
-    return out
 
 
 def _write_listener_status(path: Path, base_payload: dict[str, Any], *, status: str, stage: str, **extra: Any) -> None:

@@ -69,90 +69,6 @@ def _trusted_empty_current_projection() -> dict:
     }
 
 
-def test_holdings_sync_quality_treats_no_activity_as_not_triggered() -> None:
-    runtime = {
-        "trade_intake": {
-            "holdings_sync": {"enabled": True},
-            "sources": [
-                {
-                    "account": "lx",
-                    "summary": {
-                        "last_push_received_utc": None,
-                        "last_backfill_deal_count": 0,
-                        "last_backfill_applied_count": 0,
-                        "last_stock_holdings_sync_intent": None,
-                    },
-                }
-            ],
-        }
-    }
-
-    dataset = OMQualityService._holdings_sync_dataset(
-        runtime_for_config=[runtime],
-        account="lx",
-        market="us",
-        observed_at="2026-08-01T00:00:00Z",
-    )
-
-    assert dataset["status"] == "trusted"
-    assert dataset["reason_codes"] == []
-    assert dataset["checks"][0]["status"] == "pass"
-    assert dataset["checks"][0]["reason_code"] == "STOCK_REFRESH_INTENT_NOT_TRIGGERED"
-    assert dataset["checks"][0]["observed"] == {
-        "intent_count": 0,
-        "activity_observed": False,
-    }
-
-
-def test_holdings_sync_quality_preserves_missing_and_failed_evidence() -> None:
-    def _dataset(summary: dict) -> dict:
-        return OMQualityService._holdings_sync_dataset(
-            runtime_for_config=[
-                {
-                    "trade_intake": {
-                        "holdings_sync": {"enabled": True},
-                        "sources": [{"account": "lx", "summary": summary}],
-                    }
-                }
-            ],
-            account="lx",
-            market="us",
-            observed_at="2026-08-01T00:00:00Z",
-        )
-
-    missing = _dataset(
-        {
-            "last_push_received_utc": "2026-08-01T00:00:00Z",
-            "last_stock_holdings_sync_intent": None,
-        }
-    )
-    not_applicable = _dataset(
-        {
-            "last_push_received_utc": "2026-08-01T00:00:00Z",
-            "last_stock_holdings_sync_intent": {
-                "status": "skipped",
-                "reason": "option_deal",
-            },
-        }
-    )
-    failed = _dataset(
-        {
-            "last_push_received_utc": "2026-08-01T00:00:00Z",
-            "last_stock_holdings_sync_intent": {
-                "status": "rejected",
-                "reason": "queue_full",
-            },
-        }
-    )
-
-    assert missing["status"] == "unavailable"
-    assert missing["checks"][0]["reason_code"] == "STOCK_REFRESH_INTENT_EVIDENCE_MISSING"
-    assert not_applicable["status"] == "trusted"
-    assert not_applicable["checks"][0]["reason_code"] == "STOCK_REFRESH_INTENT_NOT_TRIGGERED"
-    assert failed["status"] == "partial"
-    assert failed["checks"][0]["reason_code"] == "STOCK_REFRESH_INTENT_DELAYED"
-
-
 def test_service_publishes_schema_valid_artifact_without_business_writes(
     monkeypatch,
     tmp_path: Path,
@@ -211,7 +127,6 @@ def test_service_publishes_schema_valid_artifact_without_business_writes(
         "summary": {"ok": True},
         "ledger_store": {"sqlite_path": str(ledger_path)},
         "trade_intake": {
-            "holdings_sync": {"enabled": False},
             "sources": [
                 {
                     "id": "lx",
@@ -256,7 +171,6 @@ def test_service_publishes_schema_valid_artifact_without_business_writes(
         "OM-LED-002",
         "OM-POS-001",
         "OM-POS-002",
-        "OM-HSYNC-001",
     } <= check_ids
     runtime_ids = {item["check_id"] for item in payload["runtime"]["checks"]}
     assert {"RT-OM-001", "RT-OM-002", "RT-OM-003", "RT-OM-004"} <= runtime_ids
@@ -385,7 +299,6 @@ def test_service_uses_account_coherent_lifecycle_read_for_position_coverage(
         "summary": {"ok": True},
         "ledger_store": {"sqlite_path": str(ledger_path)},
         "trade_intake": {
-            "holdings_sync": {"enabled": False},
             "sources": [],
         },
         "service_profile": {"loaded": True},
@@ -452,7 +365,7 @@ def test_no_deep_refresh_carries_current_snapshot_and_due_probe_rechecks(
         "config": {"config_key": "us"},
         "summary": {"ok": True},
         "ledger_store": {"sqlite_path": str(ledger_path)},
-        "trade_intake": {"holdings_sync": {"enabled": False}, "sources": []},
+        "trade_intake": {"sources": []},
         "service_profile": {"loaded": True},
     }
     artifact = QualityArtifactRepository(tmp_path / "status.v1.json")
@@ -641,7 +554,6 @@ def test_single_market_day_end_refresh_preserves_other_market(
                 "summary": {"ok": True},
                 "ledger_store": {"sqlite_path": str(ledger_path)},
                 "trade_intake": {
-                    "holdings_sync": {"enabled": False},
                     "sources": [],
                 },
                 "service_profile": {"loaded": True},
@@ -763,7 +675,7 @@ def test_active_cutover_refresh_uses_current_projection_without_history_reads(
                 "config": {"config_key": payload["config_key"]},
                 "summary": {"ok": True},
                 "ledger_store": {"sqlite_path": str(ledger_path)},
-                "trade_intake": {"holdings_sync": {"enabled": False}, "sources": []},
+                "trade_intake": {"sources": []},
                 "service_profile": {"loaded": True},
             },
         }
@@ -850,7 +762,7 @@ def test_integrity_refresh_keeps_full_replay_in_separate_artifact(
                 "config": {"config_key": "us"},
                 "summary": {"ok": True},
                 "ledger_store": {"sqlite_path": str(ledger_path)},
-                "trade_intake": {"holdings_sync": {"enabled": False}, "sources": []},
+                "trade_intake": {"sources": []},
                 "service_profile": {"loaded": True},
             },
         }

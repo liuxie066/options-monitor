@@ -367,6 +367,90 @@ def settle_trade_payload_result(
     )
 
 
+def record_trade_payload_refresh_intent(
+    path: str | Path,
+    *,
+    inbox_id: str,
+    intent: Mapping[str, Any],
+) -> None:
+    inbox_path = Path(path)
+    normalized = _normalize_portfolio_refresh_intent(intent)
+    intent_json = json.dumps(normalized, ensure_ascii=False, sort_keys=True)
+    with closing(_connect(inbox_path)) as conn:
+        with conn:
+            _ensure_schema(conn)
+            cursor = conn.execute(
+                """
+                UPDATE trade_inbox
+                SET portfolio_refresh_intent_json = COALESCE(
+                    portfolio_refresh_intent_json,
+                    ?
+                )
+                WHERE inbox_id = ?
+                """,
+                (intent_json, str(inbox_id)),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("trade inbox row not found")
+            row = conn.execute(
+                """
+                SELECT portfolio_refresh_intent_json
+                FROM trade_inbox
+                WHERE inbox_id = ?
+                """,
+                (str(inbox_id),),
+            ).fetchone()
+            stored = json.loads(str(row["portfolio_refresh_intent_json"]))
+            if _normalize_portfolio_refresh_intent(stored) != normalized:
+                raise ValueError("trade inbox portfolio refresh intent conflict")
+
+
+def claim_trade_payload_refresh_intent(
+    path: str | Path,
+    *,
+    inbox_id: str,
+) -> dict[str, str] | None:
+    inbox_path = Path(path)
+    with closing(_connect(inbox_path)) as conn:
+        with conn:
+            _ensure_schema(conn)
+            cursor = conn.execute(
+                """
+                UPDATE trade_inbox
+                SET portfolio_refresh_attempted_at_ms = ?
+                WHERE inbox_id = ?
+                  AND portfolio_refresh_intent_json IS NOT NULL
+                  AND portfolio_refresh_attempted_at_ms IS NULL
+                """,
+                (int(time.time() * 1000), str(inbox_id)),
+            )
+            if cursor.rowcount != 1:
+                return None
+            row = conn.execute(
+                """
+                SELECT portfolio_refresh_intent_json
+                FROM trade_inbox
+                WHERE inbox_id = ?
+                """,
+                (str(inbox_id),),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("trade inbox row disappeared after claim")
+            return _normalize_portfolio_refresh_intent(
+                json.loads(str(row["portfolio_refresh_intent_json"]))
+            )
+
+
+def _normalize_portfolio_refresh_intent(
+    intent: Mapping[str, Any],
+) -> dict[str, str]:
+    account = str(intent.get("account") or "").strip().lower()
+    request_id = str(intent.get("request_id") or "").strip()
+    if not account or not request_id:
+        raise ValueError("portfolio refresh intent is incomplete")
+    return {"account": account, "request_id": request_id}
+
+
 def trade_inbox_summary(path: str | Path) -> dict[str, Any]:
     inbox_path = Path(path)
     if not inbox_path.exists():
@@ -1769,7 +1853,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             updated_at_ms INTEGER NOT NULL,
             last_error TEXT,
             result_status TEXT,
-            result_reason TEXT
+            result_reason TEXT,
+            portfolio_refresh_intent_json TEXT,
+            portfolio_refresh_attempted_at_ms INTEGER
         )
         """
     )
@@ -1854,6 +1940,18 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         "trade_inbox",
         "economic_payload_hash",
         "TEXT",
+    )
+    _add_column_if_missing(
+        conn,
+        "trade_inbox",
+        "portfolio_refresh_intent_json",
+        "TEXT",
+    )
+    _add_column_if_missing(
+        conn,
+        "trade_inbox",
+        "portfolio_refresh_attempted_at_ms",
+        "INTEGER",
     )
     existing_attempt_columns = {
         str(row["name"])
@@ -2435,6 +2533,7 @@ def _require_null_fields(
 __all__ = [
     "SETTLEMENT_ATTEMPT_MIN_LEASE_MS",
     "SettlementAttemptClaimOwnershipLost",
+    "claim_trade_payload_refresh_intent",
     "enqueue_trade_payload",
     "claim_settlement_attempt",
     "claim_settlement_provider_batch",
@@ -2449,6 +2548,7 @@ __all__ = [
     "renew_settlement_provider_batch_claim",
     "mark_settlement_attempt_provider_started",
     "reconcile_settlement_attempt_invocation",
+    "record_trade_payload_refresh_intent",
     "replace_finished_settlement_attempt_provider_invocation",
     "release_settlement_provider_batch_claim",
     "reserve_settlement_attempt_invocation",

@@ -19,11 +19,15 @@ from src.application.portfolio_assignment_scenario import (
     query_portfolio_assignment_scenario,
 )
 from src.application.portfolio_pnl_bridge import build_portfolio_pnl_bridge
+from src.application.portfolio_management import (
+    PORTFOLIO_MANAGEMENT_DISABLED,
+    portfolio_management_failure_code,
+    resolve_portfolio_management_client,
+)
 from src.application.performance.service import build_option_period_performance
 from src.infrastructure.portfolio_management_client import (
     SERVICE_URL_ENV,
     PortfolioManagementClient,
-    PortfolioManagementConfigError,
     PortfolioManagementError,
     PortfolioManagementHTTPError,
 )
@@ -37,14 +41,28 @@ _PM_TRUST_STATUSES = frozenset({"trusted", "partial", "untrusted", "unavailable"
 
 def _portfolio_client() -> PortfolioManagementClient:
     try:
-        return PortfolioManagementClient(urlopen_fn=urllib.request.urlopen)
-    except PortfolioManagementConfigError as exc:
+        _config_path, config = load_runtime_config(config_key="us")
+        client = resolve_portfolio_management_client(
+            config,
+            urlopen_fn=urllib.request.urlopen,
+        )
+        if client == PORTFOLIO_MANAGEMENT_DISABLED:
+            raise AgentToolError(
+                code=PORTFOLIO_MANAGEMENT_DISABLED,
+                message="portfolio-management integration is disabled",
+            )
+        return client
+    except ValueError as exc:
         raise AgentToolError(code="CONFIG_ERROR", message=str(exc)) from exc
 
 
 def _map_client_error(exc: PortfolioManagementError) -> AgentToolError:
     details = {"status": exc.status} if isinstance(exc, PortfolioManagementHTTPError) else {}
-    return AgentToolError(code="READ_ERROR", message=str(exc), details=details)
+    return AgentToolError(
+        code=portfolio_management_failure_code(exc),
+        message=str(exc),
+        details=details,
+    )
 
 
 def _bool_query(payload: dict[str, Any], name: str, query: dict[str, str]) -> None:

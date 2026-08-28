@@ -40,7 +40,6 @@ def resolve_trade_intake_config(
     status_path = Path(status_path_override or ti.get("status_path") or "output_shared/state/auto_trade_intake_status.json")
     receipt_cfg = resolve_trade_intake_receipt_config(ti.get("receipt"))
     backfill_cfg = resolve_trade_intake_backfill_config(ti.get("backfill"))
-    holdings_sync_cfg = resolve_trade_intake_holdings_sync_config(ti.get("holdings_sync"))
     settlement_observation_cfg = (
         resolve_trade_intake_settlement_observation_config(
             ti.get("settlement_observation")
@@ -73,7 +72,6 @@ def resolve_trade_intake_config(
         "reconnect_sec": reconnect_sec,
         "receipt": receipt_cfg,
         "backfill": backfill_cfg,
-        "holdings_sync": holdings_sync_cfg,
         "settlement_observation": settlement_observation_cfg,
         "combo_reconciliation": combo_reconciliation_cfg,
         "account_mapping": account_mapping,
@@ -200,62 +198,6 @@ def resolve_trade_intake_backfill_config(value: Any) -> dict[str, Any]:
         "startup_check": startup_check,
         "interval_sec": interval_sec,
         "lookback_hours": lookback_hours,
-    }
-
-
-def resolve_trade_intake_holdings_sync_config(value: Any) -> dict[str, Any]:
-    if value is None:
-        src: dict[str, Any] = {}
-    elif isinstance(value, dict):
-        src = value
-    else:
-        raise ValueError("trade_intake.holdings_sync must be an object")
-
-    enabled = _bool_from_config(
-        src,
-        "enabled",
-        default=False,
-        section="holdings_sync",
-    )
-    debounce_sec = float(src.get("debounce_sec", 2.0))
-    request_timeout_sec = float(src.get("request_timeout_sec", 120.0))
-    max_attempts = int(src.get("max_attempts", 3))
-    retry_backoff_sec = float(src.get("retry_backoff_sec", 2.0))
-    queue_capacity = int(src.get("queue_capacity", 100))
-    recent_deal_limit = int(src.get("recent_deal_limit", 2000))
-    state_dir = Path(
-        src.get("state_dir")
-        or "output_shared/state/trade_intake/stock_holdings_sync"
-    )
-    if debounce_sec < 0:
-        raise ValueError("trade_intake.holdings_sync.debounce_sec must be >= 0")
-    if request_timeout_sec <= 0:
-        raise ValueError(
-            "trade_intake.holdings_sync.request_timeout_sec must be > 0"
-        )
-    if max_attempts <= 0:
-        raise ValueError("trade_intake.holdings_sync.max_attempts must be > 0")
-    if retry_backoff_sec < 0:
-        raise ValueError(
-            "trade_intake.holdings_sync.retry_backoff_sec must be >= 0"
-        )
-    if queue_capacity <= 0:
-        raise ValueError(
-            "trade_intake.holdings_sync.queue_capacity must be > 0"
-        )
-    if recent_deal_limit <= 0:
-        raise ValueError(
-            "trade_intake.holdings_sync.recent_deal_limit must be > 0"
-        )
-    return {
-        "enabled": enabled,
-        "debounce_sec": debounce_sec,
-        "request_timeout_sec": request_timeout_sec,
-        "max_attempts": max_attempts,
-        "retry_backoff_sec": retry_backoff_sec,
-        "queue_capacity": queue_capacity,
-        "recent_deal_limit": recent_deal_limit,
-        "state_dir": state_dir,
     }
 
 
