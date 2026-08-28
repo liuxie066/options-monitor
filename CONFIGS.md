@@ -39,6 +39,10 @@ env-file 不是合并进生成快照的配置层；它在进程启动或工具�
 - US 调度 override 放在 `markets.us.schedule`，例如通过 `gates` 设置北京时间截止点；
 - YAML 中使用 `covered_call`，生成的内部 runtime / CSV / trace key 仍可能是 `sell_call`；
 - `combo_yield` 是当前开仓策略 key；旧 `yield_enhancement` 只在明确兼容边界读取；
+- `portfolio_management.enabled` 是全局、默认关闭的 PM 集成开关，同时控制只读工具、
+  指派证据和成交后的持仓刷新提示；不要放在 `markets.*` 下；
+- 旧 `trade_intake.holdings_sync.enabled` 只保留一个版本的迁移读取，旧队列、重试、
+  超时和状态目录参数不再生效；
 - account label 在 trim + lowercase 后必须唯一；账户隔离、ledger scope 和报告归属都依赖该标识；
 - `close_advice` 只保留 `enabled`、`quote_source` 和 `max_items_per_account`
   运行配置。止盈公式与门槛在 `strict_profit_capture.v1` 中固定，

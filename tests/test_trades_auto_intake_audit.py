@@ -984,7 +984,7 @@ def test_process_payload_records_failed_state_when_resolver_raises(tmp_path: Pat
     assert any(event.get("phase") == "failed" and event.get("deal_id") == "deal-failed-1" for event in events)
 
 
-def test_process_payload_ignores_non_option_deal_without_receipt_or_state_write(tmp_path: Path) -> None:
+def test_process_payload_records_non_option_deal_once_without_receipt(tmp_path: Path) -> None:
     deal = NormalizedTradeDeal(
         broker="富途",
         futu_account_id="REAL_1",
@@ -1009,10 +1009,12 @@ def test_process_payload_ignores_non_option_deal_without_receipt_or_state_write(
     class _Result:
         status = "skipped"
         action = None
-        reason = "not_option_deal"
         deal_id = "deal-stock-1"
         account = "lx"
         operations: list[dict] = []
+
+        def __init__(self, reason: str) -> None:
+            self.reason = reason
 
         def to_dict(self) -> dict:
             return {
@@ -1027,29 +1029,72 @@ def test_process_payload_ignores_non_option_deal_without_receipt_or_state_write(
     writes: list[dict] = []
     events: list[dict] = []
     receipt_calls: list[dict] = []
+    state = {
+        "processed_deal_ids": {},
+        "failed_deal_ids": {},
+        "unresolved_deal_ids": {},
+    }
 
-    out = process_trade_payload(
-        {"deal_id": "deal-stock-1", "symbol": "TIGR"},
-        repo=object(),
-        state_path=tmp_path / "state.json",
-        audit_path=tmp_path / "audit.jsonl",
-        account_mapping={"REAL_1": "lx"},
-        apply_changes=True,
-        load_trade_intake_state_fn=lambda _path: {"processed_deal_ids": {}, "failed_deal_ids": {}, "unresolved_deal_ids": {}},
-        write_trade_intake_state_fn=lambda _path, state: writes.append(dict(state)),
-        upsert_deal_state_fn=upsert_deal_state,
-        append_trade_intake_audit_fn=lambda _path, event: events.append(dict(event)),
-        enrich_trade_payload_fn=None,
-        normalize_trade_deal_fn=lambda payload, futu_account_mapping=None: deal,
-        resolve_trade_deal_fn=lambda *_args, **_kwargs: _Result(),
-        on_result_fn=lambda context: receipt_calls.append(dict(context)) or {"status": "sent", "delivery_confirmed": True},
-    )
+    def _write_state(_path, new_state) -> None:
+        state.clear()
+        state.update(new_state)
+        writes.append(dict(new_state))
+
+    def _resolve(_deal, *, state, **_kwargs):
+        reason = (
+            "duplicate_deal_id"
+            if "futu:lx:REAL_1:deal-stock-1" in state["processed_deal_ids"]
+            else "not_option_deal"
+        )
+        return _Result(reason)
+
+    def _process(
+        source: str,
+        *,
+        observe_receipt: bool = False,
+    ) -> dict:
+        return process_trade_payload(
+            {"deal_id": "deal-stock-1", "symbol": "TIGR"},
+            repo=object(),
+            state_path=tmp_path / "state.json",
+            audit_path=tmp_path / "audit.jsonl",
+            account_mapping={"REAL_1": "lx"},
+            apply_changes=True,
+            load_trade_intake_state_fn=lambda _path: state,
+            write_trade_intake_state_fn=_write_state,
+            upsert_deal_state_fn=upsert_deal_state,
+            append_trade_intake_audit_fn=lambda _path, event: events.append(dict(event)),
+            enrich_trade_payload_fn=None,
+            normalize_trade_deal_fn=lambda payload, futu_account_mapping=None: deal,
+            resolve_trade_deal_fn=_resolve,
+            on_result_fn=(
+                lambda context: receipt_calls.append(dict(context))
+                or {"status": "sent", "delivery_confirmed": True}
+                if observe_receipt
+                else None
+            ),
+            source=source,
+            portfolio_management_enabled=True,
+        )
+
+    out = _process("push", observe_receipt=True)
+    replayed_backfill = _process("backfill")
+    replayed_push = _process("push")
 
     assert out["status"] == "skipped"
     assert out["reason"] == "not_option_deal"
+    assert out["portfolio_refresh_intent"]["account"] == "lx"
+    assert "portfolio_refresh_intent" not in replayed_backfill
+    assert "portfolio_refresh_intent" not in replayed_push
     assert "receipt" not in out
     assert receipt_calls == []
-    assert writes == []
+    assert len(writes) == 1
+    observed = state["processed_deal_ids"]["futu:lx:REAL_1:deal-stock-1"]
+    assert observed["status"] == "skipped"
+    assert observed["reason"] == "not_option_deal"
+    assert observed["source_deal_id"] == "deal-stock-1"
+    assert observed["futu_account_id"] == "REAL_1"
+    assert observed["broker_deal_key"] == "futu:lx:REAL_1:deal-stock-1"
     assert any(event.get("phase") == "resolved" and event.get("reason") == "not_option_deal" for event in events)
     assert not any(str(event.get("phase") or "").startswith("receipt_") for event in events)
 

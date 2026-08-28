@@ -15,6 +15,11 @@ from domain.domain.portfolio_assignment_scenario import (
 from domain.domain.symbol_identity import canonical_symbol
 from src.application.agent_tool_config import load_runtime_config, repo_base
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.portfolio_management import (
+    PORTFOLIO_MANAGEMENT_DISABLED,
+    portfolio_management_failure_code,
+    resolve_portfolio_management_client,
+)
 from src.application.ledger.api import (
     list_open_short_assignment_rows,
     open_position_ledger_from_runtime_config,
@@ -22,7 +27,6 @@ from src.application.ledger.api import (
 from src.infrastructure.portfolio_management_client import (
     SERVICE_URL_ENV,
     PortfolioManagementClient,
-    PortfolioManagementConfigError,
     PortfolioManagementError,
     PortfolioManagementHTTPError,
 )
@@ -38,6 +42,10 @@ class AssignmentScenarioInputError(ValueError):
 
 class PortfolioEvidenceReadError(RuntimeError):
     """Raised when the portfolio-management evidence boundary is unavailable."""
+
+    def __init__(self, message: str, *, code: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def normalize_assignment_accounts(accounts: Sequence[str]) -> list[str]:
@@ -70,11 +78,21 @@ def read_portfolio_valuation_evidence(
     supplemental_codes: Sequence[str],
     price_timeout: int = 30,
     client: PortfolioManagementClient | None = None,
+    runtime_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     try:
-        resolved_client = client or PortfolioManagementClient(
-            urlopen_fn=urllib.request.urlopen
+        if client is None and runtime_config is None:
+            _config_path, runtime_config = load_runtime_config(config_key="us")
+        resolved_client = resolve_portfolio_management_client(
+            runtime_config,
+            client=client,
+            urlopen_fn=urllib.request.urlopen,
         )
+        if resolved_client == PORTFOLIO_MANAGEMENT_DISABLED:
+            raise PortfolioEvidenceReadError(
+                "portfolio-management integration is disabled",
+                code=PORTFOLIO_MANAGEMENT_DISABLED,
+            )
         return resolved_client.read_valuation_evidence(
             accounts=list(accounts),
             supplemental_codes=list(supplemental_codes),
@@ -83,14 +101,20 @@ def read_portfolio_valuation_evidence(
     except PortfolioManagementHTTPError as exc:
         if exc.error_code == "INPUT_ERROR":
             raise AssignmentScenarioInputError(str(exc)) from exc
-        raise PortfolioEvidenceReadError(str(exc)) from exc
+        raise PortfolioEvidenceReadError(
+            str(exc),
+            code=portfolio_management_failure_code(exc),
+        ) from exc
     except PortfolioManagementError as exc:
-        raise PortfolioEvidenceReadError(str(exc)) from exc
+        raise PortfolioEvidenceReadError(
+            str(exc),
+            code=portfolio_management_failure_code(exc),
+        ) from exc
 
 
 def _load_runtime_and_positions(
     accounts: Sequence[str],
-) -> tuple[list[dict[str, Any]], str]:
+) -> tuple[list[dict[str, Any]], str, dict[str, Any]]:
     config_path, cfg = load_runtime_config(config_key="us")
     configured_accounts = {
         str(item or "").strip().lower()
@@ -110,6 +134,7 @@ def _load_runtime_and_positions(
     return (
         list_open_short_assignment_rows(repo, accounts=list(accounts)),
         str(config_path.name),
+        cfg,
     )
 
 
@@ -197,6 +222,7 @@ def _unavailable_evidence(
     message: str,
     *,
     accounts: Sequence[str],
+    reason_code: str = "PORTFOLIO_EVIDENCE_UNAVAILABLE",
 ) -> dict[str, Any]:
     return {
         "schema_version": PORTFOLIO_EVIDENCE_VERSION,
@@ -207,7 +233,7 @@ def _unavailable_evidence(
             "trust_status": "unavailable",
             "observed_at_utc": None,
             "dataset_ids": [],
-            "reason_codes": ["PORTFOLIO_EVIDENCE_UNAVAILABLE"],
+            "reason_codes": [reason_code],
         },
         "retrieved_at_utc": datetime.now(timezone.utc).isoformat(),
         "scope": {
@@ -234,7 +260,7 @@ def query_portfolio_assignment_scenario(
     normalized_accounts = normalize_assignment_accounts(accounts)
     options_observed_at = datetime.now(timezone.utc).isoformat()
     try:
-        option_positions, runtime_config_name = _load_runtime_and_positions(
+        option_positions, runtime_config_name, runtime_config = _load_runtime_and_positions(
             normalized_accounts
         )
     except (AssignmentScenarioInputError, AgentToolError):
@@ -274,6 +300,7 @@ def query_portfolio_assignment_scenario(
         evidence = read_portfolio_valuation_evidence(
             accounts=normalized_accounts,
             supplemental_codes=supplemental_codes,
+            runtime_config=runtime_config,
         )
     except AssignmentScenarioInputError:
         raise
@@ -281,6 +308,7 @@ def query_portfolio_assignment_scenario(
         evidence = _unavailable_evidence(
             str(exc),
             accounts=normalized_accounts,
+            reason_code=exc.code,
         )
 
     snapshot = _snapshot_payload(

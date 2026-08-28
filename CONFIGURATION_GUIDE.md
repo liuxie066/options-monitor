@@ -72,6 +72,10 @@ markets:
     symbols:
       - "0700.HK"
       - "9992.HK"
+
+# 仅在同机已安装并启用 portfolio-management 时打开
+portfolio_management:
+  enabled: false
 ```
 
 约定：
@@ -81,6 +85,7 @@ markets:
 - `markets.<market>.accounts` 只引用顶层已定义账户；
 - `symbols` 保持字符串列表；
 - 个性化策略配置放在 `overrides.<symbol>`；
+- `portfolio_management.enabled` 是全局开关，不按市场配置；默认关闭；
 - YAML 使用空格缩进，tab 会被拒绝。
 
 系统默认值在 `src/application/config_defaults.py::DEFAULT_CONFIG`。不需要把所有默认字段复制进 `config.yaml`。

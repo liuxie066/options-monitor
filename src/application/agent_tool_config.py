@@ -5,6 +5,9 @@ from pathlib import Path
 from typing import Any
 
 from src.application.config_loader import normalize_portfolio_broker_config
+from src.application.portfolio_management import (
+    normalize_portfolio_management_config,
+)
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.runtime_config_freshness import RuntimeConfigIdentityError, ensure_runtime_config_identity
 from src.application.runtime_config_paths import absolutize_portfolio_data_config
@@ -86,6 +89,10 @@ def load_runtime_config(
         )
     cfg = absolutize_portfolio_data_config(raw, config_path=path)
     cfg = normalize_portfolio_broker_config(cfg)
+    try:
+        cfg = normalize_portfolio_management_config(cfg)
+    except ValueError as exc:
+        raise AgentToolError(code="CONFIG_ERROR", message=str(exc)) from exc
     if require_identity:
         try:
             ensure_runtime_config_identity(

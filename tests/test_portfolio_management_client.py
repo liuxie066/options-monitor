@@ -6,7 +6,6 @@ import urllib.error
 
 import pytest
 
-from conftest import portfolio_sync_receipt as _sync_receipt
 from src.infrastructure.portfolio_management_client import (
     API_VERSION,
     PortfolioManagementClient,
@@ -18,9 +17,16 @@ from src.infrastructure.portfolio_management_client import (
 
 
 class _Response:
-    def __init__(self, payload: object, *, version: str = API_VERSION) -> None:
+    def __init__(
+        self,
+        payload: object,
+        *,
+        version: str = API_VERSION,
+        status: int = 200,
+    ) -> None:
         self._body = json.dumps(payload).encode()
         self.headers = {"X-PM-API-Version": version}
+        self.status = status
 
     def __enter__(self):
         return self
@@ -133,13 +139,15 @@ def test_client_maps_http_error_without_retry() -> None:
             request.full_url,
             503,
             "unavailable",
-            {},
+            {"X-PM-API-Version": API_VERSION},
             io.BytesIO(
                 json.dumps(
                     {
                         "success": False,
                         "error_code": "PM_SERVICE_UNAVAILABLE",
                         "message": "broker unavailable",
+                        "request_id": "request-1",
+                        "details": {},
                     }
                 ).encode()
             ),
@@ -152,49 +160,138 @@ def test_client_maps_http_error_without_retry() -> None:
     assert calls == 1
 
 
-def test_sync_holdings_is_absolute_confirmed_and_not_retried() -> None:
+@pytest.mark.parametrize(
+    ("headers", "payload", "error"),
+    [
+        ({"X-PM-API-Version": "portfolio.api.v2"}, {
+            "success": False,
+            "error_code": "INPUT_VALIDATION_ERROR",
+            "message": "invalid input",
+            "request_id": "request-1",
+            "details": {},
+        }, "version mismatch"),
+        ({"X-PM-API-Version": API_VERSION}, {
+            "success": False,
+            "error_code": "INPUT_VALIDATION_ERROR",
+            "message": "invalid input",
+        }, "missing required fields"),
+    ],
+)
+def test_versioned_http_error_requires_version_and_public_schema(
+    headers, payload, error
+) -> None:
+    def fail(request, *, timeout):
+        raise urllib.error.HTTPError(
+            request.full_url,
+            422,
+            "invalid",
+            headers,
+            io.BytesIO(json.dumps(payload).encode()),
+        )
+
+    with pytest.raises(PortfolioManagementProtocolError, match=error):
+        PortfolioManagementClient(urlopen_fn=fail).request_holdings_refresh(
+            account="lx",
+            request_id="stock-refresh:abc",
+            timeout=2,
+        )
+
+
+def test_versioned_success_status_rejects_public_error_envelope() -> None:
+    client = PortfolioManagementClient(
+        urlopen_fn=lambda *_args, **_kwargs: _Response(
+            {
+                "success": False,
+                "error_code": "PM_SERVICE_UNAVAILABLE",
+                "message": "unavailable",
+                "request_id": "request-1",
+                "details": {},
+            }
+        )
+    )
+
+    with pytest.raises(PortfolioManagementProtocolError, match="success=true"):
+        client.read_view("holdings", timeout=2)
+
+
+def test_refresh_request_is_accepted_only_and_not_retried() -> None:
     seen = {}
 
     def open_ok(request, *, timeout):
         seen["url"] = request.full_url
         seen["body"] = json.loads(request.data)
-        return _Response(_sync_receipt())
+        return _Response(
+            {
+                "success": True,
+                "status": "accepted",
+                "account": "lx",
+                "request_id": "stock-refresh:abc",
+            },
+            status=202,
+        )
 
-    result = PortfolioManagementClient(urlopen_fn=open_ok).sync_holdings(
+    result = PortfolioManagementClient(urlopen_fn=open_ok).request_holdings_refresh(
         account="lx",
-        timeout=30,
+        request_id="stock-refresh:abc",
+        timeout=2,
     )
     assert result["account"] == "lx"
-    assert seen["url"].endswith("/api/v1/futu/holdings/sync")
+    assert result["status"] == "accepted"
+    assert seen["url"].endswith("/api/v1/futu/holdings/refresh-requests")
     assert seen["body"] == {
         "account": "lx",
-        "dry_run": False,
-        "confirm": True,
-        "allow_empty_stock_snapshot": False,
+        "request_id": "stock-refresh:abc",
     }
 
 
 @pytest.mark.parametrize(
     ("mutator", "error"),
     [
-        (lambda item: item.pop("source_snapshot_id"), "missing required fields"),
+        (lambda item: item.pop("request_id"), "missing required fields"),
         (lambda item: item.update(account="sy"), "account mismatch"),
-        (lambda item: item.update(dry_run=True), "real write"),
-        (
-            lambda item: item["stages"]["positions"].update(status="failed"),
-            "stage positions",
-        ),
+        (lambda item: item.update(status="written"), "not accepted"),
+        (lambda item: item.update(request_id="other"), "request id mismatch"),
     ],
 )
-def test_sync_holdings_rejects_unconfirmed_receipts(mutator, error) -> None:
-    receipt = _sync_receipt()
+def test_refresh_request_rejects_misbound_acceptance(mutator, error) -> None:
+    receipt = {
+        "success": True,
+        "status": "accepted",
+        "account": "lx",
+        "request_id": "stock-refresh:abc",
+    }
     mutator(receipt)
     client = PortfolioManagementClient(
-        urlopen_fn=lambda *_args, **_kwargs: _Response(receipt)
+        urlopen_fn=lambda *_args, **_kwargs: _Response(receipt, status=202)
     )
 
     with pytest.raises(PortfolioManagementProtocolError, match=error):
-        client.sync_holdings(account="lx", timeout=30)
+        client.request_holdings_refresh(
+            account="lx",
+            request_id="stock-refresh:abc",
+            timeout=2,
+        )
+
+
+def test_refresh_request_rejects_200_success_status() -> None:
+    client = PortfolioManagementClient(
+        urlopen_fn=lambda *_args, **_kwargs: _Response(
+            {
+                "success": True,
+                "status": "accepted",
+                "account": "lx",
+                "request_id": "stock-refresh:abc",
+            },
+            status=200,
+        )
+    )
+
+    with pytest.raises(PortfolioManagementProtocolError, match="expected 202"):
+        client.request_holdings_refresh(
+            account="lx",
+            request_id="stock-refresh:abc",
+            timeout=2,
+        )
 
 
 @pytest.mark.parametrize(

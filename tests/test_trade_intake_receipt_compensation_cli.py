@@ -71,7 +71,6 @@ def test_compensation_apply_requires_explicit_confirmation(
             "status_path": Path("status.json"),
             "receipt": {"enabled": True},
             "backfill": {},
-            "holdings_sync": {},
             "account_mapping": {},
             "futu_account_ids": [],
             "sources": [
@@ -154,7 +153,6 @@ def test_compensation_dry_run_routes_to_guarded_application_service(
             "status_path": Path("status.json"),
             "receipt": {"enabled": True},
             "backfill": {},
-            "holdings_sync": {},
             "account_mapping": {},
             "futu_account_ids": [],
             "sources": [source],

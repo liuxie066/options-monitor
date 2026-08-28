@@ -25,6 +25,9 @@ from src.application.account_config import (
 from src.application.config_sections import resolve_templates_config, resolve_watchlist_config, set_watchlist_config
 from src.application.llm_provider_registry import supported_llm_providers
 from src.application.trades.account_mapping import resolve_trade_intake_config
+from src.application.portfolio_management import (
+    normalize_portfolio_management_config,
+)
 from src.application.positions.maintenance_receipt import resolve_auto_close_receipt_config
 from src.application.opend_fetch_config import OPEND_RATE_LIMIT_ENDPOINT_KEYS
 from src.application.combo_yield_config import (
@@ -972,6 +975,10 @@ def _validate_template_use(item: dict, *, templates: dict, symbol: str) -> None:
 
 
 def validate_config(cfg: dict):
+    try:
+        normalize_portfolio_management_config(cfg)
+    except ValueError as exc:
+        die(str(exc))
     if 'watchlist' in cfg:
         die('watchlist is no longer supported; use symbols')
     if 'profiles' in cfg:

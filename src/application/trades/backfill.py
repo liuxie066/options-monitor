@@ -14,9 +14,11 @@ from src.infrastructure.futu_history_deals import fetch_opend_history_deals
 from src.application.trades.order_fee_sync import sync_order_fees
 from src.application.trades.lifecycle_reconciliation import discover_lifecycle_cases
 from src.application.trades.inbox import (
+    claim_trade_payload_refresh_intent,
     enqueue_trade_payload,
     mark_trade_payload_handled,
     mark_trade_payload_retryable,
+    record_trade_payload_refresh_intent,
     settle_trade_payload_result,
 )
 from src.application.trades.state import (
@@ -61,7 +63,7 @@ def run_history_backfill(
     backfill_config: dict[str, Any],
     on_result_fn: Callable[[dict[str, Any]], dict[str, Any] | None] | None,
     process_payload_fn: Callable[..., dict[str, Any]],
-    on_stock_holdings_sync_fn: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
+    dispatch_portfolio_refresh_fn: Callable[[dict[str, str]], Any] | None = None,
     process_lock: Any | None = None,
     inbox_path: Path | None = None,
     checkpoint_path: Path | None = None,
@@ -148,6 +150,7 @@ def run_history_backfill(
     unresolved_count = 0
     last_result: dict[str, Any] | None = None
     durable_queue_complete = True
+    portfolio_refresh_intents: dict[str, dict[str, str]] = {}
     try:
         lifecycle_accounts = _lifecycle_discovery_accounts(
             futu_account_ids=futu_account_ids,
@@ -289,6 +292,16 @@ def run_history_backfill(
                         inbox_id=inbox_id,
                         result=last_result,
                     )
+                    intent = claim_trade_payload_refresh_intent(
+                        inbox_path
+                        or state_path.with_name("trade_intake_inbox.sqlite3"),
+                        inbox_id=inbox_id,
+                    )
+                    if intent is not None:
+                        portfolio_refresh_intents.setdefault(
+                            intent["account"],
+                            intent,
+                        )
                 continue
 
             try:
@@ -306,7 +319,6 @@ def run_history_backfill(
                     config_path=config_path,
                     runtime_root=runtime_root,
                     on_result_fn=on_result_fn,
-                    on_stock_holdings_sync_fn=on_stock_holdings_sync_fn,
                     source="backfill",
                 )
             except Exception as exc:
@@ -338,11 +350,24 @@ def run_history_backfill(
                 )
                 continue
             if inbox_id:
+                intent = result.get("portfolio_refresh_intent")
+                if isinstance(intent, dict):
+                    record_trade_payload_refresh_intent(
+                        inbox_path
+                        or state_path.with_name("trade_intake_inbox.sqlite3"),
+                        inbox_id=inbox_id,
+                        intent=intent,
+                    )
                 settle_trade_payload_result(
                     inbox_path
                     or state_path.with_name("trade_intake_inbox.sqlite3"),
                     inbox_id=inbox_id,
                     result=result,
+                )
+                claimed_intent = claim_trade_payload_refresh_intent(
+                    inbox_path
+                    or state_path.with_name("trade_intake_inbox.sqlite3"),
+                    inbox_id=inbox_id,
                 )
         last_result = dict(result)
         status = str(result.get("status") or "").strip().lower()
@@ -373,6 +398,19 @@ def run_history_backfill(
             unresolved_count += 1
         elif status == "failed":
             failed_count += 1
+
+        if inbox_id and claimed_intent is not None:
+            portfolio_refresh_intents.setdefault(
+                claimed_intent["account"],
+                claimed_intent,
+            )
+
+    if dispatch_portfolio_refresh_fn is not None:
+        for intent in portfolio_refresh_intents.values():
+            try:
+                dispatch_portfolio_refresh_fn(intent)
+            except Exception:
+                pass
 
     fee_sync_results: list[dict[str, Any]] = []
     fee_selection_after = dict(

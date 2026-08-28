@@ -14,6 +14,18 @@ from src.application.copilot import tools as copilot_tools
 from src.application.copilot.result_admission import admit_submit_answer
 
 
+@pytest.fixture(autouse=True)
+def _portfolio_management_enabled(monkeypatch) -> None:
+    monkeypatch.setattr(
+        portfolio,
+        "load_runtime_config",
+        lambda **_kwargs: (
+            None,
+            {"portfolio_management": {"enabled": True}},
+        ),
+    )
+
+
 class _Response:
     def __init__(self, payload):
         self.body = payload if isinstance(payload, bytes) else json.dumps(payload).encode("utf-8")
@@ -59,6 +71,31 @@ def test_portfolio_tools_share_one_pure_read_toolset() -> None:
         "portfolio_cash_bridge",
         "portfolio_assignment_scenario",
     )
+
+
+def test_portfolio_query_disabled_never_opens_transport(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(
+        portfolio,
+        "load_runtime_config",
+        lambda **_kwargs: (
+            None,
+            {"portfolio_management": {"enabled": False}},
+        ),
+    )
+    monkeypatch.setattr(
+        portfolio.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: calls.append(True),
+    )
+
+    definition = get_tool_definition("portfolio_query")
+    assert definition is not None
+    with pytest.raises(AgentToolError) as raised:
+        definition.call({"view": "health"})
+
+    assert raised.value.code == "PORTFOLIO_MANAGEMENT_DISABLED"
+    assert calls == []
 
 
 def test_assignment_scenario_tool_has_accounts_only_contract(monkeypatch) -> None:
@@ -337,7 +374,7 @@ def test_portfolio_query_converts_service_failure_to_agent_tool_error(monkeypatc
     with pytest.raises(AgentToolError, match="missing holdings table") as exc_info:
         definition.call({"view": "health"})
 
-    assert exc_info.value.code == "READ_ERROR"
+    assert exc_info.value.code == "PORTFOLIO_MANAGEMENT_UNAVAILABLE"
 
 
 @pytest.mark.parametrize(
@@ -360,7 +397,7 @@ def test_portfolio_query_converts_transport_failures_to_agent_tool_error(monkeyp
     with pytest.raises(AgentToolError) as exc_info:
         definition.call({"view": "health"})
 
-    assert exc_info.value.code == "READ_ERROR"
+    assert exc_info.value.code == "PORTFOLIO_MANAGEMENT_UNAVAILABLE"
 
 
 def test_portfolio_query_rejects_invalid_json(monkeypatch) -> None:
@@ -371,7 +408,7 @@ def test_portfolio_query_rejects_invalid_json(monkeypatch) -> None:
     with pytest.raises(AgentToolError, match="invalid JSON") as exc_info:
         definition.call({"view": "health"})
 
-    assert exc_info.value.code == "READ_ERROR"
+    assert exc_info.value.code == "PORTFOLIO_MANAGEMENT_INCOMPATIBLE"
 
 
 
