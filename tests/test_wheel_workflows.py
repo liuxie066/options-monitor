@@ -68,6 +68,8 @@ def _assign_short_put(
 def _create_call_intent(
     repo: SQLiteOptionPositionsRepository,
     stock_lot_id: str,
+    *,
+    new_intent_enabled: bool = True,
 ) -> tuple[dict, dict]:
     batch = build_wheel_read_model(repo, "lx", 3_000)["batches"][0]
     snapshot = {
@@ -111,6 +113,7 @@ def _create_call_intent(
         request_id="intent-create-1",
         actor="tester",
         coverage_fact=coverage,
+        new_intent_enabled=new_intent_enabled,
         apply_changes=True,
         as_of_ms=4_000,
     )
@@ -379,9 +382,25 @@ def test_intent_creation_revalidates_current_ledger_share_coverage(
                 "shares_reserved": 0,
                 "shares_available_for_cover": 100,
             },
+            new_intent_enabled=True,
             apply_changes=True,
             as_of_ms=4_000,
         )
+    assert not any(
+        event["event_type"] == "wheel_call_intent_created"
+        for event in repo.list_wheel_events(account="lx")
+    )
+
+
+def test_intent_creation_rejects_disabled_wheel(tmp_path: Path) -> None:
+    repo, _put_lot_id, stock_lot_id = _assign_short_put(
+        tmp_path,
+        wheel_start_enabled=True,
+    )
+
+    with pytest.raises(ValueError, match="wheel_disabled"):
+        _create_call_intent(repo, stock_lot_id, new_intent_enabled=False)
+
     assert not any(
         event["event_type"] == "wheel_call_intent_created"
         for event in repo.list_wheel_events(account="lx")

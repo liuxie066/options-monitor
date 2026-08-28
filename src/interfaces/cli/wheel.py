@@ -19,6 +19,7 @@ from src.application.wheel import (
     end_wheel_lifecycle,
     load_wheel_candidate_snapshot,
     reject_wheel_call_linkage,
+    resolve_wheel_config,
 )
 from src.application.wheel.capacity import load_shared_coverage_fact
 from src.interfaces.cli.ledger_write_safety import (
@@ -211,6 +212,9 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
             expires_at_ms=args.expires_at_ms,
             broker_order_id=args.broker_order_id,
             coverage_fact=coverage,
+            new_intent_enabled=resolve_wheel_config(cfg, args.account)[
+                "enabled_for_new_lifecycle"
+            ],
         )
     if args.linkage_action == "confirm":
         coverage = _coverage(
