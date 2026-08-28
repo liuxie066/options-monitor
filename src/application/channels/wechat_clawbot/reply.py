@@ -7,6 +7,7 @@ from typing import Any, Callable
 from domain.domain.multi_tick import WECHAT_CLAWBOT_NOTIFICATION_PROVIDER
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.channels.wechat_clawbot.ilink_client import DEFAULT_ILINK_BASE_URL, WechatClawbotClient
+from src.application.channels.wechat_clawbot.message import response_code, response_message_id, response_success
 from src.application.channels.wechat_clawbot.state import DEFAULT_WECHAT_CLAWBOT_LABEL, resolve_wechat_clawbot_state_dir
 from src.application.channels.wechat_clawbot.state_store import WechatClawbotStateStore
 from src.infrastructure.io_utils import utc_now
@@ -49,8 +50,8 @@ def reply_wechat_clawbot_text(
         group_id=str(group_id).strip() if str(group_id or "").strip() else None,
         client_id=client_id,
     )
-    outbound_message_id = _extract_message_id(api_response)
-    ok = _response_success(api_response)
+    outbound_message_id = response_message_id(api_response)
+    ok = response_success(api_response)
     receipt = {
         "attempted": True,
         "ok": ok,
@@ -60,7 +61,7 @@ def reply_wechat_clawbot_text(
         "outbound_message_id": outbound_message_id,
         "idempotency_key": idempotency_key_text or None,
         "client_id": client_id,
-        "provider_response_code": _response_code(api_response),
+        "provider_response_code": response_code(api_response),
     }
     if ok:
         _save_outbound_receipt(store=store, idempotency_key=idempotency_key_text, receipt=receipt)
@@ -125,41 +126,3 @@ def _idempotent_client_id(idempotency_key: str) -> str | None:
     if not key:
         return None
     return hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]
-
-
-def _response_success(response: dict[str, Any]) -> bool:
-    if response == {}:
-        return True
-    if response.get("ok") is True:
-        return True
-    for key in ("ret", "errcode", "code"):
-        value = response.get(key)
-        if isinstance(value, int):
-            return value == 0
-        if isinstance(value, str) and value.strip().lstrip("-").isdigit():
-            return int(value) == 0
-    return False
-
-
-def _response_code(response: dict[str, Any]) -> int | None:
-    for key in ("ret", "errcode", "code"):
-        value = response.get(key)
-        if isinstance(value, int):
-            return value
-        if isinstance(value, str) and value.strip().lstrip("-").isdigit():
-            return int(value)
-    return None
-
-
-def _extract_message_id(response: dict[str, Any]) -> str | None:
-    for key in ("message_id", "messageId", "id", "client_msg_id"):
-        value = response.get(key)
-        if value:
-            return str(value)
-    data = response.get("data")
-    if isinstance(data, dict):
-        return _extract_message_id(data)
-    result = response.get("result")
-    if isinstance(result, dict):
-        return _extract_message_id(result)
-    return None

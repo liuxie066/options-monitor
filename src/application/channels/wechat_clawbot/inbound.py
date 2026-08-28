@@ -41,6 +41,9 @@ from src.application.channels.wechat_clawbot.message import (
     message_id,
     message_text,
     message_user_id,
+    response_code,
+    response_message_id,
+    response_success,
 )
 from src.application.channels.wechat_clawbot.state import DEFAULT_WECHAT_CLAWBOT_LABEL, resolve_wechat_clawbot_state_dir
 from src.application.channels.wechat_clawbot.state_store import WechatClawbotStateStore
@@ -457,7 +460,7 @@ def poll_wechat_clawbot_once(
             "results": results,
         },
         error=None if all_ok else {"code": "INBOUND_PROCESSING_FAILED", "message": "one or more WeChat ClawBot inbound messages failed"},
-        meta={"provider_response_code": _response_code(response)},
+        meta={"provider_response_code": response_code(response)},
     )
 
 
@@ -683,11 +686,11 @@ def _maybe_keepalive_bound_context(
     for name, to_user_id, context_token in targets:
         try:
             response = client.get_config(ilink_user_id=to_user_id, context_token=context_token)
-            if _response_success(response):
+            if response_success(response):
                 ok_count += 1
                 continue
             failures.append(name)
-            last_error = f"{name}: provider_response_code={_response_code(response)}"
+            last_error = f"{name}: provider_response_code={response_code(response)}"
         except Exception as exc:
             failures.append(name)
             last_error = f"{name}: {type(exc).__name__}"
@@ -841,8 +844,8 @@ def _maybe_start_typing(
         }
     return {
         "attempted": True,
-        "ok": _response_success(typing_response),
-        "reason": "typing_started" if _response_success(typing_response) else "typing_failed",
+        "ok": response_success(typing_response),
+        "reason": "typing_started" if response_success(typing_response) else "typing_failed",
         "typing_ticket": typing_ticket,
     }
 
@@ -873,8 +876,8 @@ def _maybe_stop_typing(
         }
     return {
         "attempted": True,
-        "ok": _response_success(response),
-        "reason": "typing_cancelled" if _response_success(response) else "typing_cancel_failed",
+        "ok": response_success(response),
+        "reason": "typing_cancelled" if response_success(response) else "typing_cancel_failed",
     }
 
 
@@ -924,8 +927,8 @@ def _maybe_reply(
             "reason": "reply_failed",
             "error_code": type(exc).__name__,
         }
-    outbound_message_id = _extract_message_id(api_response)
-    ok = _response_success(api_response)
+    outbound_message_id = response_message_id(api_response)
+    ok = response_success(api_response)
     if outbox is not None and delivery_key:
         if ok:
             outbox.mark_reply_delivered(delivery_key)
@@ -937,7 +940,7 @@ def _maybe_reply(
         "reason": decision.send_reason if ok else "reply_failed",
         "message_id": outbound_message_id,
         "outbound_message_id": outbound_message_id,
-        "provider_response_code": _response_code(api_response),
+        "provider_response_code": response_code(api_response),
         **({"delivery_key": delivery_key} if delivery_key else {}),
     }
 
@@ -1006,7 +1009,7 @@ def _retry_pending_wechat_reply(
             group_id=str(payload.get("group_id") or "").strip() or None,
             client_id=_outbox_client_id(delivery_key),
         )
-        ok = _response_success(api_response)
+        ok = response_success(api_response)
     except Exception as exc:
         store.mark_reply_failed(delivery_key, error=type(exc).__name__, retryable=True)
         return {"attempted": True, "ok": False, "reason": "reply_failed", "delivery_key": delivery_key}
@@ -1110,44 +1113,6 @@ def _load_store_json(load_fn: Callable[..., dict[str, Any]], *, default: dict[st
         return load_fn(default=default)
     except ValueError as exc:
         raise AgentToolError(code="STATE_ERROR", message=str(exc)) from exc
-
-
-def _response_success(response: dict[str, Any]) -> bool:
-    if response == {}:
-        return True
-    if response.get("ok") is True:
-        return True
-    for key in ("ret", "errcode", "code"):
-        value = response.get(key)
-        if isinstance(value, int):
-            return value == 0
-        if isinstance(value, str) and value.strip().lstrip("-").isdigit():
-            return int(value) == 0
-    return False
-
-
-def _response_code(response: dict[str, Any]) -> int | None:
-    for key in ("ret", "errcode", "code"):
-        value = response.get(key)
-        if isinstance(value, int):
-            return value
-        if isinstance(value, str) and value.strip().lstrip("-").isdigit():
-            return int(value)
-    return None
-
-
-def _extract_message_id(response: dict[str, Any]) -> str | None:
-    for key in ("message_id", "messageId", "id", "client_msg_id"):
-        value = response.get(key)
-        if value:
-            return str(value)
-    data = response.get("data")
-    if isinstance(data, dict):
-        return _extract_message_id(data)
-    result = response.get("result")
-    if isinstance(result, dict):
-        return _extract_message_id(result)
-    return None
 
 
 def _normalize_config_key(value: str | None) -> str | None:
