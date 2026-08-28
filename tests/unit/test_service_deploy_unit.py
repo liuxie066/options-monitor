@@ -119,6 +119,7 @@ def test_render_systemd_bundle_service_hardening() -> None:
     )
     files = {item["relative_path"]: item for item in bundle["files"]}
     tick = files["systemd/options-monitor-tick-us.service"]["content"]
+    tick_hk = files["systemd/options-monitor-tick-hk.service"]["content"]
     runtime_status = files["systemd/options-monitor-runtime-status.service"]["content"]
     verify = files["systemd/options-monitor-projection-verify.service"]["content"]
     verify_timer = files["systemd/options-monitor-projection-verify.timer"]["content"]
@@ -130,6 +131,8 @@ def test_render_systemd_bundle_service_hardening() -> None:
     assert "TimeoutStartSec=" not in runtime_status
     assert "TimeoutStartSec=" not in verify
     assert "TimeoutStartSec=" not in intake
+    assert "--timeout 600" in tick
+    assert "--timeout 600" in tick_hk
     assert "RuntimeMaxSec=" not in "\n".join(item["content"] for item in files.values())
     assert "[Install]\nWantedBy=multi-user.target" in intake
     assert "[Install]\nWantedBy=multi-user.target" not in tick
