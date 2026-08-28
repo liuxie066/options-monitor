@@ -117,7 +117,7 @@ Linux / Mac 部署使用 `./om service render` 生成 systemd / launchd 服务�
 ./om run tick-cron --market hk --config /var/lib/options-monitor/config.hk.json --accounts lx sy --timeout 600
 ```
 
-旧的 `scripts/send_if_needed.py` / `scripts/send_if_needed_multi.py` 已删除。传一个账户就是单账户运行，传多个账户就是多账户运行；两者最终进入同一条 `multi_account_tick.run_tick` 链路。共享扫描数据可复用，通知与失败按账户隔离。
+已删除：`scripts/send_if_needed.py`。已删除：`scripts/send_if_needed_multi.py`。传一个账户就是单账户运行，传多个账户就是多账户运行；两者最终进入同一条 `multi_account_tick.run_tick` 链路。共享扫描数据可复用，通知与失败按账户隔离。
 
 ## 值班三步检查（先做这个）
 
@@ -215,4 +215,4 @@ cd "$REPO_ROOT"
   --confirm
 ```
 
-辅助诊断工具位于 `scripts/tools/`。
+辅助诊断优先使用 `./om-agent` 和 `./om` 的只读入口。

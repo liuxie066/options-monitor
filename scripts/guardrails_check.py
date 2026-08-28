@@ -9,6 +9,7 @@ import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 TEXT_SUFFIXES = {
@@ -35,6 +36,7 @@ TEXT_SUFFIXES = {
 }
 TEXT_FILENAMES = {"Makefile"}
 LineReader = Callable[[Path], list[str]]
+PathExists = Callable[[Path], bool]
 
 RUNTIME_TERMS = (
     "运行入口",
@@ -64,6 +66,26 @@ FORBIDDEN_CONFIG_MARKERS = (
     "config.market_us",
     "config.market_hk",
 )
+
+LIVING_DOC_HISTORY_HEADING = "## 迁移与历史兼容"
+REPO_PATH_PREFIXES = (
+    "src/",
+    "domain/",
+    "scripts/",
+    "tests/",
+    ".github/",
+    "configs/",
+    "agent-runtime/",
+)
+_MARKDOWN_LINK_RE = re.compile(r"\[[^]]+\]\(([^)]+)\)")
+_INLINE_CODE_RE = re.compile(r"(?<!`)`([^`\n]+)`(?!`)")
+_PATH_LIFECYCLE_PREFIX_RE = re.compile(
+    r"(?:\b(?:historical|removed|deleted|retired|deprecated|proposed|planned|example)\b"
+    r"|历史(?:路径|文件)?|已删除|已移除|已退役|已弃用|拟新增|计划新增|待新增|示例)"
+    r"\s*[:：]?\s*$",
+    re.IGNORECASE,
+)
+_NONDETERMINISTIC_PATH_CHARS = frozenset("*?[]{}<>")
 
 ROOT_RUNTIME_CONFIG_EXACT = {
     "config.assistant.json",
@@ -160,20 +182,28 @@ class Violation:
         return f"{self.path}:{self.line_no}: {self.reason}\n  {self.line.strip()}"
 
 
-def tracked_file_paths() -> list[Path]:
+def git_index_paths() -> list[Path]:
     try:
-        out = subprocess.check_output(["git", "ls-files"], cwd=str(ROOT), text=True)
+        out = subprocess.check_output(["git", "ls-files", "-z"], cwd=str(ROOT))
     except Exception as exc:
         raise SystemExit(f"[guardrails] failed to list files: {exc}")
 
+    return [
+        Path(raw.decode("utf-8", errors="surrogateescape"))
+        for raw in out.split(b"\0")
+        if raw
+    ]
+
+
+def tracked_file_paths() -> list[Path]:
+    paths = git_index_paths()
+
     files: list[Path] = []
-    for rel in out.splitlines():
-        if not rel:
-            continue
+    for rel in paths:
         p = ROOT / rel
         if not p.is_file():
             continue
-        files.append(Path(rel))
+        files.append(rel)
     return files
 
 
@@ -233,6 +263,138 @@ def read_staged_lines(path: Path) -> list[str]:
     except Exception as exc:
         raise SystemExit(f"[guardrails] failed to read staged file {rel}: {exc}") from exc
     return out.decode("utf-8", errors="ignore").splitlines()
+
+
+def working_tree_path_exists(path: Path) -> bool:
+    root = ROOT.resolve()
+    candidate = (root / path).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return False
+    return candidate.exists()
+
+
+def index_path_exists(path: Path, index_paths: set[str]) -> bool:
+    key = path.as_posix().rstrip("/")
+    if not key or key == "." or ".." in path.parts:
+        return False
+    return key in index_paths or any(item.startswith(f"{key}/") for item in index_paths)
+
+
+def _local_markdown_targets(
+    document: Path,
+    lines: list[str],
+    *,
+    path_exists: PathExists,
+) -> tuple[list[Path], list[Violation]]:
+    root = ROOT.resolve()
+    targets: list[Path] = []
+    issues: list[Violation] = []
+    for idx, line in enumerate(lines, start=1):
+        for raw_target in _MARKDOWN_LINK_RE.findall(line):
+            parsed = urlsplit(raw_target.strip())
+            if parsed.scheme or parsed.netloc or not parsed.path.lower().endswith(".md"):
+                continue
+            candidate = (document.parent / parsed.path).resolve()
+            try:
+                relative = candidate.relative_to(root)
+            except ValueError:
+                continue
+            if path_exists(relative):
+                targets.append(candidate)
+            else:
+                issues.append(
+                    Violation(
+                        document.relative_to(root),
+                        idx,
+                        "indexed living-doc target does not exist",
+                        line,
+                    )
+                )
+    return targets, issues
+
+
+def living_document_paths(
+    *,
+    line_reader: LineReader = read_lines,
+    path_exists: PathExists = working_tree_path_exists,
+) -> tuple[list[Path], list[Violation]]:
+    root = ROOT.resolve()
+    index = root / "docs" / "INDEX.md"
+    if not path_exists(Path("docs/INDEX.md")):
+        return [], [
+            Violation(
+                Path("docs/INDEX.md"),
+                1,
+                "living-doc authority index does not exist",
+                "<missing docs/INDEX.md>",
+            )
+        ]
+
+    index_lines: list[str] = []
+    for line in line_reader(index):
+        if line.strip() == LIVING_DOC_HISTORY_HEADING:
+            break
+        index_lines.append(line)
+
+    direct, issues = _local_markdown_targets(index, index_lines, path_exists=path_exists)
+    documents = [index, *direct]
+    for document in direct:
+        relative = document.relative_to(root)
+        if document.name != "README.md" or relative.parts[:1] != ("docs",) or len(relative.parts) < 3:
+            continue
+        nested, nested_issues = _local_markdown_targets(
+            document,
+            line_reader(document),
+            path_exists=path_exists,
+        )
+        documents.extend(nested)
+        issues.extend(nested_issues)
+    return list(dict.fromkeys(documents)), issues
+
+
+def _normalized_repo_path(token: str) -> Path | None:
+    value = token.strip()
+    if not value.startswith(REPO_PATH_PREFIXES):
+        return None
+    if (
+        any(character.isspace() for character in value)
+        or any(character in _NONDETERMINISTIC_PATH_CHARS for character in value)
+        or "..." in value
+    ):
+        return None
+    value = value.split("::", 1)[0]
+    value = re.sub(r":\d+(?:-\d+)?$", "", value)
+    return Path(value)
+
+
+def check_living_doc_repo_paths(
+    files: list[Path],
+    *,
+    line_reader: LineReader = read_lines,
+    path_exists: PathExists = working_tree_path_exists,
+) -> list[Violation]:
+    issues: list[Violation] = []
+    for path in files:
+        for idx, line in enumerate(line_reader(path), start=1):
+            for match in _INLINE_CODE_RE.finditer(line):
+                relative = _normalized_repo_path(match.group(1))
+                if relative is None:
+                    continue
+                if _PATH_LIFECYCLE_PREFIX_RE.search(line[: match.start()]):
+                    continue
+                if path_exists(relative):
+                    continue
+                issues.append(
+                    Violation(
+                        path.relative_to(ROOT.resolve()),
+                        idx,
+                        "indexed living-doc repository path does not exist",
+                        line,
+                    )
+                )
+    return issues
 
 
 def check_runtime_entry_wording(
@@ -427,14 +589,29 @@ def main() -> None:
         tracked_paths = staged_file_paths()
         files = text_staged_files(tracked_paths)
         line_reader = read_staged_lines
+        index_paths = {path.as_posix() for path in git_index_paths()}
+        path_exists = lambda path: index_path_exists(path, index_paths)
     else:
         tracked_paths = tracked_file_paths()
         files = text_tracked_files(tracked_paths)
         line_reader = read_lines
+        path_exists = working_tree_path_exists
     issues: list[Violation] = []
 
     if run_doc:
         issues.extend(check_runtime_entry_wording(files, line_reader=line_reader))
+        living_docs, living_doc_issues = living_document_paths(
+            line_reader=line_reader,
+            path_exists=path_exists,
+        )
+        issues.extend(living_doc_issues)
+        issues.extend(
+            check_living_doc_repo_paths(
+                living_docs,
+                line_reader=line_reader,
+                path_exists=path_exists,
+            )
+        )
     if run_tracking:
         issues.extend(check_runtime_config_tracking(tracked_paths))
     if run_sensitive:
