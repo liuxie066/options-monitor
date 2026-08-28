@@ -343,13 +343,7 @@ def _require_combo_confirmation_mode(
     return {"account": account, "mode": mode, "config_path": str(config_path)}
 
 
-def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description='Manage position lots via trade events')
-    ap.add_argument('--data-config', default=None, help='portfolio data config path; auto-resolves when omitted')
-    _add_runtime_root_arg(ap, default=None)
-
-    sub = ap.add_subparsers(dest='cmd', required=True)
-
+def _register_basic_ledger_parsers(sub: Any) -> None:
     p_list = sub.add_parser('list', help='list records')
     _add_runtime_root_arg(p_list)
     p_list.add_argument('--broker', default='富途')
@@ -476,6 +470,8 @@ def main(argv: list[str] | None = None) -> int:
     p_history.add_argument('--record-id', required=True)
     p_history.add_argument('--format', default='text', choices=['text', 'json'])
 
+
+def _register_projection_parsers(sub: Any) -> None:
     p_rebuild = sub.add_parser('rebuild', help='rebuild position_lots projection from trade_events')
     _add_runtime_root_arg(p_rebuild)
     p_rebuild.add_argument('--format', default='text', choices=['text', 'json'])
@@ -563,6 +559,8 @@ def main(argv: list[str] | None = None) -> int:
     p_inspect.add_argument('--exp', default=None, help='YYYY-MM-DD')
     p_inspect.add_argument('--format', default='json', choices=['json'])
 
+
+def _register_lifecycle_parsers(sub: Any) -> None:
     p_lifecycle = sub.add_parser('lifecycle', help='inspect option lifecycle cases and evidence')
     lifecycle_sub = p_lifecycle.add_subparsers(dest='lifecycle_cmd', required=True)
     p_lifecycle_list = lifecycle_sub.add_parser('list', help='list pending/reviewed assignment/expiry lifecycle cases')
@@ -773,6 +771,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     _add_local_write_flags(p_migration_apply, high_risk=True)
 
+
+def _register_store_maintenance_parsers(sub: Any) -> None:
     p_store = sub.add_parser('store', help='inspect option-position SQLite store resolution')
     store_sub = p_store.add_subparsers(dest='store_cmd', required=True)
     p_store_inspect = store_sub.add_parser('inspect', help='diagnose active SQLite store candidates')
@@ -814,6 +814,8 @@ def main(argv: list[str] | None = None) -> int:
     p_adjust.add_argument('--format', default='text', choices=['text', 'json'])
     _add_local_write_flags(p_adjust, high_risk=True)
 
+
+def _register_combo_parsers(sub: Any) -> None:
     p_adopt_combo_identity = sub.add_parser(
         "adopt-combo-identity",
         help=("insert immutable identity for two exact existing Combo Yield legs"),
@@ -916,6 +918,8 @@ def main(argv: list[str] | None = None) -> int:
     p_reject_combo.add_argument("--format", default="json", choices=["text", "json"])
     _add_local_write_flags(p_reject_combo, high_risk=True)
 
+
+def _register_auto_close_parser(sub: Any) -> None:
     p_auto_close = sub.add_parser('auto-close-expired', help='auto-close expired option position lots')
     p_auto_close.add_argument("--config", dest="auto_close_config", default=None, help="runtime config path; provides accounts and portfolio.data_config")
     p_auto_close.add_argument("--data-config", dest="auto_close_data_config", default=None, help="portfolio data config path; overrides runtime config when provided")
@@ -934,6 +938,20 @@ def main(argv: list[str] | None = None) -> int:
         default=argparse.SUPPRESS,
         help="runtime root for state, audit, output, and active ledger store",
     )
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description='Manage position lots via trade events')
+    ap.add_argument('--data-config', default=None, help='portfolio data config path; auto-resolves when omitted')
+    _add_runtime_root_arg(ap, default=None)
+
+    sub = ap.add_subparsers(dest='cmd', required=True)
+    _register_basic_ledger_parsers(sub)
+    _register_projection_parsers(sub)
+    _register_lifecycle_parsers(sub)
+    _register_store_maintenance_parsers(sub)
+    _register_combo_parsers(sub)
+    _register_auto_close_parser(sub)
 
     args = ap.parse_args(argv)
 
