@@ -8,6 +8,30 @@ from types import SimpleNamespace
 from typing import Any
 
 
+def test_wechat_clawbot_response_parsers_preserve_precedence_and_traversal() -> None:
+    from src.application.channels.wechat_clawbot.message import (
+        response_code,
+        response_message_id,
+        response_success,
+    )
+
+    assert response_success({}) is True
+    assert response_success({"ok": True, "ret": -2}) is True
+    assert response_success({"ret": 0}) is True
+    assert response_success({"ret": 2}) is False
+    assert response_success({"ret": " -0 "}) is True
+    assert response_success({"ret": " -2 "}) is False
+    assert response_code({"ret": -2, "errcode": 0}) == -2
+    assert response_code({"ret": "invalid", "errcode": " -2 ", "code": 0}) == -2
+    assert response_code({"data": {"ret": -2}}) is None
+
+    assert response_message_id({"message_id": "first", "messageId": "second"}) == "first"
+    assert response_message_id({"message_id": "", "messageId": 17, "id": "later"}) == "17"
+    assert response_message_id({"data": {"client_msg_id": 42}}) == "42"
+    assert response_message_id({"result": {"message_id": "result-id"}}) == "result-id"
+    assert response_message_id({"data": {}, "result": {"message_id": "result-id"}}) is None
+
+
 def _write_minimal_assistant_config(tmp_path: Path) -> Path:
     config_path = tmp_path / "config.assistant.json"
     config_path.write_text(

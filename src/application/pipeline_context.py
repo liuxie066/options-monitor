@@ -47,11 +47,7 @@ from src.application.prepared_option_positions_context import (
 from domain.services import adapt_holdings_context, adapt_option_positions_context
 from src.application.positions.context_builder import slice_shared_context_for_account as slice_shared_option_context_for_account
 from domain.storage.repositories import state_repo
-from src.application.strategy_policy import (
-    SELL_CALL_FAMILY,
-    SELL_PUT_FAMILY,
-    strategy_semantics_for_side_config,
-)
+from src.application.strategy_policy import wants_global_path_risk_context
 
 
 def _persist_source_snapshot(base: Path, snapshot: dict) -> None:
@@ -289,33 +285,6 @@ def _load_option_position_exchange_rates(*, base: Path, state_dir: Path, log) ->
         return None
 
 
-def _wants_global_path_risk_context(cfg: dict | None) -> bool:
-    if not isinstance(cfg, dict):
-        return False
-
-    def _uses_path_risk(node: object, *, family: str) -> bool:
-        return (
-            isinstance(node, dict)
-            and strategy_semantics_for_side_config(family=family, side_cfg=node).scan_uses_path_risk
-        )
-
-    templates = cfg.get("templates")
-    if isinstance(templates, dict):
-        for profile in templates.values():
-            if isinstance(profile, dict) and (
-                _uses_path_risk(profile.get("sell_put"), family=SELL_PUT_FAMILY)
-                or _uses_path_risk(profile.get("sell_call"), family=SELL_CALL_FAMILY)
-            ):
-                return True
-    for item in cfg.get("symbols") or []:
-        if isinstance(item, dict) and (
-            _uses_path_risk(item.get("sell_put"), family=SELL_PUT_FAMILY)
-            or _uses_path_risk(item.get("sell_call"), family=SELL_CALL_FAMILY)
-        ):
-            return True
-    return False
-
-
 def load_global_holdings_risk_context(
     *,
     base: Path,
@@ -538,7 +507,7 @@ def build_pipeline_context(
         )
 
     if prepared_option_positions_context_manifest is not None:
-        if _wants_global_path_risk_context(cfg):
+        if wants_global_path_risk_context(cfg):
             raise PreparedOptionPositionsContextError(
                 "prepared option context does not support global path risk"
             )
@@ -584,7 +553,7 @@ def build_pipeline_context(
             log=log,
         )
 
-    if portfolio_ctx is not None and _wants_global_path_risk_context(cfg):
+    if portfolio_ctx is not None and wants_global_path_risk_context(cfg):
         portfolio_ctx = dict(portfolio_ctx)
         if prepared_portfolio_context_manifest is None:
             global_portfolio_ctx = load_global_holdings_risk_context(

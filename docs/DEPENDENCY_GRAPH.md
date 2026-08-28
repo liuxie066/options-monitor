@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 1048 (`src`: 571, `domain`: 76, `scripts`: 12, `tests`: 389)
-- Internal import edges: 7012 total, 3059 production/script edges excluding tests
+- Internal import edges: 7021 total, 3063 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -46,7 +46,7 @@ flowchart LR
   scripts -->|2| domain
   scripts -->|2| infrastructure
   storage -->|1| domain
-  tests -->|2908| application
+  tests -->|2913| application
   tests -->|462| domain
   tests -->|2| domain_services
   tests -->|231| infrastructure
@@ -79,7 +79,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 2908 |
+| tests | application | 2913 |
 | tests | domain | 462 |
 | tests | interfaces | 252 |
 | tests | infrastructure | 231 |
@@ -208,11 +208,11 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.interfaces.cli.option_positions | 27 |
 | src.application.agent_tools.analysis | 26 |
 | src.application.ledger.writer_common | 26 |
+| src.application.tick_notification_flow | 26 |
 | src.application.agent_tools.materialization | 25 |
 | src.application.channels.wechat_clawbot.inbound | 25 |
 | src.application.ledger.queries | 25 |
 | src.application.pipeline_runtime | 25 |
-| src.application.tick_notification_flow | 25 |
 | src.application.daily_decision_brief_service | 24 |
 
 ## Reading

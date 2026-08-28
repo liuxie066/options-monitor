@@ -203,6 +203,39 @@ def strategy_semantics_for_side_config(
     )
 
 
+def wants_global_path_risk_context(cfg: dict[str, Any] | None) -> bool:
+    if not isinstance(cfg, dict):
+        return False
+
+    def _uses_path_risk(node: object, *, family: str) -> bool:
+        return (
+            isinstance(node, dict)
+            and strategy_semantics_for_side_config(
+                family=family,
+                side_cfg=node,
+            ).scan_uses_path_risk
+        )
+
+    templates = cfg.get("templates")
+    if isinstance(templates, dict):
+        for profile in templates.values():
+            if isinstance(profile, dict) and (
+                _uses_path_risk(profile.get("sell_put"), family=SELL_PUT_FAMILY)
+                or _uses_path_risk(
+                    profile.get("sell_call"),
+                    family=SELL_CALL_FAMILY,
+                )
+            ):
+                return True
+    for item in cfg.get("symbols") or []:
+        if isinstance(item, dict) and (
+            _uses_path_risk(item.get("sell_put"), family=SELL_PUT_FAMILY)
+            or _uses_path_risk(item.get("sell_call"), family=SELL_CALL_FAMILY)
+        ):
+            return True
+    return False
+
+
 def resolve_combo_yield_position_role(position: dict[str, Any]) -> ComboYieldPositionRole:
     option_type = str(position.get("option_type") or "").strip().lower()
     side = str(position.get("side") or position.get("position_side") or "").strip().lower()

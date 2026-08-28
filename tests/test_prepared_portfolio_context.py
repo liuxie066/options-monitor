@@ -536,7 +536,7 @@ def test_worker_consumes_published_config_bytes_and_hash(
         "load_account_portfolio_context",
         _load_account_portfolio_context,
     )
-    monkeypatch.setattr(mod, "_wants_global_path_risk_context", lambda _cfg: False)
+    monkeypatch.setattr(mod, "wants_global_path_risk_context", lambda _cfg: False)
 
     assert mod.run_worker(request_path) == 0
 

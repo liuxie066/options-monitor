@@ -26,6 +26,7 @@ from src.application.account_config import (
 )
 from src.application.config_sections import resolve_watchlist_config
 from src.application.multi_tick.misc import AccountResult
+from src.application.multi_tick_audit import record_tick_latency
 from src.application.multi_tick.required_data_prefetch import prefetch_required_data
 from src.application.prepared_portfolio_context import (
     PREPARED_PORTFOLIO_CONTEXT_SCHEMA,
@@ -1233,8 +1234,8 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
     ran_pipeline_accounts: list[str] = []
     results: list[Any] = []
     account_metrics: list[dict[str, Any]] = []
-    _record_tick_latency(
-        request,
+    record_tick_latency(
+        runlog=request.runlog,
         stage="pre_account_execution",
         started=pre_account_execution_started,
     )
@@ -1253,8 +1254,8 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
             max_workers=request.account_workers,
             run_account_fn=_run_account,
         )
-    _record_tick_latency(
-        request,
+    record_tick_latency(
+        runlog=request.runlog,
         stage="account_outcomes",
         started=account_outcomes_started,
         data={"account_count": len(account_ids)},
@@ -1334,32 +1335,12 @@ def publish_runtime_portfolio_snapshot_shadows(
             ),
             required_data_manifest_path=task.required_data_manifest_path,
         )
-    _record_tick_latency(
-        request,
+    record_tick_latency(
+        runlog=request.runlog,
         stage="runtime_portfolio_snapshot_shadow",
         started=started,
         data={"task_count": len(tasks)},
     )
-
-
-def _record_tick_latency(
-    request: TickAccountExecutionRequest,
-    *,
-    stage: str,
-    started: float,
-    data: Mapping[str, Any] | None = None,
-) -> int:
-    duration_ms = max(0, int((monotonic() - started) * 1000))
-    try:
-        request.runlog.safe_event(
-            "tick_latency",
-            "ok",
-            duration_ms=duration_ms,
-            data={"stage": stage, **dict(data or {})},
-        )
-    except Exception:
-        pass
-    return duration_ms
 
 
 def _publish_runtime_portfolio_snapshot_shadow(
