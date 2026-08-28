@@ -142,12 +142,22 @@ def test_missing_repo_venv_prefers_python312_and_forwards_agent_argv(tmp_path: P
 
 
 def test_old_python3_is_only_a_diagnostic_final_candidate(tmp_path: Path) -> None:
-    repo = _copy_launcher_repo(tmp_path)
+    repo = tmp_path / "repo"
+    repo.mkdir()
     old = _write_fake_python(tmp_path / "fake-bin" / "python3", version="3.9.6")
+    (old.parent / "bash").symlink_to("/bin/bash")
     env = _runtime_env(old.parent)
+    env["PATH"] = str(old.parent)
 
     result = subprocess.run(
-        ["bash", str(repo / "om"), "--help"],
+        [
+            "/bin/bash",
+            "-c",
+            'source "$1" && om_select_repo_python "$2"',
+            "runtime-test",
+            str(ROOT / "scripts" / "python_runtime.sh"),
+            str(repo),
+        ],
         text=True,
         capture_output=True,
         env=env,

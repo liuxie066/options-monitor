@@ -274,7 +274,7 @@ def test_python_ci_workflows_use_supported_runtime() -> None:
         assert "python-version: '3.11'" not in text
 
 
-def test_required_pr_and_release_workflows_run_control_plane_suites() -> None:
+def test_release_workflow_runs_required_control_plane_suites() -> None:
     root = Path(__file__).resolve().parents[1]
     required_suites = (
         "tests/test_config_yaml.py",
@@ -286,10 +286,7 @@ def test_required_pr_and_release_workflows_run_control_plane_suites() -> None:
         "tests/test_setup_check.py",
         "tests/test_cli_operator_commands.py",
     )
-    workflows = (
-        root / ".github" / "workflows" / "guardrails.yml",
-        root / ".github" / "workflows" / "_release-reusable.yml",
-    )
+    workflows = (root / ".github" / "workflows" / "_release-reusable.yml",)
 
     for workflow in workflows:
         text = workflow.read_text(encoding="utf-8")
@@ -297,12 +294,33 @@ def test_required_pr_and_release_workflows_run_control_plane_suites() -> None:
             assert suite in text, f"{workflow.name} is missing required suite {suite}"
 
 
-def test_required_pr_and_release_workflows_pin_and_gate_pi_runtime() -> None:
+def test_required_pr_guardrail_discovers_full_suite_after_pi_smoke() -> None:
     root = Path(__file__).resolve().parents[1]
-    workflows = (
-        root / ".github" / "workflows" / "guardrails.yml",
-        root / ".github" / "workflows" / "_release-reusable.yml",
+    text = (root / ".github" / "workflows" / "guardrails.yml").read_text(encoding="utf-8")
+
+    assert text.count("uses: actions/setup-node@v4") == 1
+    assert text.count("node-version: '22.19.0'") == 1
+    assert "npm ci --omit=dev --ignore-scripts --prefix agent-runtime" in text
+    assert (
+        'bash scripts/pi_runtime_smoke.sh --root "${{ github.workspace }}" '
+        '--python "${{ github.workspace }}/.venv/bin/python"'
+    ) in text
+    assert "npm view" not in text
+    assert [line.strip() for line in text.splitlines() if line.strip() == "./.venv/bin/python -m pytest"] == [
+        "./.venv/bin/python -m pytest"
+    ]
+    assert "tests/test_" not in text
+    assert (
+        text.index("npm ci --omit=dev --ignore-scripts --prefix agent-runtime")
+        < text.index("scripts/pi_runtime_smoke.sh")
+        < text.index("tests/run_smoke.py")
+        < text.index("./.venv/bin/python -m pytest")
     )
+
+
+def test_release_workflow_pins_and_gates_pi_runtime() -> None:
+    root = Path(__file__).resolve().parents[1]
+    workflow = root / ".github" / "workflows" / "_release-reusable.yml"
     required_suites = (
         "tests/test_pi_agent_process.py",
         "tests/test_copilot_p1_eval.py",
@@ -318,23 +336,22 @@ def test_required_pr_and_release_workflows_pin_and_gate_pi_runtime() -> None:
         "tests/copilot_eval/test_answer_quality.py",
     )
 
-    for workflow in workflows:
-        text = workflow.read_text(encoding="utf-8")
-        assert text.count("uses: actions/setup-node@v4") == 1
-        assert text.count("node-version: '22.19.0'") == 1
-        assert "npm ci --omit=dev --ignore-scripts --prefix agent-runtime" in text
-        assert (
-            'bash scripts/pi_runtime_smoke.sh --root "${{ github.workspace }}" '
-            '--python "${{ github.workspace }}/.venv/bin/python"'
-        ) in text
-        assert "npm view" not in text
-        assert (
-            text.index("npm ci --omit=dev --ignore-scripts --prefix agent-runtime")
-            < text.index("scripts/pi_runtime_smoke.sh")
-            < text.index("tests/test_pi_agent_process.py")
-        )
-        for suite in required_suites:
-            assert suite in text, f"{workflow.name} is missing Pi suite {suite}"
+    text = workflow.read_text(encoding="utf-8")
+    assert text.count("uses: actions/setup-node@v4") == 1
+    assert text.count("node-version: '22.19.0'") == 1
+    assert "npm ci --omit=dev --ignore-scripts --prefix agent-runtime" in text
+    assert (
+        'bash scripts/pi_runtime_smoke.sh --root "${{ github.workspace }}" '
+        '--python "${{ github.workspace }}/.venv/bin/python"'
+    ) in text
+    assert "npm view" not in text
+    assert (
+        text.index("npm ci --omit=dev --ignore-scripts --prefix agent-runtime")
+        < text.index("scripts/pi_runtime_smoke.sh")
+        < text.index("tests/test_pi_agent_process.py")
+    )
+    for suite in required_suites:
+        assert suite in text, f"{workflow.name} is missing Pi suite {suite}"
 
 
 def test_release_workflow_verifies_extracted_archive_before_publish() -> None:

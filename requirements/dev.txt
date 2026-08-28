@@ -1,5 +1,4 @@
 -r runtime.txt
 pytest
-basedpyright
 ruff
 jsonschema>=4.23,<5

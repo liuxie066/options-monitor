@@ -39,17 +39,6 @@ jobs:
           npm ci --omit=dev --ignore-scripts --prefix agent-runtime
           bash scripts/pi_runtime_smoke.sh --root "${{ github.workspace }}" --python "${{ github.workspace }}/.venv/bin/python"
 
-      - name: Pi runtime and Copilot regression
-        run: |
-          ./.venv/bin/python -m pytest tests/test_pi_agent_process.py
-          ./.venv/bin/python -m pytest \
-            tests/test_copilot_phase1.py \
-            tests/test_copilot_conversation_memory.py \
-            tests/test_copilot_p1_eval.py \
-            tests/test_install_script.py \
-            tests/test_release_test_plan.py \
-            tests/copilot_eval/test_answer_quality.py
-
       - name: Lint
         run: |
           ./.venv/bin/python -m ruff check .
@@ -58,38 +47,13 @@ jobs:
         run: |
           ./.venv/bin/python scripts/guardrails_check.py --check-doc-wording --check-runtime-config-tracking --check-sensitive-artifacts
 
-      - name: Minimal regression
+      - name: Standalone smoke
         run: |
           ./.venv/bin/python tests/run_smoke.py
-          ./.venv/bin/python -m pytest \
-            tests/test_quality_status_contract_vendor.py \
-            tests/test_quality_document_ownership.py \
-            tests/test_portfolio_management_contract_vendor.py \
-            tests/test_release_check.py \
-            tests/test_release_delta_coverage.py \
-            tests/test_release_version_recommendation.py \
-            tests/test_version_check.py
 
-      - name: Research domain regression
+      - name: Full regression
         run: |
-          ./.venv/bin/python -m pytest \
-            tests/test_research.py \
-            tests/test_research_archive.py \
-            tests/test_shadow_replay.py \
-            tests/test_shadow_replay_candidate_impact.py \
-            tests/test_strategy_lab.py
-
-      - name: Configuration and control-plane regression
-        run: |
-          ./.venv/bin/python -m pytest \
-            tests/test_config_yaml.py \
-            tests/test_config_template_inheritance.py \
-            tests/test_config_authoring_transaction.py \
-            tests/test_runtime_config_identity.py \
-            tests/*/test_service_deploy_*.py \
-            tests/test_inbound_control.py \
-            tests/test_setup_check.py \
-            tests/test_cli_operator_commands.py
+          ./.venv/bin/python -m pytest
 
       - name: Resolve VERSION release
         id: release

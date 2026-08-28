@@ -25,7 +25,8 @@ Workflow: `.github/workflows/guardrails.yml`
 - Runtime config tracking check: forbid committing root runtime configs such as `config.us.json` / `config.hk.json`; commit only templates under `configs/examples/`
 - Sensitive artifact check: reject high-confidence provider credentials, private keys, credentialed URLs, known private runtime/financial/email fingerprints, and literal personal home or mounted-volume paths without printing the blocked value
 - Lint: run `python -m ruff check .`
-- Minimal regression: run `tests/run_smoke.py`
+- Standalone smoke: run `tests/run_smoke.py`
+- Full regression: run `python -m pytest` so newly added tests are discovered without editing the workflow
 
 Trigger: `push` and `pull_request` to `main`
 
