@@ -1292,6 +1292,7 @@ def test_config_init_writes_starter_yaml_and_runtime_configs(tmp_path: Path) -> 
     assert "assistant" not in us_cfg
     assert "inbound" not in us_cfg
     assert hk_cfg[GENERATED_KEY]["market"] == "hk"
+    assert us_cfg["runtime"] == hk_cfg["runtime"]
     assert assistant_cfg["assistant"]["enabled"] is True
     assert assistant_cfg["assistant"]["copilot"]["enabled"] is True
     assert assistant_cfg["assistant"]["copilot"]["toolsets"]["portfolio"] is False

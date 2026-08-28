@@ -10,6 +10,8 @@ import pytest
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from src.application.opend_symbol_outputs import (
+    _csv_roundtrip_frame,
+    _validate_consumer_csv_projection,
     publish_required_data_quote_snapshot,
     save_outputs,
 )
@@ -35,6 +37,25 @@ from src.application.source_receipts import (
 
 
 _OBSERVED_AT = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def test_consumer_csv_projection_equal_frame_skips_cell_fallback(
+    monkeypatch,
+) -> None:
+    rows = [{"symbol": "NVDA"}]
+    frame = _csv_roundtrip_frame(rows)
+    monkeypatch.setattr(
+        "src.application.opend_symbol_outputs._canonical_csv_value",
+        lambda _value: pytest.fail("equal frame entered cell fallback"),
+    )
+
+    _validate_consumer_csv_projection(
+        rows=rows,
+        frame=frame,
+        csv=None,
+        symbol="NVDA",
+        raw_meta={},
+    )
 
 
 def _workspace(tmp_path: Path, run_id: str = "run-1") -> tuple[Path, Path]:
