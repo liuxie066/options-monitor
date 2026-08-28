@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Bug Fixes
+- Rejected new Wheel Call intents when Wheel is disabled for the account instead of allowing a stale candidate snapshot to reserve share coverage.
+
 ## 2.2.0 - 2026-08-27
 
 ### New Features
