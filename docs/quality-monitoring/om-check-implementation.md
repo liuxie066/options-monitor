@@ -35,7 +35,7 @@
 |---|---|---|
 | 原子 artifact | `src/infrastructure/quality/artifact_repository.py` | schema-valid service 发布测试 |
 | 控制状态 | `src/infrastructure/quality/control_state_repository.py` | transient→persistent、首次 deep reconcile 测试 |
-| OpenD 只读快照 | `src/infrastructure/quality/opend_position_adapter.py` | fake adapter、请求市场隔离与 position/lifecycle 测试 |
+| OpenD 只读快照 | `src/application/quality/opend_position_adapter.py` | fake adapter、请求市场隔离与 position/lifecycle 测试 |
 | CLI | `src/interfaces/quality/cli.py` | 复用同一 service/artifact |
 | HTTP | `src/interfaces/quality/http.py` | bearer auth、ETag、`no-store`、只读 artifact 测试 |
 | Agent tool | `src/application/agent_tools/quality.py` | agent contract/plugin smoke 全量回归 |

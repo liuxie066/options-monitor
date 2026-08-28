@@ -697,7 +697,8 @@ notification token around Close Advice.
 ### Notifications
 
 - Per-account content: `src/application/notify_symbols.py`
-- Multi-account wrapper: `src/application/multi_tick/notify_format.py`
+- Scheduled delivery flow: `src/application/tick_notification_flow.py`
+- Scheduled business renderer: `src/application/daily_decision_brief_renderer.py`
 - Shared System Notice / Receipt presentation shell: `src/application/notification_shells.py`
 - Preview tool: `preview_notification`
 - Perception audit card: `assistant_perception` events written by

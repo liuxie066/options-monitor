@@ -4,9 +4,10 @@ Status: S1-S7 were implemented and released in v1.15.0. The Assistant channel
 entry and shared Host call path use Pi Agent Core, the legacy Python Agent
 runtime is removed, and the mixed Python/Node release gates are active. S8
 context-bounded tool loading and evidence admission were released in v1.15.11.
-The repository is currently at v1.16.0. Deployment and configured-provider
-canary status are environment facts and must be checked through the controlled
-runtime surfaces; Git history alone does not prove an environment was upgraded.
+The current repository version is owned by `VERSION`, and published release
+history is owned by `CHANGELOG.md`. Deployment and configured-provider canary
+status are environment facts and must be checked through the controlled runtime
+surfaces; Git history alone does not prove an environment was upgraded.
 
 Last upstream verification: 2026-08-19. The pinned baseline is
 `@earendil-works/pi-agent-core@0.84.2`, `@earendil-works/pi-ai@0.84.2`, and
@@ -720,10 +721,10 @@ ownership pressure justifies it.
 
 ### 9.4 Delete after atomic cutover
 
-- `src/application/copilot/engine.py`
-- `src/application/copilot/model_client.py`
-- `src/application/copilot/conversation_memory.py`
-- `src/application/copilot/agent.py`
+- Removed: `src/application/copilot/engine.py`
+- Removed: `src/application/copilot/model_client.py`
+- Removed: `src/application/copilot/conversation_memory.py`
+- Removed: `src/application/copilot/agent.py`
 
 Deletion happens only after all callers and architecture guards point to Pi and
 the full acceptance gate passes. Database columns are left in place initially;
@@ -1706,9 +1707,9 @@ tests/test_inbound_control.py
 tests/test_inbound_feishu_ws.py
 ```
 
-`src/application/copilot/local_harness.py`,
-`src/application/copilot/model_client.py`, and
-`src/application/copilot/host.py` are deliberately unchanged in S4. The legacy
+Historical S4 record: `src/application/copilot/local_harness.py` and
+`src/application/copilot/host.py` were deliberately unchanged in S4.
+Removed: `src/application/copilot/model_client.py`. The legacy
 `CopilotModelSettings`, `_resolve_model_runner()`, `ModelRunner`, and
 `run_engine()` remain the application path until S5 switches the shared Host
 call site atomically. S4 must not partially implement that S5 cutover merely to
@@ -3903,7 +3904,7 @@ ambiguous, eager remains available.
 | `src/application/copilot/result_admission.py` | validate `submit_answer` claims against Host evidence and append non-removable coverage banners; retain existing final result checks |
 | `src/application/ledger/repository.py`, `queries.py`, and `api.py` | migrate and query the canonical trade-event stream; own `ingest_seq`, normalized market/effect projections, snapshot fencing, keyset SQL, cursor validation/encoding, and the public ledger facade |
 | `src/application/agent_tools/operations_impl.py` and `positions.py` | keep the existing `option_positions_read(action=events)` entry; expose the events-only cursor/count inputs and output contract; call only the public ledger facade and never load all events |
-| `src/application/copilot/pi_agent_process.py` | serialize the revised closed `run.start` and private activation/admission fields without exposing secrets |
+| `src/infrastructure/pi_agent_process.py` | serialize the revised closed `run.start` and private activation/admission fields without exposing secrets |
 | `agent-runtime/main.ts` | render dynamic catalog context, own internal tools, atomically replace schemas, enforce budgets/compaction, terminate approved answers, and normalize Session turns |
 | `src/application/agent_tools/operations_impl.py`, `secret_store/registry.py`, and `service_deploy.py` | derive the cursor child key from the existing inbound HMAC secret; keep the retired cursor env name unset without registering or binding a second credential |
 
