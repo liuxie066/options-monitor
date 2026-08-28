@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from typing import Any, Callable, Mapping, Protocol, cast
 
 from src.application.positions.context_cache import invalidate_option_positions_context_cache
@@ -489,7 +490,7 @@ def process_trade_payload(
     normalize_trade_deal_fn: Callable[..., Any],
     resolve_trade_deal_fn: Callable[..., Any],
     on_result_fn: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
-    on_stock_holdings_sync_fn: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
+    portfolio_management_enabled: bool = False,
     retry_failed_deal: bool = False,
     source: str = "push",
 ) -> dict[str, Any]:
@@ -551,38 +552,13 @@ def process_trade_payload(
     append_trade_intake_audit_fn(audit_path, build_trade_intake_audit_event("normalized", source=source, deal=deal))
     if apply_changes:
         state = _migrate_compatible_legacy_deal_state(state, deal=deal)
-    holdings_sync_intent: dict[str, Any] | None = None
-    if on_stock_holdings_sync_fn is not None:
-        try:
-            callback_result = on_stock_holdings_sync_fn(
-                {
-                    "payload": payload,
-                    "effective_payload": effective_payload,
-                    "deal": deal,
-                    "apply_changes": apply_changes,
-                    "state_path": state_path,
-                    "audit_path": audit_path,
-                    "source": source,
-                }
-            )
-            if isinstance(callback_result, dict):
-                holdings_sync_intent = dict(callback_result)
-        except Exception as exc:
-            holdings_sync_intent = {
-                "status": "failed",
-                "reason": "dispatcher_callback_exception",
-                "error": f"{type(exc).__name__}: {exc}",
-            }
-        if holdings_sync_intent is not None:
-            append_trade_intake_audit_fn(
-                audit_path,
-                build_trade_intake_audit_event(
-                    "stock_holdings_sync_intent",
-                    source=source,
-                    deal=deal,
-                    extra={"stock_holdings_sync": holdings_sync_intent},
-                ),
-            )
+    portfolio_refresh_intent = _build_portfolio_refresh_intent(
+        deal,
+        state=state,
+        apply_changes=apply_changes,
+        source=source,
+        enabled=portfolio_management_enabled,
+    )
     try:
         result = resolve_trade_deal_fn(
             deal,
@@ -597,13 +573,13 @@ def process_trade_payload(
             repo=repo,
             apply_changes=apply_changes,
         )
-        if holdings_sync_intent is not None:
-            result_dict["stock_holdings_sync"] = holdings_sync_intent
+        if portfolio_refresh_intent is not None:
+            result_dict["portfolio_refresh_intent"] = portfolio_refresh_intent
         append_trade_intake_audit_fn(audit_path, build_trade_intake_audit_event("resolved", source=source, deal=deal, result=result_dict))
     except Exception as exc:
         result_dict = _exception_result_dict(exc, payload=effective_payload, deal=deal, stage="resolve")
-        if holdings_sync_intent is not None:
-            result_dict["stock_holdings_sync"] = holdings_sync_intent
+        if portfolio_refresh_intent is not None:
+            result_dict["portfolio_refresh_intent"] = portfolio_refresh_intent
         append_trade_intake_audit_fn(
             audit_path,
             build_trade_intake_audit_event("failed", source=source, deal=deal, result=result_dict),
@@ -672,6 +648,25 @@ def process_trade_payload(
                     "event_id": deal_key,
                 },
             )
+        elif _is_ignored_non_option_result(result_dict):
+            state = upsert_deal_state_fn(
+                state,
+                bucket="processed_deal_ids",
+                deal_id=deal_key,
+                payload={
+                    "status": "skipped",
+                    "action": result.action,
+                    "account": result.account,
+                    "source_deal_id": deal.deal_id,
+                    "futu_account_id": deal.futu_account_id,
+                    "broker_deal_key": deal_key,
+                    "economic_payload_hash": economic_payload_hash,
+                    "applied_record_ids": [],
+                    "reason": "not_option_deal",
+                    "diagnostics": {},
+                },
+            )
+            write_trade_intake_state_fn(state_path, state)
         elif result.status == "unresolved":
             try:
                 prior = dict((state.get("unresolved_deal_ids") or {}).get(deal_key) or {})
@@ -740,3 +735,40 @@ def process_trade_payload(
         on_result_fn=on_result_fn,
         source=source,
     )
+
+
+def _build_portfolio_refresh_intent(
+    deal: Any,
+    *,
+    state: dict[str, Any],
+    apply_changes: bool,
+    source: str,
+    enabled: bool,
+) -> dict[str, str] | None:
+    if (
+        not enabled
+        or not apply_changes
+        or str(source or "").strip().lower() not in {"push", "backfill"}
+        or str(getattr(deal, "option_type", "") or "").strip()
+        or str(getattr(deal, "broker", "") or "").strip().lower()
+        not in {"futu", "富途"}
+    ):
+        return None
+    account = str(getattr(deal, "internal_account", "") or "").strip().lower()
+    symbol = str(getattr(deal, "symbol", "") or "").strip()
+    futu_account_id = str(getattr(deal, "futu_account_id", "") or "").strip()
+    deal_id = str(getattr(deal, "deal_id", "") or "").strip()
+    deal_key = broker_deal_key(deal)
+    if not all((account, symbol, futu_account_id, deal_id, deal_key)):
+        return None
+    if any(
+        deal_key in (state.get(bucket) or {})
+        for bucket in (
+            "processed_deal_ids",
+            "failed_deal_ids",
+            "unresolved_deal_ids",
+        )
+    ):
+        return None
+    digest = hashlib.sha256(deal_key.encode("utf-8")).hexdigest()
+    return {"account": account, "request_id": f"stock-refresh:{digest}"}

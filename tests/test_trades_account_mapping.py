@@ -79,19 +79,6 @@ def test_resolve_trade_intake_config_uses_defaults() -> None:
         "interval_sec": 300,
         "lookback_hours": 6.0,
     }
-    assert out["holdings_sync"] == {
-        "enabled": False,
-        "debounce_sec": 2.0,
-        "request_timeout_sec": 120.0,
-        "max_attempts": 3,
-        "retry_backoff_sec": 2.0,
-        "queue_capacity": 100,
-        "recent_deal_limit": 2000,
-        "state_dir": out["holdings_sync"]["state_dir"],
-    }
-    assert str(out["holdings_sync"]["state_dir"]).endswith(
-        "output_shared/state/trade_intake/stock_holdings_sync"
-    )
     assert out["combo_reconciliation"] == {
         "default_mode": "off",
         "accounts": {},
@@ -201,52 +188,6 @@ def test_resolve_trade_intake_config_rejects_invalid_backfill_flag() -> None:
         resolve_trade_intake_config(cfg)
     exc = _caught.value
     assert "trade_intake.backfill.enabled must be a boolean" in str(exc)
-
-
-def test_resolve_trade_intake_config_accepts_holdings_sync_overrides() -> None:
-    cfg = {
-        "accounts": ["lx"],
-        "trade_intake": {
-            "holdings_sync": {
-                "enabled": True,
-                "debounce_sec": 0.5,
-                "request_timeout_sec": 45,
-                "max_attempts": 4,
-                "retry_backoff_sec": 1,
-                "queue_capacity": 20,
-                "recent_deal_limit": 500,
-                "state_dir": "state/pm-sync",
-            }
-        },
-    }
-
-    out = resolve_trade_intake_config(cfg)["holdings_sync"]
-
-    assert out["enabled"] is True
-    assert out["debounce_sec"] == 0.5
-    assert out["request_timeout_sec"] == 45.0
-    assert out["max_attempts"] == 4
-    assert out["retry_backoff_sec"] == 1.0
-    assert out["queue_capacity"] == 20
-    assert out["recent_deal_limit"] == 500
-    assert str(out["state_dir"]) == "state/pm-sync"
-
-
-def test_resolve_trade_intake_config_rejects_invalid_holdings_sync() -> None:
-    cfg = {
-        "accounts": ["lx"],
-        "trade_intake": {
-            "holdings_sync": {
-                "enabled": True,
-                "queue_capacity": 0,
-            }
-        },
-    }
-
-    with pytest.raises(ValueError) as _caught:
-        resolve_trade_intake_config(cfg)
-    exc = _caught.value
-    assert "holdings_sync.queue_capacity must be > 0" in str(exc)
 
 
 def test_resolve_futu_lookup_account_ids_merges_account_settings_account_id() -> None:

@@ -168,7 +168,6 @@ def _trade_intake_summary(state_json: dict[str, Any], status_json: dict[str, Any
         "last_deal_result": status_json.get("last_deal_result"),
         "last_backfill_result": status_json.get("last_backfill_result"),
         "last_receipt_result": status_json.get("last_receipt_result"),
-        "last_stock_holdings_sync_intent": status_json.get("last_stock_holdings_sync_intent"),
         "processed_count": len(processed),
         "failed_count": len(failed),
         "unresolved_count": len(unresolved),
@@ -2290,11 +2289,6 @@ def private_runtime_status_tool(
             "enabled": bool(intake_cfg["enabled"]),
             "mode": intake_cfg["mode"],
             "receipt": dict(intake_cfg.get("receipt") or {}),
-            "holdings_sync": {
-                key: value
-                for key, value in dict(intake_cfg.get("holdings_sync") or {}).items()
-                if key != "state_dir"
-            },
             "status": trade_intake_status,
             "state": trade_intake_state,
             "audit": trade_intake_audit,

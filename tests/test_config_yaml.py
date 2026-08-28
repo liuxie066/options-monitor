@@ -1457,7 +1457,10 @@ markets:
         resolve_yaml_runtime_config(repo_root=REPO_ROOT, market="us", config_path=config_path)
 
 
-def test_yaml_config_accepts_trade_intake_holdings_sync(tmp_path: Path) -> None:
+def test_yaml_config_migrates_trade_intake_holdings_sync_alias(
+    tmp_path: Path,
+    capsys,
+) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
         """\
@@ -1468,6 +1471,13 @@ accounts:
 trade_intake:
   holdings_sync:
     enabled: true
+    debounce_sec: 1
+    request_timeout_sec: 30
+    max_attempts: 2
+    retry_backoff_sec: 1
+    queue_capacity: 10
+    recent_deal_limit: 20
+    state_dir: ignored
 markets:
   us:
     accounts: [lx]
@@ -1482,7 +1492,101 @@ markets:
     )
 
     assert cfg["trade_intake"]["mode"] == "apply"
-    assert cfg["trade_intake"]["holdings_sync"] == {"enabled": True}
+    assert "holdings_sync" not in cfg["trade_intake"]
+    assert cfg["portfolio_management"] == {"enabled": True}
+    warning = capsys.readouterr().err
+    assert "TRADE_INTAKE_HOLDINGS_SYNC_DEPRECATED" in warning
+    for key in (
+        "debounce_sec",
+        "request_timeout_sec",
+        "max_attempts",
+        "retry_backoff_sec",
+        "queue_capacity",
+        "recent_deal_limit",
+        "state_dir",
+    ):
+        assert key in warning
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_yaml_config_accepts_root_portfolio_management(
+    tmp_path: Path,
+    enabled: bool,
+) -> None:
+    config_path = _write_yaml(
+        tmp_path / "config.yaml",
+        f"""\
+accounts:
+  lx:
+    type: futu
+    futu_account_id: "REAL_12345678"
+portfolio_management:
+  enabled: {str(enabled).lower()}
+markets:
+  us:
+    accounts: [lx]
+    symbols: [NVDA]
+""",
+    )
+
+    cfg, _meta = resolve_yaml_runtime_config(
+        repo_root=REPO_ROOT,
+        market="us",
+        config_path=config_path,
+    )
+
+    assert cfg["portfolio_management"] == {"enabled": enabled}
+
+
+def test_yaml_config_rejects_market_scoped_or_conflicting_pm_gate(
+    tmp_path: Path,
+) -> None:
+    market_scoped = _write_yaml(
+        tmp_path / "market.yaml",
+        """\
+accounts:
+  lx:
+    type: futu
+    futu_account_id: "REAL_12345678"
+markets:
+  us:
+    accounts: [lx]
+    symbols: [NVDA]
+    portfolio_management:
+      enabled: true
+""",
+    )
+    with pytest.raises(AgentToolError, match="portfolio_management"):
+        resolve_yaml_runtime_config(
+            repo_root=REPO_ROOT,
+            market="us",
+            config_path=market_scoped,
+        )
+
+    conflict = _write_yaml(
+        tmp_path / "conflict.yaml",
+        """\
+accounts:
+  lx:
+    type: futu
+    futu_account_id: "REAL_12345678"
+portfolio_management:
+  enabled: true
+trade_intake:
+  holdings_sync:
+    enabled: true
+markets:
+  us:
+    accounts: [lx]
+    symbols: [NVDA]
+""",
+    )
+    with pytest.raises(AgentToolError, match="cannot both be set"):
+        resolve_yaml_runtime_config(
+            repo_root=REPO_ROOT,
+            market="us",
+            config_path=conflict,
+        )
 
 
 def test_yaml_config_accepts_settlement_observation_kill_switch(

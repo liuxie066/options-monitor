@@ -420,6 +420,61 @@
         "title": "FullReportResponse",
         "type": "object"
       },
+      "FutuHoldingsRefreshAcceptedResponse": {
+        "properties": {
+          "account": {
+            "title": "Account",
+            "type": "string"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "status": {
+            "const": "accepted",
+            "title": "Status",
+            "type": "string"
+          },
+          "success": {
+            "const": true,
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "status",
+          "account",
+          "request_id"
+        ],
+        "title": "FutuHoldingsRefreshAcceptedResponse",
+        "type": "object"
+      },
+      "FutuHoldingsRefreshRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "account": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "title": "Account",
+            "type": "string"
+          },
+          "request_id": {
+            "maxLength": 96,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9._:-]{1,96}$",
+            "title": "Request Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "account",
+          "request_id"
+        ],
+        "title": "FutuHoldingsRefreshRequest",
+        "type": "object"
+      },
       "FutuHoldingsSyncRequest": {
         "properties": {
           "account": {
@@ -634,15 +689,16 @@
           },
           "success": {
             "const": false,
-            "default": false,
             "title": "Success",
             "type": "boolean"
           }
         },
         "required": [
+          "success",
           "error_code",
           "message",
-          "request_id"
+          "request_id",
+          "details"
         ],
         "title": "PublicErrorResponse",
         "type": "object"
@@ -815,7 +871,16 @@
                 }
               }
             },
-            "description": "Bad Request"
+            "description": "Bad Request",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
           },
           "422": {
             "content": {
@@ -825,7 +890,16 @@
                 }
               }
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
           },
           "503": {
             "content": {
@@ -835,7 +909,16 @@
                 }
               }
             },
-            "description": "Service Unavailable"
+            "description": "Service Unavailable",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
           }
         },
         "summary": "List Accounts",
@@ -917,7 +1000,16 @@
                 }
               }
             },
-            "description": "Bad Request"
+            "description": "Bad Request",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
           },
           "422": {
             "content": {
@@ -927,7 +1019,16 @@
                 }
               }
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
           },
           "503": {
             "content": {
@@ -937,7 +1038,16 @@
                 }
               }
             },
-            "description": "Service Unavailable"
+            "description": "Service Unavailable",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
           }
         },
         "summary": "Multi Account Overview",
@@ -1011,7 +1121,16 @@
                 }
               }
             },
-            "description": "Bad Request"
+            "description": "Bad Request",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
           },
           "422": {
             "content": {
@@ -1021,7 +1140,16 @@
                 }
               }
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
           },
           "503": {
             "content": {
@@ -1031,7 +1159,16 @@
                 }
               }
             },
-            "description": "Service Unavailable"
+            "description": "Service Unavailable",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
           }
         },
         "summary": "Get Capital Facts Query",
@@ -1081,7 +1218,16 @@
                 }
               }
             },
-            "description": "Bad Request"
+            "description": "Bad Request",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
           },
           "422": {
             "content": {
@@ -1091,7 +1237,16 @@
                 }
               }
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
           },
           "503": {
             "content": {
@@ -1101,7 +1256,16 @@
                 }
               }
             },
-            "description": "Service Unavailable"
+            "description": "Service Unavailable",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
           }
         },
         "summary": "Get Valuation Evidence Query",
@@ -1152,7 +1316,16 @@
                 }
               }
             },
-            "description": "Bad Request"
+            "description": "Bad Request",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
           },
           "422": {
             "content": {
@@ -1162,7 +1335,16 @@
                 }
               }
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
           },
           "503": {
             "content": {
@@ -1172,7 +1354,16 @@
                 }
               }
             },
-            "description": "Service Unavailable"
+            "description": "Service Unavailable",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
           }
         },
         "summary": "Get Cash Query",
@@ -1284,7 +1475,16 @@
                 }
               }
             },
-            "description": "Bad Request"
+            "description": "Bad Request",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
           },
           "422": {
             "content": {
@@ -1294,7 +1494,16 @@
                 }
               }
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
           },
           "503": {
             "content": {
@@ -1304,12 +1513,80 @@
                 }
               }
             },
-            "description": "Service Unavailable"
+            "description": "Service Unavailable",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
           }
         },
         "summary": "Get Distribution Query",
         "tags": [
           "positions"
+        ]
+      }
+    },
+    "/api/v1/futu/holdings/refresh-requests": {
+      "post": {
+        "operationId": "request_futu_holdings_refresh_api_v1_futu_holdings_refresh_requests_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FutuHoldingsRefreshRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FutuHoldingsRefreshAcceptedResponse"
+                }
+              }
+            },
+            "description": "Successful Response",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Request Futu Holdings Refresh",
+        "tags": [
+          "holdings"
         ]
       }
     },
@@ -1354,7 +1631,16 @@
                 }
               }
             },
-            "description": "Bad Request"
+            "description": "Bad Request",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
           },
           "422": {
             "content": {
@@ -1364,7 +1650,16 @@
                 }
               }
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
           },
           "503": {
             "content": {
@@ -1374,7 +1669,16 @@
                 }
               }
             },
-            "description": "Service Unavailable"
+            "description": "Service Unavailable",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
           }
         },
         "summary": "Sync Futu Holdings Query",
@@ -1455,7 +1759,16 @@
                 }
               }
             },
-            "description": "Bad Request"
+            "description": "Bad Request",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
           },
           "422": {
             "content": {
@@ -1465,7 +1778,16 @@
                 }
               }
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
           },
           "503": {
             "content": {
@@ -1475,7 +1797,16 @@
                 }
               }
             },
-            "description": "Service Unavailable"
+            "description": "Service Unavailable",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
           }
         },
         "summary": "Get Holdings Query",
@@ -1538,7 +1869,16 @@
                 }
               }
             },
-            "description": "Bad Request"
+            "description": "Bad Request",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
           },
           "422": {
             "content": {
@@ -1548,7 +1888,16 @@
                 }
               }
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
           },
           "503": {
             "content": {
@@ -1558,7 +1907,16 @@
                 }
               }
             },
-            "description": "Service Unavailable"
+            "description": "Service Unavailable",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
           }
         },
         "summary": "Get Nav Query",
@@ -1621,7 +1979,16 @@
                 }
               }
             },
-            "description": "Bad Request"
+            "description": "Bad Request",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
           },
           "422": {
             "content": {
@@ -1631,7 +1998,16 @@
                 }
               }
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
           },
           "503": {
             "content": {
@@ -1641,7 +2017,16 @@
                 }
               }
             },
-            "description": "Service Unavailable"
+            "description": "Service Unavailable",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
           }
         },
         "summary": "Full Report Query",

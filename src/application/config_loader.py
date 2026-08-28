@@ -19,6 +19,9 @@ from typing import Any, Callable, Mapping
 
 from src.application.runtime_config_paths import write_json_atomic
 from src.application.settings import build_effective_env
+from src.application.portfolio_management import (
+    normalize_portfolio_management_config,
+)
 
 
 SCHEDULED_CONFIG_VALIDATOR_VERSION = 'notification-renderer-v2'
@@ -145,6 +148,13 @@ def load_config(
         raise SystemExit('[CONFIG_ERROR] config must be a JSON object')
 
     cfg = normalize_portfolio_broker_config(cfg)
+    try:
+        cfg = normalize_portfolio_management_config(
+            cfg,
+            warning_fn=lambda message: log(f"[WARN] {message}"),
+        )
+    except ValueError as exc:
+        raise SystemExit(f"[CONFIG_ERROR] {exc}") from exc
 
     try:
         if validate_config_fn is None:
