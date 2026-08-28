@@ -28,11 +28,7 @@ from src.application.portfolio_context_service import (
     portfolio_context_account_mismatch_reason,
     with_context_source,
 )
-from src.application.strategy_policy import (
-    SELL_CALL_FAMILY,
-    SELL_PUT_FAMILY,
-    strategy_semantics_for_side_config,
-)
+from src.application.strategy_policy import wants_global_path_risk_context
 from src.infrastructure.io_utils import (
     atomic_write_json,
     is_fresh,
@@ -737,7 +733,7 @@ def run_worker(request_path: Path) -> int:
             load_json_fn=load_cached_json,
             write_cache=False,
         )
-        if _wants_global_path_risk_context(cfg):
+        if wants_global_path_risk_context(cfg):
             shared = load_holdings_portfolio_shared_context(
                 data_config_path=Path(data_config),
                 broker=None,
@@ -799,39 +795,6 @@ def run_worker(request_path: Path) -> int:
     result_path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_json(result_path, result)
     return 0
-
-
-def _wants_global_path_risk_context(cfg: dict[str, Any] | None) -> bool:
-    if not isinstance(cfg, dict):
-        return False
-
-    def _uses_path_risk(node: object, *, family: str) -> bool:
-        return (
-            isinstance(node, dict)
-            and strategy_semantics_for_side_config(
-                family=family,
-                side_cfg=node,
-            ).scan_uses_path_risk
-        )
-
-    templates = cfg.get("templates")
-    if isinstance(templates, dict):
-        for profile in templates.values():
-            if isinstance(profile, dict) and (
-                _uses_path_risk(profile.get("sell_put"), family=SELL_PUT_FAMILY)
-                or _uses_path_risk(
-                    profile.get("sell_call"),
-                    family=SELL_CALL_FAMILY,
-                )
-            ):
-                return True
-    for item in cfg.get("symbols") or []:
-        if isinstance(item, dict) and (
-            _uses_path_risk(item.get("sell_put"), family=SELL_PUT_FAMILY)
-            or _uses_path_risk(item.get("sell_call"), family=SELL_CALL_FAMILY)
-        ):
-            return True
-    return False
 
 
 def _read_worker_result(
