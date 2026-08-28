@@ -52,6 +52,7 @@ from src.application.daily_decision_brief_repository import (
 from src.application.daily_decision_brief_service import assemble_daily_decision_briefs
 from src.application.multi_tick.misc import _safe_runlog_data, parse_hhmm
 from src.application.multi_tick.assistant_perception_event import build_notification_perception_event
+from src.application.multi_tick_audit import record_tick_latency
 from src.application.multi_tick_finalization import (
     _record_finalize_degraded,
     finalize_multi_tick_run,
@@ -168,8 +169,8 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
     try:
         daily_brief_prep = _prepare_daily_brief_notification(request)
     finally:
-        _record_tick_latency(
-            request,
+        record_tick_latency(
+            runlog=request.runlog,
             stage="daily_brief_prepare",
             started=daily_brief_prepare_started,
         )
@@ -522,8 +523,8 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
         sent_accounts = [] if request.delivery_only else list(would_send_accounts)
         request.runlog.safe_event("notify", "skip", message="no_send mode")
 
-    _record_tick_latency(
-        request,
+    record_tick_latency(
+        runlog=request.runlog,
         stage="provider_delivery",
         started=provider_delivery_started,
     )
@@ -747,31 +748,11 @@ def _observe_recommendation_points_best_effort(
             message=str(exc),
         )
     finally:
-        _record_tick_latency(
-            request,
+        record_tick_latency(
+            runlog=request.runlog,
             stage="recommendation_point_observer",
             started=started,
         )
-
-
-def _record_tick_latency(
-    request: TickNotificationRequest,
-    *,
-    stage: str,
-    started: float,
-    data: Mapping[str, Any] | None = None,
-) -> int:
-    duration_ms = max(0, int((monotonic() - started) * 1000))
-    try:
-        request.runlog.safe_event(
-            "tick_latency",
-            "ok",
-            duration_ms=duration_ms,
-            data={"stage": stage, **dict(data or {})},
-        )
-    except Exception:
-        pass
-    return duration_ms
 
 
 def _run_post_delivery_sidecars_best_effort(
@@ -1298,8 +1279,8 @@ def _prepare_daily_brief_notification(
                                 ),
                             )
                         finally:
-                            _record_tick_latency(
-                                request,
+                            record_tick_latency(
+                                runlog=request.runlog,
                                 stage="scheduler_target_commit",
                                 started=commit_started,
                             )

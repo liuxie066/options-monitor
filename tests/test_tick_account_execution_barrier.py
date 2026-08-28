@@ -6,6 +6,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -192,6 +193,37 @@ def _fake_prepare_options(**kwargs):
         observed_at_utc="2026-07-29T01:40:00+00:00",
         ledger_read_count=1 if manifests else 0,
         fx_observation_count=1 if manifests else 0,
+    )
+
+
+def test_record_tick_latency_preserves_event_and_best_effort_behavior(
+    monkeypatch,
+) -> None:
+    from src.application import multi_tick_audit as mod
+
+    clock = Mock(side_effect=(1.5, 2.0))
+    safe_event = Mock(side_effect=(None, OSError("run log unavailable")))
+    monkeypatch.setattr(mod, "monotonic", clock)
+    runlog = SimpleNamespace(safe_event=safe_event)
+
+    assert mod.record_tick_latency(
+        runlog=runlog,
+        stage="account_outcomes",
+        started=1.0,
+        data={"account_count": 2},
+    ) == 500
+    assert mod.record_tick_latency(
+        runlog=runlog,
+        stage="provider_delivery",
+        started=3.0,
+    ) == 0
+    assert clock.call_count == 2
+    assert safe_event.call_count == 2
+    safe_event.assert_any_call(
+        "tick_latency",
+        "ok",
+        duration_ms=500,
+        data={"stage": "account_outcomes", "account_count": 2},
     )
 
 
