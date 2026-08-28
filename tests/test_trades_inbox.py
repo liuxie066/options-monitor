@@ -9,14 +9,45 @@ from src.application.trades.auto_intake import (
 )
 
 from src.application.trades.inbox import (
+    claim_trade_payload_refresh_intent,
     enqueue_trade_payload,
     list_retryable_trade_payloads,
     mark_trade_payload_handled,
     mark_trade_payload_retryable,
+    record_trade_payload_refresh_intent,
     settle_trade_payload_result,
     trade_inbox_revision,
     trade_inbox_summary,
 )
+
+
+def test_trade_inbox_claims_portfolio_refresh_intent_once(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "inbox.sqlite3"
+    inbox_id = enqueue_trade_payload(
+        path,
+        payload={"deal_id": "stock-1"},
+        source="push",
+        broker_deal_key="futu:lx:REAL_1:stock-1",
+    )
+    intent = {"account": "lx", "request_id": "stock-refresh:abc"}
+
+    record_trade_payload_refresh_intent(
+        path,
+        inbox_id=inbox_id,
+        intent=intent,
+    )
+    assert claim_trade_payload_refresh_intent(
+        path,
+        inbox_id=inbox_id,
+    ) == intent
+    record_trade_payload_refresh_intent(
+        path,
+        inbox_id=inbox_id,
+        intent=intent,
+    )
+    assert claim_trade_payload_refresh_intent(path, inbox_id=inbox_id) is None
 
 
 def test_trade_inbox_is_idempotent_and_retries_callback_exception(

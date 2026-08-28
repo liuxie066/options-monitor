@@ -337,6 +337,14 @@ operate on normalized trade deals, OpenD deal intake, idempotency state,
 receipts, and event review/replay flows. Both route writes through
 `src.application.ledger` instead of owning projection or matching rules locally.
 
+For a first-seen Futu stock or ETF deal, trade intake may emit a post-settlement
+account refresh hint to the separately installed portfolio-management service.
+The hint contains no position delta: PM owns the full Futu holdings reread,
+persistence, scheduling, concurrency, and retry policy. OM only records whether
+the hint request was accepted or failed; acceptance is not synchronization
+evidence. The root `portfolio_management.enabled` switch gates this hint and all
+other production PM callers.
+
 ## Close Advice Flow
 
 Close advice keeps deterministic policy in `domain.domain.close_advice`.

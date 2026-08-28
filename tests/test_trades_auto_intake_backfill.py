@@ -10,7 +10,9 @@ import pytest
 import src.application.trades.backfill as backfill_module
 from src.application.trades.backfill import run_history_backfill
 from src.application.trades.inbox import (
+    enqueue_trade_payload,
     list_retryable_trade_payloads,
+    record_trade_payload_refresh_intent,
     trade_inbox_summary,
 )
 from src.application.trades.state import load_trade_intake_state, write_trade_intake_state
@@ -72,7 +74,7 @@ def _audit_events(path: Path) -> list[dict[str, Any]]:
 
 def test_run_history_backfill_processes_missing_deal_through_pipeline(tmp_path: Path) -> None:
     processed: list[dict[str, Any]] = []
-    callback = lambda _context: {"status": "queued"}
+    dispatched: list[dict[str, str]] = []
 
     def _history_deals_fn(**_kwargs):
         return (
@@ -85,7 +87,6 @@ def test_run_history_backfill_processes_missing_deal_through_pipeline(tmp_path: 
             {
                 "payload": payload,
                 "source": kwargs.get("source"),
-                "callback": kwargs.get("on_stock_holdings_sync_fn"),
             }
         )
         return {
@@ -94,13 +95,17 @@ def test_run_history_backfill_processes_missing_deal_through_pipeline(tmp_path: 
             "reason": "applied_open",
             "deal_id": payload["deal_id"],
             "account": "lx",
+            "portfolio_refresh_intent": {
+                "account": "lx",
+                "request_id": "stock-refresh:first",
+            },
         }
 
     out = run_history_backfill(
         **_backfill_kwargs(tmp_path),
         history_deals_fn=_history_deals_fn,
         process_payload_fn=_process_payload_fn,
-        on_stock_holdings_sync_fn=callback,
+        dispatch_portfolio_refresh_fn=dispatched.append,
     )
 
     assert out["ok"] is True
@@ -114,7 +119,9 @@ def test_run_history_backfill_processes_missing_deal_through_pipeline(tmp_path: 
     assert processed[0]["payload"]["_trade_intake_source"]["transport"] == "poll"
     assert processed[0]["payload"]["_trade_intake_source"]["opend_port"] == 11111
     assert processed[0]["source"] == "backfill"
-    assert processed[0]["callback"] is callback
+    assert dispatched == [
+        {"account": "lx", "request_id": "stock-refresh:first"}
+    ]
     phases = [event["phase"] for event in _audit_events(tmp_path / "audit.jsonl")]
     assert phases == [
         "backfill_check_started",
@@ -123,6 +130,99 @@ def test_run_history_backfill_processes_missing_deal_through_pipeline(tmp_path: 
         "backfill_applied",
         "backfill_lifecycle_reconciliation_after",
         "backfill_check_finished",
+    ]
+
+
+def test_backfill_dispatches_once_per_account_after_all_inbox_settlements(
+    tmp_path: Path,
+) -> None:
+    order: list[str] = []
+
+    def process(payload: dict[str, Any], **_kwargs):
+        order.append(f"process:{payload['deal_id']}")
+        return {
+            "status": "applied",
+            "action": "sell",
+            "reason": "applied",
+            "deal_id": payload["deal_id"],
+            "account": "lx",
+            "portfolio_refresh_intent": {
+                "account": "lx",
+                "request_id": f"stock-refresh:{payload['deal_id']}",
+            },
+        }
+
+    run_history_backfill(
+        **_backfill_kwargs(tmp_path),
+        history_deals_fn=lambda **_kwargs: (
+            [
+                {"deal_id": "deal-1", "code": "HK.00700"},
+                {"deal_id": "deal-2", "code": "HK.00700"},
+            ],
+            {},
+        ),
+        process_payload_fn=process,
+        dispatch_portfolio_refresh_fn=lambda intent: order.append(
+            f"dispatch:{intent['request_id']}"
+        ),
+    )
+
+    assert order == [
+        "process:deal-1",
+        "process:deal-2",
+        "dispatch:stock-refresh:deal-1",
+    ]
+
+
+def test_backfill_dispatches_stored_refresh_after_duplicate_recovery(
+    tmp_path: Path,
+) -> None:
+    inbox_path = tmp_path / "trade_intake_inbox.sqlite3"
+    payload = {
+        "deal_id": "stock-1",
+        "code": "HK.00700",
+        "futu_account_id": "REAL_1",
+        "internal_account": "lx",
+    }
+    inbox_id = enqueue_trade_payload(
+        inbox_path,
+        payload=payload,
+        source="push",
+        broker_deal_key="futu:lx:REAL_1:stock-1",
+    )
+    record_trade_payload_refresh_intent(
+        inbox_path,
+        inbox_id=inbox_id,
+        intent={"account": "lx", "request_id": "stock-refresh:stored"},
+    )
+    write_trade_intake_state(
+        tmp_path / "state.json",
+        {
+            "processed_deal_ids": {
+                "futu:lx:REAL_1:stock-1": {
+                    "status": "skipped",
+                    "reason": "not_option_deal",
+                }
+            },
+            "failed_deal_ids": {},
+            "unresolved_deal_ids": {},
+        },
+    )
+    dispatched: list[dict[str, str]] = []
+
+    out = run_history_backfill(
+        **_backfill_kwargs(tmp_path),
+        inbox_path=inbox_path,
+        history_deals_fn=lambda **_kwargs: ([payload], {}),
+        process_payload_fn=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("duplicate should not enter process pipeline")
+        ),
+        dispatch_portfolio_refresh_fn=dispatched.append,
+    )
+
+    assert out["skipped_duplicate_count"] == 1
+    assert dispatched == [
+        {"account": "lx", "request_id": "stock-refresh:stored"}
     ]
 
 

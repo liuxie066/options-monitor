@@ -278,7 +278,6 @@ def test_listener_main_owns_exactly_one_lifecycle_batch_dispatcher(
         "status_path": Path("status.json"),
         "receipt": {"enabled": True},
         "backfill": {"enabled": False},
-        "holdings_sync": {"enabled": False},
         "combo_reconciliation": {
             "default_mode": "off",
             "accounts": {},
@@ -1052,6 +1051,113 @@ def test_listener_binds_push_source_before_enqueue(monkeypatch, tmp_path: Path) 
         captured["broker_deal_key"]
         == "futu:sy:REAL_87654321:push-deal-1"
     )
+
+
+def test_listener_retry_preserves_source_without_dry_run_refresh_side_effects(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    stop = threading.Event()
+    order: list[str] = []
+
+    class _Listener:
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self, *, cancel_event):
+            pass
+
+        def check_health(self):
+            pass
+
+        def close(self):
+            pass
+
+    class _History:
+        def __init__(self, **_kwargs):
+            pass
+
+        def close(self):
+            pass
+
+    def _process(_payload, **kwargs):
+        order.append(f"process:{kwargs['source']}")
+        stop.set()
+        return {
+            "status": "skipped",
+            "reason": "not_option_deal",
+            "portfolio_refresh_intent": {
+                "account": "lx",
+                "request_id": "stock-refresh:abc",
+            },
+        }
+
+    monkeypatch.setattr(auto_intake, "OpenDTradePushListener", _Listener)
+    monkeypatch.setattr(auto_intake, "OpenDHistoryDealClient", _History)
+    monkeypatch.setattr(auto_intake, "_process_payload", _process)
+    monkeypatch.setattr(
+        auto_intake,
+        "list_retryable_trade_payloads",
+        lambda *_args, **_kwargs: [
+            {
+                "inbox_id": "inbox-1",
+                "source": "backfill",
+                "payload": {"deal_id": "stock-1"},
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        auto_intake,
+        "record_trade_payload_refresh_intent",
+        lambda *_args, **_kwargs: order.append("record"),
+    )
+    monkeypatch.setattr(
+        auto_intake,
+        "settle_trade_payload_result",
+        lambda *_args, **_kwargs: order.append("settle"),
+    )
+    monkeypatch.setattr(
+        auto_intake,
+        "claim_trade_payload_refresh_intent",
+        lambda *_args, **_kwargs: order.append("claim")
+        or {"account": "lx", "request_id": "stock-refresh:abc"},
+    )
+    monkeypatch.setattr(
+        auto_intake,
+        "_dispatch_portfolio_refresh_intent",
+        lambda *_args, **_kwargs: order.append("dispatch"),
+    )
+    monkeypatch.setattr(auto_intake, "trade_inbox_summary", lambda *_args, **_kwargs: {})
+
+    source = _listener_source(tmp_path, "lx", 11111)
+    for key in (
+        "state_path",
+        "audit_path",
+        "status_path",
+        "inbox_path",
+        "backfill_checkpoint_path",
+    ):
+        source[key] = tmp_path / source[key]
+    rc = auto_intake._run_listener_source_loop(
+        source=source,
+        repo=object(),
+        cfg={},
+        cfg_path=tmp_path / "config.json",
+        runtime_root=tmp_path,
+        runtime_root_source="test",
+        intake_cfg={
+            "mode": "dry-run",
+            "enabled": True,
+            "backfill": {"enabled": False},
+        },
+        apply_changes=False,
+        receipt_callback=lambda _context: {},
+        process_lock=threading.RLock(),
+        stop_event=stop,
+    )
+
+    assert rc == 0
+    assert order == ["process:backfill", "settle"]
 
 
 def test_auto_trade_intake_open_dry_run_accepts_futu_option_code_with_lookup_fields(tmp_path: Path) -> None:

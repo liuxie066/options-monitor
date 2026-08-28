@@ -29,6 +29,7 @@ from src.application.config_validator import (
     COMBO_YIELD_CALL_ALLOWED_FIELDS,
     validate_assistant_config,
     validate_config,
+    warn,
 )
 from src.application.config_defaults import (
     DEFAULT_CONFIG_REF,
@@ -42,6 +43,9 @@ from src.application.layered_config import (
 from src.application.runtime_config_freshness import GENERATED_KEY, GENERATED_SCHEMA_VERSION
 from src.application.runtime_config_paths import write_json_atomic
 from src.application.runtime_paths import resolve_runtime_root
+from src.application.portfolio_management import (
+    normalize_portfolio_management_config,
+)
 
 
 RESOLVED_KEY = "_resolved"
@@ -70,6 +74,7 @@ ROOT_KEYS = {
     "accounts",
     "features",
     "markets",
+    "portfolio_management",
     "trade_intake",
     *PASSTHROUGH_KEYS,
     *ASSISTANT_AUTHORING_KEYS,
@@ -701,6 +706,8 @@ def yaml_to_market_user_config(raw_cfg: dict[str, Any], *, market: str) -> dict[
 
     out = _copy_passthrough(raw_cfg, path="config.yaml")
     out = _deep_merge(out, _copy_passthrough(market_cfg, path=f"markets.{normalized_market}"))
+    if "portfolio_management" in raw_cfg:
+        out["portfolio_management"] = deepcopy(raw_cfg["portfolio_management"])
     if "trade_intake" in raw_cfg:
         out["trade_intake"] = _normalize_trade_intake_authoring(
             raw_cfg.get("trade_intake"),
@@ -711,7 +718,13 @@ def yaml_to_market_user_config(raw_cfg: dict[str, Any], *, market: str) -> dict[
     out["accounts"] = accounts
     out["account_settings"] = account_settings
     out["symbols"] = runtime_symbols
-    return out
+    try:
+        return normalize_portfolio_management_config(
+            out,
+            warning_fn=warn,
+        )
+    except ValueError as exc:
+        raise AgentToolError(code="CONFIG_ERROR", message=str(exc)) from exc
 
 
 def _yaml_rebuild_command(*, config_path: Path, market: str, output_path: Path | None = None) -> str:

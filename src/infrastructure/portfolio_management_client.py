@@ -24,12 +24,6 @@ _FRESHNESS_STATUSES = frozenset(
 _TRUST_STATUSES = frozenset(
     {"trusted", "partial", "untrusted", "unavailable"}
 )
-_HOLDINGS_SYNC_STAGES = (
-    "positions",
-    "securities_cash",
-    "fund_mmf",
-)
-
 _VIEW_PATHS = {
     "health": "/health",
     "accounts": "/api/v1/accounts",
@@ -42,15 +36,17 @@ _VIEW_PATHS = {
 }
 CAPITAL_FACTS_PATH = "/api/v1/analysis/capital-facts"
 VALUATION_EVIDENCE_PATH = "/api/v1/analysis/valuation-evidence"
-HOLDINGS_SYNC_PATH = "/api/v1/futu/holdings/sync"
-CONTRACT_OPERATIONS = frozenset(
-    {
-        *{("GET", path) for path in _VIEW_PATHS.values() if path.startswith("/api/v1/")},
-        ("GET", CAPITAL_FACTS_PATH),
-        ("POST", VALUATION_EVIDENCE_PATH),
-        ("POST", HOLDINGS_SYNC_PATH),
-    }
-)
+HOLDINGS_REFRESH_PATH = "/api/v1/futu/holdings/refresh-requests"
+CONTRACT_OPERATIONS = {
+    **{
+        ("GET", path): 200
+        for path in _VIEW_PATHS.values()
+        if path.startswith("/api/v1/")
+    },
+    ("GET", CAPITAL_FACTS_PATH): 200,
+    ("POST", VALUATION_EVIDENCE_PATH): 200,
+    ("POST", HOLDINGS_REFRESH_PATH): 202,
+}
 
 
 class PortfolioManagementError(RuntimeError):
@@ -185,26 +181,24 @@ class PortfolioManagementClient:
             requested_accounts=normalized_accounts,
         )
 
-    def sync_holdings(
+    def request_holdings_refresh(
         self,
         *,
         account: str,
+        request_id: str,
         timeout: float,
     ) -> dict[str, Any]:
         result = self._request(
             "POST",
-            HOLDINGS_SYNC_PATH,
-            payload={
-                "account": account,
-                "dry_run": False,
-                "confirm": True,
-                "allow_empty_stock_snapshot": False,
-            },
+            HOLDINGS_REFRESH_PATH,
+            payload={"account": account, "request_id": request_id},
             timeout=timeout,
+            expected_status=202,
         )
-        return validate_holdings_sync_response(
+        return validate_holdings_refresh_response(
             result,
             requested_account=account,
+            requested_request_id=request_id,
         )
 
     def _request(
@@ -216,6 +210,7 @@ class PortfolioManagementClient:
         payload: Mapping[str, Any] | None = None,
         timeout: float,
         max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
+        expected_status: int = 200,
     ) -> dict[str, Any]:
         query_string = urllib.parse.urlencode(
             {key: value for key, value in (query or {}).items() if value is not None}
@@ -234,12 +229,25 @@ class PortfolioManagementClient:
             with self._urlopen(request, timeout=float(timeout)) as response:
                 response_body = response.read(max_response_bytes + 1)
                 version = _response_header(response, "X-PM-API-Version")
+                response_status = _response_status(response)
         except urllib.error.HTTPError as exc:
             try:
                 error_body = exc.read(max_response_bytes + 1)
             except Exception:
                 error_body = b""
-            decoded = _decode_optional_object(error_body)
+            if len(error_body) > max_response_bytes:
+                raise PortfolioManagementProtocolError(
+                    f"portfolio-management response exceeds {max_response_bytes // (1024 * 1024)} MiB"
+                ) from exc
+            if path.startswith("/api/v1/"):
+                version = _response_header(exc, "X-PM-API-Version")
+                if version != API_VERSION:
+                    raise PortfolioManagementProtocolError(
+                        f"portfolio-management API version mismatch: {version or 'missing'}"
+                    ) from exc
+                decoded = _decode_public_error(error_body)
+            else:
+                decoded = _decode_optional_object(error_body)
             raise PortfolioManagementHTTPError(
                 str(
                     decoded.get("message")
@@ -259,12 +267,21 @@ class PortfolioManagementClient:
             raise PortfolioManagementProtocolError(
                 f"portfolio-management response exceeds {max_response_bytes // (1024 * 1024)} MiB"
             )
+        if response_status != int(expected_status):
+            raise PortfolioManagementProtocolError(
+                "portfolio-management success status mismatch: "
+                f"expected {expected_status}, got {response_status}"
+            )
         if path.startswith("/api/v1/") and version != API_VERSION:
             raise PortfolioManagementProtocolError(
                 f"portfolio-management API version mismatch: {version or 'missing'}"
             )
         decoded = _decode_object(response_body)
         if decoded.get("success") is False:
+            if path.startswith("/api/v1/"):
+                raise PortfolioManagementProtocolError(
+                    "portfolio-management success response did not confirm success=true"
+                )
             raise PortfolioManagementHTTPError(
                 str(decoded.get("message") or decoded.get("error") or "portfolio-management request failed"),
                 status=503,
@@ -280,6 +297,14 @@ def _response_header(response: Any, name: str) -> str:
         return str(headers.get(name) or "")
     getter = getattr(response, "getheader", None)
     return str(getter(name) or "") if callable(getter) else ""
+
+
+def _response_status(response: Any) -> int:
+    value = getattr(response, "status", None)
+    if value is None:
+        getter = getattr(response, "getcode", None)
+        value = getter() if callable(getter) else 200
+    return int(value)
 
 
 def _decode_object(body: bytes) -> dict[str, Any]:
@@ -302,6 +327,31 @@ def _decode_optional_object(body: bytes) -> dict[str, Any]:
     except (UnicodeDecodeError, json.JSONDecodeError):
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def _decode_public_error(body: bytes) -> dict[str, Any]:
+    item = _decode_object(body)
+    required = {"success", "error_code", "message", "request_id", "details"}
+    missing = sorted(required - set(item))
+    if missing:
+        raise PortfolioManagementProtocolError(
+            "portfolio-management error response missing required fields: "
+            + ",".join(missing)
+        )
+    if item.get("success") is not False:
+        raise PortfolioManagementProtocolError(
+            "portfolio-management error response did not confirm success=false"
+        )
+    for field in ("error_code", "message", "request_id"):
+        if not isinstance(item.get(field), str) or not item[field].strip():
+            raise PortfolioManagementProtocolError(
+                f"portfolio-management error response {field} is invalid"
+            )
+    if not isinstance(item.get("details"), dict):
+        raise PortfolioManagementProtocolError(
+            "portfolio-management error response details must be an object"
+        )
+    return item
 
 
 def _normalized_accounts(accounts: list[str]) -> list[str]:
@@ -476,85 +526,37 @@ def _validate_freshness(value: Any) -> dict[str, Any]:
     return item
 
 
-def validate_holdings_sync_response(
+def validate_holdings_refresh_response(
     result: Mapping[str, Any],
     *,
     requested_account: str,
+    requested_request_id: str,
 ) -> dict[str, Any]:
     item = dict(result)
     account = str(requested_account or "").strip().lower()
-    required = {
-        "success",
-        "account",
-        "broker",
-        "dry_run",
-        "source",
-        "source_snapshot_id",
-        "sync_run_id",
-        "stages",
-        "positions",
-    }
+    request_id = str(requested_request_id or "").strip()
+    required = {"success", "status", "account", "request_id"}
     missing = sorted(required - set(item))
     if missing:
         raise PortfolioManagementProtocolError(
-            "portfolio holdings sync response missing required fields: "
+            "portfolio holdings refresh response missing required fields: "
             + ",".join(missing)
         )
     if item.get("success") is not True:
         raise PortfolioManagementProtocolError(
-            "portfolio holdings sync did not confirm success=true"
+            "portfolio holdings refresh did not confirm success=true"
+        )
+    if item.get("status") != "accepted":
+        raise PortfolioManagementProtocolError(
+            "portfolio holdings refresh was not accepted"
         )
     if str(item.get("account") or "").strip().lower() != account:
         raise PortfolioManagementProtocolError(
-            "portfolio holdings sync account mismatch"
+            "portfolio holdings refresh account mismatch"
         )
-    if item.get("dry_run") is not False:
+    if str(item.get("request_id") or "").strip() != request_id:
         raise PortfolioManagementProtocolError(
-            "portfolio holdings sync did not confirm a real write"
-        )
-    for field in ("broker", "source_snapshot_id", "sync_run_id"):
-        if not str(item.get(field) or "").strip():
-            raise PortfolioManagementProtocolError(
-                f"portfolio holdings sync {field} is missing"
-            )
-    if str(item.get("source") or "").strip() != "futu-openapi":
-        raise PortfolioManagementProtocolError(
-            "portfolio holdings sync source mismatch"
-        )
-    if item.get("status") not in {None, "written"}:
-        raise PortfolioManagementProtocolError(
-            "portfolio holdings sync write status mismatch"
-        )
-    if item.get("partial_write_possible") is True:
-        raise PortfolioManagementProtocolError(
-            "portfolio holdings sync reports a partial write"
-        )
-    if item.get("receipt_persisted") is not True:
-        raise PortfolioManagementProtocolError(
-            "portfolio holdings sync durable receipt is unconfirmed"
-        )
-    stages = item.get("stages")
-    if not isinstance(stages, Mapping):
-        raise PortfolioManagementProtocolError(
-            "portfolio holdings sync stages must be an object"
-        )
-    if set(stages) != set(_HOLDINGS_SYNC_STAGES):
-        raise PortfolioManagementProtocolError(
-            "portfolio holdings sync stages are incomplete"
-        )
-    for stage_name in _HOLDINGS_SYNC_STAGES:
-        stage = stages.get(stage_name)
-        if (
-            not isinstance(stage, Mapping)
-            or stage.get("status") != "succeeded"
-            or stage.get("partial_write_possible") is True
-        ):
-            raise PortfolioManagementProtocolError(
-                f"portfolio holdings sync stage {stage_name} is not complete"
-            )
-    if not isinstance(item.get("positions"), list):
-        raise PortfolioManagementProtocolError(
-            "portfolio holdings sync positions must be an array"
+            "portfolio holdings refresh request id mismatch"
         )
     return item
 

@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 1048 (`src`: 571, `domain`: 76, `scripts`: 12, `tests`: 389)
-- Internal import edges: 7021 total, 3063 production/script edges excluding tests
+- Python files scanned: 1047 (`src`: 570, `domain`: 76, `scripts`: 12, `tests`: 389)
+- Internal import edges: 7022 total, 3065 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -33,7 +33,7 @@ flowchart LR
   storage["domain.storage"]
   application -->|453| domain
   application -->|4| domain_services
-  application -->|156| infrastructure
+  application -->|154| infrastructure
   application -->|41| storage
   domain_services -->|5| domain
   domain_services -->|2| storage
@@ -49,7 +49,7 @@ flowchart LR
   tests -->|2913| application
   tests -->|462| domain
   tests -->|2| domain_services
-  tests -->|231| infrastructure
+  tests -->|230| infrastructure
   tests -->|252| interfaces
   tests -->|21| scripts
   tests -->|18| storage
@@ -61,7 +61,7 @@ flowchart LR
 |---|---|---|
 | application | domain | 453 |
 | interfaces | application | 165 |
-| application | infrastructure | 156 |
+| application | infrastructure | 154 |
 | application | storage | 41 |
 | scripts | application | 38 |
 | infrastructure | application | 9 |
@@ -82,7 +82,7 @@ flowchart LR
 | tests | application | 2913 |
 | tests | domain | 462 |
 | tests | interfaces | 252 |
-| tests | infrastructure | 231 |
+| tests | infrastructure | 230 |
 | tests | scripts | 21 |
 | tests | storage | 18 |
 | tests | domain_services | 2 |
@@ -95,7 +95,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 |---|---|---|
 | src.application | domain.domain | 237 |
 | src.interfaces | src.application | 129 |
-| src.application | src.infrastructure | 111 |
+| src.application | src.infrastructure | 113 |
 | src.application.ledger | domain.domain | 64 |
 | src.application.ledger | domain.domain.ledger | 42 |
 | src.application.research | src.application | 34 |
@@ -105,18 +105,18 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application.trades | domain.domain | 28 |
 | src.application | src.application.ledger | 25 |
 | src.application.positions | src.application | 24 |
+| src.application.trades | src.application | 22 |
 | src.application.inbound | src.application | 21 |
-| src.application.trades | src.application | 21 |
 | src.application.multi_tick | src.application | 20 |
 | src.application.trades | src.application.ledger | 19 |
 | src.application | src.application.multi_tick | 16 |
 | src.application | src.application.settings | 15 |
 | src.application | src.application.positions | 15 |
-| src.application.trades | src.infrastructure | 15 |
 | src.application | domain.domain.ledger | 14 |
 | src.application.positions | domain.domain | 13 |
 | domain.domain | domain.domain.ledger | 12 |
 | src.application | src.application.research | 11 |
+| src.application.trades | src.infrastructure | 11 |
 | src.interfaces | src.application.trades | 11 |
 | src.application.ledger | src.infrastructure | 9 |
 | src.application.multi_tick | src.infrastructure | 9 |
@@ -185,8 +185,8 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.application.ledger.api | 62 |
 | src.application.payload_helpers | 48 |
 | domain.domain.ledger.position_fields | 46 |
-| src.infrastructure.io_utils | 45 |
 | src.application.account_config | 45 |
+| src.infrastructure.io_utils | 44 |
 | domain.domain.decision_state_fingerprint | 44 |
 | domain.domain.option_position_identity | 43 |
 | src.application.shadow_replay.common | 35 |
@@ -200,7 +200,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | module | outgoing imports |
 |---|---|
 | src.application.ledger.api | 32 |
-| src.application.trades.auto_intake | 32 |
+| src.application.trades.auto_intake | 31 |
 | src.application.pipeline_watchlist | 29 |
 | src.application.multi_account_tick | 28 |
 | src.interfaces.cli.main | 28 |

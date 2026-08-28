@@ -32,6 +32,9 @@
         "port": 11111
       }
     },
+    "portfolio_management": {
+      "enabled": false
+    },
     "trade_intake": {
       "enabled": true,
       "mode": "apply",

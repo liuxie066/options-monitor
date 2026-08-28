@@ -39,6 +39,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "base_currency": "CNY",
             "futu": {"host": "127.0.0.1", "port": 11111},
         },
+        "portfolio_management": {"enabled": False},
         "trade_intake": {
             "enabled": True,
             "mode": "apply",

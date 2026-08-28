@@ -83,6 +83,7 @@ def test_valuation_evidence_client_posts_to_fixed_loopback_endpoint(monkeypatch)
         accounts=["lx", "sy"],
         supplemental_codes=["NVDA"],
         price_timeout=7,
+        runtime_config={"portfolio_management": {"enabled": True}},
     )
 
     request = seen["request"]
@@ -109,7 +110,27 @@ def test_valuation_evidence_client_rejects_non_loopback_url(monkeypatch):
         application.read_portfolio_valuation_evidence(
             accounts=["lx"],
             supplemental_codes=[],
+            runtime_config={"portfolio_management": {"enabled": True}},
         )
+
+
+def test_valuation_evidence_disabled_never_opens_transport(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        application.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: calls.append(True),
+    )
+
+    with pytest.raises(application.PortfolioEvidenceReadError) as raised:
+        application.read_portfolio_valuation_evidence(
+            accounts=["lx"],
+            supplemental_codes=[],
+            runtime_config={"portfolio_management": {"enabled": False}},
+        )
+
+    assert raised.value.code == "PORTFOLIO_MANAGEMENT_DISABLED"
+    assert calls == []
 
 
 def test_query_assignment_scenario_reads_only_open_short_underlyings(monkeypatch):
@@ -133,10 +154,20 @@ def test_query_assignment_scenario_reads_only_open_short_underlyings(monkeypatch
     monkeypatch.setattr(
         application,
         "_load_runtime_and_positions",
-        lambda accounts: (positions, "config.us.json"),
+        lambda accounts: (
+            positions,
+            "config.us.json",
+            {"portfolio_management": {"enabled": True}},
+        ),
     )
 
-    def evidence_reader(*, accounts, supplemental_codes, price_timeout=30):
+    def evidence_reader(
+        *,
+        accounts,
+        supplemental_codes,
+        price_timeout=30,
+        runtime_config=None,
+    ):
         seen["accounts"] = accounts
         seen["supplemental_codes"] = supplemental_codes
         result = _valuation_response(accounts=["lx"])
@@ -172,13 +203,20 @@ def test_query_returns_business_unavailable_when_portfolio_source_is_down(monkey
     monkeypatch.setattr(
         application,
         "_load_runtime_and_positions",
-        lambda accounts: ([], "config.us.json"),
+        lambda accounts: (
+            [],
+            "config.us.json",
+            {"portfolio_management": {"enabled": True}},
+        ),
     )
     monkeypatch.setattr(
         application,
         "read_portfolio_valuation_evidence",
         lambda **_kwargs: (_ for _ in ()).throw(
-            application.PortfolioEvidenceReadError("service down")
+            application.PortfolioEvidenceReadError(
+                "service down",
+                code="PORTFOLIO_MANAGEMENT_UNAVAILABLE",
+            )
         ),
     )
 
