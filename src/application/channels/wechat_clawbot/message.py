@@ -3,6 +3,38 @@ from __future__ import annotations
 from typing import Any
 
 
+def response_code(response: dict[str, Any]) -> int | None:
+    for key in ("ret", "errcode", "code"):
+        value = response.get(key)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+            return int(value)
+    return None
+
+
+def response_success(response: dict[str, Any]) -> bool:
+    if response == {}:
+        return True
+    if response.get("ok") is True:
+        return True
+    return response_code(response) == 0
+
+
+def response_message_id(response: dict[str, Any]) -> str | None:
+    for key in ("message_id", "messageId", "id", "client_msg_id"):
+        value = response.get(key)
+        if value:
+            return str(value)
+    data = response.get("data")
+    if isinstance(data, dict):
+        return response_message_id(data)
+    result = response.get("result")
+    if isinstance(result, dict):
+        return response_message_id(result)
+    return None
+
+
 def extract_first_string(payload: dict[str, Any], keys: tuple[str, ...]) -> str:
     for item in _walk_dicts(payload):
         for key in keys:

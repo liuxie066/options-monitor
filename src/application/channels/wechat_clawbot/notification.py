@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 from domain.domain.tool_boundary import normalize_subprocess_adapter_payload
 from src.application.channels.wechat_clawbot.ilink_client import WechatClawbotClient
+from src.application.channels.wechat_clawbot.message import response_code, response_message_id, response_success
 from src.application.channels.wechat_clawbot.state import (
     load_wechat_clawbot_binding,
     load_wechat_clawbot_state,
@@ -17,27 +18,10 @@ from src.application.channels.wechat_clawbot.state import (
 ClientFactory = Callable[..., WechatClawbotClient]
 
 
-def _response_success(response: dict[str, Any]) -> bool:
-    if response == {}:
-        return True
-    if response.get("ok") is True:
-        return True
-    for key in ("ret", "errcode", "code"):
-        value = response.get(key)
-        if isinstance(value, int):
-            return value == 0
-        if isinstance(value, str) and value.strip().lstrip("-").isdigit():
-            return int(value) == 0
-    return False
-
-
 def _response_code(response: dict[str, Any]) -> int | None:
-    for key in ("ret", "errcode", "code"):
-        value = response.get(key)
-        if isinstance(value, int):
-            return value
-        if isinstance(value, str) and value.strip().lstrip("-").isdigit():
-            return int(value)
+    top_level = response_code(response)
+    if top_level is not None:
+        return top_level
     data = response.get("data")
     if isinstance(data, dict):
         nested = _response_code(data)
@@ -48,20 +32,6 @@ def _response_code(response: dict[str, Any]) -> int | None:
         nested = _response_code(result)
         if nested is not None:
             return nested
-    return None
-
-
-def _extract_message_id(response: dict[str, Any]) -> str | None:
-    for key in ("message_id", "messageId", "id", "client_msg_id"):
-        value = response.get(key)
-        if value:
-            return str(value)
-    data = response.get("data")
-    if isinstance(data, dict):
-        return _extract_message_id(data)
-    result = response.get("result")
-    if isinstance(result, dict):
-        return _extract_message_id(result)
     return None
 
 
@@ -121,8 +91,8 @@ def send_wechat_clawbot_message(
             client_id=client_id,
         )
         response_json = fallback_response_json
-    ok = _response_success(response_json)
-    message_id = _extract_message_id(response_json)
+    ok = response_success(response_json)
+    message_id = response_message_id(response_json)
     local_receipt_id = _local_receipt_id(idempotency_key=idempotency_key, target=binding.target, message=text)
     return {
         "ok": ok,
@@ -147,8 +117,8 @@ def normalize_wechat_clawbot_send_output(*, send_result: dict[str, Any]) -> dict
     result = send_result if isinstance(send_result, dict) else {}
     response_json = result.get("response_json") if isinstance(result.get("response_json"), dict) else {}
     command_ok = bool(result.get("http_status") == 200)
-    business_ok = bool(result.get("ok") or _response_success(response_json))
-    upstream_message_id = _extract_message_id(response_json) or result.get("message_id")
+    business_ok = bool(result.get("ok") or response_success(response_json))
+    upstream_message_id = response_message_id(response_json) or result.get("message_id")
     local_receipt_id = result.get("local_receipt_id")
     message_id = upstream_message_id or local_receipt_id
     provider_response_code = result.get("provider_response_code")

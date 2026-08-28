@@ -1,11 +1,33 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from time import monotonic
 from typing import Any, Callable
 
 
 SCHEMA_VALIDATION_ERROR_CODE = "SCHEMA_VALIDATION_FAILED"
+
+
+def record_tick_latency(
+    *,
+    runlog: Any,
+    stage: str,
+    started: float,
+    data: Mapping[str, Any] | None = None,
+) -> int:
+    duration_ms = max(0, int((monotonic() - started) * 1000))
+    try:
+        runlog.safe_event(
+            "tick_latency",
+            "ok",
+            duration_ms=duration_ms,
+            data={"stage": stage, **dict(data or {})},
+        )
+    except Exception:
+        pass
+    return duration_ms
 
 
 @dataclass

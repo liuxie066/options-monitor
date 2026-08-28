@@ -292,7 +292,7 @@ def test_send_wechat_clawbot_message_uses_bound_context(tmp_path: Path) -> None:
     assert out["local_receipt_id"] == "om-run-1:ops"
 
 
-def test_send_wechat_clawbot_message_retries_ret_minus_2_without_context_token(tmp_path: Path) -> None:
+def test_send_wechat_clawbot_message_retries_nested_ret_minus_2_without_context_token(tmp_path: Path) -> None:
     from src.application.channels.wechat_clawbot.notification import (
         normalize_wechat_clawbot_send_output,
         send_wechat_clawbot_message,
@@ -307,7 +307,7 @@ def test_send_wechat_clawbot_message_retries_ret_minus_2_without_context_token(t
         def send_text_message(self, **kwargs):  # type: ignore[no-untyped-def]
             calls.append(dict(kwargs))
             if len(calls) == 1:
-                return {"ret": -2, "errcode": 0}
+                return {"data": {"ret": -2}}
             return {"ret": 0, "data": {"message_id": "msg_2"}}
 
     state_dir = tmp_path / "wechat"
@@ -454,14 +454,14 @@ def test_wechat_clawbot_success_without_upstream_message_id_uses_local_receipt()
     assert out["message"] == "message_id=om-local-1"
 
 
-def test_wechat_clawbot_business_failure_with_local_receipt_is_not_confirmed() -> None:
+def test_wechat_clawbot_nested_provider_failure_reaches_normalized_receipt() -> None:
     from src.application.channels.wechat_clawbot.notification import normalize_wechat_clawbot_send_output
 
     out = normalize_wechat_clawbot_send_output(
         send_result={
             "ok": False,
             "http_status": 200,
-            "response_json": {"ret": -2},
+            "response_json": {"result": {"code": -2}},
             "response_tail": '{"ret": -2}',
             "local_receipt_id": "om-local-1",
             "message_id": None,

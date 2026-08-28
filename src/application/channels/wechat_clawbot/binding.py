@@ -15,6 +15,7 @@ from src.application.channels.wechat_clawbot.message import (
     message_id,
     message_text,
     message_user_id,
+    response_message_id,
 )
 from src.application.channels.wechat_clawbot.state import (
     DEFAULT_WECHAT_CLAWBOT_LABEL,
@@ -411,21 +412,7 @@ def _reply_message_id(reply_status: dict[str, Any]) -> str | None:
             return str(value)
     api_response = reply_status.get("api_response")
     if isinstance(api_response, dict):
-        return _extract_message_id(api_response)
-    return None
-
-
-def _extract_message_id(response: dict[str, Any]) -> str | None:
-    for key in ("message_id", "messageId", "id", "client_msg_id"):
-        value = response.get(key)
-        if value:
-            return str(value)
-    data = response.get("data")
-    if isinstance(data, dict):
-        return _extract_message_id(data)
-    result = response.get("result")
-    if isinstance(result, dict):
-        return _extract_message_id(result)
+        return response_message_id(api_response)
     return None
 
 
