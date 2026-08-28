@@ -1154,6 +1154,8 @@ def _validate_consumer_csv_projection(
         raise SourceReceiptError(
             "required-data JSON and CSV row counts differ"
         )
+    if frame.equals(expected):
+        return
     multiplier_enriched = False
     for row_index in range(len(expected.index)):
         for column in REQUIRED_DATA_COLUMNS:
