@@ -225,9 +225,12 @@ Rules:
 
 #### `run.start`
 
+Descriptions, schemas, output contracts, and the catalog hash are abbreviated
+below; the top-level fields and limit keys are complete.
+
 ```json
 {
-  "execution_environment": "eval",
+  "execution_environment": "local",
   "session_id": null,
   "system_prompt": "compiled static om_chat prompt",
   "runtime_context": [
@@ -246,16 +249,43 @@ Rules:
   },
   "tools": [
     {
-      "name": "runtime_status",
-      "description": "...",
+      "name": "tool_directory",
+      "description": "activate an exact bounded business tool set",
       "input_schema": {"type": "object", "properties": {}}
+    },
+    {
+      "name": "submit_answer",
+      "description": "submit the admitted final answer",
+      "input_schema": {"type": "object", "properties": {}}
+    }
+  ],
+  "tool_loading_mode": "directory",
+  "tool_catalog": [
+    {
+      "name": "runtime_status",
+      "toolset": "diagnostics",
+      "purpose": "读取当前运行健康状态与关键运行摘要。",
+      "access": "read",
+      "evidence_type": "diagnostic"
+    }
+  ],
+  "catalog_hash": "sha256:...",
+  "catalog_snapshot": [
+    {
+      "name": "runtime_status",
+      "toolset": "diagnostics",
+      "description": "read current runtime status",
+      "input_schema": {"type": "object", "properties": {}},
+      "output_contract": {},
+      "access": "read",
+      "purpose": "读取当前运行健康状态与关键运行摘要。",
+      "evidence_type": "diagnostic"
     }
   ],
   "limits": {
     "timeout_seconds": 180,
     "max_iterations": 16,
     "max_tool_calls": 12,
-    "max_context_tokens": 24000,
     "max_consecutive_failed_tool_batches": 2,
     "final_answer_reserve_seconds": 20
   },
@@ -274,14 +304,18 @@ Validation rules:
 - provider, API kind, model, and the operator-declared safe context window must
   already have passed OM configuration validation; `api_kind` is
   `openai-responses` or `openai-completions`;
-- `tools` accepts only the Host-projected allowlist; input schemas must be JSON
-  objects and tool names must be unique;
-- all six limits are positive integers and may only reduce Scene limits;
+- `tools` accepts only the Host-projected initial set; input schemas must be
+  JSON objects and tool names must be unique;
+- `tool_loading_mode` is `eager` or `directory`; `tool_catalog` and
+  `catalog_snapshot` have the same sorted business-tool names, and
+  `catalog_hash` binds their frozen content;
+- all five runtime limits are positive integers; the absolute context authority
+  is `model.context_window_tokens`;
 - `recovered_observations` contains previously sanitized, successful read-only
   observations from OM Host recovery;
-- `debug` must be `null` outside `eval`. Slice 1 permits
-  `{"fixture_response":"text","delay_ms":0}` to drive an actual Pi `Agent`
-  through a deterministic fake stream without network access.
+- `debug` must be `null` outside `eval`. Eval requires `delay_ms` and exactly one
+  of `fixture_response` or `fixture_turns`; optional history, persistence-delay,
+  and compaction fixtures remain deterministic and network-free.
 
 #### `tool.result`
 
@@ -713,7 +747,7 @@ loop, or Control path.
 | Inspection | runtime/config/job questions use the same Agent and read tools |
 | Control | model can request preview only; confirm/apply/readback remain deterministic |
 | Memory | same sender/conversation/canonical key-or-path scope continues; different scopes or senders cannot share memory, and plaintext paths are absent |
-| Context | effective budget is `min(model capability, Scene cap)`; pre-run compaction is independently durable and current-turn admission preserves complete message/tool groups |
+| Context | effective input capacity is `model.context_window_tokens - model.max_output_tokens`; the Runtime owns the 70% compact trigger, 75% hard gate, and 50% post-compact target; pre-run compaction is independently durable and current-turn admission preserves complete message/tool groups |
 | Tools | model-visible list equals the Host projection; no Pi builtin write/shell/file tool exists; one lock preserves every concurrent lifecycle/tool event and metric; abandoned reads cannot exceed one worker or write late Host events |
 | Providers | OpenAI, DeepSeek, Kimi, Kimi Code, and Ollama contract tests pass |
 | Cancellation | two independent Host connections racing cancel against commit/discard accept exactly one durable winner, reflected consistently in CLI, Session, Host result, and outbox |
@@ -735,7 +769,7 @@ loop, or Control path.
   normalized-key or canonical-path-hash authority scope; pass canonical paths
   only as Host-only fixed tool input.
 - Require an operator-declared safe context window; never guess it from a model
-  name or Scene cap.
+  name.
 - Use one process-wide read-worker slot and accept bounded retryable busy after
   forced process/Session failure rather than adding a worker pool or lease
   deletion path.
@@ -921,6 +955,18 @@ The payload adds:
       "toolset": "positions",
       "purpose": "查询授权账户的期权持仓及其生命周期状态",
       "access": "read",
+      "evidence_type": "collection"
+    }
+  ],
+  "catalog_snapshot": [
+    {
+      "name": "option_positions_read",
+      "toolset": "positions",
+      "description": "读取授权账户的期权持仓",
+      "input_schema": {"type": "object", "properties": {}},
+      "output_contract": {},
+      "access": "read",
+      "purpose": "查询授权账户的期权持仓及其生命周期状态",
       "evidence_type": "collection"
     }
   ],

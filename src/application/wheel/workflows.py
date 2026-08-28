@@ -256,6 +256,7 @@ def create_wheel_call_intent(
     request_id: str,
     actor: str,
     coverage_fact: Mapping[str, Any],
+    new_intent_enabled: bool,
     broker_order_id: str | None = None,
     apply_changes: bool = False,
     as_of_ms: int | None = None,
@@ -315,6 +316,8 @@ def create_wheel_call_intent(
                 dry_run=not apply_changes,
                 write_applied=False,
             )
+        if not new_intent_enabled:
+            raise ValueError("wheel_disabled: new Wheel Call intents are disabled")
 
         batch = _wheel_batch(
             rows,

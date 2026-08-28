@@ -37,6 +37,7 @@ from src.application.wheel import (
     end_wheel_lifecycle,
     load_wheel_candidate_snapshot,
     reject_wheel_call_linkage,
+    resolve_wheel_config,
 )
 from src.application.wheel.capacity import load_shared_coverage_fact
 
@@ -533,6 +534,9 @@ def _wheel_call_intent_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], li
             expires_at_ms=int(payload.get("expires_at_ms") or 0),
             broker_order_id=str(payload.get("broker_order_id") or "").strip() or None,
             coverage_fact=_wheel_coverage(repo, cfg, payload, batch, instant),
+            new_intent_enabled=resolve_wheel_config(
+                cfg, str(payload.get("account") or "")
+            )["enabled_for_new_lifecycle"],
         )
         return result, [], meta
 
