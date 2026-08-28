@@ -86,12 +86,12 @@ def _legacy_store(tmp_path: Path, *, name: str = "ledger.sqlite3") -> Path:
     return path
 
 
-def _artifact_sizes(path: Path) -> dict[str, int]:
+def _persistent_artifact_sizes(path: Path) -> dict[str, int]:
     return {
         suffix or "db": Path(f"{path}{suffix}").stat().st_size
         if Path(f"{path}{suffix}").exists()
         else 0
-        for suffix in ("", "-wal", "-shm")
+        for suffix in ("", "-wal")
     }
 
 
@@ -127,14 +127,14 @@ def _acceptance(shadow: dict[str, object]) -> dict[str, object]:
 
 def test_inventory_and_shadow_are_read_only_and_apply_verifies(tmp_path: Path) -> None:
     path = _legacy_store(tmp_path)
-    before = _artifact_sizes(path)
+    before = _persistent_artifact_sizes(path)
 
     inventory = module.build_position_projection_migration_inventory(path)
 
     assert inventory["schema_version"] == module.INVENTORY_SCHEMA
     assert inventory["read_only"] is True
     assert inventory["counts"] == {"trade_events": 1, "position_lots": 0}
-    assert _artifact_sizes(path) == before
+    assert _persistent_artifact_sizes(path) == before
     with sqlite3.connect(path) as conn:
         assert "account" not in {row[1] for row in conn.execute("PRAGMA table_info(trade_events)")}
 
@@ -143,13 +143,13 @@ def test_inventory_and_shadow_are_read_only_and_apply_verifies(tmp_path: Path) -
     assert applied["checkpoint_mode"] == "disabled"
     assert applied["projection"]["checkpoint_written"] is True
 
-    after_apply = _artifact_sizes(path)
+    after_apply = _persistent_artifact_sizes(path)
     verified = module.verify_position_projection_migration(path, shadow=True)
     assert verified["status"] == "pass"
     assert verified["readiness"] == "ready"
     assert verified["runtime_shadow"]["status"] == "pass"
     assert verified["checkpoint"]["k_within_bound"] is True
-    assert _artifact_sizes(path) == after_apply
+    assert _persistent_artifact_sizes(path) == after_apply
     status = module.position_projection_migration_status(path)
     assert status["readiness"] == "ready"
     assert status["fingerprint_scope"]["rows"] == 1
