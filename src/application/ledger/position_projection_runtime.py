@@ -33,6 +33,7 @@ from src.application.ledger.repository import (
     SQLiteOptionPositionsRepository,
     require_position_projection_publication_repo,
 )
+from src.application.ledger.results import ProjectionRefreshResult
 
 
 POSITION_PROJECTION_CHECKPOINT_SCHEMA = "position_projection_checkpoint.v1"
@@ -77,6 +78,51 @@ class ProjectionPreviewResult:
     latest_event_time_ms: int
     current_projection: Any
     projection: Any
+
+
+def projection_diagnostics_summary(diagnostics: Sequence[Any]) -> dict[str, Any]:
+    explicit_close_codes = {
+        "close_explicit_target_not_found",
+        "close_explicit_target_conflict",
+        "close_explicit_target_already_closed",
+        "close_explicit_target_mismatch",
+        "close_explicit_target_oversized",
+        "close_explicit_source_event_target_not_found",
+        "close_explicit_source_event_target_already_closed",
+        "close_explicit_source_event_target_mismatch",
+        "close_explicit_source_event_target_oversized",
+        "target_lot_id_required",
+        "target_lot_not_found",
+        "target_contract_mismatch",
+        "target_lot_already_closed",
+        "close_contracts_exceed_open",
+    }
+    return {
+        "projection_diagnostic_count": len(diagnostics),
+        "unmatched_explicit_close_count": sum(
+            1 for item in diagnostics if item.code in explicit_close_codes
+        ),
+        "unmatched_heuristic_close_count": sum(
+            1 for item in diagnostics if item.code == "close_unmatched_contracts"
+        ),
+        "projection_diagnostics": [item.to_dict() for item in diagnostics],
+    }
+
+
+def projection_refresh_result_from_runtime(
+    runtime: ProjectionRuntimeResult,
+    *,
+    trade_event_count: int,
+    decision_projection: Any | None = None,
+) -> ProjectionRefreshResult:
+    result = {
+        "trade_event_count": int(trade_event_count),
+        "position_lot_count": int(runtime.position_lot_count),
+    }
+    if decision_projection is not None:
+        result["decision_projection"] = decision_projection
+    result.update(projection_diagnostics_summary(runtime.diagnostics))
+    return ProjectionRefreshResult.from_payload(result)
 
 
 @dataclass(frozen=True)

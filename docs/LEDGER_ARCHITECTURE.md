@@ -45,6 +45,64 @@ trade_events -> deterministic projection -> position_lots
 
 `positions`、`trades`、Agent tools、CLI 和 pipeline 不应绕过 `ledger.api` 导入内部写入原语。领域层不得反向导入 `src/`。
 
+## 单次投影刷新与 SQLite 写连接生命周期锁
+
+### 当前合同
+
+- 每个非 dry-run 的到期维护账户只重建一次 `trade_events -> position_lots` 投影，并在这次刷新后确定本轮 account/broker/market lot 成员集。
+- 同一 ledger SQLite 文件的 repository writer 和公开 migration writer，从打开、WAL 配置、事务到关闭和 SQLite/WAL/SHM 安全属性加固，全部位于同一 db-path writer lock 内。
+- 保留 auto-close 的当前 fail-closed 语义、fresh-lot 校验、对外结果字段和回执行为。
+- 纯读查询不纳入 writer lock；不用 retry、sleep 或扩大 `busy_timeout` 代替锁边界。
+
+### 运行合同
+
+Auto-close 数据流：
+
+```text
+positions maintenance
+  -> 复用同次 repository open 的 startup recovery 回执，否则重建一次 trade_events -> position_lots
+  -> 读取并过滤本轮 account/broker/market open lots
+  -> 刷新行情/交割证据
+  -> ledger.auto_close_expired_positions(projection_refresh=<typed result>)
+       -> 不再重复刷新
+       -> 重读本轮已选 record IDs 的 fresh lots 并合并上游证据
+       -> decision -> preflight -> optional expire-close write -> readback
+  -> 将同一次 projection refresh 结果暴露为既有 projection_refresh 字段
+```
+
+本轮成员集在唯一刷新后冻结。刷新恢复的 lot 会参与本轮；成员集冻结后新增的 lot 留给下一次定时维护，不扩大本轮 account/broker/market 范围。已选 lot 在写前仍重读当前字段并执行原有 preflight。fresh-read 必须用 close-candidate identity 复核 account、broker、symbol、option type、side、strike、expiration 和 currency；身份改变时不得合并先前行情，并以 `position_lot_identity_changed` fail closed。
+
+`load_option_positions_repo()` 在 startup recovery 时保存同库的 typed `ProjectionRefreshResult`；positions orchestrator 单次消费该回执，避免恢复后立即重复 full rebuild。没有 recovery 回执时，positions orchestrator 自行刷新并传入同库本轮结果。`auto_close_expired_positions()` 收到该输入时不再刷新；其他调用方未传入时继续默认自行刷新，保留公共 ledger 安全语义。typed 结果只作为 ledger 输入；positions 层继续通过既有顶层 `projection_refresh` 字段输出。`ExpiredCloseRunResult` 仍只携带 decisions、applied 和 errors，不增加字段、不改变 `to_payload()` key set。无 trade event 或 dry-run 时不伪造刷新结果；刷新失败时保留现有 `projection refresh failed before auto-close` 错误和整次零写入行为。
+
+SQLite writer 状态转换：
+
+```text
+acquire <db>.writer.lock
+  -> connect + connection invariants + busy_timeout
+  -> PRAGMA journal_mode=WAL + synchronous=NORMAL
+  -> optional BEGIN IMMEDIATE
+  -> write body
+  -> commit | rollback
+  -> conn.close()
+  -> validate and harden SQLite/WAL/SHM artifact permissions
+release <db>.writer.lock
+```
+
+`_writer_connection()` 在调用现有 `_connect()` 前取得外层 writer lock。`connect_private_sqlite()` 继续作为共享连接工厂；如果它在 `sqlite3.connect()` 成功后执行的 artifact 加固失败，工厂在返回前关闭已创建连接并重新抛出该错误。repository 和 migration writer 都在外层锁内调用这个工厂；其他已有调用方只获得相同的失败清理，不新增 writer lock。
+
+工厂成功返回后，`_connect()` 保持重入取锁和 PRAGMA 顺序，并校验 `journal_mode=WAL` 的实际返回值为 `wal`。如果 connection invariant、PRAGMA、WAL 返回值校验或后续初始化 artifact 加固任一步失败，`_connect()` 在外层锁内尝试关闭连接、完成可行的 artifact 加固，并重新抛出初始化错误。这个外层锁一直持有到正常路径或失败路径的 `close()` 和 `secure_sqlite_artifacts()` 完成；连接不能因任一 helper 尚未成功返回而逃出清理边界。
+
+position-projection migration 的 `_write_connection()` 持有同一 `<db>.writer.lock`。它只负责 db-path lock、连接打开与初始化、WAL 实际返回值校验、连接关闭和 artifact 加固；apply/activate/deactivate 调用方继续负责 `BEGIN`、commit、rollback 和 `write_applied` 时序，不复用 repository 的事务 owner。current-decision migration 复用该 context manager 并遵守同一边界。读只诊断连接不受这个 writer lock 合同限制。`secure_sqlite_artifacts()` 只验证普通文件并收紧权限，不 checkpoint、不删除 WAL/SHM；活跃 reader 存在时 sidecar 可以继续存在。
+
+失败语义：
+
+- shared factory 在连接创建后的首次 artifact 加固失败：工厂在返回前尝试 close，并重新抛出该加固错误；writer 调用时整个分支仍位于 db-path lock 内。
+- factory 返回后的 invariant、PRAGMA、WAL 校验或后续初始化 artifact 加固失败：不开始业务事务；`_connect()` 仍在 writer lock 内尝试 close 和可行的 artifact 加固，重新抛出初始化错误后释放锁。
+- 写入体或 commit 失败：在同一锁内 rollback、close 并加固 artifact 权限，向上抛出错误。
+- close 或 artifact 安全属性加固失败：锁仍由 context manager 释放，错误不得被改写为成功。
+- 不新增多异常优先级状态机；保持当前 Python context-manager 的异常传播。任何 auto-close 失败都不自动 retry；操作员通过现有定时重试和读回回执区分“未写入”与“已应用”。
+- auto-close 投影刷新失败时整次零写入；进入逐 lot 写入循环后，后续 lot 失败不回滚先前已成功的 durable close，响应同时保留 `applied` 和 `errors`。
+
 ## 写入语义
 
 账本动作按业务事实区分，不能互相替代：

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 import threading
 import time
@@ -417,7 +418,7 @@ def test_dispatcher_ledger_write_serializes_auto_close_projection_refresh(
     dispatcher_write_started = threading.Event()
     release_dispatcher_write = threading.Event()
     auto_close_started = threading.Event()
-    auto_close_connection_started = threading.Event()
+    auto_close_writer_entered = threading.Event()
 
     def _hold_dispatcher_write(repo, **_kwargs):
         def _run(_sqlite_repo, _conn):
@@ -440,13 +441,19 @@ def test_dispatcher_ledger_write_serializes_auto_close_projection_refresh(
             AssertionError("provider must not run in this regression")
         ),
     )
-    real_auto_close_connect = auto_close_repo._connect
+    real_auto_close_writer_connection = auto_close_repo._writer_connection
 
-    def _observed_auto_close_connect():
-        auto_close_connection_started.set()
-        return real_auto_close_connect()
+    @contextmanager
+    def _observed_auto_close_writer_connection(*, begin_immediate: bool = False):
+        with real_auto_close_writer_connection(begin_immediate=begin_immediate) as conn:
+            auto_close_writer_entered.set()
+            yield conn
 
-    monkeypatch.setattr(auto_close_repo, "_connect", _observed_auto_close_connect)
+    monkeypatch.setattr(
+        auto_close_repo,
+        "_writer_connection",
+        _observed_auto_close_writer_connection,
+    )
 
     def _run_auto_close():
         auto_close_started.set()
@@ -464,8 +471,7 @@ def test_dispatcher_ledger_write_serializes_auto_close_projection_refresh(
         auto_close_future = executor.submit(_run_auto_close)
         try:
             assert auto_close_started.wait(1)
-            assert auto_close_connection_started.wait(1)
-            time.sleep(0.05)
+            assert not auto_close_writer_entered.wait(0.1)
             assert not auto_close_future.done()
         finally:
             release_dispatcher_write.set()
@@ -473,6 +479,7 @@ def test_dispatcher_ledger_write_serializes_auto_close_projection_refresh(
         assert dispatcher_future.result(timeout=2)["status"] == "idle"
         auto_close_result = auto_close_future.result(timeout=2).to_payload()
 
+    assert auto_close_writer_entered.is_set()
     assert len(auto_close_result["applied"]) == 1
     assert auto_close_result["errors"] == []
     assert auto_close_repo.list_position_lots()[0]["fields"]["status"] == "close"

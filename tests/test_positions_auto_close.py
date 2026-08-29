@@ -133,6 +133,64 @@ def test_run_auto_close_expired_no_send_dry_run_attaches_skipped_receipt(monkeyp
     assert receipt["reason"] == "skipped_no_send"
 
 
+def test_run_auto_close_expired_reports_projection_refresh_failure(monkeypatch, tmp_path: Path) -> None:
+    from src.application.positions import auto_close as mod
+    from src.application.positions import maintenance
+
+    base = tmp_path / "repo"
+    base.mkdir()
+    config_path = base / "config.hk.json"
+    config_path.write_text("{}", encoding="utf-8")
+    data_config = base / "portfolio.runtime.json"
+    data_config.write_text(
+        json.dumps({"option_positions": {"sqlite_path": str(base / "positions.sqlite3")}}),
+        encoding="utf-8",
+    )
+
+    class FakeRepo:
+        def count_trade_events(self) -> int:
+            return 1
+
+    monkeypatch.setattr(
+        mod,
+        "load_config",
+        lambda **_kwargs: {
+            "accounts": ["lx"],
+            "portfolio": {"data_config": str(data_config), "broker": "富途"},
+            "option_positions": {"auto_close": {"enabled": True}},
+        },
+    )
+    monkeypatch.setattr(maintenance, "open_position_ledger", lambda *_args, **_kwargs: FakeRepo())
+    monkeypatch.setattr(
+        maintenance,
+        "refresh_position_lot_projection",
+        lambda _repo: (_ for _ in ()).throw(RuntimeError("locking protocol")),
+    )
+    monkeypatch.setattr(
+        maintenance,
+        "_load_expiry_close_position_lots",
+        lambda _repo: (_ for _ in ()).throw(AssertionError("failed refresh must stop before lot load")),
+    )
+
+    result = mod.run_auto_close_expired(
+        base=base,
+        config_path=config_path,
+        data_config=None,
+        accounts=[],
+        broker=None,
+        apply_mode=True,
+        no_send=True,
+        runlog=_FakeRunlog(),  # type: ignore[arg-type]
+    )
+
+    account_result = result["account_results"][0]["result"]
+    assert result["status"] == "failed"
+    assert account_result["mode"] == "error"
+    assert account_result["positions_checked"] == 0
+    assert "projection refresh failed before auto-close: locking protocol" in account_result["errors"][0]
+    assert account_result["receipt"]["reason"] == "skipped_no_send"
+
+
 def test_auto_close_expired_main_writes_runtime_outputs_outside_release(monkeypatch, tmp_path: Path) -> None:
     from src.application.positions import auto_close as mod
 

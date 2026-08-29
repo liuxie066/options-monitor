@@ -19,7 +19,12 @@ from domain.domain.ledger.position_fields import (
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.trade_contract_identity import canonical_contract_symbol
 from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
+from src.application.ledger.current_decision_runtime import (
+    capture_trade_event_decision_projection_fence,
+    defer_current_decision_projection,
+)
 from src.application.ledger.position_projection_runtime import (
+    projection_refresh_result_from_runtime,
     run_position_projection_in_transaction,
 )
 from src.application.ledger.repository import (
@@ -27,6 +32,7 @@ from src.application.ledger.repository import (
     _load_data_config,
     with_sqlite_repo_transaction,
 )
+from src.application.ledger.results import ProjectionRefreshResult
 from src.application.ledger.store_resolution import resolve_ledger_store
 from src.infrastructure.feishu_bitable import safe_float
 
@@ -285,24 +291,46 @@ def load_option_positions_repo(
     repo = SQLiteOptionPositionsRepository(store.sqlite_path)
     repo.data_config_path = store.data_config_path
     setattr(repo, "ledger_store", store)
+    setattr(repo, "bootstrap_projection_refresh", None)
     data_cfg = _load_data_config(data_config)
     if repo.count_trade_events() > 0:
         repo.bootstrap_status = "skipped_existing_trade_events"
         repo.bootstrap_message = "trade_events already present"
         if repo.count_position_lots() == 0:
-            def _recover(sqlite_repo: Any, conn: sqlite3.Connection | None) -> None:
+            def _recover(
+                sqlite_repo: Any,
+                conn: sqlite3.Connection | None,
+            ) -> ProjectionRefreshResult:
                 if conn is None:
                     raise TypeError("ledger startup recovery requires SQLite transaction authority")
-                run_position_projection_in_transaction(
+                event_count = int(
+                    conn.execute("SELECT COUNT(*) FROM trade_events").fetchone()[0]
+                )
+                decision_fence = capture_trade_event_decision_projection_fence(
+                    sqlite_repo,
+                    conn=conn,
+                )
+                runtime = run_position_projection_in_transaction(
                     sqlite_repo,
                     conn=conn,
                     mode="forced_full",
                 )
+                return projection_refresh_result_from_runtime(
+                    runtime,
+                    trade_event_count=event_count,
+                    decision_projection=defer_current_decision_projection(
+                        decision_fence
+                    ),
+                )
 
-            with_sqlite_repo_transaction(
+            setattr(
                 repo,
-                _recover,
-                require_projection_publication=True,
+                "bootstrap_projection_refresh",
+                with_sqlite_repo_transaction(
+                    repo,
+                    _recover,
+                    require_projection_publication=True,
+                ),
             )
         return repo
 

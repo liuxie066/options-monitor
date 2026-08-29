@@ -4,6 +4,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from domain.domain.ledger import ContractKey, TradeEvent
 from domain.domain.option_position_lots import EXPIRE_AUTO_CLOSE, parse_exp_to_ms
 import src.application.ledger.manual_trades as ledger_manual_trades
@@ -50,7 +52,7 @@ def _seed_open_lot_event(
             source="test_seed_open_lot",
             multiplier=float(multiplier),
             lot_id=record_id,
-            raw_payload={"source_type": "test_seed"},
+            raw_payload={"source_type": "test_seed", "lot_record_id": record_id},
         ),
     )
 
@@ -58,6 +60,49 @@ def _seed_open_lot_event(
 def _auto_close_payloads(*args, **kwargs):
     payload = auto_close_expired_positions(*args, **kwargs).to_payload()
     return payload["decisions"], payload["applied"], payload["errors"]
+
+
+def test_auto_close_uses_provided_projection_state_without_rebuild(monkeypatch) -> None:
+    from src.application.ledger import maintenance as mod
+    from src.application.ledger.results import ProjectionRefreshResult
+
+    monkeypatch.setattr(
+        mod,
+        "_refresh_position_lot_projection_from_trade_events",
+        lambda _repo: (_ for _ in ()).throw(AssertionError("provided refresh must skip rebuild")),
+    )
+
+    for projection_refresh in (
+        ProjectionRefreshResult(trade_event_count=2, position_lot_count=1),
+        None,
+    ):
+        result = mod.auto_close_expired_positions(
+            object(),
+            [],
+            as_of_ms=1,
+            grace_days=1,
+            max_close=1,
+            projection_refresh=projection_refresh,
+        ).to_payload()
+
+        assert set(result) == {"decisions", "applied", "errors"}
+        assert result == {"decisions": [], "applied": [], "errors": []}
+
+    calls: list[object] = []
+    monkeypatch.setattr(
+        mod,
+        "_refresh_position_lot_projection_from_trade_events",
+        lambda repo: calls.append(repo),
+    )
+    repo = object()
+    mod.auto_close_expired_positions(
+        repo,
+        [],
+        as_of_ms=1,
+        grace_days=1,
+        max_close=1,
+    )
+    assert calls == [repo]
 
 
 def test_build_expired_close_decisions_marks_expired_position() -> None:
@@ -579,6 +624,217 @@ def test_auto_close_expired_positions_skips_non_current_candidate_record_id(tmp_
     assert repo.count_trade_events() == 0
 
 
+def test_auto_close_skips_same_record_id_when_selection_identity_changed() -> None:
+    from src.application.ledger import maintenance as mod
+
+    expiration = parse_exp_to_ms("2026-05-28")
+    as_of_ms = parse_exp_to_ms("2026-05-31")
+    assert expiration is not None
+    assert as_of_ms is not None
+    selected = {
+        "record_id": "rec_lx_seed",
+        "position_id": "AAPL_20260528_100P_short",
+        "status": "open",
+        "contracts": 1,
+        "contracts_open": 1,
+        "broker": "富途",
+        "account": "lx",
+        "symbol": "AAPL",
+        "option_type": "put",
+        "side": "short",
+        "currency": "USD",
+        "strike": 100,
+        "multiplier": 100,
+        "expiration": expiration,
+        "source_event_id": "bootstrap-open",
+        "_auto_close_underlying_spot": 120,
+    }
+    current = {**selected, "account": "sy", "source_event_id": "repair-open"}
+    current.pop("_auto_close_underlying_spot")
+
+    class Repo:
+        def list_position_lots(self):
+            return [{"record_id": "rec_lx_seed", "fields": current}]
+
+        def get_record_fields(self, _record_id):
+            return dict(current)
+
+    fresh = mod._fresh_auto_close_positions(Repo(), [selected])
+    assert fresh[0]["_auto_close_skip_reason"] == "position_lot_identity_changed"
+    assert "_auto_close_underlying_spot" not in fresh[0]
+
+    result = mod.auto_close_expired_positions(
+        Repo(),
+        [selected],
+        as_of_ms=as_of_ms,
+        grace_days=1,
+        max_close=5,
+        projection_refresh=None,
+    ).to_payload()
+    assert result["applied"] == []
+    assert result["errors"] == []
+    assert result["decisions"][0]["should_close"] is False
+    assert result["decisions"][0]["skip_reason"] == "position_lot_identity_changed"
+
+
+def test_auto_close_skips_when_identity_changes_after_fresh_selection(
+    tmp_path: Path,
+) -> None:
+    from domain.domain.option_position_lots import OpenPositionCommand
+
+    expiration = parse_exp_to_ms("2026-05-28")
+    as_of_ms = parse_exp_to_ms("2026-05-31")
+    assert expiration is not None
+    assert as_of_ms is not None
+    class Repo(ledger_repository.SQLiteOptionPositionsRepository):
+        identity_changed = False
+
+        def get_record_fields(self, record_id):  # type: ignore[no-untyped-def]
+            fields = super().get_record_fields(record_id)
+            if self.identity_changed:
+                fields = {
+                    **fields,
+                    "account": "sy",
+                    "symbol": "MSFT",
+                    "source_event_id": "repair-open",
+                }
+            return fields
+
+    repo = Repo(tmp_path / "option_positions.sqlite3")
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="AAPL",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=100,
+            multiplier=100,
+            expiration_ymd="2026-05-28",
+            premium_per_share=1.0,
+            opened_at_ms=1000,
+        ),
+    )
+    selected = [
+        dict(item["fields"], record_id=item["record_id"])
+        for item in repo.list_position_lots()
+    ]
+    selected[0]["_auto_close_underlying_spot"] = 120
+    repo.identity_changed = True
+
+    result = auto_close_expired_positions(
+        repo,
+        selected,
+        as_of_ms=as_of_ms,
+        grace_days=1,
+        max_close=5,
+        projection_refresh=None,
+    ).to_payload()
+
+    assert result["applied"] == []
+    assert result["errors"] == []
+    assert result["decisions"][0]["should_close"] is False
+    assert result["decisions"][0]["skip_reason"] == "position_lot_identity_changed"
+    assert [row for row in repo.list_trade_events() if row["event_type"] == "expire_close"] == []
+
+
+def test_fresh_auto_close_lot_keeps_quote_when_only_source_event_id_changes() -> None:
+    from src.application.ledger import maintenance as mod
+
+    expiration = parse_exp_to_ms("2026-05-28")
+    assert expiration is not None
+    selected = {
+        "record_id": "rec_lx_seed",
+        "status": "open",
+        "contracts": 1,
+        "contracts_open": 1,
+        "broker": "富途",
+        "account": "lx",
+        "symbol": "AAPL",
+        "option_type": "put",
+        "side": "short",
+        "currency": "USD",
+        "strike": 100,
+        "multiplier": 100,
+        "expiration": expiration,
+        "source_event_id": "bootstrap-open",
+        "_auto_close_underlying_spot": 120,
+    }
+    current = {**selected, "source_event_id": "repair-open"}
+    current.pop("_auto_close_underlying_spot")
+
+    class Repo:
+        def list_position_lots(self):
+            return [{"record_id": "rec_lx_seed", "fields": current}]
+
+        def get_record_fields(self, _record_id):
+            return dict(current)
+
+    fresh = mod._fresh_auto_close_positions(Repo(), [selected])
+    assert fresh[0].get("_auto_close_skip_reason") is None
+    assert fresh[0]["source_event_id"] == "repair-open"
+    assert fresh[0]["_auto_close_underlying_spot"] == 120
+
+
+@pytest.mark.parametrize("failure_mode", ["error", "non_mapping"])
+def test_auto_close_skips_when_fresh_lot_refresh_is_unavailable(
+    failure_mode: str,
+) -> None:
+    from src.application.ledger import maintenance as mod
+
+    expiration = parse_exp_to_ms("2026-05-28")
+    as_of_ms = parse_exp_to_ms("2026-05-31")
+    assert expiration is not None
+    assert as_of_ms is not None
+    selected = {
+        "record_id": "rec_lx_seed",
+        "position_id": "AAPL_20260528_100P_short",
+        "status": "open",
+        "contracts": 1,
+        "contracts_open": 1,
+        "broker": "富途",
+        "account": "lx",
+        "symbol": "AAPL",
+        "option_type": "put",
+        "side": "short",
+        "currency": "USD",
+        "strike": 100,
+        "multiplier": 100,
+        "expiration": expiration,
+        "source_event_id": "bootstrap-open",
+        "_auto_close_underlying_spot": 120,
+    }
+
+    class Repo:
+        def list_position_lots(self):
+            raise RuntimeError("fresh list unavailable")
+
+        def get_record_fields(self, _record_id):
+            if failure_mode == "error":
+                raise RuntimeError("fresh record unavailable")
+            return None
+
+    fresh = mod._fresh_auto_close_positions(Repo(), [selected])
+    assert fresh[0]["_auto_close_skip_reason"] == "position_lot_refresh_unavailable"
+    assert "_auto_close_underlying_spot" not in fresh[0]
+
+    result = mod.auto_close_expired_positions(
+        Repo(),
+        [selected],
+        as_of_ms=as_of_ms,
+        grace_days=1,
+        max_close=5,
+        projection_refresh=None,
+    ).to_payload()
+    assert result["applied"] == []
+    assert result["errors"] == []
+    assert result["decisions"][0]["should_close"] is False
+    assert result["decisions"][0]["skip_reason"] == "position_lot_refresh_unavailable"
+
+
 def test_auto_close_expired_positions_closes_same_expiry_without_crossing_later_expiry(tmp_path: Path) -> None:
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
@@ -797,6 +1053,98 @@ def test_auto_close_expired_positions_records_lifecycle_expire_close_for_otm_pen
     assert allocations[0]["evidence_id"] == "ev_tigr_zero_close"
     assert allocations[0]["target_lot_id"] == "lot_tigr_put_6_20260522"
     assert allocations[0]["canonical_terminal_event_id"] == events[0]["event_id"]
+
+
+def test_lifecycle_auto_expire_rejects_identity_change_after_outer_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.application.ledger import maintenance as maintenance_mod
+    from src.application.ledger.commands import persist_manual_repair_event_with_ledger
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    record_id = "lot_tigr_put_6_20260522"
+    _seed_open_lot_event(
+        repo,
+        record_id=record_id,
+        account="lx",
+        symbol="TIGR",
+        option_type="put",
+        side="short",
+        contracts=10,
+        currency="USD",
+        strike=6,
+        multiplier=100,
+        expiration_ymd="2026-05-22",
+        opened_at_ms=1000,
+    )
+    repo.upsert_trade_lifecycle_case(
+        {
+            "case_id": "lc_tigr_expire",
+            "case_key": "富途|lx|TIGR|put|short|6|2026-05-22",
+            "account": "lx",
+            "symbol": "TIGR",
+            "option_type": "put",
+            "position_side": "short",
+            "strike": 6,
+            "expiration_ymd": "2026-05-22",
+            "contracts": 10,
+            "status": "waiting_settlement_evidence",
+            "decision_type": "needs_review",
+            "target_lot_ids": [],
+        }
+    )
+    repo.upsert_trade_lifecycle_evidence(
+        {
+            "evidence_id": "ev_tigr_zero_close",
+            "case_id": "lc_tigr_expire",
+            "source_type": "opend_deal",
+            "source_event_id": "deal-zero-close",
+            "evidence_type": "option_zero_price_close",
+            "account": "lx",
+            "symbol": "TIGR",
+        }
+    )
+    original_preflight = maintenance_mod._resolve_preflight_expire_auto_close()
+
+    def repair_after_preflight(*args, **kwargs):  # type: ignore[no-untyped-def]
+        result = original_preflight(*args, **kwargs)
+        persist_manual_repair_event_with_ledger(
+            repo,
+            target_event_id=f"seed-{record_id}",
+            overrides={"account": "sy", "symbol": "MSFT"},
+            repair_reason="simulate concurrent identity repair",
+            as_of_ms=int(result.event_time_ms) + 1,
+        )
+        return result
+
+    monkeypatch.setattr(
+        maintenance_mod,
+        "_resolve_preflight_expire_auto_close",
+        lambda: repair_after_preflight,
+    )
+    as_of_ms = parse_exp_to_ms("2026-05-25")
+    assert as_of_ms is not None
+    positions = [dict(item["fields"], record_id=item["record_id"]) for item in repo.list_position_lots()]
+    positions[0]["_auto_close_underlying_spot"] = 7
+
+    decisions, applied, errors = _auto_close_payloads(
+        repo,
+        positions,
+        as_of_ms=as_of_ms,
+        grace_days=1,
+        max_close=5,
+    )
+
+    assert applied == []
+    assert errors and "target fields do not match current lot state" in errors[0]
+    assert decisions[0]["ledger_preflight"]["status"] == "ok"
+    assert [item for item in repo.list_trade_events() if item["event_type"] == "expire_close"] == []
+    assert repo.list_trade_lifecycle_allocations(case_id="lc_tigr_expire") == []
+    case = repo.get_trade_lifecycle_case("lc_tigr_expire")
+    assert case is not None
+    assert case["status"] == "waiting_settlement_evidence"
+    assert repo.get_record_fields(record_id)["symbol"] == "MSFT"
 
 
 def test_lifecycle_auto_expire_rolls_back_event_lot_and_allocation_when_case_write_fails(
@@ -1028,11 +1376,10 @@ def test_auto_close_expired_positions_fail_closed_on_ledger_identity_mismatch(tm
     )
 
     assert applied == []
-    assert len(errors) == 1
-    assert "target identity differs" in errors[0]
-    assert decisions[0]["ledger_preflight"]["status"] == "blocked"
-    assert decisions[0]["ledger_preflight"]["fail_closed"] is True
-    assert decisions[0]["ledger_preflight"]["code"] == "target_identity_mismatch"
+    assert errors == []
+    assert decisions[0]["should_close"] is False
+    assert decisions[0]["skip_reason"] == "position_lot_identity_changed"
+    assert decisions[0].get("ledger_preflight") is None
     record_id = str(decisions[0]["record_id"])
     fields = repo.get_record_fields(record_id)
     assert fields["status"] == "open"

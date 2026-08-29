@@ -440,21 +440,25 @@ def format_auto_close_summary(result: dict[str, Any]) -> str:
     return "\n".join(lines).strip()
 
 
-def _refresh_position_projection_before_auto_close(repo: Any) -> dict[str, Any] | None:
+def _refresh_position_projection_before_auto_close(repo: Any) -> Any | None:
     candidate = getattr(repo, "primary_repo", repo)
+    bootstrap_refresh = getattr(candidate, "bootstrap_projection_refresh", None)
+    if bootstrap_refresh is not None:
+        setattr(candidate, "bootstrap_projection_refresh", None)
+        return bootstrap_refresh
     count_trade_events = getattr(candidate, "count_trade_events", None)
     if not callable(count_trade_events):
         return None
     try:
         trade_event_count = int(count_trade_events())
-    except Exception:
-        return None
+    except Exception as exc:
+        raise RuntimeError(f"projection refresh failed before auto-close: {exc}") from exc
     if trade_event_count <= 0:
         return None
-    result = refresh_position_lot_projection(candidate)
-    if isinstance(result, dict):
-        return dict(result)
-    return result.to_dict()
+    try:
+        return refresh_position_lot_projection(candidate)
+    except Exception as exc:
+        raise RuntimeError(f"projection refresh failed before auto-close: {exc}") from exc
 
 
 def _write_auto_close_summary(report_dir: Path, result: dict[str, Any]) -> str:
@@ -620,6 +624,7 @@ def run_expired_position_maintenance_for_account(
                 as_of_ms=ts,
                 grace_days=int(auto_cfg["grace_days"]),
                 max_close=int(auto_cfg["max_close"]),
+                projection_refresh=projection_refresh,
             )
         )
     to_close = [
@@ -639,6 +644,8 @@ def run_expired_position_maintenance_for_account(
         and item.get("skip_reason")
         in {
             "manual_expiry_review_required",
+            "position_lot_identity_changed",
+            "position_lot_refresh_unavailable",
             "lifecycle_assignment_pending",
             "lifecycle_stock_settlement_evidence_seen",
             "expiry_assignment_review_required",
@@ -671,7 +678,7 @@ def run_expired_position_maintenance_for_account(
         "expiry_assignment_quote_refresh": expiry_assignment_quote_refresh,
     }
     if projection_refresh is not None:
-        result["projection_refresh"] = projection_refresh
+        result["projection_refresh"] = projection_refresh.to_dict()
     result["summary_text"] = _write_auto_close_summary(report_dir, result)
     if send_receipt:
         result["receipt"] = safe_send_auto_close_receipt(

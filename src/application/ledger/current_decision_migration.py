@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import ExitStack
+
 from .current_decision_common import (
     Any,
     CURRENT_DECISION_MIGRATION_INVENTORY_SCHEMA,
@@ -563,13 +565,14 @@ def apply_current_decision_projection_migration(
     path = _position_migration._store_path(sqlite_path)
     implementation, _timing = _position_migration._loaded_implementation()
     now_ms = _integer(supplied.get("now_ms"), field="manifest now_ms", minimum=1)
-    conn = _position_migration._write_connection(path)
-    repo = _position_migration._repository(path)
-    before = _position_migration._file_sizes(path)
+    connection_lifecycle = ExitStack()
+    conn = connection_lifecycle.enter_context(_position_migration._write_connection(path))
     write_applied = False
     counts: dict[str, int] = {}
     final_state: dict[str, Any] = {}
     try:
+        repo = _position_migration._repository(path)
+        before = _position_migration._file_sizes(path)
         conn.execute("BEGIN IMMEDIATE")
         current, details = _current_decision_migration_inventory_from_conn(
             path,
@@ -747,8 +750,7 @@ def apply_current_decision_projection_migration(
         conn.rollback()
         raise
     finally:
-        conn.close()
-        _position_migration.secure_sqlite_artifacts(path)
+        connection_lifecycle.close()
     return _position_migration._manifest(
         {
             "schema_version": "current_decision_projection_migration_apply.v1",

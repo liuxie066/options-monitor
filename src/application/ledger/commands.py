@@ -40,6 +40,7 @@ from src.application.ledger.lot_resolver import (
     summarize_close_candidates,
 )
 from src.application.ledger.maintenance import (
+    _PROJECTION_REFRESH_NOT_PROVIDED,
     auto_close_expired_positions,
     build_expired_close_decisions,
 )
@@ -1991,6 +1992,7 @@ def record_expired_position_closes(
     as_of_ms: int,
     grace_days: int,
     max_close: int,
+    projection_refresh: ProjectionRefreshResult | None = _PROJECTION_REFRESH_NOT_PROVIDED,
 ) -> ExpiredCloseRunResult:
     return auto_close_expired_positions(
         repo,
@@ -1998,6 +2000,7 @@ def record_expired_position_closes(
         as_of_ms=as_of_ms,
         grace_days=grace_days,
         max_close=max_close,
+        projection_refresh=projection_refresh,
     )
 
 

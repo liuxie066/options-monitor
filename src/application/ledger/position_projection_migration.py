@@ -40,12 +40,10 @@ from src.application.ledger.repository import (
     SQLiteOptionPositionsRepository,
     _ensure_position_projection_schema,
     _position_lot_contract_scalars,
-    initialize_ledger_connection,
 )
 from src.application.ledger.sqlite_row_codec import position_lot_row_to_record
 from src.application.source_identity import source_commit_sha
 from src.infrastructure.private_storage import (
-    connect_private_sqlite,
     private_path,
     secure_sqlite_artifacts,
 )
@@ -143,15 +141,6 @@ def _read_only_connection(path: Path) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
-def _write_connection(path: Path) -> sqlite3.Connection:
-    conn = connect_private_sqlite(path)
-    initialize_ledger_connection(conn)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA busy_timeout=5000")
-    return conn
-
-
 def _repository(path: Path) -> SQLiteOptionPositionsRepository:
     """Bind existing repository methods without running startup DDL."""
 
@@ -161,6 +150,20 @@ def _repository(path: Path) -> SQLiteOptionPositionsRepository:
     repo.bootstrap_status = "migration_existing_store"
     repo.bootstrap_message = None
     return repo
+
+
+@contextmanager
+def _write_connection(path: Path) -> Iterator[sqlite3.Connection]:
+    repo = _repository(path)
+    with repo._writer_lock():
+        conn = repo._connect()
+        try:
+            yield conn
+        finally:
+            try:
+                conn.close()
+            finally:
+                secure_sqlite_artifacts(path)
 
 
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
@@ -495,72 +498,69 @@ def apply_position_projection_migration(
     supplied = _validate_manifest(manifest, schema=INVENTORY_SCHEMA)
     path = _store_path(sqlite_path)
     implementation, timing = _loaded_implementation()
-    conn = _write_connection(path)
     repo = _repository(path)
-    before_sizes = _file_sizes(path)
     wall_start = time.perf_counter_ns()
     cpu_start = time.process_time_ns()
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        current = _inventory_from_conn(
-            path,
-            conn,
-            implementation=implementation,
-            implementation_timing=timing,
-        )
-        if current["inventory_fingerprint"] != supplied.get("inventory_fingerprint"):
-            raise ValueError("migration manifest is stale or belongs to another store")
-        if current["store_identity"] != supplied.get("store_identity"):
-            raise ValueError("migration manifest store identity mismatch")
-        if current["loaded_projector_implementation_fingerprint"] != supplied.get(
-            "loaded_projector_implementation_fingerprint"
-        ):
-            raise ValueError("migration manifest projector implementation mismatch")
-        if "base_tables_missing" in current["readiness_reasons"]:
-            raise ValueError("migration requires existing trade_events and position_lots tables")
-        _fail(failure_hook, "after_manifest_recheck")
-
-        _ensure_position_projection_schema(conn)
-        _fail(failure_hook, "after_schema")
-        account_updates = repo.backfill_position_projection_accounts(conn=conn)
-        pagination_updates = repo.backfill_trade_event_pagination(conn=conn)
-        scalar_updates = repo.backfill_position_lot_contract_columns(conn=conn)
-        _fail(failure_hook, "after_backfill")
-        index_wall_start = time.perf_counter_ns()
-        index_cpu_start = time.process_time_ns()
-        indexes_created = repo.build_position_projection_indexes(conn=conn)
-        index_timing = {
-            "wall_ns": time.perf_counter_ns() - index_wall_start,
-            "cpu_ns": time.process_time_ns() - index_cpu_start,
-        }
-        _fail(failure_hook, "after_indexes")
-        runtime = run_position_projection_in_transaction(
-            repo,
-            (),
-            conn=conn,
-            mode="forced_full",
-            seed_checkpoint=True,
-            failure_hook=(
-                (lambda stage: _fail(failure_hook, f"projection:{stage}"))
-                if failure_hook is not None
-                else None
-            ),
-        )
-        if not runtime.publication.heads_trusted or not runtime.checkpoint_written:
-            raise RuntimeError(
-                "migration full oracle did not publish trusted heads and checkpoint"
+    with _write_connection(path) as conn:
+        before_sizes = _file_sizes(path)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            current = _inventory_from_conn(
+                path,
+                conn,
+                implementation=implementation,
+                implementation_timing=timing,
             )
-        repo.set_position_projection_checkpoint_mode("disabled", conn=conn)
-        if len(repo.list_position_projection_checkpoints(conn=conn)) > 3:
-            raise RuntimeError("migration checkpoint retention exceeds K=3")
-        _fail(failure_hook, "before_commit")
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-        secure_sqlite_artifacts(path)
+            if current["inventory_fingerprint"] != supplied.get("inventory_fingerprint"):
+                raise ValueError("migration manifest is stale or belongs to another store")
+            if current["store_identity"] != supplied.get("store_identity"):
+                raise ValueError("migration manifest store identity mismatch")
+            if current["loaded_projector_implementation_fingerprint"] != supplied.get(
+                "loaded_projector_implementation_fingerprint"
+            ):
+                raise ValueError("migration manifest projector implementation mismatch")
+            if "base_tables_missing" in current["readiness_reasons"]:
+                raise ValueError("migration requires existing trade_events and position_lots tables")
+            _fail(failure_hook, "after_manifest_recheck")
+
+            _ensure_position_projection_schema(conn)
+            _fail(failure_hook, "after_schema")
+            account_updates = repo.backfill_position_projection_accounts(conn=conn)
+            pagination_updates = repo.backfill_trade_event_pagination(conn=conn)
+            scalar_updates = repo.backfill_position_lot_contract_columns(conn=conn)
+            _fail(failure_hook, "after_backfill")
+            index_wall_start = time.perf_counter_ns()
+            index_cpu_start = time.process_time_ns()
+            indexes_created = repo.build_position_projection_indexes(conn=conn)
+            index_timing = {
+                "wall_ns": time.perf_counter_ns() - index_wall_start,
+                "cpu_ns": time.process_time_ns() - index_cpu_start,
+            }
+            _fail(failure_hook, "after_indexes")
+            runtime = run_position_projection_in_transaction(
+                repo,
+                (),
+                conn=conn,
+                mode="forced_full",
+                seed_checkpoint=True,
+                failure_hook=(
+                    (lambda stage: _fail(failure_hook, f"projection:{stage}"))
+                    if failure_hook is not None
+                    else None
+                ),
+            )
+            if not runtime.publication.heads_trusted or not runtime.checkpoint_written:
+                raise RuntimeError(
+                    "migration full oracle did not publish trusted heads and checkpoint"
+                )
+            repo.set_position_projection_checkpoint_mode("disabled", conn=conn)
+            if len(repo.list_position_projection_checkpoints(conn=conn)) > 3:
+                raise RuntimeError("migration checkpoint retention exceeds K=3")
+            _fail(failure_hook, "before_commit")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
     result = {
         "schema_version": "position_projection_migration_apply.v1",
         "generated_at_utc": _now_iso(),
@@ -998,37 +998,34 @@ def activate_position_projection_checkpoints(
     current_source_commit = _source_commit()
     if current_source_commit != source_commit:
         raise ValueError("loaded source commit differs from acceptance evidence")
-    conn = _write_connection(path)
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        current = _verify_from_conn(
-            path,
-            conn,
-            shadow=True,
-            implementation=implementation,
-            source_commit=current_source_commit,
-        )
-        if current["status"] != "pass":
-            raise ValueError("current store verification is not pass")
-        if current["store_binding"] != dict(acceptance_binding):
-            raise ValueError("activation evidence is stale or belongs to another store")
-        cursor = conn.execute(
-            """
-            UPDATE position_projection_source_state
-            SET checkpoint_mode='enabled', updated_at_ms=?
-            WHERE singleton_id=1 AND checkpoint_mode='disabled'
-            """,
-            (int(time.time() * 1000),),
-        )
-        if int(cursor.rowcount) != 1:
-            raise ValueError("activation requires checkpoint mode disabled")
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-        secure_sqlite_artifacts(path)
+    with _write_connection(path) as conn:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            current = _verify_from_conn(
+                path,
+                conn,
+                shadow=True,
+                implementation=implementation,
+                source_commit=current_source_commit,
+            )
+            if current["status"] != "pass":
+                raise ValueError("current store verification is not pass")
+            if current["store_binding"] != dict(acceptance_binding):
+                raise ValueError("activation evidence is stale or belongs to another store")
+            cursor = conn.execute(
+                """
+                UPDATE position_projection_source_state
+                SET checkpoint_mode='enabled', updated_at_ms=?
+                WHERE singleton_id=1 AND checkpoint_mode='disabled'
+                """,
+                (int(time.time() * 1000),),
+            )
+            if int(cursor.rowcount) != 1:
+                raise ValueError("activation requires checkpoint mode disabled")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
     return _manifest(
         {
             "schema_version": "position_projection_activation.v1",
@@ -1047,28 +1044,25 @@ def deactivate_position_projection_checkpoints(
     sqlite_path: str | Path,
 ) -> dict[str, Any]:
     path = _store_path(sqlite_path)
-    conn = _write_connection(path)
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        source = _source_state(conn)
-        if source is None:
-            raise ValueError("position projection source state is missing")
-        previous = str(source.get("checkpoint_mode") or "")
-        cursor = conn.execute(
-            """
-            UPDATE position_projection_source_state
-            SET checkpoint_mode='disabled', updated_at_ms=?
-            WHERE singleton_id=1 AND checkpoint_mode='enabled'
-            """,
-            (int(time.time() * 1000),),
-        )
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-        secure_sqlite_artifacts(path)
+    with _write_connection(path) as conn:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            source = _source_state(conn)
+            if source is None:
+                raise ValueError("position projection source state is missing")
+            previous = str(source.get("checkpoint_mode") or "")
+            cursor = conn.execute(
+                """
+                UPDATE position_projection_source_state
+                SET checkpoint_mode='disabled', updated_at_ms=?
+                WHERE singleton_id=1 AND checkpoint_mode='enabled'
+                """,
+                (int(time.time() * 1000),),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
     return _manifest(
         {
             "schema_version": "position_projection_deactivation.v1",

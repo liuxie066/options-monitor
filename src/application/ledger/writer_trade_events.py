@@ -40,6 +40,7 @@ from .writer_common import (
     normalize_trade_side,
     project_stored_trade_events_to_position_lots,
     projection_diagnostics_summary,
+    projection_refresh_result_from_runtime,
     quantize_money,
     replace,
     resolve_combo_group_membership,
@@ -71,6 +72,7 @@ from .writer_lifecycle_support import (
 )
 from .order_fee_semantics import zero_option_fee_lifecycle_reason
 
+
 def rebuild_position_lots_from_trade_events(repo: Any) -> ProjectionRefreshResult:
     def _run(sqlite_repo: Any, conn: Any | None) -> ProjectionRefreshResult:
         if conn is None:
@@ -87,15 +89,11 @@ def rebuild_position_lots_from_trade_events(repo: Any) -> ProjectionRefreshResul
             conn=conn,
             mode="forced_full",
         )
-        result = {
-            "trade_event_count": event_count,
-            "position_lot_count": int(runtime.position_lot_count),
-            "decision_projection": defer_current_decision_projection(
-                decision_fence
-            ),
-        }
-        result.update(projection_diagnostics_summary(runtime.diagnostics))
-        return ProjectionRefreshResult.from_payload(result)
+        return projection_refresh_result_from_runtime(
+            runtime,
+            trade_event_count=event_count,
+            decision_projection=defer_current_decision_projection(decision_fence),
+        )
 
     return with_sqlite_repo_transaction(
         repo,
