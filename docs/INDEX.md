@@ -50,6 +50,7 @@
 ## 技术架构与核心合同
 
 - [Architecture](ARCHITECTURE.md)：技术分层、入口和真实调用链。
+- [Compatibility Freeze](COMPATIBILITY_FREEZE.md)：只修不增的兼容入口、canonical owner 和退出证据。
 - [Required Data Storage Design](REQUIRED_DATA_STORAGE_DESIGN.md)：required-data canonical blob、封存边界、兼容读取和重复存储退场合同。
 - [Futu Simulate Account Experience Scan System Design](FUTU_SIMULATE_ACCOUNT_EXPERIENCE_SYSTEM_DESIGN.md)：
   模拟账户手动体验扫描的 owner、数据合同、副作用门禁和验收映射。

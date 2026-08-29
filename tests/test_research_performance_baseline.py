@@ -3,11 +3,31 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
+import subprocess
+import sys
 from typing import Any
 
 import pytest
 
-from src.application.research import performance_baseline as module
+from scripts import benchmark_data_storage_projection as module
+
+
+def test_public_script_entrypoint_exposes_cli(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "scripts/benchmark_data_storage_projection.py"),
+            "--help",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "Benchmark canonical option-position projection" in result.stdout
 
 
 def _dimensions(**overrides: int) -> module.BaselineDimensions:

@@ -742,9 +742,9 @@ health owner 并停止重复生产路径。
   继续作为每个正式 run / account 一次的共享持仓行情 producer；formal binder 只消费本次 collector
   返回的 mark payload；
 - ExperimentStore、Top1 lifecycle / research / validation / outcome / receipt 实现：基础数据收敛不重写实验内核；
-- 通用旧 Strategy Lab 入口：`run_strategy_lab_update`、`run_strategy_lab_experiment`、
-  `generate_strategy_lab_hypotheses`、`build_strategy_lab_proposal`、`build_strategy_lab_llm_context`、
-  `run_combo_yield_group_experiment`。本轮不扩展，也不在未证明无调用时删除。
+- `run_strategy_lab_update`：现有 recorder service 仍调用，作为 Shadow Replay maintenance facade 保留。
+- 通用旧 Strategy Lab experiment / hypotheses / proposal / LLM context / domain adapter：已确认无生产调用并删除；
+  探索性 dataset 分析由 Shadow Replay 直接负责。
 
 ## 7. 存储与切换
 

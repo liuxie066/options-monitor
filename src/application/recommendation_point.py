@@ -41,10 +41,6 @@ from src.application.required_data_snapshot import (
     load_required_data_snapshot_manifest_snapshot,
 )
 from src.application.source_receipts import sha256_bytes
-from src.application.strategy_lab.top1.ranking import (
-    Top1RankingError,
-    build_ranking_projection,
-)
 from src.application.tick_run_workspace import (
     AccountRunConfigError,
     read_account_run_state_bytes_safely,
@@ -129,7 +125,6 @@ _POINT_BINDING_FIELDS_V3 = (
 _TERMINAL_STATUSES = frozenset(
     {"candidates_found", "no_candidate", "partial_data", "data_unavailable"}
 )
-_CLEAN_STATUSES = frozenset({"candidates_found", "no_candidate"})
 _HASH_64 = re.compile(r"[0-9a-f]{64}\Z")
 _HASH_40 = re.compile(r"[0-9a-f]{40}\Z")
 _TIME_COHERENCE_FIELDS = frozenset(
@@ -705,22 +700,6 @@ def build_recommendation_point(
                 opening_sealed_at_utc=opening["sealed_at_utc"],
             )
         )
-
-    if point_schema != RECOMMENDATION_POINT_SCHEMA_V3:
-        projection: dict[str, Any] | None = None
-        try:
-            projection = build_ranking_projection(
-                opening,
-                point_binding={field: payload[field] for field in _POINT_BINDING_FIELDS},
-            )
-        except Top1RankingError as exc:
-            if point_status in _CLEAN_STATUSES:
-                _fail("official_point_invalid", f"clean point is not rankable: {exc}")
-        if (
-            projection is not None
-            and projection.get("producer_accepted_candidate_ids") != accepted_ids
-        ):
-            _fail("official_point_invalid", "W1A accepted candidate IDs do not match")
 
     payload["content_sha256"] = canonical_sha256(payload)
     return validate_recommendation_point(payload)

@@ -328,7 +328,7 @@ class _ToolKwargs(TypedDict):
 
 
 def test_strategy_lab_update_cli_forwards_close_decision_build_flag(monkeypatch, tmp_path: Path) -> None:
-    import src.application.strategy_lab as strategy_lab
+    import src.application.strategy_lab.update as strategy_lab_update
     from src.interfaces.cli.main import parse_args
     from src.interfaces.cli.research import handle_research_command
 
@@ -338,7 +338,7 @@ def test_strategy_lab_update_cli_forwards_close_decision_build_flag(monkeypatch,
         calls.append(kwargs)
         return {"schema_version": "strategy_lab_update.v1", "summary": {}, "safety": {}}
 
-    monkeypatch.setattr(strategy_lab, "run_strategy_lab_update", _run_strategy_lab_update)
+    monkeypatch.setattr(strategy_lab_update, "run_strategy_lab_update", _run_strategy_lab_update)
     args = parse_args(
         [
             "research",
@@ -364,7 +364,7 @@ def test_strategy_lab_update_cli_uses_runtime_root_and_conservative_profile_limi
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    import src.application.strategy_lab as strategy_lab
+    import src.application.strategy_lab.update as strategy_lab_update
     from src.interfaces.cli.main import parse_args
     from src.interfaces.cli.research import handle_research_command
 
@@ -412,7 +412,7 @@ def test_strategy_lab_update_cli_uses_runtime_root_and_conservative_profile_limi
         calls.append(kwargs)
         return {"schema_version": "strategy_lab_update.v1", "summary": {}, "safety": {}}
 
-    monkeypatch.setattr(strategy_lab, "run_strategy_lab_update", _run_strategy_lab_update)
+    monkeypatch.setattr(strategy_lab_update, "run_strategy_lab_update", _run_strategy_lab_update)
     args = parse_args(
         [
             "research",
@@ -472,7 +472,7 @@ def test_strategy_lab_update_cli_fails_closed_when_profile_has_no_runtime_root(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    import src.application.strategy_lab as strategy_lab
+    import src.application.strategy_lab.update as strategy_lab_update
     from src.application.agent_tool_contracts import AgentToolError
     from src.interfaces.cli.main import parse_args
     from src.interfaces.cli.research import handle_research_command
@@ -491,7 +491,7 @@ def test_strategy_lab_update_cli_fails_closed_when_profile_has_no_runtime_root(
         called = True
         return {"schema_version": "strategy_lab_update.v1", "summary": {}, "safety": {}}
 
-    monkeypatch.setattr(strategy_lab, "run_strategy_lab_update", _run_strategy_lab_update)
+    monkeypatch.setattr(strategy_lab_update, "run_strategy_lab_update", _run_strategy_lab_update)
     args = parse_args(
         [
             "research",

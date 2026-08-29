@@ -138,7 +138,7 @@
           "later_phase": "phase_2"
         },
         {
-          "path_glob": "src/application/research/performance_baseline.py",
+          "path_glob": "scripts/benchmark_data_storage_projection.py",
           "owner": "storage_performance_benchmark",
           "operation": "write",
           "history_dimension": "lifecycle_history",

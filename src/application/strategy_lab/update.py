@@ -471,7 +471,7 @@ def _next_action(
     if not write and int(summary.get("planned_count") or 0) > 0:
         return "rerun_with_write_to_update_local_evidence"
     if int(((status or {}).get("summary") or {}).get("review_queue_count") or 0) > 0:
-        return "run_strategy_lab_readiness_or_experiment_for_ready_datasets"
+        return "review_ready_shadow_replay_datasets"
     if int(summary.get("executed_count") or 0) > 0:
         return "rerun_update_later_after_more_market_time"
     return "wait_for_more_replay_evidence"
