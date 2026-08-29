@@ -24,7 +24,6 @@ from src.application.strategy_lab.top1.capability_receipts import (
 from src.application.strategy_lab.top1.contracts import RESEARCH_REQUIRED_DAYS
 from src.application.strategy_lab.top1.corpus import (
     CorpusError,
-    read_corpus_status,
     read_market_calendar_binding,
     refresh_market_calendar_binding,
 )
@@ -356,7 +355,6 @@ def _store_not_ready(tool_name: str, store: ExperimentStore) -> dict[str, Any]:
 def _research_inputs(
     context: Mapping[str, Any],
     args: argparse.Namespace,
-    store: ExperimentStore,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     top1 = context["top1"]
     try:
@@ -401,11 +399,10 @@ def _research_inputs(
         config = {}
         evidence_bundle = EvidenceReadBundle(schema_state="not_initialized")
     try:
-        corpus_status = read_corpus_status(
-            store,
+        corpus_status = build_corpus_health_receipt(
+            context["runtime_root"],
             market="HK",
             account="lx",
-            artifact_root=context["artifact_root"],
             repo_root=context["repo_root"],
         )
     except Exception:
@@ -587,7 +584,7 @@ def handle_top1_command(args: argparse.Namespace) -> dict[str, Any]:
             raise AgentToolError(
                 code="INPUT_ERROR", message="Top1 research start requires --write"
             )
-        preview_inputs, config = _research_inputs(context, args, store)
+        preview_inputs, config = _research_inputs(context, args)
         tool_name = (
             "research.strategy-lab.top1-loop.research."
             f"{args.top1_research_command}"
