@@ -142,6 +142,7 @@ def _research_spec() -> dict[str, Any]:
     return build_sell_put_top1_research_spec(
         topic_id="topic-concentration",
         experiment_id="experiment-001",
+        account="lx",
         baseline_version="sell-put-baseline.v1",
         market_calendar_version="hk-calendar.v1",
         research_source={

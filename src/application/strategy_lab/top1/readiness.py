@@ -5,6 +5,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+from src.application.account_config import normalize_account_label
 from src.application.research.formal_corpus import CORPUS_HEALTH_SCHEMA
 from src.application.strategy_lab.top1.contracts import RESEARCH_REQUIRED_DAYS
 
@@ -160,11 +161,18 @@ def build_top1_readiness(
 
     top1 = _object(profile.get("strategy_lab_top1"))
     binding = _object(top1.get("opend_binding"))
+    try:
+        account = normalize_account_label(top1.get("account"))
+    except ValueError:
+        account = None
+    selected_accounts = profile.get("accounts")
     profile_valid = (
         set(top1) == _PROFILE_FIELDS
         and top1.get("enabled") is True
         and top1.get("market") == "hk"
-        and top1.get("account") == "lx"
+        and top1.get("account") == account
+        and isinstance(selected_accounts, list)
+        and account in selected_accounts
         and isinstance(binding.get("host"), str)
         and bool(str(binding.get("host") or "").strip())
         and _positive_int(binding.get("port"))
@@ -239,7 +247,7 @@ def build_top1_readiness(
     return {
         "schema_version": READINESS_SCHEMA,
         "market": "HK",
-        "account": "lx",
+        "account": account,
         "source_delivery_ready": source_ready,
         "validation_runtime_ready": not runtime_blockers,
         "source_delivery_blockers": source_blockers,

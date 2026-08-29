@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import date, timedelta
 from pathlib import Path
@@ -9,12 +10,14 @@ import pytest
 
 import src.application.strategy_lab.top1.research_runner as runner_module
 import tests.test_strategy_lab_top1_research as research_fixture
-from src.application.recommendation_point import (
-    RECOMMENDATION_POINT_FILE,
-    capture_scheduled_recommendation_point,
+from domain.domain.decision_state_fingerprint import canonical_sha256
+from src.application.recommendation_point import capture_scheduled_recommendation_point
+from src.application.research.formal_corpus import (
+    capture_formal_point_attempt,
+    seal_formal_day_expectation,
 )
 from src.application.strategy_lab.top1.contracts import VALIDATION_REQUIRED_DAYS
-from src.application.strategy_lab.top1.corpus import capture_recommendation_point
+from src.application.strategy_lab.top1.corpus import read_validation_point_source
 from src.application.strategy_lab.top1.fill_observation import observe_active_contracts
 from src.application.strategy_lab.top1.lifecycle import (
     authorize_validation,
@@ -39,8 +42,8 @@ from tests.candidate_evidence_helpers import (
     top1_hk_schedule_fixture,
 )
 from tests.test_strategy_lab_top1_corpus import (
-    _publish_source_point,
-    _seal,
+    CALENDAR_HASH,
+    _schedule,
     _scheduler,
 )
 from tests.test_strategy_lab_top1_research_runner import (
@@ -115,7 +118,7 @@ def _trading_days(start: str, count: int) -> list[str]:
 
 def _start_validation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> tuple[ExperimentStore, Path, Path, list[str]]:
+) -> tuple[ExperimentStore, Path, Path, list[str], dict[str, list[str]]]:
     monkeypatch.setattr(research_fixture, "EXPIRATION", "2026-12-18")
     store, artifact_root, case, research_hash = _prepared(tmp_path)
     monkeypatch.setattr(runner_module, "rate_limited_opend_call", _direct_limiter)
@@ -181,21 +184,151 @@ def _start_validation(
         artifact_root=artifact_root,
         environ=AVAILABLE,
     )
-    return store, artifact_root, tmp_path / "source", dates
+    source_root = tmp_path / "source"
+    from src.application import recommendation_point as recommendation_module
+    from src.application.research import formal_corpus as formal_corpus_module
+
+    required_bytes = b'{"fixture":true}\n'
+    required_hash = hashlib.sha256(required_bytes).hexdigest()
+    symbols_by_run: dict[str, list[str]] = {}
+
+    def required_loader(**kwargs: object) -> tuple[dict[str, object], Path, bytes]:
+        run_id = str(kwargs["expected_run_id"])
+        return (
+            {
+                "run_id": run_id,
+                "symbols": {
+                    symbol: {
+                        "status": "ready",
+                        "source_observed_at": "2026-06-01T00:00:00Z",
+                        "payload_sha256": "e" * 64,
+                        "scan_blob_ref": "blob/ref",
+                    }
+                    for symbol in symbols_by_run[run_id]
+                },
+            },
+            source_root,
+            required_bytes,
+        )
+
+    def receipt_loader(**kwargs: object) -> dict[str, object]:
+        run_id = str(kwargs["expected_run_id"])
+        evidence: dict[str, object] = {
+            "status": "ready",
+            "run_id": run_id,
+            "account": "lx",
+            "account_config_sha256": "a" * 64,
+            "evidence_at_utc": "2026-06-01T00:00:00Z",
+            "open_option_positions": [],
+            "valuation_mark_facts": [],
+            "fx_rate_facts": [
+                {
+                    "fact_id": "hkd-opening",
+                    "base_currency": "HKD",
+                    "quote_currency": "CNY",
+                    "rate": "1",
+                    "rate_kind": "fixture",
+                    "effective_at_ms": 1,
+                    "observed_at_ms": 1,
+                    "source": "fixture",
+                    "source_id": "hkd-opening",
+                    "revision": 1,
+                    "supersedes_fact_id": None,
+                    "source_fact_sha256": "8" * 64,
+                }
+            ],
+        }
+        evidence["content_sha256"] = canonical_sha256(evidence)
+        payload = {"strategy_lab_option_market_evidence": evidence}
+        payload_bytes = (
+            json.dumps(payload, sort_keys=True, indent=2, allow_nan=False) + "\n"
+        ).encode()
+        manifest = {
+            "schema_version": "prepared_option_positions_context.v2",
+            "status": "ready",
+            "run_id": run_id,
+            "account": str(kwargs["expected_account"]),
+            "account_config_sha256": str(
+                kwargs["expected_account_config_sha256"]
+            ),
+            "application_received_at_utc": "2026-06-01T00:00:00Z",
+            "payload_sha256": hashlib.sha256(payload_bytes).hexdigest(),
+        }
+        manifest_bytes = (
+            json.dumps(manifest, sort_keys=True, indent=2, allow_nan=False) + "\n"
+        ).encode()
+        return {
+            "manifest": manifest,
+            "payload": payload,
+            "manifest_bytes": manifest_bytes,
+            "payload_bytes": payload_bytes,
+        }
+
+    monkeypatch.setattr(
+        recommendation_module,
+        "find_prepared_option_positions_manifest",
+        lambda **_kwargs: source_root / "prepared_option_positions_context.v2.json",
+    )
+    monkeypatch.setattr(
+        recommendation_module,
+        "load_prepared_option_positions_context_receipt",
+        receipt_loader,
+    )
+    for module in (recommendation_module, formal_corpus_module):
+        monkeypatch.setattr(
+            module,
+            "_required_data_binding",
+            lambda _opening: ("required/manifest.json", required_hash),
+        )
+        monkeypatch.setattr(
+            module,
+            "load_required_data_snapshot_manifest_snapshot",
+            required_loader,
+        )
+    monkeypatch.setattr(
+        formal_corpus_module,
+        "load_prepared_option_positions_context_receipt",
+        receipt_loader,
+    )
+    monkeypatch.setattr(
+        formal_corpus_module,
+        "validate_strategy_lab_option_market_evidence",
+        lambda value, **_kwargs: value,
+    )
+    return store, artifact_root, source_root, dates, symbols_by_run
 
 
 def _publish_candidate_point(
+    artifact_root: Path,
     source_root: Path,
+    symbols_by_run: dict[str, list[str]],
     *,
     trading_date: str,
     run_id: str,
-    candidate: dict[str, Any],
-) -> tuple[str, dict[str, Any]]:
+    candidate: dict[str, Any] | None,
+    capture: bool = True,
+) -> dict[str, Any]:
+    assert seal_formal_day_expectation(
+        artifact_root,
+        market="HK",
+        account="lx",
+        schedule=_schedule(),
+        trading_date=trading_date,
+        market_calendar_version="hk-calendar.fixture.v1",
+        market_calendar_sha256=CALENDAR_HASH,
+        sealed_at_utc=f"{trading_date}T01:00:00Z",
+    )["status"] in {"published", "idempotent"}
+    if candidate is not None:
+        candidate = {
+            **candidate,
+            "snapshot_received_at_utc": "2026-06-01T00:00:00Z",
+        }
+    symbols_by_run[run_id] = [str(candidate["symbol"])] if candidate else ["NVDA"]
     seal_opening_candidate_fixture(
         source_root,
         run_id=run_id,
         market="HK",
-        accepted_rows=[candidate],
+        accepted_rows=[candidate] if candidate else [],
     )
     publication, point = capture_scheduled_recommendation_point(
         source_root,
@@ -203,40 +336,44 @@ def _publish_candidate_point(
         "lx",
         _scheduler(trading_date),
         source_commit_sha="c" * 40,
+        require_option_market_evidence=True,
+        require_formal_contract=True,
     )
     assert publication == "published"
-    return (
-        f"output_runs/{run_id}/accounts/lx/state/{RECOMMENDATION_POINT_FILE}",
-        point,
-    )
+    if capture:
+        assert capture_formal_point_attempt(
+            artifact_root,
+            source_root,
+            market="HK",
+            account="lx",
+            trading_date=trading_date,
+            run_id=run_id,
+            scheduled_scan_target_market=str(point["scheduled_scan_target_market"]),
+            captured_at_utc=f"{trading_date}T02:00:30Z",
+            producer_behavior_version="recommendation_point.v3",
+            recommendation_point=point,
+        )["status"] == "published"
+    return point
 
 
 def test_ten_day_empty_candidate_run_concludes_without_provider_access(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    store, artifact_root, source_root, dates = _start_validation(
+    store, artifact_root, source_root, dates, symbols_by_run = _start_validation(
         tmp_path, monkeypatch
     )
     gateway = NoSnapshotGateway()
 
     for index, trading_date in enumerate(dates):
-        assert _seal(store, artifact_root, day=trading_date)["status"] == "published"
-        point_ref, point = _publish_source_point(
-            source_root,
-            run_id=f"validation-{index}",
-            day=trading_date,
-            accepted=False,
-        )
-        captured = capture_recommendation_point(
-            store,
-            source_root,
+        point = _publish_candidate_point(
             artifact_root,
-            point_ref=point_ref,
+            source_root,
+            symbols_by_run,
             trading_date=trading_date,
-            captured_at_utc=f"{trading_date}T02:00:30Z",
-            environ=AVAILABLE,
+            run_id=f"validation-{index}",
+            candidate=None,
         )
-        point_id = str(captured["recommendation_point_id"])
+        point_id = str(point["recommendation_point_id"])
         consume_validation_point(
             store,
             artifact_root,
@@ -292,29 +429,29 @@ def test_ten_day_empty_candidate_run_concludes_without_provider_access(
 def test_fill_terms_and_shared_close_are_observed_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    store, artifact_root, source_root, dates = _start_validation(
+    store, artifact_root, source_root, dates, symbols_by_run = _start_validation(
         tmp_path, monkeypatch
     )
     trading_date = dates[0]
     candidate = research_fixture._candidates()[0]
     gateway = OutcomeGateway(candidate)
-    _seal(store, artifact_root, day=trading_date)
-    point_ref, _point = _publish_candidate_point(
+    point = _publish_candidate_point(
+        artifact_root,
         source_root,
+        symbols_by_run,
         trading_date=trading_date,
         run_id="validation-fill",
         candidate=candidate,
     )
-    captured = capture_recommendation_point(
-        store,
-        source_root,
+    point_id = str(point["recommendation_point_id"])
+    source = read_validation_point_source(
         artifact_root,
-        point_ref=point_ref,
+        market="HK",
+        account="lx",
         trading_date=trading_date,
-        captured_at_utc=f"{trading_date}T02:00:30Z",
-        environ=AVAILABLE,
+        recommendation_point_id=point_id,
     )
-    point_id = str(captured["recommendation_point_id"])
+    assert source["status"] == "available", source
     consume_validation_point(
         store,
         artifact_root,
@@ -356,21 +493,13 @@ def test_fill_terms_and_shared_close_are_observed_once(
     }
 
     expiration = str(candidate["expiration"])
-    _seal(store, artifact_root, day=expiration)
-    terms_ref, _terms_point = _publish_source_point(
-        source_root,
-        run_id="expiration-terms",
-        day=expiration,
-        accepted=False,
-    )
-    capture_recommendation_point(
-        store,
-        source_root,
+    _publish_candidate_point(
         artifact_root,
-        point_ref=terms_ref,
+        source_root,
+        symbols_by_run,
         trading_date=expiration,
-        captured_at_utc=f"{expiration}T02:00:30Z",
-        environ=AVAILABLE,
+        run_id="expiration-terms",
+        candidate=None,
     )
     gateway.terms_error = True
     retryable = settle_due_outcomes(
@@ -453,7 +582,7 @@ def test_fill_terms_and_shared_close_are_observed_once(
 def test_missing_day_and_point_seal_only_after_derived_deadlines(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    store, artifact_root, source_root, dates = _start_validation(
+    store, artifact_root, source_root, dates, symbols_by_run = _start_validation(
         tmp_path, monkeypatch
     )
     first = dates[0]
@@ -492,12 +621,14 @@ def test_missing_day_and_point_seal_only_after_derived_deadlines(
     )["status"] == "idempotent"
 
     second = dates[1]
-    _seal(store, artifact_root, day=second)
-    _point_ref, point = _publish_source_point(
+    point = _publish_candidate_point(
+        artifact_root,
         source_root,
+        symbols_by_run,
+        trading_date=second,
         run_id="missing-validation-point",
-        day=second,
-        accepted=False,
+        candidate=None,
+        capture=False,
     )
     point_id = str(point["recommendation_point_id"])
     with pytest.raises(Top1ValidationError) as point_early:

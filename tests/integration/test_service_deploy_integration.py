@@ -1374,6 +1374,7 @@ def test_service_drift_removes_legacy_cursor_binding_without_resuming_paused_tim
         include_strategy_lab_recorder=True,
         strategy_lab_recorder_source="local",
         include_strategy_lab_top1=True,
+        strategy_lab_top1_account="lx",
         strategy_lab_top1_advance_interval_seconds=300,
         strategy_lab_top1_timeout_start_sec=120,
         use_default_deploy_user=False,
@@ -1604,13 +1605,13 @@ def test_service_drift_round_trips_tampers_and_retires_strategy_lab_top1(
     repo.mkdir()
     runtime.mkdir()
     config_path = _write_service_account_config(
-        tmp_path / "config.hk.json", {"lx": _futu_service_account()}
+        tmp_path / "config.hk.json", {"lab1": _futu_service_account()}
     )
     render_args = {
         "target": "systemd",
         "repo_root": repo,
         "runtime_root": runtime,
-        "accounts": ["lx"],
+        "accounts": ["lab1"],
         "markets": ["hk"],
         "config_paths": {"hk": config_path},
         "env_file": tmp_path / "env",
@@ -1618,6 +1619,7 @@ def test_service_drift_round_trips_tampers_and_retires_strategy_lab_top1(
     bundle = render_service_bundle(
         **render_args,
         include_strategy_lab_top1=True,
+        strategy_lab_top1_account="lab1",
         strategy_lab_top1_advance_interval_seconds=300,
         strategy_lab_top1_timeout_start_sec=120,
     )

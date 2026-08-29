@@ -106,7 +106,7 @@ def test_run_tick_cron_seals_current_market_expectation_before_tick(tmp_path) ->
         assert runtime_root == tmp_path
         assert kwargs["profile"] == {
             "markets": ["us"],
-            "accounts": ["lx"],
+            "accounts": ["user1", "user2"],
             "config_paths": {"us": str(tmp_path / "config.us.json")},
         }
         assert kwargs["artifact_root"] == (tmp_path / "output_shared" / "research" / "strategy_lab")
@@ -118,7 +118,7 @@ def test_run_tick_cron_seals_current_market_expectation_before_tick(tmp_path) ->
 
     rc = run_tick_cron(
         market="us",
-        accounts=["lx", "sy"],
+        accounts=["user1", "user2"],
         config_path=str(tmp_path / "config.us.json"),
         lock_path=str(tmp_path / "tick.lock"),
         run_cmd=_run_cmd,
@@ -129,6 +129,38 @@ def test_run_tick_cron_seals_current_market_expectation_before_tick(tmp_path) ->
 
     assert rc == 0
     assert calls == ["seal", "tick"]
+
+
+def test_run_tick_cron_seals_configured_accounts_when_cli_scope_omitted(tmp_path) -> None:
+    from src.application.tick_cron import run_tick_cron
+
+    config_path = _write_json(
+        tmp_path / "config.us.json", {"accounts": ["user1", "user2"]}
+    )
+    profiles: list[dict] = []
+
+    def _seal(_runtime_root, **kwargs):
+        profiles.append(kwargs["profile"])
+        return {"status": "ok", "results": []}
+
+    rc = run_tick_cron(
+        market="us",
+        config_path=str(config_path),
+        lock_path=str(tmp_path / "tick.lock"),
+        run_cmd=lambda command, **_kwargs: subprocess.CompletedProcess(command, 0),
+        preflight_config_fn=None,
+        seal_formal_expectations_fn=_seal,
+        environ={"OM_RUNTIME_ROOT": str(tmp_path)},
+    )
+
+    assert rc == 0
+    assert profiles == [
+        {
+            "markets": ["us"],
+            "accounts": ["user1", "user2"],
+            "config_paths": {"us": str(config_path)},
+        }
+    ]
 
 
 def test_formal_expectation_failure_does_not_block_tick(tmp_path, capsys) -> None:

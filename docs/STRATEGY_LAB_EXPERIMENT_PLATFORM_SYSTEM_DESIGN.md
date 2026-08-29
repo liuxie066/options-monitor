@@ -1,7 +1,7 @@
 # Strategy Lab 统一策略实验平台系统设计
 
 - **状态**：MVP 实验内核、基础事实归档与健康回执来源收敛已落地；真实 20 日 / 10 日窗口待验收
-- **日期**：2026-08-29
+- **日期**：2026-08-30
 - **产品依据**：`docs/STRATEGY_LAB_EXPERIMENT_PLATFORM_PRD.md`
 - **当前实现参考**：`docs/STRATEGY_LAB_DESIGN.md`
 - **首个 recipe**：HK / lx / Sell Put Top1
@@ -151,7 +151,7 @@ conflict，不覆盖、不仲裁。
 
 日 expectation 必须早于首个预期点封存。不新建 timer：现有 HK / US `tick-cron` 在取得
 本市场锁、通过 runtime config preflight 后，于启动子进程扫描前调用
-`seal_profile_formal_expectations()`，且只传入当前 market、`lx` 和当前 config path。systemd 的
+`seal_profile_formal_expectations()`，且只传入当前 market、本次运行账户和当前 config path。systemd 的
 两个 tick 均从当地 09:00 开始，早于 runtime schedule 的首个 09:40 正式点。只有显式
 `OM_RUNTIME_ROOT` 时才写正式事实；封存缺 binding、coverage 不足或其他失败时只记录
 `FORMAL_EXPECTATION_DEGRADED` 并继续普通扫描。
@@ -656,17 +656,14 @@ MVP seed 的排序 profile 和 0.002 / 0.004 / 0.006 阈值目前没有 canonica
 | 3. 正式点绑定与校验 | `recommendation_point.py` | **复用 + 修改** | 保留 point ID、write-once 及 validator；升级 v3 绑定 opening、required-data 和 prepared 三个 owner |
 | 4. Research Archive | `research/archive.py` 只有远端 pull / inventory / verify | **复用传输 + 确实新增** | 新增 `research/formal_corpus.py`、canonical JSON + deterministic gzip 读写；不加 DB、repository 抽象或对象存储 |
 | 5. Corpus Health Receipt | `research/formal_corpus.py` 提供唯一 canonical health；旧 Store-backed health 实现已删除 | **原样复用** | 只由 `formal_corpus.py` 对比 expectation 和 archived attempts，并读取一次当前磁盘容量；手工 CLI 使用全历史 scope，scheduled readiness 使用最近 20 个成熟日加当日 scope；不建 receipt 表、摘要文件或缓存 |
-| 6. Recipe Projection | `top1/corpus.py`、`top1/ranking.py`、Candidate Engine | **复用 + 修改 + 删除重复字段** | corpus 只存 archive ref 和 recipe 派生 metric；v3 projection 不复制基础 candidate 字段，运行时在内存合并 |
+| 6. Recipe Projection | `top1/corpus.py`、`top1/ranking.py`、Candidate Engine | **复用 + 修改 + 删除重复字段** | `top1/corpus.py` 只读 formal artifact；v3 projection 不复制基础 candidate 字段，运行时在内存合并，不写第二份 corpus |
 | 7. Capability / Readiness | `top1/capability_receipts.py`、`top1/readiness.py`、`top1/workspace.py` | **复用 + 修改** | 保留四态和现有 capability；source readiness 改为消费 Corpus Health Receipt + recipe projection |
-| 8. ExperimentStore 与验证观察 | `experiment_store.py`、`validation.py`、`fill_observation.py`、`advance.py` | **原样复用为主** | 保留冻结 spec、授权、commitment、selected-arm Bid / Ask 和幂等提交；只更换 source ref，不加 schema / table |
+| 8. ExperimentStore 与验证观察 | `experiment_store.py`、`validation.py`、`fill_observation.py`、`advance.py` | **复用 + 删除旧 corpus API** | 保留冻结 spec、授权、commitment、selected-arm Bid / Ask 和幂等提交；source 只读 Formal Corpus，不新增 schema / table |
 | 9. Outcome 与确定性评价 | `research_runner.py`、`economics.py`、`statistics.py`、`outcome.py`、`terminal_projection.py` | **原样复用** | 继续使用已冻结真实合约、FX、费用、年化收益率 + CNY PnL 和现有回执链；不动公式 |
 
 ### 6.2 原样复用
 
-第 6.1 节记录整个 MVP 的代码映射；本轮工作单只允许修改健康回执与 advance 调用链。
-允许的生产文件限定为 `research/formal_corpus.py` 的健康计算、`top1/advance.py`、
-`interfaces/cli/strategy_lab_top1.py`、`top1/readiness.py` 及对应聚焦测试。tick、正式点采集、
-recommendation point、required-data、prepared context、service / timer / config 和 US 自动平仓均不在本轮范围。
+以下 owner 继续原样承担当前合同，不为已清零的旧 corpus 增加 adapter、迁移或回退。
 
 | 文件 | 函数 / 合同 | 复用理由 |
 |---|---|---|
@@ -683,20 +680,19 @@ recommendation point、required-data、prepared context、service / timer / conf
 | `src/application/research/storage_baseline.py` | `collect_storage_runtime_baseline()` | 原样保留为显式全 runtime 存储审计；health / readiness / advance 不再调用，也不修改其 collector、manifest 校验、增长预测或输出合同 |
 | `src/infrastructure/private_storage.py` | `exclusive_private_file_lock()`、`atomic_write_private_text()`、`atomic_write_private_bytes()` | 复用私有权限、同机互斥和原子发布；相同 identity 的不同 hash 仍由 formal corpus 判 conflict |
 | `src/application/strategy_lab/top1/lifecycle.py` | commitment、authorization、leader、receipt 及恢复函数 | 基础事实收敛不改实验生命周期 |
-| `src/infrastructure/strategy_lab/experiment_store.py` | 现有 experiment / generation / event / receipt API、`commit_validation_observation_batch()`、`commit_outcome_batch()` | 仍是唯一实验状态和原子提交 owner；本轮不迁移 schema |
+| `src/infrastructure/strategy_lab/experiment_store.py` | experiment / generation / event / receipt API、`commit_validation_observation_batch()`、`commit_outcome_batch()` | 仍是唯一实验状态和原子提交 owner；不再公开 corpus day / point 读写 API |
 | `src/application/strategy_lab/top1/economics.py`、`statistics.py`、`terminal_projection.py` | 现有 CNY 经济结果、配对评价和 Final Receipt 函数 | PRD 评价合同未变，不重写公式或回执 |
 
-### 6.3 需要修改
-
-本节是当前工作单唯一的 production changed-files 清单。第 6.1 节其余模块是整体 MVP owner 映射，
-均已落地或仅供架构参考，不得据此重新修改采集、projection 或 CLI。
+### 6.3 收敛后的关键调用
 
 | 文件 | 函数 | 最小修改 |
 |---|---|---|
 | `src/application/research/formal_corpus.py` | `build_corpus_health_receipt()` | 升级为 `corpus_health_receipt.v2`，新增经校验的 `scope` 参数，只允许 `full` / `latest_mature_window`，以及仅 window 使用的 `mature_day_limit`；后者先要求同一 observation time 的市场本地日期位于 calendar coverage，再只直读最近成熟日加当日；calendar 不可用或过期时复用现有 reason code fail closed，不读取 artifact、不回退全扫；删除同步 storage baseline，改为一次 `shutil.disk_usage()` 和当前 critical floor；不改 writer、loader 或采集器 |
-| `src/application/strategy_lab/top1/advance.py` | `advance_scheduled()` | 升级为 `sell_put_top1_advance_result.v2`；停止调用旧 `publish_corpus_health_receipt()` 并删除顶层 `corpus_health`；readiness 加载失败或 canonical corpus 缺失时记录 failure 并返回 `partial`，有效但未就绪的 corpus 仅阻止实验推进 |
+| `src/application/strategy_lab/top1/corpus.py` | `preview_research_dataset()`、`read_validation_day_source()`、`read_validation_point_source()` | 只接受 Formal Corpus root；在内存构造 recipe projection，删除 Store / `output_runs` fallback、旧 writer、point discovery 和兼容 dataset 分支 |
+| `src/application/strategy_lab/top1/advance.py` | `advance_scheduled()` | 只消费 readiness 和 Formal Corpus source；不再接收 source root / schedule loader，也不发现、修复或封存旧 corpus |
 | `src/interfaces/cli/strategy_lab_top1.py` | `_readiness(context, store, *, observed_at_utc=None)` | 入口只冻结一次 observation time；standalone 用该次当前时间，scheduled advance 的 `load_readiness` closure 传已有 `occurred_at_utc`。无条件且只调用一次 Formal Corpus `build_corpus_health_receipt(scope="latest_mature_window", mature_day_limit=RESEARCH_REQUIRED_DAYS, observed_at_utc=observed_at_utc)`，直接传 `runtime_root`，不经旧 `read_corpus_status()` / Store 分支；不受 `ExperimentStore.schema_state()` 是否 ready 影响，不得另调 storage baseline；结果只传给 canonical corpus，Store 仍独立形成推进 blocker |
 | `src/application/strategy_lab/top1/readiness.py` | `build_top1_readiness()` | 升级为 `sell_put_top1_readiness.v2`，删除 `corpus_health_receipt` 入参和 `facts.corpus_health_receipt`；20 个成熟连续完整日缺一即 blocked |
+| `src/application/strategy_lab/top1/workspace.py`、`validation.py`、`fill_observation.py`、`outcome.py` | research preview 与隐藏验证 source 读取 | 统一调用 Formal Corpus-only reader，不再传 Store 作为事实 fallback |
 
 ### 6.4 确实需要新增
 
@@ -719,18 +715,18 @@ health owner 并停止重复生产路径。
 私有路径、`exclusive_private_file_lock()` 和原子写入复用 `src/infrastructure/private_storage.py`；
 不新增 dependency、class、factory、锁抽象或缓存层。
 
-### 6.5 需要删除
+### 6.5 已删除的旧运行链路
 
-| 文件 | 删除项 | 删除门槛 |
+| 文件 | 已删除项 | 当前替代 |
 |---|---|---|
-| `src/application/strategy_lab/top1/corpus.py` | `_build_point_ranking_projection()` 及直接加载 `output_runs` opening / prepared artifact 的路径 | v3 projection 全部从 formal corpus 构建 |
-| 同上 | store-backed `_persist_expectation()` / `seal_day_expectation()` 及 calendar binding 实现 | calendar binding 实现移到 `research/formal_corpus.py`；新 file-only writer 保留 `_expectation_denominator()` 和首份 seal 采用语义后再删旧 caller，不删 schema v4 表或历史行 |
-| 同上 | `discover_recommendation_points()` | 新 archive 完成连续 readback，且已确认旧历史无 ready 迁移价值；不增加 apply |
-| `src/application/strategy_lab/top1/ranking.py` | projection v2 写入的 Bid / Ask、Greeks、合约和其他基础 candidate 副本 | v3 写入及读取全部通过；已有 v1/v2 artifact 仅在没有 active experiment 引用后停止支持 |
+| `src/application/strategy_lab/top1/corpus.py` | 直接加载 `output_runs`、Store-backed expectation / point writer 与 reader、point discovery、旧 dataset freeze 分支 | Formal Corpus loader + 内存 recipe projection |
+| `src/application/strategy_lab/top1/advance.py` | source-root 扫描、schedule loader、旧 expectation 封存和 point 捕获 | tick / observer 写 Formal Corpus；advance 只推进实验 |
+| `src/infrastructure/strategy_lab/experiment_store.py` | `corpus_day(s)`、`record_corpus_day()`、`corpus_point(s)`、`record_corpus_point()` | 无替代 Store API；正式事实由 immutable file artifact 拥有 |
+| `tests/test_strategy_lab_top1_corpus.py` 等 | 旧 Store corpus、`output_runs` discovery、兼容 freeze 和 advance repair 测试 | Formal Corpus、workspace、validation 与 advance 聚焦测试 |
 
 旧 `sell_put_top1_corpus_health_receipt.v1` 的 build / publish / read / validate、current / daily ref、
-Store status 包装和专属测试已在 source switch 发布且确认无内部 caller 后删除。历史 artifact、schema v4 表及
-其他 corpus projection 逻辑没有被改写或删除；其余旧 archive reader 仍按各自门槛处理。
+Store status 包装和专属测试也已删除。projection v2 仍是当前内存 materialization 和冻结研究合同的一部分，
+不是旧 corpus 读取兼容，因此不删除；持久化的 recipe projection 使用 v3。
 
 ### 6.6 明确不删除
 
@@ -740,7 +736,8 @@ Store status 包装和专属测试已在 source switch 发布且确认无内部 
 - `collect_current_performance_evidence()`、prepared v2 的 mark payload 和 performance-evidence repository：
   继续作为每个正式 run / account 一次的共享持仓行情 producer；formal binder 只消费本次 collector
   返回的 mark payload；
-- ExperimentStore、Top1 lifecycle / research / validation / outcome / receipt 实现：基础数据收敛不重写实验内核；
+- ExperimentStore 的实验、generation、event、observation、outcome 和 receipt 实现，以及 Top1 lifecycle /
+  research / validation / outcome：基础数据收敛不重写实验内核；
 - `run_strategy_lab_update`：现有 recorder service 仍调用，作为 Shadow Replay maintenance facade 保留。
 - 通用旧 Strategy Lab experiment / hypotheses / proposal / LLM context / domain adapter：已确认无生产调用并删除；
   探索性 dataset 分析由 Shadow Replay 直接负责。
@@ -755,10 +752,10 @@ capability 或 metric 表。Expectation 和 formal point 只读写 7.2 的文件
 或不可打开时，Formal Corpus health 都必须独立计算并返回，不调用 `corpus_day()`、
 `record_corpus_day()` 或其他 store API；Store 非 ready 只形成实验推进 blocker，不能吞掉健康事实。
 
-现有 `strategy_lab_corpus_days` 及其索引行只是旧 HK Top1 recipe projection 状态。切换期仅供旧 reader
-对比；Top1 reader 切到 formal corpus 后删除该路径的 caller，但不为清理闲置表引入 schema migration，
-也不删改历史行。研究、验证、observation、outcome、receipt 和内嵌 Proposal 的持久化合同
-继续复用 ExperimentStore。
+schema v4 中的 `strategy_lab_corpus_days` / `strategy_lab_corpus_points` 仅是闲置的历史表定义：生产代码不再
+读写，旧数据也不迁移或回填。为删除两个闲置空表引入 schema v5 migration 没有运行价值，因此暂留
+DDL；它们不是兼容链路，也不能作为研究事实。研究、验证、observation、outcome、receipt 和内嵌
+Proposal 的持久化合同继续复用 ExperimentStore。
 
 研究与隐藏验证继续使用现有 FX binding：研究 close receipt 绑定 terminal FX，隐藏验证通过
 `observation_json`、`job_json` 和 `fact_json` 绑定 opening / terminal FX。现有原子提交边界和 4096-byte

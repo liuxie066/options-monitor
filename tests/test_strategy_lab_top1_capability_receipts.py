@@ -67,12 +67,12 @@ def _fee_plan_payload() -> dict[str, object]:
     return {
         "schema_version": ACCOUNT_FEE_PLAN_RECEIPT_SCHEMA,
         "market": "HK",
-        "account": "lx",
+        "account": "user1",
         "commission_free": True,
         "platform_fee": 15.0,
         "fee_plan_ref": "futu-hk-plan.v1",
         "observed_at_utc": "2026-08-16T01:00:00Z",
-        "evidence_ref": "operator://futu/lx/fee-plan/2026-08-16",
+        "evidence_ref": "operator://futu/user1/fee-plan/2026-08-16",
         "evidence_sha256": "a" * 64,
     }
 
@@ -88,7 +88,7 @@ def _refresh(tmp_path: Path, gateway: Any, observed_at_utc: str) -> dict[str, ob
         tmp_path,
         gateway=gateway,
         market="HK",
-        account="lx",
+        account="user1",
         opend_binding=BINDING,
         account_fee_plan_receipt=_fee_plan(tmp_path),
         stock_owner="HK.00700",
@@ -115,7 +115,7 @@ def test_refresh_publishes_one_compact_receipt_and_readiness_facts(tmp_path: Pat
         read_top1_capability_receipt(
             tmp_path,
             market="HK",
-            account="lx",
+            account="user1",
             expected_opend_binding=BINDING,
         )
         == second
@@ -137,7 +137,7 @@ def test_receipt_fails_closed_for_provider_failure_binding_drift_and_tamper(
         read_top1_capability_receipt(
             tmp_path,
             market="HK",
-            account="lx",
+            account="user1",
             expected_opend_binding={"host": "127.0.0.1", "port": 22222},
         )
     assert drifted.value.reason_code == "top1_capability_receipt_unavailable"
@@ -150,7 +150,7 @@ def test_receipt_fails_closed_for_provider_failure_binding_drift_and_tamper(
         read_top1_capability_receipt(
             tmp_path,
             market="HK",
-            account="lx",
+            account="user1",
             expected_opend_binding=BINDING,
         )
     assert tampered.value.reason_code == "top1_capability_receipt_unavailable"
@@ -171,3 +171,25 @@ def test_fee_plan_receipt_requires_auditable_exact_facts(tmp_path: Path, change:
     path.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(Top1CapabilityReceiptError):
         load_account_fee_plan_receipt(path)
+
+
+def test_refresh_rejects_cross_account_fee_plan(tmp_path: Path) -> None:
+    fee_plan = _fee_plan_payload()
+    fee_plan["account"] = "user2"
+
+    with pytest.raises(Top1CapabilityReceiptError) as exc_info:
+        refresh_top1_capability_receipt(
+            tmp_path,
+            gateway=FakeGateway(),
+            market="HK",
+            account="user1",
+            opend_binding=BINDING,
+            account_fee_plan_receipt=fee_plan,
+            stock_owner="HK.00700",
+            contract_symbol=CONTRACT,
+            terms_expiration="2026-08-28",
+            close_expiration="2026-08-14",
+            observed_at_utc="2026-08-16T02:00:00Z",
+        )
+
+    assert exc_info.value.reason_code == "top1_capability_input_invalid"
