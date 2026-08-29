@@ -1,0 +1,49 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "2.2.3",
+  "base": {
+    "tag": "v2.2.2",
+    "commit": "d80df390f4da0abc6d36ba4bc3023273aaae1c70"
+  },
+  "reviewed_head": "731f171d86a70e10540fa5ab80470f87b748d004",
+  "commits": [
+    {
+      "sha": "ca8d86b39d71fafb494487db690a3bb86184579f",
+      "subject": "fix(strategy-lab): derive health from formal corpus"
+    },
+    {
+      "sha": "731f171d86a70e10540fa5ab80470f87b748d004",
+      "subject": "Merge pull request #184 from liuxie066/codex/strategy-lab-corpus-health-readiness-20260829"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Made Strategy Lab Top1 readiness compute a bounded 20-day corpus-health view directly from formal corpus facts, removing the stale duplicate health-artifact dependency while retaining fail-closed calendar and storage-capacity checks.",
+      "commits": [
+        "ca8d86b39d71fafb494487db690a3bb86184579f"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "731f171d86a70e10540fa5ab80470f87b748d004",
+      "reason": "Merge-only integration commit; the user-visible Strategy Lab change is mapped to its source commit."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "ca8d86b39d71fafb494487db690a3bb86184579f",
+      "references": [
+        "docs/STRATEGY_LAB_EXPERIMENT_PLATFORM_SYSTEM_DESIGN.md",
+        "https://github.com/liuxie066/options-monitor/pull/184"
+      ]
+    },
+    {
+      "commit": "731f171d86a70e10540fa5ab80470f87b748d004",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/184"
+      ]
+    }
+  ]
+}
