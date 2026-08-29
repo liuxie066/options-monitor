@@ -205,14 +205,6 @@
           "history_dimension": "required_data_and_process_payloads",
           "path_class": "compatibility_adapter",
           "later_phase": "phase_5"
-        },
-        {
-          "path_glob": "scripts/benchmark_required_data_scan_blobs.py",
-          "owner": "required_data_scan_blob_performance_harness",
-          "operation": "synthetic_encode_decode",
-          "history_dimension": "metadata_only_required_data_fixture",
-          "path_class": "benchmark_fixture",
-          "later_phase": "phase_6"
         }
       ]
     },
