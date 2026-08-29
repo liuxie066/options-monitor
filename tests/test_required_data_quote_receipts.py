@@ -4,7 +4,9 @@ import base64
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
+import stat
 
 import pandas as pd
 import pytest
@@ -16,6 +18,7 @@ from src.application.opend_symbol_outputs import (
     save_outputs,
 )
 from src.application.required_data_blobs import load_required_data_scan_blob
+from src.application import required_data_blobs as required_data_blobs_module
 from src.application.source_receipts import (
     SourceReceiptError,
     validate_source_receipt,
@@ -424,8 +427,8 @@ def test_quote_receipt_can_root_exact_canonical_scan_blob(tmp_path: Path) -> Non
 
     assert loaded["raw_json_bytes"] == raw_path.read_bytes()
     assert loaded["required_data_csv_bytes"] == csv_path.read_bytes()
-    assert base64.b64decode(bundle["raw_json_base64"]) == raw_path.read_bytes()
-    assert base64.b64decode(bundle["required_data_csv_base64"]) == csv_path.read_bytes()
+    assert "raw_json_base64" not in bundle
+    assert "required_data_csv_base64" not in bundle
     assert resolved is not None
     assert resolved["read_source"] == "canonical_blob"
     assert resolved["legacy_shadow_match"] is True
@@ -443,6 +446,56 @@ def test_quote_receipt_can_root_exact_canonical_scan_blob(tmp_path: Path) -> Non
         )
         is None
     )
+
+
+def test_canonical_blob_directory_fsync_failure_blocks_receipt(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    fetch_plan = _fetch_plan()
+    expected_contract = _contract(fetch_plan)
+    raw_path, csv_path = save_outputs(
+        tmp_path,
+        "NVDA",
+        _required_payload(),
+        output_root=tmp_path,
+    )
+    original_fsync = required_data_blobs_module.os.fsync
+    directory_fsyncs = 0
+
+    def fail_final_directory(descriptor: int) -> None:
+        nonlocal directory_fsyncs
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            directory_fsyncs += 1
+            if directory_fsyncs == 5:
+                raise OSError("injected final blob directory fsync failure")
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(required_data_blobs_module.os, "fsync", fail_final_directory)
+
+    with pytest.raises(
+        SourceReceiptError,
+        match="canonical blob publication failed",
+    ):
+        publish_required_data_quote_snapshot(
+            runtime_root=tmp_path,
+            producer_root=tmp_path,
+            producer_run_id="run-1",
+            symbol="NVDA",
+            raw_path=raw_path,
+            csv_path=csv_path,
+            fetch_plan=fetch_plan,
+            fetch_policy=_policy(),
+            expected_fetch_contract=expected_contract,
+            source_observed_at=NOW,
+            completed_at=NOW + timedelta(seconds=1),
+            now=NOW + timedelta(seconds=1),
+        )
+
+    assert directory_fsyncs == 5
+    assert raw_path.is_file()
+    assert csv_path.is_file()
+    assert not list(tmp_path.glob("source_receipts/quotes/*/*/*/receipt.json"))
 
 
 def test_quote_receipt_rejects_partial_required_data_payload(

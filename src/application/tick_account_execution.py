@@ -63,7 +63,8 @@ from src.application.ledger.api import (
 from src.application.quality.gate import QualityGateBlocked, assert_quality_allows
 from src.application.required_data_snapshot import (
     RequiredDataSnapshotError,
-    load_required_data_snapshot_manifest,
+    load_required_data_snapshot_manifest_snapshot,
+    retire_required_data_snapshot_shadows,
     seal_required_data_snapshot,
 )
 from src.application.candidate_snapshot_manifest import (
@@ -345,6 +346,51 @@ def _build_close_advice_barrier_plan(
         payload=plan,
     )
     return merged_config, plan_path
+
+
+def _retire_required_data_shadows_after_manifest(
+    *,
+    request: TickAccountExecutionRequest,
+    manifest_path: Path,
+    manifest: Mapping[str, Any],
+    manifest_bytes: bytes,
+    trigger: str,
+) -> dict[str, int]:
+    try:
+        summary = retire_required_data_snapshot_shadows(
+            manifest_path=manifest_path,
+            required_data_root=request.shared_required,
+            manifest=manifest,
+            manifest_bytes=manifest_bytes,
+        )
+    except Exception:
+        summary = {
+            "removed_files": 0,
+            "removed_bytes": 0,
+            "absent_files": 0,
+            "failed_files": 1,
+        }
+    event = {"trigger": trigger, **summary}
+    status = "ok" if summary["failed_files"] == 0 else "degraded"
+    try:
+        request.audit_helper.audit(
+            "cleanup",
+            "required_data_shadow_cleanup",
+            run_id=request.run_id,
+            status=status,
+            extra=event,
+        )
+    except Exception:
+        pass
+    try:
+        request.runlog.safe_event(
+            "required_data_shadow_cleanup",
+            status,
+            data=event,
+        )
+    except Exception:
+        pass
+    return summary
 
 
 def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAccountExecutionOutcome:
@@ -892,7 +938,8 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                     close_advice_required_data_plan_path
                 ),
             )
-            manifest_hash = sha256_bytes(snapshot_manifest_path.read_bytes())
+            manifest_bytes = snapshot_manifest_path.read_bytes()
+            manifest_hash = sha256_bytes(manifest_bytes)
             snapshot_manifest_sha256 = manifest_hash
             prefetch_summary = dict(prefetch_summary)
             prefetch_summary.update(
@@ -911,6 +958,13 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
             )
             snapshot_status = str(manifest["status"])
             prefetch_done = True
+            _retire_required_data_shadows_after_manifest(
+                request=request,
+                manifest_path=snapshot_manifest_path,
+                manifest=manifest,
+                manifest_bytes=manifest_bytes,
+                trigger="new_seal",
+            )
             request.audit_helper.audit(
                 "tool_call",
                 "required_data_prefetch",
@@ -1077,14 +1131,16 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
             / "required_data_snapshot_manifest.json"
         ).resolve()
         try:
-            manifest, _root = load_required_data_snapshot_manifest(
-                manifest_path=candidate,
-                expected_run_id=request.run_id,
-                expected_required_data_root=request.shared_required,
+            manifest, _root, manifest_bytes = (
+                load_required_data_snapshot_manifest_snapshot(
+                    manifest_path=candidate,
+                    expected_run_id=request.run_id,
+                    expected_required_data_root=request.shared_required,
+                )
             )
             snapshot_manifest_path = candidate
             snapshot_status = str(manifest["status"])
-            snapshot_manifest_sha256 = sha256_bytes(candidate.read_bytes())
+            snapshot_manifest_sha256 = sha256_bytes(manifest_bytes)
             try:
                 resolved_plan = (
                     resolve_bound_close_advice_required_data_plan(
@@ -1108,6 +1164,13 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                 )
             if snapshot_status == "failed":
                 barrier_reason = "required_data_snapshot_failed"
+            _retire_required_data_shadows_after_manifest(
+                request=request,
+                manifest_path=candidate,
+                manifest=manifest,
+                manifest_bytes=manifest_bytes,
+                trigger="recovery",
+            )
         except (OSError, RequiredDataSnapshotError):
             barrier_reason = "required_data_snapshot_manifest_unavailable"
             snapshot_status = "unavailable"

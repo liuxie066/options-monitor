@@ -336,6 +336,175 @@ def required_data_shadow_file_matches(
             os.close(descriptor)
 
 
+def fsync_required_data_bound_file(
+    *,
+    root: Path,
+    relpath: str,
+    expected_bytes: bytes,
+) -> None:
+    """Flush one exact bound artifact and every directory needed to reach it."""
+
+    opened = _open_bound_leaf(root=root, relpath=relpath, allow_absent=False)
+    assert opened is not None
+    directories, descriptor, _name = opened
+    try:
+        if not _descriptor_matches(descriptor, expected_bytes):
+            raise RequiredDataBlobError(
+                "required-data bound artifact changed before cleanup"
+            )
+        os.fsync(descriptor)
+        for directory in reversed(directories):
+            os.fsync(directory)
+    except RequiredDataBlobError:
+        raise
+    except OSError as exc:
+        raise RequiredDataBlobError(
+            "required-data bound artifact durability failed"
+        ) from exc
+    finally:
+        os.close(descriptor)
+        for directory in reversed(directories):
+            os.close(directory)
+
+
+def retire_required_data_shadow_file(
+    *,
+    root: Path,
+    relpath: str,
+    expected_bytes: bytes,
+) -> str:
+    """Remove one verified legacy shadow without following path symlinks."""
+
+    opened = _open_bound_leaf(root=root, relpath=relpath, allow_absent=True)
+    if opened is None:
+        return "absent"
+    directories, descriptor, name = opened
+    try:
+        opened_stat = os.fstat(descriptor)
+        if not _descriptor_matches(descriptor, expected_bytes):
+            raise RequiredDataBlobError("required-data shadow content mismatch")
+        current_stat = os.stat(
+            name,
+            dir_fd=directories[-1],
+            follow_symlinks=False,
+        )
+        opened_identity = (
+            opened_stat.st_dev,
+            opened_stat.st_ino,
+            opened_stat.st_size,
+            opened_stat.st_nlink,
+        )
+        current_identity = (
+            current_stat.st_dev,
+            current_stat.st_ino,
+            current_stat.st_size,
+            current_stat.st_nlink,
+        )
+        if opened_identity != current_identity:
+            raise RequiredDataBlobError(
+                "required-data shadow identity changed before cleanup"
+            )
+        os.unlink(name, dir_fd=directories[-1])
+        return "removed"
+    except RequiredDataBlobError:
+        raise
+    except OSError as exc:
+        raise RequiredDataBlobError("required-data shadow cleanup failed") from exc
+    finally:
+        os.close(descriptor)
+        for directory in reversed(directories):
+            os.close(directory)
+
+
+def _open_bound_leaf(
+    *,
+    root: Path,
+    relpath: str,
+    allow_absent: bool,
+) -> tuple[list[int], int, str] | None:
+    if (
+        not hasattr(os, "O_NOFOLLOW")
+        or not hasattr(os, "O_DIRECTORY")
+        or os.open not in os.supports_dir_fd
+        or os.stat not in os.supports_dir_fd
+        or os.stat not in os.supports_follow_symlinks
+        or os.unlink not in os.supports_dir_fd
+    ):
+        raise RequiredDataBlobError(
+            "required-data bound artifact primitives are unavailable"
+        )
+    base = _runtime_root(root)
+    parts = _bound_relpath_parts(relpath)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    directories: list[int] = []
+    try:
+        directories.append(os.open(base, flags))
+        for component in parts[:-1]:
+            directories.append(
+                os.open(component, flags, dir_fd=directories[-1])
+            )
+        descriptor = os.open(
+            parts[-1],
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=directories[-1],
+        )
+        return directories, descriptor, parts[-1]
+    except FileNotFoundError:
+        for directory in reversed(directories):
+            os.close(directory)
+        if allow_absent:
+            return None
+        raise RequiredDataBlobError(
+            "required-data bound artifact is unavailable"
+        ) from None
+    except OSError as exc:
+        for directory in reversed(directories):
+            os.close(directory)
+        raise RequiredDataBlobError(
+            "required-data bound artifact path is unsafe"
+        ) from exc
+
+
+def _bound_relpath_parts(relpath: str) -> tuple[str, ...]:
+    text = str(relpath or "").strip()
+    pure = PurePosixPath(text)
+    if (
+        not text
+        or pure.is_absolute()
+        or text != pure.as_posix()
+        or any(part in {"", ".", ".."} for part in pure.parts)
+    ):
+        raise RequiredDataBlobError(
+            "required-data bound artifact path is invalid"
+        )
+    return tuple(pure.parts)
+
+
+def _descriptor_matches(descriptor: int, expected_bytes: bytes) -> bool:
+    metadata = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or metadata.st_size != len(expected_bytes)
+    ):
+        return False
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    digest = hashlib.sha256()
+    while True:
+        chunk = os.read(descriptor, _BLOB_CHUNK_BYTES)
+        if not chunk:
+            break
+        digest.update(chunk)
+    return digest.digest() == hashlib.sha256(expected_bytes).digest()
+
+
 def _validate_required_data_scan_blob_payload(
     payload: Mapping[str, Any],
 ) -> tuple[dict[str, Any], bytes, bytes]:
@@ -660,10 +829,7 @@ def _write_once_or_adopt_blob(
             existing = _read_regular_at(directory, name)
             if existing != compressed:
                 raise RequiredDataBlobError("required-data blob destination conflicts")
-        try:
-            os.fsync(directory)
-        except OSError:
-            pass
+        os.fsync(directory)
         if _read_regular_at(directory, name) != compressed:
             raise RequiredDataBlobError("required-data blob publication mismatch")
     except RequiredDataBlobError:
@@ -725,6 +891,7 @@ def _open_directory_chain(
                     os.mkdir(component, 0o755, dir_fd=descriptor)
                 except FileExistsError:
                     pass
+                os.fsync(descriptor)
             child = os.open(
                 component,
                 flags | getattr(os, "O_NOFOLLOW", 0),
@@ -833,10 +1000,12 @@ __all__ = [
     "RequiredDataBlobError",
     "build_required_data_scan_blob_payload",
     "canonical_scan_blob_bytes",
+    "fsync_required_data_bound_file",
     "load_required_data_scan_blob",
     "publish_required_data_scan_blob",
     "required_data_scan_blob_ref_identity",
     "required_data_shadow_base64_matches",
     "required_data_shadow_file_matches",
+    "retire_required_data_shadow_file",
     "validate_required_data_scan_blob_ref",
 ]

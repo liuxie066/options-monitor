@@ -1991,7 +1991,9 @@ def publish_required_data_quote_snapshot(
         csv=csv,
         expected_fetch_contract=contract,
     )
-    raw_payload = json.loads(raw.read_text(encoding="utf-8"))
+    raw_bytes = raw.read_bytes()
+    csv_bytes = csv.read_bytes()
+    raw_payload = json.loads(raw_bytes.decode("utf-8"))
     raw_meta = raw_payload.get("meta") if isinstance(raw_payload, dict) else {}
     raw_meta = raw_meta if isinstance(raw_meta, Mapping) else {}
     _validate_quote_cache_metadata_binding(
@@ -2033,19 +2035,24 @@ def publish_required_data_quote_snapshot(
         "fetch_policy_hash": policy_hash,
         "raw_json_relpath": raw_relpath,
         "required_data_csv_relpath": csv_relpath,
-        "raw_json_base64": base64.b64encode(raw.read_bytes()).decode("ascii"),
-        "required_data_csv_base64": base64.b64encode(csv.read_bytes()).decode(
-            "ascii"
-        ),
     }
-    if runtime_root is not None:
+    if runtime_root is None:
+        bundle.update(
+            {
+                "raw_json_base64": base64.b64encode(raw_bytes).decode("ascii"),
+                "required_data_csv_base64": base64.b64encode(csv_bytes).decode(
+                    "ascii"
+                ),
+            }
+        )
+    else:
         try:
             bundle["scan_blob_ref"] = publish_required_data_scan_blob(
                 runtime_root=Path(runtime_root),
                 symbol=symbol_norm,
                 market=market,
-                raw_json_bytes=raw.read_bytes(),
-                required_data_csv_bytes=csv.read_bytes(),
+                raw_json_bytes=raw_bytes,
+                required_data_csv_bytes=csv_bytes,
                 columns=REQUIRED_DATA_COLUMNS,
             )
         except RequiredDataBlobError as exc:

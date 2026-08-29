@@ -217,21 +217,27 @@ Sealed required-data snapshots also publish one deterministic gzip payload per
 symbol at
 `output_shared/blobs/sha256/<first-two-hex>/<sha256>.json.gz`; the run's
 `state/required_data_snapshot_manifest.json` is the commit/root that retains the
-exact blob reference. During the compatibility window the producer still writes
-the legacy JSON, CSV, and inline base64 fields. A sealed reader prefers the blob
-when its reference exists, falls back only when the reference is absent, and
-fails closed instead of hiding a bad reference with legacy data. Shadow Replay
-surfaces payload-free `required_data_read_source_counts` and
-`required_data_legacy_read_count`; archive collection transfers only blob hashes
-reachable from selected run roots, never the whole shared blob store.
+exact blob reference. New scheduled receipts contain the blob reference but no
+inline base64. After a terminal manifest is durable, OM best-effort retires the
+run-local raw JSON and CSV shadows; `required_data_shadow_cleanup` reports only
+the trigger and removed/absent/failed file and byte counts. Cleanup failure is
+degraded telemetry and cannot change the sealed snapshot, barrier, or account
+result. Legacy/manual receipts without a blob reference and historical
+dual-output receipts remain readable and are never rewritten. A sealed reader
+falls back only when the reference is absent and fails closed instead of hiding
+a bad reference with legacy data. Shadow Replay surfaces payload-free
+`required_data_read_source_counts` and `required_data_legacy_read_count`;
+archive collection transfers only blob hashes reachable from selected run
+roots, never the whole shared blob store.
 
 The frozen consumer boundary is deliberate: ordinary scan/filter steps receive
 the single frame materialized by the sealed snapshot resolver; Close Advice,
 Daily Brief, Shadow Replay, and Strategy Lab consume the same sealed bytes.
 Prefetch, multiplier enrichment, coverage checks, quote-cache validation, and
 request-local materialization tools operate before sealing and therefore still
-use their producer workspace. Archive CSV checks are legacy-presence checks,
-while archive retention and replay use manifest blob references.
+use their producer workspace. Modern archive marking resolves the sealed
+manifest/blob even when run-local raw/CSV shadows are absent; parsed CSV remains
+a historical fallback only.
 
 The Phase 6 storage harness uses a checked-in metadata-only p99 descriptor and
 deterministic synthetic rows; it has no production-runtime input:
@@ -239,13 +245,14 @@ deterministic synthetic rows; it has no production-runtime input:
 ```bash
 ./.venv/bin/python scripts/benchmark_required_data_scan_blobs.py \
   --profile canonical --output docs/gateflow/scan-blob-canonical-performance.json
-./.venv/bin/python scripts/benchmark_required_data_scan_blobs.py \
-  --profile dual_output --output docs/gateflow/scan-blob-dual-output-performance.json
 ```
 
 The default 5 warmups and 30 repetitions are the formal labels. Lower counts
 are plumbing smoke only. Formal benchmark receipts remain gitignored process
-evidence and are not source-release artifacts.
+evidence and are not source-release artifacts. The only profile, `canonical`, executes
+compact receipt publication, seal, durability cleanup, and blob-only resolution.
+It gates deterministic fixture integrity, retained bytes, Python allocation,
+cleanup counts, and resolved bytes; timing is host-specific diagnostic evidence.
 
 To measure the current canonical position projector and the real SQLite full-
 replay writer on deterministic synthetic data:
@@ -408,7 +415,7 @@ For offline strategy evidence review, collect a candidate-scoped Research bundle
 
 Treat the shadow replay payload as offline evidence. If it lacks rejected samples, mark path snapshots, or outcome facts, it is not ready for manual strategy review and must not mutate production scanner config, Feishu, trade state, or notifications.
 
-When remote storage is constrained, use `./om research archive pull --remote prod --ssh-target <host> --require-replay-evidence` first. The default local archive is `output_shared/research/remote_archive/prod/`; `pull` is dry-run unless `--write` is passed. `--require-replay-evidence` filters out scheduler skip / tick heartbeat directories and selects runs with sealed candidate snapshots/status or `candidate_filter_trace.jsonl`; legacy candidate filenames are classification metadata only. After `./om research archive verify --remote prod`, use `./om research archive build-datasets --remote prod --market us --write` to create local Shadow Replay datasets; `--market` uses validated snapshot/manifest identity. Dataset build writes an initial scan-time mark from archived run `required_data/parsed` when present, but final outcome evidence still requires later path/expiry marks and `settle`. `archive prune-remote` defaults to the `output-runs` scope. The separate `shadow-replay-receipts` scope requires the verified inventory, current local archive, and current remote path/size/hash to match, then repeats plan and content checks at confirmed apply time. Neither preview authorizes `--confirm`.
+When remote storage is constrained, use `./om research archive pull --remote prod --ssh-target <host> --require-replay-evidence` first. The default local archive is `output_shared/research/remote_archive/prod/`; `pull` is dry-run unless `--write` is passed. `--require-replay-evidence` filters out scheduler skip / tick heartbeat directories and selects runs with sealed candidate snapshots/status or `candidate_filter_trace.jsonl`; legacy candidate filenames are classification metadata only. After `./om research archive verify --remote prod`, use `./om research archive build-datasets --remote prod --market us --write` to create local Shadow Replay datasets; `--market` uses validated snapshot/manifest identity. Dataset build writes an initial scan-time mark from the archived run's sealed required-data snapshot; modern runs resolve the manifest/blob without requiring `required_data/parsed`, while historical runs may use their parsed CSV fallback. Final outcome evidence still requires later path/expiry marks and `settle`. `archive prune-remote` defaults to the `output-runs` scope. The separate `shadow-replay-receipts` scope requires the verified inventory, current local archive, and current remote path/size/hash to match, then repeats plan and content checks at confirmed apply time. Neither preview authorizes `--confirm`.
 
 For an explicit local dataset, use `./om research shadow-replay build --run-id <run-id>`, then inspect `./om research shadow-replay status --min-sample 30 --min-mark-points 2 --mark-stale-hours 24` to see each dataset's next data-lifecycle action. `data_plan` contains only executable data-maintenance actions (`collect_marks` / `settle`), while `review_queue` lists datasets ready for explicit manual `analyze`. Use `./om research shadow-replay run-data-plan` as the independent low-frequency maintenance entry: it is dry-run by default with no receipt write, and only `--write` executes eligible `collect_marks` / `settle` actions and writes a compact v2 local receipt containing hashes, counts, action summaries, safety results, and non-plaintext exception evidence rather than duplicated full status payloads. It must not execute `analyze`; manual review stays on the explicit `analyze` command. Collect path samples with `./om research shadow-replay collect-marks --dataset <dataset-dir> --source local --write` or explicit OpenD sampling via `--source opend --write`. OpenD sampling refreshes local required-data cache before appending this point-in-time mark, and may update local OpenD rate-limit state / option-chain cache; it cannot recover past option marks that were never collected. OpenD preview without `--write` uses temporary paths and does not persist those files. You can still run the lower-level `mark`, `settle`, and `analyze` commands directly. Build, local collect, mark, and settle only write local replay evidence; OpenD collect also writes local evidence/cache files only. Missing required-data quotes are recorded as `missing_quote` evidence gaps and are not usable marks; expiry spot-only marks can be used for expiration outcome facts.
 

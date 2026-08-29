@@ -181,7 +181,7 @@ def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
     archive_build.add_argument(
         "--no-mark-from-run-required-data",
         action="store_true",
-        help="do not generate initial mark_path_snapshots from archived run required_data/parsed",
+        help="do not generate initial mark_path_snapshots from archived run sealed required-data",
     )
     archive_build.add_argument("--write", action="store_true")
 

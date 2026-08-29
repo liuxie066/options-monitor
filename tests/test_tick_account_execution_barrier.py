@@ -272,6 +272,7 @@ def test_barrier_prefetches_once_and_seals_before_account_submission(
 
     prefetch_calls: list[dict] = []
     account_requests = []
+    cleanup_calls: list[dict] = []
 
     def fake_prefetch(**kwargs):
         prefetch_calls.append(kwargs)
@@ -321,6 +322,11 @@ def test_barrier_prefetches_once_and_seals_before_account_submission(
     monkeypatch.setattr(mod, "prepare_portfolio_contexts", _fake_prepare)
     monkeypatch.setattr(mod, "prefetch_required_data", fake_prefetch)
     monkeypatch.setattr(mod, "seal_required_data_snapshot", fake_seal)
+    monkeypatch.setattr(
+        mod,
+        "_retire_required_data_shadows_after_manifest",
+        lambda **kwargs: cleanup_calls.append(kwargs),
+    )
     monkeypatch.setattr(mod, "run_one_account", fake_run_one_account)
 
     outcome = mod.run_tick_account_execution(
@@ -328,6 +334,11 @@ def test_barrier_prefetches_once_and_seals_before_account_submission(
     )
 
     assert len(prefetch_calls) == 1
+    assert len(cleanup_calls) == 1
+    assert cleanup_calls[0]["trigger"] == "new_seal"
+    assert cleanup_calls[0]["manifest_bytes"] == cleanup_calls[0][
+        "manifest_path"
+    ].read_bytes()
     assert prefetch_calls[0]["force_refresh"] is force
     assert {item.acct for item in account_requests} == set(accounts)
     assert all(item.required_data_snapshot_manifest for item in account_requests)
@@ -949,10 +960,15 @@ def test_reentry_restores_manifest_bound_close_advice_plan_without_replanning(
         },
     )
     account_requests = []
+    cleanup_calls: list[dict] = []
     monkeypatch.setattr(
         mod,
-        "load_required_data_snapshot_manifest",
-        lambda **_kwargs: (manifest, request.shared_required.resolve()),
+        "load_required_data_snapshot_manifest_snapshot",
+        lambda **_kwargs: (
+            manifest,
+            request.shared_required.resolve(),
+            manifest_path.read_bytes(),
+        ),
     )
     monkeypatch.setattr(
         mod,
@@ -985,6 +1001,11 @@ def test_reentry_restores_manifest_bound_close_advice_plan_without_replanning(
             AssertionError("re-entry must not prefetch again")
         ),
     )
+    monkeypatch.setattr(
+        mod,
+        "_retire_required_data_shadows_after_manifest",
+        lambda **kwargs: cleanup_calls.append(kwargs),
+    )
 
     def _run_one_account(*, request, **_kwargs):
         account_requests.append(request)
@@ -1007,6 +1028,9 @@ def test_reentry_restores_manifest_bound_close_advice_plan_without_replanning(
 
     assert outcome.prefetch_invocation_count == 0
     assert outcome.snapshot_status == "complete"
+    assert len(cleanup_calls) == 1
+    assert cleanup_calls[0]["trigger"] == "recovery"
+    assert cleanup_calls[0]["manifest_bytes"] == manifest_path.read_bytes()
     assert len(account_requests) == 1
     assert (
         account_requests[0].close_advice_required_data_plan
@@ -1016,6 +1040,75 @@ def test_reentry_restores_manifest_bound_close_advice_plan_without_replanning(
         account_requests[0].prepared_option_positions_context_manifest
         == option_manifest_path.resolve()
     )
+
+
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+def test_required_data_shadow_cleanup_is_observable_and_nonfatal(
+    monkeypatch,
+    tmp_path: Path,
+    cleanup_fails: bool,
+) -> None:
+    from src.application import tick_account_execution as mod
+
+    request = _request(
+        tmp_path,
+        accounts=["lx"],
+        workers=1,
+        force=False,
+    )
+    request.audit_helper.audit = Mock()
+    request.runlog.safe_event = Mock()
+    expected = {
+        "removed_files": 2,
+        "removed_bytes": 123,
+        "absent_files": 0,
+        "failed_files": 0,
+    }
+
+    if cleanup_fails:
+        monkeypatch.setattr(
+            mod,
+            "retire_required_data_snapshot_shadows",
+            lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("disk busy")),
+        )
+        expected = {
+            "removed_files": 0,
+            "removed_bytes": 0,
+            "absent_files": 0,
+            "failed_files": 1,
+        }
+    else:
+        monkeypatch.setattr(
+            mod,
+            "retire_required_data_snapshot_shadows",
+            lambda **_kwargs: expected,
+        )
+
+    summary = mod._retire_required_data_shadows_after_manifest(
+        request=request,
+        manifest_path=request.run_dir / "state/manifest.json",
+        manifest={},
+        manifest_bytes=b"{}\n",
+        trigger="new_seal",
+    )
+
+    status = "degraded" if cleanup_fails else "ok"
+    event = {"trigger": "new_seal", **expected}
+    assert summary == expected
+    request.audit_helper.audit.assert_called_once_with(
+        "cleanup",
+        "required_data_shadow_cleanup",
+        run_id=request.run_id,
+        status=status,
+        extra=event,
+    )
+    request.runlog.safe_event.assert_called_once_with(
+        "required_data_shadow_cleanup",
+        status,
+        data=event,
+    )
+
+
 @pytest.mark.parametrize(
     ("seal_behavior", "reason", "prefetch_done"),
     [

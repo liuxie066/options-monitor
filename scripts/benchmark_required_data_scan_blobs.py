@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
 from datetime import datetime, timezone
 import hashlib
 import io
@@ -24,35 +23,48 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.application.opend_symbol_outputs import REQUIRED_DATA_COLUMNS
+from src.application.close_advice_quote_cache import publish_quote_cache_metadata
+from src.application.opend_symbol_outputs import (
+    REQUIRED_DATA_COLUMNS,
+    publish_required_data_quote_snapshot,
+)
 from src.application.required_data_blobs import (
     build_required_data_scan_blob_payload,
     canonical_scan_blob_bytes,
-    load_required_data_scan_blob,
-    publish_required_data_scan_blob,
-    required_data_shadow_base64_matches,
-    required_data_shadow_file_matches,
+)
+from src.application.required_data_plan_identity import (
+    build_required_data_expected_fetch_contract,
+    required_data_plan_id,
+)
+from src.application.required_data_snapshot import (
+    resolve_frozen_required_data,
+    retire_required_data_snapshot_shadows,
+    seal_required_data_snapshot,
 )
 
 
 FIXTURE_SCHEMA = "required_data_scan_blob_benchmark_fixture.v1"
-RECEIPT_SCHEMA = "required_data_scan_blob_benchmark.v1"
+RECEIPT_SCHEMA = "required_data_scan_blob_benchmark.v2"
 FIXTURE_PATH = REPO_ROOT / "tests/fixtures/required_data_scan_blob_benchmark_metadata.v1.json"
-FIXTURE_CONTRACT_SHA256 = "3bb750138808d18867a73ea57587aad2ea4e548ed18c1f23dc0954d113835da4"
+FIXTURE_CONTRACT_SHA256 = "e6d4c4033a4695bfc3f38298d34be0257d90042e3a1a84907dc9812f9ced1485"
 EXPECTED_FIXTURE = {
-    "raw_json_sha256": "54a6c0af5174a00956abc822dafca03647fab963cae1ba765b358eb53b0fb64e",
-    "required_data_csv_sha256": "32cb7dda9bbbee24a7c52cf0264e6ec4c3db6041c811586975dc4f7790504087",
-    "canonical_blob_sha256": "5c32970edd645a88a8d045dddf92b5ad0dd73a2a8a1dd66610c8c20594703784",
-    "raw_json_bytes": 188_488,
-    "required_data_csv_bytes": 38_272,
-    "canonical_blob_bytes": 153_813,
+    "raw_json_sha256": "0520d76e029e6f7447d835cdb0fe77e8cd9f1b554006750c195bd7126d2a58ea",
+    "required_data_csv_sha256": "05685c16d0cb17fc1bf6359d51c01be81e96526f38920873afca266f5e709404",
+    "canonical_blob_sha256": "df7e782498fec5853515a4fd354fcfae6f13bb775cc80b64d522d5c64a5a6be3",
+    "raw_json_bytes": 187_345,
+    "required_data_csv_bytes": 39_415,
+    "canonical_blob_bytes": 146_955,
 }
 SEED = 20260816
 ROW_COUNT = 254
 TARGET_LEGACY_PAIR_BYTES = 226_760
 WARMUPS = 5
 REPETITIONS = 30
-PROFILES = ("canonical", "dual_output")
+PROFILES = ("canonical",)
+OBSERVED_AT = datetime(2026, 8, 16, 12, 0, tzinfo=timezone.utc)
+EXPIRATION = "2026-12-18"
+HOST = "127.0.0.1"
+PORT = 11111
 
 
 def _canonical_bytes(value: Any) -> bytes:
@@ -146,22 +158,22 @@ def _deterministic_text(label: str, length: int) -> str:
 
 
 def _fixture_row(index: int) -> dict[str, Any]:
-    option_type = "put" if index % 2 == 0 else "call"
     entropy_class = index % 3
     if entropy_class == 0:
-        vendor_detail = "A" * 200
+        vendor_detail = "A" * 140
     elif entropy_class == 1:
-        vendor_detail = (f"fixture-{index:04d}|" * 20)[:200]
+        vendor_detail = (f"fixture-{index:04d}|" * 20)[:140]
     else:
-        vendor_detail = _deterministic_text(f"row-{index}", 200)
+        vendor_detail = _deterministic_text(f"row-{index}", 140)
     return {
         "symbol": "FIXTURE",
         "market": "US",
-        "option_type": option_type,
-        "expiration": "2026-12-18",
+        "option_type": "put",
+        "expiration": EXPIRATION,
         "dte": 124,
-        "contract_symbol": f"FIXTURE261218{option_type[0].upper()}{index:08d}",
+        "contract_symbol": f"FIXTURE261218P{index:08d}",
         "strike": 80 + index / 10,
+        "spot": 110.0,
         "bid": 1.1,
         "ask": 1.2,
         "last_price": 1.15,
@@ -182,9 +194,31 @@ def _raw_bytes(payload: dict[str, Any]) -> bytes:
 
 def generate_fixture(*, verify: bool = True) -> dict[str, Any]:
     rows = [_fixture_row(index) for index in range(ROW_COUNT)]
+    codes = [str(row["contract_symbol"]) for row in rows]
     provider = {
         "symbol": "FIXTURE",
-        "meta": {"status": "ok", "source_outcome": "success_rows"},
+        "underlier_code": "US.FIXTURE",
+        "expiration_count": 1,
+        "expirations": [EXPIRATION],
+        "meta": {
+            "status": "ok",
+            "source": "opend",
+            "host": HOST,
+            "port": PORT,
+            "trading_date": "2026-08-16",
+            "source_outcome": "success_rows",
+            "source_observed_at": OBSERVED_AT.isoformat(),
+            "completed_at_utc": OBSERVED_AT.isoformat(),
+            "snapshot_complete": True,
+            "snapshot_requested_codes": ROW_COUNT,
+            "snapshot_returned_codes": ROW_COUNT,
+            "snapshot_missing_codes": 0,
+            "snapshot_unexpected_codes": 0,
+            "snapshot_requested_code_set": codes,
+            "snapshot_returned_code_set": codes,
+            "snapshot_missing_code_set": [],
+            "snapshot_unexpected_code_set": [],
+        },
         "rows": rows,
         "fixture_padding": "",
     }
@@ -231,119 +265,202 @@ def generate_fixture(*, verify: bool = True) -> dict[str, Any]:
     }
 
 
-def _legacy_bundle(root: Path, fixture: dict[str, Any]) -> dict[str, int]:
-    # Hold both profiles to the same semantic validation boundary.  Comparing
-    # the fail-closed CAS path with unchecked file/base64 I/O would measure two
-    # different contracts rather than the storage transition.
-    build_required_data_scan_blob_payload(
-        symbol="FIXTURE",
-        market="US",
-        raw_json_bytes=fixture["raw"],
-        required_data_csv_bytes=fixture["csv"],
-        columns=REQUIRED_DATA_COLUMNS,
-    )
-    raw_path = root / "required_data/raw/FIXTURE_required_data.json"
-    csv_path = root / "required_data/parsed/FIXTURE_required_data.csv"
-    raw_path.parent.mkdir(parents=True)
-    csv_path.parent.mkdir(parents=True)
-    raw_path.write_bytes(fixture["raw"])
-    csv_path.write_bytes(fixture["csv"])
-    bundle = {
-        "raw_json_base64": base64.b64encode(fixture["raw"]).decode("ascii"),
-        "required_data_csv_base64": base64.b64encode(fixture["csv"]).decode("ascii"),
+def _fetch_plan() -> dict[str, Any]:
+    strikes = [float(80 + index / 10) for index in range(ROW_COUNT)]
+    side_plan = {
+        "option_type": "put",
+        "min_dte": 100,
+        "max_dte": 140,
+        "explicit_expirations": [EXPIRATION],
+        "strike_window": {
+            "min_strike": strikes[0],
+            "max_strike": strikes[-1],
+            "source": "fixture",
+            "buffer_applied": False,
+            "buffer_pct": 0.0,
+            "base_min_strike": strikes[0],
+            "base_max_strike": strikes[-1],
+        },
+        "planning_reason": "fixture",
+        "source_fields": ["benchmark"],
+        "spot_reference": 110.0,
+        "min_strike": strikes[0],
+        "max_strike": strikes[-1],
+        "expiration_count": 1,
+        "required_exact_strikes_by_expiration": {EXPIRATION: strikes},
     }
-    receipt = _canonical_bytes(bundle)
-    receipt_path = root / "state/required_data_bundle.json"
-    receipt_path.parent.mkdir(parents=True)
-    receipt_path.write_bytes(receipt)
-    loaded = json.loads(receipt_path.read_text(encoding="utf-8"))
-    loaded_raw = base64.b64decode(loaded["raw_json_base64"], validate=True)
-    loaded_csv = base64.b64decode(loaded["required_data_csv_base64"], validate=True)
-    if loaded_raw != raw_path.read_bytes() or loaded_csv != csv_path.read_bytes():
-        raise RuntimeError("legacy required-data roundtrip mismatch")
-    build_required_data_scan_blob_payload(
-        symbol="FIXTURE",
-        market="US",
-        raw_json_bytes=loaded_raw,
-        required_data_csv_bytes=loaded_csv,
-        columns=REQUIRED_DATA_COLUMNS,
-    )
     return {
-        "legacy_files_bytes": len(fixture["raw"]) + len(fixture["csv"]),
-        "legacy_receipt_bytes": len(receipt),
+        "symbol": "FIXTURE",
+        "spot_reference": 110.0,
+        "side_plans": [side_plan],
+        "merged_requests": [
+            {
+                "symbol": "FIXTURE",
+                "limit_expirations": 8,
+                "host": HOST,
+                "port": PORT,
+                "option_types": ["put"],
+                "explicit_expirations": [EXPIRATION],
+                "min_dte": 100,
+                "max_dte": 140,
+                "side_strike_windows": {
+                    "put": {
+                        "min_strike": strikes[0],
+                        "max_strike": strikes[-1],
+                    }
+                },
+                "include_realized_volatility": False,
+                "trading_date": "2026-08-16",
+                "side_plans": [side_plan],
+                "planning_reason": "fixture",
+            }
+        ],
+        "require_realized_volatility": False,
+        "expiration_discovery_complete": True,
+        "expiration_discovery_error": None,
+        "expiration_discovery": {
+            "outcome": "success_rows",
+            "reason_code": None,
+            "expirations": [EXPIRATION],
+            "observed_at_utc": OBSERVED_AT.isoformat(),
+            "completed_at_utc": OBSERVED_AT.isoformat(),
+            "request_identity": {
+                "symbol": "FIXTURE",
+                "underlier": "US.FIXTURE",
+                "source": "opend",
+                "host": HOST,
+                "port": PORT,
+                "trading_date": "2026-08-16",
+            },
+            "error": None,
+        },
+        "projection_outcome": "success_rows",
+        "projected_expirations": [EXPIRATION],
+    }
+
+
+def _plan_summary(fetch_plan: dict[str, Any], contract: dict[str, Any]) -> dict[str, Any]:
+    plan_item = {
+        "symbol": "FIXTURE",
+        "source": "opend",
+        "fetch_binding": dict(contract["fetch_binding"]),
+        "fetch_plan": fetch_plan,
+        "expected_fetch_contract": contract,
+        "projection_outcome": "success_rows",
+        "discovery_status": "complete",
+    }
+    return {
+        "schema_version": "1.0",
+        "errors": 0,
+        "global_required_data_plan": {
+            "plan_id": required_data_plan_id([plan_item]),
+            "symbols": [plan_item],
+            "symbols_count": 1,
+            "discovery_complete": True,
+        },
+        "symbols": [],
+        "results": [],
     }
 
 
 def _canonical_bundle(
     root: Path,
     fixture: dict[str, Any],
-    *,
-    dual_output: bool,
 ) -> dict[str, Any]:
     root.mkdir()
-    legacy = (
-        _legacy_bundle(root, fixture)
-        if dual_output
-        else {
-            "legacy_files_bytes": 0,
-            "legacy_receipt_bytes": 0,
-        }
-    )
-    ref = publish_required_data_scan_blob(
-        runtime_root=root,
+    root = root.resolve()
+    run_id = "fixture"
+    run_dir = root / "output_runs" / run_id
+    required_root = run_dir / "required_data"
+    raw_path = required_root / "raw" / "FIXTURE_required_data.json"
+    csv_path = required_root / "parsed" / "FIXTURE_required_data.csv"
+    raw_path.parent.mkdir(parents=True)
+    csv_path.parent.mkdir(parents=True)
+    raw_path.write_bytes(fixture["raw"])
+    csv_path.write_bytes(fixture["csv"])
+    publish_quote_cache_metadata(
+        csv_path=csv_path,
         symbol="FIXTURE",
-        market="US",
-        raw_json_bytes=fixture["raw"],
-        required_data_csv_bytes=fixture["csv"],
-        columns=REQUIRED_DATA_COLUMNS,
+        source="opend",
+        source_run_id=run_id,
+        observed_at=OBSERVED_AT,
     )
-    manifest = _canonical_bytes(
-        {
-            "schema_version": "required_data_scan_blob_benchmark_manifest.v1",
-            "scan_blob_refs": [ref],
-        }
+    fetch_plan = _fetch_plan()
+    contract = build_required_data_expected_fetch_contract(
+        symbol="FIXTURE",
+        fetch_plan=fetch_plan,
+        source="opend",
+        host=HOST,
+        port=PORT,
     )
-    manifest_path = root / "output_runs/fixture/state/required_data_snapshot_manifest.json"
-    manifest_path.parent.mkdir(parents=True)
-    manifest_path.write_bytes(manifest)
-    loaded_ref = json.loads(manifest_path.read_text(encoding="utf-8"))["scan_blob_refs"][0]
-    loaded = load_required_data_scan_blob(runtime_root=root, blob_ref=loaded_ref)
+    receipt_path, receipt = publish_required_data_quote_snapshot(
+        runtime_root=root,
+        producer_root=required_root,
+        producer_run_id=run_id,
+        symbol="FIXTURE",
+        raw_path=raw_path,
+        csv_path=csv_path,
+        fetch_plan=fetch_plan,
+        fetch_policy={"source": "opend", "host": HOST, "port": PORT},
+        expected_fetch_contract=contract,
+        source_observed_at=OBSERVED_AT,
+        completed_at=OBSERVED_AT,
+        now=OBSERVED_AT,
+    )
+    manifest_path = run_dir / "state" / "required_data_snapshot_manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest = seal_required_data_snapshot(
+        manifest_path=manifest_path,
+        required_data_root=required_root,
+        run_id=run_id,
+        prefetch_summary=_plan_summary(fetch_plan, contract),
+        sealed_at=OBSERVED_AT,
+    )
+    manifest_bytes = manifest_path.read_bytes()
+    cleanup = {
+        "removed_files": 0,
+        "removed_bytes": 0,
+        "absent_files": 0,
+        "failed_files": 0,
+    }
+    cleanup = retire_required_data_snapshot_shadows(
+        manifest_path=manifest_path,
+        required_data_root=required_root,
+        manifest=manifest,
+        manifest_bytes=manifest_bytes,
+    )
+    resolved = resolve_frozen_required_data(
+        manifest_path=manifest_path,
+        expected_run_id=run_id,
+        symbol="FIXTURE",
+        required_data_root=required_root,
+        now=OBSERVED_AT,
+    )
+    ref = manifest["symbols"]["FIXTURE"]["scan_blob_ref"]
     mismatches: list[str] = []
-    if loaded["raw_json_bytes"] != fixture["raw"]:
-        mismatches.append("canonical_raw")
-    if loaded["required_data_csv_bytes"] != fixture["csv"]:
-        mismatches.append("canonical_csv")
-    if dual_output:
-        raw_path = root / "required_data/raw/FIXTURE_required_data.json"
-        csv_path = root / "required_data/parsed/FIXTURE_required_data.csv"
-        receipt = json.loads((root / "state/required_data_bundle.json").read_text(encoding="utf-8"))
-        checks = (
-            (
-                "legacy_raw_file",
-                required_data_shadow_file_matches(raw_path, loaded["raw_json_bytes"]),
-            ),
-            (
-                "legacy_csv_file",
-                required_data_shadow_file_matches(csv_path, loaded["required_data_csv_bytes"]),
-            ),
-            (
-                "legacy_raw_inline",
-                required_data_shadow_base64_matches(receipt["raw_json_base64"], loaded["raw_json_bytes"]),
-            ),
-            (
-                "legacy_csv_inline",
-                required_data_shadow_base64_matches(
-                    receipt["required_data_csv_base64"],
-                    loaded["required_data_csv_bytes"],
-                ),
-            ),
-        )
-        mismatches.extend(name for name, matched in checks if not matched)
+    if resolved["read_source"] != "canonical_blob":
+        mismatches.append("canonical_read_source")
+    if cleanup != {
+        "removed_files": 2,
+        "removed_bytes": len(fixture["raw"]) + len(fixture["csv"]),
+        "absent_files": 0,
+        "failed_files": 0,
+    }:
+        mismatches.append("canonical_cleanup")
+    if raw_path.exists():
+        mismatches.append("canonical_raw_shadow")
+    if csv_path.exists():
+        mismatches.append("canonical_csv_shadow")
+    payload_path = required_root / str(receipt["payload_relpath"])
+    compact_receipt_bytes = receipt_path.stat().st_size + payload_path.stat().st_size
+    cache_metadata_bytes = sum(path.stat().st_size for path in required_root.glob("parsed/*_required_data.meta.json"))
     retained = sum(path.stat().st_size for path in root.rglob("*") if path.is_file())
     return {
-        **legacy,
         "compressed_blob_bytes": ref["compressed_size_bytes"],
-        "manifest_bytes": len(manifest),
+        "manifest_bytes": len(manifest_bytes),
+        "compact_receipt_bytes": compact_receipt_bytes,
+        "cache_metadata_bytes": cache_metadata_bytes,
+        **cleanup,
         "retained_bytes": retained,
         "mismatch_samples": mismatches[:10],
         "mismatch_count": len(mismatches),
@@ -366,6 +483,7 @@ def _measure(
     *,
     warmups: int,
     repetitions: int,
+    measure_allocation: bool = True,
 ) -> tuple[dict[str, Any], dict[str, Any], int]:
     wall: list[int] = []
     cpu: list[int] = []
@@ -382,11 +500,13 @@ def _measure(
                 wall.append(elapsed_wall)
                 cpu.append(elapsed_cpu)
                 last = result
-        allocation_root = base / "allocation"
-        tracemalloc.start()
-        action(allocation_root)
-        _, peak = tracemalloc.get_traced_memory()
-        tracemalloc.stop()
+        peak = 0
+        if measure_allocation:
+            allocation_root = base / "allocation"
+            tracemalloc.start()
+            action(allocation_root)
+            _, peak = tracemalloc.get_traced_memory()
+            tracemalloc.stop()
     return _distribution(wall), _distribution(cpu), peak
 
 
@@ -411,40 +531,31 @@ def run_profile(profile: str, *, warmups: int, repetitions: int) -> dict[str, An
     except RuntimeError as exc:
         raise RuntimeError("scan blob fixture preflight failed") from exc
     formal = warmups == WARMUPS and repetitions == REPETITIONS
-    action = lambda root: _canonical_bundle(
-        root,
-        fixture,
-        dual_output=profile == "dual_output",
+    action = lambda root: _canonical_bundle(root, fixture)
+    wall, cpu, peak = _measure(
+        action,
+        warmups=warmups,
+        repetitions=repetitions,
+        measure_allocation=formal,
     )
-    wall, cpu, peak = _measure(action, warmups=warmups, repetitions=repetitions)
     with tempfile.TemporaryDirectory(prefix="scan-blob-evidence-") as raw_tmp:
         evidence = action(Path(raw_tmp) / "runtime")
-    legacy_wall = None
-    if profile == "canonical":
-        measured, _legacy_cpu, _legacy_peak = _measure(
-            lambda root: root.mkdir() or _legacy_bundle(root, fixture),
-            warmups=warmups,
-            repetitions=repetitions,
-        )
-        legacy_wall = measured
     allocation_limit = max(
-        32 * 1024 * 1024 if profile == "canonical" else 48 * 1024 * 1024,
-        int(fixture["observed"]["canonical_blob_bytes"] * (2 if profile == "canonical" else 2.5)),
+        32 * 1024 * 1024,
+        2 * fixture["observed"]["canonical_blob_bytes"],
     )
-    canonical_limit = evidence["compressed_blob_bytes"] + evidence["manifest_bytes"]
-    legacy_representation = evidence["legacy_files_bytes"] + evidence["legacy_receipt_bytes"]
-    transition_limit = 2 * max(evidence["compressed_blob_bytes"], legacy_representation) + evidence["manifest_bytes"]
-    peak_transition = evidence["retained_bytes"] + evidence["compressed_blob_bytes"]
+    canonical_limit = (
+        evidence["compressed_blob_bytes"]
+        + evidence["manifest_bytes"]
+        + evidence["compact_receipt_bytes"]
+        + evidence["cache_metadata_bytes"]
+    )
     if evidence["mismatch_count"] or len(evidence["mismatch_samples"]) > 10:
         violations.append("bounded_shadow_comparison")
     if peak > allocation_limit:
         violations.append("python_peak_allocation_bytes")
-    if profile == "canonical" and evidence["retained_bytes"] > canonical_limit:
+    if evidence["retained_bytes"] > canonical_limit:
         violations.append("canonical_persisted_bytes")
-    if profile == "dual_output" and peak_transition > transition_limit:
-        violations.append("dual_output_transition_bytes")
-    if formal and legacy_wall is not None and wall["p95"] > legacy_wall["p95"] * 1.10:
-        violations.append("canonical_vs_legacy_p95_wall")
     receipt = {
         "schema_version": RECEIPT_SCHEMA,
         "measured_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -461,17 +572,14 @@ def run_profile(profile: str, *, warmups: int, repetitions: int) -> dict[str, An
         "timing": {
             "canonical_wall": wall,
             "canonical_cpu": cpu,
-            "legacy_wall": legacy_wall,
             "profilers_enabled": False,
-            "tracemalloc_enabled": False,
+            "tracemalloc_enabled": formal,
         },
         "python_peak_allocation_bytes": peak,
         "python_peak_allocation_limit_bytes": allocation_limit,
         "space": {
             **evidence,
             "canonical_persisted_limit_bytes": canonical_limit,
-            "dual_output_peak_temp_plus_retained_bytes": peak_transition,
-            "dual_output_two_representation_limit_bytes": transition_limit,
         },
         "violations": sorted(set(violations)),
     }

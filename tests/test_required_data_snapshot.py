@@ -4,11 +4,13 @@ import base64
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import pytest
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
+import src.application.required_data_snapshot as required_data_snapshot_module
 from src.application.opend_symbol_outputs import (
     _csv_roundtrip_frame,
     _validate_consumer_csv_projection,
@@ -23,6 +25,7 @@ from src.application.required_data_snapshot import (
     load_required_data_snapshot_manifest_snapshot,
     resolve_frozen_required_data,
     resolve_frozen_required_data_csv_bytes_batch,
+    retire_required_data_snapshot_shadows,
     seal_required_data_snapshot,
 )
 from src.application.required_data_plan_identity import (
@@ -31,7 +34,8 @@ from src.application.required_data_plan_identity import (
 )
 from src.application.source_receipts import (
     SourceReceiptError,
-    publish_source_receipt,
+    sha256_bytes,
+    source_snapshot_id,
     validate_source_receipt,
 )
 
@@ -456,6 +460,60 @@ def _summary(
     }
 
 
+def _rewrite_quote_bundle(root: Path, update) -> None:
+    receipt_path = next(root.glob("source_receipts/quotes/*/*/*/receipt.json"))
+    receipt = json.loads(receipt_path.read_bytes())
+    payload_path = root / receipt["payload_relpath"]
+    bundle = json.loads(payload_path.read_bytes())
+    update(bundle)
+    payload_bytes = (
+        json.dumps(
+            bundle,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+    payload_path.write_bytes(payload_bytes)
+    receipt["payload_sha256"] = sha256_bytes(payload_bytes)
+    receipt["snapshot_id"] = source_snapshot_id(
+        source_kind=receipt["source_kind"],
+        source_native_id=receipt["source_native_id"],
+        source_observed_at=receipt["source_observed_at"],
+        payload_sha256=receipt["payload_sha256"],
+        producer_policy_hash=receipt["producer_policy_hash"],
+    )
+    receipt_path.write_bytes(
+        (
+            json.dumps(
+                receipt,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode("utf-8")
+    )
+
+
+def _sealed_canonical_snapshot(
+    tmp_path: Path,
+    *,
+    include_failed_symbol: bool = False,
+) -> tuple[Path, Path, dict, bytes]:
+    root, manifest_path = _workspace(tmp_path)
+    _publish_quote(root, run_id="run-1", canonical_blob=True)
+    symbols = ("3690.HK", "9898.HK") if include_failed_symbol else ("3690.HK",)
+    manifest = seal_required_data_snapshot(
+        manifest_path=manifest_path,
+        required_data_root=root,
+        run_id="run-1",
+        prefetch_summary=_summary(*symbols),
+    )
+    return root, manifest_path, manifest, manifest_path.read_bytes()
+
+
 def test_sealed_snapshot_resolves_exact_current_run_bytes(tmp_path: Path) -> None:
     root, manifest_path = _workspace(tmp_path)
     _publish_quote(root, run_id="run-1")
@@ -498,6 +556,301 @@ def test_sealed_snapshot_resolves_exact_current_run_bytes(tmp_path: Path) -> Non
     } == before
 
 
+def test_compact_snapshot_cleanup_retires_shadows_and_reenters(
+    tmp_path: Path,
+) -> None:
+    root, manifest_path, manifest, manifest_bytes = _sealed_canonical_snapshot(
+        tmp_path
+    )
+    entry = manifest["symbols"]["3690.HK"]
+    raw = root / entry["raw_json_relpath"]
+    csv = root / entry["required_data_csv_relpath"]
+    expected_bytes = raw.stat().st_size + csv.stat().st_size
+
+    first = retire_required_data_snapshot_shadows(
+        manifest_path=manifest_path,
+        required_data_root=root,
+        manifest=manifest,
+        manifest_bytes=manifest_bytes,
+    )
+    second = retire_required_data_snapshot_shadows(
+        manifest_path=manifest_path,
+        required_data_root=root,
+        manifest=manifest,
+        manifest_bytes=manifest_bytes,
+    )
+
+    assert first == {
+        "removed_files": 2,
+        "removed_bytes": expected_bytes,
+        "absent_files": 0,
+        "failed_files": 0,
+    }
+    assert second == {
+        "removed_files": 0,
+        "removed_bytes": 0,
+        "absent_files": 2,
+        "failed_files": 0,
+    }
+    assert not raw.exists()
+    assert not csv.exists()
+    assert resolve_frozen_required_data(
+        manifest_path=manifest_path,
+        expected_run_id="run-1",
+        symbol="3690.HK",
+        required_data_root=root,
+    )["read_source"] == "canonical_blob"
+
+
+def test_cleanup_durability_failure_preserves_every_shadow(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    root, manifest_path, manifest, manifest_bytes = _sealed_canonical_snapshot(
+        tmp_path
+    )
+    entry = manifest["symbols"]["3690.HK"]
+    raw = root / entry["raw_json_relpath"]
+    csv = root / entry["required_data_csv_relpath"]
+    original = required_data_snapshot_module.fsync_required_data_bound_file
+
+    def fail_manifest_flush(*, root: Path, relpath: str, expected_bytes: bytes) -> None:
+        if relpath.endswith(f"/state/{manifest_path.name}"):
+            raise required_data_snapshot_module.RequiredDataBlobError(
+                "injected durability failure"
+            )
+        original(root=root, relpath=relpath, expected_bytes=expected_bytes)
+
+    monkeypatch.setattr(
+        "src.application.required_data_snapshot.fsync_required_data_bound_file",
+        fail_manifest_flush,
+    )
+
+    result = retire_required_data_snapshot_shadows(
+        manifest_path=manifest_path,
+        required_data_root=root,
+        manifest=manifest,
+        manifest_bytes=manifest_bytes,
+    )
+
+    assert result["failed_files"] == 2
+    assert raw.is_file()
+    assert csv.is_file()
+    assert manifest_path.is_file()
+
+
+def test_cleanup_processes_one_blob_payload_at_a_time(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    root, manifest_path = _workspace(tmp_path)
+    for symbol in ("3690.HK", "0700.HK"):
+        _publish_quote(
+            root,
+            run_id="run-1",
+            symbol=symbol,
+            canonical_blob=True,
+        )
+    manifest = seal_required_data_snapshot(
+        manifest_path=manifest_path,
+        required_data_root=root,
+        run_id="run-1",
+        prefetch_summary=_summary("3690.HK", "0700.HK"),
+    )
+    events: list[str] = []
+    original_load = required_data_snapshot_module.load_required_data_scan_blob
+    original_retire = required_data_snapshot_module.retire_required_data_shadow_file
+
+    def load_one(**kwargs):
+        loaded = original_load(**kwargs)
+        events.append("load")
+        return loaded
+
+    def retire_one(**kwargs):
+        events.append("retire")
+        return original_retire(**kwargs)
+
+    monkeypatch.setattr(
+        required_data_snapshot_module,
+        "load_required_data_scan_blob",
+        load_one,
+    )
+    monkeypatch.setattr(
+        required_data_snapshot_module,
+        "retire_required_data_shadow_file",
+        retire_one,
+    )
+
+    result = retire_required_data_snapshot_shadows(
+        manifest_path=manifest_path,
+        required_data_root=root,
+        manifest=manifest,
+        manifest_bytes=manifest_path.read_bytes(),
+    )
+
+    assert result["removed_files"] == 4
+    assert result["failed_files"] == 0
+    assert events == ["load", "retire", "retire", "load", "retire", "retire"]
+
+
+@pytest.mark.parametrize("unsafe_kind", ("mismatch", "hardlink", "leaf_symlink", "parent_symlink"))
+def test_cleanup_preserves_each_unsafe_shadow(
+    unsafe_kind: str,
+    tmp_path: Path,
+) -> None:
+    root, manifest_path, manifest, manifest_bytes = _sealed_canonical_snapshot(
+        tmp_path
+    )
+    entry = manifest["symbols"]["3690.HK"]
+    raw = root / entry["raw_json_relpath"]
+    csv = root / entry["required_data_csv_relpath"]
+    if unsafe_kind == "mismatch":
+        raw.write_bytes(raw.read_bytes() + b"\n")
+    elif unsafe_kind == "hardlink":
+        os.link(raw, raw.with_name("hardlink.json"))
+    elif unsafe_kind == "leaf_symlink":
+        outside = root / "outside.json"
+        outside.write_bytes(raw.read_bytes())
+        raw.unlink()
+        raw.symlink_to(outside)
+    else:
+        real_raw = root / "raw-real"
+        raw.parent.rename(real_raw)
+        raw.parent.symlink_to(real_raw, target_is_directory=True)
+
+    result = retire_required_data_snapshot_shadows(
+        manifest_path=manifest_path,
+        required_data_root=root,
+        manifest=manifest,
+        manifest_bytes=manifest_bytes,
+    )
+
+    assert result["removed_files"] == 1
+    assert result["failed_files"] == 1
+    assert not csv.exists()
+    assert raw.exists()
+
+
+def test_cleanup_handles_partial_manifest_and_skips_legacy_receipt(
+    tmp_path: Path,
+) -> None:
+    root, manifest_path, manifest, manifest_bytes = _sealed_canonical_snapshot(
+        tmp_path / "partial",
+        include_failed_symbol=True,
+    )
+    partial = retire_required_data_snapshot_shadows(
+        manifest_path=manifest_path,
+        required_data_root=root,
+        manifest=manifest,
+        manifest_bytes=manifest_bytes,
+    )
+    legacy_root, legacy_manifest_path = _workspace(tmp_path / "legacy")
+    _publish_quote(legacy_root, run_id="run-1")
+    legacy_manifest = seal_required_data_snapshot(
+        manifest_path=legacy_manifest_path,
+        required_data_root=legacy_root,
+        run_id="run-1",
+        prefetch_summary=_summary("3690.HK"),
+    )
+    legacy = retire_required_data_snapshot_shadows(
+        manifest_path=legacy_manifest_path,
+        required_data_root=legacy_root,
+        manifest=legacy_manifest,
+        manifest_bytes=legacy_manifest_path.read_bytes(),
+    )
+
+    assert manifest["status"] == "partial"
+    assert partial["removed_files"] == 2
+    assert partial["failed_files"] == 0
+    assert legacy == {
+        "removed_files": 0,
+        "removed_bytes": 0,
+        "absent_files": 0,
+        "failed_files": 0,
+    }
+    assert (legacy_root / "raw/3690.HK_required_data.json").is_file()
+    assert (legacy_root / "parsed/3690.HK_required_data.csv").is_file()
+
+
+def test_cleanup_preserves_historical_dual_output_receipt(tmp_path: Path) -> None:
+    root, manifest_path = _workspace(tmp_path)
+    _publish_quote(root, run_id="run-1", canonical_blob=True)
+    raw = root / "raw/3690.HK_required_data.json"
+    csv = root / "parsed/3690.HK_required_data.csv"
+    _rewrite_quote_bundle(
+        root,
+        lambda bundle: bundle.update(
+            {
+                "raw_json_base64": base64.b64encode(raw.read_bytes()).decode(),
+                "required_data_csv_base64": base64.b64encode(
+                    csv.read_bytes()
+                ).decode(),
+            }
+        ),
+    )
+    manifest = seal_required_data_snapshot(
+        manifest_path=manifest_path,
+        required_data_root=root,
+        run_id="run-1",
+        prefetch_summary=_summary("3690.HK"),
+    )
+
+    result = retire_required_data_snapshot_shadows(
+        manifest_path=manifest_path,
+        required_data_root=root,
+        manifest=manifest,
+        manifest_bytes=manifest_path.read_bytes(),
+    )
+
+    assert result == {
+        "removed_files": 0,
+        "removed_bytes": 0,
+        "absent_files": 0,
+        "failed_files": 0,
+    }
+    assert raw.is_file()
+    assert csv.is_file()
+
+
+def test_cleanup_rejects_noncanonical_and_traversal_paths(tmp_path: Path) -> None:
+    root, manifest_path = _workspace(tmp_path)
+    _publish_quote(root, run_id="run-1", canonical_blob=True)
+    original = root / "raw/3690.HK_required_data.json"
+    custom = root / "raw/custom.json"
+    original.rename(custom)
+    _rewrite_quote_bundle(
+        root,
+        lambda bundle: bundle.update({"raw_json_relpath": "raw/custom.json"}),
+    )
+    manifest = seal_required_data_snapshot(
+        manifest_path=manifest_path,
+        required_data_root=root,
+        run_id="run-1",
+        prefetch_summary=_summary("3690.HK"),
+    )
+
+    result = retire_required_data_snapshot_shadows(
+        manifest_path=manifest_path,
+        required_data_root=root,
+        manifest=manifest,
+        manifest_bytes=manifest_path.read_bytes(),
+    )
+
+    assert manifest["status"] == "complete"
+    assert result["failed_files"] == 2
+    assert custom.is_file()
+    assert (root / "parsed/3690.HK_required_data.csv").is_file()
+    with pytest.raises(
+        required_data_snapshot_module.RequiredDataBlobError,
+        match="path is invalid",
+    ):
+        required_data_snapshot_module.retire_required_data_shadow_file(
+            root=root,
+            relpath="../outside.json",
+            expected_bytes=b"",
+        )
+
+
 def test_canonical_root_resolves_without_legacy_and_corruption_fails_closed(
     tmp_path: Path,
 ) -> None:
@@ -512,28 +865,8 @@ def test_canonical_root_resolves_without_legacy_and_corruption_fails_closed(
         expected_source_kind="quotes",
     )
     bundle = json.loads(validated["payload_bytes"])
-    bundle.pop("raw_json_base64")
-    bundle.pop("required_data_csv_base64")
-    old_receipt_path.unlink()
-    payload_bytes = (
-        json.dumps(bundle, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        + "\n"
-    ).encode("utf-8")
-    publish_source_receipt(
-        producer_root=root,
-        receipt_relpath="source_receipts/quotes/future/run/symbol/receipt.json",
-        payload_relpath="source_receipts/quotes/future/run/symbol/payload.json",
-        payload_bytes=payload_bytes,
-        source_kind="quotes",
-        producer_schema_version=str(old_receipt["producer_schema_version"]),
-        producer_run_id="run-1",
-        broker="futu",
-        included_markets=["HK"],
-        source_native_id=str(old_receipt["source_native_id"]),
-        source_observed_at=str(old_receipt["source_observed_at"]),
-        completed_at=str(old_receipt["completed_at"]),
-        producer_policy_hash=str(old_receipt["producer_policy_hash"]),
-    )
+    assert "raw_json_base64" not in bundle
+    assert "required_data_csv_base64" not in bundle
     (root / bundle["raw_json_relpath"]).unlink()
     (root / bundle["required_data_csv_relpath"]).unlink()
 

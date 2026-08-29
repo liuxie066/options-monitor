@@ -25,7 +25,7 @@ Strategy Lab 会按 strategy domain adapter 区分 Sell Put、Covered Call 和 C
 - `mark_path_snapshots.jsonl`：之后每个观察点的合约 mark、spot、bid/ask/mid、路径 PnL。
 - `outcome_facts.jsonl`：从 mark path 或到期 spot 推导的结果。
 
-`required_data/parsed/*_required_data.csv` 只是 mark 的报价来源，不是 replay 结果本身。真正的复盘路径要写进 replay dataset 的 `mark_path_snapshots.jsonl`。
+现代 run 的 scan-time mark 从 sealed required-data manifest/blob 解析，不要求 `required_data/parsed/*_required_data.csv` 存在；历史 run 才可以使用 parsed CSV 兼容路径。这些都只是 mark 的报价来源，不是 replay 结果本身。真正的复盘路径要写进 replay dataset 的 `mark_path_snapshots.jsonl`。
 
 ## Opportunity Quality
 
@@ -229,7 +229,7 @@ output_shared/research/remote_archive/prod/
 ./om research archive build-datasets --remote prod --market us --write
 ```
 
-`build-datasets --market us|hk --write` 会按已验证 candidate manifest/snapshot 的 market 过滤样本，必要时用 trace metadata 补充 market 识别；不传 `--market` 才会保留所有市场。CSV-only、缺失 snapshot 或 schema 无法验证的历史 run 会被分类为 unsupported，不会被转换成空的成功 dataset。dataset build 默认会尝试读取每个归档 run 内的 `required_data/parsed/*_required_data.csv`，给 dataset 生成第一批本地 `mark_path_snapshots.jsonl`。这是 scan-time mark，不等于最终 outcome；后续仍要用 `run-data-plan` / `collect-marks --source opend` 追加路径采样，再由 `settle --write` 产出 `outcome_facts.jsonl`。如需只构建候选/拒绝样本，可加 `--no-mark-from-run-required-data`。
+`build-datasets --market us|hk --write` 会按已验证 candidate manifest/snapshot 的 market 过滤样本，必要时用 trace metadata 补充 market 识别；不传 `--market` 才会保留所有市场。CSV-only、缺失 snapshot 或 schema 无法验证的历史 run 会被分类为 unsupported，不会被转换成空的成功 dataset。dataset build 默认会从每个归档 run 的 sealed required-data manifest/blob 生成第一批本地 `mark_path_snapshots.jsonl`；新 run 即使已退役 raw/CSV shadow 也可正常标记，历史 run 仍可走 parsed CSV 兼容路径。这是 scan-time mark，不等于最终 outcome；后续仍要用 `run-data-plan` / `collect-marks --source opend` 追加路径采样，再由 `settle --write` 产出 `outcome_facts.jsonl`。如需只构建候选/拒绝样本，可加 `--no-mark-from-run-required-data`。
 
 远端清理必须独立执行。默认 `--scope output-runs`，只预览远端 `service cleanup`；加 `--confirm` 前会读取本地 `output_shared/research/remote_archive/prod/manifests/inventory.latest.json`，确认远端计划删除的每个 run 都已经在本地归档中 verified：
 
