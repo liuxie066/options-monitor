@@ -27,9 +27,10 @@ Workflow: `.github/workflows/guardrails.yml`
 - Sensitive artifact check: reject high-confidence provider credentials, private keys, credentialed URLs, known private runtime/financial/email fingerprints, and literal personal home or mounted-volume paths without printing the blocked value
 - Lint: run `python -m ruff check .`
 - Standalone smoke: run `tests/run_smoke.py`
-- Full regression: run `python -m pytest` so newly added tests are discovered without editing the workflow
+- Launcher spec smoke: render `./om-agent spec` through the public wrapper
+- Full regression: run automatic pytest discovery for pull requests and VERSION-changing pushes; ordinary pushes to `main` reuse the required pull-request result
 
-Trigger: `push` and `pull_request` to `main`
+Trigger: `push` and `pull_request` to `main`. The active `main` ruleset requires pull requests, an up-to-date `guardrails` status, and blocks deletion and force pushes.
 
 ## C) Symbol Canonicalization Rule
 

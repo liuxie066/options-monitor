@@ -10,7 +10,6 @@ import pytest
 
 from domain.domain.ledger import ContractKey, TradeEvent
 from domain.domain.performance.models import (
-    EvidenceEnvelope,
     OptionInstrumentKey,
     ValuationMarkFact,
 )

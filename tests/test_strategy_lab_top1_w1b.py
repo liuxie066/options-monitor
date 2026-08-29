@@ -26,7 +26,6 @@ from src.application.strategy_lab.top1 import economics as economics_module
 from src.application.strategy_lab.top1.contracts import (
     ACCEPTED_SET_CONTRACT_VERSION,
     EVIDENCE_SELECTION_CONTRACT_VERSION,
-    EXPERIMENT_SPEC_SCHEMA_VERSION,
     EXPIRY_OUTCOME_CONTRACT_VERSION,
     RESEARCH_METRIC_CONTRACT_VERSION,
     RESEARCH_REQUIRED_DAYS,
