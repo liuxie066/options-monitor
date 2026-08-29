@@ -4,6 +4,7 @@ import gzip
 import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -332,7 +333,7 @@ def test_health_uses_calendar_denominator_and_exposes_point_diagnostics(
         "missing",
         "complete",
     ]
-    assert health["continuous_complete_trading_days"] == 1
+    assert health["continuous_complete_trading_days"] == 0
     assert health["status"] == "unhealthy"
     assert health["days"][-1]["points"][0] == {
         "recommendation_point_id": health["days"][-1]["points"][0][
@@ -357,8 +358,6 @@ def test_health_normalizes_storage_root_and_fails_closed_without_capacity(
     monkeypatch,
 ) -> None:
     from src.application.research import formal_corpus as mod
-    from src.application.research import storage_baseline
-
     _seal(tmp_path)
     monkeypatch.setattr(
         mod,
@@ -385,16 +384,13 @@ def test_health_normalizes_storage_root_and_fails_closed_without_capacity(
             },
         },
     )
-    calls: list[dict[str, object]] = []
+    calls: list[Path] = []
 
-    def baseline(**kwargs):
-        calls.append(kwargs)
-        return {
-            "status": "complete",
-            "thresholds": {"status": "insufficient_history"},
-        }
+    def disk_usage(path: Path):
+        calls.append(path)
+        return type("Usage", (), {"total": 100 * 1024**3, "free": 20 * 1024**3})()
 
-    monkeypatch.setattr(storage_baseline, "collect_storage_runtime_baseline", baseline)
+    monkeypatch.setattr(mod.shutil, "disk_usage", disk_usage)
     repo_root = tmp_path / "repo"
     artifact_root = tmp_path / "output_shared/research/strategy_lab"
     healthy = build_corpus_health_receipt(
@@ -405,12 +401,30 @@ def test_health_normalizes_storage_root_and_fails_closed_without_capacity(
         observed_at_utc="2026-08-26T03:00:00Z",
     )
     assert healthy["status"] == "healthy"
-    assert calls == [{"repo_root": repo_root, "runtime_root": tmp_path}]
+    assert healthy["storage"]["capacity"]["status"] == "insufficient_history"
+    assert calls == [tmp_path]
 
     monkeypatch.setattr(
-        storage_baseline,
-        "collect_storage_runtime_baseline",
-        lambda **_kwargs: (_ for _ in ()).throw(OSError("unavailable")),
+        mod.shutil,
+        "disk_usage",
+        lambda _path: type(
+            "Usage", (), {"total": 100 * 1024**3, "free": 9 * 1024**3}
+        )(),
+    )
+    critical = build_corpus_health_receipt(
+        artifact_root,
+        market="HK",
+        account="lx",
+        observed_at_utc="2026-08-26T03:00:00Z",
+    )
+    assert critical["status"] == "unhealthy"
+    assert critical["storage"]["capacity"]["status"] == "critical"
+    assert critical["storage"]["capacity"]["critical_floor_bytes"] == 10 * 1024**3
+
+    monkeypatch.setattr(
+        mod.shutil,
+        "disk_usage",
+        lambda _path: (_ for _ in ()).throw(OSError("unavailable")),
     )
     unavailable = build_corpus_health_receipt(
         artifact_root,
@@ -420,7 +434,170 @@ def test_health_normalizes_storage_root_and_fails_closed_without_capacity(
         observed_at_utc="2026-08-26T03:00:00Z",
     )
     assert unavailable["status"] == "unhealthy"
-    assert unavailable["storage"]["capacity"] is None
+    assert unavailable["storage"]["capacity"]["status"] == "unavailable"
+
+
+def test_health_window_reads_only_twenty_mature_days_and_current(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from src.application.research import formal_corpus as mod
+
+    cursor = date(2026, 7, 20)
+    mature_dates: list[str] = []
+    while len(mature_dates) < 22:
+        if cursor.weekday() < 5:
+            mature_dates.append(cursor.isoformat())
+        cursor += timedelta(days=1)
+    while cursor.weekday() >= 5:
+        cursor += timedelta(days=1)
+    current_date = cursor.isoformat()
+    for trading_date in mature_dates:
+        seal_formal_day_expectation(
+            tmp_path,
+            market="HK",
+            account="lx",
+            schedule=_schedule(),
+            trading_date=trading_date,
+            market_calendar_version="fixture.v1",
+            market_calendar_sha256="a" * 64,
+            sealed_at_utc=f"{trading_date}T01:00:00Z",
+        )
+    unexpected = (
+        tmp_path
+        / "output_shared/research/formal_corpus/v1/hk/lx/points"
+        / mature_dates[0]
+        / ("f" * 64)
+    )
+    unexpected.mkdir(parents=True)
+    monkeypatch.setattr(
+        mod,
+        "read_market_calendar_binding",
+        lambda *_args, **_kwargs: {
+            "market_calendar_version": "fixture.v1",
+            "snapshot_content_sha256": "a" * 64,
+            "coverage_start": mature_dates[0],
+            "coverage_end": current_date,
+            "trading_dates": [*mature_dates, current_date],
+        },
+    )
+    loaded_dates: list[str] = []
+
+    def load_point(*_args, trading_date, **_kwargs):
+        loaded_dates.append(trading_date)
+        return {
+            "status": "available",
+            "reason_code": None,
+            "point": {
+                "captured_at_utc": f"{trading_date}T02:00:02Z",
+                "recommendation_point": {
+                    "formal_point_time_coherence": {
+                        "maximum_observed_at_utc": f"{trading_date}T02:00:00Z"
+                    }
+                },
+            },
+        }
+
+    monkeypatch.setattr(mod, "load_formal_point", load_point)
+    monkeypatch.setattr(
+        mod.shutil,
+        "disk_usage",
+        lambda _path: type(
+            "Usage", (), {"total": 100 * 1024**3, "free": 20 * 1024**3}
+        )(),
+    )
+    window = build_corpus_health_receipt(
+        tmp_path,
+        market="HK",
+        account="lx",
+        observed_at_utc=f"{(cursor - timedelta(days=1)).isoformat()}T16:00:00Z",
+        scope="latest_mature_window",
+        mature_day_limit=20,
+    )
+
+    assert loaded_dates == mature_dates[-20:]
+    assert window["schema_version"] == "corpus_health_receipt.v2"
+    assert window["days_total"] == 21
+    assert window["days"][-1]["trading_date"] == current_date
+    assert window["days"][-1]["status"] == "missing"
+    assert window["continuous_complete_trading_days"] == 20
+    assert window["days_conflicting"] == 0
+    assert window["earliest_trading_date"] == mature_dates[-20]
+
+    loaded_dates.clear()
+    full = build_corpus_health_receipt(
+        tmp_path,
+        market="HK",
+        account="lx",
+        observed_at_utc=f"{(cursor - timedelta(days=1)).isoformat()}T16:00:00Z",
+    )
+    assert loaded_dates == mature_dates
+    assert full["days_conflicting"] == 1
+    assert full["earliest_trading_date"] == mature_dates[0]
+
+
+@pytest.mark.parametrize(
+    "observed_at_utc",
+    ["2026-07-31T15:59:59Z", "2026-08-23T16:00:00Z"],
+)
+def test_health_window_rejects_out_of_coverage_before_artifact_reads(
+    tmp_path: Path,
+    monkeypatch,
+    observed_at_utc: str,
+) -> None:
+    from src.application.research import formal_corpus as mod
+
+    monkeypatch.setattr(
+        mod,
+        "read_market_calendar_binding",
+        lambda *_args, **_kwargs: {
+            "market_calendar_version": "fixture.v1",
+            "snapshot_content_sha256": "a" * 64,
+            "coverage_start": "2026-08-01",
+            "coverage_end": "2026-08-23",
+            "trading_dates": ["2026-08-01", "2026-08-23"],
+        },
+    )
+    def unexpected_read(*_args, **_kwargs):
+        raise AssertionError("artifacts must not be read outside calendar coverage")
+
+    monkeypatch.setattr(mod, "_expectation_artifacts", unexpected_read)
+    monkeypatch.setattr(mod, "load_formal_point", unexpected_read)
+
+    with pytest.raises(FormalCorpusError) as raised:
+        build_corpus_health_receipt(
+            tmp_path,
+            market="HK",
+            account="lx",
+            observed_at_utc=observed_at_utc,
+            scope="latest_mature_window",
+            mature_day_limit=20,
+        )
+    assert raised.value.reason_code == "market_calendar_binding_unavailable"
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"scope": "unknown"},
+        {"scope": "full", "mature_day_limit": 20},
+        {"scope": "latest_mature_window"},
+        {"scope": "latest_mature_window", "mature_day_limit": 0},
+        {"scope": "latest_mature_window", "mature_day_limit": True},
+    ],
+)
+def test_health_scope_contract_rejects_invalid_combinations(
+    tmp_path: Path,
+    kwargs: dict[str, object],
+) -> None:
+    with pytest.raises(FormalCorpusError) as raised:
+        build_corpus_health_receipt(
+            tmp_path,
+            market="HK",
+            account="lx",
+            **kwargs,
+        )
+    assert raised.value.reason_code == "formal_corpus_input_invalid"
 
 
 def test_ready_point_reloads_and_materializes_recipe_projection(
