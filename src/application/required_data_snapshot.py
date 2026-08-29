@@ -33,9 +33,11 @@ from src.application.required_data_plan_identity import (
 )
 from src.application.required_data_blobs import (
     RequiredDataBlobError,
+    fsync_required_data_bound_file,
     load_required_data_scan_blob,
     required_data_shadow_base64_matches,
     required_data_shadow_file_matches,
+    retire_required_data_shadow_file,
     validate_required_data_scan_blob_ref,
 )
 from src.infrastructure.io_utils import atomic_write_json
@@ -323,6 +325,259 @@ def seal_required_data_snapshot(
             "terminal required-data snapshot manifest write mismatch"
         )
     return written
+
+
+def retire_required_data_snapshot_shadows(
+    *,
+    manifest_path: Path,
+    required_data_root: Path,
+    manifest: Mapping[str, Any],
+    manifest_bytes: bytes,
+) -> dict[str, int]:
+    """Best-effort retirement for compact canonical receipt shadows."""
+
+    summary = {
+        "removed_files": 0,
+        "removed_bytes": 0,
+        "absent_files": 0,
+        "failed_files": 0,
+    }
+    declared_files = _declared_canonical_shadow_files(manifest)
+    try:
+        runtime_root, targets, durable_artifacts = (
+            _required_data_shadow_cleanup_context(
+                manifest_path=Path(manifest_path),
+                required_data_root=Path(required_data_root),
+                manifest=manifest,
+                manifest_bytes=bytes(manifest_bytes),
+            )
+        )
+    except Exception:
+        summary["failed_files"] = declared_files
+        return summary
+    if not targets:
+        return summary
+
+    try:
+        for root, relpath, expected_bytes in durable_artifacts:
+            fsync_required_data_bound_file(
+                root=root,
+                relpath=relpath,
+                expected_bytes=expected_bytes,
+            )
+    except Exception:
+        summary["failed_files"] = 2 * len(targets)
+        return summary
+
+    for raw_relpath, csv_relpath, blob_ref in targets:
+        try:
+            loaded = load_required_data_scan_blob(
+                runtime_root=runtime_root,
+                blob_ref=blob_ref,
+            )
+        except RequiredDataBlobError:
+            summary["failed_files"] += 2
+            continue
+        for relpath, expected_bytes in (
+            (raw_relpath, loaded["raw_json_bytes"]),
+            (csv_relpath, loaded["required_data_csv_bytes"]),
+        ):
+            try:
+                status = retire_required_data_shadow_file(
+                    root=required_data_root,
+                    relpath=relpath,
+                    expected_bytes=expected_bytes,
+                )
+            except RequiredDataBlobError:
+                summary["failed_files"] += 1
+                continue
+            if status == "absent":
+                summary["absent_files"] += 1
+            else:
+                summary["removed_files"] += 1
+                summary["removed_bytes"] += len(expected_bytes)
+    return summary
+
+
+def _declared_canonical_shadow_files(manifest: Mapping[str, Any]) -> int:
+    symbols = manifest.get("symbols")
+    if not isinstance(symbols, Mapping):
+        return 0
+    return 2 * sum(
+        1
+        for entry in symbols.values()
+        if isinstance(entry, Mapping)
+        and str(entry.get("status") or "").strip().lower() == "ready"
+        and entry.get("scan_blob_ref") is not None
+    )
+
+
+def _required_data_shadow_cleanup_context(
+    *,
+    manifest_path: Path,
+    required_data_root: Path,
+    manifest: Mapping[str, Any],
+    manifest_bytes: bytes,
+) -> tuple[
+    Path,
+    list[tuple[str, str, dict[str, Any]]],
+    list[tuple[Path, str, bytes]],
+]:
+    payload = dict(manifest or {})
+    try:
+        if json.loads(manifest_bytes) != payload:
+            raise RequiredDataSnapshotError(
+                "required-data cleanup manifest bytes changed"
+            )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RequiredDataSnapshotError(
+            "required-data cleanup manifest bytes are invalid"
+        ) from exc
+    content = {key: value for key, value in payload.items() if key != "content_sha256"}
+    if canonical_sha256(content) != str(payload.get("content_sha256") or ""):
+        raise RequiredDataSnapshotError(
+            "required-data cleanup manifest hash changed"
+        )
+
+    symbols = payload.get("symbols")
+    if not isinstance(symbols, Mapping):
+        raise RequiredDataSnapshotError(
+            "required-data cleanup manifest symbols are invalid"
+        )
+    artifacts: list[tuple[Path, str, bytes]] = []
+    targets: list[tuple[str, str, dict[str, Any]]] = []
+    run_id = _required_text(payload.get("run_id"), "manifest run_id")
+    runtime_root = _runtime_root_from_required_data_root(
+        required_data_root,
+        run_id,
+    )
+    for symbol_key, raw_entry in symbols.items():
+        if not isinstance(raw_entry, Mapping):
+            continue
+        entry = dict(raw_entry)
+        if str(entry.get("status") or "").strip().lower() != "ready":
+            continue
+        symbol = _required_text(symbol_key, "manifest symbol").upper()
+        receipt_relpath = _required_text(
+            entry.get("receipt_relpath"),
+            "receipt_relpath",
+        )
+        receipt_bytes = safe_existing_relative_path(
+            required_data_root,
+            receipt_relpath,
+        ).read_bytes()
+        if sha256_bytes(receipt_bytes) != str(entry.get("receipt_hash") or ""):
+            raise RequiredDataSnapshotError(
+                f"{symbol} cleanup receipt hash mismatch"
+            )
+        receipt = json.loads(receipt_bytes)
+        if not isinstance(receipt, Mapping):
+            raise RequiredDataSnapshotError(
+                f"{symbol} cleanup receipt is invalid"
+            )
+        validated = validate_source_receipt(
+            receipt,
+            producer_root=required_data_root,
+            now=payload.get("sealed_at_utc"),
+            require_fresh=False,
+            expected_source_kind="quotes",
+        )
+        if (
+            validated["producer_run_id"] != run_id
+            or validated["snapshot_id"] != entry.get("snapshot_id")
+            or validated["payload_sha256"] != entry.get("payload_sha256")
+        ):
+            raise RequiredDataSnapshotError(
+                f"{symbol} cleanup receipt binding mismatch"
+            )
+        payload_relpath = _required_text(
+            receipt.get("payload_relpath"),
+            "payload_relpath",
+        )
+        payload_bytes = validated["payload_bytes"]
+        bundle = json.loads(payload_bytes)
+        if entry.get("scan_blob_ref") is None:
+            continue
+        if not isinstance(bundle, Mapping):
+            raise RequiredDataSnapshotError(
+                f"{symbol} cleanup bundle is invalid"
+            )
+        if "raw_json_base64" in bundle or "required_data_csv_base64" in bundle:
+            continue
+        expected_raw = f"raw/{symbol}_required_data.json"
+        expected_csv = f"parsed/{symbol}_required_data.csv"
+        if (
+            entry.get("raw_json_relpath") != expected_raw
+            or bundle.get("raw_json_relpath") != expected_raw
+            or entry.get("required_data_csv_relpath") != expected_csv
+            or bundle.get("required_data_csv_relpath") != expected_csv
+        ):
+            raise RequiredDataSnapshotError(
+                f"{symbol} cleanup shadow path is not canonical"
+            )
+        bundle_ref = bundle.get("scan_blob_ref")
+        if not isinstance(bundle_ref, Mapping):
+            raise RequiredDataSnapshotError(
+                f"{symbol} cleanup blob ref is invalid"
+            )
+        validated_ref = validate_required_data_scan_blob_ref(bundle_ref)
+        if validated_ref != validate_required_data_scan_blob_ref(
+            entry["scan_blob_ref"]
+        ):
+            raise RequiredDataSnapshotError(
+                f"{symbol} cleanup blob ref mismatch"
+            )
+        artifact_prefix = Path("output_runs") / run_id / "required_data"
+        artifacts.extend(
+            (
+                (
+                    runtime_root,
+                    (artifact_prefix / receipt_relpath).as_posix(),
+                    receipt_bytes,
+                ),
+                (
+                    runtime_root,
+                    (artifact_prefix / payload_relpath).as_posix(),
+                    payload_bytes,
+                ),
+            )
+        )
+        targets.append((expected_raw, expected_csv, validated_ref))
+
+    plan_relpath = payload.get("close_advice_required_data_plan_relpath")
+    if plan_relpath is not None:
+        plan_relpath = _required_text(
+            plan_relpath,
+            "close_advice_required_data_plan_relpath",
+        )
+        plan_path = safe_existing_relative_path(
+            manifest_path.parent,
+            plan_relpath,
+        )
+        plan_bytes = plan_path.read_bytes()
+        if sha256_bytes(plan_bytes) != str(
+            payload.get("close_advice_required_data_plan_sha256") or ""
+        ):
+            raise RequiredDataSnapshotError(
+                "close-advice cleanup plan hash mismatch"
+            )
+        try:
+            durable_plan_relpath = plan_path.relative_to(runtime_root).as_posix()
+        except ValueError as exc:
+            raise RequiredDataSnapshotError(
+                "close-advice cleanup plan is outside runtime root"
+            ) from exc
+        artifacts.append((runtime_root, durable_plan_relpath, plan_bytes))
+    try:
+        durable_manifest_relpath = (
+            manifest_path.resolve().relative_to(runtime_root).as_posix()
+        )
+    except ValueError as exc:
+        raise RequiredDataSnapshotError(
+            "required-data cleanup manifest is outside runtime root"
+        ) from exc
+    artifacts.append((runtime_root, durable_manifest_relpath, manifest_bytes))
+    return runtime_root, targets, artifacts
 
 
 def load_required_data_snapshot_manifest(
@@ -1530,5 +1785,6 @@ __all__ = [
     "resolve_frozen_required_data",
     "resolve_frozen_required_data_csv_bytes",
     "resolve_frozen_required_data_csv_bytes_batch",
+    "retire_required_data_snapshot_shadows",
     "seal_required_data_snapshot",
 ]
