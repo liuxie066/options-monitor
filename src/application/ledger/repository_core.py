@@ -30,13 +30,26 @@ class RepositoryCoreMixin:
 
     def _connect(self) -> sqlite3.Connection:
         conn = connect_private_sqlite(self.db_path)
-        initialize_ledger_connection(conn)
-        conn.execute("PRAGMA busy_timeout=5000")
-        with self._writer_lock():
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
-        secure_sqlite_artifacts(self.db_path)
-        return conn
+        try:
+            initialize_ledger_connection(conn)
+            conn.execute("PRAGMA busy_timeout=5000")
+            with self._writer_lock():
+                row = conn.execute("PRAGMA journal_mode=WAL").fetchone()
+                if row is None or str(row[0]).lower() != "wal":
+                    raise RuntimeError("SQLite WAL mode is required for the option ledger")
+                conn.execute("PRAGMA synchronous=NORMAL")
+            secure_sqlite_artifacts(self.db_path)
+            return conn
+        except BaseException:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            try:
+                secure_sqlite_artifacts(self.db_path)
+            except Exception:
+                pass
+            raise
 
     @contextmanager
     def _writer_lock(self):
@@ -45,9 +58,9 @@ class RepositoryCoreMixin:
 
     @contextmanager
     def _writer_connection(self, *, begin_immediate: bool = False):
-        conn = self._connect()
-        try:
-            with self._writer_lock():
+        with self._writer_lock():
+            conn = self._connect()
+            try:
                 if begin_immediate:
                     conn.execute("BEGIN IMMEDIATE")
                 try:
@@ -56,9 +69,11 @@ class RepositoryCoreMixin:
                 except Exception:
                     conn.rollback()
                     raise
-        finally:
-            conn.close()
-            secure_sqlite_artifacts(self.db_path)
+            finally:
+                try:
+                    conn.close()
+                finally:
+                    secure_sqlite_artifacts(self.db_path)
 
     @contextmanager
     def _optional_conn(self, conn: sqlite3.Connection | None, *, commit: bool = False):

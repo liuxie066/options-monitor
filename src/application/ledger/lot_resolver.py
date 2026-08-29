@@ -596,6 +596,13 @@ def _candidate_identity_tuple(candidate: LotCloseCandidate) -> tuple[Any, ...]:
     )
 
 
+def same_close_candidate_identity(
+    left: LotCloseCandidate,
+    right: LotCloseCandidate,
+) -> bool:
+    return _candidate_identity_tuple(left) == _candidate_identity_tuple(right)
+
+
 def _canonical_selector_symbol(value: Any) -> str:
     return canonical_symbol(value) or str(value or "").strip().upper()
 

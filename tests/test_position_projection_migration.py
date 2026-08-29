@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
 import shutil
 import sqlite3
 import subprocess
+import threading
 
 import pytest
 
 from domain.domain.ledger import ContractKey, TradeEvent
 from src.application.ledger import position_projection_migration as module
+from src.application.ledger import repository_core
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 
 
@@ -123,6 +126,67 @@ def _acceptance(shadow: dict[str, object]) -> dict[str, object]:
             "retained_lots_10x_guarantee": False,
         }
     )
+
+
+def test_migration_write_connection_fails_closed_when_wal_is_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Cursor:
+        def fetchone(self) -> tuple[str]:
+            return ("delete",)
+
+    class Connection:
+        closed = False
+
+        def execute(self, _sql: str) -> Cursor:
+            return Cursor()
+
+        def close(self) -> None:
+            self.closed = True
+
+    path = _legacy_store(tmp_path)
+    connection = Connection()
+    monkeypatch.setattr(repository_core, "connect_private_sqlite", lambda _path: connection)
+    monkeypatch.setattr(repository_core, "initialize_ledger_connection", lambda _conn: None)
+
+    with pytest.raises(RuntimeError, match="SQLite WAL mode is required"):
+        with module._write_connection(path):
+            raise AssertionError("migration writer body must not start")
+
+    assert connection.closed is True
+
+
+def test_migration_writer_waits_for_repository_connection_lifecycle(
+    tmp_path: Path,
+) -> None:
+    path = _legacy_store(tmp_path)
+    repo = module._repository(path)
+    repository_entered = threading.Event()
+    release_repository = threading.Event()
+    migration_entered = threading.Event()
+
+    def _repository_writer() -> None:
+        with repo._writer_connection():
+            repository_entered.set()
+            assert release_repository.wait(2)
+
+    def _migration_writer() -> None:
+        with module._write_connection(path):
+            migration_entered.set()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        repository = executor.submit(_repository_writer)
+        assert repository_entered.wait(1)
+        migration = executor.submit(_migration_writer)
+        try:
+            assert not migration_entered.wait(0.1)
+        finally:
+            release_repository.set()
+        repository.result(timeout=1)
+        migration.result(timeout=1)
+
+    assert migration_entered.is_set()
 
 
 def test_inventory_and_shadow_are_read_only_and_apply_verifies(tmp_path: Path) -> None:

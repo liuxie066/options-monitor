@@ -20,7 +20,7 @@ from domain.domain.ledger.position_fields import (
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.trade_contract_identity import canonical_contract_symbol
 from src.application.ledger.lot_resolver import CloseTargetResolution
-from src.application.ledger.preflight import _current_record_fields, preflight_broker_trade_close
+from src.application.ledger.preflight import preflight_broker_trade_close
 from src.application.ledger.results import BrokerTradeOperation, LedgerWriteResult
 from src.application.ledger.writer import persist_trade_event_objects_atomically
 
@@ -193,7 +193,9 @@ def _persist_lifecycle_close_events(
         if contracts <= 0:
             raise ValueError(f"{normalized_event_type} requires contracts_to_close > 0")
 
-        fields = _current_record_fields(repo, record_id=record_id)
+        if match.candidate is None:
+            raise ValueError(f"{normalized_event_type} close target is missing candidate fields")
+        fields = dict(match.candidate.raw_fields)
         ledger_preflight = preflight_broker_trade_close(
             repo,
             record_id=record_id,

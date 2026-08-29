@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Bug Fixes
+- Reused startup option-position projection recovery during expiry maintenance and serialized SQLite WAL setup, writes, connection close, and artifact hardening under one writer lock, preventing duplicate refreshes and close-time locking failures.
+
 ## 2.2.1 - 2026-08-29
 
 ### Improvements

@@ -200,7 +200,14 @@ def open_private_text(path: str | Path, *, encoding: str = "utf-8") -> Iterator[
 def connect_private_sqlite(path: str | Path, **kwargs: Any) -> sqlite3.Connection:
     target = ensure_private_file(path)
     connection = sqlite3.connect(str(target), **kwargs)
-    secure_sqlite_artifacts(target)
+    try:
+        secure_sqlite_artifacts(target)
+    except BaseException:
+        try:
+            connection.close()
+        except Exception:
+            pass
+        raise
     return connection
 
 

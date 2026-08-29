@@ -31,7 +31,12 @@ from domain.domain.symbol_identity import symbol_market
 from domain.domain.trade_contract_identity import canonical_contract_symbol
 from src.application.ledger.errors import LedgerPreflightError
 from src.application.ledger.lifecycle import persist_lifecycle_expire_close_events_atomically
-from src.application.ledger.lot_resolver import LotCloseResolutionError, resolve_explicit_close_target
+from src.application.ledger.lot_resolver import (
+    LotCloseResolutionError,
+    normalize_close_candidate,
+    resolve_explicit_close_target,
+    same_close_candidate_identity,
+)
 from src.application.ledger.repository import (
     require_option_positions_event_write_repo,
     require_option_positions_read_repo,
@@ -357,6 +362,29 @@ def build_expired_close_decisions(
             )
             continue
 
+        fresh_skip_reason = str(fields.get("_auto_close_skip_reason") or "")
+        if fresh_skip_reason in {
+            "position_lot_identity_changed",
+            "position_lot_refresh_unavailable",
+        }:
+            decisions.append(
+                ExpiredCloseDecision(
+                    record_id=record_id,
+                    position_id=position_id,
+                    expiration_ms=None,
+                    effective_exp_source="none",
+                    should_close=False,
+                    reason=str(
+                        fields.get("_auto_close_skip_message")
+                        or fresh_skip_reason
+                    ),
+                    skip_reason=fresh_skip_reason,
+                    contracts_open=effective_contracts_open(fields),
+                    patch=None,
+                )
+            )
+            continue
+
         exp_ms, exp_source, exp_ymd, raw_exp_ms = _auto_close_expiration_anchor(fields)
         contracts_open = effective_contracts_open(fields)
         if normalize_status(fields.get("status")) == "close" or contracts_open <= 0:
@@ -543,8 +571,6 @@ def _fresh_auto_close_positions(repo: Any, positions: list[dict[str, Any]]) -> l
             current_by_record_id[record_id] = row
 
     get_record_fields = getattr(repo, "get_record_fields", None)
-    if not callable(get_record_fields):
-        return [dict(item) for item in positions if isinstance(item, dict)]
 
     out: list[dict[str, Any]] = []
     for item in positions:
@@ -565,24 +591,92 @@ def _fresh_auto_close_positions(repo: Any, positions: list[dict[str, Any]]) -> l
             if current_lot.get("position_id") in (None, "") and original.get("position_id") not in (None, ""):
                 current_lot = dict(current_lot)
                 current_lot["position_id"] = original.get("position_id")
-            current_lot = _merge_auto_close_volatile_evidence(current_lot, original)
-            out.append(current_lot)
+            out.append(
+                _fresh_auto_close_position(
+                    record_id=record_id,
+                    current=current_lot,
+                    selected=original,
+                )
+            )
+            continue
+        if not callable(get_record_fields):
+            out.append(_unavailable_auto_close_position(original))
             continue
         try:
             raw_current = get_record_fields(record_id)
         except Exception:
-            out.append(original)
+            out.append(_unavailable_auto_close_position(original))
             continue
         if not isinstance(raw_current, dict):
-            out.append(original)
+            out.append(_unavailable_auto_close_position(original))
             continue
         current = dict(raw_current)
         current["record_id"] = record_id
         if current.get("position_id") in (None, "") and original.get("position_id") not in (None, ""):
             current["position_id"] = original.get("position_id")
-        current = _merge_auto_close_volatile_evidence(current, original)
-        out.append(current)
+        out.append(
+            _fresh_auto_close_position(
+                record_id=record_id,
+                current=current,
+                selected=original,
+            )
+        )
     return out
+
+
+def _unavailable_auto_close_position(selected: dict[str, Any]) -> dict[str, Any]:
+    stale = {
+        key: value
+        for key, value in selected.items()
+        if key not in _AUTO_CLOSE_VOLATILE_EVIDENCE_KEYS
+    }
+    stale["_auto_close_skip_reason"] = "position_lot_refresh_unavailable"
+    stale["_auto_close_skip_message"] = (
+        "position lot refresh unavailable after auto-close selection; "
+        "defer to the next scoped run"
+    )
+    return stale
+
+
+def _fresh_auto_close_position(
+    *,
+    record_id: str,
+    current: dict[str, Any],
+    selected: dict[str, Any],
+) -> dict[str, Any]:
+    if not _same_auto_close_position_identity(
+        record_id=record_id,
+        current=current,
+        selected=selected,
+    ):
+        stale = dict(current)
+        stale["record_id"] = record_id
+        stale["_auto_close_skip_reason"] = "position_lot_identity_changed"
+        stale["_auto_close_skip_message"] = (
+            "position lot identity changed after auto-close selection; "
+            "defer to the next scoped run"
+        )
+        return stale
+    return _merge_auto_close_volatile_evidence(current, selected)
+
+
+def _same_auto_close_position_identity(
+    *,
+    record_id: str,
+    current: dict[str, Any],
+    selected: dict[str, Any],
+) -> bool:
+    selected_candidate = normalize_close_candidate(
+        {"record_id": record_id, "fields": selected}
+    )
+    current_candidate = normalize_close_candidate(
+        {"record_id": record_id, "fields": current}
+    )
+    return not (
+        selected_candidate is None
+        or current_candidate is None
+        or not same_close_candidate_identity(selected_candidate, current_candidate)
+    )
 
 
 def _mark_auto_close_decision_skipped_already_closed(
@@ -881,6 +975,9 @@ def _resolve_preflight_expire_auto_close() -> Any:
     return getattr(importlib.import_module("src.application.ledger.preflight"), "preflight_expire_auto_close")
 
 
+_PROJECTION_REFRESH_NOT_PROVIDED: Any = object()
+
+
 def auto_close_expired_positions(
     repo: Any,
     positions: list[dict[str, Any]],
@@ -888,17 +985,19 @@ def auto_close_expired_positions(
     as_of_ms: int,
     grace_days: int,
     max_close: int,
+    projection_refresh: ProjectionRefreshResult | None = _PROJECTION_REFRESH_NOT_PROVIDED,
 ) -> ExpiredCloseRunResult:
     preflight_expire_auto_close = _resolve_preflight_expire_auto_close()
-    try:
-        _refresh_position_lot_projection_from_trade_events(repo)
-    except Exception as exc:
-        decisions = build_expired_close_decisions(positions, as_of_ms=as_of_ms, grace_days=grace_days)
-        return ExpiredCloseRunResult(
-            decisions=decisions,
-            applied=[],
-            errors=[f"projection refresh failed before auto-close: {exc}"],
-        )
+    if projection_refresh is _PROJECTION_REFRESH_NOT_PROVIDED:
+        try:
+            _refresh_position_lot_projection_from_trade_events(repo)
+        except Exception as exc:
+            decisions = build_expired_close_decisions(positions, as_of_ms=as_of_ms, grace_days=grace_days)
+            return ExpiredCloseRunResult(
+                decisions=decisions,
+                applied=[],
+                errors=[f"projection refresh failed before auto-close: {exc}"],
+            )
 
     fresh_positions = _fresh_auto_close_positions(repo, positions)
     decisions = build_expired_close_decisions(fresh_positions, as_of_ms=as_of_ms, grace_days=grace_days)
@@ -926,6 +1025,20 @@ def auto_close_expired_positions(
             record_id = str(decision.record_id)
             fields = repo.get_record_fields(record_id)
             contracts_to_close = effective_contracts_open(fields)
+            if not _same_auto_close_position_identity(
+                record_id=record_id,
+                current=fields,
+                selected=fresh_positions[index],
+            ):
+                decisions[index] = decision.with_skip(
+                    reason=(
+                        "position lot identity changed after auto-close selection; "
+                        "defer to the next scoped run"
+                    ),
+                    skip_reason="position_lot_identity_changed",
+                    contracts_open=contracts_to_close,
+                )
+                continue
             if contracts_to_close <= 0:
                 decisions[index] = _mark_auto_close_decision_skipped_already_closed(decision, fields)
                 continue

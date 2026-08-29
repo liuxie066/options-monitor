@@ -455,6 +455,7 @@ def test_position_maintenance_external_account_requires_manual_expiry_review(mon
 
 def test_position_maintenance_refreshes_projection_before_apply(monkeypatch, tmp_path: Path) -> None:
     from src.application.positions import maintenance as mod
+    from src.application.ledger.results import ExpiredCloseRunResult, ProjectionRefreshResult
 
     class FakeRepo:
         def count_trade_events(self) -> int:
@@ -464,6 +465,8 @@ def test_position_maintenance_refreshes_projection_before_apply(monkeypatch, tmp
     data_config.write_text(json.dumps({"option_positions": {"sqlite_path": str(tmp_path / "pos.sqlite3")}}), encoding="utf-8")
     fake_repo = FakeRepo()
     order: list[str] = []
+    captured: dict[str, Any] = {}
+    refresh_result = ProjectionRefreshResult(trade_event_count=2, position_lot_count=1)
 
     monkeypatch.setattr(mod, "resolve_data_config_path", lambda **_kwargs: data_config)
     monkeypatch.setattr(mod, "open_position_ledger", lambda _path, **kwargs: fake_repo)
@@ -471,22 +474,27 @@ def test_position_maintenance_refreshes_projection_before_apply(monkeypatch, tmp
     def _refresh(repo):
         assert repo is fake_repo
         order.append("refresh")
-        return {"trade_event_count": 2, "position_lot_count": 1}
+        return refresh_result
 
     def _load_records(repo):
         assert repo is fake_repo
         order.append("load_records")
-        return []
+        return [
+            {
+                "record_id": "recovered-lot",
+                "fields": {"account": "lx", "status": "open", "contracts": 1},
+            }
+        ]
 
     monkeypatch.setattr(mod, "refresh_position_lot_projection", _refresh)
     monkeypatch.setattr(mod, "_load_expiry_close_position_lots", _load_records)
-    from src.application.ledger.api import ExpiredCloseRunResult
+    def _record(_repo, positions, **kwargs):
+        order.append("record")
+        captured["positions"] = list(positions)
+        captured["projection_refresh"] = kwargs.get("projection_refresh")
+        return ExpiredCloseRunResult(decisions=[], applied=[], errors=[])
 
-    monkeypatch.setattr(
-        mod,
-        "record_expired_position_closes",
-        lambda *_args, **_kwargs: ExpiredCloseRunResult(decisions=[], applied=[], errors=[]),
-    )
+    monkeypatch.setattr(mod, "record_expired_position_closes", _record)
 
     result = mod.run_expired_position_maintenance_for_account(
         base=tmp_path,
@@ -496,11 +504,139 @@ def test_position_maintenance_refreshes_projection_before_apply(monkeypatch, tmp
         as_of_ms=1777766400000,
     )
 
-    assert order == ["refresh", "load_records"]
-    assert result["projection_refresh"] == {"trade_event_count": 2, "position_lot_count": 1}
+    assert order == ["refresh", "load_records", "record"]
+    assert [item["record_id"] for item in captured["positions"]] == ["recovered-lot"]
+    assert captured["projection_refresh"] is refresh_result
+    assert result["projection_refresh"] == refresh_result.to_dict()
     assert result["summary_text"] == ""
     assert result["receipt"]["status"] == "skipped"
     assert result["receipt"]["reason"] == "noop"
+
+
+def test_position_maintenance_reuses_startup_projection_recovery_once(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from domain.domain.ledger import ContractKey, TradeEvent
+    from src.application.ledger import bootstrap
+    from src.application.ledger.repository import SQLiteOptionPositionsRepository
+    from src.application.ledger.results import ExpiredCloseRunResult
+    from src.application.positions import maintenance as mod
+
+    sqlite_path = tmp_path / "output_shared" / "state" / "option_positions.sqlite3"
+    data_config = tmp_path / "data.json"
+    data_config.write_text(
+        json.dumps({"option_positions": {"sqlite_path": str(sqlite_path)}}),
+        encoding="utf-8",
+    )
+    seed_repo = SQLiteOptionPositionsRepository(sqlite_path)
+    seed_repo.upsert_trade_event(
+        TradeEvent(
+            event_id="startup-recovery-open",
+            event_type="open",
+            event_time_ms=1_000,
+            contract_key=ContractKey.from_values(
+                broker="富途",
+                account="lx",
+                underlying_symbol="NVDA",
+                option_type="put",
+                position_side="long",
+                strike=100,
+                expiration_ymd="2026-08-28",
+            ),
+            contracts=1,
+            price=1.0,
+            currency="USD",
+            source="test_startup_recovery",
+            multiplier=100,
+            lot_id="lot_startup_recovery",
+        )
+    )
+    assert seed_repo.count_trade_events() == 1
+    assert seed_repo.count_position_lots() == 0
+
+    rebuild_calls: list[object] = []
+    real_rebuild = bootstrap.run_position_projection_in_transaction
+
+    def _rebuild(repo, *args, **kwargs):
+        rebuild_calls.append(repo)
+        return real_rebuild(repo, *args, **kwargs)
+
+    monkeypatch.setattr(bootstrap, "run_position_projection_in_transaction", _rebuild)
+    monkeypatch.setattr(
+        mod,
+        "refresh_position_lot_projection",
+        lambda _repo: (_ for _ in ()).throw(
+            AssertionError("startup recovery receipt must skip rebuild")
+        ),
+    )
+    captured: dict[str, Any] = {}
+
+    def _record(repo, positions, **kwargs):
+        captured["repo"] = repo
+        captured["positions"] = list(positions)
+        captured["projection_refresh"] = kwargs["projection_refresh"]
+        return ExpiredCloseRunResult(decisions=[], applied=[], errors=[])
+
+    monkeypatch.setattr(mod, "record_expired_position_closes", _record)
+
+    result = mod.run_expired_position_maintenance_for_account(
+        base=tmp_path,
+        cfg={"portfolio": {"data_config": str(data_config), "broker": "富途"}},
+        account="lx",
+        report_dir=tmp_path / "reports",
+        as_of_ms=1788048000000,
+        send_receipt=False,
+    )
+
+    assert len(rebuild_calls) == 1
+    assert [item["record_id"] for item in captured["positions"]] == ["lot_startup_recovery"]
+    assert captured["projection_refresh"].trade_event_count == 1
+    assert result["projection_refresh"] == captured["projection_refresh"].to_dict()
+    assert captured["repo"].bootstrap_projection_refresh is None
+
+
+def test_position_maintenance_projection_refresh_failure_stops_before_load_or_write(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application.positions import maintenance as mod
+
+    class FakeRepo:
+        def count_trade_events(self) -> int:
+            return 1
+
+    data_config = tmp_path / "data.json"
+    data_config.write_text(
+        json.dumps({"option_positions": {"sqlite_path": str(tmp_path / "pos.sqlite3")}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(mod, "resolve_data_config_path", lambda **_kwargs: data_config)
+    monkeypatch.setattr(mod, "open_position_ledger", lambda _path, **_kwargs: FakeRepo())
+    monkeypatch.setattr(
+        mod,
+        "refresh_position_lot_projection",
+        lambda _repo: (_ for _ in ()).throw(RuntimeError("locking protocol")),
+    )
+    monkeypatch.setattr(
+        mod,
+        "_load_expiry_close_position_lots",
+        lambda _repo: (_ for _ in ()).throw(AssertionError("failed refresh must stop before lot load")),
+    )
+    monkeypatch.setattr(
+        mod,
+        "record_expired_position_closes",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("failed refresh must not write")),
+    )
+
+    with pytest.raises(RuntimeError, match="projection refresh failed before auto-close: locking protocol"):
+        mod.run_expired_position_maintenance_for_account(
+            base=tmp_path,
+            cfg={"portfolio": {"data_config": str(data_config)}},
+            account="lx",
+            report_dir=tmp_path / "reports",
+            as_of_ms=1777766400000,
+        )
 
 
 def test_position_maintenance_attaches_receipt_after_apply(monkeypatch, tmp_path: Path) -> None:
