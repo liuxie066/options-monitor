@@ -5,7 +5,6 @@ import json
 import os
 import plistlib
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest

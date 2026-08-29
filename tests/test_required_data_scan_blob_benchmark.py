@@ -37,9 +37,19 @@ def test_checked_in_metadata_and_fixture_are_independently_pinned() -> None:
     assert len(fixture["raw"]) + len(fixture["csv"]) == 226_760
 
 
-def test_short_profile_enforces_resource_and_exit_gates() -> None:
+def test_short_profile_enforces_resource_and_exit_gates(monkeypatch) -> None:
+    original = benchmark._canonical_bundle
+    calls = 0
+
+    def _counted(root, fixture):
+        nonlocal calls
+        calls += 1
+        return original(root, fixture)
+
+    monkeypatch.setattr(benchmark, "_canonical_bundle", _counted)
     receipt = benchmark.run_profile("canonical", warmups=0, repetitions=1)
 
+    assert calls == 1
     assert receipt["run_label"] == "non_acceptance_smoke"
     assert receipt["space"]["mismatch_count"] == 0
     assert receipt["space"]["mismatch_samples"] == []

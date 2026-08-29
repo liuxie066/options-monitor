@@ -262,7 +262,6 @@ def test_release_test_plan_rejects_unknown_mode() -> None:
 def test_python_ci_workflows_use_supported_runtime() -> None:
     root = Path(__file__).resolve().parents[1]
     workflows = (
-        root / ".github" / "workflows" / "agent-plugin.yml",
         root / ".github" / "workflows" / "guardrails.yml",
         root / ".github" / "workflows" / "_release-reusable.yml",
     )
@@ -294,10 +293,12 @@ def test_release_workflow_runs_required_control_plane_suites() -> None:
             assert suite in text, f"{workflow.name} is missing required suite {suite}"
 
 
-def test_required_pr_guardrail_discovers_full_suite_after_pi_smoke() -> None:
+def test_required_pr_and_release_guardrail_discovers_full_suite_after_smoke() -> None:
     root = Path(__file__).resolve().parents[1]
     text = (root / ".github" / "workflows" / "guardrails.yml").read_text(encoding="utf-8")
+    full_command = "./.venv/bin/python -m pytest --durations=25"
 
+    assert not (root / ".github" / "workflows" / "agent-plugin.yml").exists()
     assert text.count("uses: actions/setup-node@v4") == 1
     assert text.count("node-version: '22.19.0'") == 1
     assert "npm ci --omit=dev --ignore-scripts --prefix agent-runtime" in text
@@ -306,15 +307,17 @@ def test_required_pr_guardrail_discovers_full_suite_after_pi_smoke() -> None:
         '--python "${{ github.workspace }}/.venv/bin/python"'
     ) in text
     assert "npm view" not in text
-    assert [line.strip() for line in text.splitlines() if line.strip() == "./.venv/bin/python -m pytest"] == [
-        "./.venv/bin/python -m pytest"
-    ]
+    assert "./om-agent spec > /tmp/om-agent-spec.json" in text
+    assert "if: ${{ github.event_name == 'pull_request' || steps.release.outputs.tag != '' }}" in text
+    assert [line.strip() for line in text.splitlines() if line.strip() == full_command] == [full_command]
     assert "tests/test_" not in text
     assert (
         text.index("npm ci --omit=dev --ignore-scripts --prefix agent-runtime")
         < text.index("scripts/pi_runtime_smoke.sh")
         < text.index("tests/run_smoke.py")
-        < text.index("./.venv/bin/python -m pytest")
+        < text.index("./om-agent spec")
+        < text.index("Resolve VERSION release")
+        < text.index(full_command)
     )
 
 

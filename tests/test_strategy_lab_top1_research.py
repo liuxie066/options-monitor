@@ -16,7 +16,6 @@ from domain.domain.fee_calc import FUTU_HK_TERMINAL_FEE_SCHEDULE_VERSION
 from domain.domain.option_lifecycle import expiration_observation_start_ms
 from src.application.opening_candidate_snapshot import (
     OPENING_CANDIDATE_SNAPSHOT_FILE,
-    OPENING_CANDIDATE_SNAPSHOT_SCHEMA,
     load_opening_candidate_snapshot,
 )
 from src.application.recommendation_point import (
