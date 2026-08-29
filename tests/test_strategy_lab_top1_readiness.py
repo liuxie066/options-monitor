@@ -354,7 +354,27 @@ def test_research_preview_cli_is_read_only_and_start_requires_write(
         "reason_codes": ["research_window_coverage_missing"],
     }
     calls: list[tuple[object, dict[str, object]]] = []
-    monkeypatch.setattr(cli, "_research_inputs", lambda *_args: ({"scope": "fixed"}, {}))
+    health_calls: list[tuple[object, dict[str, object]]] = []
+    monkeypatch.setattr(
+        cli, "read_market_calendar_binding", lambda *_args, **_kwargs: {"bound": True}
+    )
+    monkeypatch.setattr(
+        cli, "read_top1_capability_receipt", lambda *_args, **_kwargs: {}
+    )
+    monkeypatch.setattr(
+        cli, "capability_facts_from_receipt", lambda _receipt: {"available": True}
+    )
+    monkeypatch.setattr(
+        cli,
+        "load_runtime_config",
+        lambda **_kwargs: (_ for _ in ()).throw(ValueError("missing")),
+    )
+
+    def health(root: object, **kwargs: object) -> dict[str, object]:
+        health_calls.append((root, kwargs))
+        return _healthy_corpus()
+
+    monkeypatch.setattr(cli, "build_corpus_health_receipt", health)
     monkeypatch.setattr(
         cli,
         "preview_sell_put_top1_research",
@@ -382,7 +402,17 @@ def test_research_preview_cli_is_read_only_and_start_requires_write(
 
     assert response["ok"] is True
     assert response["data"] == preview
-    assert calls[0][1] == {"scope": "fixed"}
+    assert calls[0][1]["corpus_status"] == _healthy_corpus()
+    assert health_calls == [
+        (
+            tmp_path / "runtime",
+            {
+                "market": "HK",
+                "account": "lx",
+                "repo_root": tmp_path / "repo",
+            },
+        )
+    ]
     assert not (
         tmp_path / "runtime/output_shared/research/strategy_lab/experiments.sqlite3"
     ).exists()

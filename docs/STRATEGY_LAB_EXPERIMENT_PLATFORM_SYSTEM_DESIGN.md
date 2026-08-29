@@ -1,6 +1,6 @@
 # Strategy Lab 统一策略实验平台系统设计
 
-- **状态**：MVP 实验内核与基础事实归档已落地；健康回执来源收敛待实施，真实 20 日 / 10 日窗口待验收
+- **状态**：MVP 实验内核、基础事实归档与健康回执来源收敛已落地；真实 20 日 / 10 日窗口待验收
 - **日期**：2026-08-29
 - **产品依据**：`docs/STRATEGY_LAB_EXPERIMENT_PLATFORM_PRD.md`
 - **当前实现参考**：`docs/STRATEGY_LAB_DESIGN.md`
@@ -42,7 +42,7 @@ MVP 不新建通用实验框架。已有 Sell Put Top1 状态机、ExperimentSto
 | 运行事实 | HK / US、`lx` 的正式 run 绑定 opening decision、同 run 持仓行情、mark 和 FX；取证失败只降级 Strategy Lab | 需要真实运行持续证明两市场均按本次 collector 结果归档 |
 | 正式点绑定 | `recommendation_point.v3` 校验 run / account / config / policy、三类 owner ref / hash 和时间一致性 | 需要抽查真实点 readback；任一缺失或冲突继续 fail closed |
 | Research Archive | `formal_corpus.py` 已提供 expectation、正式点紧凑 gzip 写入、透明读取与冲突检测 | 需要随真实正式点验证长期容量和连续性 |
-| 积累健康 | `./om research corpus-health` 已从 Formal Corpus 计算 HK / US expectation 和 archive，但同步调用全 runtime storage baseline；Top1 advance 还会生成旧 Store-backed 重复回执 | 删除旧回执读写；Formal health 改为 Formal Corpus + 当前磁盘快照，readiness 每次只构建一次且不扫描全 runtime manifest |
+| 积累健康 | `./om research corpus-health`、Top1 readiness 和 advance 共用 Formal Corpus v2；只读取当前磁盘容量，scheduled readiness 仅检查最近 20 个成熟交易日加当日 | 需要在目标运行环境验证阶段耗时和真实连续性 |
 | Recipe Projection | projection v3 从 formal archive 派生，不复制基础行情 | 需要用真实点确认与原 Top1 行为一致 |
 | 历史事实 | 无价值的历史 migration preview 已删除 | 不增加 apply；缺失历史不回填，只重新积累 |
 
@@ -655,7 +655,7 @@ MVP seed 的排序 profile 和 0.002 / 0.004 / 0.006 阈值目前没有 canonica
 | 2. 运行事实封存 | `opening_candidate_snapshot.py`、`required_data_blobs.py`、`prepared_option_positions_context.py` | **复用 + 修改条件** | opening snapshot 和 required-data blob 原样复用；prepared v2 保留现有 mark collector / payload，HK / US 正式 run 都为 `lx` 采集一次并直接使用本次返回的 facts；不新增 artifact 或 per-recipe 调用 |
 | 3. 正式点绑定与校验 | `recommendation_point.py` | **复用 + 修改** | 保留 point ID、write-once 及 validator；升级 v3 绑定 opening、required-data 和 prepared 三个 owner |
 | 4. Research Archive | `research/archive.py` 只有远端 pull / inventory / verify | **复用传输 + 确实新增** | 新增 `research/formal_corpus.py`、canonical JSON + deterministic gzip 读写；不加 DB、repository 抽象或对象存储 |
-| 5. Corpus Health Receipt | `research/formal_corpus.py` 已提供 canonical health，但错误地同步调用全 runtime storage baseline；Top1 `corpus.py` 仍保留 Store-backed 重复回执 | **修改 + 删除重复路径** | 只由 `formal_corpus.py` 对比 expectation 和 archived attempts，并读取一次当前磁盘容量；手工 CLI 使用全历史 scope，scheduled readiness 使用最近 20 个成熟日加当日 scope；不建 receipt 表、摘要文件或缓存 |
+| 5. Corpus Health Receipt | `research/formal_corpus.py` 提供唯一 canonical health；旧 Store-backed health 实现已删除 | **原样复用** | 只由 `formal_corpus.py` 对比 expectation 和 archived attempts，并读取一次当前磁盘容量；手工 CLI 使用全历史 scope，scheduled readiness 使用最近 20 个成熟日加当日 scope；不建 receipt 表、摘要文件或缓存 |
 | 6. Recipe Projection | `top1/corpus.py`、`top1/ranking.py`、Candidate Engine | **复用 + 修改 + 删除重复字段** | corpus 只存 archive ref 和 recipe 派生 metric；v3 projection 不复制基础 candidate 字段，运行时在内存合并 |
 | 7. Capability / Readiness | `top1/capability_receipts.py`、`top1/readiness.py`、`top1/workspace.py` | **复用 + 修改** | 保留四态和现有 capability；source readiness 改为消费 Corpus Health Receipt + recipe projection |
 | 8. ExperimentStore 与验证观察 | `experiment_store.py`、`validation.py`、`fill_observation.py`、`advance.py` | **原样复用为主** | 保留冻结 spec、授权、commitment、selected-arm Bid / Ask 和幂等提交；只更换 source ref，不加 schema / table |
@@ -726,12 +726,11 @@ health owner 并停止重复生产路径。
 | `src/application/strategy_lab/top1/corpus.py` | `_build_point_ranking_projection()` 及直接加载 `output_runs` opening / prepared artifact 的路径 | v3 projection 全部从 formal corpus 构建 |
 | 同上 | store-backed `_persist_expectation()` / `seal_day_expectation()` 及 calendar binding 实现 | calendar binding 实现移到 `research/formal_corpus.py`；新 file-only writer 保留 `_expectation_denominator()` 和首份 seal 采用语义后再删旧 caller，不删 schema v4 表或历史行 |
 | 同上 | `discover_recommendation_points()` | 新 archive 完成连续 readback，且已确认旧历史无 ready 迁移价值；不增加 apply |
-| 同上 | `sell_put_top1_corpus_health_receipt.v1` 的 build / publish / read / validate、current / daily ref 和仅服务该合同的 helper | **后续独立 work unit**：本轮 source switch 已发布并证明无内部 caller 后再单独确认；不删除历史 artifact、schema v4 表或其他 corpus projection 逻辑 |
 | `src/application/strategy_lab/top1/ranking.py` | projection v2 写入的 Bid / Ask、Greeks、合约和其他基础 candidate 副本 | v3 写入及读取全部通过；已有 v1/v2 artifact 仅在没有 active experiment 引用后停止支持 |
 
-删除项不得和 source switch 合并。本轮只切 health caller、将 readiness / advance 明确升级为 v2 并修改成熟日计算；旧 health
-实现与专属测试的机械删除属于独立后续 work unit，必须重新确认文件范围和 caller inventory。整个过程不改写
-历史 artifact 或回执。其余旧 archive reader 仍按其原切换门槛处理，不纳入本工作单。
+旧 `sell_put_top1_corpus_health_receipt.v1` 的 build / publish / read / validate、current / daily ref、
+Store status 包装和专属测试已在 source switch 发布且确认无内部 caller 后删除。历史 artifact、schema v4 表及
+其他 corpus projection 逻辑没有被改写或删除；其余旧 archive reader 仍按各自门槛处理。
 
 ### 6.6 明确不删除
 
@@ -966,28 +965,20 @@ mark、当天最后报价、开仓权利金、Shadow Replay 或 performance-evid
 
 ## 10. 当前运行与验收顺序
 
-基础事实代码切片已完成，advance 超时 owner 也已通过只读诊断定位。继续计算连续完整日前按以下顺序收敛：
+基础事实、health v2 source switch 和旧 Store-backed health 删除均已完成。继续计算连续完整日前按以下顺序验收：
 
-1. 将 Formal Corpus health 升级为 v2：移除全 runtime storage baseline，改为当前磁盘容量快照，
-   同时实现手工 `full` 和 readiness `latest_mature_window` 两个 scope，后者严格限定最近
-   20 个成熟交易日加当日；不改 collector、不提高超时；
-2. 将 Top1 advance / readiness 健康来源收敛到该 health v2，删除旧 Store-backed 回执的运行时读写，
-   scheduled readiness 透传 advance 已冻结的 `occurred_at_utc`；将两个返回合同明确升级为 v2，
-   不建兼容 adapter，并完成聚焦回归；
-3. 只有用户另行授权发布 / 升级后，才在目标运行环境以相同只读输入重复阶段计时，证明 health、readiness
+1. 只有用户另行授权发布 / 升级后，才在目标运行环境以相同只读输入重复阶段计时，证明 health、readiness
    和 scheduled advance 既不进入全 runtime storage baseline，也不 load / `stat` 最近 20 个成熟日加当日以外的
    Formal artifact；
-4. 旧 Store-backed health 实现只在 source switch 已发布且全仓证明无内部 caller 后，
-   作为独立 work unit 另行确认删除；不删除历史 artifact；
-5. 通过现有受控入口刷新并校验 HK / US calendar coverage；各市场现有 `tick-cron` 在启动生产 tick 前
+2. 通过现有受控入口刷新并校验 HK / US calendar coverage；各市场现有 `tick-cron` 在启动生产 tick 前
    预封本市场 `lx` expectation；
-6. ordinary scheduled tick 为 HK / US `lx` 采集一次共享持仓行情，写 recommendation point v3，
+3. ordinary scheduled tick 为 HK / US `lx` 采集一次共享持仓行情，写 recommendation point v3，
    归档后 readback；
-7. 先观察至少一个 HK 和一个 US 正式点，确认 hash、字段、压缩和健康回执；
-8. 每日检查 Corpus Health Receipt，重新积累连续 20 个完整 HK 交易日；缺点只修复事实产出，不回填；
-9. 20 日完整后生成 research preview，用户确认后执行研究；没有可信 `research_leader` 时停止；
-10. 有 leader 时由用户第二次确认未来 10 日隐藏验证，现有 timer 推进 fill、outcome 和 Final Receipt；
-11. 只有 `candidate_for_adoption` 才在回执中出现 `adoption_proposal`，且仍需独立配置、发布和部署授权。
+4. 先观察至少一个 HK 和一个 US 正式点，确认 hash、字段、压缩和健康回执；
+5. 每日检查 Corpus Health Receipt，重新积累连续 20 个完整 HK 交易日；缺点只修复事实产出，不回填；
+6. 20 日完整后生成 research preview，用户确认后执行研究；没有可信 `research_leader` 时停止；
+7. 有 leader 时由用户第二次确认未来 10 日隐藏验证，现有 timer 推进 fill、outcome 和 Final Receipt；
+8. 只有 `candidate_for_adoption` 才在回执中出现 `adoption_proposal`，且仍需独立配置、发布和部署授权。
 
 本轮不新增 MCP、Agent Skill、飞书控制面、数据库表、定时器或历史 apply 命令。任何持仓、真实合约行情
 或 FX 缺口都必须让 point / preview fail closed；不得用当前值补历史，也不得降低评价标准。
