@@ -37,47 +37,41 @@ def test_checked_in_metadata_and_fixture_are_independently_pinned() -> None:
     assert len(fixture["raw"]) + len(fixture["csv"]) == 226_760
 
 
-@pytest.mark.parametrize("profile", benchmark.PROFILES)
-def test_short_profile_enforces_resource_and_exit_gates(profile: str) -> None:
-    receipt = benchmark.run_profile(profile, warmups=0, repetitions=1)
+def test_short_profile_enforces_resource_and_exit_gates() -> None:
+    receipt = benchmark.run_profile("canonical", warmups=0, repetitions=1)
 
     assert receipt["run_label"] == "non_acceptance_smoke"
     assert receipt["space"]["mismatch_count"] == 0
     assert receipt["space"]["mismatch_samples"] == []
     assert receipt["python_peak_allocation_bytes"] <= receipt["python_peak_allocation_limit_bytes"]
     assert receipt["violations"] == []
+    assert receipt["space"]["removed_files"] == 2
+    assert receipt["space"]["failed_files"] == 0
+    assert receipt["timing"]["tracemalloc_enabled"] is False
     assert benchmark.benchmark_exit_code(receipt) == 0
     receipt["violations"] = ["injected_fault"]
     assert benchmark.benchmark_exit_code(receipt) == 1
 
 
-@pytest.mark.parametrize(
-    ("profile", "expected_violation"),
-    (
-        ("canonical", "canonical_persisted_bytes"),
-        ("dual_output", "bounded_shadow_comparison"),
-    ),
-)
-def test_each_profile_gate_drives_nonzero_exit(
-    profile: str,
-    expected_violation: str,
-    monkeypatch,
-) -> None:
+def test_canonical_space_gate_drives_nonzero_exit(monkeypatch) -> None:
     original = benchmark._canonical_bundle
 
-    def _fault(root, fixture, *, dual_output):
-        result = original(root, fixture, dual_output=dual_output)
-        if profile == "canonical":
-            result["retained_bytes"] = 10**9
-        else:
-            result["mismatch_count"] = 1
+    def _fault(root, fixture):
+        result = original(root, fixture)
+        result["retained_bytes"] = 10**9
         return result
 
     monkeypatch.setattr(benchmark, "_canonical_bundle", _fault)
-    receipt = benchmark.run_profile(profile, warmups=0, repetitions=1)
+    receipt = benchmark.run_profile("canonical", warmups=0, repetitions=1)
 
-    assert expected_violation in receipt["violations"]
+    assert "canonical_persisted_bytes" in receipt["violations"]
     assert benchmark.benchmark_exit_code(receipt) == 1
+
+
+def test_dual_output_profile_is_retired() -> None:
+    assert benchmark.PROFILES == ("canonical",)
+    with pytest.raises(ValueError, match="profile must be one of: canonical"):
+        benchmark.run_profile("dual_output", warmups=0, repetitions=1)
 
 
 def test_descriptor_drift_is_a_preflight_violation(monkeypatch, tmp_path) -> None:
