@@ -3,6 +3,7 @@ from __future__ import annotations
 import gzip
 import json
 import re
+import shutil
 from collections.abc import Mapping
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -51,7 +52,7 @@ from src.infrastructure.private_storage import (
 FORMAL_CORPUS_VERSION = "v1"
 FORMAL_EXPECTATION_SCHEMA = "formal_day_expectation.v1"
 FORMAL_POINT_SCHEMA = "formal_point_attempt.v1"
-CORPUS_HEALTH_SCHEMA = "corpus_health_receipt.v1"
+CORPUS_HEALTH_SCHEMA = "corpus_health_receipt.v2"
 FORMAL_POINT_TIME_COHERENCE_SCHEMA = "formal_point_time_coherence.v1"
 FORMAL_POINT_MAX_SKEW_MS = 300_000
 MARKET_CALENDAR_POINTER_SCHEMA = "sell_put_top1_market_calendar_pointer.v1"
@@ -1419,158 +1420,203 @@ def build_corpus_health_receipt(
     account: str,
     repo_root: str | Path | None = None,
     observed_at_utc: str | None = None,
+    scope: str = "full",
+    mature_day_limit: int | None = None,
 ) -> dict[str, Any]:
     market, account = _identity(market, account)
+    scope = _text(scope, "scope")
+    if scope not in {"full", "latest_mature_window"}:
+        _fail("formal_corpus_input_invalid", "scope is invalid")
+    if scope == "full":
+        if mature_day_limit is not None:
+            _fail(
+                "formal_corpus_input_invalid",
+                "full scope does not accept mature_day_limit",
+            )
+    elif type(mature_day_limit) is not int or mature_day_limit <= 0:
+        _fail(
+            "formal_corpus_input_invalid",
+            "latest_mature_window requires a positive mature_day_limit",
+        )
     normalized_runtime_root = _runtime_root(runtime_root)
     observed_at = _timestamp(
         observed_at_utc
         or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "observed_at_utc",
     )
+    local_date = (
+        datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+        .astimezone(ZoneInfo(_MARKET_TIMEZONES[market]))
+        .date()
+        .isoformat()
+    )
+    calendar_root = (
+        normalized_runtime_root / "output_shared" / "research" / "strategy_lab"
+    )
+    try:
+        calendar = read_market_calendar_binding(calendar_root, market=market)
+    except FormalCorpusError:
+        if scope == "latest_mature_window":
+            raise
+        calendar = None
+    selected_dates: list[str] | None = None
+    if scope == "latest_mature_window":
+        assert calendar is not None and mature_day_limit is not None
+        if not calendar["coverage_start"] <= local_date <= calendar["coverage_end"]:
+            _fail(
+                "market_calendar_binding_unavailable",
+                f"{market} observation date is outside calendar coverage",
+            )
+        trading_dates = list(calendar["trading_dates"])
+        selected_dates = [
+            value for value in trading_dates if value < local_date
+        ][-mature_day_limit:]
+        if local_date in trading_dates:
+            selected_dates.append(local_date)
+
     identity_root = _corpus_root(runtime_root) / market.lower() / account
     expectation_root = identity_root / "expectations"
     point_root = identity_root / "points"
-    try:
-        calendar = read_market_calendar_binding(
-            _runtime_root(runtime_root) / "output_shared" / "research" / "strategy_lab",
-            market=market,
-        )
-    except FormalCorpusError:
-        calendar = None
     days: list[dict[str, Any]] = []
     layout_conflicts = 0
     expectation_dates: set[str] = set()
-    if expectation_root.is_dir() and not expectation_root.is_symlink():
-        for directory in sorted(expectation_root.iterdir()):
-            if directory.is_symlink() or not directory.is_dir():
-                layout_conflicts += 1
-                continue
-            try:
-                trading_date = _day(directory.name)
-            except FormalCorpusError:
-                layout_conflicts += 1
-                continue
-            expectation_dates.add(trading_date)
-            try:
-                expectations = _expectation_artifacts(runtime_root, market, account, trading_date)
-            except FormalCorpusError:
-                expectations = []
-                conflict = True
-            else:
-                conflict = len(expectations) != 1
-            if not expectations:
-                days.append(
-                    {
-                        "trading_date": trading_date,
-                        "status": "conflict" if conflict else "missing",
-                        "reason_code": (
-                            "formal_corpus_conflict"
-                            if conflict
-                            else "formal_expectation_missing"
-                        ),
-                        "market_calendar_version": None,
-                        "market_calendar_sha256": None,
-                        "schedule_config_sha256": None,
-                        "expected_point_count": 0,
-                        "captured_point_count": 0,
-                        "not_evaluable_point_count": 0,
-                        "missing_point_count": 0,
-                        "points": [],
-                    }
-                )
-                continue
-            expectation = expectations[0][0]
-            expected = list(expectation["expected_recommendation_point_ids"])
-            conflict |= _point_day_layout_conflicts(
-                runtime_root, market, account, trading_date, expected
-            )
-            captured = not_evaluable = missing = 0
-            points: list[dict[str, Any]] = []
-            for point_id in expected:
+    candidate_dates: list[str] = []
+    if selected_dates is None:
+        if expectation_root.is_dir() and not expectation_root.is_symlink():
+            for directory in sorted(expectation_root.iterdir()):
+                if directory.is_symlink() or not directory.is_dir():
+                    layout_conflicts += 1
+                    continue
                 try:
-                    loaded = load_formal_point(
-                        runtime_root,
-                        market=market,
-                        account=account,
-                        trading_date=trading_date,
-                        recommendation_point_id=point_id,
-                    )
-                except FormalCorpusError as exc:
-                    loaded = {
-                        "status": "conflict",
-                        "reason_code": exc.reason_code,
-                        "point": None,
-                    }
-                point = loaded.get("point")
-                recommendation_point = (
-                    point.get("recommendation_point")
-                    if isinstance(point, Mapping)
-                    else None
-                )
-                coherence = (
-                    recommendation_point.get("formal_point_time_coherence")
-                    if isinstance(recommendation_point, Mapping)
-                    else None
-                )
-                points.append(
-                    {
-                        "recommendation_point_id": point_id,
-                        "status": loaded["status"],
-                        "reason_code": loaded.get("reason_code"),
-                        "captured_at_utc": (
-                            point.get("captured_at_utc")
-                            if isinstance(point, Mapping)
-                            else None
-                        ),
-                        "source_observed_at_utc": (
-                            coherence.get("maximum_observed_at_utc")
-                            if isinstance(coherence, Mapping)
-                            else None
-                        ),
-                        "time_coherence": (
-                            dict(coherence) if isinstance(coherence, Mapping) else None
-                        ),
-                    }
-                )
-                if loaded["status"] == "available":
-                    captured += 1
-                elif loaded["status"] == "not_evaluable":
-                    not_evaluable += 1
-                elif loaded["status"] == "missing":
-                    missing += 1
-                else:
-                    conflict = True
-            day_status = "conflict" if conflict else "complete" if (
-                expectation["sealed_before_first_target"]
-                and expected
-                and captured == len(expected)
-            ) else "incomplete"
+                    candidate_dates.append(_day(directory.name))
+                except FormalCorpusError:
+                    layout_conflicts += 1
+    else:
+        for trading_date in selected_dates:
+            directory = expectation_root / trading_date
+            if directory.is_symlink() or not directory.is_dir():
+                if directory.exists() or directory.is_symlink():
+                    layout_conflicts += 1
+                continue
+            candidate_dates.append(trading_date)
+    for trading_date in candidate_dates:
+        expectation_dates.add(trading_date)
+        try:
+            expectations = _expectation_artifacts(
+                runtime_root, market, account, trading_date
+            )
+        except FormalCorpusError:
+            expectations = []
+            conflict = True
+        else:
+            conflict = len(expectations) != 1
+        if not expectations:
             days.append(
                 {
                     "trading_date": trading_date,
-                    "status": day_status,
+                    "status": "conflict" if conflict else "missing",
                     "reason_code": (
                         "formal_corpus_conflict"
                         if conflict
-                        else None if day_status == "complete" else "formal_day_incomplete"
+                        else "formal_expectation_missing"
                     ),
-                    "market_calendar_version": expectation[
-                        "market_calendar_version"
-                    ],
-                    "market_calendar_sha256": expectation[
-                        "market_calendar_sha256"
-                    ],
-                    "schedule_config_sha256": expectation[
-                        "schedule_config_sha256"
-                    ],
-                    "expected_point_count": len(expected),
-                    "captured_point_count": captured,
-                    "not_evaluable_point_count": not_evaluable,
-                    "missing_point_count": missing,
-                    "points": points,
+                    "market_calendar_version": None,
+                    "market_calendar_sha256": None,
+                    "schedule_config_sha256": None,
+                    "expected_point_count": 0,
+                    "captured_point_count": 0,
+                    "not_evaluable_point_count": 0,
+                    "missing_point_count": 0,
+                    "points": [],
                 }
             )
-    if point_root.is_dir() and not point_root.is_symlink():
+            continue
+        expectation = expectations[0][0]
+        expected = list(expectation["expected_recommendation_point_ids"])
+        conflict |= _point_day_layout_conflicts(
+            runtime_root, market, account, trading_date, expected
+        )
+        captured = not_evaluable = missing = 0
+        points: list[dict[str, Any]] = []
+        for point_id in expected:
+            try:
+                loaded = load_formal_point(
+                    runtime_root,
+                    market=market,
+                    account=account,
+                    trading_date=trading_date,
+                    recommendation_point_id=point_id,
+                )
+            except FormalCorpusError as exc:
+                loaded = {
+                    "status": "conflict",
+                    "reason_code": exc.reason_code,
+                    "point": None,
+                }
+            point = loaded.get("point")
+            recommendation_point = (
+                point.get("recommendation_point")
+                if isinstance(point, Mapping)
+                else None
+            )
+            coherence = (
+                recommendation_point.get("formal_point_time_coherence")
+                if isinstance(recommendation_point, Mapping)
+                else None
+            )
+            points.append(
+                {
+                    "recommendation_point_id": point_id,
+                    "status": loaded["status"],
+                    "reason_code": loaded.get("reason_code"),
+                    "captured_at_utc": (
+                        point.get("captured_at_utc")
+                        if isinstance(point, Mapping)
+                        else None
+                    ),
+                    "source_observed_at_utc": (
+                        coherence.get("maximum_observed_at_utc")
+                        if isinstance(coherence, Mapping)
+                        else None
+                    ),
+                    "time_coherence": (
+                        dict(coherence) if isinstance(coherence, Mapping) else None
+                    ),
+                }
+            )
+            if loaded["status"] == "available":
+                captured += 1
+            elif loaded["status"] == "not_evaluable":
+                not_evaluable += 1
+            elif loaded["status"] == "missing":
+                missing += 1
+            else:
+                conflict = True
+        day_status = "conflict" if conflict else "complete" if (
+            expectation["sealed_before_first_target"]
+            and expected
+            and captured == len(expected)
+        ) else "incomplete"
+        days.append(
+            {
+                "trading_date": trading_date,
+                "status": day_status,
+                "reason_code": (
+                    "formal_corpus_conflict"
+                    if conflict
+                    else None if day_status == "complete" else "formal_day_incomplete"
+                ),
+                "market_calendar_version": expectation["market_calendar_version"],
+                "market_calendar_sha256": expectation["market_calendar_sha256"],
+                "schedule_config_sha256": expectation["schedule_config_sha256"],
+                "expected_point_count": len(expected),
+                "captured_point_count": captured,
+                "not_evaluable_point_count": not_evaluable,
+                "missing_point_count": missing,
+                "points": points,
+            }
+        )
+    if selected_dates is None and point_root.is_dir() and not point_root.is_symlink():
         for directory in point_root.iterdir():
             if (
                 directory.is_symlink()
@@ -1578,25 +1624,38 @@ def build_corpus_health_receipt(
                 or directory.name not in expectation_dates
             ):
                 layout_conflicts += 1
+    elif selected_dates is not None:
+        for trading_date in selected_dates:
+            if trading_date in expectation_dates:
+                continue
+            directory = point_root / trading_date
+            if directory.exists() or directory.is_symlink():
+                layout_conflicts += 1
     if calendar is not None:
         rows_by_date = {item["trading_date"]: item for item in days}
         trading_dates = list(calendar["trading_dates"])
-        local_date = (
-            datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
-            .astimezone(ZoneInfo(_MARKET_TIMEZONES[market]))
-            .date()
-            .isoformat()
-        )
         existing_dates = sorted(rows_by_date)
-        if existing_dates:
-            start = existing_dates[0]
-            end = max(existing_dates[-1], local_date if local_date in trading_dates else existing_dates[-1])
-        elif local_date in trading_dates:
-            start = end = local_date
+        if selected_dates is not None:
+            denominator = selected_dates
         else:
-            start = end = None
-        if start is not None and end is not None:
-            denominator = [value for value in trading_dates if start <= value <= end]
+            if existing_dates:
+                start = existing_dates[0]
+                end = max(
+                    existing_dates[-1],
+                    local_date
+                    if local_date in trading_dates
+                    else existing_dates[-1],
+                )
+            elif local_date in trading_dates:
+                start = end = local_date
+            else:
+                start = end = None
+            denominator = (
+                [value for value in trading_dates if start <= value <= end]
+                if start is not None and end is not None
+                else []
+            )
+        if denominator:
             if any(value not in trading_dates for value in existing_dates):
                 layout_conflicts += 1
             for value in denominator:
@@ -1620,7 +1679,9 @@ def build_corpus_health_receipt(
                     }
             days = [rows_by_date[value] for value in sorted(rows_by_date)]
             suffix = 0
-            for value in reversed(denominator):
+            for value in reversed(
+                [item for item in denominator if item < local_date]
+            ):
                 if rows_by_date[value]["status"] != "complete":
                     break
                 suffix += 1
@@ -1628,34 +1689,59 @@ def build_corpus_health_receipt(
             suffix = 0
     else:
         suffix = 0
-    artifact_files = [
-        path
-        for root in (expectation_root, point_root)
-        if root.is_dir() and not root.is_symlink()
-        for pattern in ("**/*.json", "**/*.json.gz")
-        for path in root.glob(pattern)
-        if path.is_file() and not path.is_symlink()
-    ]
-    storage: dict[str, Any] = {
-        "formal_corpus_bytes": sum(path.stat().st_size for path in set(artifact_files)),
-        "baseline_status": "unavailable",
-        "capacity": None,
+    artifact_files: set[Path] = set()
+    if selected_dates is None:
+        for root in (expectation_root, point_root):
+            if root.is_dir() and not root.is_symlink():
+                for pattern in ("**/*.json", "**/*.json.gz"):
+                    artifact_files.update(
+                        path
+                        for path in root.glob(pattern)
+                        if path.is_file() and not path.is_symlink()
+                    )
+    else:
+        for trading_date in selected_dates:
+            artifact_files.update(
+                path
+                for path in (expectation_root / trading_date).glob("*.json")
+                if path.is_file() and not path.is_symlink()
+            )
+            artifact_files.update(
+                path
+                for path in (point_root / trading_date).glob("*/*.json.gz")
+                if path.is_file() and not path.is_symlink()
+            )
+    capacity: dict[str, Any] = {
+        "status": "unavailable",
+        "filesystem_capacity_bytes": None,
+        "current_free_bytes": None,
+        "critical_floor_bytes": None,
+        "critical_reasons": [],
     }
     try:
-        from src.application.research.storage_baseline import collect_storage_runtime_baseline
-
-        baseline = collect_storage_runtime_baseline(
-            repo_root=repo_root or normalized_runtime_root,
-            runtime_root=normalized_runtime_root,
-        )
-        storage.update(
-            {
-                "baseline_status": baseline.get("status"),
-                "capacity": baseline.get("thresholds"),
-            }
-        )
-    except Exception:
+        disk = shutil.disk_usage(normalized_runtime_root)
+    except OSError:
         pass
+    else:
+        total_bytes = int(disk.total)
+        free_bytes = int(disk.free)
+        critical_floor = max((total_bytes + 19) // 20, 10 * 1024**3)
+        critical_reasons = (
+            ["current_free_space_below_critical_floor"]
+            if free_bytes < critical_floor
+            else []
+        )
+        capacity = {
+            "status": "critical" if critical_reasons else "insufficient_history",
+            "filesystem_capacity_bytes": total_bytes,
+            "current_free_bytes": free_bytes,
+            "critical_floor_bytes": critical_floor,
+            "critical_reasons": critical_reasons,
+        }
+    storage: dict[str, Any] = {
+        "formal_corpus_bytes": sum(path.stat().st_size for path in artifact_files),
+        "capacity": capacity,
+    }
     totals = {
         "days_total": len(days),
         "days_complete": sum(item["status"] == "complete" for item in days),
@@ -1698,17 +1784,13 @@ def build_corpus_health_receipt(
     complete_dates = [
         item["trading_date"] for item in days if item["status"] == "complete"
     ]
-    capacity_status = (
-        storage["capacity"].get("status")
-        if isinstance(storage.get("capacity"), Mapping)
-        else None
-    )
+    capacity_status = capacity["status"]
     healthy = bool(
         calendar is not None
         and days
         and all(item["status"] == "complete" for item in days)
         and layout_conflicts == 0
-        and capacity_status in {"ok", "insufficient_history"}
+        and capacity_status == "insufficient_history"
     )
     return {
         "schema_version": CORPUS_HEALTH_SCHEMA,
@@ -1716,6 +1798,11 @@ def build_corpus_health_receipt(
         "market": market,
         "account": account,
         "observed_at_utc": observed_at,
+        "scope": {
+            "mode": scope,
+            "mature_day_limit": mature_day_limit,
+            "include_current_trading_day": True,
+        },
         **totals,
         "continuous_complete_trading_days": suffix,
         "earliest_complete_trading_date": complete_dates[0] if complete_dates else None,

@@ -56,10 +56,10 @@ def _source_facts() -> tuple[dict[str, object], dict[str, object]]:
 
 def _healthy_corpus(*, complete_days: int = 20) -> dict[str, object]:
     return {
-        "schema_version": "corpus_health_receipt.v1",
+        "schema_version": "corpus_health_receipt.v2",
         "status": "healthy",
         "continuous_complete_trading_days": complete_days,
-        "storage": {"capacity": {"status": "ok"}},
+        "storage": {"capacity": {"status": "insufficient_history"}},
     }
 
 
@@ -98,12 +98,12 @@ def test_readiness_requires_every_live_capability_fact(tmp_path: Path) -> None:
     ready = build_top1_readiness(
         **common,
         capability_facts={name: True for name in CAPABILITY_FACTS},
-        corpus_health_receipt={"fresh": True, "receipt_ref": "health/current.json"},
     )
     assert ready["source_delivery_ready"] is True
+    assert ready["schema_version"] == "sell_put_top1_readiness.v2"
     assert ready["validation_runtime_ready"] is True
     assert ready["validation_runtime_blockers"] == []
-    assert ready["facts"]["corpus_health_receipt"]["fresh"] is True
+    assert "corpus_health_receipt" not in ready["facts"]
 
     warming = build_top1_readiness(
         **{**common, "corpus_status": _healthy_corpus(complete_days=19)},
@@ -259,8 +259,6 @@ def test_readiness_cli_is_read_only_and_reports_uninitialized_store(
 ) -> None:
     import src.interfaces.cli.strategy_lab_top1 as cli
     from src.interfaces.cli.main import parse_args
-    from src.application.strategy_lab.top1.corpus import CorpusError
-
     profile = _profile(tmp_path)
     profile_path = tmp_path / "service.profile.json"
     profile_path.write_text(json.dumps(profile), encoding="utf-8")
@@ -274,10 +272,16 @@ def test_readiness_cli_is_read_only_and_reports_uninitialized_store(
         "read_market_calendar_binding",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("missing")),
     )
+    health_calls: list[tuple[object, dict[str, object]]] = []
+
+    def health(root: object, **kwargs: object) -> dict[str, object]:
+        health_calls.append((root, kwargs))
+        return _healthy_corpus(complete_days=19)
+
     monkeypatch.setattr(
         cli,
-        "read_corpus_health_receipt",
-        lambda *_args, **_kwargs: {"fresh": False, "receipt_ref": "health/current.json"},
+        "build_corpus_health_receipt",
+        health,
     )
     args = parse_args(
         [
@@ -307,24 +311,30 @@ def test_readiness_cli_is_read_only_and_reports_uninitialized_store(
     assert response["ok"] is True
     assert response["data"]["validation_runtime_ready"] is False
     assert response["data"]["facts"]["store_schema"]["status"] == "not_initialized"
-    assert response["data"]["facts"]["corpus_health_receipt"]["fresh"] is False
-    assert any(
-        item["reason_code"] == "corpus_health_receipt_stale"
-        for item in response["data"]["fact_errors"]
+    assert response["data"]["facts"]["corpus"]["schema_version"] == (
+        "corpus_health_receipt.v2"
     )
+    assert "research_corpus_warming" in response["data"][
+        "validation_runtime_blockers"
+    ]
+    assert len(health_calls) == 1
+    assert health_calls[0][0] == tmp_path / "runtime"
+    assert health_calls[0][1]["market"] == "HK"
+    assert health_calls[0][1]["account"] == "lx"
+    assert health_calls[0][1]["scope"] == "latest_mature_window"
+    assert health_calls[0][1]["mature_day_limit"] == 20
+    assert str(health_calls[0][1]["observed_at_utc"]).endswith("Z")
     assert not store_path.exists()
 
     monkeypatch.setattr(
         cli,
-        "read_corpus_health_receipt",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            CorpusError("corpus_health_receipt_unavailable", "missing")
-        ),
+        "build_corpus_health_receipt",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("missing")),
     )
     missing = cli.handle_top1_command(args)
-    assert missing["data"]["facts"]["corpus_health_receipt"] is None
+    assert missing["data"]["facts"]["corpus"] is None
     assert any(
-        item["reason_code"] == "corpus_health_receipt_unavailable"
+        item["reason_code"] == "top1_status_unavailable"
         for item in missing["data"]["fact_errors"]
     )
     assert not store_path.exists()

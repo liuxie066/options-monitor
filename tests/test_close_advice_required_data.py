@@ -356,6 +356,10 @@ def test_position_only_requirement_creates_one_exact_prefetch_plan(
         lambda *_args, **_kwargs: 110.0,
     )
     monkeypatch.setattr(
+        "src.application.opend_utils.get_trading_date",
+        lambda _market: date(2026, 7, 29),
+    )
+    monkeypatch.setattr(
         planning,
         "list_option_expirations",
         lambda *_args, **_kwargs: [],

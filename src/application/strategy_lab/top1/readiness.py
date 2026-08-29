@@ -9,7 +9,7 @@ from src.application.research.formal_corpus import CORPUS_HEALTH_SCHEMA
 from src.application.strategy_lab.top1.contracts import RESEARCH_REQUIRED_DAYS
 
 
-READINESS_SCHEMA = "sell_put_top1_readiness.v1"
+READINESS_SCHEMA = "sell_put_top1_readiness.v2"
 ADVANCE_SERVICE = "options-monitor-strategy-lab-top1-advance.service"
 ADVANCE_TIMER = "options-monitor-strategy-lab-top1-advance.timer"
 CAPABILITY_FACTS = (
@@ -155,7 +155,6 @@ def build_top1_readiness(
     corpus_status: Mapping[str, Any] | None,
     calendar_binding: Mapping[str, Any] | None,
     capability_facts: Mapping[str, bool] | None = None,
-    corpus_health_receipt: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Combine existing read-only facts; never probe providers or mutate services."""
 
@@ -227,9 +226,9 @@ def build_top1_readiness(
         storage = _object(corpus_status.get("storage"))
         capacity = _object(storage.get("capacity"))
         capacity_status = capacity.get("status")
-        if capacity_status in {"warning", "critical"}:
+        if capacity_status == "critical":
             runtime_blockers.append("research_storage_capacity_risk")
-        elif capacity_status not in {"ok", "insufficient_history"}:
+        elif capacity_status != "insufficient_history":
             runtime_blockers.append("research_storage_capacity_unavailable")
     if not _calendar_ready(calendar_binding):
         runtime_blockers.append("market_calendar_binding_unavailable")
@@ -258,11 +257,6 @@ def build_top1_readiness(
             ),
             "store_schema": dict(schema_state),
             "corpus": dict(corpus_status) if corpus_status is not None else None,
-            "corpus_health_receipt": (
-                dict(corpus_health_receipt)
-                if corpus_health_receipt is not None
-                else None
-            ),
             "market_calendar": (
                 {
                     key: calendar_binding.get(key)
