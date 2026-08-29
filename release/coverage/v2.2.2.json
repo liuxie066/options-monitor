@@ -1,0 +1,83 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "2.2.2",
+  "base": {
+    "tag": "v2.2.1",
+    "commit": "fca4cfa1535e631dd533aa5249dbe26d3a131c07"
+  },
+  "reviewed_head": "543fd809aaf79c8d7474efe62d88f590c7b0914c",
+  "commits": [
+    {
+      "sha": "d2a027dddc6d8fb39ec92d3f8aa7792faf255373",
+      "subject": "perf(required-data): retire dual-output storage"
+    },
+    {
+      "sha": "55f208b0b084cbe8c5dc496bcbf97de989bb3f61",
+      "subject": "perf(required-data): integrate dual-output retirement"
+    },
+    {
+      "sha": "5d5c5426f7b4f7c2d1fb2be173828fdb3d9a4325",
+      "subject": "docs(architecture): refresh dependency graph"
+    },
+    {
+      "sha": "2cb8b1116381304887ed6bfbcd78e130d7e176c3",
+      "subject": "fix(ledger): unify projection refresh and sqlite lock lifecycle"
+    },
+    {
+      "sha": "543fd809aaf79c8d7474efe62d88f590c7b0914c",
+      "subject": "test(ci): stabilize release regression baseline"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Retired redundant inline and loose-file copies for newly sealed required-data snapshots after durable canonical-blob verification, reducing runtime storage without changing historical reads, scan decisions, or notifications.",
+      "commits": [
+        "d2a027dddc6d8fb39ec92d3f8aa7792faf255373"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Reused startup option-position projection recovery during expiry maintenance and serialized SQLite WAL setup, writes, connection close, and artifact hardening under one writer lock, preventing duplicate refreshes and close-time locking failures.",
+      "commits": [
+        "2cb8b1116381304887ed6bfbcd78e130d7e176c3"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "55f208b0b084cbe8c5dc496bcbf97de989bb3f61",
+      "reason": "Merge commit; the required-data storage improvement is mapped to its implementation commit."
+    },
+    {
+      "commit": "5d5c5426f7b4f7c2d1fb2be173828fdb3d9a4325",
+      "reason": "Generated dependency graph refresh after the required-data integration."
+    },
+    {
+      "commit": "543fd809aaf79c8d7474efe62d88f590c7b0914c",
+      "reason": "Test-date stabilization and source-inventory correction only; no runtime behavior change."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "d2a027dddc6d8fb39ec92d3f8aa7792faf255373",
+      "references": ["docs/REQUIRED_DATA_STORAGE_DESIGN.md"]
+    },
+    {
+      "commit": "55f208b0b084cbe8c5dc496bcbf97de989bb3f61",
+      "references": ["docs/REQUIRED_DATA_STORAGE_DESIGN.md"]
+    },
+    {
+      "commit": "5d5c5426f7b4f7c2d1fb2be173828fdb3d9a4325",
+      "references": ["docs/DEPENDENCY_GRAPH.md"]
+    },
+    {
+      "commit": "2cb8b1116381304887ed6bfbcd78e130d7e176c3",
+      "references": ["docs/LEDGER_ARCHITECTURE.md"]
+    },
+    {
+      "commit": "543fd809aaf79c8d7474efe62d88f590c7b0914c",
+      "references": ["docs/RELEASE_PROCESS.md", "docs/REQUIRED_DATA_STORAGE_DESIGN.md"]
+    }
+  ]
+}

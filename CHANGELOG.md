@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 2.2.2 - 2026-08-29
+
+### Improvements
+- Retired redundant inline and loose-file copies for newly sealed required-data snapshots after durable canonical-blob verification, reducing runtime storage without changing historical reads, scan decisions, or notifications.
+
 ### Bug Fixes
 - Reused startup option-position projection recovery during expiry maintenance and serialized SQLite WAL setup, writes, connection close, and artifact hardening under one writer lock, preventing duplicate refreshes and close-time locking failures.
 
