@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 2.2.1 - 2026-08-29
+
+### Improvements
+- Reduced required-data CSV validation overhead for canonical snapshots without changing freshness or data-quality decisions.
+- Delegated post-trade Futu holdings refresh requests to Portfolio Management, so PM rereads its authoritative full snapshot while OM retains only trade facts and refresh intent.
+
 ### Bug Fixes
 - Rejected new Wheel Call intents when Wheel is disabled for the account instead of allowing a stale candidate snapshot to reserve share coverage.
 

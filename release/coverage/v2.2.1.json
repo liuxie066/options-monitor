@@ -1,0 +1,239 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "2.2.1",
+  "base": {
+    "tag": "v2.2.0",
+    "commit": "bac1358ec466c3931d9426a1a871f7d31d856972"
+  },
+  "reviewed_head": "50a1719dfc48b67f54e0508c2906c69c6c297f9e",
+  "commits": [
+    {
+      "sha": "fea75af0a76eedf2dca73b46de70c2a22317d2fa",
+      "subject": "chore(ci): run full pytest discovery (#178)"
+    },
+    {
+      "sha": "f8c656d9bfa54ea047b24abd4a2be69c1c6dbfa9",
+      "subject": "refactor: extract option-position parser registrars (#182)"
+    },
+    {
+      "sha": "07e5dd497b74d80f2ca104a533b8b793fb86c718",
+      "subject": "chore(docs): guard indexed living-document paths (#179)"
+    },
+    {
+      "sha": "eff579c209528692405b7af5ca41dfd97901ef60",
+      "subject": "docs(maintainability): slim Pi and Wheel contracts"
+    },
+    {
+      "sha": "77b433558760db5e5ecb7acd7e1ea54f8a0a346e",
+      "subject": "fix(maintainability): resolve W1b review findings"
+    },
+    {
+      "sha": "7a03a737ea585fd0b1f72ed697b71f960a7fb69e",
+      "subject": "Merge pull request #180 from liuxie066/audit/maintainability-w1b-20260828"
+    },
+    {
+      "sha": "2d1a1894378d33fda6c8b27d8b80d39daa599252",
+      "subject": "chore(gateflow): accept W3 duplicate helper plan"
+    },
+    {
+      "sha": "5c1a6e6eefd8997c833ddb4ed664e25ad483cabd",
+      "subject": "refactor(strategy): centralize path risk context policy"
+    },
+    {
+      "sha": "cfeb8983d6b4520fc7b90448f015a67d53891a2d",
+      "subject": "refactor(tick): centralize latency audit recording"
+    },
+    {
+      "sha": "9482ba8a4313718ba6fde39e9ca121c42947aa0f",
+      "subject": "refactor(wechat): centralize response parsing"
+    },
+    {
+      "sha": "c943610813c6798d23dda6fbcf82c432a86cc4ff",
+      "subject": "docs(architecture): refresh dependency graph"
+    },
+    {
+      "sha": "2cc439aff1a18cd3f0659fc4bc915ac66bb7e09a",
+      "subject": "Merge pull request #181 from liuxie066/audit/maintainability-w3-20260828"
+    },
+    {
+      "sha": "5fcb8b0a4835c25f374176427c366f2bf1a7f525",
+      "subject": "perf(required-data): fast-path CSV validation"
+    },
+    {
+      "sha": "1bce2050e901609be48bfe468c21d2af65d35880",
+      "subject": "test(required-data): avoid duplicate dependency edge"
+    },
+    {
+      "sha": "801aed0762bfacb889bfb9f7b218aeb7b52f08be",
+      "subject": "Merge pull request #183 from liuxie066/codex/us-performance-optimization-review-20260828"
+    },
+    {
+      "sha": "aa7e8ca74c3f6df19754eacd30d75af8554e0cfc",
+      "subject": "feat(portfolio): delegate holdings refresh to PM"
+    },
+    {
+      "sha": "ab2dba2b398e4e547737b82d2e50d3203061523e",
+      "subject": "chore(portfolio): merge PM holdings refresh boundary"
+    },
+    {
+      "sha": "50a1719dfc48b67f54e0508c2906c69c6c297f9e",
+      "subject": "chore(portfolio): vendor pm-api-v1.0.0 contract"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Reduced required-data CSV validation overhead for canonical snapshots without changing freshness or data-quality decisions.",
+      "commits": [
+        "5fcb8b0a4835c25f374176427c366f2bf1a7f525"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Delegated post-trade Futu holdings refresh requests to Portfolio Management, so PM rereads its authoritative full snapshot while OM retains only trade facts and refresh intent.",
+      "commits": [
+        "aa7e8ca74c3f6df19754eacd30d75af8554e0cfc",
+        "50a1719dfc48b67f54e0508c2906c69c6c297f9e"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Rejected new Wheel Call intents when Wheel is disabled for the account instead of allowing a stale candidate snapshot to reserve share coverage.",
+      "commits": [
+        "77b433558760db5e5ecb7acd7e1ea54f8a0a346e"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "fea75af0a76eedf2dca73b46de70c2a22317d2fa",
+      "reason": "CI-only test discovery and runtime pinning; no product behavior change."
+    },
+    {
+      "commit": "f8c656d9bfa54ea047b24abd4a2be69c1c6dbfa9",
+      "reason": "Behavior-preserving CLI parser extraction."
+    },
+    {
+      "commit": "07e5dd497b74d80f2ca104a533b8b793fb86c718",
+      "reason": "Maintainer-only documentation path guard; no runtime behavior change."
+    },
+    {
+      "commit": "eff579c209528692405b7af5ca41dfd97901ef60",
+      "reason": "Documentation-only slimming of existing contracts."
+    },
+    {
+      "commit": "7a03a737ea585fd0b1f72ed697b71f960a7fb69e",
+      "reason": "Merge commit; the Wheel fix is mapped to its implementation commit."
+    },
+    {
+      "commit": "2d1a1894378d33fda6c8b27d8b80d39daa599252",
+      "reason": "Planning-only empty commit; implemented refactors are reviewed separately."
+    },
+    {
+      "commit": "5c1a6e6eefd8997c833ddb4ed664e25ad483cabd",
+      "reason": "Behavior-preserving shared policy helper extraction."
+    },
+    {
+      "commit": "cfeb8983d6b4520fc7b90448f015a67d53891a2d",
+      "reason": "Behavior-preserving latency audit helper extraction."
+    },
+    {
+      "commit": "9482ba8a4313718ba6fde39e9ca121c42947aa0f",
+      "reason": "Behavior-preserving WeChat response parser extraction."
+    },
+    {
+      "commit": "c943610813c6798d23dda6fbcf82c432a86cc4ff",
+      "reason": "Generated dependency graph refresh after internal refactors."
+    },
+    {
+      "commit": "2cc439aff1a18cd3f0659fc4bc915ac66bb7e09a",
+      "reason": "Merge commit; the behavior-preserving refactors are reviewed separately."
+    },
+    {
+      "commit": "1bce2050e901609be48bfe468c21d2af65d35880",
+      "reason": "Test-only dependency-edge correction."
+    },
+    {
+      "commit": "801aed0762bfacb889bfb9f7b218aeb7b52f08be",
+      "reason": "Merge commit; the performance improvement is mapped to its implementation commit."
+    },
+    {
+      "commit": "ab2dba2b398e4e547737b82d2e50d3203061523e",
+      "reason": "Integration marker; the implementation and contract commits are mapped to the release note."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "fea75af0a76eedf2dca73b46de70c2a22317d2fa",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/178"]
+    },
+    {
+      "commit": "f8c656d9bfa54ea047b24abd4a2be69c1c6dbfa9",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/182"]
+    },
+    {
+      "commit": "07e5dd497b74d80f2ca104a533b8b793fb86c718",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/179"]
+    },
+    {
+      "commit": "eff579c209528692405b7af5ca41dfd97901ef60",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/180"]
+    },
+    {
+      "commit": "77b433558760db5e5ecb7acd7e1ea54f8a0a346e",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/180"]
+    },
+    {
+      "commit": "7a03a737ea585fd0b1f72ed697b71f960a7fb69e",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/180"]
+    },
+    {
+      "commit": "2d1a1894378d33fda6c8b27d8b80d39daa599252",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/181"]
+    },
+    {
+      "commit": "5c1a6e6eefd8997c833ddb4ed664e25ad483cabd",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/181"]
+    },
+    {
+      "commit": "cfeb8983d6b4520fc7b90448f015a67d53891a2d",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/181"]
+    },
+    {
+      "commit": "9482ba8a4313718ba6fde39e9ca121c42947aa0f",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/181"]
+    },
+    {
+      "commit": "c943610813c6798d23dda6fbcf82c432a86cc4ff",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/181"]
+    },
+    {
+      "commit": "2cc439aff1a18cd3f0659fc4bc915ac66bb7e09a",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/181"]
+    },
+    {
+      "commit": "5fcb8b0a4835c25f374176427c366f2bf1a7f525",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/183"]
+    },
+    {
+      "commit": "1bce2050e901609be48bfe468c21d2af65d35880",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/183"]
+    },
+    {
+      "commit": "801aed0762bfacb889bfb9f7b218aeb7b52f08be",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/183"]
+    },
+    {
+      "commit": "aa7e8ca74c3f6df19754eacd30d75af8554e0cfc",
+      "references": ["docs/FUTU_TRADE_HOLDINGS_SYNC.md", "docs/ARCHITECTURE.md"]
+    },
+    {
+      "commit": "ab2dba2b398e4e547737b82d2e50d3203061523e",
+      "references": ["docs/FUTU_TRADE_HOLDINGS_SYNC.md", "docs/ARCHITECTURE.md"]
+    },
+    {
+      "commit": "50a1719dfc48b67f54e0508c2906c69c6c297f9e",
+      "references": ["docs/FUTU_TRADE_HOLDINGS_SYNC.md", "contracts/portfolio-management/README.md"]
+    }
+  ]
+}
