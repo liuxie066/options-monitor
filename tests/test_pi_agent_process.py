@@ -1318,14 +1318,21 @@ def _start_node_until_proposed(database, payload, run_id):
         raise
 
 
-def _lease_expiration(database: Path, session_id: str) -> int:
+def _expire_writer_lease(database: Path, session_id: str) -> None:
+    now_ms = int(time.time() * 1000)
     with sqlite3.connect(database) as connection:
         row = connection.execute(
             "SELECT expires_at_ms FROM writer_leases WHERE session_id = ?",
             (session_id,),
         ).fetchone()
-    assert row is not None
-    return row[0]
+        assert row is not None
+        assert row[0] > now_ms
+        updated = connection.execute(
+            "UPDATE writer_leases SET expires_at_ms = ? WHERE session_id = ?",
+            (now_ms - 1, session_id),
+        ).rowcount
+        connection.commit()
+    assert updated == 1
 
 
 def _wait_for_tool_slot(expected: bool, timeout: float = 2.0) -> bool:
@@ -3290,12 +3297,9 @@ def test_killed_partial_turns_rewind_and_writer_lease_expires(tmp_path):
         },
     }
 
-    expirations = [
-        _lease_expiration(database, session_id)
-        for database, session_id, *_ in cases
-    ]
-    expirations.append(_lease_expiration(compact_database, compact_session))
-    time.sleep(max(0, max(expirations) / 1000 - time.time()) + 0.2)
+    for database, session_id, *_ in cases:
+        _expire_writer_lease(database, session_id)
+    _expire_writer_lease(compact_database, compact_session)
 
     for (
         database,

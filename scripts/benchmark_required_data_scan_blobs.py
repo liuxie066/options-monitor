@@ -484,7 +484,7 @@ def _measure(
     warmups: int,
     repetitions: int,
     measure_allocation: bool = True,
-) -> tuple[dict[str, Any], dict[str, Any], int]:
+) -> tuple[dict[str, Any], dict[str, Any], int, dict[str, Any]]:
     wall: list[int] = []
     cpu: list[int] = []
     last: dict[str, Any] = {}
@@ -507,7 +507,7 @@ def _measure(
             action(allocation_root)
             _, peak = tracemalloc.get_traced_memory()
             tracemalloc.stop()
-    return _distribution(wall), _distribution(cpu), peak
+    return _distribution(wall), _distribution(cpu), peak, last
 
 
 def _git_sha() -> str:
@@ -532,14 +532,12 @@ def run_profile(profile: str, *, warmups: int, repetitions: int) -> dict[str, An
         raise RuntimeError("scan blob fixture preflight failed") from exc
     formal = warmups == WARMUPS and repetitions == REPETITIONS
     action = lambda root: _canonical_bundle(root, fixture)
-    wall, cpu, peak = _measure(
+    wall, cpu, peak, evidence = _measure(
         action,
         warmups=warmups,
         repetitions=repetitions,
         measure_allocation=formal,
     )
-    with tempfile.TemporaryDirectory(prefix="scan-blob-evidence-") as raw_tmp:
-        evidence = action(Path(raw_tmp) / "runtime")
     allocation_limit = max(
         32 * 1024 * 1024,
         2 * fixture["observed"]["canonical_blob_bytes"],

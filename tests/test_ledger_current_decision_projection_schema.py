@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-from src.application.ledger import repository as ledger_repository
 from src.application.ledger import repository_core
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 

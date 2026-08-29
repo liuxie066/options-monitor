@@ -51,9 +51,10 @@ jobs:
         run: |
           ./.venv/bin/python tests/run_smoke.py
 
-      - name: Full regression
+      - name: Launcher spec smoke
         run: |
-          ./.venv/bin/python -m pytest
+          chmod +x ./om-agent
+          ./om-agent spec > /tmp/om-agent-spec.json
 
       - name: Resolve VERSION release
         id: release
@@ -79,6 +80,11 @@ jobs:
           fi
           VERSION="$(tr -d '\n' < VERSION)"
           echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Full regression
+        if: ${{ github.event_name == 'pull_request' || steps.release.outputs.tag != '' }}
+        run: |
+          ./.venv/bin/python -m pytest --durations=25
 
   release:
     needs: guardrails
