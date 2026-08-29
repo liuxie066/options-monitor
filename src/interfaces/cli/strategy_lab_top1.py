@@ -21,9 +21,9 @@ from src.application.strategy_lab.top1.capability_receipts import (
     read_top1_capability_receipt,
     refresh_top1_capability_receipt,
 )
+from src.application.strategy_lab.top1.contracts import RESEARCH_REQUIRED_DAYS
 from src.application.strategy_lab.top1.corpus import (
     CorpusError,
-    read_corpus_health_receipt,
     read_corpus_status,
     read_market_calendar_binding,
     refresh_market_calendar_binding,
@@ -43,7 +43,10 @@ from src.application.strategy_lab.top1.workspace import (
     start_confirmed_research,
     start_confirmed_validation,
 )
-from src.application.research.formal_corpus import seal_profile_formal_expectations
+from src.application.research.formal_corpus import (
+    build_corpus_health_receipt,
+    seal_profile_formal_expectations,
+)
 from domain.domain.fee_calc import FUTU_HK_TERMINAL_FEE_SCHEDULE_VERSION
 from src.infrastructure.futu_gateway import (
     FutuGatewayError,
@@ -244,7 +247,15 @@ def _profile_context(
     }
 
 
-def _readiness(context: Mapping[str, Any], store: ExperimentStore) -> dict[str, Any]:
+def _readiness(
+    context: Mapping[str, Any],
+    store: ExperimentStore,
+    *,
+    observed_at_utc: str | None = None,
+) -> dict[str, Any]:
+    observed_at_utc = observed_at_utc or datetime.now(timezone.utc).isoformat().replace(
+        "+00:00", "Z"
+    )
     profile = context["profile"]
     errors: list[dict[str, str]] = []
     try:
@@ -268,17 +279,17 @@ def _readiness(context: Mapping[str, Any], store: ExperimentStore) -> dict[str, 
 
     schema = store.schema_state()
     corpus: dict[str, Any] | None = None
-    if schema.get("status") == "ready":
-        try:
-            corpus = read_corpus_status(
-                store,
-                market="HK",
-                account="lx",
-                artifact_root=context["artifact_root"],
-                repo_root=context["repo_root"],
-            )
-        except Exception as exc:
-            errors.append({"reason_code": "top1_status_unavailable", "message": str(exc)})
+    try:
+        corpus = build_corpus_health_receipt(
+            context["runtime_root"],
+            market="HK",
+            account="lx",
+            observed_at_utc=observed_at_utc,
+            scope="latest_mature_window",
+            mature_day_limit=RESEARCH_REQUIRED_DAYS,
+        )
+    except Exception as exc:
+        errors.append({"reason_code": "top1_status_unavailable", "message": str(exc)})
     try:
         calendar = read_market_calendar_binding(context["artifact_root"], market="HK")
     except Exception as exc:
@@ -286,24 +297,6 @@ def _readiness(context: Mapping[str, Any], store: ExperimentStore) -> dict[str, 
         errors.append(
             {"reason_code": "market_calendar_binding_unavailable", "message": str(exc)}
         )
-    health_receipt: dict[str, Any] | None = None
-    read_at_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    try:
-        health_receipt = read_corpus_health_receipt(
-            context["artifact_root"],
-            market="HK",
-            account="lx",
-            now_utc=read_at_utc,
-        )
-        if health_receipt["fresh"] is not True:
-            errors.append(
-                {
-                    "reason_code": "corpus_health_receipt_stale",
-                    "message": "Strategy Lab Top1 corpus health receipt is stale",
-                }
-            )
-    except CorpusError as exc:
-        errors.append({"reason_code": exc.reason_code, "message": str(exc)})
     capability_receipt: dict[str, object] | None = None
     binding = context["top1"].get("opend_binding")
     if isinstance(binding, Mapping):
@@ -328,7 +321,6 @@ def _readiness(context: Mapping[str, Any], store: ExperimentStore) -> dict[str, 
             if capability_receipt is not None
             else None
         ),
-        corpus_health_receipt=health_receipt,
     )
     result["facts"]["capability_receipt"] = (
         {
@@ -805,7 +797,9 @@ def handle_top1_command(args: argparse.Namespace) -> dict[str, Any]:
             market="HK",
             account="lx",
             load_schedule=load_schedule,
-            load_readiness=lambda: _readiness(context, store),
+            load_readiness=lambda: _readiness(
+                context, store, observed_at_utc=occurred_at_utc
+            ),
             load_gateway=load_gateway,
             advance_revision=ADVANCE_REVISION,
             advance_interval_seconds=int(top1["advance_interval"]),
