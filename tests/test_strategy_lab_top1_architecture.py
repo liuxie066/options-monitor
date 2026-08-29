@@ -154,7 +154,6 @@ def test_recommendation_point_imports_only_producer_evidence_owners() -> None:
         "src.application.prepared_option_positions_context",
         "src.application.required_data_snapshot",
         "src.application.source_receipts",
-        "src.application.strategy_lab.top1.ranking",
         "src.application.tick_run_workspace",
     }
 
@@ -360,14 +359,10 @@ def test_w6_validation_modules_keep_narrow_dependency_direction() -> None:
     }
 
 
-def test_production_tick_does_not_depend_on_top1_experiment_store() -> None:
+def test_production_tick_does_not_depend_on_strategy_lab() -> None:
     for path in PRODUCTION_TICK_MODULES:
-        imports = _imports(path)
-        assert "src.application.strategy_lab.top1.lifecycle" not in imports
-        assert "src.application.strategy_lab.top1.corpus" not in imports
-        assert "src.application.strategy_lab.top1.research" not in imports
-        assert "src.application.strategy_lab.top1.research_artifacts" not in imports
-        assert "src.application.strategy_lab.top1.validation" not in imports
-        assert "src.application.strategy_lab.top1.fill_observation" not in imports
-        assert "src.application.strategy_lab.top1.outcome" not in imports
-        assert "src.infrastructure.strategy_lab.experiment_store" not in imports
+        assert not any(
+            module.startswith("src.application.strategy_lab")
+            or module.startswith("src.infrastructure.strategy_lab")
+            for module in _imports(path)
+        )

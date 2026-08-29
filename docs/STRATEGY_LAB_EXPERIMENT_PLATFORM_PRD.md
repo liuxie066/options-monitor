@@ -1060,7 +1060,7 @@ ExperimentStore、Research Archive、Shadow Replay 和 Candidate Engine，不再
 | 维度 | 当前实现 | 剩余工作 |
 |---|---|---|
 | 操作入口 | `top1-loop` 已提供 readiness、历史 preview、研究 preview/start、验证 preview/start、status、receipt 和 scheduled advance | 由操作员按两次确认流程完成真实验收；不新增 Agent、MCP 或第二套业务 API |
-| 实验范围 | HK / `lx` / Sell Put Top1 是 formal MVP recipe；通用 `strategy-lab` 命令仅保留为本地探索入口 | 不扩展旧通用入口；只有真实第二个 recipe 出现时再提炼共享原语 |
+| 实验范围 | HK / `lx` / Sell Put Top1 是 formal MVP recipe；`strategy-lab update` 仅保留为 recorder maintenance | 探索性分析直接使用 Shadow Replay；只有真实第二个 recipe 出现时再提炼共享原语 |
 | 20 / 10 日内核 | 冻结 spec、研究授权、leader、未来 commitment、fill、outcome、评价和 Final Receipt 均已实现并有测试 | 先积累连续 20 个完整交易日；真实研究有可信 leader 后，才能确认并等待未来 10 日验证 |
 | 正式点事实 | 当前 Top1 projection 只保存 HK / `lx` accepted candidates；HK 已在正式 run 采集当前持仓 mark，US prepared evidence 会复用 repository 旧 mark；完整 candidate snapshot 主要位于短期 `output_runs` | 复用 candidate snapshot；HK / US 每个正式 run 为 `lx` 采集一次共享账户持仓行情，并将 accepted + rejected、exact marks 和 FX 持久化到 Research Archive；不重扫 option chain、不按 recipe 请求行情、不补造 |
 | 历史事实 | 已确认旧运行缺少等价的完整候选、同 run 持仓 mark 和来源绑定 | 不建设 migration apply，不补造旧点；从 formal writer 启用后重新积累 |

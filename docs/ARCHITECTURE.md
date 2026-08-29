@@ -68,12 +68,11 @@ sanitized summary in the inbound audit record.
 ## Research, Shadow Replay, And Strategy Lab
 
 Research and Shadow Replay are an independent offline evidence/replay module,
-not part of the Inbound Assistant core and not a remote chat surface. Strategy Lab is
-the strategy-evolution product surface above that offline module. Its generic
-local research surface provides evidence update, read-only decision-instance
-readiness, experiments, advisory proposals, and redacted local LLM context.
-Its formal HK / `lx` Sell Put `top1-loop` separately owns the confirmed 20-day
-research, 10-day hidden validation, and immutable receipt workflow.
+not part of the Inbound Assistant core and not a remote chat surface. Strategy
+Lab is limited to the formal HK / `lx` Sell Put `top1-loop`, which owns the
+confirmed 20-day research, 10-day hidden validation, and immutable receipt
+workflow. Its retained `update` command is only a recorder compatibility facade
+over Shadow Replay maintenance.
 
 ```text
 ./om research ...
@@ -92,19 +91,12 @@ store, or production configuration writer.
 checks, handoff rendering, remote archive mirroring, and local research bundle
 writes. `src.application.shadow_replay` owns offline dataset construction,
 mark/outcome lifecycle, status, analyze, and candidate-impact report logic.
-`src.application.strategy_lab` currently owns dataset evidence loading,
-decision-instance normalization, domain adapters, controlled hypothesis
-generation, Strategy Lab readiness, experiment workflow, and observed-universe
-scorecards while reusing Shadow Replay for counterfactual evaluation. It also
-owns advisory proposal generation and redacted LLM context generation.
-Its update facade wraps Shadow Replay status / data-plan so dataset mark and
-settle maintenance has one Strategy Lab entry point without adding a new write
-path.
-The shared core owns the workflow only. Sell Put, Covered Call, and Combo
-Yield keep separate decision units, objective metrics, tunable parameters,
-hard constraints, and proposal targets inside strategy-domain adapters.
-Combo Yield is group-level only and must not be optimized through the
-single-leg candidate-impact parameter model.
+`src.application.strategy_lab.top1` owns the formal experiment contract,
+lifecycle, evaluation, and receipts. The small `strategy_lab.update` facade
+wraps Shadow Replay status / data-plan so the existing recorder keeps one stable
+maintenance entry point without adding a new write path. Generic Strategy Lab
+readiness, experiment, proposal, LLM-context, and domain-adapter code has been
+retired; Shadow Replay owns exploratory replay analysis directly.
 
 This side lane may read runtime artifacts, candidate/reject/trace evidence,
 required-data snapshots, and archived run outputs. It must not mutate runtime

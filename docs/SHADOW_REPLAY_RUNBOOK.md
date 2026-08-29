@@ -10,9 +10,7 @@ Shadow Replay = 反事实复盘引擎
 Strategy Lab = 策略进化产品入口
 ```
 
-因此，本文是底层复盘引擎手册。当前 Strategy Lab 边界见 [Strategy Lab Current Contract](STRATEGY_LAB_DESIGN.md)。通用本地入口提供 update、只读 readiness、experiment、advisory proposal 和 llm-context；formal HK / `lx` Sell Put `top1-loop` 另行复用正式推荐点 corpus 完成 20 日研究和 10 日隐藏验证，当前仍在积累连续正式事实。Shadow Replay 继续作为反事实 evaluator 和 dataset / mark / outcome 生命周期引擎，不是 formal Top1 状态或回执 owner。`strategy-lab update` 包装本文的 latest scanned run dataset build、status / run-data-plan：默认 dry-run，显式 `--build-dataset --write` 才构建本地 dataset；再加 `--include-close-decisions` 时会独立选择 latest non-empty Close Advice run，严格构建 close-decision facet。显式 `--write` 才执行本地 collect / settle。远端持续记录通过 `./om service render --include-strategy-lab-recorder` 显式启用，生成低频 timer 维护 dataset、mark path 和 outcome facts；默认部署不会开启。
-
-Strategy Lab 会按 strategy domain adapter 区分 Sell Put、Covered Call 和 Combo Yield。统一的是 evidence / readiness / experiment / scorecard / proposal workflow；分开的是决策单元、目标函数、参数空间、硬约束和 proposal target。Sell Put / Covered Call 可以先复用单腿 candidate-impact；Combo Yield 必须按 `strategy_group_id` / legs 形成 group-level decision instance，不能被拆成彼此独立的单腿参数实验。
+因此，本文是探索性复盘和 evidence 生命周期的直接 owner 手册。当前 Strategy Lab 边界见 [Strategy Lab Current Contract](STRATEGY_LAB_DESIGN.md)：formal HK / `lx` Sell Put `top1-loop` 复用正式推荐点 corpus 完成 20 日研究和 10 日隐藏验证；原通用 readiness、experiment、proposal 和 llm-context 已退役。Shadow Replay 继续直接拥有反事实 evaluator 和 dataset / mark / outcome 生命周期，不是 formal Top1 状态或回执 owner。`strategy-lab update` 只为现有 recorder 包装 latest scanned run dataset build、status / run-data-plan：默认 dry-run，显式 `--build-dataset --write` 才构建本地 dataset；再加 `--include-close-decisions` 时会独立选择 latest non-empty Close Advice run，严格构建 close-decision facet。显式 `--write` 才执行本地 collect / settle。远端持续记录通过 `./om service render --include-strategy-lab-recorder` 显式启用，生成低频 timer 维护 dataset、mark path 和 outcome facts；默认部署不会开启。
 
 核心原则：复盘需要时间路径。OpenD 可以在采样时提供当前报价，但不能在几天后恢复当时没有保存的历史 option mark。要避免数据不够，必须在 dataset 建好后持续收集 mark。
 

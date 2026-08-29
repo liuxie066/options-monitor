@@ -511,7 +511,7 @@ def test_release_preflight_non_full_mode_keeps_focused_tests(tmp_path: Path) -> 
         (
             "-m pytest tests/test_research.py tests/test_research_archive.py "
             "tests/test_shadow_replay.py tests/test_shadow_replay_candidate_impact.py "
-            "tests/test_strategy_lab.py"
+            "tests/test_strategy_lab_update.py tests/test_strategy_lab_top1_architecture.py"
         ),
         (
             "-m pytest tests/test_config_yaml.py tests/test_config_template_inheritance.py "

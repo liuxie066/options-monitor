@@ -3,7 +3,7 @@
 - **状态**：代码闭环已实现，真实价值验收尚未完成
 - **当前阶段**：重新积累连续 20 个完整交易日的正式推荐点事实
 - **首个正式 recipe**：HK / `lx` / Sell Put Top1
-- **更新时间**：2026-08-25
+- **更新时间**：2026-08-29
 
 本文是 Strategy Lab 的当前运行说明。产品范围和验收口径见
 [统一策略实验平台 PRD](STRATEGY_LAB_EXPERIMENT_PLATFORM_PRD.md)，已落地模块、函数和存储合同见
@@ -12,12 +12,15 @@
 
 ## 当前结论
 
-Strategy Lab 目前有两个边界不同的入口：
+Strategy Lab 目前只有一个产品入口和一个 recorder 兼容入口：
 
 | 入口 | 用途 | 当前状态 |
 |---|---|---|
-| 通用本地研究入口 | 对 Shadow Replay dataset 做 readiness、候选影响实验、dry-run proposal 和脱敏 LLM context | 已实现；只用于探索性研究，不是正式 Top1 MVP 验收路径 |
 | `top1-loop` | 对 HK / `lx` Sell Put Top1 完成 20 日研究、10 日隐藏验证和最终回执 | 代码已实现；等待连续正式事实，不得提前开始研究 |
+| `update` | 为现有 recorder 包装 Shadow Replay dataset build、mark 和 settle 维护 | 兼容保留；默认 dry-run，不是实验入口 |
+
+原通用 `readiness / experiment / proposal / llm-context` 已退役。探索性 dataset 分析和候选影响
+继续由 `./om research shadow-replay ...` 直接负责，不再维护第二套 Strategy Lab 实验面。
 
 旧归档 run 不再进入 formal Top1 corpus，也不提供迁移入口。正式研究只使用当前合同前瞻采集的完整
 corpus；不能用当前行情、持仓、mark 或 FX 补造历史正式点。
@@ -52,8 +55,8 @@ flowchart TB
     U["实验决策者"] --> C["Codex / 操作员"]
     C --> CLI["./om research strategy-lab"]
 
-    CLI --> G["通用探索入口\nupdate / readiness / experiment / proposal / llm-context"]
-    G --> SR["Shadow Replay\ndataset / mark / outcome / candidate impact"]
+    CLI --> G["recorder maintenance\nupdate"]
+    G --> SR["Shadow Replay\ndataset / mark / outcome"]
 
     CLI --> W["Top1 Workspace\npreview / confirm / status / receipt"]
     T["HK / US tick-cron"] --> E["首个正式点前封存\n本市场 expectation"]
@@ -201,20 +204,18 @@ Adoption Proposal；其他结论的 proposal 为 `null`。回执不构成生产�
 见[系统设计](STRATEGY_LAB_EXPERIMENT_PLATFORM_SYSTEM_DESIGN.md)；不得仅为查看状态触发 provider
 probe、安装服务或推进实验。
 
-## 通用探索入口
+## Recorder maintenance 入口
 
-以下命令继续用于本地 Shadow Replay 探索，不计入 formal Top1 验收：
+以下兼容命令只维护本地 Shadow Replay evidence，不计入 formal Top1 验收：
 
 ```bash
 ./om research strategy-lab update --latest
-./om research strategy-lab readiness --dataset <dataset> --min-sample 30
-./om research strategy-lab experiment --dataset <dataset> --min-sample 30 --auto
-./om research strategy-lab proposal --experiment <experiment-json>
-./om research strategy-lab llm-context --experiment <experiment-json>
+./om research strategy-lab update --latest --build-dataset --write
 ```
 
-`update` 默认 dry-run；显式 `--build-dataset --write` 或其他输出参数才写本地 research artifact。
-这些入口不会应用 proposal、修改生产配置、写交易状态或发送通知。它们暂不扩展为第二套正式实验平台。
+`update` 默认 dry-run；显式 `--write` 才执行本地 collect / settle，`--build-dataset --write` 才构建
+latest scanned run dataset。它不会修改生产配置、写交易状态或发送通知。其他本地探索使用
+`./om research shadow-replay ...`。
 
 ## 当前完成度
 

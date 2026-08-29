@@ -649,7 +649,6 @@ def test_archive_build_marks_from_canonical_only_run_root(tmp_path: Path) -> Non
         mark_shadow_replay_dataset,
         settle_shadow_replay_dataset,
     )
-    from src.application.strategy_lab import run_strategy_lab_experiment
 
     archive_root = tmp_path / "archive"
     run_dir = archive_root / "output_runs" / "run-1"
@@ -726,11 +725,6 @@ def test_archive_build_marks_from_canonical_only_run_root(tmp_path: Path) -> Non
         quote_collection_source="opend",
     )
     settlement = settle_shadow_replay_dataset(dataset=dataset_dir, write=True)
-    strategy_lab = run_strategy_lab_experiment(
-        repo_root=tmp_path,
-        dataset=dataset_dir,
-        min_sample=1,
-    )
     assert data["ok"] is True
     assert marking["status"] == "marked"
     assert marking["scan_blob_refs"] == [entry["scan_blob_ref"]]
@@ -740,12 +734,6 @@ def test_archive_build_marks_from_canonical_only_run_root(tmp_path: Path) -> Non
     }
     assert verified_marking["summary"]["usable_mark_snapshot_count"] == 1
     assert settlement["summary"]["generated_outcome_fact_count"] == 1
-    assert strategy_lab["schema_version"] == "strategy_lab_experiment.v1"
-    assert (
-        strategy_lab["readiness"]["shadow_replay"]["outcome_coverage"]
-        ["outcome_instrument_count"]
-        == 1
-    )
     telemetry = json.dumps(marking["summary"], sort_keys=True)
     assert "raw_json_base64" not in telemetry
     assert "required_data_csv_base64" not in telemetry

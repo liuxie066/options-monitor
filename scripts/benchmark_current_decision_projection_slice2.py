@@ -33,7 +33,7 @@ from src.application.ledger.api import (
     run_position_projection_in_transaction,
 )
 from src.application.quality.service import OMQualityService
-from src.application.research import performance_baseline as baseline
+from scripts import benchmark_data_storage_projection as baseline
 from src.infrastructure.quality.artifact_repository import QualityArtifactRepository
 from src.infrastructure.quality.control_state_repository import (
     QualityControlStateRepository,
@@ -937,7 +937,10 @@ def _history_measurement(context: Mapping[str, Any]) -> dict[str, Any]:
 
 def _source_sha256() -> str:
     digest = hashlib.sha256()
-    source_files = {"scripts/benchmark_current_decision_projection_slice2.py"}
+    source_files = {
+        "scripts/benchmark_current_decision_projection_slice2.py",
+        "scripts/benchmark_data_storage_projection.py",
+    }
     for pattern in (
         "domain/domain/**/*.py",
         "src/**/*.py",
