@@ -1,0 +1,118 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.0.0",
+  "base": {
+    "tag": "v2.2.3",
+    "commit": "a00a2169080b7ee94616d4ff4e41aa395ee29c78"
+  },
+  "reviewed_head": "772db73957845e706320167ca5f2df34563bcf54",
+  "commits": [
+    {
+      "sha": "60fab4b42323a8c852afa39dcff30f8539323f11",
+      "subject": "refactor(research): slim strategy lab surfaces"
+    },
+    {
+      "sha": "f2f6ecf90bf9a0ea5483e5b82a2ce498fd286b06",
+      "subject": "refactor(research): retire legacy strategy lab readers"
+    },
+    {
+      "sha": "6c30fcaf82e6000cb9f36f122471d8af793dd423",
+      "subject": "refactor(research): retire legacy corpus health"
+    },
+    {
+      "sha": "38a5f655efbf77293325ddcf0d3ece54afe0a0ec",
+      "subject": "test(ci): streamline regression runtime"
+    },
+    {
+      "sha": "cfa295733ed55cf2097d77b22f596107c59b5126",
+      "subject": "Merge pull request #185 from liuxie066/codex/test-runtime-hotspots"
+    },
+    {
+      "sha": "30dfc8489cc0a7b53639a8ee06dc871c0ca3f321",
+      "subject": "refactor(strategy-lab): consolidate formal corpus runtime"
+    },
+    {
+      "sha": "772db73957845e706320167ca5f2df34563bcf54",
+      "subject": "Merge pull request #186 from liuxie066/codex/strategy-lab-account-generic-prerequisite"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Breaking Changes",
+      "text": "Removed the retired generic `./om research strategy-lab readiness`, `experiment`, `proposal`, and `llm-context` commands and their legacy artifact readers; use Shadow Replay for exploratory analysis and `strategy-lab top1-loop` for the formal 20-day research and 10-day hidden-validation workflow.",
+      "commits": [
+        "60fab4b42323a8c852afa39dcff30f8539323f11",
+        "f2f6ecf90bf9a0ea5483e5b82a2ce498fd286b06",
+        "6c30fcaf82e6000cb9f36f122471d8af793dd423"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Made Strategy Lab Top1 bind its scheduled service and experiment workspace to an explicit configured HK account, and consolidated runtime evidence on Formal Corpus.",
+      "commits": [
+        "30dfc8489cc0a7b53639a8ee06dc871c0ca3f321"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "38a5f655efbf77293325ddcf0d3ece54afe0a0ec",
+      "reason": "CI-only regression runtime optimization; it does not change product, runtime, configuration, or operator behavior."
+    },
+    {
+      "commit": "cfa295733ed55cf2097d77b22f596107c59b5126",
+      "reason": "Merge-only integration commit for the CI-only change in pull request 185."
+    },
+    {
+      "commit": "772db73957845e706320167ca5f2df34563bcf54",
+      "reason": "Merge-only integration commit; the Strategy Lab changes are mapped to their source commits."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "60fab4b42323a8c852afa39dcff30f8539323f11",
+      "references": [
+        "docs/STRATEGY_LAB_EXPERIMENT_PLATFORM_SYSTEM_DESIGN.md",
+        "docs/COMPATIBILITY_FREEZE.md"
+      ]
+    },
+    {
+      "commit": "f2f6ecf90bf9a0ea5483e5b82a2ce498fd286b06",
+      "references": [
+        "docs/STRATEGY_LAB_EXPERIMENT_PLATFORM_SYSTEM_DESIGN.md"
+      ]
+    },
+    {
+      "commit": "6c30fcaf82e6000cb9f36f122471d8af793dd423",
+      "references": [
+        "docs/STRATEGY_LAB_EXPERIMENT_PLATFORM_SYSTEM_DESIGN.md"
+      ]
+    },
+    {
+      "commit": "38a5f655efbf77293325ddcf0d3ece54afe0a0ec",
+      "references": [
+        "docs/GUARDRAILS.md",
+        "https://github.com/liuxie066/options-monitor/pull/185"
+      ]
+    },
+    {
+      "commit": "cfa295733ed55cf2097d77b22f596107c59b5126",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/185"
+      ]
+    },
+    {
+      "commit": "30dfc8489cc0a7b53639a8ee06dc871c0ca3f321",
+      "references": [
+        "docs/STRATEGY_LAB_EXPERIMENT_PLATFORM_SYSTEM_DESIGN.md",
+        "https://github.com/liuxie066/options-monitor/pull/186"
+      ]
+    },
+    {
+      "commit": "772db73957845e706320167ca5f2df34563bcf54",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/186"
+      ]
+    }
+  ]
+}

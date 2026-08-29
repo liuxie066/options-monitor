@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 3.0.0 - 2026-08-30
+
+### Breaking Changes
+- Removed the retired generic `./om research strategy-lab readiness`, `experiment`, `proposal`, and `llm-context` commands and their legacy artifact readers; use Shadow Replay for exploratory analysis and `strategy-lab top1-loop` for the formal 20-day research and 10-day hidden-validation workflow.
+
+### Improvements
+- Made Strategy Lab Top1 bind its scheduled service and experiment workspace to an explicit configured HK account, and consolidated runtime evidence on Formal Corpus.
+
 ## 2.2.3 - 2026-08-29
 
 ### Improvements
