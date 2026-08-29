@@ -1155,6 +1155,11 @@ def test_local_harness_routes_every_surface_to_the_same_pi_boundary(monkeypatch,
     from src.application.copilot import local_harness
 
     captured: list[dict] = []
+    monkeypatch.setattr(
+        local_harness,
+        "load_assistant_copilot_settings",
+        lambda **_kwargs: (frozenset(), "eager", None),
+    )
 
     def process(start_payload, *, on_proposed, on_tool_call, environ, **_kwargs):
         captured.append({"start": start_payload, "environ": dict(environ or {})})
@@ -1316,6 +1321,11 @@ def test_local_harness_passes_model_secret_only_in_allowlisted_child_environment
 
     captured: dict[str, object] = {}
     secret = "s5-model-secret"
+    monkeypatch.setattr(
+        local_harness,
+        "load_assistant_copilot_settings",
+        lambda **_kwargs: (frozenset(), "eager", None),
+    )
 
     def process(start_payload, *, on_proposed, on_tool_call, environ, **_kwargs):
         captured["start"] = start_payload

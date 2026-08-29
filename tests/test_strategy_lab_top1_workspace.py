@@ -274,10 +274,10 @@ def _preview_args(
         "fee_contract": _fee_contract(),
         "capability_facts": {name: True for name in CAPABILITY_FACTS},
         "corpus_status": {
-            "schema_version": "corpus_health_receipt.v1",
+            "schema_version": "corpus_health_receipt.v2",
             "status": "healthy",
             "continuous_complete_trading_days": 20,
-            "storage": {"capacity": {"status": "ok"}},
+            "storage": {"capacity": {"status": "insufficient_history"}},
         },
         "evidence_bundle": bundle,
         "environ": AVAILABLE,

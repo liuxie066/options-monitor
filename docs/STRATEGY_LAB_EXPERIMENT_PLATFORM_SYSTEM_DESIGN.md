@@ -1,7 +1,7 @@
 # Strategy Lab 统一策略实验平台系统设计
 
-- **状态**：MVP 实验内核与基础事实归档已落地；真实 20 日 / 10 日窗口待验收
-- **日期**：2026-08-26
+- **状态**：MVP 实验内核与基础事实归档已落地；健康回执来源收敛待实施，真实 20 日 / 10 日窗口待验收
+- **日期**：2026-08-29
 - **产品依据**：`docs/STRATEGY_LAB_EXPERIMENT_PLATFORM_PRD.md`
 - **当前实现参考**：`docs/STRATEGY_LAB_DESIGN.md`
 - **首个 recipe**：HK / lx / Sell Put Top1
@@ -19,8 +19,8 @@ MVP 不新建通用实验框架。已有 Sell Put Top1 状态机、ExperimentSto
 2. opening snapshot 继续封存 accepted + rejected decisions；每个正式 run / account 另采集一次共享的
    全部未平仓期权行情快照。候选扫描和账户快照共同绑定到同一 run，recipe 不再请求 provider；
 3. 经 recommendation point 绑定后，将紧凑基础事实以透明 gzip 长期保存到 Research Archive；
-4. Corpus Health Receipt 是对 expectation、archive 和现有 storage baseline 的确定性只读视图，
-   不新增状态库；
+4. Corpus Health Receipt 是对 expectation、archive 和当前文件系统容量的确定性只读视图；它不扫描
+   与 Formal Corpus 无关的 runtime 历史，也不新增状态库；
 5. Top1 corpus 改为可重建的 recipe 索引和派生投影，不再以 `output_runs` 或自己的
    accepted-candidate 副本作为基础事实；
 6. readiness、研究、验证和 outcome 只读消费 archive ref / hash 与已冻结实验合同。
@@ -42,7 +42,7 @@ MVP 不新建通用实验框架。已有 Sell Put Top1 状态机、ExperimentSto
 | 运行事实 | HK / US、`lx` 的正式 run 绑定 opening decision、同 run 持仓行情、mark 和 FX；取证失败只降级 Strategy Lab | 需要真实运行持续证明两市场均按本次 collector 结果归档 |
 | 正式点绑定 | `recommendation_point.v3` 校验 run / account / config / policy、三类 owner ref / hash 和时间一致性 | 需要抽查真实点 readback；任一缺失或冲突继续 fail closed |
 | Research Archive | `formal_corpus.py` 已提供 expectation、正式点紧凑 gzip 写入、透明读取与冲突检测 | 需要随真实正式点验证长期容量和连续性 |
-| 积累健康 | Corpus Health Receipt 对比 HK / US expectation、archive 和 storage baseline | 回执不替代 canonical corpus，不能自动补点或启动研究 |
+| 积累健康 | `./om research corpus-health` 已从 Formal Corpus 计算 HK / US expectation 和 archive，但同步调用全 runtime storage baseline；Top1 advance 还会生成旧 Store-backed 重复回执 | 删除旧回执读写；Formal health 改为 Formal Corpus + 当前磁盘快照，readiness 每次只构建一次且不扫描全 runtime manifest |
 | Recipe Projection | projection v3 从 formal archive 派生，不复制基础行情 | 需要用真实点确认与原 Top1 行为一致 |
 | 历史事实 | 无价值的历史 migration preview 已删除 | 不增加 apply；缺失历史不回填，只重新积累 |
 
@@ -57,6 +57,7 @@ flowchart LR
     M --> B
     B --> A["4 Research Archive\nresearch/formal_corpus.py\ncanonical JSON + transparent gzip"]
     A --> H["5 Corpus Health Receipt\nexpectation vs archived attempts"]
+    D["当前文件系统容量\n一次 disk_usage"] --> H
     A --> P["6 Top1 Recipe Projection\ntop1/corpus.py + ranking.py"]
     H --> R["7 Capability / Readiness\nreadiness.py + workspace.py"]
     P --> R
@@ -193,20 +194,120 @@ health 或 retention 计算。进程退出时 `flock` 由操作系统释放，�
 
 ### 3.4 Corpus 健康回执
 
-`sell_put_top1_corpus_health_receipt.v1` 同时用于当前投影和每日首次观察：
+`corpus_health_receipt.v2` 是唯一产品健康回执，由
+`src/application/research/formal_corpus.py::build_corpus_health_receipt()` 在查询时构建：
 
-- 当前路径为 `strategy_lab/top1/corpus/hk/lx/health/current.json`，每次 advance 原子替换；
-- 每日路径为 `strategy_lab/top1/corpus/hk/lx/health/days/<date>.json`，只覆盖最近 20 个成熟交易日，
-  首次写入后不覆盖；
-- `day` 只保存 expected、captured、pending、overdue、missing、not-evaluable、conflicting、unexpected
-  的计数、状态和原因码，不复制 point payload 或 point ID 列表；
-- `accumulation` 只出现在当前回执，保存最近连续完整日数、剩余日数、窗口边界和首个阻塞日；
-- 当前回执绑定 advance 周期，`fresh_until_utc = observed_at_utc + 2 * interval`；`fresh` 只在读取时计算；
-- 两类回执都校验固定 schema、identity、规范 JSON、大小、content hash、日历与 corpus evidence hash；
-  读取时另返回 file hash。
+- 唯一事实来源是 Formal Corpus 的 immutable expectation 和 point artifact；
+  `ExperimentStore` 不参与 expected、captured、missing、conflict、not-evaluable 或连续完整日的计算；
+- HK / US 共用同一函数和 `./om research corpus-health --market <hk|us> --account lx`
+  查询入口，CLI 不自行统计；
+- builder 只接受两种显式 scope：默认 `full` 供手工 CLI 审计全历史；
+  `latest_mature_window` 供 scheduled readiness 只校验日历中最近
+  `RESEARCH_REQUIRED_DAYS` 个已结束交易日和当前交易日。基础 builder 不反向依赖
+  Top1 常量，由 readiness caller 传入 `mature_day_limit=RESEARCH_REQUIRED_DAYS`。`full`
+  只允许 limit 为 `None`，window scope 只允许正整数；不增加用户可配置的 CLI scope 开关；
+- `latest_mature_window` 必须先读受控 calendar binding，再直接打开选中日期目录；
+  calendar 不可用，或同一 `observed_at_utc` 换算的市场本地日期不在
+  `[coverage_start, coverage_end]` 内时，复用 `market_calendar_binding_unavailable` fail closed，
+  且不读取任何 expectation / point artifact，也不回退成全历史扫描。该 scope 的 `days`、totals、
+  连续成熟日、freshness、最早 / 最晚日期和 `formal_corpus_bytes` 都只统计选中日期；
+  scope 外的早期缺口或冲突不阻止定时推进，但仍由 `full` 视图完整报告；
+- scope 选择、成熟日判定和 freshness 共用 builder 的同一 `observed_at_utc`。
+  standalone readiness 在入口只捕获一次当前时间；scheduled advance 透传它在调用开始时
+  已冻结的 `occurred_at_utc`。builder 在 caller 已给时间时不得重新读墙钟，保证跨市场日界时
+  同一 scheduled invocation 仍选择同一日期窗口；
+- expectation / point coverage、canonical hash 和已结束交易日完整性是 immutable artifact 的确定性派生结果；
+  freshness、archive 占用、可用磁盘和当前容量风险是查询时的运行快照，不伪装成不可变审计事实；
+- 容量快照只对 `runtime_root` 调用一次标准库 `shutil.disk_usage()`。当前可用空间低于
+  `max(filesystem_capacity * 5%, 10 GiB)` 时为 `critical`；否则为
+  `insufficient_history`，明确表示本回执没有做增长预测。两者分别阻止和允许 readiness；
+- `collect_storage_runtime_baseline()` 继续服务显式的全 runtime 存储审计、manifest 引用校验和
+  90 日预测，但不得从 health、readiness 或 scheduled advance 同步调用。两份输出职责不同，
+  不缓存、持久化或复制 storage baseline；
+- `continuous_complete_trading_days` 只统计成熟交易日，即 `trading_date < 当前市场本地日期`。
+  当前交易日仍显示在 `days` 诊断明细中，但尚未结束或尚未完整时不得把成熟日连续后缀清零；
+- 顶层 `status` 保持表达查询时的完整采集健康，因此当前交易日未完整时仍可为 `unhealthy`；Top1
+  readiness 不以该状态替代成熟日门槛，只消费连续成熟日、容量和其他独立 blocker；
+- Top1 readiness 在一次调用中只构建一次该回执，同一对象同时用于 corpus
+  门禁和返回事实；即使 `ExperimentStore` 未 ready、为空或不可打开，也必须先返回该独立事实，
+  Store 状态只单独阻止实验推进；
+- 回执是只读派生视图，可以导出，但不再持久化 `current` 或每日重复状态文件。
 
-每日文件表示该日成熟后的首次观察，允许晚于交易日生成；它不锁定 canonical corpus。后续事实恢复只会
-改善重新计算的 `current`，不会改写每日文件。研究 preview 仍重新验证正式 corpus，不能凭健康回执启动。
+公开 JSON 合同按事实 owner 收敛：
+
+- `./om research corpus-health` 升级为 `corpus_health_receipt.v2`；删除旧
+  `storage.baseline_status`，保留 `formal_corpus_bytes`，并返回当前 filesystem 容量、可用空间、
+  critical floor、`critical_reasons` 和 `status`；不返回 manifest、冷数据或增长预测；
+- Top1 readiness 升级为 `sell_put_top1_readiness.v2`；只保留 canonical
+  `facts.corpus`，删除重复的 `facts.corpus_health_receipt`；
+- scheduled advance 升级为 `sell_put_top1_advance_result.v2`；删除顶层
+  `corpus_health`，唯一健康事实位于 `readiness.facts.corpus`。
+
+已完成的有界 consumer inventory 表明：仓库 production code 只构造和返回上述
+readiness / advance 字段，没有解析它们的下游调用方；已部署 systemd unit 只执行
+`./om research strategy-lab top1-loop advance ... --write`，不解析 JSON；当前只有测试直接断言旧字段。
+不可发现的外部 consumer 不能证明兼容需求；显式升级 schema 比在 v1 中偷换嵌套形状更可审计，
+因此不增加 legacy adapter、双 schema 或过渡字段。
+
+v2 的容量字段固定为最小查询快照：
+
+```json
+{
+  "scope": {
+    "mode": "latest_mature_window",
+    "mature_day_limit": 20,
+    "include_current_trading_day": true
+  },
+  "storage": {
+    "formal_corpus_bytes": 200704,
+    "capacity": {
+      "status": "insufficient_history",
+      "filesystem_capacity_bytes": 107374182400,
+      "current_free_bytes": 21474836480,
+      "critical_floor_bytes": 10737418240,
+      "critical_reasons": []
+    }
+  }
+}
+```
+
+`status` 只允许 `insufficient_history`、`critical` 或 `unavailable`。`disk_usage` 失败时仍返回结构有效的
+health v2，capacity 为 `unavailable`、顶层 `status=unhealthy`，readiness 使用现有
+`research_storage_capacity_unavailable` 阻止推进；不得吞掉已算出的 corpus coverage。
+
+健康查询失败与查询成功但尚未就绪必须分开：
+
+- Formal Corpus builder 失败或不可用时，readiness 返回 `facts.corpus=null`，通过现有
+  `top1_status_unavailable` fact error 说明原因，且 `validation_runtime_ready=false`；
+- scheduled advance 无法加载 readiness，或加载成功但 `readiness.facts.corpus=null`时，
+  终态必须为 `partial`；
+- Formal Corpus 返回结构有效的 `unhealthy`、连续完整日不足或容量 blocker 时，
+  advance 仍可为 `ok`，但 `validation_runtime_ready=false` 且不推进实验；这是有效事实，不是读取失败。
+
+现有 `strategy_lab/top1/corpus/*/health/current.json` 和 `health/days/*.json` 是旧
+`sell_put_top1_corpus_health_receipt.v1` 产物；切换后不再更新、不再被 readiness 读取，也不作为删除或
+改写 Formal Corpus 的授权。研究 preview 仍逐日验证被选窗口，不能凭健康回执自动启动研究。
+
+### 3.5 Advance 300 秒性能边界
+
+对发布版本 2.2.1 的只读分阶段诊断已经定位首个可复现慢边界：完整 Formal Corpus health 超过
+60 秒，其中 `collect_storage_runtime_baseline()` 超过 60 秒；去掉该 baseline 后，2 日 / 24 点的
+Formal artifact 校验为 14.87 秒。相同环境中 36 个 service 的 72 次 systemd 状态查询合计 0.81 秒，
+因此本工作单不优化 systemd polling，也不把 US 自动平仓的独立失败混入本链路。
+
+根修复是 3.4 的 owner 收敛：scheduled advance 不再同步扫描约 87,261 条 runtime 研究文件和
+1,580 个 manifest，也不再校验无界的全历史 Formal artifact。scheduled readiness 只直读
+最近 20 个成熟交易日和当前交易日的 expectation / point，再读取一次当前磁盘容量。
+实现不得提高 300 秒限制，
+不得改 tick、formal point、opening snapshot、required-data、prepared context、recommendation point
+或任何采集路径，也不得新增 cache、service、timer、持久化表或 profiler。
+
+实现后以相同只读输入复核 `build_corpus_health_receipt()`、`_readiness()` 和完整 scheduled advance
+的墙钟时间；不增加依赖机器负载的单元性能断言。自动化改为断言 scoped 调用的
+point loader 与 artifact `stat` 数量上界为选中的 20 个成熟日加当日各 expectation
+声明的 point 总数，不随 scope 外历史增长。手工 `full` 审计仍为
+O(全历史)；它不在 5 分钟 advance 热路径上，MVP 不为它增加摘要或缓存。
+阶段计时和回执中的 scope 日期必须绑定同一 scheduled `occurred_at_utc`，不用各阶段的墙钟时间重算。
 
 ## 4. 核心执行流程
 
@@ -554,13 +655,18 @@ MVP seed 的排序 profile 和 0.002 / 0.004 / 0.006 阈值目前没有 canonica
 | 2. 运行事实封存 | `opening_candidate_snapshot.py`、`required_data_blobs.py`、`prepared_option_positions_context.py` | **复用 + 修改条件** | opening snapshot 和 required-data blob 原样复用；prepared v2 保留现有 mark collector / payload，HK / US 正式 run 都为 `lx` 采集一次并直接使用本次返回的 facts；不新增 artifact 或 per-recipe 调用 |
 | 3. 正式点绑定与校验 | `recommendation_point.py` | **复用 + 修改** | 保留 point ID、write-once 及 validator；升级 v3 绑定 opening、required-data 和 prepared 三个 owner |
 | 4. Research Archive | `research/archive.py` 只有远端 pull / inventory / verify | **复用传输 + 确实新增** | 新增 `research/formal_corpus.py`、canonical JSON + deterministic gzip 读写；不加 DB、repository 抽象或对象存储 |
-| 5. Corpus Health Receipt | Top1 `read_corpus_status()` 仅覆盖 HK recipe index；`research/storage_baseline.py` 已提供磁盘与保留风险 | **复用 + 确实新增** | 同一 `formal_corpus.py` 对比 expectation 和 archived attempts，并复用 storage baseline；通过现有 `./om research` 返回 canonical receipt，不建 receipt 表 |
+| 5. Corpus Health Receipt | `research/formal_corpus.py` 已提供 canonical health，但错误地同步调用全 runtime storage baseline；Top1 `corpus.py` 仍保留 Store-backed 重复回执 | **修改 + 删除重复路径** | 只由 `formal_corpus.py` 对比 expectation 和 archived attempts，并读取一次当前磁盘容量；手工 CLI 使用全历史 scope，scheduled readiness 使用最近 20 个成熟日加当日 scope；不建 receipt 表、摘要文件或缓存 |
 | 6. Recipe Projection | `top1/corpus.py`、`top1/ranking.py`、Candidate Engine | **复用 + 修改 + 删除重复字段** | corpus 只存 archive ref 和 recipe 派生 metric；v3 projection 不复制基础 candidate 字段，运行时在内存合并 |
 | 7. Capability / Readiness | `top1/capability_receipts.py`、`top1/readiness.py`、`top1/workspace.py` | **复用 + 修改** | 保留四态和现有 capability；source readiness 改为消费 Corpus Health Receipt + recipe projection |
 | 8. ExperimentStore 与验证观察 | `experiment_store.py`、`validation.py`、`fill_observation.py`、`advance.py` | **原样复用为主** | 保留冻结 spec、授权、commitment、selected-arm Bid / Ask 和幂等提交；只更换 source ref，不加 schema / table |
 | 9. Outcome 与确定性评价 | `research_runner.py`、`economics.py`、`statistics.py`、`outcome.py`、`terminal_projection.py` | **原样复用** | 继续使用已冻结真实合约、FX、费用、年化收益率 + CNY PnL 和现有回执链；不动公式 |
 
 ### 6.2 原样复用
+
+第 6.1 节记录整个 MVP 的代码映射；本轮工作单只允许修改健康回执与 advance 调用链。
+允许的生产文件限定为 `research/formal_corpus.py` 的健康计算、`top1/advance.py`、
+`interfaces/cli/strategy_lab_top1.py`、`top1/readiness.py` 及对应聚焦测试。tick、正式点采集、
+recommendation point、required-data、prepared context、service / timer / config 和 US 自动平仓均不在本轮范围。
 
 | 文件 | 函数 / 合同 | 复用理由 |
 |---|---|---|
@@ -573,7 +679,8 @@ MVP seed 的排序 profile 和 0.002 / 0.004 / 0.006 阈值目前没有 canonica
 | `domain/domain/short_vol_assessment.py` | `calculate_option_market_concentration_after()` | 首个 recipe 的唯一集中度计算 owner |
 | `domain/domain/performance/models.py` | `select_fx_rate()` 等 FX value object / selector | 研究与 outcome 继续 fail closed 选择汇率 |
 | `src/application/research/archive.py` | `archive_pull()`、`archive_inventory()`、`archive_verify()` | 新 formal corpus 位于已同步的 `output_shared/research`，无需第二个远端传输工具 |
-| `src/application/research/storage_baseline.py` | `collect_storage_runtime_baseline()` | Health Receipt 复用现有 archive 占用、磁盘余量、90 日预测和 warning / critical 阈值，不重算容量规则 |
+| `src/application/research/formal_corpus.py` | expectation / point writer、loader 与 artifact 合同 | 原样复用；本轮只修改同文件 health 的成熟交易日后缀计算，不改任何采集或 artifact 合同 |
+| `src/application/research/storage_baseline.py` | `collect_storage_runtime_baseline()` | 原样保留为显式全 runtime 存储审计；health / readiness / advance 不再调用，也不修改其 collector、manifest 校验、增长预测或输出合同 |
 | `src/infrastructure/private_storage.py` | `exclusive_private_file_lock()`、`atomic_write_private_text()`、`atomic_write_private_bytes()` | 复用私有权限、同机互斥和原子发布；相同 identity 的不同 hash 仍由 formal corpus 判 conflict |
 | `src/application/strategy_lab/top1/lifecycle.py` | commitment、authorization、leader、receipt 及恢复函数 | 基础事实收敛不改实验生命周期 |
 | `src/infrastructure/strategy_lab/experiment_store.py` | 现有 experiment / generation / event / receipt API、`commit_validation_observation_batch()`、`commit_outcome_batch()` | 仍是唯一实验状态和原子提交 owner；本轮不迁移 schema |
@@ -581,20 +688,21 @@ MVP seed 的排序 profile 和 0.002 / 0.004 / 0.006 阈值目前没有 canonica
 
 ### 6.3 需要修改
 
+本节是当前工作单唯一的 production changed-files 清单。第 6.1 节其余模块是整体 MVP owner 映射，
+均已落地或仅供架构参考，不得据此重新修改采集、projection 或 CLI。
+
 | 文件 | 函数 | 最小修改 |
 |---|---|---|
-| `src/application/tick_cron.py` | `run_tick_cron()` | 在现有 market lock 内、生产 tick 前预封当前市场 expectation；只对显式 runtime root 写入，失败不阻断 tick |
-| `src/application/tick_account_execution.py` | `prepare_option_positions_contexts()` 调用条件 | 将 HK-only、Top1-available 的 mark scope 改为 HK / US canonical scheduled run 的 `lx`；每个 run / account 仍只调用一次，手工 run 不调用 |
-| `src/application/prepared_option_positions_context.py` | `prepare_option_positions_contexts()`、`_persist_current_option_marks()`、`build_option_market_evidence_payload()` / validator | 任何 provider 读前复用完整 ready / unavailable artifact；payload-only 时从已嵌入 authority 重建 manifest，其他部分状态 fail closed，均不重拉；collector 返回本次 mark facts 供 builder 直接使用并沿用 repository 持久化；formal run 覆盖全部 open option exact instruments，禁止从 repository 重选旧 mark |
-| `src/application/recommendation_point.py` | `build_recommendation_point()`、`validate_recommendation_point()`、`capture_scheduled_recommendation_point()`、`point_binding_from_recommendation_point()` | 增加 v3 三 owner 绑定和 `formal_point_time_coherence.v1`；point ID 保持不随 envelope 版本变化 |
-| `src/application/tick_notification_flow.py` | `_observe_recommendation_points()` | 去掉 HK-only 和 Top1 availability 对基础归档的限制；只处理 scheduled HK / US、`lx`，归档仍 best effort |
-| `src/application/strategy_lab/top1/advance.py`、`src/interfaces/cli/strategy_lab_top1.py` | `advance_scheduled()`、`handle_top1_command()`、`_profile_context()` | 保留 profile expectation 的幂等复核和 HK Top1 推进，但首封时间由各市场 tick 拥有；archive / calendar 操作可选 US，不被 HK recipe scope 拒绝 |
-| `src/application/strategy_lab/top1/ranking.py` | `build_ranking_projection()`、`validate_ranking_projection()`、`rerank_recommendation_point()` | 升级 v3 只保留 archive binding 和 recipe metric；重排仍调用 Candidate Engine |
-| `src/application/strategy_lab/top1/corpus.py` | `capture_recommendation_point()`、`read_validation_point_source()`、`preview_research_dataset()`、`freeze_research_dataset()` | 改读 formal corpus，以基础 expectation 构造 HK recipe index；不扫描 `output_runs`、不打开当前账本 / mark / FX |
-| `src/application/strategy_lab/top1/readiness.py`、`workspace.py` | `build_top1_readiness()`、`preview_sell_put_top1_research()` | 注入 Corpus Health Receipt 与 v3 projection；20 个连续完整日缺一即 blocked |
-| `src/interfaces/cli/research.py` | research parser / handler | 增加只读 `corpus-health --market hk|us --account lx`；返回应用函数的 canonical response，CLI 不自行统计 |
+| `src/application/research/formal_corpus.py` | `build_corpus_health_receipt()` | 升级为 `corpus_health_receipt.v2`，新增经校验的 `scope` 参数，只允许 `full` / `latest_mature_window`，以及仅 window 使用的 `mature_day_limit`；后者先要求同一 observation time 的市场本地日期位于 calendar coverage，再只直读最近成熟日加当日；calendar 不可用或过期时复用现有 reason code fail closed，不读取 artifact、不回退全扫；删除同步 storage baseline，改为一次 `shutil.disk_usage()` 和当前 critical floor；不改 writer、loader 或采集器 |
+| `src/application/strategy_lab/top1/advance.py` | `advance_scheduled()` | 升级为 `sell_put_top1_advance_result.v2`；停止调用旧 `publish_corpus_health_receipt()` 并删除顶层 `corpus_health`；readiness 加载失败或 canonical corpus 缺失时记录 failure 并返回 `partial`，有效但未就绪的 corpus 仅阻止实验推进 |
+| `src/interfaces/cli/strategy_lab_top1.py` | `_readiness(context, store, *, observed_at_utc=None)` | 入口只冻结一次 observation time；standalone 用该次当前时间，scheduled advance 的 `load_readiness` closure 传已有 `occurred_at_utc`。无条件且只调用一次 Formal Corpus `build_corpus_health_receipt(scope="latest_mature_window", mature_day_limit=RESEARCH_REQUIRED_DAYS, observed_at_utc=observed_at_utc)`，直接传 `runtime_root`，不经旧 `read_corpus_status()` / Store 分支；不受 `ExperimentStore.schema_state()` 是否 ready 影响，不得另调 storage baseline；结果只传给 canonical corpus，Store 仍独立形成推进 blocker |
+| `src/application/strategy_lab/top1/readiness.py` | `build_top1_readiness()` | 升级为 `sell_put_top1_readiness.v2`，删除 `corpus_health_receipt` 入参和 `facts.corpus_health_receipt`；20 个成熟连续完整日缺一即 blocked |
 
 ### 6.4 确实需要新增
+
+下表是 MVP 基础事实链原需新增且当前已落地的 owner。本轮健康来源收敛和超时诊断不新增生产函数、
+存储 schema、状态、服务、timer 或依赖；只升级 health、readiness 和 advance 三个已有返回 schema，复用 6.2 中的
+health owner 并停止重复生产路径。
 
 | 文件 | 函数 | 职责 |
 |---|---|---|
@@ -602,7 +710,6 @@ MVP seed 的排序 profile 和 0.002 / 0.004 / 0.006 阈值目前没有 canonica
 | 同上 | `seal_profile_formal_expectations()` | 按调用方给出的 market / config scope 和各自 timezone 预封 `lx`；只读已绑定 calendar，不请求 provider |
 | 同上 | `capture_formal_point_attempt()` | 从 recommendation point v3 绑定的三个 owner 构造紧凑 ready / not-evaluable record；复用同一文件锁按 point identity 串行 compare-and-publish，source binding 相同时采用首份 artifact，处理时间不产生新版本；只读本次共享快照，不再读 provider、repository 或当前状态 |
 | 同上 | `load_formal_point()` | 透明解压、校验 canonical bytes / hash；只有唯一 ready attempt 时返回 available |
-| 同上 | `build_corpus_health_receipt()` | 按 market / account / trading day 统计 expected / captured / missing / conflict / not-evaluable、freshness 和连续完整日；复用 storage baseline 输出容量 / 保留风险，并按当前实验 requirement 显示 fill / outcome 或 `not_required`；零事实也返回 unhealthy |
 | 同上 | `read_bound_market_calendar_snapshot()`、`read_market_calendar_binding()`、`refresh_market_calendar_binding()` | 将 Top1 `corpus.py` 中已有的 filesystem-backed calendar binding 校验 / 读写实现移入基础 owner；它们不使用 ExperimentStore，provider refresh 仍只由现有受控命令调用；Top1 改为 import |
 | `src/application/strategy_lab/top1/ranking.py` | `materialize_top1_recipe_input()` | 只在内存中合并 formal point 基础事实和 v3 recipe metric，校验 accepted universe 不变 |
 | `tests/test_formal_corpus.py` | 一个聚合测试文件 | 覆盖 expectation、gzip readback、幂等 / conflict、完全未采集的健康回执和不阻断 production flow |
@@ -619,10 +726,12 @@ MVP seed 的排序 profile 和 0.002 / 0.004 / 0.006 阈值目前没有 canonica
 | `src/application/strategy_lab/top1/corpus.py` | `_build_point_ranking_projection()` 及直接加载 `output_runs` opening / prepared artifact 的路径 | v3 projection 全部从 formal corpus 构建 |
 | 同上 | store-backed `_persist_expectation()` / `seal_day_expectation()` 及 calendar binding 实现 | calendar binding 实现移到 `research/formal_corpus.py`；新 file-only writer 保留 `_expectation_denominator()` 和首份 seal 采用语义后再删旧 caller，不删 schema v4 表或历史行 |
 | 同上 | `discover_recommendation_points()` | 新 archive 完成连续 readback，且已确认旧历史无 ready 迁移价值；不增加 apply |
+| 同上 | `sell_put_top1_corpus_health_receipt.v1` 的 build / publish / read / validate、current / daily ref 和仅服务该合同的 helper | **后续独立 work unit**：本轮 source switch 已发布并证明无内部 caller 后再单独确认；不删除历史 artifact、schema v4 表或其他 corpus projection 逻辑 |
 | `src/application/strategy_lab/top1/ranking.py` | projection v2 写入的 Bid / Ask、Greeks、合约和其他基础 candidate 副本 | v3 写入及读取全部通过；已有 v1/v2 artifact 仅在没有 active experiment 引用后停止支持 |
 
-删除项不得和新 writer 同时一步到位。先双读验证“新 archive 可读且内容与 run owner 一致”，
-再切 Top1 reader，最后删除旧读写路径；整个过程不改写历史 artifact 或回执。
+删除项不得和 source switch 合并。本轮只切 health caller、将 readiness / advance 明确升级为 v2 并修改成熟日计算；旧 health
+实现与专属测试的机械删除属于独立后续 work unit，必须重新确认文件范围和 caller inventory。整个过程不改写
+历史 artifact 或回执。其余旧 archive reader 仍按其原切换门槛处理，不纳入本工作单。
 
 ### 6.6 明确不删除
 
@@ -642,9 +751,10 @@ MVP seed 的排序 profile 和 0.002 / 0.004 / 0.006 阈值目前没有 canonica
 ### 7.1 ExperimentStore 保持不变
 
 `ExperimentStore` 当前已经是 schema v4。本轮不做 schema migration，也不增加 archive、health、preview、
-capability 或 metric 表。新 expectation、formal point 和 Corpus Health Receipt 只读写 7.2 的文件布局，
-必须在 `ExperimentStore` 为空或不可打开时仍可封存 / 查询，不调用 `corpus_day()`、
-`record_corpus_day()` 或其他 store API。
+capability 或 metric 表。Expectation 和 formal point 只读写 7.2 的文件布局；Corpus Health Receipt
+只读这些 artifact 并按需计算，不再持久化重复状态。`ExperimentStore` 为 ready、empty、unsupported
+或不可打开时，Formal Corpus health 都必须独立计算并返回，不调用 `corpus_day()`、
+`record_corpus_day()` 或其他 store API；Store 非 ready 只形成实验推进 blocker，不能吞掉健康事实。
 
 现有 `strategy_lab_corpus_days` 及其索引行只是旧 HK Top1 recipe projection 状态。切换期仅供旧 reader
 对比；Top1 reader 切到 formal corpus 后删除该路径的 caller，但不为清理闲置表引入 schema migration，
@@ -677,12 +787,17 @@ output_shared/research/formal_corpus/v1/
 - 写入使用现有 `private_storage` 的私有目录、原子发布和权限约束；
 - loader 只枚举 `expectations/**/*.json` 和 `points/**/*.json.gz`；`.locks/` 不是 artifact，
   不进入 corpus 校验、health 或 retention；
-- Corpus Health Receipt 每次从 immutable expectation / point 事实确定性计算，可以导出，但不再持久化
-  一张重复状态表；
-- 回执的全历史 `status` 继续显示早期缺口；recipe readiness 只消费最新连续
-  20 个 complete 交易日和容量状态，再由 dataset reader 逐日校验被选窗口；
-- 已结束交易日的 point coverage 是不可变派生结果；查询时另附当前 freshness、archive 占用、可用磁盘、
-  最早保留日期和保留风险。容量规则直接复用 `collect_storage_runtime_baseline()`；
+- Corpus Health Receipt 每次从 immutable expectation / point 事实计算，可以导出，但不再持久化
+  一张重复状态表；coverage 是确定性派生值，freshness 和容量是查询时运行快照；
+- `full` 视图继续显示早期缺口和冲突；`latest_mature_window` 只返回 calendar 选中的最新
+  20 个已结束交易日和当前交易日，不解压、load 或 `stat` scope 外的 point artifact。
+  readiness 消费该有界视图的连续成熟日和容量状态，再由 dataset reader 逐日校验已冻结的
+  正好 20 日窗口；scope 外冲突不阻止 readiness，但在 `full` 手工审计中仍可见。当前市场本地日期
+  保留在 `days` 诊断中，但排除在 `continuous_complete_trading_days` 后缀之外；当前日不完整仍可使顶层
+  `status=unhealthy`，用于表达查询时的采集完整性，不得因此单独阻断已满足成熟窗口的 readiness；
+- 已结束交易日的 point coverage 是不可变派生结果；查询时另附当前 freshness、Formal Corpus 占用、
+  可用磁盘、最早保留日期和当前 critical 容量风险。容量快照只调用一次 `shutil.disk_usage()`；
+  不同步扫描全 runtime manifest，不做增长预测；
 - MVP 不做 prune。数据规模经实测需要治理且已定义 retention 合同时，再增加保留策略。
 
 该布局只保存研究所需的最小规范字段和来源 binding，不复制 provider 原始响应、完整 output run 或 recipe
@@ -710,6 +825,7 @@ mark、当天最后报价、开仓权利金、Shadow Replay 或 performance-evid
 | 请求未实现的 recipe、指标或评价合同 | `unsupported` | `unsupported_recipe` / `unsupported_metric_contract` |
 | 维护方安全开关关闭 | `disabled` | `strategy_lab_service_disabled` |
 | 正式日 expectation 缺失或迟到 | 普通扫描 / 通知继续；当日 health 不健康 | `formal_expectation_missing` / `formal_expectation_late` |
+| 当前交易日 expectation / point 尚未完整 | 保留在 `days` 明细且顶层 health 可为 `unhealthy`；不降低成熟日连续后缀，也不单独阻断已满足窗口的 readiness | 无新增 reason code |
 | 同一日 timer 重试，denominator 不变 | 采用首份 expectation 及其 seal time；返回 `idempotent`，不产生新 hash | 无新增 reason code |
 | point 首次写入后内容相同 | `idempotent` | `formal_point_already_recorded` |
 | 同一 expectation / point 出现不同内容 hash | 当日 conflict；Top1 不得消费 | `formal_corpus_conflict` |
@@ -723,7 +839,9 @@ mark、当天最后报价、开仓权利金、Shadow Replay 或 performance-evid
 | 20 日任一日无完整正式来源 | `blocked` | `research_window_coverage_missing` |
 | Top1 recipe projection 缺失但 archive 完整 | 内存重建后继续 | `recipe_projection_rebuilt` |
 | Top1 archive binding 缺失或冲突 | `blocked` | `formal_point_evidence_missing` / `formal_corpus_conflict` |
-| archive 容量或保留风险为 warning / critical | `blocked` | 复用 storage baseline 的 warning / critical reason |
+| 当前磁盘容量低于 critical floor | `blocked` | `research_storage_capacity_risk`；详细原因来自 health v2 `storage.capacity.critical_reasons` |
+| 当前磁盘容量无法读取 | `blocked`，但保留已计算的 corpus coverage | `research_storage_capacity_unavailable` |
+| `ExperimentStore` 未 ready、为空、unsupported 或不可打开 | `facts.corpus` 仍返回；实验推进独立 `blocked` | 复用 Store schema / runtime blocker |
 | 研究所需 expiration boundary 无 terminal FX | `blocked` | `terminal_fx_evidence_missing` / `terminal_fx_evidence_conflict` |
 | OpenD quota、费用或到期 close 能力不足 | `blocked` | 复用现有 capability reason code |
 | 确认 hash 与重建结果不一致 | 拒绝写入 | `preview_hash_changed` |
@@ -734,6 +852,8 @@ mark、当天最后报价、开仓权利金、Shadow Replay 或 performance-evid
 | expiry close 已成熟但 terminal FX 暂未可用 | deadline 前保持 pending；deadline 后 `outcome_unavailable` | `terminal_fx_evidence_retryable` / `terminal_fx_evidence_missing` |
 | 任一硬风控违规 | `keep_baseline` | `hard_risk_violation` |
 | 维护方在验证中停机 | 暂停推进，不终止实验 | `strategy_lab_service_disabled` |
+| advance 被 300 秒终止 | 结果视为未知；先只读核对 Store、artifact 和 journal，再决定恢复，不直接重跑 write | 现有 systemd timeout 与 readback 证据，不新增 reason code |
+| US 自动平仓 service 独立失败 | 单独诊断其业务 owner；不据此判定 Formal Corpus 正式点缺失 | 复用该 service 自身失败证据 |
 
 ## 9. 测试与验收
 
@@ -759,7 +879,8 @@ mark、当天最后报价、开仓权利金、Shadow Replay 或 performance-evid
 - `test_strategy_lab_top1.py`：recipe projection v3 不复制基础行情；从 archive binding 内存 materialize 后，
   accepted set、DTE、Mid、市场集中度和指标证据与原 recipe 一致。
 - `test_strategy_lab_top1_corpus.py`：只从 formal corpus 建立 HK Top1 recipe index，不扫描 `output_runs`；
-  archive 缺失 / 冲突 fail closed，projection 缺失可重建；健康回执区分缺失、冲突和连续完整窗口。
+  archive 缺失 / 冲突 fail closed，projection 缺失可重建。旧 Store-backed health 专属测试只在后续
+  独立删除 work unit 证明零生产 caller 后随实现机械删除。
 - `test_strategy_lab_top1_workspace.py`：正式 20 日 v3 corpus 的 preview 零写入且确定；缺任一 expected point
   即 blocked；确认 hash 不匹配零写入，匹配后发布同一 dataset 并幂等完成研究。
 - `test_strategy_lab_top1_w1b.py`：opening / terminal 使用不同汇率的 CNY 经济结果，三个原币
@@ -770,10 +891,21 @@ mark、当天最后报价、开仓权利金、Shadow Replay 或 performance-evid
   crossing 原子绑定 opening FX 至 observation / job，缺失时仍保留报价和 `crossing=true`，
   但 `not_evaluable` 且不建 job；崩溃重试不重选汇率。
 - `test_strategy_lab_top1_store.py`：保持 schema v4、receipt、Proposal 和 4096-byte FX binding 回归，不新增
-  formal corpus 表；新 expectation / health 在空 store 及 store 打开失败时仍工作，且未调用 corpus store API。
+  formal corpus 表；health 在 Store ready、empty、unsupported 和打开失败时仍工作，且未调用 corpus store API。
 - `test_tick_cron.py`：HK / US tick 只预封当前市场且严格先于生产 tick；缺 calendar /
-  coverage 只记录降级，不阻止生产 tick。`test_strategy_lab_top1_readiness.py`、
-  `test_strategy_lab_top1_advance.py` 保留 advance 的幂等复核与 Top1 service disabled 时只暂停 recipe 推进。
+  coverage 只记录降级，不阻止生产 tick；本轮不改该文件或采集行为。
+- `test_strategy_lab_top1_readiness.py`：升级为 `sell_put_top1_readiness.v2`，精确断言
+  健康事实只有 `facts.corpus` 且不存在 `facts.corpus_health_receipt`；Store 非 ready 时仍只调用一次
+  Formal Corpus builder，且参数固定为 `latest_mature_window` + `RESEARCH_REQUIRED_DAYS`；不读旧持久化回执且
+  不调用 `collect_storage_runtime_baseline()`；standalone 只捕获一次 observation time，调度入口则将已冻结的
+  `occurred_at_utc` 透传到 builder；
+  builder 失败时 `facts.corpus=null`、保留 fact error 且 runtime 不 ready；20 个成熟日完整、
+  当前日不完整、其余 facts ready 时，顶层 corpus 可为 `unhealthy`，但
+  `validation_runtime_ready=true`。
+- `test_strategy_lab_top1_advance.py`：升级为 `sell_put_top1_advance_result.v2` 并保留 service disabled 语义；
+  精确断言不存在顶层 `corpus_health`，advance 不再调用 legacy health publisher 且 readiness 只加载一次；
+  readiness 失败或 canonical corpus 缺失时为 `partial`，结构有效但 `unhealthy` / warming 时可为
+  `ok` 且 `validation_runtime_ready=false`。
 - `test_strategy_lab_top1_research_runner.py`：移除 feature mock，保留幂等恢复和 OpenD 失败路径；
   只消费 confirmed preview 绑定的 terminal FX，缺失时 fail closed；revision 已持久化后重试
   不打开 repository 或重新拉 close。
@@ -794,15 +926,27 @@ mark、当天最后报价、开仓权利金、Shadow Replay 或 performance-evid
 3. deterministic gzip 可透明读取，canonical hash 不受压缩影响，损坏文件 fail closed；
 4. ready point 含 accepted / rejected、同 run 持仓、本次共享采集的 exact marks 和 FX binding，不含 provider 原始响应；
 5. 缺任一必需 binding 时写 not-evaluable attempt，不伪造 ready；
-6. health receipt 对完全未采集、缺点、冲突和连续完整窗口返回稳定状态与计数；
-7. health receipt 复用 storage baseline 输出 archive 占用、free bytes、最早日期和保留风险；无实验时
-   fill / outcome 显示 `not_required`；
-8. writer readback 失败只产生 diagnostic，不影响调用方扫描 / 通知；
-9. loader、expectation 和 health 不依赖数据库、缓存或手工解压，且不调用
+6. health receipt 对完全未采集、缺点、冲突和连续完整窗口返回稳定状态与计数；20 个成熟交易日完整、
+   当前交易日未完整时，`days` 显示当前日、顶层 `status=unhealthy`，且
+   `continuous_complete_trading_days` 仍为 20；
+7. health v2 输出 Formal Corpus 占用、一次 `disk_usage` 的 capacity / free / critical floor、最早日期
+   和当前容量风险；可用空间低于 critical floor 时 blocked，其他情况为 `insufficient_history`；
+   `collect_storage_runtime_baseline()` 不被调用；无实验时 fill / outcome 显示 `not_required`；
+8. 构造超过 20 个成熟日和当前日的 corpus；spy 断言 `latest_mature_window` 只对选中日期
+   调用 point loader 和 artifact `stat`，`days`、totals、freshness、日期边界和 bytes 也只反映该 scope；
+   scope 外冲突只使 `full` 失败，scope 内缺口必须阻止 readiness；calendar 不可用时不得退化为全扫；
+   calendar 的 `coverage_end` 早于 observation date 或 `coverage_start` 晚于 observation date 时，
+   必须返回 `market_calendar_binding_unavailable`，且 spy 证明 point loader 和 artifact `stat` 零调用；
+   额外以香港本地 00:00 为边界，断言显式 `observed_at_utc` 决定成熟日和当前日，
+   不受 builder 真实执行时的墙钟影响；
+9. writer readback 失败只产生 diagnostic，不影响调用方扫描 / 通知；
+10. loader、expectation 和 health 不依赖数据库、缓存或手工解压，且不调用
    `ExperimentStore` corpus API；持久存在的 lock 文件不被 loader 视为 artifact；
-10. 300 秒时间跨度边界可 ready，超过或缺必需时间时稳定 not-evaluable。
+11. 300 秒时间跨度边界可 ready，超过或缺必需时间时稳定 not-evaluable。
 
 不为 9 个逻辑模块分别建类或测试文件；其余合同继续由现有 owner 测试。
+超时定位不新增易抖动的墙钟性能测试；自动化只断言公开链调用次数、schema 和 fail-closed 结果，
+生产输入规模与阶段耗时保留为一次性诊断证据。
 
 ### 9.3 MVP 真实验收
 
@@ -822,17 +966,28 @@ mark、当天最后报价、开仓权利金、Shadow Replay 或 performance-evid
 
 ## 10. 当前运行与验收顺序
 
-MVP 代码切片已完成，当前按以下顺序运行验收：
+基础事实代码切片已完成，advance 超时 owner 也已通过只读诊断定位。继续计算连续完整日前按以下顺序收敛：
 
-1. 通过现有受控入口刷新并校验 HK / US calendar coverage；各市场现有 `tick-cron` 在启动生产 tick 前
+1. 将 Formal Corpus health 升级为 v2：移除全 runtime storage baseline，改为当前磁盘容量快照，
+   同时实现手工 `full` 和 readiness `latest_mature_window` 两个 scope，后者严格限定最近
+   20 个成熟交易日加当日；不改 collector、不提高超时；
+2. 将 Top1 advance / readiness 健康来源收敛到该 health v2，删除旧 Store-backed 回执的运行时读写，
+   scheduled readiness 透传 advance 已冻结的 `occurred_at_utc`；将两个返回合同明确升级为 v2，
+   不建兼容 adapter，并完成聚焦回归；
+3. 只有用户另行授权发布 / 升级后，才在目标运行环境以相同只读输入重复阶段计时，证明 health、readiness
+   和 scheduled advance 既不进入全 runtime storage baseline，也不 load / `stat` 最近 20 个成熟日加当日以外的
+   Formal artifact；
+4. 旧 Store-backed health 实现只在 source switch 已发布且全仓证明无内部 caller 后，
+   作为独立 work unit 另行确认删除；不删除历史 artifact；
+5. 通过现有受控入口刷新并校验 HK / US calendar coverage；各市场现有 `tick-cron` 在启动生产 tick 前
    预封本市场 `lx` expectation；
-2. ordinary scheduled tick 为 HK / US `lx` 采集一次共享持仓行情，写 recommendation point v3，
+6. ordinary scheduled tick 为 HK / US `lx` 采集一次共享持仓行情，写 recommendation point v3，
    归档后 readback；
-3. 先观察至少一个 HK 和一个 US 正式点，确认 hash、字段、压缩和健康回执；
-4. 每日检查 Corpus Health Receipt，重新积累连续 20 个完整 HK 交易日；缺点只修复事实产出，不回填；
-5. 20 日完整后生成 research preview，用户确认后执行研究；没有可信 `research_leader` 时停止；
-6. 有 leader 时由用户第二次确认未来 10 日隐藏验证，现有 timer 推进 fill、outcome 和 Final Receipt；
-7. 只有 `candidate_for_adoption` 才在回执中出现 `adoption_proposal`，且仍需独立配置、发布和部署授权。
+7. 先观察至少一个 HK 和一个 US 正式点，确认 hash、字段、压缩和健康回执；
+8. 每日检查 Corpus Health Receipt，重新积累连续 20 个完整 HK 交易日；缺点只修复事实产出，不回填；
+9. 20 日完整后生成 research preview，用户确认后执行研究；没有可信 `research_leader` 时停止；
+10. 有 leader 时由用户第二次确认未来 10 日隐藏验证，现有 timer 推进 fill、outcome 和 Final Receipt；
+11. 只有 `candidate_for_adoption` 才在回执中出现 `adoption_proposal`，且仍需独立配置、发布和部署授权。
 
 本轮不新增 MCP、Agent Skill、飞书控制面、数据库表、定时器或历史 apply 命令。任何持仓、真实合约行情
 或 FX 缺口都必须让 point / preview fail closed；不得用当前值补历史，也不得降低评价标准。

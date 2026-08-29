@@ -12,18 +12,6 @@ from src.application.strategy_lab.top1.advance import advance_scheduled
 AVAILABLE = {"OM_STRATEGY_LAB_TOP1_AVAILABLE": "1"}
 
 
-@pytest.fixture(autouse=True)
-def _publish_health_receipt(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        advance_module,
-        "publish_corpus_health_receipt",
-        lambda *_args, **_kwargs: {
-            "receipt": {"schema_version": "sell_put_top1_corpus_health_receipt.v1"},
-            "daily_receipts_published": [],
-        },
-    )
-
-
 def _explode() -> Any:  # pragma: no cover - asserted unreachable
     raise AssertionError("lazy dependency must not be loaded")
 
@@ -38,6 +26,13 @@ def _calendar() -> dict[str, object]:
         ],
         "market_calendar_version": "hk-calendar.v1",
         "snapshot_content_sha256": "a" * 64,
+    }
+
+
+def _readiness(ready: bool) -> dict[str, object]:
+    return {
+        "validation_runtime_ready": ready,
+        "facts": {"corpus": {"schema_version": "corpus_health_receipt.v2"}},
     }
 
 
@@ -64,6 +59,7 @@ def test_disabled_gate_loads_no_schedule_source_readiness_or_gateway(
     )
 
     assert result["status"] == "disabled"
+    assert result["schema_version"] == "sell_put_top1_advance_result.v2"
     assert result["service_available"] is False
 
 
@@ -162,7 +158,7 @@ def test_collecting_order_due_conclusion_and_peer_failure_isolation(
         market="HK",
         account="lx",
         load_schedule=lambda: {},
-        load_readiness=lambda: {"validation_runtime_ready": False},
+        load_readiness=lambda: _readiness(False),
         load_gateway=_explode,
         advance_revision="top1-advance.v1",
         advance_interval_seconds=60,
@@ -228,7 +224,7 @@ def test_behavior_drift_terminates_without_loading_gateway(
         market="HK",
         account="lx",
         load_schedule=lambda: {},
-        load_readiness=lambda: {"validation_runtime_ready": True},
+        load_readiness=lambda: _readiness(True),
         load_gateway=_explode,
         advance_revision="top1-advance.v1",
         advance_interval_seconds=60,
@@ -320,7 +316,7 @@ def test_hidden_window_overlap_blocks_sealing_and_collection(
         market="HK",
         account="lx",
         load_schedule=lambda: {},
-        load_readiness=lambda: {"validation_runtime_ready": True},
+        load_readiness=lambda: _readiness(True),
         load_gateway=lambda: expected_gateway,
         advance_revision="top1-advance.v1",
         advance_interval_seconds=60,
@@ -381,7 +377,7 @@ def test_out_of_coverage_calendar_blocks_sealing_without_fallback(
         market="HK",
         account="lx",
         load_schedule=lambda: {},
-        load_readiness=lambda: {"validation_runtime_ready": False},
+        load_readiness=lambda: _readiness(False),
         load_gateway=_explode,
         advance_revision="top1-advance.v1",
         advance_interval_seconds=60,
@@ -423,7 +419,7 @@ def test_active_experiment_read_failure_blocks_schedule_sealing(
         market="HK",
         account="lx",
         load_schedule=lambda: {},
-        load_readiness=lambda: {"validation_runtime_ready": False},
+        load_readiness=lambda: _readiness(False),
         load_gateway=_explode,
         advance_revision="top1-advance.v1",
         advance_interval_seconds=60,
@@ -476,7 +472,7 @@ def test_idle_advance_only_fails_when_readiness_cannot_be_loaded(
         account="lx",
         load_schedule=lambda: {},
         load_readiness=(
-            (lambda: {"validation_runtime_ready": readiness_result})
+            (lambda: _readiness(readiness_result))
             if readiness_result is not None
             else _explode
         ),
@@ -556,7 +552,7 @@ def test_validation_provider_need_makes_unready_advance_partial(
         market="HK",
         account="lx",
         load_schedule=lambda: {},
-        load_readiness=lambda: {"validation_runtime_ready": False},
+        load_readiness=lambda: _readiness(False),
         load_gateway=_explode,
         advance_revision="top1-advance.v1",
         advance_interval_seconds=60,
@@ -618,7 +614,7 @@ def test_timer_binding_mismatch_is_partial_without_gateway(
         market="HK",
         account="lx",
         load_schedule=lambda: {},
-        load_readiness=lambda: {"validation_runtime_ready": True},
+        load_readiness=lambda: _readiness(True),
         load_gateway=_explode,
         advance_revision="top1-advance.v1",
         advance_interval_seconds=60,
@@ -692,7 +688,7 @@ def test_corpus_conflicts_make_advance_partial(
         market="HK",
         account="lx",
         load_schedule=lambda: {},
-        load_readiness=lambda: {"validation_runtime_ready": False},
+        load_readiness=lambda: _readiness(False),
         load_gateway=_explode,
         advance_revision="top1-advance.v1",
         advance_interval_seconds=60,
@@ -707,10 +703,10 @@ def test_corpus_conflicts_make_advance_partial(
     assert any(item.get("status") == "conflict" for item in result["corpus"])
 
 
-def test_corpus_health_publishes_before_readiness_and_failure_is_partial(
+def test_advance_uses_readiness_as_the_only_health_fact(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    calls: list[str] = []
+    readiness_calls = 0
     monkeypatch.setattr(
         advance_module,
         "read_active_experiment_ids",
@@ -728,16 +724,11 @@ def test_corpus_health_publishes_before_readiness_and_failure_is_partial(
         lambda *_args, **_kwargs: [],
     )
 
-    def publish(*_args: object, **_kwargs: object) -> dict[str, object]:
-        calls.append("health")
-        return {"receipt": {"fresh": True}, "daily_receipts_published": []}
-
     def readiness() -> dict[str, object]:
-        assert calls == ["health"]
-        calls.append("readiness")
-        return {"validation_runtime_ready": False}
+        nonlocal readiness_calls
+        readiness_calls += 1
+        return _readiness(False)
 
-    monkeypatch.setattr(advance_module, "publish_corpus_health_receipt", publish)
     result = advance_scheduled(
         object(),
         tmp_path / "source",
@@ -751,62 +742,33 @@ def test_corpus_health_publishes_before_readiness_and_failure_is_partial(
         advance_interval_seconds=300,
         actor="timer",
         occurred_at_utc="2026-08-16T01:00:00Z",
-        idempotency_key="health-before-readiness",
+        idempotency_key="single-health-fact",
         environ=AVAILABLE,
     )
     assert result["status"] == "ok"
-    assert result["corpus_health"]["receipt"] == {"fresh": True}
-    assert calls == ["health", "readiness"]
+    assert result["schema_version"] == "sell_put_top1_advance_result.v2"
+    assert "corpus_health" not in result
+    assert result["readiness"]["facts"]["corpus"] is not None
+    assert readiness_calls == 1
 
-    monkeypatch.setattr(
-        advance_module,
-        "publish_corpus_health_receipt",
-        lambda *_args, **_kwargs: {
-            "receipt": {"fresh": True},
-            "daily_receipts_published": [],
-            "daily_receipt_errors": [{"reason_code": "daily_conflict"}],
-        },
-    )
-    daily_conflict = advance_scheduled(
+    unavailable = advance_scheduled(
         object(),
         tmp_path / "source",
         tmp_path / "artifacts",
         market="HK",
         account="lx",
         load_schedule=lambda: {},
-        load_readiness=lambda: {"validation_runtime_ready": False},
+        load_readiness=lambda: {
+            "validation_runtime_ready": False,
+            "facts": {"corpus": None},
+        },
         load_gateway=_explode,
         advance_revision="top1-advance.v1",
         advance_interval_seconds=300,
         actor="timer",
         occurred_at_utc="2026-08-16T01:05:00Z",
-        idempotency_key="daily-health-conflict",
+        idempotency_key="health-unavailable",
         environ=AVAILABLE,
     )
-    assert daily_conflict["status"] == "partial"
-
-    def fail_health(*_args: object, **_kwargs: object) -> dict[str, object]:
-        raise ValueError("health failed")
-
-    monkeypatch.setattr(advance_module, "publish_corpus_health_receipt", fail_health)
-    failed = advance_scheduled(
-        object(),
-        tmp_path / "source",
-        tmp_path / "artifacts",
-        market="HK",
-        account="lx",
-        load_schedule=lambda: {},
-        load_readiness=lambda: {"validation_runtime_ready": False},
-        load_gateway=_explode,
-        advance_revision="top1-advance.v1",
-        advance_interval_seconds=300,
-        actor="timer",
-        occurred_at_utc="2026-08-16T01:10:00Z",
-        idempotency_key="health-failure",
-        environ=AVAILABLE,
-    )
-    assert failed["status"] == "partial"
-    assert failed["corpus_health"] == {
-        "reason_code": "advance_failed",
-        "message": "health failed",
-    }
+    assert unavailable["status"] == "partial"
+    assert "corpus_health" not in unavailable
