@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Mapping
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, NoReturn, cast
 
@@ -181,7 +180,6 @@ def _terms_source(
 ) -> dict[str, Any] | None:
     try:
         day = read_validation_day_source(
-            store,
             artifact_root,
             market=str(experiment["market"]),
             account=str(experiment["account"]),
@@ -192,7 +190,6 @@ def _terms_source(
         expectation = cast(Mapping[str, Any], day["expectation"])
         point_id = cast(list[str], expectation["expected_recommendation_point_ids"])[-1]
         point = read_validation_point_source(
-            store,
             artifact_root,
             market=str(experiment["market"]),
             account=str(experiment["account"]),

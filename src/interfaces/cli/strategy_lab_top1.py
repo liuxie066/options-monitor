@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from src.application.account_config import normalize_account_label
 from src.application.agent_tool_config import load_runtime_config
 from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.ledger.api import resolve_position_ledger_sqlite_path
@@ -70,14 +71,14 @@ _TOP1_PROFILE_FIELDS = {
 
 def _add_identity(parser: Any, *, markets: tuple[str, ...] = ("hk",)) -> None:
     parser.add_argument("--market", required=True, choices=markets)
-    parser.add_argument("--account", required=True, choices=("lx",))
+    parser.add_argument("--account", required=True)
     parser.add_argument("--profile-path", required=True)
 
 
 def add_top1_commands(strategy_lab_subparsers: Any) -> None:
     top1 = strategy_lab_subparsers.add_parser(
         "top1-loop",
-        help="inspect or advance the experimental HK/lx Sell Put Top1 loop",
+        help="inspect or advance the experimental HK Sell Put Top1 loop",
     )
     commands = top1.add_subparsers(dest="top1_loop_command", required=True)
 
@@ -183,8 +184,14 @@ def _profile_context(
     runtime_root = _path_from_profile(profile, "runtime_root")
     top1_raw = profile.get("strategy_lab_top1")
     top1 = dict(top1_raw) if isinstance(top1_raw, Mapping) else {}
+    try:
+        requested_account = normalize_account_label(args.account)
+        top1_account = normalize_account_label(top1.get("account")) if top1 else None
+    except ValueError as exc:
+        raise AgentToolError(code="CONFIG_ERROR", message=str(exc)) from exc
+    args.account = requested_account
     if require_top1 and top1 and (
-        top1.get("market") != args.market or top1.get("account") != args.account
+        top1.get("market") != args.market or top1_account != requested_account
     ):
         raise AgentToolError(
             code="CONFIG_ERROR",
@@ -201,11 +208,11 @@ def _profile_context(
             and isinstance(selected_markets, list)
             and "hk" in selected_markets
             and isinstance(selected_accounts, list)
-            and "lx" in selected_accounts
+            and top1_account in selected_accounts
             and set(top1) == _TOP1_PROFILE_FIELDS
             and top1.get("enabled") is True
             and top1.get("market") == "hk"
-            and top1.get("account") == "lx"
+            and top1.get("account") == top1_account
             and isinstance(binding.get("host"), str)
             and bool(str(binding.get("host") or "").strip())
             and type(binding.get("port")) is int
@@ -237,6 +244,8 @@ def _profile_context(
         "runtime_root": runtime_root,
         "config_hk": config_hk,
         "top1": top1,
+        "top1_account": top1_account,
+        "requested_account": requested_account,
         "store_path": runtime_root
         / "output_shared"
         / "research"
@@ -256,6 +265,7 @@ def _readiness(
         "+00:00", "Z"
     )
     profile = context["profile"]
+    account = context["top1_account"] or context["requested_account"]
     errors: list[dict[str, str]] = []
     try:
         drift = service_drift(
@@ -282,7 +292,7 @@ def _readiness(
         corpus = build_corpus_health_receipt(
             context["runtime_root"],
             market="HK",
-            account="lx",
+            account=account,
             observed_at_utc=observed_at_utc,
             scope="latest_mature_window",
             mature_day_limit=RESEARCH_REQUIRED_DAYS,
@@ -303,7 +313,7 @@ def _readiness(
             capability_receipt = read_top1_capability_receipt(
                 context["artifact_root"],
                 market="HK",
-                account="lx",
+                account=account,
                 expected_opend_binding=binding,
             )
         except Top1CapabilityReceiptError as exc:
@@ -357,6 +367,7 @@ def _research_inputs(
     args: argparse.Namespace,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     top1 = context["top1"]
+    account = top1["account"]
     try:
         calendar = read_market_calendar_binding(context["artifact_root"], market="HK")
     except Exception:
@@ -365,7 +376,7 @@ def _research_inputs(
         capability = read_top1_capability_receipt(
             context["artifact_root"],
             market="HK",
-            account="lx",
+            account=account,
             expected_opend_binding=top1["opend_binding"],
         )
     except Exception:
@@ -373,7 +384,7 @@ def _research_inputs(
     plan = capability.get("account_fee_plan_receipt")
     fee_contract: dict[str, object] = {
         "market": "HK",
-        "account": "lx",
+        "account": account,
         "fee_schedule_version": FUTU_HK_TERMINAL_FEE_SCHEDULE_VERSION,
         "account_fee_plan": (
             {
@@ -402,7 +413,7 @@ def _research_inputs(
         corpus_status = build_corpus_health_receipt(
             context["runtime_root"],
             market="HK",
-            account="lx",
+            account=account,
             repo_root=context["repo_root"],
         )
     except Exception:
@@ -652,6 +663,8 @@ def handle_top1_command(args: argparse.Namespace) -> dict[str, Any]:
             raise AgentToolError(code="CONFIG_ERROR", message=str(exc)) from exc
         top1 = context["top1"]
         preview_inputs = {
+            "market": args.market.upper(),
+            "account": args.account,
             "experiment_id": args.experiment_id,
             "validation_start_trading_date": args.validation_start_trading_date,
             "schedule": schedule,
@@ -747,6 +760,8 @@ def handle_top1_command(args: argparse.Namespace) -> dict[str, Any]:
             data = read_public_receipt(
                 store,
                 experiment_id=args.experiment_id,
+                expected_market=args.market.upper(),
+                expected_account=args.account,
             )
         except Exception as exc:
             raise AgentToolError(
@@ -764,15 +779,6 @@ def handle_top1_command(args: argparse.Namespace) -> dict[str, Any]:
     top1 = context["top1"]
     gateway_box: dict[str, Any] = {}
 
-    def load_schedule() -> Mapping[str, Any]:
-        _path, config = load_runtime_config(
-            config_path=context["config_hk"], expected_market="hk"
-        )
-        schedule = config.get("schedule")
-        if not isinstance(schedule, Mapping):
-            raise ValueError("HK runtime schedule is missing")
-        return schedule
-
     def load_gateway() -> Any:
         binding = top1["opend_binding"]
         gateway = build_ready_futu_quote_gateway(
@@ -789,11 +795,9 @@ def handle_top1_command(args: argparse.Namespace) -> dict[str, Any]:
     try:
         data = advance_scheduled(
             store,
-            context["runtime_root"],
             context["artifact_root"],
             market="HK",
-            account="lx",
-            load_schedule=load_schedule,
+            account=top1["account"],
             load_readiness=lambda: _readiness(
                 context, store, observed_at_utc=occurred_at_utc
             ),

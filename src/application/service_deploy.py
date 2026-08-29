@@ -15,6 +15,7 @@ from src.application.account_config import (
     AccountRuntimePlan,
     accounts_from_config,
     build_account_runtime_plan,
+    normalize_account_label,
 )
 from src.application.config_yaml import (
     load_yaml_config_file,
@@ -1212,6 +1213,7 @@ def render_service_bundle(
     strategy_lab_recorder_max_datasets: int = DEFAULT_STRATEGY_LAB_RECORDER_MAX_DATASETS,
     strategy_lab_recorder_mark_stale_hours: int = DEFAULT_STRATEGY_LAB_RECORDER_MARK_STALE_HOURS,
     include_strategy_lab_top1: bool = False,
+    strategy_lab_top1_account: str | None = None,
     strategy_lab_top1_advance_interval_seconds: int | None = None,
     strategy_lab_top1_timeout_start_sec: int | None = None,
     include_quality_monitoring: bool = False,
@@ -1230,10 +1232,11 @@ def render_service_bundle(
     if include_strategy_lab_top1 and target_key != "systemd":
         raise ValueError("Strategy Lab Top1 service rendering is supported only for systemd")
     if not include_strategy_lab_top1 and (
-        strategy_lab_top1_advance_interval_seconds is not None
+        strategy_lab_top1_account is not None
+        or strategy_lab_top1_advance_interval_seconds is not None
         or strategy_lab_top1_timeout_start_sec is not None
     ):
-        raise ValueError("Strategy Lab Top1 timing requires include_strategy_lab_top1")
+        raise ValueError("Strategy Lab Top1 settings require include_strategy_lab_top1")
     if include_strategy_lab_top1 and (
         type(strategy_lab_top1_advance_interval_seconds) is not int
         or strategy_lab_top1_advance_interval_seconds <= 0
@@ -1319,10 +1322,18 @@ def render_service_bundle(
         market_values=market_values,
         accounts=accounts,
     )
-    if include_strategy_lab_top1 and (
-        "hk" not in market_values or "lx" not in account_values
-    ):
-        raise ValueError("Strategy Lab Top1 requires selected market hk and account lx")
+    top1_account: str | None = None
+    if include_strategy_lab_top1:
+        if strategy_lab_top1_account is None:
+            raise ValueError("Strategy Lab Top1 account must be explicit")
+        try:
+            top1_account = normalize_account_label(strategy_lab_top1_account)
+        except ValueError as exc:
+            raise ValueError(f"Strategy Lab Top1 account is invalid: {exc}") from exc
+        if "hk" not in market_values or top1_account not in accounts_by_market.get("hk", []):
+            raise ValueError(
+                "Strategy Lab Top1 requires market hk and a selected HK Futu account"
+            )
     config_authoring = (
         {
             "source": "yaml",
@@ -1374,17 +1385,18 @@ def render_service_bundle(
     )
     top1_binding = None
     if include_strategy_lab_top1:
+        assert top1_account is not None
         try:
             top1_binding = _resolve_strategy_lab_recorder_binding(
                 target=target_key,
                 include_strategy_lab_recorder=True,
                 recorder_source="opend",
-                recorder_account="lx",
+                recorder_account=top1_account,
                 repo_root=repo,
                 config_yaml_path=config_yaml_path,
                 config_by_market=config_by_market,
                 market_values=["hk"],
-                account_values=["lx"],
+                account_values=[top1_account],
                 include_opend=include_opend,
                 explicit_opend_root=explicit_opend_root,
                 opend_service_plans=opend_service_plans,
@@ -1655,7 +1667,7 @@ def render_service_bundle(
                         "--market",
                         "hk",
                         "--account",
-                        "lx",
+                        top1_account,
                         "--profile-path",
                         str(runtime / "service.profile.json"),
                         "--write",
@@ -2692,7 +2704,7 @@ def render_service_bundle(
         strategy_lab_top1={
             "enabled": True,
             "market": "hk",
-            "account": "lx",
+            "account": top1_account,
             "opend_binding": {
                 "host": str(top1_binding["host"]),
                 "port": int(top1_binding["port"]),

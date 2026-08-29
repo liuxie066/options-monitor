@@ -3,7 +3,7 @@
 - **状态**：代码闭环已实现，真实价值验收尚未完成
 - **当前阶段**：重新积累连续 20 个完整交易日的正式推荐点事实
 - **首个正式 recipe**：HK / `lx` / Sell Put Top1
-- **更新时间**：2026-08-29
+- **更新时间**：2026-08-30
 
 本文是 Strategy Lab 的当前运行说明。产品范围和验收口径见
 [统一策略实验平台 PRD](STRATEGY_LAB_EXPERIMENT_PLATFORM_PRD.md)，已落地模块、函数和存储合同见
@@ -25,10 +25,10 @@ Strategy Lab 目前只有一个产品入口和一个 recorder 兼容入口：
 旧归档 run 不再进入 formal Top1 corpus，也不提供迁移入口。正式研究只使用当前合同前瞻采集的完整
 corpus；不能用当前行情、持仓、mark 或 FX 补造历史正式点。
 
-现有 advance timer 在每次正式点发现和捕获后发布 corpus 健康回执。`current` 回执展示当前交易日、
-连续完整日数、首个阻塞日、最近成功捕获时间、日历与来源 hash，并以两个 advance 周期为新鲜度上限；
-readiness 只读展示该回执，缺失、过期或篡改必须显式报告。最近 20 个成熟交易日另保留首次观察的
-不可变日回执，仅用于审计当时观察，不替代 canonical corpus，也不用于补造研究窗口。
+Corpus Health Receipt 不再持久化 `current` 或每日状态文件。readiness 与手工健康查询直接对 Formal
+Corpus 的 expectation / point artifact 计算确定性视图；缺失、冲突、不可评估、日历不可用或容量风险
+必须显式报告。scheduled readiness 只检查最近 20 个成熟交易日加当前交易日，手工 full 查询保留
+全历史审计视图；两者都不能补造研究窗口。
 
 代码和测试通过不等于 MVP 已通过。MVP 只有在真实完成一次 20 日研究，并在产生可信
 `research_leader` 后经第二次人工确认完成未来 10 个正式推荐日隐藏验证、生成可读 Final Receipt，
@@ -60,10 +60,10 @@ flowchart TB
 
     CLI --> W["Top1 Workspace\npreview / confirm / status / receipt"]
     T["HK / US tick-cron"] --> E["首个正式点前封存\n本市场 expectation"]
-    E --> P["recommendation point v2\nprepared option evidence"]
-    P --> CP["Top1 corpus"]
-    A["现有 advance timer"] --> CP
-    CP --> H["corpus 健康回执\ncurrent + 每日首次观察"]
+    E --> P["recommendation point v3\nprepared option evidence"]
+    P --> CP["Formal Corpus\nimmutable expectation + point"]
+    A["现有 advance timer"] --> W
+    CP --> H["Corpus Health Receipt\n查询时确定性计算"]
     H --> W
     CP --> W
     W --> R["20 日研究"]
@@ -86,8 +86,9 @@ flowchart TB
 | 两次确认编排 | `top1/workspace.py` |
 | 生命周期、状态和回执 | `top1/lifecycle.py`、`terminal_projection.py`、`ExperimentStore` |
 | 持仓 mark 和 FX | 现有 performance-evidence repository |
-| 调度推进 | 现有 `strategy-lab-top1-advance` timer |
-| corpus 健康计算、发布和读取 | `top1/corpus.py`；`top1/readiness.py` 只展示读取结果 |
+| 调度推进 | 现有 `strategy-lab-top1-advance` timer；`service render` 通过 `--strategy-lab-top1-account` 显式绑定一个已选 HK Futu 账户 |
+| Formal Corpus 归档与健康计算 | `research/formal_corpus.py`；`top1/readiness.py` 只消费查询结果 |
+| Top1 recipe 投影 | `top1/corpus.py`、`top1/ranking.py`；只读 Formal Corpus 并在内存派生 |
 
 不新增第二套 corpus、FX 存储、调度器、状态库或通用公式 DSL。
 
@@ -95,7 +96,7 @@ flowchart TB
 
 ```text
 正式推荐点持续取证
-  -> current / 每日 corpus 健康回执
+  -> 查询 Formal Corpus 健康视图
   -> 连续 20 个完整交易日 corpus
   -> 研究 preview
   -> 第一次人工确认并运行研究
@@ -114,11 +115,11 @@ flowchart TB
   时不写正式事实。封存失败只使当日实验事实降级，不阻断普通扫描和通知。
 - 每个交易日在首个预期点前完成封存；完整日当前按 12 个正式点校验，半日市按已绑定的
   市场日历校验实际时段。
-- 每个点必须具有可验证的 recommendation point、opening snapshot、ranking projection、真实合约
-  行情、当时未平仓期权 mark 和 FX 引用。
+- 每个点必须具有可验证的 recommendation point、opening snapshot、required-data、当时未平仓期权
+  mark 和 FX 引用；Top1 ranking projection 从该正式点按 recipe 确定性派生，不另存基础事实副本。
 - 任一预期点缺失、冲突或不可评估，整个交易日不进入研究窗口；不能跳过缺日后拼接 20 日。
 - 当天已到下一正式点或已经捕获更晚点时，前一缺点记为 `overdue`；尚未到期的点保持 `pending`。
-- 每日不可变回执记录首次成熟观察；`current` 回执按 canonical corpus 重新计算，事实恢复后可恢复健康。
+- 健康回执按 canonical corpus 重新计算；事实恢复后可恢复健康，但已有冲突 artifact 不自动删除或仲裁。
 - 回执新鲜不代表研究可启动；只有连续 20 个成熟交易日均完整，research preview 才可用。
 - corpus 积累本身不创建实验，也不启动研究或隐藏验证。
 
@@ -221,13 +222,13 @@ latest scanned run dataset。它不会修改生产配置、写交易状态或发
 
 | 项目 | 状态 |
 |---|---|
-| 正式推荐点 v2 与 prepared option evidence | 已实现 |
+| 正式推荐点 v3 与 prepared option evidence | 已实现 |
 | 旧归档迁移兼容 | 已删除；正式研究只消费前瞻采集的完整 corpus |
 | 20 日 research preview / confirm / receipt | 已实现 |
 | 期权市场集中度、CNY 经济结果和双指标评价 | 已实现 |
 | 10 日 validation preview / confirm / scheduled advance / Final Receipt | 已实现 |
 | 账户级实验 feature gate 删除 | 已完成 |
-| corpus `current` / 每日健康回执及 readiness 展示 | 已实现；只报告，不自动修复或启动研究 |
+| Formal Corpus 查询式健康回执及 readiness 展示 | 已实现；不持久化重复回执，不自动修复或启动研究 |
 | 连续 20 个完整交易日真实 corpus | 积累中；以运行时 readiness 为准 |
 | 真实 Research Receipt 和可信 leader | 未完成 |
 | 未来 10 日隐藏验证和 Final Receipt | 未开始；受 research leader 与第二次确认门槛约束 |

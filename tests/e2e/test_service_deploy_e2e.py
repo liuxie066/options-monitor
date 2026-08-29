@@ -39,6 +39,8 @@ def test_service_render_cli_exposes_strategy_lab_recorder_account(capsys: pytest
             "--config-yaml",
             "/tmp/config.yaml",
             "--include-strategy-lab-top1",
+            "--strategy-lab-top1-account",
+            "user1",
             "--strategy-lab-top1-advance-interval-seconds",
             "300",
             "--strategy-lab-top1-timeout-start-sec",
@@ -46,6 +48,7 @@ def test_service_render_cli_exposes_strategy_lab_recorder_account(capsys: pytest
         ]
     )
     assert top1.include_strategy_lab_top1 is True
+    assert top1.strategy_lab_top1_account == "user1"
     assert top1.strategy_lab_top1_advance_interval_seconds == 300
     assert top1.strategy_lab_top1_timeout_start_sec == 120
 

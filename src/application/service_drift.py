@@ -1593,6 +1593,11 @@ def _expected_bundle_from_profile(
         "strategy_lab_recorder_max_datasets": int(strategy_lab_recorder.get("max_datasets") or 5),
         "strategy_lab_recorder_mark_stale_hours": int(strategy_lab_recorder.get("mark_stale_hours") or 2),
         "include_strategy_lab_top1": include_strategy_lab_top1,
+        "strategy_lab_top1_account": (
+            strategy_lab_top1.get("account")
+            if include_strategy_lab_top1
+            else None
+        ),
         "strategy_lab_top1_advance_interval_seconds": (
             strategy_lab_top1.get("advance_interval")
             if include_strategy_lab_top1
