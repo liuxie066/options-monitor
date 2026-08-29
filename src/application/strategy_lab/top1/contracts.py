@@ -49,6 +49,7 @@ PREVIEW_SCHEMA_VERSION = "sell_put_top1_preview.v1"
 CONFIRMED_START_COMMAND_SCHEMA_VERSION = "sell_put_top1_confirmed_start.v1"
 
 _HASH_64 = re.compile(r"[0-9a-f]{64}\Z")
+_ACCOUNT_LABEL = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z")
 _BEHAVIOR_KEYS = frozenset(
     {
         "baseline_version",
@@ -677,7 +678,7 @@ def validate_experiment_spec(payload: object) -> dict[str, object]:
     _ = _text(spec["experiment_id"], "experiment_id")
     _fixed(spec["market"], "HK", "market")
     account = _text(spec["account"], "account")
-    if account != account.lower():
+    if _ACCOUNT_LABEL.fullmatch(account) is None:
         _fail("account must be lowercase canonical text")
 
     _validate_hypothesis(spec["hypothesis"])
@@ -698,6 +699,7 @@ def build_sell_put_top1_research_spec(
     *,
     topic_id: str,
     experiment_id: str,
+    account: str,
     research_source: Mapping[str, object],
     market_calendar_version: str,
     baseline_version: str = "sell_put_top1_current.v1",
@@ -713,7 +715,7 @@ def build_sell_put_top1_research_spec(
         "topic_id": _text(topic_id, "topic_id"),
         "experiment_id": _text(experiment_id, "experiment_id"),
         "market": "HK",
-        "account": "lx",
+        "account": _text(account, "account"),
         "hypothesis": {
             "hypothesis_type": "sell_put_ranking",
             "statement": (
@@ -875,7 +877,9 @@ def validate_confirmed_start_command(value: object) -> dict[str, object]:
     if stage not in {"research", "validation"}:
         _fail("confirmed_start.stage is unsupported")
     _fixed(command["market"], "HK", "confirmed_start.market")
-    _fixed(command["account"], "lx", "confirmed_start.account")
+    account = _text(command["account"], "confirmed_start.account")
+    if _ACCOUNT_LABEL.fullmatch(account) is None:
+        _fail("confirmed_start.account must be lowercase canonical text")
     _ = _text(command["experiment_id"], "confirmed_start.experiment_id")
     _ = _sha256(
         command["confirmed_preview_sha256"],

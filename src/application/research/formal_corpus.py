@@ -11,6 +11,7 @@ from typing import Any, NoReturn
 from zoneinfo import ZoneInfo
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
+from src.application.account_config import accounts_from_config
 from src.application.agent_tool_config import load_runtime_config
 from src.application.candidate_snapshot_contract import (
     CandidateSnapshotContractError,
@@ -1851,18 +1852,26 @@ def seal_profile_formal_expectations(
     results: list[dict[str, Any]] = []
     if not isinstance(markets, list) or not isinstance(accounts, list) or not isinstance(config_paths, Mapping):
         _fail("formal_corpus_input_invalid", "service profile scope is invalid")
-    if "lx" not in {str(value).strip().lower() for value in accounts}:
+    account_values = list(
+        dict.fromkeys(_identity("HK", value)[1] for value in accounts)
+    )
+    if not account_values:
         return {"status": "not_applicable", "results": []}
     for market_key in ("hk", "us"):
         if market_key not in {str(value).strip().lower() for value in markets}:
             continue
         market = market_key.upper()
+        market_accounts = account_values
         try:
             config_path = Path(str(config_paths.get(market_key) or "")).expanduser()
             _path, config = load_runtime_config(
                 config_path=config_path,
                 expected_market=market_key,
             )
+            configured_accounts = set(accounts_from_config(config, fallback=()))
+            market_accounts = [
+                account for account in account_values if account in configured_accounts
+            ]
             schedule = config.get("schedule")
             if not isinstance(schedule, Mapping):
                 raise ValueError(f"{market} runtime schedule is missing")
@@ -1890,21 +1899,22 @@ def seal_profile_formal_expectations(
                 None,
             )
             if session is None:
-                results.append(
+                results.extend(
                     {
                         "market": market,
-                        "account": "lx",
+                        "account": account,
                         "trading_date": trading_date,
                         "status": "not_applicable",
                         "reason_code": "market_closed",
                     }
+                    for account in market_accounts
                 )
                 continue
-            results.append(
+            results.extend(
                 seal_formal_day_expectation(
                     runtime_root,
                     market=market,
-                    account="lx",
+                    account=account,
                     schedule=schedule,
                     trading_date=trading_date,
                     market_calendar_version=calendar["market_calendar_version"],
@@ -1912,18 +1922,20 @@ def seal_profile_formal_expectations(
                     sealed_at_utc=occurred_at,
                     trade_date_type=str(session),
                 )
+                for account in market_accounts
             )
         except Exception as exc:
-            results.append(
+            results.extend(
                 {
                     "market": market,
-                    "account": "lx",
+                    "account": account,
                     "status": "not_evaluable",
                     "reason_code": str(
                         getattr(exc, "reason_code", "market_calendar_binding_unavailable")
                     ),
                     "message": str(exc),
                 }
+                for account in market_accounts
             )
     return {
         "status": (

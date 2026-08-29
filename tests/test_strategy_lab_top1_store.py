@@ -59,6 +59,7 @@ def _spec(experiment_id: str, *, validation: bool = False) -> dict[str, Any]:
     spec = build_sell_put_top1_research_spec(
         topic_id=f"topic-{experiment_id}",
         experiment_id=experiment_id,
+        account="user1",
         market_calendar_version="hk-calendar.v1",
         research_source={
             "mode": "sealed_historical_dataset",
@@ -210,7 +211,7 @@ def _lock_store_challenger(
     )
     commitment = build_hidden_window_commitment(
         experiment_id=experiment_id,
-        account="lx",
+        account="user1",
         validation_start_trading_date=trading_dates[0],
         market_calendar_binding=calendar_binding,
         schedule=top1_hk_schedule_fixture(),
@@ -441,7 +442,7 @@ def test_service_off_rejects_lifecycle_write(tmp_path: Path) -> None:
             environ={},
         )
     assert exc_info.value.reason_code == "strategy_lab_service_disabled"
-    assert store.active_experiments("HK", "lx") == []
+    assert store.active_experiments("HK", "user1") == []
 
 
 def test_exact_publisher_adopts_bytes_and_rejects_conflict_or_symlink(
@@ -503,18 +504,18 @@ def test_separate_authorization_starts_evidence_bound_validation(tmp_path: Path)
     assert read_public_receipt(store, experiment_id="experiment-a") is None
 
 
-def test_public_status_rejects_cross_account_identity(tmp_path: Path) -> None:
+def test_public_status_and_receipt_reject_cross_account_identity(tmp_path: Path) -> None:
     store = _store(tmp_path)
     root = tmp_path / "artifacts"
-    spec = _spec("experiment-sy")
-    spec["account"] = "sy"
+    spec = _spec("experiment-user2")
+    spec["account"] = "user2"
     prepare_experiment(
         store,
         spec,
         provenance={"source_commit_sha": "commit-1", "config_sha256": SHA_B},
         actor="human",
         occurred_at_utc=NOW,
-        idempotency_key="prepare-sy",
+        idempotency_key="prepare-user2",
         artifact_root=root,
         environ=AVAILABLE,
     )
@@ -522,9 +523,18 @@ def test_public_status_rejects_cross_account_identity(tmp_path: Path) -> None:
     with pytest.raises(Top1LifecycleError) as exc_info:
         read_public_status(
             store,
-            experiment_id="experiment-sy",
+            experiment_id="experiment-user2",
             expected_market="HK",
-            expected_account="lx",
+            expected_account="user1",
+        )
+    assert exc_info.value.reason_code == "experiment_conflict"
+
+    with pytest.raises(Top1LifecycleError) as exc_info:
+        read_public_receipt(
+            store,
+            experiment_id="experiment-user2",
+            expected_market="HK",
+            expected_account="user1",
         )
     assert exc_info.value.reason_code == "experiment_conflict"
 

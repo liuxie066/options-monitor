@@ -364,7 +364,6 @@ def consume_validation_point(
     )
     try:
         source = read_validation_point_source(
-            store,
             artifact_root,
             market=str(experiment["market"]),
             account=str(experiment["account"]),
@@ -581,7 +580,6 @@ def record_validation_day_gap(
         _fail("validation_conflict", "point intake already began for this date")
     try:
         source = read_validation_day_source(
-            store,
             artifact_root,
             market=str(experiment["market"]),
             account=str(experiment["account"]),

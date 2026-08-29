@@ -848,19 +848,20 @@ def test_render_systemd_bundle_can_include_strategy_lab_top1_timer(
     repo.mkdir()
     config_path = _write_service_account_config(
         tmp_path / "config.hk.json",
-        {"lx": _futu_service_account(opend_root=tmp_path / "opend-lx")},
+        {"lab1": _futu_service_account(opend_root=tmp_path / "opend-lab1")},
     )
 
     bundle = render_service_bundle(
         target="systemd",
         repo_root=repo,
         runtime_root=runtime,
-        accounts=["lx"],
+        accounts=["lab1"],
         markets=["hk"],
         config_paths={"hk": config_path},
         env_file=env_file,
         include_opend=True,
         include_strategy_lab_top1=True,
+        strategy_lab_top1_account="lab1",
         strategy_lab_top1_advance_interval_seconds=300,
         strategy_lab_top1_timeout_start_sec=120,
     )
@@ -876,7 +877,7 @@ def test_render_systemd_bundle_can_include_strategy_lab_top1_timer(
     assert (
         str(repo / "om")
         + " research strategy-lab top1-loop advance --scheduled --market hk "
-        "--account lx --profile-path "
+        "--account lab1 --profile-path "
         + str(runtime / "service.profile.json")
         + " --write"
     ) in service
@@ -888,7 +889,7 @@ def test_render_systemd_bundle_can_include_strategy_lab_top1_timer(
     assert profile["strategy_lab_top1"] == {
         "enabled": True,
         "market": "hk",
-        "account": "lx",
+        "account": "lab1",
         "opend_binding": {"host": "127.0.0.1", "port": 11111},
         "advance_interval": 300,
         "timeout_start_sec": 120,
@@ -931,10 +932,13 @@ def test_render_strategy_lab_top1_rejects_missing_explicit_contract(
             markets=["hk"],
             env_file=tmp_path / "env",
             include_strategy_lab_top1=True,
+            strategy_lab_top1_account="user1",
             strategy_lab_top1_advance_interval_seconds=0,
             strategy_lab_top1_timeout_start_sec=120,
         )
-    with pytest.raises(ValueError, match="requires selected market hk and account lx"):
+    with pytest.raises(
+        ValueError, match="requires market hk and a selected HK Futu account"
+    ):
         render_service_bundle(
             target="systemd",
             repo_root=repo,
@@ -942,6 +946,7 @@ def test_render_strategy_lab_top1_rejects_missing_explicit_contract(
             markets=["hk"],
             env_file=tmp_path / "env",
             include_strategy_lab_top1=True,
+            strategy_lab_top1_account="user1",
             strategy_lab_top1_advance_interval_seconds=300,
             strategy_lab_top1_timeout_start_sec=120,
         )
@@ -958,6 +963,7 @@ def test_render_strategy_lab_top1_rejects_missing_explicit_contract(
             config_paths={"hk": invalid_config},
             env_file=tmp_path / "env",
             include_strategy_lab_top1=True,
+            strategy_lab_top1_account="lx",
             strategy_lab_top1_advance_interval_seconds=300,
             strategy_lab_top1_timeout_start_sec=120,
         )

@@ -240,7 +240,6 @@ def observe_active_contracts(
     observed = decisions[-1]
     try:
         day_source = read_validation_day_source(
-            store,
             artifact_root,
             market=str(experiment["market"]),
             account=str(experiment["account"]),

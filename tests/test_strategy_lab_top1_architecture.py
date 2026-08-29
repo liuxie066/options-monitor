@@ -52,6 +52,17 @@ def _imports(path: Path) -> set[str]:
     return modules
 
 
+def _class_methods(path: Path, class_name: str) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return {
+        item.name
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == class_name
+        for item in node.body
+        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+
 def test_top1_ranking_imports_only_pure_approved_owners() -> None:
     assert _imports(RANKING_MODULE) <= {
         "__future__",
@@ -216,33 +227,22 @@ def test_top1_lifecycle_and_terminal_projection_keep_dependency_direction() -> N
         "pathlib",
         "re",
         "typing",
-        "zoneinfo",
         "domain.domain.decision_state_fingerprint",
         "src.application.candidate_snapshot_contract",
-        "src.application.opening_candidate_snapshot",
-        "src.application.prepared_option_positions_context",
         "src.application.recommendation_point",
         "src.application.research.formal_corpus",
-        "src.application.scan_scheduler",
         "src.application.shadow_replay.common",
         "src.application.strategy_lab.top1.contracts",
-        "src.application.strategy_lab.top1.lifecycle",
         "src.application.strategy_lab.top1.ranking",
-        "src.application.strategy_lab.top1.terminal_projection",
-        "src.infrastructure.private_storage",
-        "src.infrastructure.strategy_lab.experiment_store",
     }
 
     assert _imports(ADVANCE_MODULE) <= {
         "__future__",
         "collections.abc",
-        "datetime",
         "hashlib",
         "pathlib",
         "typing",
-        "zoneinfo",
         "src.application.recommendation_point",
-        "src.application.research.formal_corpus",
         "src.application.strategy_lab.top1.corpus",
         "src.application.strategy_lab.top1.fill_observation",
         "src.application.strategy_lab.top1.lifecycle",
@@ -250,12 +250,23 @@ def test_top1_lifecycle_and_terminal_projection_keep_dependency_direction() -> N
         "src.application.strategy_lab.top1.validation",
         "src.infrastructure.strategy_lab.experiment_store",
     }
+    assert _class_methods(EXPERIMENT_STORE_MODULE, "ExperimentStore").isdisjoint(
+        {
+            "corpus_day",
+            "corpus_days",
+            "record_corpus_day",
+            "corpus_point",
+            "corpus_points",
+            "record_corpus_point",
+        }
+    )
     assert _imports(READINESS_MODULE) <= {
         "__future__",
         "collections.abc",
         "datetime",
         "pathlib",
         "typing",
+        "src.application.account_config",
         "src.application.research.formal_corpus",
         "src.application.strategy_lab.top1.contracts",
     }

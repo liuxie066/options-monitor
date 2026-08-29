@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from src.application.account_config import accounts_from_config_path
 from src.application.research.formal_corpus import seal_profile_formal_expectations
 from src.application.runtime_config_freshness import (
     RuntimeConfigFreshnessError,
@@ -285,7 +286,6 @@ def run_tick_cron(
             seal_formal_expectations_fn is not None
             and str(env.get("OM_RUNTIME_ROOT") or "").strip()
             and not plan.symbols
-            and (not plan.accounts or "lx" in {item.lower() for item in plan.accounts})
         ):
             try:
                 repo_root = Path(cwd).expanduser() if cwd is not None else Path.cwd()
@@ -293,12 +293,14 @@ def run_tick_cron(
                     repo_root=repo_root,
                     environ=env,
                 ).runtime_root
+                config_path = _resolve_config_for_preflight(plan, cwd=cwd)
+                formal_accounts = plan.accounts or accounts_from_config_path(config_path)
                 expectation = seal_formal_expectations_fn(
                     runtime_root,
                     profile={
                         "markets": [plan.market],
-                        "accounts": ["lx"],
-                        "config_paths": {plan.market: str(_resolve_config_for_preflight(plan, cwd=cwd))},
+                        "accounts": formal_accounts,
+                        "config_paths": {plan.market: str(config_path)},
                     },
                     artifact_root=(runtime_root / "output_shared" / "research" / "strategy_lab"),
                     occurred_at_utc=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),

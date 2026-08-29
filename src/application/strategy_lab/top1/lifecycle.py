@@ -174,9 +174,9 @@ def _utc_datetime(value: object, label: str) -> datetime:
 def _identity(market: object, account: object) -> tuple[str, str]:
     if market != "HK":
         _fail("experiment_invalid", "market must equal HK")
-    account_text = _text(account, "account")
+    account_text = _segment(account, "account")
     if account_text != account_text.lower():
-        _fail("experiment_invalid", "account must be lowercase")
+        _fail("experiment_invalid", "account must be lowercase canonical text")
     return "HK", account_text
 
 
@@ -355,7 +355,7 @@ def _authorize(
     actor, occurred_at_utc, idempotency_key = _command_fields(
         actor, occurred_at_utc, idempotency_key
     )
-    experiment = _call(store.experiment, experiment_id)
+    _call(store.experiment, experiment_id)
     _require_service_available(environ)
     return _call(
         store.authorize,
@@ -428,7 +428,7 @@ def record_generation_revision(
     actor, occurred_at_utc, idempotency_key = _command_fields(
         actor, occurred_at_utc, idempotency_key
     )
-    experiment = _call(store.experiment, experiment_id)
+    _call(store.experiment, experiment_id)
     _require_service_available(environ)
     return _call(
         store.record_generation_revision,
@@ -466,7 +466,7 @@ def seal_generation(
     actor, occurred_at_utc, idempotency_key = _command_fields(
         actor, occurred_at_utc, idempotency_key
     )
-    experiment = _call(store.experiment, experiment_id)
+    _call(store.experiment, experiment_id)
     _require_service_available(environ)
     generation = next(
         (
@@ -1447,9 +1447,21 @@ def read_public_status(
 
 
 def read_public_receipt(
-    store: ExperimentStore, *, experiment_id: str
+    store: ExperimentStore,
+    *,
+    experiment_id: str,
+    expected_market: str | None = None,
+    expected_account: str | None = None,
 ) -> dict[str, object] | None:
     experiment_id = _segment(experiment_id, "experiment_id")
+    experiment = _call(store.experiment, experiment_id)
+    if (
+        expected_market is not None
+        and experiment["market"] != expected_market
+        or expected_account is not None
+        and experiment["account"] != expected_account
+    ):
+        _fail("experiment_conflict", "experiment identity changed")
     text = _call(store.receipt_text, experiment_id)
     if text is None:
         return None

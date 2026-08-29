@@ -19,7 +19,7 @@ def _profile(tmp_path: Path) -> dict[str, object]:
         "service_provider": "systemd",
         "repo_root": str(tmp_path / "repo"),
         "runtime_root": str(runtime),
-        "accounts": ["lx"],
+        "accounts": ["user1"],
         "markets": ["hk"],
         "config_paths": {"hk": str(runtime / "config.hk.json")},
         "env_file": str(runtime / "options-monitor.env"),
@@ -27,7 +27,7 @@ def _profile(tmp_path: Path) -> dict[str, object]:
         "strategy_lab_top1": {
             "enabled": True,
             "market": "hk",
-            "account": "lx",
+            "account": "user1",
             "opend_binding": {"host": "127.0.0.1", "port": 11111},
             "advance_interval": 300,
             "timeout_start_sec": 120,
@@ -292,7 +292,7 @@ def test_readiness_cli_is_read_only_and_reports_uninitialized_store(
             "--market",
             "hk",
             "--account",
-            "lx",
+            "user1",
             "--profile-path",
             str(profile_path),
         ]
@@ -320,7 +320,7 @@ def test_readiness_cli_is_read_only_and_reports_uninitialized_store(
     assert len(health_calls) == 1
     assert health_calls[0][0] == tmp_path / "runtime"
     assert health_calls[0][1]["market"] == "HK"
-    assert health_calls[0][1]["account"] == "lx"
+    assert health_calls[0][1]["account"] == "user1"
     assert health_calls[0][1]["scope"] == "latest_mature_window"
     assert health_calls[0][1]["mature_day_limit"] == 20
     assert str(health_calls[0][1]["observed_at_utc"]).endswith("Z")
@@ -389,7 +389,7 @@ def test_research_preview_cli_is_read_only_and_start_requires_write(
         "--market",
         "hk",
         "--account",
-        "lx",
+        "user1",
         "--profile-path",
         str(profile_path),
         "--cutoff-at-utc",
@@ -408,7 +408,7 @@ def test_research_preview_cli_is_read_only_and_start_requires_write(
             tmp_path / "runtime",
             {
                 "market": "HK",
-                "account": "lx",
+                "account": "user1",
                 "repo_root": tmp_path / "repo",
             },
         )
@@ -475,7 +475,7 @@ def test_validation_and_receipt_cli_expose_the_remaining_mvp_handoff(
         "--market",
         "hk",
         "--account",
-        "lx",
+        "user1",
         "--profile-path",
         str(profile_path),
         "--experiment-id",
@@ -497,7 +497,7 @@ def test_validation_and_receipt_cli_expose_the_remaining_mvp_handoff(
     monkeypatch.setattr(
         cli,
         "read_public_receipt",
-        lambda received_store, *, experiment_id: {
+        lambda received_store, *, experiment_id, **_expected: {
             "experiment_id": experiment_id,
             "same_store": received_store is store,
         },
@@ -512,7 +512,7 @@ def test_validation_and_receipt_cli_expose_the_remaining_mvp_handoff(
                 "--market",
                 "hk",
                 "--account",
-                "lx",
+                "user1",
                 "--profile-path",
                 str(profile_path),
                 "--experiment-id",
@@ -544,7 +544,7 @@ def test_calendar_refresh_cli_requires_write_and_closes_gateway(
         "--market",
         "hk",
         "--account",
-        "lx",
+        "user1",
         "--profile-path",
         str(profile_path),
         "--coverage-start",
@@ -626,12 +626,12 @@ def test_capability_refresh_cli_requires_write_and_readiness_only_reads_receipt(
             {
                 "schema_version": ACCOUNT_FEE_PLAN_RECEIPT_SCHEMA,
                 "market": "HK",
-                "account": "lx",
+                "account": "user1",
                 "commission_free": True,
                 "platform_fee": 15.0,
                 "fee_plan_ref": "futu-hk-plan.v1",
                 "observed_at_utc": "2026-08-16T01:00:00Z",
-                "evidence_ref": "operator://futu/lx/fee-plan/2026-08-16",
+                "evidence_ref": "operator://futu/user1/fee-plan/2026-08-16",
                 "evidence_sha256": "a" * 64,
             }
         ),
@@ -646,7 +646,7 @@ def test_capability_refresh_cli_requires_write_and_readiness_only_reads_receipt(
         "--market",
         "hk",
         "--account",
-        "lx",
+        "user1",
         "--profile-path",
         str(profile_path),
         "--fee-plan-receipt-path",
@@ -742,7 +742,7 @@ def test_capability_refresh_cli_requires_write_and_readiness_only_reads_receipt(
                 "--market",
                 "hk",
                 "--account",
-                "lx",
+                "user1",
                 "--profile-path",
                 str(profile_path),
             ]
@@ -802,7 +802,7 @@ def test_disabled_advance_migrates_store_but_loads_no_runtime_dependencies(
             "--market",
             "hk",
             "--account",
-            "lx",
+            "user1",
             "--profile-path",
             str(profile_path),
             "--write",
@@ -828,7 +828,7 @@ def test_advance_rejects_profile_mismatch_and_missing_write_before_migration(
     profile = _profile(tmp_path)
     profile_path = tmp_path / "service.profile.json"
     top1 = dict(profile["strategy_lab_top1"])
-    top1["account"] = "sy"
+    top1["account"] = "user2"
     profile["strategy_lab_top1"] = top1
     profile_path.write_text(json.dumps(profile), encoding="utf-8")
     command = [
@@ -840,7 +840,7 @@ def test_advance_rejects_profile_mismatch_and_missing_write_before_migration(
         "--market",
         "hk",
         "--account",
-        "lx",
+        "user1",
         "--profile-path",
         str(profile_path),
     ]
