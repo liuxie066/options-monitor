@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2.2.3 - 2026-08-29
+
 ### Improvements
 - Made Strategy Lab Top1 readiness compute a bounded 20-day corpus-health view directly from formal corpus facts, removing the stale duplicate health-artifact dependency while retaining fail-closed calendar and storage-capacity checks.
 
