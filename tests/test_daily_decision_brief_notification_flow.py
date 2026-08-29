@@ -939,7 +939,7 @@ def test_recommendation_point_observer_excludes_ineligible_paths(
 
 
 @pytest.mark.parametrize("market", ("HK", "US"))
-def test_recommendation_point_observer_scopes_base_corpus_to_lx(
+def test_recommendation_point_observer_scopes_base_corpus_to_ran_accounts(
     monkeypatch,
     tmp_path: Path,
     market: str,
@@ -949,12 +949,12 @@ def test_recommendation_point_observer_scopes_base_corpus_to_lx(
     bundle = _request(
         tmp_path,
         run_id="observer-account-isolation",
-        accounts=("lx", "sy"),
+        accounts=("user1", "user2"),
         markets_to_run=(market,),
     )
     bundle.request = replace(
         bundle.request,
-        ran_pipeline_accounts=("lx", "lx", "sy"),
+        ran_pipeline_accounts=("user1", "user1", "user2"),
     )
     calls: list[str] = []
     monkeypatch.setattr(mod, "source_commit_sha", lambda _root: "c" * 40)
@@ -970,14 +970,17 @@ def test_recommendation_point_observer_scopes_base_corpus_to_lx(
 
     mod._observe_recommendation_points_best_effort(bundle.request)
 
-    assert calls == ["lx"]
+    assert calls == ["user1", "user2"]
     point_events = [
         event
         for event in bundle.request.audit_helper.events
         if event["action"].startswith("recommendation_point_")
     ]
-    assert [event["extra"]["account"] for event in point_events] == ["lx"]
-    assert [event["status"] for event in point_events] == ["degraded"]
+    assert [event["extra"]["account"] for event in point_events] == [
+        "user1",
+        "user2",
+    ]
+    assert [event["status"] for event in point_events] == ["degraded", "degraded"]
 
 
 def test_provider_definite_failure_stays_pending_for_exact_delivery_only_retry(monkeypatch, tmp_path: Path) -> None:

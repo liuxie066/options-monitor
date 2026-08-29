@@ -11,11 +11,9 @@ from zoneinfo import ZoneInfo
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.option_lifecycle import expiration_observation_start_ms
 from domain.domain.performance.models import FXRateFact, select_fx_rate
+from src.application.account_config import normalize_account_label
 from src.application.recommendation_point import strategy_lab_top1_available
-from src.application.research.formal_corpus import (
-    CORPUS_HEALTH_SCHEMA,
-    formal_corpus_present,
-)
+from src.application.research.formal_corpus import CORPUS_HEALTH_SCHEMA
 from src.application.shadow_replay.common import render_json_text
 from src.application.strategy_lab.top1.contracts import (
     PREVIEW_SCHEMA_VERSION,
@@ -159,6 +157,13 @@ def _preview(
     }
 
 
+def _is_canonical_account(value: object) -> bool:
+    try:
+        return value == normalize_account_label(value)
+    except ValueError:
+        return False
+
+
 def _research_preview(
     store: ExperimentStore,
     artifact_root: str | Path,
@@ -174,7 +179,7 @@ def _research_preview(
     evidence_bundle: object,
     environ: Mapping[str, str] | None,
 ) -> tuple[dict[str, object], dict[str, Any] | None, dict[str, object]]:
-    if market != "HK" or account != "lx":
+    if market != "HK" or not _is_canonical_account(account):
         return _preview(status="unsupported", reason_codes=["unsupported_recipe"]), None, {}
     if not strategy_lab_top1_available(environ):
         return _preview(
@@ -223,7 +228,6 @@ def _research_preview(
         ), None, {}
     try:
         freeze, dataset = preview_research_dataset(
-            store,
             artifact_root,
             window_facts=_research_window_facts(
                 market=market,
@@ -233,11 +237,6 @@ def _research_preview(
                 market_calendar=market_calendar,
             ),
             environ=environ,
-            use_formal_corpus=formal_corpus_present(
-                artifact_root,
-                market=market,
-                account=account,
-            ),
         )
         if freeze["status"] != "ready" or dataset is None:
             return _preview(
@@ -261,6 +260,7 @@ def _research_preview(
         spec = build_sell_put_top1_research_spec(
             topic_id=_TOPIC_ID,
             experiment_id=experiment_id,
+            account=account,
             market_calendar_version=str(dataset["market_calendar_version"]),
             ranking_projection_schema_version=str(
                 dataset["ranking_projection_schema_version"]
@@ -466,6 +466,8 @@ def _validation_preview(
     store: ExperimentStore,
     artifact_root: str | Path,
     *,
+    market: str,
+    account: str,
     experiment_id: str,
     validation_start_trading_date: str,
     schedule: Mapping[str, Any],
@@ -473,6 +475,17 @@ def _validation_preview(
     as_of_utc: str,
     environ: Mapping[str, str] | None,
 ) -> tuple[dict[str, object], dict[str, object] | None, str | None]:
+    if market != "HK" or not _is_canonical_account(account):
+        return (
+            _preview(
+                stage="validation",
+                status="blocked",
+                reason_codes=["unsupported_recipe"],
+                experiment_id=experiment_id,
+            ),
+            None,
+            None,
+        )
     if not strategy_lab_top1_available(environ):
         return (
             _preview(
@@ -497,6 +510,10 @@ def _validation_preview(
         )
     try:
         experiment = store.experiment(experiment_id)
+        if experiment["market"] != market or experiment["account"] != account:
+            raise Top1WorkspaceError(
+                "experiment_conflict", "experiment identity changed"
+            )
         already_started = (
             experiment["phase"] == "validation"
             and experiment["validation_progress"] == "collecting_decisions"
@@ -521,7 +538,7 @@ def _validation_preview(
         assert isinstance(baseline, Mapping)
         commitment = build_hidden_window_commitment(
             experiment_id=experiment_id,
-            account="lx",
+            account=account,
             validation_start_trading_date=validation_start_trading_date,
             market_calendar_binding=calendar,
             schedule=schedule,
@@ -639,8 +656,8 @@ def start_confirmed_validation(
         reason = reasons[0] if isinstance(reasons, list) and reasons else "validation_preview_unavailable"
         _fail(str(reason), "validation preview is not available")
     if (
-        command["market"] != "HK"
-        or command["account"] != "lx"
+        command["market"] != preview_kwargs["market"]
+        or command["account"] != preview_kwargs["account"]
         or command["experiment_id"] != preview["experiment_id"]
         or command["confirmed_preview_sha256"] != preview["preview_sha256"]
     ):

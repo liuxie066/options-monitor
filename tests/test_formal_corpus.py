@@ -145,12 +145,15 @@ def test_profile_seals_hk_and_us_before_recipe_store(
             if expected_market == "hk"
             else "America/New_York"
         )
-        return Path(config_path), {"schedule": schedule}
+        return Path(config_path), {
+            "accounts": ["user1"] if expected_market == "hk" else ["user2"],
+            "schedule": schedule,
+        }
 
     monkeypatch.setattr(mod, "load_runtime_config", load_config)
     profile = {
         "markets": ["hk", "us"],
-        "accounts": ["lx"],
+        "accounts": ["user1", "user2"],
         "config_paths": {
             "hk": str(tmp_path / "config.hk.json"),
             "us": str(tmp_path / "config.us.json"),
@@ -159,7 +162,7 @@ def test_profile_seals_hk_and_us_before_recipe_store(
     seal_formal_day_expectation(
         tmp_path,
         market="HK",
-        account="lx",
+        account="user1",
         schedule=_schedule(),
         trading_date="2026-08-25",
         market_calendar_version="hk.fixture.v1",
@@ -179,9 +182,12 @@ def test_profile_seals_hk_and_us_before_recipe_store(
         occurred_at_utc="2026-08-25T12:01:00Z",
     )
 
-    assert [(item["market"], item["status"]) for item in first["results"]] == [
-        ("HK", "idempotent"),
-        ("US", "published"),
+    assert [
+        (item["market"], item["account"], item["status"])
+        for item in first["results"]
+    ] == [
+        ("HK", "user1", "idempotent"),
+        ("US", "user2", "published"),
     ]
     assert [item["status"] for item in second["results"]] == [
         "idempotent",

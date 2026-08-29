@@ -10,6 +10,7 @@ from typing import Any, NoReturn
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.symbol_identity import OPTION_CODE_RE, resolve_symbol_identity
+from src.application.account_config import normalize_account_label
 from src.application.candidate_snapshot_contract import (
     CandidateSnapshotContractError,
     utc_timestamp,
@@ -134,9 +135,19 @@ def _positive_number(value: object, label: str) -> float:
 
 
 def _identity(market: object, account: object) -> tuple[str, str]:
-    if market != "HK" or account != "lx":
-        _fail("top1_capability_input_invalid", "capability identity must equal HK/lx")
-    return "HK", "lx"
+    try:
+        normalized_account = normalize_account_label(account)
+    except ValueError as exc:
+        raise Top1CapabilityReceiptError(
+            "top1_capability_input_invalid",
+            "capability identity must use HK and a canonical account",
+        ) from exc
+    if market != "HK" or account != normalized_account:
+        _fail(
+            "top1_capability_input_invalid",
+            "capability identity must use HK and a canonical account",
+        )
+    return "HK", normalized_account
 
 
 def _opend_binding(value: object) -> dict[str, object]:
@@ -156,13 +167,13 @@ def _fee_plan_receipt(value: object, *, recorded: bool) -> dict[str, object]:
     expected = _RECORDED_FEE_PLAN_FIELDS if recorded else _FEE_PLAN_FIELDS
     if set(item) != expected or item.get("schema_version") != ACCOUNT_FEE_PLAN_RECEIPT_SCHEMA:
         _fail("top1_capability_input_invalid", "account fee-plan receipt schema is invalid")
-    _identity(item.get("market"), item.get("account"))
+    market, account = _identity(item.get("market"), item.get("account"))
     if type(item.get("commission_free")) is not bool:
         _fail("top1_capability_input_invalid", "commission_free must be boolean")
     normalized: dict[str, object] = {
         "schema_version": ACCOUNT_FEE_PLAN_RECEIPT_SCHEMA,
-        "market": "HK",
-        "account": "lx",
+        "market": market,
+        "account": account,
         "commission_free": item["commission_free"],
         "platform_fee": _nonnegative_number(item.get("platform_fee"), "platform_fee"),
         "fee_plan_ref": _text(item.get("fee_plan_ref"), "fee_plan_ref"),
@@ -310,6 +321,8 @@ def refresh_top1_capability_receipt(
     market, account = _identity(market, account)
     binding = _opend_binding(opend_binding)
     fee_plan = _fee_plan_receipt(account_fee_plan_receipt, recorded=True)
+    if (fee_plan["market"], fee_plan["account"]) != (market, account):
+        _fail("top1_capability_input_invalid", "account fee-plan identity changed")
     observed_at = _timestamp(observed_at_utc, "observed_at_utc")
     owner_identity = resolve_symbol_identity(stock_owner)
     if (
@@ -395,11 +408,16 @@ def read_top1_capability_receipt(
             raise ValueError("receipt fields are invalid")
         if payload.get("schema_version") != CAPABILITY_RECEIPT_SCHEMA:
             raise ValueError("receipt schema is invalid")
-        _identity(payload.get("market"), payload.get("account"))
+        if _identity(payload.get("market"), payload.get("account")) != (market, account):
+            raise ValueError("capability identity changed")
         _timestamp(payload.get("observed_at_utc"), "observed_at_utc")
         if _opend_binding(payload.get("opend_binding")) != expected_binding:
             raise ValueError("OpenD binding changed")
-        _fee_plan_receipt(payload.get("account_fee_plan_receipt"), recorded=True)
+        fee_plan = _fee_plan_receipt(
+            payload.get("account_fee_plan_receipt"), recorded=True
+        )
+        if (fee_plan["market"], fee_plan["account"]) != (market, account):
+            raise ValueError("account fee-plan identity changed")
         expected_hash = canonical_sha256({key: value for key, value in payload.items() if key != "content_sha256"})
         if _sha256(payload.get("content_sha256"), "content_sha256") != expected_hash:
             raise ValueError("receipt content hash changed")

@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import math
-import shutil
 from copy import deepcopy
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -17,10 +15,6 @@ from domain.domain.option_lifecycle import expiration_observation_start_ms
 from src.application.opening_candidate_snapshot import (
     OPENING_CANDIDATE_SNAPSHOT_FILE,
     load_opening_candidate_snapshot,
-)
-from src.application.recommendation_point import (
-    RECOMMENDATION_POINT_FILE,
-    capture_scheduled_recommendation_point,
 )
 from src.application.shadow_replay.common import (
     attach_artifact_provenance,
@@ -34,12 +28,6 @@ from src.application.strategy_lab.top1.contracts import (
     VALIDATION_REQUIRED_DAYS,
     build_current_behavior_binding,
     build_sell_put_top1_research_spec,
-)
-from src.application.strategy_lab.top1.corpus import (
-    RESEARCH_WINDOW_FACTS_SCHEMA,
-    capture_recommendation_point,
-    freeze_research_dataset,
-    seal_day_expectation,
 )
 from src.application.strategy_lab.top1.lifecycle import (
     Top1LifecycleError,
@@ -319,6 +307,7 @@ def _spec(
     spec = build_sell_put_top1_research_spec(
         topic_id="topic-concentration",
         experiment_id="experiment-w5-evaluator",
+        account=str(manifest["account"]),
         market_calendar_version=manifest["market_calendar_version"],
         ranking_projection_schema_version=RANKING_PROJECTION_SCHEMA_V2,
         research_source={
@@ -1163,122 +1152,3 @@ def test_evaluator_leader_crosses_existing_m3_human_authorization_gate(
             environ=AVAILABLE,
         )
     assert exc_info.value.reason_code == "authorization_required"
-
-
-def _schedule() -> dict[str, Any]:
-    return {
-        "enabled": True,
-        "timezone": "Asia/Hong_Kong",
-        "run_window": {"start": "09:50", "end": "10:10"},
-        "run_points": {"start_plus_min": 10},
-    }
-
-
-def _scheduler(day: str) -> dict[str, Any]:
-    target = datetime.fromisoformat(f"{day}T10:00:00+08:00")
-    now_utc = target.astimezone(timezone.utc) + timedelta(seconds=30)
-    return {
-        "should_run_scan": True,
-        "scheduled_scan_target_market": target.isoformat(),
-        "now_utc": now_utc.isoformat().replace("+00:00", "Z"),
-    }
-
-
-def test_accepts_real_w4_manifest_after_source_run_deletion(tmp_path: Path) -> None:
-    source_root = tmp_path / "source"
-    artifact_root = tmp_path / "artifacts"
-    store = _store(tmp_path / "w4.sqlite3")
-    _enable(store, artifact_root, key="enable-w4-seam")
-    days = _trading_days("2026-06-08", RESEARCH_REQUIRED_DAYS)
-    for index, trading_date in enumerate(days):
-        seal_day_expectation(
-            store,
-            artifact_root,
-            market="HK",
-            account="lx",
-            schedule=_schedule(),
-            trading_date=trading_date,
-            market_calendar_version=CALENDAR,
-            market_calendar_sha256=CALENDAR_SHA,
-            sealed_at_utc=f"{trading_date}T01:00:00Z",
-            environ=AVAILABLE,
-        )
-        run_id = f"w4-seam-{index:02d}"
-        seal_opening_candidate_fixture(
-            source_root,
-            run_id=run_id,
-            market="HK",
-            accepted_rows=[],
-        )
-        publication, _point = capture_scheduled_recommendation_point(
-            source_root,
-            run_id,
-            "lx",
-            _scheduler(trading_date),
-            source_commit_sha=SOURCE_SHA,
-        )
-        assert publication == "published"
-        captured = capture_recommendation_point(
-            store,
-            source_root,
-            artifact_root,
-            point_ref=(
-                f"output_runs/{run_id}/accounts/lx/state/{RECOMMENDATION_POINT_FILE}"
-            ),
-            trading_date=trading_date,
-            captured_at_utc=f"{trading_date}T02:01:00Z",
-            environ=AVAILABLE,
-        )
-        assert captured["status"] == "published"
-    facts: dict[str, Any] = {
-        "schema_version": RESEARCH_WINDOW_FACTS_SCHEMA,
-        "market": "HK",
-        "account": "lx",
-        "cutoff_at_utc": f"{days[-1]}T08:00:00Z",
-        "cutoff_trading_date": days[-1],
-        "market_calendar_version": CALENDAR,
-        "market_calendar_ref": "evidence/hk-calendar.fixture.json",
-        "market_calendar_sha256": CALENDAR_SHA,
-        "trading_calendar_dates": days,
-        "trading_calendar_dates_sha256": canonical_sha256(days),
-        "latest_mature_trading_date": days[-1],
-        "maturity_evidence_ref": "evidence/hk-maturity.fixture.json",
-        "maturity_evidence_sha256": "b" * 64,
-        "recommendation_point_selector": "official_scheduled_sell_put.v1",
-    }
-    facts["content_sha256"] = canonical_sha256(facts)
-    frozen = freeze_research_dataset(
-        store,
-        artifact_root,
-        window_facts=facts,
-        environ=AVAILABLE,
-    )
-    assert frozen["status"] == "ready"
-    manifest = json.loads(
-        (artifact_root / str(frozen["dataset_ref"])).read_text(encoding="utf-8")
-    )
-    materialized = [
-        {
-            "projection_ref": point["projection_ref"],
-            "projection": json.loads(
-                (artifact_root / point["projection_ref"]).read_text(encoding="utf-8")
-            ),
-        }
-        for day in manifest["days"]
-        for point in day["points"]
-    ]
-    shutil.rmtree(source_root / "output_runs")
-    spec = _spec(manifest, variants=(("same", "current_tie_break"),))
-    spec["research_source"]["dataset_ref"] = frozen["dataset_ref"]
-    spec["research_source"]["dataset_sha256"] = frozen["dataset_sha256"]
-    envelope = {
-        "schema_version": RESEARCH_EVALUATION_INPUT_SCHEMA,
-        "experiment_spec": spec,
-        "dataset_ref": frozen["dataset_ref"],
-        "sealed_dataset": manifest,
-        "ranking_projections": materialized,
-    }
-
-    with pytest.raises(ResearchEvaluationError) as exc_info:
-        evaluate_research(envelope, [], _fee_contract(complete=False))
-    assert exc_info.value.reason_code == "research_corpus_conflict"
