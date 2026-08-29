@@ -360,6 +360,11 @@ def test_position_only_requirement_creates_one_exact_prefetch_plan(
         "list_option_expirations",
         lambda *_args, **_kwargs: [],
     )
+    monkeypatch.setattr(
+        planning.opend_utils,
+        "get_trading_date",
+        lambda _market: date(2026, 7, 29),
+    )
     bundle = planning.build_required_data_fetch_plan(
         base=tmp_path,
         required_data_dir=tmp_path / "required_data",
