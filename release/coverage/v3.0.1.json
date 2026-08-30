@@ -1,0 +1,48 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.0.1",
+  "base": {
+    "tag": "v3.0.0",
+    "commit": "7388f9a394e38370f0b63e096b2a6fdde095cfd3"
+  },
+  "reviewed_head": "df246e9259e7346da07ab678d379685c3c7edf6f",
+  "commits": [
+    {
+      "sha": "05387295d4378ea1617382301b6969270f5fbcfb",
+      "subject": "refactor(trades): remove retired option intake"
+    },
+    {
+      "sha": "df246e9259e7346da07ab678d379685c3c7edf6f",
+      "subject": "Merge pull request #188 from liuxie066/codex/remove-option-intake-compat"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Removed the retired internal option-intake and unused TradeIntent compatibility paths while preserving the current Assistant manual-trade commands and fill-timestamp parser coverage.",
+      "commits": [
+        "05387295d4378ea1617382301b6969270f5fbcfb"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "df246e9259e7346da07ab678d379685c3c7edf6f",
+      "reason": "Merge-only integration commit; the compatibility cleanup is mapped to its source commit."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "05387295d4378ea1617382301b6969270f5fbcfb",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/188"
+      ]
+    },
+    {
+      "commit": "df246e9259e7346da07ab678d379685c3c7edf6f",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/188"
+      ]
+    }
+  ]
+}
