@@ -26,6 +26,7 @@ from src.application.recommendation_point import (
     RECOMMENDATION_POINT_SCHEMA_V3,
     RecommendationPointError,
     build_formal_point_time_coherence,
+    build_option_position_evidence_binding,
     build_recommendation_point,
     build_recommendation_point_id,
     capture_scheduled_recommendation_point,
@@ -33,8 +34,10 @@ from src.application.recommendation_point import (
     point_binding_from_recommendation_point,
     publish_recommendation_point,
     strategy_lab_top1_available,
+    validate_option_position_evidence_binding,
     validate_recommendation_point,
 )
+from src.application.required_data_snapshot import FrozenRequiredDataUnavailable
 from src.application.strategy_lab.top1.ranking import (
     Top1RankingError,
     build_ranking_projection,
@@ -107,11 +110,24 @@ def _prepared_option_receipt(
     opening: Mapping[str, Any],
     *,
     received_at: str = "2026-06-01T00:00:00Z",
+    position_lots: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     payload = {
-        "strategy_lab_option_market_evidence": {
-            "status": "ready",
-        }
+        "prepared_authority": {
+            "schema_version": "prepared_option_positions_context.v2",
+            "fx_status": "ready",
+            "fx_observation_sha256": "f" * 64,
+            "source_observed_at": "2026-07-21T14:00:00Z",
+        },
+        "exchange_rates": {
+            "timestamp": "2026-07-21T14:00:00Z",
+            "rates": {"USDCNY": 7.2, "HKDCNY": 0.92},
+        },
+        "current_decision_read": {
+            "status": "trusted",
+            "position_lots": position_lots or [],
+        },
+        "decision_snapshot_actionable": True,
     }
     payload_bytes = _canonical_bytes(payload)
     manifest = {
@@ -122,6 +138,8 @@ def _prepared_option_receipt(
         "account_config_sha256": opening["account_config_sha256"],
         "application_received_at_utc": received_at,
         "payload_sha256": hashlib.sha256(payload_bytes).hexdigest(),
+        "ledger_generation_sha256": "d" * 64,
+        "decision_state_fingerprint": "e" * 64,
     }
     return {
         "manifest": manifest,
@@ -149,20 +167,16 @@ def test_formal_point_time_coherence_canonicalizes_aware_candidate_timestamp() -
             }
         }
     }
-    prepared = {
-        "payload": {
-            "strategy_lab_option_market_evidence": {
-                "valuation_mark_facts": [
-                    {
-                        "effective_at_ms": 1_784_642_400_000,
-                        "observed_at_ms": 1_784_642_400_000,
-                    }
-                ]
+    binding = {
+        "valuation_mark_facts": [
+            {
+                "effective_at_ms": 1_784_642_400_000,
+                "observed_at_ms": 1_784_642_400_000,
             }
-        }
+        ]
     }
 
-    coherence = build_formal_point_time_coherence(opening, required_data, prepared)
+    coherence = build_formal_point_time_coherence(opening, required_data, binding)
 
     assert coherence["status"] == "ready"
     assert coherence["minimum_observed_at_utc"] == "2026-07-21T14:00:00Z"
@@ -195,17 +209,108 @@ def test_formal_point_time_coherence_rejects_non_aware_candidate_timestamp(
                 }
             }
         },
-        {
-            "payload": {
-                "strategy_lab_option_market_evidence": {
-                    "valuation_mark_facts": []
-                }
-            }
-        },
+        {"valuation_mark_facts": []},
     )
 
     assert coherence["status"] == "not_evaluable"
     assert coherence["reason_code"] == "formal_point_time_skew"
+
+
+def test_option_position_binding_uses_only_the_frozen_scan_batch() -> None:
+    opening = {
+        "run_id": "formal-binding",
+        "account": "lx",
+        "account_config_sha256": CONFIG_HASH,
+    }
+    fields = {
+        "status": "open",
+        "broker": "futu",
+        "symbol": "NVDA",
+        "option_type": "put",
+        "strike": "100",
+        "expiration_ymd": "2026-08-21",
+        "currency": "USD",
+        "multiplier": "100",
+        "side": "short",
+        "contracts_open": 1,
+        "premium": "2",
+        "opened_at": 1_700_000_000_000,
+        "market_code": "US.NVDA260821P100000",
+    }
+    receipt = _prepared_option_receipt(
+        opening,
+        position_lots=[
+            {"record_id": "lot-1", "fields": fields},
+            {"record_id": "lot-2", "fields": fields},
+        ],
+    )
+    csv_bytes = (
+        "code,bid_price,ask_price,last_price,snapshot_requested_at_utc,"
+        "snapshot_received_at_utc\n"
+        "US.NVDA260821P100000,2.0,2.4,9.0,"
+        "2026-07-21T13:59:59Z,2026-07-21T14:00:00Z\n"
+    ).encode()
+    point_id = "a" * 64
+    binding = build_option_position_evidence_binding(
+        run_id="formal-binding",
+        account="lx",
+        market="US",
+        recommendation_point_id=point_id,
+        account_config_sha256=CONFIG_HASH,
+        evidence_at_utc="2026-07-21T14:00:02Z",
+        prepared_receipt=receipt,
+        required_data_entries={
+            "NVDA": (
+                {
+                    "scan_blob_ref": {
+                        "blob_relpath": "required/NVDA.csv",
+                        "blob_sha256": "b" * 64,
+                    }
+                },
+                csv_bytes,
+            )
+        },
+        formal_time_bounds=(1_784_642_340_000, 1_784_642_405_000),
+    )
+
+    assert len(binding["open_option_positions"]) == 2
+    assert len(binding["valuation_mark_facts"]) == 1
+    assert binding["valuation_mark_facts"][0]["price"] == "2.2"
+    assert binding["valuation_mark_facts"][0]["source"] == (
+        "required_data_snapshot"
+    )
+    tampered = json.loads(json.dumps(binding))
+    tampered["valuation_mark_facts"][0]["source_artifact_sha256"] = "c" * 64
+    tampered["content_sha256"] = canonical_sha256(
+        {
+            key: value
+            for key, value in tampered.items()
+            if key != "content_sha256"
+        }
+    )
+    with pytest.raises(RecommendationPointError, match="option mark binding changed"):
+        validate_option_position_evidence_binding(
+            tampered,
+            expected_run_id="formal-binding",
+            expected_account="lx",
+            expected_recommendation_point_id=point_id,
+            expected_market="US",
+        )
+    with pytest.raises(
+        RecommendationPointError,
+        match="absent from the production snapshot batch",
+    ):
+        build_option_position_evidence_binding(
+            run_id="formal-binding",
+            account="lx",
+            market="US",
+            recommendation_point_id=point_id,
+            account_config_sha256=CONFIG_HASH,
+            evidence_at_utc="2026-07-21T14:00:02Z",
+            prepared_receipt=receipt,
+            required_data_entries={},
+            formal_time_bounds=(1_784_642_340_000, 1_784_642_405_000),
+        )
 
 
 def _build_from_bundle(
@@ -499,6 +604,56 @@ def test_best_effort_capture_builds_v2_from_strict_prepared_receipt(
             prepared_option_receipt=late,
         )
     assert raised.value.reason_code == "option_market_evidence_time_conflict"
+
+
+def test_formal_capture_preserves_frozen_required_data_failure_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from src.application import recommendation_point as mod
+
+    run_id = "frozen-required-data"
+    seal_opening_candidate_fixture(tmp_path, run_id=run_id)
+    required_bytes = b'{"fixture":true}\n'
+    required_hash = hashlib.sha256(required_bytes).hexdigest()
+    monkeypatch.setattr(
+        mod,
+        "find_prepared_option_positions_manifest",
+        lambda **_kwargs: tmp_path / "prepared_option_positions_context.v2.json",
+    )
+    monkeypatch.setattr(
+        mod,
+        "_required_data_binding",
+        lambda _opening: ("required/manifest.json", required_hash),
+    )
+    monkeypatch.setattr(
+        mod,
+        "load_required_data_snapshot_manifest_snapshot",
+        lambda **_kwargs: ({"run_id": run_id, "symbols": {}}, tmp_path, required_bytes),
+    )
+
+    def unavailable(**_kwargs: object) -> None:
+        raise FrozenRequiredDataUnavailable(
+            symbol="NVDA",
+            reason="receipt_or_payload_mismatch",
+        )
+
+    monkeypatch.setattr(
+        mod,
+        "resolve_frozen_required_data_csv_bytes_batch",
+        unavailable,
+    )
+
+    with pytest.raises(RecommendationPointError) as raised:
+        capture_scheduled_recommendation_point(
+            tmp_path,
+            run_id,
+            "lx",
+            _scheduler(now_utc="2026-06-01T00:00:01Z"),
+            source_commit_sha=SOURCE_SHA,
+            require_formal_contract=True,
+        )
+    assert raised.value.reason_code == "required_data_snapshot_unavailable"
 
 
 def test_clean_no_candidate_point_is_valid(tmp_path: Path) -> None:

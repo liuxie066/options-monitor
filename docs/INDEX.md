@@ -44,8 +44,8 @@
 - [Opportunity Quality](OPPORTUNITY_QUALITY.md)：Shadow Replay 和扫描质量判定口径。
 - [Notification Experience PRD](OPTION_NOTIFICATION_EXPERIENCE_PRD.md)：已发布的 scheduled report、增量提醒和主动查询合同。
 - [Wheel Strategy PRD](WHEEL_STRATEGY_PRD.md)：已发布 Wheel V1 的产品合同、批次级 Covered Call 监控、共享覆盖和生命周期边界。
-- [Strategy Lab Current Contract](STRATEGY_LAB_DESIGN.md)：当前已落地入口、20/10 日验收状态、证据要求和生产边界。
-- [Strategy Lab Experiment Platform PRD](STRATEGY_LAB_EXPERIMENT_PLATFORM_PRD.md)：已确认的统一实验平台产品范围、价值验证 MVP 和后续接入边界。
+- [Strategy Lab Current Implementation](STRATEGY_LAB_DESIGN.md)：Phase 1 基础能力、遗留产品壳、待删除代码和重建差距。
+- [Strategy Lab Experiment Platform PRD](STRATEGY_LAB_EXPERIMENT_PLATFORM_PRD.md)：首个可行产品的目标范围、20/10 日验收和后续接入边界。
 
 ## 技术架构与核心合同
 
@@ -55,7 +55,7 @@
 - [Tick Storage Efficiency Design](TICK_STORAGE_EFFICIENCY_DESIGN.md)：Tick prefetch 摘要投影、opening snapshot 物理编码和历史清理边界。
 - [Futu Simulate Account Experience Scan System Design](FUTU_SIMULATE_ACCOUNT_EXPERIENCE_SYSTEM_DESIGN.md)：
   模拟账户手动体验扫描的 owner、数据合同、副作用门禁和验收映射。
-- [Strategy Lab Experiment Platform System Design](STRATEGY_LAB_EXPERIMENT_PLATFORM_SYSTEM_DESIGN.md)：已落地 MVP 的技术架构、函数 owner 和存储收敛边界。
+- [Strategy Lab Experiment Platform System Design](STRATEGY_LAB_EXPERIMENT_PLATFORM_SYSTEM_DESIGN.md)：目标技术架构、Phase 1 状态、函数清单、复用和删除边界。
 - [Ledger Architecture](LEDGER_ARCHITECTURE.md)：`trade_events -> position_lots`、lot identity 和恢复流程。
 - [Futu Trade And Holdings Sync](FUTU_TRADE_HOLDINGS_SYNC.md)：broker 成交摄取、持仓对账、生命周期同步和 fail-closed 边界。
 - [Close Advice Contract](CLOSE_ADVICE_CONTRACT.md)：严格止盈平仓、报价证据、状态机与通知边界。

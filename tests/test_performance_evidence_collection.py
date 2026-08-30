@@ -5,10 +5,12 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 from domain.domain.performance.models import EvidenceEnvelope, OptionInstrumentKey, OptionValuationPosition
 from src.application.performance.evidence_collection import (
     _default_option_snapshot_rows,
+    build_option_valuation_mark_fact,
     capture_current_performance_evidence,
     collect_current_performance_evidence,
 )
@@ -222,6 +224,45 @@ def test_crossed_market_is_missing_and_capture_emits_v1_envelope() -> None:
     assert any(item["code"] == "option_mark_missing" for item in result.diagnostics)
     assert envelope.to_dict()["schema_version"] == "option_performance_evidence.v1"
     assert len(envelope.valuation_marks) == 1
+
+
+def test_formal_option_mark_uses_only_one_frozen_row_and_source_time() -> None:
+    position = _position(market_code="EXACT")
+    requested = datetime.fromtimestamp((NOW_MS - 2_000) / 1000, timezone.utc).isoformat()
+    received = datetime.fromtimestamp((NOW_MS - 1_000) / 1000, timezone.utc).isoformat()
+    row = {
+        "code": "EXACT",
+        "bid_price": "2.0",
+        "ask_price": "2.4",
+        "last_price": "9.0",
+        "snapshot_requested_at_utc": requested,
+        "snapshot_received_at_utc": received,
+    }
+    fact = build_option_valuation_mark_fact(
+        position,
+        [row],
+        {"artifact_ref": "required/NVDA.csv", "artifact_sha256": "a" * 64},
+        (NOW_MS - 3_000, NOW_MS),
+    )
+
+    assert fact.price == Decimal("2.2")
+    assert fact.mark_kind == "midpoint"
+    assert fact.source == "required_data_snapshot"
+    assert fact.quality["source_row_identity"]
+    with pytest.raises(ValueError, match="match count is 2"):
+        build_option_valuation_mark_fact(
+            position,
+            [row, row],
+            {"artifact_ref": "required/NVDA.csv", "artifact_sha256": "a" * 64},
+            (NOW_MS - 3_000, NOW_MS),
+        )
+    with pytest.raises(ValueError, match="outside the point window"):
+        build_option_valuation_mark_fact(
+            position,
+            [row],
+            {"artifact_ref": "required/NVDA.csv", "artifact_sha256": "a" * 64},
+            (NOW_MS - 500, NOW_MS),
+        )
 
 
 def test_option_capture_identity_uses_receipt_time_not_provider_trade_time(tmp_path) -> None:

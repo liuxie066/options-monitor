@@ -14,6 +14,10 @@ from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.ledger.api import resolve_position_ledger_sqlite_path
 from src.application.service_deploy import load_service_profile, service_status_from_profile
 from src.application.service_drift import service_drift
+from src.application.strategy_lab.service import (
+    StrategyLabContextError,
+    resolve_strategy_lab_context,
+)
 from src.application.strategy_lab.top1.advance import ADVANCE_REVISION, advance_scheduled
 from src.application.strategy_lab.top1.capability_receipts import (
     Top1CapabilityReceiptError,
@@ -59,16 +63,6 @@ from src.infrastructure.performance_evidence_sqlite import (
 from src.infrastructure.strategy_lab.experiment_store import ExperimentStore
 
 
-_TOP1_PROFILE_FIELDS = {
-    "enabled",
-    "market",
-    "account",
-    "opend_binding",
-    "advance_interval",
-    "timeout_start_sec",
-}
-
-
 def _add_identity(parser: Any, *, markets: tuple[str, ...] = ("hk",)) -> None:
     parser.add_argument("--market", required=True, choices=markets)
     parser.add_argument("--account", required=True)
@@ -89,22 +83,16 @@ def add_top1_commands(strategy_lab_subparsers: Any) -> None:
 
     calendar = commands.add_parser("calendar", help="manage market calendar evidence")
     calendar_commands = calendar.add_subparsers(required=True)
-    calendar_refresh = calendar_commands.add_parser(
-        "refresh", help="collect and publish HK calendar evidence"
-    )
+    calendar_refresh = calendar_commands.add_parser("refresh", help="collect and publish HK calendar evidence")
     _add_identity(calendar_refresh, markets=("hk", "us"))
     calendar_refresh.add_argument("--coverage-start", required=True)
     calendar_refresh.add_argument("--coverage-end", required=True)
     calendar_refresh.add_argument("--calendar-version", required=True)
     calendar_refresh.add_argument("--write", action="store_true")
 
-    capabilities = commands.add_parser(
-        "capabilities", help="manage compact W0R capability evidence"
-    )
+    capabilities = commands.add_parser("capabilities", help="manage compact W0R capability evidence")
     capability_commands = capabilities.add_subparsers(required=True)
-    capability_refresh = capability_commands.add_parser(
-        "refresh", help="run one explicit W0R provider probe"
-    )
+    capability_refresh = capability_commands.add_parser("refresh", help="run one explicit W0R provider probe")
     _add_identity(capability_refresh)
     capability_refresh.add_argument("--fee-plan-receipt-path", required=True)
     capability_refresh.add_argument("--stock-owner", required=True)
@@ -117,15 +105,11 @@ def add_top1_commands(strategy_lab_subparsers: Any) -> None:
     _add_identity(status)
     status.add_argument("--experiment-id", required=True)
 
-    readiness = commands.add_parser(
-        "readiness", help="show source-delivery and validation-runtime blockers"
-    )
+    readiness = commands.add_parser("readiness", help="show source-delivery and validation-runtime blockers")
     _add_identity(readiness)
 
     research = commands.add_parser("research", help="preview or start the 20-day research")
-    research_commands = research.add_subparsers(
-        dest="top1_research_command", required=True
-    )
+    research_commands = research.add_subparsers(dest="top1_research_command", required=True)
     for name in ("preview", "start"):
         parser = research_commands.add_parser(name)
         _add_identity(parser)
@@ -135,12 +119,8 @@ def add_top1_commands(strategy_lab_subparsers: Any) -> None:
             parser.add_argument("--confirmed-start-file", required=True)
             parser.add_argument("--write", action="store_true")
 
-    validation = commands.add_parser(
-        "validation", help="preview or start the 10-day hidden validation"
-    )
-    validation_commands = validation.add_subparsers(
-        dest="top1_validation_command", required=True
-    )
+    validation = commands.add_parser("validation", help="preview or start the 10-day hidden validation")
+    validation_commands = validation.add_subparsers(dest="top1_validation_command", required=True)
     for name in ("preview", "start"):
         parser = validation_commands.add_parser(name)
         _add_identity(parser)
@@ -150,9 +130,7 @@ def add_top1_commands(strategy_lab_subparsers: Any) -> None:
             parser.add_argument("--confirmed-start-file", required=True)
             parser.add_argument("--write", action="store_true")
 
-    receipt = commands.add_parser(
-        "receipt", help="read one published final experiment receipt"
-    )
+    receipt = commands.add_parser("receipt", help="read one published final experiment receipt")
     _add_identity(receipt)
     receipt.add_argument("--experiment-id", required=True)
 
@@ -166,77 +144,58 @@ def _path_from_profile(profile: Mapping[str, Any], key: str) -> Path:
     raw = str(profile.get(key) or "").strip()
     path = Path(raw).expanduser()
     if not raw or not path.is_absolute():
-        raise AgentToolError(
-            code="CONFIG_ERROR", message=f"profile {key} must be an absolute path"
-        )
+        raise AgentToolError(code="CONFIG_ERROR", message=f"profile {key} must be an absolute path")
     return path
 
 
-def _profile_context(
-    args: argparse.Namespace, *, require_top1: bool
-) -> dict[str, Any]:
+def _profile_context(args: argparse.Namespace, *, require_top1: bool) -> dict[str, Any]:
     profile_path = _absolute_profile_path(args.profile_path)
     try:
         profile = load_service_profile(profile_path)
     except (OSError, ValueError) as exc:
         raise AgentToolError(code="CONFIG_ERROR", message=str(exc)) from exc
+    try:
+        requested_account = normalize_account_label(args.account)
+    except ValueError as exc:
+        raise AgentToolError(code="CONFIG_ERROR", message=str(exc)) from exc
+    args.account = requested_account
+    if require_top1:
+        raw_top1 = profile.get("strategy_lab_top1")
+        top1 = dict(raw_top1) if isinstance(raw_top1, Mapping) else {}
+        try:
+            profile_account = normalize_account_label(top1.get("account")) if top1 else None
+        except ValueError as exc:
+            raise AgentToolError(code="CONFIG_ERROR", message=str(exc)) from exc
+        if top1 and (top1.get("market") != args.market or profile_account != requested_account):
+            raise AgentToolError(
+                code="CONFIG_ERROR",
+                message="requested market/account disagrees with the Strategy Lab Top1 profile",
+            )
+        try:
+            context = resolve_strategy_lab_context(profile)
+        except StrategyLabContextError as exc:
+            raise AgentToolError(
+                code="CONFIG_ERROR",
+                message=str(exc),
+            ) from exc
+        return {
+            **context,
+            "profile_path": profile_path,
+            "top1": top1,
+            "top1_account": context["account"],
+            "requested_account": requested_account,
+        }
+
     repo_root = _path_from_profile(profile, "repo_root")
     runtime_root = _path_from_profile(profile, "runtime_root")
     top1_raw = profile.get("strategy_lab_top1")
     top1 = dict(top1_raw) if isinstance(top1_raw, Mapping) else {}
     try:
-        requested_account = normalize_account_label(args.account)
         top1_account = normalize_account_label(top1.get("account")) if top1 else None
     except ValueError as exc:
         raise AgentToolError(code="CONFIG_ERROR", message=str(exc)) from exc
-    args.account = requested_account
-    if require_top1 and top1 and (
-        top1.get("market") != args.market or top1_account != requested_account
-    ):
-        raise AgentToolError(
-            code="CONFIG_ERROR",
-            message="requested market/account disagrees with the Strategy Lab Top1 profile",
-        )
-    if require_top1:
-        _path_from_profile(profile, "env_file")
-        binding_raw = top1.get("opend_binding")
-        binding = dict(binding_raw) if isinstance(binding_raw, Mapping) else {}
-        selected_markets = profile.get("markets")
-        selected_accounts = profile.get("accounts")
-        valid = (
-            profile.get("service_provider") == "systemd"
-            and isinstance(selected_markets, list)
-            and "hk" in selected_markets
-            and isinstance(selected_accounts, list)
-            and top1_account in selected_accounts
-            and set(top1) == _TOP1_PROFILE_FIELDS
-            and top1.get("enabled") is True
-            and top1.get("market") == "hk"
-            and top1.get("account") == top1_account
-            and isinstance(binding.get("host"), str)
-            and bool(str(binding.get("host") or "").strip())
-            and type(binding.get("port")) is int
-            and 0 < binding["port"] <= 65535
-            and type(top1.get("advance_interval")) is int
-            and top1["advance_interval"] > 0
-            and type(top1.get("timeout_start_sec")) is int
-            and top1["timeout_start_sec"] > 0
-        )
-        if not valid:
-            raise AgentToolError(
-                code="CONFIG_ERROR",
-                message="Strategy Lab Top1 systemd profile binding is missing or invalid",
-            )
     config_paths = profile.get("config_paths")
-    config_hk = (
-        Path(str(config_paths.get("hk") or "")).expanduser()
-        if isinstance(config_paths, Mapping)
-        else Path()
-    )
-    if require_top1 and (not config_hk.is_absolute() or not str(config_hk)):
-        raise AgentToolError(
-            code="CONFIG_ERROR", message="profile HK runtime config path is invalid"
-        )
+    config_hk = Path(str(config_paths.get("hk") or "")).expanduser() if isinstance(config_paths, Mapping) else Path()
     return {
         "profile_path": profile_path,
         "profile": profile,
@@ -246,11 +205,7 @@ def _profile_context(
         "top1": top1,
         "top1_account": top1_account,
         "requested_account": requested_account,
-        "store_path": runtime_root
-        / "output_shared"
-        / "research"
-        / "strategy_lab"
-        / "experiments.sqlite3",
+        "store_path": runtime_root / "output_shared" / "research" / "strategy_lab" / "experiments.sqlite3",
         "artifact_root": runtime_root / "output_shared" / "research" / "strategy_lab",
     }
 
@@ -261,9 +216,7 @@ def _readiness(
     *,
     observed_at_utc: str | None = None,
 ) -> dict[str, Any]:
-    observed_at_utc = observed_at_utc or datetime.now(timezone.utc).isoformat().replace(
-        "+00:00", "Z"
-    )
+    observed_at_utc = observed_at_utc or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     profile = context["profile"]
     account = context["top1_account"] or context["requested_account"]
     errors: list[dict[str, str]] = []
@@ -279,9 +232,7 @@ def _readiness(
         drift = {"summary": {"status": "error"}}
         errors.append({"reason_code": "service_drift_unavailable", "message": str(exc)})
     try:
-        status = service_status_from_profile(
-            profile, include_status=True, include_enabled=True
-        )
+        status = service_status_from_profile(profile, include_status=True, include_enabled=True)
     except Exception as exc:
         status = {"services": []}
         errors.append({"reason_code": "service_status_unavailable", "message": str(exc)})
@@ -303,9 +254,7 @@ def _readiness(
         calendar = read_market_calendar_binding(context["artifact_root"], market="HK")
     except Exception as exc:
         calendar = None
-        errors.append(
-            {"reason_code": "market_calendar_binding_unavailable", "message": str(exc)}
-        )
+        errors.append({"reason_code": "market_calendar_binding_unavailable", "message": str(exc)})
     capability_receipt: dict[str, object] | None = None
     binding = context["top1"].get("opend_binding")
     if isinstance(binding, Mapping):
@@ -326,9 +275,7 @@ def _readiness(
         corpus_status=corpus,
         calendar_binding=calendar,
         capability_facts=(
-            capability_facts_from_receipt(capability_receipt)
-            if capability_receipt is not None
-            else None
+            capability_facts_from_receipt(capability_receipt) if capability_receipt is not None else None
         ),
     )
     result["facts"]["capability_receipt"] = (
@@ -387,19 +334,14 @@ def _research_inputs(
         "account": account,
         "fee_schedule_version": FUTU_HK_TERMINAL_FEE_SCHEDULE_VERSION,
         "account_fee_plan": (
-            {
-                key: plan[key]
-                for key in ("commission_free", "platform_fee", "fee_plan_ref")
-            }
+            {key: plan[key] for key in ("commission_free", "platform_fee", "fee_plan_ref")}
             if isinstance(plan, Mapping)
             and all(key in plan for key in ("commission_free", "platform_fee", "fee_plan_ref"))
             else None
         ),
     }
     try:
-        _config_path, config = load_runtime_config(
-            config_path=context["config_hk"], expected_market="hk"
-        )
+        _config_path, config = load_runtime_config(config_path=context["config_hk"], expected_market="hk")
         ledger_path = resolve_position_ledger_sqlite_path(
             base=context["repo_root"],
             cfg=config,
@@ -437,15 +379,12 @@ def handle_top1_command(args: argparse.Namespace) -> dict[str, Any]:
     command = args.top1_loop_command
     context = _profile_context(
         args,
-        require_top1=command
-        in {"advance", "capabilities", "research", "validation"},
+        require_top1=command in {"advance", "capabilities", "research", "validation"},
     )
 
     if command == "calendar":
         if not args.write:
-            raise AgentToolError(
-                code="INPUT_ERROR", message="Top1 calendar refresh requires --write"
-            )
+            raise AgentToolError(code="INPUT_ERROR", message="Top1 calendar refresh requires --write")
         top1 = context["top1"]
         raw_binding = top1.get("opend_binding")
         binding = dict(raw_binding) if isinstance(raw_binding, Mapping) else {}
@@ -474,9 +413,7 @@ def handle_top1_command(args: argparse.Namespace) -> dict[str, Any]:
                 market_calendar_version=args.calendar_version,
                 coverage_start=args.coverage_start,
                 coverage_end=args.coverage_end,
-                observed_at_utc=datetime.now(timezone.utc)
-                .isoformat()
-                .replace("+00:00", "Z"),
+                observed_at_utc=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             )
         except (CorpusError, FutuGatewayError) as exc:
             raise AgentToolError(
@@ -493,35 +430,23 @@ def handle_top1_command(args: argparse.Namespace) -> dict[str, Any]:
             data={
                 "status": result["status"],
                 "market": calendar_binding["market"],
-                "market_calendar_version": calendar_binding[
-                    "market_calendar_version"
-                ],
+                "market_calendar_version": calendar_binding["market_calendar_version"],
                 "coverage_start": calendar_binding["coverage_start"],
                 "coverage_end": calendar_binding["coverage_end"],
                 "trading_date_count": len(calendar_binding["trading_dates"]),
-                "source_receipt_sha256": calendar_binding[
-                    "source_receipt_sha256"
-                ],
+                "source_receipt_sha256": calendar_binding["source_receipt_sha256"],
                 "observed_at_utc": calendar_binding["observed_at_utc"],
                 "snapshot_ref": calendar_binding["snapshot_ref"],
-                "snapshot_content_sha256": calendar_binding[
-                    "snapshot_content_sha256"
-                ],
-                "snapshot_file_sha256": calendar_binding[
-                    "snapshot_file_sha256"
-                ],
+                "snapshot_content_sha256": calendar_binding["snapshot_content_sha256"],
+                "snapshot_file_sha256": calendar_binding["snapshot_file_sha256"],
             },
         )
 
     if command == "capabilities":
         if not args.write:
-            raise AgentToolError(
-                code="INPUT_ERROR", message="Top1 capability refresh requires --write"
-            )
+            raise AgentToolError(code="INPUT_ERROR", message="Top1 capability refresh requires --write")
         try:
-            fee_plan = load_account_fee_plan_receipt(
-                Path(args.fee_plan_receipt_path).expanduser()
-            )
+            fee_plan = load_account_fee_plan_receipt(Path(args.fee_plan_receipt_path).expanduser())
         except Top1CapabilityReceiptError as exc:
             raise AgentToolError(code=exc.reason_code, message=str(exc)) from exc
         top1 = context["top1"]
@@ -544,9 +469,7 @@ def handle_top1_command(args: argparse.Namespace) -> dict[str, Any]:
                 contract_symbol=args.contract_symbol,
                 terms_expiration=args.terms_expiration,
                 close_expiration=args.close_expiration,
-                observed_at_utc=datetime.now(timezone.utc)
-                .isoformat()
-                .replace("+00:00", "Z"),
+                observed_at_utc=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             )
         except (Top1CapabilityReceiptError, FutuGatewayError) as exc:
             raise AgentToolError(
@@ -579,9 +502,7 @@ def handle_top1_command(args: argparse.Namespace) -> dict[str, Any]:
                 code="INPUT_ERROR",
                 message="Top1 advance requires --scheduled and --write",
             )
-        occurred_at_utc = (
-            datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        )
+        occurred_at_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         expectation_batch = seal_profile_formal_expectations(
             context["runtime_root"],
             profile=context["profile"],
@@ -592,31 +513,20 @@ def handle_top1_command(args: argparse.Namespace) -> dict[str, Any]:
 
     if command == "research":
         if args.top1_research_command == "start" and not args.write:
-            raise AgentToolError(
-                code="INPUT_ERROR", message="Top1 research start requires --write"
-            )
+            raise AgentToolError(code="INPUT_ERROR", message="Top1 research start requires --write")
         preview_inputs, config = _research_inputs(context, args)
-        tool_name = (
-            "research.strategy-lab.top1-loop.research."
-            f"{args.top1_research_command}"
-        )
+        tool_name = f"research.strategy-lab.top1-loop.research.{args.top1_research_command}"
         if args.top1_research_command == "preview":
-            data = preview_sell_put_top1_research(
-                store, context["artifact_root"], **preview_inputs
-            )
+            data = preview_sell_put_top1_research(store, context["artifact_root"], **preview_inputs)
             return build_response(
                 tool_name=tool_name,
                 ok=data["status"] in {"available", "blocked", "disabled", "unsupported"},
                 data=data,
             )
         try:
-            command_payload = json.loads(
-                Path(args.confirmed_start_file).expanduser().read_text(encoding="utf-8")
-            )
+            command_payload = json.loads(Path(args.confirmed_start_file).expanduser().read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise AgentToolError(
-                code="INPUT_ERROR", message="confirmed start file is unavailable or invalid"
-            ) from exc
+            raise AgentToolError(code="INPUT_ERROR", message="confirmed start file is unavailable or invalid") from exc
         binding = context["top1"]["opend_binding"]
         gateway = None
         try:
@@ -645,17 +555,11 @@ def handle_top1_command(args: argparse.Namespace) -> dict[str, Any]:
 
     if command == "validation":
         if args.top1_validation_command == "start" and not args.write:
-            raise AgentToolError(
-                code="INPUT_ERROR", message="Top1 validation start requires --write"
-            )
+            raise AgentToolError(code="INPUT_ERROR", message="Top1 validation start requires --write")
         if store.schema_state().get("status") != "ready":
-            return _store_not_ready(
-                "research.strategy-lab.top1-loop.validation", store
-            )
+            return _store_not_ready("research.strategy-lab.top1-loop.validation", store)
         try:
-            _config_path, config = load_runtime_config(
-                config_path=context["config_hk"], expected_market="hk"
-            )
+            _config_path, config = load_runtime_config(config_path=context["config_hk"], expected_market="hk")
             schedule = config.get("schedule")
             if not isinstance(schedule, Mapping):
                 raise ValueError("HK runtime schedule is missing")
@@ -671,26 +575,15 @@ def handle_top1_command(args: argparse.Namespace) -> dict[str, Any]:
             "timer_binding": {
                 "revision": ADVANCE_REVISION,
                 "producer_catchup_grace_seconds": 30,
-                "producer_run_timeout_upper_bound_seconds": int(
-                    top1["timeout_start_sec"]
-                ),
+                "producer_run_timeout_upper_bound_seconds": int(top1["timeout_start_sec"]),
                 "advance_cadence_seconds": int(top1["advance_interval"]),
-                "fill_observation_duration_upper_bound_seconds": int(
-                    top1["timeout_start_sec"]
-                ),
-                "terms_capture_duration_upper_bound_seconds": int(
-                    top1["timeout_start_sec"]
-                ),
+                "fill_observation_duration_upper_bound_seconds": int(top1["timeout_start_sec"]),
+                "terms_capture_duration_upper_bound_seconds": int(top1["timeout_start_sec"]),
             },
-            "as_of_utc": datetime.now(timezone.utc)
-            .isoformat()
-            .replace("+00:00", "Z"),
+            "as_of_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "environ": None,
         }
-        tool_name = (
-            "research.strategy-lab.top1-loop.validation."
-            f"{args.top1_validation_command}"
-        )
+        tool_name = f"research.strategy-lab.top1-loop.validation.{args.top1_validation_command}"
         if args.top1_validation_command == "preview":
             data = preview_sell_put_top1_validation(
                 store,
@@ -703,11 +596,7 @@ def handle_top1_command(args: argparse.Namespace) -> dict[str, Any]:
                 data=data,
             )
         try:
-            command_payload = json.loads(
-                Path(args.confirmed_start_file).expanduser().read_text(
-                    encoding="utf-8"
-                )
-            )
+            command_payload = json.loads(Path(args.confirmed_start_file).expanduser().read_text(encoding="utf-8"))
             data = start_confirmed_validation(
                 store,
                 context["artifact_root"],
@@ -732,9 +621,7 @@ def handle_top1_command(args: argparse.Namespace) -> dict[str, Any]:
 
     if command == "status":
         if store.schema_state().get("status") != "ready":
-            return _store_not_ready(
-                "research.strategy-lab.top1-loop.status", store
-            )
+            return _store_not_ready("research.strategy-lab.top1-loop.status", store)
         try:
             data = read_public_status(
                 store,
@@ -747,15 +634,11 @@ def handle_top1_command(args: argparse.Namespace) -> dict[str, Any]:
                 code=str(getattr(exc, "reason_code", "STATE_ERROR")),
                 message=str(exc),
             ) from exc
-        return build_response(
-            tool_name="research.strategy-lab.top1-loop.status", ok=True, data=data
-        )
+        return build_response(tool_name="research.strategy-lab.top1-loop.status", ok=True, data=data)
 
     if command == "receipt":
         if store.schema_state().get("status") != "ready":
-            return _store_not_ready(
-                "research.strategy-lab.top1-loop.receipt", store
-            )
+            return _store_not_ready("research.strategy-lab.top1-loop.receipt", store)
         try:
             data = read_public_receipt(
                 store,
@@ -768,9 +651,7 @@ def handle_top1_command(args: argparse.Namespace) -> dict[str, Any]:
                 code=str(getattr(exc, "reason_code", "STATE_ERROR")),
                 message=str(exc),
             ) from exc
-        return build_response(
-            tool_name="research.strategy-lab.top1-loop.receipt", ok=True, data=data
-        )
+        return build_response(tool_name="research.strategy-lab.top1-loop.receipt", ok=True, data=data)
 
     if command != "advance":
         raise AgentToolError(code="INPUT_ERROR", message=f"unsupported Top1 command: {command}")
@@ -789,18 +670,14 @@ def handle_top1_command(args: argparse.Namespace) -> dict[str, Any]:
         gateway_box["gateway"] = gateway
         return gateway
 
-    idempotency_key = hashlib.sha256(
-        f"{context['profile_path']}\0{occurred_at_utc}".encode()
-    ).hexdigest()
+    idempotency_key = hashlib.sha256(f"{context['profile_path']}\0{occurred_at_utc}".encode()).hexdigest()
     try:
         data = advance_scheduled(
             store,
             context["artifact_root"],
             market="HK",
             account=top1["account"],
-            load_readiness=lambda: _readiness(
-                context, store, observed_at_utc=occurred_at_utc
-            ),
+            load_readiness=lambda: _readiness(context, store, observed_at_utc=occurred_at_utc),
             load_gateway=load_gateway,
             advance_revision=ADVANCE_REVISION,
             advance_interval_seconds=int(top1["advance_interval"]),

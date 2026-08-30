@@ -550,7 +550,7 @@ def _formal_point_ranking_input(
 ) -> dict[str, Any]:
     point = formal_point.get("recommendation_point")
     opening = formal_point.get("opening_snapshot")
-    evidence = formal_point.get("option_market_evidence")
+    evidence = formal_point.get("option_position_evidence_binding")
     if not all(isinstance(value, Mapping) for value in (point, opening, evidence)):
         _fail("formal point facts are incomplete")
     assert isinstance(point, Mapping)

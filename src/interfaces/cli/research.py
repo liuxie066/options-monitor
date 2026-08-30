@@ -48,7 +48,9 @@ def _add_candidate_impact_report_args(parser: Any) -> None:
 
 
 def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
-    research = subparsers.add_parser("research", help="run offline Research evidence and Shadow Replay readiness workflows")
+    research = subparsers.add_parser(
+        "research", help="run offline Research evidence and Shadow Replay readiness workflows"
+    )
     research_sub = research.add_subparsers(dest="research_command", required=True)
     research_collect = research_sub.add_parser("collect", help="collect redacted evidence bundle")
     research_collect.add_argument("--scope", default="full", choices=("ledger", "candidate", "quality", "full"))
@@ -117,6 +119,20 @@ def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
     corpus_health.add_argument("--runtime-root", required=True)
     corpus_health.add_argument("--market", required=True, choices=("hk", "us"))
     corpus_health.add_argument("--account", required=True, choices=("lx",))
+    corpus_calendar = research_sub.add_parser(
+        "corpus-calendar",
+        help="manage formal corpus market-calendar evidence",
+    )
+    corpus_calendar_sub = corpus_calendar.add_subparsers(dest="corpus_calendar_command", required=True)
+    corpus_calendar_refresh = corpus_calendar_sub.add_parser(
+        "refresh", help="collect and publish market-calendar evidence"
+    )
+    corpus_calendar_refresh.add_argument("--market", required=True, choices=("hk", "us"))
+    corpus_calendar_refresh.add_argument("--profile-path", required=True)
+    corpus_calendar_refresh.add_argument("--coverage-start", required=True)
+    corpus_calendar_refresh.add_argument("--coverage-end", required=True)
+    corpus_calendar_refresh.add_argument("--calendar-version", required=True)
+    corpus_calendar_refresh.add_argument("--write", action="store_true")
     storage_gc = research_sub.add_parser(
         "storage-gc-preview",
         help="preview reachable and orphaned canonical scan blobs without deleting",
@@ -147,10 +163,14 @@ def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
     archive_inventory.add_argument("--remote", default="prod")
     archive_inventory.add_argument("--archive-root", default=None)
 
-    archive_pull = research_archive_sub.add_parser("pull", help="dry-run or rsync remote runtime evidence into local archive")
+    archive_pull = research_archive_sub.add_parser(
+        "pull", help="dry-run or rsync remote runtime evidence into local archive"
+    )
     archive_pull.add_argument("--remote", default="prod")
     archive_pull.add_argument("--archive-root", default=None)
-    archive_pull.add_argument("--source-root", default=None, help="local or mounted runtime root; mutually exclusive with --ssh-target")
+    archive_pull.add_argument(
+        "--source-root", default=None, help="local or mounted runtime root; mutually exclusive with --ssh-target"
+    )
     archive_pull.add_argument("--ssh-target", default=None, help="ssh target such as deploy@host")
     archive_pull.add_argument("--remote-runtime-root", default="/var/lib/options-monitor")
     archive_pull.add_argument("--since-days", type=int, default=None)
@@ -162,9 +182,13 @@ def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
     )
     archive_pull.add_argument("--no-logs", action="store_true")
     archive_pull.add_argument("--rsync-path", default="rsync")
-    archive_pull.add_argument("--write", action="store_true", help="execute rsync and write local sync/verify manifests")
+    archive_pull.add_argument(
+        "--write", action="store_true", help="execute rsync and write local sync/verify manifests"
+    )
 
-    archive_verify = research_archive_sub.add_parser("verify", help="verify local archive structure and write inventory.latest.json")
+    archive_verify = research_archive_sub.add_parser(
+        "verify", help="verify local archive structure and write inventory.latest.json"
+    )
     archive_verify.add_argument("--remote", default="prod")
     archive_verify.add_argument("--archive-root", default=None)
 
@@ -791,12 +815,7 @@ def _candidate_impact_report_params_path(args: argparse.Namespace, *, runtime_ro
         path = _resolve_shadow_path(args.params_dir, base=base) / f"params.{args.market}.json"
     elif runtime_root is not None:
         path = (
-            runtime_root
-            / "output_shared"
-            / "research"
-            / "shadow_replay"
-            / "backtests"
-            / f"params.{args.market}.json"
+            runtime_root / "output_shared" / "research" / "shadow_replay" / "backtests" / f"params.{args.market}.json"
         ).resolve()
     else:
         raise AgentToolError(
@@ -833,6 +852,81 @@ def handle_research_command(
     research_collect_fn: ResearchCollectFn | None = None,
     repo_base_fn: Callable[[], Path] = repo_base,
 ) -> dict[str, Any]:
+    if args.research_command == "corpus-calendar":
+        if not args.write:
+            raise AgentToolError(code="INPUT_ERROR", message="corpus calendar refresh requires --write")
+        from src.application.research.formal_corpus import (
+            FormalCorpusError,
+            refresh_market_calendar_binding,
+        )
+        from src.application.service_deploy import load_service_profile
+        from src.application.strategy_lab.service import (
+            resolve_strategy_lab_runtime_context,
+        )
+        from src.application.agent_tool_config import load_runtime_config
+        from src.application.futu_quote_routing import (
+            resolve_futu_quote_route,
+        )
+        from src.infrastructure.futu_gateway import (
+            FutuGatewayError,
+            build_ready_futu_quote_gateway,
+        )
+
+        try:
+            profile = load_service_profile(Path(args.profile_path).expanduser().resolve())
+            context = resolve_strategy_lab_runtime_context(profile, market=args.market)
+            _config_path, config = load_runtime_config(
+                config_path=context["config_path"],
+                expected_market=args.market,
+            )
+            route = resolve_futu_quote_route(config, market=args.market)
+            if not route.ok or route.host is None or route.port is None:
+                raise ValueError("; ".join(route.errors) or "Futu quote route is unavailable")
+        except (OSError, ValueError) as exc:
+            raise AgentToolError(code="CONFIG_ERROR", message=str(exc)) from exc
+        gateway = None
+        try:
+            gateway = build_ready_futu_quote_gateway(
+                host=str(route.host),
+                port=int(route.port),
+                is_option_chain_cache_enabled=False,
+            )
+            result = refresh_market_calendar_binding(
+                context["artifact_root"],
+                gateway=gateway,
+                market=args.market.upper(),
+                market_calendar_version=args.calendar_version,
+                coverage_start=args.coverage_start,
+                coverage_end=args.coverage_end,
+                observed_at_utc=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            )
+        except (FormalCorpusError, FutuGatewayError) as exc:
+            raise AgentToolError(
+                code=str(getattr(exc, "reason_code", getattr(exc, "code", "ERROR"))),
+                message=str(exc),
+            ) from exc
+        finally:
+            if gateway is not None:
+                gateway.close()
+        calendar = result["binding"]
+        return build_response(
+            tool_name="research.corpus-calendar.refresh",
+            ok=True,
+            data={
+                "status": result["status"],
+                "market": calendar["market"],
+                "market_calendar_version": calendar["market_calendar_version"],
+                "coverage_start": calendar["coverage_start"],
+                "coverage_end": calendar["coverage_end"],
+                "trading_date_count": len(calendar["trading_dates"]),
+                "source_receipt_sha256": calendar["source_receipt_sha256"],
+                "observed_at_utc": calendar["observed_at_utc"],
+                "snapshot_ref": calendar["snapshot_ref"],
+                "snapshot_content_sha256": calendar["snapshot_content_sha256"],
+                "snapshot_file_sha256": calendar["snapshot_file_sha256"],
+            },
+        )
+
     if args.research_command == "corpus-health":
         from src.application.research.formal_corpus import (
             build_corpus_health_receipt,
@@ -965,7 +1059,9 @@ def handle_research_command(
                 confirm=bool(args.confirm),
             )
             return build_response(tool_name="research.archive.prune-remote", ok=bool(data.get("ok")), data=data)
-        raise AgentToolError(code="INPUT_ERROR", message=f"unsupported research archive command: {args.archive_command}")
+        raise AgentToolError(
+            code="INPUT_ERROR", message=f"unsupported research archive command: {args.archive_command}"
+        )
 
     if args.research_command == "strategy-lab":
         if args.strategy_lab_command == "top1-loop":
@@ -1000,9 +1096,7 @@ def handle_research_command(
                 base=base,
             )
             opend_fetch_config = (
-                _shadow_replay_opend_fetch_config(profile=profile, base=base)
-                if args.source == "opend"
-                else None
+                _shadow_replay_opend_fetch_config(profile=profile, base=base) if args.source == "opend" else None
             )
             receipt_dir = (
                 _shadow_replay_receipt_dir(args.receipt_dir, runtime_root=runtime_root, base=base)
@@ -1152,7 +1246,7 @@ def handle_research_command(
             raise AgentToolError(
                 code="INPUT_ERROR",
                 message="--latest-scanned-run cannot be combined with --run-id or --run-dir",
-        )
+            )
         runs_root = _shadow_replay_runs_root(args, profile=profile, runtime_root=runtime_root, base=base)
         dataset_root = _shadow_replay_dataset_root(args.dataset_root, runtime_root=runtime_root, base=base)
         try:
@@ -1250,7 +1344,9 @@ def handle_research_command(
 
     if args.shadow_replay_command in {"status", "list"}:
         dataset_root = _shadow_replay_dataset_root(args.dataset_root, runtime_root=runtime_root, base=base)
-        required_data_root = _shadow_replay_required_data_root(args.required_data_root, runtime_root=runtime_root, base=base)
+        required_data_root = _shadow_replay_required_data_root(
+            args.required_data_root, runtime_root=runtime_root, base=base
+        )
         data = shadow_replay_dataset_status(
             repo_root=base,
             dataset_root=dataset_root,
@@ -1268,7 +1364,9 @@ def handle_research_command(
                 message="--receipt-output and --receipt-dir require --write for shadow-replay run-data-plan",
             )
         dataset_root = _shadow_replay_dataset_root(args.dataset_root, runtime_root=runtime_root, base=base)
-        required_data_root = _shadow_replay_required_data_root(args.required_data_root, runtime_root=runtime_root, base=base)
+        required_data_root = _shadow_replay_required_data_root(
+            args.required_data_root, runtime_root=runtime_root, base=base
+        )
         receipt_dir = (
             _shadow_replay_receipt_dir(args.receipt_dir, runtime_root=runtime_root, base=base)
             if bool(args.write)
@@ -1303,9 +1401,9 @@ def handle_research_command(
         )
 
     if args.shadow_replay_command == "mark":
-        required_data_root = _shadow_replay_required_data_root(args.required_data_root, runtime_root=runtime_root, base=base) or (
-            base / "output_shared" / "required_data"
-        )
+        required_data_root = _shadow_replay_required_data_root(
+            args.required_data_root, runtime_root=runtime_root, base=base
+        ) or (base / "output_shared" / "required_data")
         data = mark_shadow_replay_dataset(
             dataset=args.dataset,
             required_data_root=required_data_root,
@@ -1318,9 +1416,9 @@ def handle_research_command(
         return build_response(tool_name="research.shadow-replay.mark", ok=True, data=data)
 
     if args.shadow_replay_command == "collect-marks":
-        required_data_root = _shadow_replay_required_data_root(args.required_data_root, runtime_root=runtime_root, base=base) or (
-            base / "output_shared" / "required_data"
-        )
+        required_data_root = _shadow_replay_required_data_root(
+            args.required_data_root, runtime_root=runtime_root, base=base
+        ) or (base / "output_shared" / "required_data")
         data = collect_shadow_replay_marks(
             dataset=args.dataset,
             required_data_root=required_data_root,

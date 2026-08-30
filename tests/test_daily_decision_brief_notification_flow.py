@@ -795,7 +795,7 @@ def test_recommendation_point_observer_runs_after_provider_and_is_best_effort(
         order.append("observer")
         if observer_fails:
             raise mod.RecommendationPointError(
-                "official_point_unavailable",
+                "required_data_snapshot_unavailable",
                 "injected observer failure",
             )
         return "published", {"recommendation_point_id": "p" * 64}
@@ -833,6 +833,13 @@ def test_recommendation_point_observer_runs_after_provider_and_is_best_effort(
         if observer_fails
         else "recommendation_point_captured"
     ) in actions
+    if observer_fails:
+        gap = next(
+            event
+            for event in bundle.request.audit_helper.events
+            if event["action"] == "recommendation_point_gap"
+        )
+        assert gap["extra"]["reason_code"] == "required_data_snapshot_unavailable"
     latency_stages = [
         event.get("data", {}).get("stage")
         for event in bundle.request.runlog.events

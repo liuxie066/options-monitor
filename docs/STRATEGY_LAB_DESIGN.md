@@ -1,249 +1,117 @@
-# Strategy Lab 当前运行合同
+# Strategy Lab 当前实现清单
 
-- **状态**：代码闭环已实现，真实价值验收尚未完成
-- **当前阶段**：重新积累连续 20 个完整交易日的正式推荐点事实
-- **首个正式 recipe**：HK / `lx` / Sell Put Top1
+- **状态**：Phase 1 源码已实现，待自然运行取证；完整产品仍待重建
 - **更新时间**：2026-08-30
+- **目标产品合同**：[Strategy Lab PRD](STRATEGY_LAB_EXPERIMENT_PLATFORM_PRD.md)
+- **目标技术设计**：[Strategy Lab 系统设计](STRATEGY_LAB_EXPERIMENT_PLATFORM_SYSTEM_DESIGN.md)
 
-本文是 Strategy Lab 的当前运行说明。产品范围和验收口径见
-[统一策略实验平台 PRD](STRATEGY_LAB_EXPERIMENT_PLATFORM_PRD.md)，已落地模块、函数和存储合同见
-[系统设计](STRATEGY_LAB_EXPERIMENT_PLATFORM_SYSTEM_DESIGN.md)。源码、配置验证器、测试和运行回执
-仍是最高权威。
+本文描述当前源码边界，防止把 Phase 1 基础能力或旧产品壳误认为完整产品。当前代码不是已发布且
+需要兼容的产品，也没有通过新 PRD 的 20 日研究与 10 日隐藏验证验收。
 
 ## 当前结论
 
-Strategy Lab 目前只有一个产品入口和一个 recorder 兼容入口：
+源码仍保留两条待删除旧入口，同时新增了 Phase 1 的最小 owner 入口：
 
-| 入口 | 用途 | 当前状态 |
+| 入口 | 当前用途 | 与目标的关系 |
 |---|---|---|
-| `top1-loop` | 对 HK / `lx` Sell Put Top1 完成 20 日研究、10 日隐藏验证和最终回执 | 代码已实现；等待连续正式事实，不得提前开始研究 |
-| `update` | 为现有 recorder 包装 Shadow Replay dataset build、mark 和 settle 维护 | 兼容保留；默认 dry-run，不是实验入口 |
+| `./om research strategy-lab top1-loop ...` | 旧 Sell Put Top1 生命周期、readiness、研究、验证和回执 | 删除，由根级 `./om strategy-lab` 替代 |
+| `./om research strategy-lab update ...` | 包装 Shadow Replay dataset、mark 和 settle | 删除包装；Shadow Replay 自有入口继续保留 |
+| `./om research corpus-calendar refresh ...` | Research Archive 日历刷新 | 已迁出，不依赖旧 Top1 profile |
+| `./om strategy-lab readiness refresh-history-k ...` | 定向 history-K 权限、quota 和样本 PoC | Phase 1 运维入口，不是实验生命周期入口 |
 
-原通用 `readiness / experiment / proposal / llm-context` 已退役。探索性 dataset 分析和候选影响
-继续由 `./om research shadow-replay ...` 直接负责，不再维护第二套 Strategy Lab 实验面。
+当前实现把 Top1 当成产品子平台，目录位于 `src/application/strategy_lab/top1/`；旧
+`ExperimentStore` 约 13 张表，包含四代 schema migration、feature、generation、capability、corpus
+和 HK / Sell Put 专用状态。它们服务于未完成的旧设计，不迁移到新 Store。
 
-旧归档 run 不再进入 formal Top1 corpus，也不提供迁移入口。正式研究只使用当前合同前瞻采集的完整
-corpus；不能用当前行情、持仓、mark 或 FX 补造历史正式点。
+代码中已有部分原语仍有价值：Candidate Engine 排序、期权持仓市值集中度、正式点和 Research
+Archive、OpenD adapter、FX、费用、私有存储与锁。重建时复用这些 owner，不复用旧产品壳。
 
-Corpus Health Receipt 不再持久化 `current` 或每日状态文件。readiness 与手工健康查询直接对 Formal
-Corpus 的 expectation / point artifact 计算确定性视图；缺失、冲突、不可评估、日历不可用或容量风险
-必须显式报告。scheduled readiness 只检查最近 20 个成熟交易日加当前交易日，手工 full 查询保留
-全历史审计视图；两者都不能补造研究窗口。
+旧壳原有的 market-calendar refresh、账户 fee-plan loader 和 runtime context 已分别迁到 Research
+Archive、通用 performance owner 和 `strategy_lab/service.py`。旧壳当前仍被旧生命周期调用，不在
+Phase 1 提前删除；Phase 2 切换调用方后整块删除，不保留兼容层。
 
-代码和测试通过不等于 MVP 已通过。MVP 只有在真实完成一次 20 日研究，并在产生可信
-`research_leader` 后经第二次人工确认完成未来 10 个正式推荐日隐藏验证、生成可读 Final Receipt，
-才完成价值验收。
+## 与新 PRD 的主要偏差
 
-## 产品和安全边界
+| 维度 | 当前源码 | 新 PRD |
+|---|---|---|
+| 产品入口 | `research strategy-lab top1-loop` 与 `update` | 根级 `strategy-lab` 单一入口 |
+| Recipe 名称 | Sell Put Top1 | `sell_put_option_position_concentration` |
+| Top1 定位 | 目录、状态机和产品命令名 | 可复用的单推荐替换评价口径 |
+| 历史成交 | `t0_sell_limit` 假设成交 | 推荐后完整期权 1 分钟 K crossing |
+| 评价 | Student-t、最差尾部和多项硬条件 | 日等权；收益率改善且 CNY PnL 不下降 |
+| 存储 | 多代 schema、迁移和专用表 | 三张表，新建且不迁移 |
+| 运行任务 | Top1 advance 加 recorder build/sample/settle | 一个独立 Strategy Lab advance |
+| Tick 证据 | scheduled HK/US 为 Strategy Lab 同步刷新整仓 option marks | 只用 Tick 已有 provider 调用封存通用事实；缺失则不可评价 |
+| OpenD 协调 | Strategy Lab 可与 Tick 共享 limiter / market lock | 不持有 Tick lock；只用低优先级零等待配额 |
+| 版本 | 多个 Strategy Lab schema/contract 后缀 | 首次完成前不建立版本体系 |
+| 验收 | 代码路径存在 | 真实 20 日研究和未来 10 日验证完成 |
 
-Strategy Lab 负责组织实验，不拥有生产策略、交易或通知：
+因此不得继续使用旧链路积累“兼容价值”，也不得把旧状态或旧回执导入新实验。
 
-- Agent 可以澄清假设、准备 preview、调用已授权入口和解释回执；
-- 确定性平台拥有事实选择、实验合同、评价公式、状态和回执；
-- Agent 不生成运行时权威代码或公式，不自我授权；
-- 实验不修改 `config.yaml`、runtime JSON、ledger、trade events、持仓或 broker 状态；
-- Adoption Proposal 只是建议，配置变更、发布、部署和启用需要新的独立授权；
-- MCP、专用 Skill、跨机认证和飞书控制面不属于当前 MVP。
+## 当前可复用 owner
 
-维护方安全停机只暂停 Strategy Lab 推进，不影响普通扫描、通知、持仓或交易处理。账户级实验 opt-in
-和 `strategy_lab_features` 已从当前合同删除。
+| 能力 | 当前 owner | 重建处理 |
+|---|---|---|
+| 生产候选和排序 | `domain/domain/engine/candidate_engine.py` | 原样复用 |
+| 期权持仓市值集中度 | `domain/domain/short_vol_assessment.py` | 原样复用 |
+| recommendation point 与正式点 | `src/application/recommendation_point.py`、`src/application/tick_notification_flow.py`、`src/application/research/formal_corpus.py` | 修改绑定 owner 和调用顺序，Formal Corpus 从 owner artifacts 重建后封存 |
+| opening snapshot | `src/application/opening_candidate_snapshot.py` | 复用紧凑编码后的 loader 和语义 hash |
+| option mark 规范化 | `src/application/performance/evidence_collection.py` | 提升现有合约行匹配、midpoint / Last fallback 和 `ValuationMarkFact` 构造为共享函数，不建新层 |
+| OpenD snapshot | `src/application/opend_market_snapshot_fetching.py` | 隐藏观察复用 |
+| OpenD 历史 K | `src/infrastructure/futu_gateway.py` | 研究与到期按需复用 |
+| FX 和费用 | performance models、fee calculator | 原样复用 |
+| 私有文件、SQLite 和锁 | `src/infrastructure/private_storage.py` | 原样复用 |
 
-## 当前架构
+当前 `request_history_kline()` 只返回单页数据和 `page_req_key`，新 Evidence owner 必须循环到 key 为空；
+Phase 1 在现有 `rate_limited_opend_call()` 的同一状态文件上增加最小低优先级零等待入口；生产 RV 的
+history-K 调用也必须走该 coordinator，不能形成绕过生产预留的第二个计数面。
+真实 HK 期权分钟 K 权限、过期合约覆盖和零量 bar 语义已由本机 history-K PoC 证明；远端 systemd 与
+生产 Tick 的自然并发仍需取证。当前 snapshot 已保留原始
+`bid_vol`；目标设计只把有限正值作为最优买价存在非零挂量的证据，不换算为合约张数，也不新增
+snapshot-volume readiness 子流程。
 
-```mermaid
-flowchart TB
-    U["实验决策者"] --> C["Codex / 操作员"]
-    C --> CLI["./om research strategy-lab"]
+Shadow Replay、required-data、ledger、performance evidence、Tick 和普通通知都有 Strategy Lab 外的独立
+用途，不能因为删除旧实验链路而删除。
 
-    CLI --> G["recorder maintenance\nupdate"]
-    G --> SR["Shadow Replay\ndataset / mark / outcome"]
+## 当前待删除 owner
 
-    CLI --> W["Top1 Workspace\npreview / confirm / status / receipt"]
-    T["HK / US tick-cron"] --> E["首个正式点前封存\n本市场 expectation"]
-    E --> P["recommendation point v3\nprepared option evidence"]
-    P --> CP["Formal Corpus\nimmutable expectation + point"]
-    A["现有 advance timer"] --> W
-    CP --> H["Corpus Health Receipt\n查询时确定性计算"]
-    H --> W
-    CP --> W
-    W --> R["20 日研究"]
-    R -->|"有可信 leader + 第二次确认"| V["未来 10 日隐藏验证"]
-    V --> F["Final Receipt\n可选 Adoption Proposal"]
-
-    W --> S[("ExperimentStore")]
-    R --> S
-    V --> S
-    A --> V
-```
-
-模块所有权：
-
-| 能力 | 当前 owner |
+| 目标 | 处理 |
 |---|---|
-| 正式扫描、候选和排序 | `candidate_engine.py`、scheduled tick 产物 |
-| 归档、dataset、mark 和 outcome | `src/application/research/`、`shadow_replay/` |
-| Top1 实验合同和评价 | `src/application/strategy_lab/top1/` |
-| 两次确认编排 | `top1/workspace.py` |
-| 生命周期、状态和回执 | `top1/lifecycle.py`、`terminal_projection.py`、`ExperimentStore` |
-| 持仓 mark 和 FX | 现有 performance-evidence repository |
-| 调度推进 | 现有 `strategy-lab-top1-advance` timer；`service render` 通过 `--strategy-lab-top1-account` 显式绑定一个已选 HK Futu 账户 |
-| Formal Corpus 归档与健康计算 | `research/formal_corpus.py`；`top1/readiness.py` 只消费查询结果 |
-| Top1 recipe 投影 | `top1/corpus.py`、`top1/ranking.py`；只读 Formal Corpus 并在内存派生 |
+| `src/application/strategy_lab/top1/` | 整目录删除，新产品层重新实现 |
+| `src/application/strategy_lab/update.py` | 删除 recorder 包装 |
+| `src/interfaces/cli/strategy_lab_top1.py` | 删除旧命令和 capability/calendar probe |
+| `src/infrastructure/strategy_lab/experiment_store.py` | 全量替换，不保留 migration |
+| service deploy 中 recorder 和 Top1 units | 删除，换成唯一 advance unit |
+| 只验证旧入口、旧表或旧合同的测试 | 随 owner 删除 |
 
-不新增第二套 corpus、FX 存储、调度器、状态库或通用公式 DSL。
+删除前必须用引用搜索确认边界；不能顺带删除上节列出的生产或通用研究能力。
 
-## 正式 Top1 工作流
+Phase 1 已完成 calendar、fee-plan、runtime context 迁出，并让 recommendation point 从同 run
+required-data / opening artifact 绑定 position / mark / FX；Formal Corpus 会从 owner artifact 重建并精确
+比较该 binding。旧 `mark_evidence_accounts -> refresh_quotes=True` 已删除，不保留双写。进入 Phase 2 前
+仍须用自然 Tick 证明 OpenD 调用数、snapshot 批次数和 deadline 不变差；通过后再切换旧生命周期调用方，
+删除 Top1 目录和旧 CLI。
 
-```text
-正式推荐点持续取证
-  -> 查询 Formal Corpus 健康视图
-  -> 连续 20 个完整交易日 corpus
-  -> 研究 preview
-  -> 第一次人工确认并运行研究
-  -> Research Receipt
-  -> 无可信 leader：本轮结束
-  -> 有可信 leader：隐藏验证 preview
-  -> 第二次人工确认
-  -> 未来 10 个正式推荐日隐藏验证
-  -> Final Receipt
-```
+## 当前数据的处理原则
 
-### 1. 正式事实积累
+Research Archive 中的通用正式事实继续保留，因为它可以服务集中度、DTE、Delta 和其他 Recipe。
+推荐时刻集中度只能读取同一 Formal Point 绑定的 position / mark / FX refs；不能用后来的 performance
+evidence 回填。无法在不增加 Tick provider 调用数的条件下封存完整 mark 时，该点明确不可评价。
+旧 ExperimentStore 的实验状态、projection、generation、capability 和旧回执不迁移；它们不能满足新
+成交与评价合同。
 
-- 只接收 canonical scheduled tick 的正式推荐点；手工扫描不能冒充正式点。
-- HK / US 的现有 `tick-cron` 在启动本市场扫描前封存当日 expectation；没有显式受控 runtime root
-  时不写正式事实。封存失败只使当日实验事实降级，不阻断普通扫描和通知。
-- 每个交易日在首个预期点前完成封存；完整日当前按 12 个正式点校验，半日市按已绑定的
-  市场日历校验实际时段。
-- 每个点必须具有可验证的 recommendation point、opening snapshot、required-data、当时未平仓期权
-  mark 和 FX 引用；Top1 ranking projection 从该正式点按 recipe 确定性派生，不另存基础事实副本。
-- 任一预期点缺失、冲突或不可评估，整个交易日不进入研究窗口；不能跳过缺日后拼接 20 日。
-- 当天已到下一正式点或已经捕获更晚点时，前一缺点记为 `overdue`；尚未到期的点保持 `pending`。
-- 健康回执按 canonical corpus 重新计算；事实恢复后可恢复健康，但已有冲突 artifact 不自动删除或仲裁。
-- 回执新鲜不代表研究可启动；只有连续 20 个成熟交易日均完整，research preview 才可用。
-- corpus 积累本身不创建实验，也不启动研究或隐藏验证。
+新 Store 上线时不得由应用静默覆盖旧 SQLite。实施部署步骤应明确停止旧服务、确认具体旧库路径，
+再由操作员选择隔离备份或删除。Research Archive 与旧 Store 是不同数据边界。
 
-### 2. 20 日研究
+## 当前运行安全边界
 
-研究 preview 使用截至指定成熟交易日的最近连续 20 个完整交易日，重建固定 recipe 和全部来源 hash。
-第一次确认必须绑定 preview hash；确认后才冻结相同字节并执行研究。
+在重建完成前：
 
-研究没有可信 `research_leader` 是合法结论，但必须停止本轮，不进入隐藏验证，也不为追求 winner
-降低样本或证据标准。
+- 不把旧代码路径视为新 PRD 的验收实现；
+- 不用旧 `t0_sell_limit` 结果决定生产配置；
+- 不因为 Strategy Lab 失败而影响 Tick、通知、持仓或交易；
+- 不自动迁移、删除或补造生产 runtime artifact；
+- 不发布 Strategy Lab 已完成或已提高线上收益的结论。
 
-### 3. 10 日隐藏验证
-
-只有已发布 Research Receipt 和可信 leader 才能生成验证 preview。第二次确认锁定 challenger、未来
-起始交易日、10 个正式推荐日 commitment、评价合同和调度约束。验证期间不向 Agent 泄露中间优劣，
-由现有 timer 在 Agent 断开后继续推进。
-
-### 4. 最终回执
-
-Final Receipt 只读取已发布且校验通过的终态投影。结论为 `candidate_for_adoption` 时可内嵌只读
-Adoption Proposal；其他结论的 proposal 为 `null`。回执不构成生产变更授权。
-
-## 首个 recipe 和评价合同
-
-首个 case 比较当前 Top1 tie-break 与三个 challenger：当候选收益差处于冻结的 0.2%、0.4%、0.6%
-容差带内时，优先选择期权市场集中度更低的真实合约。Top1 只是首个 recipe，不是 Strategy Lab 的
-平台实体。
-
-每个 baseline/challenger 先在同一正式点配对，再按交易日聚合：
-
-- 主指标：占用资金年化收益率变化；
-- 辅助指标：CNY 收益金额变化；
-- 风险输入：recipe 明确声明的硬约束和缺失证据；
-- 不使用加权总分，也不把一天多个点当成多个独立交易日；
-- Sell Put 和普通 Covered Call 均使用各自冻结的收益率分母口径；
-- 原币金额通过已绑定的 opening / terminal FX 转为 CNY，缺失或冲突时 fail closed。
-
-公式、点配对、Student-t、尾部统计和确定性结论由 `economics.py` 与 `statistics.py` 唯一拥有；Agent
-不能按实验动态生成另一套评价函数。
-
-## 操作入口
-
-以下命令是 formal Top1 loop 的公开本地入口。所有示例都要求实际 service profile 路径。
-
-只读检查：
-
-```bash
-./om research strategy-lab top1-loop readiness \
-  --market hk --account lx --profile-path <runtime>/service.profile.json
-
-./om research strategy-lab top1-loop research preview \
-  --market hk --account lx --profile-path <runtime>/service.profile.json \
-  --cutoff-at-utc <ISO-8601> --latest-mature-trading-date <YYYY-MM-DD>
-
-./om research strategy-lab top1-loop status \
-  --market hk --account lx --profile-path <runtime>/service.profile.json \
-  --experiment-id <experiment-id>
-
-./om research strategy-lab top1-loop receipt \
-  --market hk --account lx --profile-path <runtime>/service.profile.json \
-  --experiment-id <experiment-id>
-```
-
-确认研究和验证是写操作，必须使用用户确认后的精确命令文件并显式传 `--write`：
-
-```bash
-./om research strategy-lab top1-loop research start \
-  --market hk --account lx --profile-path <runtime>/service.profile.json \
-  --cutoff-at-utc <ISO-8601> --latest-mature-trading-date <YYYY-MM-DD> \
-  --confirmed-start-file <confirmed-research.json> --write
-
-./om research strategy-lab top1-loop validation preview \
-  --market hk --account lx --profile-path <runtime>/service.profile.json \
-  --experiment-id <experiment-id> --validation-start-trading-date <YYYY-MM-DD>
-
-./om research strategy-lab top1-loop validation start \
-  --market hk --account lx --profile-path <runtime>/service.profile.json \
-  --experiment-id <experiment-id> --validation-start-trading-date <YYYY-MM-DD> \
-  --confirmed-start-file <confirmed-validation.json> --write
-```
-
-日历、W0R capability receipt、service render 和 scheduled advance 属于运维入口，具体参数和安全边界
-见[系统设计](STRATEGY_LAB_EXPERIMENT_PLATFORM_SYSTEM_DESIGN.md)；不得仅为查看状态触发 provider
-probe、安装服务或推进实验。
-
-## Recorder maintenance 入口
-
-以下兼容命令只维护本地 Shadow Replay evidence，不计入 formal Top1 验收：
-
-```bash
-./om research strategy-lab update --latest
-./om research strategy-lab update --latest --build-dataset --write
-```
-
-`update` 默认 dry-run；显式 `--write` 才执行本地 collect / settle，`--build-dataset --write` 才构建
-latest scanned run dataset。它不会修改生产配置、写交易状态或发送通知。其他本地探索使用
-`./om research shadow-replay ...`。
-
-## 当前完成度
-
-| 项目 | 状态 |
-|---|---|
-| 正式推荐点 v3 与 prepared option evidence | 已实现 |
-| 旧归档迁移兼容 | 已删除；正式研究只消费前瞻采集的完整 corpus |
-| 20 日 research preview / confirm / receipt | 已实现 |
-| 期权市场集中度、CNY 经济结果和双指标评价 | 已实现 |
-| 10 日 validation preview / confirm / scheduled advance / Final Receipt | 已实现 |
-| 账户级实验 feature gate 删除 | 已完成 |
-| Formal Corpus 查询式健康回执及 readiness 展示 | 已实现；不持久化重复回执，不自动修复或启动研究 |
-| 连续 20 个完整交易日真实 corpus | 积累中；以运行时 readiness 为准 |
-| 真实 Research Receipt 和可信 leader | 未完成 |
-| 未来 10 日隐藏验证和 Final Receipt | 未开始；受 research leader 与第二次确认门槛约束 |
-| MCP、Skill、跨机 Agent、飞书控制面 | MVP 外，未建设 |
-
-## 验证入口
-
-文档变更后最小检查：
-
-```bash
-./.venv/bin/python -m pytest \
-  tests/test_strategy_lab_top1_workspace.py \
-  tests/test_strategy_lab_top1_readiness.py \
-  tests/test_strategy_lab_top1_corpus.py \
-  tests/test_strategy_lab_top1_validation.py
-```
-
-真实验收不能由测试代替，必须以运行时 readiness、Research Receipt 和 Final Receipt 为证据。
+是否安装了旧 timer、远端是否仍有旧 SQLite、当前 Research Archive 是否健康，均属于运行事实，必须从
+目标环境的 service、artifact 和健康回执只读核验，不能由本文推断。
