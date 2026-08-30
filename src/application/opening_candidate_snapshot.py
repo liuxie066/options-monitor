@@ -1347,7 +1347,7 @@ def _canonical_json_bytes(payload: Mapping[str, Any]) -> bytes:
             dict(payload),
             ensure_ascii=False,
             sort_keys=True,
-            indent=2,
+            separators=(",", ":"),
             allow_nan=False,
         )
         + "\n"
