@@ -1,4 +1,4 @@
-"""Tests for fill-timestamp parsing and propagation in option_intake pipeline.
+"""Tests for fill-timestamp parsing and propagation in option message parsing.
 
 Covers:
 - HK message with explicit timestamp is parsed and returned as fill_time_ms
