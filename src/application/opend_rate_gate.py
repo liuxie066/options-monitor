@@ -93,6 +93,22 @@ class OpenDRateGate:
                     self._waiters.remove(ticket)
                     self._cv.notify()
 
+    def try_acquire(self) -> bool:
+        """Acquire immediately without waiting for capacity or a shared-state lock."""
+
+        with self._cv:
+            if self._waiters:
+                return False
+            now = self._clock()
+            if self._state_path is not None:
+                acquired, _wait_for = self._try_acquire_external_locked(now, blocking=False)
+                return acquired
+            self._prune_locked(now)
+            if self._blocked_until > now or len(self._timestamps) >= self._max_calls:
+                return False
+            self._timestamps.append(now)
+            return True
+
     def record_rate_limit(self, *, cooldown_sec: float | None = None) -> None:
         cooldown = self._window if cooldown_sec is None else max(0.0, float(cooldown_sec))
         now = self._clock()
@@ -125,33 +141,36 @@ class OpenDRateGate:
         while self._timestamps and now - self._timestamps[0] >= self._window:
             self._timestamps.popleft()
 
-    def _try_acquire_external_locked(self, now: float) -> tuple[bool, float]:
+    def _try_acquire_external_locked(self, now: float, *, blocking: bool = True) -> tuple[bool, float | None]:
         if self._state_path is None:
             return (False, 0.0)
         wall_now = self._wall_clock()
-        with _external_file_lock(self._state_path):
-            payload = self._read_external_payload()
-            blocked_until = _as_float(payload.get("blocked_until") if isinstance(payload, dict) else None, 0.0)
-            raw = payload.get("timestamps") if isinstance(payload, dict) else []
-            timestamps = self._fresh_wall_timestamps(raw, wall_now)
-            if blocked_until > wall_now:
-                self._timestamps = deque(ts - (wall_now - now) for ts in timestamps)
-                self._blocked_until = now + (blocked_until - wall_now)
-                self._write_external_timestamps(timestamps, blocked_until=blocked_until)
-                return (False, max(0.0, blocked_until - wall_now))
+        try:
+            with _external_file_lock(self._state_path, blocking=blocking):
+                payload = self._read_external_payload()
+                blocked_until = _as_float(payload.get("blocked_until") if isinstance(payload, dict) else None, 0.0)
+                raw = payload.get("timestamps") if isinstance(payload, dict) else []
+                timestamps = self._fresh_wall_timestamps(raw, wall_now)
+                if blocked_until > wall_now:
+                    self._timestamps = deque(ts - (wall_now - now) for ts in timestamps)
+                    self._blocked_until = now + (blocked_until - wall_now)
+                    self._write_external_timestamps(timestamps, blocked_until=blocked_until)
+                    return (False, max(0.0, blocked_until - wall_now))
 
-            self._blocked_until = 0.0
-            if len(timestamps) < self._max_calls:
-                timestamps.append(wall_now)
-                timestamps.sort()
+                self._blocked_until = 0.0
+                if len(timestamps) < self._max_calls:
+                    timestamps.append(wall_now)
+                    timestamps.sort()
+                    self._timestamps = deque(ts - (wall_now - now) for ts in timestamps)
+                    self._write_external_timestamps(timestamps)
+                    return (True, 0.0)
+
+                oldest = timestamps[0]
                 self._timestamps = deque(ts - (wall_now - now) for ts in timestamps)
                 self._write_external_timestamps(timestamps)
-                return (True, 0.0)
-
-            oldest = timestamps[0]
-            self._timestamps = deque(ts - (wall_now - now) for ts in timestamps)
-            self._write_external_timestamps(timestamps)
-            return (False, max(0.0, self._window - (wall_now - oldest)))
+                return (False, max(0.0, self._window - (wall_now - oldest)))
+        except BlockingIOError:
+            return (False, None)
 
     def _fresh_wall_timestamps(self, raw: list[Any], wall_now: float) -> list[float]:
         fresh: list[float] = []
@@ -192,18 +211,21 @@ class OpenDRateGate:
 
 
 @contextmanager
-def _external_file_lock(state_path: Path) -> Iterator[None]:
+def _external_file_lock(state_path: Path, *, blocking: bool = True) -> Iterator[None]:
     path = Path(state_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_suffix(path.suffix + ".lock")
     fh = lock_path.open("a+", encoding="utf-8")
+    locked = False
     try:
         if fcntl is not None:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            flags = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
+            fcntl.flock(fh.fileno(), flags)
+            locked = True
         yield
     finally:
         try:
-            if fcntl is not None:
+            if fcntl is not None and locked:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
         finally:
             fh.close()

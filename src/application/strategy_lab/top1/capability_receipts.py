@@ -15,6 +15,12 @@ from src.application.candidate_snapshot_contract import (
     CandidateSnapshotContractError,
     utc_timestamp,
 )
+from src.application.performance.account_fee_plan import (
+    ACCOUNT_FEE_PLAN_RECEIPT_SCHEMA,
+    AccountFeePlanReceiptError,
+    load_account_fee_plan_receipt as _load_account_fee_plan_receipt,
+    normalize_account_fee_plan_receipt,
+)
 from src.application.shadow_replay.common import render_json_text
 from src.application.strategy_lab.top1.fill_observation import (
     _price,
@@ -28,24 +34,9 @@ from src.infrastructure.private_storage import (
 )
 
 
-ACCOUNT_FEE_PLAN_RECEIPT_SCHEMA = "sell_put_top1_account_fee_plan_receipt.v1"
 CAPABILITY_RECEIPT_SCHEMA = "sell_put_top1_w0r_capability_receipt.v1"
 MAX_CAPABILITY_RECEIPT_BYTES = 8 * 1024
 
-_FEE_PLAN_FIELDS = frozenset(
-    {
-        "schema_version",
-        "market",
-        "account",
-        "commission_free",
-        "platform_fee",
-        "fee_plan_ref",
-        "observed_at_utc",
-        "evidence_ref",
-        "evidence_sha256",
-    }
-)
-_RECORDED_FEE_PLAN_FIELDS = _FEE_PLAN_FIELDS | {"source_receipt_sha256"}
 _RECEIPT_FIELDS = frozenset(
     {
         "schema_version",
@@ -161,45 +152,24 @@ def _opend_binding(value: object) -> dict[str, object]:
 
 
 def _fee_plan_receipt(value: object, *, recorded: bool) -> dict[str, object]:
-    if not isinstance(value, Mapping):
-        _fail("top1_capability_input_invalid", "account fee-plan receipt must be an object")
-    item = dict(value)
-    expected = _RECORDED_FEE_PLAN_FIELDS if recorded else _FEE_PLAN_FIELDS
-    if set(item) != expected or item.get("schema_version") != ACCOUNT_FEE_PLAN_RECEIPT_SCHEMA:
-        _fail("top1_capability_input_invalid", "account fee-plan receipt schema is invalid")
-    market, account = _identity(item.get("market"), item.get("account"))
-    if type(item.get("commission_free")) is not bool:
-        _fail("top1_capability_input_invalid", "commission_free must be boolean")
-    normalized: dict[str, object] = {
-        "schema_version": ACCOUNT_FEE_PLAN_RECEIPT_SCHEMA,
-        "market": market,
-        "account": account,
-        "commission_free": item["commission_free"],
-        "platform_fee": _nonnegative_number(item.get("platform_fee"), "platform_fee"),
-        "fee_plan_ref": _text(item.get("fee_plan_ref"), "fee_plan_ref"),
-        "observed_at_utc": _timestamp(item.get("observed_at_utc"), "observed_at_utc"),
-        "evidence_ref": _text(item.get("evidence_ref"), "evidence_ref"),
-        "evidence_sha256": _sha256(item.get("evidence_sha256"), "evidence_sha256"),
-    }
-    source_hash = canonical_sha256(normalized)
-    if recorded and _sha256(item.get("source_receipt_sha256"), "source_receipt_sha256") != source_hash:
-        _fail("top1_capability_input_invalid", "account fee-plan receipt hash changed")
-    return {**normalized, "source_receipt_sha256": source_hash}
+    try:
+        return normalize_account_fee_plan_receipt(value, recorded=recorded)
+    except AccountFeePlanReceiptError as exc:
+        raise Top1CapabilityReceiptError("top1_capability_input_invalid", str(exc)) from exc
 
 
 def load_account_fee_plan_receipt(path: str | Path) -> dict[str, object]:
     try:
-        with open_private_text(private_path(path)) as handle:
-            content = handle.read(MAX_CAPABILITY_RECEIPT_BYTES + 1)
-        if len(content.encode("utf-8")) > MAX_CAPABILITY_RECEIPT_BYTES:
-            raise ValueError("account fee-plan receipt is too large")
-        payload = json.loads(content)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        return _load_account_fee_plan_receipt(path)
+    except AccountFeePlanReceiptError as exc:
         raise Top1CapabilityReceiptError(
-            "account_fee_plan_receipt_unavailable",
-            "account fee-plan receipt cannot be read",
+            (
+                "account_fee_plan_receipt_unavailable"
+                if exc.reason_code == "account_fee_plan_receipt_unavailable"
+                else "top1_capability_input_invalid"
+            ),
+            str(exc),
         ) from exc
-    return _fee_plan_receipt(payload, recorded=False)
 
 
 def _capability_ref(market: str, account: str) -> str:
@@ -413,9 +383,7 @@ def read_top1_capability_receipt(
         _timestamp(payload.get("observed_at_utc"), "observed_at_utc")
         if _opend_binding(payload.get("opend_binding")) != expected_binding:
             raise ValueError("OpenD binding changed")
-        fee_plan = _fee_plan_receipt(
-            payload.get("account_fee_plan_receipt"), recorded=True
-        )
+        fee_plan = _fee_plan_receipt(payload.get("account_fee_plan_receipt"), recorded=True)
         if (fee_plan["market"], fee_plan["account"]) != (market, account):
             raise ValueError("account fee-plan identity changed")
         expected_hash = canonical_sha256({key: value for key, value in payload.items() if key != "content_sha256"})

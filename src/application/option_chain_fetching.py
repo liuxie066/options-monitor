@@ -134,6 +134,9 @@ class FileRateLimiter:
         except TimeoutError as exc:
             raise OptionChainRateLimitExceeded(str(exc)) from exc
 
+    def try_acquire(self) -> bool:
+        return bool(self._gate.try_acquire())
+
     def record_rate_limit(self, *, cooldown_sec: float | None = None) -> None:
         recorder = getattr(self._gate, "record_rate_limit", None)
         if callable(recorder):

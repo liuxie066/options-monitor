@@ -4,14 +4,18 @@ import gzip
 import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, Mapping
 
 import pytest
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from src.application.candidate_snapshot_manifest import load_candidate_snapshot_bundle
 from src.application.recommendation_point import (
+    build_formal_point_time_coherence,
+    build_option_position_evidence_binding,
     capture_scheduled_recommendation_point,
 )
 from src.application.research.formal_corpus import (
@@ -29,6 +33,62 @@ from src.application.strategy_lab.top1.ranking import (
     materialize_top1_recipe_input,
 )
 from tests.candidate_evidence_helpers import seal_opening_candidate_fixture
+
+
+def _canonical_bytes(payload: Mapping[str, Any]) -> bytes:
+    return (
+        json.dumps(
+            dict(payload),
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def _prepared_receipt(
+    opening: Mapping[str, Any],
+    *,
+    hkd_cny: float = 0.92,
+) -> dict[str, Any]:
+    observed_at = str(opening["sealed_at_utc"])
+    payload = {
+        "prepared_authority": {
+            "schema_version": "prepared_option_positions_context.v2",
+            "fx_status": "ready",
+            "fx_observation_sha256": "c" * 64,
+            "source_observed_at": observed_at,
+        },
+        "exchange_rates": {
+            "timestamp": observed_at,
+            "rates": {"HKDCNY": hkd_cny},
+        },
+        "current_decision_read": {
+            "status": "trusted",
+            "position_lots": [],
+        },
+        "decision_snapshot_actionable": True,
+    }
+    payload_bytes = _canonical_bytes(payload)
+    manifest = {
+        "schema_version": "prepared_option_positions_context.v2",
+        "status": "ready",
+        "run_id": opening["run_id"],
+        "account": opening["account"],
+        "account_config_sha256": opening["account_config_sha256"],
+        "application_received_at_utc": observed_at,
+        "payload_sha256": hashlib.sha256(payload_bytes).hexdigest(),
+        "ledger_generation_sha256": "a" * 64,
+        "decision_state_fingerprint": "b" * 64,
+    }
+    return {
+        "manifest": manifest,
+        "payload": payload,
+        "manifest_bytes": _canonical_bytes(manifest),
+        "payload_bytes": payload_bytes,
+    }
 
 
 def _schedule(*, start_plus_min: int = 10) -> dict[str, object]:
@@ -639,38 +699,57 @@ def test_ready_point_reloads_and_materializes_recipe_projection(
     )["owners"]["opening"]
     required_bytes = b'{"fixture":true}\n'
     required_hash = hashlib.sha256(required_bytes).hexdigest()
-    payload_bytes = b'{"prepared":true}\n'
-    evidence = {
-        "status": "ready",
+    receipt = _prepared_receipt(opening)
+    target_ms = int(
+        datetime.fromisoformat(target.replace("Z", "+00:00")).timestamp() * 1000
+    )
+    sealed_ms = int(
+        datetime.fromisoformat(
+            str(opening["sealed_at_utc"]).replace("Z", "+00:00")
+        ).timestamp()
+        * 1000
+    )
+    evidence = build_option_position_evidence_binding(
+        run_id=run_id,
+        account="lx",
+        market="HK",
+        recommendation_point_id=point["recommendation_point_id"],
+        account_config_sha256=opening["account_config_sha256"],
+        evidence_at_utc=opening["sealed_at_utc"],
+        prepared_receipt=receipt,
+        required_data_entries={},
+        formal_time_bounds=(target_ms - 300000, sealed_ms),
+    )
+    required_manifest = {
         "run_id": run_id,
-        "account": "lx",
-        "account_config_sha256": opening["account_config_sha256"],
-        "evidence_at_utc": "2026-06-01T00:00:00Z",
-        "open_option_positions": [],
-        "valuation_mark_facts": [],
-        "fx_rate_facts": [],
+        "symbols": {
+            "0700.HK": {
+                "status": "ready",
+                "source_observed_at": opening["sealed_at_utc"],
+                "payload_sha256": "e" * 64,
+                "scan_blob_ref": "blob/ref",
+            }
+        },
     }
-    evidence["content_sha256"] = canonical_sha256(evidence)
+    prepared_ref = evidence["position_source"]["manifest_ref"]
     point.update(
         {
             "schema_version": "recommendation_point.v3",
             "required_data_manifest_ref": "required/manifest.json",
             "required_data_manifest_sha256": required_hash,
-            "prepared_context_manifest_ref": "prepared/manifest.json",
-            "prepared_context_manifest_sha256": "d" * 64,
-            "prepared_context_payload_sha256": hashlib.sha256(
-                payload_bytes
+            "prepared_context_manifest_ref": prepared_ref,
+            "prepared_context_manifest_sha256": hashlib.sha256(
+                receipt["manifest_bytes"]
             ).hexdigest(),
-            "formal_point_time_coherence": {
-                "schema_version": "formal_point_time_coherence.v1",
-                "status": "ready",
-                "reason_code": None,
-                "minimum_observed_at_utc": "2026-06-01T00:00:00Z",
-                "maximum_observed_at_utc": "2026-06-01T00:00:00Z",
-                "observation_count": 1,
-                "skew_ms": 0,
-                "max_skew_ms": 300000,
-            },
+            "prepared_context_payload_sha256": hashlib.sha256(
+                receipt["payload_bytes"]
+            ).hexdigest(),
+            "option_position_evidence_binding": evidence,
+            "formal_point_time_coherence": build_formal_point_time_coherence(
+                opening,
+                required_manifest,
+                evidence,
+            ),
         }
     )
     point["content_sha256"] = canonical_sha256(
@@ -685,17 +764,7 @@ def test_ready_point_reloads_and_materializes_recipe_projection(
         mod,
         "load_required_data_snapshot_manifest_snapshot",
         lambda **_kwargs: (
-            {
-                "run_id": run_id,
-                "symbols": {
-                    "0700.HK": {
-                        "status": "ready",
-                        "source_observed_at": "2026-06-01T00:00:00Z",
-                        "payload_sha256": "e" * 64,
-                        "scan_blob_ref": "blob/ref",
-                    }
-                },
-            },
+            required_manifest,
             tmp_path,
             required_bytes,
         ),
@@ -703,17 +772,65 @@ def test_ready_point_reloads_and_materializes_recipe_projection(
     monkeypatch.setattr(
         mod,
         "load_prepared_option_positions_context_receipt",
-        lambda **_kwargs: {
-            "manifest": {},
-            "payload": {"strategy_lab_option_market_evidence": evidence},
-            "payload_bytes": payload_bytes,
-        },
+        lambda **_kwargs: receipt,
     )
     monkeypatch.setattr(
         mod,
-        "validate_strategy_lab_option_market_evidence",
-        lambda value, **_kwargs: value,
+        "resolve_frozen_required_data_csv_bytes_batch",
+        lambda **_kwargs: SimpleNamespace(entries={}, unavailable={}),
     )
+
+    alternate_receipt = _prepared_receipt(opening, hkd_cny=0.93)
+    alternate_evidence = build_option_position_evidence_binding(
+        run_id=run_id,
+        account="lx",
+        market="HK",
+        recommendation_point_id=point["recommendation_point_id"],
+        account_config_sha256=opening["account_config_sha256"],
+        evidence_at_utc=opening["sealed_at_utc"],
+        prepared_receipt=alternate_receipt,
+        required_data_entries={},
+        formal_time_bounds=(target_ms - 300000, sealed_ms),
+    )
+    alternate_evidence["position_source"] = dict(evidence["position_source"])
+    alternate_evidence["content_sha256"] = canonical_sha256(
+        {
+            key: value
+            for key, value in alternate_evidence.items()
+            if key != "content_sha256"
+        }
+    )
+    alternate_point = dict(point)
+    alternate_point["option_position_evidence_binding"] = alternate_evidence
+    alternate_point["content_sha256"] = canonical_sha256(
+        {
+            key: value
+            for key, value in alternate_point.items()
+            if key != "content_sha256"
+        }
+    )
+    tampered_root = tmp_path / "tampered-corpus"
+    _seal(tampered_root)
+    rejected = capture_formal_point_attempt(
+        tampered_root,
+        tmp_path,
+        market="HK",
+        account="lx",
+        trading_date="2026-08-26",
+        run_id=run_id,
+        scheduled_scan_target_market=target,
+        captured_at_utc="2026-08-26T02:00:02Z",
+        producer_behavior_version="recommendation_point.v3",
+        recommendation_point=alternate_point,
+    )
+    assert rejected["reason_code"] == "formal_point_evidence_missing"
+    assert mod.load_formal_point(
+        tampered_root,
+        market="HK",
+        account="lx",
+        trading_date="2026-08-26",
+        recommendation_point_id=point["recommendation_point_id"],
+    )["status"] == "not_evaluable"
 
     published = capture_formal_point_attempt(
         tmp_path,

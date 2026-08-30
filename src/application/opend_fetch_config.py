@@ -104,6 +104,9 @@ class OpenDFetchLimits:
         expiration_max_wait_sec: Any = _EXPIRATION_DEFAULT_MAX_WAIT_SEC,
         expiration_window_sec: Any = _EXPIRATION_DEFAULT_WINDOW_SEC,
         expiration_max_calls: Any = _EXPIRATION_DEFAULT_MAX_CALLS,
+        history_kline_max_wait_sec: Any = _HISTORY_KLINE_DEFAULT_MAX_WAIT_SEC,
+        history_kline_window_sec: Any = _HISTORY_KLINE_DEFAULT_WINDOW_SEC,
+        history_kline_max_calls: Any = _HISTORY_KLINE_DEFAULT_MAX_CALLS,
     ) -> "OpenDFetchLimits":
         return cls(
             option_chain=OpenDEndpointRateLimit.from_values(
@@ -125,9 +128,9 @@ class OpenDFetchLimits:
                 defaults=_EXPIRATION_DEFAULTS,
             ),
             history_kline=OpenDEndpointRateLimit.from_values(
-                window_sec=None,
-                max_calls=None,
-                max_wait_sec=None,
+                window_sec=history_kline_window_sec,
+                max_calls=history_kline_max_calls,
+                max_wait_sec=history_kline_max_wait_sec,
                 defaults=_HISTORY_KLINE_DEFAULTS,
             ),
         )
