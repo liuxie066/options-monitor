@@ -270,25 +270,58 @@ def test_barrier_prefetches_once_and_seals_before_account_submission(
     from src.application import tick_account_execution as mod
     from src.infrastructure.io_utils import atomic_write_json
 
+    is_partial = snapshot_status == "partial"
+    prefetch_payload = {
+        "schema_version": "1.0",
+        "errors": 1 if is_partial else 0,
+        "symbols": [
+            {"symbol": "NVDA", "status": "error" if is_partial else "ok"}
+        ],
+        "results": {"NVDA": "error" if is_partial else "ok"},
+        "global_required_data_plan": {
+            "plan_id": "a" * 64,
+            "symbols": [{"symbol": "NVDA", "fetch_plan": {}}],
+        },
+        "quote_receipts": {"NVDA": "receipts/NVDA.json"},
+        "audit": [
+            {
+                "symbol": "NVDA",
+                "source": "opend",
+                "status": "error" if is_partial else "fetched",
+                "message": "typed provider failure" if is_partial else "fetched",
+                "duration_sec": 0.125,
+                "quote_source_receipt": "receipts/NVDA.json",
+                **({"error_code": "RATE_LIMIT"} if is_partial else {}),
+                "payload": {
+                    "meta": {
+                        "status": "error" if is_partial else "ok",
+                        "error_code": "SNAPSHOT_COVERAGE_INCOMPLETE",
+                        "errors": ["expiration coverage incomplete"],
+                    },
+                    "option_chain": [
+                        {
+                            "contract_code": "NVDA260918P00100000",
+                            "raw": "x" * 8192,
+                        }
+                    ],
+                },
+            }
+        ],
+    }
+    prefetch_payload_before = json.loads(json.dumps(prefetch_payload))
     prefetch_calls: list[dict] = []
     account_requests = []
     cleanup_calls: list[dict] = []
 
     def fake_prefetch(**kwargs):
         prefetch_calls.append(kwargs)
-        return {
-            "schema_version": "1.0",
-            "errors": 1 if snapshot_status == "partial" else 0,
-            "symbols": [],
-            "results": {},
-            "global_required_data_plan": {
-                "plan_id": "a" * 64,
-                "symbols": [{"symbol": "NVDA", "fetch_plan": {}}],
-            },
-            "quote_receipts": {},
-        }
+        return prefetch_payload
 
     def fake_seal(**kwargs):
+        assert kwargs["prefetch_summary"] is prefetch_payload
+        assert kwargs["prefetch_summary"]["audit"][0]["payload"]["meta"][
+            "error_code"
+        ] == "SNAPSHOT_COVERAGE_INCOMPLETE"
         payload = {
             "schema_version": "required_data_snapshot_manifest.v1",
             "run_id": kwargs["run_id"],
@@ -334,6 +367,7 @@ def test_barrier_prefetches_once_and_seals_before_account_submission(
     )
 
     assert len(prefetch_calls) == 1
+    assert prefetch_payload == prefetch_payload_before
     assert len(cleanup_calls) == 1
     assert cleanup_calls[0]["trigger"] == "new_seal"
     assert cleanup_calls[0]["manifest_bytes"] == cleanup_calls[0][
@@ -362,6 +396,28 @@ def test_barrier_prefetches_once_and_seals_before_account_submission(
         for account in accounts
     ]
     assert len(set(summaries)) == 1
+    persisted = json.loads(summaries[0])
+    full_persisted = dict(prefetch_payload)
+    for field in (
+        "snapshot_manifest_relpath",
+        "snapshot_manifest_sha256",
+        "snapshot_status",
+    ):
+        full_persisted[field] = persisted[field]
+    expected_persisted = dict(full_persisted)
+    expected_persisted["audit"] = [
+        {key: value for key, value in item.items() if key != "payload"}
+        for item in full_persisted["audit"]
+    ]
+    assert persisted == expected_persisted
+    expected_bytes = (
+        json.dumps(expected_persisted, ensure_ascii=False, indent=2) + "\n"
+    ).encode("utf-8")
+    full_pretty_bytes = (
+        json.dumps(full_persisted, ensure_ascii=False, indent=2) + "\n"
+    ).encode("utf-8")
+    assert summaries[0] == expected_bytes
+    assert len(summaries[0]) * 2 < len(full_pretty_bytes)
 
 
 def test_experience_barrier_skips_account_authority_wheel_and_runtime_shadow(
