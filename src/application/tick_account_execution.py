@@ -697,25 +697,6 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                     message=str(message),
                 ),
                 persist_fx_evidence=not request.smoke,
-                mark_evidence_accounts=(
-                    tuple(
-                        account
-                        for account in sorted(scanning_configs)
-                        if account == "lx"
-                        and scheduled_scan_targets_by_account.get(account)
-                    )
-                    if (
-                        not request.smoke
-                        and str(request.trigger_kind or "").strip().lower()
-                        == "scheduled"
-                        and {
-                            str(market or "").strip().lower()
-                            for market in request.markets_to_run
-                        }
-                        in ({"hk"}, {"us"})
-                    )
-                    else ()
-                ),
                 )
             )
         except Exception as exc:

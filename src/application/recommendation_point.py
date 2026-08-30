@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import csv
 from datetime import datetime, timezone
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -10,6 +12,13 @@ import re
 from typing import Any, NoReturn
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
+from domain.domain.performance.models import (
+    FXRateFact,
+    OptionInstrumentKey,
+    OptionValuationPosition,
+    ValuationMarkFact,
+    canonical_decimal_text,
+)
 from src.application.candidate_snapshot_contract import (
     CandidateSnapshotContractError,
     utc_timestamp,
@@ -33,12 +42,18 @@ from src.application.prepared_option_positions_context import (
     PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA_V2,
     PREPARED_OPTION_POSITIONS_MANIFEST_NAME_V2,
     PreparedOptionPositionsContextError,
+    cny_per_currency_rates_from_option_context,
     find_prepared_option_positions_manifest,
     load_prepared_option_positions_context_receipt,
 )
+from src.application.performance.evidence_collection import (
+    build_option_valuation_mark_fact,
+)
 from src.application.required_data_snapshot import (
+    FrozenRequiredDataUnavailable,
     RequiredDataSnapshotError,
     load_required_data_snapshot_manifest_snapshot,
+    resolve_frozen_required_data_csv_bytes_batch,
 )
 from src.application.source_receipts import sha256_bytes
 from src.application.tick_run_workspace import (
@@ -94,6 +109,7 @@ _POINT_FIELDS_V3 = frozenset(
         "prepared_context_manifest_ref",
         "prepared_context_manifest_sha256",
         "prepared_context_payload_sha256",
+        "option_position_evidence_binding",
         "formal_point_time_coherence",
     }
 )
@@ -120,6 +136,7 @@ _POINT_BINDING_FIELDS_V3 = (
     "prepared_context_manifest_ref",
     "prepared_context_manifest_sha256",
     "prepared_context_payload_sha256",
+    "option_position_evidence_binding",
     "formal_point_time_coherence",
 )
 _TERMINAL_STATUSES = frozenset(
@@ -141,6 +158,84 @@ _TIME_COHERENCE_FIELDS = frozenset(
 )
 _TIME_COHERENCE_SCHEMA = "formal_point_time_coherence.v1"
 _TIME_COHERENCE_MAX_SKEW_MS = 300_000
+_OPTION_POSITION_EVIDENCE_SCHEMA = "option_position_evidence_binding.v1"
+_OPTION_POSITION_EVIDENCE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "status",
+        "run_id",
+        "account",
+        "account_config_sha256",
+        "recommendation_point_id",
+        "evidence_at_utc",
+        "position_source",
+        "open_option_positions",
+        "valuation_mark_facts",
+        "fx_rate_facts",
+        "content_sha256",
+    }
+)
+_POSITION_SOURCE_FIELDS = frozenset(
+    {
+        "manifest_ref",
+        "manifest_sha256",
+        "payload_sha256",
+        "ledger_generation_sha256",
+        "decision_state_fingerprint",
+        "fx_observation_sha256",
+    }
+)
+_OPTION_POSITION_FIELDS = frozenset(
+    {
+        "lot_id",
+        "account",
+        "broker",
+        "instrument_key",
+        "symbol",
+        "option_type",
+        "strike",
+        "expiration_ymd",
+        "currency",
+        "multiplier",
+        "position_side",
+        "contracts_open",
+        "market_code",
+    }
+)
+_OPTION_MARK_FIELDS = frozenset(
+    {
+        "fact_id",
+        "instrument_key",
+        "price",
+        "mark_kind",
+        "effective_at_ms",
+        "observed_at_ms",
+        "source",
+        "source_id",
+        "revision",
+        "supersedes_fact_id",
+        "source_fact_sha256",
+        "source_artifact_ref",
+        "source_artifact_sha256",
+        "source_row_identity",
+    }
+)
+_FX_RATE_FIELDS = frozenset(
+    {
+        "fact_id",
+        "base_currency",
+        "quote_currency",
+        "rate",
+        "rate_kind",
+        "effective_at_ms",
+        "observed_at_ms",
+        "source",
+        "source_id",
+        "revision",
+        "supersedes_fact_id",
+        "source_fact_sha256",
+    }
+)
 
 
 class RecommendationPointError(RuntimeError):
@@ -349,7 +444,7 @@ def _milliseconds_to_utc(value: Any, label: str) -> str:
 def build_formal_point_time_coherence(
     opening: Mapping[str, Any],
     required_data_manifest: Mapping[str, Any],
-    prepared_receipt: Mapping[str, Any],
+    option_position_evidence_binding: Mapping[str, Any],
 ) -> dict[str, Any]:
     timestamps: list[str] = []
     missing = False
@@ -380,13 +475,7 @@ def build_formal_point_time_coherence(
             )
         except RecommendationPointError:
             missing = True
-    payload = prepared_receipt.get("payload")
-    evidence = (
-        payload.get("strategy_lab_option_market_evidence")
-        if isinstance(payload, Mapping)
-        else None
-    )
-    marks = evidence.get("valuation_mark_facts") if isinstance(evidence, Mapping) else None
+    marks = option_position_evidence_binding.get("valuation_mark_facts")
     if not isinstance(marks, list):
         missing = True
         marks = []
@@ -452,16 +541,6 @@ def _prepared_option_binding(
             "option_market_evidence_conflict",
             "prepared option receipt identity does not match",
         )
-    evidence = payload.get("strategy_lab_option_market_evidence")
-    if not isinstance(evidence, Mapping) or evidence.get("status") != "ready":
-        _fail(
-            "option_market_evidence_missing",
-            str(
-                (evidence or {}).get("reason_code")
-                if isinstance(evidence, Mapping)
-                else "option market evidence is missing"
-            ),
-        )
     try:
         manifest_matches = json.loads(manifest_bytes.decode("utf-8")) == dict(
             manifest
@@ -505,6 +584,562 @@ def _prepared_option_binding(
     }
 
 
+def _prepared_position(
+    raw: Mapping[str, Any],
+    *,
+    account: str,
+) -> OptionValuationPosition:
+    fields = raw.get("fields")
+    if not isinstance(fields, Mapping):
+        _fail("option_position_evidence_missing", "prepared option lot fields are missing")
+    if str(fields.get("status") or "").strip().lower() != "open":
+        _fail("option_position_evidence_missing", "prepared option lot is not open")
+    try:
+        contracts_open = int(fields.get("contracts_open") or 0)
+        instrument = OptionInstrumentKey(
+            symbol=fields.get("symbol"),
+            option_type=fields.get("option_type"),
+            strike=fields.get("strike"),
+            expiration_ymd=fields.get("expiration_ymd"),
+            currency=fields.get("currency"),
+            multiplier=fields.get("multiplier"),
+        )
+        return OptionValuationPosition(
+            lot_id=_text(raw.get("record_id"), "position lot_id"),
+            account=account,
+            broker=_text(fields.get("broker"), "position broker"),
+            instrument=instrument,
+            position_side=str(fields.get("side") or "").strip().lower(),
+            contracts_open=contracts_open,
+            open_price=fields.get("premium") or 0,
+            open_fee_remaining=None,
+            open_fee_quality="missing",
+            opened_at_ms=int(fields.get("opened_at") or 0),
+            market_code=(
+                str(
+                    fields.get("market_code")
+                    or fields.get("contract_symbol")
+                    or fields.get("futu_code")
+                    or ""
+                ).strip()
+                or None
+            ),
+        )
+    except (TypeError, ValueError) as exc:
+        _fail("option_position_evidence_missing", f"prepared option lot is invalid: {exc}")
+
+
+def _csv_rows(encoded: bytes, *, symbol: str) -> list[dict[str, Any]]:
+    try:
+        text = bytes(encoded).decode("utf-8-sig")
+        rows = [dict(row) for row in csv.DictReader(io.StringIO(text))]
+    except (UnicodeDecodeError, csv.Error) as exc:
+        _fail("option_position_evidence_missing", f"{symbol} required-data CSV is invalid: {exc}")
+    return rows
+
+
+def _minimal_mark_fact(fact: Any) -> dict[str, Any]:
+    raw = dict(fact.raw)
+    return {
+        "fact_id": fact.fact_id,
+        "instrument_key": fact.instrument_key,
+        "price": canonical_decimal_text(fact.price),
+        "mark_kind": fact.mark_kind,
+        "effective_at_ms": fact.effective_at_ms,
+        "observed_at_ms": fact.observed_at_ms,
+        "source": fact.source,
+        "source_id": fact.source_id,
+        "revision": fact.revision,
+        "supersedes_fact_id": fact.supersedes_fact_id,
+        "source_fact_sha256": canonical_sha256(
+            fact.normalized_payload(include_fact_id=True)
+        ),
+        "source_artifact_ref": raw.get("artifact_ref"),
+        "source_artifact_sha256": raw.get("artifact_sha256"),
+        "source_row_identity": raw.get("source_row_identity"),
+    }
+
+
+def _minimal_fx_fact(fact: FXRateFact) -> dict[str, Any]:
+    return {
+        "fact_id": fact.fact_id,
+        "base_currency": fact.base_currency,
+        "quote_currency": fact.quote_currency,
+        "rate": canonical_decimal_text(fact.rate),
+        "rate_kind": fact.rate_kind,
+        "effective_at_ms": fact.effective_at_ms,
+        "observed_at_ms": fact.observed_at_ms,
+        "source": fact.source,
+        "source_id": fact.source_id,
+        "revision": fact.revision,
+        "supersedes_fact_id": fact.supersedes_fact_id,
+        "source_fact_sha256": canonical_sha256(
+            fact.normalized_payload(include_fact_id=True)
+        ),
+    }
+
+
+def build_option_position_evidence_binding(
+    *,
+    run_id: str,
+    account: str,
+    market: str,
+    recommendation_point_id: str,
+    account_config_sha256: str,
+    evidence_at_utc: str,
+    prepared_receipt: Mapping[str, Any],
+    required_data_entries: Mapping[str, tuple[Mapping[str, Any], bytes]],
+    formal_time_bounds: tuple[int, int],
+) -> dict[str, Any]:
+    """Bind held-option marks to the production scan artifacts without provider I/O."""
+
+    market = _market(market)
+    manifest = prepared_receipt.get("manifest")
+    payload = prepared_receipt.get("payload")
+    manifest_bytes = prepared_receipt.get("manifest_bytes")
+    payload_bytes = prepared_receipt.get("payload_bytes")
+    if not all(
+        (
+            isinstance(manifest, Mapping),
+            isinstance(payload, Mapping),
+            isinstance(manifest_bytes, bytes),
+            isinstance(payload_bytes, bytes),
+        )
+    ):
+        _fail("option_position_evidence_missing", "prepared position receipt is incomplete")
+    assert isinstance(manifest, Mapping) and isinstance(payload, Mapping)
+    assert isinstance(manifest_bytes, bytes) and isinstance(payload_bytes, bytes)
+    current_read = payload.get("current_decision_read")
+    if (
+        not isinstance(current_read, Mapping)
+        or current_read.get("status") != "trusted"
+        or payload.get("decision_snapshot_actionable") is not True
+        or not isinstance(current_read.get("position_lots"), list)
+    ):
+        _fail("option_position_evidence_missing", "prepared position facts are unavailable")
+
+    positions: list[OptionValuationPosition] = []
+    for row in current_read["position_lots"]:
+        if not isinstance(row, Mapping) or not isinstance(row.get("fields"), Mapping):
+            _fail("option_position_evidence_missing", "prepared option lot is invalid")
+        fields = row["fields"]
+        if str(fields.get("status") or "").strip().lower() != "open":
+            continue
+        positions.append(_prepared_position(row, account=account))
+    rows_by_symbol: dict[str, tuple[list[dict[str, Any]], dict[str, Any]]] = {}
+    for symbol, raw_entry in required_data_entries.items():
+        entry, csv_bytes = raw_entry
+        blob_ref = entry.get("scan_blob_ref")
+        if not isinstance(blob_ref, Mapping):
+            continue
+        rows_by_symbol[str(symbol).upper()] = (
+            _csv_rows(csv_bytes, symbol=str(symbol).upper()),
+            {
+                "artifact_ref": str(blob_ref.get("blob_relpath") or ""),
+                "artifact_sha256": str(blob_ref.get("blob_sha256") or ""),
+            },
+        )
+
+    marks_by_instrument: dict[str, dict[str, Any]] = {}
+    market_code_by_instrument: dict[str, str] = {}
+    for position in positions:
+        source = rows_by_symbol.get(position.instrument.symbol)
+        if source is None:
+            _fail(
+                "option_position_evidence_missing",
+                f"{position.instrument.symbol} is absent from the production snapshot batch",
+            )
+        rows, source_binding = source
+        try:
+            fact = build_option_valuation_mark_fact(
+                position,
+                rows,
+                source_binding,
+                formal_time_bounds,
+            )
+        except ValueError as exc:
+            _fail("option_position_evidence_missing", str(exc))
+        mark = _minimal_mark_fact(fact)
+        existing = marks_by_instrument.get(fact.instrument_key)
+        if existing is not None and existing != mark:
+            _fail("option_position_evidence_conflict", "one instrument has conflicting marks")
+        marks_by_instrument[fact.instrument_key] = mark
+        market_code_by_instrument[fact.instrument_key] = _text(
+            fact.raw.get("market_code"),
+            "option mark market_code",
+        )
+
+    rates = cny_per_currency_rates_from_option_context(payload)
+    required_currencies = {
+        position.instrument.currency for position in positions
+    } | {"USD" if market == "US" else "HKD"}
+    if not required_currencies.issubset(rates):
+        _fail("option_position_evidence_missing", "prepared FX facts are incomplete")
+    exchange_rates = payload.get("exchange_rates")
+    exchange_rates = exchange_rates if isinstance(exchange_rates, Mapping) else {}
+    try:
+        effective_at_ms = int(
+            datetime.fromisoformat(
+                str(exchange_rates.get("timestamp") or "").replace("Z", "+00:00")
+            ).astimezone(timezone.utc).timestamp()
+            * 1000
+        )
+        observed_at_ms = int(
+            datetime.fromisoformat(
+                str((payload.get("prepared_authority") or {}).get("source_observed_at") or "")
+                .replace("Z", "+00:00")
+            ).astimezone(timezone.utc).timestamp()
+            * 1000
+        )
+    except (TypeError, ValueError) as exc:
+        _fail("option_position_evidence_missing", f"prepared FX time is invalid: {exc}")
+    fx_hash = _hash(
+        (payload.get("prepared_authority") or {}).get("fx_observation_sha256"),
+        "fx_observation_sha256",
+        _HASH_64,
+    )
+    fx_facts = [
+        _minimal_fx_fact(
+            FXRateFact(
+                fact_id=None,
+                base_currency=currency,
+                quote_currency="CNY",
+                rate=rates[currency],
+                rate_kind="spot",
+                effective_at_ms=effective_at_ms,
+                observed_at_ms=observed_at_ms,
+                source="prepared_option_positions_context",
+                source_id=canonical_sha256(
+                    {"fx_observation_sha256": fx_hash, "currency": currency}
+                ),
+                quality={"persistence": "sealed_artifact"},
+                raw={"fx_observation_sha256": fx_hash},
+            )
+        )
+        for currency in sorted(required_currencies - {"CNY"})
+    ]
+
+    open_positions = [
+        {
+            "lot_id": position.lot_id,
+            "account": position.account,
+            "broker": position.broker,
+            "instrument_key": position.instrument.instrument_key,
+            "symbol": position.instrument.symbol,
+            "option_type": position.instrument.option_type,
+            "strike": canonical_decimal_text(position.instrument.strike),
+            "expiration_ymd": position.instrument.expiration_ymd,
+            "currency": position.instrument.currency,
+            "multiplier": canonical_decimal_text(position.instrument.multiplier),
+            "position_side": position.position_side,
+            "contracts_open": position.contracts_open,
+            "market_code": market_code_by_instrument[position.instrument.instrument_key],
+        }
+        for position in positions
+    ]
+    binding: dict[str, Any] = {
+        "schema_version": _OPTION_POSITION_EVIDENCE_SCHEMA,
+        "status": "ready",
+        "run_id": run_id,
+        "account": account,
+        "account_config_sha256": account_config_sha256,
+        "recommendation_point_id": recommendation_point_id,
+        "evidence_at_utc": evidence_at_utc,
+        "position_source": {
+            "manifest_ref": _option_market_evidence_ref(run_id, account),
+            "manifest_sha256": sha256_bytes(manifest_bytes),
+            "payload_sha256": sha256_bytes(payload_bytes),
+            "ledger_generation_sha256": _hash(
+                manifest.get("ledger_generation_sha256"),
+                "ledger_generation_sha256",
+                _HASH_64,
+            ),
+            "decision_state_fingerprint": _hash(
+                manifest.get("decision_state_fingerprint"),
+                "decision_state_fingerprint",
+                _HASH_64,
+            ),
+            "fx_observation_sha256": fx_hash,
+        },
+        "open_option_positions": sorted(open_positions, key=lambda row: row["lot_id"]),
+        "valuation_mark_facts": [marks_by_instrument[key] for key in sorted(marks_by_instrument)],
+        "fx_rate_facts": fx_facts,
+    }
+    binding["content_sha256"] = canonical_sha256(binding)
+    return validate_option_position_evidence_binding(
+        binding,
+        expected_run_id=run_id,
+        expected_account=account,
+        expected_recommendation_point_id=recommendation_point_id,
+        expected_market=market,
+    )
+
+
+def validate_option_position_evidence_binding(
+    value: Mapping[str, Any],
+    *,
+    expected_run_id: str,
+    expected_account: str,
+    expected_recommendation_point_id: str,
+    expected_market: str | None = None,
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != _OPTION_POSITION_EVIDENCE_FIELDS:
+        _fail("option_position_evidence_invalid", "option position evidence fields are invalid")
+    item = dict(value)
+    if (
+        item.get("schema_version") != _OPTION_POSITION_EVIDENCE_SCHEMA
+        or item.get("status") != "ready"
+        or item.get("run_id") != expected_run_id
+        or item.get("account") != expected_account
+        or item.get("recommendation_point_id")
+        != expected_recommendation_point_id
+    ):
+        _fail("option_position_evidence_invalid", "option position evidence identity changed")
+    _hash(item.get("account_config_sha256"), "account_config_sha256", _HASH_64)
+    evidence_at = _strict_timestamp(item.get("evidence_at_utc"), "evidence_at_utc")
+    evidence_at_ms = int(
+        datetime.fromisoformat(evidence_at.replace("Z", "+00:00")).timestamp()
+        * 1000
+    )
+    source = item.get("position_source")
+    if (
+        not isinstance(source, Mapping)
+        or set(source) != _POSITION_SOURCE_FIELDS
+        or source.get("manifest_ref")
+        != _option_market_evidence_ref(expected_run_id, expected_account)
+    ):
+        _fail("option_position_evidence_invalid", "position source binding is invalid")
+    for field in _POSITION_SOURCE_FIELDS - {"manifest_ref"}:
+        _hash(source.get(field), field, _HASH_64)
+
+    positions = item.get("open_option_positions")
+    marks = item.get("valuation_mark_facts")
+    rates = item.get("fx_rate_facts")
+    if (
+        not isinstance(positions, list)
+        or not isinstance(marks, list)
+        or not isinstance(rates, list)
+    ):
+        _fail("option_position_evidence_invalid", "option position evidence rows are invalid")
+    instruments: dict[str, OptionInstrumentKey] = {}
+    market_codes: dict[str, str] = {}
+    lot_ids: set[str] = set()
+    required_currencies: set[str] = set()
+    for row in positions:
+        if not isinstance(row, Mapping) or set(row) != _OPTION_POSITION_FIELDS:
+            _fail("option_position_evidence_invalid", "option position row is invalid")
+        lot_id = _text(row.get("lot_id"), "position lot_id")
+        if lot_id in lot_ids or row.get("account") != expected_account:
+            _fail("option_position_evidence_invalid", "option position identity is invalid")
+        lot_ids.add(lot_id)
+        try:
+            instrument = OptionInstrumentKey(
+                symbol=row.get("symbol"),
+                option_type=row.get("option_type"),
+                strike=row.get("strike"),
+                expiration_ymd=row.get("expiration_ymd"),
+                currency=row.get("currency"),
+                multiplier=row.get("multiplier"),
+            )
+            contracts_open = int(row.get("contracts_open"))
+        except (TypeError, ValueError) as exc:
+            _fail(
+                "option_position_evidence_invalid",
+                f"option position is invalid: {exc}",
+            )
+        _text(row.get("broker"), "position broker")
+        if (
+            instrument.instrument_key != row.get("instrument_key")
+            or row.get("symbol") != instrument.symbol
+            or row.get("option_type") != instrument.option_type
+            or row.get("strike")
+            != canonical_decimal_text(instrument.strike)
+            or row.get("expiration_ymd") != instrument.expiration_ymd
+            or row.get("currency") != instrument.currency
+            or row.get("multiplier")
+            != canonical_decimal_text(instrument.multiplier)
+            or row.get("position_side") not in {"short", "long"}
+            or row.get("contracts_open") != contracts_open
+            or contracts_open <= 0
+            or isinstance(row.get("contracts_open"), bool)
+        ):
+            _fail("option_position_evidence_invalid", "option position fields conflict")
+        code = _text(row.get("market_code"), "position market_code")
+        existing_code = market_codes.get(instrument.instrument_key)
+        if existing_code is not None and existing_code != code:
+            _fail("option_position_evidence_invalid", "option market code conflicts")
+        instruments[instrument.instrument_key] = instrument
+        market_codes[instrument.instrument_key] = code
+        required_currencies.add(instrument.currency)
+
+    mark_keys: set[str] = set()
+    for row in marks:
+        if not isinstance(row, Mapping) or set(row) != _OPTION_MARK_FIELDS:
+            _fail("option_position_evidence_invalid", "option mark row is invalid")
+        instrument_key = _text(row.get("instrument_key"), "mark instrument_key")
+        instrument = instruments.get(instrument_key)
+        if instrument is None or instrument_key in mark_keys:
+            _fail("option_position_evidence_invalid", "option mark coverage is invalid")
+        mark_keys.add(instrument_key)
+        artifact_ref = _text(
+            row.get("source_artifact_ref"),
+            "source_artifact_ref",
+        )
+        artifact_sha256 = _hash(
+            row.get("source_artifact_sha256"),
+            "source_artifact_sha256",
+            _HASH_64,
+        )
+        row_identity = _hash(
+            row.get("source_row_identity"),
+            "source_row_identity",
+            _HASH_64,
+        )
+        if (
+            artifact_ref.startswith("/")
+            or "\\" in artifact_ref
+            or any(
+                part in {"", ".", ".."} for part in artifact_ref.split("/")
+            )
+        ):
+            _fail("option_position_evidence_invalid", "source artifact ref is invalid")
+        source_id = canonical_sha256(
+            {
+                "artifact_sha256": artifact_sha256,
+                "row_identity": row_identity,
+                "instrument_key": instrument_key,
+                "market_code": market_codes[instrument_key],
+            }
+        )
+        try:
+            fact = ValuationMarkFact(
+                fact_id=None,
+                instrument=instrument,
+                price=row.get("price"),
+                mark_kind=row.get("mark_kind"),
+                effective_at_ms=row.get("effective_at_ms"),
+                observed_at_ms=row.get("observed_at_ms"),
+                source="required_data_snapshot",
+                source_id=source_id,
+                revision=1,
+                quality={
+                    "persistence": "sealed_artifact",
+                    "artifact_ref": artifact_ref,
+                    "artifact_sha256": artifact_sha256,
+                    "source_row_identity": row_identity,
+                },
+                raw={
+                    "artifact_ref": artifact_ref,
+                    "artifact_sha256": artifact_sha256,
+                    "source_row_identity": row_identity,
+                    "market_code": market_codes[instrument_key],
+                },
+            )
+        except (TypeError, ValueError) as exc:
+            _fail(
+                "option_position_evidence_invalid",
+                f"option mark is invalid: {exc}",
+            )
+        if (
+            row.get("source") != fact.source
+            or row.get("source_id") != fact.source_id
+            or row.get("price") != canonical_decimal_text(fact.price)
+            or row.get("mark_kind") not in {"midpoint", "last_fallback"}
+            or row.get("revision") != 1
+            or row.get("supersedes_fact_id") is not None
+            or row.get("fact_id") != fact.fact_id
+            or fact.price <= 0
+            or fact.observed_at_ms < fact.effective_at_ms
+            or fact.observed_at_ms > evidence_at_ms
+            or row.get("source_fact_sha256")
+            != canonical_sha256(
+                fact.normalized_payload(include_fact_id=True)
+            )
+        ):
+            _fail("option_position_evidence_invalid", "option mark binding changed")
+    if mark_keys != set(instruments):
+        _fail("option_position_evidence_invalid", "option mark coverage is incomplete")
+
+    market_currency = {
+        "HK": "HKD",
+        "US": "USD",
+    }.get(_market(expected_market) if expected_market is not None else None)
+    if market_currency is not None:
+        required_currencies.add(market_currency)
+    fx_currencies: set[str] = set()
+    for row in rates:
+        if not isinstance(row, Mapping) or set(row) != _FX_RATE_FIELDS:
+            _fail("option_position_evidence_invalid", "FX row is invalid")
+        try:
+            fact = FXRateFact(
+                fact_id=None,
+                base_currency=row.get("base_currency"),
+                quote_currency="CNY",
+                rate=row.get("rate"),
+                rate_kind="spot",
+                effective_at_ms=row.get("effective_at_ms"),
+                observed_at_ms=row.get("observed_at_ms"),
+                source="prepared_option_positions_context",
+                source_id=canonical_sha256(
+                    {
+                        "fx_observation_sha256": source[
+                            "fx_observation_sha256"
+                        ],
+                        "currency": row.get("base_currency"),
+                    }
+                ),
+                quality={"persistence": "sealed_artifact"},
+                raw={
+                    "fx_observation_sha256": source[
+                        "fx_observation_sha256"
+                    ]
+                },
+            )
+        except (TypeError, ValueError) as exc:
+            _fail(
+                "option_position_evidence_invalid",
+                f"FX fact is invalid: {exc}",
+            )
+        if (
+            fact.base_currency in fx_currencies
+            or row.get("base_currency") != fact.base_currency
+            or row.get("quote_currency") != "CNY"
+            or row.get("rate") != canonical_decimal_text(fact.rate)
+            or row.get("rate_kind") != fact.rate_kind
+            or row.get("source") != fact.source
+            or row.get("source_id") != fact.source_id
+            or row.get("revision") != 1
+            or row.get("supersedes_fact_id") is not None
+            or row.get("fact_id") != fact.fact_id
+            or fact.observed_at_ms < fact.effective_at_ms
+            or fact.observed_at_ms > evidence_at_ms
+            or row.get("source_fact_sha256")
+            != canonical_sha256(
+                fact.normalized_payload(include_fact_id=True)
+            )
+        ):
+            _fail("option_position_evidence_invalid", "FX binding changed")
+        fx_currencies.add(fact.base_currency)
+    if fx_currencies != required_currencies - {"CNY"}:
+        _fail("option_position_evidence_invalid", "FX coverage is incomplete")
+
+    if (
+        _hash(item.get("content_sha256"), "content_sha256", _HASH_64)
+        != canonical_sha256(
+            {
+                key: value
+                for key, value in item.items()
+                if key != "content_sha256"
+            }
+        )
+    ):
+        _fail(
+            "option_position_evidence_invalid",
+            "option position evidence hash changed",
+        )
+    return item
+
+
 def build_recommendation_point(
     scheduler_decision: Mapping[str, Any],
     terminal_manifest: Mapping[str, Any],
@@ -514,6 +1149,9 @@ def build_recommendation_point(
     source_commit_sha: str,
     prepared_option_receipt: Mapping[str, Any] | None = None,
     required_data_manifest: Mapping[str, Any] | None = None,
+    required_data_entries: Mapping[
+        str, tuple[Mapping[str, Any], bytes]
+    ] | None = None,
     required_data_manifest_ref: str | None = None,
     required_data_manifest_sha256: str | None = None,
 ) -> dict[str, Any]:
@@ -630,8 +1268,8 @@ def build_recommendation_point(
         _fail("official_point_invalid", "Sell Put terminal status is unsupported")
 
     formal = required_data_manifest is not None
-    if formal and prepared_option_receipt is None:
-        _fail("option_market_evidence_contract_missing", "formal point requires prepared evidence")
+    if formal and (prepared_option_receipt is None or required_data_entries is None):
+        _fail("option_position_evidence_missing", "formal point evidence is incomplete")
     point_schema = (
         RECOMMENDATION_POINT_SCHEMA_V3
         if formal
@@ -665,6 +1303,8 @@ def build_recommendation_point(
         "producer_accepted_candidate_ids": accepted_ids,
     }
     if point_schema == RECOMMENDATION_POINT_SCHEMA_V3:
+        assert prepared_option_receipt is not None
+        assert required_data_entries is not None
         dependency_ref, dependency_hash = _required_data_binding(opening)
         if (
             required_data_manifest_ref != dependency_ref
@@ -672,21 +1312,48 @@ def build_recommendation_point(
             or required_data_manifest.get("run_id") != run_id
         ):
             _fail("required_data_conflict", "required-data manifest binding does not match")
+        prepared_binding = _prepared_context_binding(
+            prepared_option_receipt,
+            run_id=run_id,
+            account=account,
+            account_config_sha256=opening["account_config_sha256"],
+            opening_sealed_at_utc=opening["sealed_at_utc"],
+        )
+        target_ms = int(
+            datetime.fromisoformat(target.replace("Z", "+00:00")).timestamp()
+            * 1000
+        )
+        sealed_ms = int(
+            datetime.fromisoformat(
+                _canonical_timestamp(opening["sealed_at_utc"], "opening sealed_at_utc")
+                .replace("Z", "+00:00")
+            ).timestamp()
+            * 1000
+        )
+        option_binding = build_option_position_evidence_binding(
+            run_id=run_id,
+            account=account,
+            market=market,
+            recommendation_point_id=point_id,
+            account_config_sha256=opening["account_config_sha256"],
+            evidence_at_utc=_canonical_timestamp(
+                opening["sealed_at_utc"],
+                "opening sealed_at_utc",
+            ),
+            prepared_receipt=prepared_option_receipt,
+            required_data_entries=required_data_entries,
+            formal_time_bounds=(target_ms - _TIME_COHERENCE_MAX_SKEW_MS, sealed_ms),
+        )
         payload.update(
             {
                 "required_data_manifest_ref": dependency_ref,
                 "required_data_manifest_sha256": dependency_hash,
-                **_prepared_context_binding(
-                    prepared_option_receipt,
-                    run_id=run_id,
-                    account=account,
-                    account_config_sha256=opening["account_config_sha256"],
-                    opening_sealed_at_utc=opening["sealed_at_utc"],
-                ),
+                **prepared_binding,
+                "option_position_evidence_binding": option_binding,
                 "formal_point_time_coherence": build_formal_point_time_coherence(
                     opening,
                     required_data_manifest,
-                    prepared_option_receipt,
+                    option_binding,
                 ),
             }
         )
@@ -786,6 +1453,24 @@ def validate_recommendation_point(
             "prepared_context_payload_sha256",
         ):
             _hash(item[field], field, _HASH_64)
+        option_binding = validate_option_position_evidence_binding(
+            item["option_position_evidence_binding"],
+            expected_run_id=run_id,
+            expected_account=account,
+            expected_recommendation_point_id=point_id,
+            expected_market=market,
+        )
+        if (
+            option_binding["account_config_sha256"]
+            != item["account_config_sha256"]
+            or option_binding["position_source"]["manifest_ref"]
+            != item["prepared_context_manifest_ref"]
+            or option_binding["position_source"]["manifest_sha256"]
+            != item["prepared_context_manifest_sha256"]
+            or option_binding["position_source"]["payload_sha256"]
+            != item["prepared_context_payload_sha256"]
+        ):
+            _fail("official_point_invalid", "option position evidence owner binding changed")
         coherence = item["formal_point_time_coherence"]
         if not isinstance(coherence, Mapping) or set(coherence) != _TIME_COHERENCE_FIELDS:
             _fail("official_point_invalid", "formal point time coherence is invalid")
@@ -967,6 +1652,7 @@ def capture_scheduled_recommendation_point(
         _fail("official_point_unavailable", "opening owner is unavailable")
     prepared_receipt: Mapping[str, Any] | None = None
     required_manifest: Mapping[str, Any] | None = None
+    required_entries: Mapping[str, tuple[Mapping[str, Any], bytes]] | None = None
     required_manifest_ref: str | None = None
     required_manifest_sha256: str | None = None
     if require_option_market_evidence or require_formal_contract:
@@ -988,7 +1674,7 @@ def capture_scheduled_recommendation_point(
                 required_path = Path(base).resolve().joinpath(
                     *required_manifest_ref.split("/")
                 )
-                required_manifest, _required_root, required_bytes = (
+                required_manifest, required_root, required_bytes = (
                     load_required_data_snapshot_manifest_snapshot(
                         manifest_path=required_path,
                         expected_run_id=run_id,
@@ -1002,6 +1688,23 @@ def capture_scheduled_recommendation_point(
                         "required_data_conflict",
                         "required-data manifest hash does not match",
                     )
+                required_batch = resolve_frozen_required_data_csv_bytes_batch(
+                    manifest_path=required_path,
+                    expected_run_id=run_id,
+                    required_data_root=required_root,
+                    require_fresh=False,
+                )
+                if required_batch.unavailable:
+                    _fail(
+                        "option_position_evidence_missing",
+                        "required-data snapshot batch is incomplete",
+                    )
+                required_entries = required_batch.entries
+        except FrozenRequiredDataUnavailable as exc:
+            _fail(
+                "required_data_snapshot_unavailable",
+                f"required-data snapshot unavailable: {exc.symbol}: {exc.reason}",
+            )
         except (OSError, RequiredDataSnapshotError) as exc:
             _fail("required_data_contract_missing", f"required-data manifest is invalid: {exc}")
         try:
@@ -1013,7 +1716,6 @@ def capture_scheduled_recommendation_point(
                 expected_account_config_sha256=str(
                     opening.get("account_config_sha256") or ""
                 ),
-                require_option_market_evidence=True,
             )
         except PreparedOptionPositionsContextError as exc:
             reason = str(exc)
@@ -1031,6 +1733,7 @@ def capture_scheduled_recommendation_point(
         source_commit_sha=source_commit_sha,
         prepared_option_receipt=prepared_receipt,
         required_data_manifest=required_manifest,
+        required_data_entries=required_entries,
         required_data_manifest_ref=required_manifest_ref,
         required_data_manifest_sha256=required_manifest_sha256,
     )

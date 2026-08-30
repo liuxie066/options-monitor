@@ -1340,8 +1340,6 @@ def _normalize_history_kline_quota_response(result: Any) -> dict[str, Any]:
         if not isinstance(code, str) or not code.strip():
             raise ValueError("history K-line quota detail code must be non-empty")
         normalized_code = code.strip().upper()
-        if normalized_code in seen_codes:
-            raise ValueError("history K-line quota detail codes must be unique")
         if (
             not isinstance(request_time, str)
             or not request_time
@@ -1366,8 +1364,8 @@ def _normalize_history_kline_quota_response(result: Any) -> dict[str, Any]:
             }
         )
 
-    if len(details) != used_quota:
-        raise ValueError("history K-line quota detail count must equal used_quota")
+    if len(seen_codes) != used_quota:
+        raise ValueError("history K-line quota distinct detail code count must equal used_quota")
     return {
         "used_quota": used_quota,
         "remain_quota": remain_quota,
@@ -1395,8 +1393,8 @@ def _futu_enum_value(namespace: str, value: Any) -> Any:
         if hasattr(enum_ns, name):
             return getattr(enum_ns, name)
         upper = name.upper()
-        if namespace == "KL_FIELD" and upper == "TIME_KEY":
-            upper = "DATE_TIME"
+        if namespace == "KL_FIELD":
+            upper = {"TIME_KEY": "DATE_TIME", "VOLUME": "TRADE_VOL"}.get(upper, upper)
         if hasattr(enum_ns, upper):
             return getattr(enum_ns, upper)
     except Exception:

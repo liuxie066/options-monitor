@@ -163,6 +163,20 @@ def _write_line(stream: Any, text: str) -> None:
         pass
 
 
+def tick_cron_is_busy(lock_path: str | Path) -> bool:
+    """Probe the Tick lock without waiting or retaining it."""
+
+    path = Path(lock_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+", encoding="utf-8") as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    return False
+
+
 def _resolve_config_for_preflight(plan: TickCronPlan, *, cwd: str | Path | None) -> Path:
     config_path = Path(plan.config_path).expanduser()
     if config_path.is_absolute():
