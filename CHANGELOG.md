@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Improvements
+- Reduced per-run Tick storage by omitting duplicated provider payloads from persisted prefetch summaries and compacting opening candidate snapshot JSON, without changing canonical required-data facts, candidate semantics, or notification behavior.
+
 ## 3.0.1 - 2026-08-30
 
 ### Improvements

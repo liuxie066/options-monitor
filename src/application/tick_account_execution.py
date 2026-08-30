@@ -1744,13 +1744,19 @@ def _publish_prefetch_summary_to_accounts(
     accounts: list[str],
     payload: dict[str, Any],
 ) -> None:
+    persisted_payload = dict(payload)
+    if "audit" in persisted_payload:
+        persisted_payload["audit"] = [
+            {key: value for key, value in item.items() if key != "payload"}
+            for item in persisted_payload["audit"]
+        ]
     for account in sorted(accounts):
         state_repo.write_account_run_state(
             request.base,
             request.run_id,
             account,
             "required_data_prefetch_summary.json",
-            payload,
+            persisted_payload,
         )
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +27,7 @@ from src.application.opening_candidate_snapshot import (
 )
 from src.application.candidate_snapshot_manifest import (
     CandidateSnapshotManifestError,
+    load_candidate_snapshot_bundle,
     load_latest_candidate_snapshot_bundle,
     publish_candidate_snapshot_manifest,
 )
@@ -268,12 +270,78 @@ def test_same_snapshot_replay_is_byte_hash_and_order_stable(tmp_path: Path) -> N
         / OPENING_CANDIDATE_SNAPSHOT_FILE
     )
     first_bytes = snapshot_path.read_bytes()
+    expected_compact_bytes = (
+        json.dumps(
+            first,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+    pretty_bytes = (
+        json.dumps(
+            first,
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
 
     second = _seal(tmp_path)
 
+    assert first_bytes == expected_compact_bytes
+    assert len(first_bytes) < len(pretty_bytes)
     assert second["content_sha256"] == first["content_sha256"]
     assert second["ranked_candidates"] == first["ranked_candidates"]
     assert snapshot_path.read_bytes() == first_bytes
+
+
+def test_pretty_snapshot_with_matching_manifest_remains_loadable(
+    tmp_path: Path,
+) -> None:
+    payload = _seal(tmp_path)
+    snapshot_path = (
+        tmp_path
+        / "output_runs"
+        / "run-1"
+        / "accounts"
+        / "lx"
+        / "state"
+        / OPENING_CANDIDATE_SNAPSHOT_FILE
+    )
+    compact_bytes = snapshot_path.read_bytes()
+    pretty_bytes = (
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+    assert pretty_bytes != compact_bytes
+    snapshot_path.write_bytes(pretty_bytes)
+
+    manifest = _publish_opening_manifest(tmp_path, payload)
+    bundle = load_candidate_snapshot_bundle(
+        base=tmp_path,
+        run_id="run-1",
+        account="lx",
+    )
+
+    opening_entry = next(
+        item
+        for item in manifest["owner_snapshots"]
+        if item["candidate_owner"] == "opening"
+    )
+    assert opening_entry["sha256"] == hashlib.sha256(pretty_bytes).hexdigest()
+    assert opening_entry["content_sha256"] == payload["content_sha256"]
+    assert bundle["owners"]["opening"] == payload
 
 
 @pytest.mark.parametrize(
