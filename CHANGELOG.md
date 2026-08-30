@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 3.0.1 - 2026-08-30
+
+### Improvements
+- Removed the retired internal option-intake and unused TradeIntent compatibility paths while preserving the current Assistant manual-trade commands and fill-timestamp parser coverage.
+
 ## 3.0.0 - 2026-08-30
 
 ### Breaking Changes
