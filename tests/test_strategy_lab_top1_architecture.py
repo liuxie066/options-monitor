@@ -159,13 +159,17 @@ def test_recommendation_point_imports_only_producer_evidence_owners() -> None:
         "re",
         "typing",
         "domain.domain.decision_state_fingerprint",
+        "domain.domain.performance.models",
         "src.application.candidate_snapshot_contract",
         "src.application.candidate_snapshot_manifest",
         "src.application.opening_candidate_snapshot",
+        "src.application.performance.evidence_collection",
         "src.application.prepared_option_positions_context",
         "src.application.required_data_snapshot",
         "src.application.source_receipts",
         "src.application.tick_run_workspace",
+        "csv",
+        "io",
     }
 
 

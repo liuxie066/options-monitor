@@ -226,6 +226,7 @@ def test_fetch_symbol_explicit_trading_date_anchors_chain_rv_rows_and_meta(
         market: str,
         expirations: list[str],
         base_dir: Path,
+        **_rate_limit: object,
     ) -> RealizedVolatilitySnapshot:
         rv_calls.append((underlier_code, trading_day))
         assert market == "US"

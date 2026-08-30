@@ -685,7 +685,7 @@ def test_barrier_reads_shared_ledger_once_and_plans_close_advice_before_prefetch
     outcome = mod.run_tick_account_execution(request)
 
     assert len(prepared_option_calls) == 1
-    assert prepared_option_calls[0]["mark_evidence_accounts"] == ("lx",)
+    assert "mark_evidence_accounts" not in prepared_option_calls[0]
     assert len(prefetch_calls) == 1
     merged_requirements = [
         requirement

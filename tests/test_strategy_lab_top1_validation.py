@@ -4,13 +4,13 @@ import hashlib
 import json
 from datetime import date, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 import src.application.strategy_lab.top1.research_runner as runner_module
 import tests.test_strategy_lab_top1_research as research_fixture
-from domain.domain.decision_state_fingerprint import canonical_sha256
 from src.application.recommendation_point import capture_scheduled_recommendation_point
 from src.application.research.formal_corpus import (
     capture_formal_point_attempt,
@@ -213,33 +213,23 @@ def _start_validation(
 
     def receipt_loader(**kwargs: object) -> dict[str, object]:
         run_id = str(kwargs["expected_run_id"])
-        evidence: dict[str, object] = {
-            "status": "ready",
-            "run_id": run_id,
-            "account": "lx",
-            "account_config_sha256": "a" * 64,
-            "evidence_at_utc": "2026-06-01T00:00:00Z",
-            "open_option_positions": [],
-            "valuation_mark_facts": [],
-            "fx_rate_facts": [
-                {
-                    "fact_id": "hkd-opening",
-                    "base_currency": "HKD",
-                    "quote_currency": "CNY",
-                    "rate": "1",
-                    "rate_kind": "fixture",
-                    "effective_at_ms": 1,
-                    "observed_at_ms": 1,
-                    "source": "fixture",
-                    "source_id": "hkd-opening",
-                    "revision": 1,
-                    "supersedes_fact_id": None,
-                    "source_fact_sha256": "8" * 64,
-                }
-            ],
+        payload: dict[str, object] = {
+            "prepared_authority": {
+                "schema_version": "prepared_option_positions_context.v2",
+                "fx_status": "ready",
+                "fx_observation_sha256": "f" * 64,
+                "source_observed_at": "2026-06-01T00:00:00Z",
+            },
+            "exchange_rates": {
+                "timestamp": "2026-06-01T00:00:00Z",
+                "rates": {"HKDCNY": 1, "USDCNY": 7.2},
+            },
+            "current_decision_read": {
+                "status": "trusted",
+                "position_lots": [],
+            },
+            "decision_snapshot_actionable": True,
         }
-        evidence["content_sha256"] = canonical_sha256(evidence)
-        payload = {"strategy_lab_option_market_evidence": evidence}
         payload_bytes = (
             json.dumps(payload, sort_keys=True, indent=2, allow_nan=False) + "\n"
         ).encode()
@@ -253,6 +243,8 @@ def _start_validation(
             ),
             "application_received_at_utc": "2026-06-01T00:00:00Z",
             "payload_sha256": hashlib.sha256(payload_bytes).hexdigest(),
+            "ledger_generation_sha256": "d" * 64,
+            "decision_state_fingerprint": "e" * 64,
         }
         manifest_bytes = (
             json.dumps(manifest, sort_keys=True, indent=2, allow_nan=False) + "\n"
@@ -277,6 +269,11 @@ def _start_validation(
     for module in (recommendation_module, formal_corpus_module):
         monkeypatch.setattr(
             module,
+            "resolve_frozen_required_data_csv_bytes_batch",
+            lambda **_kwargs: SimpleNamespace(entries={}, unavailable={}),
+        )
+        monkeypatch.setattr(
+            module,
             "_required_data_binding",
             lambda _opening: ("required/manifest.json", required_hash),
         )
@@ -289,11 +286,6 @@ def _start_validation(
         formal_corpus_module,
         "load_prepared_option_positions_context_receipt",
         receipt_loader,
-    )
-    monkeypatch.setattr(
-        formal_corpus_module,
-        "validate_strategy_lab_option_market_evidence",
-        lambda value, **_kwargs: value,
     )
     return store, artifact_root, source_root, dates, symbols_by_run
 
@@ -336,7 +328,6 @@ def _publish_candidate_point(
         "lx",
         _scheduler(trading_date),
         source_commit_sha="c" * 40,
-        require_option_market_evidence=True,
         require_formal_contract=True,
     )
     assert publication == "published"

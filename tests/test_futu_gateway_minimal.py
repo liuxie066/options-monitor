@@ -397,7 +397,7 @@ def test_gateway_request_history_kline_returns_page_key() -> None:
     }
 
 
-def test_gateway_request_history_kline_maps_time_key_to_sdk_date_time(monkeypatch) -> None:
+def test_gateway_request_history_kline_maps_canonical_fields_to_sdk(monkeypatch) -> None:
     import sys
     from types import SimpleNamespace
 
@@ -406,7 +406,7 @@ def test_gateway_request_history_kline_maps_time_key_to_sdk_date_time(monkeypatc
     fake_futu = SimpleNamespace(
         KLType=SimpleNamespace(K_DAY="k-day"),
         AuType=SimpleNamespace(QFQ="qfq"),
-        KL_FIELD=SimpleNamespace(DATE_TIME="date-time", CLOSE="close"),
+        KL_FIELD=SimpleNamespace(DATE_TIME="date-time", CLOSE="close", TRADE_VOL="trade-vol"),
     )
     monkeypatch.setitem(sys.modules, "futu", fake_futu)
 
@@ -443,10 +443,10 @@ def test_gateway_request_history_kline_maps_time_key_to_sdk_date_time(monkeypatc
         end="2026-08-06",
         ktype="K_DAY",
         autype="QFQ",
-        fields=["time_key", "close"],
+        fields=["time_key", "close", "volume"],
     )
 
-    assert gateway.backend.quote.kwargs["fields"] == ["date-time", "close"]
+    assert gateway.backend.quote.kwargs["fields"] == ["date-time", "close", "trade-vol"]
 
 
 def test_gateway_exact_expiration_close_requests_and_returns_bound_fact(
@@ -693,6 +693,11 @@ def test_gateway_history_kline_quota_returns_strict_compact_facts() -> None:
                             "name": "Tencent",
                             "request_time": "2026-08-14 15:59:00",
                         },
+                        {
+                            "code": "HK.00700",
+                            "name": "Tencent",
+                            "request_time": "2026-08-15 15:59:00",
+                        },
                     ],
                 ),
             )
@@ -717,6 +722,10 @@ def test_gateway_history_kline_quota_returns_strict_compact_facts() -> None:
             {
                 "code": "HK.00700",
                 "request_time": "2026-08-14 15:59:00",
+            },
+            {
+                "code": "HK.00700",
+                "request_time": "2026-08-15 15:59:00",
             },
             {
                 "code": "US.NVDA",

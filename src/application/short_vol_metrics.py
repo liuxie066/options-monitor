@@ -10,6 +10,7 @@ from typing import Any, Iterable
 
 import pandas as pd
 
+from src.application.opend_call_coordinator import rate_limited_opend_call
 from src.infrastructure.io_utils import atomic_write_json
 
 
@@ -176,6 +177,9 @@ def fetch_realized_volatility_snapshot(
     expirations: Iterable[str] | None = None,
     base_dir: Path | None = None,
     lookback_calendar_days: int = 240,
+    history_kline_max_wait_sec: float = 30.0,
+    history_kline_window_sec: float = 30.0,
+    history_kline_max_calls: int = 60,
 ) -> RealizedVolatilitySnapshot:
     expiration_dates = _normalize_expiration_dates(expirations)
     if not expiration_dates or not str(market or "").strip():
@@ -184,6 +188,10 @@ def fetch_realized_volatility_snapshot(
             underlier_code=underlier_code,
             trading_day=trading_day,
             lookback_calendar_days=lookback_calendar_days,
+            base_dir=base_dir,
+            history_kline_max_wait_sec=history_kline_max_wait_sec,
+            history_kline_window_sec=history_kline_window_sec,
+            history_kline_max_calls=history_kline_max_calls,
         )
 
     market_code = str(market or "").strip().upper()
@@ -242,6 +250,9 @@ def fetch_realized_volatility_snapshot(
             trading_day=trading_day,
             history_start=history_start,
             base_dir=base_dir,
+            history_kline_max_wait_sec=history_kline_max_wait_sec,
+            history_kline_window_sec=history_kline_window_sec,
+            history_kline_max_calls=history_kline_max_calls,
         )
     except Exception as exc:
         return _unavailable_term_snapshot(
@@ -309,6 +320,10 @@ def _fetch_legacy_diagnostic_snapshot(
     underlier_code: str,
     trading_day: date,
     lookback_calendar_days: int,
+    base_dir: Path | None,
+    history_kline_max_wait_sec: float,
+    history_kline_window_sec: float,
+    history_kline_max_calls: int,
 ) -> RealizedVolatilitySnapshot:
     start = trading_day - timedelta(days=max(140, int(lookback_calendar_days)))
     try:
@@ -317,6 +332,10 @@ def _fetch_legacy_diagnostic_snapshot(
             underlier_code=underlier_code,
             start=start,
             end=trading_day,
+            base_dir=base_dir,
+            history_kline_max_wait_sec=history_kline_max_wait_sec,
+            history_kline_window_sec=history_kline_window_sec,
+            history_kline_max_calls=history_kline_max_calls,
         )
         snapshot = compute_realized_volatility_snapshot(data)
         if snapshot.status == "ok":
@@ -390,19 +409,35 @@ def _fetch_qfq_history_rows(
     underlier_code: str,
     start: date,
     end: date,
+    base_dir: Path | None,
+    history_kline_max_wait_sec: float,
+    history_kline_window_sec: float,
+    history_kline_max_calls: int,
 ) -> list[dict[str, Any]]:
     raw_rows: list[dict[str, Any]] = []
     page_req_key = None
     for _ in range(20):
-        result = gateway.request_history_kline(
-            code=str(underlier_code),
-            start=start.isoformat(),
-            end=end.isoformat(),
-            ktype="K_DAY",
-            autype=QFQ_HISTORY_AUTYPE,
-            fields=["time_key", "close"],
-            max_count=300,
-            page_req_key=page_req_key,
+        call = lambda page_req_key=page_req_key: gateway.request_history_kline(
+                code=str(underlier_code),
+                start=start.isoformat(),
+                end=end.isoformat(),
+                ktype="K_DAY",
+                autype=QFQ_HISTORY_AUTYPE,
+                fields=["time_key", "close"],
+                max_count=300,
+                page_req_key=page_req_key,
+            )
+        result = (
+            rate_limited_opend_call(
+                base_dir=base_dir,
+                endpoint="history_kline",
+                max_wait_sec=history_kline_max_wait_sec,
+                window_sec=history_kline_window_sec,
+                max_calls=history_kline_max_calls,
+                call=call,
+            )
+            if base_dir is not None
+            else call()
         )
         chunk = result.get("data") if isinstance(result, dict) else result
         raw_rows.extend(_rows(chunk))
@@ -473,6 +508,9 @@ def _load_refresh_qfq_history(
     trading_day: date,
     history_start: date,
     base_dir: Path | None,
+    history_kline_max_wait_sec: float,
+    history_kline_window_sec: float,
+    history_kline_max_calls: int,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     cache_path = (
         qfq_history_cache_path(
@@ -505,6 +543,10 @@ def _load_refresh_qfq_history(
         underlier_code=underlier_code,
         start=refresh_start,
         end=trading_day,
+        base_dir=base_dir,
+        history_kline_max_wait_sec=history_kline_max_wait_sec,
+        history_kline_window_sec=history_kline_window_sec,
+        history_kline_max_calls=history_kline_max_calls,
     )
     revision_detected = _history_revision_detected(
         cached_rows,
@@ -518,6 +560,10 @@ def _load_refresh_qfq_history(
             underlier_code=underlier_code,
             start=history_start,
             end=trading_day,
+            base_dir=base_dir,
+            history_kline_max_wait_sec=history_kline_max_wait_sec,
+            history_kline_window_sec=history_kline_window_sec,
+            history_kline_max_calls=history_kline_max_calls,
         )
     cached_merged = _merge_history_rows(
         ([] if revision_detected else cached_rows),

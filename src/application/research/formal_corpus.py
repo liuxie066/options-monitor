@@ -25,18 +25,21 @@ from src.application.opening_candidate_snapshot import (
 from src.application.prepared_option_positions_context import (
     PreparedOptionPositionsContextError,
     load_prepared_option_positions_context_receipt,
-    validate_strategy_lab_option_market_evidence,
 )
 from src.application.recommendation_point import (
     RECOMMENDATION_POINT_SCHEMA_V3,
     RecommendationPointError,
     build_formal_point_time_coherence,
+    build_option_position_evidence_binding,
     build_recommendation_point_id,
+    validate_option_position_evidence_binding,
     validate_recommendation_point,
 )
 from src.application.required_data_snapshot import (
+    FrozenRequiredDataUnavailable,
     RequiredDataSnapshotError,
     load_required_data_snapshot_manifest_snapshot,
+    resolve_frozen_required_data_csv_bytes_batch,
 )
 from src.application.scan_scheduler import scheduled_scan_targets_for_date
 from src.application.source_receipts import sha256_bytes
@@ -124,7 +127,7 @@ _POINT_FIELDS = frozenset(
         "recommendation_point",
         "opening_snapshot",
         "required_data_symbols",
-        "option_market_evidence",
+        "option_position_evidence_binding",
         "content_sha256",
     }
 )
@@ -1005,35 +1008,26 @@ def _validate_formal_point(
         else:
             _fail("formal_corpus_artifact_invalid", "required-data symbol status is invalid")
         symbol_map[symbol] = row
-    evidence = item.get("option_market_evidence")
+    evidence = item.get("option_position_evidence_binding")
     if item["status"] == "ready" and not isinstance(evidence, Mapping):
         _fail("formal_corpus_artifact_invalid", "ready formal point evidence is missing")
     if validated_point is not None:
         if not isinstance(opening, Mapping) or not isinstance(evidence, Mapping):
             _fail("formal_corpus_artifact_invalid", "formal point owner facts are incomplete")
         try:
-            validate_strategy_lab_option_market_evidence(
+            validate_option_position_evidence_binding(
                 evidence,
-                manifest={
-                    "run_id": binding["run_id"],
-                    "account": account,
-                    "account_config_sha256": validated_point[
-                        "account_config_sha256"
-                    ],
-                    "ledger_generation_sha256": evidence.get(
-                        "ledger_generation_sha256_b"
-                    ),
-                    "decision_state_fingerprint": evidence.get(
-                        "decision_state_fingerprint_b"
-                    ),
-                },
+                expected_run_id=binding["run_id"],
+                expected_account=account,
+                expected_recommendation_point_id=point_id,
+                expected_market=market,
             )
-        except PreparedOptionPositionsContextError as exc:
+        except RecommendationPointError as exc:
             raise FormalCorpusError("formal_corpus_artifact_invalid", str(exc)) from exc
         rebuilt_coherence = build_formal_point_time_coherence(
             opening,
             {"symbols": symbol_map},
-            {"payload": {"strategy_lab_option_market_evidence": evidence}},
+            evidence,
         )
         if rebuilt_coherence != validated_point["formal_point_time_coherence"]:
             _fail("formal_corpus_artifact_invalid", "formal point time coherence changed")
@@ -1182,7 +1176,7 @@ def capture_formal_point_attempt(
             opening_snapshot = dict(opening)
             required_ref, required_hash = _required_data_binding(opening)
             required_path = private_path(source_root).joinpath(*required_ref.split("/"))
-            required_manifest, _required_root, required_bytes = (
+            required_manifest, required_root, required_bytes = (
                 load_required_data_snapshot_manifest_snapshot(
                     manifest_path=required_path,
                     expected_run_id=run_id,
@@ -1204,14 +1198,46 @@ def capture_formal_point_attempt(
                 expected_account=account,
                 expected_account_config_sha256=point["account_config_sha256"],
                 expected_manifest_sha256=point["prepared_context_manifest_sha256"],
-                require_option_market_evidence=True,
             )
-            evidence = validate_strategy_lab_option_market_evidence(
-                receipt["payload"]["strategy_lab_option_market_evidence"],
-                manifest=receipt["manifest"],
+            evidence = validate_option_position_evidence_binding(
+                point["option_position_evidence_binding"],
+                expected_run_id=run_id,
+                expected_account=account,
+                expected_recommendation_point_id=point_id,
+                expected_market=market,
             )
             if sha256_bytes(receipt["payload_bytes"]) != point["prepared_context_payload_sha256"]:
                 raise ValueError("prepared payload binding changed")
+            required_batch = resolve_frozen_required_data_csv_bytes_batch(
+                manifest_path=required_path,
+                expected_run_id=run_id,
+                required_data_root=required_root,
+                require_fresh=False,
+            )
+            if required_batch.unavailable:
+                raise ValueError("required-data snapshot batch is incomplete")
+            target_ms = int(
+                datetime.fromisoformat(target.replace("Z", "+00:00")).timestamp()
+                * 1000
+            )
+            sealed_at = utc_timestamp(opening["sealed_at_utc"], "opening sealed_at_utc")
+            sealed_ms = int(
+                datetime.fromisoformat(sealed_at.replace("Z", "+00:00")).timestamp()
+                * 1000
+            )
+            expected_evidence = build_option_position_evidence_binding(
+                run_id=run_id,
+                account=account,
+                market=market,
+                recommendation_point_id=point_id,
+                account_config_sha256=point["account_config_sha256"],
+                evidence_at_utc=sealed_at,
+                prepared_receipt=receipt,
+                required_data_entries=required_batch.entries,
+                formal_time_bounds=(target_ms - FORMAL_POINT_MAX_SKEW_MS, sealed_ms),
+            )
+            if evidence != expected_evidence:
+                raise ValueError("option position evidence does not match owner artifacts")
             owner_hashes = {
                 "recommendation_point_content_sha256": point["content_sha256"],
                 "opening_snapshot_sha256": point["opening_snapshot_sha256"],
@@ -1246,6 +1272,7 @@ def capture_formal_point_attempt(
             OpeningCandidateSnapshotError,
             PreparedOptionPositionsContextError,
             RecommendationPointError,
+            FrozenRequiredDataUnavailable,
             RequiredDataSnapshotError,
             KeyError,
             TypeError,
@@ -1282,7 +1309,7 @@ def capture_formal_point_attempt(
         "recommendation_point": point,
         "opening_snapshot": opening_snapshot,
         "required_data_symbols": symbols,
-        "option_market_evidence": evidence,
+        "option_position_evidence_binding": evidence,
     }
     payload["content_sha256"] = canonical_sha256(payload)
     content = _render(payload)

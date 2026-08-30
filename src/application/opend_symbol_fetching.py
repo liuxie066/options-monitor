@@ -365,6 +365,9 @@ class FetchSymbolRequest:
     expiration_max_wait_sec: float = 30.0
     expiration_window_sec: float = 30.0
     expiration_max_calls: int = 60
+    history_kline_max_wait_sec: float = 30.0
+    history_kline_window_sec: float = 30.0
+    history_kline_max_calls: int = 60
     gateway: Any = None
     snapshot_batch_size: int | None = None
     snapshot_fallback_max_codes: int = 100
@@ -388,10 +391,13 @@ class FetchSymbolRequest:
             expiration_max_wait_sec=self.expiration_max_wait_sec,
             expiration_window_sec=self.expiration_window_sec,
             expiration_max_calls=self.expiration_max_calls,
+            history_kline_max_wait_sec=self.history_kline_max_wait_sec,
+            history_kline_window_sec=self.history_kline_window_sec,
+            history_kline_max_calls=self.history_kline_max_calls,
         )
 
 
-def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = '127.0.0.1', port: int = 11111, spot_override: float | None = None, *, underlier_observation: dict[str, Any] | None = None, fetch_spot_if_missing: bool = True, base_dir: Path | None = None, option_types: str = 'put,call', min_strike: float | None = None, max_strike: float | None = None, side_strike_windows: dict[str, dict[str, float | None]] | None = None, min_dte: int | None = None, max_dte: int | None = None, explicit_expirations: list[str] | None = None, trading_date: str | None = None, retry_max_attempts: int = 4, retry_time_budget_sec: float = 8.0, retry_base_delay_sec: float = 0.8, retry_max_delay_sec: float = 6.0, no_retry: bool = False, chain_cache: bool = False, chain_cache_force_refresh: bool = False, freshness_policy: str = 'cache_first', max_wait_sec: float = 90.0, option_chain_window_sec: float = 30.0, option_chain_max_calls: int = 10, snapshot_max_wait_sec: float = 30.0, snapshot_window_sec: float = 30.0, snapshot_max_calls: int = 60, expiration_max_wait_sec: float = 30.0, expiration_window_sec: float = 30.0, expiration_max_calls: int = 60, gateway: Any = None, snapshot_batch_size: int | None = None, snapshot_fallback_max_codes: int = 100, snapshot_fallback_batch_size: int = 20, include_realized_volatility: bool = False) -> dict[str, Any]:
+def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = '127.0.0.1', port: int = 11111, spot_override: float | None = None, *, underlier_observation: dict[str, Any] | None = None, fetch_spot_if_missing: bool = True, base_dir: Path | None = None, option_types: str = 'put,call', min_strike: float | None = None, max_strike: float | None = None, side_strike_windows: dict[str, dict[str, float | None]] | None = None, min_dte: int | None = None, max_dte: int | None = None, explicit_expirations: list[str] | None = None, trading_date: str | None = None, retry_max_attempts: int = 4, retry_time_budget_sec: float = 8.0, retry_base_delay_sec: float = 0.8, retry_max_delay_sec: float = 6.0, no_retry: bool = False, chain_cache: bool = False, chain_cache_force_refresh: bool = False, freshness_policy: str = 'cache_first', max_wait_sec: float = 90.0, option_chain_window_sec: float = 30.0, option_chain_max_calls: int = 10, snapshot_max_wait_sec: float = 30.0, snapshot_window_sec: float = 30.0, snapshot_max_calls: int = 60, expiration_max_wait_sec: float = 30.0, expiration_window_sec: float = 30.0, expiration_max_calls: int = 60, history_kline_max_wait_sec: float = 30.0, history_kline_window_sec: float = 30.0, history_kline_max_calls: int = 60, gateway: Any = None, snapshot_batch_size: int | None = None, snapshot_fallback_max_codes: int = 100, snapshot_fallback_batch_size: int = 20, include_realized_volatility: bool = False) -> dict[str, Any]:
     return fetch_symbol_request(
         FetchSymbolRequest(
             symbol=symbol,
@@ -427,6 +433,9 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
             expiration_max_wait_sec=expiration_max_wait_sec,
             expiration_window_sec=expiration_window_sec,
             expiration_max_calls=expiration_max_calls,
+            history_kline_max_wait_sec=history_kline_max_wait_sec,
+            history_kline_window_sec=history_kline_window_sec,
+            history_kline_max_calls=history_kline_max_calls,
             gateway=gateway,
             snapshot_batch_size=snapshot_batch_size,
             snapshot_fallback_max_codes=snapshot_fallback_max_codes,
@@ -682,6 +691,9 @@ def fetch_symbol_request(
                     market=u.market,
                     expirations=expirations,
                     base_dir=effective_base_dir,
+                    history_kline_max_wait_sec=opend_limits.history_kline.max_wait_sec,
+                    history_kline_window_sec=opend_limits.history_kline.window_sec,
+                    history_kline_max_calls=opend_limits.history_kline.max_calls,
                 )
             else:
                 rv_snapshot = _no_contracts_realized_volatility()

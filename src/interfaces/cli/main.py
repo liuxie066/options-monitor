@@ -109,6 +109,10 @@ from src.interfaces.cli.settings_ops import (
     handle_settings_command,
     inspect_effective_settings,
 )
+from src.interfaces.cli.strategy_lab_ops import (
+    add_strategy_lab_commands,
+    handle_strategy_lab_command,
+)
 from src.interfaces.cli.setup_ops import add_setup_commands, handle_setup_command, run_setup_check
 
 
@@ -130,6 +134,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add_runtime_observability_commands(sub)
 
     add_research_commands(sub)
+
+    add_strategy_lab_commands(sub)
 
     add_operator_commands(sub)
 
@@ -265,6 +271,9 @@ def main(argv: list[str] | None = None) -> int:
                 args,
                 repo_base_fn=repo_base,
             ))
+
+        if args.command == "strategy-lab":
+            return _print(handle_strategy_lab_command(args))
 
         if args.command in {"scan", "close-advice", "notify"}:
             return _print(handle_operator_command(

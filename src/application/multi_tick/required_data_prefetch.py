@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import replace
 from datetime import date, datetime, timezone
 import json
 import multiprocessing
@@ -136,6 +137,7 @@ def _resolve_opend_fetch_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
         "option_chain": dict(resolved["option_chain"]),
         "market_snapshot": dict(resolved["market_snapshot"]),
         "option_expiration": dict(resolved["option_expiration"]),
+        "history_kline": dict(resolved["history_kline"]),
     }
 
 
@@ -944,6 +946,21 @@ def _fetch_one_inprocess(
             )
         gateway = _gateway_pool.get_gateway(host=host, port=port, chain_cache=True)
         if fetch_plan is None:
+            rv_fetch_kwargs = (
+                {
+                    "history_kline_max_wait_sec": float(
+                        opend_fetch_cfg["history_kline"]["max_wait_sec"]
+                    ),
+                    "history_kline_window_sec": float(
+                        opend_fetch_cfg["history_kline"]["window_sec"]
+                    ),
+                    "history_kline_max_calls": int(
+                        opend_fetch_cfg["history_kline"]["max_calls"]
+                    ),
+                }
+                if fetch_kwargs.get("include_realized_volatility")
+                else {}
+            )
             payload0 = fetch_symbol(
                 symbol,
                 limit_expirations=limit_exp,
@@ -974,6 +991,7 @@ def _fetch_one_inprocess(
                 expiration_window_sec=float(opend_fetch_cfg['option_expiration']['window_sec']),
                 expiration_max_calls=int(opend_fetch_cfg['option_expiration']['max_calls']),
                 include_realized_volatility=bool(fetch_kwargs.get("include_realized_volatility")),
+                **rv_fetch_kwargs,
             )
         else:
             specs = list(fetch_plan.merged_specs)
@@ -999,6 +1017,19 @@ def _fetch_one_inprocess(
                         not fetch_plan.spot_observation_complete
                     ),
                 )
+                if spec.include_realized_volatility:
+                    request = replace(
+                        request,
+                        history_kline_max_wait_sec=float(
+                            opend_fetch_cfg["history_kline"]["max_wait_sec"]
+                        ),
+                        history_kline_window_sec=float(
+                            opend_fetch_cfg["history_kline"]["window_sec"]
+                        ),
+                        history_kline_max_calls=int(
+                            opend_fetch_cfg["history_kline"]["max_calls"]
+                        ),
+                    )
                 child_payload = _fetch_symbol_for_required_data_request(
                     request=request,
                     base=base,
@@ -1832,7 +1863,17 @@ def _prefetch_required_data_unlocked(
         if fetch_kwargs.get("explicit_expirations"):
             cmd.extend(['--explicit-expirations', *[str(exp) for exp in fetch_kwargs["explicit_expirations"]]])
         if fetch_kwargs.get("include_realized_volatility"):
-            cmd.append('--include-realized-volatility')
+            cmd.extend(
+                [
+                    '--history-kline-window-sec',
+                    str(opend_fetch_cfg["history_kline"]["window_sec"]),
+                    '--history-kline-max-calls',
+                    str(opend_fetch_cfg["history_kline"]["max_calls"]),
+                    '--history-kline-max-wait-sec',
+                    str(opend_fetch_cfg["history_kline"]["max_wait_sec"]),
+                    '--include-realized-volatility',
+                ]
+            )
         trading_date = fetch_kwargs.get("trading_date")
         if isinstance(trading_date, str) and trading_date:
             cmd.extend(['--trading-date', trading_date])
