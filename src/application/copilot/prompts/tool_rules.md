@@ -11,7 +11,11 @@
   Activation replaces schemas; do not reactivate an unchanged set.
 - Option income/performance, including corrections: use
   `option_performance_report`, never generic analysis. One period only: MTD is
-  `period=mtd` without month/year/range; no account means all.
+  `period=mtd` without month/year/range; no account means all. An unqualified
+  current-month label such as `8月` means MTD; use `period=month` only for an
+  explicit natural or completed month. Only the exact affirmative current-message
+  form `截至YYYY-MM-DD的M月期权收益率` authorizes MTD `as_of_date`; otherwise
+  omit it, even if retained conversation or tool history contains an older cutoff.
 - Treat only runtime context fields explicitly marked as fixed tool scope as
   authoritative. Do not broaden or replace them.
 - Use the smallest useful call sequence. Stop when evidence supports the answer
