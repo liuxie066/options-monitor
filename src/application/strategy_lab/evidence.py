@@ -37,9 +37,7 @@ EVIDENCE_SCHEMA = "strategy_lab_evidence"
 MAX_EVIDENCE_BYTES = 2 * 1024 * 1024
 _HK_TZ = ZoneInfo("Asia/Hong_Kong")
 _HASH = frozenset("0123456789abcdef")
-_ARTIFACT_KINDS = frozenset(
-    {"history_k", "expiry_close", "hidden_batch", "validation_fill"}
-)
+_ARTIFACT_KINDS = frozenset({"history_k", "expiry_close", "hidden_batch", "validation_fill"})
 
 
 class StrategyLabEvidenceError(ValueError):
@@ -116,9 +114,7 @@ def _utc_text(value: datetime) -> str:
 
 
 def _first_complete_minute(value: object) -> datetime:
-    return _utc(value, "recommendation_available_at_utc").replace(
-        second=0, microsecond=0
-    ) + timedelta(minutes=1)
+    return _utc(value, "recommendation_available_at_utc").replace(second=0, microsecond=0) + timedelta(minutes=1)
 
 
 def _session_end_utc(trading_date: str, trade_date_type: object) -> datetime:
@@ -167,9 +163,7 @@ def _terminal_binding(spec: Mapping[str, Any], expiration: str) -> dict[str, Any
     matches = [
         item
         for item in spec.get("terminal_fx_bindings", [])
-        if isinstance(item, Mapping)
-        and item.get("expiration") == expiration
-        and item.get("currency") == "HKD"
+        if isinstance(item, Mapping) and item.get("expiration") == expiration and item.get("currency") == "HKD"
     ]
     if len(matches) != 1:
         _fail("research_evidence_invalid", "terminal FX binding is unavailable")
@@ -232,6 +226,16 @@ def _outcome_query(
     identity = resolve_symbol_identity(contract)
     if identity is None or identity.market != "HK":
         _fail("research_evidence_invalid", "contract underlier identity is unavailable")
+    source = _mapping(provider_source, "provider_source")
+    binding = _mapping(source.get("opend_binding"), "provider_source.opend_binding")
+    authority = {
+        "provider": _text(source.get("provider"), "provider_source.provider"),
+        "endpoint": "history_kline",
+        "opend_binding": {
+            "host": _text(binding.get("host"), "provider_source.opend_binding.host"),
+            "port": _positive_int(binding.get("port"), "provider_source.opend_binding.port"),
+        },
+    }
     return {
         "underlying_code": identity.futu_code,
         "contract_symbol": contract,
@@ -240,9 +244,28 @@ def _outcome_query(
         "multiplier": _positive_int(candidate.get("multiplier"), "multiplier"),
         "terminal_fx_binding": dict(terminal_fx_binding),
         "fee_plan": dict(fee_plan),
-        "provider_source": dict(provider_source),
+        "provider_source": {
+            **authority,
+            "source_authority_sha256": canonical_sha256(authority),
+        },
         "evaluator_behavior_sha256": evaluator_behavior_sha256,
     }
+
+
+def build_expiry_close_query(
+    arm: Mapping[str, Any],
+    terminal_fx_binding: Mapping[str, Any],
+    fee_plan: Mapping[str, Any],
+    provider_source: Mapping[str, Any],
+    evaluator_behavior_sha256: str,
+) -> dict[str, Any]:
+    return _outcome_query(
+        _mapping(arm, "arm").get("candidate", {}),
+        terminal_fx_binding,
+        fee_plan,
+        provider_source,
+        evaluator_behavior_sha256,
+    )
 
 
 def load_research_projection(spec: Mapping[str, Any]) -> dict[str, Any]:
@@ -260,9 +283,7 @@ def load_research_projection(spec: Mapping[str, Any]) -> dict[str, Any]:
     fee_plan_owner = _mapping(frozen.get("fee_plan"), "fee_plan")
     fee_plan = _mapping(fee_plan_owner.get("receipt"), "fee_plan.receipt")
     provider_source = _provider_source(frozen)
-    behavior_sha256 = _sha256(
-        frozen.get("evaluator_behavior_sha256"), "evaluator_behavior_sha256"
-    )
+    behavior_sha256 = _sha256(frozen.get("evaluator_behavior_sha256"), "evaluator_behavior_sha256")
     for session in sessions:
         session = _mapping(session, "research session")
         trading_date = _text(session.get("trading_date"), "trading_date")
@@ -308,9 +329,7 @@ def load_research_projection(spec: Mapping[str, Any]) -> dict[str, Any]:
                 )
                 expiration = _text(candidate.get("expiration"), "expiration")
                 terminal_fx = _terminal_binding(frozen, expiration)
-                outcome_query = _outcome_query(
-                    candidate, terminal_fx, fee_plan, provider_source, behavior_sha256
-                )
+                outcome_query = _outcome_query(candidate, terminal_fx, fee_plan, provider_source, behavior_sha256)
                 outcome_hash = canonical_sha256(outcome_query)
                 outcome_queries.setdefault(
                     outcome_hash,
@@ -361,9 +380,7 @@ def _artifact_location(artifact_root: str | Path, kind: str, query_sha256: str) 
     return target, Path(f"{target}.lock"), ref
 
 
-def read_evidence_artifact(
-    artifact_root: str | Path, kind: str, query_sha256: str
-) -> dict[str, Any] | None:
+def read_evidence_artifact(artifact_root: str | Path, kind: str, query_sha256: str) -> dict[str, Any] | None:
     target, lock_path, ref = _artifact_location(artifact_root, kind, query_sha256)
     if not target.exists():
         return None
@@ -424,9 +441,7 @@ def _observation_payload(observation: Mapping[str, Any]) -> dict[str, Any]:
 def _artifact_evidence_ref(observation: Mapping[str, Any]) -> dict[str, str]:
     return {
         "artifact_ref": _text(observation.get("artifact_ref"), "artifact_ref"),
-        "artifact_sha256": _sha256(
-            observation.get("artifact_sha256"), "artifact_sha256"
-        ),
+        "artifact_sha256": _sha256(observation.get("artifact_sha256"), "artifact_sha256"),
     }
 
 
@@ -446,9 +461,10 @@ def _research_fill(arm: Mapping[str, Any], history: Mapping[str, Any]) -> dict[s
         _fail("research_evidence_invalid", "normalized history-K bars are unavailable")
     for bar in bars:
         bar = _mapping(bar, "history-K bar")
-        if _decimal(bar.get("high"), "bar.high", positive=True) >= crossing and _decimal(
-            bar.get("volume"), "bar.volume"
-        ) > 0:
+        if (
+            _decimal(bar.get("high"), "bar.high", positive=True) >= crossing
+            and _decimal(bar.get("volume"), "bar.volume") > 0
+        ):
             return {
                 "status": "simulated_fill",
                 "fill_price": float(sell_limit),
@@ -479,7 +495,13 @@ def next_missing_research_evidence(
         artifact = read_evidence_artifact(artifact_root, query["artifact_kind"], query["query_sha256"])
         action = "bind_artifact" if artifact is not None else "collect_history_k"
         target, lock_path, _ref = _artifact_location(artifact_root, query["artifact_kind"], query["query_sha256"])
-        return {"action": action, **query, "artifact": artifact, "artifact_path": str(target), "lock_path": str(lock_path)}
+        return {
+            "action": action,
+            **query,
+            "artifact": artifact,
+            "artifact_path": str(target),
+            "lock_path": str(lock_path),
+        }
     for item in projection["arms"]:
         fill_key = item["research_fill_key"]
         fill_observation = indexed.get(fill_key)
@@ -581,10 +603,7 @@ def collect_research_fill_evidence(
     """Fetch and normalize one complete paginated history-K logical unit."""
 
     item = _mapping(query, "history-K query")
-    provider_query = {
-        key: item[key]
-        for key in ("code", "start", "end", "ktype", "autype", "fields", "max_count")
-    }
+    provider_query = {key: item[key] for key in ("code", "start", "end", "ktype", "autype", "fields", "max_count")}
     raw_rows: list[dict[str, Any]] = []
     page_key: object = None
     page_count = 0
@@ -748,11 +767,12 @@ def publish_evidence_artifact(
     query: Mapping[str, Any],
     observed_at_utc: str,
     producer_source_commit_sha: str,
-    lock_held: bool = False,
 ) -> dict[str, Any]:
     """Publish once or verify identical canonical Strategy Lab evidence bytes."""
 
-    target, lock_path, _ref = _artifact_location(artifact_root, kind, query_sha256)
+    location = evidence_artifact_location(artifact_root, kind, query_sha256)
+    target = Path(location["artifact_path"])
+    lock_path = Path(location["lock_path"])
     canonical_query = _mapping(query, "evidence query")
     if canonical_sha256(canonical_query) != query_sha256:
         _fail("research_evidence_invalid", "Strategy Lab evidence query hash changed")
@@ -785,15 +805,11 @@ def publish_evidence_artifact(
             _fail("research_evidence_artifact_invalid", "Strategy Lab evidence readback failed")
         return readback
 
-    if lock_held:
-        return publish()
     with exclusive_private_file_lock(lock_path, blocking=False):
         return publish()
 
 
-def evidence_artifact_location(
-    artifact_root: str | Path, kind: str, query_sha256: str
-) -> dict[str, str]:
+def evidence_artifact_location(artifact_root: str | Path, kind: str, query_sha256: str) -> dict[str, str]:
     target, lock_path, ref = _artifact_location(artifact_root, kind, query_sha256)
     return {"artifact_path": str(target), "lock_path": str(lock_path), "artifact_ref": ref}
 
@@ -820,9 +836,7 @@ def build_validation_point_evidence(
     ]
     point_id = _sha256(projected.get("recommendation_point_id"), "recommendation_point_id")
     artifact_ref = _text(loaded_point.get("artifact_ref"), "formal point artifact_ref")
-    artifact_hash = _sha256(
-        loaded_point.get("artifact_file_sha256"), "formal point artifact_file_sha256"
-    )
+    artifact_hash = _sha256(loaded_point.get("artifact_file_sha256"), "formal point artifact_file_sha256")
     arms: list[dict[str, Any]] = []
     for raw in projected["arms"]:
         arm = _mapping(raw, "validation arm")
@@ -849,9 +863,7 @@ def build_validation_point_evidence(
         "session_endpoint_utc": _utc_text(endpoint),
         "formal_point_ref": artifact_ref,
         "formal_point_sha256": artifact_hash,
-        "formal_point_content_sha256": _sha256(
-            formal_point.get("content_sha256"), "formal_point.content_sha256"
-        ),
+        "formal_point_content_sha256": _sha256(formal_point.get("content_sha256"), "formal_point.content_sha256"),
         "source_commit_sha": _source_commit(projected.get("source_commit_sha")),
         "opening_fx_binding": projected["opening_fx_binding"],
         "arms": arms,
@@ -943,18 +955,39 @@ def _source_timestamp(row: Mapping[str, Any]) -> str | None:
     return None
 
 
-def normalize_hidden_snapshot(
-    manifest: Mapping[str, Any], result: MarketSnapshotFetchResult
-) -> dict[str, Any]:
+def normalize_hidden_snapshot(manifest: Mapping[str, Any], result: MarketSnapshotFetchResult) -> dict[str, Any]:
     """Normalize exactly one provider batch without quote or time backfill."""
 
-    if result.opend_call_count != 1 or any(
-        isinstance(error, Mapping) and error.get("stage") == "market_snapshot"
+    expected_codes = frozenset(manifest["option_codes"])
+    duplicate_or_unexpected = any(
+        isinstance(error, Mapping)
+        and error.get("error_code") in {"SNAPSHOT_DUPLICATE_CODES", "SNAPSHOT_UNEXPECTED_CODES"}
         for error in result.errors
+    )
+    if (
+        result.opend_call_count != 1
+        or result.requested_codes != expected_codes
+        or bool(result.unexpected_codes)
+        or bool(result.returned_codes - expected_codes)
+        or bool(set(result.snap_map) - expected_codes)
+        or duplicate_or_unexpected
+        or result.fallback_filled != 0
+        or any(isinstance(error, Mapping) and error.get("stage") == "market_snapshot" for error in result.errors)
     ):
         _fail("validation_snapshot_invalid", "hidden snapshot did not use one provider call")
     if result.requested_at_utc is None or result.received_at_utc is None:
         _fail("validation_snapshot_invalid", "hidden snapshot observation times are missing")
+    try:
+        requested_at = _utc(result.requested_at_utc, "requested_at_utc")
+        received_at = _utc(result.received_at_utc, "received_at_utc")
+        slot = _utc(manifest.get("observation_slot_utc"), "observation_slot_utc")
+        deadline = _utc(manifest.get("deadline_utc"), "deadline_utc")
+    except StrategyLabEvidenceError as exc:
+        raise StrategyLabEvidenceError(
+            "validation_snapshot_invalid", "hidden snapshot time envelope is invalid"
+        ) from exc
+    if not slot <= requested_at <= received_at <= deadline:
+        _fail("validation_snapshot_invalid", "hidden snapshot time envelope is outside tolerance")
     quotes: list[dict[str, Any]] = []
     for code in manifest["option_codes"]:
         row = result.snap_map.get(code)
@@ -984,150 +1017,143 @@ def normalize_hidden_snapshot(
             )
     return {
         "status": "available",
-        "requested_at_utc": _utc_text(_utc(result.requested_at_utc, "requested_at_utc")),
-        "observed_at_utc": _utc_text(_utc(result.received_at_utc, "received_at_utc")),
+        "requested_at_utc": _utc_text(requested_at),
+        "observed_at_utc": _utc_text(received_at),
         "quotes": quotes,
     }
 
 
-def hidden_quote_rows(
-    manifest: Mapping[str, Any], artifact: Mapping[str, Any]
-) -> list[dict[str, Any]]:
-    payload = _mapping(artifact.get("payload"), "hidden batch payload")
-    by_code = {
-        row["code"]: row
-        for row in payload.get("quotes", [])
-        if isinstance(row, Mapping) and isinstance(row.get("code"), str)
-    }
-    rows: list[dict[str, Any]] = []
-    for arm in manifest["arms"]:
-        quote = by_code.get(arm["code"])
-        common = {
-            "batch_ref": _text(artifact.get("artifact_ref"), "batch artifact_ref"),
-            "batch_sha256": _sha256(artifact.get("artifact_sha256"), "batch artifact_sha256"),
-            "observation_slot_utc": manifest["observation_slot_utc"],
-            "sell_limit": arm["sell_limit"],
-            "quote_evidence_not_broker_execution": True,
-        }
-        if not isinstance(quote, Mapping) or quote.get("status") != "available":
-            status = "gap"
-            quote_payload = {**common, "reason_code": "validation_snapshot_invalid"}
-        else:
-            status = (
-                "observed_fill"
-                if _decimal(quote.get("bid_price"), "bid_price", positive=True)
-                >= _decimal(arm["sell_limit"], "sell_limit", positive=True)
-                else "complete"
-            )
-            quote_payload = {
-                **common,
-                "code": arm["code"],
-                "bid_price": quote["bid_price"],
-                "bid_vol": quote["bid_vol"],
-                "source_time_utc": quote["source_time_utc"],
-                "requested_at_utc": payload.get("requested_at_utc"),
-                "observed_at_utc": payload.get("observed_at_utc"),
-            }
-            if status == "observed_fill":
-                quote_payload.update(
-                    fill_price=arm["sell_limit"],
-                    fill_time=manifest["observation_slot_utc"],
-                )
-        rows.append(
-            {
-                "recommendation_point_id": arm["recommendation_point_id"],
-                "arm_id": arm["arm_id"],
-                "status": status,
-                "payload": quote_payload,
-            }
-        )
-    return rows
+def _hidden_snapshot_quotes(manifest: Mapping[str, Any], artifact: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    body = _mapping(artifact.get("artifact"), "hidden batch artifact")
+    payload = _mapping(body.get("payload"), "hidden batch payload")
+    if body.get("kind") != "hidden_batch" or body.get("query") != dict(manifest):
+        _fail("validation_snapshot_invalid", "hidden batch artifact binding changed")
+    if payload.get("status") != "available" or body.get("observed_at_utc") != payload.get("observed_at_utc"):
+        _fail("validation_snapshot_invalid", "hidden batch artifact time binding changed")
+    quotes = payload.get("quotes")
+    if not isinstance(quotes, list):
+        _fail("validation_snapshot_invalid", "hidden batch quotes are invalid")
+    indexed: dict[str, dict[str, Any]] = {}
+    for raw in quotes:
+        quote = _mapping(raw, "hidden batch quote")
+        code = _text(quote.get("code"), "hidden batch quote code")
+        if code in indexed or code not in manifest["option_codes"]:
+            _fail("validation_snapshot_invalid", "hidden batch quote identity changed")
+        if quote.get("status") == "available":
+            _decimal(quote.get("bid_price"), "bid_price", positive=True)
+            _decimal(quote.get("bid_vol"), "bid_vol", positive=True)
+            _utc(quote.get("source_time_utc"), "source_time_utc")
+        elif quote.get("status") != "not_evaluable" or quote.get("reason_code") != "validation_snapshot_invalid":
+            _fail("validation_snapshot_invalid", "hidden batch quote status changed")
+        indexed[code] = quote
+    if set(indexed) != set(manifest["option_codes"]):
+        _fail("validation_snapshot_invalid", "hidden batch quote coverage changed")
+    return indexed
+
+
+def hidden_snapshot_crossings(manifest: Mapping[str, Any], artifact: Mapping[str, Any]) -> list[tuple[str, str]]:
+    quotes = _hidden_snapshot_quotes(manifest, artifact)
+    return [
+        (str(arm["recommendation_point_id"]), str(arm["arm_id"]))
+        for arm in manifest["arms"]
+        if quotes[arm["code"]].get("status") == "available"
+        and _decimal(quotes[arm["code"]].get("bid_price"), "bid_price", positive=True)
+        >= _decimal(arm["sell_limit"], "sell_limit", positive=True)
+    ]
 
 
 def build_validation_fill_evidence(
     point: Mapping[str, Any],
     arm_id: str,
-    quote_observations: Sequence[Mapping[str, Any]],
-) -> dict[str, Any] | None:
+    batch_observations: Sequence[Mapping[str, Any]],
+    batch_artifacts: Mapping[str, Mapping[str, Any] | None],
+) -> dict[str, Any]:
     arm = next(
-        (
-            raw
-            for raw in point.get("arms", [])
-            if isinstance(raw, Mapping) and raw.get("arm_id") == arm_id
-        ),
+        (raw for raw in point.get("arms", []) if isinstance(raw, Mapping) and raw.get("arm_id") == arm_id),
         None,
     )
     if not isinstance(arm, Mapping):
         _fail("validation_source_binding_mismatch", "validation arm is unavailable")
     expected_slots = list(point.get("active_slots_utc", []))
     indexed = {
-        observation.get("observation_slot_utc"): observation
-        for observation in quote_observations
-        if observation.get("arm_id") == arm_id
-        and observation.get("recommendation_point_id") == point.get("recommendation_point_id")
+        str(observation.get("observation_slot_utc")): observation
+        for observation in batch_observations
+        if observation.get("kind") == "hidden_batch"
     }
-    crossing = next(
-        (
-            indexed[slot]
-            for slot in expected_slots
-            if slot in indexed and indexed[slot].get("status") == "observed_fill"
-        ),
-        None,
-    )
-    required_slots = (
-        expected_slots[: expected_slots.index(crossing["observation_slot_utc"]) + 1]
-        if crossing is not None
-        else expected_slots
-    )
-    if any(slot not in indexed for slot in required_slots):
-        return None
-    bindings = [
-        {
-            "observation_key": indexed[slot]["observation_key"],
-            "status": indexed[slot]["status"],
-            "batch_ref": indexed[slot]["artifact_ref"],
-            "batch_sha256": indexed[slot]["artifact_sha256"],
-        }
-        for slot in required_slots
-    ]
+    missing_slots: list[str] = []
+    invalid_slots: list[str] = []
+    bindings: list[dict[str, Any]] = []
+    for slot in expected_slots:
+        batch = indexed.get(slot)
+        if batch is None:
+            missing_slots.append(slot)
+            continue
+        key = str(batch.get("observation_key"))
+        bindings.append(
+            {
+                "observation_slot_utc": slot,
+                "observation_key": key,
+                "status": batch.get("status"),
+                "batch_ref": batch.get("artifact_ref"),
+                "batch_sha256": batch.get("artifact_sha256"),
+            }
+        )
+        artifact = batch_artifacts.get(key)
+        if batch.get("status") != "complete" or artifact is None:
+            invalid_slots.append(slot)
+            continue
+        try:
+            if artifact.get("artifact_ref") != batch.get("artifact_ref") or artifact.get(
+                "artifact_sha256"
+            ) != batch.get("artifact_sha256"):
+                _fail("validation_snapshot_invalid", "hidden batch Store binding changed")
+            manifest = _mapping(batch.get("payload"), "hidden batch manifest")
+            manifest_arm = next(
+                (
+                    raw
+                    for raw in manifest.get("arms", [])
+                    if isinstance(raw, Mapping)
+                    and raw.get("recommendation_point_id") == point.get("recommendation_point_id")
+                    and raw.get("arm_id") == arm_id
+                ),
+                None,
+            )
+            if not isinstance(manifest_arm, Mapping) or manifest_arm.get("code") != arm.get("provider_code"):
+                _fail("validation_snapshot_invalid", "hidden batch arm binding changed")
+            quote = _hidden_snapshot_quotes(manifest, artifact)[str(manifest_arm["code"])]
+            if quote.get("status") != "available" or _decimal(
+                quote.get("bid_price"), "bid_price", positive=True
+            ) >= _decimal(manifest_arm.get("sell_limit"), "sell_limit", positive=True):
+                _fail("validation_snapshot_invalid", "hidden batch terminal projection changed")
+        except StrategyLabEvidenceError:
+            invalid_slots.append(slot)
     query = {
         "recommendation_point_id": point["recommendation_point_id"],
         "arm_id": arm_id,
-        "validation_plan_sha256": _sha256(
-            point.get("validation_plan_sha256"), "validation_plan_sha256"
-        ),
-        "evaluator_behavior_sha256": _sha256(
-            point.get("evaluator_behavior_sha256"), "evaluator_behavior_sha256"
-        ),
+        "validation_plan_sha256": _sha256(point.get("validation_plan_sha256"), "validation_plan_sha256"),
+        "evaluator_behavior_sha256": _sha256(point.get("evaluator_behavior_sha256"), "evaluator_behavior_sha256"),
         "formal_point_ref": _text(point.get("formal_point_ref"), "formal_point_ref"),
-        "formal_point_sha256": _sha256(
-            point.get("formal_point_sha256"), "formal_point_sha256"
-        ),
-        "expected_slots_utc": required_slots,
-        "hidden_quotes": bindings,
+        "formal_point_sha256": _sha256(point.get("formal_point_sha256"), "formal_point_sha256"),
+        "expected_slots_utc": expected_slots,
+        "hidden_batches": bindings,
+        "missing_slots_utc": missing_slots,
+        "invalid_slots_utc": invalid_slots,
     }
-    if crossing is not None:
-        crossing_payload = _mapping(crossing.get("payload"), "hidden quote payload")
-        payload = {
-            "status": "observed_fill",
-            "fill_price": crossing_payload["fill_price"],
-            "fill_time": crossing_payload["fill_time"],
-            "quote_evidence_not_broker_execution": True,
+    payload = (
+        {
+            "status": "not_evaluable",
+            "reason_code": "validation_snapshot_invalid",
+            "missing_slots_utc": missing_slots,
+            "invalid_slots_utc": invalid_slots,
         }
-    elif any(indexed[slot].get("status") == "gap" for slot in required_slots):
-        payload = {"status": "not_evaluable", "reason_code": "validation_snapshot_invalid"}
-    else:
-        payload = {"status": "no_fill"}
-    observed_at = (
-        crossing["updated_at_utc"]
-        if crossing is not None
-        else point["session_endpoint_utc"]
+        if missing_slots or invalid_slots
+        else {"status": "no_fill"}
     )
     return {
         "query": query,
         "query_sha256": canonical_sha256(query),
         "payload": payload,
-        "observed_at_utc": _utc_text(_utc(observed_at, "validation fill observed_at_utc")),
+        "observed_at_utc": _utc_text(_utc(point["session_endpoint_utc"], "validation fill observed_at_utc")),
     }
 
 
@@ -1146,9 +1172,7 @@ def build_single_recommendation_result(
     item = _mapping(arm, "arm")
     candidate = _mapping(item.get("candidate"), "arm.candidate")
     fill_item = _mapping(fill, "fill")
-    fill_evidence_ref = _mapping(
-        fill_item.get("fill_evidence_ref"), "fill_evidence_ref"
-    )
+    fill_evidence_ref = _mapping(fill_item.get("fill_evidence_ref"), "fill_evidence_ref")
     _text(fill_evidence_ref.get("artifact_ref"), "fill_evidence_ref.artifact_ref")
     _sha256(
         fill_evidence_ref.get("artifact_sha256"),
@@ -1163,15 +1187,11 @@ def build_single_recommendation_result(
     ):
         _fail("research_evidence_invalid", "arm threshold is invalid")
     identity = {
-        "recommendation_point_id": _sha256(
-            item.get("recommendation_point_id"), "recommendation_point_id"
-        ),
+        "recommendation_point_id": _sha256(item.get("recommendation_point_id"), "recommendation_point_id"),
         "trading_day": _text(item.get("trading_day"), "trading_day"),
         "arm": arm_kind,
         "recipe_id": RECIPE_ID,
-        "variant_id": None
-        if arm_kind == "baseline"
-        else _text(item.get("arm_id"), "variant_id"),
+        "variant_id": None if arm_kind == "baseline" else _text(item.get("arm_id"), "variant_id"),
         "near_return_threshold": threshold,
         "arm_id": _text(item.get("arm_id"), "arm_id"),
         "candidate_id": _text(item.get("candidate_id"), "candidate_id"),
@@ -1184,6 +1204,12 @@ def build_single_recommendation_result(
         "fill_evidence_ref": fill_evidence_ref,
     }
     status = fill_item.get("status")
+    observed_fill = status == "observed_fill"
+    fill_declaration = (
+        {"quote_evidence_not_broker_execution": True}
+        if observed_fill or fill_item.get("quote_evidence_not_broker_execution") is True
+        else {"simulated_fill_not_real_trade": True}
+    )
     if status == "no_fill":
         return {
             **identity,
@@ -1198,7 +1224,7 @@ def build_single_recommendation_result(
             "return_capital_basis_cny": None,
             "holding_calendar_days": None,
             "reason_codes": [],
-            "simulated_fill_not_real_trade": True,
+            **fill_declaration,
         }
     if status == "not_evaluable":
         return {
@@ -1209,16 +1235,18 @@ def build_single_recommendation_result(
             "fill_time": None,
             "outcome_status": "not_evaluable",
             "outcome_evidence_ref": None,
-            "reason_codes": [
-                str(fill_item.get("reason_code") or "research_fill_not_evaluable")
-            ],
+            "reason_codes": [str(fill_item.get("reason_code") or "research_fill_not_evaluable")],
             "economic_pnl_cny": None,
             "annualized_return": None,
             "return_capital_basis_cny": None,
             "holding_calendar_days": None,
-            "simulated_fill_not_real_trade": True,
+            **fill_declaration,
         }
-    if status != "simulated_fill" or not isinstance(outcome, Mapping) or outcome.get("status") != "available":
+    if (
+        status not in {"simulated_fill", "observed_fill"}
+        or not isinstance(outcome, Mapping)
+        or outcome.get("status") != "available"
+    ):
         reason = (
             str(outcome.get("reason_code") or "research_outcome_not_evaluable")
             if isinstance(outcome, Mapping)
@@ -1229,24 +1257,18 @@ def build_single_recommendation_result(
             "status": "not_evaluable",
             "fill_status": str(status or "not_evaluable"),
             "fill_price": fill_item.get("fill_price"),
-            "fill_time": fill_item.get("bar_time_utc"),
+            "fill_time": fill_item.get("fill_time" if observed_fill else "bar_time_utc"),
             "outcome_status": "not_evaluable",
-            "outcome_evidence_ref": (
-                outcome.get("outcome_evidence_ref")
-                if isinstance(outcome, Mapping)
-                else None
-            ),
+            "outcome_evidence_ref": (outcome.get("outcome_evidence_ref") if isinstance(outcome, Mapping) else None),
             "reason_codes": [reason],
             "economic_pnl_cny": None,
             "annualized_return": None,
             "return_capital_basis_cny": None,
             "holding_calendar_days": None,
-            "simulated_fill_not_real_trade": True,
+            **fill_declaration,
         }
     try:
-        outcome_evidence_ref = _mapping(
-            outcome.get("outcome_evidence_ref"), "outcome_evidence_ref"
-        )
+        outcome_evidence_ref = _mapping(outcome.get("outcome_evidence_ref"), "outcome_evidence_ref")
         _text(
             outcome_evidence_ref.get("artifact_ref"),
             "outcome_evidence_ref.artifact_ref",
@@ -1276,7 +1298,10 @@ def build_single_recommendation_result(
             _mapping(outcome.get("terminal_fee"), "terminal fee").get("amount"),
             "terminal fee amount",
         )
-        fill_time = _utc(fill_item.get("bar_time_utc"), "bar_time_utc")
+        fill_time = _utc(
+            fill_item.get("fill_time" if observed_fill else "bar_time_utc"),
+            "fill_time",
+        )
         expiration = date.fromisoformat(_text(candidate.get("expiration"), "expiration"))
         holding_days = (expiration - fill_time.astimezone(_HK_TZ).date()).days
         intrinsic = max(strike - close, Decimal("0")) * multiplier
@@ -1289,26 +1314,22 @@ def build_single_recommendation_result(
         return {
             **identity,
             "status": "not_evaluable",
-            "fill_status": "simulated_fill",
+            "fill_status": str(status or "not_evaluable"),
             "fill_price": fill_item.get("fill_price"),
-            "fill_time": fill_item.get("bar_time_utc"),
+            "fill_time": fill_item.get("fill_time" if observed_fill else "bar_time_utc"),
             "outcome_status": "not_evaluable",
-            "outcome_evidence_ref": (
-                outcome.get("outcome_evidence_ref")
-                if isinstance(outcome, Mapping)
-                else None
-            ),
+            "outcome_evidence_ref": (outcome.get("outcome_evidence_ref") if isinstance(outcome, Mapping) else None),
             "reason_codes": ["research_result_invalid"],
             "economic_pnl_cny": None,
             "annualized_return": None,
             "return_capital_basis_cny": None,
             "holding_calendar_days": None,
-            "simulated_fill_not_real_trade": True,
+            **fill_declaration,
         }
     return {
         **identity,
         "status": "available",
-        "fill_status": "simulated_fill",
+        "fill_status": status,
         "fill_price": float(_decimal(fill_item.get("fill_price"), "fill_price", positive=True)),
         "fill_time": _utc_text(fill_time),
         "outcome_status": "available",
@@ -1321,7 +1342,7 @@ def build_single_recommendation_result(
         "opening_net_premium": float(opening_net),
         "terminal_intrinsic_loss": float(intrinsic),
         "terminal_fee": float(terminal_fee),
-        "simulated_fill_not_real_trade": True,
+        **fill_declaration,
     }
 
 
@@ -1330,12 +1351,13 @@ __all__ = [
     "MAX_EVIDENCE_BYTES",
     "StrategyLabEvidenceError",
     "build_hidden_batch_manifest",
+    "build_expiry_close_query",
     "build_single_recommendation_result",
     "build_validation_fill_evidence",
     "build_validation_point_evidence",
     "collect_research_fill_evidence",
     "evidence_artifact_location",
-    "hidden_quote_rows",
+    "hidden_snapshot_crossings",
     "load_research_projection",
     "next_missing_research_evidence",
     "normalize_hidden_snapshot",

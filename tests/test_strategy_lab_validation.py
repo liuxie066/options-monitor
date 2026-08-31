@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import threading
-from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,18 +12,19 @@ from src.application.opend_fetch_config import OpenDEndpointRateLimit
 from src.application.opend_market_snapshot_fetching import MarketSnapshotFetchResult
 from src.application.service_deploy import next_systemd_tick_target_utc
 from src.application.strategy_lab.evidence import (
+    StrategyLabEvidenceError,
     build_hidden_batch_manifest,
     build_validation_fill_evidence,
     build_validation_point_evidence,
-    hidden_quote_rows,
+    hidden_snapshot_crossings,
     normalize_hidden_snapshot,
     publish_evidence_artifact,
 )
-from src.infrastructure.private_storage import exclusive_private_file_lock
 from src.infrastructure.strategy_lab.experiment_store import (
     ExperimentStore,
     ExperimentStoreError,
 )
+from src.infrastructure.futu_gateway import FutuGatewayError
 from src.interfaces.cli.main import parse_args
 from src.interfaces.cli.strategy_lab_ops import (
     _is_bounded_systemd_invocation,
@@ -37,10 +38,16 @@ NOW = "2026-09-01T02:00:05Z"
 SOURCE = "b" * 40
 
 
-def _validation_store(tmp_path: Path, plan: dict[str, object]) -> tuple[ExperimentStore, dict]:
+def _validation_store(
+    tmp_path: Path,
+    plan: dict[str, object],
+    *,
+    spec: dict[str, object] | None = None,
+    research_observations: list[dict[str, object]] | None = None,
+) -> tuple[ExperimentStore, dict]:
     store = ExperimentStore(tmp_path / "experiments.sqlite3")
     store.initialize()
-    spec = {"recipe_id": "sell_put_option_position_concentration"}
+    spec = spec or {"recipe_id": "sell_put_option_position_concentration"}
     manifest = [{"path": "owner.py", "sha256": "a" * 64}]
     store.create_experiment(
         experiment_id="experiment-1",
@@ -54,6 +61,8 @@ def _validation_store(tmp_path: Path, plan: dict[str, object]) -> tuple[Experime
         actor="tester",
         occurred_at_utc="2026-08-30T00:00:00Z",
     )
+    for observation in research_observations or []:
+        store.put_observation("experiment-1", **observation)
     completed = store.append_event_and_transition(
         "experiment-1",
         expected_state="research_running",
@@ -121,29 +130,6 @@ def _manifest(plan: dict[str, object]) -> dict[str, object]:
     }
 
 
-def _service_plan() -> dict[str, object]:
-    sessions = []
-    for offset in range(10):
-        day = (datetime(2026, 9, 1) + timedelta(days=offset)).date().isoformat()
-        sessions.append(
-            {
-                "trading_date": day,
-                "minute_grid_utc": [SLOT] if offset == 0 else [],
-                "session_endpoint_utc": (
-                    "2026-09-01T02:01:00Z" if offset == 0 else f"{day}T02:01:00Z"
-                ),
-            }
-        )
-    return {
-        "experiment_id": "experiment-1",
-        "market_calendar": {"sessions": sessions},
-        "validation_wake_tolerance_seconds": 20,
-        "hidden_snapshot_batch_ceiling": 200,
-        "evaluator_behavior_sha256": "f" * 64,
-        "provider_source": {"provider": "futu_opend"},
-    }
-
-
 def _put_available_validation_point(
     store: ExperimentStore,
     plan: dict[str, object],
@@ -165,6 +151,8 @@ def _put_available_validation_point(
             "formal_point_ref": "formal/point.json.gz",
             "formal_point_sha256": "4" * 64,
             "formal_point_content_sha256": "5" * 64,
+            "validation_plan_sha256": canonical_sha256(plan),
+            "evaluator_behavior_sha256": "f" * 64,
             "arms": [
                 {
                     "arm_id": "baseline",
@@ -199,6 +187,22 @@ def _snapshot(*, bid: object = 1.1, bid_vol: object = 3) -> MarketSnapshotFetchR
         requested_at_utc="2026-09-01T02:00:03+00:00",
         received_at_utc="2026-09-01T02:00:04+00:00",
     )
+
+
+def _hidden_artifact(
+    manifest: dict[str, object], payload: dict[str, object], *, digest: str = "a" * 64
+) -> dict[str, object]:
+    return {
+        "artifact_ref": f"evidence/hidden_batch/{digest}.json",
+        "artifact_sha256": digest,
+        "payload": payload,
+        "artifact": {
+            "kind": "hidden_batch",
+            "query": manifest,
+            "observed_at_utc": payload["observed_at_utc"],
+            "payload": payload,
+        },
+    }
 
 
 @pytest.mark.parametrize(
@@ -239,17 +243,20 @@ def test_store_accepts_both_validation_point_not_evaluable_forms(
         created_at_utc=NOW,
     )
     assert first["artifact_ref"] == artifact_ref
-    assert store.put_observation(
-        "experiment-1",
-        observation_key="validation_point:" + "1" * 64,
-        recommendation_point_id="1" * 64,
-        kind="validation_point",
-        status="not_evaluable",
-        payload=payload,
-        artifact_ref=artifact_ref,
-        artifact_sha256=artifact_sha256,
-        created_at_utc="2026-09-01T02:00:10Z",
-    ) == first
+    assert (
+        store.put_observation(
+            "experiment-1",
+            observation_key="validation_point:" + "1" * 64,
+            recommendation_point_id="1" * 64,
+            kind="validation_point",
+            status="not_evaluable",
+            payload=payload,
+            artifact_ref=artifact_ref,
+            artifact_sha256=artifact_sha256,
+            created_at_utc="2026-09-01T02:00:10Z",
+        )
+        == first
+    )
 
 
 def test_store_requires_source_pair_for_available_validation_point(tmp_path: Path) -> None:
@@ -319,38 +326,58 @@ def test_validation_point_slots_depend_only_on_authoritative_availability(
     assert "bound_at_utc" not in payload
 
 
-def test_store_completes_batch_and_quotes_atomically_then_transitions(
+def test_store_completes_batch_and_crossing_fill_atomically_then_transitions(
     tmp_path: Path,
 ) -> None:
     plan = {"experiment_id": "experiment-1"}
     store, confirmed = _validation_store(tmp_path, plan)
     manifest = _manifest(plan)
     key = f"hidden_batch:2026-09-01:{SLOT}"
-    started = store.start_observation(
+    started, created = store.start_observation(
         "experiment-1", observation_key=key, manifest=manifest, created_at_utc=NOW
     )
-    assert started["status"] == "started"
-    quotes = [
-        {
-            "recommendation_point_id": arm["recommendation_point_id"],
-            "arm_id": arm["arm_id"],
-            "status": "complete",
-            "payload": {"bid_price": 0.9},
-        }
-        for arm in manifest["arms"]
-    ]
+    assert (started["status"], created) == ("started", True)
+    assert store.start_observation("experiment-1", observation_key=key, manifest=manifest, created_at_utc=NOW) == (
+        started,
+        False,
+    )
     complete = store.complete_observation(
         "experiment-1",
         observation_key=key,
         manifest=manifest,
-        quotes=quotes,
         artifact_ref="evidence/hidden_batch/a.json",
         artifact_sha256="a" * 64,
-        updated_at_utc="2026-09-01T02:00:06Z",
+        artifact_received_at_utc="2026-09-01T02:00:06Z",
+        crossing_arm_ids=[("1" * 64, "baseline")],
     )
     assert complete["status"] == "complete"
     observations = store.list_observations("experiment-1")
-    assert [item["kind"] for item in observations].count("hidden_quote") == 2
+    fill = next(item for item in observations if item["kind"] == "validation_fill")
+    assert fill["payload"]["fill_time"] == "2026-09-01T02:00:06Z"
+    assert fill["payload"]["fill_price"] == 1.0
+    assert (
+        store.complete_observation(
+            "experiment-1",
+            observation_key=key,
+            manifest=manifest,
+            artifact_ref="evidence/hidden_batch/a.json",
+            artifact_sha256="a" * 64,
+            artifact_received_at_utc="2026-09-01T02:00:06Z",
+            crossing_arm_ids=[("1" * 64, "baseline")],
+        )
+        == complete
+    )
+    with pytest.raises(ExperimentStoreError) as exc_info:
+        store.complete_observation(
+            "experiment-1",
+            observation_key=key,
+            manifest=manifest,
+            artifact_ref="evidence/hidden_batch/a.json",
+            artifact_sha256="a" * 64,
+            artifact_received_at_utc="2026-09-01T02:00:06Z",
+            crossing_arm_ids=[],
+        )
+    assert exc_info.value.reason_code == "validation_batch_manifest_conflict"
     transitioned = store.complete_validation_collection(
         "experiment-1",
         expected_revision=confirmed["revision"],
@@ -358,45 +385,49 @@ def test_store_completes_batch_and_quotes_atomically_then_transitions(
         occurred_at_utc="2026-09-01T08:00:00Z",
     )
     assert transitioned["state"] == "waiting_outcome"
-    assert store.complete_validation_collection(
-        "experiment-1",
-        expected_revision=0,
-        actor="retry",
-        occurred_at_utc="2026-09-02T08:00:00Z",
-    ) == transitioned
+    assert (
+        store.complete_validation_collection(
+            "experiment-1",
+            expected_revision=0,
+            actor="retry",
+            occurred_at_utc="2026-09-02T08:00:00Z",
+        )
+        == transitioned
+    )
 
 
-@pytest.mark.parametrize("started", [False, True])
-def test_elapsed_batch_gaps_original_manifest_arms_atomically(
-    tmp_path: Path, started: bool
-) -> None:
+def test_store_terminal_fill_conflict_rolls_back_batch_and_all_crossings(tmp_path: Path) -> None:
     plan = {"experiment_id": "experiment-1"}
     store, _confirmed = _validation_store(tmp_path, plan)
     manifest = _manifest(plan)
     key = f"hidden_batch:2026-09-01:{SLOT}"
-    if started:
-        store.start_observation(
-            "experiment-1", observation_key=key, manifest=manifest, created_at_utc=NOW
-        )
-        row = store.expire_started_observation(
+    store.start_observation("experiment-1", observation_key=key, manifest=manifest, created_at_utc=NOW)
+    store.put_observation(
+        "experiment-1",
+        observation_key=f"validation_fill:{'1' * 64}:challenger_0.002",
+        recommendation_point_id="1" * 64,
+        arm_id="challenger_0.002",
+        kind="validation_fill",
+        status="not_evaluable",
+        payload={"status": "not_evaluable"},
+        artifact_ref="evidence/validation_fill/existing.json",
+        artifact_sha256="b" * 64,
+        created_at_utc=NOW,
+    )
+    with pytest.raises(ExperimentStoreError) as exc_info:
+        store.complete_observation(
             "experiment-1",
             observation_key=key,
             manifest=manifest,
-            updated_at_utc="2026-09-01T02:00:21Z",
+            artifact_ref="evidence/hidden_batch/a.json",
+            artifact_sha256="a" * 64,
+            artifact_received_at_utc="2026-09-01T02:00:06Z",
+            crossing_arm_ids=[("1" * 64, "baseline"), ("1" * 64, "challenger_0.002")],
         )
-    else:
-        row = store.materialize_elapsed_observation_gap(
-            "experiment-1",
-            observation_key=key,
-            manifest=manifest,
-            updated_at_utc="2026-09-01T02:00:21Z",
-        )
-    assert row["status"] == "gap"
-    assert {
-        item["status"]
-        for item in store.list_observations("experiment-1")
-        if item["kind"] == "hidden_quote"
-    } == {"gap"}
+    assert exc_info.value.reason_code == "validation_batch_manifest_conflict"
+    observations = store.list_observations("experiment-1")
+    assert next(item for item in observations if item["kind"] == "hidden_batch")["status"] == "started"
+    assert not any(item["observation_key"] == f"validation_fill:{'1' * 64}:baseline" for item in observations)
 
 
 def test_store_rejects_hidden_batch_over_absolute_code_ceiling(tmp_path: Path) -> None:
@@ -424,23 +455,14 @@ def test_store_rejects_hidden_batch_over_absolute_code_ceiling(tmp_path: Path) -
 
 
 def test_snapshot_uses_same_row_positive_bid_and_raw_volume() -> None:
-    plan = {"experiment_id": "experiment-1"}
-    manifest = _manifest(plan)
+    manifest = _manifest({"experiment_id": "experiment-1"})
     payload = normalize_hidden_snapshot(manifest, _snapshot())
-    artifact = {
-        "artifact_ref": "evidence/hidden_batch/a.json",
-        "artifact_sha256": "a" * 64,
-        "payload": payload,
-    }
-    rows = hidden_quote_rows(manifest, artifact)
-    assert [row["status"] for row in rows] == ["observed_fill", "complete"]
-    assert rows[0]["payload"]["fill_price"] == 1.0
-    assert rows[0]["payload"]["bid_vol"] == 3.0
-    assert rows[0]["payload"]["quote_evidence_not_broker_execution"] is True
+    artifact = _hidden_artifact(manifest, payload)
+    assert hidden_snapshot_crossings(manifest, artifact) == [("1" * 64, "baseline")]
+    assert payload["observed_at_utc"] == "2026-09-01T02:00:04Z"
 
     invalid = normalize_hidden_snapshot(manifest, _snapshot(bid_vol=0))
-    invalid_rows = hidden_quote_rows(manifest, {**artifact, "payload": invalid})
-    assert {row["status"] for row in invalid_rows} == {"gap"}
+    assert hidden_snapshot_crossings(manifest, _hidden_artifact(manifest, invalid)) == []
 
     shared_contract = {
         **manifest,
@@ -454,15 +476,14 @@ def test_snapshot_uses_same_row_positive_bid_and_raw_volume() -> None:
             },
         ],
     }
-    shared_rows = hidden_quote_rows(shared_contract, artifact)
-    assert len(shared_rows) == 3
-    assert {row["recommendation_point_id"] for row in shared_rows} == {
-        "1" * 64,
-        "2" * 64,
-    }
+    shared_payload = normalize_hidden_snapshot(shared_contract, _snapshot())
+    assert hidden_snapshot_crossings(shared_contract, _hidden_artifact(shared_contract, shared_payload)) == [
+        ("1" * 64, "baseline"),
+        ("2" * 64, "baseline"),
+    ]
 
 
-def test_validation_fill_distinguishes_no_fill_and_gap() -> None:
+def test_validation_fill_projects_no_fill_or_missing_slot() -> None:
     point = {
         "recommendation_point_id": "1" * 64,
         "validation_plan_sha256": "2" * 64,
@@ -471,49 +492,36 @@ def test_validation_fill_distinguishes_no_fill_and_gap() -> None:
         "formal_point_sha256": "4" * 64,
         "session_endpoint_utc": "2026-09-01T02:02:00Z",
         "active_slots_utc": [SLOT, "2026-09-01T02:01:00Z"],
-        "arms": [{"arm_id": "baseline"}],
+        "arms": [{"arm_id": "baseline", "provider_code": "HK.80000001"}],
     }
-
-    def quote(slot: str, status: str) -> dict[str, object]:
-        return {
-            "observation_key": f"quote:{slot}",
-            "recommendation_point_id": "1" * 64,
-            "arm_id": "baseline",
-            "observation_slot_utc": slot,
-            "status": status,
-            "payload": {},
-            "artifact_ref": None if status == "gap" else f"batch:{slot}",
-            "artifact_sha256": None if status == "gap" else "5" * 64,
-            "updated_at_utc": slot,
-        }
-
-    complete = [quote(slot, "complete") for slot in point["active_slots_utc"]]
-    assert build_validation_fill_evidence(point, "baseline", complete)["payload"] == {
-        "status": "no_fill"
+    manifest = _manifest({"experiment_id": "experiment-1"})
+    manifest["arms"] = [manifest["arms"][0]]
+    payload = normalize_hidden_snapshot(manifest, _snapshot(bid=0.9))
+    artifact = _hidden_artifact(manifest, payload)
+    batch = {
+        "kind": "hidden_batch",
+        "status": "complete",
+        "observation_key": f"hidden_batch:2026-09-01:{SLOT}",
+        "observation_slot_utc": SLOT,
+        "payload": manifest,
+        "artifact_ref": artifact["artifact_ref"],
+        "artifact_sha256": artifact["artifact_sha256"],
     }
-    complete[-1] = quote(point["active_slots_utc"][-1], "gap")
-    assert build_validation_fill_evidence(point, "baseline", complete)["payload"] == {
-        "status": "not_evaluable",
-        "reason_code": "validation_snapshot_invalid",
-    }
-
-
-def test_publisher_reuses_exact_lock_without_reacquiring(tmp_path: Path) -> None:
-    query = {"batch": 1}
-    digest = canonical_sha256(query)
-    lock = tmp_path / "evidence" / "hidden_batch" / f"{digest}.json.lock"
-    with exclusive_private_file_lock(lock, blocking=False):
-        published = publish_evidence_artifact(
-            tmp_path,
-            "hidden_batch",
-            digest,
-            {"status": "available"},
-            query=query,
-            observed_at_utc=NOW,
-            producer_source_commit_sha=SOURCE,
-            lock_held=True,
-        )
-    assert published["artifact_ref"] == f"evidence/hidden_batch/{digest}.json"
+    no_fill = build_validation_fill_evidence(
+        {**point, "active_slots_utc": [SLOT]},
+        "baseline",
+        [batch],
+        {batch["observation_key"]: artifact},
+    )
+    assert no_fill["payload"] == {"status": "no_fill"}
+    missing = build_validation_fill_evidence(
+        point,
+        "baseline",
+        [batch],
+        {batch["observation_key"]: artifact},
+    )
+    assert missing["payload"]["status"] == "not_evaluable"
+    assert missing["payload"]["missing_slots_utc"] == ["2026-09-01T02:01:00Z"]
 
 
 @pytest.mark.parametrize(
@@ -528,15 +536,9 @@ def test_publisher_reuses_exact_lock_without_reacquiring(tmp_path: Path) -> None
         ("10:00:20.001", False),
     ],
 )
-def test_tick_target_owner_supports_symmetric_inclusive_guard(
-    local_time: str, expected_protected: bool
-) -> None:
-    occurred = datetime.fromisoformat(f"2026-09-01T{local_time}+08:00").astimezone(
-        timezone.utc
-    )
-    target = next_systemd_tick_target_utc(
-        "hk", occurred - timedelta(seconds=20)
-    )
+def test_tick_target_owner_supports_symmetric_inclusive_guard(local_time: str, expected_protected: bool) -> None:
+    occurred = datetime.fromisoformat(f"2026-09-01T{local_time}+08:00").astimezone(timezone.utc)
+    target = next_systemd_tick_target_utc("hk", occurred - timedelta(seconds=20))
     assert (abs((target - occurred).total_seconds()) <= 20) is expected_protected
 
 
@@ -570,16 +572,14 @@ def test_advance_cli_freezes_one_clock_and_only_native_scheduled_is_provider_cap
     monkeypatch.setattr(
         cli,
         "advance_experiment",
-        lambda context, experiment_id, **kwargs: received.update(
-            context=context, experiment_id=experiment_id, **kwargs
-        )
-        or {"status": "progress"},
+        lambda context, experiment_id, **kwargs: (
+            received.update(context=context, experiment_id=experiment_id, **kwargs) or {"status": "progress"}
+        ),
     )
     monkeypatch.setattr(
         cli,
         "advance_scheduled",
-        lambda context, **kwargs: received.update(context=context, **kwargs)
-        or {"status": "progress"},
+        lambda context, **kwargs: received.update(context=context, **kwargs) or {"status": "progress"},
     )
     target = ["--scheduled"] if scheduled else ["--experiment-id", "experiment-1"]
     response = handle_strategy_lab_command(
@@ -660,17 +660,11 @@ def test_provider_batch_starts_before_one_zero_wait_snapshot_and_completes(
     assert result["provider_logical_units"] == 1
     assert seen == ["admitted", "snapshot", "closed"]
     observations = store.list_observations("experiment-1")
-    assert next(item for item in observations if item["kind"] == "hidden_batch")[
-        "status"
-    ] == "complete"
-    assert [item["status"] for item in observations if item["kind"] == "hidden_quote"] == [
-        "observed_fill"
-    ]
+    assert next(item for item in observations if item["kind"] == "hidden_batch")["status"] == "complete"
+    assert [item["status"] for item in observations if item["kind"] == "validation_fill"] == ["observed_fill"]
 
 
-def test_direct_advance_stops_before_started_row_or_gateway(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_direct_advance_stops_before_started_row_or_gateway(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import src.application.strategy_lab.service as service
 
     plan = {
@@ -721,17 +715,16 @@ def test_started_batch_binds_artifact_from_audited_prior_source_commit(
     store, experiment = _validation_store(tmp_path, plan)
     manifest = _manifest(plan)
     key = f"hidden_batch:2026-09-01:{SLOT}"
-    store.start_observation(
-        "experiment-1", observation_key=key, manifest=manifest, created_at_utc=NOW
-    )
+    store.start_observation("experiment-1", observation_key=key, manifest=manifest, created_at_utc=NOW)
     digest = canonical_sha256(manifest)
+    payload = normalize_hidden_snapshot(manifest, _snapshot())
     publish_evidence_artifact(
         tmp_path / "artifacts",
         "hidden_batch",
         digest,
-        normalize_hidden_snapshot(manifest, _snapshot()),
+        payload,
         query=manifest,
-        observed_at_utc=NOW,
+        observed_at_utc=payload["observed_at_utc"],
         producer_source_commit_sha=SOURCE,
     )
     result = service._advance_current_batch(
@@ -752,275 +745,320 @@ def test_started_batch_binds_artifact_from_audited_prior_source_commit(
         occurred_at_utc="2026-09-01T02:00:21Z",
     )
     assert result["reason_code"] == "validation_batch_recovered"
-    assert store.list_observations("experiment-1", kind="hidden_batch")[0][
-        "status"
-    ] == "complete"
-
-
-def test_current_day_elapsed_slot_is_materialized_without_provider(tmp_path: Path) -> None:
-    import src.application.strategy_lab.service as service
-
-    plan = _service_plan()
-    store, experiment = _validation_store(tmp_path, plan)
-    _put_available_validation_point(store, plan)
-    recovered = service._recover_one_elapsed_day(
-        {"artifact_root": tmp_path / "artifacts"},
-        store,
-        experiment,
-        plan,
-        {SOURCE},
-        "2026-09-01T02:00:21Z",
-    )
-    assert recovered == "2026-09-01"
-    observations = store.list_observations("experiment-1")
-    assert next(item for item in observations if item["kind"] == "hidden_batch")[
-        "status"
-    ] == "gap"
-    assert next(item for item in observations if item["kind"] == "hidden_quote")[
-        "status"
-    ] == "gap"
+    assert store.list_observations("experiment-1", kind="hidden_batch")[0]["status"] == "complete"
 
 
 @pytest.mark.parametrize(
-    ("bid", "expected_quote_status", "expected_second_batch", "exact_reads"),
-    [(1.1, "observed_fill", None, 1), (0.9, "complete", "gap", 2)],
+    "invalid",
+    [
+        replace(_snapshot(), opend_call_count=2),
+        replace(
+            _snapshot(),
+            errors=[{"stage": "market_snapshot", "error_code": "PROVIDER_ERROR"}],
+        ),
+        replace(_snapshot(), received_at_utc="2026-09-01T02:00:21+00:00"),
+    ],
 )
-def test_artifact_recovery_updates_crossing_index_for_the_next_elapsed_slot(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    bid: float,
-    expected_quote_status: str,
-    expected_second_batch: str | None,
-    exact_reads: int,
+def test_snapshot_rejects_invalid_provider_envelope(
+    invalid: MarketSnapshotFetchResult,
 ) -> None:
+    with pytest.raises(StrategyLabEvidenceError) as exc_info:
+        normalize_hidden_snapshot(_manifest({"experiment_id": "experiment-1"}), invalid)
+    assert exc_info.value.reason_code == "validation_snapshot_invalid"
+
+
+def test_snapshot_keeps_missing_contract_as_invalid_row() -> None:
+    result = replace(
+        _snapshot(),
+        snap_map={},
+        returned_codes=frozenset(),
+        missing_codes=frozenset({"HK.80000001"}),
+        complete=False,
+    )
+    payload = normalize_hidden_snapshot(_manifest({"experiment_id": "experiment-1"}), result)
+    assert payload["quotes"] == [
+        {
+            "code": "HK.80000001",
+            "status": "not_evaluable",
+            "reason_code": "validation_snapshot_invalid",
+        }
+    ]
+
+
+def test_recovery_leaves_started_batch_without_artifact(tmp_path: Path) -> None:
     import src.application.strategy_lab.service as service
 
-    second_slot = "2026-09-01T02:01:00Z"
-    plan = _service_plan()
-    plan["market_calendar"]["sessions"][0]["minute_grid_utc"] = [SLOT, second_slot]
-    plan["market_calendar"]["sessions"][0][
-        "session_endpoint_utc"
-    ] = "2026-09-01T02:02:00Z"
+    plan = {"experiment_id": "experiment-1"}
     store, experiment = _validation_store(tmp_path, plan)
-    _put_available_validation_point(
-        store, plan, active_slots_utc=[SLOT, second_slot]
-    )
-    first_manifest = build_hidden_batch_manifest(
-        plan,
-        [
-            store.get_observation(
-                "experiment-1", "validation_point:" + "1" * 64
-            )["payload"]
-        ],
-        trading_day="2026-09-01",
-        observation_slot_utc=SLOT,
-    )
-    first_key = f"hidden_batch:2026-09-01:{SLOT}"
+    manifest = _manifest(plan)
     store.start_observation(
         "experiment-1",
-        observation_key=first_key,
-        manifest=first_manifest,
+        observation_key=f"hidden_batch:2026-09-01:{SLOT}",
+        manifest=manifest,
         created_at_utc=NOW,
     )
-    digest = canonical_sha256(first_manifest)
-    publish_evidence_artifact(
-        tmp_path / "artifacts",
-        "hidden_batch",
-        digest,
-        normalize_hidden_snapshot(first_manifest, _snapshot(bid=bid)),
-        query=first_manifest,
-        observed_at_utc=NOW,
-        producer_source_commit_sha=SOURCE,
+    assert service._recover_started_batches({"artifact_root": tmp_path / "artifacts"}, store, experiment, {SOURCE}) == 0
+    rows = store.list_observations("experiment-1")
+    assert [(row["kind"], row["status"]) for row in rows] == [("hidden_batch", "started")]
+
+
+def test_tick_busy_has_priority_over_calendar_protection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import src.application.strategy_lab.service as service
+
+    monkeypatch.setattr(service, "tick_cron_is_busy", lambda _path: True)
+    monkeypatch.setattr(
+        service,
+        "next_systemd_tick_target_utc",
+        lambda *_args: pytest.fail("busy Tick must short-circuit calendar calculation"),
     )
-    original_list = store.list_observations
-    original_get = store.get_observation
-    counts = {"full": 0, "exact": 0}
-
-    def counted_list(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
-        counts["full"] += 1
-        return original_list(*args, **kwargs)
-
-    def counted_get(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
-        counts["exact"] += 1
-        return original_get(*args, **kwargs)
-
-    monkeypatch.setattr(store, "list_observations", counted_list)
-    monkeypatch.setattr(store, "get_observation", counted_get)
-    assert service._recover_one_elapsed_day(
-        {"artifact_root": tmp_path / "artifacts"},
-        store,
-        experiment,
-        plan,
-        {SOURCE},
-        "2026-09-01T02:01:21Z",
-    ) == "2026-09-01"
-    assert counts == {"full": 1, "exact": exact_reads}
-    rows = original_list("experiment-1")
-    assert next(item for item in rows if item["observation_key"] == first_key)[
-        "status"
-    ] == "complete"
-    assert next(
-        item
-        for item in rows
-        if item["observation_key"].startswith("hidden_quote:")
-        and item["observation_slot_utc"] == SLOT
-    )["status"] == expected_quote_status
-    second = next(
-        (
-            item
-            for item in rows
-            if item["observation_key"] == f"hidden_batch:2026-09-01:{second_slot}"
-        ),
-        None,
-    )
-    assert (second or {}).get("status") == expected_second_batch
+    assert service._tick_guard({"tick_lock_path": tmp_path / "tick.lock"}, "2026-09-01T02:00:00Z") == "tick_busy"
 
 
-def test_elapsed_recovery_reads_full_observation_set_once_for_ten_by_330_slots(
-    tmp_path: Path,
+@pytest.mark.parametrize("minute", [10, 20, 30, 40, 50])
+def test_history_provider_guard_yields_at_each_late_hk_tick(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, minute: int
 ) -> None:
     import src.application.strategy_lab.service as service
 
-    sessions: list[dict[str, object]] = []
-    points: list[dict[str, object]] = []
-    rows: list[dict[str, object]] = []
-    plan: dict[str, object] = {
-        "experiment_id": "experiment-1",
-        "validation_wake_tolerance_seconds": 20,
-        "hidden_snapshot_batch_ceiling": 200,
-        "evaluator_behavior_sha256": "f" * 64,
-        "provider_source": {"provider": "futu_opend"},
-    }
-    for day_offset in range(10):
-        start = datetime(2026, 9, 1, tzinfo=timezone.utc) + timedelta(days=day_offset)
-        slots = [
-            (start + timedelta(minutes=minute)).isoformat().replace("+00:00", "Z")
-            for minute in range(330)
-        ]
-        day = start.date().isoformat()
-        session = {
-            "trading_date": day,
-            "minute_grid_utc": slots,
-            "session_endpoint_utc": (start + timedelta(minutes=330))
-            .isoformat()
-            .replace("+00:00", "Z"),
-        }
-        sessions.append(session)
-        point_id = f"{day_offset + 1:064x}"
-        point = {
-            "status": "available",
-            "trading_day": day,
-            "recommendation_point_id": point_id,
-            "active_slots_utc": slots,
-            "arms": [
-                {
-                    "arm_id": "baseline",
-                    "provider_code": "HK.80000001",
-                    "sell_limit": 1.0,
-                }
-            ],
-        }
-        points.append(point)
-        rows.append(
-            {
-                "observation_key": f"validation_point:{point_id}",
-                "kind": "validation_point",
-                "status": "available",
-                "payload": point,
-            }
+    monkeypatch.setattr(service, "tick_cron_is_busy", lambda _path: False)
+    assert (
+        service._provider_guard(
+            {"tick_lock_path": tmp_path / "tick.lock"},
+            f"2026-09-01T08:{minute:02d}:00Z",
         )
-    plan["market_calendar"] = {"sessions": sessions}
-    for session, point in zip(sessions, points, strict=True):
-        for slot in session["minute_grid_utc"]:
-            manifest = build_hidden_batch_manifest(
-                plan,
-                [point],
-                trading_day=str(session["trading_date"]),
-                observation_slot_utc=str(slot),
-            )
-            rows.append(
-                {
-                    "observation_key": (
-                        f"hidden_batch:{session['trading_date']}:{slot}"
-                    ),
-                    "kind": "hidden_batch",
-                    "status": "complete",
-                    "payload": manifest,
-                }
-            )
-
-    class ReadCountingStore:
-        full_reads = 0
-        exact_reads = 0
-        row_iterations = 0
-
-        def list_observations(self, _experiment_id: str) -> list[dict[str, object]]:
-            self.full_reads += 1
-            owner = self
-
-            class CountedRows(list[dict[str, object]]):
-                def __iter__(self):  # type: ignore[no-untyped-def]
-                    for row in super().__iter__():
-                        owner.row_iterations += 1
-                        yield row
-
-            return CountedRows(rows)
-
-        def get_observation(self, *_args: object) -> None:
-            self.exact_reads += 1
-            return None
-
-    store = ReadCountingStore()
-    assert service._recover_one_elapsed_day(
-        {"artifact_root": tmp_path / "artifacts"},
-        store,
-        {
-            "experiment_id": "experiment-1",
-            "validation_plan_sha256": canonical_sha256(plan),
-        },
-        plan,
-        {SOURCE},
-        "2026-09-11T00:00:00Z",
-    ) is None
-    assert (store.full_reads, store.exact_reads) == (1, 0)
-    assert store.row_iterations <= len(rows) * 4
+        == "tick_protection_window"
+    )
 
 
-def test_elapsed_recovery_materializes_hundreds_of_gaps_from_one_fresh_read(
+def test_history_provider_guard_allows_first_post_tick_slot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import src.application.strategy_lab.service as service
+
+    monkeypatch.setattr(service, "tick_cron_is_busy", lambda _path: False)
+    assert service._provider_guard({"tick_lock_path": tmp_path / "tick.lock"}, "2026-09-01T09:00:00Z") is None
+
+
+def test_history_provider_guard_yields_to_friday_us_tick_on_hk_saturday(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import src.application.strategy_lab.service as service
 
-    start = datetime(2026, 9, 1, 2, 0, tzinfo=timezone.utc)
-    slots = [
-        (start + timedelta(minutes=offset)).isoformat().replace("+00:00", "Z")
-        for offset in range(240)
-    ]
-    sessions = [
-        {
-            "trading_date": "2026-09-01",
-            "minute_grid_utc": slots,
-            "session_endpoint_utc": "2026-09-01T06:01:00Z",
-        }
-    ]
-    sessions.extend(
-        {
-            "trading_date": f"2026-09-{day:02d}",
-            "minute_grid_utc": [],
-            "session_endpoint_utc": f"2026-09-{day:02d}T06:01:00Z",
-        }
-        for day in range(2, 11)
+    monkeypatch.setattr(service, "tick_cron_is_busy", lambda _path: False)
+    assert (
+        service._provider_guard({"tick_lock_path": tmp_path / "tick.lock"}, "2026-09-04T17:00:00Z")
+        == "tick_protection_window"
     )
+
+
+def test_real_tick_lock_blocks_batch_before_store_or_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import fcntl
+
+    import src.application.strategy_lab.service as service
+
     plan = {
         "experiment_id": "experiment-1",
-        "market_calendar": {"sessions": sessions},
-        "validation_wake_tolerance_seconds": 20,
-        "hidden_snapshot_batch_ceiling": 200,
-        "evaluator_behavior_sha256": "f" * 64,
         "provider_source": {"provider": "futu_opend"},
+        "hidden_snapshot_batch_ceiling": 200,
     }
     store, experiment = _validation_store(tmp_path, plan)
+    lock_path = tmp_path / "tick.lock"
+    monkeypatch.setattr(
+        service,
+        "build_futu_gateway",
+        lambda **_kwargs: pytest.fail("busy Tick must block the provider"),
+    )
+    with lock_path.open("a+", encoding="utf-8") as tick_lock:
+        fcntl.flock(tick_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = service._advance_current_batch(
+            {
+                "artifact_root": tmp_path / "artifacts",
+                "opend_limiter_root": tmp_path / "runtime",
+                "opend_binding": {"host": "127.0.0.1", "port": 11111},
+                "tick_lock_path": lock_path,
+            },
+            store,
+            experiment,
+            plan,
+            _manifest(plan),
+            SOURCE,
+            {SOURCE},
+            OpenDEndpointRateLimit(30.0, 60, 0.0),
+            provider_capable=True,
+            occurred_at_utc=NOW,
+        )
+
+    assert result == {"status": "blocked", "reason_code": "tick_busy"}
+    assert store.list_observations("experiment-1", kind="hidden_batch") == []
+
+
+def test_tick_runs_while_strategy_lab_provider_is_in_flight(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import io
+    import subprocess
+    import threading
+
+    import src.application.strategy_lab.service as service
+    from src.application.tick_cron import run_tick_cron
+
+    plan = {
+        "experiment_id": "experiment-1",
+        "provider_source": {"provider": "futu_opend"},
+        "hidden_snapshot_batch_ceiling": 200,
+    }
+    store, experiment = _validation_store(tmp_path, plan)
+    manifest = _manifest(plan)
+    manifest["observation_slot_utc"] = "2026-09-01T02:01:00Z"
+    manifest["deadline_utc"] = "2026-09-01T02:01:20Z"
+    provider_started = threading.Event()
+    provider_finish = threading.Event()
+    results: list[dict[str, object]] = []
+    errors: list[BaseException] = []
+    tick_calls: list[list[str]] = []
+    lock_path = tmp_path / "tick.lock"
+
+    class Gateway:
+        def close(self) -> None:
+            pass
+
+    def fetch(**_kwargs: object) -> MarketSnapshotFetchResult:
+        provider_started.set()
+        if not provider_finish.wait(2):
+            raise AssertionError("provider test did not release")
+        return replace(
+            _snapshot(),
+            requested_at_utc="2026-09-01T02:01:03+00:00",
+            received_at_utc="2026-09-01T02:01:04+00:00",
+        )
+
+    monkeypatch.setattr(service, "build_futu_gateway", lambda **_kwargs: Gateway())
+    monkeypatch.setattr(service, "fetch_option_snapshots", fetch)
+    monkeypatch.setattr(
+        service,
+        "try_low_priority_opend_call",
+        lambda **kwargs: kwargs["call"](),
+    )
+
+    def run_lab() -> None:
+        try:
+            results.append(
+                service._advance_current_batch(
+                    {
+                        "artifact_root": tmp_path / "artifacts",
+                        "opend_limiter_root": tmp_path / "runtime",
+                        "opend_binding": {"host": "127.0.0.1", "port": 11111},
+                        "tick_lock_path": lock_path,
+                    },
+                    store,
+                    experiment,
+                    plan,
+                    manifest,
+                    SOURCE,
+                    {SOURCE},
+                    OpenDEndpointRateLimit(30.0, 60, 0.0),
+                    provider_capable=True,
+                    occurred_at_utc="2026-09-01T02:01:05Z",
+                )
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    lab = threading.Thread(target=run_lab)
+    lab.start()
+    assert provider_started.wait(2), errors
+    stdout = io.StringIO()
+    try:
+        rc = run_tick_cron(
+            market="hk",
+            lock_path=str(lock_path),
+            run_cmd=lambda command, **_kwargs: (
+                tick_calls.append(command),
+                subprocess.CompletedProcess(command, 0),
+            )[1],
+            preflight_config_fn=None,
+            seal_formal_expectations_fn=None,
+            stdout=stdout,
+            environ={},
+        )
+    finally:
+        provider_finish.set()
+        lab.join(2)
+
+    assert rc == 0
+    assert tick_calls
+    assert "SKIP_LOCKED" not in stdout.getvalue()
+    assert not lab.is_alive()
+    assert errors == []
+    assert results == [{"status": "progress", "provider_logical_units": 1}]
+
+
+def test_public_advance_busy_does_not_enter_business_logic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import src.application.strategy_lab.service as service
+
+    context = {"artifact_root": tmp_path / "artifacts"}
+    monkeypatch.setattr(
+        service,
+        "_advance_experiment_once",
+        lambda *_args, **_kwargs: pytest.fail("busy advance must not enter Store or provider logic"),
+    )
+
+    def busy_lock(*_args: object, **_kwargs: object) -> None:
+        raise BlockingIOError
+
+    monkeypatch.setattr(service, "exclusive_private_file_lock", busy_lock)
+    result = service.advance_experiment(
+        context,
+        "experiment-1",
+        occurred_at_utc=NOW,
+        provider_capable=True,
+    )
+    assert result == {
+        "status": "progress",
+        "reason_code": "validation_advance_busy",
+        "experiment_id": "experiment-1",
+    }
+
+
+@pytest.mark.parametrize(
+    ("failure", "reason_code"),
+    [
+        (StrategyLabEvidenceError("opend_low_priority_deferred", "busy"), "opend_low_priority_deferred"),
+        (StrategyLabEvidenceError("research_provider_failed", "failed"), "research_provider_failed"),
+        (FutuGatewayError("failed"), "research_provider_failed"),
+    ],
+)
+def test_validation_outcome_transient_failure_is_retryable_without_store_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Exception,
+    reason_code: str,
+) -> None:
+    import src.application.strategy_lab.service as service
+
     point_id = "1" * 64
+    timer_binding = service.build_strategy_lab_timer_binding()
+    plan = {
+        "experiment_id": "experiment-1",
+        "provider_source": {"provider": "futu_opend"},
+        "market_calendar": {
+            "sessions": [
+                {
+                    "trading_date": "2026-09-01",
+                    "expected_recommendation_point_ids": [point_id],
+                }
+            ]
+        },
+        "hidden_snapshot_batch_ceiling": service.HIDDEN_SNAPSHOT_BATCH_CEILING,
+        "validation_wake_tolerance_seconds": service.VALIDATION_WAKE_TOLERANCE_SECONDS,
+        "tick_protection_seconds": service.TICK_PROTECTION_SECONDS,
+        "timer_binding": timer_binding,
+        "timer_binding_sha256": canonical_sha256(timer_binding),
+    }
+    store, confirmed = _validation_store(
+        tmp_path,
+        plan,
+        spec={
+            "recipe_id": "sell_put_option_position_concentration",
+            "fee_plan": {"receipt": {}},
+        },
+    )
     store.put_observation(
         "experiment-1",
         observation_key=f"validation_point:{point_id}",
@@ -1031,156 +1069,157 @@ def test_elapsed_recovery_materializes_hundreds_of_gaps_from_one_fresh_read(
             "status": "available",
             "trading_day": "2026-09-01",
             "recommendation_point_id": point_id,
-            "active_slots_utc": slots,
-            "formal_point_ref": "formal/point.json.gz",
+            "formal_point_ref": f"formal/{point_id}.json.gz",
             "formal_point_sha256": "4" * 64,
             "formal_point_content_sha256": "5" * 64,
+            "opening_fx_binding": {},
             "arms": [
                 {
                     "arm_id": "baseline",
-                    "provider_code": "HK.80000001",
-                    "sell_limit": 1.0,
+                    "candidate": {"expiration": "2026-09-01", "currency": "HKD"},
                 }
             ],
         },
-        artifact_ref="formal/point.json.gz",
+        artifact_ref=f"formal/{point_id}.json.gz",
         artifact_sha256="4" * 64,
         created_at_utc=NOW,
     )
-    original_list = store.list_observations
-    original_get = store.get_observation
-    counts = {"full": 0, "exact": 0}
-
-    def counted_list(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
-        counts["full"] += 1
-        return original_list(*args, **kwargs)
-
-    def counted_get(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
-        counts["exact"] += 1
-        return original_get(*args, **kwargs)
-
-    monkeypatch.setattr(store, "list_observations", counted_list)
-    monkeypatch.setattr(store, "get_observation", counted_get)
-    assert service._recover_one_elapsed_day(
-        {"artifact_root": tmp_path / "artifacts"},
-        store,
-        experiment,
-        plan,
-        {SOURCE},
-        "2026-09-01T06:01:00Z",
-    ) == "2026-09-01"
-    assert counts == {"full": 1, "exact": 240}
-    batches = original_list("experiment-1", kind="hidden_batch")
-    assert len(batches) == 240
-    assert {batch["status"] for batch in batches} == {"gap"}
-
-
-def test_provider_publish_and_late_recovery_cannot_create_gap_with_artifact(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import src.application.strategy_lab.service as service
-
-    plan = {
-        "experiment_id": "experiment-1",
-        "provider_source": {"opend_binding": {"host": "127.0.0.1", "port": 11111}},
-        "hidden_snapshot_batch_ceiling": 200,
-        "validation_wake_tolerance_seconds": 20,
-        "evaluator_behavior_sha256": "f" * 64,
-    }
-    store, experiment = _validation_store(tmp_path, plan)
-    _put_available_validation_point(store, plan)
-    manifest = _manifest(plan)
-    context = {
-        "artifact_root": tmp_path / "artifacts",
-        "opend_limiter_root": tmp_path / "runtime",
-        "opend_binding": {"host": "127.0.0.1", "port": 11111},
-        "tick_lock_path": tmp_path / "tick.lock",
-    }
-    provider_entered = threading.Event()
-    release_provider = threading.Event()
-
-    class Gateway:
-        def close(self) -> None:
-            pass
-
-    monkeypatch.setattr(service, "_tick_guard", lambda *_args: None)
-    monkeypatch.setattr(service, "build_futu_gateway", lambda **_kwargs: Gateway())
-
-    def fetch(**_kwargs: object) -> MarketSnapshotFetchResult:
-        provider_entered.set()
-        assert release_provider.wait(2)
-        return _snapshot()
-
-    monkeypatch.setattr(service, "fetch_option_snapshots", fetch)
+    store.put_observation(
+        "experiment-1",
+        observation_key=f"validation_fill:{point_id}:baseline",
+        recommendation_point_id=point_id,
+        arm_id="baseline",
+        kind="validation_fill",
+        status="observed_fill",
+        payload={
+            "status": "observed_fill",
+            "fill_price": 1.0,
+            "fill_evidence_ref": {
+                "artifact_ref": "evidence/fill.json",
+                "artifact_sha256": "6" * 64,
+            },
+        },
+        artifact_ref="evidence/fill.json",
+        artifact_sha256="6" * 64,
+        created_at_utc=NOW,
+    )
+    waiting = store.complete_validation_collection(
+        "experiment-1",
+        expected_revision=confirmed["revision"],
+        actor="tester",
+        occurred_at_utc="2026-09-02T08:00:00Z",
+    )
+    before = store.list_observations("experiment-1")
+    monkeypatch.setattr(service, "_current_behavior", lambda *_args: "frozen")
+    monkeypatch.setattr(service, "_provider_guard", lambda *_args: None)
+    monkeypatch.setattr(service, "_current_validation_config", lambda *_args: None)
+    monkeypatch.setattr(service, "source_commit_sha", lambda _path: SOURCE)
+    monkeypatch.setattr(service, "resolve_terminal_fx_binding", lambda *_args, **_kwargs: ({}, None))
     monkeypatch.setattr(
         service,
-        "try_low_priority_opend_call",
-        lambda **kwargs: kwargs["call"](),
+        "build_expiry_close_query",
+        lambda *_args, **_kwargs: {"fee_plan": {}},
     )
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        provider = pool.submit(
-            service._advance_current_batch,
-            context,
-            store,
-            experiment,
-            plan,
-            manifest,
-            SOURCE,
-            {SOURCE},
-            OpenDEndpointRateLimit(30.0, 60, 0.0),
-            provider_capable=True,
-            occurred_at_utc=NOW,
-        )
-        assert provider_entered.wait(2)
-        recovery = pool.submit(
-            service._advance_current_batch,
-            context,
-            store,
-            experiment,
-            plan,
-            manifest,
-            SOURCE,
-            {SOURCE},
-            OpenDEndpointRateLimit(30.0, 60, 0.0),
-            provider_capable=False,
-            occurred_at_utc="2026-09-01T02:00:21Z",
-        )
-        assert recovery.result(timeout=2)["reason_code"] == "validation_evidence_busy"
-        release_provider.set()
-        assert provider.result(timeout=2)["provider_logical_units"] == 1
+    monkeypatch.setattr(service, "load_runtime_config", lambda **_kwargs: (Path("config"), {}))
+    monkeypatch.setattr(
+        service,
+        "resolve_opend_fetch_limits",
+        lambda _config: SimpleNamespace(history_kline=SimpleNamespace(window_sec=30, max_calls=20)),
+    )
+    monkeypatch.setattr(
+        service,
+        "build_futu_gateway",
+        lambda **_kwargs: SimpleNamespace(close=lambda: None),
+    )
 
-    observations = store.list_observations("experiment-1")
-    assert next(item for item in observations if item["kind"] == "hidden_batch")[
-        "status"
-    ] == "complete"
-    assert not any(item["status"] == "gap" for item in observations)
+    def fail(*_args: object, **_kwargs: object) -> None:
+        raise failure
+
+    monkeypatch.setattr(service, "resolve_expiry_outcome", fail)
+    result = service._advance_waiting_outcome(
+        {
+            "store_path": tmp_path / "experiments.sqlite3",
+            "artifact_root": tmp_path / "artifacts",
+            "opend_limiter_root": tmp_path / "runtime",
+            "repo_root": tmp_path,
+            "config_hk": tmp_path / "config.hk.json",
+            "opend_binding": {"host": "127.0.0.1", "port": 11111},
+        },
+        store,
+        waiting,
+        occurred_at_utc="2026-09-12T08:00:00Z",
+        provider_capable=True,
+    )
+
+    assert result["reason_code"] == reason_code
+    assert store.list_observations("experiment-1") == before
 
 
-def test_batch_freeze_reloads_points_after_stale_snapshot(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("case", "conclusion"),
+    [
+        ("complete", "challenger_passed"),
+        ("missing", "insufficient_evidence"),
+        ("challenger_not_passed", "keep_baseline"),
+    ],
+)
+def test_frozen_ten_day_validation_reaches_each_final_conclusion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    conclusion: str,
 ) -> None:
     import src.application.strategy_lab.service as service
 
+    sessions = [
+        {
+            "trading_date": f"2026-09-{day:02d}",
+            "expected_recommendation_point_ids": [f"{day:064x}"],
+        }
+        for day in range(1, 11)
+    ]
+    timer_binding = service.build_strategy_lab_timer_binding()
     plan = {
         "experiment_id": "experiment-1",
         "provider_source": {"provider": "futu_opend"},
-        "hidden_snapshot_batch_ceiling": 200,
-        "validation_wake_tolerance_seconds": 20,
-        "evaluator_behavior_sha256": "f" * 64,
+        "market_calendar": {"sessions": sessions},
+        "hidden_snapshot_batch_ceiling": service.HIDDEN_SNAPSHOT_BATCH_CEILING,
+        "validation_wake_tolerance_seconds": service.VALIDATION_WAKE_TOLERANCE_SECONDS,
+        "tick_protection_seconds": service.TICK_PROTECTION_SECONDS,
+        "timer_binding": timer_binding,
+        "timer_binding_sha256": canonical_sha256(timer_binding),
     }
-    store, experiment = _validation_store(tmp_path, plan)
-    _put_available_validation_point(store, plan)
-    stale_manifest = _manifest(plan)
-    context = {
-        "artifact_root": tmp_path / "artifacts",
-        "opend_limiter_root": tmp_path / "runtime",
-        "opend_binding": {"host": "127.0.0.1", "port": 11111},
-        "tick_lock_path": tmp_path / "tick.lock",
-    }
-    point_id = "2" * 64
-    with exclusive_private_file_lock(
-        service._validation_experiment_lock_path(context, "experiment-1")
-    ):
+    research_result_keys = []
+    research_observations = []
+    for arm_id in ("baseline", "challenger_0.002"):
+        key = f"single_result:{'f' * 64}:{arm_id}"
+        research_result_keys.append(key)
+        research_observations.append(
+            {
+                "observation_key": key,
+                "recommendation_point_id": "f" * 64,
+                "arm_id": arm_id,
+                "kind": "single_result",
+                "status": "available",
+                "payload": {
+                    "status": "available",
+                    "recommendation_point_id": "f" * 64,
+                    "trading_day": "2026-08-01",
+                    "arm": "baseline" if arm_id == "baseline" else "challenger",
+                    "variant_id": None if arm_id == "baseline" else arm_id,
+                },
+                "created_at_utc": "2026-08-30T00:00:30Z",
+            }
+        )
+    store, confirmed = _validation_store(
+        tmp_path,
+        plan,
+        research_observations=research_observations,
+    )
+    fill_status = "not_evaluable" if case == "missing" else "observed_fill"
+    terminal_results: list[tuple[str, str, dict[str, object]]] = []
+    for session in sessions:
+        point_id = session["expected_recommendation_point_ids"][0]
         store.put_observation(
             "experiment-1",
             observation_key=f"validation_point:{point_id}",
@@ -1189,263 +1228,174 @@ def test_batch_freeze_reloads_points_after_stale_snapshot(
             status="available",
             payload={
                 "status": "available",
-                "trading_day": "2026-09-01",
+                "trading_day": session["trading_date"],
                 "recommendation_point_id": point_id,
-                "active_slots_utc": [SLOT],
-                "formal_point_ref": "formal/point-2.json.gz",
-                "formal_point_sha256": "6" * 64,
-                "formal_point_content_sha256": "7" * 64,
+                "formal_point_ref": f"formal/{point_id}.json.gz",
+                "formal_point_sha256": "4" * 64,
+                "formal_point_content_sha256": "5" * 64,
+                "opening_fx_binding": {},
                 "arms": [
                     {
-                        "arm_id": "baseline",
-                        "provider_code": "HK.80000002",
-                        "sell_limit": 1.1,
+                        "kind": arm,
+                        "arm_id": arm_id,
+                        "near_return_threshold": threshold,
+                        "candidate_id": f"{point_id}-{arm_id}",
+                        "candidate": {"contract_symbol": "HK.80000001"},
                     }
+                    for arm, arm_id, threshold in (
+                        ("baseline", "baseline", None),
+                        ("challenger", "challenger_0.002", 0.002),
+                    )
                 ],
             },
-            artifact_ref="formal/point-2.json.gz",
-            artifact_sha256="6" * 64,
+            artifact_ref=f"formal/{point_id}.json.gz",
+            artifact_sha256="4" * 64,
             created_at_utc=NOW,
         )
-
-    class Gateway:
-        def close(self) -> None:
-            pass
-
-    monkeypatch.setattr(service, "_tick_guard", lambda *_args: None)
-    monkeypatch.setattr(service, "build_futu_gateway", lambda **_kwargs: Gateway())
-    monkeypatch.setattr(
-        service,
-        "fetch_option_snapshots",
-        lambda **_kwargs: MarketSnapshotFetchResult(
-            snap_map={
-                "HK.80000001": _snapshot().snap_map["HK.80000001"],
-                "HK.80000002": {
-                    **_snapshot().snap_map["HK.80000001"],
-                    "code": "HK.80000002",
+        for arm, arm_id, threshold, annualized, pnl in (
+            ("baseline", "baseline", None, 0.10, 100.0),
+            (
+                "challenger",
+                "challenger_0.002",
+                0.002,
+                0.12 if case == "complete" else 0.09,
+                101.0,
+            ),
+        ):
+            store.put_observation(
+                "experiment-1",
+                observation_key=f"validation_fill:{point_id}:{arm_id}",
+                recommendation_point_id=point_id,
+                arm_id=arm_id,
+                kind="validation_fill",
+                status=fill_status,
+                payload={
+                    "status": fill_status,
+                    "fill_evidence_ref": {
+                        "artifact_ref": f"evidence/fill/{point_id}-{arm_id}.json",
+                        "artifact_sha256": "6" * 64,
+                    },
+                    **(
+                        {"reason_code": "validation_snapshot_invalid"}
+                        if fill_status == "not_evaluable"
+                        else {
+                            "fill_price": 1.0,
+                            "fill_time": "2026-09-01T02:00:05Z",
+                            "quote_evidence_not_broker_execution": True,
+                        }
+                    ),
                 },
+                artifact_ref=f"evidence/fill/{point_id}-{arm_id}.json",
+                artifact_sha256="6" * 64,
+                created_at_utc=NOW,
+            )
+            if case != "missing":
+                terminal_results.append(
+                    (
+                        point_id,
+                        arm_id,
+                        {
+                            "status": "available",
+                            "recommendation_point_id": point_id,
+                            "trading_day": session["trading_date"],
+                            "arm": arm,
+                            "variant_id": None if arm == "baseline" else arm_id,
+                            "near_return_threshold": threshold,
+                            "candidate_ref": f"{point_id}-{arm_id}",
+                            "fill_status": "observed_fill",
+                            "outcome_status": "available",
+                            "outcome_evidence_ref": {
+                                "artifact_ref": f"evidence/outcome/{point_id}-{arm_id}.json",
+                                "artifact_sha256": "7" * 64,
+                            },
+                            "safety_status": "pass",
+                            "annualized_return": annualized,
+                            "economic_pnl_cny": pnl,
+                        },
+                    )
+                )
+    waiting = store.complete_validation_collection(
+        "experiment-1",
+        expected_revision=confirmed["revision"],
+        actor="tester",
+        occurred_at_utc="2026-09-11T08:00:00Z",
+    )
+    assert waiting["state"] == "waiting_outcome"
+    for point_id, arm_id, payload in terminal_results:
+        outcome_query = {
+            "provider_source": {"provider": "futu_opend"},
+            "validation_plan_sha256": canonical_sha256(plan),
+            "formal_point_ref": f"formal/{point_id}.json.gz",
+            "formal_point_sha256": "4" * 64,
+            "evaluator_behavior_sha256": canonical_sha256([{"path": "owner.py", "sha256": "a" * 64}]),
+            "arm_id": arm_id,
+        }
+        outcome_sha = canonical_sha256(outcome_query)
+        store.put_observation(
+            "experiment-1",
+            observation_key=f"expiry_close_query:{outcome_sha}",
+            kind="expiry_close_query",
+            status="available",
+            payload={
+                "query": outcome_query,
+                "query_sha256": outcome_sha,
+                "payload": {"status": "available"},
             },
-            errors=[],
-            requested_codes=frozenset({"HK.80000001", "HK.80000002"}),
-            returned_codes=frozenset({"HK.80000001", "HK.80000002"}),
-            missing_codes=frozenset(),
-            unexpected_codes=frozenset(),
-            complete=True,
-            opend_call_count=1,
-            requested_at_utc=NOW,
-            received_at_utc=NOW,
-        ),
-    )
-    monkeypatch.setattr(
-        service, "try_low_priority_opend_call", lambda **kwargs: kwargs["call"]()
-    )
-    result = service._advance_current_batch(
-        context,
-        store,
-        experiment,
-        plan,
-        stale_manifest,
-        SOURCE,
-        {SOURCE},
-        OpenDEndpointRateLimit(30.0, 60, 0.0),
-        provider_capable=True,
-        occurred_at_utc=NOW,
-    )
-    assert result["provider_logical_units"] == 1
-    batch = store.list_observations("experiment-1", kind="hidden_batch")[0]
-    assert {arm["recommendation_point_id"] for arm in batch["payload"]["arms"]} == {
-        "1" * 64,
-        "2" * 64,
-    }
+            artifact_ref=payload["outcome_evidence_ref"]["artifact_ref"],
+            artifact_sha256=payload["outcome_evidence_ref"]["artifact_sha256"],
+            created_at_utc="2026-09-12T06:00:00Z",
+        )
+        store.put_observation(
+            "experiment-1",
+            observation_key=f"single_result:{point_id}:{arm_id}",
+            recommendation_point_id=point_id,
+            arm_id=arm_id,
+            kind="single_result",
+            status="available",
+            payload=payload,
+            created_at_utc="2026-09-12T07:00:00Z",
+        )
 
-
-def test_tick_busy_has_priority_over_calendar_protection(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import src.application.strategy_lab.service as service
-
-    monkeypatch.setattr(service, "tick_cron_is_busy", lambda _path: True)
-    monkeypatch.setattr(
-        service,
-        "next_systemd_tick_target_utc",
-        lambda *_args: pytest.fail("busy Tick must short-circuit calendar calculation"),
-    )
-    assert service._tick_guard(
-        {"tick_lock_path": tmp_path / "tick.lock"}, "2026-09-01T02:00:00Z"
-    ) == "tick_busy"
-
-
-def test_public_advance_returns_current_slot_before_historical_recovery(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import src.application.strategy_lab.service as service
-
-    plan = {"experiment_id": "experiment-1"}
-    _store, _experiment = _validation_store(tmp_path, plan)
     context = {
         "store_path": tmp_path / "experiments.sqlite3",
-        "repo_root": tmp_path,
         "artifact_root": tmp_path / "artifacts",
+        "repo_root": tmp_path,
     }
-    monkeypatch.setattr(service, "_validation_plan", lambda _item: plan)
-    monkeypatch.setattr(service, "_current_behavior", lambda *_args: "f" * 64)
-    monkeypatch.setattr(service, "source_commit_sha", lambda _root: SOURCE)
+    monkeypatch.setattr(service, "_current_behavior", lambda *_args: "frozen")
     monkeypatch.setattr(
         service,
         "_current_validation_config",
-        lambda *_args: OpenDEndpointRateLimit(30.0, 60, 0.0),
-    )
-    monkeypatch.setattr(service, "_bind_validation_points", lambda *_args: None)
-    monkeypatch.setattr(
-        service, "_current_validation_slot", lambda *_args: ("2026-09-01", SLOT)
-    )
-    monkeypatch.setattr(service, "_batch_manifest_for", lambda *_args: _manifest(plan))
-    monkeypatch.setattr(
-        service,
-        "_advance_current_batch",
-        lambda *_args, **_kwargs: {
-            "status": "blocked",
-            "reason_code": "opend_low_priority_deferred",
-        },
+        lambda *_args: pytest.fail("durable terminal evidence must not read live config"),
     )
     monkeypatch.setattr(
         service,
-        "_recover_one_elapsed_day",
-        lambda *_args: pytest.fail("current eligible slot must win over recovery"),
+        "source_commit_sha",
+        lambda _path: pytest.fail("durable terminal evidence must not require a current commit"),
     )
+
     result = service.advance_experiment(
         context,
         "experiment-1",
-        occurred_at_utc=NOW,
-        provider_capable=True,
+        occurred_at_utc="2026-09-12T08:00:00Z",
     )
-    assert result["reason_code"] == "opend_low_priority_deferred"
+    receipt = service.read_receipt(context, "experiment-1", kind="final")["receipt"]
 
-
-def test_public_advance_retries_source_bound_not_evaluable_at_different_times(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import src.application.strategy_lab.service as service
-
-    sessions = []
-    for offset in range(10):
-        day = (datetime(2026, 9, 1) + timedelta(days=offset)).date().isoformat()
-        sessions.append(
-            {
-                "trading_date": day,
-                "scheduled_scan_targets_utc": [f"{day}T02:00:00Z"],
-                "expected_recommendation_point_ids": [f"{offset + 1:064x}"],
-                "minute_grid_utc": [],
-                "session_endpoint_utc": f"{day}T08:00:00Z",
-            }
-        )
-    plan = {
-        "experiment_id": "experiment-1",
-        "market_calendar": {
-            "market_calendar_version": "calendar-v1",
-            "snapshot_content_sha256": "6" * 64,
-            "sessions": sessions,
-        },
-        "schedule": {"schedule_config_sha256": "7" * 64},
-        "validation_wake_tolerance_seconds": 20,
-        "hidden_snapshot_batch_ceiling": 200,
-        "evaluator_behavior_sha256": "f" * 64,
-        "provider_source": {"provider": "futu_opend"},
+    assert result["experiment"]["state"] == "completed"
+    assert receipt["conclusion"] == conclusion
+    assert receipt["safety_status"] == ("not_evaluable" if conclusion == "insufficient_evidence" else "pass")
+    assert set(receipt["confirmations"]) == {
+        "research_confirmed",
+        "validation_confirmed",
     }
-    store, _experiment = _validation_store(tmp_path, plan)
-    context = {
-        "store_path": tmp_path / "experiments.sqlite3",
-        "repo_root": tmp_path,
-        "runtime_root": tmp_path / "runtime",
-        "artifact_root": tmp_path / "artifacts",
-    }
-    monkeypatch.setattr(service, "_validation_plan", lambda _item: plan)
-    monkeypatch.setattr(service, "_current_behavior", lambda *_args: "f" * 64)
-    monkeypatch.setattr(service, "source_commit_sha", lambda _root: SOURCE)
-    monkeypatch.setattr(
-        service,
-        "_current_validation_config",
-        lambda *_args: OpenDEndpointRateLimit(30.0, 60, 0.0),
+    assert len(receipt["validation_window"]["sessions"]) == 10
+    assert len(receipt["comparison"]["daily_aggregates"]) == (0 if conclusion == "insufficient_evidence" else 10)
+    assert sum(item["kind"] == "expiry_close_query" for item in receipt["terminal_observations"]) == (
+        0 if conclusion == "insufficient_evidence" else 20
     )
-    monkeypatch.setattr(service, "_current_validation_slot", lambda *_args: None)
-    monkeypatch.setattr(service, "_recover_one_elapsed_day", lambda *_args: None)
-    monkeypatch.setattr(service, "_derive_validation_fills", lambda *_args: 0)
-
-    def expectation(
-        _root: object, *, trading_date: str, **_kwargs: object
-    ) -> dict[str, object]:
-        if trading_date != "2026-09-01":
-            return {"status": "missing"}
-        session = sessions[0]
-        return {
-            "status": "available",
-            "expectation": {
-                "market": "HK",
-                "account": "lx",
-                "trading_date": trading_date,
-                "market_calendar_version": "calendar-v1",
-                "market_calendar_sha256": "6" * 64,
-                "schedule_config_sha256": "7" * 64,
-                "scheduled_scan_targets_market": session[
-                    "scheduled_scan_targets_utc"
-                ],
-                "expected_recommendation_point_ids": session[
-                    "expected_recommendation_point_ids"
-                ],
-            },
-        }
-
-    point_id = str(sessions[0]["expected_recommendation_point_ids"][0])
-    monkeypatch.setattr(service, "load_formal_expectation", expectation)
-    monkeypatch.setattr(
-        service,
-        "load_formal_point",
-        lambda *_args, **_kwargs: {
-            "status": "not_evaluable",
-            "reason_code": "formal_point_evidence_missing",
-            "artifact_ref": "formal/point.json.gz",
-            "artifact_file_sha256": "4" * 64,
-            "artifact_content_sha256": "5" * 64,
-            "point": {
-                "market": "HK",
-                "account": "lx",
-                "trading_date": "2026-09-01",
-                "recommendation_point_id": point_id,
-                "content_sha256": "5" * 64,
-                "source_binding": {
-                    "market": "HK",
-                    "account": "lx",
-                    "scheduled_scan_target_market": "2026-09-01T02:00:00Z",
-                },
-            },
-        },
-    )
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        calls = [
-            pool.submit(
-                service.advance_experiment,
-                context,
-                "experiment-1",
-                occurred_at_utc=occurred,
-            )
-            for occurred in (
-                "2026-08-31T01:00:00Z",
-                "2026-08-31T01:00:01Z",
-            )
-        ]
-        first, concurrent = [call.result(timeout=3) for call in calls]
-    before = store.get_observation("experiment-1", f"validation_point:{point_id}")
-    second = service.advance_experiment(
-        context, "experiment-1", occurred_at_utc="2026-08-31T02:00:00Z"
-    )
-    assert (first["status"], concurrent["status"], second["status"]) == (
-        "progress",
-        "progress",
-        "progress",
-    )
-    assert store.get_observation("experiment-1", f"validation_point:{point_id}") == before
-    assert before is not None
-    assert (before["artifact_ref"], before["artifact_sha256"]) == (
-        "formal/point.json.gz",
-        "4" * 64,
-    )
+    assert not set(research_result_keys) & {item["observation_key"] for item in receipt["terminal_observations"]}
+    assert receipt["declarations"]["experimental_improvement_is_not_realized_online_profit"] is True
+    assert service.advance_experiment(
+        context,
+        "experiment-1",
+        occurred_at_utc="2026-09-13T08:00:00Z",
+    ) == {"status": "complete", "experiment": result["experiment"]}

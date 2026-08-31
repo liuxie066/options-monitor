@@ -78,16 +78,12 @@ def add_strategy_lab_commands(subparsers: Any) -> argparse.ArgumentParser:
     confirm.add_argument("--actor", required=True)
     confirm.add_argument("--idempotency-key", required=True)
 
-    validation_preview = commands.add_parser(
-        "preview-validation", help="preview the next 10 validation sessions"
-    )
+    validation_preview = commands.add_parser("preview-validation", help="preview the next 10 validation sessions")
     validation_preview.add_argument("--profile-path", required=True)
     validation_preview.add_argument("--experiment-id", required=True)
     validation_preview.add_argument("--requested-start", required=True)
 
-    validation_confirm = commands.add_parser(
-        "confirm-validation", help="confirm one current validation preview"
-    )
+    validation_confirm = commands.add_parser("confirm-validation", help="confirm one current validation preview")
     validation_confirm.add_argument("--profile-path", required=True)
     validation_confirm.add_argument("--experiment-id", required=True)
     validation_confirm.add_argument("--requested-start", required=True)
@@ -112,9 +108,10 @@ def add_strategy_lab_commands(subparsers: Any) -> argparse.ArgumentParser:
     execute.add_argument("--experiment-id", required=True)
     execute.add_argument("--actor", required=True)
 
-    receipt = commands.add_parser("receipt", help="read one Research Receipt")
+    receipt = commands.add_parser("receipt", help="read one Strategy Lab receipt")
     receipt.add_argument("--profile-path", required=True)
     receipt.add_argument("--experiment-id", required=True)
+    receipt.add_argument("--kind", choices=("research", "final"), default="research")
     return strategy_lab
 
 
@@ -140,10 +137,7 @@ def _is_bounded_systemd_invocation(
             cgroup_text = Path("/proc/self/cgroup").read_text(encoding="utf-8")
         except OSError:
             return False
-    return any(
-        STRATEGY_LAB_ADVANCE_SERVICE in line.strip().split("/")
-        for line in cgroup_text.splitlines()
-    )
+    return any(STRATEGY_LAB_ADVANCE_SERVICE in line.strip().split("/") for line in cgroup_text.splitlines())
 
 
 def _experiment_request(args: argparse.Namespace) -> dict[str, str]:
@@ -233,7 +227,7 @@ def handle_strategy_lab_command(args: argparse.Namespace) -> dict[str, Any]:
             elif args.strategy_lab_command == "status":
                 data = get_experiment_status(context, args.experiment_id)
             elif args.strategy_lab_command == "receipt":
-                data = read_receipt(context, args.experiment_id)
+                data = read_receipt(context, args.experiment_id, kind=args.kind)
             elif args.strategy_lab_research_command == "execute":
                 data = execute_research(
                     context,
@@ -258,10 +252,7 @@ def handle_strategy_lab_command(args: argparse.Namespace) -> dict[str, Any]:
             data=data,
         )
 
-    if (
-        args.strategy_lab_command != "readiness"
-        or args.strategy_lab_readiness_command != "refresh-history-k"
-    ):
+    if args.strategy_lab_command != "readiness" or args.strategy_lab_readiness_command != "refresh-history-k":
         raise AgentToolError(code="INPUT_ERROR", message="unsupported Strategy Lab command")
     try:
         profile = load_service_profile(Path(args.profile_path).expanduser())

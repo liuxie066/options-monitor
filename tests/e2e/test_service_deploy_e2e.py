@@ -18,6 +18,7 @@ def test_service_render_cli_omits_retired_strategy_lab_flags(
         parse_args(["service", "render", "--help"])
     assert exc_info.value.code == 0
     help_text = capsys.readouterr().out
+    assert "--include-strategy-lab-advance" in help_text
     retired_flags = (
         "--include-strategy-lab-" + "recorder",
         "--strategy-lab-" + "recorder-account",
@@ -55,6 +56,7 @@ def test_cli_service_render_returns_json(capsys, tmp_path: Path) -> None:
         str(tmp_path / "runtime" / "config.yaml"),
         "--env-file",
         str(tmp_path / "options-monitor.env"),
+        "--include-strategy-lab-advance",
         "--no-content",
     ])
 
@@ -63,6 +65,11 @@ def test_cli_service_render_returns_json(capsys, tmp_path: Path) -> None:
     assert payload["ok"] is True
     assert payload["data"]["summary"]["service_provider"] == "systemd"
     assert payload["data"]["env_file"] == str(tmp_path / "options-monitor.env")
+    assert any(
+        item["relative_path"]
+        == "systemd/options-monitor-strategy-lab-advance.timer"
+        for item in payload["data"]["files"]
+    )
     profile = next(item for item in payload["data"]["files"] if item["relative_path"] == "service.profile.json")
     assert profile.get("content") is None
     assert payload["data"]["files"][0].get("content") is None

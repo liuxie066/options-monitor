@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -42,8 +43,8 @@ def _identity(value: object, label: str) -> str:
 
 
 def _receipt_ref(experiment_id: str, kind: str) -> str:
-    if kind != "research":
-        _fail("receipt_kind_unsupported", "only the research receipt exists in Phase 2")
+    if kind not in {"research", "final"}:
+        _fail("receipt_kind_unsupported", "receipt kind is unsupported")
     return f"experiments/{experiment_id}/receipts/{kind}.json"
 
 
@@ -90,9 +91,7 @@ def _canonical_comparisons(values: object) -> list[dict[str, Any]]:
             ),
         )
     except (KeyError, TypeError, ValueError) as exc:
-        raise StrategyLabReceiptError(
-            "receipt_input_invalid", "comparison identity is invalid"
-        ) from exc
+        raise StrategyLabReceiptError("receipt_input_invalid", "comparison identity is invalid") from exc
 
 
 def build_research_receipt(
@@ -117,11 +116,7 @@ def build_research_receipt(
     ):
         _fail("receipt_input_invalid", "experiment bindings are invalid")
     research_window = spec.get("research_window")
-    selected_days = (
-        research_window.get("selected_trading_dates")
-        if isinstance(research_window, Mapping)
-        else None
-    )
+    selected_days = research_window.get("selected_trading_dates") if isinstance(research_window, Mapping) else None
     sessions = research_window.get("sessions") if isinstance(research_window, Mapping) else None
     if (
         not isinstance(selected_days, list)
@@ -152,6 +147,117 @@ def build_research_receipt(
     }
 
 
+def build_final_receipt(
+    experiment: object,
+    events: object,
+    observations: object,
+    comparison: object,
+    conclusion: object,
+) -> dict[str, Any]:
+    if not isinstance(experiment, Mapping):
+        _fail("receipt_input_invalid", "experiment is invalid")
+    experiment_id = _identity(experiment.get("experiment_id"), "experiment_id")
+    plan = experiment.get("validation_plan")
+    if (
+        not isinstance(plan, Mapping)
+        or canonical_sha256(plan) != experiment.get("validation_plan_sha256")
+        or not isinstance(experiment.get("spec"), Mapping)
+        or canonical_sha256(experiment["spec"]) != experiment.get("spec_sha256")
+        or canonical_sha256(experiment.get("behavior_manifest")) != experiment.get("evaluator_behavior_sha256")
+    ):
+        _fail("receipt_input_invalid", "final receipt bindings are invalid")
+    calendar = plan.get("market_calendar")
+    sessions = calendar.get("sessions") if isinstance(calendar, Mapping) else None
+    if not isinstance(sessions, list) or len(sessions) != 10:
+        _fail("receipt_input_invalid", "validation window is not exactly 10 sessions")
+    expected_point_ids = {
+        point_id
+        for session in sessions
+        if isinstance(session, Mapping)
+        for point_id in session.get("expected_recommendation_point_ids", [])
+        if isinstance(point_id, str)
+    }
+    if conclusion not in {
+        "challenger_passed",
+        "keep_baseline",
+        "insufficient_evidence",
+    }:
+        _fail("receipt_input_invalid", "final conclusion is invalid")
+    if not isinstance(comparison, Mapping):
+        _fail("receipt_input_invalid", "final comparison is invalid")
+    expected_conclusion = (
+        "challenger_passed"
+        if comparison.get("status") == "complete" and comparison.get("passed") is True
+        else "keep_baseline"
+        if comparison.get("status") == "complete" and comparison.get("passed") is False
+        else "insufficient_evidence"
+    )
+    if conclusion != expected_conclusion:
+        _fail("receipt_input_invalid", "final conclusion does not match comparison")
+    if not isinstance(events, Sequence) or isinstance(events, (str, bytes)):
+        _fail("receipt_input_invalid", "events are invalid")
+    confirmations: dict[str, dict[str, Any]] = {}
+    for event in events:
+        if isinstance(event, Mapping) and event.get("event_type") in {
+            "research_confirmed",
+            "validation_confirmed",
+        }:
+            confirmations[str(event["event_type"])] = {
+                "occurred_at_utc": event.get("occurred_at_utc"),
+                "event_sha256": canonical_sha256(dict(event)),
+            }
+    if set(confirmations) != {"research_confirmed", "validation_confirmed"}:
+        _fail("receipt_input_invalid", "confirmation events are unavailable")
+    terminal = []
+    for value in _canonical_observations(observations):
+        if value["kind"] in {"validation_point", "validation_fill", "single_result"}:
+            if value["recommendation_point_id"] in expected_point_ids:
+                terminal.append(value)
+            continue
+        if value["kind"] == "expiry_close_query":
+            payload = value.get("payload")
+            query = payload.get("query") if isinstance(payload, Mapping) else None
+            if isinstance(query, Mapping) and query.get("validation_plan_sha256") == experiment.get(
+                "validation_plan_sha256"
+            ):
+                terminal.append(value)
+    durable_times = [
+        str(value["created_at_utc"]) for value in terminal if isinstance(value.get("created_at_utc"), str)
+    ] + [value["occurred_at_utc"] for value in confirmations.values()]
+    if not durable_times:
+        _fail("receipt_input_invalid", "final conclusion time is unavailable")
+    return {
+        "kind": "final",
+        "experiment_id": experiment_id,
+        "spec_sha256": experiment["spec_sha256"],
+        "validation_plan_sha256": experiment["validation_plan_sha256"],
+        "evaluator_behavior_sha256": experiment["evaluator_behavior_sha256"],
+        "behavior_manifest": experiment["behavior_manifest"],
+        "research_receipt_ref": experiment["research_receipt_ref"],
+        "research_receipt_sha256": experiment["research_receipt_sha256"],
+        "confirmations": confirmations,
+        "leader": experiment["leader"],
+        "validation_window": {
+            "sessions": sessions,
+            "expected_recommendation_point_ids": [
+                point_id for session in sessions for point_id in session.get("expected_recommendation_point_ids", [])
+            ],
+        },
+        "terminal_observations": terminal,
+        "comparison": comparison,
+        "safety_status": ("pass" if comparison.get("status") == "complete" else "not_evaluable"),
+        "conclusion": conclusion,
+        "declarations": {
+            "observed_fill_is_quote_evidence_not_broker_execution": True,
+            "experimental_improvement_is_not_realized_online_profit": True,
+        },
+        "concluded_at_utc": utc_timestamp(
+            max(datetime.fromisoformat(utc_timestamp(value).replace("Z", "+00:00")) for value in durable_times),
+            "concluded_at_utc",
+        ),
+    }
+
+
 def _read_path(target: Path, *, receipt_ref: str) -> dict[str, Any]:
     try:
         with open_private_text(target) as handle:
@@ -159,9 +265,7 @@ def _read_path(target: Path, *, receipt_ref: str) -> dict[str, Any]:
         encoded = content.encode("utf-8")
         payload = json.loads(content)
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise StrategyLabReceiptError(
-            "receipt_artifact_invalid", "research receipt cannot be read"
-        ) from exc
+        raise StrategyLabReceiptError("receipt_artifact_invalid", "research receipt cannot be read") from exc
     if not isinstance(payload, dict) or strict_json_bytes(payload) != encoded:
         _fail("receipt_artifact_invalid", "research receipt is not canonical")
     return {
@@ -181,9 +285,7 @@ def publish_receipt(
     if not isinstance(kind, str):
         _fail("receipt_kind_unsupported", "receipt kind is invalid")
     ref = _receipt_ref(identity, kind)
-    if not isinstance(payload, Mapping) or payload.get("kind") != kind or payload.get(
-        "experiment_id"
-    ) != identity:
+    if not isinstance(payload, Mapping) or payload.get("kind") != kind or payload.get("experiment_id") != identity:
         _fail("receipt_input_invalid", "receipt payload identity is invalid")
     encoded = strict_json_bytes(payload)
     root = private_path(artifact_root)
@@ -220,6 +322,7 @@ def read_receipt_artifact(
 __all__ = [
     "StrategyLabReceiptError",
     "build_research_receipt",
+    "build_final_receipt",
     "publish_receipt",
     "read_receipt_artifact",
 ]

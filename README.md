@@ -340,20 +340,24 @@ om research collect \
 
 `om research` 各子命令的写入参数并不统一：`collect` 使用 `--write-outputs --confirm`，Shadow Replay 的部分动作使用 `--write`，dataset build 和 archive verify 也有自己的 artifact 语义。执行前先看子命令 `--help` 与 [Shadow Replay Runbook](docs/SHADOW_REPLAY_RUNBOOK.md)；不要把 Research 整体理解成“永远只读”。
 
-Strategy Lab 当前提供固定 Recipe 的 preview、显式确认、可恢复的本地 20 日研究和 Research Receipt：
+Strategy Lab 当前提供固定 Recipe 的 preview、两次显式确认、可恢复的本地 20 日研究、未来 10 日隐藏验证和两类回执：
 
 ```bash
 om strategy-lab recipes --help
 om strategy-lab preview --help
 om strategy-lab confirm-research --help
+om strategy-lab preview-validation --help
+om strategy-lab confirm-validation --help
+om strategy-lab advance --help
 om strategy-lab status --help
 om strategy-lab research execute --help
 om strategy-lab receipt --help
 om strategy-lab readiness refresh-history-k --help
 ```
 
-`research execute` 每次最多执行一个 OpenD 逻辑证据单元；需要重复显式调用直到完成。
-Phase 2 没有研究 timer、10 日隐藏验证或生产配置采用。
+`research execute` 每次最多执行一个 OpenD 逻辑证据单元；需要重复显式调用直到完成。隐藏验证只由显式 opt-in
+的 systemd advance timer 取得 provider 权限，直接 `advance --experiment-id` 仅恢复已持久化证据。Strategy Lab
+不自动采用实验结果或修改生产配置。
 
 ### Tool Gateway
 

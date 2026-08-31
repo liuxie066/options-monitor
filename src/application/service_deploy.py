@@ -34,6 +34,7 @@ from src.application.secret_store import (
 )
 from src.application.settings import build_effective_env
 from src.application.payload_helpers import first_text as _first_text
+from src.application.strategy_lab.contracts import build_strategy_lab_timer_binding
 
 
 ServiceTarget = Literal["systemd", "launchd"]
@@ -742,19 +743,33 @@ def _dedupe_unit_dependencies(values: list[str]) -> list[str]:
     return out
 
 
-def _systemd_timer(*, description: str, unit_name: str, interval: str | None = None, calendar: str | None = None) -> str:
+def _systemd_timer(
+    *,
+    description: str,
+    unit_name: str,
+    interval: str | None = None,
+    calendar: str | list[str] | tuple[str, ...] | None = None,
+    accuracy_sec: str | None = None,
+    randomized_delay_sec: int | None = None,
+    persistent: bool = True,
+) -> str:
     timer_lines = [
         "[Unit]",
         f"Description={description}",
         "",
         "[Timer]",
     ]
-    if calendar:
-        timer_lines.append(f"OnCalendar={calendar}")
+    calendars = [calendar] if isinstance(calendar, str) else list(calendar or [])
+    if calendars:
+        timer_lines.extend(f"OnCalendar={value}" for value in calendars)
     else:
         timer_lines.extend(["OnBootSec=2min", f"OnUnitActiveSec={interval or '10min'}"])
+    if accuracy_sec is not None:
+        timer_lines.append(f"AccuracySec={accuracy_sec}")
+    if randomized_delay_sec is not None:
+        timer_lines.append(f"RandomizedDelaySec={int(randomized_delay_sec)}")
     timer_lines.extend([
-        "Persistent=true",
+        f"Persistent={'true' if persistent else 'false'}",
         f"Unit={unit_name}",
         "",
         "[Install]",
@@ -972,6 +987,7 @@ def render_service_bundle(
     wechat_clawbot_label: str | None = None,
     wechat_clawbot_allowed_senders: str | None = None,
     include_quality_monitoring: bool = False,
+    include_strategy_lab_advance: bool = False,
     include_feishu_agent_credential: bool = False,
     include_secret_credentials: bool = False,
     secret_credential_delivery: str | None = DEFAULT_SECRET_CREDENTIAL_DELIVERY,
@@ -986,6 +1002,8 @@ def render_service_bundle(
     secret_delivery = normalize_secret_credential_delivery(secret_credential_delivery)
     if include_quality_monitoring and target_key != "systemd":
         raise ValueError("quality monitoring service rendering is currently supported only for systemd")
+    if include_strategy_lab_advance and target_key != "systemd":
+        raise ValueError("Strategy Lab advance service rendering is currently supported only for systemd")
     if include_feishu_agent_credential and target_key != "systemd":
         raise ValueError("Feishu Agent credential materialization is currently supported only for systemd")
     if include_secret_credentials and target_key != "systemd":
@@ -1254,6 +1272,48 @@ def render_service_bundle(
                 install_path=f"/etc/systemd/system/{auto_close_timer}",
                 kind="systemd_timer",
                 service_name=auto_close_timer,
+            )
+
+        if include_strategy_lab_advance:
+            binding = build_strategy_lab_timer_binding()
+            advance_service = str(binding["service_name"])
+            advance_timer = str(binding["timer_name"])
+            add(
+                f"systemd/{advance_service}",
+                _systemd_unit(
+                    description="Options Monitor Strategy Lab advance",
+                    repo_root=repo,
+                    runtime_root=runtime,
+                    env_file=env_file_path,
+                    deploy_user=systemd_user,
+                    deploy_home=systemd_home,
+                    exec_args=[
+                        om,
+                        "strategy-lab",
+                        "advance",
+                        "--profile-path",
+                        str(runtime / "service.profile.json"),
+                        "--scheduled",
+                    ],
+                    timeout_start_sec=int(binding["timeout_start_sec"]),
+                ),
+                install_path=f"/etc/systemd/system/{advance_service}",
+                kind="systemd_service",
+                service_name=advance_service,
+            )
+            add(
+                f"systemd/{advance_timer}",
+                _systemd_timer(
+                    description="Options Monitor Strategy Lab advance timer",
+                    unit_name=advance_service,
+                    calendar=list(binding["calendars"]),
+                    accuracy_sec=str(binding["accuracy_sec"]),
+                    randomized_delay_sec=int(binding["randomized_delay_sec"]),
+                    persistent=bool(binding["persistent"]),
+                ),
+                install_path=f"/etc/systemd/system/{advance_timer}",
+                kind="systemd_timer",
+                service_name=advance_timer,
             )
 
         verify_service = "options-monitor-projection-verify.service"

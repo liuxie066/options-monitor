@@ -1667,6 +1667,45 @@ def test_service_drift_preserves_profile_opend_service(tmp_path: Path) -> None:
     assert "options-monitor-opend.service" in out["expected_services"]
     assert out["mismatched_units"] == []
 
+
+def test_service_drift_preserves_strategy_lab_advance_opt_in(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+    from src.application.service_drift import service_drift
+    from src.application.strategy_lab.contracts import STRATEGY_LAB_ADVANCE_TIMER
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    systemd_root = tmp_path / "systemd"
+    repo.mkdir()
+    runtime.mkdir()
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        accounts=["lx"],
+        markets=["hk"],
+        include_strategy_lab_advance=True,
+    )
+    profile = json.loads(
+        {item["relative_path"]: item for item in bundle["files"]}[
+            "service.profile.json"
+        ]["content"]
+    )
+    (runtime / "service.profile.json").write_text(
+        json.dumps(profile, ensure_ascii=False), encoding="utf-8"
+    )
+    _write_systemd_units_from_bundle(bundle, systemd_root)
+
+    out = service_drift(
+        repo_root=repo,
+        runtime_root=runtime,
+        systemd_unit_root=systemd_root,
+    )
+
+    assert out["summary"]["status"] == "ok"
+    assert STRATEGY_LAB_ADVANCE_TIMER in out["expected_services"]
+    assert out["mismatched_units"] == []
+
 def test_service_drift_preserves_quality_monitoring_opt_in_and_detects_metadata_drift(tmp_path: Path) -> None:
     from src.application.service_deploy import render_service_bundle
     from src.application.service_drift import service_drift

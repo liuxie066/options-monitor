@@ -58,7 +58,6 @@ OBSERVATION_KINDS = frozenset(
         "single_result",
         "validation_point",
         "hidden_batch",
-        "hidden_quote",
         "validation_fill",
     }
 )
@@ -70,7 +69,6 @@ OBSERVATION_STATUSES = frozenset(
         "not_evaluable",
         "started",
         "complete",
-        "gap",
         "observed_fill",
         "pending_outcome",
     }

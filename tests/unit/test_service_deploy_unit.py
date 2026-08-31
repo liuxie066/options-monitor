@@ -791,6 +791,63 @@ def test_render_service_bundle_omits_retired_strategy_lab_service_contract(
         for fragment in retired_unit_fragments
         for path in files
     )
+
+
+def test_render_systemd_bundle_can_include_single_strategy_lab_advance_timer(
+    tmp_path: Path,
+) -> None:
+    from src.application.service_deploy import render_service_bundle
+    from src.application.strategy_lab.contracts import (
+        STRATEGY_LAB_ADVANCE_CALENDARS,
+        STRATEGY_LAB_ADVANCE_SERVICE,
+        STRATEGY_LAB_ADVANCE_TIMER,
+    )
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    repo.mkdir()
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        accounts=["lx"],
+        markets=["hk"],
+        include_strategy_lab_advance=True,
+    )
+    files = {item["relative_path"]: item for item in bundle["files"]}
+    service = files[f"systemd/{STRATEGY_LAB_ADVANCE_SERVICE}"]["content"]
+    timer = files[f"systemd/{STRATEGY_LAB_ADVANCE_TIMER}"]["content"]
+    profile = json.loads(files["service.profile.json"]["content"])
+
+    assert (
+        f"ExecStart={repo / 'om'} strategy-lab advance --profile-path "
+        f"{runtime / 'service.profile.json'} --scheduled"
+    ) in service
+    assert "TimeoutStartSec=10" in service
+    assert timer.count("OnCalendar=") == 3
+    assert all(f"OnCalendar={value}" in timer for value in STRATEGY_LAB_ADVANCE_CALENDARS)
+    assert "OnBootSec=" not in timer
+    assert "OnUnitActiveSec=" not in timer
+    assert "AccuracySec=1s" in timer
+    assert "RandomizedDelaySec=0" in timer
+    assert "Persistent=false" in timer
+    assert {"name": STRATEGY_LAB_ADVANCE_SERVICE} in profile["services"]
+    assert {"name": STRATEGY_LAB_ADVANCE_TIMER} in profile["services"]
+
+
+def test_render_launchd_bundle_rejects_strategy_lab_advance(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    with pytest.raises(ValueError, match="supported only for systemd"):
+        render_service_bundle(
+            target="launchd",
+            repo_root=repo,
+            include_strategy_lab_advance=True,
+        )
+
+
 def test_render_systemd_bundle_records_yaml_authoring_source(tmp_path: Path) -> None:
     from src.application.service_deploy import render_service_bundle
 

@@ -8,6 +8,7 @@ import pytest
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from src.application.strategy_lab.receipts import (
     StrategyLabReceiptError,
+    build_final_receipt,
     build_research_receipt,
     publish_receipt,
     read_receipt_artifact,
@@ -20,10 +21,7 @@ def _experiment() -> dict[str, object]:
         "recipe": {"recipe_id": "sell_put_option_position_concentration"},
         "research_window": {
             "selected_trading_dates": [f"2026-08-{day:02d}" for day in range(1, 21)],
-            "sessions": [
-                {"trading_date": f"2026-08-{day:02d}", "points": []}
-                for day in range(1, 21)
-            ],
+            "sessions": [{"trading_date": f"2026-08-{day:02d}", "points": []} for day in range(1, 21)],
         },
     }
     manifest = [{"path": "owner.py", "sha256": "a" * 64}]
@@ -106,16 +104,12 @@ def test_research_receipt_is_deterministic_and_explicitly_provisional() -> None:
 
 
 def test_receipt_publish_is_write_once_readback_verified_and_private(tmp_path: Path) -> None:
-    payload = build_research_receipt(
-        _experiment(), [_observation("a")], [_comparison()], "2026-08-30T01:00:00Z"
-    )
+    payload = build_research_receipt(_experiment(), [_observation("a")], [_comparison()], "2026-08-30T01:00:00Z")
 
     first = publish_receipt(tmp_path, "experiment-1", "research", payload)
     second = publish_receipt(tmp_path, "experiment-1", "research", payload)
 
-    assert first == second == read_receipt_artifact(
-        tmp_path, "experiment-1", "research"
-    )
+    assert first == second == read_receipt_artifact(tmp_path, "experiment-1", "research")
     target = tmp_path / first["receipt_ref"]
     assert first["receipt_sha256"] == hashlib.sha256(target.read_bytes()).hexdigest()
     assert isinstance(first["receipt"]["comparisons"][0]["near_return_threshold"], float)
@@ -126,6 +120,101 @@ def test_receipt_publish_is_write_once_readback_verified_and_private(tmp_path: P
     with pytest.raises(StrategyLabReceiptError) as raised:
         publish_receipt(tmp_path, "experiment-1", "research", changed)
     assert raised.value.reason_code == "receipt_immutable_conflict"
+
+
+def test_final_receipt_is_deterministic_and_write_once(tmp_path: Path) -> None:
+    experiment = _experiment()
+    sessions = [
+        {
+            "trading_date": f"2026-09-{day:02d}",
+            "expected_recommendation_point_ids": [f"point-{day}"],
+        }
+        for day in range(1, 11)
+    ]
+    plan = {"market_calendar": {"sessions": sessions}}
+    experiment.update(
+        {
+            "validation_plan": plan,
+            "validation_plan_sha256": canonical_sha256(plan),
+            "research_receipt_ref": "experiments/experiment-1/receipts/research.json",
+            "research_receipt_sha256": "d" * 64,
+            "leader": {"variant_id": "challenger_0.002"},
+        }
+    )
+    events = [
+        {
+            "event_type": kind,
+            "occurred_at_utc": f"2026-08-{day:02d}T01:00:00Z",
+        }
+        for kind, day in (("research_confirmed", 1), ("validation_confirmed", 2))
+    ]
+    receipt = build_final_receipt(experiment, events, [], {"status": "insufficient_evidence"}, "insufficient_evidence")
+    assert receipt == build_final_receipt(
+        experiment, events, [], {"status": "insufficient_evidence"}, "insufficient_evidence"
+    )
+    assert receipt["safety_status"] == "not_evaluable"
+    first = publish_receipt(tmp_path, "experiment-1", "final", receipt)
+    assert first == publish_receipt(tmp_path, "experiment-1", "final", receipt)
+    assert first == read_receipt_artifact(tmp_path, "experiment-1", "final")
+    with pytest.raises(StrategyLabReceiptError) as raised:
+        publish_receipt(tmp_path, "experiment-1", "final", {**receipt, "conclusion": "keep_baseline"})
+    assert raised.value.reason_code == "receipt_immutable_conflict"
+
+    with pytest.raises(StrategyLabReceiptError) as mismatch:
+        build_final_receipt(
+            experiment,
+            events,
+            [],
+            {"status": "complete", "passed": True},
+            "keep_baseline",
+        )
+    assert mismatch.value.reason_code == "receipt_input_invalid"
+
+
+def test_final_receipt_filters_research_rows_and_uses_latest_instant() -> None:
+    experiment = _experiment()
+    sessions = [
+        {
+            "trading_date": f"2026-09-{day:02d}",
+            "expected_recommendation_point_ids": [f"point-{day}"],
+        }
+        for day in range(1, 11)
+    ]
+    plan = {"market_calendar": {"sessions": sessions}}
+    experiment.update(
+        {
+            "validation_plan": plan,
+            "validation_plan_sha256": canonical_sha256(plan),
+            "research_receipt_ref": "experiments/experiment-1/receipts/research.json",
+            "research_receipt_sha256": "d" * 64,
+            "leader": {"variant_id": "challenger_0.002"},
+        }
+    )
+    events = [
+        {"event_type": "research_confirmed", "occurred_at_utc": "2026-09-01T00:00:00Z"},
+        {"event_type": "validation_confirmed", "occurred_at_utc": "2026-09-01T00:00:00.500000Z"},
+    ]
+    validation = {
+        **_observation("single_result:point-1:challenger_0.002"),
+        "recommendation_point_id": "point-1",
+        "created_at_utc": "2026-09-01T00:00:00Z",
+    }
+    research = {
+        **_observation("single_result:research-point:challenger_0.002"),
+        "recommendation_point_id": "research-point",
+        "created_at_utc": "2026-09-02T00:00:00Z",
+    }
+
+    receipt = build_final_receipt(
+        experiment,
+        events,
+        [research, validation],
+        {"status": "insufficient_evidence"},
+        "insufficient_evidence",
+    )
+
+    assert [item["observation_key"] for item in receipt["terminal_observations"]] == [validation["observation_key"]]
+    assert receipt["concluded_at_utc"] == "2026-09-01T00:00:00.500000Z"
 
 
 def test_receipt_rejects_path_escape_and_noncanonical_readback(tmp_path: Path) -> None:
@@ -167,12 +256,8 @@ def test_published_receipt_is_attached_after_process_restart(tmp_path: Path) -> 
         payload={},
         occurred_at_utc="2026-08-30T01:00:00Z",
     )
-    payload = build_research_receipt(
-        complete, [_observation("a")], [_comparison()], complete["updated_at_utc"]
-    )
-    published = publish_receipt(
-        tmp_path, complete["experiment_id"], "research", payload
-    )
+    payload = build_research_receipt(complete, [_observation("a")], [_comparison()], complete["updated_at_utc"])
+    published = publish_receipt(tmp_path, complete["experiment_id"], "research", payload)
 
     restarted = ExperimentStore(tmp_path / "experiments.sqlite3")
     readback = read_receipt_artifact(tmp_path, "experiment-1", "research")

@@ -23,6 +23,7 @@ from src.application.strategy_lab.contracts import (
 )
 from src.infrastructure.private_storage import (
     connect_private_sqlite,
+    exclusive_private_file_lock,
     private_path,
     secure_sqlite_artifacts,
 )
@@ -118,9 +119,7 @@ _SCHEMA_STATEMENTS = (
 _SCHEMA = ";\n".join(_SCHEMA_STATEMENTS) + ";\n"
 _TABLES = {"experiments", "experiment_events", "experiment_observations"}
 _HEX = frozenset("0123456789abcdef")
-_RESEARCH_OBSERVATION_KINDS = frozenset(
-    {"history_k_query", "research_fill", "expiry_close_query", "single_result"}
-)
+_RESEARCH_OBSERVATION_KINDS = frozenset({"history_k_query", "research_fill", "expiry_close_query", "single_result"})
 
 
 class ExperimentStoreError(RuntimeError):
@@ -255,8 +254,10 @@ def _validation_manifest(value: object) -> tuple[dict[str, Any], str, str]:
             _fail("validation_batch_manifest_conflict", "validation batch arm changed")
         identities.add((point, arm))
         arm_codes.add(code)
-    if arm_codes != set(codes) or not isinstance(item["provider_source"], dict) or not isinstance(
-        item["query_controls"], dict
+    if (
+        arm_codes != set(codes)
+        or not isinstance(item["provider_source"], dict)
+        or not isinstance(item["query_controls"], dict)
     ):
         _fail("validation_batch_manifest_conflict", "validation batch authority changed")
     return item, slot, deadline
@@ -277,10 +278,7 @@ def _validate_validation_point_binding(
     }
     source_bound = artifact_ref is not None
     if source_bound:
-        if (
-            payload.get("formal_point_ref") != artifact_ref
-            or payload.get("formal_point_sha256") != artifact_sha256
-        ):
+        if payload.get("formal_point_ref") != artifact_ref or payload.get("formal_point_sha256") != artifact_sha256:
             _fail("experiment_input_invalid", "validation point artifact binding changed")
         _sha(payload.get("formal_point_content_sha256"), "formal_point_content_sha256")
     elif any(field in payload for field in source_fields):
@@ -299,15 +297,34 @@ def _validate_validation_point_binding(
         _fail("experiment_input_invalid", "non-evaluable validation point binding is invalid")
 
 
+def _validate_validation_outcome(payload: object, key: str, status: str) -> None:
+    if not isinstance(payload, dict):
+        _fail("experiment_input_invalid", "validation outcome payload is invalid")
+    query = payload.get("query")
+    query_sha = key.removeprefix("expiry_close_query:")
+    result = payload.get("payload")
+    if (
+        not isinstance(query, dict)
+        or payload.get("query_sha256") != query_sha
+        or canonical_sha256(query) != query_sha
+        or not isinstance(result, dict)
+        or result.get("status") != status
+        or not isinstance(query.get("provider_source"), dict)
+    ):
+        _fail("experiment_input_invalid", "validation outcome binding changed")
+    _sha(query.get("validation_plan_sha256"), "validation_plan_sha256")
+    _text(query.get("formal_point_ref"), "formal_point_ref")
+    _sha(query.get("formal_point_sha256"), "formal_point_sha256")
+    _sha(query.get("evaluator_behavior_sha256"), "evaluator_behavior_sha256")
+    if status == "not_evaluable":
+        _text(result.get("reason_code"), "reason_code")
+
+
 def _schema_signature(connection: sqlite3.Connection) -> list[tuple[str, str, str, str]]:
     rows = connection.execute(
-        "SELECT type, name, tbl_name, sql FROM sqlite_master "
-        "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
     ).fetchall()
-    return [
-        (str(row[0]), str(row[1]), str(row[2]), " ".join(str(row[3] or "").split()))
-        for row in rows
-    ]
+    return [(str(row[0]), str(row[1]), str(row[2]), " ".join(str(row[3] or "").split())) for row in rows]
 
 
 def _expected_schema_signature() -> list[tuple[str, str, str, str]]:
@@ -330,15 +347,23 @@ class ExperimentStore:
 
     @contextmanager
     def _write_connection(self) -> Iterator[sqlite3.Connection]:
-        connection = connect_private_sqlite(self.path, isolation_level=None, timeout=5.0)
-        connection.row_factory = sqlite3.Row
-        try:
-            connection.execute("PRAGMA foreign_keys=ON")
-            connection.execute("PRAGMA busy_timeout=5000")
-            yield connection
-        finally:
-            connection.close()
-            secure_sqlite_artifacts(self.path)
+        with exclusive_private_file_lock(f"{self.path}.write.lock"):
+            connection = connect_private_sqlite(self.path, isolation_level=None, timeout=5.0)
+            connection.row_factory = sqlite3.Row
+            try:
+                connection.execute("PRAGMA foreign_keys=ON")
+                connection.execute("PRAGMA busy_timeout=5000")
+                journal_mode = connection.execute("PRAGMA journal_mode=WAL").fetchone()
+                if journal_mode is None or str(journal_mode[0]).lower() != "wal":
+                    _fail(
+                        "experiment_store_incompatible",
+                        "experiment Store requires SQLite WAL mode",
+                    )
+                secure_sqlite_artifacts(self.path)
+                yield connection
+            finally:
+                connection.close()
+                secure_sqlite_artifacts(self.path)
 
     @contextmanager
     def _read_connection(self) -> Iterator[sqlite3.Connection]:
@@ -369,9 +394,7 @@ class ExperimentStore:
         except ExperimentStoreError:
             raise
         except (OSError, sqlite3.DatabaseError) as exc:
-            raise ExperimentStoreError(
-                "experiment_store_incompatible", "experiment Store cannot be read"
-            ) from exc
+            raise ExperimentStoreError("experiment_store_incompatible", "experiment Store cannot be read") from exc
         finally:
             if connection is not None:
                 connection.close()
@@ -393,8 +416,7 @@ class ExperimentStore:
                     tables = {
                         str(row[0])
                         for row in connection.execute(
-                            "SELECT name FROM sqlite_master "
-                            "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+                            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
                         )
                     }
                     if not tables:
@@ -460,8 +482,7 @@ class ExperimentStore:
                 self._require_schema(connection)
                 connection.execute("BEGIN IMMEDIATE")
                 prior = connection.execute(
-                    "SELECT experiment_id, payload_json FROM experiment_events "
-                    "WHERE idempotency_key = ?",
+                    "SELECT experiment_id, payload_json FROM experiment_events WHERE idempotency_key = ?",
                     (key,),
                 ).fetchone()
                 if prior is not None:
@@ -474,9 +495,10 @@ class ExperimentStore:
                     result = _experiment(row)
                     assert result is not None
                     return result
-                if connection.execute(
-                    "SELECT 1 FROM experiments WHERE state <> 'completed' LIMIT 1"
-                ).fetchone() is not None:
+                if (
+                    connection.execute("SELECT 1 FROM experiments WHERE state <> 'completed' LIMIT 1").fetchone()
+                    is not None
+                ):
                     _fail(
                         "active_experiment_exists",
                         "a non-terminal Strategy Lab experiment already exists",
@@ -520,8 +542,7 @@ class ExperimentStore:
         with self._read_connection() as connection:
             self._require_schema(connection)
             rows = connection.execute(
-                "SELECT * FROM experiments WHERE state <> 'completed' "
-                "ORDER BY created_at_utc, experiment_id LIMIT 2"
+                "SELECT * FROM experiments WHERE state <> 'completed' ORDER BY created_at_utc, experiment_id LIMIT 2"
             ).fetchall()
         if len(rows) > 1:
             _fail("experiment_store_incompatible", "multiple active experiments exist")
@@ -531,9 +552,7 @@ class ExperimentStore:
         identity = _text(experiment_id, "experiment_id")
         with self._read_connection() as connection:
             self._require_schema(connection)
-            row = connection.execute(
-                "SELECT * FROM experiments WHERE experiment_id = ?", (identity,)
-            ).fetchone()
+            row = connection.execute("SELECT * FROM experiments WHERE experiment_id = ?", (identity,)).fetchone()
         return _experiment(row)
 
     def list_events(self, experiment_id: object) -> list[dict[str, Any]]:
@@ -570,9 +589,7 @@ class ExperimentStore:
         event = _text(event_type, "event_type")
         actor_text = _text(actor, "actor")
         occurred = _timestamp(occurred_at_utc, "occurred_at_utc")
-        confirmation = (
-            None if confirmation_sha256 is None else _sha(confirmation_sha256, "confirmation_sha256")
-        )
+        confirmation = None if confirmation_sha256 is None else _sha(confirmation_sha256, "confirmation_sha256")
         key = None if idempotency_key is None else _text(idempotency_key, "idempotency_key")
         command_payload = {
             "expected_state": old_state,
@@ -618,30 +635,24 @@ class ExperimentStore:
                         _fail("idempotency_conflict", "idempotency key changed")
                     connection.commit()
                     result = _experiment(
-                        connection.execute(
-                            "SELECT * FROM experiments WHERE experiment_id = ?", (identity,)
-                        ).fetchone()
+                        connection.execute("SELECT * FROM experiments WHERE experiment_id = ?", (identity,)).fetchone()
                     )
                     assert result is not None
                     return result
-            allowed_transition = (
-                (old_state, state) in EXPERIMENT_TRANSITIONS
-                and (old_state, state, event)
-                == ("research_running", "research_complete", "research_materialized")
+            allowed_transition = (old_state, state) in EXPERIMENT_TRANSITIONS and (old_state, state, event) == (
+                "research_running",
+                "research_complete",
+                "research_materialized",
             )
             allowed_source_observation = (
-                old_state == state
-                and state not in TERMINAL_STATES
-                and event == "source_commit_observed"
+                old_state == state and state not in TERMINAL_STATES and event == "source_commit_observed"
             )
             if not (allowed_transition or allowed_source_observation):
                 _fail("experiment_transition_invalid", "experiment transition is invalid")
             if allowed_source_observation:
                 if not isinstance(payload, dict) or set(payload) != {"source_commit_sha"}:
                     _fail("experiment_input_invalid", "source commit observation is invalid")
-                source_commit = _sha(
-                    payload["source_commit_sha"], "source_commit_sha", length=40
-                )
+                source_commit = _sha(payload["source_commit_sha"], "source_commit_sha", length=40)
                 if key != f"source_commit_observed:{identity}:{source_commit}":
                     _fail(
                         "experiment_input_invalid",
@@ -654,27 +665,32 @@ class ExperimentStore:
                 _fail("experiment_not_found", "experiment does not exist")
             if current["state"] != old_state or current["revision"] != expected_revision:
                 _fail("experiment_revision_conflict", "experiment state or revision changed")
-            if confirmation is not None and connection.execute(
-                "SELECT 1 FROM experiment_events "
-                "WHERE experiment_id = ? AND confirmation_sha256 = ? LIMIT 1",
-                (identity, confirmation),
-            ).fetchone() is not None:
+            if (
+                confirmation is not None
+                and connection.execute(
+                    "SELECT 1 FROM experiment_events WHERE experiment_id = ? AND confirmation_sha256 = ? LIMIT 1",
+                    (identity, confirmation),
+                ).fetchone()
+                is not None
+            ):
                 _fail("confirmation_conflict", "confirmation was already used")
-            if state not in TERMINAL_STATES and connection.execute(
-                "SELECT 1 FROM experiments WHERE experiment_id <> ? AND state <> 'completed' LIMIT 1",
-                (identity,),
-            ).fetchone() is not None:
+            if (
+                state not in TERMINAL_STATES
+                and connection.execute(
+                    "SELECT 1 FROM experiments WHERE experiment_id <> ? AND state <> 'completed' LIMIT 1",
+                    (identity,),
+                ).fetchone()
+                is not None
+            ):
                 _fail("active_experiment_exists", "a non-terminal Strategy Lab experiment already exists")
             sequence = int(
                 connection.execute(
-                    "SELECT COALESCE(MAX(sequence), 0) + 1 FROM experiment_events "
-                    "WHERE experiment_id = ?",
+                    "SELECT COALESCE(MAX(sequence), 0) + 1 FROM experiment_events WHERE experiment_id = ?",
                     (identity,),
                 ).fetchone()[0]
             )
             connection.execute(
-                "UPDATE experiments SET state = ?, revision = revision + 1, "
-                "updated_at_utc = ? WHERE experiment_id = ?",
+                "UPDATE experiments SET state = ?, revision = revision + 1, updated_at_utc = ? WHERE experiment_id = ?",
                 (state, occurred, identity),
             )
             connection.execute(
@@ -740,32 +756,29 @@ class ExperimentStore:
                 ):
                     _fail("idempotency_conflict", "idempotency key changed")
                 result = _experiment(
-                    connection.execute(
-                        "SELECT * FROM experiments WHERE experiment_id = ?", (identity,)
-                    ).fetchone()
+                    connection.execute("SELECT * FROM experiments WHERE experiment_id = ?", (identity,)).fetchone()
                 )
                 connection.commit()
                 assert result is not None
                 return result
-            row = connection.execute(
-                "SELECT * FROM experiments WHERE experiment_id = ?", (identity,)
-            ).fetchone()
+            row = connection.execute("SELECT * FROM experiments WHERE experiment_id = ?", (identity,)).fetchone()
             if row is None:
                 _fail("experiment_not_found", "experiment does not exist")
             if row["state"] != "awaiting_validation_confirmation" or row["revision"] != expected_revision:
                 _fail("experiment_revision_conflict", "experiment state or revision changed")
             if row["validation_plan_json"] is not None:
                 _fail("validation_confirmation_mismatch", "validation plan is already bound")
-            if connection.execute(
-                "SELECT 1 FROM experiment_events "
-                "WHERE experiment_id = ? AND confirmation_sha256 = ? LIMIT 1",
-                (identity, confirmation),
-            ).fetchone() is not None:
+            if (
+                connection.execute(
+                    "SELECT 1 FROM experiment_events WHERE experiment_id = ? AND confirmation_sha256 = ? LIMIT 1",
+                    (identity, confirmation),
+                ).fetchone()
+                is not None
+            ):
                 _fail("confirmation_conflict", "confirmation was already used")
             sequence = int(
                 connection.execute(
-                    "SELECT COALESCE(MAX(sequence), 0) + 1 FROM experiment_events "
-                    "WHERE experiment_id = ?",
+                    "SELECT COALESCE(MAX(sequence), 0) + 1 FROM experiment_events WHERE experiment_id = ?",
                     (identity,),
                 ).fetchone()[0]
             )
@@ -802,7 +815,7 @@ class ExperimentStore:
         observation_key: object,
         manifest: object,
         created_at_utc: object,
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], bool]:
         identity = _text(experiment_id, "experiment_id")
         key = _text(observation_key, "observation_key")
         payload, slot, deadline = _validation_manifest(manifest)
@@ -839,7 +852,7 @@ class ExperimentStore:
                         "validation batch key is already bound",
                     )
                 connection.commit()
-                return _observation(existing)
+                return _observation(existing), False
             connection.execute(
                 "INSERT INTO experiment_observations("
                 "experiment_id, observation_key, recommendation_point_id, arm_id, "
@@ -854,7 +867,7 @@ class ExperimentStore:
             ).fetchone()
             connection.commit()
         assert row is not None
-        return _observation(row)
+        return _observation(row), True
 
     def complete_observation(
         self,
@@ -862,53 +875,49 @@ class ExperimentStore:
         *,
         observation_key: object,
         manifest: object,
-        quotes: object,
         artifact_ref: object,
         artifact_sha256: object,
-        updated_at_utc: object,
+        artifact_received_at_utc: object,
+        crossing_arm_ids: object,
     ) -> dict[str, Any]:
         identity = _text(experiment_id, "experiment_id")
         key = _text(observation_key, "observation_key")
         payload, slot, _deadline = _validation_manifest(manifest)
         ref = _text(artifact_ref, "artifact_ref")
         artifact_hash = _sha(artifact_sha256, "artifact_sha256")
-        occurred = _timestamp(updated_at_utc, "updated_at_utc")
-        if key != f"hidden_batch:{payload['trading_day']}:{slot}" or not isinstance(quotes, list):
+        received = _timestamp(artifact_received_at_utc, "artifact_received_at_utc")
+        if key != f"hidden_batch:{payload['trading_day']}:{slot}":
             _fail("validation_batch_manifest_conflict", "validation batch completion changed")
-        expected = {
-            (arm["recommendation_point_id"], arm["arm_id"]): arm for arm in payload["arms"]
-        }
-        quote_rows: list[tuple[str, str, str, str, str]] = []
-        seen: set[tuple[str, str]] = set()
-        for raw in quotes:
-            if not isinstance(raw, dict) or set(raw) != {
-                "recommendation_point_id",
-                "arm_id",
-                "status",
-                "payload",
-            }:
-                _fail("validation_snapshot_invalid", "hidden quote fields are invalid")
-            point = _text(raw["recommendation_point_id"], "recommendation_point_id")
-            arm = _text(raw["arm_id"], "arm_id")
-            status = _text(raw["status"], "status")
-            if (point, arm) not in expected or (point, arm) in seen or status not in {
-                "observed_fill",
-                "complete",
-                "gap",
-            }:
-                _fail("validation_snapshot_invalid", "hidden quote identity or status changed")
-            seen.add((point, arm))
-            quote_rows.append(
-                (
-                    f"hidden_quote:{point}:{arm}:{slot}",
-                    point,
-                    arm,
-                    status,
-                    compact_json(raw["payload"]),
-                )
+        expected = {(arm["recommendation_point_id"], arm["arm_id"]): arm for arm in payload["arms"]}
+        if not isinstance(crossing_arm_ids, (list, tuple, set, frozenset)):
+            _fail("validation_snapshot_invalid", "crossing arm identities are invalid")
+        crossings: set[tuple[str, str]] = set()
+        for raw in crossing_arm_ids:
+            if not isinstance(raw, (list, tuple)) or len(raw) != 2:
+                _fail("validation_snapshot_invalid", "crossing arm identity is invalid")
+            crossing = (
+                _text(raw[0], "recommendation_point_id"),
+                _text(raw[1], "arm_id"),
             )
-        if seen != set(expected):
-            _fail("validation_snapshot_invalid", "hidden quote coverage is incomplete")
+            if crossing not in expected or crossing in crossings:
+                _fail("validation_snapshot_invalid", "crossing arm identity changed")
+            crossings.add(crossing)
+
+        fill_payloads = {
+            crossing: compact_json(
+                {
+                    "status": "observed_fill",
+                    "fill_price": float(expected[crossing]["sell_limit"]),
+                    "fill_time": received,
+                    "quote_evidence_not_broker_execution": True,
+                    "fill_evidence_ref": {
+                        "artifact_ref": ref,
+                        "artifact_sha256": artifact_hash,
+                    },
+                }
+            )
+            for crossing in crossings
+        }
         with self._write_connection() as connection:
             self._require_schema(connection)
             connection.execute("BEGIN IMMEDIATE")
@@ -930,46 +939,57 @@ class ExperimentStore:
             if batch is None or batch["payload_json"] != compact_json(payload):
                 _fail("validation_batch_manifest_conflict", "started batch manifest changed")
             if batch["status"] == "complete":
-                stored_quotes = connection.execute(
-                    "SELECT observation_key, recommendation_point_id, arm_id, status, payload_json "
-                    "FROM experiment_observations WHERE experiment_id = ? AND kind = 'hidden_quote' "
-                    "AND observation_slot_utc = ? ORDER BY observation_key",
-                    (identity, slot),
+                stored_fills = connection.execute(
+                    "SELECT recommendation_point_id, arm_id, status, payload_json, artifact_ref, artifact_sha256 "
+                    "FROM experiment_observations WHERE experiment_id = ? AND kind = 'validation_fill' "
+                    "AND status = 'observed_fill' AND artifact_ref = ? AND artifact_sha256 = ?",
+                    (identity, ref, artifact_hash),
                 ).fetchall()
+                stored = {
+                    (str(row["recommendation_point_id"]), str(row["arm_id"])): row
+                    for row in stored_fills
+                }
                 if (
-                    batch["artifact_ref"],
-                    batch["artifact_sha256"],
-                    [tuple(row) for row in stored_quotes],
-                ) != (ref, artifact_hash, sorted(quote_rows)):
+                    batch["artifact_ref"] != ref
+                    or batch["artifact_sha256"] != artifact_hash
+                    or batch["updated_at_utc"] != received
+                    or set(stored) != crossings
+                    or any(stored[crossing]["payload_json"] != fill_payloads[crossing] for crossing in crossings)
+                ):
                     _fail("validation_batch_manifest_conflict", "completed batch changed")
                 connection.commit()
                 return _observation(batch)
             if batch["status"] != "started" or batch["artifact_ref"] is not None:
                 _fail("validation_batch_manifest_conflict", "batch is not awaiting completion")
+            for point, arm in crossings:
+                if connection.execute(
+                    "SELECT 1 FROM experiment_observations WHERE experiment_id = ? AND observation_key = ?",
+                    (identity, f"validation_fill:{point}:{arm}"),
+                ).fetchone() is not None:
+                    _fail("validation_batch_manifest_conflict", "crossing arm already has a terminal fill")
             connection.execute(
                 "UPDATE experiment_observations SET status = 'complete', artifact_ref = ?, "
                 "artifact_sha256 = ?, updated_at_utc = ? WHERE experiment_id = ? AND observation_key = ?",
-                (ref, artifact_hash, occurred, identity, key),
+                (ref, artifact_hash, received, identity, key),
             )
-            for quote_key, point, arm, status, quote_payload in quote_rows:
+            for point, arm in sorted(crossings):
                 connection.execute(
                     "INSERT INTO experiment_observations("
                     "experiment_id, observation_key, recommendation_point_id, arm_id, "
                     "observation_slot_utc, kind, status, payload_json, artifact_ref, artifact_sha256, "
                     "created_at_utc, updated_at_utc"
-                    ") VALUES (?, ?, ?, ?, ?, 'hidden_quote', ?, ?, ?, ?, ?, ?)",
+                    ") VALUES (?, ?, ?, ?, ?, 'validation_fill', 'observed_fill', ?, ?, ?, ?, ?)",
                     (
                         identity,
-                        quote_key,
+                        f"validation_fill:{point}:{arm}",
                         point,
                         arm,
                         slot,
-                        status,
-                        quote_payload,
+                        fill_payloads[(point, arm)],
                         ref,
                         artifact_hash,
-                        occurred,
-                        occurred,
+                        received,
+                        received,
                     ),
                 )
             row = connection.execute(
@@ -979,102 +999,6 @@ class ExperimentStore:
             connection.commit()
         assert row is not None
         return _observation(row)
-
-    def _gap_observation(
-        self,
-        experiment_id: object,
-        *,
-        observation_key: object,
-        manifest: object,
-        updated_at_utc: object,
-        require_started: bool,
-    ) -> dict[str, Any]:
-        identity = _text(experiment_id, "experiment_id")
-        key = _text(observation_key, "observation_key")
-        payload, slot, deadline = _validation_manifest(manifest)
-        occurred = _timestamp(updated_at_utc, "updated_at_utc")
-        if key != f"hidden_batch:{payload['trading_day']}:{slot}" or occurred <= deadline:
-            _fail("validation_slot_late", "validation batch deadline has not elapsed")
-        batch_payload = compact_json(payload)
-        gap_rows = [
-            (
-                f"hidden_quote:{arm['recommendation_point_id']}:{arm['arm_id']}:{slot}",
-                arm["recommendation_point_id"],
-                arm["arm_id"],
-                compact_json(
-                    {"batch_key": key, "reason_code": "validation_slot_late"}
-                ),
-            )
-            for arm in payload["arms"]
-        ]
-        with self._write_connection() as connection:
-            self._require_schema(connection)
-            connection.execute("BEGIN IMMEDIATE")
-            experiment = connection.execute(
-                "SELECT state, validation_plan_sha256 FROM experiments WHERE experiment_id = ?",
-                (identity,),
-            ).fetchone()
-            if experiment is None:
-                _fail("experiment_not_found", "experiment does not exist")
-            if (
-                experiment["state"] != "validation_collecting"
-                or experiment["validation_plan_sha256"] != payload["validation_plan_sha256"]
-            ):
-                _fail("observation_write_closed", "validation observations are frozen")
-            batch = connection.execute(
-                "SELECT * FROM experiment_observations WHERE experiment_id = ? AND observation_key = ?",
-                (identity, key),
-            ).fetchone()
-            if batch is not None:
-                if batch["payload_json"] != batch_payload:
-                    _fail("validation_batch_manifest_conflict", "validation batch manifest changed")
-                if batch["status"] == "gap":
-                    connection.commit()
-                    return _observation(batch)
-                if not require_started or batch["status"] != "started" or batch["artifact_ref"] is not None:
-                    _fail("validation_batch_manifest_conflict", "validation batch cannot become a gap")
-                connection.execute(
-                    "UPDATE experiment_observations SET status = 'gap', updated_at_utc = ? "
-                    "WHERE experiment_id = ? AND observation_key = ?",
-                    (occurred, identity, key),
-                )
-            else:
-                if require_started:
-                    _fail("validation_batch_manifest_conflict", "started validation batch is missing")
-                connection.execute(
-                    "INSERT INTO experiment_observations("
-                    "experiment_id, observation_key, observation_slot_utc, kind, status, payload_json, "
-                    "created_at_utc, updated_at_utc"
-                    ") VALUES (?, ?, ?, 'hidden_batch', 'gap', ?, ?, ?)",
-                    (identity, key, slot, batch_payload, occurred, occurred),
-                )
-            for quote_key, point, arm, quote_payload in gap_rows:
-                connection.execute(
-                    "INSERT INTO experiment_observations("
-                    "experiment_id, observation_key, recommendation_point_id, arm_id, observation_slot_utc, "
-                    "kind, status, payload_json, created_at_utc, updated_at_utc"
-                    ") VALUES (?, ?, ?, ?, ?, 'hidden_quote', 'gap', ?, ?, ?)",
-                    (identity, quote_key, point, arm, slot, quote_payload, occurred, occurred),
-                )
-            row = connection.execute(
-                "SELECT * FROM experiment_observations WHERE experiment_id = ? AND observation_key = ?",
-                (identity, key),
-            ).fetchone()
-            connection.commit()
-        assert row is not None
-        return _observation(row)
-
-    def expire_started_observation(self, experiment_id: object, **kwargs: object) -> dict[str, Any]:
-        return self._gap_observation(
-            experiment_id, require_started=True, **kwargs
-        )
-
-    def materialize_elapsed_observation_gap(
-        self, experiment_id: object, **kwargs: object
-    ) -> dict[str, Any]:
-        return self._gap_observation(
-            experiment_id, require_started=False, **kwargs
-        )
 
     def complete_validation_collection(
         self,
@@ -1106,9 +1030,7 @@ class ExperimentStore:
             if prior is not None:
                 if prior["experiment_id"] != identity or prior["payload_json"] != payload_json:
                     _fail("idempotency_conflict", "validation transition retry changed")
-                row = connection.execute(
-                    "SELECT * FROM experiments WHERE experiment_id = ?", (identity,)
-                ).fetchone()
+                row = connection.execute("SELECT * FROM experiments WHERE experiment_id = ?", (identity,)).fetchone()
                 connection.commit()
                 result = _experiment(row)
                 assert result is not None
@@ -1163,14 +1085,12 @@ class ExperimentStore:
         if kind_text not in OBSERVATION_KINDS or status_text not in OBSERVATION_STATUSES:
             _fail("experiment_input_invalid", "observation kind or status is invalid")
         occurred = _timestamp(created_at_utc, "created_at_utc")
-        point_id = None if recommendation_point_id is None else _text(
-            recommendation_point_id, "recommendation_point_id"
+        point_id = (
+            None if recommendation_point_id is None else _text(recommendation_point_id, "recommendation_point_id")
         )
         arm = None if arm_id is None else _text(arm_id, "arm_id")
         ref = None if artifact_ref is None else _text(artifact_ref, "artifact_ref")
-        artifact_hash = None if artifact_sha256 is None else _sha(
-            artifact_sha256, "artifact_sha256"
-        )
+        artifact_hash = None if artifact_sha256 is None else _sha(artifact_sha256, "artifact_sha256")
         if (ref is None) != (artifact_hash is None):
             _fail("experiment_input_invalid", "artifact ref/hash must be paired")
         if kind_text == "validation_point":
@@ -1188,12 +1108,13 @@ class ExperimentStore:
             self._require_schema(connection)
             connection.execute("BEGIN IMMEDIATE")
             experiment = connection.execute(
-                "SELECT state, research_receipt_ref, validation_plan_sha256 "
-                "FROM experiments WHERE experiment_id = ?",
+                "SELECT state, research_receipt_ref, validation_plan_sha256 FROM experiments WHERE experiment_id = ?",
                 (identity,),
             ).fetchone()
             if experiment is None:
                 _fail("experiment_not_found", "experiment does not exist")
+            if kind_text == "expiry_close_query" and experiment["state"] == "waiting_outcome":
+                _validate_validation_outcome(payload, key, status_text)
             research_write = (
                 kind_text in _RESEARCH_OBSERVATION_KINDS
                 and experiment["state"] == "research_running"
@@ -1216,11 +1137,37 @@ class ExperimentStore:
                 and status_text in {"observed_fill", "no_fill", "not_evaluable"}
                 and ref is not None
             )
-            if not (research_write or validation_point_write or validation_fill_write):
+            validation_outcome_write = (
+                kind_text == "expiry_close_query"
+                and experiment["state"] == "waiting_outcome"
+                and point_id is None
+                and arm is None
+                and key.startswith("expiry_close_query:")
+                and len(key.removeprefix("expiry_close_query:")) == 64
+                and status_text in {"available", "not_evaluable"}
+                and ref is not None
+            )
+            validation_result_write = (
+                kind_text == "single_result"
+                and experiment["state"] == "waiting_outcome"
+                and point_id is not None
+                and arm is not None
+                and key == f"single_result:{point_id}:{arm}"
+                and status_text in {"available", "no_fill", "not_evaluable"}
+                and ref is None
+                and isinstance(payload, dict)
+                and payload.get("status") == status_text
+            )
+            if not (
+                research_write
+                or validation_point_write
+                or validation_fill_write
+                or validation_outcome_write
+                or validation_result_write
+            ):
                 _fail("observation_write_closed", "experiment observations are frozen")
             existing = connection.execute(
-                "SELECT * FROM experiment_observations "
-                "WHERE experiment_id = ? AND observation_key = ?",
+                "SELECT * FROM experiment_observations WHERE experiment_id = ? AND observation_key = ?",
                 (identity, key),
             ).fetchone()
             if existing is not None:
@@ -1252,17 +1199,14 @@ class ExperimentStore:
                 (identity, key, *canonical, occurred, occurred),
             )
             row = connection.execute(
-                "SELECT * FROM experiment_observations "
-                "WHERE experiment_id = ? AND observation_key = ?",
+                "SELECT * FROM experiment_observations WHERE experiment_id = ? AND observation_key = ?",
                 (identity, key),
             ).fetchone()
             connection.commit()
         assert row is not None
         return _observation(row)
 
-    def list_observations(
-        self, experiment_id: object, *, kind: object | None = None
-    ) -> list[dict[str, Any]]:
+    def list_observations(self, experiment_id: object, *, kind: object | None = None) -> list[dict[str, Any]]:
         identity = _text(experiment_id, "experiment_id")
         kind_text = None if kind is None else _text(kind, "kind")
         with self._read_connection() as connection:
@@ -1275,16 +1219,13 @@ class ExperimentStore:
             ).fetchall()
         return [_observation(row) for row in rows]
 
-    def get_observation(
-        self, experiment_id: object, observation_key: object
-    ) -> dict[str, Any] | None:
+    def get_observation(self, experiment_id: object, observation_key: object) -> dict[str, Any] | None:
         identity = _text(experiment_id, "experiment_id")
         key = _text(observation_key, "observation_key")
         with self._read_connection() as connection:
             self._require_schema(connection)
             row = connection.execute(
-                "SELECT * FROM experiment_observations "
-                "WHERE experiment_id = ? AND observation_key = ?",
+                "SELECT * FROM experiment_observations WHERE experiment_id = ? AND observation_key = ?",
                 (identity, key),
             ).fetchone()
         return _observation(row) if row is not None else None
@@ -1349,9 +1290,7 @@ class ExperimentStore:
                 ):
                     _fail("idempotency_conflict", "idempotency key changed")
                 result = _experiment(
-                    connection.execute(
-                        "SELECT * FROM experiments WHERE experiment_id = ?", (identity,)
-                    ).fetchone()
+                    connection.execute("SELECT * FROM experiments WHERE experiment_id = ?", (identity,)).fetchone()
                 )
                 connection.commit()
                 assert result is not None
@@ -1366,9 +1305,7 @@ class ExperimentStore:
                     "receipt_leader_state_conflict",
                     "research leader does not match the receipt conclusion state",
                 )
-            row = connection.execute(
-                "SELECT * FROM experiments WHERE experiment_id = ?", (identity,)
-            ).fetchone()
+            row = connection.execute("SELECT * FROM experiments WHERE experiment_id = ?", (identity,)).fetchone()
             if row is None:
                 _fail("experiment_not_found", "experiment does not exist")
             if row["research_receipt_ref"] is not None:
@@ -1384,15 +1321,18 @@ class ExperimentStore:
                 return result
             if row["state"] != old_state or row["revision"] != expected_revision:
                 _fail("experiment_revision_conflict", "experiment state or revision changed")
-            if state not in TERMINAL_STATES and connection.execute(
-                "SELECT 1 FROM experiments WHERE experiment_id <> ? AND state <> 'completed' LIMIT 1",
-                (identity,),
-            ).fetchone() is not None:
+            if (
+                state not in TERMINAL_STATES
+                and connection.execute(
+                    "SELECT 1 FROM experiments WHERE experiment_id <> ? AND state <> 'completed' LIMIT 1",
+                    (identity,),
+                ).fetchone()
+                is not None
+            ):
                 _fail("active_experiment_exists", "a non-terminal Strategy Lab experiment already exists")
             sequence = int(
                 connection.execute(
-                    "SELECT COALESCE(MAX(sequence), 0) + 1 FROM experiment_events "
-                    "WHERE experiment_id = ?",
+                    "SELECT COALESCE(MAX(sequence), 0) + 1 FROM experiment_events WHERE experiment_id = ?",
                     (identity,),
                 ).fetchone()[0]
             )
@@ -1407,6 +1347,98 @@ class ExperimentStore:
                 "experiment_id, sequence, event_type, actor, idempotency_key, "
                 "payload_json, occurred_at_utc"
                 ") VALUES (?, ?, 'research_concluded', ?, ?, ?, ?)",
+                (identity, sequence, actor_text, key, payload_json, occurred),
+            )
+            connection.commit()
+        result = self.get_experiment(identity)
+        assert result is not None
+        return result
+
+    def attach_final_receipt_and_transition(
+        self,
+        experiment_id: object,
+        *,
+        expected_revision: object,
+        receipt_ref: object,
+        receipt_sha256: object,
+        conclusion: object,
+        actor: object,
+        occurred_at_utc: object,
+        idempotency_key: object,
+    ) -> dict[str, Any]:
+        identity = _text(experiment_id, "experiment_id")
+        if type(expected_revision) is not int or expected_revision < 0:
+            _fail("experiment_input_invalid", "expected_revision is invalid")
+        ref = _text(receipt_ref, "receipt_ref")
+        receipt_hash = _sha(receipt_sha256, "receipt_sha256")
+        conclusion_text = _text(conclusion, "conclusion")
+        if conclusion_text not in {
+            "challenger_passed",
+            "keep_baseline",
+            "insufficient_evidence",
+        }:
+            _fail("experiment_input_invalid", "final conclusion is invalid")
+        actor_text = _text(actor, "actor")
+        occurred = _timestamp(occurred_at_utc, "occurred_at_utc")
+        key = _text(idempotency_key, "idempotency_key")
+        payload = {
+            "event_type": "validation_concluded",
+            "receipt_ref": ref,
+            "receipt_sha256": receipt_hash,
+            "conclusion": conclusion_text,
+        }
+        payload_json = compact_json(payload)
+        with self._write_connection() as connection:
+            self._require_schema(connection)
+            connection.execute("BEGIN IMMEDIATE")
+            prior = connection.execute(
+                "SELECT experiment_id, event_type, payload_json FROM experiment_events WHERE idempotency_key = ?",
+                (key,),
+            ).fetchone()
+            if prior is not None:
+                if (
+                    prior["experiment_id"] != identity
+                    or prior["event_type"] != "validation_concluded"
+                    or prior["payload_json"] != payload_json
+                ):
+                    _fail("idempotency_conflict", "idempotency key changed")
+                row = connection.execute("SELECT * FROM experiments WHERE experiment_id = ?", (identity,)).fetchone()
+                connection.commit()
+                result = _experiment(row)
+                assert result is not None
+                return result
+            row = connection.execute("SELECT * FROM experiments WHERE experiment_id = ?", (identity,)).fetchone()
+            if row is None:
+                _fail("experiment_not_found", "experiment does not exist")
+            if row["final_receipt_ref"] is not None:
+                if (
+                    row["final_receipt_ref"] != ref
+                    or row["final_receipt_sha256"] != receipt_hash
+                    or row["state"] != "completed"
+                ):
+                    _fail("receipt_immutable_conflict", "final receipt is already bound")
+                connection.commit()
+                result = _experiment(row)
+                assert result is not None
+                return result
+            if row["state"] != "waiting_outcome" or row["revision"] != expected_revision:
+                _fail("experiment_revision_conflict", "experiment state or revision changed")
+            sequence = int(
+                connection.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) + 1 FROM experiment_events WHERE experiment_id = ?",
+                    (identity,),
+                ).fetchone()[0]
+            )
+            connection.execute(
+                "UPDATE experiments SET state = 'completed', final_receipt_ref = ?, "
+                "final_receipt_sha256 = ?, revision = revision + 1, updated_at_utc = ? "
+                "WHERE experiment_id = ?",
+                (ref, receipt_hash, occurred, identity),
+            )
+            connection.execute(
+                "INSERT INTO experiment_events(experiment_id, sequence, event_type, actor, "
+                "idempotency_key, payload_json, occurred_at_utc) "
+                "VALUES (?, ?, 'validation_concluded', ?, ?, ?, ?)",
                 (identity, sequence, actor_text, key, payload_json, occurred),
             )
             connection.commit()
