@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -21,12 +21,22 @@ from src.application.research.formal_corpus import (
     read_expectation_bound_market_calendar_snapshot,
     read_market_calendar_binding,
 )
+from src.application.recommendation_point import build_recommendation_point_id
+from src.application.scan_scheduler import (
+    scheduled_scan_targets_for_date,
+    scheduled_session_slots_for_date,
+)
 from src.application.strategy_lab.contracts import (
     ACCOUNT,
+    HIDDEN_SNAPSHOT_BATCH_CEILING,
     MARKET,
     NEAR_RETURN_THRESHOLDS,
     RECIPE_ID,
     RESEARCH_SESSIONS,
+    TICK_PROTECTION_SECONDS,
+    VALIDATION_SESSIONS,
+    VALIDATION_WAKE_TOLERANCE_SECONDS,
+    build_strategy_lab_timer_binding,
     canonical_sha256,
 )
 from src.application.strategy_lab.readiness import (
@@ -307,6 +317,230 @@ def _calendar_session(calendar: Mapping[str, Any], trading_date: str) -> dict[st
         if isinstance(item, Mapping) and item.get("trading_date") == trading_date
     ]
     return found[0] if len(found) == 1 else None
+
+
+def _utc_text(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _validation_leader(value: object) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise StrategyLabRecipeError("validation_plan_invalid", "research leader is unavailable")
+    leader = dict(value)
+    threshold = leader.get("near_return_threshold")
+    if (
+        threshold not in NEAR_RETURN_THRESHOLDS
+        or leader.get("variant_id") != f"challenger_{float(threshold):.3f}"
+        or not isinstance(leader.get("comparison_sha256"), str)
+        or len(leader["comparison_sha256"]) != 64
+        or bool(set(leader["comparison_sha256"]) - set("0123456789abcdef"))
+    ):
+        raise StrategyLabRecipeError("validation_plan_invalid", "research leader is invalid")
+    return leader
+
+
+def project_validation_arms(
+    formal_point: Mapping[str, Any], leader: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Project the frozen baseline and one confirmed challenger from a formal point."""
+
+    projected = build_concentration_arms(formal_point)
+    frozen_leader = _validation_leader(leader)
+    baseline = [arm for arm in projected["arms"] if arm["kind"] == "baseline"]
+    challenger = [
+        arm
+        for arm in projected["arms"]
+        if arm["kind"] == "challenger"
+        and arm["near_return_threshold"] == frozen_leader["near_return_threshold"]
+    ]
+    if len(baseline) != 1 or len(challenger) != 1:
+        raise StrategyLabRecipeError(
+            "validation_plan_invalid", "confirmed leader cannot be projected"
+        )
+    return {
+        key: projected[key]
+        for key in (
+            "recommendation_point_id",
+            "scheduled_scan_target_market",
+            "recommendation_available_at_utc",
+            "formal_point_ref",
+            "formal_point_content_sha256",
+            "formal_point_file_sha256",
+            "source_commit_sha",
+            "opening_fx_binding",
+            "accepted_candidate_ids",
+        )
+    } | {"arms": [baseline[0], challenger[0]]}
+
+
+def _slot_breaks(slots: list[datetime]) -> list[dict[str, str]]:
+    return [
+        {"start_utc": _utc_text(previous + timedelta(minutes=1)), "end_utc": _utc_text(current)}
+        for previous, current in zip(slots, slots[1:])
+        if current - previous > timedelta(minutes=1)
+    ]
+
+
+def build_validation_plan(
+    context: Mapping[str, Any],
+    experiment: Mapping[str, Any],
+    research_receipt: Mapping[str, Any],
+    research_confirmation: Mapping[str, Any],
+    *,
+    requested_start: str,
+    occurred_at_utc: str,
+    schedule: Mapping[str, Any],
+    account_run_config_sha256: str,
+    provider_source: Mapping[str, Any],
+    timer_binding: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the exact provider-free 10-session validation plan."""
+
+    try:
+        start = date.fromisoformat(requested_start)
+        occurred = datetime.fromisoformat(occurred_at_utc.replace("Z", "+00:00"))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise StrategyLabRecipeError(
+            "validation_plan_invalid", "validation start or evaluation time is invalid"
+        ) from exc
+    if start.isoformat() != requested_start or occurred.tzinfo is None:
+        raise StrategyLabRecipeError(
+            "validation_plan_invalid", "validation start or evaluation time is not canonical"
+        )
+    spec = experiment.get("spec")
+    leader = _validation_leader(experiment.get("leader"))
+    conclusion = research_receipt.get("conclusion")
+    if (
+        not isinstance(spec, Mapping)
+        or research_receipt.get("experiment_id") != experiment.get("experiment_id")
+        or research_receipt.get("spec_sha256") != experiment.get("spec_sha256")
+        or not isinstance(conclusion, Mapping)
+        or conclusion.get("status") != "leader"
+        or conclusion.get("leader") != leader
+        or canonical_sha256(experiment.get("behavior_manifest"))
+        != experiment.get("evaluator_behavior_sha256")
+        or not isinstance(account_run_config_sha256, str)
+        or len(account_run_config_sha256) != 64
+    ):
+        raise StrategyLabRecipeError(
+            "validation_plan_invalid", "research or evaluator binding changed"
+        )
+    if schedule.get("timezone") != "Asia/Hong_Kong" or not bool(schedule.get("enabled", True)):
+        raise StrategyLabRecipeError("validation_plan_invalid", "HK schedule is unavailable")
+    try:
+        calendar = read_market_calendar_binding(context["artifact_root"], market="HK")
+    except Exception as exc:
+        raise StrategyLabRecipeError(
+            "market_calendar_binding_unavailable", str(exc)
+        ) from exc
+    trading_dates = calendar.get("trading_dates")
+    if not isinstance(trading_dates, list) or requested_start not in trading_dates:
+        raise StrategyLabRecipeError(
+            "validation_plan_invalid", "requested start is not a frozen trading session"
+        )
+    offset = trading_dates.index(requested_start)
+    selected_dates = trading_dates[offset : offset + VALIDATION_SESSIONS]
+    if len(selected_dates) != VALIDATION_SESSIONS:
+        raise StrategyLabRecipeError(
+            "validation_plan_invalid", "market calendar does not cover 10 validation sessions"
+        )
+    sessions: list[dict[str, Any]] = []
+    try:
+        for trading_date in selected_dates:
+            session = _calendar_session(calendar, trading_date)
+            if session is None:
+                raise ValueError(f"calendar session is missing: {trading_date}")
+            trade_date_type = str(session["trade_date_type"])
+            targets = scheduled_scan_targets_for_date(
+                dict(schedule), trading_date, trade_date_type=trade_date_type
+            )
+            slots = scheduled_session_slots_for_date(
+                dict(schedule), trading_date, trade_date_type=trade_date_type
+            )
+            if not targets or not slots:
+                raise ValueError(f"validation session is empty: {trading_date}")
+            target_values = [_utc_text(value) for value in targets]
+            sessions.append(
+                {
+                    "trading_date": trading_date,
+                    "session": session,
+                    "scheduled_scan_targets_utc": target_values,
+                    "expected_recommendation_point_ids": [
+                        build_recommendation_point_id("HK", ACCOUNT, value)
+                        for value in target_values
+                    ],
+                    "minute_grid_utc": [_utc_text(value) for value in slots],
+                    "breaks_utc": _slot_breaks(slots),
+                    "session_endpoint_utc": _utc_text(slots[-1] + timedelta(minutes=1)),
+                }
+            )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise StrategyLabRecipeError("validation_plan_invalid", str(exc)) from exc
+    first_target = datetime.fromisoformat(
+        sessions[0]["scheduled_scan_targets_utc"][0].replace("Z", "+00:00")
+    )
+    if occurred.astimezone(timezone.utc) >= first_target:
+        raise StrategyLabRecipeError(
+            "validation_preview_blocked", "the first validation target has already begun"
+        )
+    timer = dict(timer_binding)
+    provider = dict(provider_source)
+    provider_authority = {
+        key: provider.get(key) for key in ("provider", "endpoint", "opend_binding")
+    }
+    if (
+        timer != build_strategy_lab_timer_binding()
+        or set(provider) != {
+            "provider",
+            "endpoint",
+            "opend_binding",
+            "source_authority_sha256",
+        }
+        or provider_authority["provider"] != "futu_opend"
+        or provider_authority["endpoint"] != "market_snapshot"
+        or provider_authority["opend_binding"] != context.get("opend_binding")
+        or provider.get("source_authority_sha256")
+        != canonical_sha256(provider_authority)
+        or bool(set(account_run_config_sha256) - set("0123456789abcdef"))
+    ):
+        raise StrategyLabRecipeError(
+            "validation_plan_invalid", "validation runtime binding is invalid"
+        )
+    schedule_copy = dict(schedule)
+    return {
+        "experiment_id": experiment["experiment_id"],
+        "research_receipt": {
+            "receipt_ref": experiment["research_receipt_ref"],
+            "receipt_sha256": experiment["research_receipt_sha256"],
+        },
+        "research_confirmation": dict(research_confirmation),
+        "leader": leader,
+        "recipe": spec.get("recipe"),
+        "scope": spec.get("scope"),
+        "requested_start": requested_start,
+        "selected_trading_dates": selected_dates,
+        "market_calendar": {
+            "market_calendar_version": calendar["market_calendar_version"],
+            "snapshot_ref": calendar["snapshot_ref"],
+            "snapshot_content_sha256": calendar["snapshot_content_sha256"],
+            "snapshot_file_sha256": calendar["snapshot_file_sha256"],
+            "sessions": sessions,
+        },
+        "schedule": {
+            "config": schedule_copy,
+            "schedule_config_sha256": canonical_sha256(schedule_copy),
+        },
+        "account_run_config_sha256": account_run_config_sha256,
+        "provider_source": provider,
+        "timer_binding": timer,
+        "timer_binding_sha256": canonical_sha256(timer),
+        "behavior_manifest": experiment["behavior_manifest"],
+        "evaluator_behavior_sha256": experiment["evaluator_behavior_sha256"],
+        "source_commit_sha": experiment["source_commit_sha"],
+        "hidden_snapshot_batch_ceiling": HIDDEN_SNAPSHOT_BATCH_CEILING,
+        "validation_wake_tolerance_seconds": VALIDATION_WAKE_TOLERANCE_SECONDS,
+        "tick_protection_seconds": TICK_PROTECTION_SECONDS,
+    }
 
 
 def _load_window_day(
@@ -674,7 +908,9 @@ __all__ = [
     "RECIPES",
     "StrategyLabRecipeError",
     "build_concentration_arms",
+    "build_validation_plan",
     "check_recipe_readiness",
     "describe_recipe",
+    "project_validation_arms",
     "select_research_window",
 ]

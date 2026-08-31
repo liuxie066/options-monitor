@@ -18,10 +18,12 @@ from src.application.strategy_lab.service import (
     StrategyLabContextError,
     StrategyLabServiceError,
     confirm_research,
+    confirm_validation,
     execute_research,
     get_experiment_status,
     list_recipes,
     preview_experiment,
+    preview_validation,
     read_receipt,
     resolve_strategy_lab_context,
     resolve_strategy_lab_runtime_context,
@@ -71,6 +73,23 @@ def add_strategy_lab_commands(subparsers: Any) -> argparse.ArgumentParser:
     confirm.add_argument("--actor", required=True)
     confirm.add_argument("--idempotency-key", required=True)
 
+    validation_preview = commands.add_parser(
+        "preview-validation", help="preview the next 10 validation sessions"
+    )
+    validation_preview.add_argument("--profile-path", required=True)
+    validation_preview.add_argument("--experiment-id", required=True)
+    validation_preview.add_argument("--requested-start", required=True)
+
+    validation_confirm = commands.add_parser(
+        "confirm-validation", help="confirm one current validation preview"
+    )
+    validation_confirm.add_argument("--profile-path", required=True)
+    validation_confirm.add_argument("--experiment-id", required=True)
+    validation_confirm.add_argument("--requested-start", required=True)
+    validation_confirm.add_argument("--confirmed-preview-sha256", required=True)
+    validation_confirm.add_argument("--actor", required=True)
+    validation_confirm.add_argument("--idempotency-key", required=True)
+
     status = commands.add_parser("status", help="read one experiment status")
     status.add_argument("--profile-path", required=True)
     status.add_argument("--experiment-id", required=True)
@@ -108,6 +127,8 @@ def handle_strategy_lab_command(args: argparse.Namespace) -> dict[str, Any]:
         "recipes",
         "preview",
         "confirm-research",
+        "preview-validation",
+        "confirm-validation",
         "status",
         "research",
         "receipt",
@@ -136,6 +157,23 @@ def handle_strategy_lab_command(args: argparse.Namespace) -> dict[str, Any]:
                 data = confirm_research(
                     context,
                     _experiment_request(args),
+                    confirmed_preview_sha256=args.confirmed_preview_sha256,
+                    actor=args.actor,
+                    idempotency_key=args.idempotency_key,
+                    occurred_at_utc=_now_utc(),
+                )
+            elif args.strategy_lab_command == "preview-validation":
+                data = preview_validation(
+                    context,
+                    args.experiment_id,
+                    args.requested_start,
+                    occurred_at_utc=_now_utc(),
+                )
+            elif args.strategy_lab_command == "confirm-validation":
+                data = confirm_validation(
+                    context,
+                    args.experiment_id,
+                    args.requested_start,
                     confirmed_preview_sha256=args.confirmed_preview_sha256,
                     actor=args.actor,
                     idempotency_key=args.idempotency_key,

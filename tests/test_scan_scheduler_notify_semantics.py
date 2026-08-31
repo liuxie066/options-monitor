@@ -435,3 +435,33 @@ def test_disabled_schedule_is_terminal_unless_force() -> None:
     assert "调度已禁用" in disabled.reason
     assert forced.should_run_scan is True
     assert forced.is_notify_window_open is True
+
+
+def test_scheduled_session_slots_follow_breaks_and_partial_days() -> None:
+    from src.application.scan_scheduler import scheduled_session_slots_for_date
+
+    schedule = {
+        "enabled": True,
+        "timezone": "Asia/Hong_Kong",
+        "run_window": {
+            "start": "09:30",
+            "end": "16:00",
+            "breaks": [{"start": "12:00", "end": "13:00"}],
+        },
+    }
+
+    whole = scheduled_session_slots_for_date(schedule, "2026-09-01")
+    morning = scheduled_session_slots_for_date(
+        schedule, "2026-09-01", trade_date_type="MORNING"
+    )
+    afternoon = scheduled_session_slots_for_date(
+        schedule, "2026-09-01", trade_date_type="AFTERNOON"
+    )
+
+    assert len(whole) == 330
+    assert len(morning) == 150
+    assert len(afternoon) == 180
+    assert whole[0].isoformat() == "2026-09-01T01:30:00+00:00"
+    assert morning[-1].isoformat() == "2026-09-01T03:59:00+00:00"
+    assert afternoon[0].isoformat() == "2026-09-01T05:00:00+00:00"
+    assert whole[-1].isoformat() == "2026-09-01T07:59:00+00:00"

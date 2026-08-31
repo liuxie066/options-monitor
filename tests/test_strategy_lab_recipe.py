@@ -10,11 +10,17 @@ import pytest
 from domain.domain.performance.models import FXRateFact
 from domain.domain.symbol_identity import OPTION_CODE_RE
 from src.application.candidate_snapshot_manifest import load_candidate_snapshot_bundle
-from src.application.strategy_lab.contracts import RECIPE_ID, canonical_sha256
+from src.application.strategy_lab.contracts import (
+    RECIPE_ID,
+    build_strategy_lab_timer_binding,
+    canonical_sha256,
+)
 from src.application.strategy_lab.recipe import (
     _history_k_authority,
     _terminal_fx_bindings,
     build_concentration_arms,
+    build_validation_plan,
+    project_validation_arms,
     select_research_window,
 )
 from src.application.strategy_lab.service import preview_experiment
@@ -142,6 +148,18 @@ def test_arms_use_explicit_sealed_rank_one_and_all_thresholds(
     ]
     assert all(arm["candidate_id"] == "lower-concentration" for arm in result["arms"][1:])
     assert result["accepted_candidate_ids"] == ["baseline", "lower-concentration", "other"]
+    validation = project_validation_arms(
+        _formal_point(),
+        {
+            "variant_id": "challenger_0.004",
+            "near_return_threshold": 0.004,
+            "comparison_sha256": "a" * 64,
+        },
+    )
+    assert [arm["arm_id"] for arm in validation["arms"]] == [
+        "baseline",
+        "challenger_0.004",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -221,6 +239,129 @@ def _trading_dates(count: int) -> list[str]:
             out.append(current.isoformat())
         current += timedelta(days=1)
     return out
+
+
+def test_validation_plan_freezes_exact_10_sessions_without_evaluation_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import src.application.strategy_lab.recipe as recipe
+
+    dates: list[str] = []
+    current = date(2026, 9, 1)
+    while len(dates) < 10:
+        if current.weekday() < 5:
+            dates.append(current.isoformat())
+        current += timedelta(days=1)
+    sessions = [
+        {
+            "trading_date": trading_date,
+            "trade_date_type": (
+                "MORNING" if index == 1 else "AFTERNOON" if index == 2 else "WHOLE"
+            ),
+        }
+        for index, trading_date in enumerate(dates)
+    ]
+    monkeypatch.setattr(
+        recipe,
+        "read_market_calendar_binding",
+        lambda *_args, **_kwargs: {
+            "market_calendar_version": "hk.v1",
+            "snapshot_ref": "calendar/snapshot.json",
+            "snapshot_content_sha256": "a" * 64,
+            "snapshot_file_sha256": "b" * 64,
+            "trading_dates": dates,
+            "trading_sessions": sessions,
+        },
+    )
+    leader = {
+        "variant_id": "challenger_0.002",
+        "near_return_threshold": 0.002,
+        "comparison_sha256": "c" * 64,
+    }
+    manifest = [{"path": "owner.py", "sha256": "d" * 64}]
+    experiment = {
+        "experiment_id": "experiment-1",
+        "spec": {
+            "recipe": {"recipe_id": RECIPE_ID},
+            "scope": {"market": "hk", "account": "lx", "strategy": "sell_put"},
+        },
+        "spec_sha256": "e" * 64,
+        "source_commit_sha": "f" * 40,
+        "behavior_manifest": manifest,
+        "evaluator_behavior_sha256": canonical_sha256(manifest),
+        "leader": leader,
+        "research_receipt_ref": "experiments/experiment-1/receipts/research.json",
+        "research_receipt_sha256": "1" * 64,
+    }
+    receipt = {
+        "experiment_id": "experiment-1",
+        "spec_sha256": "e" * 64,
+        "conclusion": {"status": "leader", "leader": leader},
+    }
+    schedule = {
+        "enabled": True,
+        "timezone": "Asia/Hong_Kong",
+        "run_window": {
+            "start": "09:30",
+            "end": "16:00",
+            "breaks": [{"start": "12:00", "end": "13:00"}],
+        },
+        "run_points": {"start_plus_min": 10, "hourly_minute": 0, "end_minus_min": 10},
+    }
+    opend_binding = {"host": "127.0.0.1", "port": 11111}
+    provider_authority = {
+        "provider": "futu_opend",
+        "endpoint": "market_snapshot",
+        "opend_binding": opend_binding,
+    }
+    kwargs = {
+        "requested_start": dates[0],
+        "schedule": schedule,
+        "account_run_config_sha256": "2" * 64,
+        "provider_source": {
+            **provider_authority,
+            "source_authority_sha256": canonical_sha256(provider_authority),
+        },
+        "timer_binding": build_strategy_lab_timer_binding(),
+    }
+
+    first = build_validation_plan(
+        {"artifact_root": tmp_path, "opend_binding": opend_binding},
+        experiment,
+        receipt,
+        {"confirmation_sha256": "3" * 64},
+        occurred_at_utc="2026-08-31T00:00:00Z",
+        **kwargs,
+    )
+    second = build_validation_plan(
+        {"artifact_root": tmp_path, "opend_binding": opend_binding},
+        experiment,
+        receipt,
+        {"confirmation_sha256": "3" * 64},
+        occurred_at_utc="2026-08-31T01:00:00Z",
+        **kwargs,
+    )
+
+    frozen = first["market_calendar"]["sessions"]
+    assert first == second
+    assert first["selected_trading_dates"] == dates
+    assert [len(item["minute_grid_utc"]) for item in frozen[:3]] == [330, 150, 180]
+    assert frozen[0]["breaks_utc"] == [
+        {"start_utc": "2026-09-01T04:00:00Z", "end_utc": "2026-09-01T05:00:00Z"}
+    ]
+    assert frozen[1]["session_endpoint_utc"].endswith("04:00:00Z")
+    assert "occurred_at_utc" not in first
+
+    with pytest.raises(recipe.StrategyLabRecipeError) as raised:
+        build_validation_plan(
+            {"artifact_root": tmp_path, "opend_binding": opend_binding},
+            experiment,
+            receipt,
+            {"confirmation_sha256": "3" * 64},
+            occurred_at_utc="2026-09-01T02:00:00Z",
+            **kwargs,
+        )
+    assert raised.value.reason_code == "validation_preview_blocked"
 
 
 def test_window_uses_newest_mature_20_and_never_skips_a_hole(
