@@ -1,0 +1,199 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.1.0",
+  "base": {
+    "tag": "v3.0.2",
+    "commit": "af7129e61c8c5900e8c5d48673e2d168b63df93b"
+  },
+  "reviewed_head": "4e27387d5af065c4f4274e3e6c4bfbf9e648355b",
+  "commits": [
+    {
+      "sha": "3d107f0709443721f4b1099770645b0e340d0d1e",
+      "subject": "feat(strategy-lab): complete phase 2 research workflow"
+    },
+    {
+      "sha": "1382621ea4fff4c710b875b64717e3c665bc58a5",
+      "subject": "docs(strategy-lab): align phase 3 receipt ownership"
+    },
+    {
+      "sha": "45891e81ca094804289764017753ae6755a31494",
+      "subject": "feat(strategy-lab): freeze hidden validation plan"
+    },
+    {
+      "sha": "215d4bbd9a0da8f8c76928029d2cf3c464c04e70",
+      "subject": "feat(strategy-lab): collect hidden validation evidence"
+    },
+    {
+      "sha": "11d9fd6e4e1ec719908d65e552e71aec789e82e9",
+      "subject": "fix(tick): fail closed on unavailable portfolio context"
+    },
+    {
+      "sha": "35218613444d1cfe30ba8b7deca8403c08ea0edd",
+      "subject": "docs(architecture): refresh dependency graph"
+    },
+    {
+      "sha": "1ee55e79fbdf09ec6f1d6359f411ffa5094f41b5",
+      "subject": "Merge pull request #194 from liuxie066/codex/opend-funds-prepared-context-fail-closed"
+    },
+    {
+      "sha": "93e52e7d42dfe93583b4e24d8347a540e6ca4306",
+      "subject": "feat(strategy-lab): complete hidden validation lifecycle"
+    },
+    {
+      "sha": "929a52785de356c9fe9a83020f2058a713dd3ab9",
+      "subject": "chore(strategy-lab): merge latest main"
+    },
+    {
+      "sha": "3e3d76f8c5aa1ae0da022dd65bf9c7b31212be39",
+      "subject": "Merge pull request #195 from liuxie066/codex/strategy-lab-rebuild-phase3"
+    },
+    {
+      "sha": "bbc98a635005d825e2c791c3979eff005a85f8f3",
+      "subject": "fix(copilot): harden answer repair and MTD cutoff"
+    },
+    {
+      "sha": "94dcee1db63e226e952e38fe37ea70927014bbbc",
+      "subject": "fix(ci): restore copilot prompt budget"
+    },
+    {
+      "sha": "4e27387d5af065c4f4274e3e6c4bfbf9e648355b",
+      "subject": "Merge pull request #196 from liuxie066/fix/copilot-answer-repair-mtd-cutoff"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "Added operator-controlled Strategy Lab workflows for deterministic 20-day concentration research and confirmed 10-day hidden validation, including low-priority batched Bid evidence, expiry outcomes, and auditable Research and Final Receipts without delaying production Tick.",
+      "commits": [
+        "3d107f0709443721f4b1099770645b0e340d0d1e",
+        "45891e81ca094804289764017753ae6755a31494",
+        "215d4bbd9a0da8f8c76928029d2cf3c464c04e70",
+        "93e52e7d42dfe93583b4e24d8347a540e6ca4306"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Reduced each portfolio fetch to one CNH OpenD funds refresh and isolated accounts with unavailable prepared portfolio context before shared prefetch, while preserving healthy peer scans and scheduled failure alerts.",
+      "commits": [
+        "11d9fd6e4e1ec719908d65e552e71aec789e82e9"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Let Copilot recover once from both plain and rejected answer attempts, preserve real cancellation and budget failures, and remove stale unrequested MTD cutoffs before option-performance reads.",
+      "commits": [
+        "bbc98a635005d825e2c791c3979eff005a85f8f3"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "1382621ea4fff4c710b875b64717e3c665bc58a5",
+      "reason": "Documentation-only ownership alignment for the Strategy Lab feature described by the New Features entry."
+    },
+    {
+      "commit": "35218613444d1cfe30ba8b7deca8403c08ea0edd",
+      "reason": "Generated dependency graph refresh for the portfolio-context fix; no independent user-visible behavior."
+    },
+    {
+      "commit": "1ee55e79fbdf09ec6f1d6359f411ffa5094f41b5",
+      "reason": "Merge-only integration commit; the portfolio-context fix is mapped to its source commit."
+    },
+    {
+      "commit": "929a52785de356c9fe9a83020f2058a713dd3ab9",
+      "reason": "Merge-only synchronization with main; the included feature and fix are mapped to their source commits."
+    },
+    {
+      "commit": "3e3d76f8c5aa1ae0da022dd65bf9c7b31212be39",
+      "reason": "Merge-only integration commit; the Strategy Lab feature is mapped to its source commits."
+    },
+    {
+      "commit": "94dcee1db63e226e952e38fe37ea70927014bbbc",
+      "reason": "Follow-up prompt-budget and test stabilization for the mapped Copilot fix; no independent user-visible behavior."
+    },
+    {
+      "commit": "4e27387d5af065c4f4274e3e6c4bfbf9e648355b",
+      "reason": "Merge-only integration commit; the Copilot fix is mapped to its source commit."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "3d107f0709443721f4b1099770645b0e340d0d1e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/195"
+      ]
+    },
+    {
+      "commit": "1382621ea4fff4c710b875b64717e3c665bc58a5",
+      "references": [
+        "docs/STRATEGY_LAB_EXPERIMENT_PLATFORM_SYSTEM_DESIGN.md"
+      ]
+    },
+    {
+      "commit": "45891e81ca094804289764017753ae6755a31494",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/195"
+      ]
+    },
+    {
+      "commit": "215d4bbd9a0da8f8c76928029d2cf3c464c04e70",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/195"
+      ]
+    },
+    {
+      "commit": "11d9fd6e4e1ec719908d65e552e71aec789e82e9",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/194"
+      ]
+    },
+    {
+      "commit": "35218613444d1cfe30ba8b7deca8403c08ea0edd",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/194"
+      ]
+    },
+    {
+      "commit": "1ee55e79fbdf09ec6f1d6359f411ffa5094f41b5",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/194"
+      ]
+    },
+    {
+      "commit": "93e52e7d42dfe93583b4e24d8347a540e6ca4306",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/195"
+      ]
+    },
+    {
+      "commit": "929a52785de356c9fe9a83020f2058a713dd3ab9",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/195"
+      ]
+    },
+    {
+      "commit": "3e3d76f8c5aa1ae0da022dd65bf9c7b31212be39",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/195"
+      ]
+    },
+    {
+      "commit": "bbc98a635005d825e2c791c3979eff005a85f8f3",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/196"
+      ]
+    },
+    {
+      "commit": "94dcee1db63e226e952e38fe37ea70927014bbbc",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/196"
+      ]
+    },
+    {
+      "commit": "4e27387d5af065c4f4274e3e6c4bfbf9e648355b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/196"
+      ]
+    }
+  ]
+}
