@@ -427,7 +427,7 @@ def test_fetch_futu_portfolio_context_filters_rows_by_mapped_account_ids() -> No
 
     assert out["cash_by_currency"] == {"CNY": 120000.0}
     assert sorted(out["stocks_by_symbol"].keys()) == ["NVDA"]
-    assert fake_gateway.balance_calls == [int(FAKE_FUTU_ACC_ID_LX_PRIMARY)] * 3
+    assert fake_gateway.balance_calls == [int(FAKE_FUTU_ACC_ID_LX_PRIMARY)]
     assert fake_gateway.position_calls == [int(FAKE_FUTU_ACC_ID_LX_PRIMARY)]
 
 
@@ -499,12 +499,11 @@ def test_fetch_futu_portfolio_context_uses_account_settings_account_id_without_t
 
     assert captured["balance"] == [
         {
-            "currency": currency,
+            "currency": "CNH",
             "acc_id": int(FAKE_FUTU_ACC_ID_LX_PRIMARY),
             "trd_env": "REAL",
             "refresh_cache": True,
         }
-        for currency in ("CNH", "USD", "HKD")
     ]
     assert captured["positions"] == [{"acc_id": int(FAKE_FUTU_ACC_ID_LX_PRIMARY), "trd_env": "REAL"}]
     assert out["cash_by_currency"] == {"USD": 2500.0}

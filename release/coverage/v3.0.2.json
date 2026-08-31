@@ -1,0 +1,79 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.0.2",
+  "base": {
+    "tag": "v3.0.1",
+    "commit": "a4488c00d4d2622f79b4da14a8d5f7e5c473510e"
+  },
+  "reviewed_head": "f18b4f4525519c19825cda9cf5ea599b0a8996a3",
+  "commits": [
+    {
+      "sha": "a3bbf10665d9fc16f17198c002aa67aa5d449c55",
+      "subject": "perf(tick): reduce per-run snapshot storage"
+    },
+    {
+      "sha": "4f8df3cbacaf0e7e7f930656ed07186b89a545d6",
+      "subject": "Merge pull request #190 from liuxie066/codex/tick-storage-efficiency"
+    },
+    {
+      "sha": "9de638e73bcdc4025fd1486206e87e6183b5c983",
+      "subject": "feat(strategy-lab): establish phase 1 evidence foundations"
+    },
+    {
+      "sha": "f18b4f4525519c19825cda9cf5ea599b0a8996a3",
+      "subject": "Merge pull request #192 from liuxie066/codex/strategy-lab-rebuild-phase1"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Reduced per-run Tick storage by omitting duplicated provider payloads from persisted prefetch summaries and compacting opening candidate snapshot JSON, without changing canonical required-data facts, candidate semantics, or notification behavior.",
+      "commits": [
+        "a3bbf10665d9fc16f17198c002aa67aa5d449c55"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Added Strategy Lab evidence-source readiness and zero-wait, low-priority OpenD admission so historical evidence requests fail closed instead of delaying production Tick.",
+      "commits": [
+        "9de638e73bcdc4025fd1486206e87e6183b5c983"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "4f8df3cbacaf0e7e7f930656ed07186b89a545d6",
+      "reason": "Merge-only integration commit; the Tick storage improvement is mapped to its source commit."
+    },
+    {
+      "commit": "f18b4f4525519c19825cda9cf5ea599b0a8996a3",
+      "reason": "Merge-only integration commit; the Strategy Lab Phase 1 improvement is mapped to its source commit."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "a3bbf10665d9fc16f17198c002aa67aa5d449c55",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/190"
+      ]
+    },
+    {
+      "commit": "4f8df3cbacaf0e7e7f930656ed07186b89a545d6",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/190"
+      ]
+    },
+    {
+      "commit": "9de638e73bcdc4025fd1486206e87e6183b5c983",
+      "references": [
+        "docs/STRATEGY_LAB_EXPERIMENT_PLATFORM_SYSTEM_DESIGN.md"
+      ]
+    },
+    {
+      "commit": "f18b4f4525519c19825cda9cf5ea599b0a8996a3",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/192"
+      ]
+    }
+  ]
+}
