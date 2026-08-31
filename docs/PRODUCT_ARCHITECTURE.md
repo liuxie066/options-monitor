@@ -233,7 +233,7 @@ output_runs / required_data / sealed candidate snapshot / candidate trace / mark
   -> Research archive / evidence bundle
   -> Shadow Replay dataset
   -> readiness / candidate-impact
-  -> Strategy Lab Top1 research / hidden validation / receipt
+  -> Strategy Lab Recipe research / hidden validation / receipt (under implementation)
   -> human review / shadow rollout / manual promotion
 ```
 
@@ -242,8 +242,8 @@ output_runs / required_data / sealed candidate snapshot / candidate trace / mark
 - 研究与复盘只产出建议和证据，不直接修改生产配置。
 - 参数假设讨论必须基于 replay / snapshot / trace / outcome 证据，而不是只看终态候选。
 - Research 是证据基础设施；Shadow Replay 是反事实复盘引擎；Strategy Lab 是策略进化产品入口。
-- Shadow Replay 直接提供 dataset、mark、outcome、候选影响和探索性复盘；Strategy Lab 只保留 formal Top1 产品面，以及 recorder 使用的 `update` maintenance facade。
-- Formal MVP 由 HK / `lx` Sell Put `top1-loop` 承担，已经实现连续 20 日研究 preview/confirm、可信 leader 门槛、未来 10 日隐藏验证、确定性 CNY 双指标评价和 Final Receipt。当前仍在积累正式 corpus，未取得真实回执前不能声称价值验证完成。
+- Shadow Replay 直接提供 dataset、mark、outcome、候选影响和探索性复盘；Strategy Lab 不包装这些维护入口。
+- Strategy Lab 当前只实现了根级 history-K readiness、普通 HK / `lx` context 和三表 Store 基础；Recipe、preview、20 日研究、10 日隐藏验证和回执尚未完成。
 - Formal Strategy Lab 不声称绝对最优；只有冻结合同、完整事实和确定性评价满足门槛时才形成可采用建议。
 - 在线生产监控和离线策略研究保持分离。
 
@@ -251,7 +251,7 @@ output_runs / required_data / sealed candidate snapshot / candidate trace / mark
 
 - `src/application/research/`
 - `src/application/shadow_replay/`
-- `src/application/strategy_lab/`（formal `top1/`；兼容 `update` 可从 latest scanned run 构建本地 replay dataset 并维护 mark / outcome）
+- `src/application/strategy_lab/`、`src/infrastructure/strategy_lab/`
 - `docs/STRATEGY_LAB_DESIGN.md`
 - `docs/SHADOW_REPLAY_RUNBOOK.md`
 - `docs/OPPORTUNITY_QUALITY.md`

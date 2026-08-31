@@ -24,14 +24,13 @@ from src.application.research.formal_corpus import (
     capture_formal_point_attempt,
     formal_corpus_present,
     load_formal_expectation,
+    read_expectation_bound_market_calendar_snapshot,
+    read_market_calendar_binding,
+    refresh_market_calendar_binding,
     seal_formal_day_expectation,
     seal_profile_formal_expectations,
 )
 from src.infrastructure.private_storage import exclusive_private_file_lock
-from src.application.strategy_lab.top1.ranking import (
-    build_top1_recipe_projection,
-    materialize_top1_recipe_input,
-)
 from tests.candidate_evidence_helpers import seal_opening_candidate_fixture
 
 
@@ -129,6 +128,77 @@ def test_persistent_lock_is_not_a_formal_corpus_artifact(tmp_path: Path) -> None
     assert not formal_corpus_present(tmp_path, market="HK", account="lx")
     _seal(tmp_path)
     assert formal_corpus_present(tmp_path, market="HK", account="lx")
+
+
+def test_market_calendar_uses_neutral_strategy_lab_artifact_path(
+    tmp_path: Path,
+) -> None:
+    artifact_root = tmp_path / "output_shared/research/strategy_lab"
+
+    class Gateway:
+        def get_trading_days_with_receipt(self, **_kwargs: object) -> dict[str, object]:
+            return {
+                "retcode": 0,
+                "rows": [{"time": "2026-08-26", "trade_date_type": "WHOLE"}],
+                "coverage_complete": True,
+                "pagination_complete": True,
+                "page_count": 1,
+            }
+
+    result = refresh_market_calendar_binding(
+        artifact_root,
+        gateway=Gateway(),
+        market="HK",
+        market_calendar_version="fixture.v1",
+        coverage_start="2026-08-26",
+        coverage_end="2026-08-26",
+        observed_at_utc="2026-08-25T00:00:00Z",
+    )
+
+    binding = result["binding"]
+    assert binding == read_market_calendar_binding(artifact_root, market="HK")
+    assert str(binding["snapshot_ref"]).startswith(
+        "capabilities/market-calendar/hk/snapshots/"
+    )
+    assert (artifact_root / "capabilities/market-calendar/hk/current.json").is_file()
+    assert not (artifact_root / "strategy_lab").exists()
+    assert not (artifact_root / "top1").exists()
+
+    class ExtendedGateway:
+        def get_trading_days_with_receipt(self, **_kwargs: object) -> dict[str, object]:
+            return {
+                "retcode": 0,
+                "rows": [
+                    {"time": "2026-08-26", "trade_date_type": "WHOLE"},
+                    {"time": "2026-08-27", "trade_date_type": "WHOLE"},
+                ],
+                "coverage_complete": True,
+                "pagination_complete": True,
+                "page_count": 1,
+            }
+
+    refresh_market_calendar_binding(
+        artifact_root,
+        gateway=ExtendedGateway(),
+        market="HK",
+        market_calendar_version="fixture.v1",
+        coverage_start="2026-08-26",
+        coverage_end="2026-08-27",
+        observed_at_utc="2026-08-26T00:00:00Z",
+    )
+    current = read_market_calendar_binding(artifact_root, market="HK")
+    old = read_expectation_bound_market_calendar_snapshot(
+        artifact_root,
+        market="HK",
+        market_calendar_version=binding["market_calendar_version"],
+        market_calendar_sha256=binding["snapshot_content_sha256"],
+    )
+    assert current["snapshot_content_sha256"] != binding["snapshot_content_sha256"]
+    assert old["snapshot_ref"] == binding["snapshot_ref"]
+    assert old["snapshot_file_sha256"] == binding["snapshot_file_sha256"]
+    assert old["trading_sessions"] == [
+        {"trading_date": "2026-08-26", "trade_date_type": "WHOLE"}
+    ]
 
 
 def test_expectation_lock_is_idempotent_and_conflicts_on_denominator_change(
@@ -853,18 +923,6 @@ def test_ready_point_reloads_and_materializes_recipe_projection(
         recommendation_point_id=point["recommendation_point_id"],
     )
     assert loaded["status"] == "available"
-    recipe_projection = build_top1_recipe_projection(
-        loaded["point"], formal_point_ref=loaded["artifact_ref"]
-    )
-    assert recipe_projection["schema_version"] == "sell_put_ranking_projection.v3"
-    assert "account_config_sha256" not in recipe_projection
-    projection = materialize_top1_recipe_input(loaded["point"], recipe_projection)
-    assert recipe_projection["materialized_input_content_sha256"] == projection[
-        "artifact_provenance"
-    ]["content_sha256"]
-    assert projection["schema_version"] == "sell_put_ranking_projection.v2"
-    assert projection["candidates"] == []
-
     artifact = tmp_path / published["artifact_ref"]
     tampered = json.loads(gzip.decompress(artifact.read_bytes()))
     tampered["required_data_symbols"][0][

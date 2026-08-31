@@ -69,34 +69,39 @@ sanitized summary in the inbound audit record.
 
 Research and Shadow Replay are an independent offline evidence/replay module,
 not part of the Inbound Assistant core and not a remote chat surface. Strategy
-Lab is limited to the formal HK / `lx` Sell Put `top1-loop`, which owns the
-confirmed 20-day research, 10-day hidden validation, and immutable receipt
-workflow. Its retained `update` command is only a recorder compatibility facade
-over Shadow Replay maintenance.
+Lab is a separate strategy-experiment product surface. Its current executable
+surface contains the fixed HK / `lx` Recipe, preview and confirmation, status,
+explicit bounded 20-day research execution, Research Receipt reading, and targeted
+history-K readiness. Hidden validation remains outside Phase 2.
 
 ```text
 ./om research ...
 -> src.interfaces.cli.research
 -> src.application.research
 -> src.application.shadow_replay
--> src.application.strategy_lab
-```
 
-The formal path continues through `src.application.strategy_lab.top1`, the
-existing `ExperimentStore`, scheduled recommendation-point corpus, and the
-existing Top1 advance timer. It does not add a second scheduler, corpus, FX
-store, or production configuration writer.
+./om strategy-lab readiness refresh-history-k ...
+-> src.interfaces.cli.strategy_lab_ops
+-> src.application.strategy_lab.service/readiness
+
+./om strategy-lab recipes|preview|confirm-research|status|receipt ...
+./om strategy-lab research execute ...
+-> src.interfaces.cli.strategy_lab_ops
+-> src.application.strategy_lab.service
+-> src.application.strategy_lab.recipe/evidence/comparison/receipts
+```
 
 `src.application.research` owns redacted evidence collection, deterministic
 checks, handoff rendering, remote archive mirroring, and local research bundle
 writes. `src.application.shadow_replay` owns offline dataset construction,
 mark/outcome lifecycle, status, analyze, and candidate-impact report logic.
-`src.application.strategy_lab.top1` owns the formal experiment contract,
-lifecycle, evaluation, and receipts. The small `strategy_lab.update` facade
-wraps Shadow Replay status / data-plan so the existing recorder keeps one stable
-maintenance entry point without adding a new write path. Generic Strategy Lab
-readiness, experiment, proposal, LLM-context, and domain-adapter code has been
-retired; Shadow Replay owns exploratory replay analysis directly.
+`src.application.strategy_lab` owns the root experiment contract, Recipe preview,
+bounded research evidence, comparison, Research Receipt, and targeted readiness; the
+same-path `ExperimentStore` is the three-table state owner.
+Shadow Replay maintenance stays on its own commands. Strategy Lab does not own
+a recorder service or timer in Phase 2. Provider evidence is admitted only after the
+non-blocking query lock and Tick/protection checks; one invocation consumes at most
+one provider logical unit.
 
 This side lane may read runtime artifacts, candidate/reject/trace evidence,
 required-data snapshots, and archived run outputs. It must not mutate runtime

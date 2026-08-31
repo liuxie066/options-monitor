@@ -9,49 +9,35 @@ from tests.service_deploy_test_support import (
     _write_systemd_units_from_bundle,
 )
 
-def test_service_render_cli_exposes_strategy_lab_recorder_account(capsys: pytest.CaptureFixture[str]) -> None:
+def test_service_render_cli_omits_retired_strategy_lab_flags(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     from src.interfaces.cli.main import parse_args
-
-    args = parse_args([
-        "service",
-        "render",
-        "--target",
-        "systemd",
-        "--config-yaml",
-        "/tmp/config.yaml",
-        "--include-strategy-lab-recorder",
-        "--strategy-lab-recorder-account",
-        "sy",
-    ])
-    assert args.strategy_lab_recorder_account == "sy"
 
     with pytest.raises(SystemExit) as exc_info:
         parse_args(["service", "render", "--help"])
     assert exc_info.value.code == 0
-    assert "--strategy-lab-recorder-account" in capsys.readouterr().out
-
-    top1 = parse_args(
-        [
-            "service",
-            "render",
-            "--target",
-            "systemd",
-            "--config-yaml",
-            "/tmp/config.yaml",
-            "--include-strategy-lab-top1",
-            "--strategy-lab-top1-account",
-            "user1",
-            "--strategy-lab-top1-advance-interval-seconds",
-            "300",
-            "--strategy-lab-top1-timeout-start-sec",
-            "120",
-        ]
+    help_text = capsys.readouterr().out
+    assert "--include-strategy-lab-advance" in help_text
+    retired_flags = (
+        "--include-strategy-lab-" + "recorder",
+        "--strategy-lab-" + "recorder-account",
+        "--include-strategy-lab-" + "top1",
+        "--strategy-lab-" + "top1-account",
     )
-    assert top1.include_strategy_lab_top1 is True
-    assert top1.strategy_lab_top1_account == "user1"
-    assert top1.strategy_lab_top1_advance_interval_seconds == 300
-    assert top1.strategy_lab_top1_timeout_start_sec == 120
+    assert all(flag not in help_text for flag in retired_flags)
 
+    for flag in retired_flags:
+        with pytest.raises(SystemExit):
+            parse_args([
+                "service",
+                "render",
+                "--target",
+                "systemd",
+                "--config-yaml",
+                "/tmp/config.yaml",
+                flag,
+            ])
 def test_cli_service_render_returns_json(capsys, tmp_path: Path) -> None:
     from src.interfaces.cli.main import main
 
@@ -70,6 +56,7 @@ def test_cli_service_render_returns_json(capsys, tmp_path: Path) -> None:
         str(tmp_path / "runtime" / "config.yaml"),
         "--env-file",
         str(tmp_path / "options-monitor.env"),
+        "--include-strategy-lab-advance",
         "--no-content",
     ])
 
@@ -78,6 +65,11 @@ def test_cli_service_render_returns_json(capsys, tmp_path: Path) -> None:
     assert payload["ok"] is True
     assert payload["data"]["summary"]["service_provider"] == "systemd"
     assert payload["data"]["env_file"] == str(tmp_path / "options-monitor.env")
+    assert any(
+        item["relative_path"]
+        == "systemd/options-monitor-strategy-lab-advance.timer"
+        for item in payload["data"]["files"]
+    )
     profile = next(item for item in payload["data"]["files"] if item["relative_path"] == "service.profile.json")
     assert profile.get("content") is None
     assert payload["data"]["files"][0].get("content") is None

@@ -89,30 +89,14 @@ def add_service_update_commands(subparsers: Any) -> None:
         help="comma-separated WeChat inbound allowlist, e.g. wechat:<from_user_id>",
     )
     service_render.add_argument(
-        "--include-strategy-lab-recorder",
-        action="store_true",
-        help="render opt-in Strategy Lab dataset build, mark sampling, and settlement timers",
-    )
-    service_render.add_argument(
-        "--include-strategy-lab-top1",
-        action="store_true",
-        help="render the experimental HK Strategy Lab Top1 advance timer",
-    )
-    service_render.add_argument("--strategy-lab-top1-account", default=None)
-    service_render.add_argument(
-        "--strategy-lab-top1-advance-interval-seconds",
-        type=int,
-        default=None,
-    )
-    service_render.add_argument(
-        "--strategy-lab-top1-timeout-start-sec",
-        type=int,
-        default=None,
-    )
-    service_render.add_argument(
         "--include-quality-monitoring",
         action="store_true",
         help="render opt-in systemd quality API, refresh, recheck, and day-end reconciliation units",
+    )
+    service_render.add_argument(
+        "--include-strategy-lab-advance",
+        action="store_true",
+        help="render the opt-in Strategy Lab scheduled advance service/timer",
     )
     service_render.add_argument(
         "--include-feishu-agent-credential",
@@ -138,24 +122,6 @@ def add_service_update_commands(subparsers: Any) -> None:
         default="/etc/credstore.encrypted",
         help="encrypted systemd credential store root",
     )
-    service_render.add_argument(
-        "--strategy-lab-recorder-source",
-        default="opend",
-        choices=("local", "opend"),
-        help="mark sampling source for Strategy Lab recorder timers",
-    )
-    service_render.add_argument(
-        "--strategy-lab-recorder-account",
-        default=None,
-        help="Futu account whose OpenD endpoint owns Strategy Lab mark sampling",
-    )
-    service_render.add_argument(
-        "--strategy-lab-recorder-max-datasets",
-        type=int,
-        default=5,
-        help="maximum datasets sampled per recorder run",
-    )
-    service_render.add_argument("--strategy-lab-recorder-mark-stale-hours", type=int, default=2)
     service_render.add_argument("--output-dir", default=None, help="write rendered files under this directory")
     service_render.add_argument("--no-content", action="store_true", help="omit file contents from JSON output")
     service_preflight_cmd = service_sub.add_parser(
@@ -371,20 +337,8 @@ def handle_service_update_command(
             wechat_clawbot_config_key=args.wechat_clawbot_config_key,
             wechat_clawbot_label=args.wechat_clawbot_label,
             wechat_clawbot_allowed_senders=args.wechat_clawbot_allowed_senders,
-            include_strategy_lab_recorder=bool(args.include_strategy_lab_recorder),
-            strategy_lab_recorder_source=args.strategy_lab_recorder_source,
-            strategy_lab_recorder_account=args.strategy_lab_recorder_account,
-            strategy_lab_recorder_max_datasets=args.strategy_lab_recorder_max_datasets,
-            strategy_lab_recorder_mark_stale_hours=args.strategy_lab_recorder_mark_stale_hours,
-            include_strategy_lab_top1=bool(args.include_strategy_lab_top1),
-            strategy_lab_top1_account=args.strategy_lab_top1_account,
-            strategy_lab_top1_advance_interval_seconds=(
-                args.strategy_lab_top1_advance_interval_seconds
-            ),
-            strategy_lab_top1_timeout_start_sec=(
-                args.strategy_lab_top1_timeout_start_sec
-            ),
             include_quality_monitoring=bool(args.include_quality_monitoring),
+            include_strategy_lab_advance=bool(args.include_strategy_lab_advance),
             include_feishu_agent_credential=bool(args.include_feishu_agent_credential),
             include_secret_credentials=bool(args.include_secret_credentials),
             secret_credential_delivery=args.secret_credential_delivery,
