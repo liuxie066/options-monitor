@@ -26,6 +26,7 @@ from src.infrastructure.pi_agent_process import (  # noqa: E402
 )
 from src.infrastructure import pi_agent_process as pi_process  # noqa: E402
 from src.application.copilot.model_config import PiModelSettings  # noqa: E402
+from src.application.copilot.result_admission import admit_submit_answer  # noqa: E402
 
 
 CONTINUATION_PROMPT_FOR_TEST = (
@@ -880,53 +881,536 @@ def test_s8_answer_admission_and_activation_names_are_explicit():
     assert all(item["pagination"].get("mode") == "none" for item in payload["catalog_snapshot"] if "pagination" in item)
 
 
-def test_s8_plain_final_repair_can_fetch_current_evidence_then_submit():
-    business = dict(_READ_TOOL)
-    payload = _directory_payload(
-        [business],
-        [
-            {"text": "plain bypass"},
-            _directory_turn("repair_directory", "runtime_status"),
-            _tool_turn(call_id="read_current"),
-            {"tool_calls": [{"call_id": "answer_1", "tool_name": "submit_answer", "arguments": {
-                "mode": "evidence", "status": "partial", "answer_markdown": "repaired", "claims": []
-            }}]},
-        ],
+@pytest.mark.parametrize("plain_first", [True, False])
+def test_s8_plain_and_rejected_submit_use_independent_repairs(
+    tmp_path, plain_first
+):
+    database = tmp_path / f"independent_repairs_{plain_first}.sqlite3"
+    session_id = derive_pi_session_id(
+        "feishu", f"independent-repairs-{plain_first}", "group-1", "key:us"
+    )
+    observation_id = "obv_partial"
+    evidence = {
+        "ok": True,
+        "authorized_read": True,
+        "observation_status": "partial",
+        "coverage": {
+            "status": "complete",
+            "complete_for": "full_query",
+            "included_count": 1,
+            "total_count": 1,
+            "omitted_count": 0,
+            "has_more": False,
+            "scope": {"config_key": "us"},
+        },
+        "freshness": {
+            "status": "historical",
+            "as_of": "2026-08-23T15:59:59+08:00",
+        },
+    }
+    claim = {
+        "text": "当前证据只支持部分结论",
+        "kind": "historical_fact",
+        "observation_ids": [observation_id],
+        "required_scope": "full_query",
+    }
+    complete = {
+        "mode": "evidence",
+        "status": "complete",
+        "answer_markdown": "错误完整结论",
+        "claims": [claim],
+    }
+    partial = {
+        "mode": "evidence",
+        "status": "partial",
+        "answer_markdown": "修正后的部分结论",
+        "claims": [claim],
+    }
+    expected = admit_submit_answer(partial, {observation_id: evidence})
+    read_turn = _tool_turn(call_id="read_partial")
+    complete_turn = {
+        "tool_calls": [{
+            "call_id": "answer_complete",
+            "tool_name": "submit_answer",
+            "arguments": complete,
+        }]
+    }
+    partial_turn = {
+        "tool_calls": [{
+            "call_id": "answer_partial",
+            "tool_name": "submit_answer",
+            "arguments": partial,
+        }]
+    }
+    turns = (
+        [{"text": "plain bypass"}, read_turn, complete_turn, partial_turn]
+        if plain_first
+        else [read_turn, complete_turn, {"text": "plain bypass"}, partial_turn]
+    )
+    payload = _start_payload(
+        session_id=session_id,
+        tools=[_READ_TOOL, _SUBMIT_TOOL],
+        debug={"fixture_turns": turns, "delay_ms": 0},
     )
     calls = []
+    events = []
+    proposals = []
 
     def callback(call):
         calls.append(call)
-        if call["tool_name"] == "tool_directory":
-            return _tool_activation(payload, [business])
         if call["tool_name"] == "runtime_status":
-            return {"observation": {"ok": True, "status": "read"}}
-        return {
-            "observation": {"ok": True, "status": "answer_accepted"},
-            "approved_answer": {
-                "status": "partial",
-                "text": "repaired",
-                "text_sha256": "sha256:"
-                + hashlib.sha256(b"repaired").hexdigest(),
-            },
-        }
+            return {
+                "observation": {
+                    "ok": True,
+                    "status": "partial",
+                    "observation_id": observation_id,
+                }
+            }
+        return admit_submit_answer(
+            call["arguments"], {observation_id: evidence}
+        )
 
     result = run_pi_agent(
         payload,
-        request_id="req_s8_repair",
-        run_id="run_s8_repair",
+        request_id=f"req_independent_{plain_first}",
+        run_id=f"run_independent_{plain_first}",
         timeout_seconds=60,
+        on_event=events.append,
         on_tool_call=callback,
-        on_proposed=lambda _: "commit",
+        on_proposed=lambda proposal: proposals.append(proposal) or "commit",
+        environ=_session_env(database),
     )
 
     assert result["ok"] is True, result
     assert [call["tool_name"] for call in calls] == [
-        "tool_directory",
         "runtime_status",
         "submit_answer",
+        "submit_answer",
     ]
-    assert result["result"]["text"] == "repaired"
+    assert calls[1]["arguments"] == complete
+    assert calls[2]["arguments"] == partial
+    assert result["result"]["text"] == expected["approved_answer"]["text"]
+    assert expected["approved_answer"]["text_sha256"] == (
+        "sha256:"
+        + hashlib.sha256(result["result"]["text"].encode()).hexdigest()
+    )
+    assert len(proposals) == 1
+    assert proposals[0]["text"] == result["result"]["text"]
+    admission = [
+        event["data"]
+        for event in events
+        if event["event_type"] == "answer_admission"
+    ]
+    assert admission == [{
+        "status": "partial",
+        "evidence_count": 1,
+        "repair_count": 2,
+        "banner_present": True,
+    }]
+    messages = [
+        entry["payload"]["message"]
+        for entry in _session_entries(database, session_id)
+        if entry["type"] == "message"
+    ]
+    assert [message["role"] for message in messages] == [
+        "user",
+        "assistant",
+        "toolResult",
+        "assistant",
+    ]
+    assert messages[1]["content"][0]["name"] == "runtime_status"
+    assert messages[2]["toolName"] == "runtime_status"
+    persisted = json.dumps(messages, ensure_ascii=False)
+    assert "plain bypass" not in persisted
+    assert "错误完整结论" not in persisted
+    assert persisted.count("修正后的部分结论") == 1
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "poll_race"),
+    [("submit_answer", False), ("runtime_status", False), ("submit_answer", True)],
+)
+def test_s8_host_cancelled_tool_result_uses_single_run_cancel(
+    tmp_path, monkeypatch, tool_name, poll_race
+):
+    database = tmp_path / f"tool_cancel_{tool_name}_{poll_race}.sqlite3"
+    session_id = derive_pi_session_id(
+        "feishu", f"tool-cancel-{tool_name}-{poll_race}", "group-1", "key:us"
+    )
+    arguments = (
+        _submit_arguments("must not commit")
+        if tool_name == "submit_answer"
+        else {"index": 1}
+    )
+    payload = _start_payload(
+        session_id=session_id,
+        tools=[_READ_TOOL, _SUBMIT_TOOL],
+        debug={
+            "fixture_turns": [
+                _tool_turn(
+                    call_id="cancelled_tool",
+                    tool_name=tool_name,
+                    arguments=arguments,
+                ),
+                _tool_turn(
+                    call_id="must_not_run",
+                    tool_name=tool_name,
+                    arguments=arguments,
+                ),
+            ],
+            "delay_ms": 0,
+        },
+    )
+    callback_started = threading.Event()
+    poll_seen = threading.Event()
+    outbound = []
+    calls = []
+    proposals = []
+    original_encode = pi_process._encode_envelope
+
+    def capture_encode(type_, record_payload, identity, seq):
+        outbound.append(type_)
+        return original_encode(type_, record_payload, identity, seq)
+
+    def is_cancelled():
+        if callback_started.is_set():
+            poll_seen.set()
+            return True
+        return False
+
+    def callback(call):
+        calls.append(call)
+        callback_started.set()
+        if poll_race:
+            assert poll_seen.wait(2)
+        observation = {
+            "tool_name": tool_name,
+            "ok": False,
+            "status": "failed",
+            "error": "CANCELLED",
+            "code": "CANCELLED",
+            "message": "run cancelled before tool execution",
+            "retryable": False,
+        }
+        return {"observation": observation} if tool_name == "submit_answer" else observation
+
+    monkeypatch.setattr(pi_process, "_encode_envelope", capture_encode)
+    result = run_pi_agent(
+        payload,
+        request_id=f"req_cancel_{tool_name}_{poll_race}",
+        run_id=f"run_cancel_{tool_name}_{poll_race}",
+        timeout_seconds=60,
+        on_tool_call=callback,
+        on_proposed=lambda proposal: proposals.append(proposal) or "commit",
+        is_cancelled=is_cancelled if poll_race else None,
+        environ=_session_env(database),
+    )
+
+    assert result["ok"] is True, result
+    assert result["result"]["status"] == "cancelled"
+    assert result["result"]["committed"] is False
+    assert len(calls) == 1
+    assert outbound.count("run.cancel") == 1
+    assert "tool.result" not in outbound
+    assert proposals == []
+    assert _session_entries(database, session_id) == []
+
+
+def test_s8_unexpected_nonretryable_submit_result_is_terminal_without_commit(tmp_path):
+    database = tmp_path / "submit_terminal_upstream.sqlite3"
+    session_id = derive_pi_session_id(
+        "feishu", "submit-terminal-upstream", "group-1", "key:us"
+    )
+    payload = _start_payload(
+        session_id=session_id,
+        tools=[_SUBMIT_TOOL],
+        debug={
+            "fixture_turns": [
+                _tool_turn(
+                    call_id="answer_terminal",
+                    tool_name="submit_answer",
+                    arguments=_submit_arguments("must not commit"),
+                ),
+                _tool_turn(
+                    call_id="answer_must_not_run",
+                    tool_name="submit_answer",
+                    arguments=_submit_arguments("must not run"),
+                ),
+            ],
+            "delay_ms": 0,
+        },
+    )
+    calls = []
+    proposals = []
+    observation = {
+        "ok": False,
+        "status": "failed",
+        "error": "UPSTREAM_FAILURE",
+        "code": "UPSTREAM_FAILURE",
+        "message": "unexpected submit failure",
+        "retryable": False,
+    }
+    result = run_pi_agent(
+        payload,
+        request_id="req_terminal_upstream",
+        run_id="run_terminal_upstream",
+        timeout_seconds=60,
+        on_tool_call=lambda call: calls.append(call) or {"observation": observation},
+        on_proposed=lambda proposal: proposals.append(proposal) or "commit",
+        environ=_session_env(database),
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "TOOL_BRIDGE_ERROR"
+    assert result["error"]["stage"] == "tool"
+    assert len(calls) == 1
+    assert proposals == []
+    assert _session_entries(database, session_id) == []
+
+
+@pytest.mark.parametrize("repair_kind", ["plain", "submission"])
+def test_s8_repair_budget_exhaustion_makes_no_extra_provider_turn(
+    tmp_path, repair_kind
+):
+    database = tmp_path / f"repair_budget_{repair_kind}.sqlite3"
+    session_id = derive_pi_session_id(
+        "feishu", f"repair-budget-{repair_kind}", "group-1", "key:us"
+    )
+    response = (
+        _chat_response(text="plain needs repair")
+        if repair_kind == "plain"
+        else _chat_response(
+            tool_name="submit_answer",
+            tool_arguments=_submit_arguments("rejected"),
+            call_id="answer_rejected",
+        )
+    )
+    calls = []
+    events = []
+    proposals = []
+
+    def callback(call):
+        calls.append(call)
+        return {
+            "observation": {
+                "ok": False,
+                "status": "rejected",
+                "code": "POLICY_ERROR",
+                "reason": "answer_status_overstates_evidence",
+                "message": "repair required",
+                "retryable": True,
+            }
+        }
+
+    with _loopback_server([{"body": response}]) as (root, requests):
+        payload = _provider_payload(
+            "deepseek", root, session_id=session_id, tools=[_SUBMIT_TOOL]
+        )
+        payload["model"]["max_attempts"] = 1
+        payload["limits"]["max_iterations"] = 1
+        result = run_pi_agent(
+            payload,
+            request_id=f"req_budget_{repair_kind}",
+            run_id=f"run_budget_{repair_kind}",
+            timeout_seconds=payload["limits"]["timeout_seconds"],
+            on_event=events.append,
+            on_tool_call=callback,
+            on_proposed=lambda proposal: proposals.append(proposal) or "commit",
+            environ=_provider_env(database=database),
+        )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "BUDGET_EXHAUSTED", result
+    assert len(requests) == 1
+    assert len(calls) == (0 if repair_kind == "plain" else 1)
+    assert not any(event["event_type"] == "forced_final_activated" for event in events)
+    assert proposals == []
+    assert _session_entries(database, session_id) == []
+
+
+@pytest.mark.parametrize(
+    "limit_name",
+    [
+        "max_tool_calls",
+        "max_consecutive_failed_tool_batches",
+        "final_answer_reserve_seconds",
+    ],
+)
+def test_s8_submission_repair_checks_every_shared_budget(
+    tmp_path, limit_name
+):
+    database = tmp_path / f"repair_budget_{limit_name}.sqlite3"
+    session_id = derive_pi_session_id(
+        "feishu", f"repair-budget-{limit_name}", "group-1", "key:us"
+    )
+    response = {
+        "body": _chat_response(
+            tool_name="submit_answer",
+            tool_arguments=_submit_arguments("rejected"),
+            call_id="answer_rejected",
+        )
+    }
+    if limit_name == "final_answer_reserve_seconds":
+        response["delay"] = 1.5
+    calls = []
+    events = []
+    proposals = []
+
+    with _loopback_server([response]) as (root, requests):
+        payload = _provider_payload(
+            "deepseek", root, session_id=session_id, tools=[_SUBMIT_TOOL]
+        )
+        payload["model"]["max_attempts"] = 1
+        payload["limits"][limit_name] = (
+            5 if limit_name == "final_answer_reserve_seconds" else 1
+        )
+        result = run_pi_agent(
+            payload,
+            request_id=f"req_budget_{limit_name}",
+            run_id=f"run_budget_{limit_name}",
+            timeout_seconds=payload["limits"]["timeout_seconds"],
+            on_event=events.append,
+            on_tool_call=lambda call: calls.append(call) or {
+                "observation": {
+                    "ok": False,
+                    "status": "rejected",
+                    "code": "POLICY_ERROR",
+                    "reason": "answer_status_overstates_evidence",
+                    "message": "repair required",
+                    "retryable": True,
+                }
+            },
+            on_proposed=lambda proposal: proposals.append(proposal) or "commit",
+            environ=_provider_env(database=database),
+        )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "BUDGET_EXHAUSTED", result
+    assert len(requests) == 1
+    assert len(calls) == 1
+    assert not any(event["event_type"] == "forced_final_activated" for event in events)
+    assert proposals == []
+    assert _session_entries(database, session_id) == []
+
+
+def test_s8_plain_repair_preserves_budget_failure_from_nested_prompt(tmp_path):
+    database = tmp_path / "nested_plain_repair_budget.sqlite3"
+    session_id = derive_pi_session_id(
+        "feishu", "nested-plain-repair-budget", "group-1", "key:us"
+    )
+    calls = []
+    proposals = []
+    responses = [
+        {"body": _chat_response(text="plain needs repair")},
+        {
+            "body": _chat_response(
+                tool_name="submit_answer",
+                tool_arguments=_submit_arguments("rejected in plain repair"),
+                call_id="answer_rejected_in_plain_repair",
+            )
+        },
+    ]
+
+    with _loopback_server(responses) as (root, requests):
+        payload = _provider_payload(
+            "deepseek", root, session_id=session_id, tools=[_SUBMIT_TOOL]
+        )
+        payload["model"]["max_attempts"] = 1
+        payload["limits"]["max_tool_calls"] = 1
+        result = run_pi_agent(
+            payload,
+            request_id="req_nested_plain_repair_budget",
+            run_id="run_nested_plain_repair_budget",
+            timeout_seconds=payload["limits"]["timeout_seconds"],
+            on_tool_call=lambda call: calls.append(call) or {
+                "observation": {
+                    "ok": False,
+                    "status": "rejected",
+                    "code": "POLICY_ERROR",
+                    "reason": "answer_status_overstates_evidence",
+                    "message": "repair required",
+                    "retryable": True,
+                }
+            },
+            on_proposed=lambda proposal: proposals.append(proposal) or "commit",
+            environ=_provider_env(database=database),
+        )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "BUDGET_EXHAUSTED", result
+    assert len(requests) == 2
+    assert len(calls) == 1
+    assert proposals == []
+    assert _session_entries(database, session_id) == []
+
+
+def test_s8_cancel_during_plain_repair_after_submission_repair_is_preserved(
+    tmp_path, monkeypatch
+):
+    database = tmp_path / "reverse_repair_cancel.sqlite3"
+    session_id = derive_pi_session_id(
+        "feishu", "reverse-repair-cancel", "group-1", "key:us"
+    )
+    third_request_started = threading.Event()
+    outbound = []
+    calls = []
+    proposals = []
+    original_encode = pi_process._encode_envelope
+
+    def capture_encode(type_, record_payload, identity, seq):
+        outbound.append(type_)
+        return original_encode(type_, record_payload, identity, seq)
+
+    responses = [
+        {
+            "body": _chat_response(
+                tool_name="submit_answer",
+                tool_arguments=_submit_arguments("rejected first"),
+                call_id="answer_rejected_first",
+            )
+        },
+        {"body": _chat_response(text="plain after submission repair")},
+        {
+            "body": _chat_response(text="must not commit"),
+            "started": third_request_started,
+            "delay": 2,
+        },
+    ]
+
+    monkeypatch.setattr(pi_process, "_encode_envelope", capture_encode)
+    with _loopback_server(responses) as (root, requests):
+        payload = _provider_payload(
+            "deepseek", root, session_id=session_id, tools=[_SUBMIT_TOOL]
+        )
+        payload["model"]["max_attempts"] = 1
+        result = run_pi_agent(
+            payload,
+            request_id="req_reverse_repair_cancel",
+            run_id="run_reverse_repair_cancel",
+            timeout_seconds=payload["limits"]["timeout_seconds"],
+            on_tool_call=lambda call: calls.append(call) or {
+                "observation": {
+                    "ok": False,
+                    "status": "rejected",
+                    "code": "POLICY_ERROR",
+                    "reason": "answer_status_overstates_evidence",
+                    "message": "repair required",
+                    "retryable": True,
+                }
+            },
+            on_proposed=lambda proposal: proposals.append(proposal) or "commit",
+            is_cancelled=third_request_started.is_set,
+            environ=_provider_env(database=database),
+        )
+
+    assert result["ok"] is True, result
+    assert result["result"]["status"] == "cancelled"
+    assert result["result"]["committed"] is False
+    assert len(requests) == 3
+    assert len(calls) == 1
+    assert outbound.count("run.cancel") == 1
+    assert proposals == []
+    assert _session_entries(database, session_id) == []
 
 
 @pytest.mark.parametrize(
@@ -990,6 +1474,94 @@ def test_s8_second_schema_invalid_protocol_call_is_terminal(tool_name, expected_
     assert result["error"]["code"] == expected_code
     assert callbacks == []
     assert proposed == []
+
+
+@pytest.mark.parametrize(
+    ("protocol_tool", "protocol_arguments"),
+    [
+        (
+            "tool_directory",
+            {
+                "catalog_hash": "sha256:placeholder",
+                "tool_names": ["runtime_status"],
+            },
+        ),
+        (
+            "request_control_preview",
+            {"intent_name": "upgrade_now", "arguments": {}},
+        ),
+    ],
+)
+def test_s8_mixed_submit_and_protocol_consumes_both_repair_classes(
+    protocol_tool, protocol_arguments
+):
+    invalid_submit = {
+        "mode": "conceptual",
+        "status": "complete",
+        "answer_markdown": "missing claims",
+    }
+    turns = [
+        {
+            "tool_calls": [
+                {
+                    "call_id": "answer_mixed_protocol",
+                    "tool_name": "submit_answer",
+                    "arguments": _submit_arguments("blocked mixed answer"),
+                },
+                {
+                    "call_id": "directory_mixed_protocol",
+                    "tool_name": protocol_tool,
+                    "arguments": protocol_arguments,
+                },
+            ]
+        },
+        {
+            "tool_calls": [{
+                "call_id": "answer_second_invalid",
+                "tool_name": "submit_answer",
+                "arguments": invalid_submit,
+            }]
+        },
+        {
+            "tool_calls": [{
+                "call_id": "answer_must_not_run",
+                "tool_name": "submit_answer",
+                "arguments": _submit_arguments("must not run"),
+            }]
+        },
+    ]
+    payload = (
+        _directory_payload([_READ_TOOL], turns)
+        if protocol_tool == "tool_directory"
+        else _start_payload(
+            tools=[_CONTROL_TOOL, _SUBMIT_TOOL],
+            debug={"fixture_turns": turns, "delay_ms": 0},
+        )
+    )
+    callbacks = []
+    proposals = []
+
+    result = run_pi_agent(
+        payload,
+        request_id=f"req_s8_mixed_protocol_classes_{protocol_tool}",
+        run_id=f"run_s8_mixed_protocol_classes_{protocol_tool}",
+        timeout_seconds=60,
+        on_tool_call=lambda call: callbacks.append(call) or {
+            "observation": {"ok": True, "status": "answer_accepted"},
+            "approved_answer": {
+                "status": "complete",
+                "text": "must not run",
+                "text_sha256": "sha256:"
+                + hashlib.sha256(b"must not run").hexdigest(),
+            },
+        },
+        on_proposed=lambda proposal: proposals.append(proposal) or "commit",
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "ANSWER_ADMISSION_FAILED", result
+    assert callbacks == []
+    assert proposals == []
 
 
 def test_s8_session_omits_mixed_protocol_batch_and_persists_answer_once(tmp_path):

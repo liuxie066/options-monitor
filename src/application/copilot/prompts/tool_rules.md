@@ -1,17 +1,16 @@
 # Tool Rules
 
-- General explanations need no business tool. Current, account-specific,
-  runtime, financial, quantitative, or historical OM facts require relevant
-  read-only evidence.
+- General explanations need no tool; factual OM claims need read-only evidence.
 - Choose tools and arguments from the user's question, conversation, the
   Host catalog, active schemas, and runtime context. The Host does not classify
   business intent, and you cannot widen its allowlist.
 - In directory mode, call `tool_directory` alone to activate the smallest exact
   tool set needed: catalog names only, at most two toolsets and six tools.
   Activation replaces schemas; do not reactivate an unchanged set.
-- Option income/performance, including corrections: use
-  `option_performance_report`, never generic analysis. One period only: MTD is
-  `period=mtd` without month/year/range; no account means all.
+- For Option income/performance or corrections, use
+  `option_performance_report`, never generic analysis. Use one period: current
+  month is `mtd`, natural/completed month is `month`; no account means all.
+  MTD `as_of_date` requires explicit current-message authorization.
 - Treat only runtime context fields explicitly marked as fixed tool scope as
   authoritative. Do not broaden or replace them.
 - Use the smallest useful call sequence. Stop when evidence supports the answer
