@@ -5,7 +5,7 @@
     "tag": "v3.0.2",
     "commit": "af7129e61c8c5900e8c5d48673e2d168b63df93b"
   },
-  "reviewed_head": "008531405e899cdee6cae222ba21e7f79c56c113",
+  "reviewed_head": "d47d5fc16197834debaa64e64357b71dd60b56cf",
   "commits": [
     {
       "sha": "3d107f0709443721f4b1099770645b0e340d0d1e",
@@ -70,6 +70,18 @@
     {
       "sha": "008531405e899cdee6cae222ba21e7f79c56c113",
       "subject": "fix(release): accept protected-main merge topology"
+    },
+    {
+      "sha": "969679dbc9e8d20d6a744e2816ae89f1d102c883",
+      "subject": "chore: release 3.1.0"
+    },
+    {
+      "sha": "9548d2f5cb08594d913281e652e5cacbb02c33ea",
+      "subject": "Merge pull request #198 from liuxie066/codex/fix-release-merge-boundary"
+    },
+    {
+      "sha": "d47d5fc16197834debaa64e64357b71dd60b56cf",
+      "subject": "fix(release): validate diverged protected-main merge"
     }
   ],
   "release_notes": [
@@ -101,7 +113,8 @@
       "category": "Bug Fixes",
       "text": "Allowed the release gate to validate the unchanged GitHub merge commit that wraps an audited release-metadata commit on protected `main`.",
       "commits": [
-        "008531405e899cdee6cae222ba21e7f79c56c113"
+        "008531405e899cdee6cae222ba21e7f79c56c113",
+        "d47d5fc16197834debaa64e64357b71dd60b56cf"
       ]
     }
   ],
@@ -141,6 +154,14 @@
     {
       "commit": "f8960fd8d7472d8499f322996d8f1e210544de83",
       "reason": "Merge-only integration commit for the failed initial publication attempt; no independent user-visible behavior."
+    },
+    {
+      "commit": "969679dbc9e8d20d6a744e2816ae89f1d102c883",
+      "reason": "Superseded release-metadata commit from the second failed publication attempt; no independent user-visible behavior."
+    },
+    {
+      "commit": "9548d2f5cb08594d913281e652e5cacbb02c33ea",
+      "reason": "Merge-only integration commit for the second failed publication attempt; no independent user-visible behavior."
     }
   ],
   "design_evidence": [
@@ -238,6 +259,24 @@
       "commit": "008531405e899cdee6cae222ba21e7f79c56c113",
       "references": [
         "https://github.com/liuxie066/options-monitor/pull/198"
+      ]
+    },
+    {
+      "commit": "969679dbc9e8d20d6a744e2816ae89f1d102c883",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/198"
+      ]
+    },
+    {
+      "commit": "9548d2f5cb08594d913281e652e5cacbb02c33ea",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/198"
+      ]
+    },
+    {
+      "commit": "d47d5fc16197834debaa64e64357b71dd60b56cf",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/199"
       ]
     }
   ]

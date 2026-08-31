@@ -604,10 +604,14 @@ def _validate_reviewed_head_boundary(
             ["show", "-s", "--format=%P", current_head],
             run_cmd=run_cmd,
         ).lower().split()
-        if len(parents) != 2 or parents[0] != reviewed_head:
+        if len(parents) != 2 or _git_result(
+            base,
+            ["merge-base", "--is-ancestor", parents[0], reviewed_head],
+            run_cmd=run_cmd,
+        ).returncode != 0:
             _fail(
                 "RELEASE_DELTA_POST_REVIEW_COMMITS",
-                "only a protected-main merge of the release-metadata commit may follow reviewed_head",
+                "protected-main merge first parent must be an ancestor of reviewed_head",
             )
         release_commit = parents[1]
         if _git_stdout(
