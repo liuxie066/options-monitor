@@ -1513,6 +1513,131 @@ def test_config_failure_projection_does_not_follow_output_runs_symlink(
     assert list(outside.iterdir()) == []
 
 
+@pytest.mark.parametrize(
+    ("accounts", "expected_healthy"),
+    [(["lx"], []), (["lx", "sy"], ["sy"])],
+)
+def test_unavailable_prepared_context_fails_closed_before_shared_prefetch(
+    monkeypatch,
+    tmp_path: Path,
+    accounts: list[str],
+    expected_healthy: list[str],
+) -> None:
+    from src.application import tick_account_execution as mod
+    from src.infrastructure.io_utils import atomic_write_json
+
+    request = _request(
+        tmp_path,
+        accounts=accounts,
+        workers=len(accounts),
+        force=False,
+    )
+    build_prefetch_config = Mock(wraps=mod.build_cross_account_prefetch_config)
+    prepare_options = Mock(wraps=_fake_prepare_options)
+    prefetch = Mock(
+        return_value={
+            "global_required_data_plan": {
+                "plan_id": "a" * 64,
+                "symbols": [],
+            },
+            "symbols": [],
+            "results": {},
+        }
+    )
+    account_children: list[str] = []
+
+    def _prepare(**kwargs):
+        prepared = _fake_prepare(**kwargs)
+        authority = kwargs["account_config_authorities"]["lx"]
+        manifest_path = Path(prepared["lx"]["manifest_path"])
+        manifest = {
+            "schema_version": "prepared_portfolio_context.v1",
+            "run_id": kwargs["run_id"],
+            "account": "lx",
+            "status": "unavailable",
+            "account_config_sha256": authority.account_config_sha256,
+            "reason": "portfolio_context_unavailable",
+        }
+        atomic_write_json(manifest_path, manifest)
+        prepared["lx"] = {
+            **manifest,
+            "manifest_path": str(manifest_path),
+            "manifest_sha256": hashlib.sha256(
+                manifest_path.read_bytes()
+            ).hexdigest(),
+        }
+        return prepared
+
+    def _seal(**kwargs):
+        payload = {
+            "schema_version": "required_data_snapshot_manifest.v1",
+            "run_id": kwargs["run_id"],
+            "status": "complete",
+            "plan_id": "a" * 64,
+            "symbols": {},
+            "summary": {},
+        }
+        atomic_write_json(kwargs["manifest_path"], payload)
+        return payload
+
+    def _run_one_account(*, request, **_kwargs):
+        account_children.append(request.acct)
+        return mod.AccountRunOutcome(
+            result=AccountResult(request.acct, True, False, "ok", ""),
+            acct_metrics={"account": request.acct},
+            prefetch_done=True,
+            ran_pipeline=True,
+        )
+
+    monkeypatch.setattr(mod, "_account_pipeline_is_required", lambda **_kwargs: True)
+    monkeypatch.setattr(mod, "prepare_portfolio_contexts", _prepare)
+    monkeypatch.setattr(mod, "prepare_option_positions_contexts", prepare_options)
+    monkeypatch.setattr(
+        mod,
+        "build_cross_account_prefetch_config",
+        build_prefetch_config,
+    )
+    monkeypatch.setattr(
+        mod,
+        "_build_close_advice_barrier_plan",
+        lambda **kwargs: (kwargs["candidate_config"], None),
+    )
+    monkeypatch.setattr(mod, "prefetch_required_data", prefetch)
+    monkeypatch.setattr(mod, "seal_required_data_snapshot", _seal)
+    monkeypatch.setattr(mod, "run_one_account", _run_one_account)
+
+    outcome = mod.run_tick_account_execution(request)
+
+    expected_scope = set(expected_healthy)
+    assert build_prefetch_config.call_count == 1
+    planner_kwargs = build_prefetch_config.call_args.kwargs
+    assert set(planner_kwargs["account_configs"]) == expected_scope
+    assert set(planner_kwargs["prepared_portfolio_contexts"]) == expected_scope
+    assert prepare_options.call_count == 1
+    assert (
+        set(prepare_options.call_args.kwargs["account_config_authorities"])
+        == expected_scope
+    )
+    assert prefetch.call_count == (1 if expected_healthy else 0)
+    assert account_children == expected_healthy
+    assert outcome.ran_pipeline_accounts == expected_healthy
+    results_by_account = {result.account: result for result in outcome.results}
+    metrics_by_account = {
+        str(metrics["account"]): metrics for metrics in outcome.account_metrics
+    }
+    assert results_by_account["lx"].decision_reason == (
+        "account_config_prepared_context_invalid"
+    )
+    assert results_by_account["lx"].should_notify is False
+    assert metrics_by_account["lx"]["error_code"] == (
+        "ACCOUNT_CONFIG_PREPARED_CONTEXT_INVALID"
+    )
+    assert metrics_by_account["lx"]["error"] == "portfolio_context_unavailable"
+    assert metrics_by_account["lx"]["ran_scan"] is False
+    assert metrics_by_account["lx"]["ran_pipeline"] is False
+    assert metrics_by_account["lx"]["should_notify"] is False
+
+
 def test_config_drift_isolated_to_one_account_before_shared_prefetch(
     monkeypatch,
     tmp_path: Path,
