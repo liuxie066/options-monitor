@@ -17,7 +17,7 @@ def source_commit_sha(
 ) -> str | None:
     """Resolve the clean production source commit for a worktree or release."""
 
-    root = root or Path(__file__).resolve().parents[2]
+    root = (root or Path(__file__).resolve().parents[2]).resolve()
     runner = run_cmd or subprocess.run
     git_prefix = ["git"]
     git_env: dict[str, str] | None = None
