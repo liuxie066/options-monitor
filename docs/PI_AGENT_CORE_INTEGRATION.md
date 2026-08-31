@@ -1098,18 +1098,26 @@ mutation, confirm, cancel, or apply tools.
 
 ### 13.7 Repair budgets and terminal failures
 
-Repairs are independent but share the existing global model-turn, wall-time,
-token, and tool-call budgets:
+Repairs are request-local and independent by failure class, but share the
+existing global model-turn, wall-time, token, tool-call, failed-batch, context,
+and final-answer-reserve budgets:
 
 | Budget | Used for | Maximum |
 |---|---|---:|
 | Protocol repair | invalid hash, unauthorized tool, tool/toolset count violation, or malformed activation | 1 |
-| Answer repair | missing evidence, unsupported claim, insufficient coverage/freshness, a plain final response, or any other failure to call `submit_answer` | 1 |
+| Plain-final repair | the first ordinary assistant final that omits `submit_answer` | 1 |
+| Submission repair | the first invalid assistant batch containing `submit_answer`, or the first canonical retryable Host admission rejection | 1 |
 
-The same event cannot create a third “no evidence” budget; missing evidence is
-an answer-repair reason. A directory protocol error that also prevents an
-answer consumes protocol repair first, and any later evidence rejection may
-still consume answer repair if global budgets remain.
+Among Host results, only `status=rejected`, `retryable=true`, with a non-empty
+`reason` consumes submission repair. Cancellation, infrastructure failure, and
+other non-retryable results never become model repair. An invalid mixed batch
+consumes every repair category represented by its calls; for example, a batch
+containing both `tool_directory` and `submit_answer` consumes both protocol and
+submission repair. A second failure in either answer class is terminal even if
+the other class remains unused. Before either answer repair continues the
+provider loop, the Runtime checks the remaining model iterations, tool calls,
+consecutive failed-tool-batch budget, and final-answer time reserve. Failure
+uses the existing `BUDGET_EXHAUSTED` path and never enters forced final.
 
 Compaction failure, context hard-gate failure, private schema validation
 failure, Pi atomic-apply failure, timeout, cancellation, and child failure are
@@ -1475,16 +1483,27 @@ Python Host compares the proposal with the retained approved candidate before
 the existing durable admission CAS and outbox flow.
 
 On rejection, the tool returns only a compact structured reason. The Node
-Runtime owns the one answer-repair counter because it can observe both a
-rejected tool result and a plain assistant final that bypasses `submit_answer`.
-For the first rejected tool result, its compact error observation is the repair
-instruction; for the first plain-final bypass, the Runtime appends one
-synthetic repair prompt. A second rejection or bypass ends with the existing
-safe error path using
+Runtime owns separate one-shot plain-final and submission-repair counters. The
+first plain assistant final that bypasses `submit_answer` appends the synthetic
+repair prompt. The first invalid submission batch, or the first Host result
+with `status=rejected`, `retryable=true`, and a non-empty `reason`, consumes
+submission repair; the compact rejection observation is the instruction for
+the next turn. An invalid mixed batch consumes every represented repair class,
+not only the first class detected. The answer-admission `repair_count` is the
+sum of the two counters.
+
+A second failure in the same answer class ends with
 `ANSWER_ADMISSION_FAILED`; it produces no proposal and persists no current-turn
-message. No extra Host callback or fallback-answer IPC is added. Control
-proposals continue through `request_control_preview` and the existing Control
-terminal path, not `submit_answer`.
+message. Both the initial user prompt and the synthetic repair prompt preserve
+the real terminal outcome: an inbound Host error, Runtime failure, or
+cancellation is handled before a generic prompt or answer-admission failure.
+An exact canonical cancellation returned by a Host callback is normalized by
+the Python adapter and sent as the existing `run.cancel`; it is never forwarded
+as `tool.result` and never triggers submission repair. Other unexpected
+non-retryable submit failures remain terminal tool-bridge errors. No extra Host
+callback or fallback-answer IPC is added. Control proposals continue through
+`request_control_preview` and the existing Control terminal path, not
+`submit_answer`.
 
 The Host, not the model, forces coverage banners:
 
@@ -1522,15 +1541,34 @@ path above, not through a fabricated `approved_answer`.
 The answer state machine is:
 
 ```text
-running -> submit_pending                         (submit call)
-running -> repair_pending                         (first plain-final bypass)
-submit_pending -> answer_ready                    (accepted `approved_answer`)
-submit_pending -> repair_pending                  (first rejection)
-repair_pending -> running                         (one repair turn)
+running -> submit_pending                              (submit call)
+running -> plain_repair_pending                        (first plain final)
+plain_repair_pending -> running                        (synthetic prompt)
+submit_pending -> submission_repair_pending            (first repairable failure)
+submission_repair_pending -> running                   (structured rejection)
+submit_pending -> answer_ready                         (accepted `approved_answer`)
 answer_ready -> proposed -> committed | discarded | cancelled
-running | submit_pending | repair_pending -> failed
-  (second answer-admission failure; no proposal or current-turn commit)
+second same-class answer failure -> failed              (no proposal or commit)
+Host callback cancellation -> Python `run.cancel` -> cancelled
 ```
+
+The two answer-repair transitions may occur once each and in either order,
+subject to the same global limits.
+
+At the Copilot Host boundary, `option_performance_report` has one narrow
+current-message authorization fence with two branches. If the entire immutable
+current message matches the affirmative form
+`截至 YYYY-MM-DD 的 M月期权收益率`, with only the existing optional whitespace,
+`总计`, `不分账号`, comma, and terminal punctuation variants, the Host requires
+canonical `period=mtd` and an equal `as_of_date`; the date must be
+Gregorian-valid and its month must match the stated month. Any mismatch,
+including non-MTD or a missing date, is `INPUT_ERROR`. For every other message,
+the stale/ambiguous fence runs only when the canonical payload is MTD with a
+non-empty `as_of_date`: no cutoff indicator removes the model-supplied date,
+while a recognized cutoff indicator rejects before the business read. Thus
+non-affirmative non-MTD calls and MTD calls without `as_of_date` do not enter
+the stale/ambiguous fence. Neither branch selects a tool or period, inspects
+Session history, or changes direct Tool Gateway behavior.
 
 Before `proposed`, cancellation wins and the current turn is not persisted.
 After `proposed`, the existing Host admission CAS remains the sole winner. The
@@ -1749,7 +1787,7 @@ registry is permitted by this design.
 |---|---|
 | Catalog ownership | every scene-visible tool has valid canonical summary/evidence metadata; hash is deterministic; missing metadata fails scene preparation |
 | Contract inventory | CI walks the canonical scene allowlist and fails any visible tool without an output contract, coverage/freshness resolver, and explicit pagination mode; no manual readiness matrix exists |
-| Intent boundary | conceptual fixture reaches `submit_answer` without a business tool; factual fixtures select tools through the Pi main model; Host has no keyword router |
+| Intent boundary | conceptual fixture reaches `submit_answer` without a business tool; factual fixtures select tools through the Pi main model; Host has no general keyword router, and its narrow MTD cutoff fence does not select a tool or period |
 | Activation | exact names only, two-toolset/six-tool maximum, hash/allowlist enforcement, idempotent no-op, two successful replacements, one repair, and atomic apply failure all pass |
 | Control | Host rejects unauthorized preview schemas by channel/spec/arguments; a model fixture verifies explicit-action instructions before preview selection; sole-call and deterministic confirm/apply/readback behavior are unchanged |
 | Projection | every allowlisted output contract reports coverage/freshness; `total_count`/`omitted_count` may be null but then cannot support a complete/full-query claim |
@@ -1757,7 +1795,8 @@ registry is permitted by this design.
 | Pagination scale | CI query-plan fixtures prove account/market/effect filters, snapshot fence, stable order, and keyset execute at the SQLite owner without full-collection deserialization or a temporary sort; a non-default one-million-row local benchmark proves per-page memory is bounded by page size and later-page cost does not grow linearly with cursor depth |
 | Cursor secret | an inbound-only runtime fixture pages successfully with the fixed domain derivation; no dedicated cursor credential is registered or bound; a missing inbound key makes `events` fail explicitly; neither master nor child key appears in Node/model/metrics or upgrader state, and an intentional inbound-key change deterministically invalidates old cursors |
 | Evidence scope | observation IDs are globally unique and valid only in the current external request; pre-run committed-prefix compaction cannot grant old IDs current authority; old-page follow-up re-calls the canonical tool |
-| Answer admission | conceptual/evidence modes, every claim kind/scope, mutually exclusive private result fields, plain-final bypass, one Runtime-owned repair across bypass/rejection, second-failure safe error with no commit, cancel/propose race, and exact approved-text/hash comparison pass |
+| Answer admission | conceptual/evidence modes, every claim kind/scope, mutually exclusive private result fields, one plain-final repair and one submission repair in either order, mixed-batch consumption of every represented class, second same-class safe failure with no commit, shared-budget exhaustion before either repair, canonical retryable rejection only, callback cancellation through Python `run.cancel`, identical terminal arbitration after both prompts, cancel/propose race, and exact approved-text/hash comparison pass |
+| MTD cutoff scope | the real Copilot Host callback proves exact affirmative MTD/date attestation, no-indicator stale-date removal, and ambiguous-indicator rejection before any business read; outside the exact affirmative branch, non-MTD and MTD without `as_of_date` remain unchanged; direct Tool Gateway behavior remains unchanged |
 | Context | 69/70/75 percent boundaries, committed-prefix-only pre-run compact, untouched open suffix, same-model compact, <=50 percent target, failed compact rollback, and exact pre-provider rejection before every main call pass at 128k and smaller fixtures |
 | Session | internal directory/finalizer groups and repair prompts are absent; canonical assistant answer appears once; business tool groups remain complete |
 | Compatibility | eager mode keeps all business schemas while using the same projection, cursor, budget, compact, metrics, and answer-admission contract |
@@ -1777,13 +1816,22 @@ completion must never become an admitted answer.
 - Use catalog-first loading, not directory-first enumeration or an eager-only
   prompt.
 - Keep the single Pi main model responsible for exact tool selection.
-- Keep Host authority deterministic and intent-blind.
+- Keep Host authority deterministic and intent-blind. Its only current-message
+  input attestation is the Copilot-only two-branch fence defined in 13.11:
+  attest canonical MTD and an equal `as_of_date` for an exact affirmative
+  match; for every other message, act only on canonical MTD payloads that
+  actually contain `as_of_date`, removing an old cutoff when there is no
+  indicator and rejecting an ambiguous indicator. Outside the exact
+  affirmative branch, non-MTD and MTD without `as_of_date` remain unchanged;
+  direct Tool Gateway calls remain outside the fence.
 - Project the compact catalog from canonical metadata; do not duplicate it.
 - Preserve `run.start`; add the catalog and policy fields there, and keep only
   one absolute context-window authority.
 - Apply active schemas atomically and replace rather than accumulate them.
 - Bound the request to two toolsets, six business tools, two successful schema
-  changes, one protocol repair, and one answer repair.
+  changes, one protocol repair, one plain-final repair, and one submission
+  repair. The answer repairs share global limits, and a mixed batch consumes
+  every represented repair class.
 - Extend `compact_observation()` and canonical output contracts; do not add a
   raw-result cache or generic recall tool.
 - Let only eligible immutable collection owners expose signed stateless keyset
@@ -1805,6 +1853,10 @@ completion must never become an admitted answer.
   the hard gate before every provider call.
 - Require `submit_answer` for ordinary answers and keep Control on its separate
   deterministic path.
+- Among Host results, repair only canonical retryable admission rejection;
+  route an exact Host callback cancellation through Python `run.cancel`, and
+  preserve the real terminal outcome after both the initial and synthetic
+  prompts.
 - Guarantee evidence structure and declared scope, not semantic truth for
   arbitrary prose.
 - Derive one domain-separated cursor child key from the existing inbound HMAC

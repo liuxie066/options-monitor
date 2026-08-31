@@ -989,14 +989,19 @@ function createToolBridge(
   protocolRepairCount: () => number;
   protocolRepairTool: () => string | null;
   beginProtocolRepair: (toolName: string) => boolean;
-  beginAnswerRepair: () => boolean;
+  beginPlainAnswerRepair: () => boolean;
+  beginSubmissionRepair: () => boolean;
+  plainAnswerRepairCount: () => number;
+  takeSubmissionRepairPending: () => boolean;
 } {
   let pending: PendingTool | null = null;
   let controlRequest: JsonObject | null = null;
   let approvedAnswer: JsonObject | null = null;
   let approvedEvidenceIds = new Set<string>();
   let approvedBannerPresent = false;
-  let answerRepairCount = 0;
+  let plainAnswerRepairCount = 0;
+  let submissionRepairCount = 0;
+  let submissionRepairPending = false;
   let protocolRepairCount = 0;
   let protocolRepairTool: string | null = null;
   let activationChanges = 0;
@@ -1007,9 +1012,15 @@ function createToolBridge(
     protocolRepairCount += 1;
     return protocolRepairCount <= 1;
   };
-  const beginAnswerRepair = (): boolean => {
-    if (answerRepairCount >= 1) return false;
-    answerRepairCount += 1;
+  const beginPlainAnswerRepair = (): boolean => {
+    if (plainAnswerRepairCount >= 1) return false;
+    plainAnswerRepairCount += 1;
+    return true;
+  };
+  const beginSubmissionRepair = (): boolean => {
+    if (submissionRepairCount >= 1) return false;
+    submissionRepairCount += 1;
+    submissionRepairPending = true;
     return true;
   };
 
@@ -1158,8 +1169,16 @@ function createToolBridge(
         throw new Error("approved answer result is not accepted");
       }
       if (pending?.toolName === "submit_answer" && result.observation.ok === false) {
-        answerRepairCount += 1;
-        if (answerRepairCount > 1) throw new Error("ANSWER_ADMISSION_FAILED");
+        if (
+          result.observation.status !== "rejected" ||
+          result.observation.retryable !== true ||
+          !isNonEmptyString(result.observation.reason)
+        ) {
+          settlePending(new Error("tool bridge failed"));
+          onFailure("unexpected submit result");
+          return;
+        }
+        if (!beginSubmissionRepair()) throw new Error("ANSWER_ADMISSION_FAILED");
       }
       if (pending?.toolName === "tool_directory" && result.observation.ok === false) {
         if (!beginProtocolRepair(pending.toolName)) throw new Error("PROTOCOL_ERROR");
@@ -1232,11 +1251,18 @@ function createToolBridge(
     requiresAdmission: () => tools.some((tool) => tool.name === "submit_answer"),
     approvedEvidenceCount: () => approvedEvidenceIds.size,
     approvedBannerPresent: () => approvedBannerPresent,
-    answerRepairCount: () => answerRepairCount,
+    answerRepairCount: () => plainAnswerRepairCount + submissionRepairCount,
     protocolRepairCount: () => protocolRepairCount,
     protocolRepairTool: () => protocolRepairTool,
     beginProtocolRepair,
-    beginAnswerRepair,
+    beginPlainAnswerRepair,
+    beginSubmissionRepair,
+    plainAnswerRepairCount: () => plainAnswerRepairCount,
+    takeSubmissionRepairPending: () => {
+      const value = submissionRepairPending;
+      submissionRepairPending = false;
+      return value;
+    },
   };
 }
 
@@ -1945,6 +1971,12 @@ async function run(): Promise<void> {
     let bridgeFailure: JsonObject | null = null;
     let runtimeFailure: JsonObject | null = null;
     let agent: Agent | undefined;
+    const repairBudgetExhausted = (): boolean =>
+      assistantTurns >= (limits.max_iterations as number) ||
+      finalizedToolCalls >= (limits.max_tool_calls as number) ||
+      consecutiveFailedToolBatches >=
+        (limits.max_consecutive_failed_tool_batches as number) ||
+      remainingSceneMs() <= (limits.final_answer_reserve_seconds as number) * 1_000;
 
     const inbound = {
       expectedSeq: 2,
@@ -2160,6 +2192,20 @@ async function run(): Promise<void> {
           : undefined;
       },
       prepareNextTurnWithContext: ({ context, message, newMessages, toolResults }) => {
+        if (bridge.takeSubmissionRepairPending()) {
+          if (repairBudgetExhausted()) {
+            runtimeFailure = safeError(
+              "BUDGET_EXHAUSTED",
+              "budget",
+              "agent budget exhausted without a final answer",
+              false,
+            );
+            runAbort.abort();
+            agent?.abort();
+            throw new Error("BUDGET_EXHAUSTED");
+          }
+          return undefined;
+        }
         const activationResult = toolResults.find((result) => {
           const details = result.details;
           return isRecord(details) && isRecord(details.toolActivation);
@@ -2258,11 +2304,15 @@ async function run(): Promise<void> {
           const directoryOrControl = immediateProtocolCalls.find((call) =>
             call.name === "tool_directory" || call.name === CONTROL_PREVIEW_TOOL
           );
-          const repairAllowed = directoryOrControl
+          const submission = immediateProtocolCalls.find((call) => call.name === "submit_answer");
+          const protocolRepairAllowed = directoryOrControl
             ? bridge.beginProtocolRepair(directoryOrControl.name)
-            : bridge.beginAnswerRepair();
-          if (!repairAllowed) {
-            runtimeFailure = directoryOrControl
+            : true;
+          const submissionRepairAllowed = submission
+            ? bridge.beginSubmissionRepair()
+            : true;
+          if (!protocolRepairAllowed || !submissionRepairAllowed) {
+            runtimeFailure = !protocolRepairAllowed
               ? safeError("PROTOCOL_ERROR", "protocol", "protocol repair failed", false)
               : safeError("ANSWER_ADMISSION_FAILED", "answer", "answer admission failed", false);
             runAbort.abort();
@@ -2334,16 +2384,47 @@ async function run(): Promise<void> {
         (Array.isArray(payload.debug.forbidden_history) &&
           payload.debug.forbidden_history.includes("__eval_only_plain_final__")));
     if (approvedAnswer === null && bridge.requiresAdmission() && !evalOnlyPlainFinal && finalMessage &&
-      finalMessage.stopReason === "stop" && bridge.answerRepairCount() === 0) {
-      if (!bridge.beginAnswerRepair()) {
+      finalMessage.stopReason === "stop" && bridge.plainAnswerRepairCount() === 0) {
+      if (repairBudgetExhausted()) {
+        runAbort.abort();
+        agent.abort();
+        finishError(safeError(
+          "BUDGET_EXHAUSTED",
+          "budget",
+          "agent budget exhausted without a final answer",
+          false,
+        ));
+        return;
+      }
+      if (!bridge.beginPlainAnswerRepair()) {
         finishError(safeError("ANSWER_ADMISSION_FAILED", "answer", "answer repair budget exhausted", false));
         return;
       }
+      let repairPromptFailed = false;
       try {
         await agent.prompt(ANSWER_REPAIR_PROMPT);
         finalMessage = lastAssistant(agent);
         approvedAnswer = bridge.approvedAnswer();
       } catch {
+        repairPromptFailed = true;
+      }
+      if (inbound.error) {
+        finishError(inbound.error);
+        return;
+      }
+      if (runtimeFailure) {
+        finishError(runtimeFailure);
+        return;
+      }
+      if (bridgeFailure) {
+        finishError(bridgeFailure);
+        return;
+      }
+      if (inbound.cancelled) {
+        finishCancelled(metrics.usageTotal());
+        return;
+      }
+      if (repairPromptFailed) {
         finishError(safeError("ANSWER_ADMISSION_FAILED", "answer", "answer repair failed", false));
         return;
       }

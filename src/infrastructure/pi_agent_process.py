@@ -1281,19 +1281,50 @@ def run_pi_agent(
                     continue
                 tool_name = pending_tool["tool_name"]
                 try:
-                    line_out = _encode_envelope(
-                        "tool.result",
-                        _tool_result_payload(
-                            call_id=call_id,
-                            tool_name=tool_name,
-                            callback_result=observation,
-                        ),
-                        identity,
-                        py_seq,
+                    result_payload = _tool_result_payload(
+                        call_id=call_id,
+                        tool_name=tool_name,
+                        callback_result=observation,
                     )
+                    tool_observation = result_payload.get("observation")
+                    callback_cancelled = (
+                        isinstance(tool_observation, dict)
+                        and set(tool_observation)
+                        == {
+                            "tool_name",
+                            "ok",
+                            "status",
+                            "error",
+                            "code",
+                            "message",
+                            "retryable",
+                        }
+                        and tool_observation["tool_name"] == tool_name
+                        and tool_observation["ok"] is False
+                        and tool_observation["status"] == "failed"
+                        and tool_observation["error"] == "CANCELLED"
+                        and tool_observation["code"] == "CANCELLED"
+                        and _is_nonempty_str(tool_observation["message"])
+                        and tool_observation["retryable"] is False
+                    )
+                    if callback_cancelled:
+                        line_out = _encode_envelope(
+                            "run.cancel",
+                            {"reason": "host_cancel_requested"},
+                            identity,
+                            py_seq,
+                        )
+                    else:
+                        line_out = _encode_envelope(
+                            "tool.result", result_payload, identity, py_seq
+                        )
                     py_seq += 1
                     process.stdin.write(line_out)
                     process.stdin.flush()
+                    if callback_cancelled:
+                        cancel_sent = True
+                        cancel_deadline = time.monotonic() + 2
+                        continue
                     if tool_name == "tool_directory" and isinstance(observation, dict):
                         activation = observation.get("tool_activation")
                         if isinstance(activation, dict) and isinstance(activation.get("tools"), list):
