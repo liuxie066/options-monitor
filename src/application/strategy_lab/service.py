@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,6 +14,7 @@ from src.application.account_config import (
     resolve_account_type,
     resolve_configured_accounts,
 )
+from src.application.account_run import build_account_runtime_config
 from src.application.futu_portfolio_context import infer_futu_portfolio_settings
 from src.application.ledger.api import resolve_position_ledger_sqlite_path
 from src.application.candidate_snapshot_contract import utc_timestamp
@@ -25,6 +27,7 @@ from src.application.strategy_lab.contracts import (
     RECIPE_ID,
     StrategyLabContractError,
     build_evaluator_behavior_manifest,
+    build_strategy_lab_timer_binding,
     canonical_sha256,
     evaluator_behavior_sha256,
 )
@@ -36,7 +39,12 @@ from src.application.strategy_lab.evidence import (
     publish_research_evidence_artifact,
     resolve_expiry_outcome,
 )
-from src.application.strategy_lab.recipe import check_recipe_readiness, describe_recipe
+from src.application.strategy_lab.recipe import (
+    StrategyLabRecipeError,
+    build_validation_plan,
+    check_recipe_readiness,
+    describe_recipe,
+)
 from src.application.strategy_lab.readiness import HISTORY_K_POC_NOT_BEFORE_HK
 from src.application.strategy_lab.receipts import (
     StrategyLabReceiptError,
@@ -45,6 +53,7 @@ from src.application.strategy_lab.receipts import (
     read_receipt_artifact,
 )
 from src.application.tick_cron import tick_cron_is_busy
+from src.application.tick_run_workspace import canonical_account_run_config_bytes
 from src.infrastructure.futu_gateway import FutuGatewayError, build_futu_gateway
 from src.infrastructure.private_storage import exclusive_private_file_lock
 from src.infrastructure.strategy_lab.experiment_store import (
@@ -341,6 +350,9 @@ def _experiment_view(item: Mapping[str, Any]) -> dict[str, Any]:
             "leader",
             "research_receipt_ref",
             "research_receipt_sha256",
+            "validation_plan_sha256",
+            "final_receipt_ref",
+            "final_receipt_sha256",
             "revision",
             "created_at_utc",
             "updated_at_utc",
@@ -396,6 +408,265 @@ def confirm_research(
     return {"status": "confirmed", "experiment": _experiment_view(item)}
 
 
+def _validation_request(experiment_id: object, requested_start: object) -> dict[str, str]:
+    identity = _required_text(experiment_id, "experiment_id")
+    start = _required_text(requested_start, "requested_start")
+    try:
+        parsed = datetime.strptime(start, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise StrategyLabServiceError(
+            "validation_plan_invalid", "requested_start must use YYYY-MM-DD"
+        ) from exc
+    if parsed.isoformat() != start:
+        raise StrategyLabServiceError(
+            "validation_plan_invalid", "requested_start must be canonical"
+        )
+    return {"experiment_id": identity, "requested_start": start}
+
+
+def _research_confirmation(events: list[dict[str, Any]]) -> dict[str, Any]:
+    matches = [event for event in events if event.get("event_type") == "research_confirmed"]
+    if len(matches) != 1:
+        raise StrategyLabServiceError(
+            "validation_plan_invalid", "research confirmation identity is unavailable"
+        )
+    event = matches[0]
+    confirmation = _required_sha256(event.get("confirmation_sha256"), "confirmation_sha256")
+    return {
+        "sequence": event["sequence"],
+        "confirmation_sha256": confirmation,
+        "idempotency_key": event["idempotency_key"],
+        "occurred_at_utc": event["occurred_at_utc"],
+    }
+
+
+def _hk_schedule(config: Mapping[str, Any]) -> dict[str, Any]:
+    selected = config.get("schedule_hk")
+    if not isinstance(selected, Mapping):
+        fallback = config.get("schedule")
+        selected = (
+            fallback
+            if isinstance(fallback, Mapping)
+            and fallback.get("timezone") == "Asia/Hong_Kong"
+            else None
+        )
+    if not isinstance(selected, Mapping):
+        raise StrategyLabServiceError(
+            "validation_plan_invalid", "HK schedule is unavailable"
+        )
+    return dict(selected)
+
+
+def preview_validation(
+    context: Mapping[str, Any],
+    experiment_id: str,
+    requested_start: str,
+    *,
+    occurred_at_utc: str,
+) -> dict[str, Any]:
+    """Build the second-confirmation payload without provider access or writes."""
+
+    request = _validation_request(experiment_id, requested_start)
+    occurred = _occurred_at(occurred_at_utc)
+    try:
+        store = _store(context)
+        item = _experiment(store, request["experiment_id"])
+        if item["state"] != "awaiting_validation_confirmation":
+            raise StrategyLabServiceError(
+                "validation_preview_blocked", "experiment is not awaiting validation confirmation"
+            )
+        _current_behavior(context, item)
+        current_source = source_commit_sha(Path(context["repo_root"]))
+        if current_source is None:
+            raise StrategyLabServiceError(
+                "source_commit_unavailable", "Strategy Lab requires a clean source commit"
+            )
+        receipt = read_receipt(context, item["experiment_id"])["receipt"]
+        events = store.list_events(item["experiment_id"])
+        config_path, config = load_runtime_config(
+            config_path=context["config_hk"], expected_market="hk"
+        )
+        account_config = build_account_runtime_config(
+            base_cfg=config,
+            cfg_path=config_path,
+            account=ACCOUNT,
+            markets_to_run=["HK"],
+        )
+        account_config_sha256 = hashlib.sha256(
+            canonical_account_run_config_bytes(account_config)
+        ).hexdigest()
+        authority = {
+            "provider": "futu_opend",
+            "endpoint": "market_snapshot",
+            "opend_binding": dict(context["opend_binding"]),
+        }
+        provider_source = {
+            **authority,
+            "source_authority_sha256": canonical_sha256(authority),
+        }
+        plan = build_validation_plan(
+            context,
+            item,
+            receipt,
+            _research_confirmation(events),
+            requested_start=request["requested_start"],
+            occurred_at_utc=occurred,
+            schedule=_hk_schedule(config),
+            account_run_config_sha256=account_config_sha256,
+            provider_source=provider_source,
+            timer_binding=build_strategy_lab_timer_binding(),
+        )
+    except StrategyLabServiceError as exc:
+        return {
+            "status": "blocked",
+            "blockers": [{"reason_code": exc.reason_code, "message": str(exc)}],
+            "occurred_at_utc": occurred,
+            "request": request,
+        }
+    except (
+        AgentToolError,
+        ExperimentStoreError,
+        StrategyLabRecipeError,
+        StrategyLabReceiptError,
+        OSError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        return {
+            "status": "blocked",
+            "blockers": [
+                {
+                    "reason_code": str(
+                        getattr(exc, "reason_code", "validation_plan_invalid")
+                    ),
+                    "message": str(exc),
+                }
+            ],
+            "occurred_at_utc": occurred,
+            "request": request,
+        }
+    plan_sha256 = canonical_sha256(plan)
+    payload = {
+        "request": request,
+        "validation_plan": plan,
+        "validation_plan_sha256": plan_sha256,
+    }
+    return {
+        "status": "available",
+        "blockers": [],
+        "occurred_at_utc": occurred,
+        **payload,
+        "preview_sha256": canonical_sha256(payload),
+    }
+
+
+def confirm_validation(
+    context: Mapping[str, Any],
+    experiment_id: str,
+    requested_start: str,
+    *,
+    confirmed_preview_sha256: str,
+    actor: str,
+    idempotency_key: str,
+    occurred_at_utc: str,
+) -> dict[str, Any]:
+    confirmation = _required_sha256(
+        confirmed_preview_sha256, "confirmed_preview_sha256"
+    )
+    actor_text = _required_text(actor, "actor")
+    key = _required_text(idempotency_key, "idempotency_key")
+    occurred = _occurred_at(occurred_at_utc)
+    try:
+        retry_store = _store(context)
+        retry_item = _experiment(retry_store, experiment_id)
+        if retry_item["state"] in {
+            "validation_collecting",
+            "waiting_outcome",
+            "completed",
+        }:
+            matches = [
+                event
+                for event in retry_store.list_events(retry_item["experiment_id"])
+                if event.get("idempotency_key") == key
+            ]
+            plan = retry_item.get("validation_plan")
+            if len(matches) != 1 or not isinstance(plan, Mapping):
+                raise StrategyLabServiceError("idempotency_conflict", "validation retry changed")
+            event = matches[0]
+            payload = event.get("payload")
+            if (
+                not isinstance(payload, Mapping)
+                or event.get("event_type") != "validation_confirmed"
+                or event.get("actor") != actor_text
+                or event.get("confirmation_sha256") != confirmation
+                or plan.get("requested_start") != requested_start
+            ):
+                raise StrategyLabServiceError("idempotency_conflict", "validation retry changed")
+            item = retry_store.confirm_validation(
+                retry_item["experiment_id"],
+                expected_revision=payload["expected_revision"],
+                validation_plan=plan,
+                validation_plan_sha256=retry_item["validation_plan_sha256"],
+                preview_sha256=confirmation,
+                actor=actor_text,
+                idempotency_key=key,
+                occurred_at_utc=occurred,
+            )
+            return {"status": "confirmed", "experiment": _experiment_view(item)}
+    except StrategyLabServiceError:
+        raise
+    except (ExperimentStoreError, KeyError, OSError) as exc:
+        raise StrategyLabServiceError(
+            str(getattr(exc, "reason_code", "experiment_store_incompatible")), str(exc)
+        ) from exc
+    preview = preview_validation(
+        context,
+        experiment_id,
+        requested_start,
+        occurred_at_utc=occurred,
+    )
+    if preview["status"] != "available":
+        raise StrategyLabServiceError(
+            "validation_preview_blocked", "validation preview is not currently available"
+        )
+    if preview["preview_sha256"] != confirmation:
+        raise StrategyLabServiceError(
+            "validation_confirmation_mismatch", "confirmed validation preview changed"
+        )
+    try:
+        store = _store(context)
+        item = _experiment(store, experiment_id)
+        current_source = source_commit_sha(Path(context["repo_root"]))
+        if current_source is None:
+            raise StrategyLabServiceError(
+                "source_commit_unavailable", "Strategy Lab requires a clean source commit"
+            )
+        item = _observe_source_commit(
+            store,
+            item,
+            current_source,
+            actor=actor_text,
+            occurred_at_utc=occurred,
+        )
+        item = store.confirm_validation(
+            item["experiment_id"],
+            expected_revision=item["revision"],
+            validation_plan=preview["validation_plan"],
+            validation_plan_sha256=preview["validation_plan_sha256"],
+            preview_sha256=confirmation,
+            actor=actor_text,
+            idempotency_key=key,
+            occurred_at_utc=occurred,
+        )
+    except StrategyLabServiceError:
+        raise
+    except (ExperimentStoreError, OSError) as exc:
+        raise StrategyLabServiceError(
+            str(getattr(exc, "reason_code", "experiment_store_incompatible")), str(exc)
+        ) from exc
+    return {"status": "confirmed", "experiment": _experiment_view(item)}
+
+
 def get_experiment_status(
     context: Mapping[str, Any], experiment_id: str
 ) -> dict[str, Any]:
@@ -415,8 +686,57 @@ def get_experiment_status(
         counts[key] = counts.get(key, 0) + 1
     try:
         _current_behavior(context, item)
-        projection = load_research_projection(item["spec"])
         indexed = {value["observation_key"]: value for value in observations}
+
+        if item["state"] in {"validation_collecting", "waiting_outcome"}:
+            plan = item.get("validation_plan")
+            if (
+                not isinstance(plan, Mapping)
+                or canonical_sha256(plan) != item.get("validation_plan_sha256")
+            ):
+                raise StrategyLabServiceError(
+                    "validation_plan_invalid", "frozen validation plan binding changed"
+                )
+            calendar = plan.get("market_calendar") if isinstance(plan, Mapping) else None
+            sessions = calendar.get("sessions") if isinstance(calendar, Mapping) else None
+            if not isinstance(sessions, list):
+                raise StrategyLabServiceError(
+                    "validation_plan_invalid", "frozen validation plan is unavailable"
+                )
+            expected_points = sum(
+                len(session.get("expected_recommendation_point_ids", []))
+                for session in sessions
+                if isinstance(session, Mapping)
+            )
+            progress = {
+                "validation_sessions": {"total": len(sessions)},
+                "validation_points": {
+                    "completed": counts.get("validation_point", 0),
+                    "total": expected_points,
+                },
+                "hidden_batches": {"completed": counts.get("hidden_batch", 0)},
+                "validation_fills": {"completed": counts.get("validation_fill", 0)},
+            }
+            blocker = None
+            next_action = {
+                "action": (
+                    "collect_validation_evidence"
+                    if item["state"] == "validation_collecting"
+                    else "settle_validation_outcomes"
+                ),
+                "provider_required": True,
+                "provider_admission_checked": False,
+            }
+            return {
+                "experiment": _experiment_view(item),
+                "observation_count": len(observations),
+                "observation_counts": counts,
+                "progress": progress,
+                "blocker": blocker,
+                "next_action": next_action,
+            }
+
+        projection = load_research_projection(item["spec"])
 
         def observation_status(key: str) -> object:
             observation = indexed.get(key)
@@ -474,10 +794,14 @@ def get_experiment_status(
     except StrategyLabServiceError as exc:
         progress = None
         blocker = {"reason_code": exc.reason_code, "message": str(exc)}
-        next_action = {
-            "action": "restore_evaluator_behavior",
-            "provider_required": False,
-        }
+        next_action = (
+            {"action": "inspect_validation_plan", "provider_required": False}
+            if exc.reason_code == "validation_plan_invalid"
+            else {
+                "action": "restore_evaluator_behavior",
+                "provider_required": False,
+            }
+        )
     except StrategyLabEvidenceError as exc:
         progress = None
         blocker = {"reason_code": exc.reason_code, "message": str(exc)}
@@ -532,9 +856,9 @@ def _observe_source_commit(
         return experiment
     return store.append_event_and_transition(
         experiment["experiment_id"],
-        expected_state="research_running",
+        expected_state=experiment["state"],
         expected_revision=experiment["revision"],
-        new_state="research_running",
+        new_state=experiment["state"],
         event_type="source_commit_observed",
         actor=actor,
         payload={"source_commit_sha": source_commit},
@@ -676,7 +1000,12 @@ def execute_research(
         store = _store(context)
         item = _experiment(store, experiment_id)
         _current_behavior(context, item)
-        if item["state"] in {"awaiting_validation_confirmation", "completed"}:
+        if item["state"] in {
+            "awaiting_validation_confirmation",
+            "validation_collecting",
+            "waiting_outcome",
+            "completed",
+        }:
             return {"status": "complete", "experiment": _experiment_view(item)}
         if item["state"] == "research_complete":
             return _conclude_research(context, store, item, actor=actor_text)
@@ -849,7 +1178,13 @@ def read_receipt(
         if (
             not isinstance(receipt_ref, str)
             or not isinstance(receipt_sha256, str)
-            or item["state"] not in {"awaiting_validation_confirmation", "completed"}
+            or item["state"]
+            not in {
+                "awaiting_validation_confirmation",
+                "validation_collecting",
+                "waiting_outcome",
+                "completed",
+            }
         ):
             raise StrategyLabServiceError(
                 "receipt_immutable_conflict", "research receipt Store binding is invalid"
@@ -884,10 +1219,12 @@ __all__ = [
     "StrategyLabContextError",
     "StrategyLabServiceError",
     "confirm_research",
+    "confirm_validation",
     "execute_research",
     "get_experiment_status",
     "list_recipes",
     "preview_experiment",
+    "preview_validation",
     "read_receipt",
     "resolve_strategy_lab_context",
     "resolve_strategy_lab_runtime_context",

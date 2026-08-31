@@ -415,6 +415,80 @@ def _scheduled_scan_targets(
     return sorted(set(report_targets) | set(candidate_targets)), set(report_targets)
 
 
+def _apply_trade_date_type(
+    targets: list[datetime],
+    *,
+    trade_date_type: str,
+    run_start: time,
+    run_end: time,
+    breaks: list[tuple[time, time]],
+) -> list[datetime]:
+    if trade_date_type == 'WHOLE':
+        return targets
+    if trade_date_type not in {'MORNING', 'AFTERNOON'}:
+        raise ValueError("trade_date_type is invalid")
+    if len(breaks) != 1:
+        raise ValueError("partial trading day requires one session break")
+    break_start, break_end = breaks[0]
+    if not run_start < break_start < break_end < run_end:
+        raise ValueError("partial trading day session break is invalid")
+    return [
+        target
+        for target in targets
+        if (
+            target.time() < break_start
+            if trade_date_type == 'MORNING'
+            else target.time() >= break_end
+        )
+    ]
+
+
+def scheduled_session_slots_for_date(
+    schedule_cfg: dict[str, Any],
+    trading_date: date | str,
+    *,
+    trade_date_type: str = 'WHOLE',
+) -> list[datetime]:
+    """Return exact UTC minute starts for one declared market session."""
+
+    if not isinstance(schedule_cfg, dict):
+        raise ValueError("schedule_cfg must be an object")
+    try:
+        raw_day = None if isinstance(trading_date, date) else trading_date
+        day = trading_date if isinstance(trading_date, date) else date.fromisoformat(trading_date)
+    except ValueError as exc:
+        raise ValueError("trading_date must be an ISO date") from exc
+    if raw_day is not None and day.isoformat() != raw_day:
+        raise ValueError("trading_date must be a canonical ISO date")
+    if trade_date_type not in {'WHOLE', 'MORNING', 'AFTERNOON'}:
+        raise ValueError("trade_date_type is invalid")
+    if not bool(schedule_cfg.get('enabled', True)):
+        return []
+    try:
+        market_tz = ZoneInfo(str(schedule_cfg.get('timezone') or 'America/New_York'))
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError("schedule timezone is invalid") from exc
+    run_start, run_end, breaks = _resolve_run_window(schedule_cfg)
+    start = datetime.combine(day, run_start, tzinfo=market_tz)
+    end = datetime.combine(day, run_end, tzinfo=market_tz)
+    slots: list[datetime] = []
+    cursor = start
+    while cursor < end:
+        if is_run_window_open(cursor, run_start, run_end, breaks):
+            slots.append(cursor)
+        cursor += timedelta(minutes=1)
+    return [
+        value.astimezone(timezone.utc)
+        for value in _apply_trade_date_type(
+            slots,
+            trade_date_type=trade_date_type,
+            run_start=run_start,
+            run_end=run_end,
+            breaks=breaks,
+        )
+    ]
+
+
 def scheduled_scan_targets_for_date(
     schedule_cfg: dict[str, Any],
     trading_date: date | str,
@@ -464,22 +538,13 @@ def scheduled_scan_targets_for_date(
         )
     except ZoneInfoNotFoundError as exc:
         raise ValueError("schedule gate timezone is invalid") from exc
-    if trade_date_type != 'WHOLE':
-        if len(breaks) != 1:
-            raise ValueError("partial trading day requires one session break")
-        break_start, break_end = breaks[0]
-        if not run_start < break_start < break_end < run_end:
-            raise ValueError("partial trading day session break is invalid")
-        targets = [
-            target
-            for target in targets
-            if (
-                target.time() < break_start
-                if trade_date_type == 'MORNING'
-                else target.time() >= break_end
-            )
-        ]
-    return targets
+    return _apply_trade_date_type(
+        targets,
+        trade_date_type=trade_date_type,
+        run_start=run_start,
+        run_end=run_end,
+        breaks=breaks,
+    )
 
 
 # Compatibility for tests/operators that still inspect the old private helper.

@@ -10,6 +10,19 @@ from domain.domain.decision_state_fingerprint import canonical_sha256 as _canoni
 
 RECIPE_ID = "sell_put_option_position_concentration"
 RESEARCH_SESSIONS = 20
+VALIDATION_SESSIONS = 10
+HIDDEN_SNAPSHOT_BATCH_CEILING = 200
+ADVANCE_HARD_TIMEOUT_SECONDS = 10
+VALIDATION_WAKE_TOLERANCE_SECONDS = 20
+TICK_PROTECTION_SECONDS = 20
+HIDDEN_SNAPSHOT_LOW_PRIORITY_CALLS_PER_WINDOW = 1
+STRATEGY_LAB_ADVANCE_SERVICE = "options-monitor-strategy-lab-advance.service"
+STRATEGY_LAB_ADVANCE_TIMER = "options-monitor-strategy-lab-advance.timer"
+STRATEGY_LAB_ADVANCE_CALENDARS = (
+    "Mon..Fri *-*-* 09..15:*:00 Asia/Hong_Kong",
+    "Mon..Fri *-*-* 16..23:00/10:00 Asia/Hong_Kong",
+    "Tue..Sat *-*-* 00..08:00/10:00 Asia/Hong_Kong",
+)
 NEAR_RETURN_THRESHOLDS = (0.002, 0.004, 0.006)
 MARKET = "hk"
 ACCOUNT = "lx"
@@ -21,22 +34,46 @@ EXPERIMENT_STATES = frozenset(
         "research_running",
         "research_complete",
         "awaiting_validation_confirmation",
+        "validation_collecting",
+        "waiting_outcome",
         "completed",
     }
 )
 TERMINAL_STATES = frozenset({"completed"})
-PHASE2_TRANSITIONS = frozenset(
+EXPERIMENT_TRANSITIONS = frozenset(
     {
         ("research_running", "research_complete"),
         ("research_complete", "awaiting_validation_confirmation"),
         ("research_complete", "completed"),
+        ("awaiting_validation_confirmation", "validation_collecting"),
+        ("validation_collecting", "waiting_outcome"),
+        ("waiting_outcome", "completed"),
     }
 )
 OBSERVATION_KINDS = frozenset(
-    {"history_k_query", "research_fill", "expiry_close_query", "single_result"}
+    {
+        "history_k_query",
+        "research_fill",
+        "expiry_close_query",
+        "single_result",
+        "validation_point",
+        "hidden_batch",
+        "hidden_quote",
+        "validation_fill",
+    }
 )
 OBSERVATION_STATUSES = frozenset(
-    {"available", "simulated_fill", "no_fill", "not_evaluable"}
+    {
+        "available",
+        "simulated_fill",
+        "no_fill",
+        "not_evaluable",
+        "started",
+        "complete",
+        "gap",
+        "observed_fill",
+        "pending_outcome",
+    }
 )
 
 EVALUATOR_OWNER_PATHS = (
@@ -76,6 +113,18 @@ def _fail(reason_code: str, message: str) -> NoReturn:
 
 def canonical_sha256(value: Any) -> str:
     return _canonical_sha256(value)
+
+
+def build_strategy_lab_timer_binding() -> dict[str, Any]:
+    return {
+        "service_name": STRATEGY_LAB_ADVANCE_SERVICE,
+        "timer_name": STRATEGY_LAB_ADVANCE_TIMER,
+        "calendars": list(STRATEGY_LAB_ADVANCE_CALENDARS),
+        "accuracy_sec": "1s",
+        "randomized_delay_sec": 0,
+        "persistent": False,
+        "timeout_start_sec": ADVANCE_HARD_TIMEOUT_SECONDS,
+    }
 
 
 def strict_json_bytes(value: Any) -> bytes:
@@ -129,19 +178,29 @@ def evaluator_behavior_sha256(manifest: object) -> str:
 
 __all__ = [
     "ACCOUNT",
+    "ADVANCE_HARD_TIMEOUT_SECONDS",
     "EVALUATOR_OWNER_PATHS",
     "EXPERIMENT_STATES",
+    "EXPERIMENT_TRANSITIONS",
+    "HIDDEN_SNAPSHOT_BATCH_CEILING",
+    "HIDDEN_SNAPSHOT_LOW_PRIORITY_CALLS_PER_WINDOW",
     "MARKET",
     "NEAR_RETURN_THRESHOLDS",
     "OBSERVATION_KINDS",
     "OBSERVATION_STATUSES",
-    "PHASE2_TRANSITIONS",
     "RECIPE_ID",
     "RESEARCH_SESSIONS",
+    "STRATEGY_LAB_ADVANCE_CALENDARS",
+    "STRATEGY_LAB_ADVANCE_SERVICE",
+    "STRATEGY_LAB_ADVANCE_TIMER",
     "STRATEGY",
     "StrategyLabContractError",
     "TERMINAL_STATES",
+    "TICK_PROTECTION_SECONDS",
+    "VALIDATION_SESSIONS",
+    "VALIDATION_WAKE_TOLERANCE_SECONDS",
     "build_evaluator_behavior_manifest",
+    "build_strategy_lab_timer_binding",
     "canonical_sha256",
     "evaluator_behavior_sha256",
     "strict_json_bytes",

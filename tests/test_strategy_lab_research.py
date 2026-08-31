@@ -16,8 +16,10 @@ from src.application.strategy_lab.receipts import build_research_receipt, publis
 from src.application.strategy_lab.service import (
     StrategyLabServiceError,
     confirm_research,
+    confirm_validation,
     execute_research,
     get_experiment_status,
+    preview_validation,
     read_receipt,
 )
 from src.infrastructure.strategy_lab.experiment_store import ExperimentStore
@@ -87,6 +89,39 @@ def _create(context: dict[str, object]) -> dict[str, object]:
     )
 
 
+def _awaiting_validation(context: dict[str, object]) -> dict[str, object]:
+    created = _create(context)
+    store = ExperimentStore(context["store_path"])
+    complete = store.append_event_and_transition(
+        "experiment-1",
+        expected_state="research_running",
+        expected_revision=created["revision"],
+        new_state="research_complete",
+        event_type="research_materialized",
+        actor="tester",
+        payload={},
+        occurred_at_utc=NOW,
+    )
+    leader = {
+        "variant_id": "challenger_0.002",
+        "near_return_threshold": 0.002,
+        "comparison_sha256": "e" * 64,
+    }
+    return store.attach_research_receipt_and_transition(
+        "experiment-1",
+        expected_state="research_complete",
+        expected_revision=complete["revision"],
+        new_state="awaiting_validation_confirmation",
+        receipt_ref="experiments/experiment-1/receipts/research.json",
+        receipt_sha256="f" * 64,
+        leader=leader,
+        actor="tester",
+        occurred_at_utc=NOW,
+        payload={"status": "leader"},
+        idempotency_key="conclude-1",
+    )
+
+
 def _patch_behavior(monkeypatch: pytest.MonkeyPatch, *, matches: bool = True) -> None:
     import src.application.strategy_lab.service as service
 
@@ -133,6 +168,142 @@ def test_confirm_rebuilds_exact_preview_and_is_idempotent(
     assert first == second
     assert first["experiment"]["state"] == "research_running"
     assert calls == [NOW, NOW]
+
+
+def test_validation_preview_hash_excludes_time_and_confirmation_is_idempotent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import src.application.strategy_lab.service as service
+
+    context = _context(tmp_path)
+    awaiting = _awaiting_validation(context)
+    _patch_behavior(monkeypatch)
+    monkeypatch.setattr(service, "source_commit_sha", lambda _root: "c" * 40)
+    monkeypatch.setattr(
+        service,
+        "load_runtime_config",
+        lambda **_kwargs: (
+            Path(context["config_hk"]),
+            {
+                "schedule_hk": {
+                    "enabled": True,
+                    "timezone": "Asia/Hong_Kong",
+                    "run_window": {"start": "09:30", "end": "16:00", "breaks": []},
+                }
+            },
+        ),
+    )
+    receipt = {
+        "experiment_id": "experiment-1",
+        "spec_sha256": awaiting["spec_sha256"],
+        "conclusion": {"status": "leader", "leader": awaiting["leader"]},
+    }
+    monkeypatch.setattr(service, "read_receipt", lambda *_args, **_kwargs: {"receipt": receipt})
+
+    def plan(*_args: object, requested_start: str, **_kwargs: object) -> dict[str, object]:
+        return {
+            "experiment_id": "experiment-1",
+            "requested_start": requested_start,
+            "market_calendar": {
+                "sessions": [
+                    {
+                        "expected_recommendation_point_ids": ["point-1"],
+                    }
+                ]
+            },
+        }
+
+    monkeypatch.setattr(service, "build_validation_plan", plan)
+    monkeypatch.setattr(
+        service,
+        "build_futu_gateway",
+        lambda **_kwargs: pytest.fail("validation confirmation must not build a gateway"),
+    )
+    store = ExperimentStore(context["store_path"])
+    before = store.get_experiment("experiment-1")
+
+    first = preview_validation(
+        context,
+        "experiment-1",
+        "2026-09-01",
+        occurred_at_utc="2026-08-31T00:00:00Z",
+    )
+    second = preview_validation(
+        context,
+        "experiment-1",
+        "2026-09-01",
+        occurred_at_utc="2026-08-31T01:00:00Z",
+    )
+
+    assert first["preview_sha256"] == second["preview_sha256"]
+    assert first["validation_plan_sha256"] == second["validation_plan_sha256"]
+    assert first["occurred_at_utc"] != second["occurred_at_utc"]
+    assert store.get_experiment("experiment-1") == before
+
+    command = {
+        "confirmed_preview_sha256": first["preview_sha256"],
+        "actor": "tester",
+        "idempotency_key": "validation-confirm-1",
+        "occurred_at_utc": "2026-08-31T00:00:00Z",
+    }
+    confirmed = confirm_validation(
+        context, "experiment-1", "2026-09-01", **command
+    )
+    retried = confirm_validation(
+        context,
+        "experiment-1",
+        "2026-09-01",
+        **{**command, "occurred_at_utc": "2026-09-02T00:00:00Z"},
+    )
+
+    assert retried == confirmed
+    assert confirmed["experiment"]["state"] == "validation_collecting"
+    events = store.list_events("experiment-1")
+    assert [event["event_type"] for event in events][-2:] == [
+        "source_commit_observed",
+        "validation_confirmed",
+    ]
+    assert events[-1]["occurred_at_utc"] == "2026-08-31T00:00:00Z"
+    assert events[-1]["confirmation_sha256"] == first["preview_sha256"]
+
+    status = get_experiment_status(context, "experiment-1")
+    assert status["progress"]["validation_sessions"] == {"total": 1}
+    assert status["next_action"]["action"] == "collect_validation_evidence"
+
+    with pytest.raises(StrategyLabServiceError) as changed_retry:
+        confirm_validation(
+            context,
+            "experiment-1",
+            "2026-09-01",
+            **{**command, "idempotency_key": "validation-confirm-2"},
+        )
+    assert changed_retry.value.reason_code == "idempotency_conflict"
+
+    with sqlite3.connect(context["store_path"]) as connection:
+        connection.execute(
+            "UPDATE experiments SET state = 'waiting_outcome' WHERE experiment_id = ?",
+            ("experiment-1",),
+        )
+    later_retry = confirm_validation(
+        context,
+        "experiment-1",
+        "2026-09-01",
+        **{**command, "occurred_at_utc": "2026-09-21T00:00:00Z"},
+    )
+    assert later_retry["experiment"]["state"] == "waiting_outcome"
+
+    with sqlite3.connect(context["store_path"]) as connection:
+        connection.execute(
+            "UPDATE experiments SET validation_plan_json = ? WHERE experiment_id = ?",
+            (json.dumps({"changed": True}), "experiment-1"),
+        )
+    drifted = get_experiment_status(context, "experiment-1")
+    assert drifted["progress"] is None
+    assert drifted["blocker"]["reason_code"] == "validation_plan_invalid"
+    assert drifted["next_action"] == {
+        "action": "inspect_validation_plan",
+        "provider_required": False,
+    }
 
 
 def test_status_missing_store_is_read_only(tmp_path: Path) -> None:

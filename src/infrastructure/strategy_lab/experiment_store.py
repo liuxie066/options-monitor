@@ -11,6 +11,7 @@ from typing import Any, Iterator, NoReturn
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from src.application.candidate_snapshot_contract import utc_timestamp
 from src.application.strategy_lab.contracts import (
+    EXPERIMENT_TRANSITIONS,
     EXPERIMENT_STATES,
     OBSERVATION_KINDS,
     OBSERVATION_STATUSES,
@@ -29,7 +30,8 @@ _SCHEMA_STATEMENTS = (
     experiment_id TEXT PRIMARY KEY,
     state TEXT NOT NULL CHECK (state IN (
         'research_running', 'research_complete',
-        'awaiting_validation_confirmation', 'completed'
+        'awaiting_validation_confirmation', 'validation_collecting',
+        'waiting_outcome', 'completed'
     )),
     spec_json TEXT NOT NULL,
     spec_sha256 TEXT NOT NULL CHECK (length(spec_sha256) = 64),
@@ -39,12 +41,36 @@ _SCHEMA_STATEMENTS = (
     leader_json TEXT,
     research_receipt_ref TEXT,
     research_receipt_sha256 TEXT,
+    validation_plan_json TEXT,
+    validation_plan_sha256 TEXT,
+    final_receipt_ref TEXT,
+    final_receipt_sha256 TEXT,
     revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
     created_at_utc TEXT NOT NULL,
     updated_at_utc TEXT NOT NULL,
     CHECK (
         (research_receipt_ref IS NULL AND research_receipt_sha256 IS NULL)
-        OR (research_receipt_ref IS NOT NULL AND length(research_receipt_sha256) = 64)
+        OR (
+            research_receipt_ref IS NOT NULL
+            AND research_receipt_sha256 IS NOT NULL
+            AND length(research_receipt_sha256) = 64
+        )
+    ),
+    CHECK (
+        (validation_plan_json IS NULL AND validation_plan_sha256 IS NULL)
+        OR (
+            validation_plan_json IS NOT NULL
+            AND validation_plan_sha256 IS NOT NULL
+            AND length(validation_plan_sha256) = 64
+        )
+    ),
+    CHECK (
+        (final_receipt_ref IS NULL AND final_receipt_sha256 IS NULL)
+        OR (
+            final_receipt_ref IS NOT NULL
+            AND final_receipt_sha256 IS NOT NULL
+            AND length(final_receipt_sha256) = 64
+        )
     )
 )""",
     """CREATE TABLE experiment_events (
@@ -66,6 +92,7 @@ _SCHEMA_STATEMENTS = (
     observation_key TEXT NOT NULL,
     recommendation_point_id TEXT,
     arm_id TEXT,
+    observation_slot_utc TEXT,
     kind TEXT NOT NULL,
     status TEXT NOT NULL,
     payload_json TEXT NOT NULL,
@@ -77,7 +104,11 @@ _SCHEMA_STATEMENTS = (
     FOREIGN KEY (experiment_id) REFERENCES experiments(experiment_id) ON DELETE CASCADE,
     CHECK (
         (artifact_ref IS NULL AND artifact_sha256 IS NULL)
-        OR (artifact_ref IS NOT NULL AND length(artifact_sha256) = 64)
+        OR (
+            artifact_ref IS NOT NULL
+            AND artifact_sha256 IS NOT NULL
+            AND length(artifact_sha256) = 64
+        )
     )
 )""",
 )
@@ -134,10 +165,17 @@ def _experiment(row: sqlite3.Row | None) -> dict[str, Any] | None:
     item["spec"] = _decode(item.pop("spec_json"))
     item["behavior_manifest"] = _decode(item.pop("behavior_manifest_json"))
     item["leader"] = _decode(item.pop("leader_json"))
+    item["validation_plan"] = _decode(item.pop("validation_plan_json"))
     return item
 
 
 def _observation(row: sqlite3.Row) -> dict[str, Any]:
+    item = dict(row)
+    item["payload"] = _decode(item.pop("payload_json"))
+    return item
+
+
+def _event(row: sqlite3.Row) -> dict[str, Any]:
     item = dict(row)
     item["payload"] = _decode(item.pop("payload_json"))
     return item
@@ -380,6 +418,16 @@ class ExperimentStore:
             ).fetchone()
         return _experiment(row)
 
+    def list_events(self, experiment_id: object) -> list[dict[str, Any]]:
+        identity = _text(experiment_id, "experiment_id")
+        with self._read_connection() as connection:
+            self._require_schema(connection)
+            rows = connection.execute(
+                "SELECT * FROM experiment_events WHERE experiment_id = ? ORDER BY sequence",
+                (identity,),
+            ).fetchall()
+        return [_event(row) for row in rows]
+
     def append_event_and_transition(
         self,
         experiment_id: object,
@@ -458,13 +506,14 @@ class ExperimentStore:
                     )
                     assert result is not None
                     return result
-            allowed_transition = (old_state, state) == (
-                "research_running",
-                "research_complete",
+            allowed_transition = (
+                (old_state, state) in EXPERIMENT_TRANSITIONS
+                and (old_state, state, event)
+                == ("research_running", "research_complete", "research_materialized")
             )
             allowed_source_observation = (
                 old_state == state
-                and state == "research_running"
+                and state not in TERMINAL_STATES
                 and event == "source_commit_observed"
             )
             if not (allowed_transition or allowed_source_observation):
@@ -516,6 +565,112 @@ class ExperimentStore:
                 "idempotency_key, payload_json, occurred_at_utc"
                 ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (identity, sequence, event, actor_text, confirmation, key, payload_json, occurred),
+            )
+            connection.commit()
+        result = self.get_experiment(identity)
+        assert result is not None
+        return result
+
+    def confirm_validation(
+        self,
+        experiment_id: object,
+        *,
+        expected_revision: object,
+        validation_plan: object,
+        validation_plan_sha256: object,
+        preview_sha256: object,
+        actor: object,
+        idempotency_key: object,
+        occurred_at_utc: object,
+    ) -> dict[str, Any]:
+        identity = _text(experiment_id, "experiment_id")
+        if type(expected_revision) is not int or expected_revision < 0:
+            _fail("experiment_input_invalid", "expected_revision is invalid")
+        plan_hash = _sha(validation_plan_sha256, "validation_plan_sha256")
+        if canonical_sha256(validation_plan) != plan_hash:
+            _fail("experiment_input_invalid", "validation plan hash does not match")
+        confirmation = _sha(preview_sha256, "preview_sha256")
+        actor_text = _text(actor, "actor")
+        key = _text(idempotency_key, "idempotency_key")
+        occurred = _timestamp(occurred_at_utc, "occurred_at_utc")
+        command_payload = {
+            "expected_state": "awaiting_validation_confirmation",
+            "expected_revision": expected_revision,
+            "new_state": "validation_collecting",
+            "event_type": "validation_confirmed",
+            "actor": actor_text,
+            "preview_sha256": confirmation,
+            "validation_plan_sha256": plan_hash,
+        }
+        payload_json = compact_json(command_payload)
+        plan_json = compact_json(validation_plan)
+        with self._write_connection() as connection:
+            self._require_schema(connection)
+            connection.execute("BEGIN IMMEDIATE")
+            prior = connection.execute(
+                "SELECT experiment_id, event_type, actor, confirmation_sha256, payload_json "
+                "FROM experiment_events WHERE idempotency_key = ?",
+                (key,),
+            ).fetchone()
+            if prior is not None:
+                if (
+                    prior["experiment_id"] != identity
+                    or prior["event_type"] != "validation_confirmed"
+                    or prior["actor"] != actor_text
+                    or prior["confirmation_sha256"] != confirmation
+                    or prior["payload_json"] != payload_json
+                ):
+                    _fail("idempotency_conflict", "idempotency key changed")
+                result = _experiment(
+                    connection.execute(
+                        "SELECT * FROM experiments WHERE experiment_id = ?", (identity,)
+                    ).fetchone()
+                )
+                connection.commit()
+                assert result is not None
+                return result
+            row = connection.execute(
+                "SELECT * FROM experiments WHERE experiment_id = ?", (identity,)
+            ).fetchone()
+            if row is None:
+                _fail("experiment_not_found", "experiment does not exist")
+            if row["state"] != "awaiting_validation_confirmation" or row["revision"] != expected_revision:
+                _fail("experiment_revision_conflict", "experiment state or revision changed")
+            if row["validation_plan_json"] is not None:
+                _fail("validation_confirmation_mismatch", "validation plan is already bound")
+            if connection.execute(
+                "SELECT 1 FROM experiment_events "
+                "WHERE experiment_id = ? AND confirmation_sha256 = ? LIMIT 1",
+                (identity, confirmation),
+            ).fetchone() is not None:
+                _fail("confirmation_conflict", "confirmation was already used")
+            sequence = int(
+                connection.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) + 1 FROM experiment_events "
+                    "WHERE experiment_id = ?",
+                    (identity,),
+                ).fetchone()[0]
+            )
+            connection.execute(
+                "UPDATE experiments SET state = 'validation_collecting', "
+                "validation_plan_json = ?, validation_plan_sha256 = ?, "
+                "revision = revision + 1, updated_at_utc = ? WHERE experiment_id = ?",
+                (plan_json, plan_hash, occurred, identity),
+            )
+            connection.execute(
+                "INSERT INTO experiment_events("
+                "experiment_id, sequence, event_type, actor, confirmation_sha256, "
+                "idempotency_key, payload_json, occurred_at_utc"
+                ") VALUES (?, ?, 'validation_confirmed', ?, ?, ?, ?, ?)",
+                (
+                    identity,
+                    sequence,
+                    actor_text,
+                    confirmation,
+                    key,
+                    payload_json,
+                    occurred,
+                ),
             )
             connection.commit()
         result = self.get_experiment(identity)
@@ -601,9 +756,9 @@ class ExperimentStore:
             connection.execute(
                 "INSERT INTO experiment_observations("
                 "experiment_id, observation_key, recommendation_point_id, arm_id, "
-                "kind, status, payload_json, artifact_ref, artifact_sha256, "
+                "observation_slot_utc, kind, status, payload_json, artifact_ref, artifact_sha256, "
                 "created_at_utc, updated_at_utc"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ") VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)",
                 (identity, key, *canonical, occurred, occurred),
             )
             row = connection.execute(

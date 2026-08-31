@@ -36,13 +36,18 @@ def _patch_read_only_context(
     return profile_path, fee_plan_path, context
 
 
-def test_strategy_lab_help_exposes_phase2_commands(capsys: pytest.CaptureFixture[str]) -> None:
+def test_strategy_lab_help_exposes_phase3_confirmation_commands(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     with pytest.raises(SystemExit) as raised:
         parse_args(["strategy-lab", "--help"])
 
     assert raised.value.code == 0
     help_text = capsys.readouterr().out
-    assert "{readiness,recipes,preview,confirm-research,status,research,receipt}" in help_text
+    assert (
+        "{readiness,recipes,preview,confirm-research,preview-validation,"
+        "confirm-validation,status,research,receipt}" in help_text
+    )
 
     with pytest.raises(SystemExit) as research_help:
         parse_args(["strategy-lab", "research", "--help"])
@@ -210,6 +215,65 @@ def test_confirm_research_freezes_one_clock(
     assert received["context"] == context
     assert received["occurred_at_utc"] == NOW
     assert received["confirmed_preview_sha256"] == "a" * 64
+    with pytest.raises(StopIteration):
+        next(clock_values)
+
+
+@pytest.mark.parametrize("command", ["preview-validation", "confirm-validation"])
+def test_validation_confirmation_commands_freeze_one_clock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+) -> None:
+    import src.interfaces.cli.strategy_lab_ops as cli
+
+    profile_path, _fee_plan_path, context = _patch_read_only_context(monkeypatch, tmp_path)
+    clock_values = iter([NOW])
+    monkeypatch.setattr(cli, "_now_utc", lambda: next(clock_values))
+    received: dict[str, object] = {}
+    service_name = command.replace("-", "_")
+
+    def invoke(fake_context: object, experiment_id: str, requested_start: str, **kwargs: object):
+        received.update(
+            context=fake_context,
+            experiment_id=experiment_id,
+            requested_start=requested_start,
+            **kwargs,
+        )
+        return {"status": "available"}
+
+    monkeypatch.setattr(cli, service_name, invoke)
+    argv = [
+        "strategy-lab",
+        command,
+        "--profile-path",
+        str(profile_path),
+        "--experiment-id",
+        "exp-1",
+        "--requested-start",
+        "2026-09-01",
+    ]
+    if command == "confirm-validation":
+        argv.extend(
+            [
+                "--confirmed-preview-sha256",
+                "a" * 64,
+                "--actor",
+                "tester",
+                "--idempotency-key",
+                "validation-confirm-1",
+            ]
+        )
+
+    response = handle_strategy_lab_command(parse_args(argv))
+
+    assert response["tool_name"] == f"strategy-lab.{command}"
+    assert received["context"] == context
+    assert received["occurred_at_utc"] == NOW
+    assert received["experiment_id"] == "exp-1"
+    assert received["requested_start"] == "2026-09-01"
+    if command == "confirm-validation":
+        assert received["confirmed_preview_sha256"] == "a" * 64
     with pytest.raises(StopIteration):
         next(clock_values)
 
