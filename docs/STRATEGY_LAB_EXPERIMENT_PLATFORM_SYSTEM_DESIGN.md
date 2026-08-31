@@ -1,12 +1,12 @@
 # Strategy Lab 统一策略实验平台系统设计
 
-- **状态**：目标设计；Phase 1 源码已实现，待自然运行取证；Phase 2～4 尚未实现
+- **状态**：Phase 2 本地实现完成；Phase 3～4 尚未实现；远端自然 Tick 门槛待验收
 - **日期**：2026-08-30
 - **产品依据**：[Strategy Lab PRD](STRATEGY_LAB_EXPERIMENT_PLATFORM_PRD.md)
 - **首个 Recipe**：`sell_put_option_position_concentration`
 
-本文定义首条可行产品链路的技术边界、函数归属和代码处理方式。当前 `top1-loop`、旧
-`ExperimentStore` 和 recorder 是待删除的遗留实现，不是本文要求兼容的已发布产品。
+本文定义首条可行产品链路的技术边界、函数归属和代码处理方式。旧 Top1 loop、多代
+ExperimentStore 和 recorder 产品壳已删除，不是本文要求兼容的已发布产品。
 
 ## 1. 设计目标
 
@@ -87,7 +87,7 @@ src/application/performance/
   account_fee_plan.py  # 从旧 capability probe 迁出的通用严格 fee-plan loader
 
 src/interfaces/cli/
-  strategy_lab.py
+  strategy_lab_ops.py
 ```
 
 当前不建立每个 Recipe 子目录、插件接口、抽象 repository 层或 DSL。第二个 Recipe 真正出现，
@@ -99,7 +99,7 @@ CLI 和将来的 MCP 只能调用以下应用函数：
 
 | 函数 | 输入 | 输出 | 是否写入 |
 |---|---|---|---|
-| `resolve_strategy_lab_runtime_context(profile, market)` | 受控 profile、market | runtime / artifact / config、limiter、Tick busy binding | 否 |
+| `resolve_strategy_lab_runtime_context(profile, market)` | 受控 profile、market | runtime / artifact / Store / config、limiter、Tick busy binding | 否 |
 | `resolve_strategy_lab_context(profile)` | 受控 profile | runtime / artifact / Store、HK/lx config、OpenD、limiter、Tick schedule binding | 否 |
 | `list_recipes()` | context | Recipe、参数、readiness | 否 |
 | `preview_experiment(request)` | hypothesis、Recipe、参数、market、account | 完整 spec、readiness、`spec_sha256` | 否 |
@@ -115,6 +115,8 @@ CLI 和将来的 MCP 只能调用以下应用函数：
 约束：
 
 - `preview_experiment()` 不创建数据库行；
+- `spec_sha256` 是 `spec` 的 sibling envelope hash，不写入 `spec` 自身；preview、Store 和 Receipt 使用
+  同一个 `canonical_sha256(spec)`；
 - 两次确认都用原 request 重新生成当前 preview；只有 `available` 且 hash 与用户确认值相同才写入，
   不能接受调用方回传的 spec；
 - `create_experiment()` 在 `BEGIN IMMEDIATE` 内拒绝全局第二个未终态实验；
@@ -126,11 +128,15 @@ CLI 和将来的 MCP 只能调用以下应用函数：
 - `list_recipes()`、两种 preview、`get_experiment_status()` 和 `read_receipt()` 的 provider 调用数必须为
   0；只有显式 history-K readiness refresh 和 advance 可以调用 OpenD；
 - `get_experiment_status()` 和 `read_receipt()` 不请求 OpenD、不刷新事实、不写状态；
+- `get_experiment_status()` 和 `read_receipt()` 只解析 runtime / artifact / Store authority，不要求当前账户、
+  ledger 或 OpenD config 仍可用；status 返回分类进度、静态 blocker 和唯一 next action，provider/Tick 的
+  瞬时准入只在显式 execute 响应中报告且不持久化；status 只读核对当前 evaluator，mismatch 时保留
+  durable 计数但不再用当前代码解释冻结 spec；
 - 所有应用错误返回稳定 reason code，不把异常文本当产品合同。
 
 两个 context resolver 都是普通函数，不新增 context class，也不从 cwd、localhost 或隐式默认值猜运行环境。
-共享 runtime resolver 只读取 runtime root、artifact root、指定 market config、limiter root 和 Tick busy
-binding，Research owner 可独立使用；产品 resolver 在其上增加 Store、account、OpenD endpoint 和 schedule
+共享 runtime resolver 只读取 runtime root、artifact root、Store path、指定 market config、limiter root 和
+Tick busy binding，Research owner 和历史只读入口可独立使用；产品 resolver 在其上增加 account、OpenD endpoint 和 schedule
 约束。共享 resolver 不读取旧 `strategy_lab_top1` profile。
 
 ## 5. Recipe 和评价合同
@@ -280,15 +286,21 @@ requested instrument key / code 的 canonical hash，fact id 继续由现有 can
 
 `collect_research_fill_evidence()`：
 
-1. 调用现有 `FutuGateway.request_history_kline()` 获取具体期权合约 1 分钟 K，并携带返回的
+1. 先冻结 `recommendation_available_at_utc`：取正式点 capture、decision、opening seal、候选最大
+   observed time 和 scheduled target 中最晚的合法 UTC；查询从其后的下一根完整分钟开始；
+2. 调用现有 `FutuGateway.request_history_kline()` 获取具体期权合约 1 分钟 K，并携带返回的
    `page_req_key` 逐页请求直到为空；所有页都通过低优先级零等待 limiter；
-2. 规范化后要求 bar 严格有序、时间唯一且位于冻结查询边界内；“完整”表示请求参数绑定完整查询
-   范围、所有分页成功且最终 `page_req_key` 为空，不要求零成交的每个墙钟分钟都存在 bar；
-3. 首根满足 `high >= sell_limit + price_tick` 且 `volume > 0` 的 bar 为
+3. 规范化后要求全部返回 bar 严格有序且时间唯一；早于冻结起点的同日 bar 仅用于校验 provider 顺序，
+   不参与成交判断，晚于冻结终点的 bar 失败；“完整”表示请求参数绑定完整查询范围、所有分页成功且
+   最终 `page_req_key` 为空，不要求零成交的每个墙钟分钟都存在 bar；
+4. 首根满足 `high >= sell_limit + price_tick` 且 `volume > 0` 的 bar 为
    `simulated_fill`，成交价记为 `sell_limit`；
-4. 完整覆盖但未满足为 `no_fill`；缺口、重复、时区不明或 provider 不支持为
+5. 完整覆盖但未满足为 `no_fill`；缺口、重复、时区不明或 provider 不支持为
    `not_evaluable`；
-5. 保存规范化 bars 的 artifact ref/hash，Store 只保存判定和引用。
+6. query 与 artifact 同时绑定冻结的 OpenD provider/endpoint/source authority、
+   `evaluator_behavior_sha256`、完整 query、provider 观测时间、producer source commit 和内容 hash；不同
+   source authority 或 evaluator behavior 不得复用 artifact；provider 成功后先幂等记录 producer commit，
+   再发布 artifact，绑定既有 artifact 时也把其 producer commit 写入 Store 审计。Store 只保存判定和引用。
 
 不得用日 K 判断成交，也不得把模拟成交描述为真实成交。
 
@@ -345,7 +357,8 @@ binding。实时 snapshot 的 Bid、raw Bid Volume 或 source time 缺失 / 非�
 - 使用真实合约到期日和标的未复权日 K 收盘；
 - 使用开仓、到期时点已绑定的 `FXRateFact`；
 - 开仓费用使用 formal point 已封存结果；终端费用使用严格 account fee-plan fact
-  (`commission_free`、`platform_fee`、`fee_plan_ref`) 及其内容 hash，并复用现有期权费用计算；
+  (`commission_free`、`platform_fee`、`fee_plan_ref`) 及其内容 hash，并复用现有期权费用计算；Sell Put
+  指派产生的股票结算费用以 Strike 为成交价，不使用到期收盘价；
 - 生成规范化 outcome artifact 和 hash；
 - 未到期为 `pending_outcome`，可恢复缺失为 `blocked`，冻结窗口不可恢复缺失为
   `not_evaluable`。
@@ -390,7 +403,9 @@ MVP 不抓期权逐笔、不模拟提前平仓，也不计算指派后的持股�
 | `list_observations()` | 按 point / arm / kind 读取 |
 | `attach_receipt()` | 仅在不可变 receipt 已 readback 验证后绑定 ref/hash |
 
-复用 `connect_private_sqlite()`、`secure_sqlite_artifacts()` 和 SQLite `BEGIN IMMEDIATE`。不再使用
+写路径复用 `connect_private_sqlite()`、`secure_sqlite_artifacts()` 和 SQLite `BEGIN IMMEDIATE`；
+`get_active_experiment()`、`get_experiment()`、`list_observations()` 使用严格 `mode=ro` / `query_only`
+连接，只校验 Store 是私有普通文件，不创建文件、不 chmod、不修复 sidecar。不再使用
 `strategy_lab_schema`、`schema_state()`、`migrate()`、generation、capability、corpus、feature 或
 Top1 专用表。
 
@@ -430,21 +445,23 @@ MVP manifest 固定覆盖以下文件，每项只保存路径和文件 SHA-256�
 - 待新增：`src/application/strategy_lab/recipe.py`
 - 待新增：`src/application/strategy_lab/comparison.py`
 - 待新增：`src/application/strategy_lab/evidence.py`
+- 待新增：`src/application/strategy_lab/readiness.py`
 - 待新增：`src/application/strategy_lab/service.py`
 - 待新增：`src/application/strategy_lab/receipts.py`
+- 全量替换：`src/infrastructure/strategy_lab/experiment_store.py`
 - 现有：`domain/domain/engine/candidate_engine.py`
 - 现有：`domain/domain/short_vol_assessment.py`
+- 现有：`domain/domain/option_lifecycle.py`
 - 现有：`domain/domain/fee_calc.py`
 - 现有：`domain/domain/performance/models.py`
 - 待新增：`src/application/performance/account_fee_plan.py`
-- 现有：`src/application/performance/evidence_collection.py`
+- 现有：`src/infrastructure/performance_evidence_sqlite.py`
 - 现有：`src/application/opend_market_snapshot_fetching.py`
 - 现有：`src/infrastructure/futu_gateway.py`
 - 现有：`src/application/opening_candidate_snapshot.py`
 - 现有：`src/application/prepared_option_positions_context.py`
 - 现有：`src/application/recommendation_point.py`
 - 现有：`src/application/research/formal_corpus.py`
-- 全量替换：`src/infrastructure/strategy_lab/experiment_store.py`
 
 固定参数和公式输入由 canonical spec 覆盖；timer unit、冻结 schedule 和 account config 由独立 binding
 hash 覆盖。新增实际执行 owner 时必须先更新固定清单和设计，不能运行时递归发现依赖、生成 AST 图或
@@ -515,8 +532,8 @@ MVP 保持 `blocked`；不在本设计中预建第二个 OpenD endpoint。
 |---|---|
 | `src/interfaces/cli/main.py` | 注册根级 `strategy-lab` 命令 |
 | `src/interfaces/cli/research.py` | 删除旧 `research strategy-lab` 路由；增加 Research owner 的 `corpus-calendar refresh` 运维入口 |
-| `src/application/service_deploy.py` | 删除 recorder/Top1 units；最小扩展现有 `_systemd_timer()` 支持重复 `OnCalendar` 和显式 accuracy/persistent，生成唯一 Strategy Lab advance unit |
-| `src/interfaces/cli/service_ops.py` | 用最小 Strategy Lab 开关替换 recorder/Top1 参数 |
+| `src/application/service_deploy.py` | Slice 1 删除 recorder/Top1 units；Phase 3 再最小扩展现有 `_systemd_timer()` 以生成唯一 Strategy Lab advance unit |
+| `src/interfaces/cli/service_ops.py` | Slice 1 删除 recorder/Top1 参数；Phase 3 再增加唯一 advance 开关 |
 | `src/application/tick_cron.py` | 只暴露非持有式 busy / schedule 探针；不改变 Tick 自己的 lock / `SKIP_LOCKED` 行为 |
 | `src/application/opend_call_coordinator.py` | 在现有 limiter 上增加最小 `try_low_priority_opend_call()`，零等待且保留生产容量 |
 | `src/application/tick_account_execution.py` | 取消 Strategy Lab 专用 `mark_evidence_accounts` 整仓刷新；不增加 Tick provider 调用 |
@@ -533,41 +550,38 @@ MVP 保持 `blocked`；不在本设计中预建第二个 OpenD endpoint。
 
 | 文件 | 处理 |
 |---|---|
-| 拟新增：`src/application/strategy_lab/contracts.py` | 最小 spec、结果和状态合同 |
-| 拟新增：`src/application/strategy_lab/recipe.py` | 目录与首个集中度 Recipe |
-| 拟新增：`src/application/strategy_lab/evidence.py` | 按需证据读取与规范化 |
-| 拟新增：`src/application/strategy_lab/comparison.py` | 可复用单推荐替换评价 |
-| 拟新增：`src/application/strategy_lab/service.py` | 唯一应用编排 owner |
-| 拟新增：`src/application/strategy_lab/receipts.py` | 两个不可变回执 builder |
-| 拟新增：`src/application/performance/account_fee_plan.py` | 从旧 capability probe 迁出的严格 account fee-plan fact loader |
-| `src/infrastructure/strategy_lab/experiment_store.py` | 全量替换为三表 Store |
-| 拟新增：`src/interfaces/cli/strategy_lab.py` | MVP CLI 适配 |
+| `src/application/strategy_lab/contracts.py` | 最小状态、canonical hash、冻结确认和研究结果合同 |
+| `src/application/strategy_lab/recipe.py` | 首个集中度 Recipe、20 日 preview 和标准结果投影 |
+| `src/application/strategy_lab/evidence.py` | source-bound 历史 K / 到期证据查询、获取、artifact 发布与读取 |
+| `src/application/strategy_lab/comparison.py` | 可复用单推荐替换评价与唯一 leader 选择 |
+| `src/application/strategy_lab/service.py` | 唯一应用编排 owner；完成 preview、确认、研究执行和状态读取 |
+| `src/application/strategy_lab/receipts.py` | Research Receipt 的不可变发布与 Store-bound 公共读取；Final Receipt 留待 Phase 4 |
+| `src/application/performance/account_fee_plan.py` | Phase 1 已迁出的严格 account fee-plan fact loader |
+| `src/infrastructure/strategy_lab/experiment_store.py` | Slice 1 已全量替换为三表 Store |
+| `src/interfaces/cli/strategy_lab_ops.py` | 根级 CLI 适配；暴露 recipes、preview、confirm、status、research execute、receipt 和 readiness |
 
 ### 9.4 删除
 
 | 删除目标 | 原因 |
 |---|---|
-| `src/application/strategy_lab/top1/` 整个目录 | 先迁出 corpus calendar 写入口和 account fee-plan loader，再删除错误产品子平台 |
-| `src/application/strategy_lab/update.py` | recorder 兼容入口不是 MVP 产品能力；Shadow Replay 已有自己的入口 |
-| `src/interfaces/cli/strategy_lab_top1.py` | 删除 `top1-loop`、calendar/capability probe 和 profile 壳 |
-| 旧 ExperimentStore 内容 | 13 表、四代迁移、feature/generation/corpus 专用状态无保留价值 |
-| recorder build/sample/settle service 与 timer | 三套维护循环不再属于 Strategy Lab |
-| Top1 advance service 与 timer | 由唯一 Strategy Lab advance unit 替换 |
-| 只覆盖上述旧入口、迁移和状态表的测试/fixture | 不保留未发布兼容合同 |
+| 旧 Strategy Lab Top1 子目录 | Slice 1 已删除；calendar 和 fee-plan owner 已先迁出 |
+| 旧 Strategy Lab update 包装 | Slice 1 已删除；Shadow Replay 保留自有入口 |
+| 旧 nested Top1 CLI 文件 | Slice 1 已删除；根级 `strategy_lab_ops.py` 是唯一适配 |
+| 旧 ExperimentStore 内容 | Slice 1 已替换；13 表、四代迁移和专用状态不保留 |
+| recorder 与 Top1 service/timer | Slice 1 已删除；当前不生成 Strategy Lab timer |
+| 只覆盖上述旧入口、迁移和状态表的测试/fixture | Slice 1 已随 owner 删除 |
 
-删除以引用清单为准：先用 `rg` 证明没有生产消费者，再删定义和死测试。不得顺带删除 Research
-Archive、Shadow Replay、required-data 或 Candidate Engine。
-
-旧 `strategy_lab_top1.py` 是当前唯一 calendar refresh 写入口；`top1/capability_receipts.py` 持有严格
-fee-plan 读取逻辑。两项在新 owner 的 focused tests 通过前不得随目录删除。它们是有效能力，不是兼容
-包袱。
+删除以引用清单为准；Research Archive、Shadow Replay、required-data 和 Candidate Engine
+继续保留。calendar refresh 和 fee-plan 读取已分别迁到 Formal Corpus 与 performance owner，
+不依赖已删除的旧产品壳。
 
 ## 10. Receipt 与 artifact
 
 `receipts.py` 使用现有 canonical JSON、`exclusive_private_file_lock()` 和私有原子写入函数实现
 write-once-or-verify。路径只由 experiment id 和 receipt kind 决定：目标不存在时原子写入、fsync、
 readback 并校验 SHA-256；目标已存在且字节相同则复用；不同则返回 `receipt_immutable_conflict`。
-Store 只能在 artifact 已 durable 并通过 readback 后绑定 ref/hash。
+Store 只能在 artifact 已 durable 并通过 readback 后绑定 ref/hash。公共读取反向校验 Store 的 ref/hash/state；
+只有文件而没有 Store 绑定的孤立 artifact 不构成正式回执。
 
 Research Receipt 包含 spec/hash、source commit、behavior hash/manifest、20 日固定窗口、每个变体完整性与聚合、leader 和
 `provisional` 声明。Final Receipt 包含两次确认、10 日固定窗口、逐点结果引用、按日等权聚合和
@@ -635,8 +649,8 @@ OpenD 的 HK 期权分钟 K 权限、过期合约覆盖、零成交 bar 行为�
 ### Phase 1：先保住 owner 和生产优先级
 
 - 迁出 `corpus-calendar refresh`、严格 account fee-plan loader 和共享
-  `resolve_strategy_lab_runtime_context(profile, market)`；Research calendar 不依赖旧 Top1 profile，旧
-  `resolve_strategy_lab_context(profile)` 仅在尚未删除的定向 PoC 壳内使用；
+  `resolve_strategy_lab_runtime_context(profile, market)`；Research calendar 不依赖旧 Top1 profile，产品
+  `resolve_strategy_lab_context(profile)` 已切换到普通 HK / `lx` profile；
 - 在现有 coordinator 增加低优先级零等待准入，先用 fake provider 覆盖生产容量保留、busy / guard、零等待
   和双向并发；
 - 再实现显式 targeted history-K readiness refresh，先通过 fake provider 测试，再完成权限 / quota / 过期
@@ -644,8 +658,8 @@ OpenD 的 HK 期权分钟 K 权限、过期合约覆盖、零成交 bar 行为�
 - 建立 Evidence Source Gate：复用现有 mark 规范化，先实现 recommendation point 的新 binding 和完整
   fail-closed / 零 provider 测试，再移除 Tick 的 Strategy Lab 专用整仓 quote refresh，并证明 Tick OpenD
   调用数、snapshot 批次数和 deadline 不变差；
-- 验收：calendar / fee-plan / context owner 已保留，Tick 不因实验持锁或额外调用受影响。任一门槛不能
-  证明时停止，不删除旧 owner，也不进入 Phase 2。
+- 验收：calendar / fee-plan / context owner 已保留；本地 Phase 2 可继续，但自然 Tick 隔离证据仍是
+  合并或交付门槛。
 
 ### Phase 2：替换产品壳并完成 20 日研究
 
@@ -653,6 +667,8 @@ OpenD 的 HK 期权分钟 K 权限、过期合约覆盖、零成交 bar 行为�
 - 实现成熟 20 日选择、集中度 Recipe、完整分页分钟 K、标准结果、比较器和 write-once Research Receipt；
 - 旧 calendar / fee-plan / context 引用切换完成后，删除旧 CLI、Top1 目录、recorder 入口、旧服务定义和
   只服务旧合同的测试；
+- Phase 2 本地实现已完成：三表 Store/context 切换、旧产品壳删除、Recipe、preview、确认、研究执行、
+  source-bound evidence、比较器和 Research Receipt 均已落地；
 - 验收：旧入口不存在；固定 20 日 fixture 产生唯一 leader 或确定性无 leader；全局第二个活动实验被
   拒绝；不迁移旧数据。
 

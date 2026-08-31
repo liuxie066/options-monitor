@@ -514,7 +514,11 @@ def test_release_preflight_non_full_mode_keeps_focused_tests(tmp_path: Path) -> 
         (
             "-m pytest tests/test_research.py tests/test_research_archive.py "
             "tests/test_shadow_replay.py tests/test_shadow_replay_candidate_impact.py "
-            "tests/test_strategy_lab_update.py tests/test_strategy_lab_top1_architecture.py"
+            "tests/test_strategy_lab_store.py tests/test_strategy_lab_phase1_owners.py "
+            "tests/test_strategy_lab_history_k_readiness.py tests/test_strategy_lab_recipe.py "
+            "tests/test_strategy_lab_comparison.py tests/test_strategy_lab_evidence.py "
+            "tests/test_strategy_lab_receipts.py tests/test_strategy_lab_research.py "
+            "tests/test_strategy_lab_cli.py"
         ),
         (
             "-m pytest tests/test_config_yaml.py tests/test_config_template_inheritance.py "
@@ -523,6 +527,34 @@ def test_release_preflight_non_full_mode_keeps_focused_tests(tmp_path: Path) -> 
     ]
     assert commands.count("npm ci --omit=dev --ignore-scripts --prefix agent-runtime") == 1
     assert any("copilot eval --fixture current_option_exposure_model_ready" in command for command in commands)
+
+
+def test_release_workflow_strategy_lab_test_paths_exist_and_match_preflight() -> None:
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / ".github/workflows/_release-reusable.yml").read_text(encoding="utf-8")
+    preflight = (root / "scripts/release_preflight.sh").read_text(encoding="utf-8")
+    expected = {
+        "tests/test_strategy_lab_store.py",
+        "tests/test_strategy_lab_phase1_owners.py",
+        "tests/test_strategy_lab_history_k_readiness.py",
+        "tests/test_strategy_lab_recipe.py",
+        "tests/test_strategy_lab_comparison.py",
+        "tests/test_strategy_lab_evidence.py",
+        "tests/test_strategy_lab_receipts.py",
+        "tests/test_strategy_lab_research.py",
+        "tests/test_strategy_lab_cli.py",
+    }
+    workflow_paths = {
+        token for token in workflow.split() if token.startswith("tests/test_strategy_lab_")
+    }
+    preflight_paths = {
+        token.rstrip("\\")
+        for token in preflight.split()
+        if token.startswith("tests/test_strategy_lab_")
+    }
+    assert workflow_paths == expected
+    assert preflight_paths == expected
+    assert all((root / path).is_file() for path in expected)
 
 
 def test_release_preflight_focused_mode_is_independent_of_caller_cwd(tmp_path: Path) -> None:

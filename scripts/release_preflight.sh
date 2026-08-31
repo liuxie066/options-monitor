@@ -189,8 +189,15 @@ if [[ "${FOCUSED}" -eq 1 && "${FULL}" -eq 0 ]]; then
       tests/test_research_archive.py \
       tests/test_shadow_replay.py \
       tests/test_shadow_replay_candidate_impact.py \
-      tests/test_strategy_lab_update.py \
-      tests/test_strategy_lab_top1_architecture.py
+      tests/test_strategy_lab_store.py \
+      tests/test_strategy_lab_phase1_owners.py \
+      tests/test_strategy_lab_history_k_readiness.py \
+      tests/test_strategy_lab_recipe.py \
+      tests/test_strategy_lab_comparison.py \
+      tests/test_strategy_lab_evidence.py \
+      tests/test_strategy_lab_receipts.py \
+      tests/test_strategy_lab_research.py \
+      tests/test_strategy_lab_cli.py
   run_step "configuration focused tests" \
     "${PYTHON_BIN}" -m pytest \
       tests/test_config_yaml.py \

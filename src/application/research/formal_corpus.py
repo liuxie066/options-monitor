@@ -259,16 +259,13 @@ def _relative_ref(value: Any, label: str) -> str:
 
 
 def _calendar_pointer_ref(market: str) -> str:
-    return (
-        "strategy_lab/top1/capabilities/market-calendar/"
-        f"{market.lower()}/current.json"
-    )
+    return f"capabilities/market-calendar/{market.lower()}/current.json"
 
 
 def _calendar_snapshot_ref(market: str, content_sha256: str) -> str:
     return (
-        "strategy_lab/top1/capabilities/market-calendar/"
-        f"{market.lower()}/snapshots/{content_sha256}.json"
+        f"capabilities/market-calendar/{market.lower()}/snapshots/"
+        f"{content_sha256}.json"
     )
 
 
@@ -378,6 +375,41 @@ def read_bound_market_calendar_snapshot(
         "snapshot_ref": ref,
         "snapshot_content_sha256": content_hash,
         "snapshot_file_sha256": file_hash,
+    }
+
+
+def read_expectation_bound_market_calendar_snapshot(
+    artifact_root: str | Path,
+    *,
+    market: str,
+    market_calendar_version: str,
+    market_calendar_sha256: str,
+) -> dict[str, Any]:
+    """Read the immutable calendar snapshot named by a sealed expectation."""
+
+    market = _calendar_market(market)
+    try:
+        version = _text(market_calendar_version, "market_calendar_version")
+        content_hash = _hash(market_calendar_sha256, "market_calendar_sha256")
+    except FormalCorpusError as exc:
+        raise FormalCorpusError("market_calendar_binding_unavailable", str(exc)) from exc
+    assert content_hash is not None
+    ref = _calendar_snapshot_ref(market, content_hash)
+    payload, content = _read_canonical_calendar_artifact(artifact_root, ref)
+    item = _validate_calendar_snapshot(payload, expected_market=market)
+    if (
+        item["content_sha256"] != content_hash
+        or item["market_calendar_version"] != version
+    ):
+        _fail(
+            "market_calendar_binding_unavailable",
+            "expectation-bound market calendar identity does not match",
+        )
+    return {
+        **item,
+        "snapshot_ref": ref,
+        "snapshot_content_sha256": content_hash,
+        "snapshot_file_sha256": sha256_bytes(content),
     }
 
 
@@ -1990,6 +2022,7 @@ __all__ = [
     "load_formal_point",
     "load_formal_expectation",
     "read_bound_market_calendar_snapshot",
+    "read_expectation_bound_market_calendar_snapshot",
     "read_market_calendar_binding",
     "refresh_market_calendar_binding",
     "seal_formal_day_expectation",

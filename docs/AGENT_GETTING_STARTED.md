@@ -114,12 +114,11 @@ healthcheck 会额外给出本地 `ledger_store` 和 `option_positions_bootstrap
 ./om research collect --config-key us --scope full --output both --no-write-outputs
 ./om research shadow-replay status --min-sample 30
 ./om research shadow-replay candidate-impact-report --params <params.json> --market us --start-date <YYYY-MM-DD> --account lx --min-sample 30
-./om research strategy-lab update --latest
-./om research strategy-lab update --latest --build-dataset --write
-./om research strategy-lab top1-loop readiness --market hk --account lx --profile-path <runtime>/service.profile.json
+./om research shadow-replay build --run-id <run-id>
+./om research shadow-replay run-data-plan
 ```
 
-Research 不属于 `./om-agent` manifest，也不能修改 runtime config、交易状态或通知，但它不是统一的“零写入”命令组：`collect --no-write-outputs` 和 status 等是只读；dataset build、mark/settle 和带输出路径的 report 会写本地 research artifacts。执行前应查看具体子命令的 `--help` 和输出参数。`strategy-lab update` 仅保留为 recorder maintenance facade，默认 dry-run；只有显式 `--build-dataset --write` 才从 latest scanned run 构建本地 replay dataset。探索性分析由 Shadow Replay 直接负责；formal HK / `lx` Sell Put `top1-loop` 执行 20 日研究、第二次确认和 10 日隐藏验证。当前边界见 [Strategy Lab Current Contract](STRATEGY_LAB_DESIGN.md)。线上调度系统的状态需要通过 `scheduler_evidence` 或 `--scheduler-evidence-json` 传入。
+Research 不属于 `./om-agent` manifest，也不能修改 runtime config、交易状态或通知，但它不是统一的“零写入”命令组：`collect --no-write-outputs` 和 status 等是只读；Shadow Replay dataset build、mark/settle 和带输出路径的 report 会写本地 research artifacts。执行前应查看具体子命令的 `--help` 和输出参数。Strategy Lab 当前暴露根级 Recipe、preview、确认、状态、显式 `research execute`、Research Receipt 和 readiness；`recipes`、`preview`、`status`、`receipt` 只读。20 日研究执行每次最多取一个 provider 逻辑证据单元，10 日隐藏验证尚未实现，边界见 [Strategy Lab 当前实现清单](STRATEGY_LAB_DESIGN.md)。线上调度系统的状态需要通过 `scheduler_evidence` 或 `--scheduler-evidence-json` 传入。
 
 ---
 
