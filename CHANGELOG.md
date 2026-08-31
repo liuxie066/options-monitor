@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Bug Fixes
+- Reduced each portfolio fetch to one CNH OpenD funds refresh and isolated accounts with unavailable prepared portfolio context before shared prefetch, while preserving healthy peer scans and scheduled failure alerts.
+
 ## 3.0.2 - 2026-08-31
 
 ### Improvements
