@@ -7,15 +7,15 @@ import re
 import shlex
 import subprocess
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from json import JSONDecodeError
 from pathlib import Path
 from typing import Any, Callable, Literal, cast
+from zoneinfo import ZoneInfo
 
 from src.application.account_config import (
-    AccountRuntimePlan,
     accounts_from_config,
     build_account_runtime_plan,
-    normalize_account_label,
 )
 from src.application.config_yaml import (
     load_yaml_config_file,
@@ -34,6 +34,7 @@ from src.application.secret_store import (
 )
 from src.application.settings import build_effective_env
 from src.application.payload_helpers import first_text as _first_text
+from src.application.strategy_lab.contracts import build_strategy_lab_timer_binding
 
 
 ServiceTarget = Literal["systemd", "launchd"]
@@ -57,15 +58,6 @@ PROJECTION_VERIFY_SYSTEMD_CALENDAR = "*-*-* 09:30:00 Asia/Shanghai"
 PROJECTION_VERIFY_LAUNCHD_CALENDAR = {"Hour": 9, "Minute": 30}
 AUTO_UPGRADE_SYSTEMD_CALENDAR = "*-*-* 06:10:00 Asia/Shanghai"
 AUTO_UPGRADE_LAUNCHD_CALENDAR = {"Hour": 6, "Minute": 10}
-STRATEGY_LAB_BUILD_INTERVAL_SYSTEMD = "6h"
-STRATEGY_LAB_SAMPLE_INTERVAL_SYSTEMD = "2h"
-STRATEGY_LAB_SETTLE_SYSTEMD_CALENDAR = "*-*-* 07:20:00 Asia/Shanghai"
-STRATEGY_LAB_BUILD_INTERVAL_SECONDS = 21600
-STRATEGY_LAB_SAMPLE_INTERVAL_SECONDS = 7200
-STRATEGY_LAB_SETTLE_LAUNCHD_CALENDAR = {"Hour": 7, "Minute": 20}
-DEFAULT_STRATEGY_LAB_RECORDER_SOURCE = "opend"
-DEFAULT_STRATEGY_LAB_RECORDER_MAX_DATASETS = 5
-DEFAULT_STRATEGY_LAB_RECORDER_MARK_STALE_HOURS = 2
 DEFAULT_OPEND_EXECUTABLE = "FutuOpenD"
 QUALITY_HTTP_PORT = 8792
 QUALITY_REFRESH_INTERVAL_SYSTEMD = "15min"
@@ -193,13 +185,6 @@ def normalize_accounts(values: list[str] | tuple[str, ...] | None) -> list[str]:
         if account and account not in out:
             out.append(account)
     return out or list(DEFAULT_ACCOUNTS)
-
-
-def normalize_strategy_lab_recorder_source(value: str | None) -> str:
-    source = str(value or DEFAULT_STRATEGY_LAB_RECORDER_SOURCE).strip().lower()
-    if source not in {"local", "opend"}:
-        raise ValueError("strategy_lab_recorder_source must be local or opend")
-    return source
 
 
 def _resolve_feishu_ws_config_key(
@@ -500,254 +485,6 @@ def _resolve_service_account_scopes(
     return selected, by_market
 
 
-def _configured_account_names(config: dict[str, Any]) -> set[str]:
-    raw_accounts = config.get("accounts")
-    if isinstance(raw_accounts, dict):
-        values = raw_accounts
-    elif isinstance(raw_accounts, (list, tuple, set)):
-        values = raw_accounts
-    elif isinstance(raw_accounts, str):
-        values = [raw_accounts]
-    else:
-        values = []
-    return {str(item or "").strip().lower() for item in values if str(item or "").strip()}
-
-
-def _strategy_lab_recorder_account_plans(
-    *,
-    configs: dict[str, dict[str, Any]],
-    market_values: list[str],
-    account_values: list[str],
-) -> tuple[
-    dict[str, set[str]],
-    dict[str, list[AccountRuntimePlan]],
-    list[str],
-]:
-    configured_accounts = {
-        market: _configured_account_names(config)
-        for market, config in configs.items()
-    }
-    plans_by_account: dict[str, list[AccountRuntimePlan]] = {}
-    futu_accounts: list[str] = []
-    for account in account_values:
-        market_plans = [
-            build_account_runtime_plan(configs[market], account=account)
-            for market in market_values
-        ]
-        plans_by_account[account] = market_plans
-        account_types = {plan.account_type for plan in market_plans}
-        configured_in_all_markets = all(
-            account in configured_accounts[market]
-            for market in market_values
-        )
-        if configured_in_all_markets and account_types == {"futu"}:
-            futu_accounts.append(account)
-    return configured_accounts, plans_by_account, futu_accounts
-
-
-def _strategy_lab_recorder_endpoint_for_account(
-    *,
-    selected_account: str,
-    market_values: list[str],
-    configured_accounts: dict[str, set[str]],
-    plans_by_account: dict[str, list[AccountRuntimePlan]],
-) -> tuple[dict[str, Any], list[AccountRuntimePlan]]:
-    selected_plans = plans_by_account.get(selected_account) or []
-    missing_markets = [
-        market
-        for market in market_values
-        if selected_account not in configured_accounts[market]
-    ]
-    if missing_markets:
-        raise ValueError(
-            f"strategy_lab_recorder_account is not configured for markets {','.join(missing_markets)}: "
-            f"{selected_account}"
-        )
-    selected_account_types = {plan.account_type for plan in selected_plans}
-    if len(selected_account_types) != 1:
-        raise ValueError(f"strategy_lab_recorder account type differs across markets: {selected_account}")
-    if not selected_plans or any(plan.account_type != "futu" for plan in selected_plans):
-        raise ValueError(f"strategy_lab_recorder_account must be a selected Futu account: {selected_account}")
-
-    hosts = [str(plan.futu_host or "").strip() for plan in selected_plans]
-    ports: list[int] = []
-    if any(not host for host in hosts):
-        raise ValueError(f"strategy_lab_recorder OpenD host is missing: {selected_account}")
-    for plan in selected_plans:
-        port = plan.futu_port
-        if port is None or port <= 0 or port > 65535:
-            raise ValueError(f"strategy_lab_recorder OpenD port is invalid: {selected_account}")
-        ports.append(port)
-    if len({host.lower() for host in hosts}) != 1 or len(set(ports)) != 1:
-        raise ValueError(f"strategy_lab_recorder OpenD endpoint differs across markets: {selected_account}")
-
-    return {
-        "account": selected_account,
-        "host": hosts[0],
-        "port": ports[0],
-    }, selected_plans
-
-
-def resolve_strategy_lab_recorder_endpoint_matches(
-    *,
-    repo_root: str | Path,
-    runtime_root: str | Path | None,
-    accounts: list[str] | tuple[str, ...] | None,
-    markets: list[str] | tuple[str, ...] | None,
-    config_paths: dict[str, str | Path] | None,
-    config_yaml: str | Path | None,
-    include_auto_upgrade: bool,
-    host: str,
-    port: int,
-) -> list[str]:
-    """Resolve selected Futu endpoint owners without rendering OpenD services."""
-
-    repo = _absolute_path_preserve_symlink(repo_root)
-    runtime = _absolute_path_preserve_symlink(runtime_root, base=repo) if runtime_root is not None else repo
-    account_values = normalize_accounts(accounts)
-    market_values = normalize_markets(markets)
-    config_default_root = runtime if include_auto_upgrade else None
-    config_by_market = {
-        market: _config_path_for_market(
-            market,
-            repo_root=repo,
-            runtime_root=config_default_root,
-            config_paths=config_paths,
-        )
-        for market in market_values
-    }
-    config_yaml_path = (
-        _absolute_path_preserve_symlink(config_yaml, base=repo)
-        if config_yaml is not None and str(config_yaml).strip()
-        else None
-    )
-    configs = _runtime_configs_by_market(
-        repo_root=repo,
-        config_yaml_path=config_yaml_path,
-        config_by_market=config_by_market,
-        market_values=market_values,
-    )
-    configured_accounts, plans_by_account, futu_accounts = _strategy_lab_recorder_account_plans(
-        configs=configs,
-        market_values=market_values,
-        account_values=account_values,
-    )
-    expected_host = str(host or "").strip().lower()
-    matches: list[str] = []
-    for account in futu_accounts:
-        endpoint, _selected_plans = _strategy_lab_recorder_endpoint_for_account(
-            selected_account=account,
-            market_values=market_values,
-            configured_accounts=configured_accounts,
-            plans_by_account=plans_by_account,
-        )
-        if str(endpoint["host"]).strip().lower() == expected_host and endpoint["port"] == port:
-            matches.append(account)
-    return sorted(set(matches))
-
-
-def _resolve_strategy_lab_recorder_binding(
-    *,
-    target: ServiceTarget,
-    include_strategy_lab_recorder: bool,
-    recorder_source: str,
-    recorder_account: str | None,
-    repo_root: Path,
-    config_yaml_path: Path | None,
-    config_by_market: dict[str, Path],
-    market_values: list[str],
-    account_values: list[str],
-    include_opend: bool,
-    explicit_opend_root: bool,
-    opend_service_plans: list[OpendServicePlan],
-) -> dict[str, Any] | None:
-    requested_account = str(recorder_account or "").strip().lower() or None
-    if not include_strategy_lab_recorder:
-        if requested_account is not None:
-            raise ValueError("strategy_lab_recorder_account requires include_strategy_lab_recorder")
-        return None
-    if recorder_source == "local":
-        if requested_account is not None:
-            raise ValueError("strategy_lab_recorder_account is not valid when strategy_lab_recorder_source=local")
-        return None
-
-    selected_accounts: list[str] = []
-    for raw_account in account_values:
-        account = str(raw_account or "").strip().lower()
-        if account and account not in selected_accounts:
-            selected_accounts.append(account)
-    if requested_account is not None and requested_account not in selected_accounts:
-        raise ValueError("strategy_lab_recorder_account must be included in accounts")
-
-    configs = _runtime_configs_by_market(
-        repo_root=repo_root,
-        config_yaml_path=config_yaml_path,
-        config_by_market=config_by_market,
-        market_values=market_values,
-    )
-    configured_accounts, plans_by_account, futu_accounts = _strategy_lab_recorder_account_plans(
-        configs=configs,
-        market_values=market_values,
-        account_values=selected_accounts,
-    )
-
-    if requested_account is None:
-        if not futu_accounts:
-            raise ValueError("strategy_lab_recorder_source=opend requires one selected Futu account")
-        if len(futu_accounts) != 1:
-            raise ValueError("strategy_lab_recorder_account is required when multiple Futu accounts are selected")
-        selected_account = futu_accounts[0]
-    else:
-        selected_account = requested_account
-
-    endpoint, selected_plans = _strategy_lab_recorder_endpoint_for_account(
-        selected_account=selected_account,
-        market_values=market_values,
-        configured_accounts=configured_accounts,
-        plans_by_account=plans_by_account,
-    )
-
-    if include_opend and not explicit_opend_root:
-        roots = [
-            _absolute_path_preserve_symlink(str(plan.futu_opend_root), base=repo_root)
-            if plan.futu_opend_root
-            else None
-            for plan in selected_plans
-        ]
-        if any(root is None for root in roots):
-            raise ValueError(f"strategy_lab_recorder OpenD root is missing: {selected_account}")
-        if len({str(root) for root in roots}) != 1:
-            raise ValueError(f"strategy_lab_recorder OpenD root differs across markets: {selected_account}")
-
-    service_name: str | None = None
-    if include_opend:
-        matching_plans = [
-            plan
-            for plan in opend_service_plans
-            if str(plan.account or "").strip().lower() == selected_account
-        ]
-        if len(matching_plans) == 1:
-            selected_service_plan = matching_plans[0]
-        elif (
-            len(opend_service_plans) == 1
-            and opend_service_plans[0].account is None
-            and len(futu_accounts) == 1
-        ):
-            selected_service_plan = opend_service_plans[0]
-        else:
-            raise ValueError(f"strategy_lab_recorder OpenD service is not uniquely mapped: {selected_account}")
-        service_name = (
-            selected_service_plan.systemd_service_name
-            if target == "systemd"
-            else selected_service_plan.launchd_label
-        )
-
-    return {
-        **endpoint,
-        **({"service_name": service_name} if service_name is not None else {}),
-    }
-
-
 def _config_path_for_market(
     market: str,
     *,
@@ -1006,19 +743,33 @@ def _dedupe_unit_dependencies(values: list[str]) -> list[str]:
     return out
 
 
-def _systemd_timer(*, description: str, unit_name: str, interval: str | None = None, calendar: str | None = None) -> str:
+def _systemd_timer(
+    *,
+    description: str,
+    unit_name: str,
+    interval: str | None = None,
+    calendar: str | list[str] | tuple[str, ...] | None = None,
+    accuracy_sec: str | None = None,
+    randomized_delay_sec: int | None = None,
+    persistent: bool = True,
+) -> str:
     timer_lines = [
         "[Unit]",
         f"Description={description}",
         "",
         "[Timer]",
     ]
-    if calendar:
-        timer_lines.append(f"OnCalendar={calendar}")
+    calendars = [calendar] if isinstance(calendar, str) else list(calendar or [])
+    if calendars:
+        timer_lines.extend(f"OnCalendar={value}" for value in calendars)
     else:
         timer_lines.extend(["OnBootSec=2min", f"OnUnitActiveSec={interval or '10min'}"])
+    if accuracy_sec is not None:
+        timer_lines.append(f"AccuracySec={accuracy_sec}")
+    if randomized_delay_sec is not None:
+        timer_lines.append(f"RandomizedDelaySec={int(randomized_delay_sec)}")
     timer_lines.extend([
-        "Persistent=true",
+        f"Persistent={'true' if persistent else 'false'}",
         f"Unit={unit_name}",
         "",
         "[Install]",
@@ -1034,6 +785,40 @@ def _systemd_tick_calendar(market: str) -> str | None:
     if market == "hk":
         return HK_TICK_SYSTEMD_CALENDAR
     return None
+
+
+def next_systemd_tick_target_utc(market: str, at_or_after_utc: datetime) -> datetime:
+    """Return the first canonical Tick target at or after one UTC instant."""
+
+    calendar = _systemd_tick_calendar(str(market or "").strip().lower())
+    if calendar is None or at_or_after_utc.tzinfo is None:
+        raise ValueError("Tick calendar request is invalid")
+    match = re.fullmatch(
+        r"Mon\.\.Fri \*-\*-\* (\d{2})\.\.(\d{2}):(\d{2})/(\d{2}):(\d{2}) (\S+)",
+        calendar,
+    )
+    if match is None:
+        raise ValueError("Tick systemd calendar is unsupported")
+    start_hour, end_hour, start_minute, minute_step, second = map(
+        int, match.groups()[:5]
+    )
+    if minute_step <= 0 or second not in range(60):
+        raise ValueError("Tick systemd calendar is invalid")
+    zone = ZoneInfo(match.group(6))
+    probe = at_or_after_utc.astimezone(timezone.utc)
+    local_day = probe.astimezone(zone).date()
+    for day_offset in range(8):
+        day = local_day + timedelta(days=day_offset)
+        if day.weekday() >= 5:
+            continue
+        for hour in range(start_hour, end_hour + 1):
+            for minute in range(start_minute, 60, minute_step):
+                candidate = datetime(
+                    day.year, day.month, day.day, hour, minute, second, tzinfo=zone
+                ).astimezone(timezone.utc)
+                if candidate >= probe:
+                    return candidate
+    raise ValueError("next Tick target is unavailable")
 
 
 def _launchd_plist(
@@ -1092,8 +877,6 @@ def build_service_profile(
     opend: dict[str, Any] | None = None,
     feishu_ws: dict[str, Any] | None = None,
     wechat_clawbot: dict[str, Any] | None = None,
-    strategy_lab_recorder: dict[str, Any] | None = None,
-    strategy_lab_top1: dict[str, Any] | None = None,
     quality_monitoring: dict[str, Any] | None = None,
     feishu_agent_credential: dict[str, Any] | None = None,
     secret_credentials: dict[str, Any] | None = None,
@@ -1170,10 +953,6 @@ def build_service_profile(
         profile["feishu_ws"] = dict(feishu_ws)
     if wechat_clawbot is not None:
         profile["wechat_clawbot"] = dict(wechat_clawbot)
-    if strategy_lab_recorder is not None:
-        profile["strategy_lab_recorder"] = dict(strategy_lab_recorder)
-    if strategy_lab_top1 is not None:
-        profile["strategy_lab_top1"] = dict(strategy_lab_top1)
     if quality_monitoring is not None:
         profile["quality_monitoring"] = dict(quality_monitoring)
     if feishu_agent_credential is not None:
@@ -1207,16 +986,8 @@ def render_service_bundle(
     wechat_clawbot_config_key: str | None = None,
     wechat_clawbot_label: str | None = None,
     wechat_clawbot_allowed_senders: str | None = None,
-    include_strategy_lab_recorder: bool = False,
-    strategy_lab_recorder_source: str | None = DEFAULT_STRATEGY_LAB_RECORDER_SOURCE,
-    strategy_lab_recorder_account: str | None = None,
-    strategy_lab_recorder_max_datasets: int = DEFAULT_STRATEGY_LAB_RECORDER_MAX_DATASETS,
-    strategy_lab_recorder_mark_stale_hours: int = DEFAULT_STRATEGY_LAB_RECORDER_MARK_STALE_HOURS,
-    include_strategy_lab_top1: bool = False,
-    strategy_lab_top1_account: str | None = None,
-    strategy_lab_top1_advance_interval_seconds: int | None = None,
-    strategy_lab_top1_timeout_start_sec: int | None = None,
     include_quality_monitoring: bool = False,
+    include_strategy_lab_advance: bool = False,
     include_feishu_agent_credential: bool = False,
     include_secret_credentials: bool = False,
     secret_credential_delivery: str | None = DEFAULT_SECRET_CREDENTIAL_DELIVERY,
@@ -1229,23 +1000,10 @@ def render_service_bundle(
 ) -> dict[str, Any]:
     target_key = normalize_target(target)
     secret_delivery = normalize_secret_credential_delivery(secret_credential_delivery)
-    if include_strategy_lab_top1 and target_key != "systemd":
-        raise ValueError("Strategy Lab Top1 service rendering is supported only for systemd")
-    if not include_strategy_lab_top1 and (
-        strategy_lab_top1_account is not None
-        or strategy_lab_top1_advance_interval_seconds is not None
-        or strategy_lab_top1_timeout_start_sec is not None
-    ):
-        raise ValueError("Strategy Lab Top1 settings require include_strategy_lab_top1")
-    if include_strategy_lab_top1 and (
-        type(strategy_lab_top1_advance_interval_seconds) is not int
-        or strategy_lab_top1_advance_interval_seconds <= 0
-        or type(strategy_lab_top1_timeout_start_sec) is not int
-        or strategy_lab_top1_timeout_start_sec <= 0
-    ):
-        raise ValueError("Strategy Lab Top1 interval and timeout must be explicit positive integers")
     if include_quality_monitoring and target_key != "systemd":
         raise ValueError("quality monitoring service rendering is currently supported only for systemd")
+    if include_strategy_lab_advance and target_key != "systemd":
+        raise ValueError("Strategy Lab advance service rendering is currently supported only for systemd")
     if include_feishu_agent_credential and target_key != "systemd":
         raise ValueError("Feishu Agent credential materialization is currently supported only for systemd")
     if include_secret_credentials and target_key != "systemd":
@@ -1295,11 +1053,6 @@ def render_service_bundle(
     opend_executable_value = str(opend_executable or DEFAULT_OPEND_EXECUTABLE).strip() or DEFAULT_OPEND_EXECUTABLE
     account_values = normalize_accounts(accounts)
     market_values = normalize_markets(markets)
-    if include_strategy_lab_top1 and env_file_path is None:
-        raise ValueError("Strategy Lab Top1 requires a non-empty service env file")
-    recorder_source = normalize_strategy_lab_recorder_source(strategy_lab_recorder_source)
-    recorder_max_datasets = max(1, int(strategy_lab_recorder_max_datasets))
-    recorder_mark_stale_hours = max(1, int(strategy_lab_recorder_mark_stale_hours))
     config_default_root = runtime if include_auto_upgrade else None
     config_by_market = {
         market: _config_path_for_market(
@@ -1322,18 +1075,6 @@ def render_service_bundle(
         market_values=market_values,
         accounts=accounts,
     )
-    top1_account: str | None = None
-    if include_strategy_lab_top1:
-        if strategy_lab_top1_account is None:
-            raise ValueError("Strategy Lab Top1 account must be explicit")
-        try:
-            top1_account = normalize_account_label(strategy_lab_top1_account)
-        except ValueError as exc:
-            raise ValueError(f"Strategy Lab Top1 account is invalid: {exc}") from exc
-        if "hk" not in market_values or top1_account not in accounts_by_market.get("hk", []):
-            raise ValueError(
-                "Strategy Lab Top1 requires market hk and a selected HK Futu account"
-            )
     config_authoring = (
         {
             "source": "yaml",
@@ -1369,43 +1110,6 @@ def render_service_bundle(
             default=default_opend_root(deploy_home=systemd_home),
         )
         opend_service_plans = [_legacy_opend_service_plan(root=opend_root_path, executable=opend_executable_value)]
-    recorder_binding = _resolve_strategy_lab_recorder_binding(
-        target=target_key,
-        include_strategy_lab_recorder=include_strategy_lab_recorder,
-        recorder_source=recorder_source,
-        recorder_account=strategy_lab_recorder_account,
-        repo_root=repo,
-        config_yaml_path=config_yaml_path,
-        config_by_market=config_by_market,
-        market_values=market_values,
-        account_values=account_values,
-        include_opend=include_opend,
-        explicit_opend_root=explicit_opend_root,
-        opend_service_plans=opend_service_plans,
-    )
-    top1_binding = None
-    if include_strategy_lab_top1:
-        assert top1_account is not None
-        try:
-            top1_binding = _resolve_strategy_lab_recorder_binding(
-                target=target_key,
-                include_strategy_lab_recorder=True,
-                recorder_source="opend",
-                recorder_account=top1_account,
-                repo_root=repo,
-                config_yaml_path=config_yaml_path,
-                config_by_market=config_by_market,
-                market_values=["hk"],
-                account_values=[top1_account],
-                include_opend=include_opend,
-                explicit_opend_root=explicit_opend_root,
-                opend_service_plans=opend_service_plans,
-            )
-        except ValueError as exc:
-            raise ValueError(
-                str(exc).replace("strategy_lab_recorder", "Strategy Lab Top1")
-            ) from exc
-
     om = str(repo / "om")
     lock_root = runtime / "locks"
     log_root = runtime / "logs"
@@ -1570,6 +1274,48 @@ def render_service_bundle(
                 service_name=auto_close_timer,
             )
 
+        if include_strategy_lab_advance:
+            binding = build_strategy_lab_timer_binding()
+            advance_service = str(binding["service_name"])
+            advance_timer = str(binding["timer_name"])
+            add(
+                f"systemd/{advance_service}",
+                _systemd_unit(
+                    description="Options Monitor Strategy Lab advance",
+                    repo_root=repo,
+                    runtime_root=runtime,
+                    env_file=env_file_path,
+                    deploy_user=systemd_user,
+                    deploy_home=systemd_home,
+                    exec_args=[
+                        om,
+                        "strategy-lab",
+                        "advance",
+                        "--profile-path",
+                        str(runtime / "service.profile.json"),
+                        "--scheduled",
+                    ],
+                    timeout_start_sec=int(binding["timeout_start_sec"]),
+                ),
+                install_path=f"/etc/systemd/system/{advance_service}",
+                kind="systemd_service",
+                service_name=advance_service,
+            )
+            add(
+                f"systemd/{advance_timer}",
+                _systemd_timer(
+                    description="Options Monitor Strategy Lab advance timer",
+                    unit_name=advance_service,
+                    calendar=list(binding["calendars"]),
+                    accuracy_sec=str(binding["accuracy_sec"]),
+                    randomized_delay_sec=int(binding["randomized_delay_sec"]),
+                    persistent=bool(binding["persistent"]),
+                ),
+                install_path=f"/etc/systemd/system/{advance_timer}",
+                kind="systemd_timer",
+                service_name=advance_timer,
+            )
+
         verify_service = "options-monitor-projection-verify.service"
         verify_timer = "options-monitor-projection-verify.timer"
         verify_args = [
@@ -1610,11 +1356,6 @@ def render_service_bundle(
         )
 
         opend_dependency_units = [item.systemd_service_name for item in opend_service_plans]
-        recorder_opend_dependency_units = (
-            [str(recorder_binding["service_name"])]
-            if recorder_binding is not None and recorder_binding.get("service_name")
-            else []
-        )
         for opend_plan in opend_service_plans:
             add(
                 f"systemd/{opend_plan.systemd_service_name}",
@@ -1637,59 +1378,6 @@ def render_service_bundle(
                 install_path=f"/etc/systemd/system/{opend_plan.systemd_service_name}",
                 kind="systemd_service",
                 service_name=opend_plan.systemd_service_name,
-            )
-
-        if include_strategy_lab_top1:
-            assert top1_binding is not None
-            top1_service = "options-monitor-strategy-lab-top1-advance.service"
-            top1_timer = "options-monitor-strategy-lab-top1-advance.timer"
-            top1_dependency = (
-                [str(top1_binding["service_name"])]
-                if top1_binding.get("service_name")
-                else []
-            )
-            add(
-                f"systemd/{top1_service}",
-                _systemd_unit(
-                    description="Options Monitor Strategy Lab Top1 scheduled advance",
-                    repo_root=repo,
-                    runtime_root=runtime,
-                    env_file=env_file_path,
-                    deploy_user=systemd_user,
-                    deploy_home=systemd_home,
-                    exec_args=[
-                        om,
-                        "research",
-                        "strategy-lab",
-                        "top1-loop",
-                        "advance",
-                        "--scheduled",
-                        "--market",
-                        "hk",
-                        "--account",
-                        top1_account,
-                        "--profile-path",
-                        str(runtime / "service.profile.json"),
-                        "--write",
-                    ],
-                    after=top1_dependency or None,
-                    wants=top1_dependency or None,
-                    timeout_start_sec=strategy_lab_top1_timeout_start_sec,
-                ),
-                install_path=f"/etc/systemd/system/{top1_service}",
-                kind="systemd_service",
-                service_name=top1_service,
-            )
-            add(
-                f"systemd/{top1_timer}",
-                _systemd_timer(
-                    description="Options Monitor Strategy Lab Top1 scheduled advance timer",
-                    unit_name=top1_service,
-                    interval=f"{strategy_lab_top1_advance_interval_seconds}s",
-                ),
-                install_path=f"/etc/systemd/system/{top1_timer}",
-                kind="systemd_timer",
-                service_name=top1_timer,
             )
 
         trade_market = "us" if "us" in config_by_market else market_values[0]
@@ -1899,162 +1587,6 @@ def render_service_bundle(
                     kind="systemd_timer",
                     service_name=quality_day_end_timer,
                 )
-        if include_strategy_lab_recorder:
-            profile_path = str(runtime / "service.profile.json")
-            recorder_build_service = "options-monitor-strategy-lab-build.service"
-            recorder_build_timer = "options-monitor-strategy-lab-build.timer"
-            recorder_build_args = [
-                om,
-                "research",
-                "strategy-lab",
-                "update",
-                "--latest",
-                "--profile-path",
-                profile_path,
-                "--build-dataset",
-                "--include-close-decisions",
-                "--write",
-                "--source",
-                "local",
-                "--min-sample",
-                "30",
-                "--min-mark-points",
-                "2",
-                "--mark-stale-hours",
-                str(recorder_mark_stale_hours),
-                "--max-datasets",
-                "0",
-            ]
-            add(
-                f"systemd/{recorder_build_service}",
-                _systemd_unit(
-                    description="Options Monitor Strategy Lab latest-run dataset recorder",
-                    repo_root=repo,
-                    runtime_root=runtime,
-                    env_file=env_file_path,
-                    deploy_user=systemd_user,
-                    deploy_home=systemd_home,
-                    exec_args=recorder_build_args,
-                ),
-                install_path=f"/etc/systemd/system/{recorder_build_service}",
-                kind="systemd_service",
-                service_name=recorder_build_service,
-            )
-            add(
-                f"systemd/{recorder_build_timer}",
-                _systemd_timer(
-                    description="Options Monitor Strategy Lab latest-run dataset recorder timer",
-                    unit_name=recorder_build_service,
-                    interval=STRATEGY_LAB_BUILD_INTERVAL_SYSTEMD,
-                ),
-                install_path=f"/etc/systemd/system/{recorder_build_timer}",
-                kind="systemd_timer",
-                service_name=recorder_build_timer,
-            )
-
-            recorder_sample_service = "options-monitor-strategy-lab-sample.service"
-            recorder_sample_timer = "options-monitor-strategy-lab-sample.timer"
-            recorder_sample_args = [
-                om,
-                "research",
-                "strategy-lab",
-                "update",
-                "--profile-path",
-                profile_path,
-                "--source",
-                recorder_source,
-                "--write",
-                "--action",
-                "collect_marks",
-                "--max-datasets",
-                str(recorder_max_datasets),
-                "--min-sample",
-                "30",
-                "--min-mark-points",
-                "2",
-                "--mark-stale-hours",
-                str(recorder_mark_stale_hours),
-            ]
-            if recorder_binding is not None:
-                recorder_sample_args.extend([
-                    "--opend-host",
-                    str(recorder_binding["host"]),
-                    "--opend-port",
-                    str(recorder_binding["port"]),
-                ])
-            add(
-                f"systemd/{recorder_sample_service}",
-                _systemd_unit(
-                    description="Options Monitor Strategy Lab mark sampler",
-                    repo_root=repo,
-                    runtime_root=runtime,
-                    env_file=env_file_path,
-                    deploy_user=systemd_user,
-                    deploy_home=systemd_home,
-                    exec_args=recorder_sample_args,
-                    after=recorder_opend_dependency_units if recorder_source == "opend" else None,
-                    timeout_start_sec=600,
-                    wants=recorder_opend_dependency_units if recorder_source == "opend" else None,
-                ),
-                install_path=f"/etc/systemd/system/{recorder_sample_service}",
-                kind="systemd_service",
-                service_name=recorder_sample_service,
-            )
-            add(
-                f"systemd/{recorder_sample_timer}",
-                _systemd_timer(
-                    description="Options Monitor Strategy Lab mark sampler timer",
-                    unit_name=recorder_sample_service,
-                    interval=STRATEGY_LAB_SAMPLE_INTERVAL_SYSTEMD,
-                ),
-                install_path=f"/etc/systemd/system/{recorder_sample_timer}",
-                kind="systemd_timer",
-                service_name=recorder_sample_timer,
-            )
-
-            recorder_settle_service = "options-monitor-strategy-lab-settle.service"
-            recorder_settle_timer = "options-monitor-strategy-lab-settle.timer"
-            recorder_settle_args = [
-                om,
-                "research",
-                "strategy-lab",
-                "update",
-                "--profile-path",
-                profile_path,
-                "--write",
-                "--action",
-                "settle",
-                "--min-sample",
-                "30",
-                "--min-mark-points",
-                "2",
-            ]
-            add(
-                f"systemd/{recorder_settle_service}",
-                _systemd_unit(
-                    description="Options Monitor Strategy Lab outcome settler",
-                    repo_root=repo,
-                    runtime_root=runtime,
-                    env_file=env_file_path,
-                    deploy_user=systemd_user,
-                    deploy_home=systemd_home,
-                    exec_args=recorder_settle_args,
-                ),
-                install_path=f"/etc/systemd/system/{recorder_settle_service}",
-                kind="systemd_service",
-                service_name=recorder_settle_service,
-            )
-            add(
-                f"systemd/{recorder_settle_timer}",
-                _systemd_timer(
-                    description="Options Monitor Strategy Lab outcome settler timer",
-                    unit_name=recorder_settle_service,
-                    calendar=STRATEGY_LAB_SETTLE_SYSTEMD_CALENDAR,
-                ),
-                install_path=f"/etc/systemd/system/{recorder_settle_timer}",
-                kind="systemd_timer",
-                service_name=recorder_settle_timer,
-            )
         if include_auto_upgrade:
             upgrade_service = "options-monitor-upgrade.service"
             upgrade_timer = "options-monitor-upgrade.timer"
@@ -2434,123 +1966,6 @@ def render_service_bundle(
             kind="launchd_plist",
             service_name=status_label,
         )
-        if include_strategy_lab_recorder:
-            profile_path = str(runtime / "service.profile.json")
-            recorder_build_label = "com.options-monitor.strategy-lab-build"
-            recorder_build_args = [
-                om,
-                "research",
-                "strategy-lab",
-                "update",
-                "--latest",
-                "--profile-path",
-                profile_path,
-                "--build-dataset",
-                "--include-close-decisions",
-                "--write",
-                "--source",
-                "local",
-                "--min-sample",
-                "30",
-                "--min-mark-points",
-                "2",
-                "--mark-stale-hours",
-                str(recorder_mark_stale_hours),
-                "--max-datasets",
-                "0",
-            ]
-            add(
-                f"launchd/{recorder_build_label}.plist",
-                _launchd_plist(
-                    label=recorder_build_label,
-                    repo_root=repo,
-                    runtime_root=runtime,
-                    program_args=recorder_build_args,
-                    log_root=log_root,
-                    env_file=env_file_path,
-                    start_interval=STRATEGY_LAB_BUILD_INTERVAL_SECONDS,
-                ),
-                install_path=f"~/Library/LaunchAgents/{recorder_build_label}.plist",
-                kind="launchd_plist",
-                service_name=recorder_build_label,
-            )
-
-            recorder_sample_label = "com.options-monitor.strategy-lab-sample"
-            recorder_sample_args = [
-                om,
-                "research",
-                "strategy-lab",
-                "update",
-                "--profile-path",
-                profile_path,
-                "--source",
-                recorder_source,
-                "--write",
-                "--action",
-                "collect_marks",
-                "--max-datasets",
-                str(recorder_max_datasets),
-                "--min-sample",
-                "30",
-                "--min-mark-points",
-                "2",
-                "--mark-stale-hours",
-                str(recorder_mark_stale_hours),
-            ]
-            if recorder_binding is not None:
-                recorder_sample_args.extend([
-                    "--opend-host",
-                    str(recorder_binding["host"]),
-                    "--opend-port",
-                    str(recorder_binding["port"]),
-                ])
-            add(
-                f"launchd/{recorder_sample_label}.plist",
-                _launchd_plist(
-                    label=recorder_sample_label,
-                    repo_root=repo,
-                    runtime_root=runtime,
-                    program_args=recorder_sample_args,
-                    log_root=log_root,
-                    env_file=env_file_path,
-                    start_interval=STRATEGY_LAB_SAMPLE_INTERVAL_SECONDS,
-                ),
-                install_path=f"~/Library/LaunchAgents/{recorder_sample_label}.plist",
-                kind="launchd_plist",
-                service_name=recorder_sample_label,
-            )
-
-            recorder_settle_label = "com.options-monitor.strategy-lab-settle"
-            recorder_settle_args = [
-                om,
-                "research",
-                "strategy-lab",
-                "update",
-                "--profile-path",
-                profile_path,
-                "--write",
-                "--action",
-                "settle",
-                "--min-sample",
-                "30",
-                "--min-mark-points",
-                "2",
-            ]
-            add(
-                f"launchd/{recorder_settle_label}.plist",
-                _launchd_plist(
-                    label=recorder_settle_label,
-                    repo_root=repo,
-                    runtime_root=runtime,
-                    program_args=recorder_settle_args,
-                    log_root=log_root,
-                    env_file=env_file_path,
-                    start_calendar_interval=STRATEGY_LAB_SETTLE_LAUNCHD_CALENDAR,
-                ),
-                install_path=f"~/Library/LaunchAgents/{recorder_settle_label}.plist",
-                kind="launchd_plist",
-                service_name=recorder_settle_label,
-            )
         if include_auto_upgrade:
             upgrade_label = "com.options-monitor.upgrade"
             upgrade_args = [
@@ -2690,28 +2105,6 @@ def render_service_bundle(
             **({"allowed_senders": wechat_clawbot_allowed_senders_value} if wechat_clawbot_allowed_senders_explicit else {}),
             "lock_path": str(lock_root / "wechat-clawbot.lock"),
         } if include_wechat_clawbot else None,
-        strategy_lab_recorder={
-            "enabled": True,
-            "include_close_decisions": True,
-            "source": recorder_source,
-            "max_datasets": recorder_max_datasets,
-            "mark_stale_hours": recorder_mark_stale_hours,
-            "build_interval": STRATEGY_LAB_BUILD_INTERVAL_SYSTEMD if target_key == "systemd" else STRATEGY_LAB_BUILD_INTERVAL_SECONDS,
-            "sample_interval": STRATEGY_LAB_SAMPLE_INTERVAL_SYSTEMD if target_key == "systemd" else STRATEGY_LAB_SAMPLE_INTERVAL_SECONDS,
-            "settle_schedule_beijing": "07:20",
-            **({"binding": dict(recorder_binding)} if recorder_binding is not None else {}),
-        } if include_strategy_lab_recorder else None,
-        strategy_lab_top1={
-            "enabled": True,
-            "market": "hk",
-            "account": top1_account,
-            "opend_binding": {
-                "host": str(top1_binding["host"]),
-                "port": int(top1_binding["port"]),
-            },
-            "advance_interval": int(strategy_lab_top1_advance_interval_seconds),
-            "timeout_start_sec": int(strategy_lab_top1_timeout_start_sec),
-        } if top1_binding is not None else None,
         quality_monitoring={
             "enabled": True,
             "artifact_path": str(runtime / "output_shared" / "state" / "quality" / "status.v1.json"),

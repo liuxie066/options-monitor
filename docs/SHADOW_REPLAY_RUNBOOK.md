@@ -10,7 +10,7 @@ Shadow Replay = 反事实复盘引擎
 Strategy Lab = 策略进化产品入口
 ```
 
-因此，本文是探索性复盘和 evidence 生命周期的直接 owner 手册。当前 Strategy Lab 边界见 [Strategy Lab Current Contract](STRATEGY_LAB_DESIGN.md)：formal HK / `lx` Sell Put `top1-loop` 复用正式推荐点 corpus 完成 20 日研究和 10 日隐藏验证；原通用 readiness、experiment、proposal 和 llm-context 已退役。Shadow Replay 继续直接拥有反事实 evaluator 和 dataset / mark / outcome 生命周期，不是 formal Top1 状态或回执 owner。`strategy-lab update` 只为现有 recorder 包装 latest scanned run dataset build、status / run-data-plan：默认 dry-run，显式 `--build-dataset --write` 才构建本地 dataset；再加 `--include-close-decisions` 时会独立选择 latest non-empty Close Advice run，严格构建 close-decision facet。显式 `--write` 才执行本地 collect / settle。远端持续记录通过 `./om service render --include-strategy-lab-recorder` 显式启用，生成低频 timer 维护 dataset、mark path 和 outcome facts；默认部署不会开启。
+因此，本文是探索性复盘和 evidence 生命周期的直接 owner 手册。Shadow Replay 直接拥有 dataset / mark / outcome 维护、反事实评价和 candidate-impact；Strategy Lab 不包装这些命令，也不为它们生成专用 recorder service/timer。当前 Strategy Lab 产品面只有根级 history-K readiness 运维入口，见 [Strategy Lab 当前实现清单](STRATEGY_LAB_DESIGN.md)。
 
 核心原则：复盘需要时间路径。OpenD 可以在采样时提供当前报价，但不能在几天后恢复当时没有保存的历史 option mark。要避免数据不够，必须在 dataset 建好后持续收集 mark。
 
@@ -51,21 +51,14 @@ Shadow Replay 的分析结论使用 [Opportunity Quality](OPPORTUNITY_QUALITY.md
 3. 样本足够后运行 `analyze`，人工评审分桶表现。
 4. 人工决定是否调整策略参数；replay 不自动修改 runtime config。
 
-远端部署时，推荐用 Strategy Lab recorder 代替手工调度这些维护动作：
+当前 service renderer 不为 Shadow Replay 生成专用 timer。维护直接使用下文的
+`build`、`collect-marks`、`settle` 和 `run-data-plan` 入口：
 
 ```bash
-./om service render \
-  --target systemd \
-  --runtime-root /var/lib/options-monitor \
-  --config-yaml /var/lib/options-monitor/config.yaml \
-  --markets us hk \
-  --accounts lx sy \
-  --include-strategy-lab-recorder \
-  --strategy-lab-recorder-source opend \
-  --strategy-lab-recorder-account lx
+./om research shadow-replay run-data-plan
 ```
 
-生成的 build timer 每 6 小时分别按 latest scanned candidate run 和 latest non-empty Close Advice run 幂等构建 dataset；同 run 时只生成一个 close-aware dataset。Close 正式 evidence 不完整会 fail closed，但 candidate build 仍独立执行。sample timer 每 2 小时采样 candidate / close mark path；`--strategy-lab-recorder-account` 只确定其 OpenD endpoint 和可选 service 依赖，不改变两小时 cadence，也不会在失败时切换到另一个账户。选择多个 Futu 账户时必须显式指定，只有一个时可省略。settle timer 每天维护 `outcome_facts.jsonl` 与 close outcomes。这些 timer 只写本地 replay artifact、required-data / OpenD cache / rate-limit state 和 receipt，不运行 Strategy Lab experiment/proposal，也不改生产配置、交易状态或通知。6 小时 cadence 是采样覆盖，不是每个 tick 的完整事件日志。
+该命令默认 dry-run，只有 `--write` 才执行当前可行的 `collect_marks` / `settle` 动作。如需持续调度，应对 Shadow Replay 自有入口单独设计并审核，不借 Strategy Lab 兼容入口恢复。
 
 ## 候选影响对比
 

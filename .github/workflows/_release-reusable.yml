@@ -75,7 +75,7 @@ jobs:
           ./.venv/bin/python tests/run_smoke.py
           ./.venv/bin/python -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py
           ./.venv/bin/python -m pytest tests/test_release_check.py tests/test_release_delta_coverage.py tests/test_release_version_recommendation.py tests/test_version_check.py
-          ./.venv/bin/python -m pytest tests/test_research.py tests/test_research_archive.py tests/test_shadow_replay.py tests/test_shadow_replay_candidate_impact.py tests/test_strategy_lab_update.py tests/test_strategy_lab_top1_architecture.py
+          ./.venv/bin/python -m pytest tests/test_research.py tests/test_research_archive.py tests/test_shadow_replay.py tests/test_shadow_replay_candidate_impact.py tests/test_strategy_lab_store.py tests/test_strategy_lab_phase1_owners.py tests/test_strategy_lab_history_k_readiness.py tests/test_strategy_lab_recipe.py tests/test_strategy_lab_comparison.py tests/test_strategy_lab_evidence.py tests/test_strategy_lab_receipts.py tests/test_strategy_lab_research.py tests/test_strategy_lab_cli.py
 
       - name: Configuration and control-plane release gate
         if: ${{ inputs.run_regression_gates }}

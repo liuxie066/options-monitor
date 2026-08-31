@@ -215,6 +215,15 @@ def test_refresh_fails_closed_for_confirmation_tick_and_protection_window(
 
 def test_receipt_read_fails_closed_for_expiry_and_tamper(tmp_path: Path) -> None:
     receipt = _refresh(tmp_path, FakeGateway())
+    with pytest.raises(HistoryKReadinessError) as wrong_endpoint:
+        read_history_k_readiness_receipt(
+            tmp_path / "artifacts",
+            probe_sha256=receipt["probe_sha256"],
+            expected_opend_binding={"host": "127.0.0.1", "port": 22222},
+            as_of_utc=OBSERVED,
+        )
+    assert wrong_endpoint.value.reason_code == "history_k_readiness_invalid"
+
     with pytest.raises(HistoryKReadinessError) as expired:
         read_history_k_readiness_receipt(
             tmp_path / "artifacts",
@@ -248,15 +257,30 @@ def _profile(tmp_path: Path) -> dict[str, object]:
         "markets": ["hk"],
         "config_paths": {"hk": str(runtime / "config.hk.json")},
         "env_file": str(runtime / "options-monitor.env"),
-        "strategy_lab_top1": {
-            "enabled": True,
-            "market": "hk",
-            "account": "lx",
-            "opend_binding": BINDING,
-            "advance_interval": 300,
-            "timeout_start_sec": 120,
-        },
     }
+
+
+def _patch_context_owners(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import src.application.strategy_lab.service as service
+
+    monkeypatch.setattr(
+        service,
+        "load_runtime_config",
+        lambda **_kwargs: (
+            tmp_path / "runtime/config.hk.json",
+            {"accounts": ["lx"]},
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "infer_futu_portfolio_settings",
+        lambda _config, *, account: dict(BINDING),
+    )
+    monkeypatch.setattr(
+        service,
+        "resolve_position_ledger_sqlite_path",
+        lambda **_kwargs: tmp_path / "runtime/option-positions.sqlite3",
+    )
 
 
 def test_public_cli_previews_without_provider_then_refreshes_confirmed_probe(
@@ -264,6 +288,8 @@ def test_public_cli_previews_without_provider_then_refreshes_confirmed_probe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import src.interfaces.cli.strategy_lab_ops as cli
+
+    _patch_context_owners(tmp_path, monkeypatch)
 
     profile_path = tmp_path / "service.profile.json"
     profile_path.write_text(json.dumps(_profile(tmp_path)), encoding="utf-8")
@@ -331,6 +357,8 @@ def test_public_cli_checks_tick_before_building_gateway(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import src.interfaces.cli.strategy_lab_ops as cli
+
+    _patch_context_owners(tmp_path, monkeypatch)
 
     profile_path = tmp_path / "service.profile.json"
     profile_path.write_text(json.dumps(_profile(tmp_path)), encoding="utf-8")

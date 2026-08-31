@@ -30,14 +30,6 @@ def _profile(tmp_path: Path) -> dict[str, object]:
         "markets": ["hk"],
         "config_paths": {"hk": str(runtime / "config.hk.json")},
         "env_file": str(runtime / "options-monitor.env"),
-        "strategy_lab_top1": {
-            "enabled": True,
-            "market": "hk",
-            "account": "lx",
-            "opend_binding": {"host": "127.0.0.1", "port": 11111},
-            "advance_interval": 300,
-            "timeout_start_sec": 120,
-        },
     }
 
 
@@ -68,8 +60,28 @@ def test_account_fee_plan_owner_keeps_strict_auditable_facts(tmp_path: Path) -> 
 
 def test_strategy_lab_context_owner_resolves_only_controlled_profile_paths(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    import src.application.strategy_lab.service as service
+
     profile = _profile(tmp_path)
+    monkeypatch.setattr(
+        service,
+        "load_runtime_config",
+        lambda **_kwargs: (Path(profile["config_paths"]["hk"]), {"accounts": ["lx"]}),
+    )
+    monkeypatch.setattr(
+        service,
+        "infer_futu_portfolio_settings",
+        lambda _config, *, account: {"host": "127.0.0.1", "port": 11111},
+    )
+    ledger_calls: list[dict[str, object]] = []
+
+    def resolve_ledger(**kwargs: object) -> Path:
+        ledger_calls.append(kwargs)
+        return tmp_path / "runtime/option-positions.sqlite3"
+
+    monkeypatch.setattr(service, "resolve_position_ledger_sqlite_path", resolve_ledger)
     context = resolve_strategy_lab_context(profile)
 
     assert context["artifact_root"] == (tmp_path / "runtime/output_shared/research/strategy_lab")
@@ -78,28 +90,100 @@ def test_strategy_lab_context_owner_resolves_only_controlled_profile_paths(
     assert context["opend_binding"] == {"host": "127.0.0.1", "port": 11111}
     assert context["opend_limiter_root"] == tmp_path / "runtime"
     assert context["tick_lock_path"] == tmp_path / "runtime/locks/tick-hk.lock"
+    assert ledger_calls[0]["runtime_root"] == tmp_path / "runtime"
 
     with pytest.raises(StrategyLabContextError, match="absolute path"):
         resolve_strategy_lab_context({**profile, "runtime_root": "runtime"})
 
 
-@pytest.mark.parametrize("legacy_top1", [None, {"enabled": False}])
-def test_strategy_lab_runtime_context_does_not_depend_on_legacy_top1(
+def test_strategy_lab_context_binds_ledger_to_profile_runtime_root(
     tmp_path: Path,
-    legacy_top1: dict[str, object] | None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    import src.application.strategy_lab.service as service
+
     profile = _profile(tmp_path)
-    if legacy_top1 is None:
-        profile.pop("strategy_lab_top1")
-    else:
-        profile["strategy_lab_top1"] = legacy_top1
+    profile_runtime = tmp_path / "profile-runtime"
+    config_path = tmp_path / "runtime-config" / "config.hk.json"
+    data_config = tmp_path / "portfolio-config" / "portfolio.runtime.json"
+    profile.update(
+        {
+            "runtime_root": str(profile_runtime),
+            "config_paths": {"hk": str(config_path)},
+        }
+    )
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path / "environment-runtime"))
+    monkeypatch.setenv("OM_DATA_CONFIG", str(tmp_path / "environment-data.json"))
+    monkeypatch.setattr(
+        service,
+        "load_runtime_config",
+        lambda **_kwargs: (
+            config_path,
+            {
+                "accounts": ["lx"],
+                "portfolio": {"data_config": str(data_config)},
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "infer_futu_portfolio_settings",
+        lambda _config, *, account: {"host": "127.0.0.1", "port": 11111},
+    )
+
+    context = resolve_strategy_lab_context(profile)
+
+    assert context["ledger_path"] == (
+        profile_runtime / "output_shared/state/option_positions.sqlite3"
+    ).resolve()
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {},
+        {"accounts": ["sy"]},
+        {
+            "accounts": ["lx"],
+            "account_settings": {"lx": {"type": "external_holdings"}},
+        },
+    ],
+)
+def test_strategy_lab_context_requires_configured_futu_lx(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    config: dict[str, object],
+) -> None:
+    import src.application.strategy_lab.service as service
+
+    profile = _profile(tmp_path)
+    monkeypatch.setattr(
+        service,
+        "load_runtime_config",
+        lambda **_kwargs: (Path(profile["config_paths"]["hk"]), config),
+    )
+
+    def unexpected(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("invalid lx config must fail before resolving owners")
+
+    monkeypatch.setattr(service, "infer_futu_portfolio_settings", unexpected)
+    monkeypatch.setattr(service, "resolve_position_ledger_sqlite_path", unexpected)
+
+    with pytest.raises(StrategyLabContextError):
+        resolve_strategy_lab_context(profile)
+
+
+def test_strategy_lab_runtime_context_uses_ordinary_profile(tmp_path: Path) -> None:
+    profile = _profile(tmp_path)
 
     context = resolve_strategy_lab_runtime_context(profile, market="hk")
 
     assert context["artifact_root"] == (
         tmp_path / "runtime/output_shared/research/strategy_lab"
     )
+    assert context["store_path"] == context["artifact_root"] / "experiments.sqlite3"
     assert context["config_path"] == tmp_path / "runtime/config.hk.json"
+    assert not context["config_path"].exists()
 
 
 def test_research_corpus_calendar_owner_requires_write_and_closes_gateway(
@@ -110,7 +194,6 @@ def test_research_corpus_calendar_owner_requires_write_and_closes_gateway(
 
     profile_path = tmp_path / "service.profile.json"
     profile = _profile(tmp_path)
-    profile.pop("strategy_lab_top1")
     profile_path.write_text(json.dumps(profile), encoding="utf-8")
     command = [
         "research",

@@ -112,6 +112,10 @@ cd "$REPO"
 
 `--include-feishu-ws` 会生成 `options-monitor-feishu-ws.service`。它通过飞书长连接接收事件，不监听本地 HTTP 端口，也不需要公网回调 URL、Nginx/Caddy 或 Cloudflare Tunnel。服务会使用 `/var/lib/options-monitor/locks/feishu-ws.lock` 防止同一个 Feishu App 启动多个长连接客户端。
 
+Strategy Lab 隐藏验证不是默认服务。确认需要未来 10 日验证后，在同一 render 命令增加
+`--include-strategy-lab-advance`，只为 systemd 生成唯一
+`options-monitor-strategy-lab-advance.service/.timer`；未传该开关时不会生成或启用。
+
 推荐的 `--include-secret-credentials` 默认为每个消费 unit 生成只包含所需
 `LoadCredentialEncrypted=` 的 drop-in，不解密为共享 env 文件。它只渲染配置，不创建或修改真实凭据。
 
@@ -184,35 +188,6 @@ cd "$REPO"
 
 `--no-restart-services` 只控制长期 service restart。若升级前已为维护显式暂停 systemd timer，同时传 `--preserve-activation-state`；控制面会在 release 切换前记录既有 timer 状态，并让 inactive、disabled 或 masked timer 在升级、失败补偿和 rollback 中保持暂停。定义文件仍会更新和 `daemon-reload`，但保留的 timer 不会被 `enable --now` 或 `restart`，避免 Persistent timer 在升级过程中补跑。
 
-如果要让远端持续积累 Strategy Lab / Shadow Replay 复盘数据，额外显式开启 recorder：
-
-```bash
-./om service render \
-  --target systemd \
-  --repo-root "$REPO" \
-  --runtime-root "$RUNTIME" \
-  --env-file "$ENV_FILE" \
-  --deploy-user "$DEPLOY_USER" \
-  --markets us hk \
-  --accounts lx sy \
-  --config-yaml "$RUNTIME/config.yaml" \
-  --config-us "$RUNTIME/config.us.json" \
-  --config-hk "$RUNTIME/config.hk.json" \
-  --include-strategy-lab-recorder \
-  --strategy-lab-recorder-source opend \
-  --strategy-lab-recorder-account lx \
-  --strategy-lab-recorder-max-datasets 5 \
-  --output-dir /tmp/options-monitor-service
-```
-
-这个开关会生成三类独立 timer：
-
-- `options-monitor-strategy-lab-build.timer`：每 6 小时幂等构建 latest scanned run 对应的 Shadow Replay dataset；dataset id 默认使用 run id，已存在就跳过，不覆盖已有 mark path。build 只建立 cohort，不占用 mark/settle 维护批次。
-- `options-monitor-strategy-lab-sample.timer`：每 2 小时只执行 mark path 采样，单次最多处理 `--strategy-lab-recorder-max-datasets` 个 dataset。`--strategy-lab-recorder-source opend` 会从 canonical config 解析 `--strategy-lab-recorder-account` 的 OpenD host/port，并把端点显式写入采样命令。选择了多个 Futu 账户时必须显式给出 recorder account；只有一个 Futu 账户时可以省略。若同一次 render 也包含 `--include-opend`，systemd unit 只依赖该账户对应的 OpenD service，不依赖其他账户。
-- `options-monitor-strategy-lab-settle.timer`：每天北京时间 07:20 尝试 settle 所有到期的 outcome facts；settlement 只读取本地 dataset，不占用 OpenD 采样批次。
-
-如果 OpenD 由外部服务管理，不传 `--include-opend` 即可；渲染出的采样命令仍包含所选账户的显式 host/port，但不会伪造 systemd 依赖。部署前必须单独确认该端点可用。recorder 只写 `$RUNTIME`/repo 下的本地 research artifact、Shadow Replay dataset、required-data / OpenD cache / rate-limit state 和 receipt。它不发通知，不运行 experiment/proposal，不调用在线 AI，不修改 runtime config、交易状态、Feishu 或 broker-facing state。升级时 `service.profile.json` 会保留 `strategy_lab_recorder` opt-in 和账户绑定；service drift 会按绑定账户从 canonical config 重新解析端点，因此配置变化会显示为 drift。不传 recorder 开关则默认不启用。
-
 ### 已退役 AI Advice 的生产清理
 
 当前 service bundle 不再渲染 AI 外部证据 Collector。升级前已经安装的 Collector
@@ -272,6 +247,12 @@ sudo systemctl enable --now options-monitor-projection-verify.timer
 sudo systemctl enable --now options-monitor-runtime-status.timer
 sudo systemctl enable --now options-monitor-trade-intake.service
 sudo systemctl enable --now options-monitor-feishu-ws.service
+```
+
+仅当 render 使用了 `--include-strategy-lab-advance` 且人工确认隐藏验证已经开始时，再启用：
+
+```bash
+sudo systemctl enable --now options-monitor-strategy-lab-advance.timer
 ```
 
 如果 render 时传了 `--include-feishu-agent-credential`，先确认加密凭据已经存在，再安装 helper 和 drop-in：
@@ -384,27 +365,6 @@ cd "$REPO"
 
 launchd 不读取 shell profile。渲染器会把 `OM_ENV_FILE=$ENV_FILE` 写入 plist，CLI 启动后再从该 env file 读取 Feishu Bot、holdings 和 inbound audit 配置。
 
-Mac 上同样可以显式开启 Strategy Lab recorder：
-
-```bash
-./om service render \
-  --target launchd \
-  --repo-root "$REPO" \
-  --runtime-root "$RUNTIME" \
-  --env-file "$ENV_FILE" \
-  --markets us hk \
-  --accounts lx sy \
-  --config-yaml "$RUNTIME/config.yaml" \
-  --config-us "$RUNTIME/config.us.json" \
-  --config-hk "$RUNTIME/config.hk.json" \
-  --include-strategy-lab-recorder \
-  --strategy-lab-recorder-source opend \
-  --strategy-lab-recorder-account lx \
-  --output-dir /tmp/options-monitor-service
-```
-
-launchd plist 同样会写入所选账户的显式 OpenD host/port。launchd 没有 systemd 的 `After=` / `Wants=` 关系；使用 `opend` source 时，需要先确认该端点已经稳定可用。
-
 安装：
 
 ```bash
@@ -419,14 +379,6 @@ launchctl bootstrap "gui/$UID" "$HOME/Library/LaunchAgents/com.options-monitor.p
 launchctl bootstrap "gui/$UID" "$HOME/Library/LaunchAgents/com.options-monitor.runtime-status.plist"
 launchctl bootstrap "gui/$UID" "$HOME/Library/LaunchAgents/com.options-monitor.trade-intake.plist"
 launchctl bootstrap "gui/$UID" "$HOME/Library/LaunchAgents/com.options-monitor.feishu-ws.plist"
-```
-
-如果本次 render 开启了 Strategy Lab recorder，再额外加载：
-
-```bash
-launchctl bootstrap "gui/$UID" "$HOME/Library/LaunchAgents/com.options-monitor.strategy-lab-build.plist"
-launchctl bootstrap "gui/$UID" "$HOME/Library/LaunchAgents/com.options-monitor.strategy-lab-sample.plist"
-launchctl bootstrap "gui/$UID" "$HOME/Library/LaunchAgents/com.options-monitor.strategy-lab-settle.plist"
 ```
 
 launchd 的日历时间按 Mac 本机时区执行；要等价于北京时间 09:00 / 09:30，Mac 的系统时区需要设为中国标准时间或等价时区。

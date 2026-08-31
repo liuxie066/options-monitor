@@ -270,8 +270,48 @@ def test_exclusive_private_file_lock_is_reentrant_in_same_thread(tmp_path: Path)
     lock_path = tmp_path / "private" / "ledger.writer.lock"
 
     with exclusive_private_file_lock(lock_path):
-        with exclusive_private_file_lock(lock_path):
+        with exclusive_private_file_lock(lock_path, blocking=False):
             assert _mode(lock_path) == 0o600
+
+
+def test_exclusive_private_file_lock_nonblocking_contender_fails_and_releases(
+    tmp_path: Path,
+) -> None:
+    lock_path = tmp_path / "private" / "ledger.writer.lock"
+    first_entered = threading.Event()
+    release_first = threading.Event()
+
+    def _hold_first() -> None:
+        with exclusive_private_file_lock(lock_path):
+            first_entered.set()
+            assert release_first.wait(2)
+
+    def _try_second() -> None:
+        with pytest.raises(BlockingIOError):
+            with exclusive_private_file_lock(lock_path, blocking=False):
+                raise AssertionError("contended non-blocking lock must not enter")
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(_hold_first)
+        assert first_entered.wait(1)
+        try:
+            executor.submit(_try_second).result(timeout=1)
+        finally:
+            release_first.set()
+        first.result(timeout=1)
+
+    with exclusive_private_file_lock(lock_path, blocking=False):
+        assert _mode(lock_path) == 0o600
+
+
+def test_exclusive_private_file_lock_releases_after_body_exception(tmp_path: Path) -> None:
+    lock_path = tmp_path / "private" / "ledger.writer.lock"
+    with pytest.raises(RuntimeError, match="body failed"):
+        with exclusive_private_file_lock(lock_path, blocking=False):
+            raise RuntimeError("body failed")
+
+    with exclusive_private_file_lock(lock_path, blocking=False):
+        assert _mode(lock_path) == 0o600
 
 
 def test_sqlite_artifact_helper_tolerates_sidecar_disappearing_before_open(

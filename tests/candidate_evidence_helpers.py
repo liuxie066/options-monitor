@@ -24,7 +24,7 @@ from src.application.shadow_replay.common import (
     DATASET_FILES,
     refresh_dataset_manifest,
 )
-from src.application.strategy_lab.top1.corpus import refresh_market_calendar_binding
+from src.application.research.formal_corpus import refresh_market_calendar_binding
 from src.application.strategy_scan_status import (
     publish_strategy_scan_status,
     publish_strategy_scan_status_index_v2,
@@ -121,7 +121,11 @@ def seal_market_calendar_fixture(
         coverage_end=end,
         observed_at_utc="2026-08-15T00:00:00Z",
     )
-    return dict(result["binding"])
+    binding = dict(result["binding"])
+    assert str(binding["snapshot_ref"]).startswith(
+        "capabilities/market-calendar/hk/snapshots/"
+    )
+    return binding
 
 
 def seal_opening_candidate_fixture(

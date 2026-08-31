@@ -761,143 +761,81 @@ def test_render_launchd_bundle_rejects_quality_monitoring(tmp_path: Path) -> Non
             include_quality_monitoring=True,
         )
 
-def test_render_systemd_bundle_can_include_strategy_lab_recorder_timers(tmp_path: Path) -> None:
+def test_render_service_bundle_omits_retired_strategy_lab_service_contract(
+    tmp_path: Path,
+) -> None:
     from src.application.service_deploy import render_service_bundle
 
-    repo = tmp_path / "current"
-    runtime = tmp_path / "runtime"
+    repo = tmp_path / "repo"
     repo.mkdir()
-    opend_root = tmp_path / "opend-lx"
-    config_path = _write_service_account_config(
-        tmp_path / "config.us.json",
-        {"lx": _futu_service_account(opend_root=opend_root)},
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=tmp_path / "runtime",
+        accounts=["lx"],
+        markets=["hk"],
+    )
+    files = {item["relative_path"]: item for item in bundle["files"]}
+    profile = json.loads(files["service.profile.json"]["content"])
+
+    retired_keys = ("strategy_lab_" + "recorder", "strategy_lab_" + "top1")
+    retired_unit_fragments = (
+        "strategy-lab-" + "build",
+        "strategy-lab-" + "sample",
+        "strategy-lab-" + "settle",
+        "strategy-lab-" + "top1",
+    )
+    assert all(key not in profile for key in retired_keys)
+    assert not any(
+        fragment in path
+        for fragment in retired_unit_fragments
+        for path in files
     )
 
-    default_bundle = render_service_bundle(target="systemd", repo_root=repo, runtime_root=runtime, markets=["us"])
-    default_files = {item["relative_path"]: item for item in default_bundle["files"]}
-    assert "systemd/options-monitor-strategy-lab-build.service" not in default_files
 
+def test_render_systemd_bundle_can_include_single_strategy_lab_advance_timer(
+    tmp_path: Path,
+) -> None:
+    from src.application.service_deploy import render_service_bundle
+    from src.application.strategy_lab.contracts import (
+        STRATEGY_LAB_ADVANCE_CALENDARS,
+        STRATEGY_LAB_ADVANCE_SERVICE,
+        STRATEGY_LAB_ADVANCE_TIMER,
+    )
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    repo.mkdir()
     bundle = render_service_bundle(
         target="systemd",
         repo_root=repo,
         runtime_root=runtime,
         accounts=["lx"],
-        markets=["us"],
-        config_paths={"us": config_path},
-        include_opend=True,
-        include_strategy_lab_recorder=True,
-        strategy_lab_recorder_source="opend",
-        strategy_lab_recorder_max_datasets=3,
-        strategy_lab_recorder_mark_stale_hours=2,
-    )
-
-    files = {item["relative_path"]: item for item in bundle["files"]}
-    build_service = files["systemd/options-monitor-strategy-lab-build.service"]["content"]
-    build_timer = files["systemd/options-monitor-strategy-lab-build.timer"]["content"]
-    sample_service = files["systemd/options-monitor-strategy-lab-sample.service"]["content"]
-    sample_timer = files["systemd/options-monitor-strategy-lab-sample.timer"]["content"]
-    assert "TimeoutStartSec=600" in sample_service
-    settle_service = files["systemd/options-monitor-strategy-lab-settle.service"]["content"]
-    settle_timer = files["systemd/options-monitor-strategy-lab-settle.timer"]["content"]
-    profile = json.loads(files["service.profile.json"]["content"])
-
-    assert str(repo / "om") + " research strategy-lab update --latest" in build_service
-    assert "--profile-path " + str(runtime / "service.profile.json") in build_service
-    assert "--include-close-decisions" in build_service
-    assert "--build-dataset --include-close-decisions --write --source local" in build_service
-    assert "--max-datasets 0" in build_service
-    assert "--settle-after-collect" not in build_service
-    assert "OnUnitActiveSec=6h" in build_timer
-    assert str(repo / "om") + " research strategy-lab update --profile-path" in sample_service
-    assert "--source opend --write --action collect_marks --max-datasets 3" in sample_service
-    assert "--opend-host 127.0.0.1 --opend-port 11111" in sample_service
-    assert "--settle-after-collect" not in sample_service
-    assert "After=network-online.target options-monitor-opend.service" in sample_service
-    assert "OnUnitActiveSec=2h" in sample_timer
-    assert "--write --action settle --min-sample 30" in settle_service
-    assert "--max-datasets" not in settle_service
-    assert "OnCalendar=*-*-* 07:20:00 Asia/Shanghai" in settle_timer
-    assert {"name": "options-monitor-strategy-lab-build.timer"} in profile["services"]
-    assert {"name": "options-monitor-strategy-lab-sample.timer"} in profile["services"]
-    assert {"name": "options-monitor-strategy-lab-settle.timer"} in profile["services"]
-    assert profile["strategy_lab_recorder"] == {
-        "enabled": True,
-        "include_close_decisions": True,
-        "source": "opend",
-        "max_datasets": 3,
-        "mark_stale_hours": 2,
-        "build_interval": "6h",
-        "sample_interval": "2h",
-        "settle_schedule_beijing": "07:20",
-        "binding": {
-            "account": "lx",
-            "host": "127.0.0.1",
-            "port": 11111,
-            "service_name": "options-monitor-opend.service",
-        },
-    }
-
-def test_render_systemd_bundle_can_include_strategy_lab_top1_timer(
-    tmp_path: Path,
-) -> None:
-    from src.application.service_deploy import render_service_bundle
-
-    repo = tmp_path / "current"
-    runtime = tmp_path / "runtime"
-    env_file = runtime / "options-monitor.env"
-    repo.mkdir()
-    config_path = _write_service_account_config(
-        tmp_path / "config.hk.json",
-        {"lab1": _futu_service_account(opend_root=tmp_path / "opend-lab1")},
-    )
-
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        accounts=["lab1"],
         markets=["hk"],
-        config_paths={"hk": config_path},
-        env_file=env_file,
-        include_opend=True,
-        include_strategy_lab_top1=True,
-        strategy_lab_top1_account="lab1",
-        strategy_lab_top1_advance_interval_seconds=300,
-        strategy_lab_top1_timeout_start_sec=120,
+        include_strategy_lab_advance=True,
     )
-
     files = {item["relative_path"]: item for item in bundle["files"]}
-    service = files[
-        "systemd/options-monitor-strategy-lab-top1-advance.service"
-    ]["content"]
-    timer = files["systemd/options-monitor-strategy-lab-top1-advance.timer"][
-        "content"
-    ]
+    service = files[f"systemd/{STRATEGY_LAB_ADVANCE_SERVICE}"]["content"]
+    timer = files[f"systemd/{STRATEGY_LAB_ADVANCE_TIMER}"]["content"]
     profile = json.loads(files["service.profile.json"]["content"])
-    assert (
-        str(repo / "om")
-        + " research strategy-lab top1-loop advance --scheduled --market hk "
-        "--account lab1 --profile-path "
-        + str(runtime / "service.profile.json")
-        + " --write"
-    ) in service
-    assert f"EnvironmentFile={env_file}" in service
-    assert "After=network-online.target options-monitor-opend.service" in service
-    assert "Wants=network-online.target options-monitor-opend.service" in service
-    assert "TimeoutStartSec=120" in service
-    assert "OnUnitActiveSec=300s" in timer
-    assert profile["strategy_lab_top1"] == {
-        "enabled": True,
-        "market": "hk",
-        "account": "lab1",
-        "opend_binding": {"host": "127.0.0.1", "port": 11111},
-        "advance_interval": 300,
-        "timeout_start_sec": 120,
-    }
 
-def test_render_strategy_lab_top1_rejects_missing_explicit_contract(
-    tmp_path: Path,
-) -> None:
+    assert (
+        f"ExecStart={repo / 'om'} strategy-lab advance --profile-path "
+        f"{runtime / 'service.profile.json'} --scheduled"
+    ) in service
+    assert "TimeoutStartSec=10" in service
+    assert timer.count("OnCalendar=") == 3
+    assert all(f"OnCalendar={value}" in timer for value in STRATEGY_LAB_ADVANCE_CALENDARS)
+    assert "OnBootSec=" not in timer
+    assert "OnUnitActiveSec=" not in timer
+    assert "AccuracySec=1s" in timer
+    assert "RandomizedDelaySec=0" in timer
+    assert "Persistent=false" in timer
+    assert {"name": STRATEGY_LAB_ADVANCE_SERVICE} in profile["services"]
+    assert {"name": STRATEGY_LAB_ADVANCE_TIMER} in profile["services"]
+
+
+def test_render_launchd_bundle_rejects_strategy_lab_advance(tmp_path: Path) -> None:
     from src.application.service_deploy import render_service_bundle
 
     repo = tmp_path / "repo"
@@ -906,446 +844,9 @@ def test_render_strategy_lab_top1_rejects_missing_explicit_contract(
         render_service_bundle(
             target="launchd",
             repo_root=repo,
-            accounts=["lx"],
-            markets=["hk"],
-            include_strategy_lab_top1=True,
-            strategy_lab_top1_advance_interval_seconds=300,
-            strategy_lab_top1_timeout_start_sec=120,
-        )
-    for env_file in (None, "", " \t "):
-        with pytest.raises(ValueError, match="non-empty service env file"):
-            render_service_bundle(
-                target="systemd",
-                repo_root=repo,
-                accounts=["lx"],
-                markets=["hk"],
-                env_file=env_file,
-                include_strategy_lab_top1=True,
-                strategy_lab_top1_advance_interval_seconds=300,
-                strategy_lab_top1_timeout_start_sec=120,
-            )
-    with pytest.raises(ValueError, match="explicit positive integers"):
-        render_service_bundle(
-            target="systemd",
-            repo_root=repo,
-            accounts=["lx"],
-            markets=["hk"],
-            env_file=tmp_path / "env",
-            include_strategy_lab_top1=True,
-            strategy_lab_top1_account="user1",
-            strategy_lab_top1_advance_interval_seconds=0,
-            strategy_lab_top1_timeout_start_sec=120,
-        )
-    with pytest.raises(
-        ValueError, match="requires market hk and a selected HK Futu account"
-    ):
-        render_service_bundle(
-            target="systemd",
-            repo_root=repo,
-            accounts=["sy"],
-            markets=["hk"],
-            env_file=tmp_path / "env",
-            include_strategy_lab_top1=True,
-            strategy_lab_top1_account="user1",
-            strategy_lab_top1_advance_interval_seconds=300,
-            strategy_lab_top1_timeout_start_sec=120,
-        )
-    invalid_config = _write_service_account_config(
-        tmp_path / "invalid-config.hk.json",
-        {"lx": _futu_service_account(port=0)},
-    )
-    with pytest.raises(ValueError, match="Strategy Lab Top1 OpenD port is invalid"):
-        render_service_bundle(
-            target="systemd",
-            repo_root=repo,
-            accounts=["lx"],
-            markets=["hk"],
-            config_paths={"hk": invalid_config},
-            env_file=tmp_path / "env",
-            include_strategy_lab_top1=True,
-            strategy_lab_top1_account="lx",
-            strategy_lab_top1_advance_interval_seconds=300,
-            strategy_lab_top1_timeout_start_sec=120,
+            include_strategy_lab_advance=True,
         )
 
-def test_render_launchd_strategy_lab_recorder_separates_actions(tmp_path: Path) -> None:
-    from src.application.service_deploy import render_service_bundle
-
-    repo = tmp_path / "current"
-    runtime = tmp_path / "runtime"
-    repo.mkdir()
-    config_path = _write_service_account_config(
-        tmp_path / "config.us.json",
-        {"lx": _futu_service_account(opend_root=tmp_path / "opend-lx")},
-    )
-
-    bundle = render_service_bundle(
-        target="launchd",
-        repo_root=repo,
-        runtime_root=runtime,
-        accounts=["lx"],
-        markets=["us"],
-        config_paths={"us": config_path},
-        include_opend=True,
-        include_strategy_lab_recorder=True,
-        strategy_lab_recorder_source="opend",
-        strategy_lab_recorder_max_datasets=3,
-    )
-    files = {item["relative_path"]: item for item in bundle["files"]}
-
-    def args(name: str) -> list[str]:
-        content = files[f"launchd/com.options-monitor.strategy-lab-{name}.plist"]["content"]
-        return plistlib.loads(content.encode("utf-8"))["ProgramArguments"]
-
-    build_args = args("build")
-    sample_args = args("sample")
-    settle_args = args("settle")
-    build_plist = files["launchd/com.options-monitor.strategy-lab-build.plist"]["content"]
-    build_payload = plistlib.loads(build_plist.encode("utf-8"))
-    sample_payload = plistlib.loads(
-        files["launchd/com.options-monitor.strategy-lab-sample.plist"]["content"].encode("utf-8")
-    )
-    profile = json.loads(files["service.profile.json"]["content"])
-
-    assert build_args[build_args.index("--max-datasets") + 1] == "0"
-    assert "--include-close-decisions" in build_args
-    assert "--settle-after-collect" not in build_args
-    assert build_payload["StartInterval"] == 21600
-    assert sample_args[sample_args.index("--action") + 1] == "collect_marks"
-    assert sample_args[sample_args.index("--max-datasets") + 1] == "3"
-    assert sample_args[sample_args.index("--opend-host") + 1] == "127.0.0.1"
-    assert sample_args[sample_args.index("--opend-port") + 1] == "11111"
-    assert "--settle-after-collect" not in sample_args
-    assert "After" not in sample_payload
-    assert "Wants" not in sample_payload
-    assert profile["strategy_lab_recorder"]["binding"]["service_name"] == "com.options-monitor.opend"
-    assert settle_args[settle_args.index("--action") + 1] == "settle"
-    assert "--max-datasets" not in settle_args
-
-def test_render_strategy_lab_recorder_requires_account_for_multiple_futu_accounts(tmp_path: Path) -> None:
-    from src.application.service_deploy import render_service_bundle
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    config_path = _write_service_account_config(
-        tmp_path / "config.us.json",
-        _two_futu_service_accounts(tmp_path),
-    )
-
-    with pytest.raises(ValueError, match="required when multiple Futu accounts"):
-        render_service_bundle(
-            target="systemd",
-            repo_root=repo,
-            accounts=["lx", "sy"],
-            markets=["us"],
-            config_paths={"us": config_path},
-            include_opend=True,
-            include_strategy_lab_recorder=True,
-            strategy_lab_recorder_source="opend",
-        )
-
-@pytest.mark.parametrize(
-    ("recorder_account", "expected_account", "expected_port", "expected_service", "other_service"),
-    [
-        ("LX", "lx", 11111, "options-monitor-opend-lx.service", "options-monitor-opend-sy.service"),
-        ("sy", "sy", 11112, "options-monitor-opend-sy.service", "options-monitor-opend-lx.service"),
-    ],
-)
-def test_render_strategy_lab_recorder_binds_only_selected_systemd_opend(
-    tmp_path: Path,
-    recorder_account: str,
-    expected_account: str,
-    expected_port: int,
-    expected_service: str,
-    other_service: str,
-) -> None:
-    from src.application.service_deploy import render_service_bundle
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    config_path = _write_service_account_config(
-        tmp_path / "config.us.json",
-        _two_futu_service_accounts(tmp_path),
-    )
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        accounts=["lx", "sy"],
-        markets=["us"],
-        config_paths={"us": config_path},
-        include_opend=True,
-        include_strategy_lab_recorder=True,
-        strategy_lab_recorder_source="opend",
-        strategy_lab_recorder_account=recorder_account,
-    )
-    files = {item["relative_path"]: item for item in bundle["files"]}
-    sample = files["systemd/options-monitor-strategy-lab-sample.service"]["content"]
-    profile = json.loads(files["service.profile.json"]["content"])
-
-    assert f"--opend-host 127.0.0.1 --opend-port {expected_port}" in sample
-    assert f"After=network-online.target {expected_service}" in sample
-    assert f"Wants=network-online.target {expected_service}" in sample
-    assert other_service not in sample
-    assert profile["schema_version"] == 1
-    assert profile["strategy_lab_recorder"]["binding"] == {
-        "account": expected_account,
-        "host": "127.0.0.1",
-        "port": expected_port,
-        "service_name": expected_service,
-    }
-
-@pytest.mark.parametrize(
-    ("settings", "accounts", "recorder_account", "error_pattern"),
-    [
-        ({"lx": _futu_service_account()}, ["lx"], "sy", "must be included in accounts"),
-        ({"lx": _futu_service_account()}, ["lx", "sy"], "sy", "not configured for markets us"),
-        ({"lx": {"type": "external_holdings"}}, ["lx"], "lx", "selected Futu account"),
-        ({"lx": _futu_service_account(host="")}, ["lx"], "lx", "host is missing"),
-        ({"lx": _futu_service_account(port=None)}, ["lx"], "lx", "port is invalid"),
-        ({"lx": _futu_service_account(port=11111.9)}, ["lx"], "lx", "port is invalid"),
-        ({"lx": _futu_service_account(port=True)}, ["lx"], "lx", "port is invalid"),
-        ({"lx": _futu_service_account(port="11111.0")}, ["lx"], "lx", "port is invalid"),
-        ({"lx": _futu_service_account(port=70000)}, ["lx"], "lx", "port is invalid"),
-    ],
-)
-def test_render_strategy_lab_recorder_rejects_invalid_account_or_endpoint(
-    tmp_path: Path,
-    settings: dict[str, dict[str, object]],
-    accounts: list[str],
-    recorder_account: str,
-    error_pattern: str,
-) -> None:
-    from src.application.service_deploy import render_service_bundle
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    config_path = _write_service_account_config(tmp_path / "config.us.json", settings)
-
-    with pytest.raises(ValueError, match=error_pattern):
-        render_service_bundle(
-            target="systemd",
-            repo_root=repo,
-            accounts=accounts,
-            markets=["us"],
-            config_paths={"us": config_path},
-            include_strategy_lab_recorder=True,
-            strategy_lab_recorder_source="opend",
-            strategy_lab_recorder_account=recorder_account,
-        )
-
-def test_render_strategy_lab_recorder_rejects_non_integer_yaml_port(tmp_path: Path) -> None:
-    from src.application.agent_tool_contracts import AgentToolError
-    from src.application.service_deploy import render_service_bundle
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    config_yaml = tmp_path / "config.yaml"
-    config_yaml.write_text(
-        """\
-accounts:
-  lx:
-    type: futu
-    futu:
-      account_id: "REAL_12345678"
-      host: 127.0.0.1
-      port: 11111.9
-markets:
-  us:
-    accounts: [lx]
-    symbols: [NVDA]
-""",
-        encoding="utf-8",
-    )
-
-    with pytest.raises(AgentToolError) as _caught:
-        render_service_bundle(
-            target="systemd",
-            repo_root=repo,
-            accounts=["lx"],
-            markets=["us"],
-            config_yaml=config_yaml,
-            include_strategy_lab_recorder=True,
-            strategy_lab_recorder_source="opend",
-            strategy_lab_recorder_account="lx",
-        )
-    exc = _caught.value
-    assert "account_settings.lx.futu.port must be an integer" in str(exc)
-
-@pytest.mark.parametrize(
-    ("hk_settings", "error_pattern"),
-    [
-        ({"lx": _futu_service_account(port=11112)}, "endpoint differs across markets"),
-        ({"lx": {"type": "external_holdings"}}, "account type differs across markets"),
-    ],
-)
-def test_render_strategy_lab_recorder_rejects_cross_market_binding_mismatch(
-    tmp_path: Path,
-    hk_settings: dict[str, dict[str, object]],
-    error_pattern: str,
-) -> None:
-    from src.application.service_deploy import render_service_bundle
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    us_config = _write_service_account_config(
-        tmp_path / "config.us.json",
-        {"lx": _futu_service_account(port=11111)},
-    )
-    hk_config = _write_service_account_config(
-        tmp_path / "config.hk.json",
-        hk_settings,
-    )
-
-    with pytest.raises(ValueError, match=error_pattern):
-        render_service_bundle(
-            target="systemd",
-            repo_root=repo,
-            accounts=["lx"],
-            markets=["us", "hk"],
-            config_paths={"us": us_config, "hk": hk_config},
-            include_strategy_lab_recorder=True,
-            strategy_lab_recorder_source="opend",
-            strategy_lab_recorder_account="lx",
-        )
-
-def test_render_strategy_lab_recorder_rejects_cross_market_opend_root_mismatch(tmp_path: Path) -> None:
-    from src.application.service_deploy import render_service_bundle
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    us_config = _write_service_account_config(
-        tmp_path / "config.us.json",
-        {"lx": _futu_service_account(opend_root=tmp_path / "opend-us")},
-    )
-    hk_config = _write_service_account_config(
-        tmp_path / "config.hk.json",
-        {"lx": _futu_service_account(opend_root=tmp_path / "opend-hk")},
-    )
-
-    with pytest.raises(ValueError, match="root differs across markets"):
-        render_service_bundle(
-            target="systemd",
-            repo_root=repo,
-            accounts=["lx"],
-            markets=["us", "hk"],
-            config_paths={"us": us_config, "hk": hk_config},
-            include_opend=True,
-            include_strategy_lab_recorder=True,
-            strategy_lab_recorder_source="opend",
-        )
-
-def test_render_strategy_lab_recorder_external_opend_has_endpoint_without_dependency(tmp_path: Path) -> None:
-    from src.application.service_deploy import render_service_bundle
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    config_path = _write_service_account_config(
-        tmp_path / "config.us.json",
-        _two_futu_service_accounts(tmp_path),
-    )
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        accounts=["lx", "sy"],
-        markets=["us"],
-        config_paths={"us": config_path},
-        include_opend=False,
-        include_strategy_lab_recorder=True,
-        strategy_lab_recorder_source="opend",
-        strategy_lab_recorder_account="lx",
-    )
-    files = {item["relative_path"]: item for item in bundle["files"]}
-    sample = files["systemd/options-monitor-strategy-lab-sample.service"]["content"]
-    profile = json.loads(files["service.profile.json"]["content"])
-
-    assert "--opend-host 127.0.0.1 --opend-port 11111" in sample
-    assert "After=network-online.target\n" in sample
-    assert "options-monitor-opend" not in sample
-    assert profile["strategy_lab_recorder"]["binding"] == {
-        "account": "lx",
-        "host": "127.0.0.1",
-        "port": 11111,
-    }
-
-def test_render_strategy_lab_recorder_allows_only_unambiguous_legacy_opend_plan(tmp_path: Path) -> None:
-    from src.application.service_deploy import render_service_bundle
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    sole_config = _write_service_account_config(
-        tmp_path / "config.sole.json",
-        {"lx": _futu_service_account()},
-    )
-    sole = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        accounts=["lx"],
-        markets=["us"],
-        config_paths={"us": sole_config},
-        include_opend=True,
-        opend_root=tmp_path / "legacy-opend",
-        include_strategy_lab_recorder=True,
-        strategy_lab_recorder_source="opend",
-    )
-    sole_profile = json.loads({item["relative_path"]: item for item in sole["files"]}["service.profile.json"]["content"])
-    assert sole_profile["strategy_lab_recorder"]["binding"]["service_name"] == "options-monitor-opend.service"
-
-    multi_config = _write_service_account_config(
-        tmp_path / "config.multi.json",
-        _two_futu_service_accounts(tmp_path),
-    )
-    with pytest.raises(ValueError, match="service is not uniquely mapped"):
-        render_service_bundle(
-            target="systemd",
-            repo_root=repo,
-            accounts=["lx", "sy"],
-            markets=["us"],
-            config_paths={"us": multi_config},
-            include_opend=True,
-            opend_root=tmp_path / "legacy-opend",
-            include_strategy_lab_recorder=True,
-            strategy_lab_recorder_source="opend",
-            strategy_lab_recorder_account="lx",
-        )
-
-def test_render_local_strategy_lab_recorder_rejects_account_and_has_no_binding(tmp_path: Path) -> None:
-    from src.application.service_deploy import render_service_bundle
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    with pytest.raises(ValueError, match="requires include_strategy_lab_recorder"):
-        render_service_bundle(
-            target="systemd",
-            repo_root=repo,
-            accounts=["lx"],
-            markets=["us"],
-            strategy_lab_recorder_account="lx",
-        )
-    with pytest.raises(ValueError, match="not valid.*source=local"):
-        render_service_bundle(
-            target="systemd",
-            repo_root=repo,
-            accounts=["lx"],
-            markets=["us"],
-            include_strategy_lab_recorder=True,
-            strategy_lab_recorder_source="local",
-            strategy_lab_recorder_account="lx",
-        )
-
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        accounts=["lx"],
-        markets=["us"],
-        include_strategy_lab_recorder=True,
-        strategy_lab_recorder_source="local",
-    )
-    files = {item["relative_path"]: item for item in bundle["files"]}
-    sample = files["systemd/options-monitor-strategy-lab-sample.service"]["content"]
-    profile = json.loads(files["service.profile.json"]["content"])
-    assert "--opend-host" not in sample
-    assert "--opend-port" not in sample
-    assert "binding" not in profile["strategy_lab_recorder"]
 
 def test_render_systemd_bundle_records_yaml_authoring_source(tmp_path: Path) -> None:
     from src.application.service_deploy import render_service_bundle

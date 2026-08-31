@@ -123,7 +123,7 @@
 - `notification_perception_read`
 - `daily_decision_brief_read`
 
-历史 `monthly_income_report`、`portfolio_capital_bridge` 和 `strategy_replay_analyze` 已移除。Research / Shadow Replay / Strategy Lab 使用 `./om research` 人工 CLI，不注册成一个通用 Tool Gateway 工具。
+历史 `monthly_income_report`、`portfolio_capital_bridge` 和 `strategy_replay_analyze` 已移除。Research / Shadow Replay 使用 `./om research` 人工 CLI。Strategy Lab 使用根级 `./om strategy-lab` CLI：`recipes`、`preview`、`confirm-research`、`research execute`、`preview-validation`、`confirm-validation`、`advance`、`status`、`receipt` 和 `readiness refresh-history-k`。研究执行需要操作员重复显式调用，每次最多一个 provider 逻辑证据单元；未来 10 日隐藏验证由显式 opt-in 的 systemd advance timer 推进。两者都不注册成通用 Tool Gateway 工具。
 
 ## 常用调用
 
