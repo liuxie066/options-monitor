@@ -555,7 +555,7 @@ MVP 保持 `blocked`；不在本设计中预建第二个 OpenD endpoint。
 | `src/application/strategy_lab/evidence.py` | source-bound 历史 K / 到期证据查询、获取、artifact 发布与读取 |
 | `src/application/strategy_lab/comparison.py` | 可复用单推荐替换评价与唯一 leader 选择 |
 | `src/application/strategy_lab/service.py` | 唯一应用编排 owner；完成 preview、确认、研究执行和状态读取 |
-| `src/application/strategy_lab/receipts.py` | Research Receipt 的不可变发布与 Store-bound 公共读取；Final Receipt 留待 Phase 4 |
+| `src/application/strategy_lab/receipts.py` | Research / Final Receipt 的不可变发布与 Store-bound 公共读取；Final Receipt 由 Phase 3 完成 |
 | `src/application/performance/account_fee_plan.py` | Phase 1 已迁出的严格 account fee-plan fact loader |
 | `src/infrastructure/strategy_lab/experiment_store.py` | Slice 1 已全量替换为三表 Store |
 | `src/interfaces/cli/strategy_lab_ops.py` | 根级 CLI 适配；暴露 recipes、preview、confirm、status、research execute、receipt 和 readiness |
