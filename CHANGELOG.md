@@ -2,8 +2,14 @@
 
 ## Unreleased
 
+### Bug Fixes
+- Reduced each portfolio fetch to one CNH OpenD funds refresh and isolated accounts with unavailable prepared portfolio context before shared prefetch, while preserving healthy peer scans and scheduled failure alerts.
+
+## 3.0.2 - 2026-08-31
+
 ### Improvements
 - Reduced per-run Tick storage by omitting duplicated provider payloads from persisted prefetch summaries and compacting opening candidate snapshot JSON, without changing canonical required-data facts, candidate semantics, or notification behavior.
+- Added Strategy Lab evidence-source readiness and zero-wait, low-priority OpenD admission so historical evidence requests fail closed instead of delaying production Tick.
 
 ## 3.0.1 - 2026-08-30
 

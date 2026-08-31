@@ -494,7 +494,7 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
         str, list[dict[str, Any]]
     ] = {}
     prepared_option_unavailable_by_account: dict[str, str] = {}
-    prepared_contexts: dict[str, dict[str, Any] | None] = {}
+    prepared_contexts: dict[str, dict[str, Any]] = {}
     snapshot_status: str | None = None
     barrier_reason: str | None = None
     prefetch_done = bool(request.prefetch_done)
@@ -630,7 +630,7 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                 invalid_prepared_accounts.add(account)
                 continue
             try:
-                prepared_contexts[account] = load_prepared_portfolio_context(
+                prepared_context = load_prepared_portfolio_context(
                     manifest_path=manifest_path,
                     expected_base=request.base,
                     expected_run_id=request.run_id,
@@ -652,6 +652,17 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                 )
                 invalid_prepared_accounts.add(account)
                 continue
+            if not isinstance(prepared_context, dict):
+                account_config_errors[account] = AccountRunConfigError(
+                    "ACCOUNT_CONFIG_PREPARED_CONTEXT_INVALID",
+                    str(
+                        manifest.get("reason")
+                        or "prepared portfolio context is unavailable"
+                    ),
+                )
+                invalid_prepared_accounts.add(account)
+                continue
+            prepared_contexts[account] = prepared_context
             prepared_manifest_paths[account] = manifest_path
             prepared_manifest_sha256_by_account[account] = str(
                 manifest.get("manifest_sha256") or ""
