@@ -27,6 +27,7 @@ from src.application.service_deploy import (
     render_service_bundle,
 )
 from src.application.secret_store import credential_spec
+from src.application.strategy_lab.contracts import STRATEGY_LAB_ADVANCE_TIMER
 
 
 SYSTEMD_REQUIRED_MAINTENANCE_UNITS = (
@@ -1499,6 +1500,7 @@ def _expected_bundle_from_profile(
         quality_monitoring.get("enabled")
         or any(name.startswith("options-monitor-quality-") for name in services)
     )
+    include_strategy_lab_advance = STRATEGY_LAB_ADVANCE_TIMER in services
     include_feishu_agent_credential = bool(
         feishu_agent_credential.get("enabled")
         or FEISHU_AGENT_CREDENTIAL_SERVICE in services
@@ -1544,6 +1546,7 @@ def _expected_bundle_from_profile(
         "wechat_clawbot_label": str(wechat_clawbot.get("label") or "default"),
         "wechat_clawbot_allowed_senders": wechat_clawbot_allowed_senders,
         "include_quality_monitoring": include_quality_monitoring,
+        "include_strategy_lab_advance": include_strategy_lab_advance,
         "include_feishu_agent_credential": include_feishu_agent_credential,
         "include_secret_credentials": include_secret_credentials,
         "secret_credential_delivery": (

@@ -10,6 +10,7 @@ from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.fee_calc import calc_futu_hk_terminal_fee
 from src.application.strategy_lab.evidence import (
     StrategyLabEvidenceError,
+    build_expiry_close_query,
     build_single_recommendation_result,
     collect_research_fill_evidence,
     load_research_projection,
@@ -83,9 +84,7 @@ def _spec() -> dict[str, object]:
         "evaluator_behavior_sha256": "d" * 64,
         "fee_plan": {"receipt": _fee_plan()},
         "history_k_authority": {
-            "probe_request": {
-                "opend_binding": {"host": "127.0.0.1", "port": 11111}
-            },
+            "probe_request": {"opend_binding": {"host": "127.0.0.1", "port": 11111}},
             "probe_sha256": "b" * 64,
             "receipt": {"content_sha256": "c" * 64},
         },
@@ -208,9 +207,7 @@ def test_pre_recommendation_crossing_cannot_fill(tmp_path: Path) -> None:
         tmp_path,
     )
 
-    assert evidence["bars"] == [
-        {"time_utc": "2026-08-03T01:43:00Z", "high": 1.0, "volume": 10.0}
-    ]
+    assert evidence["bars"] == [{"time_utc": "2026-08-03T01:43:00Z", "high": 1.0, "volume": 10.0}]
     assert action["action"] == "derive_research_fill"
     assert action["payload"]["status"] == "no_fill"
 
@@ -426,24 +423,27 @@ def test_artifact_publish_is_idempotent_and_conflicting_content_fails(tmp_path: 
         "observed_at_utc": "2026-08-30T12:00:00Z",
         "producer_source_commit_sha": "1" * 40,
     }
-    first = publish_evidence_artifact(
-        tmp_path, "history_k", digest, {"status": "no_fill"}, **kwargs
-    )
-    second = publish_evidence_artifact(
-        tmp_path, "history_k", digest, {"status": "no_fill"}, **kwargs
-    )
+    first = publish_evidence_artifact(tmp_path, "history_k", digest, {"status": "no_fill"}, **kwargs)
+    second = publish_evidence_artifact(tmp_path, "history_k", digest, {"status": "no_fill"}, **kwargs)
     assert first == second
 
     with pytest.raises(StrategyLabEvidenceError) as raised:
-        publish_evidence_artifact(
-            tmp_path, "history_k", digest, {"status": "available"}, **kwargs
-        )
+        publish_evidence_artifact(tmp_path, "history_k", digest, {"status": "available"}, **kwargs)
     assert raised.value.reason_code == "research_evidence_immutable_conflict"
 
 
 def test_expiry_close_and_single_result_use_only_frozen_fx_and_fee(tmp_path: Path) -> None:
     projection = load_research_projection(_spec())
     query = projection["expiry_close_queries"][0]["query"]
+    authority = {
+        "provider": "futu_opend",
+        "endpoint": "history_kline",
+        "opend_binding": {"host": "127.0.0.1", "port": 11111},
+    }
+    assert query["provider_source"] == {
+        **authority,
+        "source_authority_sha256": canonical_sha256(authority),
+    }
     gateway = SimpleNamespace(
         get_exact_expiration_close=lambda **_kwargs: {
             "code": "HK.09992",
@@ -485,6 +485,68 @@ def test_expiry_close_and_single_result_use_only_frozen_fx_and_fee(tmp_path: Pat
     assert result["economic_pnl_cny"] < 0
     assert result["return_capital_basis_cny"] > 0
     assert result["holding_calendar_days"] == 25
+
+
+def test_validation_expiry_query_rebinds_snapshot_source_to_history_kline() -> None:
+    source = {
+        "provider": "futu_opend",
+        "endpoint": "market_snapshot",
+        "opend_binding": {"host": "127.0.0.1", "port": 11111},
+    }
+    source["source_authority_sha256"] = canonical_sha256(source)
+    query = build_expiry_close_query(
+        _arm(),
+        _fx("0.92", expiration="2026-08-28"),
+        _fee_plan(),
+        source,
+        "d" * 64,
+    )
+    authority = {
+        "provider": "futu_opend",
+        "endpoint": "history_kline",
+        "opend_binding": {"host": "127.0.0.1", "port": 11111},
+    }
+    assert query["provider_source"] == {
+        **authority,
+        "source_authority_sha256": canonical_sha256(authority),
+    }
+
+
+def test_observed_fill_reuses_standard_result_without_simulation_declaration(
+    tmp_path: Path,
+) -> None:
+    projection = load_research_projection(_spec())
+    query = projection["expiry_close_queries"][0]["query"]
+    outcome = resolve_expiry_outcome(
+        SimpleNamespace(
+            get_exact_expiration_close=lambda **_kwargs: {
+                "code": "HK.09992",
+                "expiration": "2026-08-28",
+                "close": 130.0,
+            }
+        ),
+        query,
+        _fee_plan(),
+        query["terminal_fx_binding"],
+        limiter_root=tmp_path,
+        window_sec=30,
+        max_calls=20,
+    )
+    result = build_single_recommendation_result(
+        projection["arms"][0]["arm"],
+        {
+            "status": "observed_fill",
+            "fill_price": 1.0,
+            "fill_time": "2026-08-03T01:41:00Z",
+            "fill_evidence_ref": _evidence_ref("hidden"),
+        },
+        {**outcome, "outcome_evidence_ref": _evidence_ref("expiry")},
+    )
+
+    assert result["status"] == "available"
+    assert result["fill_status"] == "observed_fill"
+    assert result["quote_evidence_not_broker_execution"] is True
+    assert "simulated_fill_not_real_trade" not in result
 
 
 def test_no_fill_is_zero_and_terminal_gap_is_not_evaluable(tmp_path: Path) -> None:

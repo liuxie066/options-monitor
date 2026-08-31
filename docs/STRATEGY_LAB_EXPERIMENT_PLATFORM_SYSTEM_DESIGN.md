@@ -1,7 +1,7 @@
 # Strategy Lab 统一策略实验平台系统设计
 
-- **状态**：Phase 2 本地实现完成；Phase 3～4 尚未实现；远端自然 Tick 门槛待验收
-- **日期**：2026-08-30
+- **状态**：Phase 3 本地实现完成；远端自然 Tick 隔离门槛已通过；待 Phase 4 真实数据验收
+- **日期**：2026-08-31
 - **产品依据**：[Strategy Lab PRD](STRATEGY_LAB_EXPERIMENT_PLATFORM_PRD.md)
 - **首个 Recipe**：`sell_put_option_position_concentration`
 
@@ -120,9 +120,12 @@ CLI 和将来的 MCP 只能调用以下应用函数：
 - 两次确认都用原 request 重新生成当前 preview；只有 `available` 且 hash 与用户确认值相同才写入，
   不能接受调用方回传的 spec；
 - `create_experiment()` 在 `BEGIN IMMEDIATE` 内拒绝全局第二个未终态实验；
-- `advance_experiment()` 每次只处理有限工作，并用传入的同一时间完成全部阶段判断；
-- `advance_scheduled()` 从冻结 calendar 和 `occurred_at_utc` 解析墙钟 slot；仍在 tolerance 内时先处理当前
-  slot，再把一个交易日内已过期但从未 started 的 slot 本地记 gap，不为历史 slot 请求报价；
+- `advance_experiment()` 使用一个非阻塞 experiment advance 锁串行化全局唯一实验，每次只处理有限工作，
+  并用传入的同一时间完成全部阶段判断；它不取得 Tick market lock；
+- `advance_scheduled()` 从冻结 calendar 和 `occurred_at_utc` 解析墙钟 slot；先恢复已有 started batch 的
+  durable artifact，再只处理仍在 tolerance 内的当前 slot，不为历史 slot 请求报价或写 gap；
+- Tick guard 和低优先级准入成功后才能创建 started batch；`start_observation()` 返回是否由本次调用新建，
+  只有新建者可以访问 provider；
 - 每次确认和推进都重新计算冻结 owner manifest 的 `evaluator_behavior_sha256`；不匹配返回
   `evaluator_behavior_mismatch`，不迁移旧实验；`source_commit_sha` 只追加到审计事件，不参与准入；
 - `list_recipes()`、两种 preview、`get_experiment_status()` 和 `read_receipt()` 的 provider 调用数必须为
@@ -316,34 +319,57 @@ receipt。receipt 过期、endpoint / 权限漂移、样本范围不足或当前
 第二次确认冻结 10 个交易日的 calendar session、UTC 分钟网格、wake-up tolerance 和订单有效终点。
 每个 formal point artifact 持久化后，服务把 arm active window 固化为“point 持久化后的第一个完整交易
 分钟至同日冻结终点”；午休、半日市和临时休市完全由冻结 calendar 决定，point 出现前的 slot 不属于该
-arm。任务晚于 `slot + tolerance` 才醒来时只记 gap，不用当前报价回填过去 slot。slot 来源是冻结 calendar
+arm。任务晚于 `slot + tolerance` 才醒来时不请求 provider，也不用当前报价回填过去 slot。slot 来源是冻结 calendar
 与本次 `occurred_at_utc`，不从上一次任务完成时间递推。
 
 `observe_hidden_fill()`：
 
-1. 先计算仍在 tolerance 内的当前 slot，优先处理其全部 active、尚未确定 fill 的 arms，并按合约去重；
-2. 在一个 SQLite 事务写 batch-kind started observation，key 为
+1. 在非阻塞 experiment advance 锁内，按 slot 排序读取真实存在的 started batch；发现匹配的 durable
+   artifact 时补 Store binding，并完成其中首次 crossing。没有 artifact 的 started row 保持原样；
+2. 计算仍在 tolerance 内的当前 slot，收集其全部 active、尚未确定 fill 的 arms，并按合约去重；任务晚到
+   或没有 active arm 时不创建 observation；
+3. Tick guard 和低优先级 OpenD 准入成功后，在一个 SQLite 事务创建 batch-kind started observation，key 为
    `hidden_batch:<trading_day>:<observation_slot_utc>`，payload 冻结 exact arm ids、option codes 和 query；
-3. 随后一次调用现有 `fetch_option_snapshots()`，固定 `max_wait_sec=0`、`no_retry=True`、
+   `start_observation()` 返回 created 标志，只有本次新建者可以继续调用 provider；
+4. 一次调用现有 `fetch_option_snapshots()`，固定 `max_wait_sec=0`、`no_retry=True`、
    `snapshot_fallback_max_codes=0`、一个明确 batch size 和进程级硬 timeout；去重后不得超过单批上限；
-4. 对每个 arm 使用冻结 `sell_limit` 判断 `bid >= sell_limit and raw_bid_vol > 0`；Bid 和 raw Bid Volume
+5. 对每个 arm 使用冻结 `sell_limit` 判断 `bid >= sell_limit and raw_bid_vol > 0`；Bid 和 raw Bid Volume
    必须来自同一 snapshot 且为有限正值。raw Bid Volume 只证明最优买价存在非零挂量，不换算为合约张数，
    不估算可成交规模或滑点；
-5. provider 返回后先写一份含完整查询条件、scheduled / observed time 的不可变批次 artifact，再在一个
-   事务 complete batch 并绑定 manifest 中全部 arm observations；首次满足写 `observed_fill`，价格记为
-   `sell_limit`，以后不再要求该 arm 的 slot；
-6. started batch 在 deadline 后仍无 artifact 时，按原 manifest 将全部 arms 一次性记 gap；artifact 已存在
-   时只补 Store binding。同 slot 后出现的新 arm 不修改旧 manifest；
-7. 当前 slot 处理后，把 deadline 已过且连 started row 都不存在的 expected slots 直接物化为 gap，绝不
-   调 provider；每次最多处理一个冻结交易日，优先当天、再处理最早未完成日；
-8. 当日无 fill 时，只有 active window 中全部 expected slots 已 observation 或 gap 化才可结算；全部
-   observation 才是 `no_fill`，任一 gap 都是 `not_evaluable`。10 日窗口存在未显式 slot 时不得结束。
+6. 按下方证据分支校验 provider envelope。`observation_slot_utc` 只作 identity；artifact 的
+   `observed_at_utc` 和 crossing 的 `fill_time` 均使用真实 `received_at_utc`；
+7. 调用 artifact publish owner；它内部使用 `evidence_artifact_location()` 返回的真实 lock 原子发布并
+   readback。service 不预持该锁，不增加 batch lock，也不传 `lock_held`；
+8. artifact durable 后，在一个 SQLite 事务 complete batch；只为本批首次满足条件的 arm 写唯一
+   `validation_fill:<point_id>:<arm_id>`，状态为 `observed_fill`、价格为 `sell_limit`，并直接引用 batch
+   artifact。完整批次内容不复制为逐 arm、逐分钟 Store 行；
+9. active window 终点对尚无 fill 的 arm 投影一次终态：全部 expected slots 都有内容和绑定有效的 complete
+   batch 时为 `no_fill`；任一 slot 不存在、started 未完成或 artifact 不可评价时为 `not_evaluable`。
+   projection artifact 列出 expected slots、实际 batch ref/hash 和 missing/invalid slot identities；
+10. 进入 `waiting_outcome` 前完整恢复一次全部 started rows，再确认每个 arm 已有唯一 terminal fill。
+
+provider envelope 只走以下三条分支：
+
+| 条件 | 处理 |
+|---|---|
+| 调用报错或超时、`opend_call_count != 1`、request / receive UTC 缺失或不可解析、任一时间超出冻结 tolerance、存在未请求或重复代码 | 不发布 artifact，started row 保持原样 |
+| exact query identity、单次调用和时间 envelope 有效，但 requested code 缺行，或 Bid / raw Bid Volume / source time 非法 | 为每个缺陷 code 写明确 invalid row，发布不可评价的 complete batch artifact |
+| envelope 与报价行均有效 | 发布 complete batch artifact；application/evidence 层从 readback artifact 计算 crossing 集合 |
+
+缺少 requested code 是可枚举的行级缺陷；未请求或重复代码破坏 query identity，不能封存为该 query 的事实。
+artifact publish/readback、crossing 计算和 Store complete 使用同一份 canonical payload。
 
 中间观察和阶段效果不向用户展示。status 只返回进度与阻塞原因。
 
 每个 batch 断言 `opend_call_count <= 1`。系统不承诺 provider exactly-once；batch started 后不再对同 key
-发起查询。进程在 artifact 持久化前崩溃时，deadline 后由 manifest 生成 gaps；artifact 已持久化但 Store
-未绑定时，重启只补绑定。历史 K / outcome 查询没有盘中 slot 语义，artifact 未持久化时允许安全重试。
+发起查询。进程在 artifact 持久化前崩溃时，started row 永久代表缺失证据；artifact 已持久化但 Store
+未绑定时，重启只补 complete 和首次 crossing。未 started 的过期 slot 保持不存在。历史 K / outcome 查询
+没有盘中 slot 语义，artifact 未持久化时允许安全重试。
+
+`validation_fill` 是每个 arm 的唯一终态事实。`observed_fill` 表示首次持久化观察到的 crossing，不证明缺失
+slot 中不存在更早 crossing；它直接引用 batch artifact，不再发布独立 observed-fill artifact。
+`no_fill / not_evaluable` 只在窗口终点发布 projection artifact，已存在 `observed_fill` 时不得再生成第二份
+terminal fill。
 
 `preview_validation()` 只从已完成研究和本地冻结事实构造 leader、未来窗口及其 binding，不访问 provider。
 第二次确认重新生成 preview，并把 schedule、account config、timer 和 behavior hashes 固化进 validation
@@ -355,6 +381,8 @@ binding。实时 snapshot 的 Bid、raw Bid Volume 或 source time 缺失 / 非�
 `resolve_expiry_outcome()` 对已成交 arm：
 
 - 使用真实合约到期日和标的未复权日 K 收盘；
+- outcome query 从冻结 OpenD binding 派生 `endpoint=history_kline` 的独立 source authority 与 hash，不能沿用
+  盘中隐藏报价的 `market_snapshot` authority；
 - 使用开仓、到期时点已绑定的 `FXRateFact`；
 - 开仓费用使用 formal point 已封存结果；终端费用使用严格 account fee-plan fact
   (`commission_free`、`platform_fee`、`fee_plan_ref`) 及其内容 hash，并复用现有期权费用计算；Sell Put
@@ -382,8 +410,10 @@ MVP 不抓期权逐笔、不模拟提前平仓，也不计算指派后的持股�
 - `create_experiment()` 在 `BEGIN IMMEDIATE` 内查询并拒绝全局第二个未终态 experiment；
 - 每个 experiment 的 confirmation hash 只能消费一次；
 - observation 以 `(experiment_id, observation_key)` 唯一；隐藏 batch key 只含 trading day + scheduled slot，
-  payload 冻结 exact arm/query manifest；各 arm key 另含 slot + arm identity，research K / outcome key
-  包含冻结 query identity；相同 key 的不同内容必须拒绝；
+  payload 冻结 exact arm/query manifest；每个 arm 只有一个
+  `validation_fill:<point>:<arm>`，`observed_fill` 直接引用首次 crossing 的 batch artifact，
+  `no_fill / not_evaluable` 引用终态 projection artifact；research K / outcome key 包含冻结 query identity；
+  相同 key 的不同内容必须拒绝；
 - event 以 `(experiment_id, sequence)` 排序，只追加；
 - 状态更新使用 `revision` compare-and-set，并在同一 SQLite 事务提交事件。
 
@@ -396,14 +426,29 @@ MVP 不抓期权逐笔、不模拟提前平仓，也不计算指派后的持股�
 | `get_active_experiment()` | 返回全局唯一未终态实验；没有则返回空 |
 | `get_experiment()` | 读取状态与引用 |
 | `append_event_and_transition()` | 校验旧状态、revision 后追加事件并推进 |
-| `start_observation()` | 在一个事务保存 batch started 与 exact arm/query manifest；已存在不再调用 provider |
-| `complete_observation()` | artifact durable 后在一个事务完成 batch 并绑定全部 arm rows；拒绝同 key 不同内容 |
-| `expire_started_observation()` | deadline 后按原 manifest 将无 artifact 的 batch 全部 arms 记 gap |
-| `materialize_elapsed_observation_gaps()` | 在一个事务把一个冻结交易日内从未 started 的过期 slots 及其 arms 记 gap；不访问 provider |
+| `start_observation()` | 在一个事务保存 batch started 与 exact arm/query manifest，返回 `(observation, created)`；只有 `created=true` 的调用方可以访问 provider |
+| `complete_observation(..., artifact_ref, artifact_sha256, artifact_received_at_utc, crossing_arm_ids)` | artifact durable 后在一个事务完成 batch，并为 application/evidence 已判定 crossing 的 arm 插入唯一 `observed_fill` |
+| `put_observation()` | 写 research / outcome 事实及窗口终点的 `no_fill / not_evaluable`；终态 fill 必须引用不可变 projection artifact |
 | `list_observations()` | 按 point / arm / kind 读取 |
 | `attach_receipt()` | 仅在不可变 receipt 已 readback 验证后绑定 ref/hash |
 
-写路径复用 `connect_private_sqlite()`、`secure_sqlite_artifacts()` 和 SQLite `BEGIN IMMEDIATE`；
+`complete_observation()` 不读取 artifact，也不计算 Bid crossing。application/evidence 必须先 readback 同一
+artifact，并只传其中满足条件的 `(recommendation_point_id, arm_id)` 集合。Store 在一个
+`BEGIN IMMEDIATE` 内：
+
+1. 校验 batch 仍为 started、manifest 完全相同，crossing identities 唯一且都是 manifest arms；
+2. 用 manifest 中冻结的 `sell_limit` 作为 `fill_price`，用 `artifact_received_at_utc` 作为 `fill_time`，
+   并把同一 artifact ref/hash 绑定到 batch 和新 fill；
+3. 更新 batch 为 complete，并插入尚不存在的 `validation_fill:<point>:<arm>`；
+4. 完全相同的 batch/artifact/crossing 集合重试返回既有结果；manifest、artifact、received time 或 crossing
+   集合任一不同均返回 `validation_batch_manifest_conflict`；
+5. 若任一 arm 已绑定其他 terminal fill，整个事务失败，不留下 complete batch 或部分 fills。
+
+Store 只负责 identity、原子性和冲突校验；报价规范化、invalid row 和 crossing 判定仍归
+application/evidence owner。
+
+写路径复用 `connect_private_sqlite()`、`secure_sqlite_artifacts()`、现有跨进程 writer lock、SQLite WAL 和
+`BEGIN IMMEDIATE`；writer lock 负责串行写入，WAL 只负责隔离短生命周期 reader 与连续 writer；
 `get_active_experiment()`、`get_experiment()`、`list_observations()` 使用严格 `mode=ro` / `query_only`
 连接，只校验 Store 是私有普通文件，不创建文件、不 chmod、不修复 sidecar。不再使用
 `strategy_lab_schema`、`schema_state()`、`migrate()`、generation、capability、corpus、feature 或
@@ -441,20 +486,20 @@ formal point 绑定各自生产 config / source hashes；未来验证在第二�
 
 MVP manifest 固定覆盖以下文件，每项只保存路径和文件 SHA-256：
 
-- 待新增：`src/application/strategy_lab/contracts.py`
-- 待新增：`src/application/strategy_lab/recipe.py`
-- 待新增：`src/application/strategy_lab/comparison.py`
-- 待新增：`src/application/strategy_lab/evidence.py`
-- 待新增：`src/application/strategy_lab/readiness.py`
-- 待新增：`src/application/strategy_lab/service.py`
-- 待新增：`src/application/strategy_lab/receipts.py`
-- 全量替换：`src/infrastructure/strategy_lab/experiment_store.py`
+- 现有：`src/application/strategy_lab/contracts.py`
+- 现有：`src/application/strategy_lab/recipe.py`
+- 现有：`src/application/strategy_lab/comparison.py`
+- 现有：`src/application/strategy_lab/evidence.py`
+- 现有：`src/application/strategy_lab/readiness.py`
+- 现有：`src/application/strategy_lab/service.py`
+- 现有：`src/application/strategy_lab/receipts.py`
+- 现有：`src/infrastructure/strategy_lab/experiment_store.py`
 - 现有：`domain/domain/engine/candidate_engine.py`
 - 现有：`domain/domain/short_vol_assessment.py`
 - 现有：`domain/domain/option_lifecycle.py`
 - 现有：`domain/domain/fee_calc.py`
 - 现有：`domain/domain/performance/models.py`
-- 待新增：`src/application/performance/account_fee_plan.py`
+- 现有：`src/application/performance/account_fee_plan.py`
 - 现有：`src/infrastructure/performance_evidence_sqlite.py`
 - 现有：`src/application/opend_market_snapshot_fetching.py`
 - 现有：`src/infrastructure/futu_gateway.py`
@@ -476,7 +521,7 @@ adapter 和文档不属于行为 manifest。opening snapshot loader 也采用整
 仅保留一个 Strategy Lab timer，调用：
 
 ```text
-./om strategy-lab advance --scheduled
+./om strategy-lab advance --profile-path <runtime>/service.profile.json --scheduled
 ```
 
 `service_deploy.py` 为同一 timer 生成三条墙钟 `OnCalendar=`：盘中
@@ -489,21 +534,32 @@ adapter 和文档不属于行为 manifest。opening snapshot loader 也采用整
 
 调度实现：
 
-1. 不取得 Tick market lock；只读检查 Tick busy 和下一计划时间，busy 或进入保护窗口立即让路；
-2. OpenD coordinator 为生产保留容量；实验调用只允许低优先级立即准入，配额不足即返回，不等待；
-3. 历史 K 和 outcome 只在闭市后、且不在 Tick 保护窗口内运行，每次最多处理一个 point 或 outcome；
-4. 盘中隐藏观察每分钟最多一个 snapshot batch，按合约去重，固定单批、硬超时、零等待、不重试、
+1. `advance` 先非阻塞取得 experiment 级 advance lock；失败返回只读
+   `status=progress, reason_code=validation_advance_busy`，不写 Store、不访问 provider。该锁覆盖一次推进，
+   不取得 Tick market lock；Tick busy 或进入保护窗口立即让路；
+2. 按 slot 顺序扫描 Store 中真实存在的 started batch。artifact 已存在时只补 Store complete 及首次 crossing
+   的 `observed_fill`；artifact 不存在时保持 started，不重试；不存在 started row 的历史 slot 不创建记录；
+3. 当前 slot 已有 started/complete batch 时本次推进不再申请低优先级额度。只有无 batch 的当前 slot 才在
+   创建 started row 前完成 Tick guard 和 OpenD 低优先级零等待准入；`start_observation()` 返回 `created`，
+   只有创建者调用 provider；
+4. 历史 K 和 outcome 只在闭市后、且不在 HK 或 US Tick 保护窗口内运行，每次最多处理一个 point 或
+   outcome；周六香港时间仍须保护对应的美股周五盘中 Tick；
+5. 盘中隐藏观察每分钟最多一个 snapshot batch，按合约去重，固定单批、硬超时、零等待、不重试、
    无 fallback；
-5. 每次先处理仍可观察的当前 slot；之后在一个本地事务把一个交易日内已过 deadline、但没有 started row
-   的 expected slots 物化为 gap，优先当天、再处理最早未完成日，且不调用 provider；闭市条目继续恢复；
-6. provider 返回先发布不可变 artifact，再绑定 Store；已发布未绑定的 artifact 只补绑定；未发布的隐藏
-   batch 在 deadline 后按 started manifest 记 gap，历史 / outcome query 可安全重试；
-7. 让路、限流或 provider 暂不可用只记录稳定 gap/blocker，不忙等；
-8. 旧 recorder 的 build/sample/settle timers 和旧 Top1 timer 全部删除。
+6. provider 响应严格应用 §6.3 的三分支 envelope 合同；只有 envelope 有效的结果才发布 artifact，行级缺陷
+   写入 artifact 的 invalid rows；
+7. batch artifact 只由 artifact publish owner 内部取得真实 artifact lock。发布并 readback 后，一个 Store
+   事务完成 batch 并写首次 crossing fill；service 不预持 artifact lock，不增加 batch lock 或 `lock_held`；
+8. 进入 `waiting_outcome` 前完整恢复全部 started rows。窗口到期后，完整 expected slots 生成
+   `no_fill` projection；缺失、started 或无效 slot 生成 `not_evaluable` projection；
+9. 旧 recorder 的 build/sample/settle timers 和旧 Top1 timer 全部删除。
+
+MVP 全局只有一个实验且窗口固定 10 日，恢复直接线性扫描真实 started rows；不增加 recovery cursor、索引表
+或批次调度状态。
 
 保护窗口和生产预留容量在实施前由 OpenD PoC 与当前 Tick 调用计划确定为代码常量，不增加用户配置。
 并发测试必须覆盖两个方向：Tick 已运行时实验立即让路；实验已开始后 Tick 仍取得自己的锁且不会
-`SKIP_LOCKED`，实验在 deadline 内结束或记 gap。若共享 endpoint 的低优先级协议无法证明这一点，
+`SKIP_LOCKED`，实验在硬超时内结束。若共享 endpoint 的低优先级协议无法证明这一点，
 MVP 保持 `blocked`；不在本设计中预建第二个 OpenD endpoint。
 
 ## 9. 代码处理清单
@@ -534,6 +590,7 @@ MVP 保持 `blocked`；不在本设计中预建第二个 OpenD endpoint。
 | `src/interfaces/cli/research.py` | 删除旧 `research strategy-lab` 路由；增加 Research owner 的 `corpus-calendar refresh` 运维入口 |
 | `src/application/service_deploy.py` | Slice 1 删除 recorder/Top1 units；Phase 3 再最小扩展现有 `_systemd_timer()` 以生成唯一 Strategy Lab advance unit |
 | `src/interfaces/cli/service_ops.py` | Slice 1 删除 recorder/Top1 参数；Phase 3 再增加唯一 advance 开关 |
+| `src/application/service_drift.py` | 从现有 profile 的 advance timer 名称恢复 opt-in，确保受控重渲染不误删唯一 timer/service |
 | `src/application/tick_cron.py` | 只暴露非持有式 busy / schedule 探针；不改变 Tick 自己的 lock / `SKIP_LOCKED` 行为 |
 | `src/application/opend_call_coordinator.py` | 在现有 limiter 上增加最小 `try_low_priority_opend_call()`，零等待且保留生产容量 |
 | `src/application/tick_account_execution.py` | 取消 Strategy Lab 专用 `mark_evidence_accounts` 整仓刷新；不增加 Tick provider 调用 |
@@ -552,13 +609,13 @@ MVP 保持 `blocked`；不在本设计中预建第二个 OpenD endpoint。
 |---|---|
 | `src/application/strategy_lab/contracts.py` | 最小状态、canonical hash、冻结确认和研究结果合同 |
 | `src/application/strategy_lab/recipe.py` | 首个集中度 Recipe、20 日 preview 和标准结果投影 |
-| `src/application/strategy_lab/evidence.py` | source-bound 历史 K / 到期证据查询、获取、artifact 发布与读取 |
+| `src/application/strategy_lab/evidence.py` | source-bound 历史 K / 到期证据，以及隐藏 batch envelope 规范化、crossing 和 terminal projection |
 | `src/application/strategy_lab/comparison.py` | 可复用单推荐替换评价与唯一 leader 选择 |
-| `src/application/strategy_lab/service.py` | 唯一应用编排 owner；完成 preview、确认、研究执行和状态读取 |
+| `src/application/strategy_lab/service.py` | 唯一应用编排 owner；完成 preview、确认、研究执行、隐藏验证、outcome 和状态读取 |
 | `src/application/strategy_lab/receipts.py` | Research / Final Receipt 的不可变发布与 Store-bound 公共读取；Final Receipt 由 Phase 3 完成 |
 | `src/application/performance/account_fee_plan.py` | Phase 1 已迁出的严格 account fee-plan fact loader |
-| `src/infrastructure/strategy_lab/experiment_store.py` | Slice 1 已全量替换为三表 Store |
-| `src/interfaces/cli/strategy_lab_ops.py` | 根级 CLI 适配；暴露 recipes、preview、confirm、status、research execute、receipt 和 readiness |
+| `src/infrastructure/strategy_lab/experiment_store.py` | 三表 Store；Phase 3 只增加 batch started/complete 与唯一 terminal fill 原子合同 |
+| `src/interfaces/cli/strategy_lab_ops.py` | 根级 CLI 适配；暴露研究与验证 preview/confirm、research execute、advance、status、两类 receipt 和 readiness |
 
 ### 9.4 删除
 
@@ -568,12 +625,16 @@ MVP 保持 `blocked`；不在本设计中预建第二个 OpenD endpoint。
 | 旧 Strategy Lab update 包装 | Slice 1 已删除；Shadow Replay 保留自有入口 |
 | 旧 nested Top1 CLI 文件 | Slice 1 已删除；根级 `strategy_lab_ops.py` 是唯一适配 |
 | 旧 ExperimentStore 内容 | Slice 1 已替换；13 表、四代迁移和专用状态不保留 |
-| recorder 与 Top1 service/timer | Slice 1 已删除；当前不生成 Strategy Lab timer |
+| recorder 与 Top1 service/timer | Slice 1 已删除；只保留显式 opt-in 的唯一 Strategy Lab advance service/timer |
 | 只覆盖上述旧入口、迁移和状态表的测试/fixture | Slice 1 已随 owner 删除 |
+| Store `_gap_observation()`、`expire_started_observation()`、`materialize_elapsed_observation_gap()`，以及 `hidden_quote` kind / `gap` status | 过期 slot 不物化，完整批次不复制逐 arm Store 行 |
+| service `_validation_batch_lock_path()`、`_freeze_current_batch()`、逐日 gap recovery 和对应分支 | 一个 advance lock 已串行化唯一实验；恢复只扫描 started rows |
+| evidence `hidden_quote_rows()` 与旧的独立 observed-fill artifact 构造 | crossing 由 batch artifact 直接绑定；只有 `no_fill / not_evaluable` 生成 terminal projection artifact |
+| 断言 gap 物化、`hidden_quote` 行、batch lock 或 `lock_held` 的测试 | 用 start/complete 原子性、artifact recovery 和 terminal projection 测试替换，不保留兼容断言 |
 
 删除以引用清单为准；Research Archive、Shadow Replay、required-data 和 Candidate Engine
 继续保留。calendar refresh 和 fee-plan 读取已分别迁到 Formal Corpus 与 performance owner，
-不依赖已删除的旧产品壳。
+不依赖已删除的旧产品壳。Strategy Lab 尚未形成可用版本，上述过渡实现不做数据或 API 迁移。
 
 ## 10. Receipt 与 artifact
 
@@ -590,9 +651,11 @@ Research Receipt 包含 spec/hash、source commit、behavior hash/manifest、20 
 同一 experiment、同一输入重复构建必须得到相同语义 hash。时间戳只记录事实发生时间，不能在重试时
 改写为新值导致第二份结论。
 
-外部证据沿用相同发布顺序：provider response -> immutable artifact durable -> Store attach。artifact
-存在而 Store 未绑定时只补绑定；artifact 未落盘时，历史 / outcome 查询可重试，隐藏 batch 必须按
-manifest 记 gap。
+外部证据沿用相同发布顺序：provider response -> immutable artifact durable -> Store attach。隐藏 batch
+artifact 的互斥由 artifact publish owner 内部持有，调用方不得预持同一锁。artifact 存在而 Store 未绑定时
+只补绑定；artifact 未落盘时，历史 / outcome 查询可重试，但隐藏 batch 保持 started 且永不重试。
+`observed_fill` 直接引用首次 crossing 的 batch artifact，不额外生成 fill artifact；`no_fill / not_evaluable`
+引用窗口终点生成的 projection artifact，其中列出 expected slots、batch refs/hashes、缺失及无效 slot。
 targeted history-K readiness receipt 复用现有 canonical JSON、私有原子写入和 readback helper，以 probe
 hash 与观测日期寻址，不写 ExperimentStore；过期只影响后续 preview，不改写旧 receipt。
 
@@ -605,29 +668,39 @@ hash 与观测日期寻址，不写 ExperimentStore；过期只影响后续 prev
 3. mark binding：midpoint、Last fallback、无价、crossed、重复匹配、缺 market code、多 lots、越界 source
    time / 后续批次、deterministic fact/hash 和 provider 调用数为 0；
 4. `evidence.py`：分钟 K 多页 / 顺序 / 重复 / receipt readiness、Bid crossing、正 / 零 / 非法 raw Bid
-   Volume、session slot、batch manifest、从未 started 的过期 slot、当前 slot 优先、全天 gap、单批调用上限；
-5. `ExperimentStore`：初始化、全局单活动实验、两次确认幂等、revision 冲突、batch / arm identity、重启恢复、
-   同 key 不同内容拒绝；
+   Volume、request / receive tolerance；分别断言 call/envelope 无效不写 artifact、requested code 行缺陷写 invalid
+   artifact、完整行写 available artifact，且 observed/fill time 使用 received time；到期查询必须绑定实际
+   `history_kline` endpoint 与 source authority hash；
+5. `ExperimentStore`：初始化、全局单活动实验、两次确认幂等、revision 冲突、start 的 `created` 返回、
+   started 重试与内容冲突、complete 与 crossing fills 原子提交、equal retry、不同 crossing/artifact conflict、
+   事务失败无单边状态、每 arm 唯一 terminal fill、重启恢复；
 6. public CLI：重复 list / 两种 preview / status 的 provider 调用数为 0；显式 history-K readiness refresh
    在 busy/guard 时让路，receipt drift/expiry 阻断 research preview；确认时重新 preview/hash 校验；无关
    commit 漂移不阻断，behavior owner 漂移 fail closed；receipt write-once readback；
 7. behavior manifest：逐一替换固定清单中每个 owner 的内容都会改变聚合 hash；改变 prepared position /
-   FX producer、Store gap、formal mark binding、corpus completeness 或 candidate loader 语义必须 mismatch；
+   FX producer、hidden batch / terminal fill、formal mark binding、corpus completeness 或 candidate loader 语义
+   必须 mismatch；
    修改通知、ledger 或文档不会改变聚合 hash；
 8. Research 运维：`corpus-calendar refresh` 保留当前 immutable binding 语义，fee-plan loader 严格校验三项
    account facts；
 9. service deploy：唯一 timer 含冻结的全部 `OnCalendar`、`AccuracySec=1s`、`Persistent=false`，不含
    `OnUnitActiveSec`，且旧 recorder / Top1 timer 不再生成；
-10. Tick / OpenD：Evidence Source Gate 证明 provider 调用数不增加；Tick 持锁时实验立即让路；实验已启动
-   时 Tick 不 `SKIP_LOCKED`，实验配额不足或 deadline 到达时记 gap。
+10. Tick / OpenD：Evidence Source Gate 证明 provider 调用数不增加；准入失败不创建 started row；同 slot 并发
+    只有一个 provider 调用；真实 artifact lock 不死锁；Tick 持锁时实验立即让路，实验已启动时 Tick 不
+    `SKIP_LOCKED`，历史 / outcome 查询在每个 Tick 对称保护窗口内也让路，实验在硬超时内结束；
+11. 终态隔离 fixture：同一 Store 先保留研究阶段 `single_result`，再注入 10 日验证证据；终态比较和
+    Final Receipt 只消费冻结 validation plan 对应的结果，低优先级拒绝和短暂 provider 失败返回可重试
+    blocker。该 fixture 不替代下述完整生命周期与自然运行验收。
 
 ### 11.2 集成验收
 
 - 用冻结 fixture 完成一次 20 日研究并得到唯一 leader；
 - 第二次确认后用 10 日 fixture 完成隐藏观察、等待到期并生成稳定 Final Receipt；
-- 覆盖午休、半日市、timer 晚到 / 停机 / 禁用、日内新增 point、多个 arms 共享合约，以及 batch started
-  前后 / artifact 后部分绑定崩溃；当前 slot 不被历史 gap 恢复挤占，artifact 已 durable 时重启只补绑定，
-  未 durable 的隐藏 batch 按 manifest 记 gap，从未 started 的过期 slot 不调用 provider 即记 gap；
+- 覆盖午休、半日市、timer 晚到 / 停机 / 禁用、日内新增 point、多个 arms 共享合约但 sell limit 不同，
+  以及 batch started 前后 / artifact 后部分绑定崩溃；artifact 已 durable 时重启只补 complete 和首次 crossing
+  fill，started 无 artifact 不重试，历史 absent slot 不创建记录；
+- 窗口终点验证完整 slots 得到 `no_fill`、缺失 / started / 无效 slots 得到 `not_evaluable`，且每个 arm
+  只有一个 `validation_fill`；
 - 缺失分钟 K、FX、正式点或 outcome 时输出 `insufficient_evidence`，不缩短或换窗口；
 - 运行 focused tests 后执行现有 analyze 和全量测试基线。
 
@@ -658,8 +731,8 @@ OpenD 的 HK 期权分钟 K 权限、过期合约覆盖、零成交 bar 行为�
 - 建立 Evidence Source Gate：复用现有 mark 规范化，先实现 recommendation point 的新 binding 和完整
   fail-closed / 零 provider 测试，再移除 Tick 的 Strategy Lab 专用整仓 quote refresh，并证明 Tick OpenD
   调用数、snapshot 批次数和 deadline 不变差；
-- 验收：calendar / fee-plan / context owner 已保留；本地 Phase 2 可继续，但自然 Tick 隔离证据仍是
-  合并或交付门槛。
+- 验收：calendar / fee-plan / context owner 已保留；2026-08-31 HK 自然 Tick 已证明 Strategy Lab 不增加
+  provider 调用且不造成锁等待，Phase 1 隔离门槛通过。
 
 ### Phase 2：替换产品壳并完成 20 日研究
 
@@ -674,12 +747,28 @@ OpenD 的 HK 期权分钟 K 权限、过期合约覆盖、零成交 bar 行为�
 
 ### Phase 3：10 日隐藏验证与到期
 
-- 实现独立 advance timer、每分钟批量观察、outcome 和 Final Receipt；
-- 使用同一 snapshot 的正 Bid 和正 raw Bid Volume 判断一张合约的 observed fill；不换算 volume 单位，
-  不新增 snapshot readiness 入口；
-- 验证 session slot、batch manifest、低优先级 limiter、硬超时、artifact-first 恢复、scoped behavior /
-  config drift、gap 与固定窗口；
-- 验收：fixture 闭环得到三个终态之一。
+按以下顺序实施，不保留过渡实现兼容：
+
+1. **隐藏验证核心原子切换**：在同一个确认边界内同时修改 Store、evidence、service 和旧断言。内部按
+   Store → evidence → service 顺序编辑，但不把中间状态作为可交付切片：删除 gap / `hidden_quote` 合同与 API、
+   `hidden_quote_rows()`、独立 observed-fill artifact、experiment + batch 锁组合和 `lock_held`；实现
+   `start_observation()` 的 created 结果、§7.2 的 batch complete + crossing fills 单事务、§6.3 的三分支
+   envelope、真实 received/fill time、batch crossing / 窗口终点 projection、单 advance lock、started artifact
+   恢复和当前 slot 编排。切片结束必须通过 Store / evidence / service / CLI focused tests 与模块导入检查；
+2. **唯一 timer/service 与 Tick 并发验收**：扩展现有 systemd helper 生成唯一 advance timer/service，不改变 Tick
+   自己的锁和 `SKIP_LOCKED` 语义。运行 admission fail-no-row、provider once、真实 artifact lock、timer 合同和
+   Tick 双向并发测试；
+3. **Outcome 与 Final Receipt**：复用到期事实和标准结果，完成 `waiting_outcome -> completed` 与三态 Final
+   Receipt。用一个冻结 10 日 fixture 验证完整、缺失和 challenger 不通过三条终态。
+
+Phase 3 本地实现已完成：隐藏批次、唯一 advance timer/service、Tick 双向并发、到期结果、三态 Final
+Receipt 和冻结 10 日终态 fixture 均已落地。该结论只表示源码与确定性测试完成，不替代 Phase 4 的真实
+20 日研究、未来 10 日隐藏验证或到期回执审计。
+
+核心原子切换内部先删除被替换路径及其旧断言，再增加最小新实现；不得通过保留旧 helper、kind、status 或
+测试来兼容尚未发布的 Phase 3 代码。第一个切片结束时 `rg` 不得再发现 gap Store API、`hidden_quote` kind、
+batch-lock helper 或 `lock_held` 生产引用。三个切片的每个确认边界都必须保持仓库可导入，并通过完整
+Strategy Lab focused suite；后续切片不得负责修复上一切片留下的断链。
 
 ### Phase 4：真实数据验收
 

@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import hashlib
-import sys
 from collections.abc import Mapping
-from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterator, NoReturn
+from typing import Any, NoReturn
 from zoneinfo import ZoneInfo
 
 from src.application.agent_tool_config import load_runtime_config
@@ -51,11 +49,12 @@ from src.application.strategy_lab.contracts import (
 from src.application.strategy_lab.evidence import (
     StrategyLabEvidenceError,
     build_hidden_batch_manifest,
+    build_expiry_close_query,
+    build_single_recommendation_result,
     build_validation_fill_evidence,
     build_validation_point_evidence,
     collect_research_fill_evidence,
-    evidence_artifact_location,
-    hidden_quote_rows,
+    hidden_snapshot_crossings,
     load_research_projection,
     next_missing_research_evidence,
     normalize_hidden_snapshot,
@@ -68,14 +67,17 @@ from src.application.strategy_lab.recipe import (
     build_validation_plan,
     check_recipe_readiness,
     describe_recipe,
+    resolve_terminal_fx_binding,
 )
 from src.application.strategy_lab.readiness import HISTORY_K_POC_NOT_BEFORE_HK
 from src.application.strategy_lab.receipts import (
     StrategyLabReceiptError,
     build_research_receipt,
+    build_final_receipt,
     publish_receipt,
     read_receipt_artifact,
 )
+from domain.domain.option_lifecycle import expiration_observation_start_ms
 from src.application.tick_cron import tick_cron_is_busy
 from src.application.tick_run_workspace import canonical_account_run_config_bytes
 from src.infrastructure.futu_gateway import FutuGatewayError, build_futu_gateway
@@ -401,17 +403,11 @@ def confirm_research(
     occurred = _occurred_at(occurred_at_utc)
     preview = preview_experiment(context, request, occurred_at_utc=occurred)
     if preview["status"] != "available":
-        raise StrategyLabServiceError(
-            "experiment_preview_blocked", "experiment preview is not currently available"
-        )
+        raise StrategyLabServiceError("experiment_preview_blocked", "experiment preview is not currently available")
     if preview["preview_sha256"] != confirmation:
-        raise StrategyLabServiceError(
-            "experiment_confirmation_mismatch", "confirmed preview hash changed"
-        )
+        raise StrategyLabServiceError("experiment_confirmation_mismatch", "confirmed preview hash changed")
     spec = preview["spec"]
-    experiment_id = "exp-" + canonical_sha256(
-        {"confirmed_preview_sha256": confirmation, "idempotency_key": key}
-    )
+    experiment_id = "exp-" + canonical_sha256({"confirmed_preview_sha256": confirmation, "idempotency_key": key})
     try:
         item = _store(context, initialize=True).create_experiment(
             experiment_id=experiment_id,
@@ -438,22 +434,16 @@ def _validation_request(experiment_id: object, requested_start: object) -> dict[
     try:
         parsed = datetime.strptime(start, "%Y-%m-%d").date()
     except ValueError as exc:
-        raise StrategyLabServiceError(
-            "validation_plan_invalid", "requested_start must use YYYY-MM-DD"
-        ) from exc
+        raise StrategyLabServiceError("validation_plan_invalid", "requested_start must use YYYY-MM-DD") from exc
     if parsed.isoformat() != start:
-        raise StrategyLabServiceError(
-            "validation_plan_invalid", "requested_start must be canonical"
-        )
+        raise StrategyLabServiceError("validation_plan_invalid", "requested_start must be canonical")
     return {"experiment_id": identity, "requested_start": start}
 
 
 def _research_confirmation(events: list[dict[str, Any]]) -> dict[str, Any]:
     matches = [event for event in events if event.get("event_type") == "research_confirmed"]
     if len(matches) != 1:
-        raise StrategyLabServiceError(
-            "validation_plan_invalid", "research confirmation identity is unavailable"
-        )
+        raise StrategyLabServiceError("validation_plan_invalid", "research confirmation identity is unavailable")
     event = matches[0]
     confirmation = _required_sha256(event.get("confirmation_sha256"), "confirmation_sha256")
     return {
@@ -468,16 +458,9 @@ def _hk_schedule(config: Mapping[str, Any]) -> dict[str, Any]:
     selected = config.get("schedule_hk")
     if not isinstance(selected, Mapping):
         fallback = config.get("schedule")
-        selected = (
-            fallback
-            if isinstance(fallback, Mapping)
-            and fallback.get("timezone") == "Asia/Hong_Kong"
-            else None
-        )
+        selected = fallback if isinstance(fallback, Mapping) and fallback.get("timezone") == "Asia/Hong_Kong" else None
     if not isinstance(selected, Mapping):
-        raise StrategyLabServiceError(
-            "validation_plan_invalid", "HK schedule is unavailable"
-        )
+        raise StrategyLabServiceError("validation_plan_invalid", "HK schedule is unavailable")
     return dict(selected)
 
 
@@ -502,23 +485,17 @@ def preview_validation(
         _current_behavior(context, item)
         current_source = source_commit_sha(Path(context["repo_root"]))
         if current_source is None:
-            raise StrategyLabServiceError(
-                "source_commit_unavailable", "Strategy Lab requires a clean source commit"
-            )
+            raise StrategyLabServiceError("source_commit_unavailable", "Strategy Lab requires a clean source commit")
         receipt = read_receipt(context, item["experiment_id"])["receipt"]
         events = store.list_events(item["experiment_id"])
-        config_path, config = load_runtime_config(
-            config_path=context["config_hk"], expected_market="hk"
-        )
+        config_path, config = load_runtime_config(config_path=context["config_hk"], expected_market="hk")
         account_config = build_account_runtime_config(
             base_cfg=config,
             cfg_path=config_path,
             account=ACCOUNT,
             markets_to_run=["HK"],
         )
-        account_config_sha256 = hashlib.sha256(
-            canonical_account_run_config_bytes(account_config)
-        ).hexdigest()
+        account_config_sha256 = hashlib.sha256(canonical_account_run_config_bytes(account_config)).hexdigest()
         authority = {
             "provider": "futu_opend",
             "endpoint": "market_snapshot",
@@ -560,9 +537,7 @@ def preview_validation(
             "status": "blocked",
             "blockers": [
                 {
-                    "reason_code": str(
-                        getattr(exc, "reason_code", "validation_plan_invalid")
-                    ),
+                    "reason_code": str(getattr(exc, "reason_code", "validation_plan_invalid")),
                     "message": str(exc),
                 }
             ],
@@ -594,9 +569,7 @@ def confirm_validation(
     idempotency_key: str,
     occurred_at_utc: str,
 ) -> dict[str, Any]:
-    confirmation = _required_sha256(
-        confirmed_preview_sha256, "confirmed_preview_sha256"
-    )
+    confirmation = _required_sha256(confirmed_preview_sha256, "confirmed_preview_sha256")
     actor_text = _required_text(actor, "actor")
     key = _required_text(idempotency_key, "idempotency_key")
     occurred = _occurred_at(occurred_at_utc)
@@ -650,21 +623,15 @@ def confirm_validation(
         occurred_at_utc=occurred,
     )
     if preview["status"] != "available":
-        raise StrategyLabServiceError(
-            "validation_preview_blocked", "validation preview is not currently available"
-        )
+        raise StrategyLabServiceError("validation_preview_blocked", "validation preview is not currently available")
     if preview["preview_sha256"] != confirmation:
-        raise StrategyLabServiceError(
-            "validation_confirmation_mismatch", "confirmed validation preview changed"
-        )
+        raise StrategyLabServiceError("validation_confirmation_mismatch", "confirmed validation preview changed")
     try:
         store = _store(context)
         item = _experiment(store, experiment_id)
         current_source = source_commit_sha(Path(context["repo_root"]))
         if current_source is None:
-            raise StrategyLabServiceError(
-                "source_commit_unavailable", "Strategy Lab requires a clean source commit"
-            )
+            raise StrategyLabServiceError("source_commit_unavailable", "Strategy Lab requires a clean source commit")
         item = _observe_source_commit(
             store,
             item,
@@ -691,9 +658,7 @@ def confirm_validation(
     return {"status": "confirmed", "experiment": _experiment_view(item)}
 
 
-def get_experiment_status(
-    context: Mapping[str, Any], experiment_id: str
-) -> dict[str, Any]:
+def get_experiment_status(context: Mapping[str, Any], experiment_id: str) -> dict[str, Any]:
     """Read the durable experiment and observation summary without creating state."""
 
     try:
@@ -714,19 +679,12 @@ def get_experiment_status(
 
         if item["state"] in {"validation_collecting", "waiting_outcome"}:
             plan = item.get("validation_plan")
-            if (
-                not isinstance(plan, Mapping)
-                or canonical_sha256(plan) != item.get("validation_plan_sha256")
-            ):
-                raise StrategyLabServiceError(
-                    "validation_plan_invalid", "frozen validation plan binding changed"
-                )
+            if not isinstance(plan, Mapping) or canonical_sha256(plan) != item.get("validation_plan_sha256"):
+                raise StrategyLabServiceError("validation_plan_invalid", "frozen validation plan binding changed")
             calendar = plan.get("market_calendar") if isinstance(plan, Mapping) else None
             sessions = calendar.get("sessions") if isinstance(calendar, Mapping) else None
             if not isinstance(sessions, list):
-                raise StrategyLabServiceError(
-                    "validation_plan_invalid", "frozen validation plan is unavailable"
-                )
+                raise StrategyLabServiceError("validation_plan_invalid", "frozen validation plan is unavailable")
             expected_points = sum(
                 len(session.get("expected_recommendation_point_ids", []))
                 for session in sessions
@@ -740,7 +698,7 @@ def get_experiment_status(
                 },
                 "hidden_batches": {
                     "settled": sum(
-                        observation["status"] in {"complete", "gap"}
+                        observation["status"] == "complete"
                         for observation in observations
                         if observation["kind"] == "hidden_batch"
                     ),
@@ -795,10 +753,7 @@ def get_experiment_status(
                 "total": len(projection["arms"]),
             },
             "expiry_close_queries": {
-                "completed": sum(
-                    f"expiry_close_query:{digest}" in indexed
-                    for digest in required_outcomes
-                ),
+                "completed": sum(f"expiry_close_query:{digest}" in indexed for digest in required_outcomes),
                 "total_required": len(required_outcomes),
             },
             "single_results": {
@@ -808,9 +763,7 @@ def get_experiment_status(
         }
         blocker = None
         if item["state"] == "research_running":
-            action = next_missing_research_evidence(
-                item["spec"], observations, context["artifact_root"]
-            )
+            action = next_missing_research_evidence(item["spec"], observations, context["artifact_root"])
             next_action = {
                 "action": action["action"],
                 "observation_key": action.get("observation_key"),
@@ -864,9 +817,7 @@ def _current_behavior(context: Mapping[str, Any], experiment: Mapping[str, Any])
         or spec.get("evaluator_behavior_sha256") != frozen_behavior
         or behavior_sha != frozen_behavior
     ):
-        raise StrategyLabServiceError(
-            "evaluator_behavior_mismatch", "confirmed evaluator behavior changed"
-        )
+        raise StrategyLabServiceError("evaluator_behavior_mismatch", "confirmed evaluator behavior changed")
     return behavior_sha
 
 
@@ -902,9 +853,7 @@ def _observe_source_commit(
     )
 
 
-def _observed_source_commits(
-    store: ExperimentStore, experiment: Mapping[str, Any]
-) -> set[str]:
+def _observed_source_commits(store: ExperimentStore, experiment: Mapping[str, Any]) -> set[str]:
     commits = {str(experiment["source_commit_sha"])}
     for event in store.list_events(experiment["experiment_id"]):
         if event.get("event_type") != "source_commit_observed":
@@ -922,9 +871,7 @@ def _provider_guard(context: Mapping[str, Any], occurred_at_utc: str) -> str | N
     local = occurred.astimezone(_HK_TZ)
     if local.weekday() < 5 and local.time() < HISTORY_K_POC_NOT_BEFORE_HK:
         return "tick_protection_window"
-    if tick_cron_is_busy(context["tick_lock_path"]):
-        return "tick_busy"
-    return None
+    return _tick_guard(context, occurred_at_utc)
 
 
 def _put_action(
@@ -976,11 +923,7 @@ def _comparisons(spec: Mapping[str, Any], observations: list[dict[str, Any]]) ->
     results = [item["payload"] for item in observations if item["kind"] == "single_result"]
     baseline = [item for item in results if item.get("arm") == "baseline"]
     variants = sorted(
-        {
-            str(item["variant_id"])
-            for item in results
-            if item.get("arm") == "challenger" and item.get("variant_id")
-        }
+        {str(item["variant_id"]) for item in results if item.get("arm") == "challenger" and item.get("variant_id")}
     )
     comparisons: list[dict[str, Any]] = []
     for variant in variants:
@@ -1007,9 +950,7 @@ def _conclude_research(
         comparisons,
         experiment["updated_at_utc"],
     )
-    published = publish_receipt(
-        context["artifact_root"], experiment["experiment_id"], "research", receipt
-    )
+    published = publish_receipt(context["artifact_root"], experiment["experiment_id"], "research", receipt)
     conclusion = receipt["conclusion"]
     leader = conclusion["leader"] if conclusion["status"] == "leader" else None
     new_state = "awaiting_validation_confirmation" if leader is not None else "completed"
@@ -1065,9 +1006,7 @@ def execute_research(
         provider_units = 0
         while True:
             observations = store.list_observations(item["experiment_id"])
-            action = next_missing_research_evidence(
-                item["spec"], observations, context["artifact_root"]
-            )
+            action = next_missing_research_evidence(item["spec"], observations, context["artifact_root"])
             if action["action"] == "complete":
                 item = _observe_source_commit(
                     store,
@@ -1099,9 +1038,7 @@ def execute_research(
                     item = _observe_source_commit(
                         store,
                         item,
-                        action["artifact"]["artifact"][
-                            "producer_source_commit_sha"
-                        ],
+                        action["artifact"]["artifact"]["producer_source_commit_sha"],
                         actor=actor_text,
                         occurred_at_utc=occurred,
                     )
@@ -1125,25 +1062,19 @@ def execute_research(
             try:
                 with exclusive_private_file_lock(action["lock_path"], blocking=False):
                     observations = store.list_observations(item["experiment_id"])
-                    locked_action = next_missing_research_evidence(
-                        item["spec"], observations, context["artifact_root"]
-                    )
-                    if locked_action["action"] != action["action"] or locked_action.get(
+                    locked_action = next_missing_research_evidence(item["spec"], observations, context["artifact_root"])
+                    if locked_action["action"] != action["action"] or locked_action.get("query_sha256") != action.get(
                         "query_sha256"
-                    ) != action.get("query_sha256"):
+                    ):
                         continue
                     blocker = _provider_guard(context, occurred)
                     if blocker is not None:
                         return _blocked(item, blocker)
                     source = locked_action["query"].get("provider_source")
-                    frozen_binding = (
-                        source.get("opend_binding") if isinstance(source, Mapping) else None
-                    )
+                    frozen_binding = source.get("opend_binding") if isinstance(source, Mapping) else None
                     if frozen_binding != context["opend_binding"]:
                         return _blocked(item, "research_provider_binding_mismatch")
-                    _config_path, config = load_runtime_config(
-                        config_path=context["config_hk"], expected_market="hk"
-                    )
+                    _config_path, config = load_runtime_config(config_path=context["config_hk"], expected_market="hk")
                     limit = resolve_opend_fetch_limits(config).history_kline
                     binding = context["opend_binding"]
                     gateway = build_futu_gateway(
@@ -1221,30 +1152,25 @@ def _validation_plan(experiment: Mapping[str, Any]) -> dict[str, Any]:
         not isinstance(plan, Mapping)
         or canonical_sha256(plan) != experiment.get("validation_plan_sha256")
         or plan.get("experiment_id") != experiment.get("experiment_id")
-        or plan.get("hidden_snapshot_batch_ceiling")
-        != HIDDEN_SNAPSHOT_BATCH_CEILING
-        or plan.get("validation_wake_tolerance_seconds")
-        != VALIDATION_WAKE_TOLERANCE_SECONDS
+        or plan.get("hidden_snapshot_batch_ceiling") != HIDDEN_SNAPSHOT_BATCH_CEILING
+        or plan.get("validation_wake_tolerance_seconds") != VALIDATION_WAKE_TOLERANCE_SECONDS
         or plan.get("tick_protection_seconds") != TICK_PROTECTION_SECONDS
         or plan.get("timer_binding") != timer_binding
-        or plan.get("timer_binding_sha256")
-        != canonical_sha256(timer_binding)
+        or plan.get("timer_binding_sha256") != canonical_sha256(timer_binding)
     ):
-        raise StrategyLabServiceError(
-            "validation_plan_invalid", "frozen validation plan binding changed"
-        )
+        raise StrategyLabServiceError("validation_plan_invalid", "frozen validation plan binding changed")
     return dict(plan)
 
 
 def _validation_sessions(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
     calendar = plan.get("market_calendar")
     sessions = calendar.get("sessions") if isinstance(calendar, Mapping) else None
-    if not isinstance(sessions, list) or len(sessions) != 10 or any(
-        not isinstance(session, Mapping) for session in sessions
+    if (
+        not isinstance(sessions, list)
+        or len(sessions) != 10
+        or any(not isinstance(session, Mapping) for session in sessions)
     ):
-        raise StrategyLabServiceError(
-            "validation_plan_invalid", "frozen validation sessions are unavailable"
-        )
+        raise StrategyLabServiceError("validation_plan_invalid", "frozen validation sessions are unavailable")
     return [dict(session) for session in sessions]
 
 
@@ -1262,12 +1188,9 @@ def _expectation_binding_matches(
         == ("HK", ACCOUNT, session.get("trading_date"))
         and expected.get("market_calendar_version") == calendar.get("market_calendar_version")
         and expected.get("market_calendar_sha256") == calendar.get("snapshot_content_sha256")
-        and expected.get("schedule_config_sha256")
-        == plan["schedule"]["schedule_config_sha256"]
-        and expected.get("scheduled_scan_targets_market")
-        == session.get("scheduled_scan_targets_utc")
-        and expected.get("expected_recommendation_point_ids")
-        == session.get("expected_recommendation_point_ids")
+        and expected.get("schedule_config_sha256") == plan["schedule"]["schedule_config_sha256"]
+        and expected.get("scheduled_scan_targets_market") == session.get("scheduled_scan_targets_utc")
+        and expected.get("expected_recommendation_point_ids") == session.get("expected_recommendation_point_ids")
     )
 
 
@@ -1321,33 +1244,24 @@ def _bind_validation_points(
     plan: Mapping[str, Any],
     occurred_at_utc: str,
 ) -> None:
-    indexed = {
-        item["observation_key"]: item
-        for item in store.list_observations(experiment["experiment_id"])
-    }
+    indexed = {item["observation_key"]: item for item in store.list_observations(experiment["experiment_id"])}
     now = datetime.fromisoformat(occurred_at_utc.replace("Z", "+00:00"))
     for session in _validation_sessions(plan):
         day = str(session["trading_date"])
-        endpoint = datetime.fromisoformat(
-            str(session["session_endpoint_utc"]).replace("Z", "+00:00")
-        )
+        endpoint = datetime.fromisoformat(str(session["session_endpoint_utc"]).replace("Z", "+00:00"))
         try:
             expectation = load_formal_expectation(
                 context["runtime_root"], market="HK", account=ACCOUNT, trading_date=day
             )
         except FormalCorpusError as exc:
-            raise StrategyLabServiceError(
-                "validation_source_binding_mismatch", str(exc)
-            ) from exc
+            raise StrategyLabServiceError("validation_source_binding_mismatch", str(exc)) from exc
         targets = session["scheduled_scan_targets_utc"]
         point_ids = session["expected_recommendation_point_ids"]
         if expectation.get("status") not in {"available", "missing"}:
             raise StrategyLabServiceError(
                 "validation_source_binding_mismatch", "formal expectation conflicts with the frozen plan"
             )
-        if expectation.get("status") == "available" and not _expectation_binding_matches(
-            plan, session, expectation
-        ):
+        if expectation.get("status") == "available" and not _expectation_binding_matches(plan, session, expectation):
             raise StrategyLabServiceError(
                 "validation_source_binding_mismatch",
                 "formal expectation changed from the frozen plan",
@@ -1374,9 +1288,7 @@ def _bind_validation_points(
                         recommendation_point_id=point_id,
                     )
                 except FormalCorpusError as exc:
-                    raise StrategyLabServiceError(
-                        "validation_source_binding_mismatch", str(exc)
-                    ) from exc
+                    raise StrategyLabServiceError("validation_source_binding_mismatch", str(exc)) from exc
             if existing is not None:
                 stored = existing["payload"]
                 if existing["status"] == "available":
@@ -1390,10 +1302,8 @@ def _bind_validation_points(
                             loaded,
                         )
                         or stored.get("formal_point_ref") != loaded.get("artifact_ref")
-                        or stored.get("formal_point_sha256")
-                        != loaded.get("artifact_file_sha256")
-                        or stored.get("formal_point_content_sha256")
-                        != loaded.get("artifact_content_sha256")
+                        or stored.get("formal_point_sha256") != loaded.get("artifact_file_sha256")
+                        or stored.get("formal_point_content_sha256") != loaded.get("artifact_content_sha256")
                     ):
                         raise StrategyLabServiceError(
                             "validation_source_binding_mismatch",
@@ -1411,20 +1321,15 @@ def _bind_validation_points(
                         )
                         if stored.get("reason_code") == "validation_point_late"
                         else loaded.get("status") == "not_evaluable"
-                        and _formal_point_identity_matches(
-                            session, str(target), str(point_id), loaded
-                        )
+                        and _formal_point_identity_matches(session, str(target), str(point_id), loaded)
                     )
                     if (
                         not source_matches
                         or stored.get("formal_point_ref") != loaded.get("artifact_ref")
-                        or stored.get("formal_point_sha256")
-                        != loaded.get("artifact_file_sha256")
-                        or stored.get("formal_point_content_sha256")
-                        != loaded.get("artifact_content_sha256")
+                        or stored.get("formal_point_sha256") != loaded.get("artifact_file_sha256")
+                        or stored.get("formal_point_content_sha256") != loaded.get("artifact_content_sha256")
                         or existing.get("artifact_ref") != loaded.get("artifact_ref")
-                        or existing.get("artifact_sha256")
-                        != loaded.get("artifact_file_sha256")
+                        or existing.get("artifact_sha256") != loaded.get("artifact_file_sha256")
                     ):
                         raise StrategyLabServiceError(
                             "validation_source_binding_mismatch",
@@ -1442,9 +1347,7 @@ def _bind_validation_points(
                     status="not_evaluable",
                     payload={
                         "status": "not_evaluable",
-                        "reason_code": str(
-                            loaded.get("reason_code") or "formal_point_evidence_missing"
-                        ),
+                        "reason_code": str(loaded.get("reason_code") or "formal_point_evidence_missing"),
                         "trading_day": day,
                         "recommendation_point_id": point_id,
                         "active_slots_utc": [],
@@ -1454,9 +1357,7 @@ def _bind_validation_points(
                 )
                 continue
             if loaded.get("status") == "not_evaluable":
-                if not _formal_point_identity_matches(
-                    session, str(target), str(point_id), loaded
-                ):
+                if not _formal_point_identity_matches(session, str(target), str(point_id), loaded):
                     raise StrategyLabServiceError(
                         "validation_source_binding_mismatch",
                         "non-evaluable formal point changed from the frozen plan",
@@ -1469,27 +1370,21 @@ def _bind_validation_points(
                     status="not_evaluable",
                     payload={
                         "status": "not_evaluable",
-                        "reason_code": str(
-                            loaded.get("reason_code") or "formal_point_not_evaluable"
-                        ),
+                        "reason_code": str(loaded.get("reason_code") or "formal_point_not_evaluable"),
                         "trading_day": day,
                         "recommendation_point_id": point_id,
                         "active_slots_utc": [],
                         "arms": [],
                         "formal_point_ref": loaded["artifact_ref"],
                         "formal_point_sha256": loaded["artifact_file_sha256"],
-                        "formal_point_content_sha256": loaded[
-                            "artifact_content_sha256"
-                        ],
+                        "formal_point_content_sha256": loaded["artifact_content_sha256"],
                     },
                     artifact_ref=loaded["artifact_ref"],
                     artifact_sha256=loaded["artifact_file_sha256"],
                     created_at_utc=occurred_at_utc,
                 )
                 continue
-            if not _point_binding_matches(
-                plan, session, str(target), str(point_id), expectation, loaded
-            ):
+            if not _point_binding_matches(plan, session, str(target), str(point_id), expectation, loaded):
                 raise StrategyLabServiceError(
                     "validation_source_binding_mismatch", "formal point changed from the frozen plan"
                 )
@@ -1515,9 +1410,7 @@ def _bind_validation_points(
                     "arms": [],
                     "formal_point_ref": loaded["artifact_ref"],
                     "formal_point_sha256": loaded["artifact_file_sha256"],
-                    "formal_point_content_sha256": loaded[
-                        "artifact_content_sha256"
-                    ],
+                    "formal_point_content_sha256": loaded["artifact_content_sha256"],
                 }
                 store.put_observation(
                     experiment["experiment_id"],
@@ -1532,9 +1425,7 @@ def _bind_validation_points(
                 )
             else:
                 payload["validation_plan_sha256"] = experiment["validation_plan_sha256"]
-                payload["evaluator_behavior_sha256"] = experiment[
-                    "evaluator_behavior_sha256"
-                ]
+                payload["evaluator_behavior_sha256"] = experiment["evaluator_behavior_sha256"]
                 store.put_observation(
                     experiment["experiment_id"],
                     observation_key=key,
@@ -1559,11 +1450,11 @@ def _validation_observation_index(
     ]
     crossed: dict[tuple[str, str], str] = {}
     for item in observations:
-        if item["kind"] != "hidden_quote" or item["status"] != "observed_fill":
+        if item["kind"] != "validation_fill" or item["status"] != "observed_fill":
             continue
         identity = (str(item["recommendation_point_id"]), str(item["arm_id"]))
-        slot = str(item["observation_slot_utc"])
-        crossed[identity] = min(slot, crossed.get(identity, slot))
+        fill_time = str(item["payload"].get("fill_time"))
+        crossed[identity] = min(fill_time, crossed.get(identity, fill_time))
     return by_key, points, crossed
 
 
@@ -1587,19 +1478,14 @@ def _available_validation_points(
     for item in points:
         payload = dict(item)
         payload["arms"] = [
-            arm
-            for arm in payload.get("arms", [])
-            if (payload["recommendation_point_id"], arm["arm_id"])
-            not in crossed
+            arm for arm in payload.get("arms", []) if (payload["recommendation_point_id"], arm["arm_id"]) not in crossed
         ]
         if payload["arms"]:
             available.append(payload)
     return available
 
 
-def _current_validation_slot(
-    plan: Mapping[str, Any], occurred_at_utc: str
-) -> tuple[str, str] | None:
+def _current_validation_slot(plan: Mapping[str, Any], occurred_at_utc: str) -> tuple[str, str] | None:
     occurred = datetime.fromisoformat(occurred_at_utc.replace("Z", "+00:00"))
     slot = occurred.replace(second=0, microsecond=0)
     tolerance = int(plan["validation_wake_tolerance_seconds"])
@@ -1615,9 +1501,7 @@ def _current_validation_slot(
 def _batch_manifest_for(
     experiment: Mapping[str, Any],
     plan: Mapping[str, Any],
-    observation_index: tuple[
-        dict[str, dict[str, Any]], list[dict[str, Any]], dict[tuple[str, str], str]
-    ],
+    observation_index: tuple[dict[str, dict[str, Any]], list[dict[str, Any]], dict[tuple[str, str], str]],
     day: str,
     slot: str,
 ) -> dict[str, Any] | None:
@@ -1629,124 +1513,38 @@ def _batch_manifest_for(
         if (
             manifest.get("trading_day") != day
             or manifest.get("observation_slot_utc") != slot
-            or manifest.get("validation_plan_sha256")
-            != experiment["validation_plan_sha256"]
+            or manifest.get("validation_plan_sha256") != experiment["validation_plan_sha256"]
         ):
-            raise StrategyLabServiceError(
-                "validation_batch_manifest_conflict", "hidden batch manifest changed"
-            )
+            raise StrategyLabServiceError("validation_batch_manifest_conflict", "hidden batch manifest changed")
         return manifest
-    points = _available_validation_points(
-        points, crossed_at, before_slot_utc=slot
-    )
+    points = _available_validation_points(points, crossed_at, before_slot_utc=slot)
     active = [point for point in points if slot in point.get("active_slots_utc", [])]
     if not active:
         return None
-    manifest = build_hidden_batch_manifest(
-        plan, active, trading_day=day, observation_slot_utc=slot
-    )
+    manifest = build_hidden_batch_manifest(plan, active, trading_day=day, observation_slot_utc=slot)
     if manifest["validation_plan_sha256"] != experiment["validation_plan_sha256"]:
-        raise StrategyLabServiceError(
-            "validation_plan_invalid", "validation plan hash changed"
-        )
+        raise StrategyLabServiceError("validation_plan_invalid", "validation plan hash changed")
     return manifest
 
 
-def _validation_experiment_lock_path(
-    context: Mapping[str, Any], experiment_id: str
-) -> Path:
+def _validation_experiment_lock_path(context: Mapping[str, Any], experiment_id: str) -> Path:
     digest = hashlib.sha256(experiment_id.encode()).hexdigest()
     return Path(context["artifact_root"]) / ".locks" / "validation" / f"{digest}.lock"
-
-
-def _validation_batch_lock_path(
-    context: Mapping[str, Any], experiment_id: str, day: str, slot: str
-) -> Path:
-    digest = canonical_sha256(
-        {"experiment_id": experiment_id, "trading_day": day, "observation_slot_utc": slot}
-    )
-    return Path(context["artifact_root"]) / ".locks" / "validation-batches" / f"{digest}.lock"
-
-
-@contextmanager
-def _freeze_current_batch(
-    context: Mapping[str, Any],
-    store: ExperimentStore,
-    experiment: Mapping[str, Any],
-    plan: Mapping[str, Any],
-    day: str,
-    slot: str,
-    *,
-    start_new: bool,
-    occurred_at_utc: str,
-) -> Iterator[tuple[dict[str, Any] | None, dict[str, Any] | None]]:
-    """Acquire experiment then stable batch lock, release experiment before I/O."""
-
-    experiment_lock = exclusive_private_file_lock(
-        _validation_experiment_lock_path(context, str(experiment["experiment_id"])),
-    )
-    experiment_lock.__enter__()
-    batch_lock = exclusive_private_file_lock(
-        _validation_batch_lock_path(
-            context, str(experiment["experiment_id"]), day, slot
-        ),
-        blocking=False,
-    )
-    batch_entered = False
-    try:
-        batch_lock.__enter__()
-        batch_entered = True
-        observations = store.list_observations(str(experiment["experiment_id"]))
-        manifest = _batch_manifest_for(
-            experiment,
-            plan,
-            _validation_observation_index(observations),
-            day,
-            slot,
-        )
-        key = f"hidden_batch:{day}:{slot}"
-        batch = next(
-            (item for item in observations if item["observation_key"] == key), None
-        )
-        if manifest is not None and batch is None and start_new:
-            batch = store.start_observation(
-                str(experiment["experiment_id"]),
-                observation_key=key,
-                manifest=manifest,
-                created_at_utc=occurred_at_utc,
-            )
-    except BaseException:
-        if batch_entered:
-            batch_lock.__exit__(*sys.exc_info())
-        experiment_lock.__exit__(*sys.exc_info())
-        raise
-    experiment_lock.__exit__(None, None, None)
-    if not start_new:
-        batch_lock.__exit__(None, None, None)
-        batch_entered = False
-    try:
-        yield manifest, batch
-    finally:
-        if batch_entered:
-            batch_lock.__exit__(None, None, None)
 
 
 def _matching_batch_artifact(
     context: Mapping[str, Any],
     manifest: Mapping[str, Any],
     source_commits: set[str],
-) -> tuple[str, dict[str, Any] | None, dict[str, str]]:
+) -> tuple[str, dict[str, Any] | None]:
     query_sha = canonical_sha256(manifest)
-    location = evidence_artifact_location(context["artifact_root"], "hidden_batch", query_sha)
     artifact = read_evidence_artifact(context["artifact_root"], "hidden_batch", query_sha)
     if artifact is not None and (
         artifact["artifact"].get("query") != manifest
         or artifact["artifact"].get("producer_source_commit_sha") not in source_commits
     ):
-        raise StrategyLabServiceError(
-            "validation_source_binding_mismatch", "hidden batch artifact binding changed"
-        )
-    return query_sha, artifact, location
+        raise StrategyLabServiceError("validation_source_binding_mismatch", "hidden batch artifact binding changed")
+    return query_sha, artifact
 
 
 def _complete_batch_from_artifact(
@@ -1754,19 +1552,19 @@ def _complete_batch_from_artifact(
     experiment: Mapping[str, Any],
     manifest: Mapping[str, Any],
     artifact: Mapping[str, Any],
-    occurred_at_utc: str,
-    *,
-    quotes: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     key = f"hidden_batch:{manifest['trading_day']}:{manifest['observation_slot_utc']}"
+    payload = artifact.get("payload")
+    if not isinstance(payload, Mapping) or not isinstance(payload.get("observed_at_utc"), str):
+        raise StrategyLabServiceError("validation_snapshot_invalid", "hidden batch receive time is unavailable")
     return store.complete_observation(
         experiment["experiment_id"],
         observation_key=key,
         manifest=manifest,
-        quotes=quotes if quotes is not None else hidden_quote_rows(manifest, artifact),
         artifact_ref=artifact["artifact_ref"],
         artifact_sha256=artifact["artifact_sha256"],
-        updated_at_utc=occurred_at_utc,
+        artifact_received_at_utc=payload["observed_at_utc"],
+        crossing_arm_ids=hidden_snapshot_crossings(manifest, artifact),
     )
 
 
@@ -1774,45 +1572,31 @@ def _tick_guard(context: Mapping[str, Any], occurred_at_utc: str) -> str | None:
     if tick_cron_is_busy(context["tick_lock_path"]):
         return "tick_busy"
     occurred = datetime.fromisoformat(occurred_at_utc.replace("Z", "+00:00"))
-    target = next_systemd_tick_target_utc(
-        "hk", occurred - timedelta(seconds=TICK_PROTECTION_SECONDS)
-    )
-    if abs((target - occurred).total_seconds()) <= TICK_PROTECTION_SECONDS:
-        return "tick_protection_window"
+    for market in ("hk", "us"):
+        target = next_systemd_tick_target_utc(market, occurred - timedelta(seconds=TICK_PROTECTION_SECONDS))
+        if abs((target - occurred).total_seconds()) <= TICK_PROTECTION_SECONDS:
+            return "tick_protection_window"
     return None
 
 
-def _current_validation_config(
-    context: Mapping[str, Any], plan: Mapping[str, Any]
-) -> OpenDEndpointRateLimit:
+def _current_validation_config(context: Mapping[str, Any], plan: Mapping[str, Any]) -> OpenDEndpointRateLimit:
     if plan["provider_source"].get("opend_binding") != context.get("opend_binding"):
-        raise StrategyLabServiceError(
-            "validation_source_binding_mismatch", "frozen OpenD binding changed"
-        )
-    config_path, config = load_runtime_config(
-        config_path=context["config_hk"], expected_market="hk"
-    )
+        raise StrategyLabServiceError("validation_source_binding_mismatch", "frozen OpenD binding changed")
+    config_path, config = load_runtime_config(config_path=context["config_hk"], expected_market="hk")
     account_config = build_account_runtime_config(
         base_cfg=config,
         cfg_path=config_path,
         account=ACCOUNT,
         markets_to_run=["HK"],
     )
-    account_sha = hashlib.sha256(
-        canonical_account_run_config_bytes(account_config)
-    ).hexdigest()
+    account_sha = hashlib.sha256(canonical_account_run_config_bytes(account_config)).hexdigest()
     if (
         account_sha != plan["account_run_config_sha256"]
-        or canonical_sha256(_hk_schedule(config))
-        != plan["schedule"]["schedule_config_sha256"]
+        or canonical_sha256(_hk_schedule(config)) != plan["schedule"]["schedule_config_sha256"]
     ):
-        raise StrategyLabServiceError(
-            "validation_source_binding_mismatch", "current HK config changed"
-        )
+        raise StrategyLabServiceError("validation_source_binding_mismatch", "current HK config changed")
     limit = resolve_opend_fetch_limits(config).market_snapshot
-    return OpenDEndpointRateLimit(
-        window_sec=limit.window_sec, max_calls=limit.max_calls, max_wait_sec=0.0
-    )
+    return OpenDEndpointRateLimit(window_sec=limit.window_sec, max_calls=limit.max_calls, max_wait_sec=0.0)
 
 
 def _advance_current_batch(
@@ -1831,279 +1615,108 @@ def _advance_current_batch(
     day = str(manifest["trading_day"])
     slot = str(manifest["observation_slot_utc"])
     key = f"hidden_batch:{day}:{slot}"
+    batch = store.get_observation(experiment["experiment_id"], key)
+    if batch is not None and batch["payload"] != manifest:
+        raise StrategyLabServiceError("validation_batch_manifest_conflict", "hidden batch manifest changed")
+    query_sha, artifact = _matching_batch_artifact(context, manifest, source_commits)
+    if batch is not None:
+        if batch["status"] == "complete":
+            return {"status": "progress", "reason_code": "validation_batch_complete"}
+        if batch["status"] != "started":
+            raise StrategyLabServiceError("validation_batch_manifest_conflict", "hidden batch status changed")
+        if artifact is not None:
+            _complete_batch_from_artifact(store, experiment, manifest, artifact)
+            return {"status": "progress", "reason_code": "validation_batch_recovered"}
+        return {"status": "progress", "reason_code": "validation_batch_started"}
+    if artifact is not None:
+        raise StrategyLabServiceError("validation_batch_manifest_conflict", "hidden artifact has no started batch")
+    if not provider_capable:
+        return {"status": "blocked", "reason_code": "advance_external_timeout_required"}
+    blocker = _tick_guard(context, occurred_at_utc)
+    if blocker is not None:
+        return {"status": "blocked", "reason_code": blocker}
+    reserve = snapshot_limit.max_calls - min(
+        HIDDEN_SNAPSHOT_LOW_PRIORITY_CALLS_PER_WINDOW,
+        max(0, snapshot_limit.max_calls - 1),
+    )
+
+    def collect() -> dict[str, Any]:
+        started, created = store.start_observation(
+            experiment["experiment_id"],
+            observation_key=key,
+            manifest=manifest,
+            created_at_utc=occurred_at_utc,
+        )
+        if not created:
+            return started
+        binding = context["opend_binding"]
+        gateway = build_futu_gateway(
+            host=str(binding["host"]),
+            port=int(binding["port"]),
+            is_option_chain_cache_enabled=False,
+        )
+        try:
+            result = fetch_option_snapshots(
+                option_codes=list(manifest["option_codes"]),
+                gateway=gateway,
+                snapshot_limit=snapshot_limit,
+                base_dir=Path(context["opend_limiter_root"]),
+                snapshot_batch_size=int(plan["hidden_snapshot_batch_ceiling"]),
+                snapshot_fallback_max_codes=0,
+                no_retry=True,
+                rate_limited_call=lambda **kwargs: kwargs["call"](),
+            )
+        finally:
+            gateway.close()
+        payload = normalize_hidden_snapshot(manifest, result)
+        published = publish_evidence_artifact(
+            context["artifact_root"],
+            "hidden_batch",
+            query_sha,
+            payload,
+            query=manifest,
+            observed_at_utc=payload["observed_at_utc"],
+            producer_source_commit_sha=source_commit,
+        )
+        _complete_batch_from_artifact(store, experiment, manifest, published)
+        return published
+
     try:
-        with _freeze_current_batch(
-            context,
-            store,
-            experiment,
-            plan,
-            day,
-            slot,
-            start_new=False,
-            occurred_at_utc=occurred_at_utc,
-        ) as (fresh_manifest, batch):
-            if fresh_manifest is None:
-                return {"status": "progress", "reason_code": "validation_slot_inactive"}
-            manifest = fresh_manifest
-            _query_sha, artifact, _location = _matching_batch_artifact(
-                context, manifest, source_commits
-            )
-            if batch is not None:
-                if batch["payload"] != manifest:
-                    raise StrategyLabServiceError(
-                        "validation_batch_manifest_conflict", "hidden batch manifest changed"
-                    )
-                if batch["status"] == "complete":
-                    return {"status": "progress", "reason_code": "validation_batch_complete"}
-                if batch["status"] == "gap":
-                    if artifact is not None:
-                        raise StrategyLabServiceError(
-                            "validation_batch_manifest_conflict", "gap has a matching artifact"
-                        )
-                    return {"status": "progress", "reason_code": "validation_slot_late"}
-                if artifact is not None:
-                    _complete_batch_from_artifact(
-                        store, experiment, manifest, artifact, occurred_at_utc
-                    )
-                    return {"status": "progress", "reason_code": "validation_batch_recovered"}
-                deadline = datetime.fromisoformat(
-                    str(manifest["deadline_utc"]).replace("Z", "+00:00")
-                )
-                occurred = datetime.fromisoformat(occurred_at_utc.replace("Z", "+00:00"))
-                if occurred > deadline:
-                    store.expire_started_observation(
-                        experiment["experiment_id"],
-                        observation_key=key,
-                        manifest=manifest,
-                        updated_at_utc=occurred_at_utc,
-                    )
-                    return {"status": "progress", "reason_code": "validation_slot_late"}
-                return {"status": "progress", "reason_code": "validation_batch_started"}
-            if artifact is not None:
-                raise StrategyLabServiceError(
-                    "validation_batch_manifest_conflict", "hidden artifact has no started batch"
-                )
-            if not provider_capable:
-                return {
-                    "status": "blocked",
-                    "reason_code": "advance_external_timeout_required",
-                }
-            blocker = _tick_guard(context, occurred_at_utc)
-            if blocker is not None:
-                return {"status": "blocked", "reason_code": blocker}
-            reserve = snapshot_limit.max_calls - min(
-                HIDDEN_SNAPSHOT_LOW_PRIORITY_CALLS_PER_WINDOW,
-                max(0, snapshot_limit.max_calls - 1),
-            )
-
-            def collect() -> dict[str, Any]:
-                with _freeze_current_batch(
-                    context,
-                    store,
-                    experiment,
-                    plan,
-                    day,
-                    slot,
-                    start_new=True,
-                    occurred_at_utc=occurred_at_utc,
-                ) as (frozen_manifest, frozen_batch):
-                    if frozen_manifest is None or frozen_batch is None:
-                        raise StrategyLabServiceError(
-                            "validation_batch_manifest_conflict",
-                            "validation slot is no longer active",
-                        )
-                    if frozen_batch["status"] != "started":
-                        return frozen_batch
-                    query_sha = canonical_sha256(frozen_manifest)
-                    binding = context["opend_binding"]
-                    gateway = build_futu_gateway(
-                        host=str(binding["host"]),
-                        port=int(binding["port"]),
-                        is_option_chain_cache_enabled=False,
-                    )
-                    try:
-                        result = fetch_option_snapshots(
-                            option_codes=list(frozen_manifest["option_codes"]),
-                            gateway=gateway,
-                            snapshot_limit=snapshot_limit,
-                            base_dir=Path(context["opend_limiter_root"]),
-                            snapshot_batch_size=int(
-                                plan["hidden_snapshot_batch_ceiling"]
-                            ),
-                            snapshot_fallback_max_codes=0,
-                            no_retry=True,
-                            rate_limited_call=lambda **kwargs: kwargs["call"](),
-                        )
-                    finally:
-                        gateway.close()
-                    payload = normalize_hidden_snapshot(frozen_manifest, result)
-                    published = publish_evidence_artifact(
-                        context["artifact_root"],
-                        "hidden_batch",
-                        query_sha,
-                        payload,
-                        query=frozen_manifest,
-                        observed_at_utc=occurred_at_utc,
-                        producer_source_commit_sha=source_commit,
-                        lock_held=True,
-                    )
-                    _complete_batch_from_artifact(
-                        store,
-                        experiment,
-                        frozen_manifest,
-                        published,
-                        occurred_at_utc,
-                    )
-                    return published
-
-            try:
-                try_low_priority_opend_call(
-                    base_dir=Path(context["opend_limiter_root"]),
-                    endpoint="market_snapshot",
-                    window_sec=snapshot_limit.window_sec,
-                    max_calls=snapshot_limit.max_calls,
-                    production_reserve_calls=reserve,
-                    call=collect,
-                )
-            except LowPriorityOpenDCallDeferred:
-                return {"status": "blocked", "reason_code": "opend_low_priority_deferred"}
-            except FutuGatewayError:
-                return {"status": "blocked", "reason_code": "research_provider_failed"}
-            except StrategyLabEvidenceError as exc:
-                return {"status": "blocked", "reason_code": exc.reason_code}
-            return {"status": "progress", "provider_logical_units": 1}
+        try_low_priority_opend_call(
+            base_dir=Path(context["opend_limiter_root"]),
+            endpoint="market_snapshot",
+            window_sec=snapshot_limit.window_sec,
+            max_calls=snapshot_limit.max_calls,
+            production_reserve_calls=reserve,
+            call=collect,
+        )
+    except LowPriorityOpenDCallDeferred:
+        return {"status": "blocked", "reason_code": "opend_low_priority_deferred"}
+    except FutuGatewayError:
+        return {"status": "blocked", "reason_code": "research_provider_failed"}
+    except StrategyLabEvidenceError as exc:
+        return {"status": "blocked", "reason_code": exc.reason_code}
     except BlockingIOError:
         return {"status": "progress", "reason_code": "validation_evidence_busy"}
+    return {"status": "progress", "provider_logical_units": 1}
 
 
-def _recover_one_elapsed_day(
+def _recover_started_batches(
     context: Mapping[str, Any],
     store: ExperimentStore,
     experiment: Mapping[str, Any],
-    plan: Mapping[str, Any],
     source_commits: set[str],
-    occurred_at_utc: str,
-) -> str | None:
-    occurred = datetime.fromisoformat(occurred_at_utc.replace("Z", "+00:00"))
-    with exclusive_private_file_lock(
-        _validation_experiment_lock_path(context, str(experiment["experiment_id"]))
-    ):
-        observations = store.list_observations(experiment["experiment_id"])
-        observation_index = _validation_observation_index(observations)
-        indexed, _points, crossed_at = observation_index
-        for session in _validation_sessions(plan):
-            day = str(session["trading_date"])
-            changed = False
-            unsettled = False
-            for slot in session["minute_grid_utc"]:
-                manifest = _batch_manifest_for(
-                    experiment,
-                    plan,
-                    observation_index,
-                    day,
-                    slot,
-                )
-                if manifest is None:
-                    continue
-                deadline = datetime.fromisoformat(
-                    str(manifest["deadline_utc"]).replace("Z", "+00:00")
-                )
-                if occurred <= deadline:
-                    continue
-                key = f"hidden_batch:{day}:{manifest['observation_slot_utc']}"
-                batch = indexed.get(key)
-                if batch is not None and batch["status"] in {"complete", "gap"}:
-                    continue
-                try:
-                    with exclusive_private_file_lock(
-                        _validation_batch_lock_path(
-                            context,
-                            str(experiment["experiment_id"]),
-                            day,
-                            str(slot),
-                        ),
-                        blocking=False,
-                    ):
-                        batch = store.get_observation(experiment["experiment_id"], key)
-                        if batch is not None and batch["payload"] != manifest:
-                            raise StrategyLabServiceError(
-                                "validation_batch_manifest_conflict",
-                                "hidden batch manifest changed",
-                            )
-                        _query_sha, artifact, _location = _matching_batch_artifact(
-                            context, manifest, source_commits
-                        )
-                        if batch is not None and batch["status"] in {"complete", "gap"}:
-                            if batch["status"] == "gap" and artifact is not None:
-                                raise StrategyLabServiceError(
-                                    "validation_batch_manifest_conflict",
-                                    "gap has a matching artifact",
-                                )
-                            continue
-                        unsettled = True
-                        if artifact is not None and batch is not None:
-                            quotes = hidden_quote_rows(manifest, artifact)
-                            committed = _complete_batch_from_artifact(
-                                store,
-                                experiment,
-                                manifest,
-                                artifact,
-                                occurred_at_utc,
-                                quotes=quotes,
-                            )
-                            indexed[key] = committed
-                            for quote in quotes:
-                                point_id = str(quote["recommendation_point_id"])
-                                arm_id = str(quote["arm_id"])
-                                quote_slot = str(manifest["observation_slot_utc"])
-                                quote_key = (
-                                    f"hidden_quote:{point_id}:{arm_id}:{quote_slot}"
-                                )
-                                indexed[quote_key] = {
-                                    "experiment_id": experiment["experiment_id"],
-                                    "observation_key": quote_key,
-                                    "recommendation_point_id": point_id,
-                                    "arm_id": arm_id,
-                                    "observation_slot_utc": quote_slot,
-                                    "kind": "hidden_quote",
-                                    "status": quote["status"],
-                                    "payload": quote["payload"],
-                                    "artifact_ref": artifact["artifact_ref"],
-                                    "artifact_sha256": artifact["artifact_sha256"],
-                                    "created_at_utc": occurred_at_utc,
-                                    "updated_at_utc": occurred_at_utc,
-                                }
-                                if quote["status"] == "observed_fill":
-                                    identity = (point_id, arm_id)
-                                    crossed_at[identity] = min(
-                                        quote_slot,
-                                        crossed_at.get(identity, quote_slot),
-                                    )
-                        elif batch is not None:
-                            indexed[key] = store.expire_started_observation(
-                                experiment["experiment_id"],
-                                observation_key=key,
-                                manifest=manifest,
-                                updated_at_utc=occurred_at_utc,
-                            )
-                        elif artifact is not None:
-                            raise StrategyLabServiceError(
-                                "validation_batch_manifest_conflict",
-                                "hidden artifact has no batch",
-                            )
-                        else:
-                            indexed[key] = store.materialize_elapsed_observation_gap(
-                                experiment["experiment_id"],
-                                observation_key=key,
-                                manifest=manifest,
-                                updated_at_utc=occurred_at_utc,
-                            )
-                        changed = True
-                except BlockingIOError:
-                    unsettled = True
-            if unsettled:
-                return day if changed else None
-    return None
+) -> int:
+    recovered = 0
+    for batch in store.list_observations(experiment["experiment_id"], kind="hidden_batch"):
+        if batch["status"] != "started":
+            continue
+        manifest = batch["payload"]
+        _query_sha, artifact = _matching_batch_artifact(context, manifest, source_commits)
+        if artifact is not None:
+            _complete_batch_from_artifact(store, experiment, manifest, artifact)
+            recovered += 1
+    return recovered
 
 
 def _derive_validation_fills(
@@ -2116,48 +1729,43 @@ def _derive_validation_fills(
 ) -> int:
     observations = store.list_observations(experiment["experiment_id"])
     fills = {
-        (item["recommendation_point_id"], item["arm_id"])
-        for item in observations
-        if item["kind"] == "validation_fill"
+        (item["recommendation_point_id"], item["arm_id"]) for item in observations if item["kind"] == "validation_fill"
     }
+    batches = [item for item in observations if item["kind"] == "hidden_batch"]
+    batch_artifacts: dict[str, dict[str, Any] | None] = {}
+    for batch in batches:
+        if batch["status"] != "complete":
+            batch_artifacts[batch["observation_key"]] = None
+            continue
+        try:
+            _query_sha, artifact = _matching_batch_artifact(context, batch["payload"], source_commits)
+        except StrategyLabEvidenceError:
+            artifact = None
+        batch_artifacts[batch["observation_key"]] = artifact
     now = datetime.fromisoformat(occurred_at_utc.replace("Z", "+00:00"))
     created = 0
     for point_observation in observations:
         if point_observation["kind"] != "validation_point" or point_observation["status"] != "available":
             continue
         point = point_observation["payload"]
-        endpoint = datetime.fromisoformat(
-            str(point["session_endpoint_utc"]).replace("Z", "+00:00")
-        )
-        point_quotes = [
-            item
-            for item in observations
-            if item["kind"] == "hidden_quote"
-            and item["recommendation_point_id"] == point["recommendation_point_id"]
-        ]
+        endpoint = datetime.fromisoformat(str(point["session_endpoint_utc"]).replace("Z", "+00:00"))
         for arm in point["arms"]:
             identity = (point["recommendation_point_id"], arm["arm_id"])
             if identity in fills:
                 continue
-            has_crossing = any(
-                item["arm_id"] == arm["arm_id"] and item["status"] == "observed_fill"
-                for item in point_quotes
-            )
-            if not has_crossing and now <= endpoint:
+            if now <= endpoint:
                 continue
             evidence = build_validation_fill_evidence(
-                point, arm["arm_id"], point_quotes
+                point,
+                arm["arm_id"],
+                batches,
+                batch_artifacts,
             )
-            if evidence is None:
-                continue
-            published = read_evidence_artifact(
-                context["artifact_root"], "validation_fill", evidence["query_sha256"]
-            )
+            published = read_evidence_artifact(context["artifact_root"], "validation_fill", evidence["query_sha256"])
             if published is not None and (
                 published["artifact"].get("query") != evidence["query"]
                 or published["artifact"].get("payload") != evidence["payload"]
-                or published["artifact"].get("producer_source_commit_sha")
-                not in source_commits
+                or published["artifact"].get("producer_source_commit_sha") not in source_commits
             ):
                 raise StrategyLabServiceError(
                     "validation_source_binding_mismatch",
@@ -2199,29 +1807,355 @@ def _derive_validation_fills(
     return created
 
 
-def _validation_is_materialized(
-    plan: Mapping[str, Any], observations: list[dict[str, Any]]
-) -> bool:
-    expected_points = sum(
-        len(session["expected_recommendation_point_ids"])
-        for session in _validation_sessions(plan)
-    )
+def _validation_is_materialized(plan: Mapping[str, Any], observations: list[dict[str, Any]]) -> bool:
+    expected_points = sum(len(session["expected_recommendation_point_ids"]) for session in _validation_sessions(plan))
     points = [item for item in observations if item["kind"] == "validation_point"]
     if len(points) != expected_points:
         return False
     fills = {
-        (item["recommendation_point_id"], item["arm_id"])
-        for item in observations
-        if item["kind"] == "validation_fill"
+        (item["recommendation_point_id"], item["arm_id"]) for item in observations if item["kind"] == "validation_fill"
     }
     return all(
         point["status"] == "not_evaluable"
-        or all(
-            (point["recommendation_point_id"], arm["arm_id"]) in fills
-            for arm in point["payload"].get("arms", [])
-        )
+        or all((point["recommendation_point_id"], arm["arm_id"]) in fills for arm in point["payload"].get("arms", []))
         for point in points
     )
+
+
+def _validation_expected_points(plan: Mapping[str, Any]) -> list[dict[str, str]]:
+    return [
+        {"recommendation_point_id": point_id, "trading_day": session["trading_date"]}
+        for session in plan["market_calendar"]["sessions"]
+        for point_id in session["expected_recommendation_point_ids"]
+    ]
+
+
+def _validation_single_result_keys(observations: list[dict[str, Any]]) -> set[str]:
+    return {
+        f"single_result:{value['recommendation_point_id']}:{value['arm_id']}"
+        for value in observations
+        if value["kind"] == "validation_fill"
+    }
+
+
+def _finalize_validation(
+    context: Mapping[str, Any], store: ExperimentStore, item: dict[str, Any], plan: Mapping[str, Any]
+) -> dict[str, Any]:
+    observations = store.list_observations(item["experiment_id"])
+    result_keys = _validation_single_result_keys(observations)
+    results = [
+        value["payload"]
+        for value in observations
+        if value["kind"] == "single_result" and value["observation_key"] in result_keys
+    ]
+    leader = item["leader"]
+    baseline = [value for value in results if value.get("arm") == "baseline"]
+    challenger = [value for value in results if value.get("variant_id") == leader["variant_id"]]
+    comparison = compare_single_recommendations(_validation_expected_points(plan), baseline, challenger)
+    conclusion = (
+        "challenger_passed"
+        if comparison.get("status") == "complete" and comparison.get("passed") is True
+        else "keep_baseline"
+        if comparison.get("status") == "complete"
+        else "insufficient_evidence"
+    )
+    receipt = build_final_receipt(item, store.list_events(item["experiment_id"]), observations, comparison, conclusion)
+    published = publish_receipt(context["artifact_root"], item["experiment_id"], "final", receipt)
+    attached = store.attach_final_receipt_and_transition(
+        item["experiment_id"],
+        expected_revision=item["revision"],
+        receipt_ref=published["receipt_ref"],
+        receipt_sha256=published["receipt_sha256"],
+        conclusion=conclusion,
+        actor=_ADVANCE_ACTOR,
+        occurred_at_utc=receipt["concluded_at_utc"],
+        idempotency_key=f"validation_concluded:{item['experiment_id']}",
+    )
+    return {"status": "complete", "experiment": _experiment_view(attached)}
+
+
+def _validation_arm(point: Mapping[str, Any], arm_id: str) -> dict[str, Any]:
+    payload = point["payload"]
+    arm = next(value for value in payload["arms"] if value["arm_id"] == arm_id)
+    return {
+        **arm,
+        "recommendation_point_id": point["recommendation_point_id"],
+        "trading_day": payload["trading_day"],
+        "opening_fx_binding": payload["opening_fx_binding"],
+    }
+
+
+def _advance_waiting_outcome(
+    context: Mapping[str, Any],
+    store: ExperimentStore,
+    item: dict[str, Any],
+    *,
+    occurred_at_utc: str,
+    provider_capable: bool,
+) -> dict[str, Any]:
+    plan = _validation_plan(item)
+    _current_behavior(context, item)
+    observations = store.list_observations(item["experiment_id"])
+    points = {
+        value["recommendation_point_id"]: value
+        for value in observations
+        if value["kind"] == "validation_point" and value["status"] == "available"
+    }
+    fills = [value for value in observations if value["kind"] == "validation_fill"]
+    outcomes = {
+        value["observation_key"].removeprefix("expiry_close_query:"): value
+        for value in observations
+        if value["kind"] == "expiry_close_query"
+    }
+    expected_results = _validation_single_result_keys(observations)
+    results = {
+        value["observation_key"]
+        for value in observations
+        if value["kind"] == "single_result" and value["observation_key"] in expected_results
+    }
+    provider_units = 0
+    for fill in fills:
+        point_id = fill["recommendation_point_id"]
+        arm_id = fill["arm_id"]
+        result_key = f"single_result:{point_id}:{arm_id}"
+        if result_key in results:
+            continue
+        point = points.get(point_id)
+        if point is None:
+            return _blocked(item, "validation_point_not_evaluable")
+        arm = _validation_arm(point, arm_id)
+        fill_payload = {
+            **fill["payload"],
+            "quote_evidence_not_broker_execution": True,
+        }
+        if fill_payload.get("status") != "observed_fill":
+            result = build_single_recommendation_result(arm, fill_payload, None)
+        else:
+            expiration = str(arm["candidate"]["expiration"])
+            start_ms = expiration_observation_start_ms(expiration, "HK")
+            if start_ms is None:
+                return _blocked(item, "terminal_fx_unavailable")
+            occurred_ms = int(datetime.fromisoformat(occurred_at_utc.replace("Z", "+00:00")).timestamp() * 1000)
+            if occurred_ms < start_ms:
+                return _blocked(item, "pending_outcome")
+            terminal_fx, blocker = resolve_terminal_fx_binding(
+                context, expiration=expiration, currency=str(arm["candidate"]["currency"])
+            )
+            if terminal_fx is None:
+                return _blocked(item, str((blocker or {}).get("reason_code") or "terminal_fx_unavailable"))
+            query = build_expiry_close_query(
+                arm,
+                terminal_fx,
+                item["spec"]["fee_plan"]["receipt"],
+                plan["provider_source"],
+                item["evaluator_behavior_sha256"],
+            ) | {
+                "validation_plan_sha256": item["validation_plan_sha256"],
+                "formal_point_ref": point["payload"]["formal_point_ref"],
+                "formal_point_sha256": point["payload"]["formal_point_sha256"],
+            }
+            query_sha = canonical_sha256(query)
+            outcome_observation = outcomes.get(query_sha)
+            if outcome_observation is None:
+                artifact = read_evidence_artifact(context["artifact_root"], "expiry_close", query_sha)
+                if artifact is None:
+                    if not provider_capable:
+                        return _blocked(item, "advance_external_timeout_required")
+                    if provider_units:
+                        return {
+                            "status": "progress",
+                            "experiment_id": item["experiment_id"],
+                            "state": item["state"],
+                            "provider_logical_units": 1,
+                        }
+                    try:
+                        blocker_code = _provider_guard(context, occurred_at_utc)
+                        if blocker_code is not None:
+                            return _blocked(item, blocker_code)
+                        _current_validation_config(context, plan)
+                        current_source = source_commit_sha(Path(context["repo_root"]))
+                        if current_source is None:
+                            return _blocked(item, "source_commit_unavailable")
+                        _config_path, config = load_runtime_config(
+                            config_path=context["config_hk"], expected_market="hk"
+                        )
+                        limit = resolve_opend_fetch_limits(config).history_kline
+                        binding = context["opend_binding"]
+                        gateway = build_futu_gateway(
+                            host=str(binding["host"]),
+                            port=int(binding["port"]),
+                            is_option_chain_cache_enabled=False,
+                        )
+                        try:
+                            payload = resolve_expiry_outcome(
+                                gateway,
+                                query,
+                                query["fee_plan"],
+                                terminal_fx,
+                                limiter_root=context["opend_limiter_root"],
+                                window_sec=limit.window_sec,
+                                max_calls=limit.max_calls,
+                            )
+                        finally:
+                            gateway.close()
+                        artifact = publish_evidence_artifact(
+                            context["artifact_root"],
+                            "expiry_close",
+                            query_sha,
+                            payload,
+                            query=query,
+                            observed_at_utc=occurred_at_utc,
+                            producer_source_commit_sha=current_source,
+                        )
+                        provider_units = 1
+                    except BlockingIOError:
+                        return _blocked(item, "validation_outcome_busy")
+                    except StrategyLabEvidenceError as exc:
+                        if exc.reason_code in {"opend_low_priority_deferred", "research_provider_failed"}:
+                            return _blocked(item, exc.reason_code)
+                        raise
+                    except FutuGatewayError:
+                        return _blocked(item, "research_provider_failed")
+                assert artifact is not None
+                item = _observe_source_commit(
+                    store,
+                    item,
+                    artifact["artifact"]["producer_source_commit_sha"],
+                    actor=_ADVANCE_ACTOR,
+                    occurred_at_utc=occurred_at_utc,
+                )
+                payload = artifact["artifact"]["payload"]
+                outcome_observation = store.put_observation(
+                    item["experiment_id"],
+                    observation_key=f"expiry_close_query:{query_sha}",
+                    kind="expiry_close_query",
+                    status=payload["status"],
+                    payload={"query": query, "query_sha256": query_sha, "payload": payload},
+                    artifact_ref=artifact["artifact_ref"],
+                    artifact_sha256=artifact["artifact_sha256"],
+                    created_at_utc=occurred_at_utc,
+                )
+                outcomes[query_sha] = outcome_observation
+            outcome_payload = dict(outcome_observation["payload"]["payload"])
+            outcome_payload["outcome_evidence_ref"] = {
+                "artifact_ref": outcome_observation["artifact_ref"],
+                "artifact_sha256": outcome_observation["artifact_sha256"],
+            }
+            result = build_single_recommendation_result(arm, fill_payload, outcome_payload)
+        store.put_observation(
+            item["experiment_id"],
+            observation_key=result_key,
+            recommendation_point_id=point_id,
+            arm_id=arm_id,
+            kind="single_result",
+            status=result["status"],
+            payload=result,
+            created_at_utc=occurred_at_utc,
+        )
+        results.add(result_key)
+    if results == expected_results:
+        return _finalize_validation(context, store, _experiment(store, item["experiment_id"]), plan)
+    return {
+        "status": "progress",
+        "experiment_id": item["experiment_id"],
+        "state": item["state"],
+        "provider_logical_units": provider_units,
+    }
+
+
+def _advance_experiment_once(
+    context: Mapping[str, Any],
+    experiment_id: str,
+    *,
+    occurred_at_utc: str,
+    provider_capable: bool,
+) -> dict[str, Any]:
+    store = _store(context)
+    item = _experiment(store, experiment_id)
+    if item["state"] == "completed":
+        return {"status": "complete", "experiment": _experiment_view(item)}
+    if item["state"] == "waiting_outcome":
+        return _advance_waiting_outcome(
+            context,
+            store,
+            item,
+            occurred_at_utc=occurred_at_utc,
+            provider_capable=provider_capable,
+        )
+    if item["state"] != "validation_collecting":
+        return _blocked(item, "experiment_not_validation_collecting")
+    plan = _validation_plan(item)
+    _current_behavior(context, item)
+    current_source = source_commit_sha(Path(context["repo_root"]))
+    if current_source is None:
+        return _blocked(item, "source_commit_unavailable")
+    snapshot_limit = _current_validation_config(context, plan)
+    item = _observe_source_commit(
+        store,
+        item,
+        current_source,
+        actor=_ADVANCE_ACTOR,
+        occurred_at_utc=occurred_at_utc,
+    )
+    source_commits = _observed_source_commits(store, item)
+    _bind_validation_points(context, store, item, plan, occurred_at_utc)
+    recovered = _recover_started_batches(context, store, item, source_commits)
+    observations = store.list_observations(item["experiment_id"])
+    observation_index = _validation_observation_index(observations)
+    current = _current_validation_slot(plan, occurred_at_utc)
+    if current is not None:
+        day, slot = current
+        manifest = _batch_manifest_for(
+            item,
+            plan,
+            observation_index,
+            day,
+            slot,
+        )
+        if manifest is not None:
+            response = _advance_current_batch(
+                context,
+                store,
+                item,
+                plan,
+                manifest,
+                current_source,
+                source_commits,
+                snapshot_limit,
+                provider_capable=provider_capable,
+                occurred_at_utc=occurred_at_utc,
+            )
+            if response.get("reason_code") != "validation_batch_complete":
+                return {
+                    **response,
+                    "experiment_id": item["experiment_id"],
+                    "state": item["state"],
+                    "recovered_batch_count": recovered,
+                }
+    derived = _derive_validation_fills(
+        context,
+        store,
+        item,
+        current_source,
+        source_commits,
+        occurred_at_utc,
+    )
+    observations = store.list_observations(item["experiment_id"])
+    if _validation_is_materialized(plan, observations):
+        item = store.complete_validation_collection(
+            item["experiment_id"],
+            expected_revision=item["revision"],
+            actor=_ADVANCE_ACTOR,
+            occurred_at_utc=occurred_at_utc,
+        )
+        return {"status": "complete", "experiment": _experiment_view(item)}
+    return {
+        "status": "progress",
+        "experiment_id": item["experiment_id"],
+        "state": item["state"],
+        "recovered_batch_count": recovered,
+        "derived_fill_count": derived,
+    }
 
 
 def advance_experiment(
@@ -2231,86 +2165,36 @@ def advance_experiment(
     occurred_at_utc: str,
     provider_capable: bool = False,
 ) -> dict[str, Any]:
-    """Advance hidden validation with at most one low-priority snapshot call."""
+    """Advance hidden validation under the experiment's single non-blocking lock."""
 
     occurred = _occurred_at(occurred_at_utc)
     try:
-        store = _store(context)
-        item = _experiment(store, experiment_id)
-        if item["state"] == "waiting_outcome":
-            return {"status": "complete", "experiment": _experiment_view(item)}
-        if item["state"] != "validation_collecting":
-            return _blocked(item, "experiment_not_validation_collecting")
-        plan = _validation_plan(item)
-        _current_behavior(context, item)
-        current_source = source_commit_sha(Path(context["repo_root"]))
-        if current_source is None:
-            return _blocked(item, "source_commit_unavailable")
-        snapshot_limit = _current_validation_config(context, plan)
-        item = _observe_source_commit(
-            store,
-            item,
-            current_source,
-            actor=_ADVANCE_ACTOR,
-            occurred_at_utc=occurred,
-        )
-        source_commits = _observed_source_commits(store, item)
         with exclusive_private_file_lock(
-            _validation_experiment_lock_path(context, item["experiment_id"]),
+            _validation_experiment_lock_path(context, experiment_id),
+            blocking=False,
         ):
-            _bind_validation_points(context, store, item, plan, occurred)
-        observations = store.list_observations(item["experiment_id"])
-        observation_index = _validation_observation_index(observations)
-        current = _current_validation_slot(plan, occurred)
-        if current is not None:
-            day, slot = current
-            manifest = _batch_manifest_for(
-                item,
-                plan,
-                observation_index,
-                day,
-                slot,
-            )
-            if manifest is not None:
-                response = _advance_current_batch(
-                    context,
-                    store,
-                    item,
-                    plan,
-                    manifest,
-                    current_source,
-                    source_commits,
-                    snapshot_limit,
-                    provider_capable=provider_capable is True,
-                    occurred_at_utc=occurred,
-                )
-                if response.get("reason_code") != "validation_batch_complete":
-                    return {**response, "experiment_id": item["experiment_id"], "state": item["state"]}
-        recovered_day = _recover_one_elapsed_day(
-            context, store, item, plan, source_commits, occurred
-        )
-        derived = _derive_validation_fills(
-            context, store, item, current_source, source_commits, occurred
-        )
-        observations = store.list_observations(item["experiment_id"])
-        if _validation_is_materialized(plan, observations):
-            item = store.complete_validation_collection(
-                item["experiment_id"],
-                expected_revision=item["revision"],
-                actor=_ADVANCE_ACTOR,
+            return _advance_experiment_once(
+                context,
+                experiment_id,
                 occurred_at_utc=occurred,
+                provider_capable=provider_capable is True,
             )
-            return {"status": "complete", "experiment": _experiment_view(item)}
+    except BlockingIOError:
         return {
             "status": "progress",
-            "experiment_id": item["experiment_id"],
-            "state": item["state"],
-            "recovered_trading_day": recovered_day,
-            "derived_fill_count": derived,
+            "reason_code": "validation_advance_busy",
+            "experiment_id": experiment_id,
         }
     except StrategyLabServiceError:
         raise
-    except (AgentToolError, ExperimentStoreError, StrategyLabEvidenceError, OSError, ValueError) as exc:
+    except (
+        AgentToolError,
+        ExperimentStoreError,
+        StrategyLabEvidenceError,
+        FutuGatewayError,
+        OSError,
+        ValueError,
+    ) as exc:
         raise StrategyLabServiceError(
             str(getattr(exc, "reason_code", "strategy_lab_validation_failed")), str(exc)
         ) from exc
@@ -2341,57 +2225,49 @@ def advance_scheduled(
     )
 
 
-def read_receipt(
-    context: Mapping[str, Any], experiment_id: str, *, kind: str = "research"
-) -> dict[str, Any]:
+def read_receipt(context: Mapping[str, Any], experiment_id: str, *, kind: str = "research") -> dict[str, Any]:
     """Read the one Phase 2 receipt without creating Store or provider state."""
 
     try:
         store = _store(context)
         item = _experiment(store, experiment_id)
-        receipt_ref = item["research_receipt_ref"]
-        receipt_sha256 = item["research_receipt_sha256"]
+        if kind not in {"research", "final"}:
+            raise StrategyLabServiceError("receipt_kind_unsupported", "receipt kind is invalid")
+        final = kind == "final"
+        receipt_ref = item["final_receipt_ref" if final else "research_receipt_ref"]
+        receipt_sha256 = item["final_receipt_sha256" if final else "research_receipt_sha256"]
         if receipt_ref is None and receipt_sha256 is None:
-            raise StrategyLabServiceError(
-                "receipt_not_found", "research receipt is not attached"
-            )
+            raise StrategyLabServiceError("receipt_not_found", f"{kind} receipt is not attached")
         if (
             not isinstance(receipt_ref, str)
             or not isinstance(receipt_sha256, str)
-            or item["state"]
-            not in {
-                "awaiting_validation_confirmation",
-                "validation_collecting",
-                "waiting_outcome",
-                "completed",
-            }
+            or (final and item["state"] != "completed")
+            or (
+                not final
+                and item["state"]
+                not in {
+                    "awaiting_validation_confirmation",
+                    "validation_collecting",
+                    "waiting_outcome",
+                    "completed",
+                }
+            )
         ):
-            raise StrategyLabServiceError(
-                "receipt_immutable_conflict", "research receipt Store binding is invalid"
-            )
+            raise StrategyLabServiceError("receipt_immutable_conflict", f"{kind} receipt Store binding is invalid")
         try:
-            artifact = read_receipt_artifact(
-                context["artifact_root"], item["experiment_id"], kind
-            )
+            artifact = read_receipt_artifact(context["artifact_root"], item["experiment_id"], kind)
         except StrategyLabReceiptError as exc:
             if exc.reason_code == "receipt_not_found":
                 raise StrategyLabServiceError(
-                    "receipt_artifact_invalid", "attached research receipt is missing"
+                    "receipt_artifact_invalid", f"attached {kind} receipt is missing"
                 ) from exc
             raise
-        if (
-            artifact["receipt_ref"] != receipt_ref
-            or artifact["receipt_sha256"] != receipt_sha256
-        ):
-            raise StrategyLabServiceError(
-                "receipt_immutable_conflict", "research receipt artifact changed"
-            )
+        if artifact["receipt_ref"] != receipt_ref or artifact["receipt_sha256"] != receipt_sha256:
+            raise StrategyLabServiceError("receipt_immutable_conflict", f"{kind} receipt artifact changed")
     except StrategyLabServiceError:
         raise
     except (ExperimentStoreError, StrategyLabReceiptError, OSError) as exc:
-        raise StrategyLabServiceError(
-            str(getattr(exc, "reason_code", "receipt_not_found")), str(exc)
-        ) from exc
+        raise StrategyLabServiceError(str(getattr(exc, "reason_code", "receipt_not_found")), str(exc)) from exc
     return {"experiment": _experiment_view(item), **artifact}
 
 

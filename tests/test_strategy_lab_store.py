@@ -33,9 +33,84 @@ def test_behavior_manifest_fails_closed_when_slice2_owner_is_absent(tmp_path: Pa
     assert raised.value.reason_code == "evaluator_owner_unavailable"
 
 
-def _create(
-    store: ExperimentStore, identity: str, key: str, *, actor: str = "tester"
-) -> dict[str, object]:
+def test_final_receipt_attach_is_atomic_idempotent_and_immutable(tmp_path: Path) -> None:
+    store = ExperimentStore(tmp_path / "experiments.sqlite3")
+    store.initialize()
+    created = _create(store, "experiment-final", "confirm-final")
+    with store._write_connection() as connection:
+        connection.execute(
+            "UPDATE experiments SET state = 'waiting_outcome' WHERE experiment_id = ?",
+            (created["experiment_id"],),
+        )
+        connection.commit()
+    outcome_query = {
+        "provider_source": {"provider": "futu_opend"},
+        "validation_plan_sha256": "a" * 64,
+        "formal_point_ref": "formal/point.json",
+        "formal_point_sha256": "b" * 64,
+        "evaluator_behavior_sha256": "c" * 64,
+    }
+    outcome_sha = canonical_sha256(outcome_query)
+    outcome = store.put_observation(
+        created["experiment_id"], observation_key=f"expiry_close_query:{outcome_sha}",
+        kind="expiry_close_query", status="not_evaluable",
+        payload={
+            "query": outcome_query,
+            "query_sha256": outcome_sha,
+            "payload": {"status": "not_evaluable", "reason_code": "terminal_gap"},
+        },
+        artifact_ref="evidence/expiry.json", artifact_sha256="b" * 64,
+        created_at_utc=NOW,
+    )
+    result = store.put_observation(
+        created["experiment_id"], observation_key="single_result:point-1:baseline",
+        recommendation_point_id="point-1", arm_id="baseline", kind="single_result",
+        status="no_fill", payload={"status": "no_fill"}, created_at_utc=NOW,
+    )
+    assert outcome["artifact_ref"] == "evidence/expiry.json"
+    assert result["status"] == "no_fill"
+    attached = store.attach_final_receipt_and_transition(
+        created["experiment_id"],
+        expected_revision=created["revision"],
+        receipt_ref="experiments/experiment-final/receipts/final.json",
+        receipt_sha256="f" * 64,
+        conclusion="insufficient_evidence",
+        actor="tester",
+        occurred_at_utc=NOW,
+        idempotency_key="finalize-final",
+    )
+    assert attached["state"] == "completed"
+    assert (
+        store.attach_final_receipt_and_transition(
+            created["experiment_id"],
+            expected_revision=created["revision"],
+            receipt_ref=attached["final_receipt_ref"],
+            receipt_sha256=attached["final_receipt_sha256"],
+            conclusion="insufficient_evidence",
+            actor="tester",
+            occurred_at_utc=NOW,
+            idempotency_key="finalize-final",
+        )
+        == attached
+    )
+    assert [event["event_type"] for event in store.list_events(created["experiment_id"])].count(
+        "validation_concluded"
+    ) == 1
+    with pytest.raises(ExperimentStoreError) as raised:
+        store.attach_final_receipt_and_transition(
+            created["experiment_id"],
+            expected_revision=attached["revision"],
+            receipt_ref=attached["final_receipt_ref"],
+            receipt_sha256="e" * 64,
+            conclusion="keep_baseline",
+            actor="tester",
+            occurred_at_utc=NOW,
+            idempotency_key="changed-final",
+        )
+    assert raised.value.reason_code == "receipt_immutable_conflict"
+
+
+def _create(store: ExperimentStore, identity: str, key: str, *, actor: str = "tester") -> dict[str, object]:
     spec = {
         "recipe_id": "sell_put_option_position_concentration",
         "id": identity,
@@ -76,9 +151,7 @@ def test_store_preserves_json_number_types(tmp_path: Path) -> None:
     assert isinstance(stored["payload"]["holding_calendar_days"], int)
 
 
-def test_store_reads_are_strictly_read_only(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_store_reads_are_strictly_read_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     store = ExperimentStore(tmp_path / "experiments.sqlite3")
     store.initialize()
     _create(store, "experiment-1", "confirm-1")
@@ -122,10 +195,12 @@ def test_store_initializes_only_exact_three_table_schema(tmp_path: Path) -> None
     store = ExperimentStore(tmp_path / "experiments.sqlite3")
     assert store.initialize() == {"status": "ready"}
     assert store.initialize() == {"status": "ready"}
-
-    incompatible = ExperimentStore(tmp_path / "old.sqlite3")
     import sqlite3
 
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+
+    incompatible = ExperimentStore(tmp_path / "old.sqlite3")
     connection = sqlite3.connect(incompatible.path)
     connection.execute("CREATE TABLE legacy(id INTEGER)")
     connection.close()
@@ -141,9 +216,7 @@ def test_store_concurrent_initialization_is_idempotent(tmp_path: Path) -> None:
     assert results == [{"status": "ready"}, {"status": "ready"}]
 
 
-def test_store_initialization_rolls_back_partial_ddl(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_store_initialization_rolls_back_partial_ddl(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     path = tmp_path / "experiments.sqlite3"
     monkeypatch.setattr(
         store_module,
@@ -187,9 +260,7 @@ def test_store_rejects_schema_column_or_index_drift(tmp_path: Path, drift_sql: s
 
 
 @pytest.mark.parametrize("drift_kind", ["constraint", "foreign_key"])
-def test_store_rejects_constraint_or_foreign_key_drift(
-    tmp_path: Path, drift_kind: str
-) -> None:
+def test_store_rejects_constraint_or_foreign_key_drift(tmp_path: Path, drift_kind: str) -> None:
     import sqlite3
 
     statements = list(store_module._SCHEMA_STATEMENTS)
@@ -268,16 +339,19 @@ def test_observation_is_write_once_and_transition_uses_revision(tmp_path: Path) 
         artifact_sha256="d" * 64,
         created_at_utc=NOW,
     )
-    assert store.put_observation(
-        "experiment-1",
-        observation_key="history-k:1",
-        kind="history_k_query",
-        status="available",
-        payload={"rows": 1},
-        artifact_ref="experiments/experiment-1/history-k.json",
-        artifact_sha256="d" * 64,
-        created_at_utc=NOW,
-    ) == observation
+    assert (
+        store.put_observation(
+            "experiment-1",
+            observation_key="history-k:1",
+            kind="history_k_query",
+            status="available",
+            payload={"rows": 1},
+            artifact_ref="experiments/experiment-1/history-k.json",
+            artifact_sha256="d" * 64,
+            created_at_utc=NOW,
+        )
+        == observation
+    )
     with pytest.raises(ExperimentStoreError) as raised:
         store.put_observation(
             "experiment-1",
@@ -421,16 +495,17 @@ def test_generic_transition_reserves_validation_lifecycle_for_dedicated_apis(
         "occurred_at_utc": "2026-08-30T02:00:00Z",
     }
     confirmed = store.confirm_validation("experiment-1", **command)
-    assert store.confirm_validation(
-        "experiment-1",
-        **{**command, "occurred_at_utc": "2026-08-30T02:00:01Z"},
-    ) == confirmed
+    assert (
+        store.confirm_validation(
+            "experiment-1",
+            **{**command, "occurred_at_utc": "2026-08-30T02:00:01Z"},
+        )
+        == confirmed
+    )
     assert confirmed["state"] == "validation_collecting"
     assert confirmed["validation_plan"] == plan
 
-    assert_generic_rejected(
-        "validation_collecting", "waiting_outcome", "validation_materialized"
-    )
+    assert_generic_rejected("validation_collecting", "waiting_outcome", "validation_materialized")
 
     with sqlite3.connect(store.path) as connection:
         connection.execute(
@@ -445,24 +520,30 @@ def test_observation_artifact_pair_is_strict_in_api_and_sql(tmp_path: Path) -> N
     store.initialize()
     _create(store, "experiment-1", "confirm-1")
 
-    assert store.put_observation(
-        "experiment-1",
-        observation_key="api-null",
-        kind="history_k_query",
-        status="available",
-        payload={},
-        created_at_utc=NOW,
-    )["artifact_ref"] is None
-    assert store.put_observation(
-        "experiment-1",
-        observation_key="api-full",
-        kind="history_k_query",
-        status="available",
-        payload={},
-        artifact_ref="experiments/experiment-1/full.json",
-        artifact_sha256="d" * 64,
-        created_at_utc=NOW,
-    )["artifact_sha256"] == "d" * 64
+    assert (
+        store.put_observation(
+            "experiment-1",
+            observation_key="api-null",
+            kind="history_k_query",
+            status="available",
+            payload={},
+            created_at_utc=NOW,
+        )["artifact_ref"]
+        is None
+    )
+    assert (
+        store.put_observation(
+            "experiment-1",
+            observation_key="api-full",
+            kind="history_k_query",
+            status="available",
+            payload={},
+            artifact_ref="experiments/experiment-1/full.json",
+            artifact_sha256="d" * 64,
+            created_at_utc=NOW,
+        )["artifact_sha256"]
+        == "d" * 64
+    )
     for key, ref, digest in (
         ("api-ref-only", "experiments/experiment-1/ref-only.json", None),
         ("api-hash-only", None, "e" * 64),
@@ -487,9 +568,7 @@ def test_observation_artifact_pair_is_strict_in_api_and_sql(tmp_path: Path) -> N
         ") VALUES (?, ?, 'history_k_query', 'available', '{}', ?, ?, ?, ?)"
     )
     with sqlite3.connect(store.path, isolation_level=None) as connection:
-        connection.execute(
-            statement, ("experiment-1", "raw-null", None, None, NOW, NOW)
-        )
+        connection.execute(statement, ("experiment-1", "raw-null", None, None, NOW, NOW))
         connection.execute(
             statement,
             (
@@ -506,14 +585,11 @@ def test_observation_artifact_pair_is_strict_in_api_and_sql(tmp_path: Path) -> N
             ("raw-hash-only", None, "a" * 64),
         ):
             with pytest.raises(sqlite3.IntegrityError):
-                connection.execute(
-                    statement, ("experiment-1", key, ref, digest, NOW, NOW)
-                )
+                connection.execute(statement, ("experiment-1", key, ref, digest, NOW, NOW))
         stored = {
             row[0]
             for row in connection.execute(
-                "SELECT observation_key FROM experiment_observations "
-                "WHERE observation_key LIKE 'raw-%'"
+                "SELECT observation_key FROM experiment_observations WHERE observation_key LIKE 'raw-%'"
             )
         }
     assert stored == {"raw-null", "raw-full"}
@@ -584,15 +660,18 @@ def test_transition_idempotency_binds_complete_command(tmp_path: Path) -> None:
         idempotency_key="research_materialized:experiment-1",
     )
     first = store.append_event_and_transition("experiment-1", **command)
-    assert store.append_event_and_transition(
-        "experiment-1",
-        **{
-            **command,
-            "actor": "other",
-            "expected_revision": 99,
-            "occurred_at_utc": "2026-08-30T01:00:01Z",
-        },
-    ) == first
+    assert (
+        store.append_event_and_transition(
+            "experiment-1",
+            **{
+                **command,
+                "actor": "other",
+                "expected_revision": 99,
+                "occurred_at_utc": "2026-08-30T01:00:01Z",
+            },
+        )
+        == first
+    )
     mutations = [
         {"new_state": "completed"},
         {"event_type": "changed"},
@@ -707,22 +786,27 @@ def test_research_receipt_binding_is_atomic_and_immutable(tmp_path: Path) -> Non
         payload={"status": "leader"},
         idempotency_key="conclude-1",
     )
-    attached = store.attach_research_receipt_and_transition(
-        "experiment-1", **receipt_command
-    )
+    attached = store.attach_research_receipt_and_transition("experiment-1", **receipt_command)
     assert attached["revision"] == 2
     assert attached["research_receipt_sha256"] == "e" * 64
-    assert store.attach_research_receipt_and_transition(
-        "experiment-1",
-        **{**receipt_command, "occurred_at_utc": "2026-08-30T01:00:01Z"},
-    ) == attached
-    assert store.attach_research_receipt_and_transition(
-        "experiment-1",
-        **{**receipt_command, "idempotency_key": "conclude-recovered"},
-    ) == attached
-    assert store.attach_research_receipt_and_transition(
-        "experiment-1", **{**receipt_command, "actor": "other"}
-    ) == attached
+    assert (
+        store.attach_research_receipt_and_transition(
+            "experiment-1",
+            **{**receipt_command, "occurred_at_utc": "2026-08-30T01:00:01Z"},
+        )
+        == attached
+    )
+    assert (
+        store.attach_research_receipt_and_transition(
+            "experiment-1",
+            **{**receipt_command, "idempotency_key": "conclude-recovered"},
+        )
+        == attached
+    )
+    assert (
+        store.attach_research_receipt_and_transition("experiment-1", **{**receipt_command, "actor": "other"})
+        == attached
+    )
     for mutation in (
         {"payload": {"status": "changed"}},
         {"expected_revision": 99},
@@ -730,9 +814,7 @@ def test_research_receipt_binding_is_atomic_and_immutable(tmp_path: Path) -> Non
         {"leader": {"arm_id": "threshold-0.004"}},
     ):
         with pytest.raises(ExperimentStoreError) as raised:
-            store.attach_research_receipt_and_transition(
-                "experiment-1", **{**receipt_command, **mutation}
-            )
+            store.attach_research_receipt_and_transition("experiment-1", **{**receipt_command, **mutation})
         assert raised.value.reason_code == "idempotency_conflict"
     with pytest.raises(ExperimentStoreError) as raised:
         store.attach_research_receipt_and_transition(
@@ -782,13 +864,17 @@ def test_source_commit_observation_is_same_state_idempotent_event(tmp_path: Path
     assert observed["state"] == "research_running"
     assert observed["revision"] == 1
     assert store.append_event_and_transition("experiment-1", **command) == observed
-    assert store.append_event_and_transition(
-        "experiment-1", **{**command, "expected_revision": observed["revision"]}
-    ) == observed
-    assert store.append_event_and_transition(
-        "experiment-1",
-        **{**command, "expected_revision": observed["revision"], "actor": "other"},
-    ) == observed
+    assert (
+        store.append_event_and_transition("experiment-1", **{**command, "expected_revision": observed["revision"]})
+        == observed
+    )
+    assert (
+        store.append_event_and_transition(
+            "experiment-1",
+            **{**command, "expected_revision": observed["revision"], "actor": "other"},
+        )
+        == observed
+    )
     with pytest.raises(ExperimentStoreError) as raised:
         store.append_event_and_transition(
             "experiment-1",
@@ -879,8 +965,7 @@ def test_validation_confirmation_is_atomic_idempotent_and_records_actual_time(
     with sqlite3.connect(store.path) as connection:
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute(
-                "UPDATE experiments SET validation_plan_sha256 = NULL "
-                "WHERE experiment_id = 'experiment-1'"
+                "UPDATE experiments SET validation_plan_sha256 = NULL WHERE experiment_id = 'experiment-1'"
             )
 
     with pytest.raises(ExperimentStoreError) as raised:

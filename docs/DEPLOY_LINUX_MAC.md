@@ -112,6 +112,10 @@ cd "$REPO"
 
 `--include-feishu-ws` 会生成 `options-monitor-feishu-ws.service`。它通过飞书长连接接收事件，不监听本地 HTTP 端口，也不需要公网回调 URL、Nginx/Caddy 或 Cloudflare Tunnel。服务会使用 `/var/lib/options-monitor/locks/feishu-ws.lock` 防止同一个 Feishu App 启动多个长连接客户端。
 
+Strategy Lab 隐藏验证不是默认服务。确认需要未来 10 日验证后，在同一 render 命令增加
+`--include-strategy-lab-advance`，只为 systemd 生成唯一
+`options-monitor-strategy-lab-advance.service/.timer`；未传该开关时不会生成或启用。
+
 推荐的 `--include-secret-credentials` 默认为每个消费 unit 生成只包含所需
 `LoadCredentialEncrypted=` 的 drop-in，不解密为共享 env 文件。它只渲染配置，不创建或修改真实凭据。
 
@@ -243,6 +247,12 @@ sudo systemctl enable --now options-monitor-projection-verify.timer
 sudo systemctl enable --now options-monitor-runtime-status.timer
 sudo systemctl enable --now options-monitor-trade-intake.service
 sudo systemctl enable --now options-monitor-feishu-ws.service
+```
+
+仅当 render 使用了 `--include-strategy-lab-advance` 且人工确认隐藏验证已经开始时，再启用：
+
+```bash
+sudo systemctl enable --now options-monitor-strategy-lab-advance.timer
 ```
 
 如果 render 时传了 `--include-feishu-agent-credential`，先确认加密凭据已经存在，再安装 helper 和 drop-in：

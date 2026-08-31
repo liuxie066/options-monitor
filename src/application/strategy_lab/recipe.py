@@ -201,9 +201,7 @@ def _opening_fx_binding(formal_point: Mapping[str, Any]) -> dict[str, Any]:
     matches = [
         dict(row)
         for row in rows or []
-        if isinstance(row, Mapping)
-        and row.get("base_currency") == "HKD"
-        and row.get("quote_currency") == "CNY"
+        if isinstance(row, Mapping) and row.get("base_currency") == "HKD" and row.get("quote_currency") == "CNY"
     ]
     if len(matches) != 1:
         raise StrategyLabRecipeError(
@@ -213,12 +211,7 @@ def _opening_fx_binding(formal_point: Mapping[str, Any]) -> dict[str, Any]:
     fact = matches[0]
     fact_id = fact.get("fact_id")
     source_hash = fact.get("source_fact_sha256")
-    if (
-        not isinstance(fact_id, str)
-        or not fact_id
-        or not isinstance(source_hash, str)
-        or len(source_hash) != 64
-    ):
+    if not isinstance(fact_id, str) or not fact_id or not isinstance(source_hash, str) or len(source_hash) != 64:
         raise StrategyLabRecipeError(
             "recipe_evidence_incomplete",
             "formal point opening FX identity is incomplete",
@@ -250,12 +243,8 @@ def _recommendation_available_at_utc(formal_point: Mapping[str, Any]) -> str:
             "recipe_evidence_incomplete", "formal point availability time is incomplete"
         ) from exc
     if any(value.tzinfo is None for value in parsed):
-        raise StrategyLabRecipeError(
-            "recipe_evidence_incomplete", "formal point availability time lacks a timezone"
-        )
-    return max(value.astimezone(timezone.utc) for value in parsed).isoformat().replace(
-        "+00:00", "Z"
-    )
+        raise StrategyLabRecipeError("recipe_evidence_incomplete", "formal point availability time lacks a timezone")
+    return max(value.astimezone(timezone.utc) for value in parsed).isoformat().replace("+00:00", "Z")
 
 
 def build_concentration_arms(
@@ -278,9 +267,7 @@ def build_concentration_arms(
         arms.append(_arm("challenger", ranked[0], threshold))
     return {
         "recommendation_point_id": formal_point["recommendation_point_id"],
-        "scheduled_scan_target_market": formal_point["recommendation_point"][
-            "scheduled_scan_target_market"
-        ],
+        "scheduled_scan_target_market": formal_point["recommendation_point"]["scheduled_scan_target_market"],
         "recommendation_available_at_utc": _recommendation_available_at_utc(formal_point),
         "formal_point_ref": parameters.get("formal_point_ref"),
         "formal_point_content_sha256": formal_point["content_sha256"],
@@ -311,11 +298,7 @@ def _calendar_session(calendar: Mapping[str, Any], trading_date: str) -> dict[st
     sessions = calendar.get("trading_sessions")
     if not isinstance(sessions, list):
         return None
-    found = [
-        dict(item)
-        for item in sessions
-        if isinstance(item, Mapping) and item.get("trading_date") == trading_date
-    ]
+    found = [dict(item) for item in sessions if isinstance(item, Mapping) and item.get("trading_date") == trading_date]
     return found[0] if len(found) == 1 else None
 
 
@@ -339,9 +322,7 @@ def _validation_leader(value: object) -> dict[str, Any]:
     return leader
 
 
-def project_validation_arms(
-    formal_point: Mapping[str, Any], leader: Mapping[str, Any]
-) -> dict[str, Any]:
+def project_validation_arms(formal_point: Mapping[str, Any], leader: Mapping[str, Any]) -> dict[str, Any]:
     """Project the frozen baseline and one confirmed challenger from a formal point."""
 
     projected = build_concentration_arms(formal_point)
@@ -350,13 +331,10 @@ def project_validation_arms(
     challenger = [
         arm
         for arm in projected["arms"]
-        if arm["kind"] == "challenger"
-        and arm["near_return_threshold"] == frozen_leader["near_return_threshold"]
+        if arm["kind"] == "challenger" and arm["near_return_threshold"] == frozen_leader["near_return_threshold"]
     ]
     if len(baseline) != 1 or len(challenger) != 1:
-        raise StrategyLabRecipeError(
-            "validation_plan_invalid", "confirmed leader cannot be projected"
-        )
+        raise StrategyLabRecipeError("validation_plan_invalid", "confirmed leader cannot be projected")
     return {
         key: projected[key]
         for key in (
@@ -404,9 +382,7 @@ def build_validation_plan(
             "validation_plan_invalid", "validation start or evaluation time is invalid"
         ) from exc
     if start.isoformat() != requested_start or occurred.tzinfo is None:
-        raise StrategyLabRecipeError(
-            "validation_plan_invalid", "validation start or evaluation time is not canonical"
-        )
+        raise StrategyLabRecipeError("validation_plan_invalid", "validation start or evaluation time is not canonical")
     spec = experiment.get("spec")
     leader = _validation_leader(experiment.get("leader"))
     conclusion = research_receipt.get("conclusion")
@@ -417,33 +393,24 @@ def build_validation_plan(
         or not isinstance(conclusion, Mapping)
         or conclusion.get("status") != "leader"
         or conclusion.get("leader") != leader
-        or canonical_sha256(experiment.get("behavior_manifest"))
-        != experiment.get("evaluator_behavior_sha256")
+        or canonical_sha256(experiment.get("behavior_manifest")) != experiment.get("evaluator_behavior_sha256")
         or not isinstance(account_run_config_sha256, str)
         or len(account_run_config_sha256) != 64
     ):
-        raise StrategyLabRecipeError(
-            "validation_plan_invalid", "research or evaluator binding changed"
-        )
+        raise StrategyLabRecipeError("validation_plan_invalid", "research or evaluator binding changed")
     if schedule.get("timezone") != "Asia/Hong_Kong" or not bool(schedule.get("enabled", True)):
         raise StrategyLabRecipeError("validation_plan_invalid", "HK schedule is unavailable")
     try:
         calendar = read_market_calendar_binding(context["artifact_root"], market="HK")
     except Exception as exc:
-        raise StrategyLabRecipeError(
-            "market_calendar_binding_unavailable", str(exc)
-        ) from exc
+        raise StrategyLabRecipeError("market_calendar_binding_unavailable", str(exc)) from exc
     trading_dates = calendar.get("trading_dates")
     if not isinstance(trading_dates, list) or requested_start not in trading_dates:
-        raise StrategyLabRecipeError(
-            "validation_plan_invalid", "requested start is not a frozen trading session"
-        )
+        raise StrategyLabRecipeError("validation_plan_invalid", "requested start is not a frozen trading session")
     offset = trading_dates.index(requested_start)
     selected_dates = trading_dates[offset : offset + VALIDATION_SESSIONS]
     if len(selected_dates) != VALIDATION_SESSIONS:
-        raise StrategyLabRecipeError(
-            "validation_plan_invalid", "market calendar does not cover 10 validation sessions"
-        )
+        raise StrategyLabRecipeError("validation_plan_invalid", "market calendar does not cover 10 validation sessions")
     sessions: list[dict[str, Any]] = []
     try:
         for trading_date in selected_dates:
@@ -451,12 +418,8 @@ def build_validation_plan(
             if session is None:
                 raise ValueError(f"calendar session is missing: {trading_date}")
             trade_date_type = str(session["trade_date_type"])
-            targets = scheduled_scan_targets_for_date(
-                dict(schedule), trading_date, trade_date_type=trade_date_type
-            )
-            slots = scheduled_session_slots_for_date(
-                dict(schedule), trading_date, trade_date_type=trade_date_type
-            )
+            targets = scheduled_scan_targets_for_date(dict(schedule), trading_date, trade_date_type=trade_date_type)
+            slots = scheduled_session_slots_for_date(dict(schedule), trading_date, trade_date_type=trade_date_type)
             if not targets or not slots:
                 raise ValueError(f"validation session is empty: {trading_date}")
             target_values = [_utc_text(value) for value in targets]
@@ -466,8 +429,7 @@ def build_validation_plan(
                     "session": session,
                     "scheduled_scan_targets_utc": target_values,
                     "expected_recommendation_point_ids": [
-                        build_recommendation_point_id("HK", ACCOUNT, value)
-                        for value in target_values
+                        build_recommendation_point_id("HK", ACCOUNT, value) for value in target_values
                     ],
                     "minute_grid_utc": [_utc_text(value) for value in slots],
                     "breaks_utc": _slot_breaks(slots),
@@ -476,21 +438,16 @@ def build_validation_plan(
             )
     except (KeyError, TypeError, ValueError) as exc:
         raise StrategyLabRecipeError("validation_plan_invalid", str(exc)) from exc
-    first_target = datetime.fromisoformat(
-        sessions[0]["scheduled_scan_targets_utc"][0].replace("Z", "+00:00")
-    )
+    first_target = datetime.fromisoformat(sessions[0]["scheduled_scan_targets_utc"][0].replace("Z", "+00:00"))
     if occurred.astimezone(timezone.utc) >= first_target:
-        raise StrategyLabRecipeError(
-            "validation_preview_blocked", "the first validation target has already begun"
-        )
+        raise StrategyLabRecipeError("validation_preview_blocked", "the first validation target has already begun")
     timer = dict(timer_binding)
     provider = dict(provider_source)
-    provider_authority = {
-        key: provider.get(key) for key in ("provider", "endpoint", "opend_binding")
-    }
+    provider_authority = {key: provider.get(key) for key in ("provider", "endpoint", "opend_binding")}
     if (
         timer != build_strategy_lab_timer_binding()
-        or set(provider) != {
+        or set(provider)
+        != {
             "provider",
             "endpoint",
             "opend_binding",
@@ -499,13 +456,10 @@ def build_validation_plan(
         or provider_authority["provider"] != "futu_opend"
         or provider_authority["endpoint"] != "market_snapshot"
         or provider_authority["opend_binding"] != context.get("opend_binding")
-        or provider.get("source_authority_sha256")
-        != canonical_sha256(provider_authority)
+        or provider.get("source_authority_sha256") != canonical_sha256(provider_authority)
         or bool(set(account_run_config_sha256) - set("0123456789abcdef"))
     ):
-        raise StrategyLabRecipeError(
-            "validation_plan_invalid", "validation runtime binding is invalid"
-        )
+        raise StrategyLabRecipeError("validation_plan_invalid", "validation runtime binding is invalid")
     schedule_copy = dict(schedule)
     return {
         "experiment_id": experiment["experiment_id"],
@@ -649,9 +603,7 @@ def select_research_window(
     maturity_cutoff_utc: str,
 ) -> dict[str, Any]:
     try:
-        cutoff = datetime.fromisoformat(maturity_cutoff_utc.replace("Z", "+00:00")).astimezone(
-            timezone.utc
-        )
+        cutoff = datetime.fromisoformat(maturity_cutoff_utc.replace("Z", "+00:00")).astimezone(timezone.utc)
         calendar = read_market_calendar_binding(context["artifact_root"], market="HK")
     except Exception as exc:
         return _blocked("market_calendar_binding_unavailable", str(exc), sessions=[])
@@ -680,13 +632,8 @@ def select_research_window(
                 invalid.append((index, reason or "research_window_coverage_missing"))
         if invalid:
             first_invalid = invalid[0][0]
-            if (
-                [index for index, _reason in invalid]
-                == list(range(first_invalid, RESEARCH_SESSIONS))
-                and all(
-                    reason in {"research_outcome_immature", "research_point_post_cutoff"}
-                    for _index, reason in invalid
-                )
+            if [index for index, _reason in invalid] == list(range(first_invalid, RESEARCH_SESSIONS)) and all(
+                reason in {"research_outcome_immature", "research_point_post_cutoff"} for _index, reason in invalid
             ):
                 skipped_newer_suffix += 1
                 if any(reason == "research_point_post_cutoff" for _index, reason in invalid):
@@ -770,6 +717,18 @@ def _terminal_fx_bindings(
             }
         )
     return bindings, blockers
+
+
+def resolve_terminal_fx_binding(
+    context: Mapping[str, Any], *, expiration: str, currency: str
+) -> tuple[dict[str, Any] | None, dict[str, str] | None]:
+    """Resolve one expiry-date FX fact from the existing evidence owner."""
+
+    bindings, blockers = _terminal_fx_bindings(
+        context,
+        [{"candidate": {"expiration": expiration, "currency": currency}}],
+    )
+    return (bindings[0], None) if bindings else (None, blockers[0])
 
 
 def _history_k_authority(
@@ -912,5 +871,6 @@ __all__ = [
     "check_recipe_readiness",
     "describe_recipe",
     "project_validation_arms",
+    "resolve_terminal_fx_binding",
     "select_research_window",
 ]

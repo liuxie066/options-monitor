@@ -94,6 +94,11 @@ def add_service_update_commands(subparsers: Any) -> None:
         help="render opt-in systemd quality API, refresh, recheck, and day-end reconciliation units",
     )
     service_render.add_argument(
+        "--include-strategy-lab-advance",
+        action="store_true",
+        help="render the opt-in Strategy Lab scheduled advance service/timer",
+    )
+    service_render.add_argument(
         "--include-feishu-agent-credential",
         action="store_true",
         help="render the deprecated encrypted Feishu env materializer during migration only",
@@ -333,6 +338,7 @@ def handle_service_update_command(
             wechat_clawbot_label=args.wechat_clawbot_label,
             wechat_clawbot_allowed_senders=args.wechat_clawbot_allowed_senders,
             include_quality_monitoring=bool(args.include_quality_monitoring),
+            include_strategy_lab_advance=bool(args.include_strategy_lab_advance),
             include_feishu_agent_credential=bool(args.include_feishu_agent_credential),
             include_secret_credentials=bool(args.include_secret_credentials),
             secret_credential_delivery=args.secret_credential_delivery,

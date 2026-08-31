@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 1016 (`src`: 543, `domain`: 76, `scripts`: 12, `tests`: 385)
-- Internal import edges: 6773 total, 2944 production/script edges excluding tests
+- Internal import edges: 6784 total, 2947 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,7 +31,7 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|436| domain
+  application -->|437| domain
   application -->|4| domain_services
   application -->|146| infrastructure
   application -->|41| storage
@@ -46,7 +46,7 @@ flowchart LR
   scripts -->|4| domain
   scripts -->|2| infrastructure
   storage -->|1| domain
-  tests -->|2818| application
+  tests -->|2826| application
   tests -->|453| domain
   tests -->|2| domain_services
   tests -->|232| infrastructure
@@ -59,7 +59,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 436 |
+| application | domain | 437 |
 | interfaces | application | 164 |
 | application | infrastructure | 146 |
 | scripts | application | 45 |
@@ -79,7 +79,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 2818 |
+| tests | application | 2826 |
 | tests | domain | 453 |
 | tests | interfaces | 237 |
 | tests | infrastructure | 232 |
@@ -93,7 +93,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 
 | from | to | imports |
 |---|---|---|
-| src.application | domain.domain | 226 |
+| src.application | domain.domain | 227 |
 | src.interfaces | src.application | 129 |
 | src.application | src.infrastructure | 105 |
 | src.application.ledger | domain.domain | 64 |
@@ -213,7 +213,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.application.channels.wechat_clawbot.inbound | 25 |
 | src.application.ledger.queries | 25 |
 | src.application.pipeline_runtime | 25 |
-| src.application.daily_decision_brief_service | 24 |
+| src.application.strategy_lab.service | 25 |
 
 ## Reading
 

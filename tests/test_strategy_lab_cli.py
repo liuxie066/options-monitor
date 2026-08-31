@@ -304,7 +304,7 @@ def test_status_and_receipt_do_not_read_clock_or_provider(
     monkeypatch.setattr(
         cli,
         service_name,
-        lambda fake_context, experiment_id: {
+        lambda fake_context, experiment_id, **_kwargs: {
             "context_matches": fake_context == context,
             "experiment_id": experiment_id,
         },
