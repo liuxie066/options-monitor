@@ -157,6 +157,13 @@ def test_scene_manifest_owns_prompt_tools_and_runtime_limits() -> None:
     assert "Option income/performance" in definition["system_prompt"]
     assert "`option_performance_report`, never generic analysis" in definition["system_prompt"]
     assert "MTD is" in definition["system_prompt"]
+    assert "current-month label such as `8月` means MTD" in definition["system_prompt"]
+    assert "use `period=month` only for an" in definition["system_prompt"]
+    assert "explicit natural or completed month" in definition["system_prompt"]
+    assert "exact affirmative current-message" in definition["system_prompt"]
+    assert "`截至YYYY-MM-DD的M月期权收益率` authorizes MTD `as_of_date`" in definition["system_prompt"]
+    assert "retained conversation or tool history" in definition["system_prompt"]
+    assert "older cutoff" in definition["system_prompt"]
     assert "primary option PnL before option cash" in definition["system_prompt"]
     assert "A short follow-up such as" in definition["system_prompt"]
     assert "read-first options-monitor assistant" not in definition["system_prompt"]
@@ -1502,6 +1509,251 @@ def test_explicit_month_scope_is_not_pruned_by_model_mtd_arguments(monkeypatch) 
             "month": "2026-06",
         }
     ]
+
+
+@pytest.mark.parametrize(
+    ("question", "arguments", "expected_scope"),
+    [
+        (
+            "8月期权收益率，总计，不分账号",
+            {"period": "mtd", "as_of_date": "2026-08-23"},
+            {"period": "mtd"},
+        ),
+        (
+            "8月期权收益率，总计，不分账号，共2个账户",
+            {"period": "mtd", "as_of_date": "2026-08-23"},
+            {"period": "mtd"},
+        ),
+        (
+            "截至2026-08-23的8月期权收益率，总计，不分账号",
+            {"period": "mtd", "as_of_date": "2026-08-23"},
+            {"period": "mtd", "as_of_date": "2026-08-23"},
+        ),
+        (
+            "查询2026年8月自然月期权收益率",
+            {"period": "month", "month": "2026-08"},
+            {"period": "month", "month": "2026-08"},
+        ),
+        (
+            "截至2026-08-23查询YTD期权收益率",
+            {"period": "ytd", "as_of_date": "2026-08-23"},
+            {"period": "ytd", "as_of_date": "2026-08-23"},
+        ),
+        (
+            "查询2026-08-01到2026-08-23的期权收益率",
+            {
+                "period": "range",
+                "start_date": "2026-08-01",
+                "end_date": "2026-08-23",
+            },
+            {
+                "period": "range",
+                "start_date": "2026-08-01",
+                "end_date": "2026-08-23",
+            },
+        ),
+        (
+            "不要再用截至2026-08-23的旧口径，查当前 MTD",
+            {"period": "mtd"},
+            {"period": "mtd"},
+        ),
+    ],
+)
+def test_host_constrains_option_performance_cutoff_before_business_read(
+    monkeypatch,
+    question: str,
+    arguments: dict,
+    expected_scope: dict,
+) -> None:
+    calls: list[dict] = []
+
+    def fake_call(name: str, payload: dict, *, allowed_tools: tuple[str, ...]) -> dict:
+        assert name == "option_performance_report"
+        calls.append(dict(payload))
+        return {"ok": True, "data": {"summary": []}}
+
+    turns = iter(
+        (
+            ModelTurn(tool_calls=(_call("option_performance_report", arguments),)),
+            ModelTurn(text="结论：已按当前消息允许的范围查询。"),
+        )
+    )
+    monkeypatch.setattr(copilot_tools, "call_read_tool", fake_call)
+
+    result = run_contract(_contract(question), model_runner=lambda _request: next(turns))
+
+    assert result.status == "answered"
+    assert len(calls) == 1
+    assert {
+        key: calls[0][key]
+        for key in (
+            "period",
+            "as_of_date",
+            "month",
+            "year",
+            "start_date",
+            "end_date",
+        )
+        if key in calls[0]
+    } == expected_scope
+
+
+@pytest.mark.parametrize(
+    ("question", "arguments"),
+    [
+        (
+            "截至2026-08-23的8月期权收益率，总计，不分账号",
+            {"period": "mtd", "as_of_date": "2026-08-22"},
+        ),
+        (
+            "截至2026-08-23的8月期权收益率，总计，不分账号",
+            {"period": "mtd"},
+        ),
+        (
+            "截至2026-02-30的2月期权收益率",
+            {"period": "mtd", "as_of_date": "2026-02-30"},
+        ),
+        (
+            "截至2026-08-23的7月期权收益率",
+            {"period": "mtd", "as_of_date": "2026-08-23"},
+        ),
+        (
+            "截至2026-08-23的8月期权收益率，比较2026-08-24",
+            {"period": "mtd", "as_of_date": "2026-08-23"},
+        ),
+        (
+            "截至昨天的8月期权收益率",
+            {"period": "mtd", "as_of_date": "2026-08-23"},
+        ),
+        (
+            "2026-08-23的8月期权收益率",
+            {"period": "mtd", "as_of_date": "2026-08-23"},
+        ),
+        (
+            "8月23日的期权收益率",
+            {"period": "mtd", "as_of_date": "2026-08-23"},
+        ),
+        (
+            "2026年8月23日的期权收益率",
+            {"period": "mtd", "as_of_date": "2026-08-23"},
+        ),
+        (
+            "Option performance as of 2026-08-23",
+            {"period": "mtd", "as_of_date": "2026-08-23"},
+        ),
+        (
+            "截至2026-08-23的8月期权收益率",
+            {"period": "month", "month": "2026-08"},
+        ),
+        (
+            "不要再用截至2026-08-23的旧口径，查当前 MTD",
+            {"period": "mtd", "as_of_date": "2026-08-23"},
+        ),
+        (
+            "上次是截至2026-08-23，这次查当前 MTD",
+            {"period": "mtd", "as_of_date": "2026-08-23"},
+        ),
+    ],
+)
+def test_host_rejects_unapproved_option_performance_cutoff_without_evidence(
+    monkeypatch,
+    question: str,
+    arguments: dict,
+) -> None:
+    calls: list[dict] = []
+
+    def fake_call(name: str, payload: dict, *, allowed_tools: tuple[str, ...]) -> dict:
+        calls.append(dict(payload))
+        return {"ok": True, "data": {"summary": []}}
+
+    def model(request: ModelRequest) -> ModelTurn:
+        tool_messages = [item for item in request.messages if item.get("role") == "tool"]
+        if not tool_messages:
+            return ModelTurn(tool_calls=(_call("option_performance_report", arguments),))
+        observation = json.loads(tool_messages[-1]["content"])
+        assert observation["ok"] is False
+        assert observation["code"] == "INPUT_ERROR"
+        return ModelTurn(text="结论：截止范围未获当前消息明确授权，未读取业务数据。")
+
+    monkeypatch.setattr(copilot_tools, "call_read_tool", fake_call)
+    result = run_contract(_contract(question), model_runner=model)
+
+    assert result.status == "answered"
+    assert calls == []
+    performance_results = [
+        event
+        for event in result.events
+        if event.type == "tool_result"
+        and event.payload.get("tool_name") == "option_performance_report"
+    ]
+    assert len(performance_results) == 1
+    assert performance_results[0].payload["ok"] is False
+    assert not any(
+        event.type == "tool_call"
+        and event.payload.get("tool_name") == "option_performance_report"
+        for event in result.events
+    )
+
+
+def test_rejected_cutoff_observation_cannot_support_submit_answer(monkeypatch) -> None:
+    captured: dict[str, dict] = {}
+    calls: list[dict] = []
+
+    def process(_start, *, on_tool_call, **_kwargs):
+        rejected = on_tool_call(
+            {
+                "call_id": "cutoff_rejected",
+                "tool_name": "option_performance_report",
+                "arguments": {"period": "mtd", "as_of_date": "2026-08-22"},
+            }
+        )
+        captured["rejected"] = rejected
+        captured["admission"] = on_tool_call(
+            {
+                "call_id": "answer_rejected",
+                "tool_name": "submit_answer",
+                "arguments": {
+                    "mode": "evidence",
+                    "status": "complete",
+                    "answer_markdown": "结论：截至日收益已确认。",
+                    "claims": [
+                        {
+                            "text": "截至日收益已确认",
+                            "kind": "historical_fact",
+                            "observation_ids": [rejected["ref"]],
+                            "required_scope": "point",
+                        }
+                    ],
+                },
+            }
+        )
+        return {
+            "ok": False,
+            "error": {
+                "code": "MODEL_ERROR",
+                "stage": "model",
+                "message": "test completed",
+                "retryable": False,
+            },
+        }
+
+    monkeypatch.setattr("src.application.copilot.host.run_pi_agent", process)
+    monkeypatch.setattr(
+        copilot_tools,
+        "call_read_tool",
+        lambda name, payload, *, allowed_tools: calls.append(dict(payload))
+        or {"ok": True, "data": {"summary": []}},
+    )
+
+    run_contract(
+        _contract("截至2026-08-23的8月期权收益率"),
+        model_settings=_TEST_MODEL,
+    )
+
+    assert calls == []
+    assert captured["rejected"]["code"] == "INPUT_ERROR"
+    assert captured["admission"]["observation"]["ok"] is False
+    assert captured["admission"]["observation"]["reason"] == "observation_outside_request"
 
 
 def test_truncated_model_answer_is_continued_and_joined() -> None:

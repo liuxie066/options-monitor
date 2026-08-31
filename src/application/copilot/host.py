@@ -3,9 +3,11 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import re
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
+from datetime import date
 from threading import Lock
 from typing import Any, Callable, Mapping
 
@@ -49,6 +51,43 @@ _PROCESS_ERROR_CODES = {
     "PROTOCOL_ERROR": "INTERNAL_ERROR",
     "INTERNAL_ERROR": "INTERNAL_ERROR",
 }
+_OPTION_PERFORMANCE_CUTOFF = re.compile(
+    r"^\s*截至\s*(?P<date>\d{4}-\d{2}-\d{2})\s*的\s*"
+    r"(?P<month>0?[1-9]|1[0-2])月期权收益率"
+    r"(?:\s*[，,]\s*总计)?(?:\s*[，,]\s*不分账号)?\s*[。.]?\s*$"
+)
+_OPTION_PERFORMANCE_CUTOFF_INDICATOR = re.compile(
+    r"截至|截止到|截止|(?i:\bas\s+of\b)|"
+    r"(?<!\d)\d{4}-\d{1,2}-\d{1,2}(?!\d)|"
+    r"(?<!\d)\d{4}年\d{1,2}月\d{1,2}日|"
+    r"(?<!\d)\d{1,2}月\d{1,2}日"
+)
+
+
+def _constrain_option_performance_cutoff(
+    payload: dict[str, Any],
+    *,
+    user_message: str,
+) -> str | None:
+    match = _OPTION_PERFORMANCE_CUTOFF.fullmatch(user_message)
+    if match is not None:
+        try:
+            cutoff = date.fromisoformat(match.group("date"))
+        except ValueError:
+            return "option performance cutoff is not authorized by the current message"
+        if (
+            cutoff.month != int(match.group("month"))
+            or payload.get("period") != "mtd"
+            or payload.get("as_of_date") != cutoff.isoformat()
+        ):
+            return "option performance cutoff is not authorized by the current message"
+        return None
+    if payload.get("period") != "mtd" or payload.get("as_of_date") in (None, ""):
+        return None
+    if _OPTION_PERFORMANCE_CUTOFF_INDICATOR.search(user_message):
+        return "option performance cutoff is not authorized by the current message"
+    payload.pop("as_of_date", None)
+    return None
 
 
 @contextmanager
@@ -650,6 +689,13 @@ def run_contract(
                     "INPUT_ERROR",
                     payload_error or "tool input could not be prepared",
                 )
+            if tool_name == "option_performance_report":
+                cutoff_error = _constrain_option_performance_cutoff(
+                    payload,
+                    user_message=str(contract.input.get("user_message") or ""),
+                )
+                if cutoff_error:
+                    return reject("INPUT_ERROR", cutoff_error)
             event_log.record(
                 "tool_call",
                 copilot_tools.audit_tool_event_payload(
