@@ -7,9 +7,11 @@ import re
 import shlex
 import subprocess
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from json import JSONDecodeError
 from pathlib import Path
 from typing import Any, Callable, Literal, cast
+from zoneinfo import ZoneInfo
 
 from src.application.account_config import (
     accounts_from_config,
@@ -768,6 +770,40 @@ def _systemd_tick_calendar(market: str) -> str | None:
     if market == "hk":
         return HK_TICK_SYSTEMD_CALENDAR
     return None
+
+
+def next_systemd_tick_target_utc(market: str, at_or_after_utc: datetime) -> datetime:
+    """Return the first canonical Tick target at or after one UTC instant."""
+
+    calendar = _systemd_tick_calendar(str(market or "").strip().lower())
+    if calendar is None or at_or_after_utc.tzinfo is None:
+        raise ValueError("Tick calendar request is invalid")
+    match = re.fullmatch(
+        r"Mon\.\.Fri \*-\*-\* (\d{2})\.\.(\d{2}):(\d{2})/(\d{2}):(\d{2}) (\S+)",
+        calendar,
+    )
+    if match is None:
+        raise ValueError("Tick systemd calendar is unsupported")
+    start_hour, end_hour, start_minute, minute_step, second = map(
+        int, match.groups()[:5]
+    )
+    if minute_step <= 0 or second not in range(60):
+        raise ValueError("Tick systemd calendar is invalid")
+    zone = ZoneInfo(match.group(6))
+    probe = at_or_after_utc.astimezone(timezone.utc)
+    local_day = probe.astimezone(zone).date()
+    for day_offset in range(8):
+        day = local_day + timedelta(days=day_offset)
+        if day.weekday() >= 5:
+            continue
+        for hour in range(start_hour, end_hour + 1):
+            for minute in range(start_minute, 60, minute_step):
+                candidate = datetime(
+                    day.year, day.month, day.day, hour, minute, second, tzinfo=zone
+                ).astimezone(timezone.utc)
+                if candidate >= probe:
+                    return candidate
+    raise ValueError("next Tick target is unavailable")
 
 
 def _launchd_plist(

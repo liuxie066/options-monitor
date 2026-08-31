@@ -14,7 +14,7 @@ from src.application.strategy_lab.evidence import (
     collect_research_fill_evidence,
     load_research_projection,
     next_missing_research_evidence,
-    publish_research_evidence_artifact,
+    publish_evidence_artifact,
     resolve_expiry_outcome,
 )
 
@@ -230,7 +230,7 @@ def test_provider_binding_is_part_of_query_and_artifact_identity(tmp_path: Path)
     first_spec = _spec()
     first_projection = load_research_projection(first_spec)
     first = first_projection["history_k_queries"][0]
-    publish_research_evidence_artifact(
+    publish_evidence_artifact(
         tmp_path,
         "history_k",
         first["query_sha256"],
@@ -256,7 +256,7 @@ def test_evaluator_behavior_is_part_of_query_and_artifact_identity(tmp_path: Pat
     first_spec = _spec()
     first_projection = load_research_projection(first_spec)
     first = first_projection["history_k_queries"][0]
-    publish_research_evidence_artifact(
+    publish_evidence_artifact(
         tmp_path,
         "history_k",
         first["query_sha256"],
@@ -355,7 +355,7 @@ def test_next_action_adopts_existing_artifact_then_derives_fill(tmp_path: Path) 
         "bar_count": 1,
         "bars": [{"time_utc": "2026-08-03T01:41:00Z", "high": 1.02, "volume": 5.0}],
     }
-    published = publish_research_evidence_artifact(
+    published = publish_evidence_artifact(
         tmp_path,
         "history_k",
         query["query_sha256"],
@@ -426,16 +426,16 @@ def test_artifact_publish_is_idempotent_and_conflicting_content_fails(tmp_path: 
         "observed_at_utc": "2026-08-30T12:00:00Z",
         "producer_source_commit_sha": "1" * 40,
     }
-    first = publish_research_evidence_artifact(
+    first = publish_evidence_artifact(
         tmp_path, "history_k", digest, {"status": "no_fill"}, **kwargs
     )
-    second = publish_research_evidence_artifact(
+    second = publish_evidence_artifact(
         tmp_path, "history_k", digest, {"status": "no_fill"}, **kwargs
     )
     assert first == second
 
     with pytest.raises(StrategyLabEvidenceError) as raised:
-        publish_research_evidence_artifact(
+        publish_evidence_artifact(
             tmp_path, "history_k", digest, {"status": "available"}, **kwargs
         )
     assert raised.value.reason_code == "research_evidence_immutable_conflict"
