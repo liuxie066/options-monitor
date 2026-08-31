@@ -45,8 +45,8 @@ def test_strategy_lab_help_exposes_phase3_confirmation_commands(
     assert raised.value.code == 0
     help_text = capsys.readouterr().out
     assert (
-        "{readiness,recipes,preview,confirm-research,preview-validation,"
-        "confirm-validation,status,research,receipt}" in help_text
+            "{readiness,recipes,preview,confirm-research,preview-validation,"
+            "confirm-validation,advance,status,research,receipt}" in help_text
     )
 
     with pytest.raises(SystemExit) as research_help:

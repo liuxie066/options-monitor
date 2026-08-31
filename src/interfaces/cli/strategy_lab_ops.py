@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from src.application.agent_tool_config import load_runtime_config
 from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.opend_fetch_config import resolve_opend_fetch_limits
 from src.application.service_deploy import load_service_profile
+from src.application.strategy_lab.contracts import STRATEGY_LAB_ADVANCE_SERVICE
 from src.application.strategy_lab.readiness import (
     HistoryKReadinessError,
     preview_history_k_readiness,
@@ -17,6 +20,8 @@ from src.application.strategy_lab.readiness import (
 from src.application.strategy_lab.service import (
     StrategyLabContextError,
     StrategyLabServiceError,
+    advance_experiment,
+    advance_scheduled,
     confirm_research,
     confirm_validation,
     execute_research,
@@ -90,6 +95,12 @@ def add_strategy_lab_commands(subparsers: Any) -> argparse.ArgumentParser:
     validation_confirm.add_argument("--actor", required=True)
     validation_confirm.add_argument("--idempotency-key", required=True)
 
+    advance = commands.add_parser("advance", help="advance hidden validation evidence")
+    advance.add_argument("--profile-path", required=True)
+    advance_target = advance.add_mutually_exclusive_group(required=True)
+    advance_target.add_argument("--experiment-id")
+    advance_target.add_argument("--scheduled", action="store_true")
+
     status = commands.add_parser("status", help="read one experiment status")
     status.add_argument("--profile-path", required=True)
     status.add_argument("--experiment-id", required=True)
@@ -111,6 +122,30 @@ def _now_utc() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _is_bounded_systemd_invocation(
+    environ: Mapping[str, str] | None = None,
+    pid: int | None = None,
+    cgroup_text: str | None = None,
+) -> bool:
+    values = os.environ if environ is None else environ
+    actual_pid = os.getpid() if pid is None else pid
+    invocation = str(values.get("INVOCATION_ID") or "")
+    systemd_pid = str(values.get("SYSTEMD_EXEC_PID") or "")
+    if re.fullmatch(r"[0-9a-fA-F]{32}", invocation) is None or not systemd_pid.isdigit():
+        return False
+    if int(systemd_pid) != actual_pid:
+        return False
+    if cgroup_text is None:
+        try:
+            cgroup_text = Path("/proc/self/cgroup").read_text(encoding="utf-8")
+        except OSError:
+            return False
+    return any(
+        STRATEGY_LAB_ADVANCE_SERVICE in line.strip().split("/")
+        for line in cgroup_text.splitlines()
+    )
+
+
 def _experiment_request(args: argparse.Namespace) -> dict[str, str]:
     return {
         "hypothesis": args.hypothesis,
@@ -129,6 +164,7 @@ def handle_strategy_lab_command(args: argparse.Namespace) -> dict[str, Any]:
         "confirm-research",
         "preview-validation",
         "confirm-validation",
+        "advance",
         "status",
         "research",
         "receipt",
@@ -179,6 +215,21 @@ def handle_strategy_lab_command(args: argparse.Namespace) -> dict[str, Any]:
                     idempotency_key=args.idempotency_key,
                     occurred_at_utc=_now_utc(),
                 )
+            elif args.strategy_lab_command == "advance":
+                occurred_at_utc = _now_utc()
+                if args.scheduled:
+                    data = advance_scheduled(
+                        context,
+                        occurred_at_utc=occurred_at_utc,
+                        provider_capable=_is_bounded_systemd_invocation(),
+                    )
+                else:
+                    data = advance_experiment(
+                        context,
+                        args.experiment_id,
+                        occurred_at_utc=occurred_at_utc,
+                        provider_capable=False,
+                    )
             elif args.strategy_lab_command == "status":
                 data = get_experiment_status(context, args.experiment_id)
             elif args.strategy_lab_command == "receipt":

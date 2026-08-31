@@ -480,7 +480,7 @@ def test_execute_consumes_at_most_one_provider_unit(
         assert json.loads(payload[0])["payload"] == {"source_commit_sha": "c" * 40}
         return {}
 
-    monkeypatch.setattr(service, "publish_research_evidence_artifact", publish)
+    monkeypatch.setattr(service, "publish_evidence_artifact", publish)
     collect = {
         "action": "collect_history_k",
         "query_sha256": "a" * 64,
@@ -615,7 +615,7 @@ def test_concurrent_execute_uses_one_provider_unit(
     monkeypatch.setattr(service, "collect_research_fill_evidence", collect)
     monkeypatch.setattr(
         service,
-        "publish_research_evidence_artifact",
+        "publish_evidence_artifact",
         lambda *_args, **_kwargs: published.set() or {},
     )
     collect_action = {
