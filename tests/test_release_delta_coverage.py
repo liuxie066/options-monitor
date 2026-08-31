@@ -168,6 +168,22 @@ def test_delta_coverage_accepts_complete_review_before_and_after_release_commit(
     assert post_commit == summary
 
 
+def test_delta_coverage_accepts_protected_main_merge_of_release_commit(tmp_path: Path) -> None:
+    repo, _manifest = _prepared_repo(tmp_path)
+    main_branch = _git(repo, "branch", "--show-current")
+    _git(repo, "switch", "-c", "release")
+    _git(repo, "add", "VERSION", "CHANGELOG.md", "release/coverage/v1.1.0.json")
+    _git(repo, "commit", "-m", "chore: release 1.1.0")
+    _git(repo, "switch", main_branch)
+    _git(repo, "merge", "--no-ff", "release", "-m", "Merge pull request #123 from release")
+
+    validate_release_delta_coverage(
+        base_dir=repo,
+        version="1.1.0",
+        release_evidence=_release_evidence(repo),
+    )
+
+
 def test_release_check_cli_enforces_delta_coverage(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
