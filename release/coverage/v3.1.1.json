@@ -1,0 +1,48 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.1.1",
+  "base": {
+    "tag": "v3.1.0",
+    "commit": "9e45d3d3b8f4d538ac5970586fe5895bcb2ece29"
+  },
+  "reviewed_head": "3b920c671cd890ee42023946c719d1b08fd927e0",
+  "commits": [
+    {
+      "sha": "98f0e8622ce035eec65cdb06beb9213be21acd4d",
+      "subject": "fix(strategy-lab): resolve release source identity"
+    },
+    {
+      "sha": "3b920c671cd890ee42023946c719d1b08fd927e0",
+      "subject": "Merge pull request #200 from liuxie066/codex/fix-release-source-identity"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Resolved stable release symlinks before verifying source identity, allowing deployed Strategy Lab previews to bind the audited release commit.",
+      "commits": [
+        "98f0e8622ce035eec65cdb06beb9213be21acd4d"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "3b920c671cd890ee42023946c719d1b08fd927e0",
+      "reason": "Merge-only integration commit; the Strategy Lab source-identity fix is mapped to its source commit."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "98f0e8622ce035eec65cdb06beb9213be21acd4d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/200"
+      ]
+    },
+    {
+      "commit": "3b920c671cd890ee42023946c719d1b08fd927e0",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/200"
+      ]
+    }
+  ]
+}
