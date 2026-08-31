@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 1036 (`src`: 558, `domain`: 76, `scripts`: 12, `tests`: 390)
-- Internal import edges: 6938 total, 3038 production/script edges excluding tests
+- Python files scanned: 1015 (`src`: 543, `domain`: 76, `scripts`: 12, `tests`: 384)
+- Internal import edges: 6735 total, 2933 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,26 +31,26 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|453| domain
+  application -->|436| domain
   application -->|4| domain_services
-  application -->|154| infrastructure
+  application -->|146| infrastructure
   application -->|41| storage
   domain_services -->|5| domain
   domain_services -->|2| storage
-  infrastructure -->|9| application
-  infrastructure -->|3| domain
-  interfaces -->|179| application
-  interfaces -->|3| domain
-  interfaces -->|9| infrastructure
+  infrastructure -->|11| application
+  infrastructure -->|4| domain
+  interfaces -->|163| application
+  interfaces -->|2| domain
+  interfaces -->|6| infrastructure
   scripts -->|45| application
   scripts -->|4| domain
   scripts -->|2| infrastructure
   storage -->|1| domain
-  tests -->|2861| application
-  tests -->|457| domain
+  tests -->|2798| application
+  tests -->|452| domain
   tests -->|2| domain_services
-  tests -->|231| infrastructure
-  tests -->|250| interfaces
+  tests -->|230| infrastructure
+  tests -->|233| interfaces
   tests -->|23| scripts
   tests -->|18| storage
 ```
@@ -59,18 +59,18 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 453 |
-| interfaces | application | 179 |
-| application | infrastructure | 154 |
+| application | domain | 436 |
+| interfaces | application | 163 |
+| application | infrastructure | 146 |
 | scripts | application | 45 |
 | application | storage | 41 |
-| infrastructure | application | 9 |
-| interfaces | infrastructure | 9 |
+| infrastructure | application | 11 |
+| interfaces | infrastructure | 6 |
 | domain_services | domain | 5 |
 | application | domain_services | 4 |
+| infrastructure | domain | 4 |
 | scripts | domain | 4 |
-| infrastructure | domain | 3 |
-| interfaces | domain | 3 |
+| interfaces | domain | 2 |
 | domain_services | storage | 2 |
 | scripts | infrastructure | 2 |
 | storage | domain | 1 |
@@ -79,10 +79,10 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 2861 |
-| tests | domain | 457 |
-| tests | interfaces | 250 |
-| tests | infrastructure | 231 |
+| tests | application | 2798 |
+| tests | domain | 452 |
+| tests | interfaces | 233 |
+| tests | infrastructure | 230 |
 | tests | scripts | 23 |
 | tests | storage | 18 |
 | tests | domain_services | 2 |
@@ -93,17 +93,17 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 
 | from | to | imports |
 |---|---|---|
-| src.application | domain.domain | 242 |
-| src.interfaces | src.application | 142 |
-| src.application | src.infrastructure | 113 |
+| src.application | domain.domain | 226 |
+| src.interfaces | src.application | 128 |
+| src.application | src.infrastructure | 105 |
 | src.application.ledger | domain.domain | 64 |
 | src.application.ledger | domain.domain.ledger | 42 |
 | src.application.research | src.application | 35 |
 | scripts | src.application | 34 |
 | src.application | domain.storage | 32 |
-| src.application | domain.domain.engine | 29 |
+| src.application | domain.domain.engine | 28 |
 | src.application.trades | domain.domain | 26 |
-| src.application | src.application.ledger | 24 |
+| src.application | src.application.ledger | 25 |
 | src.application.positions | src.application | 24 |
 | src.application.trades | src.application | 22 |
 | src.application.inbound | src.application | 21 |
@@ -116,43 +116,43 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application.positions | domain.domain | 13 |
 | domain.domain | domain.domain.ledger | 12 |
 | src.application.trades | src.infrastructure | 11 |
+| src.infrastructure | src.application | 11 |
 | src.interfaces | src.application.trades | 11 |
-| src.interfaces | src.application.research | 10 |
-| src.application | src.application.research | 9 |
 | src.application.ledger | src.infrastructure | 9 |
 | src.application.multi_tick | src.infrastructure | 9 |
-| src.infrastructure | src.application | 9 |
-| src.interfaces | src.infrastructure | 9 |
+| src.interfaces | src.application.research | 9 |
 | src.application.trades | domain.domain.ledger | 8 |
 | src.application | src.application.trades | 7 |
 | src.application.ledger | src.application | 7 |
 | src.application.positions | domain.domain.ledger | 7 |
 | src.application.positions | domain.storage | 7 |
-| src.interfaces | src.application.ledger | 7 |
 | domain.domain.ledger | domain.domain | 7 |
+| src.application | src.application.research | 6 |
 | src.application.multi_tick | domain.domain | 6 |
 | src.application.positions | src.infrastructure | 6 |
 | src.application.setup | src.application | 6 |
+| src.interfaces | src.application.ledger | 6 |
+| src.interfaces | src.infrastructure | 6 |
 | domain.domain | domain.domain.engine | 5 |
 | domain.services | domain.domain | 5 |
 | scripts | src.application.ledger | 5 |
 | src.application.positions | src.application.ledger | 4 |
 | src.application.settings | src.application | 4 |
+| src.infrastructure | domain.domain | 4 |
 | src.interfaces | src.application.settings | 4 |
 | scripts | src.application.trades | 4 |
 | src.application.inbound | src.infrastructure | 3 |
 | src.application | domain.services | 3 |
 | src.application.research | src.application.ledger | 3 |
-| src.infrastructure | domain.domain | 3 |
 | src.interfaces | src.application.positions | 3 |
 | scripts | domain.domain | 3 |
 | src.application.ledger | src.application.settings | 2 |
 | src.application.multi_tick | domain.storage | 2 |
 | src.application.setup | src.infrastructure | 2 |
 | src.application.trades | src.application.positions | 2 |
-| src.interfaces | domain.domain | 2 |
 | domain.domain.engine | domain.domain | 2 |
 | domain.services | domain.storage | 2 |
+| scripts | src.infrastructure | 2 |
 
 ## Boundary Checks
 
@@ -180,20 +180,20 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | module | incoming imports |
 |---|---|
 | src.application.agent_tool_contracts | 99 |
-| domain.domain.symbol_identity | 70 |
+| domain.domain.symbol_identity | 71 |
 | src.application.agent_tool_config | 65 |
 | src.application.ledger.api | 61 |
-| src.application.account_config | 53 |
+| src.application.account_config | 49 |
 | src.application.payload_helpers | 48 |
-| domain.domain.decision_state_fingerprint | 47 |
 | domain.domain.ledger.position_fields | 45 |
 | src.infrastructure.io_utils | 44 |
 | domain.domain.option_position_identity | 42 |
-| src.application.shadow_replay.common | 28 |
-| src.infrastructure.futu_gateway | 27 |
-| domain.domain.engine | 26 |
+| domain.domain.decision_state_fingerprint | 39 |
+| domain.domain.engine | 25 |
+| src.infrastructure.futu_gateway | 25 |
 | domain.domain.ledger | 24 |
 | src.application.settings | 23 |
+| domain.domain.trade_contract_identity | 23 |
 
 ### Highest Fan-Out Production Modules
 

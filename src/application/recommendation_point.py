@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 import hashlib
 import io
 import json
-import os
 from pathlib import Path
 import re
 from typing import Any, NoReturn
@@ -69,7 +68,6 @@ RECOMMENDATION_POINT_SCHEMA_V3 = "recommendation_point.v3"
 RECOMMENDATION_POINT_SCHEMA = RECOMMENDATION_POINT_SCHEMA_V1
 RECOMMENDATION_POINT_FILE = "recommendation_point.sell_put.json"
 STRATEGY_FAMILY = "sell_put"
-AVAILABILITY_ENV = "OM_STRATEGY_LAB_TOP1_AVAILABLE"
 
 _POINT_FIELDS_V1 = frozenset(
     {
@@ -336,11 +334,6 @@ def _option_market_evidence_ref(run_id: str, account: str) -> str:
         f"output_runs/{run_id}/accounts/{account}/state/"
         f"{PREPARED_OPTION_POSITIONS_MANIFEST_NAME_V2}"
     )
-
-
-def strategy_lab_top1_available(environ: Mapping[str, str] | None = None) -> bool:
-    source = os.environ if environ is None else environ
-    return source.get(AVAILABILITY_ENV) == "1"
 
 
 def build_recommendation_point_id(

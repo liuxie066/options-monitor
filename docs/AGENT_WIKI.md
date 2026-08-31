@@ -858,7 +858,7 @@ Use supported `gh release view --json` fields such as `tagName`, `name`, `url`, 
 | Change area | Suggested checks |
 |---|---|
 | Tool Gateway manifest/handler | `./.venv/bin/python -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py` |
-| Research / Shadow Replay / Strategy Lab | `./.venv/bin/python -m pytest tests/test_research.py tests/test_research_archive.py tests/test_shadow_replay.py tests/test_shadow_replay_candidate_impact.py tests/test_strategy_lab_update.py tests/test_strategy_lab_top1_architecture.py` |
+| Research / Shadow Replay / Strategy Lab | `./.venv/bin/python -m pytest tests/test_research.py tests/test_research_archive.py tests/test_shadow_replay.py tests/test_shadow_replay_candidate_impact.py tests/test_strategy_lab_store.py tests/test_strategy_lab_phase1_owners.py tests/test_strategy_lab_history_k_readiness.py` |
 | Candidate filter/rank | Candidate engine tests, candidate tool tests, focused trace/replay tests |
 | Tick orchestration | `./.venv/bin/python -m pytest tests/test_multi_tick_*.py tests/test_unified_tick_entrypoint.py` |
 | Close Advice frozen snapshot | `python3.12 -m pytest -q -p no:cacheprovider tests/test_close_advice_required_data.py tests/test_close_advice_runner.py tests/test_account_run.py tests/test_tick_account_execution_barrier.py` |

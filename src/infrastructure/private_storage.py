@@ -58,7 +58,13 @@ def ensure_private_file(path: str | Path) -> Path:
 
 
 @contextmanager
-def exclusive_private_file_lock(path: str | Path) -> Iterator[None]:
+def exclusive_private_file_lock(
+    path: str | Path,
+    *,
+    blocking: bool = True,
+) -> Iterator[None]:
+    if type(blocking) is not bool:
+        raise TypeError("blocking must be boolean")
     target = ensure_private_file(path)
     lock_key = str(target)
     process_id = os.getpid()
@@ -88,7 +94,8 @@ def exclusive_private_file_lock(path: str | Path) -> Iterator[None]:
         if not stat.S_ISREG(file_stat.st_mode):
             raise OSError(f"sensitive lock must be a regular file: {target.name}")
         os.fchmod(descriptor, PRIVATE_FILE_MODE)
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        operation = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
+        fcntl.flock(descriptor, operation)
         held[lock_key] = (descriptor, 1)
         try:
             yield

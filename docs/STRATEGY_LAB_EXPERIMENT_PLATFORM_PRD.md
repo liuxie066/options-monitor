@@ -3,7 +3,7 @@
 - **产品名称**：Strategy Lab
 - **产品范围**：用真实证据完成策略假设的历史研究、未来隐藏验证和可审计回执
 - **MVP Recipe**：Sell Put 期权持仓市值集中度
-- **产品状态**：待按本 PRD 重建；当前代码不代表本 PRD 已完成
+- **产品状态**：Phase 2 本地实现完成；10 日隐藏验证与 Final Receipt 尚未实现，远端自然 Tick 门槛待验收
 
 本文是 Strategy Lab 的产品权威。技术架构、代码复用和删除范围见
 [系统设计](STRATEGY_LAB_EXPERIMENT_PLATFORM_SYSTEM_DESIGN.md)；当前遗留实现与重建差距见
@@ -29,12 +29,13 @@ MVP 不建设本地 Agent 接入、MCP、Skill、飞书控制、多实验并行�
 ## 2. 背景与问题
 
 Options Monitor 已有完成实验所需的基础能力：生产候选引擎、正式推荐点、Research Archive、OpenD
-行情适配、期权持仓估值、FX、费用计算和 Shadow Replay。但旧 Strategy Lab / Top1 代码把 Recipe、
-生命周期、兼容迁移、corpus、provider probe 和用户入口混在一起，尚未形成一个清晰、可持续使用的产品。
+行情适配、期权持仓估值、FX、费用计算和 Shadow Replay。此前的 Strategy Lab / Top1 代码把 Recipe、
+生命周期、兼容迁移、corpus、provider probe 和用户入口混在一起。旧产品壳已删除；新的 20 日研究与
+Research Receipt 链路已完成本地实现，未来 10 日隐藏验证仍待实现。
 
 主要问题是：
 
-1. 用户需要理解 `top1-loop`、Research、Shadow Replay、profile、calendar 和多个内部入口；
+1. 历史入口曾要求用户理解 Top1 loop、Research、Shadow Replay、profile 和 calendar；
 2. Top1 被误写成平台模块，而它实际只是“每个推荐点选一个候选”的比较口径；
 3. 历史研究一律假设 `t0_sell_limit` 成交，未充分使用 OpenD 期权分钟 K 线；
 4. 评价器加入了小样本 Student-t 和最差 20% 硬门槛，超出已确认的 MVP 目标；
@@ -293,9 +294,11 @@ research_complete
 `blocked` 表示当前阶段可重试的能力或运行阻塞；`not_evaluable` 表示冻结窗口存在不能恢复的证据缺口，
 必须生成证据不足回执并结束。状态推进必须幂等，服务重启后从 ExperimentStore 继续。
 
-每次确认和推进都重新计算同一行为 owner 清单的 `evaluator_behavior_sha256`；不一致时返回
+每次确认和推进都重新计算同一行为 owner 清单的 `evaluator_behavior_sha256`；该 hash 同时进入 provider
+query 与 artifact identity，不允许跨 evaluator behavior 复用已规范化或已计算的证据。不一致时返回
 `evaluator_behavior_mismatch`，不迁移或偷偷换实现。当前 `source_commit_sha` 可以不同，但必须写入事件
-供审计。历史研究保留每个 formal point 自己绑定的配置和源事实 hash；未来验证另行冻结 schedule、
+供审计；provider artifact 还必须记录真实 producer commit，并在公共绑定时写回 Store 审计。历史研究
+保留每个 formal point 自己绑定的配置和源事实 hash；未来验证另行冻结 schedule、
 account-config 和 timer binding，后续 formal point 不匹配时 fail closed。
 
 ## 11. 单推荐替换评价合同（Top1 Comparison）
@@ -454,7 +457,8 @@ option_position_concentration_after
 
 历史研究不用日 K，也不一律假设 t0 成交。对每个 arm：
 
-1. 从推荐时刻后的下一根完整期权 1 分钟 K 线开始，到当日正常交易结束；
+1. 先冻结 `recommendation_available_at_utc`：取正式点 capture、decision、opening seal、候选最大观测时间
+   和计划目标时间中的最晚合法 UTC；从其后的下一根完整期权 1 分钟 K 线开始，到当日正常交易结束；
 2. 首次满足 `high >= sell_limit + 1 price_tick` 且 `volume > 0`，记为 `simulated_fill`；
 3. 模拟成交价仍为 `sell_limit`；
 4. 未穿越则记为 `no_fill`；
@@ -519,7 +523,8 @@ artifact-first 和 deadline 后 gap 保证 Store 可确定性恢复。
 
 成交后持有至真实到期日。到期 payoff 使用 OpenD 标的未复权日 K 收盘和冻结费用、FX 事实；期权分钟
 K 不用于到期损益。开仓费用复用正式点已封存费用；指派 / 行权费用必须绑定账户的
-`commission_free`、`platform_fee`、`fee_plan_ref` 及其内容 hash，缺失则 fail closed。到期结果未成熟时
+`commission_free`、`platform_fee`、`fee_plan_ref` 及其内容 hash，缺失则 fail closed。Sell Put 指派
+产生的股票结算费用以 Strike 为成交价计算，不得使用到期收盘价。到期结果未成熟时
 状态为 `waiting_outcome`，不得提前发布结论。
 
 ## 14. Evidence 获取、保存与使用
@@ -664,7 +669,11 @@ Tick busy / 保护窗口 / 低优先级零等待准入：
 
 它生成 history-K 的不可变、带有效期 readiness receipt，不创建实验，也不扩展成通用 capability 平台。
 通用 provider probe、Evidence 获取和 outcome job 不作为 Strategy Lab 用户命令暴露。status 返回当前
-状态、进度、阻塞原因和唯一下一动作，不因查询触发 provider 或写入。
+状态、分类进度、可由本地冻结事实证明的静态阻塞原因和唯一下一动作，不因查询触发 provider、读取墙钟
+或写入；Tick busy、保护窗口和 limiter 等瞬时阻塞只由当次 execute 返回，不为 status 新增持久状态。
+status 和 receipt 只依赖 profile 中的 runtime / artifact / Store authority，当前账户或 OpenD 配置退役后
+仍可读取既有审计事实。status 会只读核对冻结 evaluator；若行为已变化，只返回 durable 计数和静态
+`evaluator_behavior_mismatch` blocker，不再用当前实现推导旧实验进度或下一采集动作。
 
 后续 MCP、Skill、Claude 和飞书只能适配上述应用服务。Skill 负责交互与推理提示，不拥有 Recipe、评价
 规则、能力清单或写权限。
@@ -687,6 +696,8 @@ broker state、普通策略通知或发布状态。
 
 Receipt 采用 write-once-or-verify：目标不存在时原子写入并 readback；已存在且字节相同则复用；已存在
 但内容不同则返回 immutable conflict。只有 artifact 已持久化并校验 hash 后，Store 才能绑定 ref/hash。
+公共读取必须反向校验 Store 中绑定的 receipt ref/hash/state；只有文件而没有 Store 绑定的孤立 artifact
+不是正式回执。
 
 ## 18. MVP 验收标准
 

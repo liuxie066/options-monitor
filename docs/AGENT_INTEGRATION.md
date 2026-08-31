@@ -150,21 +150,18 @@ lane instead of `om-agent` and instead of calling an online AI provider:
 ./om research collect --config-key us --scope full --output both --no-write-outputs
 ./om research shadow-replay status --min-sample 30
 ./om research shadow-replay candidate-impact-report --params <params.json> --market us --start-date <YYYY-MM-DD> --account lx --min-sample 30
-./om research strategy-lab update --latest
-./om research strategy-lab update --latest --build-dataset --write
-./om research strategy-lab top1-loop readiness --market hk --account lx --profile-path <runtime>/service.profile.json
+./om research shadow-replay build --run-id <run-id>
+./om research shadow-replay run-data-plan
 ```
 
 Research / Shadow Replay remains an offline evidence side lane. Strategy Lab is
-now limited to the formal HK / `lx` Sell Put `top1-loop`. The retained `update`
-command is a recorder maintenance facade: it is dry-run by default;
-`--build-dataset --write` builds a local replay dataset from the latest scanned
-run, and `--write` wraps the local Shadow Replay collect/settle data-plan.
-Exploratory dataset analysis and candidate-impact stay on the Shadow Replay
-commands. `top1-loop` is the formal 20-day research and 10-day hidden-validation
-path. It is not an
-`om-agent` tool and must follow the two explicit confirmations documented in
-[Strategy Lab Current Contract](STRATEGY_LAB_DESIGN.md).
+not an `om-agent` tool. Its current public surface is the root
+`./om strategy-lab` operator command group: Recipe listing, preview, explicit
+confirmation, status, bounded `research execute`, Research Receipt reading, and
+targeted readiness. Each research invocation consumes at most one provider logical
+evidence unit; Phase 2 has no timer or hidden validation. Shadow Replay
+directly owns exploratory dataset construction, maintenance, analysis, and
+candidate impact. See [Strategy Lab Current Implementation](STRATEGY_LAB_DESIGN.md).
 Use
 `review_readiness` to decide whether evidence is ready for manual strategy
 review, and use `candidate-impact` / `candidate-impact-report` to compare how

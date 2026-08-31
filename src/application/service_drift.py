@@ -25,7 +25,6 @@ from src.application.service_deploy import (
     load_service_profile,
     normalize_secret_credential_delivery,
     render_service_bundle,
-    resolve_strategy_lab_recorder_endpoint_matches,
 )
 from src.application.secret_store import credential_spec
 
@@ -37,8 +36,6 @@ SYSTEMD_REQUIRED_MAINTENANCE_UNITS = (
 LAUNCHD_REQUIRED_MAINTENANCE_UNITS = (
     "com.options-monitor.projection-verify",
 )
-LEGACY_STRATEGY_LAB_RECORDER_HOST = "127.0.0.1"
-LEGACY_STRATEGY_LAB_RECORDER_PORT = 11111
 LEGACY_FEISHU_AGENT_CREDENTIAL_UNIT_PATH = Path(
     "/usr/lib/systemd/system/options-monitor-feishu-agent-credential.service"
 )
@@ -53,6 +50,10 @@ SERVICE_ACTIVATION_POLICIES = frozenset(
         SERVICE_ACTIVATION_POLICY_ENSURE_ACTIVE,
         SERVICE_ACTIVATION_POLICY_PRESERVE_EXISTING,
     }
+)
+RETIRED_PROFILE_KEYS = (
+    "strategy_lab_" + "recorder",
+    "strategy_lab_" + "top1",
 )
 
 
@@ -1224,10 +1225,17 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
         }
 
     if isinstance(profile.get("services"), list) and not profile.get("services"):
+        profile_content_changed = any(
+            key in persisted_profile for key in RETIRED_PROFILE_KEYS
+        )
         return {
             "checked": True,
             "supported": True,
-            "reason": "service_profile_has_no_services",
+            "reason": (
+                "retired_service_profile_keys_present"
+                if profile_content_changed
+                else "service_profile_has_no_services"
+            ),
             "provider": provider,
             "profile_path": str(ctx["profile_path"]),
             "repo_root": str(ctx["repo_root"]),
@@ -1257,61 +1265,30 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
             "execution_drift_units": [],
             "required_units": [],
             "missing_required_units": [],
-            "profile_content_changed": False,
+            "profile_content_changed": profile_content_changed,
             "activation_policy": ctx.get("activation_policy"),
             "preserved_activation_states": ctx.get(
                 "preserved_activation_states", {}
             ),
             "manual_actions": [],
-            "summary": {"ok": True, "status": "skipped", "error_count": 0, "warning_count": 0},
+            "summary": {
+                "ok": not profile_content_changed,
+                "status": "warn" if profile_content_changed else "skipped",
+                "error_count": 0,
+                "warning_count": int(profile_content_changed),
+            },
         }
     effective_profile, profile_compatibility_warnings = _effective_profile_with_legacy_feishu_credential(
         profile,
         ctx=ctx,
     )
     ctx["effective_profile"] = effective_profile
-    try:
-        bundle = _expected_bundle_from_profile(
-            effective_profile,
-            provider=provider,
-            repo_root=ctx["repo_root"],
-            runtime_root=ctx["runtime_root"],
-        )
-    except ValueError as exc:
-        error = str(exc)
-        if error.startswith("strategy_lab_recorder_binding_"):
-            reason = "strategy_lab_recorder_binding_invalid"
-        elif error.startswith("Strategy Lab Top1"):
-            reason = "strategy_lab_top1_profile_invalid"
-        else:
-            raise
-        return {
-            "checked": True,
-            "supported": False,
-            "reason": reason,
-            "error": error,
-            "provider": provider,
-            "profile_path": str(ctx["profile_path"]),
-            "repo_root": str(ctx["repo_root"]),
-            "runtime_root": str(ctx["runtime_root"]),
-            "systemd_unit_root": str(ctx["systemd_unit_root"]) if provider == "systemd" else None,
-            "activation_policy": ctx.get("activation_policy"),
-            "preserved_activation_states": ctx.get(
-                "preserved_activation_states", {}
-            ),
-            "observed_activation_drift_units": [],
-            "activation_drift_units": [],
-            "preserved_activation_units": [],
-            "activation_preservation_conflicts": [],
-            "compatibility_warnings": [],
-            "summary": {
-                "ok": False,
-                "status": "error",
-                "error_count": 1,
-                "warning_count": 0,
-                "missing_required_units": [],
-            },
-        }
+    bundle = _expected_bundle_from_profile(
+        effective_profile,
+        provider=provider,
+        repo_root=ctx["repo_root"],
+        runtime_root=ctx["runtime_root"],
+    )
     compatibility_warnings_raw = bundle.get("compatibility_warnings")
     compatibility_warnings = list(profile_compatibility_warnings)
     if isinstance(compatibility_warnings_raw, list):
@@ -1486,10 +1463,6 @@ def _expected_bundle_from_profile(
     feishu_ws = feishu_ws_raw if isinstance(feishu_ws_raw, dict) else {}
     wechat_clawbot_raw = profile.get("wechat_clawbot")
     wechat_clawbot = wechat_clawbot_raw if isinstance(wechat_clawbot_raw, dict) else {}
-    strategy_lab_recorder_raw = profile.get("strategy_lab_recorder")
-    strategy_lab_recorder = strategy_lab_recorder_raw if isinstance(strategy_lab_recorder_raw, dict) else {}
-    strategy_lab_top1_raw = profile.get("strategy_lab_top1")
-    strategy_lab_top1 = strategy_lab_top1_raw if isinstance(strategy_lab_top1_raw, dict) else {}
     quality_monitoring_raw = profile.get("quality_monitoring")
     quality_monitoring = quality_monitoring_raw if isinstance(quality_monitoring_raw, dict) else {}
     feishu_agent_credential_raw = profile.get("feishu_agent_credential")
@@ -1522,20 +1495,6 @@ def _expected_bundle_from_profile(
         or "options-monitor-opend.service" in services
         or "com.options-monitor.opend" in services
     )
-    include_strategy_lab_recorder = bool(
-        strategy_lab_recorder.get("enabled")
-        or "options-monitor-strategy-lab-build.timer" in services
-        or "options-monitor-strategy-lab-sample.timer" in services
-        or "options-monitor-strategy-lab-settle.timer" in services
-        or "com.options-monitor.strategy-lab-build" in services
-        or "com.options-monitor.strategy-lab-sample" in services
-        or "com.options-monitor.strategy-lab-settle" in services
-    )
-    include_strategy_lab_top1 = bool(
-        strategy_lab_top1.get("enabled")
-        or "options-monitor-strategy-lab-top1-advance.service" in services
-        or "options-monitor-strategy-lab-top1-advance.timer" in services
-    )
     include_quality_monitoring = bool(
         quality_monitoring.get("enabled")
         or any(name.startswith("options-monitor-quality-") for name in services)
@@ -1561,10 +1520,6 @@ def _expected_bundle_from_profile(
     if include_wechat_clawbot and not wechat_clawbot_allowed_senders_configured:
         include_wechat_clawbot = False
     accounts = _profile_accounts(profile)
-    recorder_source = str(strategy_lab_recorder.get("source") or "opend").strip().lower() or "opend"
-    binding_raw = strategy_lab_recorder.get("binding")
-    binding = binding_raw if isinstance(binding_raw, dict) else {}
-    recorder_account = str(binding.get("account") or "").strip().lower() or None
     opend_root, opend_executable = _profile_opend_render_values(opend)
     render_kwargs: dict[str, Any] = {
         "target": provider,
@@ -1588,26 +1543,6 @@ def _expected_bundle_from_profile(
         "wechat_clawbot_config_key": wechat_clawbot_config_key,
         "wechat_clawbot_label": str(wechat_clawbot.get("label") or "default"),
         "wechat_clawbot_allowed_senders": wechat_clawbot_allowed_senders,
-        "include_strategy_lab_recorder": include_strategy_lab_recorder,
-        "strategy_lab_recorder_source": recorder_source,
-        "strategy_lab_recorder_max_datasets": int(strategy_lab_recorder.get("max_datasets") or 5),
-        "strategy_lab_recorder_mark_stale_hours": int(strategy_lab_recorder.get("mark_stale_hours") or 2),
-        "include_strategy_lab_top1": include_strategy_lab_top1,
-        "strategy_lab_top1_account": (
-            strategy_lab_top1.get("account")
-            if include_strategy_lab_top1
-            else None
-        ),
-        "strategy_lab_top1_advance_interval_seconds": (
-            strategy_lab_top1.get("advance_interval")
-            if include_strategy_lab_top1
-            else None
-        ),
-        "strategy_lab_top1_timeout_start_sec": (
-            strategy_lab_top1.get("timeout_start_sec")
-            if include_strategy_lab_top1
-            else None
-        ),
         "include_quality_monitoring": include_quality_monitoring,
         "include_feishu_agent_credential": include_feishu_agent_credential,
         "include_secret_credentials": include_secret_credentials,
@@ -1637,49 +1572,7 @@ def _expected_bundle_from_profile(
         ),
         "include_content": True,
     }
-    compatibility_warnings: list[dict[str, Any]] = []
-    if include_strategy_lab_recorder and recorder_source == "opend" and recorder_account is None:
-        try:
-            matching_accounts = resolve_strategy_lab_recorder_endpoint_matches(
-                repo_root=repo_root,
-                runtime_root=runtime_root,
-                accounts=accounts,
-                markets=market_values,
-                config_paths=render_kwargs["config_paths"],
-                config_yaml=render_kwargs["config_yaml"],
-                include_auto_upgrade=include_auto_upgrade,
-                host=LEGACY_STRATEGY_LAB_RECORDER_HOST,
-                port=LEGACY_STRATEGY_LAB_RECORDER_PORT,
-            )
-        except ValueError as exc:
-            raise ValueError(f"strategy_lab_recorder_binding_invalid: {exc}") from exc
-        if len(matching_accounts) != 1:
-            matches = ",".join(matching_accounts) if matching_accounts else "none"
-            raise ValueError(
-                "strategy_lab_recorder_binding_unresolved: legacy endpoint "
-                f"{LEGACY_STRATEGY_LAB_RECORDER_HOST}:{LEGACY_STRATEGY_LAB_RECORDER_PORT} "
-                f"matched {matches}; expected exactly one selected Futu account"
-            )
-        recorder_account = matching_accounts[0]
-        compatibility_warnings.append({
-            "code": "legacy_strategy_lab_recorder_binding_inferred",
-            "account": recorder_account,
-            "host": LEGACY_STRATEGY_LAB_RECORDER_HOST,
-            "port": LEGACY_STRATEGY_LAB_RECORDER_PORT,
-        })
-
-    try:
-        bundle = render_service_bundle(
-            **render_kwargs,
-            strategy_lab_recorder_account=recorder_account,
-        )
-    except ValueError as exc:
-        if include_strategy_lab_recorder and recorder_source == "opend":
-            raise ValueError(f"strategy_lab_recorder_binding_invalid: {exc}") from exc
-        raise
-    if compatibility_warnings:
-        bundle["compatibility_warnings"] = compatibility_warnings
-    return bundle
+    return render_service_bundle(**render_kwargs)
 
 
 def _profile_opend_render_values(opend: dict[str, Any]) -> tuple[str | None, str | None]:
@@ -2049,6 +1942,8 @@ def _execution_states(
 
 
 def _profile_content_changed(profile: dict[str, Any], bundle: dict[str, Any]) -> bool:
+    if any(key in profile for key in RETIRED_PROFILE_KEYS):
+        return True
     expected = _bundle_profile(bundle)
     keys = (
         "service_provider",
@@ -2065,8 +1960,6 @@ def _profile_content_changed(profile: dict[str, Any], bundle: dict[str, Any]) ->
         "opend",
         "feishu_ws",
         "wechat_clawbot",
-        "strategy_lab_recorder",
-        "strategy_lab_top1",
         "quality_monitoring",
         "feishu_agent_credential",
         "secret_credentials",
@@ -2251,6 +2144,54 @@ def _apply_service_drift(
     run_cmd: Callable[..., Any],
 ) -> dict[str, Any]:
     provider = str(ctx["provider"])
+    profile = ctx.get("profile_on_disk")
+    if (
+        isinstance(profile, dict)
+        and isinstance(profile.get("services"), list)
+        and not profile.get("services")
+        and before.get("profile_content_changed")
+    ):
+        canonical_profile = copy.deepcopy(profile)
+        for key in RETIRED_PROFILE_KEYS:
+            canonical_profile.pop(key, None)
+        try:
+            ctx["profile_path"].parent.mkdir(parents=True, exist_ok=True)
+            ctx["profile_path"].write_text(
+                json.dumps(canonical_profile, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            errors = [
+                f"write {ctx['profile_path']}: {type(exc).__name__}: {exc}"
+            ]
+            profile_written = False
+        else:
+            errors = []
+            profile_written = True
+            ctx["profile"] = canonical_profile
+            ctx["profile_on_disk"] = dict(canonical_profile)
+            operations.append(
+                {
+                    "operation": "write_profile",
+                    "path": str(ctx["profile_path"]),
+                    "ok": True,
+                }
+            )
+        return {
+            "changed": profile_written,
+            "errors": errors,
+            "written_units": [],
+            "written_managed_files": [],
+            "retired_managed_files": [],
+            "enabled_timers": [],
+            "enabled_services": [],
+            "started_services": [],
+            "restarted_timers": [],
+            "preserved_activation_units": [],
+            "deferred_restart_units": [],
+            "retired_units": [],
+            "profile_written": profile_written,
+        }
     if provider != "systemd":
         return {
             "changed": False,

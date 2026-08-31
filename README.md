@@ -54,7 +54,8 @@ trade_events -> projection -> position_lots
 | 全部 Sell Put / Sell Call 指派压力测试 | `om portfolio assignment-scenario` | 本 README 的“指派后资产分布” |
 | 本地 Copilot | `om copilot` | [Agent Integration](docs/AGENT_INTEGRATION.md) |
 | 结构化 Tool Gateway | `om-agent spec`、`om-agent run --tool <name> --input-json '<json>'` | [Tool Reference](docs/TOOL_REFERENCE.md) |
-| Shadow Replay / Strategy Lab | `om research` | [Shadow Replay Runbook](docs/SHADOW_REPLAY_RUNBOOK.md) / [Strategy Lab Current Contract](docs/STRATEGY_LAB_DESIGN.md) |
+| Shadow Replay | `om research` | [Shadow Replay Runbook](docs/SHADOW_REPLAY_RUNBOOK.md) |
+| Strategy Lab | `om strategy-lab`（Recipe、preview、确认、状态、显式研究执行、Research Receipt、readiness） | [Strategy Lab Current Contract](docs/STRATEGY_LAB_DESIGN.md) |
 | 运行诊断、服务与版本升级 | `om status`、`om service`、`om update` | [RUNBOOK.md](RUNBOOK.md) |
 
 本表是主要能力索引，不是 CLI 或 Tool Gateway 的完整命令清单。人工操作入口以 `om --help` 为准；结构化工具名、输入 schema、风险级别和副作用以 `om-agent spec` 为准。
@@ -337,7 +338,22 @@ om research collect \
   --no-write-outputs
 ```
 
-`om research` 各子命令的写入参数并不统一：`collect` 使用 `--write-outputs --confirm`，Shadow Replay / Strategy Lab 的部分动作使用 `--write`，dataset build 和 archive verify 也有自己的 artifact 语义。执行前先看子命令 `--help` 与 [Shadow Replay Runbook](docs/SHADOW_REPLAY_RUNBOOK.md)；不要把 Research 整体理解成“永远只读”。
+`om research` 各子命令的写入参数并不统一：`collect` 使用 `--write-outputs --confirm`，Shadow Replay 的部分动作使用 `--write`，dataset build 和 archive verify 也有自己的 artifact 语义。执行前先看子命令 `--help` 与 [Shadow Replay Runbook](docs/SHADOW_REPLAY_RUNBOOK.md)；不要把 Research 整体理解成“永远只读”。
+
+Strategy Lab 当前提供固定 Recipe 的 preview、显式确认、可恢复的本地 20 日研究和 Research Receipt：
+
+```bash
+om strategy-lab recipes --help
+om strategy-lab preview --help
+om strategy-lab confirm-research --help
+om strategy-lab status --help
+om strategy-lab research execute --help
+om strategy-lab receipt --help
+om strategy-lab readiness refresh-history-k --help
+```
+
+`research execute` 每次最多执行一个 OpenD 逻辑证据单元；需要重复显式调用直到完成。
+Phase 2 没有研究 timer、10 日隐藏验证或生产配置采用。
 
 ### Tool Gateway
 

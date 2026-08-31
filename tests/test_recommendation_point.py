@@ -19,7 +19,6 @@ from src.application.opening_candidate_snapshot import (
     seal_opening_candidate_snapshot,
 )
 from src.application.recommendation_point import (
-    AVAILABILITY_ENV,
     RECOMMENDATION_POINT_FILE,
     RECOMMENDATION_POINT_SCHEMA_V1,
     RECOMMENDATION_POINT_SCHEMA_V2,
@@ -33,15 +32,10 @@ from src.application.recommendation_point import (
     load_recommendation_point,
     point_binding_from_recommendation_point,
     publish_recommendation_point,
-    strategy_lab_top1_available,
     validate_option_position_evidence_binding,
     validate_recommendation_point,
 )
 from src.application.required_data_snapshot import FrozenRequiredDataUnavailable
-from src.application.strategy_lab.top1.ranking import (
-    Top1RankingError,
-    build_ranking_projection,
-)
 from src.application.strategy_scan_status import (
     publish_strategy_scan_status,
     publish_strategy_scan_status_index_v2,
@@ -456,7 +450,7 @@ def _seal_partial_fixture(
     )
 
 
-def test_point_identity_canonicalizes_target_and_availability_is_exact() -> None:
+def test_point_identity_canonicalizes_target() -> None:
     assert build_recommendation_point_id("US", "lx", TARGET) == (
         build_recommendation_point_id("US", "lx", TARGET_UTC)
     )
@@ -474,10 +468,6 @@ def test_point_identity_canonicalizes_target_and_availability_is_exact() -> None
     ) == build_recommendation_point_id(
         "US", "lx", TARGET, schema_version=RECOMMENDATION_POINT_SCHEMA_V2
     )
-    assert strategy_lab_top1_available({AVAILABILITY_ENV: "1"}) is True
-    for value in ("", "0", "true", " 1", "1 "):
-        assert strategy_lab_top1_available({AVAILABILITY_ENV: value}) is False
-    assert strategy_lab_top1_available({}) is False
 
 
 def test_clean_point_capture_is_manifest_bound_rankable_and_idempotent(
@@ -504,11 +494,7 @@ def test_clean_point_capture_is_manifest_bound_rankable_and_idempotent(
     assert len(point["producer_accepted_candidate_ids"]) == 1
     assert load_recommendation_point(tmp_path, run_id, "lx") == point
     bundle = load_candidate_snapshot_bundle(base=tmp_path, run_id=run_id, account="lx")
-    projection = build_ranking_projection(
-        bundle["owners"]["opening"],
-        point_binding=point_binding_from_recommendation_point(point),
-    )
-    assert projection["producer_accepted_candidate_ids"] == point[
+    assert [row["candidate_id"] for row in bundle["owners"]["opening"]["ranked_candidates"]] == point[
         "producer_accepted_candidate_ids"
     ]
     assert capture_scheduled_recommendation_point(
@@ -664,10 +650,7 @@ def test_clean_no_candidate_point_is_valid(tmp_path: Path) -> None:
 
     assert point["terminal_sell_put_status"] == "no_candidate"
     assert point["producer_accepted_candidate_ids"] == []
-    assert build_ranking_projection(
-        opening,
-        point_binding=point_binding_from_recommendation_point(point),
-    )["producer_accepted_candidate_ids"] == []
+    assert opening["ranked_candidates"] == []
 
 
 def test_failed_sibling_preserves_candidate_but_is_not_rankable(tmp_path: Path) -> None:
@@ -678,11 +661,7 @@ def test_failed_sibling_preserves_candidate_but_is_not_rankable(tmp_path: Path) 
 
     assert point["terminal_sell_put_status"] == "data_unavailable"
     assert len(point["producer_accepted_candidate_ids"]) == 1
-    with pytest.raises(Top1RankingError):
-        build_ranking_projection(
-            opening,
-            point_binding=point_binding_from_recommendation_point(point),
-        )
+    assert opening["ranked_candidates"]
 
 
 def test_partial_completed_scope_stays_partial_when_subset_is_rankable(
@@ -695,11 +674,7 @@ def test_partial_completed_scope_stays_partial_when_subset_is_rankable(
 
     assert point["terminal_sell_put_status"] == "partial_data"
     assert len(point["producer_accepted_candidate_ids"]) == 1
-    projection = build_ranking_projection(
-        opening,
-        point_binding=point_binding_from_recommendation_point(point),
-    )
-    assert projection["producer_accepted_candidate_ids"] == point[
+    assert [row["candidate_id"] for row in opening["ranked_candidates"]] == point[
         "producer_accepted_candidate_ids"
     ]
 

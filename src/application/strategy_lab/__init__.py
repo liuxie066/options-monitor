@@ -1,1 +1,1 @@
-"""Formal Top1 Strategy Lab package."""
+"""Strategy Lab package."""

@@ -1371,12 +1371,6 @@ def test_service_drift_removes_legacy_cursor_binding_without_resuming_paused_tim
         wechat_clawbot_allowed_senders="wechat:test-user",
         include_secret_credentials=True,
         secret_credential_store_root=store,
-        include_strategy_lab_recorder=True,
-        strategy_lab_recorder_source="local",
-        include_strategy_lab_top1=True,
-        strategy_lab_top1_account="lx",
-        strategy_lab_top1_advance_interval_seconds=300,
-        strategy_lab_top1_timeout_start_sec=120,
         use_default_deploy_user=False,
     )
     files = {item["relative_path"]: item for item in bundle["files"]}
@@ -1412,8 +1406,8 @@ def test_service_drift_removes_legacy_cursor_binding_without_resuming_paused_tim
         target_path.write_text(content, encoding="utf-8")
 
     paused_timers = {
-        "options-monitor-strategy-lab-sample.timer",
-        "options-monitor-strategy-lab-top1-advance.timer",
+        "options-monitor-tick-hk.timer",
+        "options-monitor-auto-close-hk.timer",
     }
     snapshot = {
         name: {"activation_state": "disabled", "active_state": "inactive"}
@@ -1485,6 +1479,127 @@ def test_service_drift_removes_legacy_cursor_binding_without_resuming_paused_tim
     assert final["profile_content_changed"] is False
     assert final["activation_drift_units"] == []
     assert final["preserved_activation_units"] == sorted(paused_timers)
+
+
+@pytest.mark.parametrize(
+    "retired_suffixes",
+    [("recorder",), ("top1",), ("recorder", "top1")],
+)
+def test_service_drift_removes_retired_strategy_lab_profile_keys(
+    tmp_path: Path,
+    retired_suffixes: tuple[str, ...],
+) -> None:
+    from src.application.service_deploy import render_service_bundle
+    from src.application.service_drift import service_drift
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    systemd_root = tmp_path / "systemd"
+    repo.mkdir()
+    runtime.mkdir()
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        accounts=["lx"],
+        markets=["hk"],
+    )
+    profile = json.loads(
+        {item["relative_path"]: item for item in bundle["files"]}[
+            "service.profile.json"
+        ]["content"]
+    )
+    retired_keys = [f"strategy_lab_{suffix}" for suffix in retired_suffixes]
+    for key in retired_keys:
+        profile[key] = {"enabled": True}
+    (runtime / "service.profile.json").write_text(
+        json.dumps(profile, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    _write_systemd_units_from_bundle(bundle, systemd_root)
+
+    drift_kwargs = {
+        "repo_root": repo,
+        "runtime_root": runtime,
+        "systemd_unit_root": systemd_root,
+    }
+    before = service_drift(**drift_kwargs)
+    assert before["profile_content_changed"] is True
+    assert before["mismatched_units"] == []
+    assert before["extra_installed_units"] == []
+
+    applied = service_drift(**drift_kwargs, confirm=True)
+    assert applied["applied"]["profile_written"] is True
+    assert applied["applied"]["written_units"] == []
+    assert applied["applied"]["retired_units"] == []
+    assert applied["profile_content_changed"] is False
+    readback = json.loads(
+        (runtime / "service.profile.json").read_text(encoding="utf-8")
+    )
+    assert all(key not in readback for key in retired_keys)
+
+    final = service_drift(**drift_kwargs)
+    assert final["summary"]["status"] == "ok"
+    assert final["profile_content_changed"] is False
+
+
+@pytest.mark.parametrize("provider", ["systemd", "launchd"])
+@pytest.mark.parametrize(
+    "retired_suffixes",
+    [("recorder",), ("top1",), ("recorder", "top1")],
+)
+def test_service_drift_removes_retired_keys_from_empty_services_profile(
+    tmp_path: Path,
+    provider: str,
+    retired_suffixes: tuple[str, ...],
+) -> None:
+    from src.application.service_drift import service_drift
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    systemd_root = tmp_path / "systemd"
+    repo.mkdir()
+    runtime.mkdir()
+    profile = {
+        "schema_version": 1,
+        "service_provider": provider,
+        "repo_root": str(repo),
+        "runtime_root": str(runtime),
+        "accounts": ["lx"],
+        "markets": ["hk"],
+        "config_paths": {"hk": str(runtime / "config.hk.json")},
+        "services": [],
+    }
+    retired_keys = [f"strategy_lab_{suffix}" for suffix in retired_suffixes]
+    for key in retired_keys:
+        profile[key] = {"enabled": True}
+    profile_path = runtime / "service.profile.json"
+    profile_path.write_text(json.dumps(profile), encoding="utf-8")
+    drift_kwargs = {
+        "repo_root": repo,
+        "runtime_root": runtime,
+        "systemd_unit_root": systemd_root,
+    }
+
+    before = service_drift(**drift_kwargs)
+    assert before["reason"] == "retired_service_profile_keys_present"
+    assert before["profile_content_changed"] is True
+    assert before["expected_services"] == []
+    assert before["summary"]["status"] == "warn"
+
+    applied = service_drift(**drift_kwargs, confirm=True)
+    assert applied["applied"]["profile_written"] is True
+    assert applied["applied"]["written_units"] == []
+    assert applied["apply_errors"] == []
+    readback = json.loads(profile_path.read_text(encoding="utf-8"))
+    assert readback["services"] == []
+    assert all(key not in readback for key in retired_keys)
+
+    final = service_drift(**drift_kwargs)
+    assert final["reason"] == "service_profile_has_no_services"
+    assert final["profile_content_changed"] is False
+    assert final["summary"]["status"] == "skipped"
+
 
 def test_service_drift_discovers_installed_wechat_clawbot_as_managed_service(tmp_path: Path) -> None:
     from src.application.service_deploy import render_service_bundle
@@ -1592,450 +1707,6 @@ def test_service_drift_preserves_quality_monitoring_opt_in_and_detects_metadata_
     assert drifted["summary"]["status"] == "warn"
     assert drifted["profile_content_changed"] is True
     assert drifted["mismatched_units"] == []
-
-def test_service_drift_round_trips_tampers_and_retires_strategy_lab_top1(
-    tmp_path: Path,
-) -> None:
-    from src.application.service_deploy import render_service_bundle
-    from src.application.service_drift import service_drift
-
-    repo = tmp_path / "repo"
-    runtime = tmp_path / "runtime"
-    systemd_root = tmp_path / "systemd"
-    repo.mkdir()
-    runtime.mkdir()
-    config_path = _write_service_account_config(
-        tmp_path / "config.hk.json", {"lab1": _futu_service_account()}
-    )
-    render_args = {
-        "target": "systemd",
-        "repo_root": repo,
-        "runtime_root": runtime,
-        "accounts": ["lab1"],
-        "markets": ["hk"],
-        "config_paths": {"hk": config_path},
-        "env_file": tmp_path / "env",
-    }
-    bundle = render_service_bundle(
-        **render_args,
-        include_strategy_lab_top1=True,
-        strategy_lab_top1_account="lab1",
-        strategy_lab_top1_advance_interval_seconds=300,
-        strategy_lab_top1_timeout_start_sec=120,
-    )
-    profile = json.loads(
-        {item["relative_path"]: item for item in bundle["files"]}[
-            "service.profile.json"
-        ]["content"]
-    )
-    (runtime / "service.profile.json").write_text(
-        json.dumps(profile, ensure_ascii=False), encoding="utf-8"
-    )
-    _write_systemd_units_from_bundle(bundle, systemd_root)
-
-    clean = service_drift(
-        repo_root=repo, runtime_root=runtime, systemd_unit_root=systemd_root
-    )
-    assert clean["summary"]["status"] == "ok"
-    assert clean["profile_content_changed"] is False
-
-    for invalid_timing in (None, True, "abc"):
-        invalid_profile = json.loads(json.dumps(profile))
-        if invalid_timing is None:
-            invalid_profile["strategy_lab_top1"].pop("advance_interval")
-        else:
-            invalid_profile["strategy_lab_top1"]["advance_interval"] = invalid_timing
-        (runtime / "service.profile.json").write_text(
-            json.dumps(invalid_profile, ensure_ascii=False), encoding="utf-8"
-        )
-        invalid = service_drift(
-            repo_root=repo, runtime_root=runtime, systemd_unit_root=systemd_root
-        )
-        assert invalid["summary"]["status"] == "error"
-        assert invalid["reason"] == "strategy_lab_top1_profile_invalid"
-
-    (runtime / "service.profile.json").write_text(
-        json.dumps(profile, ensure_ascii=False), encoding="utf-8"
-    )
-
-    service_path = systemd_root / "options-monitor-strategy-lab-top1-advance.service"
-    service_path.write_text(service_path.read_text(encoding="utf-8") + "# tampered\n")
-    tampered = service_drift(
-        repo_root=repo, runtime_root=runtime, systemd_unit_root=systemd_root
-    )
-    assert "options-monitor-strategy-lab-top1-advance.service" in tampered[
-        "mismatched_units"
-    ]
-
-    default_bundle = render_service_bundle(**render_args)
-    default_profile = json.loads(
-        {item["relative_path"]: item for item in default_bundle["files"]}[
-            "service.profile.json"
-        ]["content"]
-    )
-    assert "strategy_lab_top1" not in default_profile
-    assert not any(
-        "strategy-lab-top1" in item["relative_path"]
-        for item in default_bundle["files"]
-    )
-    (runtime / "service.profile.json").write_text(
-        json.dumps(default_profile, ensure_ascii=False), encoding="utf-8"
-    )
-    retired = service_drift(
-        repo_root=repo, runtime_root=runtime, systemd_unit_root=systemd_root
-    )
-    assert "options-monitor-strategy-lab-top1-advance.service" in retired[
-        "extra_installed_units"
-    ]
-    assert "options-monitor-strategy-lab-top1-advance.timer" in retired[
-        "extra_installed_units"
-    ]
-
-def test_strategy_lab_recorder_profile_round_trips_and_reresolves_endpoint(tmp_path: Path) -> None:
-    from src.application.service_deploy import render_service_bundle
-    from src.application.service_drift import service_drift
-
-    repo = tmp_path / "repo"
-    runtime = tmp_path / "runtime"
-    systemd_root = tmp_path / "systemd"
-    repo.mkdir()
-    runtime.mkdir()
-    config_path = _write_service_account_config(
-        tmp_path / "config.us.json",
-        _two_futu_service_accounts(tmp_path),
-    )
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        accounts=["lx", "sy"],
-        markets=["us"],
-        config_paths={"us": config_path},
-        include_opend=True,
-        include_strategy_lab_recorder=True,
-        strategy_lab_recorder_source="opend",
-        strategy_lab_recorder_account="lx",
-    )
-    profile = json.loads({item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"])
-    (runtime / "service.profile.json").write_text(json.dumps(profile), encoding="utf-8")
-    _write_systemd_units_from_bundle(bundle, systemd_root)
-
-    clean = service_drift(repo_root=repo, runtime_root=runtime, systemd_unit_root=systemd_root)
-    assert clean["summary"]["status"] == "ok"
-    assert clean["profile_content_changed"] is False
-    assert clean["compatibility_warnings"] == []
-
-    _write_service_account_config(
-        config_path,
-        _two_futu_service_accounts(tmp_path, lx_port=11113),
-    )
-    changed = service_drift(repo_root=repo, runtime_root=runtime, systemd_unit_root=systemd_root)
-    assert changed["summary"]["status"] == "warn"
-    assert changed["profile_content_changed"] is True
-    assert "options-monitor-strategy-lab-sample.service" in changed["mismatched_units"]
-    assert changed["compatibility_warnings"] == []
-
-def test_legacy_strategy_lab_recorder_binding_warns_then_confirm_migrates(tmp_path: Path) -> None:
-    from src.application.service_deploy import render_service_bundle
-    from src.application.service_drift import service_drift
-
-    repo = tmp_path / "repo"
-    runtime = tmp_path / "runtime"
-    systemd_root = tmp_path / "systemd"
-    repo.mkdir()
-    runtime.mkdir()
-    config_path = _write_service_account_config(
-        tmp_path / "config.us.json",
-        _two_futu_service_accounts(tmp_path),
-    )
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        accounts=["lx", "sy"],
-        markets=["us"],
-        config_paths={"us": config_path},
-        include_opend=True,
-        include_strategy_lab_recorder=True,
-        strategy_lab_recorder_source="opend",
-        strategy_lab_recorder_account="lx",
-    )
-    profile = json.loads({item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"])
-    profile["strategy_lab_recorder"].pop("binding")
-    (runtime / "service.profile.json").write_text(json.dumps(profile), encoding="utf-8")
-    _write_systemd_units_from_bundle(bundle, systemd_root)
-    sample_path = systemd_root / "options-monitor-strategy-lab-sample.service"
-    sample_path.write_text(
-        sample_path.read_text(encoding="utf-8").replace(" --opend-host 127.0.0.1 --opend-port 11111", ""),
-        encoding="utf-8",
-    )
-
-    warning = {
-        "code": "legacy_strategy_lab_recorder_binding_inferred",
-        "account": "lx",
-        "host": "127.0.0.1",
-        "port": 11111,
-    }
-    before = service_drift(repo_root=repo, runtime_root=runtime, systemd_unit_root=systemd_root)
-    assert before["compatibility_warnings"] == [warning]
-    assert before["summary"]["status"] == "warn"
-    assert before["summary"]["warning_count"] >= 1
-    assert before["profile_content_changed"] is True
-    assert "options-monitor-strategy-lab-sample.service" in before["mismatched_units"]
-
-    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
-        if command[1] == "is-enabled":
-            return subprocess.CompletedProcess(command, 0, stdout="enabled\n", stderr="")
-        if command[1] == "is-active":
-            return subprocess.CompletedProcess(command, 0, stdout="active\n", stderr="")
-        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
-
-    migrated = service_drift(
-        repo_root=repo,
-        runtime_root=runtime,
-        systemd_unit_root=systemd_root,
-        confirm=True,
-        run_cmd=_run_cmd,
-    )
-    refreshed = json.loads((runtime / "service.profile.json").read_text(encoding="utf-8"))
-    assert migrated["before"]["compatibility_warnings"] == [warning]
-    assert migrated["compatibility_warnings"] == []
-    assert migrated["summary"]["status"] == "ok"
-    assert refreshed["strategy_lab_recorder"]["binding"] == {
-        "account": "lx",
-        "host": "127.0.0.1",
-        "port": 11111,
-        "service_name": "options-monitor-opend-lx.service",
-    }
-    subsequent = service_drift(repo_root=repo, runtime_root=runtime, systemd_unit_root=systemd_root)
-    assert subsequent["compatibility_warnings"] == []
-    assert subsequent["summary"]["status"] == "ok"
-
-@pytest.mark.parametrize(("lx_port", "sy_port"), [(11113, 11112), (11111, 11111)])
-def test_legacy_strategy_lab_recorder_binding_ambiguity_blocks_confirmed_writes(
-    tmp_path: Path,
-    lx_port: int,
-    sy_port: int,
-) -> None:
-    from src.application.service_deploy import render_service_bundle
-    from src.application.service_drift import service_drift
-
-    repo = tmp_path / "repo"
-    runtime = tmp_path / "runtime"
-    systemd_root = tmp_path / "systemd"
-    repo.mkdir()
-    runtime.mkdir()
-    config_path = _write_service_account_config(
-        tmp_path / "config.us.json",
-        _two_futu_service_accounts(tmp_path, lx_port=lx_port, sy_port=sy_port),
-    )
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        accounts=["lx", "sy"],
-        markets=["us"],
-        config_paths={"us": config_path},
-        include_opend=True,
-        include_strategy_lab_recorder=True,
-        strategy_lab_recorder_source="opend",
-        strategy_lab_recorder_account="lx",
-    )
-    profile = json.loads({item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"])
-    profile["strategy_lab_recorder"].pop("binding")
-    profile_path = runtime / "service.profile.json"
-    profile_path.write_text(json.dumps(profile), encoding="utf-8")
-    _write_systemd_units_from_bundle(bundle, systemd_root)
-    original_profile = profile_path.read_text(encoding="utf-8")
-    original_sample = (systemd_root / "options-monitor-strategy-lab-sample.service").read_text(encoding="utf-8")
-
-    out = service_drift(
-        repo_root=repo,
-        runtime_root=runtime,
-        systemd_unit_root=systemd_root,
-        confirm=True,
-    )
-
-    assert out["supported"] is False
-    assert out["reason"] == "strategy_lab_recorder_binding_invalid"
-    assert out["summary"]["status"] == "error"
-    assert out["changed"] is False
-    assert out["operations"] == []
-    assert profile_path.read_text(encoding="utf-8") == original_profile
-    assert (systemd_root / "options-monitor-strategy-lab-sample.service").read_text(encoding="utf-8") == original_sample
-
-@pytest.mark.parametrize("root_case", ["missing", "cross_market_mismatch"])
-def test_legacy_strategy_lab_recorder_counts_endpoint_matches_before_opend_root_validation(
-    tmp_path: Path,
-    root_case: str,
-) -> None:
-    from src.application.service_deploy import render_service_bundle
-    from src.application.service_drift import service_drift
-
-    repo = tmp_path / "repo"
-    runtime = tmp_path / "runtime"
-    systemd_root = tmp_path / "systemd"
-    repo.mkdir()
-    runtime.mkdir()
-    us_settings = _two_futu_service_accounts(tmp_path, lx_port=11111, sy_port=11111)
-    markets = ["us"]
-    config_paths = {
-        "us": _write_service_account_config(tmp_path / "config.us.json", us_settings),
-    }
-    if root_case == "missing":
-        sy_futu = us_settings["sy"]["futu"]
-        assert isinstance(sy_futu, dict)
-        sy_futu.pop("opend_root")
-        _write_service_account_config(config_paths["us"], us_settings)
-    else:
-        markets.append("hk")
-        hk_settings = _two_futu_service_accounts(tmp_path, lx_port=11111, sy_port=11111)
-        sy_hk_futu = hk_settings["sy"]["futu"]
-        assert isinstance(sy_hk_futu, dict)
-        sy_hk_futu["opend_root"] = str(tmp_path / "opend-sy-hk")
-        config_paths["hk"] = _write_service_account_config(tmp_path / "config.hk.json", hk_settings)
-
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        accounts=["lx", "sy"],
-        markets=markets,
-        config_paths=config_paths,
-        include_opend=True,
-        include_strategy_lab_recorder=True,
-        strategy_lab_recorder_source="opend",
-        strategy_lab_recorder_account="lx",
-    )
-    profile = json.loads({item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"])
-    profile["strategy_lab_recorder"].pop("binding")
-    profile_path = runtime / "service.profile.json"
-    profile_path.write_text(json.dumps(profile), encoding="utf-8")
-    _write_systemd_units_from_bundle(bundle, systemd_root)
-    original_profile = profile_path.read_bytes()
-    original_units = {
-        path.name: path.read_bytes()
-        for path in systemd_root.iterdir()
-        if path.is_file()
-    }
-
-    dry_run = service_drift(
-        repo_root=repo,
-        runtime_root=runtime,
-        systemd_unit_root=systemd_root,
-    )
-    confirmed = service_drift(
-        repo_root=repo,
-        runtime_root=runtime,
-        systemd_unit_root=systemd_root,
-        confirm=True,
-    )
-
-    for out in (dry_run, confirmed):
-        assert out["supported"] is False
-        assert out["reason"] == "strategy_lab_recorder_binding_invalid"
-        assert "matched lx,sy" in out["error"]
-        assert out["summary"]["status"] == "error"
-        assert out["changed"] is False
-        assert out["operations"] == []
-    assert profile_path.read_bytes() == original_profile
-    assert {
-        path.name: path.read_bytes()
-        for path in systemd_root.iterdir()
-        if path.is_file()
-    } == original_units
-
-def test_legacy_strategy_lab_recorder_invalid_runtime_port_blocks_confirmed_writes(tmp_path: Path) -> None:
-    from src.application.service_deploy import render_service_bundle
-    from src.application.service_drift import service_drift
-
-    repo = tmp_path / "repo"
-    runtime = tmp_path / "runtime"
-    systemd_root = tmp_path / "systemd"
-    repo.mkdir()
-    runtime.mkdir()
-    config_path = _write_service_account_config(
-        tmp_path / "config.us.json",
-        _two_futu_service_accounts(tmp_path),
-    )
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        accounts=["lx", "sy"],
-        markets=["us"],
-        config_paths={"us": config_path},
-        include_opend=True,
-        include_strategy_lab_recorder=True,
-        strategy_lab_recorder_source="opend",
-        strategy_lab_recorder_account="lx",
-    )
-    profile = json.loads({item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"])
-    profile["strategy_lab_recorder"].pop("binding")
-    profile_path = runtime / "service.profile.json"
-    profile_path.write_text(json.dumps(profile), encoding="utf-8")
-    _write_systemd_units_from_bundle(bundle, systemd_root)
-    _write_service_account_config(
-        config_path,
-        _two_futu_service_accounts(tmp_path, lx_port=11111.9),
-    )
-    original_profile = profile_path.read_bytes()
-    original_units = {
-        path.name: path.read_bytes()
-        for path in systemd_root.iterdir()
-        if path.is_file()
-    }
-
-    out = service_drift(
-        repo_root=repo,
-        runtime_root=runtime,
-        systemd_unit_root=systemd_root,
-        confirm=True,
-    )
-
-    assert out["supported"] is False
-    assert out["reason"] == "strategy_lab_recorder_binding_invalid"
-    assert "OpenD port is invalid: lx" in out["error"]
-    assert out["changed"] is False
-    assert out["operations"] == []
-    assert profile_path.read_bytes() == original_profile
-    assert {
-        path.name: path.read_bytes()
-        for path in systemd_root.iterdir()
-        if path.is_file()
-    } == original_units
-
-def test_service_drift_preserves_strategy_lab_recorder_opt_in(tmp_path: Path) -> None:
-    from src.application.service_deploy import render_service_bundle
-    from src.application.service_drift import service_drift
-
-    repo = tmp_path / "repo"
-    runtime = tmp_path / "runtime"
-    systemd_root = tmp_path / "systemd"
-    repo.mkdir()
-    runtime.mkdir()
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        accounts=["lx"],
-        markets=["us"],
-        include_strategy_lab_recorder=True,
-        strategy_lab_recorder_source="local",
-        strategy_lab_recorder_max_datasets=2,
-        strategy_lab_recorder_mark_stale_hours=4,
-    )
-    profile = json.loads({item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"])
-    (runtime / "service.profile.json").write_text(json.dumps(profile, ensure_ascii=False), encoding="utf-8")
-    _write_systemd_units_from_bundle(bundle, systemd_root)
-
-    out = service_drift(repo_root=repo, runtime_root=runtime, systemd_unit_root=systemd_root)
-
-    assert out["summary"]["status"] == "ok"
-    assert "options-monitor-strategy-lab-build.timer" in out["expected_services"]
-    assert "options-monitor-strategy-lab-sample.timer" in out["expected_services"]
-    assert "options-monitor-strategy-lab-settle.timer" in out["expected_services"]
-    assert out["mismatched_units"] == []
 
 def test_service_upgrade_verify_returns_compact_read_only_summary(tmp_path: Path) -> None:
     from src.application.service_upgrade import service_upgrade_verify, write_upgrade_status
