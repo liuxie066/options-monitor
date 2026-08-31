@@ -49,6 +49,9 @@ def test_release_identity_compares_with_its_tag_not_cache_head(tmp_path: Path) -
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
 
+    stable_release = apps / "options-monitor"
+    stable_release.symlink_to(release, target_is_directory=True)
     assert source_commit_sha(release) == release_commit
+    assert source_commit_sha(stable_release) == release_commit
     (release / "src/value.py").write_text("VALUE = 3\n", encoding="utf-8")
     assert source_commit_sha(release) is None
