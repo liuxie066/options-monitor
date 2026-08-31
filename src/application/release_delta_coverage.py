@@ -597,27 +597,54 @@ def _validate_reviewed_head_boundary(
         ["rev-list", "--count", f"{reviewed_head}..{current_head}"],
         run_cmd=run_cmd,
     )
-    if count_text != "1":
+    release_commit = current_head
+    if count_text == "2":
+        parents = _git_stdout(
+            base,
+            ["show", "-s", "--format=%P", current_head],
+            run_cmd=run_cmd,
+        ).lower().split()
+        if len(parents) != 2 or parents[0] != reviewed_head:
+            _fail(
+                "RELEASE_DELTA_POST_REVIEW_COMMITS",
+                "only a protected-main merge of the release-metadata commit may follow reviewed_head",
+            )
+        release_commit = parents[1]
+        if _git_stdout(
+            base,
+            ["rev-parse", f"{current_head}^{{tree}}"],
+            run_cmd=run_cmd,
+        ) != _git_stdout(
+            base,
+            ["rev-parse", f"{release_commit}^{{tree}}"],
+            run_cmd=run_cmd,
+        ):
+            _fail(
+                "RELEASE_DELTA_RELEASE_COMMIT_SCOPE",
+                "protected-main merge must not change the release commit tree",
+            )
+    elif count_text != "1":
         _fail(
             "RELEASE_DELTA_POST_REVIEW_COMMITS",
-            "more than the single release-metadata commit exists after reviewed_head",
+            "more than the release-metadata commit and its protected-main merge exist after reviewed_head",
         )
-    parent = _git_stdout(base, ["rev-parse", f"{current_head}^"], run_cmd=run_cmd).lower()
+
+    parent = _git_stdout(base, ["rev-parse", f"{release_commit}^"], run_cmd=run_cmd).lower()
     subject = _git_stdout(
         base,
-        ["show", "-s", "--format=%s", current_head],
+        ["show", "-s", "--format=%s", release_commit],
         run_cmd=run_cmd,
     )
     if parent != reviewed_head or subject != f"chore: release {version}":
         _fail(
             "RELEASE_DELTA_INVALID_RELEASE_COMMIT",
-            f"the only commit after reviewed_head must be 'chore: release {version}' with reviewed_head as its parent",
+            f"the release commit must be 'chore: release {version}' with reviewed_head as its parent",
         )
 
     changed = set(
         _git_lines(
             base,
-            ["diff-tree", "--no-commit-id", "--name-only", "-r", current_head],
+            ["diff-tree", "--no-commit-id", "--name-only", "-r", release_commit],
             run_cmd=run_cmd,
         )
     )
