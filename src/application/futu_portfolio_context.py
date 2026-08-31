@@ -45,7 +45,6 @@ _FUTU_NET_CASH_POWER_FIELDS_BY_CCY = {
     "MYR": ("myr_net_cash_power",),
 }
 _FUTU_FUND_ASSET_FIELDS = ("fund_assets", "mmf_assets", "money_fund_assets")
-_OPEND_FX_DISPLAY_CURRENCIES = ("CNH", "USD", "HKD")
 
 
 def _resolve_trd_env(value: Any) -> str:
@@ -430,23 +429,19 @@ def _query_opend_exchange_rate_observation(
     account_ids: set[str],
     trd_env: str,
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
-    rows_by_currency = {
-        currency: _filter_rows_for_account_ids(
+    return (
+        _filter_rows_for_account_ids(
             _query_rows_for_account_ids(
                 gateway,
                 "get_account_balance",
                 account_ids,
                 trd_env=trd_env,
-                currency=currency,
+                currency="CNH",
                 refresh_cache=True,
             ),
             account_ids,
             trd_env=trd_env,
-        )
-        for currency in _OPEND_FX_DISPLAY_CURRENCIES
-    }
-    return (
-        rows_by_currency["CNH"],
+        ),
         _fetch_market_exchange_rate_observation(),
     )
 
