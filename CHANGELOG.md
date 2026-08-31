@@ -10,6 +10,7 @@
 ### Bug Fixes
 - Reduced each portfolio fetch to one CNH OpenD funds refresh and isolated accounts with unavailable prepared portfolio context before shared prefetch, while preserving healthy peer scans and scheduled failure alerts.
 - Let Copilot recover once from both plain and rejected answer attempts, preserve real cancellation and budget failures, and remove stale unrequested MTD cutoffs before option-performance reads.
+- Allowed the release gate to validate the unchanged GitHub merge commit that wraps an audited release-metadata commit on protected `main`.
 
 ## 3.0.2 - 2026-08-31
 

@@ -5,7 +5,7 @@
     "tag": "v3.0.2",
     "commit": "af7129e61c8c5900e8c5d48673e2d168b63df93b"
   },
-  "reviewed_head": "4e27387d5af065c4f4274e3e6c4bfbf9e648355b",
+  "reviewed_head": "008531405e899cdee6cae222ba21e7f79c56c113",
   "commits": [
     {
       "sha": "3d107f0709443721f4b1099770645b0e340d0d1e",
@@ -58,6 +58,18 @@
     {
       "sha": "4e27387d5af065c4f4274e3e6c4bfbf9e648355b",
       "subject": "Merge pull request #196 from liuxie066/fix/copilot-answer-repair-mtd-cutoff"
+    },
+    {
+      "sha": "18f35d2ec2aa51c2aceebce82ca03eb573b88d26",
+      "subject": "chore: release 3.1.0"
+    },
+    {
+      "sha": "f8960fd8d7472d8499f322996d8f1e210544de83",
+      "subject": "Merge pull request #197 from liuxie066/codex/release-v3.1.0"
+    },
+    {
+      "sha": "008531405e899cdee6cae222ba21e7f79c56c113",
+      "subject": "fix(release): accept protected-main merge topology"
     }
   ],
   "release_notes": [
@@ -83,6 +95,13 @@
       "text": "Let Copilot recover once from both plain and rejected answer attempts, preserve real cancellation and budget failures, and remove stale unrequested MTD cutoffs before option-performance reads.",
       "commits": [
         "bbc98a635005d825e2c791c3979eff005a85f8f3"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Allowed the release gate to validate the unchanged GitHub merge commit that wraps an audited release-metadata commit on protected `main`.",
+      "commits": [
+        "008531405e899cdee6cae222ba21e7f79c56c113"
       ]
     }
   ],
@@ -114,6 +133,14 @@
     {
       "commit": "4e27387d5af065c4f4274e3e6c4bfbf9e648355b",
       "reason": "Merge-only integration commit; the Copilot fix is mapped to its source commit."
+    },
+    {
+      "commit": "18f35d2ec2aa51c2aceebce82ca03eb573b88d26",
+      "reason": "Superseded release-metadata commit from the failed initial publication attempt; no independent user-visible behavior."
+    },
+    {
+      "commit": "f8960fd8d7472d8499f322996d8f1e210544de83",
+      "reason": "Merge-only integration commit for the failed initial publication attempt; no independent user-visible behavior."
     }
   ],
   "design_evidence": [
@@ -193,6 +220,24 @@
       "commit": "4e27387d5af065c4f4274e3e6c4bfbf9e648355b",
       "references": [
         "https://github.com/liuxie066/options-monitor/pull/196"
+      ]
+    },
+    {
+      "commit": "18f35d2ec2aa51c2aceebce82ca03eb573b88d26",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/197"
+      ]
+    },
+    {
+      "commit": "f8960fd8d7472d8499f322996d8f1e210544de83",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/197"
+      ]
+    },
+    {
+      "commit": "008531405e899cdee6cae222ba21e7f79c56c113",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/198"
       ]
     }
   ]
