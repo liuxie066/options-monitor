@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 3.1.0 - 2026-09-01
+
+### New Features
+- Added operator-controlled Strategy Lab workflows for deterministic 20-day concentration research and confirmed 10-day hidden validation, including low-priority batched Bid evidence, expiry outcomes, and auditable Research and Final Receipts without delaying production Tick.
+
 ### Bug Fixes
 - Reduced each portfolio fetch to one CNH OpenD funds refresh and isolated accounts with unavailable prepared portfolio context before shared prefetch, while preserving healthy peer scans and scheduled failure alerts.
 - Let Copilot recover once from both plain and rejected answer attempts, preserve real cancellation and budget failures, and remove stale unrequested MTD cutoffs before option-performance reads.
