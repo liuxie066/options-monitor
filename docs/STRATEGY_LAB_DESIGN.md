@@ -1,7 +1,8 @@
 # Strategy Lab 当前实现清单
 
 - **状态**：Phase 3 本地实现完成；远端自然 Tick 隔离门槛已通过；待真实 20 日 / 10 日验收
-- **更新时间**：2026-08-31
+- **工程验通**：只读两日 Canary 已实现，待两个完整自然交易日线上验收
+- **更新时间**：2026-09-01
 - **产品合同**：[Strategy Lab PRD](STRATEGY_LAB_EXPERIMENT_PLATFORM_PRD.md)
 - **技术设计**：[Strategy Lab 系统设计](STRATEGY_LAB_EXPERIMENT_PLATFORM_SYSTEM_DESIGN.md)
 
@@ -14,6 +15,7 @@ Strategy Lab 当前有以下根级入口：
 
 ```text
 ./om strategy-lab recipes
+./om strategy-lab canary
 ./om strategy-lab preview
 ./om strategy-lab confirm-research
 ./om strategy-lab preview-validation
@@ -25,7 +27,7 @@ Strategy Lab 当前有以下根级入口：
 ./om strategy-lab readiness refresh-history-k
 ```
 
-`recipes` 和 `preview` 只读，不创建实验、写 Store 或调用 OpenD。readiness 入口预览或在
+`recipes`、`canary` 和 `preview` 只读，不创建实验、写 Store 或调用 OpenD。readiness 入口预览或在
 显式 hash、actor 和 `--write` 确认后发布 targeted history-K readiness receipt。
 `confirm-research` 和 `confirm-validation` 分别只接受当次重建后仍可用且 hash 相同的 preview；
 `research execute` 与 `advance` 每次最多执行一个 provider 逻辑证据单元。`status` 和 `receipt` 只读，只依赖
@@ -56,8 +58,78 @@ dataset、mark、outcome 和 candidate-impact 继续使用 `./om research shadow
 三表 Store 仅包含 `experiments`、`experiment_events` 和 `experiment_observations`。全局
 最多一个非终态实验，确认、revision、observation 和 receipt 绑定必须幂等并 fail closed。
 
+## 两日工程验通
+
+两日工程验通用于尽快确认新链路能够消费真实正式点并执行集中度 Recipe。它是工程 canary，不能替代
+20 日研究或 10 日隐藏验证，也不能产生实验结论。
+
+公开只读入口为：
+
+```bash
+./om strategy-lab canary --profile-path <runtime>/service.profile.json
+```
+
+CLI 在一次调用内冻结当前 UTC 时间，并调用 `preview_engineering_canary()`。该服务只选择截至该时间的
+最近两个市场交易日；不会因为最近一天缺点、冲突或尚未结束而回退到更早的完整日。每个选中日期必须：
+
+1. 存在唯一且有效的 expectation；
+2. 所有预期正式推荐点均已封存且早于调用时间；
+3. 每个正式点都能复用 `build_concentration_arms()` 生成一个 baseline 和三个固定 challenger；
+4. 不要求合约已经到期，不读取 terminal FX、费用计划或收益 outcome。
+
+输出保持为一个小型只读摘要：
+
+```json
+{
+  "authoritative": false,
+  "status": "available",
+  "observed_at_utc": "<UTC>",
+  "selected_trading_dates": ["<day-1>", "<day-2>"],
+  "blockers": [],
+  "projection": {
+    "recipe_id": "sell_put_option_position_concentration",
+    "trading_day_count": 2,
+    "recommendation_point_count": 24,
+    "variant_ids": [
+      "baseline",
+      "challenger_0.002",
+      "challenger_0.004",
+      "challenger_0.006"
+    ]
+  },
+  "unlocks": []
+}
+```
+
+实际点数由两日 expectation 决定，示例中的 `24` 不是固定门槛。缺日、冲突、点未到时或 Recipe
+证据不完整时返回 `blocked`、原 owner 的 reason code 和 `projection: null`；不得增加 Canary 专用的
+reason-code 映射层。任何结果的 `authoritative` 都为 `false`，`unlocks` 都为空，也不包含 leader、
+comparison、Research Receipt 或 Final Receipt 字段。`available` 只表示两日 Corpus 和 Recipe 投影可用，
+不是实验通过或收益结论。
+
+实现边界：
+
+| 文件 | 当前实现 |
+|---|---|
+| `src/application/strategy_lab/recipe.py` | 给现有 `_load_window_day()` 增加一个默认开启的内部 maturity 开关，并新增固定两日的 `select_engineering_canary_window()`；正式 20 日选择保持原行为，Canary 不要求到期且不回退 |
+| `src/application/strategy_lab/service.py` | 新增只读 `preview_engineering_canary()`，校验轻量 runtime context 并汇总覆盖和 Recipe 投影 |
+| `src/interfaces/cli/strategy_lab_ops.py` | 新增 `canary` 子命令；只调用 `resolve_strategy_lab_runtime_context(profile, market="hk")` 并要求 profile 包含 `lx`，不解析 ledger、费用或 OpenD binding，不打开或创建 Experiment Store |
+| `tests/test_strategy_lab_recipe.py`、`tests/test_strategy_lab_cli.py` | 增加一个未到期两日成功测试、一个最新日异常且不回退测试、一个 CLI 单次时钟及零文件/Store/OpenD 副作用测试；缺失和冲突的底层矩阵继续由现有 Formal Corpus 测试拥有 |
+
+不修改 `RESEARCH_SESSIONS = 20`、`VALIDATION_SESSIONS = 10`、正式 preview、Research Receipt、
+leader、隐藏验证或 Final Receipt。Canary 不增加表、状态、timer、配置项、可变 `--days` 参数或迁移。
+
+history-K provider PoC 仍由现有 `strategy-lab readiness refresh-history-k` 显式执行。该入口按合同只接受
+已到期合约；两日新候选通常尚未到期，因此 Canary 不生成伪装成可立即执行的 probe，也不把 provider
+调用藏进只读命令。工程验通时另选一个已到期真实合约执行 PoC，并独立核对自然 Tick 的延迟和超时。
+
+两日工程验通的完成信号是：Canary 对两个连续自然交易日返回 `available`、显式 history-K PoC 成功、
+同一窗口内 Tick 没有新增 Strategy Lab 导致的超时。它仍不能证明收益、成交、Research Receipt、
+research leader 或 Final Receipt。
+
 ## 尚未完成
 
+- 两日工程 Canary 的真实线上验通；
 - 真实 20 日研究、未来 10 日隐藏验证、合约到期等待和 Final Receipt 审计；
 - MCP、Skill、飞书、并行实验、自动采用与生产配置写入。
 

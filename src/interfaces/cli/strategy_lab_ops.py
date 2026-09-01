@@ -27,6 +27,7 @@ from src.application.strategy_lab.service import (
     execute_research,
     get_experiment_status,
     list_recipes,
+    preview_engineering_canary,
     preview_experiment,
     preview_validation,
     read_receipt,
@@ -55,6 +56,9 @@ def add_strategy_lab_commands(subparsers: Any) -> argparse.ArgumentParser:
     refresh.add_argument("--confirmed-probe-sha256", default=None)
     refresh.add_argument("--actor", default=None)
     refresh.add_argument("--write", action="store_true")
+
+    canary = commands.add_parser("canary", help="preview two days of engineering-only Recipe projection")
+    canary.add_argument("--profile-path", required=True)
 
     recipes = commands.add_parser("recipes", help="list currently supported experiment recipes")
     recipes.add_argument("--profile-path", required=True)
@@ -154,6 +158,7 @@ def _experiment_request(args: argparse.Namespace) -> dict[str, str]:
 def handle_strategy_lab_command(args: argparse.Namespace) -> dict[str, Any]:
     if args.strategy_lab_command in {
         "recipes",
+        "canary",
         "preview",
         "confirm-research",
         "preview-validation",
@@ -167,10 +172,15 @@ def handle_strategy_lab_command(args: argparse.Namespace) -> dict[str, Any]:
             profile = load_service_profile(Path(args.profile_path).expanduser())
             context = (
                 resolve_strategy_lab_runtime_context(profile, market="hk")
-                if args.strategy_lab_command in {"status", "receipt"}
+                if args.strategy_lab_command in {"canary", "status", "receipt"}
                 else resolve_strategy_lab_context(profile)
             )
-            if args.strategy_lab_command == "recipes":
+            if args.strategy_lab_command == "canary":
+                data = preview_engineering_canary(
+                    context,
+                    occurred_at_utc=_now_utc(),
+                )
+            elif args.strategy_lab_command == "recipes":
                 data = list_recipes(
                     context,
                     fee_plan_receipt_path=args.fee_plan_receipt_path,

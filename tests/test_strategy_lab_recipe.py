@@ -21,9 +21,10 @@ from src.application.strategy_lab.recipe import (
     build_concentration_arms,
     build_validation_plan,
     project_validation_arms,
+    select_engineering_canary_window,
     select_research_window,
 )
-from src.application.strategy_lab.service import preview_experiment
+from src.application.strategy_lab.service import preview_engineering_canary, preview_experiment
 from tests.candidate_evidence_helpers import seal_opening_candidate_fixture
 
 
@@ -445,6 +446,191 @@ def test_window_uses_newest_mature_20_and_never_skips_a_hole(
     assert hole in interior["selected_trading_dates"]
 
 
+def test_engineering_canary_uses_exact_latest_two_without_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.application.strategy_lab.recipe as recipe
+
+    dates = _trading_dates(3)
+    monkeypatch.setattr(
+        recipe,
+        "read_market_calendar_binding",
+        lambda *_args, **_kwargs: {
+            "coverage_start": dates[0],
+            "coverage_end": "2026-07-05",
+            "trading_dates": dates,
+        },
+    )
+    calls: list[str] = []
+
+    def load_day(
+        _context: object,
+        trading_date: str,
+        _cutoff: datetime,
+        _cutoff_ms: int,
+        _calendar: object,
+        *,
+        require_mature_outcomes: bool = True,
+    ):
+        assert require_mature_outcomes is False
+        calls.append(trading_date)
+        return {
+            "trading_date": trading_date,
+            "points": [
+                {
+                    "arms": [
+                        {"arm_id": "baseline"},
+                        {"arm_id": "challenger_0.002"},
+                        {"arm_id": "challenger_0.004"},
+                        {"arm_id": "challenger_0.006"},
+                    ]
+                }
+            ],
+        }, None
+
+    monkeypatch.setattr(recipe, "_load_window_day", load_day)
+    context = {"artifact_root": Path("/does/not/read"), "runtime_root": Path("/does/not/read")}
+
+    available = select_engineering_canary_window(context, "2026-07-05T08:00:00Z")
+
+    assert available["status"] == "available"
+    assert available["selected_trading_dates"] == dates[-2:]
+    assert calls == dates[-2:]
+
+    calls.clear()
+
+    def load_with_latest_gap(*args: object, **kwargs: object):
+        day, reason = load_day(*args, **kwargs)
+        if args[1] == dates[-1]:
+            return None, "formal_point_evidence_missing"
+        return day, reason
+
+    monkeypatch.setattr(recipe, "_load_window_day", load_with_latest_gap)
+    blocked = select_engineering_canary_window(context, "2026-07-05T08:00:00Z")
+
+    assert blocked["status"] == "blocked"
+    assert blocked["selected_trading_dates"] == dates[-2:]
+    assert blocked["blockers"][0]["reason_code"] == "formal_point_evidence_missing"
+    assert calls == dates[-2:]
+
+    calls.clear()
+    monkeypatch.setattr(
+        recipe,
+        "read_market_calendar_binding",
+        lambda *_args, **_kwargs: {
+            "coverage_start": dates[0],
+            "coverage_end": dates[-1],
+            "trading_dates": dates,
+        },
+    )
+    stale = select_engineering_canary_window(context, "2026-07-05T08:00:00Z")
+
+    assert stale["status"] == "blocked"
+    assert stale["blockers"][0]["reason_code"] == "market_calendar_binding_unavailable"
+    assert calls == []
+
+
+def test_engineering_canary_returns_read_only_non_authoritative_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.application.strategy_lab.service as service
+
+    sessions = [
+        {
+            "trading_date": trading_date,
+            "points": [
+                {
+                    "arms": [
+                        {"arm_id": "baseline"},
+                        {"arm_id": "challenger_0.002"},
+                        {"arm_id": "challenger_0.004"},
+                        {"arm_id": "challenger_0.006"},
+                    ]
+                }
+            ],
+        }
+        for trading_date in ("2026-08-27", "2026-08-28")
+    ]
+    monkeypatch.setattr(
+        service,
+        "select_engineering_canary_window",
+        lambda *_args, **_kwargs: {
+            "status": "available",
+            "blockers": [],
+            "selected_trading_dates": [item["trading_date"] for item in sessions],
+            "sessions": sessions,
+        },
+    )
+    monkeypatch.setattr(service, "_store", lambda *_args: pytest.fail("canary must not open Store"))
+    monkeypatch.setattr(
+        service,
+        "build_futu_gateway",
+        lambda **_kwargs: pytest.fail("canary must not build an OpenD gateway"),
+    )
+    before = list(tmp_path.iterdir())
+
+    result = preview_engineering_canary(
+        {
+            "market": "hk",
+            "profile": {"accounts": ["lx"]},
+            "artifact_root": tmp_path,
+            "runtime_root": tmp_path,
+        },
+        occurred_at_utc="2026-08-28T08:00:00Z",
+    )
+
+    assert result == {
+        "authoritative": False,
+        "status": "available",
+        "observed_at_utc": "2026-08-28T08:00:00Z",
+        "selected_trading_dates": ["2026-08-27", "2026-08-28"],
+        "blockers": [],
+        "projection": {
+            "recipe_id": RECIPE_ID,
+            "trading_day_count": 2,
+            "recommendation_point_count": 2,
+            "variant_ids": [
+                "baseline",
+                "challenger_0.002",
+                "challenger_0.004",
+                "challenger_0.006",
+            ],
+        },
+        "unlocks": [],
+    }
+    assert not {"leader", "comparison", "research_receipt", "final_receipt"} & result.keys()
+
+    monkeypatch.setattr(
+        service,
+        "select_engineering_canary_window",
+        lambda *_args, **_kwargs: {
+            "status": "blocked",
+            "blockers": [
+                {
+                    "reason_code": "formal_corpus_conflict",
+                    "message": "fixture conflict",
+                }
+            ],
+            "selected_trading_dates": ["2026-08-27", "2026-08-28"],
+            "sessions": [],
+        },
+    )
+    blocked = preview_engineering_canary(
+        {
+            "market": "hk",
+            "profile": {"accounts": ["lx"]},
+            "artifact_root": tmp_path,
+            "runtime_root": tmp_path,
+        },
+        occurred_at_utc="2026-08-28T08:00:00Z",
+    )
+    assert blocked["status"] == "blocked"
+    assert blocked["projection"] is None
+    assert blocked["blockers"][0]["reason_code"] == "formal_corpus_conflict"
+    assert list(tmp_path.iterdir()) == before
+
+
 def _window_day_artifacts(timestamp: str) -> tuple[dict[str, object], dict[str, object]]:
     expectation = {
         "status": "available",
@@ -694,6 +880,32 @@ def test_window_day_uses_expectation_calendar_and_compares_only_session_semantic
     assert reason is None
     assert day is not None
     assert day["market_calendar_binding"]["market_calendar_version"] == "old.v1"
+
+    monkeypatch.setattr(
+        recipe,
+        "build_concentration_arms",
+        lambda *_args, **_kwargs: {"arms": [{"candidate": {"expiration": "2026-09-30"}}]},
+    )
+    immature, immature_reason = recipe._load_window_day(
+        context,
+        "2026-08-26",
+        cutoff,
+        int(cutoff.timestamp() * 1000),
+        current,
+    )
+    assert immature is None
+    assert immature_reason == "research_outcome_immature"
+
+    canary_day, canary_reason = recipe._load_window_day(
+        context,
+        "2026-08-26",
+        cutoff,
+        int(cutoff.timestamp() * 1000),
+        current,
+        require_mature_outcomes=False,
+    )
+    assert canary_reason is None
+    assert canary_day is not None
 
     current["trading_sessions"][0]["trade_date_type"] = "MORNING"
     changed, changed_reason = recipe._load_window_day(
