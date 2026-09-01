@@ -1,0 +1,79 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.3.0",
+  "base": {
+    "tag": "v3.2.0",
+    "commit": "98e2a55e7b47a28349e91c01f647a9a9832187e1"
+  },
+  "reviewed_head": "72250357ed766f89e2d7ae4d8cba1a25519fe235",
+  "commits": [
+    {
+      "sha": "9e34f001ce6fff578d146a9e97288cc6cf272dd5",
+      "subject": "fix(quality): avoid historical audit scans"
+    },
+    {
+      "sha": "9e167c6885ec84b8d5362432763927b39331347a",
+      "subject": "Merge pull request #205 from liuxie066/codex/fix-quality-runtime-audit-scan"
+    },
+    {
+      "sha": "0ef32dbac2172e620a491e42ad4a575b78c7b54b",
+      "subject": "feat(trades): auto-adopt exact combo pairs"
+    },
+    {
+      "sha": "72250357ed766f89e2d7ae4d8cba1a25519fe235",
+      "subject": "Merge pull request #206 from liuxie066/codex/auto-combo-receipt"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "Added account-scoped automatic Combo Yield adoption for uniquely matched, delivery-confirmed Funding Put and Participation Call fills, with successful grouping shown in the trade receipt.",
+      "commits": [
+        "0ef32dbac2172e620a491e42ad4a575b78c7b54b"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Stopped runtime quality refreshes from scanning complete historical trade-intake audit logs while preserving explicit reconciliation access to that evidence.",
+      "commits": [
+        "9e34f001ce6fff578d146a9e97288cc6cf272dd5"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "9e167c6885ec84b8d5362432763927b39331347a",
+      "reason": "Merge-only integration commit; the runtime quality fix is mapped to its source commit."
+    },
+    {
+      "commit": "72250357ed766f89e2d7ae4d8cba1a25519fe235",
+      "reason": "Merge-only integration commit; automatic Combo Yield adoption is mapped to its source commit."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "9e34f001ce6fff578d146a9e97288cc6cf272dd5",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/205"
+      ]
+    },
+    {
+      "commit": "9e167c6885ec84b8d5362432763927b39331347a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/205"
+      ]
+    },
+    {
+      "commit": "0ef32dbac2172e620a491e42ad4a575b78c7b54b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/206"
+      ]
+    },
+    {
+      "commit": "72250357ed766f89e2d7ae4d8cba1a25519fe235",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/206"
+      ]
+    }
+  ]
+}
