@@ -104,7 +104,7 @@ def _prepared_option_receipt(
     opening: Mapping[str, Any],
     *,
     received_at: str = "2026-06-01T00:00:00Z",
-    position_lots: list[dict[str, Any]] | None = None,
+    open_positions: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     payload = {
         "prepared_authority": {
@@ -117,10 +117,7 @@ def _prepared_option_receipt(
             "timestamp": "2026-07-21T14:00:00Z",
             "rates": {"USDCNY": 7.2, "HKDCNY": 0.92},
         },
-        "current_decision_read": {
-            "status": "trusted",
-            "position_lots": position_lots or [],
-        },
+        "open_positions_min": open_positions or [],
         "decision_snapshot_actionable": True,
     }
     payload_bytes = _canonical_bytes(payload)
@@ -233,9 +230,9 @@ def test_option_position_binding_uses_only_the_frozen_scan_batch() -> None:
     }
     receipt = _prepared_option_receipt(
         opening,
-        position_lots=[
-            {"record_id": "lot-1", "fields": fields},
-            {"record_id": "lot-2", "fields": fields},
+        open_positions=[
+            {"record_id": "lot-1", **fields},
+            {"record_id": "lot-2", **fields},
         ],
     )
     csv_bytes = (
