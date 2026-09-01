@@ -64,10 +64,7 @@ def _prepared_receipt(
             "timestamp": observed_at,
             "rates": {"HKDCNY": hkd_cny},
         },
-        "current_decision_read": {
-            "status": "trusted",
-            "position_lots": [],
-        },
+        "open_positions_min": [],
         "decision_snapshot_actionable": True,
     }
     payload_bytes = _canonical_bytes(payload)
