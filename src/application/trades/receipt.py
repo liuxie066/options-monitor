@@ -751,7 +751,9 @@ def build_trade_intake_receipt_message(
         )
     if ledger_store:
         fields.append(("账本", ledger_store.get("sqlite_path") or "-"))
-    if _combo_yield_relation_pending(diagnostics):
+    if _matching_auto_combo_adoption(result):
+        fields.append(("组合", "✅ 已自动归入 Combo Yield（Funding Put + Participation Call）"))
+    elif _combo_yield_relation_pending(diagnostics):
         fields.append(("组合", "关系待确认；未提供 pair_intent_id，当前按单腿记录，未自动归入 Combo Yield 组。"))
     fields.append(("诊断", reason))
     sections: list[tuple[str, list[str]]] = []
@@ -778,6 +780,30 @@ def _combo_yield_relation_pending(diagnostics: dict[str, Any]) -> bool:
     for key in ("combo_yield_enrichment", "position_effect_inference"):
         item = diagnostics.get(key)
         if isinstance(item, dict) and bool(item.get("combination_relation_pending")):
+            return True
+    return False
+
+
+def _matching_auto_combo_adoption(result: dict[str, Any]) -> bool:
+    event_ids = {
+        str(item.get("event_id") or "").strip()
+        for item in result.get("operations") or []
+        if isinstance(item, dict)
+    }
+    reconciliation = result.get("combo_reconciliation")
+    if not event_ids or not isinstance(reconciliation, dict):
+        return False
+    for adoption in reconciliation.get("auto_adoptions") or []:
+        if not isinstance(adoption, dict) or adoption.get("status") not in {
+            "adopted",
+            "already_confirmed",
+        }:
+            continue
+        inference = adoption.get("inference")
+        if isinstance(inference, dict) and event_ids & {
+            str(inference.get("put_open_event_id") or "").strip(),
+            str(inference.get("call_open_event_id") or "").strip(),
+        }:
             return True
     return False
 

@@ -58,7 +58,7 @@ def _event(
     )
 
 
-def test_account_reconciler_reads_frozen_exposure_and_persists_only_inference(
+def test_account_reconciler_reads_frozen_exposure_and_auto_adopts_strict_match(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -137,6 +137,30 @@ def test_account_reconciler_reads_frozen_exposure_and_persists_only_inference(
         not item["fields"].get("strategy_group_id")
         for item in repo.list_position_lots()
     )
+
+    adoptions: list[dict] = []
+
+    def _adopt(**kwargs):
+        adoptions.append(kwargs)
+        return {
+            "status": "adopted",
+            "inference": result["inferences"][0],
+        }
+
+    monkeypatch.setattr(module, "adopt_post_trade_combo_pair", _adopt)
+    auto_result = reconcile_account_post_trade_combos(
+        repo=repo,
+        runtime_root=tmp_path,
+        account="lx",
+        runtime_environment="opend:127.0.0.1:11111",
+        mode="auto",
+        effective_now_ms=BASE_TIME_MS + 4_000,
+    )
+
+    assert auto_result["auto_adoption_count"] == 1
+    assert adoptions[0]["inference_id"] == result["inferences"][0]["inference_id"]
+    assert adoptions[0]["actor"] == "trade_intake:auto_combo_reconciliation"
+    assert adoptions[0]["apply_changes"] is True
 
 
 def test_off_mode_does_not_touch_the_repository(tmp_path) -> None:

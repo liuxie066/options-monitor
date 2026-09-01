@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### New Features
+- Added account-scoped automatic Combo Yield adoption for uniquely matched, delivery-confirmed Funding Put and Participation Call fills, with successful grouping shown in the trade receipt.
+
 ### Bug Fixes
 - Stopped runtime quality refreshes from scanning complete historical trade-intake audit logs while preserving explicit reconciliation access to that evidence.
 

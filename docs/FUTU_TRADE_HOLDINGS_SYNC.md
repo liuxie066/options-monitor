@@ -152,6 +152,30 @@ payload hash。任一来源不完整、日历 hash 变化、零价锚点无法�
 
 ## 通知 Outbox 与批量回执
 
+### Combo Yield 自动归组
+
+自动归组按账户显式开启；默认仍关闭：
+
+```yaml
+trade_intake:
+  combo_reconciliation:
+    default_mode: off
+    accounts:
+      sy: auto
+```
+
+`auto` 只自动采用 `exact_delivered_candidate`、没有候选替代项且属于唯一最优解的
+Put + Call 配对；缺证据或多解继续停在待确认状态。第二腿归组成功后，成交回执显示
+`组合｜✅ 已自动归入 Combo Yield（Funding Put + Participation Call）`。
+
+`observe` 只记录提案，`confirm` 生成提案并要求人工执行 `confirm-combo`；`auto` 下仍可
+手工确认未被自动采用的提案。
+
+成交先持久化，再执行每组独立事务的 adoption，最后渲染回执。单组 adoption 失败不会回滚已记录
+成交，也不会把失败提案标成成功；错误保留在 reconciliation 结果中，提案继续等待后续自动重试或
+人工确认。把账户改回 `confirm` 或 `off` 只影响后续自动采用，不拆除既有组合；既有误归组使用
+`supersede-combo` 的 append-only 回滚路径。
+
 普通开仓成交保留逐 broker deal 的 intake 回执；已处理的 deal 在
 history backfill 中会于 pipeline 之前跳过，不会因回执未确认而重放交易。
 provider 命令已成功但缺少 delivery confirmation 时记为
