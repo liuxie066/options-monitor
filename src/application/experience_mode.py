@@ -139,7 +139,7 @@ def render_experience_report(
         return value_text
 
     labels = {
-        "opening": "Sell Put / Covered Call",
+        "opening": "CSP / CC",
         "sp_lc": "Combo Yield SP+LC",
         "cc_lp": "Combo Yield CC+LP",
     }

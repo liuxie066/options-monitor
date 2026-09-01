@@ -8,7 +8,7 @@ service/timer，以及 Daily Brief / Agent 当前展示面均已删除。配置�
 
 ## 保留边界
 
-- Candidate Engine 继续拥有 Sell Put、Covered Call 与 Combo Yield 的资格判断和排序。
+- Candidate Engine 继续拥有 Cash-Secured Put (CSP)、Covered Call (CC) 与 Combo Yield 的资格判断和排序。
 - Daily Brief 继续使用确定性的候选、持仓、资金、事件、拒绝原因和 Close Advice 事实。
 - `prepared_option_positions_context`、opening candidate snapshot、SQLite ledger 和通用
   Assistant LLM provider/credential 保持不变；它们不是 AI Decision Advice 的替代实现。

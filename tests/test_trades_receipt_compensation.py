@@ -169,7 +169,7 @@ def test_receipt_compensation_preview_combines_two_ledger_trades_without_writes(
     assert "target" not in out["route"]
     assert "类型｜历史成交补充" in out["message"]
     assert "状态｜✅ 已入账" in out["message"]
-    assert "动作｜Sell Put 开仓" in out["message"]
+    assert "动作｜CSP 开仓" in out["message"]
     assert "标的｜0700.HK" in out["message"]
     assert "合约｜2026-09-29 430 Put" in out["message"]
     assert "数量｜2 笔 · 2 张" in out["message"]

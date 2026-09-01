@@ -4,7 +4,7 @@
 This is the same logic as the previous notify_watchlist.py, renamed for clarity.
 
 NOTE (template ownership):
-- This file owns the per-candidate facts and field ordering for Put/Covered Call notification bodies.
+- This file owns the per-candidate facts and field ordering for Put/CC notification bodies.
 - Final notification shells may normalize headings and flat spacing, but must not reinterpret individual candidate facts.
 """
 
@@ -389,8 +389,8 @@ def _build_notification_block_compact(
     strike = _normalize_contract_strike(strike_raw)
     emoji = _action_emoji(action_label, risk_line)
     is_enhancement = _is_combo_yield_action(action_label)
-    is_call = 'Call' in action_label
-    action_display = '组合·同期' if is_enhancement else ('Call' if is_call else 'Put')
+    is_call = _is_covered_call_action(action_label)
+    action_display = '组合·同期' if is_enhancement else ('CC' if is_call else 'CSP')
     expiry_display = exp_part.replace('@ ', '· ', 1)
 
     if not is_enhancement:
@@ -500,13 +500,17 @@ def _build_notification_block_compact(
 def _action_emoji(action_label: str, risk_line: str = '') -> str:
     if _is_combo_yield_action(action_label):
         return '💎'
-    if 'Covered Call' in action_label or '卖Call' in action_label:
+    if _is_covered_call_action(action_label):
         if '不可覆盖' in risk_line or 'cover=0' in risk_line:
             return '🟡'
         return '🟢'
-    if '卖Put' in action_label:
+    if action_label in {'CSP', '卖Put'}:
         return '🟢'
     return '⚪'
+
+
+def _is_covered_call_action(action_label: str) -> bool:
+    return action_label in {'CC', 'Covered Call', '卖Call'}
 
 
 def _is_combo_yield_action(action_label: str) -> bool:
@@ -579,7 +583,7 @@ def _format_alert_line(line: str, *, account_label: str = '当前账户') -> str
         extra_detail_lines: list[str] = []
         if not _is_missing_value(used_symbol):
             extra_detail_lines.append(
-                f"- 已持仓: 同标的Sell Put占用="
+                f"- 已持仓: 同标的CSP占用="
                 f"{_present_money_or_zero(used_symbol, reason='告警未提供cash_used_sym')}"
             )
         if not _is_missing_value(event):
@@ -950,7 +954,7 @@ def build_notification(
             emit_fn(f'### {put_label}' if use_compact else put_label, groups[STRATEGY_SELL_PUT])
         if groups[STRATEGY_COVERED_CALL]:
             call_label = strategy_section_label(STRATEGY_COVERED_CALL)
-            emit_fn('### Call' if use_compact else call_label, groups[STRATEGY_COVERED_CALL])
+            emit_fn('### CC' if use_compact else call_label, groups[STRATEGY_COVERED_CALL])
         if groups[STRATEGY_COMBO_YIELD]:
             enhancement_label = strategy_section_label(STRATEGY_COMBO_YIELD)
             emit_fn(

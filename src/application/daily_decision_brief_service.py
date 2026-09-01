@@ -1802,11 +1802,11 @@ def _candidate_action(
         "contract_symbol": _text(row.get("contract_symbol") or row.get("code")).upper(),
         "position_lot_id": _text(row.get("position_lot_id")),
         "title": (
-            "Sell Put 候选"
+            "CSP 候选"
             if family == "sell_put"
             else "Wheel 候选"
             if family == "wheel"
-            else "Covered Call 候选"
+            else "CC 候选"
         ),
         "reason": _text(row.get("reason") or (capacity or {}).get("reason") or "已通过现有候选过滤"),
         "metrics": {**_candidate_metrics(row, rank=rank), "capacity": dict(capacity or {})},
@@ -2587,8 +2587,8 @@ def _strategy_summary(
         return "日报阻塞：" + "；".join(blockers)
     active = sum(1 for item in actions if item.get("state") == "active")
     summary = (
-        f"有效行动 {active} 条；候选证据：Sell Put {len(candidates['sell_put'])}，"
-        f"Covered Call {len(candidates['covered_call'])}，"
+        f"有效行动 {active} 条；候选证据：CSP {len(candidates['sell_put'])}，"
+        f"CC {len(candidates['covered_call'])}，"
         f"Combo Yield {len(candidates['combo_yield'])}"
     )
     if "wheel" in candidates:

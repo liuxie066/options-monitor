@@ -1,18 +1,18 @@
-# Sell Put / Covered Call 候选策略合同
+# Cash-Secured Put (CSP) / Covered Call (CC) 候选策略合同
 
 > 状态：当前 `main` 策略合同
 >
-> 权威范围：Sell Put / Covered Call 的召回、数据、筛选、容量、排序和候选快照
+> 权威范围：CSP / CC 的召回、数据、筛选、容量、排序和候选快照
 >
 > 实施状态：已实现并发布；具体部署状态以目标环境的运行证据为准
 
-本文是 Sell Put / Covered Call 开仓候选策略的唯一细则真源。产品域和依赖方向见
+本文是 CSP / CC 开仓候选策略的唯一细则真源。产品域和依赖方向见
 [STRATEGY_ARCHITECTURE.md](STRATEGY_ARCHITECTURE.md)；Combo Yield 保持独立策略，
 不从本文件推导其组合筛选和排序规则。
 
 ## 1. 策略目标
 
-### Sell Put
+### CSP
 
 核心目标是承担“价格合适时接货”的风险，用权利金参与投资布局并获取收益：
 
@@ -22,7 +22,7 @@
 - 正式比较整个持有周期的非年化净收益，不用年化收益主导排序；
 - 接货能力必须真实存在，但候选不是自动下单或自动换汇授权。
 
-### Covered Call
+### CC
 
 核心目标是在愿意以合适价格卖出正股的前提下，用权利金增强持股收益：
 
@@ -46,7 +46,7 @@
 - `domain/domain/engine/candidate_engine.py`
 
 应用层不得再实现第二套评分、排序或候选裁剪。Combo Yield 可以共享标准化证据，
-但必须使用 `strategy=combo_yield` 的独立策略结果，不能修改 Sell Put / Covered Call 决策。
+但必须使用 `strategy=combo_yield` 的独立策略结果，不能修改 CSP / CC 决策。
 
 ## 3. 共同报价与合约合同
 
@@ -126,7 +126,7 @@ net_premium = gross_premium - estimated_full_sell_fees
 - `IV - term_matched_RV >= 0.05`；
 - 任一必要 IV/RV 证据缺失时，在最小受影响范围内不可用，不做回退。
 
-## 5. Sell Put
+## 5. CSP
 
 ### 5.1 召回窗口
 
@@ -183,7 +183,7 @@ max_new_contracts = floor(effective_free_cash / assignment_notional)
 
 ### 5.4 不作为硬门槛的指标
 
-以下指标不阻断 Sell Put 候选：
+以下指标不阻断 CSP 候选：
 
 - stress / gap-down / sigma stress；
 - 路径压力和资本 charge；
@@ -217,7 +217,7 @@ breakeven = strike - net_premium / multiplier
 net_assignment_discount_pct = (spot - breakeven) / spot
 ```
 
-## 6. Covered Call
+## 6. CC
 
 ### 6.1 strike 底线与召回窗口
 
@@ -256,8 +256,8 @@ annualized_net_premium_return = period_net_premium_return * 365 / DTE
 ### 6.3 覆盖能力
 
 - 持仓事实来自同一物理 Futu 账户的 OpenD `qty`、`can_sell_qty`、`average_cost` 和 currency；其中 `average_cost` 映射为 OM `avg_cost`。
-- symbol 配置可以在多账户间共用；当前账户未持有该 symbol 时，该 Covered Call scope 以 `covered_call_underlying_not_held` 正常跳过，不会将其他已完成 scope 降级为 `data_unavailable`。
-- 若当前账户的 Covered Call scope 全部因未持股而跳过，账户级结果是合法的 `no_candidate`；持仓上下文缺失或损坏仍为 `data_unavailable`。
+- symbol 配置可以在多账户间共用；当前账户未持有该 symbol 时，该 CC scope 以 `covered_call_underlying_not_held` 正常跳过，不会将其他已完成 scope 降级为 `data_unavailable`。
+- 若当前账户的 CC scope 全部因未持股而跳过，账户级结果是合法的 `no_candidate`；持仓上下文缺失或损坏仍为 `data_unavailable`。
 - 已开放 Short Call 的股票锁定来自权威 SQLite option-position ledger。
 - OpenD 持仓与 SQLite short-call 锁定无法一致解释时 fail closed。
 - 不跨账户借用股票，也不默认 multiplier。
@@ -271,13 +271,13 @@ max_new_contracts = floor(shares_available_for_cover / multiplier)
 - 不另行扫描待成交挂单；OpenD `can_sell_qty` 作为券商当前可卖事实。
 - 交割物就是普通股票。
 
-普通持股与 Sell Put 指派股混合且无法归属时，股票仍可按账户总量判断覆盖能力，
+普通持股与 CSP 指派股混合且无法归属时，股票仍可按账户总量判断覆盖能力，
 但保持未分配，不计算批次级 Wheel 收益。只有显式 `stock_lot_id` 或充分 FIFO 证据
-才能把 Covered Call 归属到指定指派批次。
+才能把 CC 归属到指定指派批次。
 
 ### 6.4 不作为硬门槛的指标
 
-以下指标不阻断 Covered Call 候选：
+以下指标不阻断 CC 候选：
 
 - gap-up opportunity cost；
 - path stress；
@@ -306,7 +306,7 @@ max_new_contracts = floor(shares_available_for_cover / multiplier)
 
 ## 7. 期限匹配 RV
 
-Sell Put 与 Covered Call 使用完全相同的正式 RV：
+CSP 与 CC 使用完全相同的正式 RV：
 
 1. 数据只认 OpenD 前复权（QFQ）已完成日线和 OpenD 交易日历；
 2. 计算从扫描时点到到期日剩余的交易 session 数；
@@ -354,7 +354,7 @@ RV20 / RV60 / RV120 只保留为诊断字段，不加权生成正式 RV。历史
 - expiry 当天为第 0 天，`expiry-6天` 为第 6 天，两端都包含。
 - 按市场本地日期判定；扫描当天的财报全天视为尚未发生，不使用 `earnings_timestamp` 或 `pub_type` 把它判为已发生。
 - 硬窗口完整且无事件可以通过；硬窗口证据不完整时 fail closed，但不影响其他已完整证明的合约继续入选。
-- 该规则统一用于 Sell Put、Covered Call 和 Combo Yield Funding Put，不为 Combo Yield 设置第二套窗口。
+- 该规则统一用于 CSP、CC 和 Combo Yield Funding Put，不为 Combo Yield 设置第二套窗口。
 
 ## 9. 运行状态与失败范围
 
@@ -387,7 +387,7 @@ hash 有效的 snapshot；不允许调用方传任意文件系统路径。
 
 ## 10. 组合口径与消费边界
 
-- Sell Put 的接货后 concentration 和 Covered Call 的被叫走后剩余 concentration
+- CSP 的接货后 concentration 和 CC 的被叫走后剩余 concentration
   继续使用当前组合 NAV 计算口径；资产按当前市值计量，货币基金计入 NAV。
 - concentration 只在跨 symbol 且收益接近时参与选择，不变成硬风险门槛。
 - 美股和港股使用同一套公式、状态和失败范围；市场配置窗口、费用表、时区和交易日历分别取对应市场事实。
@@ -407,20 +407,20 @@ hash 有效的 snapshot；不允许调用方传任意文件系统路径。
 
 | ID | 已确认结论 | 正文 |
 |---|---|---|
-| S01 | Sell Put 是愿意按合适价格接货并赚取权利金，不主动追求接货 | §1、§5 |
-| S02 | Covered Call 是愿意按合适价格卖股并增强收益，不主动追求被叫走 | §1、§6 |
+| S01 | CSP 是愿意按合适价格接货并赚取权利金，不主动追求接货 | §1、§5 |
+| S02 | CC 是愿意按合适价格卖股并增强收益，不主动追求被叫走 | §1、§6 |
 | S03 | 两者都按可执行 mid 限价等待，不追价 | §1、§3.2 |
 | S04 | 保持现有 DTE 召回和筛选窗口，不新增 DTE 奖励 | §5.1、§6.1 |
 | S05 | 主收益统一为整个周期的非年化净收益；年化只作 10% 硬门槛 | §4.2、§5.2、§6.2 |
-| S06 | Sell Put 收益分母使用扣除净权利金后的净资金 | §5.2 |
-| S07 | Covered Call 收益分母使用正股当前市值 | §6.2 |
+| S06 | CSP 收益分母使用扣除净权利金后的净资金 | §5.2 |
+| S07 | CC 收益分母使用正股当前市值 | §6.2 |
 | S08 | 单张合约净权利金至少 CNY 50 | §4.2 |
 | S09 | IV/RV 同时满足 ratio 1.10 和 spread 0.05 | §4.3 |
 | S10 | spread 40% 是硬门槛；OI 只在收益接近时排序，volume/delta 只展示 | §3.2、§3.4 |
 | S11 | `0.002` 使用锚定收益分组，不使用非传递性的两两“接近”比较 | §5.5、§6.5 |
 | S12 | 每个 symbol 先选一张代表合约，再做跨 symbol 排序 | §5.5、§6.5 |
-| S13 | Sell Put 同 symbol 收益接近时优先净接货折价、spread、OI、净权利金 | §5.5 |
-| S14 | Covered Call 同 symbol 收益接近时先选更高 strike，再看 spread、OI、净权利金 | §6.5 |
+| S13 | CSP 同 symbol 收益接近时优先净接货折价、spread、OI、净权利金 | §5.5 |
+| S14 | CC 同 symbol 收益接近时先选更高 strike，再看 spread、OI、净权利金 | §6.5 |
 | S15 | 跨 symbol 时 concentration 仅作接近收益的排序参考，不作硬门槛 | §5.5、§6.5、§10 |
 | S16 | stress、gap、path、delta band、gamma、vega 和旧评分不进入正式开仓决策 | §5.4、§6.4、§12 |
 
@@ -428,18 +428,18 @@ hash 有效的 snapshot；不允许调用方传任意文件系统路径。
 
 | ID | 已确认结论 | 正文 |
 |---|---|---|
-| C01 | Sell Put 先取 `min(max_strike, spot)`，再从该上界向下召回 20% | §5.1 |
-| C02 | Sell Put 显式 `min_strike` 继续作为更严格下界 | §5.1 |
-| C03 | Covered Call 最低卖价为 `max(min_strike, avg_cost*1.02)` | §6.1 |
-| C04 | Covered Call 召回最小值再与 spot 取大，最大值为其上方 20% 并受 configured max 限制 | §6.1 |
+| C01 | CSP 先取 `min(max_strike, spot)`，再从该上界向下召回 20% | §5.1 |
+| C02 | CSP 显式 `min_strike` 继续作为更严格下界 | §5.1 |
+| C03 | CC 最低卖价为 `max(min_strike, avg_cost*1.02)` | §6.1 |
+| C04 | CC 召回最小值再与 spot 取大，最大值为其上方 20% 并受 configured max 限制 | §6.1 |
 | C05 | 现金、持仓和锁定全部按物理 Futu 账户隔离 | §5.3、§6.3 |
-| C06 | Sell Put 先用同币种现金，不足部分按新鲜 OpenD 汇率折算其他币种 | §5.3 |
+| C06 | CSP 先用同币种现金，不足部分按新鲜 OpenD 汇率折算其他币种 | §5.3 |
 | C07 | 跨币种资金不保留 0.95 或其他安全折扣 | §5.3 |
 | C08 | 现金组成保留当前 `cash_by_currency + fund_assets` 口径，货币基金算入 | §5.3 |
 | C09 | 已有 Short Put 按 gross strike notional 占用担保，不抵扣历史权利金 | §5.3 |
-| C10 | 不考虑 Sell Put 待成交挂单或 frozen cash，候选共享资金不可相加 | §5.3 |
+| C10 | 不考虑 CSP 待成交挂单或 frozen cash，候选共享资金不可相加 | §5.3 |
 | C11 | 每张候选按一张合约计算，最大张数用资金或股票整除 multiplier | §5.3、§6.3 |
-| C12 | Covered Call 使用 OpenD qty/can_sell_qty 和 SQLite 已开放 Short Call 锁定 | §6.3 |
+| C12 | CC 使用 OpenD qty/can_sell_qty 和 SQLite 已开放 Short Call 锁定 | §6.3 |
 | C13 | 普通持股与指派股混合可用于账户级覆盖，但无法归属时不算批次 Wheel 收益 | §6.3 |
 | C14 | 交割物是普通股票，不支持裸 Call 或非标准交割 | §3.3、§6.3 |
 | C15 | 组合集中度延续当前 NAV 口径，按当前市值且货币基金计入 | §10 |
@@ -468,7 +468,7 @@ hash 有效的 snapshot；不允许调用方传任意文件系统路径。
 
 | ID | 已确认结论 | 正文 |
 |---|---|---|
-| E01 | 财报是 Sell Put、Covered Call 与 Combo Yield Funding Put 的临近到期硬风险 | §8.3 |
+| E01 | 财报是 CSP、CC 与 Combo Yield Funding Put 的临近到期硬风险 | §8.3 |
 | E02 | 唯一正式来源为 OpenD `get_earnings_calendar` | §8.1 |
 | E03 | 删除 yfinance，包括依赖、fallback、probe、除息/拆股和事件实现 | §8.1、§12 |
 | E04 | 不用财报价格历史证明未来覆盖，也不预测财报日期 | §8.1 |
@@ -522,7 +522,7 @@ hash 有效的 snapshot；不允许调用方传任意文件系统路径。
   交易日历和汇率证据；
 - 期限匹配 RV 是 Candidate Engine 唯一正式 RV；RV20/60/120 和旧加权值只保留为
   诊断或离线 shadow 对照，不进入正式 decision；
-- Sell Put / Covered Call 的计算、硬筛和排序由 Candidate Engine 唯一所有；
+- CSP / CC 的计算、硬筛和排序由 Candidate Engine 唯一所有；
 - 现金、汇率、持仓与锁定能力绑定物理 Futu 账户，OpenD FX 最长有效 24 小时，
   无 `0.95` haircut；
 - 每个账户/run 封存不可变 `opening_candidate_snapshot.v1`，并由最后发布的
@@ -535,15 +535,15 @@ hash 有效的 snapshot；不允许调用方传任意文件系统路径。
 发布记录只证明源码和产物已交付。受控远程升级是独立授权边界；在完成升级和运行时
 验证前，不得宣称目标环境已按本合同运行。
 
-## 附：CC+LP（Covered Call + Long Put）变体
+## 附：CC+LP（CC + Long Put）变体
 
 CC+LP 是 `combo_yield` 模块下的同到期变体（`combo_yield.variant=cc_lp`）；策略边界见
 [Strategy Architecture](STRATEGY_ARCHITECTURE.md)，组合校验实现见
 `domain/domain/engine/cc_lp.py`：
 
-- 定位：Sell Call 资金腿（收权利金、承担被叫走风险）+ Long Put 看跌反转腿（表达转跌观点），
+- 定位：CC 资金腿（收权利金、承担被叫走风险）+ Long Put 看跌反转腿（表达转跌观点），
   与 SP+LC 严格对称，不是保护/保险；
-- Sell Call 腿独立扫描，继承 Sell Call 全部硬门槛（收益下限、`max(min_strike, avg_cost*1.02)`、max_strike、流动性、期限），
+- CC 腿独立扫描，继承 CC 全部硬门槛（收益下限、`max(min_strike, avg_cost*1.02)`、max_strike、流动性、期限），
   无持仓上下文 → `not_applicable` 跳过；
 - Long Put 反转腿 delta 区间 0.10~0.25，目标 delta 0.12；
 - 结构方向 `call_strike > put_strike`（复用 `strike_order` 角色参数化）；

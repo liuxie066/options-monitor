@@ -51,7 +51,7 @@ dataset、mark、outcome 和 candidate-impact 继续使用 `./om research shadow
 | Final Receipt | `src/application/strategy_lab/receipts.py` | 两次确认、锁定 leader、fill/outcome 引用、按日比较、安全状态和三态结论；write-once-or-verify |
 | 独立 advance 调度 | `src/application/service_deploy.py` | opt-in 的唯一 timer/service；不进入 Tick 调用链，不持有 Tick lock |
 | Experiment Store | `src/infrastructure/strategy_lab/experiment_store.py` | 只接受新建/空库或精确三表 schema；不迁移旧数据 |
-| 最小合同 | `src/application/strategy_lab/contracts.py` | 固定 HK / `lx` / Sell Put 范围、研究状态和 canonical hash |
+| 最小合同 | `src/application/strategy_lab/contracts.py` | 固定 HK / `lx` / Cash-Secured Put (CSP) 范围、研究状态和 canonical hash |
 | Formal Corpus | `src/application/research/formal_corpus.py` | expectation、formal point、calendar 和不可变证据 |
 | 生产优先级 | `src/application/opend_call_coordinator.py`、`src/application/tick_cron.py` | Strategy Lab 只可低优先级零等待准入，不取得 Tick lock |
 

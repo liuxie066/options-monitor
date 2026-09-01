@@ -28,7 +28,7 @@ def _action(
         "expiration": "2026-05-15",
         "strike": 100,
         "contract_symbol": f"{symbol}260515P00100000",
-        "title": f"评估 {symbol} Sell Put",
+        "title": f"评估 {symbol} CSP",
         "reason": "收益/风险通过筛选",
         "metrics": {
             "mid": mid,

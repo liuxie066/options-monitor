@@ -222,7 +222,7 @@ def test_experience_report_marks_non_executable_and_redacts_internal_label() -> 
     )
     assert EXPERIENCE_BANNER in report
     assert "- 可执行：否" in report
-    assert "正式状态（Sell Put / Covered Call）：candidates_found" in report
+    assert "正式状态（CSP / CC）：candidates_found" in report
     assert "正式状态（Combo Yield SP+LC）：no_candidate" in report
     assert f"routed by {ACCOUNT}" not in report
     assert "routed by <account>" in report
@@ -277,7 +277,7 @@ def test_experience_child_facade_renders_status_from_sealed_bundle(
     ) == 0
 
     report = (report_dir / "experience_report.md").read_text(encoding="utf-8")
-    assert "正式状态（Sell Put / Covered Call）：candidates_found" in report
+    assert "正式状态（CSP / CC）：candidates_found" in report
     assert "| DEMO | sell_put | 1 | candidate |" in report
 
 

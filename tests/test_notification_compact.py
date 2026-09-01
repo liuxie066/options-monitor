@@ -19,7 +19,7 @@ def test_build_notification_block_compact_sell_put() -> None:
         suggestion="2.3",
     )
 
-    assert "🟢 Put 腾讯 460P · 04-29 · 挂单 2.3" in out
+    assert "🟢 CSP 腾讯 460P · 04-29 · 挂单 2.3" in out
     assert "收益｜权利金 2.3 · 年化 12% · 29天" in out
     assert "风险｜保守 · Δ 0.25 · 担保 ¥46000" in out
     assert "---" not in out
@@ -53,7 +53,7 @@ def test_format_alert_line_compact_sell_put() -> None:
     line = "腾讯 | sell_put | 2026-04-29 460 | 年化 12% | 净收入 2300 | DTE 29 | Strike 460 | mid 2.3 | ccy USD | cash_req_cny ¥46000 | delta 0.25 | 风险 保守 | 通过准入"
     out = _format_alert_line_compact(line, account_label="lx")
 
-    assert "🟢 Put 腾讯" in out
+    assert "🟢 CSP 腾讯" in out
     assert "年化 12%" in out
     assert "---" not in out
     assert "###" not in out
@@ -65,7 +65,7 @@ def test_format_alert_line_compact_sell_put_shows_event_risk() -> None:
     line = "腾讯 | sell_put | 2026-04-29 460 | 年化 12% | 净收入 2300 | DTE 29 | Strike 460 | mid 2.3 | ccy USD | cash_req_cny ¥46000 | delta 0.25 | event earnings@2026-04-20 | 风险 保守 | 通过准入"
     out = _format_alert_line_compact(line, account_label="lx")
 
-    assert "🟢 Put 腾讯" in out
+    assert "🟢 CSP 腾讯" in out
     assert "事件 earnings@2026-04-20" in out
     assert "---" not in out
 
@@ -91,8 +91,8 @@ def test_build_notification_compact_style() -> None:
     alerts_text = "## 高优先级\n腾讯 | sell_put | 2026-04-29 460 | 年化 12% | 净收入 2300 | DTE 29 | Strike 460 | mid 2.3 | ccy USD | 风险 保守 | 通过准入\n"
     out = build_notification("", alerts_text, render_style="compact")
 
-    assert "### Put" in out
-    assert "🟢 Put 腾讯" in out
+    assert "### CSP" in out
+    assert "🟢 CSP 腾讯" in out
     assert "---" not in out
 
 
@@ -128,8 +128,8 @@ def test_build_notification_legacy_style_uses_flat_fields() -> None:
     with pytest.warns(DeprecationWarning, match="Legacy Tick renderer"):
         out = build_notification("", alerts_text, render_style="legacy")
 
-    assert "Put" in out
-    assert "**[当前账户] 腾讯｜卖Put｜2026-04-29 460**" in out
+    assert "CSP" in out
+    assert "**[当前账户] 腾讯｜CSP｜2026-04-29 460**" in out
     assert "收益｜" in out
     assert "---" not in out
 
@@ -146,7 +146,7 @@ def test_build_notification_compact_keeps_medium_strategy_with_total_limit() -> 
     ]
     medium_call = (
         "CALL1 | sell_call | 2026-06-19 180C | 年化 6.50% | 净收入 80.00 | "
-        "DTE 30 | Strike 180 | 保守 | ccy USD | mid 0.800 | cover 1 | shares 100(-0) | 已通过准入，可作为 Covered Call 备选。"
+        "DTE 30 | Strike 180 | 保守 | ccy USD | mid 0.800 | cover 1 | shares 100(-0) | 已通过准入，可作为 CC 备选。"
     )
     alerts_text = (
         "## 高优先级\n"
@@ -158,9 +158,9 @@ def test_build_notification_compact_keeps_medium_strategy_with_total_limit() -> 
 
     out = build_notification("", alerts_text, render_style="compact")
 
-    assert out.count("🟢 Put") == 5
+    assert out.count("🟢 CSP") == 5
     assert "PUT5" in out
     assert "PUT6" not in out
     assert "CALL1" in out
-    assert "🟢 Call CALL1" in out
-    assert out.index("### Put") < out.index("### Call")
+    assert "🟢 CC CALL1" in out
+    assert out.index("### CSP") < out.index("### CC")

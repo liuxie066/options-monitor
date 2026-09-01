@@ -88,7 +88,7 @@ def run_cc_lp_scan(
     required_data_frame: pd.DataFrame | None = None,
     demo_capacity: bool = False,
 ) -> pd.DataFrame:
-    """Run the CC+LP opening scan: independent Sell Call scan + Long Put pairing."""
+    """Run the CC+LP opening scan: independent CC scan + Long Put pairing."""
 
     shares_total = shares_can_sell = shares_locked = 0
     avg_cost = 0.0

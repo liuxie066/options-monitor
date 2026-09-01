@@ -7,7 +7,7 @@ import json
 
 @dataclass(frozen=True)
 class SellPutAlertThresholds:
-    """Sell Put 候选评级阈值。默认值与历史硬编码行为一致。"""
+    """CSP 候选评级阈值。默认值与历史硬编码行为一致。"""
 
     high_annual: float = 0.20
     high_spread_max: float = 0.20
@@ -23,7 +23,7 @@ class SellPutAlertThresholds:
 
 @dataclass(frozen=True)
 class SellCallAlertThresholds:
-    """Covered Call 候选评级阈值。默认值与历史硬编码行为一致。"""
+    """CC 候选评级阈值。默认值与历史硬编码行为一致。"""
 
     high_annual: float = 0.10
     high_total: float = 0.15

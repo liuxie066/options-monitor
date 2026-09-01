@@ -122,7 +122,7 @@ Delta coverage manifest 不是从 commit message 猜 Release Notes。它先确�
 `release_delta_coverage.v2` 对 `2.1.3` 之后的版本要求每个待发布 commit 都有设计证据。允许两类引用：
 
 - reviewed HEAD 中已跟踪的稳定 Markdown，例如
-  `docs/candidate_strategy.md#63-covered-call-容量`；
+  `docs/candidate_strategy.md#63-覆盖能力`；
 - GitHub Pull Request URL，例如
   `https://github.com/liuxie066/options-monitor/pull/123`。
 
@@ -135,7 +135,7 @@ commit，但 manifest 中仍须逐 commit 显式登记：
   {
     "commit": "<full commit SHA>",
     "references": [
-      "docs/candidate_strategy.md#63-covered-call-容量",
+      "docs/candidate_strategy.md#63-覆盖能力",
       "https://github.com/liuxie066/options-monitor/pull/123"
     ]
   }

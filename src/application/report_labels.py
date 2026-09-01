@@ -8,7 +8,7 @@ from domain.domain.sell_put_risk_bands import classify_sell_put_risk
 
 
 def label_sell_put_candidates(df: pd.DataFrame) -> pd.DataFrame:
-    """Add deterministic Sell Put display bands without file I/O."""
+    """Add deterministic CSP display bands without file I/O."""
 
     out = df.copy()
     if 'otm_pct' in out.columns:

@@ -38,14 +38,14 @@
 
 包含策略：
 
-- Sell Put
-- Covered Call
+- Cash-Secured Put (CSP)
+- Covered Call (CC)
 - Combo Yield
 
 当前状态：
 
-- Sell Put / Covered Call 已完成本轮 `insurance_underwriting` 语义重构。
-- Combo Yield 产品上属于平行开仓策略，运行编排已从 Sell Put 模块迁出到独立模块；当前 runtime key 为 `combo_yield`。当前仅支持 `same_expiry_pair`：Funding Put 复用完整 Sell Put underwriting 结果，再配对同到期、可由 Put 净收入覆盖成本的 Long Call。成本约束统一为 `min_net_credit_retention`，排序以 retention 优先、跨标的以 Funding Put 期间非年化净收益主导；候选写入独立的 run/account 级 sealed snapshot，消费者从 CSV 切换为快照。
+- CSP / CC 已完成本轮 `insurance_underwriting` 语义重构。
+- Combo Yield 产品上属于平行开仓策略，运行编排已从 CSP 模块迁出到独立模块；当前 runtime key 为 `combo_yield`。当前仅支持 `same_expiry_pair`：Funding Put 复用完整 CSP underwriting 结果，再配对同到期、可由 Put 净收入覆盖成本的 Long Call。成本约束统一为 `min_net_credit_retention`，排序以 retention 优先、跨标的以 Funding Put 期间非年化净收益主导；候选写入独立的 run/account 级 sealed snapshot，消费者从 CSV 切换为快照。
 
 标准生命周期：
 
@@ -60,7 +60,7 @@
 
 - 开仓机会监控只推荐候选，不记录真实成交，不修改持仓账本。
 - 排序用于推荐最优候选，不能替代硬风险阈值。
-- Combo Yield 使用独立的组合腿结构、组合资金关系和组合排序，不再作为 Sell Put overlay 扩展；仅支持 `same_expiry_pair` 同期两腿，不把不同期限的两腿压成单一组合年化或 scenario 指标。正式排序唯一存在于 domain / seal 时，Daily Brief 只读快照结果。
+- Combo Yield 使用独立的组合腿结构、组合资金关系和组合排序，不再作为 CSP overlay 扩展；仅支持 `same_expiry_pair` 同期两腿，不把不同期限的两腿压成单一组合年化或 scenario 指标。正式排序唯一存在于 domain / seal 时，Daily Brief 只读快照结果。
 - 推荐身份 `candidate_pair_id` 与真实成交意图 `pair_intent_id` 分离；没有显式 intent 时只记录单腿，不猜测持仓关系。
 
 主要实现位置：
@@ -275,9 +275,9 @@ output_runs / required_data / sealed candidate snapshot / candidate trace / mark
 
 当前已对齐：
 
-- Sell Put / Covered Call 的开仓语义已经从 `short_vol` 转为 `insurance_underwriting`。
+- CSP / CC 的开仓语义已经从 `short_vol` 转为 `insurance_underwriting`。
 - 开仓配置不再接受 `strategy=short_vol`。
-- Combo Yield 已有独立开仓编排模块，不再由 `sell_put_steps.py` 拥有组合收益的 trace、summary 和 alert 决策；Funding Put 仍通过显式依赖复用 Sell Put underwriting。
+- Combo Yield 已有独立开仓编排模块，不再由 `sell_put_steps.py` 拥有组合收益的 trace、summary 和 alert 决策；Funding Put 仍通过显式依赖复用 CSP underwriting。
 - 已有两腿（含历史错期组合）可用精确 lot id 原子登记 `pair_intent_id` 和共享 `strategy_group_id`，不做启发式匹配。
 - Close Advice 已收敛为固定 `strict_profit_capture.v1`，不读取 `short_vol` thesis、事件、delta 或集中度。
 - Research / Shadow Replay 与生产执行保持分离。

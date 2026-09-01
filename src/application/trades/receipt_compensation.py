@@ -10,6 +10,11 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from domain.domain.ledger.position_fields import normalize_trade_price
+from domain.domain.strategy_vocab import (
+    STRATEGY_COVERED_CALL,
+    STRATEGY_SELL_PUT,
+    strategy_action_label,
+)
 from src.application.notification_delivery_adapter import (
     build_notification_transport_key,
     normalize_notification_delivery_result,
@@ -512,7 +517,7 @@ def _validate_uniform_open_contract(members: list[dict[str, Any]]) -> None:
         or first.get("option_type") not in {"put", "call"}
     ):
         raise ValueError(
-            "receipt compensation only supports already-recorded Sell Put/Call opens"
+            "receipt compensation only supports already-recorded CSP/CC opens"
         )
 
 
@@ -524,6 +529,9 @@ def _build_message(
     first = members[0]
     option_type = str(first["option_type"])
     option_label = "Put" if option_type == "put" else "Call"
+    action_label = strategy_action_label(
+        STRATEGY_SELL_PUT if option_type == "put" else STRATEGY_COVERED_CALL
+    )
     total_contracts = sum(int(item["contracts"]) for item in members)
     total_premium = sum(
         (_decimal(item["premium_amount"], field="premium_amount") for item in members),
@@ -537,7 +545,7 @@ def _build_message(
         else "见成交明细"
     )
     fields: list[tuple[str, object]] = [
-        ("动作", f"Sell {option_label} 开仓"),
+        ("动作", f"{action_label} 开仓"),
         ("标的", first["symbol"]),
         (
             "合约",

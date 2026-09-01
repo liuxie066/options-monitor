@@ -366,7 +366,7 @@ def _register_basic_ledger_parsers(sub: Any) -> None:
     p_add.add_argument('--multiplier', type=float, required=True, help='contract multiplier')
     p_add.add_argument('--exp', required=True, help='YYYY-MM-DD')
     p_add.add_argument('--premium-per-share', type=float, required=True, help='premium per share; positive, up to 3 decimals')
-    p_add.add_argument('--underlying-share-locked', type=int, default=None, help='for covered call locking shares')
+    p_add.add_argument('--underlying-share-locked', type=int, default=None, help='for CC locking shares')
     p_add.add_argument('--note', default=None)
     p_add.add_argument(
         '--request-id',
@@ -443,7 +443,7 @@ def _register_basic_ledger_parsers(sub: Any) -> None:
 
     p_assigned_stock_sale = sub.add_parser(
         'assigned-stock-sale',
-        help='record a sale of stock created by a Sell Put assignment',
+        help='record a sale of stock created by a CSP assignment',
     )
     _add_runtime_root_arg(p_assigned_stock_sale)
     p_assigned_stock_sale.add_argument('--target-stock-lot-id', required=True)

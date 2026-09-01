@@ -228,7 +228,7 @@ Current collection runs only for `partial_current` reports with `refresh_quotes=
 
 Current report FX reuses the exchange-rate adapter with cache writes disabled. A payload older than 24 hours is labelled `cache_snapshot`, and the common seven-day evidence rule still applies. Report generation never persists collected facts. It merges `live_unpersisted` facts only into the current ending valuation and exposes collection provenance. Explicit capture produces the same v1 evidence envelope for the evidence lifecycle commands. Non-smoke scheduled tick preparation separately persists the exact provider USD/CNY and HKD/CNY observation once per unique ledger; retries of the same provider timestamp are idempotent, and persistence failures are reported as degraded tick evidence events without blocking monitoring.
 
-## Sell Put Assigned-Stock Lifecycle
+## Cash-Secured Put (CSP) Assigned-Stock Lifecycle
 
 Supported assigned-stock inventory is projected once by
 `domain.domain.assigned_stock.project_assigned_stock_lifecycle`. The
@@ -247,7 +247,7 @@ short put assignment
   -> zero or more partial/full assigned-stock sales
 ```
 
-Assignment/exercise inventory outside that Sell Put buy-side transition is returned as `incomplete_inventory_basis`; the system does not invent a stock basis. External holdings are reconciliation evidence only. They never create, close, or resize a canonical assigned-stock lot.
+Assignment/exercise inventory outside that CSP buy-side transition is returned as `incomplete_inventory_basis`; the system does not invent a stock basis. External holdings are reconciliation evidence only. They never create, close, or resize a canonical assigned-stock lot.
 
 Option premium remains owned by the canonical option allocation. Stock gross PnL uses settlement principal only:
 
@@ -281,9 +281,9 @@ capital_days = notional * overlap_ms / 86_400_000
 
 Short puts use strike * multiplier * remaining contracts. Long options use the remaining
 opening premium debit. Assigned stock uses remaining stock cost basis and reduces both shares
-and basis at the exact sale timestamp. A Sell Put assignment closes put exposure and opens
+and basis at the exact sale timestamp. A CSP assignment closes put exposure and opens
 assigned-stock exposure at the same timestamp. The shared assigned-stock projector publishes
-the covered-call allocation identities it already validated, allowing attributed covered calls
+the CC allocation identities it already validated, allowing attributed CC
 to contribute an explicit zero-incremental segment without reimplementing attribution in the
 performance engine. Naked or otherwise unallocated short calls remain unavailable.
 
@@ -321,7 +321,7 @@ still requires its option-order fee evidence.
 
 The numerator includes every canonical option trade event in the scoped period exactly once, whether
 or not strategy attribution is present. Sell-open and long-option sell-close cash are positive;
-buy-close and long-option buy-open cash are negative. This covers standalone Sell Put and Covered Call,
+buy-close and long-option buy-open cash are negative. This covers standalone CSP and Covered Call (CC),
 both Combo Yield legs, Wheel Calls, and any other canonical option trade without using strategy identity
 as an admission rule. Strategy attribution may provide breakdowns, but missing or conflicting strategy
 metadata does not remove valid cash from the total. It degrades only the affected breakdown unless it
@@ -348,13 +348,13 @@ Capital is counted once for each supported position:
   or assignment;
 - a Long Call or Put uses its remaining opening-premium debit from buy-open until sell-close, expiry,
   or exercise;
-- an ordinary or Wheel Covered Call uses strike notional for its remaining covered shares, from Call
+- an ordinary or Wheel CC uses strike notional for its remaining covered shares, from Call
   open until Call close, expiry, or assignment;
 - Combo Yield has no special denominator rule: its Short Put and Long Option segments are added using
   the same rules above;
 - an invalid explicit covered-share allocation has no valid denominator.
 
-A Sell Put assignment ends its Put segment but does not automatically start a stock-capital segment.
+A CSP assignment ends its Put segment but does not automatically start a stock-capital segment.
 For an assigned-stock Wheel, stock capital begins only when a Wheel Call opens and ends when that Call
 closes, expires, or is assigned. The interval from assignment to the first Call and gaps between Call
 rounds contribute no cash-flow-return capital-days. The configured scope treats canonical short Calls
@@ -555,4 +555,4 @@ untagged Combo groups remain in canonical totals and are explicit in attribution
 
 `include_rows=false` only omits raw fact rows. Attribution summaries and conservation are computed
 before serialization and remain identical. A proven scope with no Combo Yield group produces an
-observed empty attribution object; ordinary Sell Put or Covered Call reports are not downgraded.
+observed empty attribution object; ordinary CSP or CC reports are not downgraded.

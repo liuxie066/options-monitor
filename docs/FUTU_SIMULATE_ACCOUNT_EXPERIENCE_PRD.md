@@ -3,7 +3,7 @@
 - **状态**：已实现，待线上 OpenD PoC 验收
 - **日期**：2026-08-27
 - **产品范围**：不依赖模拟账户资产的手动体验扫描
-- **适用策略**：Sell Put、Covered Call、Combo Yield
+- **适用策略**：Cash-Secured Put (CSP)、Covered Call (CC)、Combo Yield
 - **明确排除**：Wheel
 - **文档性质**：产品需求；不规定具体代码拆分
 
@@ -19,7 +19,7 @@ Options Monitor 的正式开仓扫描是账户感知型流程：
 行情 -> 现金与持仓 -> 账户约束 -> 策略候选
 ```
 
-Sell Put 需要现金容量，Covered Call 需要股票覆盖，Combo Yield 根据变体复用现金或股票容量。
+CSP 需要现金容量，CC 需要股票覆盖，Combo Yield 根据变体复用现金或股票容量。
 但富途模拟账户用户不一定能方便地调整模拟现金、持仓或已有期权仓位，模拟数据差异也可能让正式
 账户约束提前终止扫描，使用户无法体验行情监控、策略过滤、排名和候选报告。
 
@@ -36,12 +36,12 @@ Sell Put 需要现金容量，Covered Call 需要股票覆盖，Combo Yield 根�
 
 ### 2.2 回归验证
 
-开发与验收人员需要在不读取账户资产、不下单、不发送通知的前提下，证明 Sell Put、Covered Call
+开发与验收人员需要在不读取账户资产、不下单、不发送通知的前提下，证明 CSP、CC
 和 Combo Yield 仍走同一套正式策略逻辑。
 
 ## 3. 产品目标
 
-1. 富途 `SIMULATE` 用户可通过现有公共扫描入口的一次性开关体验 Sell Put、Covered Call
+1. 富途 `SIMULATE` 用户可通过现有公共扫描入口的一次性开关体验 CSP、CC
    和 Combo Yield 候选链路。
 2. 体验模式只允许读取账户列表元数据，不查询模拟账户现金、持仓、订单或成交，不要求模拟账户
    提供资产 authority。
@@ -89,7 +89,7 @@ Sell Put 需要现金容量，Covered Call 需要股票覆盖，Combo Yield 根�
 2. 仅接受 `trd_env: SIMULATE`，拒绝 REAL 配置、定时入口和未同时指定 `--no-send` 的请求。
 3. 只读取 `get_acc_list()` 账户列表元数据，并跳过账户现金、持仓、可卖数量、订单、成交和已有
    期权占用查询。
-4. 使用系统内置的单合约演示场景支持 Sell Put、Covered Call 和 Combo Yield。
+4. 使用系统内置的单合约演示场景支持 CSP、CC 和 Combo Yield。
 5. 复用现有行情、策略过滤、风险检查、排名、候选快照和本地报告链路。
 6. 在所有结果中显示体验模式、演示容量来源、账户显示名、不可执行声明和正式扫描状态。
 7. 账户显示名来自 OpenD 元数据，不显示内部 account label 或完整账户号码。
@@ -117,15 +117,15 @@ Sell Put 需要现金容量，Covered Call 需要股票覆盖，Combo Yield 根�
   订单或成交。
 
 现有 `--smoke` 会跳过整个 pipeline，不能承担体验模式。现有 `om scan --no-context` 会跳过
-portfolio context，无法完成 Covered Call，因此也不作为完整体验模式的公共合同。
+portfolio context，无法完成 CC，因此也不作为完整体验模式的公共合同。
 
 ### 7.2 演示账户场景
 
 体验模式为每个候选或候选组合独立提供一组可解释的单合约演示事实：
 
-- Sell Put：演示现金恰好足以承担一张候选合约的完整指派要求；
-- Covered Call：演示持股数量与可卖数量均为该合约的 `multiplier`，支持一张覆盖；
-- Covered Call 演示 `average_cost` 使用本轮权威正股现价；
+- CSP：演示现金恰好足以承担一张候选合约的完整指派要求；
+- CC：演示持股数量与可卖数量均为该合约的 `multiplier`，支持一张覆盖；
+- CC 演示 `average_cost` 使用本轮权威正股现价；
 - 演示已有期权仓位、现金占用和股票锁定均为零；
 - Combo Yield `sp_lc`：提供一组组合所需的单组演示资金容量；
 - Combo Yield `cc_lp`：提供一个 `multiplier` 的演示持股和一组组合所需容量；
@@ -216,7 +216,7 @@ flowchart TD
     H -- 市场关闭 --> I["market_closed"]
     H -- 必要证据不可用 --> J["data_unavailable"]
     H -- 可继续 --> K["提供单合约演示容量"]
-    K --> L["复用 Candidate Engine<br/>Sell Put、Covered Call、Combo Yield"]
+    K --> L["复用 Candidate Engine<br/>CSP、CC、Combo Yield"]
     L --> M{"是否存在未完成范围？"}
     M -- 是 --> N["partial_data<br/>显示候选或淘汰摘要及证据缺口"]
     M -- 否 --> O{"候选数量大于零？"}
@@ -234,14 +234,14 @@ flowchart TD
 
 ## 8. 策略范围
 
-### 8.1 Sell Put
+### 8.1 CSP
 
-体验模式执行正式 Sell Put 行情、流动性、收益、波动率、事件和排名规则，并展示一张合约的完整
+体验模式执行正式 CSP 行情、流动性、收益、波动率、事件和排名规则，并展示一张合约的完整
 指派资金要求。演示现金仅用于让正式容量公式完成，不产生真实账户容量结论。
 
-### 8.2 Covered Call
+### 8.2 CC
 
-体验模式执行正式 Covered Call 行情、流动性、收益、波动率、事件、sale floor 和排名规则。
+体验模式执行正式 CC 行情、流动性、收益、波动率、事件、sale floor 和排名规则。
 演示场景提供一张合约的覆盖股数；`average_cost=本轮正股现价` 是明确的演示假设，不得展示为
 broker 成本。
 
@@ -250,8 +250,8 @@ broker 成本。
 体验模式覆盖正式启用的 Combo Yield 变体，复用其现有 leg、组合、容量、过滤和排序合同。
 演示场景只保证单个候选组合可完成容量评估，不表示多个组合能够同时开立。
 
-Combo 的开仓容量门槛继承组合中的对应短腿：`sp_lc` 继承 Sell Put 的现金容量，`cc_lp` 继承
-Covered Call 的股票覆盖容量。组合 premium、成本、收益、风险和 `cash_required` 等经济指标仍由
+Combo 的开仓容量门槛继承组合中的对应短腿：`sp_lc` 继承 CSP 的现金容量，`cc_lp` 继承
+CC 的股票覆盖容量。组合 premium、成本、收益、风险和 `cash_required` 等经济指标仍由
 现有 Combo owner 根据完整组合计算，不要求与单腿经济指标相等，也不得在组合层另建容量口径。
 
 Combo 所有期权腿必须使用现有 required-data 链路取得的当轮正式 bid/ask。任一必要报价缺失或
@@ -284,7 +284,7 @@ Wheel 明确不纳入体验模式。体验模式产生的候选不会创建交�
 
 ### 10.1 产品成功标准
 
-- 一次公共入口运行能够执行 Sell Put、Covered Call 和 Combo Yield 候选链路；
+- 一次公共入口运行能够执行 CSP、CC 和 Combo Yield 候选链路；
 - REAL 配置、定时入口或缺少 `--no-send` 的请求在扫描前被拒绝；
 - 三种策略继续经过现有策略 owner 和 Candidate Engine；
 - 输出完整展示体验模式、演示容量来源和不可执行声明；
@@ -298,7 +298,7 @@ Wheel 明确不纳入体验模式。体验模式产生的候选不会创建交�
 - 体验结果不得把账户现金、持仓、期权占用或 physical account authority 缺失报告为数据缺口；
 - `partial_data`、`data_unavailable` 和 `market_closed` 不得伪装成 `no_candidate`；
 - `invalid_request` 在候选扫描前拒绝，且不写入正式候选状态；
-- Covered Call 明确使用一张合约的演示覆盖和现价成本假设；
+- CC 明确使用一张合约的演示覆盖和现价成本假设；
 - Combo Yield 明确按单个候选组合独立评估；
 - Wheel 不执行、不产出候选、不创建任何生命周期事实；
 - fake/spy 验证除 `get_acc_list()` 元数据读取外，账户资金、持仓、订单、成交查询以及通知、broker
@@ -310,7 +310,7 @@ Wheel 明确不纳入体验模式。体验模式产生的候选不会创建交�
 
 | ID | 场景 | 输入与操作 | 预期结果 |
 |---|---|---|---|
-| AC-01 | 正常有候选 | SIMULATE 配置通过手动体验入口运行完整行情 | Sell Put、Covered Call、Combo Yield 均经过正式链路并形成 `candidates_found` 体验结果 |
+| AC-01 | 正常有候选 | SIMULATE 配置通过手动体验入口运行完整行情 | CSP、CC、Combo Yield 均经过正式链路并形成 `candidates_found` 体验结果 |
 | AC-02 | 正常无候选 | 行情与证据完整，但全部合约未通过正式门槛 | 返回 `no_candidate`、保持零候选并展示主要淘汰原因，不放宽规则 |
 | AC-03 | 数据异常或休市 | 分别提供部分证据、必要证据缺失、Combo 必要 bid/ask 缺失和市场关闭场景 | 分别保持正式的 `partial_data`、`data_unavailable`、`market_closed` 或合约拒绝语义，不得降级为 `no_candidate`；`partial_data` 同时展示已完成范围的候选或淘汰摘要与未完成范围的证据缺口，且原因中不出现账户资产或 authority 缺失；Combo 不使用零价、中间价或模型价补齐 |
 | AC-04 | 请求无效 | 使用 REAL 配置、缺少 `--no-send` 或从定时入口请求体验模式 | 在扫描前拒绝，不生成正式候选状态、快照或体验报告 |
@@ -333,7 +333,7 @@ Wheel 明确不纳入体验模式。体验模式产生的候选不会创建交�
 
 ### 12.1 可行性结论
 
-需求可落地，整体风险为中等。现有 `run tick`、行情预取、Sell Put、Covered Call、Combo Yield
+需求可落地，整体风险为中等。现有 `run tick`、行情预取、CSP、CC、Combo Yield
 和 Candidate Engine 均可复用；不需要第二套扫描器、模拟持仓模型、新配置字段或可编辑的虚拟资产。
 
 不能把本需求实现成 Candidate Engine 的一个通用“跳过容量校验”开关，也不能伪造
@@ -364,16 +364,16 @@ Wheel 明确不纳入体验模式。体验模式产生的候选不会创建交�
 
 ### 12.4 容量与策略复用
 
-- Sell Put：在现有逐候选现金容量入口提供 `strike * multiplier` 的演示可用现金，得到一张容量；
-- Covered Call：必须在现有逐合约覆盖计算入口按该合约的 `multiplier` 提供演示持股和可卖数量，
+- CSP：在现有逐候选现金容量入口提供 `strike * multiplier` 的演示可用现金，得到一张容量；
+- CC：必须在现有逐合约覆盖计算入口按该合约的 `multiplier` 提供演示持股和可卖数量，
   不能用固定 100 股，因为不同合约 multiplier 不一定相同；
-- Covered Call 的演示成本在本轮正股现价可用后生成，不在行情预取前伪造；
-- Combo Yield：`sp_lc` 的容量门槛复用 Sell Put 演示现金，`cc_lp` 的容量门槛复用 Covered Call
+- CC 的演示成本在本轮正股现价可用后生成，不在行情预取前伪造；
+- Combo Yield：`sp_lc` 的容量门槛复用 CSP 演示现金，`cc_lp` 的容量门槛复用 CC
   演示覆盖；组合经济指标继续由现有 Combo owner 根据完整组合计算，不与单腿经济指标强制相等；
 - Candidate Engine 的现金、覆盖、流动性、收益、风险和排名规则保持不变。
 
-Covered Call 当前会在行情预取前因缺少正式持仓 authority 被裁掉。体验模式需要让配置中的
-Covered Call 和 `cc_lp` 标的进入行情预取，但只把它们标记为“待生成演示覆盖”，不能伪装成已持仓。
+CC 当前会在行情预取前因缺少正式持仓 authority 被裁掉。体验模式需要让配置中的
+CC 和 `cc_lp` 标的进入行情预取，但只把它们标记为“待生成演示覆盖”，不能伪装成已持仓。
 
 ### 12.5 输出合同
 
@@ -401,7 +401,7 @@ executable=false
 - 一个 broker spy 证明除 `get_acc_list()` 外，资金、持仓、订单和成交调用均为零；
 - 一个 `get_acc_list()` 故障注入证明账户显示降级、审计原因明确且候选扫描继续；
 - 一个副作用 spy 证明通知、trade intake、正式 ledger、lifecycle 和 broker 写调用均为零；
-- Sell Put、Covered Call、`sp_lc`、`cc_lp` 各保留一个容量断言，Wheel 保留一个不进入链路的断言；
+- CSP、CC、`sp_lc`、`cc_lp` 各保留一个容量断言，Wheel 保留一个不进入链路的断言；
 - 一个 Combo 报价完整性断言证明必要 bid/ask 缺失或非正数时 fail closed，且没有零价、中间价或
   模型价回退；
 - 一个状态原因断言证明体验模式的 `partial_data` 和 `data_unavailable` 不包含现金、持仓、期权占用
