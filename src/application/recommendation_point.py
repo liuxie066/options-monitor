@@ -1219,9 +1219,9 @@ def build_recommendation_point(
         and row.get("candidate_owner") == "opening"
     ]
     if not sell_put_scopes:
-        _fail("official_point_unavailable", "terminal Sell Put scope is unavailable")
+        _fail("official_point_unavailable", "terminal CSP scope is unavailable")
     if any(row.get("market") != market for row in sell_put_scopes):
-        _fail("official_point_invalid", "Sell Put scope market does not match")
+        _fail("official_point_invalid", "CSP scope market does not match")
 
     put_results = [
         row
@@ -1229,7 +1229,7 @@ def build_recommendation_point(
         if isinstance(row, Mapping) and row.get("strategy_mode") == "put"
     ]
     if len(put_results) != 1:
-        _fail("official_point_invalid", "Sell Put strategy result is invalid")
+        _fail("official_point_invalid", "CSP strategy result is invalid")
     aggregate_status = str(put_results[0].get("strategy_status") or "")
     try:
         incomplete_put = any(
@@ -1242,9 +1242,9 @@ def build_recommendation_point(
             if row.get("strategy_mode") == "put"
         ]
     except (KeyError, TypeError, ValueError, OpeningCandidateSnapshotError) as exc:
-        _fail("official_point_invalid", f"Sell Put producer facts are invalid: {exc}")
+        _fail("official_point_invalid", f"CSP producer facts are invalid: {exc}")
     if len(accepted_ids) != len(set(accepted_ids)):
-        _fail("official_point_invalid", "Sell Put candidate IDs are duplicated")
+        _fail("official_point_invalid", "CSP candidate IDs are duplicated")
     if aggregate_status == "data_unavailable":
         point_status = "data_unavailable"
     elif incomplete_put:
@@ -1252,7 +1252,7 @@ def build_recommendation_point(
     elif aggregate_status in _TERMINAL_STATUSES:
         point_status = aggregate_status
     else:
-        _fail("official_point_invalid", "Sell Put terminal status is unsupported")
+        _fail("official_point_invalid", "CSP terminal status is unsupported")
 
     formal = required_data_manifest is not None
     if formal and (prepared_option_receipt is None or required_data_entries is None):
@@ -1399,7 +1399,7 @@ def validate_recommendation_point(
         _fail("official_point_invalid", "recommendation point identity does not match")
     status = item["terminal_sell_put_status"]
     if status not in _TERMINAL_STATUSES:
-        _fail("official_point_invalid", "terminal Sell Put status is invalid")
+        _fail("official_point_invalid", "terminal CSP status is invalid")
     for field in (
         "account_config_sha256",
         "strategy_policy_sha256",

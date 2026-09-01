@@ -40,9 +40,9 @@ def test_notify_symbols_markdown_put_layout() -> None:
 """
     out = _render_legacy("", alerts, account_label="LX")
 
-    expected = """Put
+    expected = """CSP
 
-**[lx] 腾讯｜卖Put｜2026-04-29 460P**
+**[lx] 腾讯｜CSP｜2026-04-29 460P**
 收益｜权利金=5.720 (HKD) | 年化 17.21% | 净收 557
 合约｜行权价=460 | 数量=1张(默认) | DTE=26
 风控｜风险=中性 | delta=-0.23 | IV=缺失(告警未提供iv)
@@ -77,7 +77,7 @@ def test_notify_symbols_markdown_put_layout_missing_fields_have_reasons() -> Non
     assert "行权价=156" in out
     assert "年化 缺失(告警未提供年化)" in out
     assert "保证金占用=缺失(告警未提供cash_req_cny/cash_req)" in out
-    assert "同标的Sell Put占用" not in out
+    assert "同标的CSP占用" not in out
     assert "delta=缺失(告警未提供delta)" in out
     assert "IV=缺失(告警未提供iv)" in out
 
@@ -87,7 +87,7 @@ def test_notify_symbols_markdown_call_layout_ignores_changes_input() -> None:
     alerts = """# Symbols Alerts
 
 ## 高优先级
-- [英伟达](NVDA) | sell_call | 2026-06-18 180C | 年化 12.30% | 净收入 240.40 | DTE 44 | Strike 180 | 保守 | ccy USD | ask 2.500 | bid 2.300 | mid 2.400 | delta 0.16 | cover 2 | shares 200(-0) | 已通过准入，可作为 Covered Call 备选。
+- [英伟达](NVDA) | sell_call | 2026-06-18 180C | 年化 12.30% | 净收入 240.40 | DTE 44 | Strike 180 | 保守 | ccy USD | ask 2.500 | bid 2.300 | mid 2.400 | delta 0.16 | cover 2 | shares 200(-0) | 已通过准入，可作为 CC 备选。
 """
     changes = """# Symbols Changes
 
@@ -95,7 +95,7 @@ def test_notify_symbols_markdown_call_layout_ignores_changes_input() -> None:
 """
     out = _render_legacy(changes, alerts, account_label="SY")
 
-    assert "**[sy] 英伟达｜Covered Call｜2026-06-18 180C**" in out
+    assert "**[sy] 英伟达｜CC｜2026-06-18 180C**" in out
     assert "数量=2张(可覆盖)" in out
     assert "持仓｜总股数=200 | 已占用=0 | 可用=200 | 可覆盖=2张" in out
     assert "变化" not in out
@@ -107,7 +107,7 @@ def test_notify_symbols_markdown_call_layout_missing_fields_have_reasons() -> No
     alerts = """# Symbols Alerts
 
 ## 高优先级
-- NVDA | sell_call | 2026-06-18 180C | 年化 - | 净收入 240.40 | DTE 44 | Strike nan | 保守 | ccy USD | ask 2.500 | bid 2.300 | mid 2.400 | delta nan | cover nan | shares nan | 已通过准入，可作为 Covered Call 备选。
+- NVDA | sell_call | 2026-06-18 180C | 年化 - | 净收入 240.40 | DTE 44 | Strike nan | 保守 | ccy USD | ask 2.500 | bid 2.300 | mid 2.400 | delta nan | cover nan | shares nan | 已通过准入，可作为 CC 备选。
 """
     out = _render_legacy("", alerts, account_label="SY")
 
@@ -142,7 +142,7 @@ def test_notify_symbols_markdown_put_chain_uses_upstream_fields_when_available()
     )
 
     assert "保证金占用=¥110,720 (CNY)" in out
-    assert "同标的Sell Put占用" not in out
+    assert "同标的CSP占用" not in out
     assert "delta=-0.23" in out
     assert "IV=41.00%" in out
     assert "告警未提供cash_req_cny/cash_req" not in out
@@ -206,7 +206,7 @@ def test_notify_symbols_markdown_put_chain_shows_same_symbol_usage_from_summary_
     )
 
     assert "保证金占用=¥32,715 (CNY)" in out
-    assert "同标的Sell Put占用=¥45,000" in out
+    assert "同标的CSP占用=¥45,000" in out
 
 
 def test_notify_symbols_markdown_put_chain_uses_total_cny_cash_guard_for_alert_engine() -> None:
@@ -308,7 +308,7 @@ def test_notify_symbols_markdown_put_shows_same_symbol_position_usage() -> None:
 """
     out = _render_legacy("", alerts, account_label="LX")
 
-    assert "同标的Sell Put占用=¥45,000" in out
+    assert "同标的CSP占用=¥45,000" in out
 
 
 def test_notify_symbols_markdown_put_chain_shows_linked_call_hint() -> None:
@@ -345,7 +345,7 @@ def test_notify_symbols_markdown_put_chain_shows_linked_call_hint() -> None:
     assert "净权利金=145.33" in out
     assert "场景评分=4.58%" in out
     assert "目标收益" not in out
-    assert "全账户Sell Put占用" not in out
+    assert "全账户CSP占用" not in out
 
 
 def test_notify_symbols_markdown_combo_yield_layout() -> None:
@@ -573,17 +573,17 @@ def test_build_notification_keeps_per_strategy_capacity() -> None:
     ]
     call_line = (
         "- CALL1 | sell_call | 2026-06-19 180C | 年化 9.00% | 净收入 90.00 | "
-        "DTE 30 | Strike 180 | 保守 | ccy USD | mid 1.000 | cover 1 | shares 100(-0) | 已通过准入，可作为 Covered Call 备选。"
+        "DTE 30 | Strike 180 | 保守 | ccy USD | mid 1.000 | cover 1 | shares 100(-0) | 已通过准入，可作为 CC 备选。"
     )
     alerts = "# Symbols Alerts\n\n## 高优先级\n" + "\n".join(put_lines + [call_line]) + "\n"
 
     out = _render_legacy("", alerts, account_label="LX")
 
-    assert out.count("｜卖Put｜") == 5
+    assert out.count("｜CSP｜") == 5
     assert "PUT5" in out
     assert "PUT6" not in out
     assert "CALL1" in out
-    assert out.count("｜Covered Call｜") == 1
+    assert out.count("｜CC｜") == 1
 
 
 def test_build_notification_keeps_medium_strategy_when_high_exists() -> None:
@@ -595,7 +595,7 @@ def test_build_notification_keeps_medium_strategy_when_high_exists() -> None:
     )
     medium_call = (
         "- MSFT | sell_call | 2026-06-19 430C | 年化 6.50% | 净收入 80.00 | "
-        "DTE 30 | Strike 430 | 保守 | ccy USD | mid 0.800 | cover 1 | shares 100(-0) | 已通过准入，可作为 Covered Call 备选。"
+        "DTE 30 | Strike 430 | 保守 | ccy USD | mid 0.800 | cover 1 | shares 100(-0) | 已通过准入，可作为 CC 备选。"
     )
     alerts = (
         "# Symbols Alerts\n\n"
@@ -609,5 +609,4 @@ def test_build_notification_keeps_medium_strategy_when_high_exists() -> None:
 
     assert "NVDA" in out
     assert "MSFT" in out
-    assert out.index("Put") < out.index("Call")
-
+    assert out.index("CSP") < out.index("CC")

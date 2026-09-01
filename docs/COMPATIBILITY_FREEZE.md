@@ -29,7 +29,7 @@ recorder 包装和 Top1 产品壳已退役，不再列为冻结兼容面。当�
 
 以下生产核继续演进，但不得再建平行实现：
 
-- Candidate Engine、Sell Put / Covered Call / Combo Yield steps；
+- Candidate Engine、Cash-Secured Put (CSP) / Covered Call (CC) / Combo Yield steps；
 - Daily Brief service、repository、renderer；
 - ledger commands、queries、projection；
 - trade intake / lifecycle（migration 与 backfill 除外）；

@@ -680,7 +680,7 @@ VIEW_SPECS: dict[str, dict[str, Any]] = _build_view_specs({
         "alias_of": "assigned_stock_sales",
     },
     "assigned_stock_lifecycle": {
-        "description": "Sell Put assignment stock lots with stock PnL and lifecycle PnL",
+        "description": "CSP assignment stock lots with stock PnL and lifecycle PnL",
         "fields": (
             "account",
             "symbol",

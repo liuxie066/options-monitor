@@ -61,7 +61,7 @@ def validate_min_strike_cost_multiplier(value, *, source: str) -> float:
 
 
 def resolve_effective_sell_call_min_strike(*, min_strike, avg_cost, cost_multiplier=1.02) -> float | None:
-    """Covered Call strike floor: never recommend selling below stock cost."""
+    """CC strike floor: never recommend selling below stock cost."""
     configured = _optional_positive_float(min_strike)
     multiplier = _optional_positive_float(cost_multiplier) or 1.02
     cost_value = _optional_positive_float(avg_cost)

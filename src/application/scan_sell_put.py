@@ -115,7 +115,7 @@ def run_sell_put_scan(
     required_data_frames: Mapping[str, pd.DataFrame] | None = None,
 ) -> pd.DataFrame:
     """计算卖出看跌期权候选，并返回类型化内存结果。"""
-    # Kept in the public Python/CLI surface for compatibility only. Sell Put
+    # Kept in the public Python/CLI surface for compatibility only. CSP
     # deliberately treats OI as ranking evidence and volume as display-only;
     # neither value is a hard eligibility gate.
     del min_open_interest, min_volume
@@ -159,7 +159,7 @@ def run_sell_put_scan(
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run Sell Put scan on required_data CSV files")
+    parser = argparse.ArgumentParser(description="Run Cash-Secured Put (CSP) scan on required_data CSV files")
     parser.add_argument("--symbols", nargs="+", required=True)
     parser.add_argument("--min-dte", type=int, default=DEFAULT_SELL_PUT_WINDOW.min_dte)
     parser.add_argument("--max-dte", type=int, default=DEFAULT_SELL_PUT_WINDOW.max_dte)
@@ -167,8 +167,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--min-net-income", type=float, default=50.0)
     parser.add_argument("--min-strike", type=float, default=None)
     parser.add_argument("--max-strike", type=float, default=None)
-    parser.add_argument("--min-open-interest", type=float, default=None, help="deprecated compatibility option; ignored by Sell Put")
-    parser.add_argument("--min-volume", type=float, default=None, help="deprecated compatibility option; ignored by Sell Put")
+    parser.add_argument("--min-open-interest", type=float, default=None, help="deprecated compatibility option; ignored by CSP")
+    parser.add_argument("--min-volume", type=float, default=None, help="deprecated compatibility option; ignored by CSP")
     parser.add_argument("--max-spread-ratio", type=float, default=DEFAULT_CANDIDATE_LIQUIDITY.max_spread_ratio)
     parser.add_argument("--input-root", default=None, help="Input root containing parsed/ required_data CSVs (default: output_shared/required_data)")
     return parser.parse_args(argv)

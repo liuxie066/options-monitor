@@ -559,7 +559,7 @@ def calculate_opening_candidate_metrics(
         if net_cash_basis <= 0:
             raise CandidateCalculationError(
                 "net_cash_basis_non_positive",
-                "sell put net cash basis must be positive",
+                "CSP net cash basis must be positive",
                 metric_value=net_cash_basis,
                 threshold=0,
             )
@@ -753,9 +753,9 @@ def evaluate_opening_candidate_policy(
                 stage=STAGE_HARD_CONSTRAINTS,
                 reason=REJECT_HARD_CAPACITY_PUT,
                 message=(
-                    f"sell put capacity below one contract: {capacity_reason}"
+                    f"CSP capacity below one contract: {capacity_reason}"
                     if capacity_reason
-                    else "sell put capacity below one contract or unavailable"
+                    else "CSP capacity below one contract or unavailable"
                 ),
                 metric_value=max_new_contracts,
                 threshold=1,
@@ -771,7 +771,7 @@ def evaluate_opening_candidate_policy(
                 rejects,
                 stage=STAGE_HARD_CONSTRAINTS,
                 reason=REJECT_HARD_CAPACITY_CALL,
-                message="covered call capacity below one contract or unavailable",
+                message="CC capacity below one contract or unavailable",
                 metric_value=covered_contracts,
                 threshold=1,
             )
@@ -1496,10 +1496,10 @@ def rank_candidate_rows(
     mode_norm = normalize_strategy_mode(mode)
     if sell_put_ranking_profile not in SELL_PUT_RANKING_PROFILES:
         raise ValueError(
-            f"unsupported Sell Put ranking profile: {sell_put_ranking_profile}"
+            f"unsupported CSP ranking profile: {sell_put_ranking_profile}"
         )
     if mode_norm == "call" and sell_put_ranking_profile != "current_tie_break":
-        raise ValueError("Sell Put ranking profiles cannot rank Covered Call rows")
+        raise ValueError("CSP ranking profiles cannot rank CC rows")
     if (
         isinstance(near_return_threshold, bool)
         or not isinstance(near_return_threshold, (int, float))

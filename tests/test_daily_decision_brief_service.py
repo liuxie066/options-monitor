@@ -1558,8 +1558,8 @@ def test_close_advice_daily_brief_selects_only_close_state(tmp_path: Path) -> No
         "HOLD": False,
         "GAP": False,
     }
-    assert "FIRST｜Sell Put｜08-21 $100 Put｜建议平仓" in message
-    assert "SECOND｜Sell Put｜08-21 $101 Put｜建议平仓" in message
+    assert "FIRST｜CSP｜08-21 $100 Put｜建议平仓" in message
+    assert "SECOND｜CSP｜08-21 $101 Put｜建议平仓" in message
     assert "HOLD" not in message
     assert "GAP" not in message
     assert "汇总｜共 4 条，需处理 2 条。" in message
@@ -1762,7 +1762,7 @@ def test_close_advice_daily_brief_honors_ranked_account_limit(
         "FIRST": True,
         "THIRD": False,
     }
-    assert "FIRST｜Sell Put｜08-21 $100 Put｜建议平仓" in message
+    assert "FIRST｜CSP｜08-21 $100 Put｜建议平仓" in message
     assert "SECOND" not in message
     assert "THIRD" not in message
     assert "汇总｜共 3 条，需处理 1 条。" in message
@@ -2055,7 +2055,7 @@ def test_partial_frozen_scope_warns_without_erasing_valid_candidate(
         and item.get("reason_code") == "term_matched_rv_unavailable"
         for item in brief["data_gaps"]
     )
-    assert "AAPL Covered Call｜期限匹配的已实现波动率（RV）证据不可用，候选结果不完整" in (
+    assert "AAPL CC｜期限匹配的已实现波动率（RV）证据不可用，候选结果不完整" in (
         render_full_brief(brief)
     )
 
@@ -2405,7 +2405,7 @@ def test_sell_put_conflict_uses_only_labeled_candidates(tmp_path: Path) -> None:
 
     assert "0700_P450_RAW_ONLY" not in render_full_brief(brief)
     assert "有效行动 2 条" in brief["strategy_summary"]
-    assert "候选证据：Sell Put 2，Covered Call 0，Combo Yield 0" in brief["strategy_summary"]
+    assert "候选证据：CSP 2，CC 0，Combo Yield 0" in brief["strategy_summary"]
     assert not any(item["path"].endswith("_sell_put_candidates.csv") for item in brief["source_artifacts"])
 
 
@@ -2574,11 +2574,11 @@ def test_strategy_step_failure_preserves_other_candidates_and_warns_user(tmp_pat
     assert any(item.get("contract_symbol") == "NVDA_CALL_VALID" for item in brief["actions"])
     assert not any(item.get("contract_symbol") == "STALE_PUT" for item in brief["actions"])
     assert brief["candidates"]["sell_put"] == []
-    assert "NVDA Sell Put 扫描失败，本轮无结果" in message
-    assert "补充｜NVDA Sell Put 扫描失败，未纳入本轮候选" in message
+    assert "NVDA CSP 扫描失败，本轮无结果" in message
+    assert "补充｜NVDA CSP 扫描失败，未纳入本轮候选" in message
     assert "本轮结果不完整" not in message
     assert "NVDA_CALL_VALID" not in message
-    assert "Covered Call" in message
+    assert "CC" in message
 
 
 def test_strategy_step_failure_reminders_list_each_failed_symbol(tmp_path: Path) -> None:
@@ -2612,9 +2612,9 @@ def test_strategy_step_failure_reminders_list_each_failed_symbol(tmp_path: Path)
     brief = _assemble(tmp_path)
     message = render_fixed_report(brief)
 
-    assert message.count("SPCX Sell Put 扫描失败，本轮无结果") == 1
-    assert "XYZ Sell Put 扫描失败，本轮无结果" in message
-    assert "补充｜SPCX、XYZ Sell Put 扫描失败，未纳入本轮候选" in message
+    assert message.count("SPCX CSP 扫描失败，本轮无结果") == 1
+    assert "XYZ CSP 扫描失败，本轮无结果" in message
+    assert "补充｜SPCX、XYZ CSP 扫描失败，未纳入本轮候选" in message
     assert "本轮结果不完整" not in message
 
 
@@ -2643,8 +2643,8 @@ def test_strategy_step_failure_empty_summary_points_to_reminders(tmp_path: Path)
 
     assert (
         view["candidate_empty_summary"]
-        == "本轮暂无符合条件的候选；SPCX、XYZ Sell Put 扫描失败。"
+        == "本轮暂无符合条件的候选；SPCX、XYZ CSP 扫描失败。"
     )
-    assert "SPCX Sell Put 扫描失败，本轮无结果" in view["reminders"]
-    assert "XYZ Sell Put 扫描失败，本轮无结果" in view["reminders"]
+    assert "SPCX CSP 扫描失败，本轮无结果" in view["reminders"]
+    assert "XYZ CSP 扫描失败，本轮无结果" in view["reminders"]
     assert not any("本轮结果不完整" in item for item in view["reminders"])

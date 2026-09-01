@@ -130,7 +130,7 @@ JSON
 - `lifecycle_pnl_net` 存在，且 `capital_days > 0`。
 - `fee_basis` 为 `actual`、`estimated` 或 `mixed`，并且
   `fee_missing_components` 为空。
-- Covered Call 的 lot allocation 不能是 `unallocated`、`mixed`、
+- Covered Call (CC) 的 lot allocation 不能是 `unallocated`、`mixed`、
   `ambiguous` 或 `missing`。
 
 Settlement 会把这些生命周期字段从 candidate/mark evidence 传播到
@@ -451,8 +451,8 @@ Put-only baseline、资本天数、路径回撤和非概率加权的提前指派
 - `outcome_gaps`：把缺失 outcome 分成 `ready_to_settle`、`needs_mark` 和 `blocked`，并给出 blocker 计数与样例；缺少完整合约身份的元数据行单独计入 `identity_missing_candidate_count`。`data_plan` 和 `review_queue` 会携带同一摘要，避免对不可恢复数据反复执行 settle。
 - `path_risk.by_status`：accepted / rejected 的最大浮亏和路径样本数量。
 - `outcome_stats.by_status`：accepted 与 rejected 的 PnL、胜率、损失次数。
-- `insurance_metrics`：把 Sell Put / Covered Call 当作承保组合复盘；接货/被叫走必须使用完整生命周期 PnL，缺失时不回退单腿期权 PnL。除保费、loss ratio、资本占用和路径最大浮亏外，至少 30 个且达到 `min_sample` 的资金回报样本后才输出经验 90% CVaR（越负越差）。
-- `wheel_lifecycle_risk`：按账户和标的汇总 Sell Put 的单张候选接货义务、接货后标的/账户暴露，以及 Covered Call 的已锁定和单张候选可能叫走股数。候选 strike 是替代场景，不会相加成实际仓位；缺现金、NAV 或持股上下文时输出 `not_evaluable`，该汇总不参与生产过滤。
+- `insurance_metrics`：把 Cash-Secured Put (CSP) / CC 当作承保组合复盘；接货/被叫走必须使用完整生命周期 PnL，缺失时不回退单腿期权 PnL。除保费、loss ratio、资本占用和路径最大浮亏外，至少 30 个且达到 `min_sample` 的资金回报样本后才输出经验 90% CVaR（越负越差）。
+- `wheel_lifecycle_risk`：按账户和标的汇总 CSP 的单张候选接货义务、接货后标的/账户暴露，以及 CC 的已锁定和单张候选可能叫走股数。候选 strike 是替代场景，不会相加成实际仓位；缺现金、NAV 或持股上下文时输出 `not_evaluable`，该汇总不参与生产过滤。
 - `outcome_by_bucket`：DTE、Delta、IV/RV、Spread、集中度各区间的表现。
 - `close_decision_readiness`：close facet 的 episode、point-in-time、费用、窗口和 terminal lifecycle 覆盖；它是机械 evidence gate，不是生产策略授权。
 - Close facet 只保留 `strict_profit_capture.v1` 的正式决策、mark、outcome 和机械就绪度；不再重建 P0/P1/P2/P3，不输出替代策略比较、policy winner 或自动晋级结论。
