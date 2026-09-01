@@ -38,8 +38,8 @@ from src.application.opening_candidate_snapshot import (
     validate_opening_candidate_snapshot,
 )
 from src.application.prepared_option_positions_context import (
-    PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA_V2,
-    PREPARED_OPTION_POSITIONS_MANIFEST_NAME_V2,
+    PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA,
+    PREPARED_OPTION_POSITIONS_MANIFEST_NAME,
     PreparedOptionPositionsContextError,
     cny_per_currency_rates_from_option_context,
     find_prepared_option_positions_manifest,
@@ -332,7 +332,7 @@ def _opening_snapshot_ref(run_id: str, account: str) -> str:
 def _option_market_evidence_ref(run_id: str, account: str) -> str:
     return (
         f"output_runs/{run_id}/accounts/{account}/state/"
-        f"{PREPARED_OPTION_POSITIONS_MANIFEST_NAME_V2}"
+        f"{PREPARED_OPTION_POSITIONS_MANIFEST_NAME}"
     )
 
 
@@ -524,7 +524,7 @@ def _prepared_option_binding(
         )
     if (
         manifest.get("schema_version")
-        != PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA_V2
+        != PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA
         or manifest.get("status") != "ready"
         or manifest.get("run_id") != run_id
         or manifest.get("account") != account

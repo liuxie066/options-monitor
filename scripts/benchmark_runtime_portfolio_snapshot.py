@@ -140,8 +140,8 @@ CURRENT_STATE_10X = {
 
 # Re-pinned only after both profiles pass all real owner validators.
 EXPECTED_FIXTURE_PAYLOAD_SHA256 = {
-    "current_scale": "344f3d943f56981174974f64cd5965a5345d057d1a7dfe1aabfa33379d17d4f7",
-    "current_state_10x": "8e057aa0dc95b4af636ef50bfcd9905f691961cc9c3e08f660a0d36096ec4e09",
+    "current_scale": "749ea27d7f7796469dfb4cd5371a255a5bd62141b30960d4c5bbe9046c79b0e7",
+    "current_state_10x": "7cb932b02ed81d096370ef52581374ee2632a9a02d368c78c02975c455260f15",
 }
 
 _H = {
