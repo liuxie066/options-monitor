@@ -1141,6 +1141,7 @@ def test_process_payload_records_receipt_state_after_applied(tmp_path: Path) -> 
 
     writes: list[dict] = []
     events: list[dict] = []
+    receipt_results: list[dict] = []
 
     out = process_trade_payload(
         {"deal_id": "deal-receipt-1"},
@@ -1156,10 +1157,16 @@ def test_process_payload_records_receipt_state_after_applied(tmp_path: Path) -> 
         enrich_trade_payload_fn=None,
         normalize_trade_deal_fn=lambda payload, futu_account_mapping=None: deal,
         resolve_trade_deal_fn=lambda *_args, **_kwargs: _Result(),
-        on_result_fn=lambda _context: {"status": "sent", "delivery_confirmed": True, "message_id": "msg-1"},
+        before_receipt_fn=lambda result: {
+            **result,
+            "combo_reconciliation": {"status": "reconciled"},
+        },
+        on_result_fn=lambda context: receipt_results.append(context["result"])
+        or {"status": "sent", "delivery_confirmed": True, "message_id": "msg-1"},
     )
 
     assert out["receipt"]["status"] == "sent"
+    assert receipt_results[0]["combo_reconciliation"]["status"] == "reconciled"
     receipt = writes[-1]["processed_deal_ids"][
         "futu:lx:REAL_1:deal-receipt-1"
     ]["receipt"]
