@@ -181,7 +181,6 @@ def _trade_intake_summary(state_json: dict[str, Any], status_json: dict[str, Any
 def _trade_intake_reconciliation_summary(
     *,
     state_path: Path,
-    audit_path: Path,
     ledger_store: dict[str, Any],
 ) -> dict[str, Any]:
     sqlite_path_raw = ledger_store.get("sqlite_path")
@@ -198,7 +197,6 @@ def _trade_intake_reconciliation_summary(
     try:
         preview = preview_trade_intake_reconciliation_from_sqlite(
             state_path=state_path,
-            audit_path=audit_path,
             sqlite_path=Path(str(sqlite_path_raw)).expanduser(),
         )
     except Exception as exc:
@@ -2209,7 +2207,6 @@ def private_runtime_status_tool(
                 source_summary.update(
                     _trade_intake_reconciliation_summary(
                         state_path=source_state_path,
-                        audit_path=source_audit_path,
                         ledger_store=ledger_store,
                     )
                 )
@@ -2273,15 +2270,9 @@ def private_runtime_status_tool(
                 if payload.get("trade_intake_state_path")
                 else default_intake_state_path
             )
-            resolved_legacy_audit_path = (
-                _path_from_config(payload.get("trade_intake_audit_path"), base=base)
-                if payload.get("trade_intake_audit_path")
-                else default_intake_audit_path
-            )
             trade_intake_summary.update(
                 _trade_intake_reconciliation_summary(
                     state_path=resolved_legacy_state_path,
-                    audit_path=resolved_legacy_audit_path,
                     ledger_store=ledger_store,
                 )
             )

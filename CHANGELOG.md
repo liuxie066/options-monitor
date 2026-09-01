@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Bug Fixes
+- Stopped runtime quality refreshes from scanning complete historical trade-intake audit logs while preserving explicit reconciliation access to that evidence.
+
 ## 3.2.0 - 2026-09-01
 
 ### New Features
