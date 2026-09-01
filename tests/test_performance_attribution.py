@@ -67,17 +67,7 @@ def test_production_form_without_expiry_structure_keeps_none() -> None:
     assert resolved.attribution.expiry_structure is None
 
 
-def test_legacy_structure_mode_maps_to_expiry_structure() -> None:
-    staggered = _open_event(
-        raw_payload={
-            "strategy_snapshot": {
-                "strategy": "combo_yield",
-                "leg_role": "funding_put",
-                "strategy_group_id": "combo_yield:lx:pair-1",
-                "structure_mode": "staggered_expiry_pair",
-            }
-        }
-    )
+def test_structure_mode_maps_to_expiry_structure() -> None:
     same_expiry = _open_event(
         raw_payload={
             "strategy_snapshot": {
@@ -89,16 +79,11 @@ def test_legacy_structure_mode_maps_to_expiry_structure() -> None:
         }
     )
 
-    staggered_resolved = resolve_event_attribution(
-        staggered, lifecycle_source_id=lot_id_for_open_event(staggered)
-    )
     same_expiry_resolved = resolve_event_attribution(
         same_expiry, lifecycle_source_id=lot_id_for_open_event(same_expiry)
     )
 
-    assert staggered_resolved.issues == ()
-    assert staggered_resolved.attribution is not None
-    assert staggered_resolved.attribution.expiry_structure == "diagonal"
+    assert same_expiry_resolved.issues == ()
     assert same_expiry_resolved.attribution is not None
     assert same_expiry_resolved.attribution.expiry_structure == "same_expiry"
 

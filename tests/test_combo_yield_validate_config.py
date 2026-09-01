@@ -290,7 +290,7 @@ def test_validate_config_rejects_invalid_template_combo_yield_call_bounds() -> N
     assert "templates.put_base.combo_yield.call.min_strike" in str(exc)
 
 
-def test_validate_config_rejects_removed_staggered_expiry_gap_fields() -> None:
+def test_validate_config_rejects_staggered_expiry_gap_fields_as_unknown_keys() -> None:
     from src.application.config_validator import validate_config
 
     cfg = {
@@ -301,7 +301,7 @@ def test_validate_config_rejects_removed_staggered_expiry_gap_fields() -> None:
                 "sell_put": {"enabled": True, "min_dte": 20, "max_dte": 60},
                 "combo_yield": {
                     "enabled": True,
-                    "structure_mode": "staggered_expiry_pair",
+                    "structure_mode": "same_expiry_pair",
                     "min_expiry_gap_days": 30,
                     "max_expiry_gap_days": 90,
                 },
@@ -313,7 +313,8 @@ def test_validate_config_rejects_removed_staggered_expiry_gap_fields() -> None:
     with pytest.raises(SystemExit) as _caught:
         validate_config(cfg)
     exc = _caught.value
-    assert "has removed staggered-expiry gap fields" in str(exc)
+    assert "contains unsupported keys" in str(exc)
+    assert "min_expiry_gap_days" in str(exc)
 
 
 def test_validate_config_rejects_absolute_call_dte_for_combo_yield() -> None:

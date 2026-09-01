@@ -96,17 +96,31 @@ def normalize_combo_variant_spec(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_COMBO_VARIANT_ALLOWED_FIELDS = frozenset(
+    {
+        "variant_id",
+        "structure_mode",
+        "min_net_credit_retention",
+        "max_call_cost_to_put_credit",
+        "min_abs_call_delta",
+        "target_abs_call_delta",
+        "max_abs_call_delta",
+    }
+)
+
+
+def _reject_unknown_variant_keys(raw: dict[str, Any]) -> None:
+    unknown = sorted(str(key) for key in raw if str(key) not in _COMBO_VARIANT_ALLOWED_FIELDS)
+    if not unknown:
+        return
+    raise ValueError(
+        "Combo variant contains unsupported keys: "
+        f"{', '.join(unknown)}; Combo Yield supports same_expiry_pair only"
+    )
+
+
 def combo_research_policy_from_dict(raw: dict[str, Any]) -> ComboYieldResearchPolicy:
-    removed_gap_keys = [
-        key
-        for key in ("min_expiry_gap_days", "target_expiry_gap_days", "max_expiry_gap_days")
-        if key in raw
-    ]
-    if removed_gap_keys:
-        raise ValueError(
-            "Combo variant has removed staggered-expiry gap fields: "
-            f"{', '.join(removed_gap_keys)}; Combo Yield supports same_expiry_pair only"
-        )
+    _reject_unknown_variant_keys(raw)
     mode = text(raw.get("structure_mode")).lower()
     return ComboYieldResearchPolicy(
         variant_id=text(raw.get("variant_id")),
