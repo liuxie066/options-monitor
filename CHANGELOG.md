@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 3.3.1 - 2026-09-01
+
+### Improvements
+- Simplified the rebuilt Strategy Lab prepared option-position context to one canonical unversioned contract, removing obsolete compatibility handling.
+- Standardized product-facing option strategy terminology around Cash-Secured Put (CSP) and Covered Call (CC) while preserving internal persisted contracts.
+
+### Bug Fixes
+- Allowed Strategy Lab formal recommendation points to use sealed prepared position facts without requiring current-decision projection migration.
+- Prevented compact notifications from classifying Covered Call candidates as Puts.
+
 ## 3.3.0 - 2026-09-01
 
 ### New Features
