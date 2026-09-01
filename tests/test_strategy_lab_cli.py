@@ -45,7 +45,7 @@ def test_strategy_lab_help_exposes_phase3_confirmation_commands(
     assert raised.value.code == 0
     help_text = capsys.readouterr().out
     assert (
-            "{readiness,recipes,preview,confirm-research,preview-validation,"
+            "{readiness,canary,recipes,preview,confirm-research,preview-validation,"
             "confirm-validation,advance,status,research,receipt}" in help_text
     )
 
@@ -53,6 +53,46 @@ def test_strategy_lab_help_exposes_phase3_confirmation_commands(
         parse_args(["strategy-lab", "research", "--help"])
     assert research_help.value.code == 0
     assert "{execute}" in capsys.readouterr().out
+
+
+def test_canary_uses_light_context_one_clock_and_no_side_effects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.interfaces.cli.strategy_lab_ops as cli
+
+    profile_path, _fee_plan_path, context = _patch_read_only_context(monkeypatch, tmp_path)
+    clock_values = iter([NOW])
+    monkeypatch.setattr(cli, "_now_utc", lambda: next(clock_values))
+    monkeypatch.setattr(
+        cli,
+        "resolve_strategy_lab_context",
+        lambda _profile: pytest.fail("canary must not resolve ledger or OpenD context"),
+    )
+    runtime_calls: list[tuple[object, str]] = []
+
+    def resolve_runtime(profile: object, *, market: str) -> dict[str, object]:
+        runtime_calls.append((profile, market))
+        return context
+
+    monkeypatch.setattr(cli, "resolve_strategy_lab_runtime_context", resolve_runtime)
+    received: dict[str, object] = {}
+
+    def preview(fake_context: object, **kwargs: object) -> dict[str, object]:
+        received.update(context=fake_context, **kwargs)
+        return {"authoritative": False, "status": "blocked"}
+
+    monkeypatch.setattr(cli, "preview_engineering_canary", preview)
+
+    response = handle_strategy_lab_command(parse_args(["strategy-lab", "canary", "--profile-path", str(profile_path)]))
+
+    assert response["tool_name"] == "strategy-lab.canary"
+    assert response["data"] == {"authoritative": False, "status": "blocked"}
+    assert received == {"context": context, "occurred_at_utc": NOW}
+    assert runtime_calls == [({"path": str(profile_path)}, "hk")]
+    with pytest.raises(StopIteration):
+        next(clock_values)
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_recipes_freezes_one_clock_and_calls_only_service(
