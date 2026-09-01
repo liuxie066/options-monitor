@@ -51,33 +51,11 @@ from functools import partial
 _required_text = partial(required_text, error=lambda m: PreparedOptionPositionsContextError(m))
 
 
-PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA = "prepared_option_positions_context.v2"
-LEGACY_PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA = (
-    "prepared_option_positions_context.v1"
-)
+PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA = "prepared_option_positions_context"
 PREPARED_OPTION_POSITIONS_PAYLOAD_NAME = "option_positions_context.json"
-PREPARED_OPTION_POSITIONS_MANIFEST_NAME = (
-    "prepared_option_positions_context.v2.json"
-)
-LEGACY_PREPARED_OPTION_POSITIONS_MANIFEST_NAME = (
-    "prepared_option_positions_context.v1.json"
-)
-PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA_V1 = (
-    LEGACY_PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA
-)
-PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA_V2 = (
-    PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA
-)
-PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMAS = (
-    PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA_V1,
-    PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA_V2,
-)
-PREPARED_OPTION_POSITIONS_MANIFEST_NAME_V1 = (
-    LEGACY_PREPARED_OPTION_POSITIONS_MANIFEST_NAME
-)
-PREPARED_OPTION_POSITIONS_MANIFEST_NAME_V2 = (
-    PREPARED_OPTION_POSITIONS_MANIFEST_NAME
-)
+PREPARED_OPTION_POSITIONS_MANIFEST_NAME = "prepared_option_positions_context.json"
+
+
 class PreparedOptionPositionsContextError(RuntimeError):
     pass
 
@@ -296,7 +274,7 @@ def _reuse_prepared_option_positions_contexts(
     observed_values: list[str] = []
     for account in sorted(configs):
         state_dir = base / "output_runs" / run_id / "accounts" / account / "state"
-        manifest_path = state_dir / PREPARED_OPTION_POSITIONS_MANIFEST_NAME_V2
+        manifest_path = state_dir / PREPARED_OPTION_POSITIONS_MANIFEST_NAME
         payload_path = state_dir / PREPARED_OPTION_POSITIONS_PAYLOAD_NAME
         manifest_exists = manifest_path.is_file() and not manifest_path.is_symlink()
         payload_exists = payload_path.is_file() and not payload_path.is_symlink()
@@ -309,7 +287,7 @@ def _reuse_prepared_option_positions_contexts(
                     base=base,
                     run_id=run_id,
                     account=account,
-                    name=PREPARED_OPTION_POSITIONS_MANIFEST_NAME_V2,
+                    name=PREPARED_OPTION_POSITIONS_MANIFEST_NAME,
                 )
                 manifest = json.loads(manifest_bytes)
                 if not isinstance(manifest, dict) or manifest_bytes != _json_bytes(manifest):
@@ -318,7 +296,7 @@ def _reuse_prepared_option_positions_contexts(
                     )
                 if (
                     manifest.get("schema_version")
-                    != PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA_V2
+                    != PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA
                     or manifest.get("run_id") != run_id
                     or normalize_account(manifest.get("account")) != account
                     or manifest.get("account_config_sha256")
@@ -381,7 +359,7 @@ def _reuse_prepared_option_positions_contexts(
                     )
                 if (
                     prepared.get("schema_version")
-                    != PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA_V2
+                    != PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA
                     or prepared.get("run_id") != run_id
                     or normalize_account(prepared.get("account")) != account
                     or prepared.get("account_config_sha256")
@@ -391,7 +369,7 @@ def _reuse_prepared_option_positions_contexts(
                         "prepared option payload identity mismatch"
                     )
                 recovered: dict[str, Any] = {
-                    "schema_version": PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA_V2,
+                    "schema_version": PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA,
                     "run_id": run_id,
                     "account": account,
                     "status": "ready",
@@ -451,7 +429,7 @@ def _reuse_prepared_option_positions_contexts(
                 unavailable[account] = "prepared_option_context_partial"
                 continue
         manifest = dict(receipt["manifest"])
-        manifest_path = state_dir / PREPARED_OPTION_POSITIONS_MANIFEST_NAME_V2
+        manifest_path = state_dir / PREPARED_OPTION_POSITIONS_MANIFEST_NAME
         manifest_bytes = receipt["manifest_bytes"]
         manifests[account] = {
             **manifest,
@@ -748,7 +726,7 @@ def prepare_option_positions_contexts(
                     continue
                 authority = authorities[account]
                 prepared_authority = {
-                    "schema_version": PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA_V2,
+                    "schema_version": PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA,
                     "run_id": run_id_norm,
                     "account": account,
                     "account_config_sha256": authority.account_config_sha256,
@@ -882,14 +860,8 @@ def find_prepared_option_positions_manifest(
         / account_norm
         / "state"
     )
-    for name in (
-        PREPARED_OPTION_POSITIONS_MANIFEST_NAME_V2,
-        PREPARED_OPTION_POSITIONS_MANIFEST_NAME_V1,
-    ):
-        path = (state_dir / name).resolve()
-        if path.is_file():
-            return path
-    return None
+    path = (state_dir / PREPARED_OPTION_POSITIONS_MANIFEST_NAME).resolve()
+    return path if path.is_file() else None
 
 
 def _load_prepared_option_positions_context_artifacts(
@@ -912,14 +884,7 @@ def _load_prepared_option_positions_context_artifacts(
         os.path.abspath(str(Path(manifest_path).expanduser()))
     )
     manifest_name = supplied_path.name
-    supported_manifests = {
-        PREPARED_OPTION_POSITIONS_MANIFEST_NAME: PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA,
-        LEGACY_PREPARED_OPTION_POSITIONS_MANIFEST_NAME: (
-            LEGACY_PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA
-        ),
-    }
-    expected_schema = supported_manifests.get(manifest_name)
-    if expected_schema is None:
+    if manifest_name != PREPARED_OPTION_POSITIONS_MANIFEST_NAME:
         raise PreparedOptionPositionsContextError(
             "prepared option manifest path mismatch"
         )
@@ -966,7 +931,7 @@ def _load_prepared_option_positions_context_artifacts(
         raise PreparedOptionPositionsContextError(
             "prepared option manifest generation mismatch"
         )
-    if manifest.get("schema_version") != expected_schema:
+    if manifest.get("schema_version") != PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA:
         raise PreparedOptionPositionsContextError(
             "prepared option manifest schema mismatch"
         )
@@ -1064,53 +1029,37 @@ def _load_prepared_option_positions_context_artifacts(
         raise PreparedOptionPositionsContextError(
             "prepared option payload account config hash mismatch"
         )
-    if expected_schema == LEGACY_PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA:
-        decision_snapshot = payload.get("decision_state_snapshot")
-        if not isinstance(decision_snapshot, Mapping):
-            raise PreparedOptionPositionsContextError(
-                "prepared option decision snapshot is missing"
-            )
-        if validate_position_fact_snapshot_contract(decision_snapshot):
-            raise PreparedOptionPositionsContextError(
-                "prepared option decision snapshot contract is invalid"
-            )
-        decision_fingerprint = str(
-            decision_snapshot.get("decision_state_fingerprint") or ""
+    current_read = payload.get("current_decision_read")
+    if not isinstance(current_read, Mapping):
+        raise PreparedOptionPositionsContextError(
+            "prepared option current decision read is missing"
         )
-    else:
-        current_read = payload.get("current_decision_read")
-        if not isinstance(current_read, Mapping):
-            raise PreparedOptionPositionsContextError(
-                "prepared option current decision read is missing"
-            )
-        if set(current_read) == {"status", "reason"}:
-            if str(current_read.get("status") or "") != "data_unavailable":
-                raise PreparedOptionPositionsContextError(
-                    "prepared option current decision read is invalid"
-                )
-        elif (
-            current_read.get("schema_version") != CURRENT_DECISION_READ_SCHEMA
-            or normalize_account(current_read.get("account")) != account
-            or not isinstance(current_read.get("position_lots"), list)
-            or (
-                current_read.get("payload") is not None
-                and not isinstance(current_read.get("payload"), Mapping)
-            )
-        ):
+    if set(current_read) == {"status", "reason"}:
+        if str(current_read.get("status") or "") != "data_unavailable":
             raise PreparedOptionPositionsContextError(
                 "prepared option current decision read is invalid"
             )
-        if not isinstance(payload.get("decision_snapshot_actionable"), bool):
-            raise PreparedOptionPositionsContextError(
-                "prepared option decision actionability is invalid"
-            )
-        if not isinstance(payload.get("current_decision_shadow"), Mapping):
-            raise PreparedOptionPositionsContextError(
-                "prepared option current decision shadow is missing"
-            )
-        decision_fingerprint = str(
-            payload.get("decision_state_fingerprint") or ""
+    elif (
+        current_read.get("schema_version") != CURRENT_DECISION_READ_SCHEMA
+        or normalize_account(current_read.get("account")) != account
+        or not isinstance(current_read.get("position_lots"), list)
+        or (
+            current_read.get("payload") is not None
+            and not isinstance(current_read.get("payload"), Mapping)
         )
+    ):
+        raise PreparedOptionPositionsContextError(
+            "prepared option current decision read is invalid"
+        )
+    if not isinstance(payload.get("decision_snapshot_actionable"), bool):
+        raise PreparedOptionPositionsContextError(
+            "prepared option decision actionability is invalid"
+        )
+    if not isinstance(payload.get("current_decision_shadow"), Mapping):
+        raise PreparedOptionPositionsContextError(
+            "prepared option current decision shadow is missing"
+        )
+    decision_fingerprint = str(payload.get("decision_state_fingerprint") or "")
     if (
         decision_fingerprint
         != str(manifest.get("decision_state_fingerprint") or "")
@@ -1252,7 +1201,7 @@ def _publish_ready_context(
         payload=payload_bytes,
     )
     manifest: dict[str, Any] = {
-        "schema_version": PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA_V2,
+        "schema_version": PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA,
         "run_id": run_id,
         "account": account,
         "status": "ready",
@@ -1290,7 +1239,7 @@ def _publish_unavailable_manifest(
 ) -> dict[str, Any]:
     application_received_at_utc = datetime.now(timezone.utc).isoformat()
     manifest: dict[str, Any] = {
-        "schema_version": PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA_V2,
+        "schema_version": PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA,
         "run_id": run_id,
         "account": account,
         "status": "unavailable",
@@ -1323,7 +1272,7 @@ def _publish_manifest(
         base=base,
         run_id=run_id,
         account=account,
-        name=PREPARED_OPTION_POSITIONS_MANIFEST_NAME_V2,
+        name=PREPARED_OPTION_POSITIONS_MANIFEST_NAME,
         payload=manifest_bytes,
     )
     return {
@@ -1433,15 +1382,8 @@ def _positive_float(value: Any) -> float | None:
 
 
 __all__ = [
-    "LEGACY_PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA",
-    "LEGACY_PREPARED_OPTION_POSITIONS_MANIFEST_NAME",
     "PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA",
-    "PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA_V1",
-    "PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA_V2",
-    "PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMAS",
     "PREPARED_OPTION_POSITIONS_MANIFEST_NAME",
-    "PREPARED_OPTION_POSITIONS_MANIFEST_NAME_V1",
-    "PREPARED_OPTION_POSITIONS_MANIFEST_NAME_V2",
     "PREPARED_OPTION_POSITIONS_PAYLOAD_NAME",
     "PreparedOptionPositionsBatch",
     "PreparedOptionPositionsContextError",
