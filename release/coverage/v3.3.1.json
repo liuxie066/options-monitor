@@ -1,0 +1,121 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.3.1",
+  "base": {
+    "tag": "v3.3.0",
+    "commit": "33cea09c320ac1f522d2041f5f7a739fad7d6274"
+  },
+  "reviewed_head": "cea58a5e232a4922cd78fff0d1550476efb21cc9",
+  "commits": [
+    {
+      "sha": "9fd68041cfc792d22d1aca12e38dcd5318828213",
+      "subject": "refactor(strategy-lab): remove prepared context versioning"
+    },
+    {
+      "sha": "4255249f847e49ae356d16ebc59e6161c885a21e",
+      "subject": "docs(architecture): refresh dependency graph"
+    },
+    {
+      "sha": "731a8acf4c5b998142dc6633e0b734ed7030e913",
+      "subject": "Merge pull request #208 from liuxie066/codex/unversion-prepared-option-context"
+    },
+    {
+      "sha": "ed96be49bd4c120ad8f32573b9bd119c40de4ed7",
+      "subject": "fix(strategy-lab): use sealed prepared position facts"
+    },
+    {
+      "sha": "bc3e89160c2b92709f6d8b179f3bdcf23b542d47",
+      "subject": "Merge pull request #209 from liuxie066/codex/fix-strategy-lab-decision-evidence"
+    },
+    {
+      "sha": "703a827cdb8b1efc237dff3c3060ca0ffe7b4a0d",
+      "subject": "refactor(strategy): standardize CSP and CC terminology"
+    },
+    {
+      "sha": "53c07fe97a0b1a04ebeac1a914197180026696d4",
+      "subject": "docs(architecture): refresh dependency graph"
+    },
+    {
+      "sha": "cea58a5e232a4922cd78fff0d1550476efb21cc9",
+      "subject": "Merge pull request #210 from liuxie066/codex/unify-strategy-terminology"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Simplified the rebuilt Strategy Lab prepared option-position context to one canonical unversioned contract, removing obsolete compatibility handling.",
+      "commits": [
+        "9fd68041cfc792d22d1aca12e38dcd5318828213",
+        "731a8acf4c5b998142dc6633e0b734ed7030e913"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Standardized product-facing option strategy terminology around Cash-Secured Put (CSP) and Covered Call (CC) while preserving internal persisted contracts.",
+      "commits": [
+        "703a827cdb8b1efc237dff3c3060ca0ffe7b4a0d",
+        "cea58a5e232a4922cd78fff0d1550476efb21cc9"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Allowed Strategy Lab formal recommendation points to use sealed prepared position facts without requiring current-decision projection migration.",
+      "commits": [
+        "ed96be49bd4c120ad8f32573b9bd119c40de4ed7",
+        "bc3e89160c2b92709f6d8b179f3bdcf23b542d47"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Prevented compact notifications from classifying Covered Call candidates as Puts.",
+      "commits": [
+        "703a827cdb8b1efc237dff3c3060ca0ffe7b4a0d",
+        "cea58a5e232a4922cd78fff0d1550476efb21cc9"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "4255249f847e49ae356d16ebc59e6161c885a21e",
+      "reason": "Regenerated architecture dependency documentation for PR #208; it has no independent runtime or operator impact."
+    },
+    {
+      "commit": "53c07fe97a0b1a04ebeac1a914197180026696d4",
+      "reason": "Regenerated architecture dependency documentation for PR #210; it has no independent runtime or operator impact."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "9fd68041cfc792d22d1aca12e38dcd5318828213",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/208"]
+    },
+    {
+      "commit": "4255249f847e49ae356d16ebc59e6161c885a21e",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/208"]
+    },
+    {
+      "commit": "731a8acf4c5b998142dc6633e0b734ed7030e913",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/208"]
+    },
+    {
+      "commit": "ed96be49bd4c120ad8f32573b9bd119c40de4ed7",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/209"]
+    },
+    {
+      "commit": "bc3e89160c2b92709f6d8b179f3bdcf23b542d47",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/209"]
+    },
+    {
+      "commit": "703a827cdb8b1efc237dff3c3060ca0ffe7b4a0d",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/210"]
+    },
+    {
+      "commit": "53c07fe97a0b1a04ebeac1a914197180026696d4",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/210"]
+    },
+    {
+      "commit": "cea58a5e232a4922cd78fff0d1550476efb21cc9",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/210"]
+    }
+  ]
+}
