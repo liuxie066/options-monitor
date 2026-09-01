@@ -73,6 +73,18 @@ README 不复制完整规则：[候选策略合同](docs/candidate_strategy.md) 
 [策略架构](docs/STRATEGY_ARCHITECTURE.md) 定义模块责任；目标是否已经上线必须以当前代码和测试验证，
 不能只凭文档判断。
 
+### 策略术语对照
+
+| OM 内部 key | 项目内名称 | 金融专业术语 |
+|---|---|---|
+| `sell_put` | Cash-Secured Put (CSP) | 现金担保认沽（Cash-Secured Put） |
+| `sell_call` | Covered Call (CC) | 备兑看涨（Covered Call） |
+| `combo_yield`（variant `sp_lc`） | Combo Yield SP+LC | 看涨风险反转（Bullish Risk Reversal，现金担保变体） |
+| `combo_yield`（variant `cc_lp`） | Combo Yield CC+LP | 领口策略（Collar，净收权利金即 Credit Collar） |
+| `wheel` | 轮转策略 | 轮转策略（Wheel Strategy） |
+
+结构说明、别名与参考来源见 [策略术语对照](docs/STRATEGY_TERMINOLOGY.md)。
+
 ## 安装
 
 运行时要求 Python 3.12 或更高版本。
