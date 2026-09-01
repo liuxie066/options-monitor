@@ -5,7 +5,12 @@ import src.application.ledger.repository as ledger_repository
 from domain.domain.combo_yield_lifecycle import build_full_group_lifecycle, build_option_group_inventory
 
 
-def _lot(record_id: str, *, option_type: str, side: str, opened: int, open_count: int, expiration: str, group_id: str | None, structure: str = "same_expiry") -> dict:
+def _lot(record_id: str, *, option_type: str, side: str, opened: int, open_count: int, expiration: str, group_id: str | None, structure: str | None = "same_expiry", structure_mode: str | None = None) -> dict:
+    snapshot: dict = {}
+    if structure is not None:
+        snapshot["expiry_structure"] = structure
+    if structure_mode is not None:
+        snapshot["structure_mode"] = structure_mode
     return {
         "record_id": record_id,
         "account": "lx",
@@ -19,7 +24,7 @@ def _lot(record_id: str, *, option_type: str, side: str, opened: int, open_count
         "strategy": "combo_yield",
         "leg_role": "sell_put" if option_type == "put" else "enhancement_call",
         "strategy_group_id": group_id,
-        "strategy_snapshot": {"expiry_structure": structure},
+        "strategy_snapshot": snapshot,
     }
 
 
@@ -113,6 +118,20 @@ def test_option_group_inventory_fails_closed_on_legacy_staggered_structure() -> 
     assert group["summary_classification"] == "review_required"
     assert "unsupported_expiry_structure" in group["inventory_issues"]
     assert "same_expiry_mismatch" not in group["inventory_issues"]
+
+
+def test_option_group_inventory_fails_closed_on_staggered_structure_mode_same_expiry() -> None:
+    group_id = "combo_yield:lx:pair-legacy-mode"
+    rows = [
+        _lot("put-1", option_type="put", side="short", opened=1, open_count=1, expiration="2026-08-21", group_id=group_id, structure=None, structure_mode="staggered_expiry_pair"),
+        _lot("call-1", option_type="call", side="long", opened=1, open_count=1, expiration="2026-08-21", group_id=group_id, structure=None, structure_mode="staggered_expiry_pair"),
+    ]
+
+    group = build_option_group_inventory(rows)[0]
+
+    assert group["expiry_structure"] == "unknown"
+    assert group["summary_classification"] == "review_required"
+    assert "unsupported_expiry_structure" in group["inventory_issues"]
 
 
 def test_manual_open_preview_projection_restart_reconstructs_same_expiry_group(tmp_path: Path) -> None:

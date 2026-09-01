@@ -231,7 +231,17 @@ def test_proposed_dual_funding_gates_are_independent_and_equality_passes() -> No
     assert "max_call_cost_to_put_credit" in reasons
 
 
-def test_combo_research_policy_rejects_removed_expiry_gap_fields() -> None:
+def test_proposed_gate_rejects_expiry_gap_field_without_expirations() -> None:
+    policy = _policy()
+    row = dict(_pair())
+    row.pop("put_expiration", None)
+    row.pop("call_expiration", None)
+    # 仅带 expiry_gap_days=0 字段、缺真实到期日：必须拒绝，不得靠字段侥幸通过
+    reasons = combo_yield_proposed_gate_reasons(row, policy)
+    assert "same_expiry" in reasons
+
+
+def test_combo_research_policy_rejects_unknown_variant_keys() -> None:
     base = {
         "variant_id": "same-d20",
         "structure_mode": "same_expiry_pair",
@@ -240,9 +250,10 @@ def test_combo_research_policy_rejects_removed_expiry_gap_fields() -> None:
         "target_abs_call_delta": 0.20,
         "max_abs_call_delta": 0.30,
     }
-    for field in ("min_expiry_gap_days", "target_expiry_gap_days", "max_expiry_gap_days"):
-        with pytest.raises(ValueError):
+    for field in ("min_expiry_gap_days", "target_expiry_gap_days", "max_expiry_gap_days", "bogus_field"):
+        with pytest.raises(ValueError) as excinfo:
             combo_research_policy_from_dict({**base, field: 28})
+        assert "unsupported keys" in str(excinfo.value)
 
 
 def test_rank_provenance_keeps_original_put_rank_after_pair_filtering() -> None:

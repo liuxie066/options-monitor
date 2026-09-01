@@ -109,9 +109,10 @@ def resolve_expiry_structure_from_fields(
 ) -> str | None:
     """Resolve Combo expiry structure with the same fallback as the lifecycle layer.
 
-    Explicit ``expiry_structure`` wins; otherwise ``structure_mode`` maps legacy
-    ``staggered_expiry_pair`` to ``diagonal`` and ``same_expiry_pair`` to
-    ``same_expiry``. Missing structure metadata stays ``None`` so production
+    Explicit ``expiry_structure`` wins; otherwise ``structure_mode`` maps
+    ``same_expiry_pair`` to ``same_expiry`` and any other explicit value to
+    ``unknown`` (fail-closed: unsupported structures must not be treated as
+    same-expiry). Missing structure metadata stays ``None`` so production
     same-expiry rows keep their serialized shape.
     """
     snapshot = snapshot if isinstance(snapshot, Mapping) else {}
@@ -122,10 +123,10 @@ def resolve_expiry_structure_from_fields(
     structure_mode = (
         _text(snapshot.get("structure_mode")) or _text(payload.get("structure_mode"))
     ).lower()
-    if structure_mode == "staggered_expiry_pair":
-        return "diagonal"
     if structure_mode == "same_expiry_pair":
         return "same_expiry"
+    if structure_mode:
+        return "unknown"
     return None
 
 

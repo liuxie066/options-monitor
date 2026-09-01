@@ -665,16 +665,6 @@ def _validate_optional_dte_window(cfg: dict, path: str):
 def _validate_combo_yield_cfg(cfg: dict, path: str):
     if not isinstance(cfg, dict):
         die(f'{path} must be an object')
-    removed_gap_keys = [
-        key
-        for key in ('min_expiry_gap_days', 'max_expiry_gap_days')
-        if key in cfg
-    ]
-    if removed_gap_keys:
-        die(
-            f"{path} has removed staggered-expiry gap fields: {', '.join(removed_gap_keys)}; "
-            "Combo Yield supports same_expiry_pair only"
-        )
     _reject_unknown_keys(cfg, COMBO_YIELD_ALLOWED_FIELDS, path)
     _validate_optional_bool(cfg, 'enabled', path)
     removed_funding_keys = [
