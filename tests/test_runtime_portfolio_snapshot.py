@@ -45,8 +45,8 @@ from src.application.tick_run_workspace import (
 
 _CONTRACT_HASH = "f180e7bbcdd2f9bdaf6edfc540099b5c54156f3c6971ce83ef55c6fea51099c8"
 _INPUT_HASHES = {
-    "current_scale": "344f3d943f56981174974f64cd5965a5345d057d1a7dfe1aabfa33379d17d4f7",
-    "current_state_10x": "8e057aa0dc95b4af636ef50bfcd9905f691961cc9c3e08f660a0d36096ec4e09",
+    "current_scale": "749ea27d7f7796469dfb4cd5371a255a5bd62141b30960d4c5bbe9046c79b0e7",
+    "current_state_10x": "7cb932b02ed81d096370ef52581374ee2632a9a02d368c78c02975c455260f15",
 }
 
 
@@ -225,10 +225,10 @@ def test_assembler_consumes_one_exact_owner_bundle() -> None:
     )
 
 
-def test_runtime_snapshot_preserves_v2_prepared_owner_binding() -> None:
+def test_runtime_snapshot_preserves_prepared_owner_binding() -> None:
     assembly = _owner_assembly_kwargs()
     manifest = json.loads(assembly["prepared_option_manifest_bytes"])
-    manifest["schema_version"] = "prepared_option_positions_context.v2"
+    manifest["schema_version"] = "prepared_option_positions_context"
     assembly["prepared_option_manifest_bytes"] = canonical_json_bytes(manifest)
 
     snapshot, references = assemble_runtime_portfolio_snapshot(**assembly)
@@ -238,9 +238,9 @@ def test_runtime_snapshot_preserves_v2_prepared_owner_binding() -> None:
         if row["role"] == "prepared_option_positions_context"
     )
 
-    assert binding["schema_version"] == "prepared_option_positions_context.v2"
+    assert binding["schema_version"] == "prepared_option_positions_context"
     assert binding["relpath"] == (
-        "state/prepared_option_positions_context.v2.json"
+        "state/prepared_option_positions_context.json"
     )
     assert snapshot == verify_runtime_portfolio_snapshot(
         snapshot,

@@ -631,7 +631,7 @@ def test_analysis_query_select_constant_materializes_no_views(monkeypatch: pytes
     assert meta["materialized_views"] == []
 
 
-def test_analysis_query_strategy_replay_read_surface_reads_candidate_impact_and_ignores_legacy_artifact(tmp_path: Path) -> None:
+def test_analysis_query_strategy_replay_read_surface_reads_candidate_impact(tmp_path: Path) -> None:
     result_path = (
         tmp_path
         / "output_shared"
@@ -682,9 +682,6 @@ def test_analysis_query_strategy_replay_read_surface_reads_candidate_impact_and_
         ),
         encoding="utf-8",
     )
-    legacy_path = tmp_path / "output_shared" / "research" / "strategy_lab" / "proposal.json"
-    legacy_path.parent.mkdir(parents=True)
-    legacy_path.write_text(json.dumps({"schema_version": "strategy_lab_proposal.v1"}), encoding="utf-8")
     data, warnings, meta = _call_analysis_tool(ANALYSIS_QUERY_TOOL,
         _AnalysisQueryContext(tmp_path),
         {
