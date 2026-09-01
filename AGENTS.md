@@ -11,6 +11,12 @@
 - Prefer root-cause fixes at the owning boundary. If a tactical patch is unavoidable, state the tradeoff and follow-up.
 - Follow parsimony at repo boundaries: do not add entities, layers, states, tools, config keys, or workflows unless they are necessary.
 - Preserve user changes in a dirty worktree. Never reset or revert unrelated files unless explicitly asked.
+- Worktrees are conditional isolation, not a per-phase default. Reuse the same task worktree through implementation,
+  validation, review, and PR; create another only for a protected/shared branch, unrelated dirty changes, or parallel conflict.
+- Close a task worktree only after its PR and required checks are terminal; for a release, wait until the tag, GitHub
+  Release, target commit, and assets are verified. Require a clean status, proof that the branch is contained in
+  `origin/main`, and no active owner before removing the exact worktree and local branch. Preserve dirty, unmerged,
+  patch-equivalent-only, stashed, or owner-unknown work unless separately approved.
 - Do not invoke Gateflow, planreview, or deepreview unless the user explicitly requests the named workflow or skill in the current task.
 
 ## DeepReview Profile
