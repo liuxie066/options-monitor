@@ -582,37 +582,34 @@ def _prepared_position(
     *,
     account: str,
 ) -> OptionValuationPosition:
-    fields = raw.get("fields")
-    if not isinstance(fields, Mapping):
-        _fail("option_position_evidence_missing", "prepared option lot fields are missing")
-    if str(fields.get("status") or "").strip().lower() != "open":
+    if str(raw.get("status") or "").strip().lower() != "open":
         _fail("option_position_evidence_missing", "prepared option lot is not open")
     try:
-        contracts_open = int(fields.get("contracts_open") or 0)
+        contracts_open = int(raw.get("contracts_open") or 0)
         instrument = OptionInstrumentKey(
-            symbol=fields.get("symbol"),
-            option_type=fields.get("option_type"),
-            strike=fields.get("strike"),
-            expiration_ymd=fields.get("expiration_ymd"),
-            currency=fields.get("currency"),
-            multiplier=fields.get("multiplier"),
+            symbol=raw.get("symbol"),
+            option_type=raw.get("option_type"),
+            strike=raw.get("strike"),
+            expiration_ymd=raw.get("expiration_ymd"),
+            currency=raw.get("currency"),
+            multiplier=raw.get("multiplier"),
         )
         return OptionValuationPosition(
             lot_id=_text(raw.get("record_id"), "position lot_id"),
             account=account,
-            broker=_text(fields.get("broker"), "position broker"),
+            broker=_text(raw.get("broker"), "position broker"),
             instrument=instrument,
-            position_side=str(fields.get("side") or "").strip().lower(),
+            position_side=str(raw.get("side") or "").strip().lower(),
             contracts_open=contracts_open,
-            open_price=fields.get("premium") or 0,
+            open_price=raw.get("premium") or 0,
             open_fee_remaining=None,
             open_fee_quality="missing",
-            opened_at_ms=int(fields.get("opened_at") or 0),
+            opened_at_ms=int(raw.get("opened_at") or 0),
             market_code=(
                 str(
-                    fields.get("market_code")
-                    or fields.get("contract_symbol")
-                    or fields.get("futu_code")
+                    raw.get("market_code")
+                    or raw.get("contract_symbol")
+                    or raw.get("futu_code")
                     or ""
                 ).strip()
                 or None
@@ -702,21 +699,18 @@ def build_option_position_evidence_binding(
         _fail("option_position_evidence_missing", "prepared position receipt is incomplete")
     assert isinstance(manifest, Mapping) and isinstance(payload, Mapping)
     assert isinstance(manifest_bytes, bytes) and isinstance(payload_bytes, bytes)
-    current_read = payload.get("current_decision_read")
+    position_rows = payload.get("open_positions_min")
     if (
-        not isinstance(current_read, Mapping)
-        or current_read.get("status") != "trusted"
+        not isinstance(position_rows, list)
         or payload.get("decision_snapshot_actionable") is not True
-        or not isinstance(current_read.get("position_lots"), list)
     ):
         _fail("option_position_evidence_missing", "prepared position facts are unavailable")
 
     positions: list[OptionValuationPosition] = []
-    for row in current_read["position_lots"]:
-        if not isinstance(row, Mapping) or not isinstance(row.get("fields"), Mapping):
+    for row in position_rows:
+        if not isinstance(row, Mapping):
             _fail("option_position_evidence_missing", "prepared option lot is invalid")
-        fields = row["fields"]
-        if str(fields.get("status") or "").strip().lower() != "open":
+        if str(row.get("status") or "").strip().lower() != "open":
             continue
         positions.append(_prepared_position(row, account=account))
     rows_by_symbol: dict[str, tuple[list[dict[str, Any]], dict[str, Any]]] = {}
