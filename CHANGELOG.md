@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 3.2.0 - 2026-09-01
+
+### New Features
+- Added a read-only two-day Strategy Lab engineering canary that validates complete formal-corpus and concentration-recipe evidence before starting the full 20-day research window.
+
 ## 3.1.1 - 2026-09-01
 
 ### Bug Fixes
