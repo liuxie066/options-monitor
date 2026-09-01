@@ -118,9 +118,9 @@ PORTFOLIO_SERVICE_URL=http://127.0.0.1:8765 ./om-agent run --tool portfolio_assi
 缺少指派费用规则时净现金与净分布保持 `null/partial`。该工具不写 assignment、
 持仓、报告或通知状态；上游实时估值可能刷新 portfolio-management 的既有行情 cache。
 
-Sell Put 现金余量的标准 Tool Gateway 工具是 `query_cash_headroom`。它包装
+Cash-Secured Put (CSP) 现金余量的标准 Tool Gateway 工具是 `query_cash_headroom`。它包装
 `src.application.cash_headroom_query` 里的 `query_sell_put_cash(...)`，用于返回账户现金、
-Sell Put 担保占用和剩余可用现金，并支持按账户和币种折算到 CNY。该工具是纯读入口，
+CSP 担保占用和剩余可用现金，并支持按账户和币种折算到 CNY。该工具是纯读入口，
 不会为了查询而写本地 cache。
 
 如果 payload 很长，优先用：

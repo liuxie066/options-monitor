@@ -218,13 +218,13 @@ def test_full_renderer_is_compact_human_readable_and_allowlisted() -> None:
     assert "状态｜今日首次 · 10:00 批次" in message
     assert "市场｜美股" in message
     assert "数据｜美东 10:03 / 北京 22:03" in message
-    assert "## Sell Put" in message
+    assert "## CSP" in message
     assert "## 持仓" in message
     assert "汇总｜共 3 条，需处理 1 条。" in message
     assert "## 资金" in message
-    assert "MSFT｜Sell Put｜08-21 $400 Put（策略排序 1）" in message
-    assert "NVDA｜Sell Put｜08-21 $100 Put（策略排序 2）" in message
-    assert "AAPL｜Covered Call｜08-21 $250 Call（策略排序 1）" in message
+    assert "MSFT｜CSP｜08-21 $400 Put（策略排序 1）" in message
+    assert "NVDA｜CSP｜08-21 $100 Put（策略排序 2）" in message
+    assert "AAPL｜CC｜08-21 $250 Call（策略排序 1）" in message
     assert "TSLA｜组合增强（策略排序 1）" in message
     assert "Put｜08-21 $300 Put｜推荐卖出 $3.45" in message
     assert "Call｜09-18 $400 Call｜推荐买入 $1.05" in message
@@ -233,7 +233,7 @@ def test_full_renderer_is_compact_human_readable_and_allowlisted() -> None:
     assert "FUTU" not in message
     assert "MSFT 08-21 $400 Put｜按当前现金最多 2 手" in message
     assert "NVDA 08-21 $100 Put｜按当前现金最多 5 手" in message
-    assert "多个 Sell Put 候选共享同一现金额度，手数不能相加" in message
+    assert "多个 CSP 候选共享同一现金额度，手数不能相加" in message
     assert_mobile_flat_markdown(message)
     _assert_no_internal_leak(message)
     _assert_no_internal_leak(view)
@@ -298,7 +298,7 @@ def test_success_empty_warning_is_embedded_without_failure_wording() -> None:
     )
 
     reminder = (
-        "NVDA Sell Put：本轮未发现可用到期日，"
+        "NVDA CSP：本轮未发现可用到期日，"
         "已按零候选完成（非操作建议）"
     )
     assert reminder in view["reminders"]
@@ -332,7 +332,7 @@ def test_status_projection_mismatch_renders_only_a_local_reminder() -> None:
     )
 
     assert (
-        "NVDA Sell Put｜局部告警证据不一致，"
+        "NVDA CSP｜局部告警证据不一致，"
         "已忽略该提示（不影响其他可靠结果）"
     ) in message
     assert "数据异常" not in message
@@ -366,7 +366,7 @@ def test_hk_actionable_close_renders_price_locked_profit_and_remaining_yield() -
 
     message = render_full_brief(brief)
 
-    assert "3690.HK｜Sell Put｜08-28 HK$65 Put｜建议平仓" in message
+    assert "3690.HK｜CSP｜08-28 HK$65 Put｜建议平仓" in message
     assert (
         "参考｜买回参考价 HK$0.52（ask） · 预计锁定收益 HK$474.50 · "
         "净兑现比例 93.0% · 全成本平仓占名义本金 0.1% · 剩余期限比例 60.0%"
@@ -405,7 +405,7 @@ def test_strict_close_uses_one_action_label_for_every_close_state() -> None:
     )
 
     for symbol in ("A", "B", "C", "D", "E", "F"):
-        assert f"{symbol}｜Sell Put｜建议平仓" in message
+        assert f"{symbol}｜CSP｜建议平仓" in message
     assert "汇总｜共 6 条，需处理 6 条。" in message
 
 
@@ -463,7 +463,7 @@ def test_close_details_use_signed_pnl_and_degrade_without_inventing_values() -> 
     message = render_full_brief(brief)
 
     assert "预计平仓损益 -HK$125.50" in message
-    assert "PARTIAL.HK｜Sell Put｜08-28 HK$55 Put｜建议平仓" in message
+    assert "PARTIAL.HK｜CSP｜08-28 HK$55 Put｜建议平仓" in message
     assert "买回参考价 HK$0.30（ask）" in message
     assert "nan" not in message.lower()
     assert "invalid" not in message.lower()
@@ -483,7 +483,7 @@ def test_strict_close_position_is_independent_from_new_combo_candidates() -> Non
     message = render_full_brief(brief)
 
     assert "TSLA · 组合增强" not in message
-    assert "NVDA｜Sell Put" in message
+    assert "NVDA｜CSP" in message
     assert "PDD" not in message
     assert "combo-pdd-secret" not in message
     assert "funding_put" not in message
@@ -504,7 +504,7 @@ def test_blocked_renderer_is_short_safe_and_has_no_candidate_snapshot() -> None:
     assert "状态｜数据异常 · 10:00 批次" in message
     assert "结论｜本轮行情覆盖不足，暂时无法形成可靠决策。" in message
     assert "后续｜系统将在后续批次自动重新评估。" in message
-    assert "## Sell Put" not in message
+    assert "## CSP" not in message
     assert "## 持仓" not in message
     assert "MSFT" not in message
     _assert_no_internal_leak(message)
@@ -551,9 +551,9 @@ def test_delta_and_recovery_add_change_banner_but_keep_current_snapshot() -> Non
         context=_scheduled_context(),
     )
     assert "状态｜盘中更新 · 10:00 批次" in delta
-    assert "较上一轮：新增 1 个 Sell Put 候选" in delta
+    assert "较上一轮：新增 1 个 CSP 候选" in delta
     assert "MSFT 08-21 $400 Put 条件容量 1 → 2 手" in delta
-    assert "MSFT｜Sell Put｜08-21 $400 Put（策略排序 1）" in delta
+    assert "MSFT｜CSP｜08-21 $400 Put（策略排序 1）" in delta
     assert "secret-in-diff" not in delta
 
     recovery = render_daily_brief_lifecycle(
@@ -566,7 +566,7 @@ def test_delta_and_recovery_add_change_banner_but_keep_current_snapshot() -> Non
     )
     assert "状态｜数据已恢复 · 10:00 批次" in recovery
     assert "数据已恢复，以下为当前结果。" in recovery
-    assert "MSFT｜Sell Put｜08-21 $400 Put（策略排序 1）" in recovery
+    assert "MSFT｜CSP｜08-21 $400 Put（策略排序 1）" in recovery
 
 
 def test_old_candidate_diff_vocabulary_is_not_mislabeled_as_position_change() -> None:
@@ -598,7 +598,7 @@ def test_old_candidate_diff_vocabulary_is_not_mislabeled_as_position_change() ->
         }
     )
 
-    assert "新增 1 个 Sell Put 候选" in message
+    assert "新增 1 个 CSP 候选" in message
     assert "持仓建议已变化" not in message
 
 
@@ -622,10 +622,10 @@ def test_position_statuses_use_safe_allowlisted_fallbacks() -> None:
 
     assert "暂无法评估" not in message
     assert "继续观察" not in message
-    assert "**A｜Sell Put" not in message
-    assert "**B｜Sell Put" not in message
-    assert "**C｜Sell Put" not in message
-    assert "**D｜Sell Put" not in message
+    assert "**A｜CSP" not in message
+    assert "**B｜CSP" not in message
+    assert "**C｜CSP" not in message
+    assert "**D｜CSP" not in message
     assert "汇总｜共 4 条，当前没有需要处理的持仓。" in message
     assert "持仓未展开" not in message
     assert "future_state" not in message
@@ -658,7 +658,7 @@ def test_malformed_fields_and_unknown_enums_do_not_echo_raw_values() -> None:
     assert message.startswith("# OM · 决策简报 · lx")
     assert "市场｜市场" in message
     assert "数据｜数据时间未知" in message
-    assert "TCOM｜Sell Put｜合约信息不完整（策略排序 1）" in message
+    assert "TCOM｜CSP｜合约信息不完整（策略排序 1）" in message
     for raw in (
         "FUTURE_MARKET",
         "FUTURE_STATE",
@@ -729,13 +729,13 @@ def test_renderer_honors_section_limits() -> None:
         },
     )
 
-    assert "P0｜Sell Put" in message
-    assert "P1｜Sell Put" in message
-    assert "P2｜Sell Put" not in message
+    assert "P0｜CSP" in message
+    assert "P1｜CSP" in message
+    assert "P2｜CSP" not in message
     assert "汇总｜共 8 条，需处理 8 条，本消息展示 2 条。" in message
     assert "持仓未展开" not in message
-    assert "C6｜Sell Put" in message
-    assert "C7｜Sell Put" not in message
+    assert "C6｜CSP" in message
+    assert "C7｜CSP" not in message
     assert "补充｜另有 13 个策略候选未展开" in message
     assert "C6 08-21 $106 Put｜按当前现金最多 1 手" in message
     assert "C7 08-21 $107 Put｜按当前现金最多 1 手" not in message
@@ -784,9 +784,9 @@ def test_material_candidates_break_soft_limit_and_keep_funds_in_sync() -> None:
         limits={"max_candidates_per_strategy": 1},
     )
 
-    assert "C2｜Sell Put｜08-21 $102 Put（策略排序 3）" in message
-    assert "C3｜Sell Put｜08-21 $103 Put（策略排序 4）" in message
-    assert "C0｜Sell Put" not in message
+    assert "C2｜CSP｜08-21 $102 Put（策略排序 3）" in message
+    assert "C3｜CSP｜08-21 $103 Put（策略排序 4）" in message
+    assert "C0｜CSP" not in message
     assert "补充｜另有 2 个策略候选未展开" in message
     assert "C2 08-21 $102 Put｜按当前现金最多 3 手" in message
     assert "C3 08-21 $103 Put｜按当前现金最多 4 手" in message
@@ -866,7 +866,7 @@ def test_material_position_uses_exact_lot_before_same_contract_siblings() -> Non
         limits={"max_actions_per_priority": 1},
     )
 
-    assert "PDD｜Sell Put｜08-21 $95 Put｜建议平仓" in view_message
+    assert "PDD｜CSP｜08-21 $95 Put｜建议平仓" in view_message
     assert "继续观察" not in view_message
     assert "汇总｜共 3 条，需处理 1 条。" in view_message
     assert "持仓未展开" not in view_message
@@ -941,7 +941,7 @@ def test_notification_and_query_projections_use_plain_language_and_account_funds
     fixed = render_fixed_report(brief, context=_scheduled_context())
     assert fixed.startswith("# OM · 决策简报 · lx")
     assert "状态｜10:00 批次" in fixed
-    assert "## Sell Put" in fixed
+    assert "## CSP" in fixed
     assert "现金总额｜$180,000.00" not in fixed
     assert "现金总额（折CNY）｜¥1,260,000.00" in fixed
     assert "可用于期权开仓｜$75,000.00" not in fixed
@@ -956,12 +956,12 @@ def test_notification_and_query_projections_use_plain_language_and_account_funds
         context=alert_context,
     )
     assert "状态｜新增候选 · 10:30 发现" in alert
-    assert "## Sell Put" in alert
+    assert "## CSP" in alert
     assert "### 新增策略候选" in alert
     assert "## 持仓" not in alert
     assert "另有 1 个新增候选未展开" in alert
-    assert "MSFT｜Sell Put" in alert
-    assert "NVDA｜Sell Put" in alert
+    assert "MSFT｜CSP" in alert
+    assert "NVDA｜CSP" in alert
     assert "较上一轮" not in alert
     assert "现金总额｜$180,000.00" not in alert
     assert "现金总额（折CNY）｜¥1,260,000.00" in alert
@@ -969,7 +969,7 @@ def test_notification_and_query_projections_use_plain_language_and_account_funds
     failure = render_fixed_failure(brief, context=_scheduled_context())
     assert "数据异常 · 10:00 批次失败" in failure
     assert "未形成可靠结果" in failure
-    assert "## Sell Put" not in failure
+    assert "## CSP" not in failure
     assert "本轮暂无符合条件的候选" not in failure
     assert_mobile_flat_markdown(fixed)
     assert_mobile_flat_markdown(alert)
@@ -1157,7 +1157,7 @@ def test_event_date_change_summary_names_candidate_and_expiry_relation() -> None
 
     assert "较上一轮：NVDA 08-21 $100 Put 财报日期调整至 8 月 5 日，现在早于当前 Put 到期日。" in message
     assert message.count("进入当前合约关注窗口") == 0
-    assert "NVDA｜Sell Put｜08-21 $100 Put（策略排序 2）" in message
+    assert "NVDA｜CSP｜08-21 $100 Put（策略排序 2）" in message
 
 
 def test_event_evidence_degradation_summary_does_not_claim_event_removal() -> None:
@@ -1267,7 +1267,7 @@ def test_retired_ai_overlay_is_ignored_by_fixed_report_and_card() -> None:
         assert "AI建议" not in message
         assert "RETIRED-ADVICE-MUST-NOT-LEAK" not in message
         assert "RETIRED-SOURCE-MUST-NOT-LEAK" not in message
-        assert "C4｜Sell Put｜08-21 $104 Put（策略排序 4）" not in message
+        assert "C4｜CSP｜08-21 $104 Put（策略排序 4）" not in message
 
 
 def test_fixed_report_card_compacts_status_and_hides_non_error_gaps() -> None:
@@ -1301,11 +1301,11 @@ def test_fixed_report_card_compacts_status_and_hides_non_error_gaps() -> None:
     assert "AI｜" not in message
     assert "AI建议" not in message
     assert "### 策略候选" not in message
-    assert "## Covered Call" not in message
-    assert "多个 Sell Put 候选共享同一现金额度" not in message
+    assert "## CC" not in message
+    assert "多个 CSP 候选共享同一现金额度" not in message
     assert "## 提醒" not in message
     assert "提醒｜" not in message
-    assert "GOOGL Sell Put：本轮部分行情证据不可用" not in message
+    assert "GOOGL CSP：本轮部分行情证据不可用" not in message
     assert "事件数据不完整，无法排除近期重要事件；下单前复核。" in message
     assert "当前无法确认没有重要事件" not in message
 
@@ -1392,7 +1392,7 @@ def test_fixed_report_card_keeps_specific_hard_evidence_gap() -> None:
 
     assert message.count("提醒｜") == 1
     assert (
-        "提醒｜GOOGL Sell Put：期限匹配的已实现波动率（RV）证据不可用，候选结果不完整"
+        "提醒｜GOOGL CSP：期限匹配的已实现波动率（RV）证据不可用，候选结果不完整"
         in message
     )
     assert "提醒｜NVDA" not in message
@@ -1455,8 +1455,8 @@ def test_candidate_alert_ignores_retired_ai_candidate_selection() -> None:
 
     assert "AI建议" not in message
     assert "当前首选存在额外事件风险" not in message
-    assert "**MSFT｜Sell Put｜08-21 $400 Put（策略排序 1）**" in message
-    assert "**NVDA｜Sell Put" not in message
+    assert "**MSFT｜CSP｜08-21 $400 Put（策略排序 1）**" in message
+    assert "**NVDA｜CSP" not in message
 
 
 def test_fixed_report_card_renders_candidate_paragraphs_and_actionable_position_table() -> None:
@@ -1505,17 +1505,17 @@ def test_fixed_report_card_renders_candidate_paragraphs_and_actionable_position_
     )
 
     assert "| 优先 | 合约 | 权利金 / 净收入 | 年化 | 风险 / 容量 |" not in message
-    assert "## Sell Put" in message
+    assert "## CSP" in message
     assert "### 策略候选" not in message
-    assert "**MSFT｜Sell Put｜08-21 $400 Put（策略排序 1）**" in message
-    assert "**NVDA｜Sell Put｜08-21 $100 Put（策略排序 2）**" in message
+    assert "**MSFT｜CSP｜08-21 $400 Put（策略排序 1）**" in message
+    assert "**NVDA｜CSP｜08-21 $100 Put（策略排序 2）**" in message
     assert (
         "指标｜权利金 $5.25 · 门槛年化 18.1% · Delta -0.24 · 32 天 · "
         "预计净收入 $480.00"
         in message
     )
-    assert "## Covered Call" in message
-    assert "**AAPL｜Covered Call｜08-21 $250 Call（策略排序 1）**" in message
+    assert "## CC" in message
+    assert "**AAPL｜CC｜08-21 $250 Call（策略排序 1）**" in message
     assert "| 优先 | 标的 | Put 侧 | Call 侧 | 收益 |" not in message
     assert "## 组合增强" in message
     assert "**TSLA｜组合增强（策略排序 1）**" in message
@@ -1523,16 +1523,16 @@ def test_fixed_report_card_renders_candidate_paragraphs_and_actionable_position_
     assert "Call｜09-18 $400 Call｜推荐买入 $1.05" in message
     assert "指标｜门槛年化 15.4% · 预计净收入 $620.00" in message
     assert (
-        "\n\n事件｜Sell Put #1（MSFT）、Sell Put #2（NVDA）、"
-        "Covered Call #1（AAPL）、组合增强 #1（TSLA）："
+        "\n\n事件｜CSP #1（MSFT）、CSP #2（NVDA）、"
+        "CC #1（AAPL）、组合增强 #1（TSLA）："
         in message
     )
-    assert "**1｜NVDA｜Sell Put｜08-21 $100 Put｜建议平仓**" in message
+    assert "**1｜NVDA｜CSP｜08-21 $100 Put｜建议平仓**" in message
     assert "参考｜买回参考价 $0.35 · 预计锁定损益 +$285.00" in message
     assert "净兑现比例 92.5%" in message
     assert "平仓成本占本金 0.1%" in message
     assert "剩余期限比例 61.0%" in message
-    assert "AMD｜Sell Put｜08-21 $150 Put｜建议平仓" in message
+    assert "AMD｜CSP｜08-21 $150 Put｜建议平仓" in message
     assert "现金总额｜暂不可用" in message
     assert "可用于期权开仓｜暂不可用" in message
     assert "| 项目 | 数值 |" not in message
@@ -1585,11 +1585,11 @@ def test_candidate_alert_card_keeps_single_candidate_compact_and_events_explicit
         context=_scheduled_context(),
     )
 
-    assert "## Sell Put" in message
+    assert "## CSP" in message
     assert "### 新增策略候选" in message
-    assert "**MSFT｜Sell Put｜08-21 $400 Put（策略排序 1）**" in message
+    assert "**MSFT｜CSP｜08-21 $400 Put（策略排序 1）**" in message
     assert "| 优先 | 合约 |" not in message
-    assert "\n\n事件｜Sell Put #1（MSFT）：" in message
+    assert "\n\n事件｜CSP #1（MSFT）：" in message
     assert message.count("执行前需要再次检查") == 1
     assert "## 持仓" not in message
     assert "现金总额｜暂不可用" in message

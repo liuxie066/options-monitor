@@ -1,6 +1,6 @@
 # 轮转策略（Wheel）PRD
 
-- **状态**：V1 已实现；默认关闭，按账户显式启用
+- **状态**：已实现；默认关闭，按账户显式启用
 - **中文名**：轮转策略
 - **英文名**：Wheel
 - **内部标识**：`wheel`
@@ -11,8 +11,8 @@
 
 ## 1. 背景
 
-Sell Put 被指派后，用户已经持有交割正股。Wheel 监控这一批正股，在愿意以不低于正股
-保本底线的价格卖出时推荐 Covered Call，直到正股被 Call 行权卖出或用户手动结束。
+Cash-Secured Put (CSP) 被指派后，用户已经持有交割正股。Wheel 监控这一批正股，在愿意以不低于正股
+保本底线的价格卖出时推荐 Covered Call (CC)，直到正股被 Call 行权卖出或用户手动结束。
 
 Wheel 是单向生命周期，不是无限循环：
 
@@ -46,23 +46,23 @@ flowchart TD
     Q -- 部分指派 --> S[减少本批次剩余股份]
     S --> C
     Q -- 全部叫走 --> T[called_away]
-    M --> Z[生命周期结束，不自动回到 Sell Put]
+    M --> Z[生命周期结束，不自动回到 CSP]
     T --> Z
 ```
 
-终止后不自动回到 Sell Put。
+终止后不自动回到 CSP。
 
 ## 2. 产品目标
 
-1. 从可审计的 Sell Put 指派事实建立批次级 Wheel 监控。
+1. 从可审计的 CSP 指派事实建立批次级 Wheel 监控。
 2. 在不降低正股保本卖出底线的前提下，优先推荐被行权后生命周期净收益更高的 Call。
-3. 统一管理普通 Covered Call 和 Wheel Covered Call 的股票覆盖额度，防止 Short Call 合计超过持股。
-4. 复用现有 Covered Call 的行情、费用、波动率、流动性、容量和候选快照能力。
+3. 统一管理普通 CC 和 Wheel CC 的股票覆盖额度，防止 Short Call 合计超过持股。
+4. 复用现有 CC 的行情、费用、波动率、流动性、容量和候选快照能力。
 5. 以独立策略合同接入现有扫描链路，使新增 Wheel 不会在未声明的情况下改变既有策略的候选、交易归属、生命周期或报告结论。
 
 ## 3. 非目标
 
-V1 不包括：
+当前实现不包括：
 
 - 自动下单、自动平仓、自动行权或自动滚动 Call；
 - Wheel 结束后自动重新卖出 Put；
@@ -71,7 +71,7 @@ V1 不包括：
 - 普通正股卖单与 Wheel 批次的新归属、拆分或解析工具；
 - 跨 `stock_lot_id` 合并一个 Wheel 生命周期；
 - 仅根据同一账户、标的、成交时间或持股数量做模糊评分，自动猜测 Short Call 属于哪个批次；
-- 复用普通 Covered Call 的启用状态、watchlist 或 symbol 配置作为 Wheel 的启动条件。
+- 复用普通 CC 的启用状态、watchlist 或 symbol 配置作为 Wheel 的启动条件。
 - 将策略拆成微服务、引入动态插件平台，或为接入 Wheel 重写全部现有策略。
 
 ## 4. 启动与批次
@@ -114,7 +114,7 @@ trade intake、生命周期核对和 SQLite option-position ledger 形成权威�
 | Combo Funding Put | `combo_yield` | 必填 | `funding_put` | 无 |
 | Combo Long Call | `combo_yield` | 必填 | `participation_call` | 无 |
 | 已确认 Wheel Short Call | `wheel` | 禁止 | `wheel_call` | 必填 |
-| 普通 Covered Call | `sell_call` | 禁止 | 保持现有值 | 无 |
+| 普通 CC | `sell_call` | 禁止 | 保持现有值 | 无 |
 
 - Combo Long Call 和 Wheel Short Call 独立开仓、平仓和结算，不互相改变状态。
 - Combo 指派正股可保留原 `strategy_group_id` 作为来源血缘；Wheel Short Call 只通过
@@ -145,14 +145,14 @@ Intent 过期由显式 `expires_at_ms` 和 `as_of_ms` 派生，不新增过期�
 同一订单的多笔部分成交可在 intent 数量和覆盖容量内逐笔累计，但单笔 fill 不拆分，
 也不跨 Wheel 批次分配。当前责任边界见第 11 节。
 
-## 5. Covered Call 候选
+## 5. CC 候选
 
 ### 5.1 独立配置，复用策略能力
 
 Wheel 在 `wheel` 命名空间维护独立配置，不在运行时读取普通 `sell_call` 的 symbol 配置。
-实现应复用 canonical Covered Call 的规则、配置解析器和 Candidate Engine，不建立平行扫描器或排序器。
+实现应复用 canonical CC 的规则、配置解析器和 Candidate Engine，不建立平行扫描器或排序器。
 
-V1 配置包含：
+当前配置包含：
 
 - `enabled`；
 - DTE 窗口 `30..45` 个日历日；
@@ -160,7 +160,7 @@ V1 配置包含：
 - 年化净权利金收益硬底线 `10%`；
 - 单张合约净收入折算不低于 `CNY 50`；
 - spread 硬上限 `0.40`；
-- 独立的 `min_iv_rv_ratio` 和 `min_iv_minus_rv`，语义与 canonical Covered Call 相同。
+- 独立的 `min_iv_rv_ratio` 和 `min_iv_minus_rv`，语义与 canonical CC 相同。
 
 Intent 有效截止时间是每次创建操作的显式输入，不是 Wheel 配置项。
 
@@ -183,7 +183,7 @@ broker `average_cost` 填补。
 
 ### 5.3 收益与排序
 
-本轮 Call 继续复用 Covered Call 的当前市值分母：
+本轮 Call 继续复用 CC 的当前市值分母：
 
 ```text
 covered_market_value = live_spot * covered_shares
@@ -212,7 +212,7 @@ projected_lifecycle_net_pnl_if_called
 - 普通正股卖出不自动计入任一 Wheel 批次；因此无法完整归属股数、成本、收入或费用时，
   不输出完整生命周期收益。
 - 预计生命周期收益率使用同一 `covered_market_value` 作分母，不再年化。
-- DTE 不单独优先；只有在预计净收益相同时，才复用 Covered Call 的执行质量和稳定排序规则。
+- DTE 不单独优先；只有在预计净收益相同时，才复用 CC 的执行质量和稳定排序规则。
 
 只有当本轮候选覆盖批次全部剩余股份、且被行权后不留下 `residual_stock` 时，
 才将该指标标注为“最终全部叫走后预计总收益”。容量分配后本轮只覆盖部分剩余股份时，
@@ -221,7 +221,7 @@ projected_lifecycle_net_pnl_if_called
 ### 5.4 期权数据需求与取数
 
 - 活跃 Wheel 批次的 symbol 必须进入全局 required-data 计划，即使该 symbol 不在普通
-  Covered Call watchlist 中或普通 Covered Call 未启用。
+  CC watchlist 中或普通 CC 未启用。
 - Wheel 按活跃批次提交 Call 侧 DTE、strike 区间和 IV/RV 数据需求；多批次及其他策略
   的同侧需求由全局 planner 合并。
 - 同一 Tick 复用全局取数计划和同一份冻结快照，不为 Wheel 建立第二套合约链、
@@ -230,7 +230,7 @@ projected_lifecycle_net_pnl_if_called
 
 ## 6. 共享持股覆盖
 
-正股在 broker 层面是可替换的。V1 不判断卖出的是“原有持股”还是“Wheel 持股”，只维护一个账户+
+正股在 broker 层面是可替换的。当前实现不判断卖出的是“原有持股”还是“Wheel 持股”，只维护一个账户+
 标的级覆盖不变式。容量键为 `(account, canonical_symbol)`：
 
 ```text
@@ -244,7 +244,7 @@ all_open_short_call_locked_shares
 
 其中：
 
-- `all_open_short_call_locked_shares` 包含普通 Covered Call、Wheel Call 和尚未确认策略归属的
+- `all_open_short_call_locked_shares` 包含普通 CC、Wheel Call 和尚未确认策略归属的
   全部未平仓 Short Call；
 - `active_call_intent_reserved_shares` 包含所有有效且未消费的显式 Call 交易意图；
 - `current_tick_recommendation_reserved_shares` 只包含当前冻结 Tick 最终准备展示的开仓动作，
@@ -266,7 +266,7 @@ recommendation_capacity
 分配器。分配顺序固定为：
 
 1. Wheel 批次；
-2. 普通 Covered Call。
+2. 普通 CC。
 
 多个 Wheel 批次之间不使用历史生命周期收益竞价，而按 `assignment_at` 升序、
 再按 `stock_lot_id` 稳定排序。同一批次内仍选择预计生命周期净收益最高的 Call。
@@ -290,10 +290,10 @@ capacity_after
 额外要求：
 
 1. 所有未平仓 Short Call 使用同一 SQLite option-position ledger 计算锁定股数。
-2. Wheel Call 和普通 Covered Call 不得各自计算一份可用持股。
+2. Wheel Call 和普通 CC 不得各自计算一份可用持股。
 3. 已锁定股数和有效 intent 预留超过 `eligible_shares` 时，输出高风险覆盖不足，
    并停止该账户+标的的所有新 Call 推荐。
-4. 普通正股卖出只通过新的 OpenD 持仓事实改变覆盖容量；V1 不为此新增 Wheel 卖单归属工作流。
+4. 普通正股卖出只通过新的 OpenD 持仓事实改变覆盖容量；当前实现不为此新增 Wheel 卖单归属工作流。
 5. 该分配只约束 OM 候选和意图，不能阻止用户绕过 OM 在 broker 手动卖出额外 Call；
    这类成交被同步后必须立即计入锁定股数并报告覆盖不足。
 
@@ -355,7 +355,7 @@ Call 开仓、买入平仓、到期失效和部分指派仅改变派生运行阶
 生命周期状态必须从可审计的持久事实重建，不得从当前持股是否存在临时推算。
 每个生命周期使用 `(account, stock_lot_id)` 作为唯一身份，并保留：
 
-- `wheel_started`：Wheel 已启用时发生的权威 Sell Put 指派，必须引用确切指派事件；
+- `wheel_started`：Wheel 已启用时发生的权威 CSP 指派，必须引用确切指派事件；
 - `wheel_called_away`：关联 Wheel Call 的权威交割累计卖出该批次全部剩余股份，
   必须引用确切 Call 结算事件；
 - `wheel_manual_ended`：用户手动结束的确认事实，必须保留 actor、事件时间、请求身份和确认输入。
@@ -368,7 +368,7 @@ Call 开仓、买入平仓、到期失效和部分指派仅改变派生运行阶
 fail closed，停止自动转换和新推荐；普通操作不得覆盖终态，只有受控 ledger repair
 可以纠正错误事实。
 
-Wheel 未启用时已发生的历史指派在 V1 不自动回溯创建生命周期；以后启用只处理新的
+Wheel 未启用时已发生的历史指派不自动回溯创建生命周期；以后启用只处理新的
 权威指派。
 
 ### 7.2 投影事实来源
@@ -444,7 +444,7 @@ Agent 同时获得 Wheel Call 归属工具，用于：
 Wheel 接入现有 canonical tick 编排和 Daily Brief，不新增 scheduler 或通知通道。策略展示顺序为：
 
 ```text
-Sell Put -> Covered Call -> Combo Yield -> Wheel
+CSP -> CC -> Combo Yield -> Wheel
 ```
 
 Wheel 区块每个批次最小展示：
@@ -466,7 +466,7 @@ Wheel 区块每个批次最小展示：
 - 已锁定 Short Call 超过持股时返回高风险覆盖不足，不以排序或降级候选解决。
 - Wheel 自身缺少数据时只将 Wheel 标记为 `data_unavailable`；未预期的执行异常只将
   Wheel 标记为 `failed`，reason 为 `wheel_scan_failed`，不得删除其他策略结果。
-- 共享 ledger 或持股事实不可信时，普通 Covered Call 与 Wheel 都停止新增 Call 推荐；
+- 共享 ledger 或持股事实不可信时，普通 CC 与 Wheel 都停止新增 Call 推荐；
   不受该事实影响的其他策略可继续输出。
 - 无论 Wheel 扫描是否成功，现有 Short Call 和有效 intent 都必须进入共享覆盖占用；
   无效 Wheel 快照不参与当轮新增容量分配。
@@ -508,11 +508,11 @@ scheduler 和通知通道。不得新增平行排序器、账本、投影表、b
 7. 候选通过全部硬门槛后按预计生命周期净收益排序。已卖与未卖股份成本范围不得重叠，
    部分覆盖不得描述为完整生命周期最终结果。
 8. 每个 `(account, canonical_symbol)` 的全部未平仓 Short Call、有效 intent 和当轮 grant
-   共用一份持仓权威容量；Wheel 按稳定顺序先于普通 Covered Call 分配，并以真实 multiplier
+   共用一份持仓权威容量；Wheel 按稳定顺序先于普通 CC 分配，并以真实 multiplier
    只批准整张合约。
 9. 关闭 Wheel 只停止新生命周期、候选和 intent；现有 scope 继续投影、占用覆盖和处理终态。
    没有未结束 scope 时，既有策略输出保持不变。
-10. 活跃可扫描批次即使在普通 Covered Call 关闭或 watchlist 为空时也进入现有
+10. 活跃可扫描批次即使在普通 CC 关闭或 watchlist 为空时也进入现有
     required-data plan；Wheel 不新增第二次行情读取、缓存、manifest 或快照。
 11. 扫描、CLI、Agent 读取和 Daily Brief 消费同一一致性 Wheel 读模型或已提交快照；
     消费端不得重新推导生命周期、容量或候选身份。

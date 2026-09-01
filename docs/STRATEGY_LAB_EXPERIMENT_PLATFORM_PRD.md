@@ -2,7 +2,7 @@
 
 - **产品名称**：Strategy Lab
 - **产品范围**：用真实证据完成策略假设的历史研究、未来隐藏验证和可审计回执
-- **MVP Recipe**：Sell Put 期权持仓市值集中度
+- **MVP Recipe**：Cash-Secured Put (CSP) 期权持仓市值集中度
 - **产品状态**：Phase 3 本地实现完成；远端自然 Tick 隔离门槛已通过；待 Phase 4 真实 20 日 / 10 日验收
 
 本文是 Strategy Lab 的产品权威。技术架构、代码复用和删除范围见
@@ -20,7 +20,7 @@ Strategy Lab 是 Options Monitor 的策略实验功能。它借助 Agent / LLM �
 逻辑，也不得修改策略、配置、交易、持仓或通知状态。
 
 MVP 只证明一条端到端链路可行：用最近连续 20 个“正式点完整且入选合约均已到期”的历史交易日
-研究 Sell Put 期权持仓市值集中度，产生唯一 `research_leader` 后，经第二次人工确认进入未来 10 个
+研究 CSP 期权持仓市值集中度，产生唯一 `research_leader` 后，经第二次人工确认进入未来 10 个
 正式推荐日隐藏验证，待真实合约到期结果齐备后生成 Final Receipt。
 
 MVP 不建设本地 Agent 接入、MCP、Skill、飞书控制、多实验并行或自动采用。操作员可以通过受控 CLI
@@ -39,7 +39,7 @@ Research Receipt、未来 10 日隐藏验证和 Final Receipt 链路已完成本
 2. Top1 被误写成平台模块，而它实际只是“每个推荐点选一个候选”的比较口径；
 3. 历史研究一律假设 `t0_sell_limit` 成交，未充分使用 OpenD 期权分钟 K 线；
 4. 评价器加入了小样本 Student-t 和最差 20% 硬门槛，超出已确认的 MVP 目标；
-5. ExperimentStore 包含多代迁移和大量 Sell Put / HK 专用表，成本高于首个可行版本所需；
+5. ExperimentStore 包含多代迁移和大量 CSP / HK 专用表，成本高于首个可行版本所需；
 6. 旧实验链路的运行复杂度可能与生产 Tick 争用 OpenD 和执行时间。
 
 本 PRD 不重写生产候选、Research Archive 或 OpenD 基础适配。它只重建 Strategy Lab 产品层，并删除
@@ -330,7 +330,7 @@ Recipe 计算结果；评价器不得请求 OpenD、补汇率或修复缺失输�
 
 ### 11.3 真实合约经济口径
 
-Sell Put 使用一张真实合约：
+CSP 使用一张真实合约：
 
 ```text
 assignment_notional_native = strike × multiplier
@@ -353,7 +353,7 @@ annualized_return
 Multiplier、原币金额和 Evidence 引用必须保留。MVP 持有至到期，不包含人工平仓、展期、Wheel 或到期
 后持股收益。
 
-普通 Covered Call 将来复用本评价器时，收益率分母使用推荐时股票市值 `spot × multiplier`；它不属于
+普通 Covered Call (CC) 将来复用本评价器时，收益率分母使用推荐时股票市值 `spot × multiplier`；它不属于
 本次 Recipe。
 
 `no_fill` 的 `economic_pnl_cny` 和 `annualized_return` 均为零，资金分母和持有天数为空。
@@ -393,7 +393,7 @@ MVP 不使用 Student-t 置信下界、最差 20% 交易日、加权总分或收
 20 日研究对全部变体应用同一规则。多个变体通过时，先按年化收益率改善、再按 CNY 收益改善选择唯一
 `research_leader`。10 日隐藏验证只评价已锁定 leader，不并入历史研究数据。
 
-## 12. 首个 Recipe：Sell Put 期权持仓市值集中度
+## 12. 首个 Recipe：CSP 期权持仓市值集中度
 
 ### 12.1 假设与参数
 
@@ -415,7 +415,7 @@ near_return_threshold = 0.002 / 0.004 / 0.006
 ### 12.2 baseline 与 challenger
 
 - baseline 是推荐时刻实际封存的生产 Top1；
-- challenger 只使用同一点 accepted Sell Put 候选；
+- challenger 只使用同一点 accepted CSP 候选；
 - 为所有 accepted 候选计算期权持仓市值集中度；
 - 使用 Candidate Engine 现有 `rank_candidate_rows()`、`option_market_concentration` profile 和对应收益带；
 - 排序后第一名是 challenger；
@@ -543,7 +543,7 @@ expected slots、实际 batch ref/hash 和 missing/invalid slot identities。不
 
 成交后持有至真实到期日。到期 payoff 使用 OpenD 标的未复权日 K 收盘和冻结费用、FX 事实；期权分钟
 K 不用于到期损益。开仓费用复用正式点已封存费用；指派 / 行权费用必须绑定账户的
-`commission_free`、`platform_fee`、`fee_plan_ref` 及其内容 hash，缺失则 fail closed。Sell Put 指派
+`commission_free`、`platform_fee`、`fee_plan_ref` 及其内容 hash，缺失则 fail closed。CSP 指派
 产生的股票结算费用以 Strike 为成交价计算，不得使用到期收盘价。到期结果未成熟时
 状态为 `waiting_outcome`，不得提前发布结论。
 

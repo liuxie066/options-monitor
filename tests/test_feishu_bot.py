@@ -420,7 +420,7 @@ def test_send_post_message_maps_zero_width_spacer_lines_to_paragraph_breaks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[dict] = []
-    markdown = "# OM · 决策简报 · lx\n\u200b\n状态｜扫描完成\n\u200b\n**1｜NVDA｜Sell Put**\n指标｜权利金 $5.25"
+    markdown = "# OM · 决策简报 · lx\n\u200b\n状态｜扫描完成\n\u200b\n**1｜NVDA｜CSP**\n指标｜权利金 $5.25"
 
     monkeypatch.setattr(
         feishu_bot,
@@ -447,7 +447,7 @@ def test_send_post_message_maps_zero_width_spacer_lines_to_paragraph_breaks(
                 [{"tag": "text", "text": "\u00a0"}],
                 [{"tag": "md", "text": "状态｜扫描完成"}],
                 [{"tag": "text", "text": "\u00a0"}],
-                [{"tag": "md", "text": "**1｜NVDA｜Sell Put**\n指标｜权利金 $5.25"}],
+                [{"tag": "md", "text": "**1｜NVDA｜CSP**\n指标｜权利金 $5.25"}],
             ]
         }
     }
@@ -747,7 +747,7 @@ def test_real_notification_renderers_preserve_content_and_visible_blank_paragrap
 
     assert daily_brief.startswith("# OM · 决策简报 · lx")
     assert "状态｜当前简报" in daily_brief
-    assert "\n## Sell Put\n" in daily_brief
+    assert "\n## CSP\n" in daily_brief
     assert "合约｜2026-08-21 100 Put" in trade_receipt
     assert "## 可选批次" in trade_receipt
     assert "## 已完成" in maintenance_receipt and "## 失败" in maintenance_receipt

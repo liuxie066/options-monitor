@@ -169,7 +169,7 @@ def derive_combo_yield_policy(
     variant = str(raw_cfg.get("variant") or cfg.get("variant") or "sp_lc").strip().lower()
     cfg["variant"] = variant
     cfg["derived_from_sell_put_strategy"] = combo_strategy
-    # Combo Yield owns its Funding Put scan even when the standalone Sell Put
+    # Combo Yield owns its Funding Put scan even when the standalone CSP
     # step is disabled. That leg still runs the canonical insurance
     # underwriting gate, so realized volatility is required by the strategy.
     cfg["requires_realized_volatility"] = True

@@ -37,13 +37,13 @@
 ## 产品与策略
 
 - [Product Architecture](PRODUCT_ARCHITECTURE.md)：产品域、模块责任和依赖。
-- [Strategy Architecture](STRATEGY_ARCHITECTURE.md)：Sell Put、Covered Call、Combo Yield 的开仓边界。
+- [Strategy Architecture](STRATEGY_ARCHITECTURE.md)：Cash-Secured Put (CSP)、Covered Call (CC)、Combo Yield 的开仓边界。
 - [Candidate Strategy](candidate_strategy.md)：当前候选筛选、排序和 trace。
 - [Futu Simulate Account Experience Scan PRD](FUTU_SIMULATE_ACCOUNT_EXPERIENCE_PRD.md)：
-  面向富途模拟账户用户的 Sell Put、Covered Call、Combo Yield 手动体验模式合同。
+  面向富途模拟账户用户的 CSP、CC、Combo Yield 手动体验模式合同。
 - [Opportunity Quality](OPPORTUNITY_QUALITY.md)：Shadow Replay 和扫描质量判定口径。
 - [Notification Experience PRD](OPTION_NOTIFICATION_EXPERIENCE_PRD.md)：已发布的 scheduled report、增量提醒和主动查询合同。
-- [Wheel Strategy PRD](WHEEL_STRATEGY_PRD.md)：已发布 Wheel V1 的产品合同、批次级 Covered Call 监控、共享覆盖和生命周期边界。
+- [Wheel Strategy PRD](WHEEL_STRATEGY_PRD.md)：当前 Wheel 产品合同、批次级 CC 监控、共享覆盖和生命周期边界。
 - [Strategy Lab Current Implementation](STRATEGY_LAB_DESIGN.md)：Phase 3 本地实现、当前唯一入口和真实数据验收边界。
 - [Strategy Lab Experiment Platform PRD](STRATEGY_LAB_EXPERIMENT_PLATFORM_PRD.md)：首个可行产品的目标范围、20/10 日验收和后续接入边界。
 
@@ -95,7 +95,7 @@
 ## 退役与阶段性证据
 
 - [AI Decision Advice retirement](AI_DECISION_ADVICE_DESIGN.md)：已退役能力和残留兼容边界。
-- [Sell Put Top1 W0 preflight](performance/sell-put-top1-capability-preflight-20260814.md)：2026-08-14 的阶段性
+- [CSP Top1 W0 preflight](performance/sell-put-top1-capability-preflight-20260814.md)：2026-08-14 的阶段性
   只读证据；不代表当前 readiness，当前状态见 Strategy Lab Current Contract 和运行时回执。
 
 这些文件保留用于解释历史决策，不逐段更新成当前实现。

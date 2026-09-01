@@ -71,7 +71,7 @@ def describe_recipe(recipe_id: str) -> dict[str, Any]:
         raise StrategyLabRecipeError("recipe_unsupported", "Recipe is not supported")
     return {
         "recipe_id": RECIPE_ID,
-        "name": "Sell Put option-position concentration",
+        "name": "CSP option-position concentration",
         "question": "降低近收益候选的期权持仓市值集中度，能否改善单推荐结果？",
         "market": MARKET,
         "account": ACCOUNT,
@@ -139,7 +139,7 @@ def _candidate_rows(formal_point: Mapping[str, Any]) -> tuple[dict[str, Any], li
         raise StrategyLabRecipeError("recipe_evidence_incomplete", "formal point opening snapshot binding changed")
     accepted_ids = recommendation.get("producer_accepted_candidate_ids")
     if not isinstance(accepted_ids, list) or not accepted_ids:
-        raise StrategyLabRecipeError("recipe_evidence_incomplete", "formal point has no accepted Sell Put candidate")
+        raise StrategyLabRecipeError("recipe_evidence_incomplete", "formal point has no accepted CSP candidate")
     decisions = [
         item
         for item in ranked_opening_candidate_decisions(opening)

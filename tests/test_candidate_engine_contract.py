@@ -444,13 +444,13 @@ def test_sell_put_profiles_do_not_change_within_symbol_ranking() -> None:
 
 
 def test_sell_put_profiles_reject_covered_call_and_unknown_names() -> None:
-    with pytest.raises(ValueError, match="cannot rank Covered Call"):
+    with pytest.raises(ValueError, match="cannot rank CC"):
         rank_candidate_rows(
             [_policy_row(mode="call")],
             mode="call",
             sell_put_ranking_profile="without_concentration",
         )
-    with pytest.raises(ValueError, match="unsupported Sell Put ranking profile"):
+    with pytest.raises(ValueError, match="unsupported CSP ranking profile"):
         rank_candidate_rows(
             [_policy_row()],
             mode="put",

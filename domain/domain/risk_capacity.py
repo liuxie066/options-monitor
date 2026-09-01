@@ -265,7 +265,7 @@ def compute_sell_call_share_capacity(
     multiplier: Any,
     shares_available_for_cover: Any = None,
 ) -> SellCallShareCapacity:
-    """Compute account share capacity for sell-call candidates."""
+    """Compute account share capacity for CC candidates."""
 
     total_value = _to_float(shares_total)
     total = _to_nonnegative_int(shares_total)

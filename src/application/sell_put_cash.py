@@ -422,7 +422,7 @@ def enrich_sell_put_candidates_with_cash(
         df_sp_lab['cash_required_cny'] = pd.NA
         df_sp_lab['cash_requirement_unavailable_reason'] = 'sell_put_candidate_cash_requirement_calc_failed'
 
-    # Canonical Sell Put capacity: gross assignment requirement in the option's
+    # Canonical CSP capacity: gross assignment requirement in the option's
     # native currency; native cash first and fresh FX funds at 100%.
     df_sp_lab['cash_required_native'] = pd.NA
     df_sp_lab['cash_free_effective_native'] = pd.NA

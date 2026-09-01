@@ -338,15 +338,15 @@ def render_assignment_scenario_text(result: Mapping[str, Any]) -> str:
         f"- 账户：{', '.join(scope.get('accounts') or [])}",
         (
             f"- 指派：{summary.get('assignment_count', 0)} 笔"
-            f"（Sell Put {summary.get('short_put_count', 0)}；"
-            f"Sell Call {summary.get('short_call_count', 0)}）"
+            f"（CSP {summary.get('short_put_count', 0)}；"
+            f"CC {summary.get('short_call_count', 0)}）"
         ),
         "",
         "## CNY 资金覆盖",
         "",
         f"- 现金 + MMF：{cash.get('available_cash_and_mmf_cny') or '-'}",
-        f"- Sell Put 总需求：{cash.get('gross_put_requirement_cny') or '-'}",
-        f"- Sell Call 回款：{cash.get('call_assignment_inflow_cny') or '-'}",
+        f"- CSP 总需求：{cash.get('gross_put_requirement_cny') or '-'}",
+        f"- CC 回款：{cash.get('call_assignment_inflow_cny') or '-'}",
         f"- 指派后净现金（估算）：{cash.get('ending_cash_net_estimated_cny') or '-'}",
         f"- 终局资金缺口：{cash.get('terminal_funding_gap_cny') or '-'}",
         "",
