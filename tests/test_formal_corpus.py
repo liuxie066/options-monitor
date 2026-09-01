@@ -55,7 +55,7 @@ def _prepared_receipt(
     observed_at = str(opening["sealed_at_utc"])
     payload = {
         "prepared_authority": {
-            "schema_version": "prepared_option_positions_context.v2",
+            "schema_version": "prepared_option_positions_context",
             "fx_status": "ready",
             "fx_observation_sha256": "c" * 64,
             "source_observed_at": observed_at,
@@ -72,7 +72,7 @@ def _prepared_receipt(
     }
     payload_bytes = _canonical_bytes(payload)
     manifest = {
-        "schema_version": "prepared_option_positions_context.v2",
+        "schema_version": "prepared_option_positions_context",
         "status": "ready",
         "run_id": opening["run_id"],
         "account": opening["account"],

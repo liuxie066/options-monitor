@@ -108,7 +108,7 @@ def _prepared_option_receipt(
 ) -> dict[str, Any]:
     payload = {
         "prepared_authority": {
-            "schema_version": "prepared_option_positions_context.v2",
+            "schema_version": "prepared_option_positions_context",
             "fx_status": "ready",
             "fx_observation_sha256": "f" * 64,
             "source_observed_at": "2026-07-21T14:00:00Z",
@@ -125,7 +125,7 @@ def _prepared_option_receipt(
     }
     payload_bytes = _canonical_bytes(payload)
     manifest = {
-        "schema_version": "prepared_option_positions_context.v2",
+        "schema_version": "prepared_option_positions_context",
         "status": "ready",
         "run_id": opening["run_id"],
         "account": opening["account"],
@@ -536,7 +536,7 @@ def test_best_effort_capture_builds_v2_from_strict_prepared_receipt(
     monkeypatch.setattr(
         mod,
         "find_prepared_option_positions_manifest",
-        lambda **_kwargs: tmp_path / "prepared_option_positions_context.v2.json",
+        lambda **_kwargs: tmp_path / "prepared_option_positions_context.json",
     )
     monkeypatch.setattr(
         mod,
@@ -556,7 +556,7 @@ def test_best_effort_capture_builds_v2_from_strict_prepared_receipt(
     assert publication == "published"
     assert point["schema_version"] == "recommendation_point.v2"
     assert point["option_market_evidence_ref"].endswith(
-        "/prepared_option_positions_context.v2.json"
+        "/prepared_option_positions_context.json"
     )
     assert point["option_market_evidence_manifest_sha256"] == hashlib.sha256(
         receipt["manifest_bytes"]
@@ -605,7 +605,7 @@ def test_formal_capture_preserves_frozen_required_data_failure_reason(
     monkeypatch.setattr(
         mod,
         "find_prepared_option_positions_manifest",
-        lambda **_kwargs: tmp_path / "prepared_option_positions_context.v2.json",
+        lambda **_kwargs: tmp_path / "prepared_option_positions_context.json",
     )
     monkeypatch.setattr(
         mod,

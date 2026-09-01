@@ -36,8 +36,6 @@ from src.application.opening_candidate_snapshot import (
     validate_opening_candidate_snapshot,
 )
 from src.application.prepared_option_positions_context import (
-    LEGACY_PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA,
-    LEGACY_PREPARED_OPTION_POSITIONS_MANIFEST_NAME,
     PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA,
     PREPARED_OPTION_POSITIONS_MANIFEST_NAME,
     PREPARED_OPTION_POSITIONS_PAYLOAD_NAME,
@@ -99,8 +97,6 @@ _ROLE_SCHEMAS = {
 def _prepared_option_binding(schema_version: str) -> tuple[str, str]:
     if schema_version == PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA:
         return schema_version, f"state/{PREPARED_OPTION_POSITIONS_MANIFEST_NAME}"
-    if schema_version == LEGACY_PREPARED_OPTION_POSITIONS_CONTEXT_SCHEMA:
-        return schema_version, f"state/{LEGACY_PREPARED_OPTION_POSITIONS_MANIFEST_NAME}"
     _fail("REFERENCE_SCHEMA_INVALID", "prepared option context schema is unsupported")
 CURRENT_DECISION_READ_KEYS = tuple(
     "account status reason payload lot_count lifecycle_by_lot lifecycle_by_case lifecycle_quality".split()
