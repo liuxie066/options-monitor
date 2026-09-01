@@ -842,9 +842,12 @@ When the user explicitly asks to publish a release, execute the full publication
    `--require-delta-coverage`.
 7. Commit only `VERSION`, `CHANGELOG.md`, and the coverage manifest as
    `chore: release <version>`.
-8. Push `main`.
-9. Watch the `Guardrails` workflow and its downstream `release` job.
-10. Verify the GitHub Release, remote tag, target commit, and assets.
+8. Push the release branch, open a Pull Request to protected `main`, and wait for required checks; do not attempt a direct `main` push.
+9. Merge the release Pull Request.
+10. Watch the `main` push `Guardrails` workflow and its downstream `release` job.
+11. Verify the GitHub Release, remote tag, target commit, and assets.
+12. Close the exact release worktree and local branch only after the release verification and ownership checks in
+    [Release Process](RELEASE_PROCESS.md#发布工作区收口) pass.
 
 The coverage gate uses the previous stable tag as the baseline. It requires every commit in the
 delta to map to an exact Changelog item or an explicit `no_release_note` reason, and rejects code
