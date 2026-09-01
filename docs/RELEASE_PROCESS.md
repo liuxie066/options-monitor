@@ -103,8 +103,9 @@ Changelog、commit、push、创建 tag、发布 GitHub Release 或升级生产�
 5. 将 `Unreleased` 移入日期化的目标版本段落，并更新 `VERSION`；
 6. 渲染最终 Release Notes，确认只包含目标版本且分类顺序正确；
 7. 运行发布前检查；
-8. 把 `VERSION`、`CHANGELOG.md` 和 coverage manifest 作为唯一的
-   `chore: release <version>` 提交推送到 `main`。
+8. 在基于最新 `origin/main` 的 release 分支上，把 `VERSION`、`CHANGELOG.md` 和 coverage
+   manifest 作为唯一的 `chore: release <version>` 提交；
+9. 推送 release 分支，通过 Pull Request 合入受保护的 `main`，并等待必需检查通过。
 
 Delta coverage manifest 不是从 commit message 猜 Release Notes。它先确定上一稳定 tag 和
 当前 `HEAD`，生成完整 commit inventory，并复制已经人工维护的 `Unreleased` 条目。维护者必须：
@@ -273,7 +274,7 @@ VERSION="$(cat VERSION)"
 - 重新校验 release metadata / coverage，并验证最终 source archive 中的 Pi runtime
 - 发布对应 GitHub Release
 
-因此常规发布只需要把版本元数据改好并推到 `main`；不需要再手动补打上同名 tag。
+因此常规发布只需要把版本元数据改好，通过 Pull Request 合入 `main`；不需要再手动补打上同名 tag。
 自动 release job 复用同一次 `Guardrails` 已通过的回归结果，不重复运行同一批 Python / Pi
 测试。普通开发提交因为不修改 `VERSION`，不会进入 release job。
 
@@ -281,6 +282,29 @@ VERSION="$(cat VERSION)"
 审阅与发布前检查，再从 GitHub Actions 手动运行 `Release from VERSION`。手动入口使用当前
 `main` 的 `VERSION` 和提交 SHA，并以完整模式重新执行 metadata、coverage、测试、归档和发布步骤；
 不得用它跳过失败门禁或从未审阅的提交补发 tag。
+
+### 发布工作区收口
+
+Release worktree 只用于本地隔离；GitHub Actions 使用临时 checkout，不需要保留本地发布工作区。
+只有在 tag、GitHub Release、target commit 和产物全部验证后，才可收口 release worktree。
+
+收口前必须同时确认：
+
+- worktree 没有已修改或未跟踪文件；
+- `git merge-base --is-ancestor <branch> origin/main` 成功；
+- 没有活跃任务继续占用该 worktree。
+
+然后只按准确路径和分支名收口：
+
+```bash
+git worktree remove <exact-worktree-path>
+git branch -d <exact-local-branch>
+```
+
+仓库启用 GitHub 合并后自动删除 head branch；这不会删除本地 worktree 或本地分支。
+如果分支只能通过 `git cherry origin/main <branch>` 证明 patch-equivalent，而不是 `origin/main`
+的祖先，不得自动使用 `git branch -D`；应单独审阅并确认。不得清理脏 worktree、
+未合并分支、stash、所有权不明的任务，也不得用通配符批量删除临时目录。
 
 ---
 
