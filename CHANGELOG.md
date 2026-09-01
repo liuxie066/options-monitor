@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 3.1.1 - 2026-09-01
+
 ### Bug Fixes
 - Resolved stable release symlinks before verifying source identity, allowing deployed Strategy Lab previews to bind the audited release commit.
 
