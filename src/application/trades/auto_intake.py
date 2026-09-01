@@ -272,6 +272,7 @@ def _process_payload(
     config: dict[str, Any] | None = None,
     config_path: Path | None = None,
     runtime_root: Path | None = None,
+    before_receipt_fn: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
     on_result_fn: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
     retry_failed_deal: bool = False,
     source: str = "push",
@@ -355,6 +356,7 @@ def _process_payload(
         enrich_trade_payload_fn=_enrich_payload if allow_external_lookup else None,
         normalize_trade_deal_fn=normalize_fn,
         resolve_trade_deal_fn=_resolve_with_wheel_intent,
+        before_receipt_fn=before_receipt_fn,
         on_result_fn=on_result_fn,
         portfolio_management_enabled=is_portfolio_management_enabled(config),
         retry_failed_deal=retry_failed_deal,
@@ -747,6 +749,9 @@ def main(argv: list[str] | None = None) -> int:
                 receipt_config=intake_cfg["receipt"],
                 repo=repo,
             )
+            combo_mode = str(
+                manual_source.get("combo_reconciliation_mode") or "off"
+            ).strip().lower()
             result = _process_payload(
                 payload,
                 repo=repo,
@@ -760,32 +765,29 @@ def main(argv: list[str] | None = None) -> int:
                 config=cfg,
                 config_path=cfg_path,
                 runtime_root=runtime_root,
+                before_receipt_fn=lambda current: _attach_combo_reconciliation_after_open(
+                    current,
+                    apply_changes=apply_changes,
+                    mode=combo_mode,
+                    reconcile_fn=lambda: reconcile_account_post_trade_combos(
+                        repo=repo,
+                        runtime_root=runtime_root,
+                        account=str(
+                            current.get("account")
+                            or manual_source.get("account")
+                            or ""
+                        ),
+                        runtime_environment=trade_combo_runtime_environment(
+                            host=manual_host,
+                            port=manual_port,
+                        ),
+                        mode=combo_mode,
+                    ),
+                ),
                 on_result_fn=receipt_callback,
                 retry_failed_deal=bool(args.retry_failed),
                 source="manual",
                 allow_external_lookup=bool(apply_changes),
-            )
-            combo_mode = str(
-                manual_source.get("combo_reconciliation_mode") or "off"
-            ).strip().lower()
-            _attach_combo_reconciliation_after_open(
-                result,
-                apply_changes=apply_changes,
-                mode=combo_mode,
-                reconcile_fn=lambda: reconcile_account_post_trade_combos(
-                    repo=repo,
-                    runtime_root=runtime_root,
-                    account=str(
-                        result.get("account")
-                        or manual_source.get("account")
-                        or ""
-                    ),
-                    runtime_environment=trade_combo_runtime_environment(
-                        host=manual_host,
-                        port=manual_port,
-                    ),
-                    mode=combo_mode,
-                ),
             )
         if apply_changes:
             _write_listener_status(
@@ -1550,16 +1552,18 @@ def _run_listener_source_loop(
     ) -> dict[str, Any]:
         if apply_changes:
             _ensure_settlement_gateways()
-        result = _process_payload(payload, **kwargs)
-        if not apply_changes:
-            return result
-        if str(kwargs.get("source") or "").strip().lower() != "backfill":
-            _attach_combo_reconciliation_after_open(
-                result,
+        result = _process_payload(
+            payload,
+            before_receipt_fn=lambda current: _attach_combo_reconciliation_after_open(
+                current,
                 apply_changes=apply_changes,
                 mode=combo_mode,
                 reconcile_fn=_run_combo_reconciliation,
-            )
+            ),
+            **kwargs,
+        )
+        if not apply_changes:
+            return result
         try:
             timing = ensure_lifecycle_timing_after_intake(
                 repo,

@@ -331,12 +331,12 @@ def _require_combo_confirmation_mode(
         )
     if not config_path.exists():
         raise SystemExit(
-            f"confirm-combo apply requires a runtime config with account mode=confirm: {config_path}"
+            f"confirm-combo apply requires a runtime config with account mode=confirm or auto: {config_path}"
         )
     config = _load_json_object(config_path)
     account = normalize_account(inference.get("account"))
     mode = combo_reconciliation_mode_for_account(config, account=account)
-    if mode != "confirm":
+    if mode not in {"confirm", "auto"}:
         raise SystemExit(
             f"confirm-combo apply is disabled for account {account}: effective mode={mode}"
         )

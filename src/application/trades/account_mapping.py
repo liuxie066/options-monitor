@@ -139,9 +139,9 @@ def resolve_combo_reconciliation_config(
             raise ValueError(
                 f"trade_intake.combo_reconciliation.accounts.{account} is not a configured account"
             )
-        if mode not in {"off", "observe", "confirm"}:
+        if mode not in {"off", "observe", "confirm", "auto"}:
             raise ValueError(
-                f"trade_intake.combo_reconciliation.accounts.{account} must be off, observe, or confirm"
+                f"trade_intake.combo_reconciliation.accounts.{account} must be off, observe, confirm, or auto"
             )
         account_modes[account] = mode
     return {
