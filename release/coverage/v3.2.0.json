@@ -1,0 +1,104 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.2.0",
+  "base": {
+    "tag": "v3.1.1",
+    "commit": "a57c526dae0228d262cc7bebf35f814e25afd204"
+  },
+  "reviewed_head": "232cc11a722634bc7be0e0948aab08e3b3c87533",
+  "commits": [
+    {
+      "sha": "04648e9b3fe9dc4d650e30339359f719ae3b35a6",
+      "subject": "feat(strategy-lab): add two-day engineering canary"
+    },
+    {
+      "sha": "e4dd6c0a83c6f4281f1a40d938e13b14900f0e11",
+      "subject": "docs(worktree): define release closeout"
+    },
+    {
+      "sha": "687d6f5a1c6eec357d7b6839a6c5228aa3aadd8e",
+      "subject": "Merge pull request #203 from liuxie066/chore/worktree-release-closeout"
+    },
+    {
+      "sha": "d0ad6056025ec374b4dced81841cc6f129287c57",
+      "subject": "docs(architecture): refresh dependency graph"
+    },
+    {
+      "sha": "165d507182681c139474fc373b8986868c76e76c",
+      "subject": "chore(merge): sync origin main"
+    },
+    {
+      "sha": "232cc11a722634bc7be0e0948aab08e3b3c87533",
+      "subject": "Merge pull request #202 from liuxie066/codex/strategy-lab-engineering-canary"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "Added a read-only two-day Strategy Lab engineering canary that validates complete formal-corpus and concentration-recipe evidence before starting the full 20-day research window.",
+      "commits": [
+        "04648e9b3fe9dc4d650e30339359f719ae3b35a6"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "e4dd6c0a83c6f4281f1a40d938e13b14900f0e11",
+      "reason": "Documentation-only clarification of release worktree closeout; no independent user or runtime behavior."
+    },
+    {
+      "commit": "687d6f5a1c6eec357d7b6839a6c5228aa3aadd8e",
+      "reason": "Merge-only integration commit for the release-worktree documentation change."
+    },
+    {
+      "commit": "d0ad6056025ec374b4dced81841cc6f129287c57",
+      "reason": "Generated dependency graph refresh for the Strategy Lab canary; no independent user-visible behavior."
+    },
+    {
+      "commit": "165d507182681c139474fc373b8986868c76e76c",
+      "reason": "Merge-only synchronization with main; the Strategy Lab canary is mapped to its source commit."
+    },
+    {
+      "commit": "232cc11a722634bc7be0e0948aab08e3b3c87533",
+      "reason": "Merge-only integration commit; the Strategy Lab canary is mapped to its source commit."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "04648e9b3fe9dc4d650e30339359f719ae3b35a6",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/202"
+      ]
+    },
+    {
+      "commit": "e4dd6c0a83c6f4281f1a40d938e13b14900f0e11",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/203"
+      ]
+    },
+    {
+      "commit": "687d6f5a1c6eec357d7b6839a6c5228aa3aadd8e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/203"
+      ]
+    },
+    {
+      "commit": "d0ad6056025ec374b4dced81841cc6f129287c57",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/202"
+      ]
+    },
+    {
+      "commit": "165d507182681c139474fc373b8986868c76e76c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/202"
+      ]
+    },
+    {
+      "commit": "232cc11a722634bc7be0e0948aab08e3b3c87533",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/202"
+      ]
+    }
+  ]
+}
