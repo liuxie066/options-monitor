@@ -745,6 +745,40 @@ def test_build_trade_intake_receipt_message_marks_same_expiry_combo_relation_pen
     assert "未自动归入 Combo Yield 组" in msg
 
 
+def test_build_trade_intake_receipt_message_reports_auto_combo_adoption() -> None:
+    msg = build_trade_intake_receipt_message(
+        deal=None,
+        result={
+            "status": "applied",
+            "reason": "applied_open",
+            "deal_id": "call-open",
+            "account": "sy",
+            "action": "open",
+            "operations": [{"event_id": "call-open"}],
+            "diagnostics": {
+                "combo_yield_enrichment": {
+                    "combination_relation_pending": True,
+                }
+            },
+            "combo_reconciliation": {
+                "auto_adoptions": [
+                    {
+                        "status": "adopted",
+                        "inference": {
+                            "put_open_event_id": "put-open",
+                            "call_open_event_id": "call-open",
+                        },
+                    }
+                ]
+            },
+        },
+        payload={"symbol": "0700.HK"},
+    )
+
+    assert "组合｜✅ 已自动归入 Combo Yield" in msg
+    assert "关系待确认" not in msg
+
+
 def test_trade_receipt_preserves_normalized_feishu_size_error(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_bot")
     out = send_trade_intake_receipt(

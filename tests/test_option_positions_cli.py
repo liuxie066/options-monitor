@@ -303,6 +303,15 @@ def test_combo_confirmation_mode_is_account_scoped_and_fail_closed(
         inference=inference,
     )["mode"] == "confirm"
 
+    config = json.loads(confirm_path.read_text(encoding="utf-8"))
+    config["trade_intake"]["combo_reconciliation"]["accounts"]["lx"] = "auto"
+    confirm_path.write_text(json.dumps(config), encoding="utf-8")
+    assert cli_mod._require_combo_confirmation_mode(
+        base=tmp_path,
+        args=args,
+        inference=inference,
+    )["mode"] == "auto"
+
 
 def _write_data_config(path: Path, *, sqlite_path: Path) -> Path:
     payload = {

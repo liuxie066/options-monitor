@@ -7,11 +7,12 @@ from src.application.daily_decision_brief_repository import (
     read_combo_candidate_exposures,
 )
 from src.application.ledger.api import (
+    adopt_post_trade_combo_pair,
     reconcile_combo_pair_inferences,
 )
 
 
-_ENABLED_MODES = {"observe", "confirm"}
+_ENABLED_MODES = {"observe", "confirm", "auto"}
 
 
 def trade_combo_runtime_environment(*, host: str, port: int) -> str:
@@ -33,12 +34,12 @@ def reconcile_account_post_trade_combos(
     mode: str,
     effective_now_ms: int | None = None,
 ) -> dict[str, Any]:
-    """Reconcile one account after trade commit without changing Combo membership."""
+    """Reconcile one account after trade commit and adopt only strict auto matches."""
 
     account_value = str(account or "").strip().lower()
     mode_value = str(mode or "off").strip().lower()
     if mode_value not in {"off", *_ENABLED_MODES}:
-        raise ValueError("combo reconciliation mode must be off, observe, or confirm")
+        raise ValueError("combo reconciliation mode must be off, observe, confirm, or auto")
     if not account_value:
         raise ValueError("combo reconciliation requires account")
     if mode_value == "off":
@@ -100,11 +101,44 @@ def reconcile_account_post_trade_combos(
         persist=True,
         effective_now_ms=effective_now_ms,
     )
+    auto_adoptions = []
+    auto_adoption_errors = []
+    if mode_value == "auto":
+        for inference in reconciled.get("inferences") or []:
+            if not (
+                inference.get("status") == "proposal_ready"
+                and inference.get("evidence_grade") == "exact_delivered_candidate"
+                and not inference.get("alternative_inference_ids")
+                and inference.get("selected_in_one_optimum") is True
+            ):
+                continue
+            try:
+                adopted = adopt_post_trade_combo_pair(
+                    repo=repo,
+                    inference_id=str(inference["inference_id"]),
+                    expected_input_hash=str(inference["input_snapshot_hash"]),
+                    actor="trade_intake:auto_combo_reconciliation",
+                    apply_changes=True,
+                    effective_now_ms=effective_now_ms,
+                )
+            except Exception as exc:
+                auto_adoption_errors.append(
+                    {
+                        "inference_id": inference["inference_id"],
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+            else:
+                auto_adoptions.append(adopted)
     return {
         **reconciled,
         "status": "reconciled",
         "mode": mode_value,
         "evidence_reads": evidence_reads,
+        "auto_adoption_count": len(auto_adoptions),
+        "auto_adoptions": auto_adoptions,
+        "auto_adoption_error_count": len(auto_adoption_errors),
+        "auto_adoption_errors": auto_adoption_errors,
     }
 
 

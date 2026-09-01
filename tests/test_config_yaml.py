@@ -1668,7 +1668,7 @@ trade_intake:
   combo_reconciliation:
     default_mode: off
     accounts:
-      lx: observe
+      lx: auto
 markets:
   us:
     accounts: [lx]
@@ -1684,7 +1684,7 @@ markets:
 
     assert cfg["trade_intake"]["combo_reconciliation"] == {
         "default_mode": "off",
-        "accounts": {"lx": "observe"},
+        "accounts": {"lx": "auto"},
     }
 
 

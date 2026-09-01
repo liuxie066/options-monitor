@@ -489,6 +489,7 @@ def process_trade_payload(
     enrich_trade_payload_fn: Callable[[dict[str, Any]], TradePayloadEnrichmentReturn] | None,
     normalize_trade_deal_fn: Callable[..., Any],
     resolve_trade_deal_fn: Callable[..., Any],
+    before_receipt_fn: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
     on_result_fn: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
     portfolio_management_enabled: bool = False,
     retry_failed_deal: bool = False,
@@ -721,6 +722,10 @@ def process_trade_payload(
                 payload=payload,
             )
             write_trade_intake_state_fn(state_path, state)
+    if before_receipt_fn is not None:
+        enriched_result = before_receipt_fn(result_dict)
+        if isinstance(enriched_result, dict):
+            result_dict = enriched_result
     return _finalize_trade_payload_result(
         result_dict=result_dict,
         state=state,
