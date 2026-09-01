@@ -31,10 +31,8 @@ def _expiry_structure(row: dict[str, Any]) -> str:
     if value:
         return _text(value).lower()
     structure_mode = _text(snapshot_fields.get("structure_mode") or row.get("structure_mode")).lower()
-    if structure_mode == "staggered_expiry_pair":
-        return "diagonal"
-    if structure_mode == "same_expiry_pair":
-        return "same_expiry"
+    if structure_mode and structure_mode != "same_expiry_pair":
+        return "unknown"
     return "same_expiry"
 
 

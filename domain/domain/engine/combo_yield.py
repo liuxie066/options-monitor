@@ -502,8 +502,9 @@ def combo_yield_proposed_gate_reasons(
         if _safe_float(row.get(field)) is None:
             reasons.append(field)
 
-    gap = _expiry_gap_days(row)
-    if gap is None or gap != 0:
+    put_expiration = str(row.get("put_expiration") or "")[:10]
+    call_expiration = str(row.get("call_expiration") or "")[:10]
+    if not put_expiration or not call_expiration or put_expiration != call_expiration:
         reasons.append("same_expiry")
     if spot is None or call_strike is None or call_strike < spot:
         reasons.append("call_strike_below_spot")
@@ -597,20 +598,6 @@ def _positive_int(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed >= 1 else None
-
-
-def _expiry_gap_days(row: dict[str, Any]) -> int | None:
-    direct = _safe_float(row.get("expiry_gap_days"))
-    if direct is not None:
-        return int(direct)
-    try:
-        from datetime import date
-
-        put_expiry = date.fromisoformat(str(row.get("put_expiration") or "")[:10])
-        call_expiry = date.fromisoformat(str(row.get("call_expiration") or "")[:10])
-    except (TypeError, ValueError):
-        return None
-    return (call_expiry - put_expiry).days
 
 
 def _typed_rank_key(values: tuple[Any, ...]) -> list[dict[str, Any]]:
