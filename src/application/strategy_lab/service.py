@@ -68,6 +68,7 @@ from src.application.strategy_lab.recipe import (
     check_recipe_readiness,
     describe_recipe,
     resolve_terminal_fx_binding,
+    select_engineering_canary_window,
 )
 from src.application.strategy_lab.readiness import HISTORY_K_POC_NOT_BEFORE_HK
 from src.application.strategy_lab.receipts import (
@@ -273,6 +274,47 @@ def list_recipes(
                 },
             }
         ]
+    }
+
+
+def preview_engineering_canary(
+    context: Mapping[str, Any],
+    *,
+    occurred_at_utc: str,
+) -> dict[str, Any]:
+    profile = context.get("profile") if isinstance(context, Mapping) else None
+    accounts = profile.get("accounts") if isinstance(profile, Mapping) else None
+    if context.get("market") != MARKET or not isinstance(accounts, list) or ACCOUNT not in accounts:
+        _fail("Strategy Lab engineering canary requires hk/lx in the service profile")
+    observed = _occurred_at(occurred_at_utc)
+    window = select_engineering_canary_window(context, observed)
+    selected_dates = list(window.get("selected_trading_dates", []))
+    if window.get("status") != "available":
+        return {
+            "authoritative": False,
+            "status": "blocked",
+            "observed_at_utc": observed,
+            "selected_trading_dates": selected_dates,
+            "blockers": list(window.get("blockers", [])),
+            "projection": None,
+            "unlocks": [],
+        }
+    sessions = list(window["sessions"])
+    points = [point for session in sessions for point in session["points"]]
+    variant_ids = [str(arm["arm_id"]) for arm in points[0]["arms"]]
+    return {
+        "authoritative": False,
+        "status": "available",
+        "observed_at_utc": observed,
+        "selected_trading_dates": selected_dates,
+        "blockers": [],
+        "projection": {
+            "recipe_id": RECIPE_ID,
+            "trading_day_count": len(sessions),
+            "recommendation_point_count": len(points),
+            "variant_ids": variant_ids,
+        },
+        "unlocks": [],
     }
 
 
@@ -2281,6 +2323,7 @@ __all__ = [
     "execute_research",
     "get_experiment_status",
     "list_recipes",
+    "preview_engineering_canary",
     "preview_experiment",
     "preview_validation",
     "read_receipt",

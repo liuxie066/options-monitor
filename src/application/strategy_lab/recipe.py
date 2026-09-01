@@ -503,6 +503,8 @@ def _load_window_day(
     cutoff: datetime,
     cutoff_ms: int,
     calendar: Mapping[str, Any],
+    *,
+    require_mature_outcomes: bool = True,
 ) -> tuple[dict[str, Any] | None, str | None]:
     runtime_root = context["runtime_root"]
     try:
@@ -576,7 +578,9 @@ def _load_window_day(
             )
         except StrategyLabRecipeError as exc:
             return None, exc.reason_code
-        if any(not _expiration_is_mature(arm["candidate"].get("expiration"), cutoff_ms) for arm in arms["arms"]):
+        if require_mature_outcomes and any(
+            not _expiration_is_mature(arm["candidate"].get("expiration"), cutoff_ms) for arm in arms["arms"]
+        ):
             return None, "research_outcome_immature"
         points.append(arms)
     return (
@@ -664,6 +668,53 @@ def select_research_window(
         "no mature 20-session research window is available",
         sessions=[],
     )
+
+
+def select_engineering_canary_window(
+    context: Mapping[str, Any],
+    observed_at_utc: str,
+) -> dict[str, Any]:
+    try:
+        cutoff = datetime.fromisoformat(observed_at_utc.replace("Z", "+00:00")).astimezone(timezone.utc)
+        calendar = read_market_calendar_binding(context["artifact_root"], market="HK")
+    except Exception as exc:
+        return _blocked("market_calendar_binding_unavailable", str(exc), sessions=[])
+    cutoff_ms = int(cutoff.timestamp() * 1000)
+    cutoff_date = cutoff.astimezone(_HK_TZ).date().isoformat()
+    if not calendar["coverage_start"] <= cutoff_date <= calendar["coverage_end"]:
+        return _blocked(
+            "market_calendar_binding_unavailable",
+            "HK observation date is outside calendar coverage",
+            sessions=[],
+        )
+    dates = [value for value in calendar["trading_dates"] if value <= cutoff_date]
+    if len(dates) < 2:
+        return _blocked("research_corpus_warming", "fewer than 2 trading sessions", sessions=[])
+    selected_dates = dates[-2:]
+    sessions: list[dict[str, Any]] = []
+    for trading_date in selected_dates:
+        day, reason = _load_window_day(
+            context,
+            trading_date,
+            cutoff,
+            cutoff_ms,
+            calendar,
+            require_mature_outcomes=False,
+        )
+        if day is None:
+            return _blocked(
+                reason or "research_window_coverage_missing",
+                f"engineering canary session is incomplete: {trading_date}",
+                sessions=sessions,
+                selected_trading_dates=selected_dates,
+            )
+        sessions.append(day)
+    return {
+        "status": "available",
+        "blockers": [],
+        "selected_trading_dates": selected_dates,
+        "sessions": sessions,
+    }
 
 
 def _all_arms(window: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -872,5 +923,6 @@ __all__ = [
     "describe_recipe",
     "project_validation_arms",
     "resolve_terminal_fx_binding",
+    "select_engineering_canary_window",
     "select_research_window",
 ]
