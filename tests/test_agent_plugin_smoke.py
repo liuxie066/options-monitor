@@ -2391,6 +2391,35 @@ def test_runtime_status_reads_account_trade_intake_sources(tmp_path: Path) -> No
     assert trade["summary"]["last_backfill_applied_count"] == 1
 
 
+def test_runtime_status_reconciliation_preview_skips_historical_audit(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.agent_tools.runtime_status_impl as runtime_status
+
+    calls: list[dict[str, Any]] = []
+
+    def _preview(**kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        return {"available": True}
+
+    monkeypatch.setattr(
+        runtime_status,
+        "preview_trade_intake_reconciliation_from_sqlite",
+        _preview,
+    )
+    state_path = tmp_path / "state.json"
+    sqlite_path = tmp_path / "ledger.sqlite3"
+
+    summary = runtime_status._trade_intake_reconciliation_summary(
+        state_path=state_path,
+        ledger_store={"sqlite_path": str(sqlite_path)},
+    )
+
+    assert calls == [{"state_path": state_path, "sqlite_path": sqlite_path}]
+    assert summary["reconciliation_preview_available"] is True
+
+
 def test_runtime_status_reports_config_authority(tmp_path: Path) -> None:
 
     cfg_path = tmp_path / "config.us.json"
