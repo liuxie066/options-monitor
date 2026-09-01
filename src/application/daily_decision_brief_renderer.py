@@ -11,7 +11,7 @@ _DEFAULT_MAX_CANDIDATES = 3
 _DEFAULT_MAX_REJECTIONS = 5
 _MAX_TOTAL_ITEMS = 40
 _MAX_MESSAGE_CHARS = 12_000
-_SHARED_SELL_PUT_CAPACITY_REMINDER = "多个 Sell Put 候选共享同一现金额度，手数不能相加"
+_SHARED_SELL_PUT_CAPACITY_REMINDER = "多个 CSP 候选共享同一现金额度，手数不能相加"
 
 # 飞书 post 消息的 md 标签会把纯空行折叠掉，段落之间没有可视间距；
 # 用零宽空格撑出可见空行（不是空白字符，不会被渲染端或 str.strip() 移除）。
@@ -21,9 +21,9 @@ _MARKET_LABELS = {"US": "美股", "HK": "港股", "CN": "A股"}
 _MARKET_TIMEZONES = {"US": "America/New_York", "HK": "Asia/Hong_Kong", "CN": "Asia/Shanghai"}
 _MARKET_TIME_LABELS = {"US": "美东", "HK": "香港", "CN": "北京时间"}
 _STRATEGY_LABELS = {
-    "sell_put": "Sell Put",
-    "short_put": "Sell Put",
-    "covered_call": "Covered Call",
+    "sell_put": "CSP",
+    "short_put": "CSP",
+    "covered_call": "CC",
     "combo_yield": "组合增强",
     "wheel": "Wheel",
 }

@@ -2,9 +2,9 @@
 
 `options-monitor` 是一个本地运行、人工决策优先的期权监控系统。它把行情、现金、正股持仓、期权账本、策略规则、报告和通知串成一条可审计链路，帮助用户完成：
 
-- `Sell Put` 与 `Covered Call` 候选筛选；
+- `Cash-Secured Put (CSP)` 与 `Covered Call (CC)` 候选筛选；
 - `Combo Yield` 组合候选评估；
-- `Sell Put` 被指派后，继续管理买入的股票并寻找增收与退出机会；
+- `CSP` 被指派后，继续管理买入的股票并寻找增收与退出机会；
 - 已开期权 lot 的 `Close Advice`；
 - 期权利润、现金活动、持仓与到期生命周期查询；
 - Daily Decision Brief、候选变化提醒和离线策略复盘。
@@ -44,14 +44,14 @@ trade_events -> projection -> position_lots
 | 能力 | 当前入口 | 权威说明 |
 |---|---|---|
 | YAML 配置构建与校验 | `om config` | [CONFIGS.md](CONFIGS.md) |
-| Sell Put / Covered Call | `om run tick`、`om scan` | [策略架构](docs/STRATEGY_ARCHITECTURE.md) |
+| CSP / CC | `om run tick`、`om scan` | [策略架构](docs/STRATEGY_ARCHITECTURE.md) |
 | Combo Yield | 与开仓扫描同链路 | [策略架构](docs/STRATEGY_ARCHITECTURE.md) |
 | 轮转策略 | `om run tick`、`om wheel` | [轮转策略 PRD](docs/WHEEL_STRATEGY_PRD.md) |
 | Close Advice | `om close-advice` | [Close Advice Contract](docs/CLOSE_ADVICE_CONTRACT.md) |
 | Daily Decision Brief | `om daily-brief` | [通知体验 PRD](docs/OPTION_NOTIFICATION_EXPERIENCE_PRD.md) |
 | 期权账本与生命周期 | `om option-positions`、`om trade-events` | [Ledger Architecture](docs/LEDGER_ARCHITECTURE.md) |
 | 期权收益与现金 | `om option-performance` | [Option Performance](docs/OPTION_PERFORMANCE_DESIGN.md) |
-| 全部 Sell Put / Sell Call 指派压力测试 | `om portfolio assignment-scenario` | 本 README 的“指派后资产分布” |
+| 全部 CSP / CC 指派压力测试 | `om portfolio assignment-scenario` | 本 README 的“指派后资产分布” |
 | 本地 Copilot | `om copilot` | [Agent Integration](docs/AGENT_INTEGRATION.md) |
 | 结构化 Tool Gateway | `om-agent spec`、`om-agent run --tool <name> --input-json '<json>'` | [Tool Reference](docs/TOOL_REFERENCE.md) |
 | Shadow Replay | `om research` | [Shadow Replay Runbook](docs/SHADOW_REPLAY_RUNBOOK.md) |
@@ -66,7 +66,7 @@ trade_events -> projection -> position_lots
 
 已收到的期权收入会计入总收益，但不用于降低股票的卖出底线。系统还会合并检查所有可能占用持股的期权合约，避免新建议超过实际可用持股。该策略只提供监控和候选建议，不自动下单，也不保证收益。
 
-Sell Put / Covered Call 新开仓只使用 `insurance_underwriting`。历史 artifact 和持仓解释可继续读取
+CSP / CC 新开仓只使用 `insurance_underwriting`。历史 artifact 和持仓解释可继续读取
 `return_first` / `short_vol`，但这些兼容语义不能重新进入当前开仓配置或正式候选排序。
 
 README 不复制完整规则：[候选策略合同](docs/candidate_strategy.md) 是已经确认的目标口径，
@@ -259,7 +259,7 @@ om option-positions add \
 
 ### 指派后资产分布
 
-把所选账户中所有 open short Sell Put 和 Sell Call 同时按 strike 实物指派，并按当前现货价格与当前显式汇率证据计算 CNY 资产分布、现金覆盖、费用、到期梯度和潜在负债：
+把所选账户中所有 open short CSP 和 CC 同时按 strike 实物指派，并按当前现货价格与当前显式汇率证据计算 CNY 资产分布、现金覆盖、费用、到期梯度和潜在负债：
 
 ```bash
 om portfolio assignment-scenario --accounts lx sy
@@ -276,7 +276,7 @@ om-agent run --tool portfolio_assignment_scenario \
 - MMF 并入现金，资金覆盖统一用 CNY；账户、券商和币种拆分仍保留作操作约束；
 - 股票按当前 spot 估值，指派现金按 strike 结算；历史已收权利金不重复计入；
 - 费用复用统一股票费用计算器；缺少券商、币种或指派费用规则时返回 `partial` 和 `null`，不按 0 处理；
-- 现金不足形成 funding liability，Sell Call 覆盖不足形成 short-stock liability，不会被改写成执行错误。
+- 现金不足形成 funding liability，CC 覆盖不足形成 short-stock liability，不会被改写成执行错误。
 
 Copilot 通过同一个 `portfolio_assignment_scenario` 纯读工具调用，不维护第二套触发词或计算逻辑。使用 Copilot 时需在 assistant 配置中显式启用可选的 `portfolio` toolset，并保持 portfolio-management API 仅在同机 loopback 提供服务。
 
@@ -461,7 +461,7 @@ Linux 主机预置加密凭据后，推荐在 render 时显式加上 `--include-
 - [配置指南](CONFIGURATION_GUIDE.md)：账户、市场、环境变量和验证方法。
 - [产品架构](docs/PRODUCT_ARCHITECTURE.md)：产品域与模块关系。
 - [系统架构](docs/ARCHITECTURE.md)：技术分层与真实调用链。
-- [策略架构](docs/STRATEGY_ARCHITECTURE.md)：Sell Put、Covered Call、Combo Yield。
+- [策略架构](docs/STRATEGY_ARCHITECTURE.md)：CSP、CC、Combo Yield。
 - [Ledger Architecture](docs/LEDGER_ARCHITECTURE.md)：交易与持仓事实边界。
 - [Tool Reference](docs/TOOL_REFERENCE.md)：当前 Tool Gateway 分类和 manifest 使用。
 - [RUNBOOK.md](RUNBOOK.md)：巡检、故障诊断和应急操作。

@@ -5431,7 +5431,7 @@ def test_symbol_config_read_resolves_alias_and_reports_missing_field(tmp_path: P
 
     out = run_tool(
         "symbol_config_read",
-        {"config_path": str(cfg_path), "symbol": "泡泡玛特", "strategy": "sell_put", "field": "max_strike"},
+        {"config_path": str(cfg_path), "symbol": "泡泡玛特", "strategy": "csp", "field": "max_strike"},
     )
 
     assert out["ok"] is True
@@ -5451,7 +5451,7 @@ def test_symbol_config_read_resolves_alias_and_reports_missing_field(tmp_path: P
     observation = copilot_tools.compact_observation(
         "symbol_config_read",
         out,
-        {"config_path": str(cfg_path), "symbol": "泡泡玛特", "strategy": "sell_put", "field": "max_strike"},
+        {"config_path": str(cfg_path), "symbol": "泡泡玛特", "strategy": "csp", "field": "max_strike"},
     )
     assert observation["coverage"]["status"] == "complete"
     assert observation["coverage"]["complete_for"] == "point"
@@ -5523,7 +5523,7 @@ def test_symbol_config_read_routes_to_calibrated_symbol_market(monkeypatch, tmp_
 
     hk_out = run_tool(
         "symbol_config_read",
-        {"config_key": "us", "symbol": "腾讯", "strategy": "sell_call", "field": "min_strike"},
+        {"config_key": "us", "symbol": "腾讯", "strategy": "cc", "field": "min_strike"},
     )
     us_out = run_tool(
         "symbol_config_read",
@@ -5667,8 +5667,8 @@ def test_preview_notification_is_read_only() -> None:
     out = run_tool("preview_notification", {"alerts_text": alerts, "account_label": "user1"})
 
     assert out["ok"] is True
-    assert "### Put" in out["data"]["notification_text"]
-    assert "🟢 Put NVDA 156P · 06-18 · 挂单 1" in out["data"]["notification_text"]
+    assert "### CSP" in out["data"]["notification_text"]
+    assert "🟢 CSP NVDA 156P · 06-18 · 挂单 1" in out["data"]["notification_text"]
     assert out["data"]["renderer"] == "compact"
     assert out["data"]["render_style"] == "compact"
     assert out["data"]["authority"] == "compatibility_only"

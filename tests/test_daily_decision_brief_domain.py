@@ -33,7 +33,7 @@ def _action(
         "expiration": "2026-08-21",
         "strike": 100.0,
         "contract_symbol": contract_symbol,
-        "title": "Sell Put candidate",
+        "title": "CSP candidate",
         "reason": "passed canonical filter",
         "metrics": {
             "rank": rank,

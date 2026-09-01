@@ -3,7 +3,7 @@
 - **状态**：已实现并发布；当前通知产品合同
 - **日期**：2026-08-25
 - **产品范围**：Options Monitor 策略扫描后的主动通知与主动查询
-- **适用策略**：Sell Put、Covered Call、Combo Yield
+- **适用策略**：Cash-Secured Put (CSP)、Covered Call (CC)、Combo Yield
 - **适用粒度**：账户 + 市场 + 市场交易日
 - **文档性质**：产品需求；不规定具体代码拆分
 
@@ -183,7 +183,7 @@ scheduler 触发
 
 ## 当前候选
 
-**1｜9992.HK｜Sell Put｜08-28 HK$145 Put（首选）**
+**1｜9992.HK｜CSP｜08-28 HK$145 Put（首选）**
 指标｜年化 25.2% · Delta -0.23
 
 ## 持仓
@@ -196,7 +196,7 @@ scheduler 触发
 9992.HK 08-28 HK$145 Put｜按当前现金最多 8 手
 
 ## 提醒
-多个 Sell Put 候选共享同一现金额度，手数不能相加
+多个 CSP 候选共享同一现金额度，手数不能相加
 ```
 
 飞书固定简报的紧凑卡片投影只在实际展示了逐候选手数容量时保留上述
@@ -248,8 +248,8 @@ scheduler 触发
 - 数据未过期；
 - 不是 rejected、raw-only、malformed 或关键数据缺失的结果；
 - 具备明确标的、策略、合约、报价和必要指标；
-- Sell Put 资金容量至少支持一手；
-- Covered Call 具备至少一手有效覆盖能力；
+- CSP 资金容量至少支持一手；
+- CC 具备至少一手有效覆盖能力；
 - Combo Yield 满足 canonical 组合容量与腿关系要求。
 
 ### 8.3 候选身份与去重
@@ -263,8 +263,8 @@ scheduler 触发
 示例：
 
 ```text
-lx + HK + 9992.HK + Sell Put
-lx + HK + 9992.HK + Covered Call
+lx + HK + 9992.HK + CSP
+lx + HK + 9992.HK + CC
 ```
 
 规则：
@@ -298,7 +298,7 @@ lx + HK + 9992.HK + Covered Call
 
 ## 新增候选
 
-**1｜3690.HK｜Sell Put｜08-28 HK$95 Put（首选）**
+**1｜3690.HK｜CSP｜08-28 HK$95 Put（首选）**
 指标｜年化 18.5% · Delta -0.22
 
 ## 资金
@@ -307,7 +307,7 @@ lx + HK + 9992.HK + Covered Call
 3690.HK 08-28 HK$95 Put｜按当前现金最多 3 手
 
 ## 提醒
-多个 Sell Put 候选共享同一现金额度，手数不能相加
+多个 CSP 候选共享同一现金额度，手数不能相加
 下单前重新确认报价、流动性和事件风险
 ```
 
@@ -414,8 +414,8 @@ lx + HK + 9992.HK + Covered Call
 ### 11.3 候选容量
 
 - 每个候选分别显示当前最多支持的整手数；
-- Sell Put 共享现金池时必须提示手数不可相加；
-- Covered Call 使用可覆盖股数与 multiplier 计算；
+- CSP 共享现金池时必须提示手数不可相加；
+- CC 使用可覆盖股数与 multiplier 计算；
 - Combo Yield 使用 canonical 组合容量口径。
 
 资金数据不可用时显示：
@@ -527,7 +527,7 @@ lx + HK + 9992.HK + Covered Call
 
 ### 场景 E：同一标的新增另一合约
 
-- 上次已有 `9992.HK + Sell Put`；
+- 上次已有 `9992.HK + CSP`；
 - 本轮只新增另一个到期日或行权价；
 - 不发送新增候选通知；
 - 固定报告或主动查询显示当前首选和备选合约。

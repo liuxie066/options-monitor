@@ -196,7 +196,7 @@ security identity 与 quota code 完全相同。已有 receipt、保护窗口和
 `build_arms()` 的确定性步骤：
 
 1. 从 formal point 读取实际封存的生产 Top1 作为 baseline；
-2. 读取同一点完整 accepted Sell Put 候选，缺任一候选事实则该点不可评价；
+2. 读取同一点完整 accepted Cash-Secured Put (CSP) 候选，缺任一候选事实则该点不可评价；
 3. 对每个候选调用
    `calculate_option_market_concentration_after()`，只使用同一 formal point 绑定的全部未平仓期权、mark 和
    FX；
@@ -213,7 +213,7 @@ Recipe 不增加指派后股票集中度、全部 Short Put 名义敞口或其�
 ### 5.3 标准结果
 
 `build_single_recommendation_result()` 只接受已经规范化的 arm、fill 和 outcome，不访问 provider。
-输出 PRD 定义的 `single_recommendation_result`。Sell Put 资金分母和损益公式只有这一处实现。
+输出 PRD 定义的 `single_recommendation_result`。CSP 资金分母和损益公式只有这一处实现。
 
 `no_fill` 输出零 PnL 和零年化收益率，资金分母与持有天数为空；`pending_outcome` 保持等待；
 `not_evaluable` 不参与计算且不能改写为零。
@@ -385,7 +385,7 @@ binding。实时 snapshot 的 Bid、raw Bid Volume 或 source time 缺失 / 非�
   盘中隐藏报价的 `market_snapshot` authority；
 - 使用开仓、到期时点已绑定的 `FXRateFact`；
 - 开仓费用使用 formal point 已封存结果；终端费用使用严格 account fee-plan fact
-  (`commission_free`、`platform_fee`、`fee_plan_ref`) 及其内容 hash，并复用现有期权费用计算；Sell Put
+  (`commission_free`、`platform_fee`、`fee_plan_ref`) 及其内容 hash，并复用现有期权费用计算；CSP
   指派产生的股票结算费用以 Strike 为成交价，不使用到期收盘价；
 - 生成规范化 outcome artifact 和 hash；
 - 未到期为 `pending_outcome`，可恢复缺失为 `blocked`，冻结窗口不可恢复缺失为

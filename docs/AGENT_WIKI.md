@@ -101,7 +101,7 @@ Use the lowest-risk tool that can answer the question.
 | Why is candidate ranking odd? | `candidate_rank_explain` | Explains the sealed candidate snapshot ranking |
 | Is shadow replay evidence ready for tuning? | `research collect --scope candidate` | Offline candidate/reject universe readiness; no live config mutation |
 | Is candidate evidence complete enough for scan diagnosis? | `healthcheck` / `doctor` with `candidate_evidence` inputs | Diagnostic row-count/readiness check, not a strategy recommendation |
-| Is Sell Put cash constrained? | `query_cash_headroom` | Account-aware cash and collateral view |
+| Is Cash-Secured Put (CSP) cash constrained? | `query_cash_headroom` | Account-aware cash and collateral view |
 | Is ledger projection trustworthy? | `option_positions_read action=inspect`, Research `ledger` scope | Reads canonical event/projection state |
 | Does close advice have inputs? | `prepare_close_advice_inputs`, then `close_advice` or `get_close_advice` | Keeps refresh and recommendation explicit |
 | What evidence should MacBook Codex analyze? | `research` | Builds a redacted evidence bundle and handoff |
@@ -352,7 +352,7 @@ Recommended Codex prompt:
 
 ```text
 你现在作为 OM research analyst。请基于下面的 Research Handoff 分析线上质量问题，
-重点看持仓/交易一致性、多账户对 sell put / covered call / YE 的影响，
+重点看持仓/交易一致性、多账户对 CSP / Covered Call (CC) / YE 的影响，
 输出：问题判断、证据、优先级、本地修复建议和需要补充的证据。
 ```
 
@@ -927,7 +927,7 @@ Smallest remaining actions, with blockers called out.
 - Retry: no-scan wake-ups replay an already persisted exact envelope, or rebuild one missing fixed envelope from its exact target/revision/digest binding. They must not run broker access, pipeline, assembler, candidate detection, or revision persistence; recovery rendering consumes only the bound immutable Brief.
 - Successful current: ready/degraded reliable scans advance current; failed/blocked/no-op scans do not. Query always reads the latest successful current, never the last delivered message.
 - Close Advice projection: structured positions retain every evaluated holding for the total count, but only priced `recommendation_state=close` rows enter Daily Brief actions, ordered deterministically and capped by `max_items_per_account`. `hold` rows stay silent; quote/evaluation gaps remain explicit data-quality evidence rather than recommendations.
-- Funds: render `cash_total_by_currency`, `option_opening_available_by_currency`, and candidate-scoped capacity. Never display total assets, NAV, securities market value, or `0` for unknown funds. Sell Put capacities share account cash and cannot be summed.
+- Funds: render `cash_total_by_currency`, `option_opening_available_by_currency`, and candidate-scoped capacity. Never display total assets, NAV, securities market value, or `0` for unknown funds. CSP capacities share account cash and cannot be summed.
 - Time and identity: scheduled batch and actual data-as-of are separate renderer inputs. Transient display time does not enter the persisted brief digest, candidate identity, or delivery confirmation pointer.
 - Candidate event authority: user event facts come only from the same run's `output_runs/<run_id>/state/event_snapshot.json`. Missing, malformed, stale, partial, conflicting, or degraded evidence remains unable-to-confirm; it never falls back to candidate CSV compatibility fields and never changes candidate identity, ranking, eligibility, or capacity.
 - User projection: fixed report, candidate alert, fixed failure, and query share the Daily Brief human contract. Markdown hides revision, internal IDs, broker codes, raw enums, raw ISO timestamps, paths, and rejection dumps while structured artifacts retain them.

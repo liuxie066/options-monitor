@@ -23,17 +23,17 @@ class StrategyTerm:
 STRATEGY_TERMS: tuple[StrategyTerm, ...] = (
     StrategyTerm(
         internal_id=STRATEGY_SELL_PUT,
-        display_name="Sell Put",
-        section_label="Put",
-        action_label="卖Put",
-        aliases=("put", "sell put", "sell-put"),
+        display_name="Cash-Secured Put (CSP)",
+        section_label="CSP",
+        action_label="CSP",
+        aliases=("put", "sell put", "sell-put", "csp", "cash secured put"),
     ),
     StrategyTerm(
         internal_id=STRATEGY_COVERED_CALL,
-        display_name="Covered Call",
-        section_label="Covered Call",
-        action_label="Covered Call",
-        aliases=("call", "sell call", "sell-call", "covered_call", "covered call", "covered-call"),
+        display_name="Covered Call (CC)",
+        section_label="CC",
+        action_label="CC",
+        aliases=("call", "sell call", "sell-call", "covered_call", "covered call", "covered-call", "cc"),
     ),
     StrategyTerm(
         internal_id=STRATEGY_COMBO_YIELD,

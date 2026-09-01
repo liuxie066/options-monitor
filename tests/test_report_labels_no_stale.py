@@ -1,4 +1,4 @@
-"""Regression coverage for pure Sell Put display labeling."""
+"""Regression coverage for pure CSP display labeling."""
 
 from __future__ import annotations
 

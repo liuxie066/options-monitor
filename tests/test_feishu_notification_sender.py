@@ -674,7 +674,7 @@ def test_send_feishu_card_uses_interactive_transport_and_preserves_logical_key(
     monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_1")
     fallback_text = "# 决策简报\n\n候选｜NVDA"
     envelope = render_feishu_notification_card(
-        markdown="# 决策简报\n\n| 标的 | 建议 |\n|---|---|\n| NVDA | Sell Put |",
+        markdown="# 决策简报\n\n| 标的 | 建议 |\n|---|---|\n| NVDA | CSP |",
         fallback_text=fallback_text,
     )
     captured: dict[str, object] = {}
@@ -727,7 +727,7 @@ def test_send_feishu_card_falls_back_once_on_safe_permanent_rejection(
     monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_1")
     fallback_text = "# 决策简报\n\n候选｜NVDA"
     envelope = render_feishu_notification_card(
-        markdown="# 决策简报\n\n| 标的 | 建议 |\n|---|---|\n| NVDA | Sell Put |",
+        markdown="# 决策简报\n\n| 标的 | 建议 |\n|---|---|\n| NVDA | CSP |",
         fallback_text=fallback_text,
     )
     fallback_calls: list[dict[str, object]] = []
@@ -783,7 +783,7 @@ def test_send_feishu_card_does_not_fallback_after_ambiguous_failure(
     monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_1")
     fallback_text = "# 决策简报\n\n候选｜NVDA"
     envelope = render_feishu_notification_card(
-        markdown="# 决策简报\n\n| 标的 | 建议 |\n|---|---|\n| NVDA | Sell Put |",
+        markdown="# 决策简报\n\n| 标的 | 建议 |\n|---|---|\n| NVDA | CSP |",
         fallback_text=fallback_text,
     )
 
@@ -841,7 +841,7 @@ def test_send_feishu_card_does_not_change_uuid_after_transient_then_rejection(
     monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_1")
     fallback_text = "# 决策简报\n\n候选｜NVDA"
     envelope = render_feishu_notification_card(
-        markdown="# 决策简报\n\n| 标的 | 建议 |\n|---|---|\n| NVDA | Sell Put |",
+        markdown="# 决策简报\n\n| 标的 | 建议 |\n|---|---|\n| NVDA | CSP |",
         fallback_text=fallback_text,
     )
 

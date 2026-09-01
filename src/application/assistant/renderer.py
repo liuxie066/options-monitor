@@ -453,13 +453,13 @@ def _render_cash_headroom(data: dict[str, Any], _tool_result: dict[str, Any]) ->
     unavailable_reason = str(data.get("cash_secured_unavailable_reason") or "").strip()
     if data.get("cash_secured_usage_reliable") is False:
         reason = f"：{unavailable_reason}" if unavailable_reason else "。"
-        return f"{account_prefix}sell put 担保金是否超过现金加货基暂时不能确认{reason}\n数据来源：OM cash headroom query".strip()
+        return f"{account_prefix}CSP 担保金是否超过现金加货基暂时不能确认{reason}\n数据来源：OM cash headroom query".strip()
 
     used = _float_or_none(data.get("cash_secured_used_cny"))
     available = _float_or_none(data.get("cash_available_total_cny"))
     if used is None or available is None:
         return (
-            f"{account_prefix}sell put 担保金是否超过现金加货基暂时不能确认：缺少 CNY 折算后的担保金或现金类资产。\n"
+            f"{account_prefix}CSP 担保金是否超过现金加货基暂时不能确认：缺少 CNY 折算后的担保金或现金类资产。\n"
             "数据来源：OM cash headroom query"
         ).strip()
 
@@ -470,8 +470,8 @@ def _render_cash_headroom(data: dict[str, Any], _tool_result: dict[str, Any]) ->
     conclusion = "已经超过" if exceeds else "没有超过"
     gap_label = "缺口" if exceeds else "余量"
     gap_value = abs(free)
-    lines = [f"{account_prefix}sell put 担保金{conclusion}账户现有现金加货基。".strip()]
-    lines.append(f"- Sell Put 已占用担保金：{_money(used, 'CNY')}")
+    lines = [f"{account_prefix}CSP 担保金{conclusion}账户现有现金加货基。".strip()]
+    lines.append(f"- CSP 已占用担保金：{_money(used, 'CNY')}")
     lines.append(f"- 现金加货基（全币种折算）：{_money(available, 'CNY')}")
     lines.append(f"- {gap_label}：{_money(gap_value, 'CNY')}")
     by_ccy = data.get("cash_secured_total_by_ccy")
@@ -960,7 +960,7 @@ def _render_assigned_stock_lifecycle(data: dict[str, Any]) -> str:
     warnings = [str(item).strip() for item in _list(data.get("warnings")) if str(item).strip()]
     if warnings:
         lines.append("提示：" + "；".join(warnings[:3]))
-    lines.append("口径：正股成本按真实交割价记录，不扣除 Sell Put 权利金；生命周期PnL 才包含权利金归因。")
+    lines.append("口径：正股成本按真实交割价记录，不扣除 CSP 权利金；生命周期PnL 才包含权利金归因。")
     lines.append(f"数据源：{source_label}")
     return "\n".join(lines)
 

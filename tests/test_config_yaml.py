@@ -162,7 +162,7 @@ def test_yaml_market_wheel_config_is_independent_and_account_scoped(tmp_path: Pa
     assert config["symbols"][0]["sell_call"]["enabled"] is False
 
 
-def test_yaml_wheel_rejects_unknown_v1_field(tmp_path: Path) -> None:
+def test_yaml_wheel_rejects_unknown_field(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
         _minimal_yaml().replace(

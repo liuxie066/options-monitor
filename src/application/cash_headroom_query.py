@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""查询 sell put 担保占用与可用现金。"""
+"""查询 CSP 担保占用与可用现金。"""
 
 from __future__ import annotations
 
@@ -439,7 +439,7 @@ def query_sell_put_cash(
         return payload
 
     lines = []
-    lines.append('# Sell Put 担保现金占用 / 剩余现金')
+    lines.append('# Cash-Secured Put (CSP) 担保现金占用 / 剩余现金')
     lines.append(f"as_of_utc: {payload['as_of_utc']}")
     lines.append(f"market: {market} | account: {account or '-'}")
     lines.append(f"portfolio_source: {portfolio_source_name}")
@@ -448,7 +448,7 @@ def query_sell_put_cash(
     lines.append('')
 
     lines.append(f"- base(CNY) 现金（账户口径）: {money(cash_avail_cny, 'CNY')}")
-    lines.append(f"- Sell Put 已占用担保现金（折算CNY）: {money(cash_secured_total_cny, 'CNY')}")
+    lines.append(f"- CSP 已占用担保现金（折算CNY）: {money(cash_secured_total_cny, 'CNY')}")
     lines.append(f"- 不在担保之内的剩余现金（base free, CNY）: {money(cash_free_cny, 'CNY')}")
 
     lines.append(f"- 现金类资产（全币种折算CNY）: {money(payload.get('cash_available_total_cny'), 'CNY')}")
@@ -467,7 +467,7 @@ def query_sell_put_cash(
     lines.append('')
     lines.append('## USD 视角（仅当账户口径里有 USD 现金时可靠）')
     lines.append(f"- USD 现金（账户口径）: {money(cash_avail_usd, 'USD')}")
-    lines.append(f"- Sell Put 占用（USD 项合计）: {money(cash_secured_total_usd, 'USD')}")
+    lines.append(f"- CSP 占用（USD 项合计）: {money(cash_secured_total_usd, 'USD')}")
     lines.append(f"- USD free（仅扣 USD 占用）: {money(cash_free_usd, 'USD')}")
 
     lines.append('')

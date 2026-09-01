@@ -285,7 +285,7 @@ external event source directly; source failures remain explicit as `error` or
 
 Strategy terminology is centralized in `domain.domain.strategy_vocab`.
 Application and interface code should use it to translate between stable
-internal ids such as `sell_call` and user-facing names such as `Covered Call`.
+internal ids such as `sell_call` and user-facing names such as `Covered Call (CC)`.
 Do not scatter display names, aliases, or section labels through notification,
 report, or Tool Gateway manifest code.
 

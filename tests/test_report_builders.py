@@ -58,8 +58,8 @@ def test_build_symbols_digest_deduplicates_symbols_with_combo_yield_section(tmp_
 
     text = (report_dir / "symbols_digest.txt").read_text(encoding="utf-8")
     assert text.count("## NVDA") == 1
-    assert "### Sell Put" in text
-    assert "### Covered Call" in text
+    assert "### Cash-Secured Put (CSP)" in text
+    assert "### Covered Call (CC)" in text
     assert "### Combo Yield" in text
     assert "enhance alert" in text
     assert "### Rebound Combo" not in text

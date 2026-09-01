@@ -244,7 +244,7 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         read_only=False,
         risk_level="preview_write",
         examples=("/symbol edit <symbol> <field>=<value>", "/symbol edit 3690.HK combo_yield.enabled=true"),
-        summary="preview editing covered-call, sell-put, or combo-yield monitored-symbol settings",
+        summary="preview editing CC, sell-put, or combo-yield monitored-symbol settings",
         operation_action="preview",
         operation_target="symbol",
     ),

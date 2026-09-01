@@ -1,6 +1,6 @@
 # Assigned Stock Return Contract
 
-本文记录 Sell Put 被指派后的正股事实、估值和收益合同。它描述当前实现，
+本文记录 Cash-Secured Put (CSP) 被指派后的正股事实、估值和收益合同。它描述当前实现，
 不是未来设计或迁移计划。
 
 ## 核心边界
@@ -20,7 +20,7 @@ canonical trade_events
   canonical assigned-stock lot。
 - Feishu 不承载 assigned-stock 或 option-position 事实源。
 
-当前范围是 Sell Put 被指派后买入正股及其后续卖出。普通股票交易、分红、税务和
+当前范围是 CSP 被指派后买入正股及其后续卖出。普通股票交易、分红、税务和
 无法证明成本基础的其他 assignment / exercise 不在自动计算范围；证据不足时返回
 review/incomplete，而不是猜测。
 
@@ -101,12 +101,12 @@ assigned-stock read view 另外保留两类生命周期字段：
   `option_premium_attribution - stock_cost_basis_total
   + stock_sale_cash_in_net + remaining_market_value`；
 - `lifecycle_pnl_gross/net` 是 read-model 生命周期口径，gross 合并
-  option premium attribution、stock PnL 和可归属 Covered Call PnL，net 再扣
+  option premium attribution、stock PnL 和可归属 Covered Call (CC) PnL，net 再扣
   `fees_used`。
 
 read view 可以展示明确标注的 estimated fee，因此它的 `lifecycle_pnl_net`
 不能替代 production `option_performance_report.pnl.period_total_net`。
-Covered Call 只有在显式 `stock_lot_id` 关联，或完全可证明的 assigned-stock FIFO
+CC 只有在显式 `stock_lot_id` 关联，或完全可证明的 assigned-stock FIFO
 场景下才归属；mixed ordinary/assigned inventory 会 fail closed。
 
 ## CNY 与 FX 证据

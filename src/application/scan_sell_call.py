@@ -239,7 +239,7 @@ def run_sell_call_scan(
     required_data_frames: Mapping[str, pd.DataFrame] | None = None,
     demo_capacity: bool = False,
 ) -> pd.DataFrame:
-    """计算 Covered Call 候选，并返回类型化内存结果。"""
+    """计算 CC 候选，并返回类型化内存结果。"""
     # OI is a formal tie-break only; volume and delta remain display evidence.
     del min_open_interest, min_volume
     share_facts = {
@@ -336,8 +336,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--min-strike-cost-multiplier", type=float, default=1.02, help="effective min strike also floors at avg_cost multiplied by this value")
     parser.add_argument("--min-annualized-net-return", type=float, default=None, help="required; min annualized net premium return in [0,1]")
     parser.add_argument("--min-net-income", type=float, default=50.0)
-    parser.add_argument("--min-open-interest", type=float, default=None, help="deprecated compatibility option; ignored by Covered Call")
-    parser.add_argument("--min-volume", type=float, default=None, help="deprecated compatibility option; ignored by Covered Call")
+    parser.add_argument("--min-open-interest", type=float, default=None, help="deprecated compatibility option; ignored by CC")
+    parser.add_argument("--min-volume", type=float, default=None, help="deprecated compatibility option; ignored by CC")
     parser.add_argument("--max-spread-ratio", type=float, default=DEFAULT_CANDIDATE_LIQUIDITY.max_spread_ratio)
     parser.add_argument("--input-root", default=None, help="Input root containing parsed/ required_data CSVs (default: output_shared/required_data)")
     return parser.parse_args(argv)

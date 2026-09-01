@@ -3,7 +3,7 @@
 - **状态**：已实现，待线上 OpenD PoC 验收
 - **日期**：2026-08-27
 - **产品合同**：[富途模拟账户体验扫描 PRD](FUTU_SIMULATE_ACCOUNT_EXPERIENCE_PRD.md)
-- **实施范围**：手动 `run tick` 的 Sell Put、Covered Call、Combo Yield 体验链路
+- **实施范围**：手动 `run tick` 的 Cash-Secured Put (CSP)、Covered Call (CC)、Combo Yield 体验链路
 - **明确排除**：Wheel、通知、交易、正式账户资产读取和权威金融状态写入
 
 本文只定义实现边界、代码 owner、数据合同和验收证据。产品目标、用户场景和文案以 PRD 为准。
@@ -46,9 +46,9 @@ run tick --experience --no-send
 | 实际策略扫描由独立 `scan-pipeline` 子进程执行 | `src/application/account_run.py`、`src/infrastructure/external_services.py`、`src/application/pipeline_runtime.py` | `experience` 必须显式传入子进程，外层 request 不会自动生效 |
 | 子进程仍会自行构建 pipeline context | `src/application/pipeline_watchlist.py`、`src/application/pipeline_context.py` | 即使外层没有 prepared manifest，也必须禁止子进程回退查询账户资产 |
 | broker readiness 会建立 physical account authority，portfolio fetch 会继续查询资产 | `src/infrastructure/futu_gateway.py`、`src/application/futu_portfolio_context.py` | 体验模式不能复用完整 readiness/portfolio 入口 |
-| Covered Call 会在父进程预取和子进程 symbol monitoring 中两次经过正式持仓 prefilter | `src/application/prefilters.py`、`src/application/required_data_prefetch_planning.py`、`src/application/pipeline_watchlist.py`、`src/application/symbol_monitoring.py` | 两处都需识别 demo capacity，不能只放行父进程预取 |
-| Sell Put 和 Covered Call 已有各自容量 owner | `src/application/sell_put_cash.py`、`src/application/scan_sell_call.py` | 演示容量只进入这些逐候选、逐合约入口 |
-| Combo 已复用 Sell Put / Covered Call 容量并自行计算组合经济指标 | `src/application/combo_yield_steps.py`、`src/application/cc_lp_steps.py` | 只替换容量输入，不复制 Combo 公式或报价规则 |
+| CC 会在父进程预取和子进程 symbol monitoring 中两次经过正式持仓 prefilter | `src/application/prefilters.py`、`src/application/required_data_prefetch_planning.py`、`src/application/pipeline_watchlist.py`、`src/application/symbol_monitoring.py` | 两处都需识别 demo capacity，不能只放行父进程预取 |
+| CSP 和 CC 已有各自容量 owner | `src/application/sell_put_cash.py`、`src/application/scan_sell_call.py` | 演示容量只进入这些逐候选、逐合约入口 |
+| Combo 已复用 CSP / CC 容量并自行计算组合经济指标 | `src/application/combo_yield_steps.py`、`src/application/cc_lp_steps.py` | 只替换容量输入，不复制 Combo 公式或报价规则 |
 | 开仓快照当前要求 physical account 与五类依赖 | `src/application/opening_candidate_snapshot.py`、`src/application/candidate_snapshot_contract.py` | 体验快照需有明确的非 physical 合同，不能伪造依赖 |
 | pipeline runtime 会生成 alert、notification compatibility bundle，并可能追加 cash footer | `src/application/pipeline_runtime.py` | `--no-send` 不等于这些内部步骤零调用，体验模式必须显式跳过 |
 | 候选由 run-scoped manifest 提交并被只读工具和正式研究链路共同消费 | `src/application/candidate_snapshot_manifest.py`、`src/application/candidate_evidence_history.py`、`src/application/shadow_replay/` | 体验结果可供本地解释，但不得贡献正式 replay、Combo capture 或 recommendation evidence |
@@ -161,9 +161,9 @@ run tick --experience --no-send
 `build_cross_account_prefetch_config()` 继续作为跨账户 required-data 需求 owner，`pipeline_watchlist` /
 `symbol_monitoring` 继续作为账户内实际扫描 owner。体验模式只改变两层 prefilter 的容量来源输入：
 
-- Sell Put 与 `sp_lc` 按现有配置产生 Put/Call leg 行情需求；
-- Covered Call 与 `cc_lp` 标的不再因缺少正式 holdings authority 在预取前被裁掉；
-- 子进程内的 `apply_prefilters()` 同样保留配置中的 Covered Call 与 `cc_lp` scope；
+- CSP 与 `sp_lc` 按现有配置产生 Put/Call leg 行情需求；
+- CC 与 `cc_lp` 标的不再因缺少正式 holdings authority 在预取前被裁掉；
+- 子进程内的 `apply_prefilters()` 同样保留配置中的 CC 与 `cc_lp` scope；
 - 该放行只表示“需要获取行情以生成演示覆盖”，不得产生持仓事实；
 - 股票现价、期权链、bid/ask、事件和 RV 继续走现有 required-data owner；
 - Combo 任一必要腿 bid/ask 缺失或非正数时继续 fail closed，不增加零价、中间价或模型价 fallback。
@@ -176,7 +176,7 @@ run tick --experience --no-send
 `experience` 通过 `SymbolMonitoringInputs` 到达策略 orchestration，再由现有 SP、CC 和 Combo owner
 消费。不能在报告或 snapshot 层事后重写容量结果。
 
-### 7.1 Sell Put
+### 7.1 CSP
 
 在 `sell_put_opening_capacity_inputs()` / `enrich_sell_put_candidates_with_cash()` 的逐候选容量边界传入：
 
@@ -190,7 +190,7 @@ capacity_source = demo_scenario
 
 这些值只服务当前候选，不能跨候选累计，也不表示账户余额、购买力或跨币种能力。
 
-### 7.2 Covered Call
+### 7.2 CC
 
 在 `_resolve_sell_call_contract_capacity()` 的逐合约边界生成：
 
@@ -208,8 +208,8 @@ capacity_source = demo_scenario
 
 ### 7.3 Combo Yield
 
-- `sp_lc` 复用 Sell Put 的一组演示现金容量；
-- `cc_lp` 复用 Covered Call 的一组合约覆盖容量；
+- `sp_lc` 复用 CSP 的一组演示现金容量；
+- `cc_lp` 复用 CC 的一组合约覆盖容量；
 - Combo premium、`cash_required`、收益、风险和排名继续由现有 Combo owner 计算；
 - 所有腿保持现有正式 bid/ask、同币种和 multiplier 一致性要求。
 

@@ -1167,7 +1167,7 @@ def build_single_recommendation_result(
     fill: Mapping[str, Any],
     outcome: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
-    """Build the one-contract Sell Put result used by every comparison."""
+    """Build the one-contract CSP result used by every comparison."""
 
     item = _mapping(arm, "arm")
     candidate = _mapping(item.get("candidate"), "arm.candidate")

@@ -75,7 +75,7 @@ def run_sell_call_scan_and_summarize(
     required_data_frame: pd.DataFrame | None = None,
     demo_capacity: bool = False,
 ) -> dict[str, Any]:
-    """Run the Covered Call opening policy in memory and summarize it."""
+    """Run the CC opening policy in memory and summarize it."""
     sell_call_semantics = strategy_semantics_for_side_config(family=SELL_CALL_FAMILY, side_cfg=cc)
     portfolio_source = str(
         (portfolio_ctx or {}).get("portfolio_source_name")
