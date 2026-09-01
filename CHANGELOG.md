@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 3.3.0 - 2026-09-01
+
 ### New Features
 - Added account-scoped automatic Combo Yield adoption for uniquely matched, delivery-confirmed Funding Put and Participation Call fills, with successful grouping shown in the trade receipt.
 
