@@ -1,7 +1,8 @@
 # Required Data Storage Design
 
-> Status: source contract implemented. Commit, release, deployment, and any
-> production history cleanup remain separate operator actions.
+> Status: source contract and shared projection-validation optimization
+> implemented. Commit, release, deployment, and any production history cleanup
+> remain separate operator actions.
 
 ## Goal
 
@@ -286,6 +287,118 @@ the relevant tick/research integration tests, and the full project test suite.
 No production tick is required for source validation. A later natural scheduled
 run may verify storage and read-source evidence only after separate release and
 upgrade authorization.
+
+## Shared projection-validation performance
+
+### Goal, success signals, and non-goals
+
+Reduce the CPU cost of the shared JSON-to-CSV projection validator without
+changing its evidence or failure contract. The deterministic 254-row, 60-column
+fixture must produce the same canonical comparison result while removing the
+per-cell pandas row indexing hotspot. On the same host and fixture, the fallback
+loop should be at least 80% faster than the recorded baseline, and the canonical
+benchmark must retain zero violations and the existing exact cleanup and
+blob-only-resolution evidence.
+
+This optimization does not remove or cache validation across receipt
+publication, manifest sealing, recovery, or blob-only resolution. It does not
+change CSV columns, numeric equivalence, null and boolean handling, multiplier
+enrichment or attestation, schemas, public commands, persisted state, or
+production behavior.
+
+### Current facts and chosen design
+
+`_validate_consumer_csv_projection()` is the shared owner used by quote-receipt
+validation, the unplanned/finalization path, and canonical blob-byte resolution
+through `validate_required_data_quote_bytes()`. It first validates column order
+and row count, constructs the round-tripped expected frame, and returns early
+when `DataFrame.equals()` succeeds. Before the optimization, the fallback
+performed two `DataFrame.iloc` row lookups per cell and repeated both lookups for
+an allowed multiplier enrichment.
+
+The canonical benchmark profile reaches this fallback at multiple trust
+boundaries. A read-only profile attributed 94.2% of its cumulative time to the
+shared validator and recorded 152,847 `iloc` calls. On the same deterministic
+fixture, caching each expected and actual row Series produced identical
+canonical value pairs while reducing median loop time from about 1.11 seconds to
+about 0.026 seconds, a 97.6% reduction. These timings are host-specific
+diagnostic evidence, not a cross-host acceptance threshold.
+
+Keep the existing fast path, row-major validation order, and mixed-dtype row
+coercion. For each row, construct the expected and actual Series once with
+`iloc`, then iterate their scalar values positionally with
+`REQUIRED_DATA_COLUMNS` in a strict zip for the existing canonical comparison
+and multiplier-enrichment check. This removes per-cell Series construction and
+label indexing, creates no new abstraction, and preserves the existing error
+and metadata-binding paths.
+
+```text
+JSON rows -> CSV round-trip frame -> column/row checks -> frame.equals fast path
+  -> row-cached fallback -> canonical scalar comparison
+  -> optional multiplier metadata binding -> return or SourceReceiptError
+```
+
+The function remains stateless: success returns without mutation, and any
+invalid projection or unattested enrichment raises before receipt publication.
+No manifest, cleanup, notification, ledger, broker, or runtime state transition
+changes.
+
+| Owner | Contract |
+|---|---|
+| `src/application/opend_symbol_outputs.py` | Owns the shared fallback loop and preserves fail-closed projection semantics |
+| `tests/test_required_data_snapshot.py` | Covers the unchanged fast path and mixed-dtype row canonicalization |
+| `tests/test_required_data_output_integrity.py` | Covers value drift rejection and multiplier attestation |
+| `scripts/benchmark_required_data_scan_blobs.py` | Provides deterministic end-to-end correctness, storage, allocation, and corroborating host-local timing evidence |
+
+### Rejected alternatives
+
+- `itertuples()` or whole-frame coercion avoids every Series construction but
+  changes mixed-dtype boolean scalar classification on the supported pandas
+  runtime. The faster option is rejected because this work unit does not change
+  canonical projection semantics.
+- Caching or removing repeated validation across lifecycle stages would weaken
+  independent trust boundaries and expand the change beyond the hotspot.
+- Adding a helper, configuration switch, dependency, or timing gate would add
+  ownership and maintenance without improving the loop.
+
+### Implementation slice
+
+Replace only the fallback indexing loop in
+`_validate_consumer_csv_projection()` by caching its two row Series per row and
+iterating their values positionally, then add one focused mixed-dtype regression
+covering the existing boolean canonicalization. Keep the fast path, canonical
+helpers, enrichment rule, metadata binding, and errors unchanged.
+
+### Validation plan
+
+- In one process on the deterministic fixture, use `perf_counter_ns()` to run
+  one warmup and at least five paired repetitions of the repeated-index and
+  row-cached fallback loops. Require identical canonical value pairs and at
+  least 80% reduction in median elapsed time. Record the command, Python and
+  pandas versions, samples, medians, and ratio in the implementation Deepreview
+  artifact; do not add a checked-in helper or timing gate.
+- Run the focused projection and integrity tests and Ruff on the changed Python
+  files.
+- Run the canonical benchmark smoke profile as corroborating end-to-end timing
+  evidence, then the formal canonical profile for deterministic fixture,
+  storage, allocation, cleanup, and blob-only-resolution acceptance. Its timing
+  is not the fallback performance gate.
+- Run the project-required broader tests and guardrails. Regenerate the
+  dependency graph only if imports change.
+
+The implementation is acceptable only if existing drift and unattested-
+multiplier failures remain fail-closed, canonical benchmark violations remain
+empty, and the host-local fallback improves by at least 80%. Timing remains
+reported evidence rather than a portable CI gate.
+
+### Risks and open questions
+
+The fallback still constructs two Series per row, so its remaining ceiling is
+linear in row count. The measured reduction exceeds the target while retaining
+mixed-dtype row coercion; remove the Series only if a separately approved
+canonical-type contract change makes that safe. The integrity tests remain the
+authority for fail-closed behavior. No open product, schema, architecture,
+permission, or production question remains.
 
 ## Risks and deferred work
 
