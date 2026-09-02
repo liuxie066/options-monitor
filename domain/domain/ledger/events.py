@@ -23,6 +23,8 @@ class LedgerDiagnostic:
     code: str
     message: str
     details: dict[str, Any] = field(default_factory=dict)
+    account: str | None = None
+    broker: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -31,6 +33,8 @@ class LedgerDiagnostic:
             "code": self.code,
             "message": self.message,
             "details": dict(self.details),
+            "account": self.account,
+            "broker": self.broker,
         }
 
 

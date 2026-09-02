@@ -1,12 +1,10 @@
 from domain.domain.performance.models import (
-    DecimalAmountEnvelope,
     EvidenceEnvelope,
     EvidenceSelection,
     FXRateFact,
     FeeBasis,
     FeeComponent,
     FeeFact,
-    MetricQuality,
     MetricStatus,
     OptionInstrumentKey,
     OptionValuationPosition,
@@ -21,17 +19,20 @@ from domain.domain.performance.models import (
     to_decimal,
     validate_evidence_facts,
 )
-from domain.domain.performance.period import PeriodRequest, PeriodWindow, REPORTING_TIMEZONE, normalize_period
+from domain.domain.performance.period import (
+    REPORTING_TIMEZONE,
+    PeriodRequest,
+    PeriodWindow,
+    normalize_performance_period,
+)
 
 __all__ = [
-    "DecimalAmountEnvelope",
     "EvidenceEnvelope",
     "EvidenceSelection",
     "FXRateFact",
     "FeeBasis",
     "FeeComponent",
     "FeeFact",
-    "MetricQuality",
     "MetricStatus",
     "OptionInstrumentKey",
     "OptionValuationPosition",
@@ -42,7 +43,7 @@ __all__ = [
     "ValuationMarkFact",
     "canonical_decimal_text",
     "normalize_currency",
-    "normalize_period",
+    "normalize_performance_period",
     "parse_evidence_envelope",
     "quantize_money",
     "select_fx_rate",

@@ -2,47 +2,27 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import Decimal
 from enum import Enum
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Mapping
 from urllib.parse import quote, unquote
 
+from domain.domain.ledger.fees import FeeBasis, FeeComponent, FeeFact
+from domain.domain.money import (
+    MONEY_QUANTUM,
+    canonical_decimal_text,
+    quantize_money,
+    to_decimal,
+)
 if TYPE_CHECKING:
     from domain.domain.ledger.identity import ContractKey
 from domain.domain.option_position_identity import normalize_option_type
 from domain.domain.trade_contract_identity import canonical_contract_symbol, normalize_contract_expiration
 
-MONEY_QUANTUM = Decimal("0.000001")
 CAPITAL_DAYS_QUANTUM = Decimal("0.000000000001")
 MILLISECONDS_PER_DAY = Decimal("86400000")
 _CURRENCY_RE = re.compile(r"^[A-Z][A-Z0-9]{2,9}$")
-
-
-def to_decimal(value: Any, *, field_name: str = "value") -> Decimal:
-    if isinstance(value, bool) or value in (None, ""):
-        raise ValueError(f"{field_name} is required")
-    try:
-        out = Decimal(str(value).strip())
-    except (InvalidOperation, ValueError) as exc:
-        raise ValueError(f"{field_name} must be a finite decimal") from exc
-    if not out.is_finite():
-        raise ValueError(f"{field_name} must be a finite decimal")
-    return out
-
-
-def canonical_decimal_text(value: Any, *, field_name: str = "value") -> str:
-    decimal_value = to_decimal(value, field_name=field_name)
-    if decimal_value == 0:
-        return "0"
-    rendered = format(decimal_value, "f")
-    if "." in rendered:
-        rendered = rendered.rstrip("0").rstrip(".")
-    return rendered
-
-
-def quantize_money(value: Any) -> Decimal:
-    return to_decimal(value, field_name="amount").quantize(MONEY_QUANTUM, rounding=ROUND_HALF_UP)
 
 
 def normalize_currency(value: Any) -> str:
@@ -189,121 +169,9 @@ class StockInstrumentKey:
 class MetricStatus(str, Enum):
     OBSERVED = "observed"
     PARTIAL = "partial"
-    NOT_OBSERVED = "not_observed"
     NOT_APPLICABLE = "not_applicable"
 
 
-@dataclass(frozen=True)
-class MetricQuality:
-    status: MetricStatus
-    missing: tuple[str, ...] = ()
-    warnings: tuple[str, ...] = ()
-    evidence_fact_ids: tuple[str, ...] = ()
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "status", MetricStatus(self.status))
-        object.__setattr__(self, "missing", tuple(sorted({str(item) for item in self.missing if str(item)})))
-        object.__setattr__(self, "warnings", tuple(str(item) for item in self.warnings if str(item)))
-        object.__setattr__(
-            self,
-            "evidence_fact_ids",
-            tuple(dict.fromkeys(str(item) for item in self.evidence_fact_ids if str(item))),
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "status": self.status.value,
-            "missing": list(self.missing),
-            "warnings": list(self.warnings),
-            "evidence_fact_ids": list(self.evidence_fact_ids),
-        }
-
-
-@dataclass(frozen=True)
-class DecimalAmountEnvelope:
-    by_currency: Mapping[str, Decimal] = field(default_factory=dict)
-    cny: Decimal | None = None
-    quality: MetricQuality = field(default_factory=lambda: MetricQuality(MetricStatus.NOT_OBSERVED))
-    fx_fact_ids: tuple[str, ...] = ()
-
-    def __post_init__(self) -> None:
-        normalized: dict[str, Decimal] = {}
-        for currency, amount in self.by_currency.items():
-            canonical_currency = normalize_currency(currency)
-            if canonical_currency in normalized:
-                raise ValueError(f"duplicate canonical currency: {canonical_currency}")
-            normalized[canonical_currency] = quantize_money(amount)
-        object.__setattr__(self, "by_currency", MappingProxyType(dict(sorted(normalized.items()))))
-        object.__setattr__(self, "cny", None if self.cny is None else quantize_money(self.cny))
-        object.__setattr__(self, "fx_fact_ids", tuple(dict.fromkeys(str(x) for x in self.fx_fact_ids if str(x))))
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "by_currency": {currency: float(amount) for currency, amount in self.by_currency.items()},
-            "cny": None if self.cny is None else float(self.cny),
-            "status": self.quality.status.value,
-            "missing": list(self.quality.missing),
-            "fx_fact_ids": list(self.fx_fact_ids),
-        }
-
-
-class FeeBasis(str, Enum):
-    ACTUAL = "actual"
-    ESTIMATED = "estimated"
-    MISSING = "missing"
-
-
-class FeeComponent(str, Enum):
-    OPTION_OPEN = "option_open"
-    OPTION_CLOSE = "option_close"
-    ASSIGNMENT_OPTION = "assignment_option"
-    STOCK_SETTLEMENT = "stock_settlement"
-    STOCK_SALE = "stock_sale"
-
-
-@dataclass(frozen=True)
-class FeeFact:
-    amount: Decimal | None
-    basis: FeeBasis
-    component: FeeComponent
-    source_event_id: str
-    source: str | None = None
-    reason: str | None = None
-
-    def __post_init__(self) -> None:
-        basis = FeeBasis(self.basis)
-        component = FeeComponent(self.component)
-        source_event_id = str(self.source_event_id or "").strip()
-        if not source_event_id:
-            raise ValueError("source_event_id is required")
-        if basis == FeeBasis.MISSING:
-            if self.amount is not None:
-                raise ValueError("missing fee must not have an amount")
-            amount = None
-        else:
-            amount = quantize_money(self.amount)
-            if amount < 0:
-                raise ValueError("fee amount cannot be negative")
-        object.__setattr__(self, "basis", basis)
-        object.__setattr__(self, "component", component)
-        object.__setattr__(self, "source_event_id", source_event_id)
-        object.__setattr__(self, "amount", amount)
-        object.__setattr__(self, "source", str(self.source).strip() if self.source not in (None, "") else None)
-        object.__setattr__(self, "reason", str(self.reason).strip() if self.reason not in (None, "") else None)
-
-    @property
-    def is_complete(self) -> bool:
-        return self.basis in {FeeBasis.ACTUAL, FeeBasis.ESTIMATED}
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "amount": None if self.amount is None else float(self.amount),
-            "basis": self.basis.value,
-            "component": self.component.value,
-            "source": self.source,
-            "reason": self.reason,
-            "source_event_id": self.source_event_id,
-        }
 
 
 @dataclass(frozen=True)
@@ -330,111 +198,13 @@ class StrategyAttribution:
         }
 
 
-@dataclass(frozen=True)
-class CapitalExposureSegment:
-    account: str
-    broker: str
-    symbol: str
-    currency: str
-    exposure_kind: str
-    source_id: str
-    start_at_ms: int
-    end_at_ms: int
-    notional: Decimal
-    quantity: Decimal
-    incremental: bool = True
-    attribution: StrategyAttribution | None = None
-    attribution_issues: tuple[str, ...] = ()
-
-    def __post_init__(self) -> None:
-        account = str(self.account or "").strip().lower()
-        broker = str(self.broker or "").strip().lower()
-        symbol = str(self.symbol or "").strip().upper()
-        exposure_kind = str(self.exposure_kind or "").strip()
-        source_id = str(self.source_id or "").strip()
-        start_at_ms = int(self.start_at_ms)
-        end_at_ms = int(self.end_at_ms)
-        notional = to_decimal(self.notional, field_name="notional")
-        quantity = to_decimal(self.quantity, field_name="quantity")
-        if not account or not broker or not symbol or not exposure_kind or not source_id:
-            raise ValueError("capital exposure requires account, broker, symbol, kind, and source_id")
-        if start_at_ms <= 0 or end_at_ms < start_at_ms:
-            raise ValueError("capital exposure interval is invalid")
-        if notional < 0 or quantity < 0:
-            raise ValueError("capital exposure notional and quantity cannot be negative")
-        if not self.incremental and notional != 0:
-            raise ValueError("zero-incremental capital exposure must have zero notional")
-        object.__setattr__(self, "account", account)
-        object.__setattr__(self, "broker", broker)
-        object.__setattr__(self, "symbol", symbol)
-        object.__setattr__(self, "currency", normalize_currency(self.currency))
-        object.__setattr__(self, "exposure_kind", exposure_kind)
-        object.__setattr__(self, "source_id", source_id)
-        object.__setattr__(self, "start_at_ms", start_at_ms)
-        object.__setattr__(self, "end_at_ms", end_at_ms)
-        object.__setattr__(self, "notional", notional)
-        object.__setattr__(self, "quantity", quantity)
-        object.__setattr__(
-            self,
-            "attribution_issues",
-            tuple(sorted({str(item) for item in self.attribution_issues if str(item)})),
-        )
-
-    def overlap_ms(self, *, period_start_at_ms: int, period_end_exclusive_at_ms: int) -> int:
-        return max(
-            0,
-            min(self.end_at_ms, int(period_end_exclusive_at_ms))
-            - max(self.start_at_ms, int(period_start_at_ms)),
-        )
-
-    def capital_days(self, *, period_start_at_ms: int, period_end_exclusive_at_ms: int) -> Decimal:
-        overlap_ms = self.overlap_ms(
-            period_start_at_ms=period_start_at_ms,
-            period_end_exclusive_at_ms=period_end_exclusive_at_ms,
-        )
-        if overlap_ms <= 0 or not self.incremental:
-            return Decimal(0)
-        return self.notional * Decimal(overlap_ms) / MILLISECONDS_PER_DAY
-
-    def to_dict(self, *, period_start_at_ms: int, period_end_exclusive_at_ms: int) -> dict[str, Any]:
-        overlap_ms = self.overlap_ms(
-            period_start_at_ms=period_start_at_ms,
-            period_end_exclusive_at_ms=period_end_exclusive_at_ms,
-        )
-        return {
-            "account": self.account,
-            "broker": self.broker,
-            "symbol": self.symbol,
-            "currency": self.currency,
-            "exposure_kind": self.exposure_kind,
-            "source_id": self.source_id,
-            "start_at_ms": self.start_at_ms,
-            "end_at_ms": self.end_at_ms,
-            "notional": float(self.notional),
-            "quantity": float(self.quantity),
-            "incremental": self.incremental,
-            "overlap_ms": overlap_ms,
-            "attribution": None if self.attribution is None else self.attribution.to_dict(),
-            "attribution_issues": list(self.attribution_issues),
-            "capital_days": float(
-                self.capital_days(
-                    period_start_at_ms=period_start_at_ms,
-                    period_end_exclusive_at_ms=period_end_exclusive_at_ms,
-                )
-            ),
-        }
-
-
 __all__ = [
     "CAPITAL_DAYS_QUANTUM",
     "MILLISECONDS_PER_DAY",
-    "CapitalExposureSegment",
-    "DecimalAmountEnvelope",
     "FeeBasis",
     "FeeComponent",
     "FeeFact",
     "MONEY_QUANTUM",
-    "MetricQuality",
     "MetricStatus",
     "EvidenceEnvelope",
     "EvidenceSelection",

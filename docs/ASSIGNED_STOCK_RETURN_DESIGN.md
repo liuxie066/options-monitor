@@ -10,7 +10,7 @@ canonical trade_events
   -> option allocation / position_lots
   -> assignment stock settlement
   -> assigned-stock lifecycle projection
-  -> option performance + assigned-stock read view
+  -> assigned-stock read view
 ```
 
 - `assignment` 关闭确定的 short option lot，并记录正股交割事实。
@@ -41,38 +41,12 @@ broker deal 重放和人工重试必须靠稳定 source identity 保持幂等。
 
 不要用 symbol、当前持仓数量或聚合 `position_key` 猜写入目标。
 
-## Option Performance 命名空间
+## 与 Option Performance 的边界
 
-`option_performance_report` 将 activity、cash 和 PnL 分开：
-
-| 区域 | 当前字段 | 语义 |
-|---|---|---|
-| Activity | `premium_collected_gross`, `premium_paid_gross`, `contracts_opened/closed`, `assigned_stock_shares_opened/sold` | 发生了什么；premium activity 不是 PnL |
-| Cash | `option_trade_cash_gross`, `option_fee_cash`, `stock_settlement_cash_gross`, `stock_settlement_fee_cash`, `assigned_stock_sale_cash_gross`, `assigned_stock_sale_fee_cash`, `total_cash_change_net` | 实际现金移动 |
-| PnL aggregate | `realized_*`, `opening_unrealized_*`, `ending_unrealized_*`, `period_total_*` | option 与 assigned stock 的期间合计 |
-| PnL components | `option_realized_gross/net`, `assigned_stock_realized_gross/net` | 已实现结果的可审计分量 |
-| Lifecycle | `assignment_lifecycle.period`, `assignment_lifecycle.ending_lots`, `assignment_lifecycle.review` | stock lot、估值、费用和 review 证据 |
-
-证据完整且币种相同时：
-
-```text
-pnl.realized_*
-  = pnl.option_realized_*
-  + pnl.assigned_stock_realized_*
-
-pnl.period_total_*
-  = pnl.realized_*
-  + pnl.ending_unrealized_*
-  - pnl.opening_unrealized_*
-```
-
-顶层 unrealized 是 option 与 assigned-stock 的合计。只看正股明细时，应读
-`assignment_lifecycle` 或 `option_positions_read action=assigned-stock`，不要用
-aggregate PnL 反推 stock component。
-
-`cash.stock_settlement_cash_gross` 是交割本金现金流，不是亏损；
-`activity.premium_collected_gross` 是权利金活动，不是额外利润。
-
+`option_performance_report` 不读取 assigned-stock projection，也不包含正股交割本金、
+卖出回款、正股费用、正股已实现/未实现 PnL 或行情估值。指派或行权事件只作为期权
+lot 的终结状态参与期权胜率；正股事实和收益只由本模块的 assigned-stock read view
+提供。两个模块不得互相合成缺失指标。
 ## 正股成本与生命周期口径
 
 正股本金始终使用真实交割事实：
@@ -104,8 +78,8 @@ assigned-stock read view 另外保留两类生命周期字段：
   option premium attribution、stock PnL 和可归属 Covered Call (CC) PnL，net 再扣
   `fees_used`。
 
-read view 可以展示明确标注的 estimated fee，因此它的 `lifecycle_pnl_net`
-不能替代 production `option_performance_report.pnl.period_total_net`。
+read view 可以展示明确标注的 estimated fee；这些正股指标不进入
+`option_performance_report`。
 CC 只有在显式 `stock_lot_id` 关联，或完全可证明的 assigned-stock FIFO
 场景下才归属；mixed ordinary/assigned inventory 会 fail closed。
 
@@ -150,8 +124,7 @@ CNY 为 null/partial；禁止用当前汇率补历史缺口。
 ./om option-performance report \
   --config-key us \
   --account lx \
-  --period month \
-  --month 2026-06 \
+  --period ytd \
   --include-rows
 
 ./om-agent run --tool option_performance_report \
@@ -207,7 +180,7 @@ Broker stock sell intake 仅在 deal 能唯一匹配开放 assigned-stock lot �
 | 边界 | Owner |
 |---|---|
 | assigned-stock projection | `domain/domain/assigned_stock.py` |
-| production period PnL/cash | `domain/domain/performance/engine.py` |
+| option performance（不含正股） | `domain/domain/performance/weighted_reducer.py` |
 | ledger input adapters | `src/application/performance/adapters.py` |
 | assigned-stock read view | `src/application/positions/assigned_stock_view.py` |
 | manual sale workflow | `src/application/positions/workflows.py` |
@@ -223,8 +196,7 @@ Control / CLI 边界。
 - 同一 assignment 不重复创建 stock lot。
 - partial/full sale 后 shares、basis 和 cash 守恒。
 - option premium、stock price movement、settlement principal 和费用不重复计算。
-- `realized = option_realized + assigned_stock_realized` 在完整同币种证据下成立。
 - historical as-of 不读取未来 quote、sale、event 或 FX。
 - missing/estimated fee、quote、FX 或 lifecycle evidence 保持 partial。
-- production performance 与 assigned-stock read view 使用同一 canonical projector，
-  但各自口径和 fee quality 不混用。
+- option performance 与 assigned-stock read view 复用 canonical ledger/projector，
+  但期权指标不纳入正股现金、成本或 PnL。

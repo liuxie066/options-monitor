@@ -644,17 +644,15 @@ def _request_scope(payload: dict[str, Any]) -> dict[str, Any]:
     allowed = {
         "account",
         "action",
+        "as_of_date",
+        "broker",
         "config_key",
-        "end_date",
         "limit",
         "market",
-        "month",
         "period",
         "run_id",
-        "start_date",
         "status",
         "symbol",
-        "year",
     }
     return _preview({key: value for key, value in payload.items() if key in allowed})
 

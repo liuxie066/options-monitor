@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from datetime import date, datetime
-import calendar
 from difflib import SequenceMatcher
 import json
 from pathlib import Path
@@ -30,7 +29,6 @@ from src.application.positions.assigned_stock_quotes import refresh_assigned_sto
 from src.application.agent_tool_config import repo_base
 from src.application.ledger.api import (
     MAX_TRADE_EVENT_PAGE_ROWS,
-    open_performance_evidence_repository,
     open_position_ledger_from_data_config as resolve_option_positions_repo,
 )
 from src.application.agent_tool_config import resolve_output_root
@@ -77,153 +75,57 @@ ALLOWED_SQL_FUNCTIONS = {
 }
 
 
-PERFORMANCE_SCOPE_FIELDS: tuple[str, ...] = (
+OPTION_PERIOD_SCOPE_FIELDS: tuple[str, ...] = (
+    "config_key",
     "period_kind",
     "period_start_date",
-    "period_end_date",
-    "period_status",
-    "month",
-    "account",
+    "as_of_date",
+    "start_at_ms",
+    "end_exclusive_at_ms",
+    "statistic_days",
     "accounts",
-    "broker",
     "brokers",
+    "ledger_input_hash",
+)
+
+
+OPTION_PERFORMANCE_LOGICAL_KEY: tuple[str, ...] = (
+    "config_key",
+    "period_kind",
+    "period_start_date",
+    "as_of_date",
+    "start_at_ms",
+    "end_exclusive_at_ms",
+    "accounts",
+    "brokers",
+    "ledger_input_hash",
+)
+
+
+OPTION_PERIOD_PERFORMANCE_FIELDS: tuple[str, ...] = (
+    *OPTION_PERIOD_SCOPE_FIELDS,
+    "option_net_cashflow_by_currency",
+    "option_return_by_currency",
+    "sell_option_winning_contracts",
+    "sell_option_eligible_contracts",
+    "sell_option_win_rate",
+    "sell_option_win_rate_status",
+    "buy_option_winning_contracts",
+    "buy_option_eligible_contracts",
+    "buy_option_win_rate",
+    "buy_option_win_rate_status",
     "quality_status",
-)
-
-
-OPTION_PERFORMANCE_FIELDS: tuple[str, ...] = (
-    *PERFORMANCE_SCOPE_FIELDS,
-    "premium_collected_cny",
-    "premium_collected_by_ccy",
-    "premium_collected_status",
-    "premium_paid_cny",
-    "premium_paid_by_ccy",
-    "premium_paid_status",
-    "contracts_opened",
-    "contracts_closed",
-    "option_trade_cash_cny",
-    "option_trade_cash_by_ccy",
-    "option_trade_cash_status",
-    "option_trade_cash_missing",
-    "option_trade_cash_evidence_fact_ids",
-    "option_fee_cash_cny",
-    "option_fee_cash_by_ccy",
-    "option_fee_cash_status",
-    "option_fee_cash_missing",
-    "option_fee_cash_evidence_fact_ids",
-    "option_net_cashflow_cny",
-    "option_net_cashflow_by_ccy",
-    "option_net_cashflow_status",
-    "option_net_cashflow_missing",
-    "option_net_cashflow_evidence_fact_ids",
-    "stock_settlement_cash_cny",
-    "stock_settlement_cash_by_ccy",
-    "stock_settlement_cash_status",
-    "stock_settlement_cash_missing",
-    "stock_settlement_cash_evidence_fact_ids",
-    "assigned_stock_sale_cash_cny",
-    "assigned_stock_sale_cash_by_ccy",
-    "assigned_stock_sale_cash_status",
-    "assigned_stock_sale_cash_missing",
-    "assigned_stock_sale_cash_evidence_fact_ids",
-    "total_cash_change_cny",
-    "total_cash_change_by_ccy",
-    "total_cash_change_status",
-    "total_cash_change_missing",
-    "total_cash_change_evidence_fact_ids",
-    "realized_pnl_gross_cny",
-    "realized_pnl_gross_by_ccy",
-    "realized_pnl_gross_status",
-    "realized_pnl_net_cny",
-    "realized_pnl_net_by_ccy",
-    "realized_pnl_net_status",
-    "opening_unrealized_pnl_net_cny",
-    "opening_unrealized_pnl_net_by_ccy",
-    "opening_unrealized_pnl_net_status",
-    "ending_unrealized_pnl_net_cny",
-    "ending_unrealized_pnl_net_by_ccy",
-    "ending_unrealized_pnl_net_status",
-    "period_total_pnl_gross_cny",
-    "period_total_pnl_gross_by_ccy",
-    "period_total_pnl_gross_status",
-    "period_total_pnl_net_cny",
-    "period_total_pnl_net_by_ccy",
-    "period_total_pnl_net_status",
-    "capital_days_by_ccy",
-    "period_total_net_annualized_efficiency",
-    "cashflow_capital_basis",
-    "cashflow_period_duration_days",
-    "cashflow_capital_days_by_ccy",
-    "cashflow_average_capital_by_ccy",
-    "period_cashflow_return_by_ccy",
-    "period_cashflow_return_status",
-    "period_cashflow_return_missing",
-    "annualized_cashflow_return_by_ccy",
-    "annualized_cashflow_return_status",
-    "annualized_cashflow_return_missing",
-    "cashflow_coverage_status",
-    "cashflow_missing_by_ccy",
-    "cashflow_global_missing",
-)
-
-
-PERFORMANCE_COMPONENT_FIELDS: tuple[str, ...] = (
-    *PERFORMANCE_SCOPE_FIELDS,
-    "component",
-    "component_label",
-    "component_order",
-    "amount_cny",
-    "amount_by_ccy",
-    "metric_status",
     "missing",
-    "conversion_ids",
-    "quantity",
-    "source_namespace",
-    "source_field",
 )
 
 
-ASSIGNED_STOCK_POSITION_PNL_FIELDS: tuple[str, ...] = (
-    "account",
-    "symbol",
+OPTION_CASH_COMPONENT_FIELDS: tuple[str, ...] = (
+    *OPTION_PERIOD_SCOPE_FIELDS,
     "currency",
+    "state",
+    "amount",
     "status",
-    "review_status",
-    "stock_lot_id",
-    "shares_opened",
-    "shares_remaining",
-    "shares_sold",
-    "stock_cost_per_share",
-    "remaining_stock_cost_basis",
-    "spot",
-    "spot_time",
-    "quote_source",
-    "quote_status",
-    "remaining_market_value",
-    "assigned_stock_unrealized_pnl",
-    "assigned_stock_realized_pnl",
-    "option_premium_attribution",
-    "assignment_lifecycle_pnl",
-)
-
-
-ASSIGNED_STOCK_SALE_EVENT_FIELDS: tuple[str, ...] = (
-    "month",
-    "account",
-    "symbol",
-    "currency",
-    "stock_lot_id",
-    "stock_event_id",
-    "event_at",
-    "shares",
-    "sale_price",
-    "fees",
-    "cash_in_gross",
-    "stock_sale_cash_in_net",
-    "stock_cost_basis_sold",
-    "assigned_stock_realized_pnl",
-    "source",
-    "source_deal_id",
+    "missing",
 )
 
 
@@ -274,13 +176,20 @@ EXPIRATION_RISK_BUCKET_FIELDS: tuple[str, ...] = (
 
 
 SYMBOL_PERFORMANCE_ATTRIBUTION_FIELDS: tuple[str, ...] = (
-    "month",
-    "account",
+    *OPTION_PERIOD_SCOPE_FIELDS,
     "symbol",
-    "component",
-    "currency",
-    "amount_gross",
-    "source_view",
+    "option_net_cashflow_by_currency",
+    "option_return_by_currency",
+    "sell_option_winning_contracts",
+    "sell_option_eligible_contracts",
+    "sell_option_win_rate",
+    "sell_option_win_rate_status",
+    "buy_option_winning_contracts",
+    "buy_option_eligible_contracts",
+    "buy_option_win_rate",
+    "buy_option_win_rate_status",
+    "status",
+    "missing",
 )
 
 
@@ -359,18 +268,6 @@ RUNTIME_TICK_STATUS_FIELDS: tuple[str, ...] = (
     "warning_count",
     "warning_codes",
     "source",
-)
-
-
-QUOTE_FRESHNESS_FIELDS: tuple[str, ...] = (
-    "symbol",
-    "market",
-    "source",
-    "quote_status",
-    "spot",
-    "spot_time",
-    "account",
-    "view",
 )
 
 
@@ -592,147 +489,33 @@ def _build_view_specs(raw_specs: dict[str, dict[str, Any]]) -> dict[str, dict[st
 
 VIEW_SPECS: dict[str, dict[str, Any]] = _build_view_specs({
     "option_period_performance": {
-        "description": "primary period option performance view with parallel activity, cash, PnL, and capital namespaces",
-        "fields": OPTION_PERFORMANCE_FIELDS,
-        "primary_metric": "period_total_pnl_net_cny",
-        "row_grain": "period + account scope",
-        "primary_keys": ("period_start_date", "period_end_date", "account"),
-        "time_grain": "period",
+        "description": "MTD/YTD option cash flow, win rates, and return",
+        "fields": OPTION_PERIOD_PERFORMANCE_FIELDS,
+        "primary_metric": "option_net_cashflow_by_currency",
+        "row_grain": "period + selected account scope",
+        "primary_keys": OPTION_PERFORMANCE_LOGICAL_KEY,
+        "time_grain": "mtd_or_ytd",
         "source_tools": ("option_performance_report",),
-        "semantic_source": "option_performance_report period summary",
-        "freshness": "ledger_and_evidence_snapshot",
-        "recommended_filters": ("period_kind", "account", "period_status"),
-        "safe_join_keys": ("account", "period_start_date", "period_end_date"),
-    },
-    "option_monthly_performance": {
-        "description": "primary natural-month option performance view with activity, cash, gross/net PnL, and explicit quality",
-        "fields": OPTION_PERFORMANCE_FIELDS,
-        "primary_metric": "period_total_pnl_net_cny",
-        "row_grain": "month + account",
-        "primary_keys": ("month", "account"),
-        "time_grain": "month",
-        "source_tools": ("option_performance_report",),
-        "semantic_source": "option_performance_report.breakdowns.monthly",
-        "freshness": "ledger_and_evidence_snapshot",
-        "recommended_filters": ("month", "account", "period_status"),
-        "safe_join_keys": ("month", "account"),
-    },
-    "option_activity_components": {
-        "description": "premium and contract activity components; activity is not profit and is not additive with PnL",
-        "fields": PERFORMANCE_COMPONENT_FIELDS,
-        "row_grain": "period or month + account + activity component",
-        "primary_keys": ("period_start_date", "period_end_date", "month", "account", "component"),
-        "time_grain": "period_or_month",
-        "source_tools": ("option_performance_report",),
-        "semantic_source": "option_performance_report.activity",
+        "semantic_source": "option_performance_report canonical bundle",
         "freshness": "ledger_snapshot",
-        "recommended_filters": ("month", "account", "component", "metric_status"),
-        "safe_join_keys": ("month", "account"),
+        "recommended_filters": ("period_kind", "as_of_date"),
+        "safe_join_keys": OPTION_PERFORMANCE_LOGICAL_KEY,
     },
     "option_cash_components": {
-        "description": "cash-movement components with native amounts and immutable event-booking CNY conversion evidence",
-        "fields": PERFORMANCE_COMPONENT_FIELDS,
-        "row_grain": "period or month + account + cash component",
-        "primary_keys": ("period_start_date", "period_end_date", "month", "account", "component"),
-        "time_grain": "period_or_month",
+        "description": "native-currency option net cash flow split by open and terminated state",
+        "fields": OPTION_CASH_COMPONENT_FIELDS,
+        "primary_metric": "amount",
+        "row_grain": "period + currency + state",
+        "primary_keys": (*OPTION_PERFORMANCE_LOGICAL_KEY, "currency", "state"),
+        "time_grain": "mtd_or_ytd",
         "source_tools": ("option_performance_report",),
-        "semantic_source": "option_performance_report.cash",
+        "semantic_source": "option_performance_report.option_net_cashflow",
         "freshness": "ledger_snapshot",
-        "recommended_filters": ("month", "account", "component", "metric_status"),
-        "safe_join_keys": ("month", "account"),
-    },
-    "option_pnl_components": {
-        "description": "realized, opening/ending unrealized, and period-total gross/net PnL components",
-        "fields": PERFORMANCE_COMPONENT_FIELDS,
-        "primary_metric": "period_total_net",
-        "row_grain": "period or month + account + PnL component",
-        "primary_keys": ("period_start_date", "period_end_date", "month", "account", "component"),
-        "time_grain": "period_or_month",
-        "source_tools": ("option_performance_report",),
-        "semantic_source": "option_performance_report.pnl",
-        "freshness": "ledger_and_evidence_snapshot",
-        "recommended_filters": ("month", "account", "component", "metric_status"),
-        "safe_join_keys": ("month", "account"),
-    },
-    "assigned_stock_position_pnl": {
-        "description": "semantic assigned-stock lot PnL view for current holding, realized sale, and lifecycle PnL analysis",
-        "fields": ASSIGNED_STOCK_POSITION_PNL_FIELDS,
-        "row_grain": "account + symbol + stock_lot_id",
-        "primary_keys": ("account", "symbol", "stock_lot_id"),
-        "source_tools": ("option_performance_report", "option_positions_read"),
-        "semantic_source": "option_performance_report.assignment_lifecycle_rows",
-        "freshness": "realtime_or_cached_quote_snapshot",
-        "recommended_filters": ("account", "symbol", "status", "currency", "quote_status"),
-        "safe_join_keys": ("account", "symbol", "currency", "stock_lot_id"),
-        "alias_of": "assigned_stock_lifecycle",
-    },
-    "assigned_stock_sale_events": {
-        "description": "semantic assigned-stock sale events view with realized stock PnL attribution",
-        "fields": ASSIGNED_STOCK_SALE_EVENT_FIELDS,
-        "row_grain": "account + symbol + stock_lot_id + sale event",
-        "primary_keys": ("account", "symbol", "stock_lot_id", "stock_event_id"),
-        "time_grain": "month",
-        "source_tools": ("option_performance_report", "option_positions_read"),
-        "semantic_source": "option_performance_report.assigned_stock_sale_rows",
-        "freshness": "snapshot",
-        "recommended_filters": ("month", "account", "symbol", "currency"),
-        "safe_join_keys": ("month", "account", "symbol", "currency", "stock_lot_id"),
-        "alias_of": "assigned_stock_sales",
-    },
-    "assigned_stock_lifecycle": {
-        "description": "CSP assignment stock lots with stock PnL and lifecycle PnL",
-        "fields": (
-            "account",
-            "symbol",
-            "currency",
-            "status",
-            "shares_remaining",
-            "shares_sold",
-            "stock_cost_per_share",
-            "spot",
-            "assigned_stock_unrealized_pnl",
-            "assigned_stock_realized_pnl",
-            "option_premium_attribution",
-            "assignment_lifecycle_pnl",
-            "quote_status",
-        ),
-        "row_grain": "account + symbol + assigned stock lot",
-        "primary_keys": ("account", "symbol"),
-        "source_tools": ("option_performance_report", "option_positions_read"),
-        "semantic_source": "option_performance_report.assignment_lifecycle_rows",
-        "freshness": "realtime_or_cached_quote_snapshot",
-        "recommended_filters": ("account", "symbol", "status", "currency"),
-        "safe_join_keys": ("account", "symbol", "currency"),
-    },
-    "assigned_stock_sales": {
-        "description": "recorded assigned-stock sale events and realized stock PnL",
-        "fields": (
-            "account",
-            "symbol",
-            "currency",
-            "shares",
-            "sale_price",
-            "assigned_stock_realized_pnl",
-            "stock_lot_id",
-        ),
-        "row_grain": "account + symbol + stock_lot_id + sale event",
-        "primary_keys": ("account", "symbol", "stock_lot_id"),
-        "source_tools": ("option_performance_report", "option_positions_read"),
-        "semantic_source": "option_performance_report.assigned_stock_sale_rows",
-        "freshness": "snapshot",
-        "recommended_filters": ("account", "symbol", "currency"),
-        "safe_join_keys": ("account", "symbol", "currency", "stock_lot_id"),
-    },
-    "assigned_stock_review": {
-        "description": "assigned-stock lifecycle review rows such as missing_quote or missing_stock_sale",
-        "fields": ("account", "symbol", "currency", "status", "message", "stock_lot_id"),
-        "row_grain": "account + symbol + review finding",
-        "primary_keys": ("account", "symbol", "stock_lot_id", "status"),
-        "source_tools": ("option_performance_report", "option_positions_read"),
-        "semantic_source": "option_performance_report.assigned_stock_review_rows",
-        "freshness": "snapshot",
-        "recommended_filters": ("account", "symbol", "status"),
-        "safe_join_keys": ("account", "symbol", "currency", "stock_lot_id"),
+        "recommended_filters": ("period_kind", "as_of_date", "currency", "state"),
+        "safe_join_keys": (*OPTION_PERFORMANCE_LOGICAL_KEY, "currency", "state"),
+        "_field_semantics": {
+            "amount": {"type": "money", "aggregation": "sum", "currency": "currency field"},
+        },
     },
     "open_option_exposure": {
         "description": "semantic open option exposure view with strategy and risk-model labels",
@@ -760,16 +543,16 @@ VIEW_SPECS: dict[str, dict[str, Any]] = _build_view_specs({
         "safe_join_keys": ("account", "currency"),
     },
     "symbol_performance_attribution": {
-        "description": "symbol-level performance attribution rows by month/account/component",
+        "description": "symbol-level MTD/YTD option cash flow, win rates, and return",
         "fields": SYMBOL_PERFORMANCE_ATTRIBUTION_FIELDS,
-        "row_grain": "month + account + symbol + component + currency",
-        "primary_keys": ("month", "account", "symbol", "component", "currency"),
-        "time_grain": "month",
+        "row_grain": "period + selected account scope + symbol",
+        "primary_keys": (*OPTION_PERFORMANCE_LOGICAL_KEY, "symbol"),
+        "time_grain": "mtd_or_ytd",
         "source_tools": ("option_performance_report",),
-        "semantic_source": "option_performance_report fact rows",
-        "freshness": "snapshot",
-        "recommended_filters": ("month", "account", "symbol", "component", "currency"),
-        "safe_join_keys": ("month", "account", "symbol", "currency"),
+        "semantic_source": "option_performance_report.breakdowns.symbols",
+        "freshness": "ledger_snapshot",
+        "recommended_filters": ("period_kind", "as_of_date", "symbol"),
+        "safe_join_keys": (*OPTION_PERFORMANCE_LOGICAL_KEY, "symbol"),
     },
     "strategy_config_by_symbol_account": {
         "description": "strategy config rows expanded by symbol/account/strategy family",
@@ -815,17 +598,6 @@ VIEW_SPECS: dict[str, dict[str, Any]] = _build_view_specs({
                 "removal_phase": "phase_c",
             }
         },
-    },
-    "quote_freshness": {
-        "description": "quote freshness rows derived from existing quote status surfaces",
-        "fields": QUOTE_FRESHNESS_FIELDS,
-        "row_grain": "symbol + market + source",
-        "primary_keys": ("symbol", "market", "source", "account"),
-        "source_tools": ("option_performance_report", "runtime_status"),
-        "semantic_source": "assigned_stock quote status and runtime quote snapshots",
-        "freshness": "realtime_or_cached_quote_snapshot",
-        "recommended_filters": ("symbol", "market", "quote_status", "account"),
-        "safe_join_keys": ("account", "symbol"),
     },
     "upgrade_operation_status": {
         "description": "upgrade operation status and receipt diagnostics derived from inbound operation timeline",
@@ -931,15 +703,7 @@ VIEW_SPECS: dict[str, dict[str, Any]] = _build_view_specs({
 
 _PERFORMANCE_SOURCE_VIEWS: set[str] = {
     "option_period_performance",
-    "option_monthly_performance",
-    "option_activity_components",
     "option_cash_components",
-    "option_pnl_components",
-    "assigned_stock_position_pnl",
-    "assigned_stock_sale_events",
-    "assigned_stock_lifecycle",
-    "assigned_stock_sales",
-    "assigned_stock_review",
     "symbol_performance_attribution",
 }
 _POSITION_SOURCE_VIEWS: set[str] = {
@@ -957,7 +721,6 @@ _ARTIFACT_SOURCE_VIEWS: set[str] = {
     "runtime_tick_status",
     "strategy_replay_read_surface",
 }
-_QUOTE_SOURCE_VIEWS: set[str] = {"quote_freshness"}
 _OPERATION_SOURCE_VIEWS: set[str] = {"upgrade_operation_status"}
 
 
@@ -976,17 +739,19 @@ _ANALYSIS_OUTPUT_CONTRACT: dict[str, Any] = {
         "scope.limit",
         "coverage.views[]",
         "coverage.accounts[]",
-        "coverage.months[]",
         "coverage.symbols[]",
-        "rows[].month",
-        "rows[].account",
+        "rows[].period_kind",
+        "rows[].as_of_date",
         "rows[].symbol",
         "rows[].currency",
+        "rows[].state",
+        "rows[].amount",
         "rows[].status",
-        "rows[].period_total_pnl_net_cny",
-        "rows[].realized_pnl_net_cny",
-        "rows[].total_cash_change_cny",
-        "rows[].premium_collected_cny",
+        "rows[].option_net_cashflow_by_currency",
+        "rows[].option_return_by_currency",
+        "rows[].sell_option_win_rate",
+        "rows[].buy_option_win_rate",
+        "rows[].quality_status",
         "query_explain.warnings[]",
     ],
     "freshness_fields": ["freshness[]"],
@@ -1006,33 +771,26 @@ def _analysis_catalog_tool(
     }
     query_patterns = [
         {
-            "question": "按账户对比利润，有什么不同？",
+            "question": "查看本月至今的期权指标",
             "sql": (
-                "select month, account, period_total_pnl_net_cny, period_total_pnl_net_status "
-                "from option_monthly_performance "
-                "order by month, account"
+                "select period_kind, as_of_date, option_net_cashflow_by_currency, "
+                "sell_option_win_rate, buy_option_win_rate, option_return_by_currency "
+                "from option_period_performance"
             ),
         },
         {
-            "question": "按账户对比现金变动",
+            "question": "按币种和持仓状态查看期权净现金流",
             "sql": (
-                "select month, account, component, amount_cny, amount_by_ccy, metric_status "
-                "from option_cash_components order by month, account, component"
+                "select currency, state, amount, status "
+                "from option_cash_components order by currency, state"
             ),
         },
         {
-            "question": "按账户对比开仓权利金活动",
+            "question": "按标的查看期权指标归因",
             "sql": (
-                "select month, account, component, amount_cny, amount_by_ccy, metric_status "
-                "from option_activity_components where component = 'premium_collected' "
-                "order by month, account"
-            ),
-        },
-        {
-            "question": "指派正股当前浮盈亏按账户汇总",
-            "sql": (
-                "select account, currency, sum(assigned_stock_unrealized_pnl) as unrealized_pnl "
-                "from assigned_stock_position_pnl group by account, currency"
+                "select symbol, option_net_cashflow_by_currency, sell_option_win_rate, "
+                "buy_option_win_rate, option_return_by_currency "
+                "from symbol_performance_attribution order by symbol"
             ),
         },
     ]
@@ -1051,10 +809,10 @@ def _analysis_catalog_tool(
         "aggregation_policies": _catalog_aggregation_policies(specs),
         "join_policies": _catalog_join_policies(specs),
         "metric_policy": {
-            "primary_profit": "pnl.period_total_net for period profit; pnl.realized_net for realized-only questions",
-            "cash_movement": "cash.total_cash_change_net and option_cash_components; never infer cash as PnL residual",
-            "premium_activity": "activity.premium_collected_gross; activity only, never add to PnL",
-            "assigned_stock": "assignment economics are already included in supported PnL/cash facts; inspect lifecycle views for lot detail",
+            "option_net_cashflow": "sell premium - buy premium - fees; native currency only",
+            "sell_option_win_rate": "winning eligible sell contracts / eligible sell contracts",
+            "buy_option_win_rate": "winning eligible buy contracts / eligible buy contracts",
+            "option_return": "option net cash flow / average occupied capital; native currency only",
         },
         "sql_rules": {
             "allowed_statements": ["SELECT", "WITH"],
@@ -1066,8 +824,8 @@ def _analysis_catalog_tool(
         "query_patterns": query_patterns,
         "examples": query_patterns,
         "anti_patterns": [
-            "Do not invent unlisted columns such as net_cashflow, total_return, return_rate, or open_basis_pnl.",
-            "Do not subtract premium or realized PnL from cash to manufacture a residual component.",
+            "Do not invent PnL, stock cash, assignment settlement, CNY conversion, or quote-refresh metrics.",
+            "Do not average win rates or returns across rows; recompute from their numerators and denominators.",
             "Do not join views unless the join fields are listed in each view's safe_join_keys.",
         ],
     }, [], {"config_path": mask_path(config_path)}
@@ -1202,8 +960,7 @@ def _analysis_views_mode_result(
     limit: int,
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     view_names = sorted(views)
-    semantic_warnings = _performance_metric_semantic_warnings(sql="", views_used=view_names)
-    warnings.extend(warning for warning in semantic_warnings if warning not in warnings)
+    semantic_warnings: list[str] = []
     view_datasets: dict[str, dict[str, Any]] = {}
     preview_rows: list[dict[str, Any]] = []
     all_rows: list[dict[str, Any]] = []
@@ -1438,316 +1195,153 @@ def _bounded_limit(value: Any) -> int:
     return max(1, min(MAX_QUERY_LIMIT, limit))
 
 
-def _analysis_performance_request(payload: dict[str, Any], *, account: str | None) -> dict[str, Any]:
+def _canonical_analysis_performance_request(payload: dict[str, Any]) -> dict[str, Any]:
+    removed = sorted(
+        key
+        for key in ("month", "months", "year", "start_date", "end_date", "refresh_quotes")
+        if payload.get(key) not in (None, "", [], ())
+    )
+    if removed:
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message=f"option performance analysis does not accept: {', '.join(removed)}",
+        )
+    accounts = sorted(_payload_filter_values(payload, "account", "accounts"))
+    if len(accounts) > 1:
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message="analysis_query option performance accepts at most one account filter",
+        )
+    period = str(payload.get("period") or "ytd").strip().lower()
+    if period not in {"mtd", "ytd"}:
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message="analysis_query option performance period must be mtd or ytd",
+        )
     request = {
         "config_key": payload.get("config_key") or "us",
         "config_path": payload.get("config_path"),
         "data_config": payload.get("data_config"),
-        "account": account,
+        "period": period,
+        "as_of_date": payload.get("as_of_date"),
+        "account": accounts[0] if accounts else None,
         "broker": payload.get("broker"),
-        "include_rows": True,
-        "refresh_quotes": payload.get("refresh_quotes") is not False,
     }
-    explicit_period = str(payload.get("period") or "").strip().lower()
-    if explicit_period:
-        request["period"] = explicit_period
-        for key in ("as_of_date", "month", "year", "start_date", "end_date"):
-            if payload.get(key) not in (None, ""):
-                request[key] = payload.get(key)
-        return request
-    month = str(payload.get("month") or "").strip()
-    if month:
-        return {**request, "period": "month", "month": month}
-    months = sorted(_payload_filter_values(payload, "month", "months"))
-    if months:
-        first = date.fromisoformat(f"{months[0]}-01")
-        last = date.fromisoformat(f"{months[-1]}-01")
-        last_day = calendar.monthrange(last.year, last.month)[1]
-        return {
-            **request,
-            "period": "range",
-            "start_date": first.isoformat(),
-            "end_date": date(last.year, last.month, last_day).isoformat(),
-        }
-    year = payload.get("year")
-    if year not in (None, ""):
-        return {**request, "period": "year", "year": year}
-    if payload.get("start_date") not in (None, "") or payload.get("end_date") not in (None, ""):
-        return {
-            **request,
-            "period": "range",
-            "start_date": payload.get("start_date"),
-            "end_date": payload.get("end_date"),
-        }
-    return {**request, "period": "ytd", "as_of_date": payload.get("as_of_date")}
+    return {key: value for key, value in request.items() if value not in (None, "")}
 
 
-def _call_option_performance_report(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+def _load_canonical_analysis_performance_report(
+    payload: dict[str, Any],
+    *,
+    warnings: list[str],
+) -> dict[str, Any]:
     report, report_warnings, _meta = option_performance_report_tool(
-        payload,
+        _canonical_analysis_performance_request(payload),
         load_runtime_config=load_runtime_config,
         resolve_public_data_config_path=resolve_public_data_config_path,
         normalize_broker=normalize_broker,
         resolve_option_positions_repo=resolve_option_positions_repo,
-        open_performance_evidence_repository=open_performance_evidence_repository,
         build_option_period_performance=build_option_period_performance,
         repo_base=repo_base,
         mask_path=mask_path,
     )
-    return report, [str(item) for item in report_warnings if str(item).strip()]
+    warnings.extend(str(item) for item in report_warnings if str(item).strip())
+    return report
 
 
-def _load_analysis_performance_reports(
-    payload: dict[str, Any],
-    *,
-    warnings: list[str],
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    explicit_accounts = sorted(_payload_filter_values(payload, "account", "accounts"))
-    primary_account = explicit_accounts[0] if len(explicit_accounts) == 1 else None
-    aggregate_request = _analysis_performance_request(payload, account=primary_account)
-    aggregate_report, aggregate_warnings = _call_option_performance_report(aggregate_request)
-    warnings.extend(aggregate_warnings)
-    if primary_account:
-        return aggregate_report, [aggregate_report]
-
-    scope = aggregate_report.get("scope") if isinstance(aggregate_report.get("scope"), dict) else {}
-    accounts = explicit_accounts or [
-        str(item).strip().lower()
-        for item in scope.get("accounts") or []
-        if str(item).strip()
-    ]
-    account_reports: list[dict[str, Any]] = []
-    for account in sorted(dict.fromkeys(accounts)):
-        report, account_warnings = _call_option_performance_report(
-            _analysis_performance_request(payload, account=account)
-        )
-        warnings.extend(account_warnings)
-        account_reports.append(report)
-    return aggregate_report, account_reports
-
-
-def _metric_envelope(value: Any) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
-
-
-def _metric_status(value: Any) -> str | None:
-    if isinstance(value, dict) and value.get("status") not in (None, ""):
-        return str(value.get("status"))
-    quality = value.get("quality") if isinstance(value, dict) and isinstance(value.get("quality"), dict) else {}
-    return str(quality.get("status") or "") or None
-
-
-def _summary_context(report: dict[str, Any], *, month: str | None, account: str | None) -> dict[str, Any]:
+def _canonical_performance_scope(report: dict[str, Any]) -> dict[str, Any]:
     period = report.get("period") if isinstance(report.get("period"), dict) else {}
     scope = report.get("scope") if isinstance(report.get("scope"), dict) else {}
     quality = report.get("quality") if isinstance(report.get("quality"), dict) else {}
     return {
+        "config_key": scope.get("config_key"),
         "period_kind": period.get("kind"),
-        "period_start_date": period.get("requested_start_date"),
-        "period_end_date": period.get("requested_end_date"),
-        "period_status": period.get("status"),
-        "month": month,
-        "account": account if account is not None else scope.get("account"),
+        "period_start_date": period.get("start_date"),
+        "as_of_date": period.get("as_of_date"),
+        "start_at_ms": period.get("start_at_ms"),
+        "end_exclusive_at_ms": period.get("end_exclusive_at_ms"),
+        "statistic_days": period.get("statistic_days"),
         "accounts": scope.get("accounts") or [],
-        "broker": scope.get("broker"),
         "brokers": scope.get("brokers") or [],
-        "quality_status": quality.get("status"),
+        "ledger_input_hash": quality.get("ledger_input_hash"),
     }
 
 
-def _put_metric(row: dict[str, Any], prefix: str, value: Any) -> None:
-    metric = _metric_envelope(value)
-    row[f"{prefix}_cny"] = metric.get("cny")
-    row[f"{prefix}_by_ccy"] = metric.get("by_currency") or {}
-    row[f"{prefix}_status"] = _metric_status(metric)
-    row[f"{prefix}_missing"] = list(metric.get("missing") or [])
-    row[f"{prefix}_evidence_fact_ids"] = list(
-        metric.get("evidence_fact_ids") or metric.get("fx_fact_ids") or []
-    )
+def _canonical_rate_fields(value: Any, *, prefix: str) -> dict[str, Any]:
+    metric = value if isinstance(value, dict) else {}
+    return {
+        f"{prefix}_option_winning_contracts": metric.get("winning_contracts"),
+        f"{prefix}_option_eligible_contracts": metric.get("eligible_contracts"),
+        f"{prefix}_option_win_rate": metric.get("rate"),
+        f"{prefix}_option_win_rate_status": metric.get("status"),
+    }
 
 
-def _performance_summary_row(
-    report: dict[str, Any],
-    *,
-    summary: dict[str, Any] | None = None,
-    month: str | None = None,
-    account: str | None = None,
-) -> dict[str, Any]:
-    source = summary or report
-    row = _summary_context(report, month=month, account=account)
-    activity = source.get("activity") if isinstance(source.get("activity"), dict) else {}
-    cash = source.get("cash") if isinstance(source.get("cash"), dict) else {}
-    pnl = source.get("pnl") if isinstance(source.get("pnl"), dict) else {}
-    capital = report.get("capital") if summary is None and isinstance(report.get("capital"), dict) else {}
-    cashflow = source.get("cashflow_return") if isinstance(source.get("cashflow_return"), dict) else {}
-    _put_metric(row, "premium_collected", activity.get("premium_collected_gross"))
-    _put_metric(row, "premium_paid", activity.get("premium_paid_gross"))
-    row["contracts_opened"] = activity.get("contracts_opened")
-    row["contracts_closed"] = activity.get("contracts_closed")
-    _put_metric(row, "option_trade_cash", cash.get("option_trade_cash_gross"))
-    _put_metric(row, "option_fee_cash", cash.get("option_fee_cash"))
-    _put_metric(row, "option_net_cashflow", cash.get("option_net_cashflow"))
-    _put_metric(row, "stock_settlement_cash", cash.get("stock_settlement_cash_gross"))
-    _put_metric(row, "assigned_stock_sale_cash", cash.get("assigned_stock_sale_cash_gross"))
-    _put_metric(row, "total_cash_change", cash.get("total_cash_change_net"))
-    _put_metric(row, "realized_pnl_gross", pnl.get("realized_gross"))
-    _put_metric(row, "realized_pnl_net", pnl.get("realized_net"))
-    _put_metric(row, "opening_unrealized_pnl_net", pnl.get("opening_unrealized_net"))
-    _put_metric(row, "ending_unrealized_pnl_net", pnl.get("ending_unrealized_net"))
-    _put_metric(row, "period_total_pnl_gross", pnl.get("period_total_gross"))
-    _put_metric(row, "period_total_pnl_net", pnl.get("period_total_net"))
-    row["capital_days_by_ccy"] = capital.get("capital_days_by_currency") or {}
-    row["period_total_net_annualized_efficiency"] = capital.get("period_total_net_annualized_efficiency")
-    period_cashflow_return = _metric_envelope(cashflow.get("period_return"))
-    annualized_cashflow_return = _metric_envelope(cashflow.get("annualized_return"))
-    cashflow_coverage = _metric_envelope(cashflow.get("coverage"))
-    row["cashflow_capital_basis"] = cashflow.get("capital_basis")
-    row["cashflow_period_duration_days"] = cashflow.get("period_duration_days")
-    row["cashflow_capital_days_by_ccy"] = cashflow.get("capital_days_by_currency") or {}
-    row["cashflow_average_capital_by_ccy"] = cashflow.get("average_incremental_capital_by_currency") or {}
-    row["period_cashflow_return_by_ccy"] = period_cashflow_return.get("by_currency") or {}
-    row["period_cashflow_return_status"] = _metric_status(period_cashflow_return)
-    row["period_cashflow_return_missing"] = list(period_cashflow_return.get("missing") or [])
-    row["annualized_cashflow_return_by_ccy"] = annualized_cashflow_return.get("by_currency") or {}
-    row["annualized_cashflow_return_status"] = _metric_status(annualized_cashflow_return)
-    row["annualized_cashflow_return_missing"] = list(annualized_cashflow_return.get("missing") or [])
-    row["cashflow_coverage_status"] = cashflow_coverage.get("status")
-    row["cashflow_missing_by_ccy"] = cashflow_coverage.get("missing_by_currency") or {}
-    row["cashflow_global_missing"] = list(cashflow_coverage.get("global_missing") or [])
-    return row
+def _canonical_period_performance_row(report: dict[str, Any]) -> dict[str, Any]:
+    quality = report.get("quality") if isinstance(report.get("quality"), dict) else {}
+    return {
+        **_canonical_performance_scope(report),
+        "option_net_cashflow_by_currency": _metric_envelope(report.get("option_net_cashflow")).get("by_currency") or {},
+        "option_return_by_currency": _metric_envelope(report.get("option_return")).get("by_currency") or {},
+        **_canonical_rate_fields(report.get("sell_option_win_rate"), prefix="sell"),
+        **_canonical_rate_fields(report.get("buy_option_win_rate"), prefix="buy"),
+        "quality_status": quality.get("status"),
+        "missing": list(quality.get("missing") or []),
+    }
 
 
-def _performance_monthly_rows(
-    reports: list[dict[str, Any]],
-    *,
-    aggregate: bool = False,
-) -> list[dict[str, Any]]:
+def _canonical_cash_component_rows(report: dict[str, Any]) -> list[dict[str, Any]]:
+    by_currency = _metric_envelope(report.get("option_net_cashflow")).get("by_currency")
+    if not isinstance(by_currency, dict):
+        return []
+    scope = _canonical_performance_scope(report)
     rows: list[dict[str, Any]] = []
-    for report in reports:
-        scope = report.get("scope") if isinstance(report.get("scope"), dict) else {}
-        account = "all" if aggregate else str(scope.get("account") or "").strip() or None
-        breakdowns = report.get("breakdowns") if isinstance(report.get("breakdowns"), dict) else {}
-        monthly = breakdowns.get("monthly") if isinstance(breakdowns.get("monthly"), list) else []
-        for item in monthly:
-            if not isinstance(item, dict):
-                continue
-            rows.append(
-                _performance_summary_row(
-                    report,
-                    summary=item,
-                    month=str(item.get("month") or "") or None,
-                    account=account,
-                )
-            )
-    return sorted(rows, key=lambda item: (str(item.get("month") or ""), str(item.get("account") or "")))
-
-
-_ACTIVITY_COMPONENTS = (
-    ("premium_collected", "premium collected", 10, "premium_collected_cny", "premium_collected_by_ccy", "premium_collected_status", None),
-    ("premium_paid", "premium paid", 20, "premium_paid_cny", "premium_paid_by_ccy", "premium_paid_status", None),
-    ("contracts_opened", "contracts opened", 30, None, None, None, "contracts_opened"),
-    ("contracts_closed", "contracts closed", 40, None, None, None, "contracts_closed"),
-)
-_CASH_COMPONENTS = (
-    ("option_trade_cash", "option trade cash", 10, "option_trade_cash_cny", "option_trade_cash_by_ccy", "option_trade_cash_status", None),
-    ("option_fee_cash", "option fee cash", 20, "option_fee_cash_cny", "option_fee_cash_by_ccy", "option_fee_cash_status", None),
-    ("option_net_cashflow", "option net cashflow", 25, "option_net_cashflow_cny", "option_net_cashflow_by_ccy", "option_net_cashflow_status", None),
-    ("stock_settlement_cash", "stock settlement principal cash", 30, "stock_settlement_cash_cny", "stock_settlement_cash_by_ccy", "stock_settlement_cash_status", None),
-    ("assigned_stock_sale_cash", "assigned-stock sale cash", 40, "assigned_stock_sale_cash_cny", "assigned_stock_sale_cash_by_ccy", "assigned_stock_sale_cash_status", None),
-    ("total_cash_change", "total cash change net", 90, "total_cash_change_cny", "total_cash_change_by_ccy", "total_cash_change_status", None),
-)
-_PNL_COMPONENTS = (
-    ("realized_gross", "realized PnL gross", 10, "realized_pnl_gross_cny", "realized_pnl_gross_by_ccy", "realized_pnl_gross_status", None),
-    ("realized_net", "realized PnL net", 20, "realized_pnl_net_cny", "realized_pnl_net_by_ccy", "realized_pnl_net_status", None),
-    ("opening_unrealized_net", "opening unrealized PnL net", 30, "opening_unrealized_pnl_net_cny", "opening_unrealized_pnl_net_by_ccy", "opening_unrealized_pnl_net_status", None),
-    ("ending_unrealized_net", "ending unrealized PnL net", 40, "ending_unrealized_pnl_net_cny", "ending_unrealized_pnl_net_by_ccy", "ending_unrealized_pnl_net_status", None),
-    ("period_total_gross", "period total PnL gross", 50, "period_total_pnl_gross_cny", "period_total_pnl_gross_by_ccy", "period_total_pnl_gross_status", None),
-    ("period_total_net", "period total PnL net", 60, "period_total_pnl_net_cny", "period_total_pnl_net_by_ccy", "period_total_pnl_net_status", None),
-)
-
-
-def _performance_component_rows(
-    period_rows: list[dict[str, Any]],
-    monthly_rows: list[dict[str, Any]],
-    *,
-    namespace: str,
-) -> list[dict[str, Any]]:
-    specs = {"activity": _ACTIVITY_COMPONENTS, "cash": _CASH_COMPONENTS, "pnl": _PNL_COMPONENTS}[namespace]
-    rows: list[dict[str, Any]] = []
-    sources = monthly_rows or period_rows
-    for source in sources:
-        for component, label, order, cny_field, ccy_field, status_field, quantity_field in specs:
-            amount_cny = source.get(cny_field) if cny_field else None
-            amount_by_ccy = source.get(ccy_field) if ccy_field else {}
-            quantity = source.get(quantity_field) if quantity_field else None
-            if amount_cny is None and not _dict_has_amount(amount_by_ccy) and quantity is None:
+    for currency in sorted(by_currency):
+        components = by_currency.get(currency)
+        if not isinstance(components, dict):
+            continue
+        for state in ("total", "open", "terminated"):
+            component = components.get(state)
+            if not isinstance(component, dict):
                 continue
             rows.append(
                 {
-                    **{field: source.get(field) for field in PERFORMANCE_SCOPE_FIELDS},
-                    "component": component,
-                    "component_label": label,
-                    "component_order": order,
-                    "amount_cny": amount_cny,
-                    "amount_by_ccy": amount_by_ccy or {},
-                    "metric_status": source.get(status_field) if status_field else "observed",
-                    "missing": list(source.get(f"{component}_missing") or []) if namespace == "cash" else [],
-                    "conversion_ids": (
-                        list(source.get(f"{component}_evidence_fact_ids") or []) if namespace == "cash" else []
-                    ),
-                    "quantity": quantity,
-                    "source_namespace": namespace,
-                    "source_field": component,
+                    **scope,
+                    "currency": currency,
+                    "state": state,
+                    "amount": component.get("amount"),
+                    "status": component.get("status"),
+                    "missing": list(component.get("missing") or []),
                 }
             )
     return rows
 
 
-def _fact_month(row: dict[str, Any]) -> str:
-    try:
-        timestamp_ms = int(row.get("effective_at_ms") or 0)
-    except (TypeError, ValueError):
-        return ""
-    if timestamp_ms <= 0:
-        return ""
-    return datetime.fromtimestamp(timestamp_ms / 1000, tz=ZoneInfo("Asia/Shanghai")).strftime("%Y-%m")
+def _canonical_symbol_performance_rows(report: dict[str, Any]) -> list[dict[str, Any]]:
+    breakdowns = report.get("breakdowns") if isinstance(report.get("breakdowns"), dict) else {}
+    symbols = breakdowns.get("symbols") if isinstance(breakdowns.get("symbols"), list) else []
+    scope = _canonical_performance_scope(report)
+    rows: list[dict[str, Any]] = []
+    for item in symbols:
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            {
+                **scope,
+                "symbol": item.get("key"),
+                "option_net_cashflow_by_currency": _metric_envelope(item.get("option_net_cashflow")).get("by_currency") or {},
+                "option_return_by_currency": _metric_envelope(item.get("option_return")).get("by_currency") or {},
+                **_canonical_rate_fields(item.get("sell_option_win_rate"), prefix="sell"),
+                **_canonical_rate_fields(item.get("buy_option_win_rate"), prefix="buy"),
+                "status": item.get("status"),
+                "missing": list(item.get("missing") or []),
+            }
+        )
+    return rows
 
 
-def _symbol_performance_attribution_rows(reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    grouped: dict[tuple[str, str, str, str, str], float] = {}
-    mapping = {
-        "premium_collected_gross": "premium_activity",
-        "option_trade_cash_gross": "option_trade_cash",
-        "realized_gross": "realized_pnl_gross",
-        "realized_net": "realized_pnl_net",
-    }
-    for report in reports:
-        for row in report.get("rows") or []:
-            if not isinstance(row, dict) or row.get("amount") is None:
-                continue
-            component = mapping.get(str(row.get("fact_kind") or ""))
-            if component is None:
-                continue
-            key = (
-                _fact_month(row),
-                str(row.get("account") or ""),
-                str(row.get("symbol") or ""),
-                component,
-                str(row.get("currency") or ""),
-            )
-            grouped[key] = _round_public_float(grouped.get(key, 0.0) + float(row.get("amount") or 0.0))
-    return [
-        {
-            "month": key[0],
-            "account": key[1],
-            "symbol": key[2],
-            "component": key[3],
-            "currency": key[4],
-            "amount_gross": amount,
-            "source_view": "option_performance_report.rows",
-        }
-        for key, amount in sorted(grouped.items())
-    ]
+def _metric_envelope(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
 
 
 def _materialize_views(
@@ -1759,8 +1353,7 @@ def _materialize_views(
     requested = set(requested_views) if requested_views is not None else set(VIEW_SPECS)
     if not requested:
         return {}
-    performance_report: dict[str, Any] = {}
-    account_performance_reports: list[dict[str, Any]] = []
+    canonical_performance_report: dict[str, Any] = {}
     position_data: dict[str, Any] = {}
     event_data: dict[str, Any] = {}
     symbol_rows: list[dict[str, Any]] = []
@@ -1769,8 +1362,12 @@ def _materialize_views(
     strategy_replay_rows: list[dict[str, Any]] = []
     upgrade_operation_rows: list[dict[str, Any]] = []
 
-    if requested & (_PERFORMANCE_SOURCE_VIEWS | _QUOTE_SOURCE_VIEWS):
-        performance_report, account_performance_reports = _load_analysis_performance_reports(
+    if requested & {
+        "option_period_performance",
+        "option_cash_components",
+        "symbol_performance_attribution",
+    }:
+        canonical_performance_report = _load_canonical_analysis_performance_report(
             payload,
             warnings=warnings,
         )
@@ -1832,41 +1429,24 @@ def _materialize_views(
         upgrade_operation_rows, upgrade_warnings = _upgrade_operation_status_rows(payload)
         warnings.extend(upgrade_warnings)
 
-    period_rows = [_performance_summary_row(performance_report)] if performance_report else []
-    monthly_rows = _performance_monthly_rows(account_performance_reports)
-    activity_rows = _performance_component_rows(period_rows, monthly_rows, namespace="activity")
-    cash_rows = _performance_component_rows(period_rows, monthly_rows, namespace="cash")
-    pnl_rows = _performance_component_rows(period_rows, monthly_rows, namespace="pnl")
-    lifecycle = performance_report.get("assignment_lifecycle") if isinstance(performance_report.get("assignment_lifecycle"), dict) else {}
-    open_option_exposure_rows = _open_option_exposure_rows(position_data.get("rows"))
-    quote_rows = _quote_freshness_rows(
-        assignment_rows=lifecycle.get("ending_lots"),
-        runtime_rows=runtime_rows,
+    period_rows = (
+        [_canonical_period_performance_row(canonical_performance_report)]
+        if canonical_performance_report
+        else []
     )
+    cash_rows = _canonical_cash_component_rows(canonical_performance_report)
+    open_option_exposure_rows = _open_option_exposure_rows(position_data.get("rows"))
     materialized = {
         "option_period_performance": _normalize_rows(period_rows),
-        "option_monthly_performance": _normalize_rows(monthly_rows),
-        "option_activity_components": _normalize_rows(activity_rows),
         "option_cash_components": _normalize_rows(cash_rows),
-        "option_pnl_components": _normalize_rows(pnl_rows),
-        "assigned_stock_position_pnl": _normalize_rows(
-            _assigned_stock_position_pnl_rows(lifecycle.get("ending_lots"))
-        ),
-        "assigned_stock_sale_events": _normalize_rows(
-            _assigned_stock_sale_event_rows(lifecycle.get("sales"))
-        ),
-        "assigned_stock_lifecycle": _normalize_rows(lifecycle.get("ending_lots")),
-        "assigned_stock_sales": _normalize_rows(_assigned_stock_sale_event_rows(lifecycle.get("sales"))),
-        "assigned_stock_review": _normalize_rows(lifecycle.get("review")),
         "open_option_exposure": _normalize_rows(open_option_exposure_rows),
         "expiration_risk_buckets": _normalize_rows(_expiration_risk_bucket_rows(open_option_exposure_rows)),
         "symbol_performance_attribution": _normalize_rows(
-            _symbol_performance_attribution_rows(account_performance_reports)
+            _canonical_symbol_performance_rows(canonical_performance_report)
         ),
         "strategy_config_by_symbol_account": _normalize_rows(_strategy_config_by_symbol_account_rows(symbol_rows)),
         "close_advice_snapshot": _normalize_rows(close_advice_rows),
         "runtime_tick_status": _normalize_rows(runtime_rows),
-        "quote_freshness": _normalize_rows(quote_rows),
         "upgrade_operation_status": _normalize_rows(upgrade_operation_rows),
         "strategy_replay_read_surface": _normalize_rows(strategy_replay_rows),
         "position_lots": _normalize_rows(position_data.get("rows")),
@@ -1875,36 +1455,6 @@ def _materialize_views(
         "symbol_strategy_config": _normalize_rows(symbol_rows),
     }
     return {view_name: rows for view_name, rows in materialized.items() if view_name in requested}
-
-
-def _assigned_stock_position_pnl_rows(value: Any) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-    fields = ASSIGNED_STOCK_POSITION_PNL_FIELDS
-    return [
-        {field: row.get(field) for field in fields}
-        for row in value
-        if isinstance(row, dict)
-    ]
-
-
-def _assigned_stock_sale_event_rows(value: Any) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-    rows: list[dict[str, Any]] = []
-    for row in value:
-        if not isinstance(row, dict):
-            continue
-        out = {field: row.get(field) for field in ASSIGNED_STOCK_SALE_EVENT_FIELDS}
-        out["sale_price"] = row.get("sale_price", row.get("price"))
-        rows.append(out)
-    return rows
-
-
-def _dict_has_amount(value: Any) -> bool:
-    if not isinstance(value, dict):
-        return False
-    return any(_float_or_none(item) is not None for item in value.values())
 
 
 def _float_or_none(value: Any) -> float | None:
@@ -2778,44 +2328,6 @@ def _strategy_replay_limitations(*payloads: dict[str, Any]) -> list[str]:
     return out
 
 
-def _quote_freshness_rows(*, assignment_rows: Any, runtime_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    del runtime_rows
-    if not isinstance(assignment_rows, list):
-        return []
-    grouped: dict[tuple[str, str, str, str], dict[str, Any]] = {}
-    for row in assignment_rows:
-        if not isinstance(row, dict):
-            continue
-        symbol = str(row.get("symbol") or "").strip()
-        quote_status = str(row.get("quote_status") or "").strip()
-        if not symbol and not quote_status:
-            continue
-        source = str(row.get("quote_source") or "assigned_stock").strip()
-        account = str(row.get("account") or "").strip()
-        market = _market_from_symbol(symbol)
-        key = (symbol, market, source, account)
-        grouped[key] = {
-            "symbol": symbol,
-            "market": market,
-            "source": source,
-            "quote_status": quote_status or None,
-            "spot": row.get("spot"),
-            "spot_time": row.get("spot_time"),
-            "account": account,
-            "view": "assigned_stock_position_pnl",
-        }
-    return sorted(grouped.values(), key=lambda item: (str(item.get("symbol")), str(item.get("account")), str(item.get("source"))))
-
-
-def _market_from_symbol(symbol: Any) -> str:
-    text = str(symbol or "").strip().upper()
-    if text.endswith(".HK"):
-        return "HK"
-    if text:
-        return "US"
-    return ""
-
-
 def _upgrade_operation_status_rows(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
     try:
         data = collect_operation_timeline(
@@ -3070,8 +2582,7 @@ def _query_explain_and_evidence(
     materialization_warnings: list[str] | None = None,
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     aggregations, aggregation_warnings = _query_aggregation_explain(sql=sql, views_used=views_used)
-    semantic_warnings = _performance_metric_semantic_warnings(sql=sql, views_used=views_used)
-    query_warnings = [*aggregation_warnings, *semantic_warnings]
+    query_warnings = list(aggregation_warnings)
     coverage = _query_coverage(rows)
     freshness = _query_freshness(views_used)
     diagnostics = _query_diagnostics(
@@ -3122,7 +2633,6 @@ def _query_diagnostics(
         if view_name not in {
             "close_advice_snapshot",
             "runtime_tick_status",
-            "quote_freshness",
             "upgrade_operation_status",
             "strategy_replay_read_surface",
         }:
@@ -3149,7 +2659,6 @@ def _diagnostic_records_from_warnings(
         for candidate in (
             "close_advice_snapshot",
             "runtime_tick_status",
-            "quote_freshness",
             "upgrade_operation_status",
             "strategy_replay_read_surface",
         ):
@@ -3209,8 +2718,6 @@ def _diagnostic_records_from_rows(*, view_name: str, rows: list[dict[str, Any]])
         return _close_advice_diagnostic_records(rows)
     if view_name == "runtime_tick_status":
         return _runtime_diagnostic_records(rows)
-    if view_name == "quote_freshness":
-        return _quote_diagnostic_records(rows)
     if view_name == "upgrade_operation_status":
         return _upgrade_diagnostic_records(rows)
     if view_name == "strategy_replay_read_surface":
@@ -3322,25 +2829,6 @@ def _runtime_diagnostic_records(rows: list[dict[str, Any]]) -> list[dict[str, An
             else "observed_runtime_status_only",
         }
     ]
-
-
-def _quote_diagnostic_records(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    quote_statuses = {str(row.get("quote_status") or "").strip().lower() for row in rows if isinstance(row, dict)}
-    bad = quote_statuses & {"missing", "missing_quote", "stale", "unknown", "failed", "error"}
-    as_of_values = _quote_as_of_values(rows)
-    record = {
-        "view": "quote_freshness",
-        "status": "observed_quote_freshness_gap" if bad else "observed_quote_freshness",
-        "severity": "warning" if bad else "info",
-        "accounts": _sorted_unique_row_values(rows, "account"),
-        "symbols": _sorted_unique_row_values(rows, "symbol"),
-        "quote_statuses": sorted(quote_statuses),
-        "summary": _quote_diagnostic_summary(quote_statuses=sorted(quote_statuses), as_of_values=as_of_values),
-        "answer_boundary": "quote_dependent_calculations_only",
-    }
-    if as_of_values:
-        record["as_of_values"] = as_of_values
-    return [record]
 
 
 def _upgrade_diagnostic_records(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -3507,29 +2995,6 @@ def _runtime_first_text(rows: list[dict[str, Any]], *fields: str) -> str:
     return ""
 
 
-def _quote_diagnostic_summary(*, quote_statuses: list[str], as_of_values: list[Any]) -> str:
-    bad = set(quote_statuses) & {"missing", "missing_quote", "stale", "unknown", "failed", "error"}
-    if bad:
-        parts = ["quote_status=" + ",".join(str(item) for item in quote_statuses if item)]
-        if as_of_values:
-            parts.append("as_of=" + ",".join(str(item) for item in as_of_values[:3]))
-        return "quote freshness rows indicate stale or missing quote data: " + "; ".join(parts)
-    return "quote freshness rows were observed"
-
-
-def _quote_as_of_values(rows: list[dict[str, Any]]) -> list[Any]:
-    values: list[Any] = []
-    seen: set[str] = set()
-    for field in ("as_of", "spot_time"):
-        for value in _sorted_unique_row_values(rows, field):
-            text = str(value or "").strip()
-            if not text or text in seen:
-                continue
-            seen.add(text)
-            values.append(value)
-    return values
-
-
 def _upgrade_diagnostic_summary(
     *,
     missing: list[dict[str, Any]],
@@ -3688,8 +3153,8 @@ def _query_aggregation_explain(*, sql: str, views_used: list[str]) -> tuple[list
             policy = "invalid_rate_aggregation"
             status = "warning"
             warning = (
-                f"{function_name}({field}) is unsafe for return-rate fields; recompute as "
-                "sum(money numerator) / sum(cash_secured_cny) when aggregating."
+                f"{function_name}({field}) is unsafe for rate fields; recompute from the "
+                "corresponding summed numerator and denominator."
             )
         elif aggregation_policy in {"sum", "count", "min", "max", "latest", "weighted_recompute"}:
             policy = "allowed" if function_name in {"sum", "count", "min", "max", "total"} else "review"
@@ -3708,37 +3173,6 @@ def _query_aggregation_explain(*, sql: str, views_used: list[str]) -> tuple[list
             warnings.append(warning)
         aggregations.append(item)
     return aggregations, warnings
-
-
-def _performance_metric_semantic_warnings(*, sql: str, views_used: list[str]) -> list[str]:
-    def mentions(*fields: str) -> bool:
-        return any(re.search(rf"(?i)\b{re.escape(field)}\b", sql) for field in fields)
-
-    warnings: list[str] = []
-    if not sql.strip() and any(
-        view in {
-            "option_period_performance",
-            "option_monthly_performance",
-            "option_activity_components",
-            "option_cash_components",
-            "option_pnl_components",
-        }
-        for view in views_used
-    ):
-        warnings.append(
-            "Option performance uses parallel namespaces: profit questions use PnL, cash questions use cash, "
-            "and premium questions use activity; do not add or subtract them to manufacture a residual."
-        )
-    if mentions("premium_income_cny", "premium_collected_cny") and mentions(
-        "realized_pnl_cny",
-        "realized_pnl_gross_cny",
-        "realized_pnl_net_cny",
-        "period_total_pnl_net_cny",
-    ):
-        warnings.append(
-            "Premium is activity and PnL is profit; they overlap in lifecycle timing and must not be added."
-        )
-    return warnings
 
 
 def _field_semantics_for_query_field(field: str, views_used: list[str]) -> dict[str, Any]:
@@ -3978,27 +3412,11 @@ def _suggest_fields_for_unknown_column(unknown_column: str, available_fields: di
 def _preferred_unknown_column_replacements(unknown_column: str) -> list[str]:
     normalized = _normalized_identifier(unknown_column)
     if normalized in {"netcashflow", "cashflow", "netcashflowcny"}:
-        return [
-            "option_net_cashflow_cny",
-            "option_net_cashflow_by_ccy",
-            "total_cash_change_cny",
-            "total_cash_change_by_ccy",
-        ]
+        return ["option_net_cashflow_by_currency"]
     if normalized in {"returnrate", "totalreturnrate"}:
-        return [
-            "period_cashflow_return_by_ccy",
-            "annualized_cashflow_return_by_ccy",
-            "period_total_net_annualized_efficiency",
-        ]
-    if normalized in {"totalreturn", "totalincome", "profit", "pnl"}:
-        return [
-            "period_total_pnl_net_cny",
-            "period_total_pnl_gross_cny",
-            "realized_pnl_net_cny",
-            "realized_pnl_gross_cny",
-        ]
-    if normalized in {"premium", "premiumincome"}:
-        return ["premium_collected_cny", "premium_collected_by_ccy"]
+        return ["option_return_by_currency"]
+    if normalized in {"totalreturn", "totalincome", "profit", "pnl", "premium", "premiumincome"}:
+        return ["option_net_cashflow_by_currency"]
     return []
 
 
@@ -4040,7 +3458,7 @@ def _create_view_table(conn: sqlite3.Connection, name: str, rows: list[dict[str,
     quoted_columns = ", ".join(f'"{column}"' for column in columns)
     conn.executemany(
         f'insert into "{name}" ({quoted_columns}) values ({placeholders})',
-        [[row.get(column) for column in columns] for row in rows],
+        [[_sqlite_value(row.get(column)) for column in columns] for row in rows],
     )
 
 
@@ -4148,9 +3566,10 @@ def _analysis_catalog_output_contract(payload: dict[str, Any]) -> dict[str, Any]
         "fact_fields": [
             "view_count",
             "view_names[]",
-            "metric_policy.primary_profit",
-            "metric_policy.cash_movement",
-            "metric_policy.premium_activity",
+            "metric_policy.option_net_cashflow",
+            "metric_policy.sell_option_win_rate",
+            "metric_policy.buy_option_win_rate",
+            "metric_policy.option_return",
             "sql_rules.allowed_statements[]",
             "sql_rules.writes_allowed",
         ],
@@ -4163,8 +3582,8 @@ ANALYSIS_CATALOG_TOOL = build_agent_tool(
     catalog_summary="读取可用分析视图与字段目录。",
     description=(
         "List the read-only analysis views, their fields, metric roles, source semantics, and allowed SQL rules. "
-        "For profit use option PnL views, for cash use option_cash_components, and for premium use "
-        "option_activity_components. "
+        "Option performance is limited to option_period_performance, option_cash_components, and "
+        "symbol_performance_attribution. "
         "Use this before analysis_query when the correct view or field names are not already known."
     ),
     requires=("runtime_config",),
@@ -4195,10 +3614,8 @@ ANALYSIS_QUERY_TOOL = build_agent_tool(
         "Run a SELECT-only query against whitelisted in-memory OM analysis views for comparisons, "
         "rankings, trends, breakdowns, and other open-ended analytical questions. Supply either "
         "SELECT/WITH SQL or one or more catalog view names. Inspect analysis_catalog first when view "
-        "or field names are uncertain. Route profit questions to option_pnl_components or "
-        "option_monthly_performance, cash questions to option_cash_components, and premium questions to "
-        "option_activity_components. These namespaces are parallel and must not be added or subtracted to "
-        "manufacture a residual."
+        "or field names are uncertain. Option performance supports only MTD/YTD native-currency net cash "
+        "flow, sell/buy win rates, and option return."
     ),
     requires=("runtime_config", "sqlite_data_config"),
     capabilities=("analysis_query", "read_only", "analysis_workspace"),
@@ -4220,12 +3637,8 @@ ANALYSIS_QUERY_TOOL = build_agent_tool(
             "maximum": MAX_QUERY_LIMIT,
             "description": "Maximum rows returned",
         },
-        "period": {"type": "string", "enum": ["mtd", "ytd", "month", "year", "range"]},
+        "period": {"type": "string", "enum": ["mtd", "ytd"]},
         "as_of_date": "optional YYYY-MM-DD cutoff for mtd/ytd",
-        "year": "optional natural year",
-        "start_date": "optional range start YYYY-MM-DD",
-        "end_date": "optional range end YYYY-MM-DD",
-        "refresh_quotes": "optional current-period quote refresh flag",
         "account": "optional materialization account filter",
         "broker": "optional materialization broker filter",
         "accounts": {
@@ -4254,8 +3667,8 @@ ANALYSIS_QUERY_TOOL = build_agent_tool(
             "input": {
                 "config_key": "us",
                 "sql": (
-                    "select month, account, period_total_pnl_net_cny, period_total_pnl_net_status "
-                    "from option_monthly_performance order by month, account"
+                    "select period_kind, as_of_date, option_net_cashflow_by_currency, sell_option_win_rate, "
+                    "buy_option_win_rate, option_return_by_currency from option_period_performance"
                 ),
             }
         },
@@ -4263,7 +3676,7 @@ ANALYSIS_QUERY_TOOL = build_agent_tool(
     output_contract=_ANALYSIS_OUTPUT_CONTRACT,
     copilot_input_fields=(
         "config_key", "sql", "view", "views", "limit", "period", "as_of_date", "account", "accounts",
-        "broker", "refresh_quotes", "month", "months", "year", "start_date", "end_date", "symbol", "symbols",
+        "broker", "month", "months", "symbol", "symbols",
     ),
 )
 

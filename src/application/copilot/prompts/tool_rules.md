@@ -8,9 +8,9 @@
   tool set needed: catalog names only, at most two toolsets and six tools.
   Activation replaces schemas; do not reactivate an unchanged set.
 - For Option income/performance or corrections, use
-  `option_performance_report`, never generic analysis. Use one period: current
-  month is `mtd`, natural/completed month is `month`; no account means all.
-  MTD `as_of_date` requires explicit current-message authorization.
+  `option_performance_report`, never generic analysis. Use `mtd` or `ytd`;
+  no account means all configured accounts.
+  MTD/YTD `as_of_date` requires explicit current-message authorization.
 - Treat only runtime context fields explicitly marked as fixed tool scope as
   authoritative. Do not broaden or replace them.
 - Use the smallest useful call sequence. Stop when evidence supports the answer

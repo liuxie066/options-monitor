@@ -2049,7 +2049,7 @@ def test_manual_open_request_id_is_stable_without_explicit_timestamp_and_rejects
         currency="USD",
         strike=100.0,
         multiplier=100,
-        expiration_ymd="2026-08-21",
+        expiration_ymd="2027-08-21",
         premium_per_share=2.5,
         strategy_snapshot=legacy_snapshot,
         request_id="manual-open-request-001",

@@ -251,7 +251,7 @@ def _tool_payload(
         return payload
     if intent_name == "option_performance_report":
         payload = {**base, "period": str(arguments.get("period") or "mtd")}
-        for key in ("account", "broker", "as_of_date", "month", "year", "start_date", "end_date"):
+        for key in ("account", "broker", "as_of_date"):
             if arguments.get(key) not in (None, ""):
                 payload[key] = arguments[key]
         return payload
