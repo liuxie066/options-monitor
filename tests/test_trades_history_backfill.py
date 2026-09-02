@@ -11,6 +11,7 @@ from src.infrastructure.futu_history_deals import (
     fetch_opend_history_deals,
     history_deal_query_dates,
 )
+from src.infrastructure.futu_gateway import FutuGatewayTransientError
 
 
 @pytest.fixture(autouse=True)
@@ -282,6 +283,151 @@ def test_history_deal_client_normalizes_terminal_orders_and_order_fees(monkeypat
         "trd_env": "REAL",
         "acc_id": 123,
     }
+
+
+def test_exact_terminal_order_uses_current_query_then_narrow_history_fallback(
+    monkeypatch,
+) -> None:
+    calls: list[dict] = []
+
+    class _FakeData:
+        def __init__(self, rows: list[dict]) -> None:
+            self.rows = rows
+
+        def to_dict(self, orient: str) -> list[dict]:
+            assert orient == "records"
+            return self.rows
+
+    class _FakeContext:
+        def __init__(self, **_kwargs):
+            pass
+
+        def order_list_query(self, **kwargs):
+            calls.append({"current": kwargs})
+            return 0, _FakeData([])
+
+        def history_order_list_query(self, **kwargs):
+            calls.append({"history": kwargs})
+            return 0, _FakeData(
+                [
+                    {
+                        "order_id": "other",
+                        "order_status": "FILLED_ALL",
+                        "dealt_qty": 99,
+                        "currency": "USD",
+                    },
+                    {
+                        "order_id": "o1",
+                        "order_status": "FILLED_ALL",
+                        "dealt_qty": 2,
+                        "currency": "USD",
+                    },
+                ]
+            )
+
+        def close(self):
+            pass
+
+    monkeypatch.setitem(
+        sys.modules,
+        "futu",
+        SimpleNamespace(
+            OpenSecTradeContext=_FakeContext,
+            TrdEnv=SimpleNamespace(REAL="REAL"),
+            RET_OK=0,
+        ),
+    )
+    client = OpenDHistoryDealClient(host="127.0.0.1", port=11111)
+
+    orders, diagnostics = client.fetch_terminal_orders(
+        futu_account_id="123",
+        order_ids=["o1"],
+        start="2026-05-01 00:00:00",
+        end="2026-05-02 00:00:00",
+        exact=True,
+    )
+
+    assert set(orders) == {"o1"}
+    assert diagnostics["query_source"] == "history_order"
+    assert calls[0]["current"] == {
+        "trd_env": "REAL",
+        "acc_id": 123,
+        "order_id": "o1",
+        "refresh_cache": True,
+    }
+    assert calls[1]["history"]["start"] == "2026-05-01 00:00:00"
+    assert calls[1]["history"]["end"] == "2026-05-02 00:00:00"
+
+
+def test_exact_terminal_order_falls_back_when_current_query_fails() -> None:
+    class _Gateway:
+        def get_order_list(self, **_kwargs):
+            raise FutuGatewayTransientError("temporary current-order failure")
+
+        def get_history_orders(self, **_kwargs):
+            return [
+                {
+                    "order_id": "o1",
+                    "order_status": "FILLED_ALL",
+                    "dealt_qty": 2,
+                    "currency": "USD",
+                }
+            ]
+
+        def close(self):
+            pass
+
+    client = OpenDHistoryDealClient(host="127.0.0.1", port=11111)
+    client._gateway = _Gateway()
+
+    orders, diagnostics = client.fetch_terminal_orders(
+        futu_account_id="123",
+        order_ids=["o1"],
+        start="2026-05-01 00:00:00",
+        end="2026-05-02 00:00:00",
+        exact=True,
+    )
+
+    assert set(orders) == {"o1"}
+    assert diagnostics["query_source"] == "history_order"
+    assert diagnostics["current_order_error_type"] == "FutuGatewayTransientError"
+
+
+def test_order_fee_query_rate_limit_is_shared_across_client_calls(monkeypatch) -> None:
+    from src.infrastructure import futu_history_deals
+    from src.infrastructure.futu_gateway import FutuGatewayRateLimitError
+
+    class _FakeData:
+        def to_dict(self, orient: str) -> list[dict]:
+            assert orient == "records"
+            return [{"order_id": "o1", "fee_amount": 1, "fee_details": {}}]
+
+    class _FakeContext:
+        def __init__(self, **_kwargs):
+            pass
+
+        def order_fee_query(self, **_kwargs):
+            return 0, _FakeData()
+
+        def close(self):
+            pass
+
+    monkeypatch.setitem(
+        sys.modules,
+        "futu",
+        SimpleNamespace(
+            OpenSecTradeContext=_FakeContext,
+            TrdEnv=SimpleNamespace(REAL="REAL"),
+            RET_OK=0,
+        ),
+    )
+    monkeypatch.setattr(futu_history_deals.time, "monotonic", lambda: 100.0)
+    client = OpenDHistoryDealClient(host="127.0.0.1", port=11111)
+
+    for _ in range(10):
+        client.fetch_order_fees(futu_account_id="123", order_ids=["o1"])
+    with pytest.raises(FutuGatewayRateLimitError):
+        client.fetch_order_fees(futu_account_id="123", order_ids=["o1"])
 
 
 def test_backfill_raises_typed_unreachable_when_port_closed(monkeypatch) -> None:

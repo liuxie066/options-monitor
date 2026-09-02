@@ -432,7 +432,7 @@ def test_run_history_backfill_skips_processed_outbox_managed_duplicate_before_pi
     )
 
     def _history_deals_fn(**_kwargs):
-        return ([{"deal_id": "deal-1"}], {})
+        return ([{"deal_id": "deal-1", "order_id": "order-1"}], {})
 
     def _process_payload_fn(_payload: dict[str, Any], **_kwargs):
         raise AssertionError("duplicate should not enter process pipeline")
@@ -442,17 +442,92 @@ def test_run_history_backfill_skips_processed_outbox_managed_duplicate_before_pi
     kwargs["on_result_fn"] = lambda _context: (_ for _ in ()).throw(
         AssertionError("duplicate backfill must not invoke receipt callback")
     )
+    fee_targets: list[tuple[str, str, str, str]] = []
     out = run_history_backfill(
         **kwargs,
         history_deals_fn=_history_deals_fn,
         process_payload_fn=_process_payload_fn,
+        enqueue_fee_target_fn=fee_targets.append,
     )
 
     assert out["applied_count"] == 0
     assert out["skipped_duplicate_count"] == 1
+    assert fee_targets == [("富途", "lx", "REAL_1", "order-1")]
     events = _audit_events(tmp_path / "audit.jsonl")
     skipped = [event for event in events if event["phase"] == "backfill_skipped_duplicate"]
     assert skipped == [{"phase": "backfill_skipped_duplicate", "source": "backfill", "deal_id": "deal-1", "reason": "state:processed_deal_ids"}]
+
+
+def test_history_backfill_does_not_enqueue_processed_non_option_fee_target(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "state.json"
+    write_trade_intake_state(
+        state_path,
+        {
+            "processed_deal_ids": {
+                "futu:lx:REAL_1:deal-stock": {
+                    "status": "skipped",
+                    "reason": "not_option_deal",
+                }
+            },
+            "failed_deal_ids": {},
+            "unresolved_deal_ids": {},
+        },
+    )
+    fee_targets: list[tuple[str, str, str, str]] = []
+    kwargs = _backfill_kwargs(tmp_path)
+    kwargs["state_path"] = state_path
+
+    out = run_history_backfill(
+        **kwargs,
+        history_deals_fn=lambda **_kwargs: (
+            [{"deal_id": "deal-stock", "order_id": "order-stock"}],
+            {},
+        ),
+        process_payload_fn=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("duplicate should not enter process pipeline")
+        ),
+        enqueue_fee_target_fn=fee_targets.append,
+    )
+
+    assert out["skipped_duplicate_count"] == 1
+    assert fee_targets == []
+    assert out["diagnostics"]["fee_target_count"] == 0
+
+
+@pytest.mark.parametrize(
+    ("status", "reason"),
+    [
+        ("unresolved", "waiting_settlement_evidence"),
+        ("failed", "projection_verification_failed"),
+    ],
+)
+def test_history_backfill_does_not_enqueue_non_durable_fee_target(
+    tmp_path: Path,
+    status: str,
+    reason: str,
+) -> None:
+    fee_targets: list[tuple[str, str, str, str]] = []
+
+    out = run_history_backfill(
+        **_backfill_kwargs(tmp_path),
+        history_deals_fn=lambda **_kwargs: (
+            [{"deal_id": "deal-1", "order_id": "order-1"}],
+            {},
+        ),
+        process_payload_fn=lambda payload, **_kwargs: {
+            "status": status,
+            "action": None,
+            "reason": reason,
+            "deal_id": payload["deal_id"],
+            "account": "lx",
+        },
+        enqueue_fee_target_fn=fee_targets.append,
+    )
+
+    assert fee_targets == []
+    assert out["diagnostics"]["fee_target_count"] == 0
 
 
 def test_run_history_backfill_retries_retryable_unresolved_state(tmp_path: Path) -> None:
@@ -820,20 +895,33 @@ def test_history_backfill_handles_lifecycle_pending_in_durable_inbox(
     assert list_retryable_trade_payloads(inbox_path, retry_delay_sec=0) == []
 
 
-def test_history_backfill_fee_sync_failure_receipt_redacts_exception_message(
+def test_history_backfill_fee_target_enqueue_failure_redacts_exception_message(
     tmp_path: Path,
 ) -> None:
     out = run_history_backfill(
         **_backfill_kwargs(tmp_path),
-        history_deals_fn=lambda **_kwargs: ([], {}),
-        process_payload_fn=lambda *_args, **_kwargs: {},
-        fee_provider=object(),
-        fee_sync_fn=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        history_deals_fn=lambda **_kwargs: (
+            [{"deal_id": "deal-1", "order_id": "order-1"}],
+            {},
+        ),
+        process_payload_fn=lambda payload, **_kwargs: {
+            "status": "applied",
+            "action": "open",
+            "reason": "applied_open",
+            "deal_id": payload["deal_id"],
+            "account": "lx",
+        },
+        enqueue_fee_target_fn=lambda _target: (_ for _ in ()).throw(
             RuntimeError("secret-order-id=/private/path")
         ),
     )
 
-    fee_receipt = out["diagnostics"]["fee_sync"][0]
-    assert fee_receipt["reason"] == "fee_sync_failed"
-    assert fee_receipt["error_type"] == "RuntimeError"
-    assert "secret-order-id" not in str(fee_receipt)
+    assert out["diagnostics"]["fee_target_count"] == 1
+    assert out["diagnostics"]["fee_target_enqueue_failed_count"] == 1
+    event = next(
+        event
+        for event in _audit_events(tmp_path / "audit.jsonl")
+        if event["phase"] == "backfill_fee_target_enqueue_failed"
+    )
+    assert event["error_type"] == "RuntimeError"
+    assert "secret-order-id" not in str(event)

@@ -958,6 +958,51 @@ def test_push_source_binding_rejects_ambiguous_source_without_payload_account() 
         )
 
 
+def test_fee_target_requires_durable_intake_outcome() -> None:
+    payload = {
+        "deal_id": "deal-1",
+        "order_id": "order-1",
+        "futu_account_id": "REAL_LX",
+        "_trade_intake_source": {
+            "schema_version": "trade_intake_source.v1",
+            "account": "lx",
+            "futu_account_id": "REAL_LX",
+        },
+    }
+    mapping = {"REAL_LX": "lx"}
+    deal_key = "futu:lx:REAL_LX:deal-1"
+
+    assert auto_intake._durable_fee_target(
+        payload=payload,
+        result={"status": "skipped", "reason": "not_option_deal"},
+        state={
+            "processed_deal_ids": {
+                deal_key: {
+                    "status": "skipped",
+                    "reason": "not_option_deal",
+                }
+            }
+        },
+        account_mapping=mapping,
+    ) is None
+    assert auto_intake._durable_fee_target(
+        payload=payload,
+        result={"status": "applied"},
+        state={},
+        account_mapping=mapping,
+    ) == ("富途", "lx", "REAL_LX", "order-1")
+    assert auto_intake._durable_fee_target(
+        payload=payload,
+        result={"status": "skipped", "reason": "duplicate_deal_id"},
+        state={
+            "processed_deal_ids": {
+                deal_key: {"status": "applied"}
+            }
+        },
+        account_mapping=mapping,
+    ) == ("富途", "lx", "REAL_LX", "order-1")
+
+
 def test_listener_binds_push_source_before_enqueue(monkeypatch, tmp_path: Path) -> None:
     import threading
 
