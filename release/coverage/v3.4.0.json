@@ -1,0 +1,109 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.4.0",
+  "base": {
+    "tag": "v3.3.1",
+    "commit": "542d2812d1cec11908688ca1eaaa06bfdaeaea4c"
+  },
+  "reviewed_head": "3fa5be9a436a441e27065e60fb74115d63ed9d18",
+  "commits": [
+    {
+      "sha": "27010af85140b1101f3759cdc17abe012a4cd39c",
+      "subject": "refactor(combo): retire staggered-expiry compat paths"
+    },
+    {
+      "sha": "d1b4da247d4f297512711dea72e07593fc751d05",
+      "subject": "Merge pull request #212 from liuxie066/codex/unify-strategy-terminology"
+    },
+    {
+      "sha": "73eb8a2d94b7710b3981a069f81c0d50db2e1f7e",
+      "subject": "docs(strategy): add strategy terminology cross-reference"
+    },
+    {
+      "sha": "2794bf56d1378199545e7b672b96f00b6c7acca1",
+      "subject": "Merge pull request #213 from liuxie066/codex/unify-strategy-terminology"
+    },
+    {
+      "sha": "dfcfb92f4d1e4a552486455c6004dc7566ca6be6",
+      "subject": "refactor(performance): unify option metrics"
+    },
+    {
+      "sha": "3fa5be9a436a441e27065e60fb74115d63ed9d18",
+      "subject": "Merge pull request #214 from liuxie066/codex/refactor-option-performance"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Breaking Changes",
+      "text": "Replaced the public option-performance report with four MTD/YTD metrics and removed legacy custom periods plus activity, cash, PnL, capital, valuation, and assigned-stock fields.",
+      "commits": [
+        "dfcfb92f4d1e4a552486455c6004dc7566ca6be6",
+        "3fa5be9a436a441e27065e60fb74115d63ed9d18"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Unified option-performance calculations on canonical ledger cash facts, fee allocation, and average occupied capital while keeping CSP, CC, Combo Yield, and Wheel as grouping dimensions only.",
+      "commits": [
+        "dfcfb92f4d1e4a552486455c6004dc7566ca6be6",
+        "3fa5be9a436a441e27065e60fb74115d63ed9d18"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Added a product-facing terminology reference for CSP, CC, bullish risk reversal, collar, and Wheel strategy relationships.",
+      "commits": [
+        "73eb8a2d94b7710b3981a069f81c0d50db2e1f7e",
+        "2794bf56d1378199545e7b672b96f00b6c7acca1"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "27010af85140b1101f3759cdc17abe012a4cd39c",
+      "reason": "Removed obsolete staggered-expiry compatibility code while preserving the existing fail-closed Combo Yield behavior; it has no independent user or operator impact."
+    },
+    {
+      "commit": "d1b4da247d4f297512711dea72e07593fc751d05",
+      "reason": "Merge commit for the behavior-preserving Combo Yield compatibility cleanup; the underlying change has no independent user or operator impact."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "27010af85140b1101f3759cdc17abe012a4cd39c",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/212"]
+    },
+    {
+      "commit": "d1b4da247d4f297512711dea72e07593fc751d05",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/212"]
+    },
+    {
+      "commit": "73eb8a2d94b7710b3981a069f81c0d50db2e1f7e",
+      "references": [
+        "docs/STRATEGY_TERMINOLOGY.md#总览",
+        "https://github.com/liuxie066/options-monitor/pull/213"
+      ]
+    },
+    {
+      "commit": "2794bf56d1378199545e7b672b96f00b6c7acca1",
+      "references": [
+        "docs/STRATEGY_TERMINOLOGY.md#总览",
+        "https://github.com/liuxie066/options-monitor/pull/213"
+      ]
+    },
+    {
+      "commit": "dfcfb92f4d1e4a552486455c6004dc7566ca6be6",
+      "references": [
+        "docs/OPTION_PERFORMANCE_DESIGN.md#public-contract",
+        "https://github.com/liuxie066/options-monitor/pull/214"
+      ]
+    },
+    {
+      "commit": "3fa5be9a436a441e27065e60fb74115d63ed9d18",
+      "references": [
+        "docs/OPTION_PERFORMANCE_DESIGN.md#public-contract",
+        "https://github.com/liuxie066/options-monitor/pull/214"
+      ]
+    }
+  ]
+}
