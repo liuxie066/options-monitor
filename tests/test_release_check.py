@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.release_check import changelog_section
+from scripts.release_check import changelog_section, validate_major_version_policy
 from src.application.release_notes import parse_version_categories, render_release_notes
 
 
@@ -159,3 +159,30 @@ def test_legacy_history_can_be_read_without_weakening_current_taxonomy() -> None
         "### Bug Fixes\n"
         "- Historical fix.\n"
     )
+
+
+@pytest.mark.parametrize("version", ["2.0.0", "2.0.0-rc.1"])
+def test_major_policy_accepts_next_major_for_breaking_changes(version: str) -> None:
+    validate_major_version_policy(
+        base_tag="v1.9.4",
+        version=version,
+        evidence={"breaking_changes": ["Removed a public command."]},
+    )
+
+
+def test_major_policy_rejects_breaking_changes_without_next_major() -> None:
+    with pytest.raises(SystemExit, match="BREAKING_CHANGES_REQUIRE_MAJOR"):
+        validate_major_version_policy(
+            base_tag="v1.9.4",
+            version="1.10.0",
+            evidence={"breaking_changes": ["Removed a public command."]},
+        )
+
+
+def test_major_policy_rejects_major_without_breaking_changes() -> None:
+    with pytest.raises(SystemExit, match="MAJOR_RELEASE_REQUIRES_BREAKING_CHANGES"):
+        validate_major_version_policy(
+            base_tag="v1.9.4",
+            version="2.0.0",
+            evidence={"breaking_changes": []},
+        )

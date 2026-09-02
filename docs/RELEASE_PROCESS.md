@@ -60,7 +60,19 @@
 - `New Features`：用户或运营人员可以完成以前不能完成的事情；内部新增类、字段或测试工具不自动算新功能。
 - `Improvements`：已有行为本来正确，现在变得更清晰、更快、更稳定或更容易操作。
 - `Bug Fixes`：修复已经存在的错误、遗漏、重复、错误计算或状态不一致。
-- `Breaking Changes`：删除公开能力，或者以旧调用无法继续工作的方式改变命令、配置或工具契约。
+- `Breaking Changes`：让既有受支持的调用、配置、持久化数据或运维流程无法继续工作，或者在没有兼容层或迁移路径时改变其含义。
+
+以下公开契约发生不兼容变化时必须升 `MAJOR`：
+
+- CLI 与自动化：删除或重命名命令、参数、退出码，改变默认副作用或机器可读输出；
+- Tool Gateway / API：删除或重命名工具、输入字段、输出字段、schema 或权限/确认语义；
+- 配置：删除或重命名配置键、改变类型、默认值、校验或生成结果，导致现有配置失效或变义；
+- 持久化与回放：现有 ledger、SQLite、事件、缓存或 receipt 无法直接读取、投影、重试或安全迁移；
+- 部署与运维：改变受支持的安装、升级、服务、环境变量或运行入口，导致旧流程失效；
+- 对外业务语义：同一公开字段、状态、指标或策略名称在无版本化迁移时改变含义。
+
+增加向后兼容的可选字段或命令、内部重构、仅文案改进，以及不改变既有成功路径和语义的修复，不要求升
+`MAJOR`。兼容适配层仍支持旧契约时，按实际用户影响选择 `MINOR` 或 `PATCH`。
 
 历史版本中的 `Added` / `Changed` / `Fixed` 保持不变；新分类只用于 `Unreleased` 和未来版本。
 
@@ -89,6 +101,16 @@ apply 会重新计算证据；发生变化时返回 `stale` 且不写入。成�
 Changelog、commit、push、创建 tag、发布 GitHub Release 或升级生产。正常发布还必须把
 已确认的 `Unreleased` 内容移动到 `## <version> - <date>`，并保留一个空的 `## Unreleased`。手动
 `bump=patch|minor|major` 与 `target_version` 流程保持可用。
+
+自动建议对兼容性敏感路径采用 fail-closed：如果这些路径发生变化但 `Unreleased` 没有声明
+`Breaking Changes`，返回 `COMPATIBILITY_REVIEW_REQUIRED`，不自动猜 `MINOR` 或 `PATCH`。维护者确认兼容后可显式选择
+`minor` / `patch`；确认不兼容则必须补充 `Breaking Changes`。
+
+最终发布检查会双向校验：存在 `Breaking Changes` 时目标必须是相对上一稳定 tag 的下一个
+`MAJOR.0.0`（允许预发布后缀）；目标跨越 `MAJOR` 时也必须存在 `Breaking Changes`。
+
+实际写入跨 `MAJOR` 的 `VERSION` 还需要第二道确认：除通用写入门的 `apply=true`、`confirm=true` 外，必须显式传入
+`confirm_major=true`。该规则覆盖 `bump=major`、显式跨 major 的 `target_version` 和 `bump=auto`；只读预览与已到目标版本的幂等重试不需要该确认。
 
 ---
 

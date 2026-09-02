@@ -240,6 +240,7 @@ def version_update_tool(
             target_version=target_version,
             bump=bump,
             apply=apply_mode,
+            confirm_major=bool(payload.get("confirm_major", False)),
             allow_downgrade=allow_downgrade,
             remote_name=_optional_text(payload.get("remote_name")) or "origin",
             recommendation_digest=_optional_text(payload.get("recommendation_digest")),

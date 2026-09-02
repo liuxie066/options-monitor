@@ -1185,6 +1185,29 @@ def test_version_update_apply_writes_version(monkeypatch, tmp_path: Path) -> Non
     assert (tmp_path / "VERSION").read_text(encoding="utf-8").strip() == "1.1.0"
 
 
+def test_version_update_major_apply_requires_specific_confirmation(monkeypatch, tmp_path: Path) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    (tmp_path / "VERSION").write_text("1.9.0\n", encoding="utf-8")
+    _patch_agent_tool_dependencies(monkeypatch, repo_base=lambda: tmp_path)
+    monkeypatch.setenv("OM_AGENT_ENABLE_WRITE_TOOLS", "true")
+
+    blocked = run_tool(
+        "version_update",
+        {"bump": "major", "apply": True, "confirm": True},
+    )
+    assert blocked["ok"] is False
+    assert blocked["error"]["code"] == "INPUT_ERROR"
+    assert "confirm_major=true" in blocked["error"]["message"]
+
+    applied = run_tool(
+        "version_update",
+        {"bump": "major", "apply": True, "confirm": True, "confirm_major": True},
+    )
+    assert applied["ok"] is True, applied["error"]
+    assert (tmp_path / "VERSION").read_text(encoding="utf-8").strip() == "2.0.0"
+
+
 def test_version_update_apply_requires_write_gate(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 

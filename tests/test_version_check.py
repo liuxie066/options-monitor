@@ -57,6 +57,18 @@ def test_update_local_version_apply_writes_version(tmp_path: Path) -> None:
     assert (base / "VERSION").read_text(encoding="utf-8").strip() == "1.1.0"
 
 
+def test_update_local_version_major_apply_requires_specific_confirmation(tmp_path: Path) -> None:
+    base = _write_version(tmp_path, "1.9.0")
+
+    with pytest.raises(ValueError, match="confirm_major=true"):
+        update_local_version(base_dir=base, bump="major", apply=True)
+
+    out = update_local_version(base_dir=base, bump="major", apply=True, confirm_major=True)
+
+    assert out["target_version"] == "2.0.0"
+    assert (base / "VERSION").read_text(encoding="utf-8").strip() == "2.0.0"
+
+
 def test_update_local_version_rejects_downgrade_by_default(tmp_path: Path) -> None:
     base = _write_version(tmp_path, "1.0.0")
 
