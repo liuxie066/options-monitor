@@ -15,6 +15,14 @@
       "authority": "reference"
     },
     {
+      "name": "operating_date",
+      "authority": "reference"
+    },
+    {
+      "name": "report_now_ms",
+      "authority": "host_only_tool_scope"
+    },
+    {
       "name": "config_key",
       "authority": "fixed_tool_scope"
     },

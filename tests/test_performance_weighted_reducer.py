@@ -97,7 +97,7 @@ def _period(
     )
 
 
-def test_period_is_mtd_or_ytd_and_cohort_uses_effective_opening_date() -> None:
+def test_period_normalization_and_cohort_use_effective_opening_date() -> None:
     current = _period()
     assert current.requested_start_date == "2026-09-01"
     assert current.effective_end_exclusive_at_ms == _ms("2026-09-02T12:00:00") + 1
@@ -106,11 +106,12 @@ def test_period_is_mtd_or_ytd_and_cohort_uses_effective_opening_date() -> None:
     historical = _period(kind="ytd", as_of="2026-09-01")
     assert historical.requested_start_date == "2026-01-01"
     assert historical.effective_end_exclusive_at_ms == _ms("2026-09-02T00:00:00")
-    with pytest.raises(ValueError, match="mtd or ytd"):
-        normalize_performance_period(
-            PeriodRequest(period="month", month="2026-09"),
-            report_now_ms=_ms("2026-09-02T12:00:00"),
-        )
+    natural_month = normalize_performance_period(
+        PeriodRequest(period="month", month="2026-08"),
+        report_now_ms=_ms("2026-09-02T12:00:00"),
+    )
+    assert natural_month.requested_start_date == "2026-08-01"
+    assert natural_month.effective_end_exclusive_at_ms == _ms("2026-09-01T00:00:00")
 
     adjusted = project_trade_events(
         [

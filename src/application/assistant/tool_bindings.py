@@ -190,14 +190,14 @@ _TOOL_OVERRIDES: dict[str, dict[str, Any]] = {
     "option_performance_report": {
         "commands": ("/income",),
         "display_name": "期权收益",
-        "arguments": ("account", "broker", "period", "as_of_date"),
+        "arguments": ("account", "broker", "period", "as_of_date", "month", "year"),
         "direct_executable": True,
         "examples": (
             "收益",
-            "收益 [账户] [mtd|ytd|本月|今年]",
-            "/income [账户] [mtd|ytd|本月|今年]",
+            "收益 [账户] [mtd|ytd|本月|今年|上月|YYYY-MM|YYYY]",
+            "/income [账户] [mtd|ytd|本月|今年|上月|YYYY-MM|YYYY]",
         ),
-        "summary": "show MTD/YTD option net cash flow, sell/buy win rates, and option return",
+        "summary": "show MTD/YTD or natural month/year option net cash flow, sell/buy win rates, and option return",
         "scope_policy": "config_required",
         "renderer_key": "option_performance",
     },

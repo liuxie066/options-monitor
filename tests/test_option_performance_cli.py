@@ -43,6 +43,8 @@ def test_report_cli_uses_same_request_payload(monkeypatch: pytest.MonkeyPatch) -
         "broker": None,
         "period": "ytd",
         "as_of_date": "2026-09-02",
+        "month": None,
+        "year": None,
         "include_rows": True,
     }
 
@@ -68,9 +70,6 @@ def test_report_cli_normalizes_config_failure_to_read_error(
 @pytest.mark.parametrize(
     "flags",
     [
-        ["--period", "month"],
-        ["--month", "2026-09"],
-        ["--year", "2026"],
         ["--start-date", "2026-09-01"],
         ["--end-date", "2026-09-02"],
         ["--refresh-quotes"],
@@ -80,6 +79,32 @@ def test_report_cli_normalizes_config_failure_to_read_error(
 def test_report_cli_rejects_removed_period_and_quote_flags(flags: list[str]) -> None:
     with pytest.raises(SystemExit):
         parse_args(["option-performance", "report", *flags])
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [
+        (["--period", "month", "--month", "2026-08"], {"period": "month", "month": "2026-08"}),
+        (["--period", "year", "--year", "2025"], {"period": "year", "year": "2025"}),
+    ],
+)
+def test_report_cli_propagates_natural_periods(
+    monkeypatch: pytest.MonkeyPatch,
+    flags: list[str],
+    expected: dict[str, str],
+) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        option_performance,
+        "option_performance_report_tool",
+        lambda payload, **_kwargs: (captured.update(payload) or {}, [], {}),
+    )
+
+    option_performance.handle_option_performance_command(
+        parse_args(["option-performance", "report", *flags])
+    )
+
+    assert {key: captured[key] for key in expected} == expected
 
 
 def test_evidence_flags_are_mutually_exclusive() -> None:

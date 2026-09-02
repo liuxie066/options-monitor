@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import csv
+from contextlib import contextmanager
+from contextvars import ContextVar
 from copy import deepcopy
 from datetime import datetime, timezone
 from io import StringIO
@@ -449,6 +451,8 @@ _OPTION_PERFORMANCE_INPUT_FIELDS = frozenset(
         "broker",
         "period",
         "as_of_date",
+        "month",
+        "year",
         "include_rows",
     }
 )
@@ -497,9 +501,26 @@ def normalize_option_performance_request(
         "broker": broker,
         "period": period_request.period,
         "as_of_date": period_request.as_of_date,
+        "month": period_request.month,
+        "year": period_request.year,
         "include_rows": bool(include_rows),
     }
     return normalized, window
+
+
+_OPTION_PERFORMANCE_REPORT_NOW_MS: ContextVar[int | None] = ContextVar(
+    "option_performance_report_now_ms",
+    default=None,
+)
+
+
+@contextmanager
+def option_performance_report_now_ms(now_ms: int):
+    token = _OPTION_PERFORMANCE_REPORT_NOW_MS.set(int(now_ms))
+    try:
+        yield
+    finally:
+        _OPTION_PERFORMANCE_REPORT_NOW_MS.reset(token)
 
 
 def option_performance_report_tool(
@@ -516,9 +537,12 @@ def option_performance_report_tool(
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     from src.application.performance.service import OptionPerformanceReadError
 
+    contextual_now_ms = _OPTION_PERFORMANCE_REPORT_NOW_MS.get()
     report_now_ms = int(
         now_ms
         if now_ms is not None
+        else contextual_now_ms
+        if contextual_now_ms is not None
         else datetime.now(timezone.utc).timestamp() * 1000
     )
     request, window = normalize_option_performance_request(
