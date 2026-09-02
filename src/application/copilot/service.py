@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
 from src.application.copilot.contracts import AppResult, CopilotRequest, ExecutionContract, new_id
 from src.application.copilot.scene import GENERAL_SCENE
 
 
-def prepare_contract(request: CopilotRequest, *, reference_year: int) -> ExecutionContract | AppResult:
+def prepare_contract(
+    request: CopilotRequest,
+    *,
+    reference_year: int | None = None,
+    report_now_ms: int | None = None,
+) -> ExecutionContract | AppResult:
     message = request.user_message.strip()
     if not message:
         return AppResult(
@@ -34,6 +42,18 @@ def prepare_contract(request: CopilotRequest, *, reference_year: int) -> Executi
         }
         and value not in (None, "")
     }
+    effective_now_ms = int(
+        report_now_ms
+        if report_now_ms is not None
+        else datetime.now(timezone.utc).timestamp() * 1000
+    )
+    operating_date = datetime.fromtimestamp(
+        effective_now_ms / 1000,
+        tz=ZoneInfo("Asia/Shanghai"),
+    ).date()
+    effective_reference_year = int(reference_year or operating_date.year)
+    if effective_reference_year != operating_date.year:
+        raise ValueError("reference_year must match the frozen report instant")
     return ExecutionContract(
         contract_id=new_id("contract"),
         request_id=request.request_id,
@@ -45,7 +65,9 @@ def prepare_contract(request: CopilotRequest, *, reference_year: int) -> Executi
             "config_path": config_path,
             "symbol": symbol,
             "month": month,
-            "reference_year": int(reference_year),
+            "reference_year": effective_reference_year,
+            "operating_date": operating_date.isoformat(),
+            "report_now_ms": effective_now_ms,
             "messages": messages,
             "fixture_id": fixture_id,
             **trusted_tool_scope,

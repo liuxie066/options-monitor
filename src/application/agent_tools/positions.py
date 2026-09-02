@@ -576,9 +576,9 @@ def _normalize_option_performance_copilot_input(payload: Mapping[str, Any]) -> d
 
 OPTION_PERFORMANCE_REPORT_TOOL = build_agent_tool(
     name="option_performance_report",
-    catalog_summary="读取 MTD/YTD 期权四指标与明细分解。",
+    catalog_summary="读取 MTD/YTD 或自然月/自然年期权四指标与明细分解。",
     description=(
-        "Read-only MTD or YTD option performance from the canonical ledger. Reports native-currency "
+        "Read-only MTD, YTD, natural-month, or natural-year option performance from the canonical ledger. Reports native-currency "
         "option net cash flow, sell-option and buy-option win rates, and return on average occupied "
         "capital. Stock trades, assignment settlement cash, PnL, FX conversion, and quote refresh are "
         "outside this report."
@@ -593,9 +593,11 @@ OPTION_PERFORMANCE_REPORT_TOOL = build_agent_tool(
         "broker": "optional broker filter; omitted aggregates all brokers",
         "period": {
             "type": "string",
-            "enum": ["mtd", "ytd"],
+            "enum": ["mtd", "ytd", "month", "year"],
         },
         "as_of_date": {"type": ["string", "null"], "format": "date"},
+        "month": {"type": ["string", "null"], "pattern": "^\\d{4}-(0[1-9]|1[0-2])$"},
+        "year": {"type": ["integer", "string", "null"]},
         "include_rows": {"type": "boolean"},
     },
     handler=_option_performance_report_tool,
@@ -616,7 +618,8 @@ OPTION_PERFORMANCE_REPORT_TOOL = build_agent_tool(
         "broker",
         "period",
         "as_of_date",
-        "include_rows",
+        "month",
+        "year",
     ),
     copilot_input_schema={
         "type": "object",
@@ -630,9 +633,10 @@ OPTION_PERFORMANCE_REPORT_TOOL = build_agent_tool(
                 "type": "string",
                 "description": "Optional broker filter. Omit or use all for all brokers.",
             },
-            "period": {"type": "string", "enum": ["mtd", "ytd"]},
+            "period": {"type": "string", "enum": ["mtd", "ytd", "month", "year"]},
             "as_of_date": {"type": "string", "format": "date"},
-            "include_rows": {"type": "boolean"},
+            "month": {"type": "string", "pattern": "^\\d{4}-(0[1-9]|1[0-2])$"},
+            "year": {"type": ["integer", "string"]},
         },
         "additionalProperties": False,
     },

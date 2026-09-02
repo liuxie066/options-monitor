@@ -83,7 +83,13 @@ def build_tool_payload(
     return payload, None
 
 
-def call_read_tool(tool_name: str, payload: dict[str, Any], *, allowed_tools: tuple[str, ...]) -> dict[str, Any]:
+def call_read_tool(
+    tool_name: str,
+    payload: dict[str, Any],
+    *,
+    allowed_tools: tuple[str, ...],
+    now_ms: int | None = None,
+) -> dict[str, Any]:
     if tool_name not in allowed_tools:
         return _tool_error(tool_name, "POLICY_ERROR", "tool is outside the Host allowlist")
     definition = get_tool_definition(tool_name)
@@ -91,6 +97,13 @@ def call_read_tool(tool_name: str, payload: dict[str, Any], *, allowed_tools: tu
         return _tool_error(tool_name, "INPUT_ERROR", f"unknown tool: {tool_name}")
     if not definition.is_pure_read():
         return _tool_error(tool_name, "POLICY_ERROR", f"tool is not pure read-only: {tool_name}")
+    if tool_name in {"analysis_query", "option_performance_report"} and now_ms is not None:
+        from src.application.agent_tools.materialization_impl import (
+            option_performance_report_now_ms,
+        )
+
+        with option_performance_report_now_ms(now_ms):
+            return execute_tool(tool_name, payload)
     return execute_tool(tool_name, payload)
 
 
@@ -649,10 +662,12 @@ def _request_scope(payload: dict[str, Any]) -> dict[str, Any]:
         "config_key",
         "limit",
         "market",
+        "month",
         "period",
         "run_id",
         "status",
         "symbol",
+        "year",
     }
     return _preview({key: value for key, value in payload.items() if key in allowed})
 

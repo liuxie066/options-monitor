@@ -12,6 +12,10 @@ from src.application.assistant.contracts import ControlCommand
 from src.application.assistant.position_query import parse_position_query_text, position_query_intent_arguments
 
 
+_MONTH_RE = re.compile(r"^(20\d{2})[-/.](0[1-9]|1[0-2])$")
+_YEAR_RE = re.compile(r"^(20\d{2})年?$")
+_YEAR_MONTH_CN_RE = re.compile(r"^(20\d{2})年(1[0-2]|0?[1-9])月$")
+_MONTH_CN_RE = re.compile(r"^(1[0-2]|0?[1-9])月$")
 _OPERATION_ID_RE = re.compile(r"^in_[A-Za-z0-9_.:-]+$")
 _VERSION_RE = re.compile(r"^v?(\d+\.\d+\.\d+(?:[-+][A-Za-z0-9_.-]+)?)$")
 _DEFAULT_COMMAND_ACCOUNTS = ("lx", "sy")
@@ -50,7 +54,7 @@ def parse_assistant_command(
     if command in _COMMANDS["assigned_stock_position_query"]:
         return _parse_assigned_stock(command, args, accounts=account_set)
     if command in _COMMANDS["option_performance_report"]:
-        return _parse_income(command, args, accounts=account_set)
+        return _parse_income(command, args, today=today, accounts=account_set)
     if command in _COMMANDS["runtime_runs"]:
         return _parse_runs(command, args)
     if command in _COMMANDS["runtime_logs"]:
@@ -333,9 +337,16 @@ def _parse_manual_trade_update_command(command: str, args: list[str]) -> Control
     )
 
 
-def _parse_income(command: str, args: list[str], *, accounts: frozenset[str]) -> ControlCommand:
+def _parse_income(
+    command: str,
+    args: list[str],
+    *,
+    today: date,
+    accounts: frozenset[str],
+) -> ControlCommand:
     account: str | None = None
     period = "mtd"
+    selector: dict[str, object] = {}
     for arg in args:
         normalized = arg.lower()
         if normalized in accounts:
@@ -346,18 +357,41 @@ def _parse_income(command: str, args: list[str], *, accounts: frozenset[str]) ->
             continue
         elif normalized in {"mtd", "本月", "this-month"}:
             period = "mtd"
+            selector = {}
         elif normalized in {"ytd", "今年", "年初至今", "year-to-date"}:
             period = "ytd"
+            selector = {}
+        elif normalized in {"上月", "last-month"}:
+            period = "month"
+            selector = {"month": _previous_month(today)}
+        elif match := _MONTH_RE.match(normalized):
+            period = "month"
+            selector = {"month": f"{int(match.group(1)):04d}-{int(match.group(2)):02d}"}
+        elif match := _YEAR_MONTH_CN_RE.match(normalized):
+            period = "month"
+            selector = {"month": f"{int(match.group(1)):04d}-{int(match.group(2)):02d}"}
+        elif match := _MONTH_CN_RE.match(normalized):
+            month = int(match.group(1))
+            year = today.year - (month > today.month)
+            period = "month"
+            selector = {"month": f"{year:04d}-{month:02d}"}
+        elif match := _YEAR_RE.match(normalized):
+            period = "year"
+            selector = {"year": int(match.group(1))}
         else:
             raise _bad_arg(
                 command,
                 arg,
-                "支持：/income、/income [账户] mtd、/income [账户] ytd。",
+                "支持：/income、/income [账户] mtd|ytd|上月|YYYY-MM|YYYY。",
             )
-    payload: dict[str, object] = {"period": period}
+    payload: dict[str, object] = {"period": period, **selector}
     if account:
         payload["account"] = account
     return _intent("option_performance_report", payload)
+
+
+def _previous_month(today: date) -> str:
+    return f"{today.year - (today.month == 1):04d}-{12 if today.month == 1 else today.month - 1:02d}"
 
 
 def _parse_runs(command: str, args: list[str]) -> ControlCommand:

@@ -1198,7 +1198,7 @@ def _bounded_limit(value: Any) -> int:
 def _canonical_analysis_performance_request(payload: dict[str, Any]) -> dict[str, Any]:
     removed = sorted(
         key
-        for key in ("month", "months", "year", "start_date", "end_date", "refresh_quotes")
+        for key in ("months", "start_date", "end_date", "refresh_quotes")
         if payload.get(key) not in (None, "", [], ())
     )
     if removed:
@@ -1213,10 +1213,10 @@ def _canonical_analysis_performance_request(payload: dict[str, Any]) -> dict[str
             message="analysis_query option performance accepts at most one account filter",
         )
     period = str(payload.get("period") or "ytd").strip().lower()
-    if period not in {"mtd", "ytd"}:
+    if period not in {"mtd", "ytd", "month", "year"}:
         raise AgentToolError(
             code="INPUT_ERROR",
-            message="analysis_query option performance period must be mtd or ytd",
+            message="analysis_query option performance period must be mtd, ytd, month, or year",
         )
     request = {
         "config_key": payload.get("config_key") or "us",
@@ -1224,6 +1224,8 @@ def _canonical_analysis_performance_request(payload: dict[str, Any]) -> dict[str
         "data_config": payload.get("data_config"),
         "period": period,
         "as_of_date": payload.get("as_of_date"),
+        "month": payload.get("month"),
+        "year": payload.get("year"),
         "account": accounts[0] if accounts else None,
         "broker": payload.get("broker"),
     }
@@ -3614,8 +3616,8 @@ ANALYSIS_QUERY_TOOL = build_agent_tool(
         "Run a SELECT-only query against whitelisted in-memory OM analysis views for comparisons, "
         "rankings, trends, breakdowns, and other open-ended analytical questions. Supply either "
         "SELECT/WITH SQL or one or more catalog view names. Inspect analysis_catalog first when view "
-        "or field names are uncertain. Option performance supports only MTD/YTD native-currency net cash "
-        "flow, sell/buy win rates, and option return."
+        "or field names are uncertain. Option performance supports MTD/YTD or one natural month/year, "
+        "with native-currency net cash flow, sell/buy win rates, and option return."
     ),
     requires=("runtime_config", "sqlite_data_config"),
     capabilities=("analysis_query", "read_only", "analysis_workspace"),
@@ -3637,8 +3639,12 @@ ANALYSIS_QUERY_TOOL = build_agent_tool(
             "maximum": MAX_QUERY_LIMIT,
             "description": "Maximum rows returned",
         },
-        "period": {"type": "string", "enum": ["mtd", "ytd"]},
+        "period": {"type": "string", "enum": ["mtd", "ytd", "month", "year"]},
         "as_of_date": "optional YYYY-MM-DD cutoff for mtd/ytd",
+        "year": {
+            "type": ["integer", "string"],
+            "description": "optional natural year YYYY when period=year",
+        },
         "account": "optional materialization account filter",
         "broker": "optional materialization broker filter",
         "accounts": {
@@ -3676,7 +3682,7 @@ ANALYSIS_QUERY_TOOL = build_agent_tool(
     output_contract=_ANALYSIS_OUTPUT_CONTRACT,
     copilot_input_fields=(
         "config_key", "sql", "view", "views", "limit", "period", "as_of_date", "account", "accounts",
-        "broker", "month", "months", "symbol", "symbols",
+        "broker", "month", "months", "year", "symbol", "symbols",
     ),
 )
 

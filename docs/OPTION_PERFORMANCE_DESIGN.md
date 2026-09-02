@@ -1,11 +1,10 @@
 # Option Performance Design
 
-Status: target design; plan re-review and implementation are pending.
+Status: current contract.
 
 This document is the canonical owner of the option-performance contract. Current source and tests
-remain the authority for behavior until the implementation described here is complete. The target is
-an in-place replacement: there is no parallel version, compatibility payload, dual read, dual write,
-or historical backfill requirement.
+remain the runtime authority. The implementation is in place: there is no parallel version,
+compatibility payload, dual read, dual write, or historical backfill path.
 
 ## Goal
 
@@ -14,7 +13,7 @@ Replace the mixed performance report with one option-only statistical module tha
 - calculates four agreed metrics from one canonical ledger source;
 - applies one calculation path to Short Put, Short Call, Long Put, and Long Call legs;
 - treats strategy as attribution and grouping rather than a second calculation system;
-- supports MTD and YTD opening cohorts only;
+- supports MTD, YTD, natural-month, and natural-year opening cohorts;
 - keeps the existing public entry names and read-only behavior while replacing the business payload;
 - removes PnL, stock, valuation, FX, and legacy compatibility behavior from the report path.
 
@@ -23,7 +22,7 @@ Replace the mixed performance report with one option-only statistical module tha
 - Realized, unrealized, gross, net, period-total, or combined PnL.
 - Stock settlement principal, stock trades, stock fees, assigned-stock return, dividends, interest,
   margin movements, NAV, buying power, broker margin, or current holdings value.
-- Natural-month, natural-year, or custom-range queries.
+- Custom-range queries.
 - CNY conversion or cross-currency aggregation. Native currencies remain separate.
 - Market marks, quote refresh, valuation evidence, or current-price collection.
 - Strategy-specific formulas or inference from matching symbol, trade date, strike, or expiration.
@@ -59,35 +58,29 @@ The refactor is complete only when all of the following are true:
    partial; they do not suppress an independently proven lifecycle outcome.
 9. Every public entry preserves the same `INPUT_ERROR` or `READ_ERROR` classification for the same
    report failure and publishes no business data on error.
+10. A fully executed aggregate report declares `coverage.status=complete` and
+    `complete_for=full_query` independently of metric-level `quality.status`; partial fee, lifecycle,
+    or capital evidence remains partial and is never promoted to a complete metric.
+11. Copilot may admit a supported partial answer when the report covers the full requested scope and
+    the answer preserves the report's missing-data and freshness limits.
 
 ## Current Facts and Constraints
 
-The existing code is physically grouped under `domain/domain/performance` and
-`src/application/performance`, but its responsibilities are not isolated:
+The option-only report, canonical ledger projection, metric reducer, facade cutover, natural-period
+windows, and fail-closed Copilot admission are implemented. Current behavior adds three narrow
+contracts without reopening those completed boundaries:
 
-- the application service reads trade events, assigned-stock events, persisted marks, FX rates, and
-  optional live quotes;
-- the domain engine mixes activity, cash, realized/unrealized PnL, assigned stock, capital efficiency,
-  strategy attribution, and multiple period kinds;
-- the public materializer constructs another presentation projection;
-- assistant renderers, analysis tools, and portfolio bridges depend directly on old nested fields;
-- current strategy attribution covers only part of the target strategy vocabulary.
+- `PeriodRequest` and every public facade accept `mtd|ytd|month|year` with exactly one matching
+  selector.
+- `src.application.performance.service._serialize_report()` declares aggregate coverage and period
+  freshness at the source; `compact_observation()` remains fail-closed for missing or malformed
+  declarations.
+- The Python Host retains only the terminal-adjacent admission category, clears it across model
+  turns, and emits a coarse Chinese receipt plus `run_id` without exposing verifier internals.
 
-The canonical ledger projection already owns event ordering, void handling, lot close matching,
-partial-close allocation, and stable `OptionEconomicAllocation` identities. The refactor must reuse
-that owner rather than rematching trades inside performance.
-
-Two current ownership defects must be removed before the old statistics code can be deleted:
-
-- `domain.domain.ledger.economics` imports fee and money primitives from
-  `domain.domain.performance.models`; these primitives belong to the ledger or a lower neutral domain
-  module, and the ledger must not depend on performance;
-- canonical allocation currently lacks one effective attribution contract after economic `adjust`,
-  attribution-only `adjust`, and `void` replay, so the old performance service compensates by
-  interpreting patches itself.
-
-Historical rows may not contain complete actual-fee or strategy evidence. The report exposes this as
-partial quality; it does not repair, estimate, infer, or backfill facts during a read.
+The existing answer verifier remains authoritative and fail-closed. Historical rows may still lack
+complete fee or lifecycle evidence; that is metric quality, not query coverage, and the report must
+not estimate, infer, or backfill it during a read.
 
 ## Ownership and Data Flow
 
@@ -163,18 +156,28 @@ stream.
 
 ## Period and Cohort Contract
 
-Public period kinds are exactly `mtd` and `ytd`. Dates use `Asia/Shanghai`.
+Public period kinds are exactly `mtd`, `ytd`, `month`, and `year`. Dates use `Asia/Shanghai`.
 
 - MTD starts on the first calendar day of the `as_of_date` month.
 - YTD starts on January 1 of the `as_of_date` year.
+- Natural month requires `month=YYYY-MM`. A past month ends at the next local midnight after its last
+  calendar day; the current month ends at the frozen `report_now_ms + 1`.
+- Natural year requires `year=YYYY`. A past year ends at the next local midnight after December 31;
+  the current year ends at the frozen `report_now_ms + 1`.
+- Future natural months and years are invalid. `month` and `year` do not accept `as_of_date`.
 - `as_of_date` is inclusive and may be T-1.
 - T-1 means an explicitly selected latest complete source/trading date; the report never implements it
   as `today - 1 calendar day`.
-- One `report_now_ms` is frozen at request start. When `as_of_date` is omitted or equals the current
-  operating date, `end_exclusive_at_ms = report_now_ms + 1` and freshness is `current`.
+- One `report_now_ms` is frozen during request contract preparation. Its `Asia/Shanghai` calendar date
+  is the request `operating_date`; natural-selector attestation and canonical period normalization use
+  that same instant, including across a local-midnight boundary. The derived `operating_date` and
+  existing `reference_year` are model-visible reference context; raw `report_now_ms` is Host-only
+  execution context, not a public report or model tool argument.
+- When `as_of_date` is omitted or equals `operating_date`,
+  `end_exclusive_at_ms = report_now_ms + 1` and freshness is `current`.
 - For a past `as_of_date`, `end_exclusive_at_ms` is the next Asia/Shanghai local midnight and freshness
   is `historical`.
-- `start_at_ms` is the Asia/Shanghai local midnight at the MTD/YTD start date. Event admission uses the
+- `start_at_ms` is the Asia/Shanghai local midnight at the selected period's start date. Event admission uses the
   half-open window `[start_at_ms, end_exclusive_at_ms)`.
 - `statistic_days = (end_exclusive_at_ms - start_at_ms) / 86,400,000`. It is an exact decimal duration:
   a past complete date produces whole days, while a current partial date produces fractional days.
@@ -182,7 +185,7 @@ Public period kinds are exactly `mtd` and `ytd`. Dates use `Asia/Shanghai`.
   data passes the selected T-1 `as_of_date` explicitly.
 
 Selection is by each option leg's own opening date. A leg is admitted when its opening date falls in
-the requested MTD/YTD window. For an admitted leg, all canonical lifecycle cash and state transitions
+the requested period window. For an admitted leg, all canonical lifecycle cash and state transitions
 before `end_exclusive_at_ms` participate. A close inside the period for a leg opened before the period
 is not admitted.
 
@@ -407,7 +410,8 @@ The report supports these dimensions:
 - exclusive attribution strategy;
 - underlying symbol.
 
-Opening year/month are dimensions, not additional period query kinds.
+Opening year/month breakdowns remain dimensions derived from each leg's opening date; they do not
+replace or reinterpret the selected period kind.
 
 Exclusive attribution strategy values are:
 
@@ -588,9 +592,28 @@ option_performance_report
 ```
 
 The report remains read-only. Supported public inputs are `config_key`, optional `config_path` and
-`data_config`, optional `account` and `broker`, `period=mtd|ytd`, optional `as_of_date`, and optional
-`include_rows`. Old `month`, `year`, `start_date`, `end_date`, and `refresh_quotes` inputs are removed
-and rejected as invalid. `/income` accepts account plus MTD or YTD only.
+`data_config`, optional `account` and `broker`, `period=mtd|ytd|month|year`, the matching selector
+(`as_of_date` for MTD/YTD, `month=YYYY-MM`, or `year=YYYY`), and optional `include_rows`.
+`start_date`, `end_date`, `range`, and `refresh_quotes` remain unsupported and are rejected as invalid.
+`/income` accepts account plus MTD, YTD, an exact natural month, an exact natural year, or `上月`.
+`include_rows` remains available to direct Tool Gateway and CLI callers but is absent from the
+Copilot-visible schema and fixed to `false`; Copilot evidence is the canonical aggregate only.
+
+For Copilot only, the current-message selector fence attests a closed grammar before any ledger read:
+
+- explicit month: `YYYY-MM` or `YYYY年M月`;
+- relative month: `上月`;
+- bare month: `M月`, resolved to the most recent non-future occurrence relative to the frozen
+  `operating_date`;
+- explicit year: `YYYY` or `YYYY年`;
+- the existing exact affirmative MTD/YTD cutoff forms.
+
+The model proposes arguments; the Host compares them with the one selector authorized by the current
+message. Multiple, conflicting, future, or otherwise ambiguous calendar selectors fail before the
+ledger read. The Host does not translate a natural month/year into MTD/YTD. Copilot
+`analysis_query` calls that materialize option performance use the same selector fence and frozen
+clock. Direct Tool Gateway, CLI, `/income`, Control, and non-Copilot analysis callers pass canonical
+`month=YYYY-MM` or `year=YYYY` and rely on the period owner for validation.
 
 The business payload is replaced in place and does not expose a report-version selector or legacy
 aliases. If the generic Tool Gateway envelope requires framework schema metadata, that metadata stays
@@ -636,13 +659,45 @@ breakdowns
   # every item is {key, <shared metric bundle>}
 quality
   status, missing, diagnostics, ledger_input_hash
+coverage
+  status=complete, complete_for=full_query,
+  included_count=1, total_count=1, omitted_count=0
+freshness
+  status=current|historical, as_of
 rows[]                         # exact weighted-row contract; only when include_rows=true
 ```
 
-`freshness_status` is `current` only when `as_of_date` is the current operating date. A past date,
-including T-1, is `historical`. Public adapters receive the same frozen `report_now_ms`; equal inputs
-and equal `report_now_ms` produce equal metric facts across Agent, CLI, Control, Copilot, and Feishu.
-Presentation wording may differ.
+`freshness_status` is `current` only when the selected period ends at the frozen request instant. A
+completed natural period or past MTD/YTD cutoff, including T-1, is `historical`. Public adapters
+receive the same frozen `report_now_ms`; equal inputs and equal `report_now_ms` produce equal metric
+facts across Agent, CLI, Control, Copilot, and Feishu. Presentation wording may differ.
+
+## Evidence Envelope and Copilot Admission
+
+The existing canonical `src.application.performance.service._serialize_report()` owns the top-level
+`coverage` and `freshness` declarations consumed unchanged by the public materializer and Copilot
+evidence projection. No facade, generic projection, or Host reconstructs either declaration from
+metric contents.
+
+`coverage.status=complete` means the requested period, account, broker, and configured aggregate scope
+were fully queried with no pagination or projection omission. It does not mean every metric is
+observed. Missing fee, terminal, or occupied-capital evidence remains represented by the metric bundle
+and root `quality`; a complete query may therefore produce a partial report.
+
+Copilot never requests `rows[]`. This keeps the source-declared complete scope equal to the
+model-visible aggregate projection. A future row-detail Copilot contract would require its own
+bounded collection coverage and is outside this aggregate Copilot contract.
+
+`freshness.status=current` requires a current partial period and an ISO `as_of` at the frozen report
+instant. Completed natural periods and past MTD/YTD cutoffs are `historical` with an ISO `as_of` at the
+inclusive period end. Aggregate count fields describe one fully executed aggregate result; omitting
+`has_more` avoids rendering a row-pagination banner for that aggregate. Missing or malformed source
+declarations remain `unknown` and continue to fail closed in answer admission.
+
+The answer verifier is unchanged: it still checks current-request evidence identity, authority,
+coverage, freshness, answer status, and required claim scope. The evidence declarations live at their
+source; no branch relaxes `claim_scope_not_covered`,
+`claim_freshness_not_supported`, or status-overstatement rejection.
 
 ## Failure Behavior
 
@@ -711,10 +766,10 @@ it with a differently named metric:
 
 | Current analysis view | Cutover disposition |
 |---|---|
-| `option_period_performance` | Keep the view name; replace its rows with the canonical MTD/YTD opening-cohort metrics. |
+| `option_period_performance` | Keep the view name; project the canonical requested-period opening-cohort metrics. |
 | `option_cash_components` | Keep the view name; expose native-currency option net cash-flow components only, with no CNY or assignment cash. |
 | `symbol_performance_attribution` | Keep the view name; project the canonical symbol breakdown and its cash, capital-days, and eligible/winning contract counts. |
-| `option_monthly_performance` | Remove from the catalog; natural-month performance is unsupported. Opening month remains only a report dimension. |
+| `option_monthly_performance` | Keep removed; natural-month requests use `option_period_performance` rather than restoring a second monthly owner. Opening month also remains a report dimension. |
 | `option_activity_components` | Remove from the catalog; activity is not one of the agreed metrics. |
 | `option_pnl_components` | Remove from the catalog; PnL is explicitly outside this module. |
 | `assigned_stock_position_pnl`, `assigned_stock_sale_events`, `assigned_stock_lifecycle`, `assigned_stock_sales`, `assigned_stock_review` | Detach from option performance and source only from the independent assigned-stock owner. If that owner cannot satisfy a view at cutover, reject that view as unavailable rather than synthesizing it. |
@@ -760,101 +815,58 @@ request key; neither dates nor `ledger_input_hash` alone identify the requested 
 It remains owned by quote/assigned-stock evidence or becomes explicitly unavailable. Removed analysis
 views receive no aliases or compatibility rows.
 
-## Implementation Slices
+## Implementation Ownership
 
-The implementation plan may refine file lists, but each slice must leave the repository testable and
-preserve this order of responsibility:
+The implementation uses three narrow owners and changes no ledger, metric reducer, answer-admission
+rule, Node protocol, release artifact, or runtime configuration.
 
-1. **Ledger prerequisites, public report unchanged.** Move fee/money primitives out of performance,
-   make economic allocations reflect canonical economic/attribution adjustments and voids, extend
-   existing `match_post_trade_combo_pairs` reconciliation and `confirm-combo` with the CC+LP
-   signed-leg inference/adjustment path while leaving the inference persistence shape and
-   `combo_identity.v2` unchanged, admit exercise fee provenance, enforce the temporal invariants, and
-   emit account/broker-addressable diagnostics. Update the projection semantic fingerprint and
-   boundary tests.
-2. **Private reducer, public report unchanged.** Build the minimum weighted contract-share reducer on
-   `OptionEconomicAllocation`, one residual-open segment per lot, MTD/YTD cohort selection,
-   `unresolved_after_expiry`, post-graph account/broker filtering of facts and diagnostics,
-   deterministic aggregation, and domain tests. No old public test is replaced before the public path
-   switches.
-3. **Private consumer preparation, public report unchanged.** Make serializers, renderers, analysis
-   mappers, and bridge unavailable responses accept a canonical reducer fixture. Keep every public
-   entry bound to the old service while contract tests prove the prepared projections.
-4. **Narrow atomic public pointer cutover.** Replace the application-service owner and switch CLI,
-   Tool Gateway, `/income`, Control, Copilot, renderer, and analysis entry bindings to that one owner
-   in the same slice. Reject removed inputs and expose bridge unavailable states. Do not delete the old
-   implementation in this slice.
-5. **Cleanup after facade proof.** After all public facade tests pass against the new owner, delete the
-   old report engine, presentation code, and dependencies proven unused. Update indexed living docs
-   and generated tool descriptions.
+1. **Canonical natural periods and facade propagation.** The existing period owner validates `month`
+   and `year` without accepting `range`. Shared materializer, Tool Gateway, CLI, `/income`, Control,
+   tool bindings, analysis, and Copilot propagate only `period`, `as_of_date`, `month`, and `year`.
+   Copilot omits `include_rows`; direct facades retain it.
+2. **Evidence at the canonical serializer.** `_serialize_report()` emits complete aggregate
+   `coverage` and period `freshness`; public materialization passes them unchanged and
+   `compact_observation()` does not synthesize replacements.
+3. **Host selector attestation and terminal receipt.** Contract preparation freezes one injectable
+   `report_now_ms`, derives `reference_year` and `operating_date` in `Asia/Shanghai`, and keeps the raw
+   instant Host-only. A scoped `ContextVar` supplies that instant only to option performance. The Host
+   attests the current-message selector before reading and renders only allowlisted, terminal-adjacent
+   receipt categories plus public `run_id`.
 
-No slice creates a second public report, migration layer, feature flag, or release artifact.
+## Verification
 
-Deletion uses an explicit keep-set. Ledger evidence-import and cash-conversion maintenance commands,
-their public invocations, and any shared code they still require remain in place unless this work unit
-proves them unused independently of the report. A misleading directory name alone is not deletion
-evidence; relocating those maintenance capabilities is a separate work unit.
+Focused deterministic checks cover this contract:
 
-## Validation Plan
-
-Domain checks must cover:
-
-- all four leg types and cash signs;
-- open, full close, multiple partial closes, expiry, assignment, and exercise;
-- expiry passed with missing or conflicting terminal evidence, proving `unresolved_after_expiry` is
-  neither normal open nor terminated and never accumulates invented capital-days;
-- proportional opening cash/fee allocation and final-segment rounding conservation;
-- actual, explicit-zero, estimated, missing, and malformed fee evidence;
-- exercise with actual, explicit-zero, and missing fee provenance;
-- economic adjustments to opening time, contracts, premium, multiplier, currency, strike, and expiry,
-  including multiple/voided adjustments after partial close, opening moved after a partial or full
-  close, expiration moved before opening, a valid adjustment across an MTD/YTD cohort boundary, a
-  same-millisecond open/close with zero capital-days, and conservation failure;
-- attribution-only correction, superseded correction, correction after `as_of_date`, and current-ledger
-  restatement without post-cutoff economic activity;
-- opening-cohort MTD/YTD admission and exclusion of pre-period openings;
-- a past as-of date ending at the next Asia/Shanghai midnight, a current as-of date ending at the
-  frozen `report_now_ms + 1`, and exact whole/fractional `statistic_days` respectively;
-- open plus terminated cash conservation;
-- unresolved terminal evidence with complete recorded option cash, proving `total` remains observed
-  while `open` and `terminated` are independently partial/null through every facade and analysis row;
-- the terminal-outcome and fee-evidence cross-product for Short expiry without assignment, Short
-  assignment, Short buy to close, Long sell to close, Long worthless expiry, and Long exercise,
-  proving fee-incomplete close-based outcomes are excluded while fee-independent lifecycle outcomes
-  retain proven counts; mixed complete/incomplete and only-incomplete samples must publish a null,
-  partial rate, while complete zero-eligible samples are `not_applicable`, identically through every
-  facade and analysis row;
-- all four occupied-capital bases, exact close-time reduction, and zero/missing denominator behavior;
-- native-currency isolation and aggregate conservation;
-- two accounts and two brokers with one scoped event/allocation diagnostic, proving an unrelated
-  filtered request stays observed, the unfiltered aggregate is partial, a missing dimension cannot be
-  silently excluded, and an in-scope late adjust/void still reaches its target before scope filtering;
-- bundle/root quality aggregation for complete children plus `not_applicable`, a proven empty scope,
-  one partial breakdown with complete root metrics, and multiple duplicate missing reasons,
-  identically through every facade and retained analysis row;
-- CSP, CC, CSP+LC, CC+LP, Wheel, and unassigned attribution;
-- CSP/CC parent-universe overlap without additive double counting;
-- unchanged CSP+LC `combo_identity.v2` payload/hash, cross-expiry CSP+LC, and an end-to-end same-expiry
-  CC+LP path from reconciliation inference/preview through the two-event confirmation pair, including
-  signed-leg hash changes, stale-hash rejection, repeat idempotency, supersede, one-member
-  void/conflict fallback, and no second public command, heuristic grouping, or report-side writes;
-- weighted multi-contract allocations and one residual-open segment without per-contract expansion;
-- one request-wide event snapshot and stable `ledger_input_hash` under a concurrent later write.
-
-Facade checks must prove equal facts through domain, application service, Tool Gateway, CLI, and
-`/income`, including propagation of one frozen `report_now_ms`; removed inputs and fields must be
-absent or explicitly rejected. Consumer checks must prove that bridges do not relabel net cash flow
-as PnL, combined lifecycle cash, or CNY. Analysis checks must prove the three retained views expose
-only their exact schemas above, removed views reject explicitly, and assigned-stock/quote views do not
-call option performance.
-
-Failure-contract checks must inject an invalid or removed input, ledger read failure, invalid tuple,
-unresolved control-target graph, and unproved scope through Tool Gateway, CLI, Control, Copilot, and
-`/income`. Every matching failure must preserve `INPUT_ERROR` or `READ_ERROR`, publish `ok=false` with
-empty business `data`, and never reach a renderer as a successful unavailable report. A recursive
-contract check must prove that no successful report payload, breakdown, audit row, or retained
-analysis row contains `not_observed`, including proven-empty, partial, and child `not_applicable`
-cases.
+- `test_performance_period.py`: canonical past/current month and year, future rejection, selector
+  mismatch, a January request for canonical `month=previous-December`, and one frozen-instant
+  local-midnight boundary. This owner never parses `上月`.
+- `test_option_performance_agent_tool.py`: schema/normalizer propagation; canonical envelope for
+  complete, partial-quality, and proven-empty aggregates; past MTD and past natural month/year produce
+  historical ISO freshness; current MTD/month/year produce current freshness at the frozen instant;
+  Copilot rejects `include_rows` while direct tool execution still accepts it.
+- One end-to-end report -> `compact_observation()` -> `admit_submit_answer()` test proves historical
+  claims are admitted for past periods while current claims are rejected; current claims are admitted
+  for current periods; partial-quality evidence admits an honestly partial answer but rejects a
+  complete answer; missing or malformed coverage/freshness stays fail-closed; a proven-empty aggregate
+  never invents a zero metric.
+- Copilot Host tests prove exact explicit/bare/relative month and explicit-year attestation, rejection
+  of wrong, future, multiple, or conflicting selectors before a ledger read, including through
+  `analysis_query`, and reuse of the frozen `operating_date`. Contract/scene tests prove
+  `reference_year` and `operating_date` derive from one
+  injected millisecond, while raw `report_now_ms` remains Host-only. One test freezes preparation
+  immediately before local midnight, advances wall time past midnight before execution, and proves the
+  report still uses the frozen instant. A second test
+  proves the ContextVar resets after success and failure so direct or concurrent requests cannot
+  inherit it. Copilot Host and `/income` parser tests prove a January `上月` becomes the same canonical
+  previous-December month. An expiration date outside the report phrase never authorizes a period,
+  and a second period phrase is rejected. Prompt/catalog tests prove natural periods are selectable
+  without restoring range. Existing runtime-context prompt-budget checks remain at or below baseline.
+- Receipt tests prove the four allowlisted categories, fallback wording, public `run_id`, no raw reason
+  or answer leakage, and no stale relabel when an earlier rejected submission is followed by a model,
+  tool, schema, budget, or cancellation terminal.
+- One month and one year smoke per direct facade proves CLI, `/income`, Control, and analysis selector
+  propagation. Existing MTD/YTD and removed-input tests remain the regression baseline; no
+  facade-by-period Cartesian suite is added.
 
 Run focused performance/ledger/CLI/Tool/assistant tests first, then the repository-required analyze,
 full test, documentation guardrail, and `git diff --check` gates. Report generation tests must remain
@@ -872,6 +884,18 @@ coupling.
 
 Rejected because a v2 module, feature flag, alias payload, or dual-read path would preserve two owners
 for the same money facts and make external callers diverge.
+
+### Translate natural periods into hidden MTD/YTD cutoffs in the Host
+
+Rejected because the canonical period owner already validates calendar windows. Rewriting a natural
+month or year in the Copilot Host would duplicate business semantics, weaken facade consistency, and
+conflict with the current-message cutoff authority rule.
+
+### Relax answer admission for option performance
+
+Rejected because unknown coverage is a source-contract defect, not permission to accept an
+unsupported financial claim. The report must declare its actual envelope and the verifier must remain
+fail-closed.
 
 ### Build calculators per strategy
 
@@ -904,26 +928,17 @@ proof still follow the deterministic `cc` / `unassigned` defaults and are never 
 ## Risks and Open Evidence
 
 - Historical actual-fee coverage may be incomplete, so some cash flows, returns, and close-based
-  win outcomes will legitimately remain partial after cutover. Lifecycle-based win counts remain
+  win outcomes legitimately remain partial. Lifecycle-based win counts remain
   included when their terminal evidence is complete and non-conflicting.
-- The exact capital stop boundary for an expired share without terminal evidence is not yet proven by
-  the current ledger contract. The application ledger lifecycle-evidence owner in
-  `src/application/ledger/lifecycle_overlay.py` and its lifecycle intake path own that follow-up work
-  unit. Until they publish broker-authoritative evidence, the share remains
-  `unresolved_after_expiry` with partial/null return; this refactor must not invent a grace period.
-- Historical CC+LP pairs without an explicit canonical group stay ungrouped; the ledger prerequisite
-  supports the confirmed adjustment-event pair going forward but does not infer or backfill history.
-- Existing CSP+LC post-trade and candidate validation differ on cross-expiry support. Statistics trust
-  a confirmed canonical group and must not reimpose a same-expiry restriction.
-- The generic Tool Gateway may currently assume a `schema_version` field. The implementation must
-  separate framework metadata from the one business contract without adding report versions.
-- Analysis and portfolio bridge dependencies are broad. Deletion is safe only after all current
-  callers are enumerated and the disposition table is exercised through facade tests.
-- The active development branch must be based on current `origin/main` before implementation; no
-  design decision depends on the stale local branch state.
+- Bare `M月` is deliberately resolved by the frozen `Asia/Shanghai` operating date, so a user who
+  meant an older same-numbered month must provide the year. The Host rejects conflicting selectors
+  instead of guessing.
+- A complete aggregate coverage declaration proves execution of the requested ledger scope, not
+  correctness of missing fee/lifecycle inputs. Metric quality and answer-status checks remain the
+  protection against overstatement.
+- The receipt categories are deliberately coarse. Support uses `run_id` and private audit events;
+  user-facing text never exposes raw verifier reasons.
 
-The only unresolved source-evidence question is the lifecycle owner's exact capital stop boundary for
-`unresolved_after_expiry`; it is a named follow-up risk, not permission to guess during this work unit.
-The current contract remains deliberately fail-closed. Any implementation discovery that changes
-metric meaning, source authority, public invocation, or failure behavior returns to the design and
-review gates before code proceeds.
+No open source-authority question remains. Any future change that would alter
+metric meaning, ledger ownership, answer-admission rules, public error schema, or the Node protocol
+returns to design review instead of expanding this work unit.

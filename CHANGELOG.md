@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Improvements
+- Restored natural-month and natural-year option-performance reports across the CLI, Assistant, Analysis, and Copilot with canonical coverage and freshness evidence.
+
+### Bug Fixes
+- Replaced Copilot's generic answer-admission failure receipt with categorized evidence diagnostics and enforced frozen period selection for option-performance answers.
+
 ## 3.4.0 - 2026-09-02
 
 ### Breaking Changes

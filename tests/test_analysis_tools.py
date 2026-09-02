@@ -522,6 +522,57 @@ def test_analysis_query_forwards_account_and_broker_scope_to_performance_tool(mo
     ]
 
 
+@pytest.mark.parametrize(
+    ("period", "selector"),
+    [
+        ("month", {"month": "2026-08"}),
+        ("year", {"year": 2025}),
+    ],
+)
+def test_analysis_query_forwards_natural_period_selector(
+    monkeypatch: pytest.MonkeyPatch,
+    period: str,
+    selector: dict[str, Any],
+) -> None:
+    requests: list[dict[str, Any]] = []
+
+    def fake_performance_tool(payload, *_args, **_kwargs):
+        requests.append(dict(payload))
+        return _performance_report(), [], {}
+
+    monkeypatch.setattr(analysis_module, "option_performance_report_tool", fake_performance_tool)
+
+    _call_analysis_tool(
+        ANALYSIS_QUERY_TOOL,
+        _AnalysisQueryContext(),
+        {"view": "option_period_performance", "period": period, **selector},
+    )
+
+    assert requests == [{"config_key": "us", "period": period, **selector}]
+
+
+def test_analysis_query_rejects_multi_month_filter_for_performance_view(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called = False
+
+    def fake_performance_tool(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        return _performance_report(), [], {}
+
+    monkeypatch.setattr(analysis_module, "option_performance_report_tool", fake_performance_tool)
+
+    with pytest.raises(AgentToolError, match="does not accept: months"):
+        _call_analysis_tool(
+            ANALYSIS_QUERY_TOOL,
+            _AnalysisQueryContext(),
+            {"view": "option_period_performance", "months": ["2026-07", "2026-08"]},
+        )
+
+    assert called is False
+
+
 def test_analysis_query_materializes_only_referenced_position_views(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
 
