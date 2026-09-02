@@ -280,13 +280,6 @@ def run_scheduler_flow(
             message=str(exc),
         )
 
-    def _global_scan_fallback(source: str) -> dict[str, Any]:
-        return {
-            "should_run": bool(should_run_global),
-            "reason": str(reason_global),
-            "source": str(source),
-        }
-
     notify_decision_by_account: dict[str, AccountSchedulerDecisionView | None] = {}
     scan_decision_by_account: dict[str, dict[str, Any]] = {}
     for acct0 in [str(a).strip() for a in accounts if str(a).strip()]:

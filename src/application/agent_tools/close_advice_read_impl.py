@@ -587,13 +587,6 @@ def _query_market(query: PositionQuery) -> str | None:
     return _normalize_market(symbol_market(query.symbol))
 
 
-def _has_explicit_source_scope(payload: dict[str, Any]) -> bool:
-    for key in ("run_id", "report_path", "csv_path", "output_dir"):
-        if str(payload.get(key) or "").strip():
-            return True
-    return False
-
-
 def _source_market_values(source: _Source) -> set[str]:
     account_dir = source.path.parent if source.account else None
     run_dir = _source_run_dir(source)
