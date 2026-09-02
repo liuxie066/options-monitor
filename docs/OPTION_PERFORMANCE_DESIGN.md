@@ -610,10 +610,9 @@ For Copilot only, the current-message selector fence attests a closed grammar be
 
 The model proposes arguments; the Host compares them with the one selector authorized by the current
 message. Multiple, conflicting, future, or otherwise ambiguous calendar selectors fail before the
-ledger read. The Host does not translate a natural month/year into MTD/YTD. Copilot
-`analysis_query` calls that materialize option performance use the same selector fence and frozen
-clock. Direct Tool Gateway, CLI, `/income`, Control, and non-Copilot analysis callers pass canonical
-`month=YYYY-MM` or `year=YYYY` and rely on the period owner for validation.
+ledger read. The Host does not translate a natural month/year into MTD/YTD. Direct Tool Gateway,
+CLI, `/income`, and Control callers pass canonical `month=YYYY-MM` or `year=YYYY` and rely on the
+period owner for validation.
 
 The business payload is replaced in place and does not expose a report-version selector or legacy
 aliases. If the generic Tool Gateway envelope requires framework schema metadata, that metadata stays
@@ -747,8 +746,8 @@ groups. An unfiltered aggregate includes every relevant scoped degradation.
 All in-repository consumers must switch atomically to the new canonical fields. No consumer may derive
 deleted PnL, stock cash, or CNY amounts from option net cash flow.
 
-- The option-performance renderer, Control `/income`, Copilot projection, Tool contract, and analysis
-  catalog must use the new fields without recalculation.
+- The option-performance renderer, Control `/income`, Copilot projection, and Tool contract use the
+  canonical fields without recalculation.
 - `portfolio_pnl_bridge` cannot use this report after `pnl.period_total_net` is removed. Its public
   route may remain, but option PnL must be explicitly unavailable until a separate authoritative PnL
   source is designed.
@@ -761,59 +760,8 @@ deleted PnL, stock cash, or CNY amounts from option net cash flow.
 - Assigned-stock and Wheel read models remain independent and unchanged except where their callers
   currently depend on deleted performance fields.
 
-The analysis catalog has an explicit cutover disposition; it must not preserve an old view by filling
-it with a differently named metric:
-
-| Current analysis view | Cutover disposition |
-|---|---|
-| `option_period_performance` | Keep the view name; project the canonical requested-period opening-cohort metrics. |
-| `option_cash_components` | Keep the view name; expose native-currency option net cash-flow components only, with no CNY or assignment cash. |
-| `symbol_performance_attribution` | Keep the view name; project the canonical symbol breakdown and its cash, capital-days, and eligible/winning contract counts. |
-| `option_monthly_performance` | Keep removed; natural-month requests use `option_period_performance` rather than restoring a second monthly owner. Opening month also remains a report dimension. |
-| `option_activity_components` | Remove from the catalog; activity is not one of the agreed metrics. |
-| `option_pnl_components` | Remove from the catalog; PnL is explicitly outside this module. |
-| `assigned_stock_position_pnl`, `assigned_stock_sale_events`, `assigned_stock_lifecycle`, `assigned_stock_sales`, `assigned_stock_review` | Detach from option performance and source only from the independent assigned-stock owner. If that owner cannot satisfy a view at cutover, reject that view as unavailable rather than synthesizing it. |
-
-The three retained analysis views are projections, not calculators. Their grains and exact fields are:
-
-- `option_period_performance`: one row per requested period and scope, with
-  `config_key`, `period_kind`, `period_start_date`, `as_of_date`, `start_at_ms`,
-  `end_exclusive_at_ms`, `statistic_days`, `accounts`, `brokers`,
-  `option_net_cashflow_by_currency`, `option_return_by_currency`,
-  `sell_option_winning_contracts`, `sell_option_eligible_contracts`,
-  `sell_option_win_rate`, `sell_option_win_rate_status`, `buy_option_winning_contracts`,
-  `buy_option_eligible_contracts`, `buy_option_win_rate`, `buy_option_win_rate_status`,
-  `quality_status`, `missing`, and `ledger_input_hash`;
-- `option_cash_components`: one row per requested period, scope, native currency, and state, with
-  `config_key`, `period_kind`, `period_start_date`, `as_of_date`, `start_at_ms`,
-  `end_exclusive_at_ms`, `statistic_days`, `accounts`, `brokers`, `currency`, `state`, `amount`,
-  `status`, `missing`, and `ledger_input_hash`. `state` is exactly `total`, `open`, or `terminated`;
-- `symbol_performance_attribution`: one row per requested period and canonical symbol breakdown, with
-  `config_key`, `period_kind`, `period_start_date`, `as_of_date`, `start_at_ms`,
-  `end_exclusive_at_ms`, `statistic_days`, `accounts`, `brokers`, `symbol`,
-  `option_net_cashflow_by_currency`, `option_return_by_currency`,
-  `sell_option_winning_contracts`, `sell_option_eligible_contracts`,
-  `sell_option_win_rate`, `sell_option_win_rate_status`, `buy_option_winning_contracts`,
-  `buy_option_eligible_contracts`, `buy_option_win_rate`, `buy_option_win_rate_status`, `status`,
-  `missing`, and `ledger_input_hash`.
-
-In the period and symbol views, `option_net_cashflow_by_currency` is exactly
-`currency -> {total, open, terminated}`, where every component is `{amount, status, missing}`. Each
-`option_cash_components` row directly selects one of those three component objects; its `amount`,
-`status`, and `missing` are copied without reinterpretation.
-
-Analysis serialization stores arrays and maps as canonical JSON text with sorted keys. Null and metric
-status semantics are the shared public semantics above. No retained view exposes an old field, creates
-account/currency cross-products absent from its source breakdown, or recomputes a metric from rows.
-The logical request key is (`config_key`, `period_kind`, `period_start_date`, `as_of_date`,
-`start_at_ms`, `end_exclusive_at_ms`, canonical `accounts`, canonical `brokers`, `ledger_input_hash`).
-It is the `option_period_performance` row key; `option_cash_components` adds (`currency`, `state`) and
-`symbol_performance_attribution` adds `symbol`. Cross-view joins are safe only on the complete logical
-request key; neither dates nor `ledger_input_hash` alone identify the requested scope and cutoff.
-
-`quote_freshness` must likewise stop loading option performance or triggering report-side quote work.
-It remains owned by quote/assigned-stock evidence or becomes explicitly unavailable. Removed analysis
-views receive no aliases or compatibility rows.
+`quote_freshness` does not load option performance or trigger report-side quote work. It remains owned
+by quote or assigned-stock evidence.
 
 ## Implementation Ownership
 
@@ -822,7 +770,7 @@ rule, Node protocol, release artifact, or runtime configuration.
 
 1. **Canonical natural periods and facade propagation.** The existing period owner validates `month`
    and `year` without accepting `range`. Shared materializer, Tool Gateway, CLI, `/income`, Control,
-   tool bindings, analysis, and Copilot propagate only `period`, `as_of_date`, `month`, and `year`.
+   tool bindings, and Copilot propagate only `period`, `as_of_date`, `month`, and `year`.
    Copilot omits `include_rows`; direct facades retain it.
 2. **Evidence at the canonical serializer.** `_serialize_report()` emits complete aggregate
    `coverage` and period `freshness`; public materialization passes them unchanged and
@@ -850,8 +798,8 @@ Focused deterministic checks cover this contract:
   complete answer; missing or malformed coverage/freshness stays fail-closed; a proven-empty aggregate
   never invents a zero metric.
 - Copilot Host tests prove exact explicit/bare/relative month and explicit-year attestation, rejection
-  of wrong, future, multiple, or conflicting selectors before a ledger read, including through
-  `analysis_query`, and reuse of the frozen `operating_date`. Contract/scene tests prove
+  of wrong, future, multiple, or conflicting selectors before a ledger read, and reuse of the frozen
+  `operating_date`. Contract/scene tests prove
   `reference_year` and `operating_date` derive from one
   injected millisecond, while raw `report_now_ms` remains Host-only. One test freezes preparation
   immediately before local midnight, advances wall time past midnight before execution, and proves the
@@ -864,7 +812,7 @@ Focused deterministic checks cover this contract:
 - Receipt tests prove the four allowlisted categories, fallback wording, public `run_id`, no raw reason
   or answer leakage, and no stale relabel when an earlier rejected submission is followed by a model,
   tool, schema, budget, or cancellation terminal.
-- One month and one year smoke per direct facade proves CLI, `/income`, Control, and analysis selector
+- One month and one year smoke per direct facade proves CLI, `/income`, and Control selector
   propagation. Existing MTD/YTD and removed-input tests remain the regression baseline; no
   facade-by-period Cartesian suite is added.
 

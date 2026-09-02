@@ -3599,6 +3599,132 @@ def test_persisted_session_continuity_and_scope_isolation(tmp_path):
         assert result["ok"] is True
 
 
+def test_retired_analysis_history_is_preserved_but_not_current_evidence(tmp_path):
+    from src.application.agent_tool_registry import pure_read_tool_names
+
+    database = tmp_path / "retired_analysis_session.sqlite3"
+    session_id = derive_pi_session_id("feishu", "retired-analysis", "group-1", "key:us")
+    old_observation_id = "obv_retired_analysis"
+    old_tool = {
+        "name": "analysis_query",
+        "description": "Retired analysis query",
+        "input_schema": {
+            "type": "object",
+            "properties": {"sql": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    }
+    first_payload = _start_payload(
+        session_id=session_id,
+        tools=[old_tool, _SUBMIT_TOOL],
+        user_message="historical analysis question",
+        debug={
+            "fixture_turns": [
+                _tool_turn(
+                    "old_analysis_call",
+                    tool_name="analysis_query",
+                    arguments={"sql": "select historical_fact"},
+                ),
+                {
+                    "tool_calls": [{
+                        "call_id": "old_answer",
+                        "tool_name": "submit_answer",
+                        "arguments": _submit_arguments("historical analysis answer"),
+                    }]
+                },
+            ],
+            "delay_ms": 0,
+        },
+    )
+
+    def first_callback(call):
+        if call["tool_name"] == "analysis_query":
+            return {
+                "observation": {
+                    "ok": True,
+                    "status": "complete",
+                    "observation_id": old_observation_id,
+                    "value": "historical analysis observation",
+                }
+            }
+        return _approved_provider_tool_result(call)
+
+    first = _run_session(
+        database,
+        session_id,
+        first_payload,
+        run_id="retired_analysis_seed",
+        on_tool_call=first_callback,
+    )
+    assert first["ok"] is True, first
+    before = _session_entries(database, session_id)
+    current_names = pure_read_tool_names()
+    assert "analysis_catalog" not in current_names
+    assert "analysis_query" not in current_names
+
+    stale_claim = {
+        "mode": "evidence",
+        "status": "complete",
+        "answer_markdown": "stale evidence must not pass",
+        "claims": [{
+            "text": "historical analysis observation",
+            "kind": "historical_fact",
+            "observation_ids": [old_observation_id],
+            "required_scope": "point",
+        }],
+    }
+    second_payload = _start_payload(
+        session_id=session_id,
+        tools=[_READ_TOOL, _SUBMIT_TOOL],
+        user_message="current question",
+        debug={
+            "fixture_turns": [
+                {
+                    "tool_calls": [{
+                        "call_id": "stale_answer",
+                        "tool_name": "submit_answer",
+                        "arguments": stale_claim,
+                    }]
+                },
+                {
+                    "tool_calls": [{
+                        "call_id": "current_answer",
+                        "tool_name": "submit_answer",
+                        "arguments": _submit_arguments("current conceptual answer"),
+                    }]
+                },
+            ],
+            "delay_ms": 0,
+            "expected_history": [
+                "analysis_query",
+                "historical analysis observation",
+                "historical analysis answer",
+            ],
+        },
+    )
+    second_calls = []
+
+    def second_callback(call):
+        second_calls.append(call)
+        if call["arguments"]["mode"] == "evidence":
+            return admit_submit_answer(call["arguments"], {})
+        return _approved_provider_tool_result(call)
+
+    second = _run_session(
+        database,
+        session_id,
+        second_payload,
+        run_id="retired_analysis_current",
+        on_tool_call=second_callback,
+    )
+    after = _session_entries(database, session_id)
+
+    assert first["result"]["committed"] is True
+    assert second["ok"] is True and second["result"]["committed"] is True
+    assert [call["tool_name"] for call in second_calls] == ["submit_answer", "submit_answer"]
+    assert before == after[: len(before)]
+
+
 def test_persisted_session_survives_runtime_cwd_change(tmp_path):
     database = tmp_path / "pi_sessions.sqlite3"
     session_id = derive_pi_session_id("feishu", "sender-a", "group-1", "key:us")

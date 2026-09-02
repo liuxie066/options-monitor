@@ -138,27 +138,6 @@ _TOOL_OVERRIDES: dict[str, dict[str, Any]] = {
         "summary": "explain a symbol's recorded opening status and accepted decisions from the sealed account snapshot",
         "scope_policy": "symbol_market_config_optional",
     },
-    "analysis_catalog": {
-        "display_name": "分析目录",
-        "arguments": ("view", "views"),
-        "examples": ("有哪些数据可以分析", "收益和指派正股能查询哪些字段"),
-        "summary": "inspect Tool OS read-only analysis views and SQL rules",
-        "scope_policy": "config_optional",
-    },
-    "analysis_query": {
-        "display_name": "通用分析",
-        "arguments": ("sql", "query", "limit", "account", "month"),
-        "examples": (
-            "对比 lx 和 sy 的账户收益，有什么不同？",
-            "指派正股浮盈亏按账户汇总",
-            "按标的统计已实现收益",
-        ),
-        "summary": (
-            "run SELECT-only queries over whitelisted OM analysis views for comparisons, rankings, trends, "
-            "breakdowns, and cross-domain analytical answers"
-        ),
-        "scope_policy": "config_optional",
-    },
     "operation_timeline": {
         "display_name": "操作时间线",
         "arguments": ("operation_id", "operation_types", "statuses", "limit"),

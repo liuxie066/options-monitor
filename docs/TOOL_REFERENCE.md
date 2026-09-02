@@ -90,15 +90,13 @@
 - `symbol_config_read`
 - `manage_symbols`
 
-### 分析与收益
+### 收益与桥接
 
-- `analysis_catalog`
-- `analysis_query`
 - `option_performance_report`
 - `portfolio_pnl_bridge`
 - `portfolio_cash_bridge`
 
-`option_performance_report` 只提供 MTD/YTD 的期权净现金流、卖出期权胜率、买入
+`option_performance_report` 提供 MTD/YTD/自然月/自然年的期权净现金流、卖出期权胜率、买入
 期权胜率和期权收益率。金额保持原币；正股交易、指派/行权交割现金、PnL、CNY
 换算和行情刷新不属于该报告。
 
@@ -269,18 +267,6 @@ root 来源及每个 JSONL 文件的 `ok`、`missing`、`valid_empty`、`partial
 ./om-agent run --tool option_performance_report \
   --input-json '{"config_key":"us","account":"lx","period":"mtd"}'
 ```
-
-分析层只保留同口径的期间、现金分量和标的归因视图：
-
-```bash
-./om-agent run --tool analysis_catalog \
-  --input-json '{"config_key":"us"}'
-
-./om-agent run --tool analysis_query \
-  --input-json '{"config_key":"us","sql":"select period_kind, accounts, option_net_cashflow_by_currency from option_period_performance"}'
-```
-
-`analysis_query` 只接受白名单 view 上的单条 SELECT / CTE；不要从旧报告猜 view 或 column 名。
 
 ### Close Advice
 
