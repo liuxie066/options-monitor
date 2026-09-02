@@ -252,12 +252,6 @@ def _build_ranked_row(
     return row
 
 
-def _first_top(df: pd.DataFrame) -> pd.Series | None:
-    if df.empty:
-        return None
-    return df.iloc[0]
-
-
 def _sell_put_extras(df: pd.DataFrame, top: pd.Series) -> dict[str, Any]:
     return {
         'earnings_evidence_status': _safe_text(top.get('earnings_evidence_status')),

@@ -3,14 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
-from domain.domain.strategy_vocab import STRATEGY_COMBO_YIELD
-from domain.domain.symbol_identity import canonical_symbol
 from src.application.ledger.api import (
     BrokerTradeOperation,
     CloseTargetResolution,
     LotCloseMatch as CloseMatch,
     LotCloseResolutionError,
-    find_unique_open_position_lot,
     list_close_lot_candidates,
     record_normalized_trade_event,
     resolve_broker_trade_close_targets,
@@ -726,103 +723,6 @@ def _combo_yield_payload_value(raw_payload: Any, key: str) -> str:
     if isinstance(snapshot, dict):
         return str(snapshot.get(key) or "").strip()
     return ""
-
-
-def _with_combo_yield_long_call_payload(
-    raw_payload: dict[str, Any],
-    *,
-    deal: NormalizedTradeDeal,
-    companion: dict[str, Any] | None,
-    inferred_position_effect: bool,
-) -> dict[str, Any]:
-    payload = dict(raw_payload or {})
-    if inferred_position_effect:
-        payload = _with_position_effect_inference_payload(
-            payload,
-            inferred_effect="open",
-            reason=(
-                "buy_call_with_companion_short_put"
-                if companion is not None
-                else "buy_call_without_close_target"
-            ),
-        )
-    group_id = _stable_combo_yield_group_id(deal)
-    payload.setdefault("strategy", STRATEGY_COMBO_YIELD)
-    payload.setdefault("leg_role", "enhancement_call")
-    if group_id:
-        payload.setdefault("strategy_group_id", group_id)
-    if companion is not None:
-        paired_record_id = str(companion.get("record_id") or "").strip()
-        if paired_record_id:
-            payload.setdefault("paired_short_put_record_id", paired_record_id)
-    snapshot = payload.get("strategy_snapshot")
-    if not isinstance(snapshot, dict):
-        payload["strategy_snapshot"] = {
-            "strategy": STRATEGY_COMBO_YIELD,
-            "strategy_source": "trade_intake_inference",
-            "leg_role": "enhancement_call",
-        }
-        if group_id:
-            payload["strategy_snapshot"]["strategy_group_id"] = group_id
-    return payload
-
-
-def _with_combo_yield_sell_put_payload(
-    raw_payload: dict[str, Any],
-    *,
-    deal: NormalizedTradeDeal,
-    companion: dict[str, Any],
-) -> dict[str, Any]:
-    payload = dict(raw_payload or {})
-    group_id = _stable_combo_yield_group_id(deal)
-    payload.setdefault("strategy", STRATEGY_COMBO_YIELD)
-    payload.setdefault("leg_role", "sell_put")
-    if group_id:
-        payload.setdefault("strategy_group_id", group_id)
-    paired_record_id = str(companion.get("record_id") or "").strip()
-    if paired_record_id:
-        payload.setdefault("paired_long_call_record_id", paired_record_id)
-    snapshot = payload.get("strategy_snapshot")
-    if not isinstance(snapshot, dict):
-        payload["strategy_snapshot"] = {
-            "strategy": STRATEGY_COMBO_YIELD,
-            "strategy_source": "trade_intake_inference",
-            "leg_role": "sell_put",
-        }
-        if group_id:
-            payload["strategy_snapshot"]["strategy_group_id"] = group_id
-    return payload
-
-
-def _stable_combo_yield_group_id(deal: NormalizedTradeDeal) -> str:
-    account = str(deal.internal_account or "").strip().lower()
-    symbol = canonical_symbol(deal.symbol) or str(deal.symbol or "").strip().upper()
-    expiration_ymd = str(deal.expiration_ymd or "").strip()
-    return f"combo_yield:{account}:{symbol}:{expiration_ymd}"
-
-
-def _combo_yield_companion_short_put(repo: OptionPositionsRepoLike, deal: NormalizedTradeDeal) -> dict[str, Any] | None:
-    return find_unique_open_position_lot(
-        repo,
-        broker=deal.broker,
-        account=deal.internal_account,
-        symbol=deal.symbol,
-        option_type="put",
-        side="short",
-        expiration_ymd=deal.expiration_ymd,
-    )
-
-
-def _combo_yield_companion_long_call(repo: OptionPositionsRepoLike, deal: NormalizedTradeDeal) -> dict[str, Any] | None:
-    return find_unique_open_position_lot(
-        repo,
-        broker=deal.broker,
-        account=deal.internal_account,
-        symbol=deal.symbol,
-        option_type="call",
-        side="long",
-        expiration_ymd=deal.expiration_ymd,
-    )
 
 
 def _close_candidate_summary(repo: OptionPositionsRepoLike, deal: NormalizedTradeDeal) -> dict[str, Any]:

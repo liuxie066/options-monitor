@@ -40,11 +40,6 @@ def _positive(value: Any) -> Decimal | None:
     return result if result is not None and result > 0 else None
 
 
-def _non_negative(value: Any) -> Decimal | None:
-    result = _decimal(value)
-    return result if result is not None and result >= 0 else None
-
-
 def _integer(value: Any) -> int | None:
     number = _positive(value)
     if number is None or number != number.to_integral_value():
