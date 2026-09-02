@@ -408,7 +408,13 @@ def test_freeform_answer_quality_scenarios(monkeypatch, scenario: Scenario) -> N
     requests: list[ModelRequest] = []
     turns: Iterator[ModelTurn] = iter(scenario.turns)
 
-    def call_tool(name: str, payload: dict[str, Any], *, allowed_tools: tuple[str, ...]) -> dict[str, Any]:
+    def call_tool(
+        name: str,
+        payload: dict[str, Any],
+        *,
+        allowed_tools: tuple[str, ...],
+        now_ms: int | None = None,
+    ) -> dict[str, Any]:
         assert name in allowed_tools
         calls.append((name, dict(payload)))
         return dict(scenario.tool_results[name])
@@ -454,7 +460,13 @@ def test_freeform_answer_quality_scenarios(monkeypatch, scenario: Scenario) -> N
 def test_freeform_loop_recovers_from_bad_arguments(monkeypatch) -> None:
     calls: list[dict[str, Any]] = []
 
-    def call_tool(name: str, payload: dict[str, Any], *, allowed_tools: tuple[str, ...]) -> dict[str, Any]:
+    def call_tool(
+        name: str,
+        payload: dict[str, Any],
+        *,
+        allowed_tools: tuple[str, ...],
+        now_ms: int | None = None,
+    ) -> dict[str, Any]:
         calls.append(dict(payload))
         return {
             "ok": True,

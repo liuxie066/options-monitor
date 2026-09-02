@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime
 from decimal import Decimal
 from enum import Enum
 from typing import Any, Iterable, Mapping
+from zoneinfo import ZoneInfo
 
 from domain.domain.option_position_identity import normalize_broker
 from domain.domain.performance.period import PeriodWindow
@@ -167,6 +169,10 @@ def _serialize_report(
 ) -> dict[str, Any]:
     period = reduction.period
     bundle = reduction.bundle
+    freshness_as_of = datetime.fromtimestamp(
+        (period.effective_end_exclusive_at_ms - 1) / 1000,
+        tz=ZoneInfo(period.reporting_timezone),
+    ).isoformat(timespec="milliseconds")
     result: dict[str, Any] = {
         "period": {
             "kind": period.kind,
@@ -182,6 +188,17 @@ def _serialize_report(
             "config_key": config_key,
             "accounts": list(accounts),
             "brokers": list(brokers),
+        },
+        "coverage": {
+            "status": "complete",
+            "complete_for": "full_query",
+            "included_count": 1,
+            "total_count": 1,
+            "omitted_count": 0,
+        },
+        "freshness": {
+            "status": "current" if period.is_current else "historical",
+            "as_of": freshness_as_of,
         },
         "option_net_cashflow": _json_value(bundle["option_net_cashflow"]),
         "sell_option_win_rate": _json_value(bundle["sell_option_win_rate"]),

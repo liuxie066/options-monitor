@@ -547,6 +547,15 @@ def test_inbound_command_surface_maps_core_read_only_commands() -> None:
     ytd_income = parse_assistant_command("/income sy ytd", now_fn=lambda: date(2026, 7, 17))
     assert ytd_income.arguments == {"account": "sy", "period": "ytd"}
 
+    previous_month = parse_assistant_command("/income 上月", now_fn=lambda: date(2026, 1, 3))
+    assert previous_month.arguments == {"period": "month", "month": "2025-12"}
+    exact_month = parse_assistant_command("/income sy 2026年5月", now_fn=lambda: date(2026, 7, 17))
+    assert exact_month.arguments == {"account": "sy", "period": "month", "month": "2026-05"}
+    recent_bare_month = parse_assistant_command("/income 12月", now_fn=lambda: date(2026, 7, 17))
+    assert recent_bare_month.arguments == {"period": "month", "month": "2025-12"}
+    exact_year = parse_assistant_command("/income 2025年", now_fn=lambda: date(2026, 7, 17))
+    assert exact_year.arguments == {"period": "year", "year": 2025}
+
     logs = parse_assistant_command("/logs 20260515T182459Z-474761")
     assert logs.intent_name == "runtime_logs"
     assert logs.arguments["run_id"] == "20260515T182459Z-474761"
@@ -3622,6 +3631,18 @@ def test_inbound_handle_omits_account_filter_when_account_not_provided(tmp_path:
         execute_tool_fn=_execute_tool,
         allowed_senders="feishu:ou_1",
     )
+    natural_month_income = handle_assistant_request(
+        AssistantRequest(
+            text="/income 2026-05",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_natural_month_income",
+            config_key="us",
+            audit_db=str(audit_db),
+        ),
+        execute_tool_fn=_execute_tool,
+        allowed_senders="feishu:ou_1",
+    )
     positions = handle_assistant_request(
         AssistantRequest(
             text="/positions",
@@ -3636,9 +3657,14 @@ def test_inbound_handle_omits_account_filter_when_account_not_provided(tmp_path:
     )
 
     assert income["ok"] is True
+    assert natural_month_income["ok"] is True
     assert positions["ok"] is True
     assert calls == [
         ("option_performance_report", {"config_key": "us", "period": "ytd"}),
+        (
+            "option_performance_report",
+            {"config_key": "us", "period": "month", "month": "2026-05"},
+        ),
         ("option_positions_read", {"config_key": "us", "action": "list", "query": {"status": "open", "limit": 50}}),
     ]
     with sqlite3.connect(audit_db) as conn:

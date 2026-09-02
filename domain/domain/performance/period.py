@@ -7,7 +7,7 @@ from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
 REPORTING_TIMEZONE = "Asia/Shanghai"
-_PERIOD_KINDS = frozenset({"mtd", "ytd"})
+_PERIOD_KINDS = frozenset({"mtd", "ytd", "month", "year"})
 
 
 def _parse_date(value: Any, *, field_name: str) -> date:
@@ -24,8 +24,32 @@ def _parse_date(value: Any, *, field_name: str) -> date:
         raise ValueError(f"{field_name} must be YYYY-MM-DD") from exc
 
 
+def _parse_month(value: Any) -> tuple[int, int]:
+    raw = str(value or "").strip()
+    if len(raw) != 7 or raw[4] != "-":
+        raise ValueError("month must be YYYY-MM")
+    try:
+        parsed = date.fromisoformat(f"{raw}-01")
+    except ValueError as exc:
+        raise ValueError("month must be YYYY-MM") from exc
+    return parsed.year, parsed.month
+
+
+def _parse_year(value: Any) -> int:
+    if isinstance(value, bool):
+        raise ValueError("year must be four digits")
+    raw = str(value or "").strip()
+    if len(raw) != 4 or not raw.isdigit():
+        raise ValueError("year must be four digits")
+    return int(raw)
+
+
 def _local_midnight_ms(value: date, tz: ZoneInfo) -> int:
     return int(datetime.combine(value, time.min, tzinfo=tz).timestamp() * 1000)
+
+
+def _next_month_start(year: int, month: int) -> date:
+    return date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
 
 
 @dataclass(frozen=True)
@@ -40,11 +64,24 @@ class PeriodRequest:
     def validate(self) -> "PeriodRequest":
         period = str(self.period or "mtd").strip().lower()
         if period not in _PERIOD_KINDS:
-            raise ValueError("period must be mtd or ytd")
+            raise ValueError("period must be one of: month, mtd, year, ytd")
+        relevant = {
+            "mtd": {"as_of_date"},
+            "ytd": {"as_of_date"},
+            "month": {"month"},
+            "year": {"year"},
+        }[period]
+        values = {
+            "as_of_date": self.as_of_date,
+            "month": self.month,
+            "year": self.year,
+            "start_date": self.start_date,
+            "end_date": self.end_date,
+        }
         extras = sorted(
             field
-            for field in ("month", "year", "start_date", "end_date")
-            if getattr(self, field) not in (None, "")
+            for field, value in values.items()
+            if field not in relevant and value not in (None, "")
         )
         if extras:
             raise ValueError(f"period={period} does not accept: {', '.join(extras)}")
@@ -113,7 +150,7 @@ def normalize_performance_period(
 
     kind = str(request.period or "mtd").strip().lower()
     if kind not in _PERIOD_KINDS:
-        raise ValueError("period must be mtd or ytd")
+        raise ValueError("period must be one of: month, mtd, year, ytd")
 
     tz = ZoneInfo(REPORTING_TIMEZONE)
     effective_now_ms = int(
@@ -124,14 +161,28 @@ def normalize_performance_period(
     now_local = datetime.fromtimestamp(effective_now_ms / 1000, tz=tz)
     today = now_local.date()
 
-    end_date = (
-        _parse_date(request.as_of_date, field_name="as_of_date")
-        if request.as_of_date
-        else today
-    )
-    if end_date > today:
-        raise ValueError("as_of_date cannot be in the future")
-    start_date = date(end_date.year, end_date.month if kind == "mtd" else 1, 1)
+    if kind in {"mtd", "ytd"}:
+        end_date = (
+            _parse_date(request.as_of_date, field_name="as_of_date")
+            if request.as_of_date
+            else today
+        )
+        if end_date > today:
+            raise ValueError("as_of_date cannot be in the future")
+        start_date = date(end_date.year, end_date.month if kind == "mtd" else 1, 1)
+    elif kind == "month":
+        year, month = _parse_month(request.month)
+        start_date = date(year, month, 1)
+        current_month = date(today.year, today.month, 1)
+        if start_date > current_month:
+            raise ValueError("month cannot be in the future")
+        end_date = today if start_date == current_month else _next_month_start(year, month) - timedelta(days=1)
+    else:
+        year = _parse_year(request.year)
+        if year > today.year:
+            raise ValueError("year cannot be in the future")
+        start_date = date(year, 1, 1)
+        end_date = today if year == today.year else date(year, 12, 31)
 
     start_at_ms = _local_midnight_ms(start_date, tz)
     current_ending = end_date == today
