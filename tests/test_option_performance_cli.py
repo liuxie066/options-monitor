@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from src.application.agent_tool_contracts import AgentToolError
 from src.interfaces.cli.main import parse_args
 from src.interfaces.cli import option_performance
 
@@ -14,7 +15,7 @@ def test_report_cli_uses_same_request_payload(monkeypatch: pytest.MonkeyPatch) -
 
     def _report(payload, **_kwargs):
         captured.update(payload)
-        return {"schema_version": "option_performance_report.output.v1", "period": {}, "scope": {}}, [], {}
+        return {"period": {}, "scope": {}, "quality": {}}, [], {}
 
     monkeypatch.setattr(option_performance, "option_performance_report_tool", _report)
     args = parse_args(
@@ -22,36 +23,63 @@ def test_report_cli_uses_same_request_payload(monkeypatch: pytest.MonkeyPatch) -
             "option-performance",
             "report",
             "--period",
-            "range",
-            "--start-date",
-            "2026-04-01",
-            "--end-date",
-            "2026-06-30",
+            "ytd",
+            "--as-of-date",
+            "2026-09-02",
             "--account",
             "LX",
             "--include-rows",
-            "--no-refresh-quotes",
         ]
     )
 
     result = option_performance.handle_option_performance_command(args)
 
-    assert result["schema_version"] == "option_performance_report.output.v1"
+    assert "schema_version" not in result
     assert captured == {
         "config_key": "us",
         "config_path": None,
         "data_config": None,
         "account": "LX",
         "broker": None,
-        "period": "range",
-        "as_of_date": None,
-        "month": None,
-        "year": None,
-        "start_date": "2026-04-01",
-        "end_date": "2026-06-30",
+        "period": "ytd",
+        "as_of_date": "2026-09-02",
         "include_rows": True,
-        "refresh_quotes": False,
     }
+
+
+def test_report_cli_normalizes_config_failure_to_read_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        option_performance,
+        "load_runtime_config",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("private path")),
+    )
+    args = parse_args(["option-performance", "report", "--period", "mtd"])
+
+    with pytest.raises(AgentToolError) as caught:
+        option_performance.handle_option_performance_command(args)
+
+    assert caught.value.code == "READ_ERROR"
+    assert caught.value.details == {"reason_codes": ["ledger_read_failed"]}
+    assert "private path" not in caught.value.message
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        ["--period", "month"],
+        ["--month", "2026-09"],
+        ["--year", "2026"],
+        ["--start-date", "2026-09-01"],
+        ["--end-date", "2026-09-02"],
+        ["--refresh-quotes"],
+        ["--no-refresh-quotes"],
+    ],
+)
+def test_report_cli_rejects_removed_period_and_quote_flags(flags: list[str]) -> None:
+    with pytest.raises(SystemExit):
+        parse_args(["option-performance", "report", *flags])
 
 
 def test_evidence_flags_are_mutually_exclusive() -> None:

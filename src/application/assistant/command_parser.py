@@ -12,32 +12,12 @@ from src.application.assistant.contracts import ControlCommand
 from src.application.assistant.position_query import parse_position_query_text, position_query_intent_arguments
 
 
-_MONTH_RE = re.compile(r"^(20\d{2})[-/.](0[1-9]|1[0-2])$")
-_YEAR_RE = re.compile(r"^(20\d{2})$")
-_YEAR_MONTH_CN_RE = re.compile(r"^(20\d{2})年(1[0-2]|0?[1-9]|十[一二]?|[一二三四五六七八九])月$")
-_MONTH_CN_RE = re.compile(r"^(1[0-2]|0?[1-9]|十[一二]?|[一二三四五六七八九])月$")
 _OPERATION_ID_RE = re.compile(r"^in_[A-Za-z0-9_.:-]+$")
 _VERSION_RE = re.compile(r"^v?(\d+\.\d+\.\d+(?:[-+][A-Za-z0-9_.-]+)?)$")
 _DEFAULT_COMMAND_ACCOUNTS = ("lx", "sy")
 _COMMANDS = commands_by_intent()
 _CONFIRM_TARGETS = operation_target_intents("confirm")
 _CANCEL_TARGETS = operation_target_intents("cancel")
-_CN_MONTHS = {
-    "一": 1,
-    "二": 2,
-    "三": 3,
-    "四": 4,
-    "五": 5,
-    "六": 6,
-    "七": 7,
-    "八": 8,
-    "九": 9,
-    "十": 10,
-    "十一": 11,
-    "十二": 12,
-}
-
-
 def parse_assistant_command(
     text: str,
     *,
@@ -70,7 +50,7 @@ def parse_assistant_command(
     if command in _COMMANDS["assigned_stock_position_query"]:
         return _parse_assigned_stock(command, args, accounts=account_set)
     if command in _COMMANDS["option_performance_report"]:
-        return _parse_income(command, args, today=today, accounts=account_set)
+        return _parse_income(command, args, accounts=account_set)
     if command in _COMMANDS["runtime_runs"]:
         return _parse_runs(command, args)
     if command in _COMMANDS["runtime_logs"]:
@@ -353,10 +333,9 @@ def _parse_manual_trade_update_command(command: str, args: list[str]) -> Control
     )
 
 
-def _parse_income(command: str, args: list[str], *, today: date, accounts: frozenset[str]) -> ControlCommand:
+def _parse_income(command: str, args: list[str], *, accounts: frozenset[str]) -> ControlCommand:
     account: str | None = None
     period = "mtd"
-    period_value: object | None = None
     for arg in args:
         normalized = arg.lower()
         if normalized in accounts:
@@ -367,42 +346,17 @@ def _parse_income(command: str, args: list[str], *, today: date, accounts: froze
             continue
         elif normalized in {"mtd", "本月", "this-month"}:
             period = "mtd"
-            period_value = None
         elif normalized in {"ytd", "今年", "年初至今", "year-to-date"}:
             period = "ytd"
-            period_value = None
-        elif normalized in {"上月", "last-month"}:
-            period = "month"
-            period_value = _previous_month(today)
-        elif _MONTH_RE.match(normalized):
-            period = "month"
-            period_value = normalized.replace("/", "-").replace(".", "-")
-        elif _YEAR_RE.match(normalized):
-            period = "year"
-            period_value = int(normalized)
-        elif match := _YEAR_MONTH_CN_RE.match(normalized):
-            month_number = _month_number(match.group(2))
-            if month_number is not None:
-                period = "month"
-                period_value = f"{int(match.group(1)):04d}-{month_number:02d}"
-        elif match := _MONTH_CN_RE.match(normalized):
-            month_number = _month_number(match.group(1))
-            if month_number is not None:
-                period = "month"
-                period_value = f"{today.year:04d}-{month_number:02d}"
         else:
             raise _bad_arg(
                 command,
                 arg,
-                "支持：/income、/income [账户] ytd、/income [账户] 2026、/income [账户] 2026-05、/income 上月。",
+                "支持：/income、/income [账户] mtd、/income [账户] ytd。",
             )
     payload: dict[str, object] = {"period": period}
     if account:
         payload["account"] = account
-    if period == "month" and period_value is not None:
-        payload["month"] = period_value
-    elif period == "year" and period_value is not None:
-        payload["year"] = period_value
     return _intent("option_performance_report", payload)
 
 
@@ -509,23 +463,6 @@ def _positive_int(value: str, name: str) -> int:
     if parsed <= 0:
         raise AgentToolError(code="INPUT_ERROR", message=f"{name} must be positive")
     return parsed
-
-
-def _previous_month(today: date) -> str:
-    year = today.year
-    month = today.month - 1
-    if month == 0:
-        year -= 1
-        month = 12
-    return f"{year:04d}-{month:02d}"
-
-
-def _month_number(raw: str) -> int | None:
-    if raw.isdigit():
-        value = int(raw)
-    else:
-        value = _CN_MONTHS.get(raw)
-    return value if value is not None and 1 <= value <= 12 else None
 
 
 def _reject_extra(command: str, args: list[str]) -> None:

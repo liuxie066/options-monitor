@@ -105,11 +105,17 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     performance_report = next(item for item in spec["tools"] if item["name"] == "option_performance_report")
     assert performance_report["risk_level"] == "read_only"
     assert performance_report["requires_confirm"] is False
-    assert performance_report["safe_default_input"]["config_key"] == "us"
-    assert performance_report["safe_default_input"]["period"] == "mtd"
-    assert performance_report["safe_default_input"]["refresh_quotes"] is True
-    assert "capital.period_realized_net_annualized_efficiency" in performance_report["output_contract"]["fact_fields"]
-    assert "capital.period_total_net_annualized_efficiency" in performance_report["output_contract"]["fact_fields"]
+    assert performance_report["safe_default_input"] == {
+        "config_key": "us",
+        "period": "mtd",
+        "include_rows": False,
+    }
+    assert {
+        "option_net_cashflow",
+        "sell_option_win_rate",
+        "buy_option_win_rate",
+        "option_return",
+    }.issubset(performance_report["output_contract"]["fact_fields"])
     option_positions_read = next(item for item in spec["tools"] if item["name"] == "option_positions_read")
     assert option_positions_read["risk_level"] == "read_only"
     assert option_positions_read["safe_default_input"]["action"] == "list"

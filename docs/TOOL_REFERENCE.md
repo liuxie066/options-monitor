@@ -98,9 +98,9 @@
 - `portfolio_pnl_bridge`
 - `portfolio_cash_bridge`
 
-`option_performance_report` 的 `presentation` 视图优先展示纯期权已实现毛收益和
-期权交易现金流，并提供相同口径的分账户行。这里的期权交易现金流不包含指派正股
-结算本金、结算费用、卖出回款或卖出费用；完整审计字段仍保留在原始报告中。
+`option_performance_report` 只提供 MTD/YTD 的期权净现金流、卖出期权胜率、买入
+期权胜率和期权收益率。金额保持原币；正股交易、指派/行权交割现金、PnL、CNY
+换算和行情刷新不属于该报告。
 
 ### 持仓、现金与组合
 
@@ -270,14 +270,14 @@ root 来源及每个 JSONL 文件的 `ok`、`missing`、`valid_empty`、`partial
   --input-json '{"config_key":"us","account":"lx","period":"mtd"}'
 ```
 
-利润、现金和活动是不同口径。需要跨月查询时，先用 `analysis_catalog` 查看当前 view 与字段：
+分析层只保留同口径的期间、现金分量和标的归因视图：
 
 ```bash
 ./om-agent run --tool analysis_catalog \
   --input-json '{"config_key":"us"}'
 
 ./om-agent run --tool analysis_query \
-  --input-json '{"config_key":"us","sql":"select month, account, period_total_pnl_net_cny from option_monthly_performance order by month, account"}'
+  --input-json '{"config_key":"us","sql":"select period_kind, accounts, option_net_cashflow_by_currency from option_period_performance"}'
 ```
 
 `analysis_query` 只接受白名单 view 上的单条 SELECT / CTE；不要从旧报告猜 view 或 column 名。

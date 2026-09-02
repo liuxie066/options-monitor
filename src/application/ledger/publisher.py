@@ -20,8 +20,7 @@ from domain.domain.ledger.position_fields import (
     EXPIRE_AUTO_CLOSE,
     SELL_TO_CLOSE,
     OpenPositionCommand,
-    LEGACY_POSITION_LOT_PATCH_FIELDS,
-    POSITION_LOT_STRATEGY_PATCH_FIELDS,
+    apply_strategy_metadata_patch,
     build_position_id,
     build_position_lot_fields,
     parse_exp_to_ms,
@@ -588,31 +587,22 @@ def _apply_strategy_patch_payload(
     fields: dict[str, Any],
     patch: dict[str, Any],
 ) -> dict[str, Any]:
-    out = dict(fields)
-    for key in (*POSITION_LOT_STRATEGY_PATCH_FIELDS, *LEGACY_POSITION_LOT_PATCH_FIELDS):
-        if key not in patch:
-            continue
-        value = patch.get(key)
-        if value in (None, ""):
-            out.pop(key, None)
-        elif key == "strategy_snapshot":
-            if isinstance(value, dict):
-                out[key] = dict(value)
-                family = str(value.get("strategy_family") or value.get("family") or "").strip().lower()
-                profile = str(
-                    value.get("strategy_profile") or value.get("profile") or value.get("strategy") or ""
-                ).strip().lower()
-                if family in {"", "sell_put"} and profile in {
-                    "legacy",
-                    "return",
-                    "return_first",
-                    "short_vol",
-                    "insurance_underwriting",
-                    "yield_first",
-                }:
-                    out.pop("yield_enhancement_mode", None)
-        else:
-            out[key] = str(value).strip()
+    out = apply_strategy_metadata_patch(fields, patch, include_legacy=True)
+    value = patch.get("strategy_snapshot")
+    if isinstance(value, dict):
+        family = str(value.get("strategy_family") or value.get("family") or "").strip().lower()
+        profile = str(
+            value.get("strategy_profile") or value.get("profile") or value.get("strategy") or ""
+        ).strip().lower()
+        if family in {"", "sell_put"} and profile in {
+            "legacy",
+            "return",
+            "return_first",
+            "short_vol",
+            "insurance_underwriting",
+            "yield_first",
+        }:
+            out.pop("yield_enhancement_mode", None)
     return out
 
 

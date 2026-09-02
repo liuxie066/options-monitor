@@ -80,7 +80,7 @@ Use the launcher as a local command tool. Typical pattern:
 ./om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","account":"lx"}'
 ./om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","account":"sy"}'
 ./om-agent run --tool candidate_rank_explain --input-json '{"mode":"put","top_n":5}'
-./om-agent run --tool option_performance_report --input-json '{"config_key":"us","account":"lx","period":"month","month":"2026-04"}'
+./om-agent run --tool option_performance_report --input-json '{"config_key":"us","account":"lx","period":"mtd"}'
 ./om-agent run --tool option_positions_read --input-json '{"config_key":"us","action":"list","account":"lx","status":"open"}'
 ./om-agent run --tool get_close_advice --input-json '{"config_key":"us"}'
 ./om-agent run --tool prepare_close_advice_inputs --input-json '{"config_key":"us"}'
@@ -98,18 +98,10 @@ PORTFOLIO_SERVICE_URL=http://127.0.0.1:8765 ./om-agent run --tool portfolio_assi
 业务字段保留在结果顶层，并补充 `source`、`scope`、`freshness`。portfolio-management
 返回 `success=false`、HTTP 错误、无效 JSON 或超时时，工具返回标准失败 envelope。
 
-`portfolio_pnl_bridge` 和 `portfolio_cash_bridge` 都要求
-`period=mtd|ytd`、`as_of_month=YYYY-MM` 和账户列表，并使用 PM 返回的实际期末日期
-调用只读的 `option_performance_report`。PnL 桥使用 PM
-`/api/v1/analysis/capital-facts` 的
-期初/期末总资产、外部出入金和期间盈亏，以及
-`pnl.period_total_net`；指派股票本金不会进入 PnL 方程。Cash 桥只使用 PM
-现金事实尚未由 PM onboarding，因此 Cash 桥直接返回
-`portfolio_cash_facts_not_onboarded`，不会请求占位接口，也不会拿总资产代替现金。
-未来只有在 PM 独立交付 cash/MMF、期初期末和外部现金流契约后才启用该桥。
-两者都要求 CNY、期末日期、FX 和实际费用覆盖对齐；缺失或不完整证据保持
-`amount=null`，不会按 0 处理。
-输出包含结构化 `steps[]`、显式对账残差和 `fallback_text`，不生成图片。
+`portfolio_pnl_bridge` 和 `portfolio_cash_bridge` 的路由仍保留，但期权收益模块不再
+提供 PnL 或包含指派正股现金的组合现金事实。因此两者分别返回
+`authoritative_option_pnl_source_unavailable` 和
+`combined_option_assignment_cash_source_required`，不会从期权净现金流推导替代值。
 
 `portfolio_assignment_scenario` 只接受 `accounts`。它通过 PM 的
 `portfolio.valuation_evidence.v1` 只读快照取得全部非期权资产、当前报价和显式 FX，

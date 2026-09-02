@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -20,7 +19,6 @@ from src.application.ledger.commands import record_manual_assignment
 from src.application.ledger.manual_trades import persist_manual_open_event
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.ledger.writer import persist_trade_event_object
-from src.application.performance.service import build_option_period_performance
 from src.application.positions.workflows import execute_manual_assigned_stock_sale
 
 
@@ -57,15 +55,6 @@ def _open_event(event_id: str, *, price: float) -> TradeEvent:
     )
 
 
-def _report(repo: SQLiteOptionPositionsRepository) -> dict:
-    return build_option_period_performance(
-        repo,
-        period={"period": "month", "month": "2026-07"},
-        account="lx",
-        now_ms=NOW_MS,
-    )
-
-
 def test_trade_write_freezes_cny_and_duplicate_keeps_original_booking_rate(
     tmp_path: Path,
     monkeypatch,
@@ -91,10 +80,6 @@ def test_trade_write_freezes_cny_and_duplicate_keeps_original_booking_rate(
     assert stored["option_trade_cash_gross"]["fx_rate"] == "7.2"
     assert stored["option_trade_cash_gross"]["amount_cny"] == "1440"
     assert stored["option_fee_cash"]["amount_cny"] == "-18.16776"
-    report = _report(repo)
-    assert report["cash"]["option_trade_cash_gross"]["cny"] == 1440.0
-    assert report["cash"]["option_fee_cash"]["cny"] == -18.16776
-    assert report["cash"]["total_cash_change_net"]["cny"] == 1421.83224
 
 
 def test_missing_fx_is_pending_but_zero_cash_needs_no_rate(tmp_path: Path, monkeypatch) -> None:
@@ -122,12 +107,6 @@ def test_missing_fx_is_pending_but_zero_cash_needs_no_rate(tmp_path: Path, monke
     pending = pending_repo.list_trade_events()[0]["raw_payload"]["cash_conversions"]["option_trade_cash_gross"]
     assert pending["status"] == "pending"
     assert pending["amount_cny"] is None
-    pending_metric = _report(pending_repo)["cash"]["option_trade_cash_gross"]
-    assert pending_metric["cny"] is None
-    assert pending_metric["fx_fact_ids"] == [pending["conversion_id"]]
-    assert pending_metric["missing"] == [
-        "cash_conversion_pending:option_trade_cash_gross:pending:USDCNY booking FX unavailable"
-    ]
     assert zero["status"] == "observed"
     assert zero["method"] == "zero_identity"
     assert zero["amount_cny"] == "0"
@@ -226,10 +205,7 @@ def test_historical_business_day_cash_conversion_rejects_invalid_provenance(
     assert issue == reason
 
 
-def test_performance_keeps_native_cash_but_rejects_forged_cny(
-    tmp_path: Path,
-) -> None:
-    repo = SQLiteOptionPositionsRepository(tmp_path / "forged.sqlite3")
+def test_forged_cny_is_rejected_at_conversion_boundary() -> None:
     event = _open_event("forged", price=2.0)
     conversion = build_cash_conversion(
         cash_fact_id="option_trade_cash_gross:forged",
@@ -243,26 +219,16 @@ def test_performance_keeps_native_cash_but_rejects_forged_cny(
         observed_at_ms=event.event_time_ms + 1_000,
     )
     conversion["amount_cny"] = "999999"
-    repo.upsert_trade_event(
-        replace(
-            event,
-            raw_payload={
-                **event.raw_payload,
-                "cash_conversions": {
-                    "option_trade_cash_gross": conversion,
-                },
-            },
-        )
+    amount_cny, issue = validate_observed_cash_conversion(
+        conversion,
+        cash_fact_id="option_trade_cash_gross:forged",
+        native_amount=200,
+        native_currency="USD",
+        effective_at_ms=event.event_time_ms,
     )
 
-    metric = _report(repo)["cash"]["option_trade_cash_gross"]
-
-    assert metric["by_currency"] == {"USD": 200.0}
-    assert metric["cny"] is None
-    assert metric["status"] == "partial"
-    assert metric["missing"] == [
-        "cash_conversion_corrupt:option_trade_cash_gross:forged:fx_arithmetic_mismatch"
-    ]
+    assert amount_cny is None
+    assert issue == "fx_arithmetic_mismatch"
 
 
 def test_assignment_and_assigned_stock_sale_store_their_own_cny_cash(
@@ -319,6 +285,3 @@ def test_assignment_and_assigned_stock_sale_store_their_own_cny_cash(
     sale_conversions = repo.list_assigned_stock_events()[0]["cash_conversions"]
     assert assignment_conversions["stock_settlement_cash_gross"]["amount_cny"] == "-72000"
     assert sale_conversions["assigned_stock_sale_cash_gross"]["amount_cny"] == "75600"
-    report = _report(repo)
-    assert report["cash"]["stock_settlement_cash_gross"]["cny"] == -72000.0
-    assert report["cash"]["assigned_stock_sale_cash_gross"]["cny"] == 75600.0

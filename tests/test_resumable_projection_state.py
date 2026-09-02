@@ -342,6 +342,13 @@ def test_domain_full_then_tail_matches_full_at_every_prefix() -> None:
             ),
             entry_mode="tail",
         )
+        if any(
+            event.event_type == "adjust"
+            for event in events[prefix_length:]
+        ):
+            assert resumed.requires_full_replay is True
+            assert resumed.full_replay_reason == "tail_control_event"
+            continue
         assert resumed.eligible is True
         assert resumed.state == full.state
         assert _lots_payload(resumed.active_lots) == _lots_payload(full.active_lots)
@@ -544,6 +551,13 @@ def test_stateful_publisher_matches_full_fields_at_every_prefix() -> None:
             publication_state=publication_state,
             entry_mode="tail",
         )
+        if any(
+            event.event_type == "adjust"
+            for event in events[prefix_length:]
+        ):
+            assert resumed.requires_full_replay is True
+            assert resumed.full_replay_reason == "tail_control_event"
+            continue
         assert resumed.eligible is True
         assert _records_by_id(resumed.active_lots) == _records_by_id(
             full.active_lots

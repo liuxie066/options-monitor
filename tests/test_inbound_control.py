@@ -544,21 +544,8 @@ def test_inbound_command_surface_maps_core_read_only_commands() -> None:
     assert all_income.intent_name == "option_performance_report"
     assert all_income.arguments == {"period": "mtd"}
 
-    last_month = parse_assistant_command("/income lx 上月", now_fn=lambda: date(2026, 1, 3))
-    assert last_month.arguments == {"account": "lx", "period": "month", "month": "2025-12"}
-
-    june_income = parse_assistant_command("/income sy 6月", now_fn=lambda: date(2026, 6, 1))
-    assert june_income.intent_name == "option_performance_report"
-    assert june_income.arguments == {"account": "sy", "period": "month", "month": "2026-06"}
-
-    june_income_year = parse_assistant_command("/income sy 2026年6月", now_fn=lambda: date(2026, 6, 1))
-    assert june_income_year.arguments == {"account": "sy", "period": "month", "month": "2026-06"}
-
     ytd_income = parse_assistant_command("/income sy ytd", now_fn=lambda: date(2026, 7, 17))
     assert ytd_income.arguments == {"account": "sy", "period": "ytd"}
-
-    year_income = parse_assistant_command("/income 2025", now_fn=lambda: date(2026, 7, 17))
-    assert year_income.arguments == {"period": "year", "year": 2025}
 
     logs = parse_assistant_command("/logs 20260515T182459Z-474761")
     assert logs.intent_name == "runtime_logs"
@@ -829,7 +816,7 @@ def test_inbound_manual_trade_preview_and_confirm_open(monkeypatch: pytest.Monke
 
     preview = handle_assistant_request(
         AssistantRequest(
-            text="/record-open sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
+            text="/record-open sy NVDA short put strike 100 exp 2027-06-18 1张 premium 2.5 multiplier 100",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_open_preview",
@@ -1045,7 +1032,7 @@ def test_inbound_manual_open_repairs_currency_from_symbol(monkeypatch: pytest.Mo
 
     preview = handle_assistant_request(
         AssistantRequest(
-            text="/record-open sy PDD short put strike 78 exp 2026-06-26 1张 premium 1.43 multiplier 100 currency:HKD",
+            text="/record-open sy PDD short put strike 78 exp 2027-06-25 1张 premium 1.43 multiplier 100 currency:HKD",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_open_currency_repair",
@@ -1117,6 +1104,7 @@ def test_inbound_record_expiry_creates_independent_previews_and_confirms_one(
             underlying_share_locked=100 if option_type == "call" else None,
             note=None,
             dry_run=False,
+            opened_at_ms=int(datetime(2026, 7, 1, tzinfo=timezone.utc).timestamp() * 1000),
             request_id=f"inbound-seed-{symbol}-{option_type}-{strike}",
         )
 
@@ -1390,7 +1378,7 @@ def test_inbound_manual_trade_confirm_rejects_signature_mismatch(monkeypatch: py
 
     preview = handle_assistant_request(
         AssistantRequest(
-            text="/record-open sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
+            text="/record-open sy NVDA short put strike 100 exp 2027-06-18 1张 premium 2.5 multiplier 100",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_open_preview_signed",
@@ -1605,7 +1593,7 @@ def test_inbound_manual_trade_update_pending_preview_then_confirm(monkeypatch: p
 
     preview = handle_assistant_request(
         AssistantRequest(
-            text="/record-open sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
+            text="/record-open sy NVDA short put strike 100 exp 2027-06-18 1张 premium 2.5 multiplier 100",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_update_open_preview",
@@ -2813,7 +2801,7 @@ def test_inbound_bare_confirm_is_scoped_to_conversation(monkeypatch: pytest.Monk
 
     preview = handle_assistant_request(
         AssistantRequest(
-            text="/record-open sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
+            text="/record-open sy NVDA short put strike 100 exp 2027-06-18 1张 premium 2.5 multiplier 100",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_conversation_preview",
@@ -2934,7 +2922,7 @@ def test_inbound_manual_trade_preview_and_confirm_close(monkeypatch: pytest.Monk
 
     open_preview = handle_assistant_request(
         AssistantRequest(
-            text="/record-open sy 0700.HK short put strike 450 exp 2026-06-19 2张 premium 2.5 multiplier 500",
+            text="/record-open sy 0700.HK short put strike 450 exp 2027-06-18 2张 premium 2.5 multiplier 500",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_close_open_preview",
@@ -2958,7 +2946,7 @@ def test_inbound_manual_trade_preview_and_confirm_close(monkeypatch: pytest.Monk
 
     close_preview = handle_assistant_request(
         AssistantRequest(
-            text="/record-close sy HK.00700 short put strike 450 exp 2026-06-19 1张 close 1.0",
+            text="/record-close sy HK.00700 short put strike 450 exp 2027-06-18 1张 close 1.0",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_close_preview",
@@ -3570,7 +3558,7 @@ def test_inbound_handle_executes_read_only_tool_and_replays_duplicate_message(tm
         )
 
     request = AssistantRequest(
-        text="/income sy 2026-05",
+        text="/income sy ytd",
         sender_id="ou_1",
         channel="feishu",
         message_id="msg_1",
@@ -3584,11 +3572,11 @@ def test_inbound_handle_executes_read_only_tool_and_replays_duplicate_message(tm
     assert first["ok"] is True
     assert first["data"]["tool_call"] == {
         "tool_name": "option_performance_report",
-        "payload": {"config_key": "us", "account": "sy", "period": "month", "month": "2026-05"},
+        "payload": {"config_key": "us", "account": "sy", "period": "ytd"},
     }
     assert first["data"]["response_text"].startswith("期权收益统计完成")
     assert second["meta"]["idempotent_replay"] is True
-    assert calls == [("option_performance_report", {"config_key": "us", "account": "sy", "period": "month", "month": "2026-05"})]
+    assert calls == [("option_performance_report", {"config_key": "us", "account": "sy", "period": "ytd"})]
 
     with sqlite3.connect(audit_db) as conn:
         row = conn.execute(
@@ -3607,7 +3595,7 @@ def test_inbound_handle_executes_read_only_tool_and_replays_duplicate_message(tm
     assert control["action_kind"] == "tool"
     assert control["reason"] == "read_only_capability"
     assert control["tool_name"] == "option_performance_report"
-    assert control["payload"] == {"config_key": "us", "account": "sy", "period": "month", "month": "2026-05"}
+    assert control["payload"] == {"config_key": "us", "account": "sy", "period": "ytd"}
     assert control["response_text"] == first["data"]["response_text"]
     assert control["executed"] is True
     assert control["ok"] is True
@@ -3624,7 +3612,7 @@ def test_inbound_handle_omits_account_filter_when_account_not_provided(tmp_path:
 
     income = handle_assistant_request(
         AssistantRequest(
-            text="/income 2026-05",
+            text="/income ytd",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_income",
@@ -3650,7 +3638,7 @@ def test_inbound_handle_omits_account_filter_when_account_not_provided(tmp_path:
     assert income["ok"] is True
     assert positions["ok"] is True
     assert calls == [
-        ("option_performance_report", {"config_key": "us", "period": "month", "month": "2026-05"}),
+        ("option_performance_report", {"config_key": "us", "period": "ytd"}),
         ("option_positions_read", {"config_key": "us", "action": "list", "query": {"status": "open", "limit": 50}}),
     ]
     with sqlite3.connect(audit_db) as conn:
@@ -4095,7 +4083,7 @@ def test_inbound_renderer_summarizes_runs_and_logs() -> None:
     assert '"phase"' not in logs_text
 
 
-def test_inbound_audit_keeps_monthly_income_diagnostics(tmp_path: Path) -> None:
+def test_inbound_audit_keeps_income_diagnostics(tmp_path: Path) -> None:
     audit_db = tmp_path / "inbound.sqlite3"
 
     def _execute_tool(tool_name: str, payload: dict) -> dict:
@@ -4122,7 +4110,7 @@ def test_inbound_audit_keeps_monthly_income_diagnostics(tmp_path: Path) -> None:
 
     out = handle_assistant_request(
         AssistantRequest(
-            text="/income sy 2026-05",
+            text="/income sy mtd",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_diag",
@@ -4212,7 +4200,7 @@ def test_feishu_payload_adapter_extracts_text_message_and_calls_inbound(tmp_path
                 "message_id": "om_1",
                 "chat_id": "oc_1",
                 "message_type": "text",
-                "content": json.dumps({"text": '<at user_id="bot">Bot</at> /income sy 2026-05'}, ensure_ascii=False),
+                "content": json.dumps({"text": '<at user_id="bot">Bot</at> /income sy ytd'}, ensure_ascii=False),
             },
         },
     }
@@ -4228,7 +4216,7 @@ def test_feishu_payload_adapter_extracts_text_message_and_calls_inbound(tmp_path
 
     request = feishu_payload_to_inbound_request(payload, audit_db=str(tmp_path / "audit.sqlite3"))
     assert request == AssistantRequest(
-        text="/income sy 2026-05",
+        text="/income sy ytd",
         sender_id="ou_1",
         channel="feishu",
         message_id="om_1",
@@ -4247,7 +4235,7 @@ def test_feishu_payload_adapter_extracts_text_message_and_calls_inbound(tmp_path
     assert out["ok"] is True
     assert out["tool_name"] == "inbound.feishu"
     assert out["data"]["response_text"].startswith("期权收益统计完成")
-    assert calls == [("option_performance_report", {"config_key": "us", "account": "sy", "period": "month", "month": "2026-05"})]
+    assert calls == [("option_performance_report", {"config_key": "us", "account": "sy", "period": "ytd"})]
 
 
 def test_feishu_payload_adapter_assistant_reads_assistant_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

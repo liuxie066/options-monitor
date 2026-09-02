@@ -1555,20 +1555,14 @@ Host callback cancellation -> Python `run.cancel` -> cancelled
 The two answer-repair transitions may occur once each and in either order,
 subject to the same global limits.
 
-At the Copilot Host boundary, `option_performance_report` has one narrow
-current-message authorization fence with two branches. If the entire immutable
-current message matches the affirmative form
-`截至 YYYY-MM-DD 的 M月期权收益率`, with only the existing optional whitespace,
-`总计`, `不分账号`, comma, and terminal punctuation variants, the Host requires
-canonical `period=mtd` and an equal `as_of_date`; the date must be
-Gregorian-valid and its month must match the stated month. Any mismatch,
-including non-MTD or a missing date, is `INPUT_ERROR`. For every other message,
-the stale/ambiguous fence runs only when the canonical payload is MTD with a
-non-empty `as_of_date`: no cutoff indicator removes the model-supplied date,
-while a recognized cutoff indicator rejects before the business read. Thus
-non-affirmative non-MTD calls and MTD calls without `as_of_date` do not enter
-the stale/ambiguous fence. Neither branch selects a tool or period, inspects
-Session history, or changes direct Tool Gateway behavior.
+At the Copilot Host boundary, `option_performance_report` accepts only MTD or
+YTD. MTD keeps the strict affirmative cutoff form
+`截至 YYYY-MM-DD 的 M月期权收益率`; the date must be valid, equal the payload
+`as_of_date`, and match the stated month. YTD `as_of_date` is retained only
+when the same ISO date is explicitly present in the current message. Otherwise
+a model-supplied cutoff is removed, or an ambiguous cutoff indicator is rejected
+before the business read. Month/year/range and quote-refresh arguments are not
+in the Copilot tool schema.
 
 Before `proposed`, cancellation wins and the current turn is not persisted.
 After `proposed`, the existing Host admission CAS remains the sole winner. The
