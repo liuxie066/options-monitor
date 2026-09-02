@@ -69,6 +69,7 @@ _OPTION_PERFORMANCE_CUTOFF_INDICATOR = re.compile(
     r"(?<!\d)\d{4}年\d{1,2}月\d{1,2}日|"
     r"(?<!\d)\d{1,2}月\d{1,2}日"
 )
+_OPTION_PERFORMANCE_PERIOD_TOKEN = re.compile(r"\b(?:MTD|YTD)\b", re.IGNORECASE)
 _OPTION_PERFORMANCE_NATURAL_SELECTOR = (
     r"20\d{2}-(?:0[1-9]|1[0-2])|"
     r"20\d{2}年(?:0?[1-9]|1[0-2])月|"
@@ -77,6 +78,10 @@ _OPTION_PERFORMANCE_NATURAL_SELECTOR = (
 _OPTION_PERFORMANCE_NATURAL_SLOTS = (
     re.compile(rf"期权\s*({_OPTION_PERFORMANCE_NATURAL_SELECTOR})\s*收益率?"),
     re.compile(rf"({_OPTION_PERFORMANCE_NATURAL_SELECTOR})\s*期权收益率?"),
+)
+_OPTION_PERFORMANCE_PHRASE_SLOTS = (
+    re.compile(r"期权\s*([^\s，,。]+)\s*收益率?"),
+    re.compile(r"([^\s，,。]+)\s*期权收益率?"),
 )
 _ANSWER_ADMISSION_CATEGORIES = {
     "claim_scope_not_covered": "coverage",
@@ -95,69 +100,86 @@ _ANSWER_ADMISSION_RECEIPTS = {
 }
 
 
-def _constrain_option_performance_cutoff(
-    payload: dict[str, Any],
+def _bind_option_performance_scope(
+    arguments: dict[str, Any],
     *,
     user_message: str,
-    operating_date: date,
+    operating_date: date | None,
+    fixed_month: Any = None,
 ) -> str | None:
+    if operating_date is None:
+        return "option performance requires a valid frozen operating date"
+    expected: dict[str, Any] | None = None
     period_match = _OPTION_PERFORMANCE_PERIOD_CUTOFF.fullmatch(user_message)
     if period_match is not None:
         try:
             cutoff = date.fromisoformat(period_match.group("date"))
         except ValueError:
             return "option performance cutoff is not authorized by the current message"
-        if (
-            payload.get("period") != period_match.group("period").lower()
-            or payload.get("as_of_date") != cutoff.isoformat()
-        ):
+        if cutoff > operating_date:
             return "option performance cutoff is not authorized by the current message"
-        return None
-    match = _OPTION_PERFORMANCE_CUTOFF.fullmatch(user_message)
-    if match is not None:
+        expected = {
+            "period": period_match.group("period").lower(),
+            "as_of_date": cutoff.isoformat(),
+        }
+    elif match := _OPTION_PERFORMANCE_CUTOFF.fullmatch(user_message):
         try:
             cutoff = date.fromisoformat(match.group("date"))
         except ValueError:
             return "option performance cutoff is not authorized by the current message"
-        if (
-            cutoff.month != int(match.group("month"))
-            or payload.get("period") != "mtd"
-            or payload.get("as_of_date") != cutoff.isoformat()
-        ):
+        if cutoff > operating_date or cutoff.month != int(match.group("month")):
             return "option performance cutoff is not authorized by the current message"
-        return None
-    natural_selectors = [
-        match.group(1)
-        for pattern in _OPTION_PERFORMANCE_NATURAL_SLOTS
-        for match in pattern.finditer(user_message)
-    ]
-    if len(natural_selectors) > 1:
-        return "option performance period is ambiguous in the current message"
-    if natural_selectors:
-        expected = _natural_option_performance_scope(
-            natural_selectors[0],
+        expected = {"period": "mtd", "as_of_date": cutoff.isoformat()}
+    else:
+        natural_selectors = [
+            match.group(1)
+            for pattern in _OPTION_PERFORMANCE_NATURAL_SLOTS
+            for match in pattern.finditer(user_message)
+        ]
+        if len(natural_selectors) > 1:
+            return "option performance period is ambiguous in the current message"
+        if natural_selectors:
+            if _OPTION_PERFORMANCE_CUTOFF_INDICATOR.search(user_message):
+                return "option performance cutoff is not authorized by the current message"
+            expected = _natural_option_performance_scope(
+                natural_selectors[0],
+                operating_date=operating_date,
+            )
+            if expected is None:
+                return "option performance period is not authorized by the current message"
+        elif (
+            _OPTION_PERFORMANCE_PERIOD_TOKEN.search(user_message) is None
+            and any(pattern.search(user_message) for pattern in _OPTION_PERFORMANCE_PHRASE_SLOTS)
+        ):
+            return "option performance period is invalid in the current message"
+
+    fixed_expected: dict[str, Any] | None = None
+    if fixed_month not in (None, ""):
+        fixed_expected = _natural_option_performance_scope(
+            str(fixed_month).strip(),
             operating_date=operating_date,
         )
-        if expected is None:
-            return "option performance period is not authorized by the current message"
-        if any(
-            str(payload.get(key)) != str(value)
-            if key == "year"
-            else payload.get(key) != value
-            for key, value in expected.items()
-        ) or any(
-            payload.get(key) not in (None, "")
-            for key in ({"as_of_date", "month", "year"} - set(expected))
-        ):
-            return "option performance period is not authorized by the current message"
+        if fixed_expected is None or fixed_expected.get("period") != "month":
+            return "fixed option performance month is invalid"
+    if fixed_expected is not None and expected is not None and fixed_expected != expected:
+        return "option performance period conflicts with the fixed request scope"
+    authoritative = fixed_expected or expected
+    if authoritative is not None:
+        for name in ("period", "as_of_date", "month", "year"):
+            arguments.pop(name, None)
+        arguments.update(authoritative)
         return None
-    if payload.get("period") in {"month", "year"}:
+
+    if arguments.get("period") in {"month", "year"} or any(
+        arguments.get(name) not in (None, "") for name in ("month", "year")
+    ):
         return "option performance period is not authorized by the current message"
-    if payload.get("period") not in {"mtd", "ytd"} or payload.get("as_of_date") in (None, ""):
-        return None
-    if _OPTION_PERFORMANCE_CUTOFF_INDICATOR.search(user_message):
-        return "option performance cutoff is not authorized by the current message"
-    payload.pop("as_of_date", None)
+    if "as_of_date" in arguments:
+        if arguments.get("as_of_date") not in (None, "") and _OPTION_PERFORMANCE_CUTOFF_INDICATOR.search(
+            user_message
+        ):
+            return "option performance cutoff is not authorized by the current message"
+        arguments.pop("as_of_date")
     return None
 
 
@@ -192,17 +214,20 @@ def _natural_option_performance_scope(
     return None
 
 
-def _contract_operating_date(contract: ExecutionContract) -> date:
+def _contract_operating_date(contract: ExecutionContract) -> date | None:
     try:
         return date.fromisoformat(str(contract.input.get("operating_date") or ""))
-    except ValueError:
+    except (TypeError, ValueError):
         report_now_ms = contract.input.get("report_now_ms")
-        if report_now_ms is not None:
+        if not isinstance(report_now_ms, int) or isinstance(report_now_ms, bool):
+            return None
+        try:
             return datetime.fromtimestamp(
-                int(report_now_ms) / 1000,
+                report_now_ms / 1000,
                 tz=ZoneInfo("Asia/Shanghai"),
             ).date()
-        return date.today()
+        except (OSError, OverflowError, TypeError, ValueError):
+            return None
 
 
 @contextmanager
@@ -572,6 +597,8 @@ def run_contract(
         tool_name = str(call.get("tool_name") or "")
         call_id = str(call.get("call_id") or "")
         arguments = dict(call.get("arguments") or {})
+        model_input_audit: dict[str, Any] | None = None
+        model_input_hash: str | None = None
         if tool_name != "submit_answer":
             pending_answer_admission_category = None
 
@@ -740,7 +767,18 @@ def run_contract(
             }
             event_log.record(
                 "tool_result",
-                {**observation, "tool_call_id": call_id},
+                {
+                    **observation,
+                    "tool_call_id": call_id,
+                    **(
+                        {
+                            "model_input": model_input_audit,
+                            "model_input_hash": model_input_hash,
+                        }
+                        if model_input_audit is not None and model_input_hash is not None
+                        else {}
+                    ),
+                },
                 observation["ref"],
             )
             return observation
@@ -800,9 +838,33 @@ def run_contract(
                 or not definition.is_pure_read()
             ):
                 return reject("POLICY_ERROR", "tool is outside the Host read-only allowlist")
-            payload, payload_error = copilot_tools.build_tool_payload(
+            model_input_audit = copilot_tools.audit_tool_input(
                 tool_name,
                 arguments,
+                model_proposal=True,
+            )
+            model_input_hash = "sha256:" + hashlib.sha256(
+                json.dumps(
+                    arguments,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                ).encode("utf-8")
+            ).hexdigest()
+            prepared_arguments = dict(arguments)
+            if tool_name in {"analysis_query", "option_performance_report"}:
+                binding_error = _bind_option_performance_scope(
+                    prepared_arguments,
+                    user_message=str(contract.input.get("user_message") or ""),
+                    operating_date=_contract_operating_date(contract),
+                    fixed_month=manifest.fixed_tool_input.get("month"),
+                )
+                if binding_error:
+                    return reject("INPUT_ERROR", binding_error)
+            payload, payload_error = copilot_tools.build_tool_payload(
+                tool_name,
+                prepared_arguments,
                 static_payloads=manifest.tool_static_payloads,
                 fixed_input=manifest.fixed_tool_input,
             )
@@ -811,21 +873,18 @@ def run_contract(
                     "INPUT_ERROR",
                     payload_error or "tool input could not be prepared",
                 )
-            if tool_name in {"analysis_query", "option_performance_report"}:
-                cutoff_error = _constrain_option_performance_cutoff(
-                    payload,
-                    user_message=str(contract.input.get("user_message") or ""),
-                    operating_date=_contract_operating_date(contract),
-                )
-                if cutoff_error:
-                    return reject("INPUT_ERROR", cutoff_error)
+            audit_inputs = {
+                "model_input": model_input_audit,
+                "model_input_hash": model_input_hash,
+                "tool_input": copilot_tools.audit_tool_input(tool_name, payload),
+            }
             event_log.record(
                 "tool_call",
                 copilot_tools.audit_tool_event_payload(
                     {
                         "tool_call_id": call_id,
                         "tool_name": tool_name,
-                        "tool_input": payload,
+                        **audit_inputs,
                     }
                 ),
             )
@@ -890,7 +949,7 @@ def run_contract(
                             {
                                 **failed_observation,
                                 "tool_call_id": call_id,
-                                "tool_input": payload,
+                                **audit_inputs,
                             }
                         ),
                         str(failed_observation.get("ref") or "") or None,
@@ -946,7 +1005,7 @@ def run_contract(
                     {
                         **observation,
                         "tool_call_id": call_id,
-                        "tool_input": payload,
+                        **audit_inputs,
                     }
                 ),
                 str(observation.get("ref") or "") or None,
@@ -1322,6 +1381,8 @@ def _submit_answer_description() -> dict[str, Any]:
         "description": (
             "提交经过证据范围和新鲜度校验的结构化最终答案。"
             "observation_ids 只能引用本次 request 内成功读取的证据，不得复用历史会话 observation。"
+            "conceptual 模式必须传 claims=[]；evidence 模式必须至少提交一条 claim，"
+            "并引用本次 request 内成功读取返回的 observation ID。"
             "claim kind 必须匹配证据 freshness：current/fresh + as_of 使用 current_fact；"
             "historical + as_of 使用 historical_fact 或 derived_fact；"
             "unknown/stale 只能在不完整答案中使用 judgment。"

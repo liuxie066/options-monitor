@@ -374,6 +374,64 @@ def audit_tool_event_payload(value: dict[str, Any]) -> dict[str, Any]:
     return _replace_cursor_values_with_hashes(value, redacted)
 
 
+def audit_tool_input(
+    tool_name: str,
+    value: dict[str, Any],
+    *,
+    model_proposal: bool = False,
+) -> dict[str, Any]:
+    """Keep useful tool-input audit evidence without retaining free-form bodies."""
+
+    definition = get_tool_definition(tool_name)
+    if definition is None:
+        supported_fields: set[str] = set()
+    else:
+        schema = (
+            _copilot_input_schema(definition)
+            if model_proposal
+            else definition.input_json_schema()
+        )
+        properties = schema.get("properties")
+        supported_fields = set(properties) if isinstance(properties, dict) else set()
+    projected = {
+        str(name): (
+            _audit_value_metadata(field_value)
+            if name in {"query", "sql"} or name not in supported_fields
+            else audit_tool_event_payload({"value": field_value})["value"]
+        )
+        for name, field_value in value.items()
+    }
+    if conservative_json_tokens(projected) <= MAX_OBSERVATION_TOKENS:
+        return projected
+    bounded = {str(name): _audit_value_metadata(field_value) for name, field_value in value.items()}
+    if conservative_json_tokens(bounded) <= MAX_OBSERVATION_TOKENS:
+        return bounded
+    return {
+        "field_count": len(value),
+        "sha256": hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest(),
+        "truncated": True,
+    }
+
+
+def _audit_value_metadata(value: Any) -> dict[str, Any]:
+    serialized = _canonical_json(value)
+    return {
+        "type": type(value).__name__,
+        "length": len(serialized),
+        "sha256": hashlib.sha256(serialized.encode("utf-8")).hexdigest(),
+    }
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+
+
 def _replace_cursor_values_with_hashes(original: Any, redacted: Any) -> Any:
     if isinstance(original, dict) and isinstance(redacted, dict):
         for key, original_value in original.items():
@@ -989,6 +1047,7 @@ def _clip(value: Any, limit: int) -> str:
 
 __all__ = [
     "available_read_tools",
+    "audit_tool_input",
     "bounded_failed_observation",
     "bounded_narrowing_observation",
     "build_tool_payload",
