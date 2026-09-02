@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 import contextlib
+import hashlib
 import json
 import os
 import queue
@@ -30,12 +31,17 @@ from src.application.trades.resolver import resolve_trade_deal
 from src.application.trades.state import (
     append_lifecycle_attempt_checkpoint_seal,
     append_trade_intake_audit,
+    is_durable_processed_deal,
     load_trade_intake_state,
     upsert_deal_state,
     write_trade_intake_state,
 )
 from src.application.wheel.config import resolve_wheel_config
 from src.application.trades.backfill import payload_deal_id, run_history_backfill
+from src.application.trades.order_fee_sync import (
+    fee_target_from_trusted_payload,
+    sync_order_fees,
+)
 from src.application.trades.deal_identity import broker_deal_key_from_payload
 from src.infrastructure.futu_history_deals import OpenDHistoryDealClient
 from src.application.trades.state_reconcile import reconcile_trade_intake_state
@@ -1431,6 +1437,10 @@ def _run_listener_source_loop(
     )
     inbox_summary_cache: dict[str, Any] = {}
     lifecycle_delivery_snapshot_cache: dict[str, Any] = {}
+    fee_target_queue: queue.SimpleQueue[tuple[str, str, str, str]] = queue.SimpleQueue()
+
+    def _enqueue_fee_target(target: tuple[str, str, str, str]) -> None:
+        fee_target_queue.put(target)
 
     def current_inbox_summary() -> dict[str, Any]:
         return _cached_trade_inbox_summary(
@@ -1637,6 +1647,14 @@ def _run_listener_source_loop(
             result=result,
         )
         if apply_changes:
+            fee_target = _durable_fee_target(
+                payload=payload,
+                result=result,
+                state=load_trade_intake_state(state_path),
+                account_mapping=account_mapping,
+            )
+            if fee_target is not None:
+                _enqueue_fee_target(fee_target)
             _dispatch_portfolio_refresh_intent(
                 claim_trade_payload_refresh_intent(
                     inbox_path,
@@ -1821,6 +1839,34 @@ def _run_listener_source_loop(
                 listener.check_health()
                 reconnect_delay_sec = reconnect_floor_sec
                 now_mono = time.monotonic()
+                fee_targets = _drain_fee_target_queue(fee_target_queue)
+                if fee_targets:
+                    fee_status, fee_receipts = _run_fee_sync_cycle(
+                        repo=repo,
+                        provider=history_client,
+                        targets=fee_targets,
+                        apply_changes=apply_changes,
+                        observed_at_ms=int(time.time() * 1000),
+                    )
+                    status_state["last_fee_sync"] = fee_status
+                    for fee_receipt in fee_receipts:
+                        append_trade_intake_audit(
+                            audit_path,
+                            {
+                                "phase": "auto_order_fee_attempt",
+                                "source": "auto",
+                                "source_id": source.get("id"),
+                                "account": source.get("account"),
+                                **_fee_attempt_audit_summary(fee_receipt),
+                            },
+                        )
+                    _write_listener_status(
+                        status_path,
+                        status_state,
+                        status="listening",
+                        stage="fee_sync",
+                        restart_count=restart_count,
+                    )
                 inbox_retry_due = (
                     last_inbox_retry_monotonic is None
                     or now_mono - last_inbox_retry_monotonic >= 60
@@ -1985,7 +2031,7 @@ def _run_listener_source_loop(
                                 inbox_path=inbox_path,
                                 checkpoint_path=backfill_checkpoint_path,
                                 history_deals_fn=history_client.fetch,
-                                fee_provider=history_client,
+                                enqueue_fee_target_fn=_enqueue_fee_target,
                             )
                         except Exception as exc:
                             result = {
@@ -2729,12 +2775,6 @@ def _write_listener_status(path: Path, base_payload: dict[str, Any], *, status: 
 
 def _update_status_from_backfill(status_state: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
     diagnostics = result.get("diagnostics") if isinstance(result.get("diagnostics"), dict) else {}
-    fee_rows = [
-        dict(item)
-        for item in diagnostics.get("fee_sync") or []
-        if isinstance(item, dict)
-    ]
-    fee_error = _latest_fee_sync_error(fee_rows)
     out = dict(status_state)
     out.update(
         {
@@ -2757,29 +2797,6 @@ def _update_status_from_backfill(status_state: dict[str, Any], result: dict[str,
             "last_backfill_unresolved_count": result.get("unresolved_count"),
             "last_backfill_result": result.get("last_result"),
             "last_backfill_error": result.get("error"),
-            "last_fee_sync": {
-                "selected_count": sum(int(item.get("selected_order_count") or 0) for item in fee_rows),
-                "actual_count": sum(int(item.get("actual_observation_count") or 0) for item in fee_rows),
-                "conflict_count": sum(
-                    int((item.get("reason_counts") or {}).get("actual_fee_conflict") or 0)
-                    for item in fee_rows
-                ),
-                "pending_count": sum(
-                    int((item.get("reason_counts") or {}).get("terminal_pending") or 0)
-                    for item in fee_rows
-                ),
-                "cursor_advanced": bool(diagnostics.get("fee_cursor_advanced")),
-                "selection_cursor": next(
-                    (
-                        dict(item["selection_cursor"])
-                        for item in reversed(fee_rows)
-                        if isinstance(item.get("selection_cursor"), dict)
-                    ),
-                    None,
-                ),
-                "last_error": fee_error.get("reason") if fee_error else None,
-                "last_error_type": fee_error.get("error_type") if fee_error else None,
-            },
         }
     )
     prior = int(out.get("missed_push_backfill_count") or 0)
@@ -2787,20 +2804,152 @@ def _update_status_from_backfill(status_state: dict[str, Any], result: dict[str,
     return out
 
 
-def _latest_fee_sync_error(rows: list[dict[str, Any]]) -> dict[str, str] | None:
-    for row in reversed(rows):
-        if row.get("error_type"):
-            return {
-                "reason": str(row.get("reason") or "fee_sync_failed"),
-                "error_type": str(row["error_type"]),
+def _drain_fee_target_queue(
+    target_queue: queue.SimpleQueue[tuple[str, str, str, str]],
+) -> list[tuple[str, str, str, str]]:
+    targets: set[tuple[str, str, str, str]] = set()
+    while True:
+        try:
+            targets.add(target_queue.get_nowait())
+        except queue.Empty:
+            return sorted(targets)
+
+
+def _durable_fee_target(
+    *,
+    payload: dict[str, Any],
+    result: dict[str, Any],
+    state: dict[str, Any],
+    account_mapping: dict[str, str],
+) -> tuple[str, str, str, str] | None:
+    target = fee_target_from_trusted_payload(payload)
+    if target is None:
+        return None
+    if str(result.get("status") or "").strip().lower() == "applied":
+        return target
+    deal_key = broker_deal_key_from_payload(
+        payload,
+        account_mapping=account_mapping,
+    )
+    return target if is_durable_processed_deal(state, deal_key) else None
+
+
+def _run_fee_sync_cycle(
+    *,
+    repo: Any,
+    provider: Any,
+    targets: list[tuple[str, str, str, str]],
+    apply_changes: bool,
+    observed_at_ms: int,
+    sync_fn: Callable[..., dict[str, Any]] = sync_order_fees,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    receipts: list[dict[str, Any]] = []
+    for target in sorted(set(targets)):
+        try:
+            receipt = sync_fn(
+                repo,
+                account=target[1],
+                futu_account_id=target[2],
+                provider=provider,
+                apply=apply_changes,
+                observed_at_ms=int(observed_at_ms),
+                target_identity=target,
+            )
+        except Exception as exc:
+            receipt = {
+                "schema_version": "order_fee_sync_receipt.v1",
+                "account": target[1],
+                "futu_account_id": target[2],
+                "target_identity_sha256": hashlib.sha256(
+                    chr(31).join(target).encode()
+                ).hexdigest(),
+                "reason": "fee_sync_failed",
+                "error_type": type(exc).__name__,
+                "reason_counts": {"fee_sync_failed": 1},
             }
-        for issue in reversed(row.get("issues") or []):
-            if isinstance(issue, dict) and issue.get("error_type"):
-                return {
-                    "reason": str(issue.get("reason") or "provider_query_failed"),
-                    "error_type": str(issue["error_type"]),
-                }
-    return None
+        receipts.append(receipt)
+
+    counts = {
+        "actual_count": 0,
+        "already_actual_count": 0,
+        "pending_count": 0,
+        "failed_count": 0,
+    }
+    reason_counts: Counter[str] = Counter()
+    last_error: dict[str, str] | None = None
+    for receipt in receipts:
+        reasons = {
+            str(key): int(value or 0)
+            for key, value in dict(receipt.get("reason_counts") or {}).items()
+        }
+        reason_counts.update(reasons)
+        statuses = {
+            str(key): int(value or 0)
+            for key, value in dict(
+                (receipt.get("migration") or {}).get("status_counts") or {}
+            ).items()
+        }
+        if statuses.get("committed") or statuses.get("no_op"):
+            counts["actual_count"] += 1
+        elif reasons.get("already_actual"):
+            counts["already_actual_count"] += 1
+        elif any(
+            reasons.get(reason)
+            for reason in ("terminal_pending", "terminal_order_missing", "fee_pending")
+        ):
+            counts["pending_count"] += 1
+        else:
+            counts["failed_count"] += 1
+            issue = next(
+                (
+                    item
+                    for item in receipt.get("issues") or []
+                    if isinstance(item, dict) and item.get("reason")
+                ),
+                None,
+            )
+            reason = str(
+                (issue or {}).get("reason")
+                or receipt.get("reason")
+                or next(iter(reasons), "fee_sync_failed")
+            )
+            last_error = {
+                "reason": reason,
+                "error_type": str(
+                    (issue or {}).get("error_type")
+                    or receipt.get("error_type")
+                    or ""
+                ),
+            }
+    return (
+        {
+            "attempted_at_ms": int(observed_at_ms),
+            "target_count": len(receipts),
+            **counts,
+            "reason_counts": dict(sorted(reason_counts.items())),
+            "last_error": last_error["reason"] if last_error else None,
+            "last_error_type": last_error["error_type"] if last_error else None,
+        },
+        receipts,
+    )
+
+
+def _fee_attempt_audit_summary(receipt: dict[str, Any]) -> dict[str, Any]:
+    error_types = {
+        str(item.get("error_type"))
+        for item in receipt.get("issues") or []
+        if isinstance(item, dict) and item.get("error_type")
+    }
+    if receipt.get("error_type"):
+        error_types.add(str(receipt["error_type"]))
+    return {
+        "identity_sha256": receipt.get("target_identity_sha256"),
+        "reason_counts": dict(receipt.get("reason_counts") or {}),
+        "status_counts": dict(
+            (receipt.get("migration") or {}).get("status_counts") or {}
+        ),
+        "error_types": sorted(error_types),
+    }
 
 
 def _result_summary(result: dict[str, Any] | None) -> dict[str, Any]:

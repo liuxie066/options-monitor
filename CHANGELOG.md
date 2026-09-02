@@ -5,6 +5,9 @@
 ### Breaking Changes
 - Removed the generic `analysis_catalog` and `analysis_query` tools from Tool Gateway and Copilot; current reads use canonical typed tools, while unsupported cross-view aggregation remains unavailable.
 
+### Bug Fixes
+- Queried and persisted actual option fees by the specific broker order after automatic trade intake, with exact account isolation, terminal-order evidence, and recent-history retry instead of a full-ledger fee scan.
+
 ## 3.4.2 - 2026-09-02
 
 ### Bug Fixes
