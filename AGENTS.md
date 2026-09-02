@@ -13,7 +13,8 @@
 - Preserve user changes in a dirty worktree. Never reset or revert unrelated files unless explicitly asked.
 - Worktrees are conditional isolation, not a per-phase default. Reuse the same task worktree through implementation,
   validation, review, and PR; create another only for a protected/shared branch, unrelated dirty changes, or parallel conflict.
-- Close a task worktree only after its PR and required checks are terminal; for a release, wait until the tag, GitHub
+- After a task PR and required checks are terminal, the same task must close its exact worktree and local branch before
+  declaring completion; for a release, wait until the tag, GitHub
   Release, target commit, and assets are verified. Require a clean status, proof that the branch is contained in
   `origin/main`, and no active owner before removing the exact worktree and local branch. Preserve dirty, unmerged,
   patch-equivalent-only, stashed, or owner-unknown work unless separately approved.
