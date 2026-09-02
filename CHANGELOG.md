@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 3.4.2 - 2026-09-02
+
+### Bug Fixes
+- Bound Copilot option-performance period inputs to the current request before tool execution and recorded model-selected versus effective inputs, preventing valid natural-month and natural-year answers from failing evidence admission.
+
 ## 3.4.1 - 2026-09-02
 
 ### Improvements
