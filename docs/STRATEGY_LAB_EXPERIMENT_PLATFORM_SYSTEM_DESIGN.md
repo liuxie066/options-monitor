@@ -1,7 +1,7 @@
 # Strategy Lab 统一策略实验平台系统设计
 
-- **状态**：Phase 3 本地实现完成；远端自然 Tick 隔离门槛已通过；待 Phase 4 真实数据验收
-- **日期**：2026-08-31
+- **状态**：Phase 3 本地实现完成；远端自然 Tick 隔离门槛已通过；Phase 4 正式点持仓证据范围待修复
+- **日期**：2026-09-02
 - **产品依据**：[Strategy Lab PRD](STRATEGY_LAB_EXPERIMENT_PLATFORM_PRD.md)
 - **首个 Recipe**：`sell_put_option_position_concentration`
 
@@ -30,7 +30,8 @@ Recipe preview
 4. 实验状态可在进程重启后恢复，重复命令和调度推进幂等；
 5. 旧实验库、旧命令和旧兼容路径不迁移；
 6. 首次完成前不引入 Strategy Lab 的 schema、Recipe 或合同版本体系；
-7. MVP 全局最多一个未终态实验，且不能增加生产 Tick 的 OpenD 调用数。
+7. MVP 全局最多一个未终态实验，且不能增加生产 Tick 的 OpenD 调用数；
+8. 正式点只绑定同账户、同市场的当前持有期权仓位，不要求取得其他市场的同期行情。
 
 ## 2. 总体架构
 
@@ -198,8 +199,8 @@ security identity 与 quota code 完全相同。已有 receipt、保护窗口和
 1. 从 formal point 读取实际封存的生产 Top1 作为 baseline；
 2. 读取同一点完整 accepted Cash-Secured Put (CSP) 候选，缺任一候选事实则该点不可评价；
 3. 对每个候选调用
-   `calculate_option_market_concentration_after()`，只使用同一 formal point 绑定的全部未平仓期权、mark 和
-   FX；
+   `calculate_option_market_concentration_after()`，只使用同一 formal point 绑定的同账户、同市场全部当前
+   持有期权、mark 和 FX；
 4. 调用 `rank_candidate_rows(mode="put", sell_put_ranking_profile=
    "option_market_concentration", near_return_threshold=...)`；
 5. 排序第一名为 challenger，保留候选、持仓、mark、FX 和排名输入的 ref/hash。
@@ -209,6 +210,35 @@ security identity 与 quota code 完全相同。已有 receipt、保护窗口和
 Recipe 不增加指派后股票集中度、全部 Short Put 名义敞口或其他新安全门槛。baseline 和 challenger
 都必须来自生产 accepted 集合。不得从 performance-evidence repository、其他 run 或后来的 quote
 回退补推荐时刻集中度输入。
+
+#### 5.2.1 持仓证据的市场范围
+
+正式点和冻结 required-data batch 都以 `market` 为边界。唯一 owner
+`build_option_position_evidence_binding()` 按以下顺序处理：
+
+1. 先校验 prepared receipt、账户 identity 和 `decision_snapshot_actionable`；所有 open position 仍通过现有
+   `_prepared_position()` 校验，不能因为属于其他市场而跳过坏行；
+2. 每条 open position 只调用一次现有 `resolve_symbol_identity()`；无法解析市场，或 identity currency 与
+   instrument currency 不一致时返回 `option_position_evidence_missing`。原始持仓存在 `market_code` 时，也必须
+   先解析并确认其 market 与 identity market 一致，不能先把冲突行当作其他市场过滤；
+3. 完成上述逐行一致性校验后，只把 identity market 等于正式点 market 的仓位放入一个
+   `selected_positions` 集合；最终匹配到的 mark `market_code` 也必须解析为该市场；
+4. required-data mark 查找、`open_option_positions`、mark coverage 和持仓产生的 FX currencies 全部只消费
+   `selected_positions`。正式点市场 currency 仍必须存在，供同市场候选换算使用；其他市场仓位不能额外引入
+   mark 或 FX 要求；
+5. `validate_option_position_evidence_binding(..., expected_market=...)` 对已生成 artifact 重复检查 position
+   identity market、currency 和 mark `market_code` 的同市场不变量，不能只依赖 content hash。
+
+同市场持仓缺少 required-data symbol、唯一合约行、有效 mark、时间一致性或 FX 时，正式点继续 fail closed。
+point producer 与 Formal Corpus verifier 都调用该 builder；`formal_corpus.py` 不增加第二套筛选。该修复不改变
+artifact schema、不新增 provider 调用，也不回填已经封存的失败正式点。没有同市场当前持仓是合法输入；此时
+binding 的持仓和 mark 列表为空，但仍保留正式点市场候选所需的 FX，集中度在加入 candidate 后计算。
+
+不采用以下方案：把其他市场持仓加入当前 Tick 批次会增加 provider 调用并破坏生产优先级；使用其他 run
+或上一交易窗口的 mark 会破坏同点时间一致性。若未来需要跨市场账户级集中度，应作为独立 Recipe 定义
+异步估值时点和证据合同，不扩展本次修复。现有 symbol alias fallback 可能把显式市场代码解析成另一市场；
+本修复以现有 identity 结果和 currency 一致性 fail closed，不在本 work unit 改写全局 alias 规则。修复后由
+自然正式点和 Corpus Health 回执验证同市场持仓的原批次覆盖率。
 
 ### 5.3 标准结果
 
@@ -246,7 +276,7 @@ CNY PnL 改善，从通过变体中选择唯一 leader；隐藏验证只评价�
 |---|---|---|---|
 | 推荐时刻 | 正式点、accepted/rejected 候选、生产 Top1 | Research Archive | 只读现有 artifact |
 | 推荐时刻 | 合约报价、Greeks、OI、DTE、标的价 | Research Archive | 只读 required-data / opening snapshot |
-| 推荐时刻 | 全部未平仓期权 identity / 数量、mark、FX | Formal Point artifact | 只读同 point 绑定事实；不跨 repository 回退 |
+| 推荐时刻 | 同账户、同市场全部当前持有期权 identity / 数量、mark、FX | Formal Point artifact | 只读同 point 绑定事实；不跨市场或 repository 回退 |
 | 20 日研究 | 入选 arm 的期权 1 分钟 K | OpenD | 闭市后按需请求 |
 | 10 日验证 | 锁定 arm 的 Bid / Bid Volume | OpenD | 盘中每分钟一个批次 |
 | 到期 | 标的未复权日收盘、FX、费用 | OpenD / performance evidence / fee-plan | 成熟后按需补全 |
@@ -257,14 +287,14 @@ Evidence cutover 只走一条路径：
    Strategy Lab mark；
 2. 原生产扫描完成并持久化 required-data / opening artifact；
 3. `tick_notification_flow.py` 在这些 artifact 可读后调用 `recommendation_point.py`；后者按同一
-   run/account/point time 从允许的 artifact 解析每个持仓合约的 exact mark，复用
+   run/account/market/point time 从允许的 artifact 解析当前正式点市场每个持仓合约的 exact mark，复用
    `performance/evidence_collection.py` 的合约行匹配、mark 选择和 `ValuationMarkFact` 规范化，生成
    `option_position_evidence_binding`；
 4. `formal_corpus.py` 重新读取 point 所引用的 prepared context 和冻结 required-data batch，用同一确定性
    builder 重建 position / mark / FX binding，并与 point 中的 binding 精确比较后封存；不调用 provider，
    不跨 run/repository 回退；
-5. 任一持仓合约未被原批次覆盖、source time 超出冻结 coherence 窗口、identity 或 hash 不一致时，point
-   `not_evaluable`，且不得新增 provider 请求。
+5. 任一同市场持仓合约未被原批次覆盖、source time 超出冻结 coherence 窗口、identity 或 hash 不一致时，
+   point `not_evaluable`；其他市场持仓不参与该点，且不得新增 provider 请求。
 
 现有 private helper 在原文件内提升为一个可复用
 `build_option_valuation_mark_fact(position, snapshot_rows, source_binding, formal_time_bounds)`，不另建 mark
@@ -596,7 +626,7 @@ MVP 保持 `blocked`；不在本设计中预建第二个 OpenD endpoint。
 | `src/application/tick_account_execution.py` | 取消 Strategy Lab 专用 `mark_evidence_accounts` 整仓刷新；不增加 Tick provider 调用 |
 | `src/application/prepared_option_positions_context.py` | 删除 Strategy Lab 触发的 `refresh_quotes=True` mark 路径和 prepared mark ready 要求；继续封存 position / FX 通用事实 |
 | `src/application/performance/evidence_collection.py` | 提升 `build_option_valuation_mark_fact()`，复用现有行匹配、mark 选择和 fact 构造；现有 performance 调用方改用同一实现 |
-| `src/application/recommendation_point.py` | 在原扫描 artifact 可读后组装唯一 `option_position_evidence_binding`；不请求 provider |
+| `src/application/recommendation_point.py` | 在共同 builder 内构造一次 `selected_positions`，据此组装并验证唯一 `option_position_evidence_binding`；不请求 provider |
 | `src/application/tick_notification_flow.py` | 固定“扫描 artifact durable -> recommendation point -> formal corpus”的调用顺序 |
 | `src/application/research/formal_corpus.py` | 从绑定的 prepared context 与冻结 required-data batch 重建 position / mark / FX binding，精确比较后封存；不调用 provider 或跨源回退 |
 
@@ -665,8 +695,15 @@ hash 与观测日期寻址，不写 ExperimentStore；过期只影响后续 prev
 
 1. `comparison.py`：完整配对、同合约 delta 零、缺点、`no_fill` 和两条判断；
 2. `recipe.py`：三个收益带、完整 accepted 集合、同 formal point 绑定、成熟 20 日窗口和缺失 fail closed；
-3. mark binding：midpoint、Last fallback、无价、crossed、重复匹配、缺 market code、多 lots、越界 source
-   time / 后续批次、deterministic fact/hash 和 provider 调用数为 0；
+3. mark binding 保留现有基础覆盖，并只新增五个回归断言：
+   - mixed HK/US prepared rows + HK required-data batch 时，positions、marks 和由持仓产生的 FX 只含 HK；
+   - 未知 market，或任一 position 的 identity / currency / 原始 market code 冲突时在筛选前 fail closed；同市场
+     mark market code 冲突也 fail closed，且 fixture 包含一条本会被误归为其他市场的冲突行；
+   - 同市场 required-data symbol 缺失时仍 fail closed；
+   - 对 binding 重新计算 hash 后混入跨市场 position，validator 仍拒绝；
+   - 一个 producer -> Formal Corpus 混合市场 fixture 能由共同 builder 精确重建并封存；
+   midpoint、Last fallback、无价、crossed、重复匹配、多 lots、时间边界、deterministic hash 和 provider 调用数
+   继续由现有测试证明，不为本修复重复建测试矩阵；
 4. `evidence.py`：分钟 K 多页 / 顺序 / 重复 / receipt readiness、Bid crossing、正 / 零 / 非法 raw Bid
    Volume、request / receive tolerance；分别断言 call/envelope 无效不写 artifact、requested code 行缺陷写 invalid
    artifact、完整行写 available artifact，且 observed/fill time 使用 received time；到期查询必须绑定实际
@@ -772,6 +809,9 @@ Strategy Lab focused suite；后续切片不得负责修复上一切片留下的
 
 ### Phase 4：真实数据验收
 
+- 只在共同 `build_option_position_evidence_binding()` 及其 validator 修复正式点市场范围；使用一个
+  `selected_positions` 驱动 position / mark / FX 输出，并用最小混合市场、冲突、缺失和 Formal Corpus 集成
+  回归证明 producer / verifier 合同一致；
 - 先确认 Research Archive readiness，再人工启动 20 日真实研究；
 - 只有可信 leader 才确认未来 10 日；
 - 到期后审计 Final Receipt 和生产 Tick 性能。

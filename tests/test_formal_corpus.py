@@ -51,6 +51,7 @@ def _prepared_receipt(
     opening: Mapping[str, Any],
     *,
     hkd_cny: float = 0.92,
+    open_positions: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     observed_at = str(opening["sealed_at_utc"])
     payload = {
@@ -62,9 +63,9 @@ def _prepared_receipt(
         },
         "exchange_rates": {
             "timestamp": observed_at,
-            "rates": {"HKDCNY": hkd_cny},
+            "rates": {"HKDCNY": hkd_cny, "USDCNY": 7.2},
         },
-        "open_positions_min": [],
+        "open_positions_min": open_positions or [],
         "decision_snapshot_actionable": True,
     }
     payload_bytes = _canonical_bytes(payload)
@@ -84,6 +85,31 @@ def _prepared_receipt(
         "payload": payload,
         "manifest_bytes": _canonical_bytes(manifest),
         "payload_bytes": payload_bytes,
+    }
+
+
+def _open_position(
+    record_id: str,
+    *,
+    symbol: str,
+    currency: str,
+    market_code: str,
+) -> dict[str, Any]:
+    return {
+        "record_id": record_id,
+        "status": "open",
+        "broker": "futu",
+        "symbol": symbol,
+        "option_type": "put",
+        "strike": "100",
+        "expiration_ymd": "2026-08-21",
+        "currency": currency,
+        "multiplier": "100",
+        "side": "short",
+        "contracts_open": 1,
+        "premium": "2",
+        "opened_at": 1_700_000_000_000,
+        "market_code": market_code,
     }
 
 
@@ -747,6 +773,8 @@ def test_ready_point_reloads_and_materializes_recipe_projection(
         tmp_path,
         run_id=run_id,
         market="HK",
+        sealed_at="2026-08-26T02:00:01Z",
+        manifest_sealed_at="2026-08-26T02:00:02Z",
     )
     _publication, point = capture_scheduled_recommendation_point(
         tmp_path,
@@ -766,7 +794,21 @@ def test_ready_point_reloads_and_materializes_recipe_projection(
     )["owners"]["opening"]
     required_bytes = b'{"fixture":true}\n'
     required_hash = hashlib.sha256(required_bytes).hexdigest()
-    receipt = _prepared_receipt(opening)
+    open_positions = [
+        _open_position(
+            "hk-lot",
+            symbol="0700.HK",
+            currency="HKD",
+            market_code="HK.0700260821P100000",
+        ),
+        _open_position(
+            "us-lot",
+            symbol="FUTU",
+            currency="USD",
+            market_code="US.FUTU260821P100000",
+        ),
+    ]
+    receipt = _prepared_receipt(opening, open_positions=open_positions)
     target_ms = int(
         datetime.fromisoformat(target.replace("Z", "+00:00")).timestamp() * 1000
     )
@@ -776,6 +818,22 @@ def test_ready_point_reloads_and_materializes_recipe_projection(
         ).timestamp()
         * 1000
     )
+    required_entries = {
+        "0700.HK": (
+            {
+                "scan_blob_ref": {
+                    "blob_relpath": "required/0700.HK.csv",
+                    "blob_sha256": "e" * 64,
+                }
+            },
+            (
+                "code,bid_price,ask_price,snapshot_requested_at_utc,"
+                "snapshot_received_at_utc\n"
+                f"HK.0700260821P100000,2.0,2.4,{opening['sealed_at_utc']},"
+                f"{opening['sealed_at_utc']}\n"
+            ).encode(),
+        )
+    }
     evidence = build_option_position_evidence_binding(
         run_id=run_id,
         account="lx",
@@ -784,9 +842,10 @@ def test_ready_point_reloads_and_materializes_recipe_projection(
         account_config_sha256=opening["account_config_sha256"],
         evidence_at_utc=opening["sealed_at_utc"],
         prepared_receipt=receipt,
-        required_data_entries={},
+        required_data_entries=required_entries,
         formal_time_bounds=(target_ms - 300000, sealed_ms),
     )
+    assert [row["lot_id"] for row in evidence["open_option_positions"]] == ["hk-lot"]
     required_manifest = {
         "run_id": run_id,
         "symbols": {
@@ -844,10 +903,14 @@ def test_ready_point_reloads_and_materializes_recipe_projection(
     monkeypatch.setattr(
         mod,
         "resolve_frozen_required_data_csv_bytes_batch",
-        lambda **_kwargs: SimpleNamespace(entries={}, unavailable={}),
+        lambda **_kwargs: SimpleNamespace(entries=required_entries, unavailable={}),
     )
 
-    alternate_receipt = _prepared_receipt(opening, hkd_cny=0.93)
+    alternate_receipt = _prepared_receipt(
+        opening,
+        hkd_cny=0.93,
+        open_positions=open_positions,
+    )
     alternate_evidence = build_option_position_evidence_binding(
         run_id=run_id,
         account="lx",
@@ -856,7 +919,7 @@ def test_ready_point_reloads_and_materializes_recipe_projection(
         account_config_sha256=opening["account_config_sha256"],
         evidence_at_utc=opening["sealed_at_utc"],
         prepared_receipt=alternate_receipt,
-        required_data_entries={},
+        required_data_entries=required_entries,
         formal_time_bounds=(target_ms - 300000, sealed_ms),
     )
     alternate_evidence["position_source"] = dict(evidence["position_source"])

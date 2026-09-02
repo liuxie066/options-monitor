@@ -9,6 +9,7 @@ import pytest
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.engine import build_candidate_decision
+from domain.domain.performance.models import OptionInstrumentKey
 from src.application.candidate_snapshot_manifest import (
     CANDIDATE_SNAPSHOT_MANIFEST_FILE,
     load_candidate_snapshot_bundle,
@@ -140,6 +141,33 @@ def _prepared_option_receipt(
     }
 
 
+def _open_option_position(
+    record_id: str,
+    *,
+    symbol: str,
+    currency: str,
+    market_code: str | None = None,
+) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "record_id": record_id,
+        "status": "open",
+        "broker": "futu",
+        "symbol": symbol,
+        "option_type": "put",
+        "strike": "100",
+        "expiration_ymd": "2026-08-21",
+        "currency": currency,
+        "multiplier": "100",
+        "side": "short",
+        "contracts_open": 1,
+        "premium": "2",
+        "opened_at": 1_700_000_000_000,
+    }
+    if market_code is not None:
+        row["market_code"] = market_code
+    return row
+
+
 def test_formal_point_time_coherence_canonicalizes_aware_candidate_timestamp() -> None:
     opening = {
         "candidate_decisions": [
@@ -213,26 +241,21 @@ def test_option_position_binding_uses_only_the_frozen_scan_batch() -> None:
         "account": "lx",
         "account_config_sha256": CONFIG_HASH,
     }
-    fields = {
-        "status": "open",
-        "broker": "futu",
-        "symbol": "NVDA",
-        "option_type": "put",
-        "strike": "100",
-        "expiration_ymd": "2026-08-21",
-        "currency": "USD",
-        "multiplier": "100",
-        "side": "short",
-        "contracts_open": 1,
-        "premium": "2",
-        "opened_at": 1_700_000_000_000,
-        "market_code": "US.NVDA260821P100000",
-    }
     receipt = _prepared_option_receipt(
         opening,
         open_positions=[
-            {"record_id": "lot-1", **fields},
-            {"record_id": "lot-2", **fields},
+            _open_option_position(
+                "lot-1",
+                symbol="NVDA",
+                currency="USD",
+                market_code="US.NVDA260821P100000",
+            ),
+            _open_option_position(
+                "lot-2",
+                symbol="NVDA",
+                currency="USD",
+                market_code="US.NVDA260821P100000",
+            ),
         ],
     )
     csv_bytes = (
@@ -287,6 +310,38 @@ def test_option_position_binding_uses_only_the_frozen_scan_batch() -> None:
             expected_recommendation_point_id=point_id,
             expected_market="US",
         )
+    cross_market = json.loads(json.dumps(binding))
+    hk_instrument = OptionInstrumentKey(
+        symbol="0700.HK",
+        option_type="put",
+        strike="100",
+        expiration_ymd="2026-08-21",
+        currency="HKD",
+        multiplier="100",
+    )
+    cross_market["open_option_positions"][0].update(
+        {
+            "instrument_key": hk_instrument.instrument_key,
+            "symbol": hk_instrument.symbol,
+            "currency": hk_instrument.currency,
+            "market_code": "HK.0700260821P100000",
+        }
+    )
+    cross_market["content_sha256"] = canonical_sha256(
+        {
+            key: value
+            for key, value in cross_market.items()
+            if key != "content_sha256"
+        }
+    )
+    with pytest.raises(RecommendationPointError, match="option position fields conflict"):
+        validate_option_position_evidence_binding(
+            cross_market,
+            expected_run_id="formal-binding",
+            expected_account="lx",
+            expected_recommendation_point_id=point_id,
+            expected_market="US",
+        )
     with pytest.raises(
         RecommendationPointError,
         match="absent from the production snapshot batch",
@@ -300,6 +355,161 @@ def test_option_position_binding_uses_only_the_frozen_scan_batch() -> None:
             evidence_at_utc="2026-07-21T14:00:02Z",
             prepared_receipt=receipt,
             required_data_entries={},
+            formal_time_bounds=(1_784_642_340_000, 1_784_642_405_000),
+        )
+
+
+def test_option_position_binding_uses_only_same_market_positions() -> None:
+    opening = {
+        "run_id": "mixed-market-binding",
+        "account": "lx",
+        "account_config_sha256": CONFIG_HASH,
+    }
+    receipt = _prepared_option_receipt(
+        opening,
+        open_positions=[
+            _open_option_position(
+                "hk-lot",
+                symbol="0700.HK",
+                currency="HKD",
+                market_code="HK.0700260821P100000",
+            ),
+            _open_option_position(
+                "us-lot",
+                symbol="FUTU",
+                currency="USD",
+                market_code="US.FUTU260821P100000",
+            ),
+        ],
+    )
+    hk_csv = (
+        "code,bid_price,ask_price,last_price,snapshot_requested_at_utc,"
+        "snapshot_received_at_utc\n"
+        "HK.0700260821P100000,2.0,2.4,9.0,"
+        "2026-07-21T13:59:59Z,2026-07-21T14:00:00Z\n"
+    ).encode()
+    kwargs = {
+        "run_id": "mixed-market-binding",
+        "account": "lx",
+        "market": "HK",
+        "recommendation_point_id": "d" * 64,
+        "account_config_sha256": CONFIG_HASH,
+        "evidence_at_utc": "2026-07-21T14:00:02Z",
+        "prepared_receipt": receipt,
+        "formal_time_bounds": (1_784_642_340_000, 1_784_642_405_000),
+    }
+    binding = build_option_position_evidence_binding(
+        **kwargs,
+        required_data_entries={
+            "0700.HK": (
+                {
+                    "scan_blob_ref": {
+                        "blob_relpath": "required/0700.HK.csv",
+                        "blob_sha256": "b" * 64,
+                    }
+                },
+                hk_csv,
+            )
+        },
+    )
+
+    assert [row["lot_id"] for row in binding["open_option_positions"]] == ["hk-lot"]
+    assert len(binding["valuation_mark_facts"]) == 1
+    assert [row["base_currency"] for row in binding["fx_rate_facts"]] == ["HKD"]
+    with pytest.raises(
+        RecommendationPointError,
+        match="0700.HK is absent from the production snapshot batch",
+    ):
+        build_option_position_evidence_binding(
+            **kwargs,
+            required_data_entries={},
+        )
+
+
+@pytest.mark.parametrize(
+    "symbol,currency,market_code,market",
+    [
+        ("???", "USD", None, "US"),
+        ("US.MET", "USD", None, "US"),
+        ("0700.HK", "HKD", "US.FUTU260821P100000", "US"),
+    ],
+)
+def test_option_position_binding_rejects_invalid_market_identity_before_filtering(
+    symbol: str,
+    currency: str,
+    market_code: str | None,
+    market: str,
+) -> None:
+    opening = {
+        "run_id": "invalid-market-binding",
+        "account": "lx",
+        "account_config_sha256": CONFIG_HASH,
+    }
+    row = _open_option_position(
+        "bad-lot",
+        symbol=symbol,
+        currency=currency,
+        market_code=market_code,
+    )
+    with pytest.raises(RecommendationPointError, match="market"):
+        build_option_position_evidence_binding(
+            run_id="invalid-market-binding",
+            account="lx",
+            market=market,
+            recommendation_point_id="e" * 64,
+            account_config_sha256=CONFIG_HASH,
+            evidence_at_utc="2026-07-21T14:00:02Z",
+            prepared_receipt=_prepared_option_receipt(
+                opening,
+                open_positions=[row],
+            ),
+            required_data_entries={},
+            formal_time_bounds=(1_784_642_340_000, 1_784_642_405_000),
+        )
+
+
+def test_option_position_binding_rejects_cross_market_snapshot_code() -> None:
+    opening = {
+        "run_id": "cross-market-mark",
+        "account": "lx",
+        "account_config_sha256": CONFIG_HASH,
+    }
+    receipt = _prepared_option_receipt(
+        opening,
+        open_positions=[
+            _open_option_position(
+                "hk-lot",
+                symbol="0700.HK",
+                currency="HKD",
+            )
+        ],
+    )
+    csv_bytes = (
+        "code,option_type,expiration_ymd,strike,multiplier,bid_price,ask_price,"
+        "snapshot_requested_at_utc,snapshot_received_at_utc\n"
+        "US.FUTU260821P100000,put,2026-08-21,100,100,2.0,2.4,"
+        "2026-07-21T13:59:59Z,2026-07-21T14:00:00Z\n"
+    ).encode()
+    with pytest.raises(RecommendationPointError, match="formal point"):
+        build_option_position_evidence_binding(
+            run_id="cross-market-mark",
+            account="lx",
+            market="HK",
+            recommendation_point_id="f" * 64,
+            account_config_sha256=CONFIG_HASH,
+            evidence_at_utc="2026-07-21T14:00:02Z",
+            prepared_receipt=receipt,
+            required_data_entries={
+                "0700.HK": (
+                    {
+                        "scan_blob_ref": {
+                            "blob_relpath": "required/0700.HK.csv",
+                            "blob_sha256": "b" * 64,
+                        }
+                    },
+                    csv_bytes,
+                )
+            },
             formal_time_bounds=(1_784_642_340_000, 1_784_642_405_000),
         )
 

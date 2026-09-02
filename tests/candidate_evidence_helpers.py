@@ -136,6 +136,8 @@ def seal_opening_candidate_fixture(
     market: str = "US",
     accepted_rows: Iterable[Mapping[str, Any]] = (),
     rejected_rows: Iterable[Mapping[str, Any]] = (),
+    sealed_at: str = "2026-06-01T00:00:00Z",
+    manifest_sealed_at: str = "2026-06-01T00:00:01Z",
 ) -> dict[str, Any]:
     """Publish a current manifest-bound opening snapshot for test facts."""
 
@@ -263,7 +265,7 @@ def seal_opening_candidate_fixture(
         scan_statuses=scan_statuses,
         final_candidates=final_candidates,
         candidate_evaluations=evaluations,
-        sealed_at="2026-06-01T00:00:00Z",
+        sealed_at=sealed_at,
     )
     publish_strategy_scan_status_index_v2(
         report_dir=account_dir,
@@ -277,7 +279,7 @@ def seal_opening_candidate_fixture(
         run_id=run_id,
         account=account,
         strategy_policy_sha256=POLICY_HASH,
-        sealed_at="2026-06-01T00:00:01Z",
+        sealed_at=manifest_sealed_at,
     )
 
 
