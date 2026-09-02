@@ -143,6 +143,8 @@ def _trade_intake_summary(state_json: dict[str, Any], status_json: dict[str, Any
     processed: dict[str, Any] = processed_raw if isinstance(processed_raw, dict) else {}
     failed: dict[str, Any] = failed_raw if isinstance(failed_raw, dict) else {}
     unresolved: dict[str, Any] = unresolved_raw if isinstance(unresolved_raw, dict) else {}
+    fee_sync_raw = status_json.get("last_fee_sync")
+    fee_sync: dict[str, Any] = fee_sync_raw if isinstance(fee_sync_raw, dict) else {}
     receipt_items: list[dict[str, Any]] = []
     for bucket in (processed, failed, unresolved):
         for item in bucket.values():
@@ -168,6 +170,16 @@ def _trade_intake_summary(state_json: dict[str, Any], status_json: dict[str, Any
         "last_deal_result": status_json.get("last_deal_result"),
         "last_backfill_result": status_json.get("last_backfill_result"),
         "last_receipt_result": status_json.get("last_receipt_result"),
+        "last_fee_attempted_at_ms": fee_sync.get("attempted_at_ms"),
+        "fee_actual_count": fee_sync.get("actual_count"),
+        "fee_already_actual_count": fee_sync.get("already_actual_count"),
+        "fee_pending_count": fee_sync.get("pending_count"),
+        "fee_failed_count": fee_sync.get("failed_count"),
+        "fee_failed_source_count": int(
+            int(fee_sync.get("failed_count") or 0) > 0
+        ),
+        "last_fee_error": fee_sync.get("last_error"),
+        "last_fee_error_type": fee_sync.get("last_error_type"),
         "processed_count": len(processed),
         "failed_count": len(failed),
         "unresolved_count": len(unresolved),
@@ -266,6 +278,11 @@ def _aggregate_trade_intake_summaries(summaries: list[dict[str, Any]]) -> dict[s
         "last_backfill_failed_count",
         "last_backfill_unresolved_count",
         "missed_push_backfill_count",
+        "fee_actual_count",
+        "fee_already_actual_count",
+        "fee_pending_count",
+        "fee_failed_count",
+        "fee_failed_source_count",
     )
     passthrough_keys = (
         "listener_stage",
@@ -322,6 +339,22 @@ def _aggregate_trade_intake_summaries(summaries: list[dict[str, Any]]) -> dict[s
         values = [item.get(key) for item in summaries if item.get(key) not in (None, "")]
         if values:
             out[key] = values[-1]
+    fee_attempts = [
+        item
+        for item in summaries
+        if isinstance(item.get("last_fee_attempted_at_ms"), (int, float))
+    ]
+    if fee_attempts:
+        latest_fee = max(
+            fee_attempts,
+            key=lambda item: int(item["last_fee_attempted_at_ms"]),
+        )
+        for key in (
+            "last_fee_attempted_at_ms",
+            "last_fee_error",
+            "last_fee_error_type",
+        ):
+            out[key] = latest_fee.get(key)
     return out
 
 

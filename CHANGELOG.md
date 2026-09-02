@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Bug Fixes
+- Queried and persisted actual option fees by the specific broker order after automatic trade intake, with exact account isolation, terminal-order evidence, and recent-history retry instead of a full-ledger fee scan.
+
 ## 3.4.2 - 2026-09-02
 
 ### Bug Fixes

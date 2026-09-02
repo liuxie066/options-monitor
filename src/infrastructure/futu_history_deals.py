@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import time
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -10,6 +12,8 @@ from zoneinfo import ZoneInfo
 
 from domain.domain.option_position_identity import normalize_currency
 from src.infrastructure.futu_gateway import (
+    FutuGatewayError,
+    FutuGatewayRateLimitError,
     FutuGatewayUnreachableError,
     build_futu_gateway,
 )
@@ -53,6 +57,7 @@ class OpenDHistoryDealClient:
         self.host = str(host)
         self.port = int(port)
         self._gateway: Any = None
+        self._fee_query_times: dict[str, deque[float]] = {}
 
     def fetch(
         self,
@@ -95,40 +100,64 @@ class OpenDHistoryDealClient:
         order_ids: list[str],
         start: str,
         end: str,
+        exact: bool = False,
     ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
         requested = _normalized_order_ids(order_ids)
         if len(requested) > 400:
             raise ValueError("order query supports at most 400 order IDs")
+        if exact and len(requested) != 1:
+            raise ValueError("exact order query requires exactly one order ID")
         try:
             gateway = self._gateway_client()
             acc_id = _numeric_account_id(futu_account_id)
+            requested_set = set(requested)
+            rows: dict[str, dict[str, Any]] = {}
+            current_order_error_type: str | None = None
+            if exact:
+                try:
+                    current = gateway.get_order_list(
+                        trd_env="REAL",
+                        acc_id=acc_id,
+                        order_id=requested[0],
+                        refresh_cache=True,
+                    )
+                    _collect_terminal_orders(
+                        rows,
+                        _gateway_rows(current),
+                        requested=requested_set,
+                        futu_account_id=acc_id,
+                        source="current order",
+                    )
+                except FutuGatewayError as exc:
+                    current_order_error_type = type(exc).__name__
+                if rows:
+                    return rows, {
+                        "requested_count": 1,
+                        "returned_count": 1,
+                        "query_source": "current_order",
+                    }
             result = gateway.get_history_orders(
                 start=str(start),
                 end=str(end),
                 trd_env="REAL",
                 acc_id=acc_id,
             )
-            provider_rows = _gateway_rows(result)
-            requested_set = set(requested)
-            rows: dict[str, dict[str, Any]] = {}
-            for raw in provider_rows:
-                order_id = str(raw.get("order_id") or raw.get("orderID") or "").strip()
-                if order_id not in requested_set:
-                    continue
-                normalized = {
-                    "provider": "opend",
-                    "futu_account_id": str(acc_id),
-                    "order_id": order_id,
-                    "status": _normalize_order_status(raw.get("order_status") or raw.get("status")),
-                    "dealt_qty": _decimal_text(raw.get("dealt_qty"), nonnegative=True),
-                    "currency": normalize_currency(raw.get("currency")) or None,
-                }
-                _put_unique(rows, order_id, normalized, source="history order")
-            return rows, {
+            _collect_terminal_orders(
+                rows,
+                _gateway_rows(result),
+                requested=requested_set,
+                futu_account_id=acc_id,
+                source="history order",
+            )
+            diagnostics = {
                 "requested_count": len(requested),
                 "returned_count": len(rows),
                 "missing_order_ids": sorted(requested_set - set(rows)),
+                "query_source": "history_order",
             }
+            if current_order_error_type:
+                diagnostics["current_order_error_type"] = current_order_error_type
+            return rows, diagnostics
         except Exception:
             self.close()
             raise
@@ -145,6 +174,7 @@ class OpenDHistoryDealClient:
         try:
             gateway = self._gateway_client()
             acc_id = _numeric_account_id(futu_account_id)
+            self._reserve_fee_query(str(acc_id))
             data = gateway.get_order_fees(
                 order_id_list=requested,
                 trd_env="REAL",
@@ -172,6 +202,17 @@ class OpenDHistoryDealClient:
         except Exception:
             self.close()
             raise
+
+    def _reserve_fee_query(self, futu_account_id: str) -> None:
+        now = time.monotonic()
+        calls = self._fee_query_times.setdefault(str(futu_account_id), deque())
+        while calls and now - calls[0] >= 30.0:
+            calls.popleft()
+        if len(calls) >= 10:
+            raise FutuGatewayRateLimitError(
+                "order_fee_query local limit exceeded: 10 calls per 30 seconds"
+            )
+        calls.append(now)
 
     def _gateway_client(self) -> Any:
         if self._gateway is None:
@@ -289,6 +330,35 @@ def _normalized_order_ids(values: list[str]) -> list[str]:
     if not out or any(not value for value in out):
         raise ValueError("order_ids must be non-empty strings")
     return out
+
+
+def _collect_terminal_orders(
+    rows: dict[str, dict[str, Any]],
+    provider_rows: list[dict[str, Any]],
+    *,
+    requested: set[str],
+    futu_account_id: int,
+    source: str,
+) -> None:
+    for raw in provider_rows:
+        order_id = str(raw.get("order_id") or raw.get("orderID") or "").strip()
+        if order_id not in requested:
+            continue
+        _put_unique(
+            rows,
+            order_id,
+            {
+                "provider": "opend",
+                "futu_account_id": str(futu_account_id),
+                "order_id": order_id,
+                "status": _normalize_order_status(
+                    raw.get("order_status") or raw.get("status")
+                ),
+                "dealt_qty": _decimal_text(raw.get("dealt_qty"), nonnegative=True),
+                "currency": normalize_currency(raw.get("currency")) or None,
+            },
+            source=source,
+        )
 
 
 def _numeric_account_id(value: str) -> int:

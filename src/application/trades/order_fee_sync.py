@@ -19,6 +19,7 @@ from src.application.ledger.api import (
     enrich_order_fees,
     zero_option_fee_lifecycle_reason,
 )
+from src.infrastructure.futu_gateway import FutuGatewayRateLimitError
 
 
 _PROVIDER_CUTOFF_MS = int(
@@ -26,12 +27,32 @@ _PROVIDER_CUTOFF_MS = int(
 )
 
 
+def fee_target_from_trusted_payload(
+    payload: Mapping[str, Any],
+) -> tuple[str, str, str, str] | None:
+    source = payload.get("_trade_intake_source")
+    if not isinstance(source, Mapping) or source.get("schema_version") != "trade_intake_source.v1":
+        return None
+    order_id = str(
+        payload.get("order_id")
+        or payload.get("orderID")
+        or payload.get("orderId")
+        or ""
+    ).strip()
+    return _identity(
+        "富途",
+        source.get("account"),
+        source.get("futu_account_id"),
+        order_id,
+    )
+
+
 def sync_order_fees(
     repo: Any,
     *,
     account: str,
-    start_ms: int,
-    end_exclusive_ms: int,
+    start_ms: int | None = None,
+    end_exclusive_ms: int | None = None,
     provider: Any | None,
     apply: bool,
     observed_at_ms: int,
@@ -40,21 +61,29 @@ def sync_order_fees(
     selection_after: str | None = None,
     max_orders: int | None = None,
     sleep_fn: Callable[[float], None] = time.sleep,
+    target_identity: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Run canonical ledger selection, normalized provider admission, and enrichment."""
 
     account_value = str(account or "").strip().lower()
     if not account_value:
         raise ValueError("fee sync account is required")
-    start = int(start_ms)
-    end = int(end_exclusive_ms)
-    if start <= 0 or end <= start:
-        raise ValueError("fee sync range is invalid")
+    target = _target_identity(target_identity)
+    if target is None:
+        start = int(start_ms or 0)
+        end = int(end_exclusive_ms or 0)
+        if start <= 0 or end <= start:
+            raise ValueError("fee sync range is invalid")
+    else:
+        start = end = None
+        if target[1] != account_value:
+            raise ValueError("fee sync target account is outside scope")
     candidates, selection_issues = _select_candidates(
         repo,
         account=account_value,
         start_ms=start,
         end_exclusive_ms=end,
+        target_identity=target,
     )
     provider_accounts: set[str] | None = None
     if allowed_futu_account_ids is not None:
@@ -88,10 +117,14 @@ def sync_order_fees(
             _issue(item, "provider_account_outside_scope")
             for item in outside_scope
         )
-    selected, cursor = _cursor_select(
-        candidates,
-        selection_after=selection_after,
-        limit=max_orders,
+    selected, cursor = (
+        (candidates, {"before": None, "after": None, "wrapped": False})
+        if target is not None
+        else _cursor_select(
+            candidates,
+            selection_after=selection_after,
+            limit=max_orders,
+        )
     )
     actual: list[dict[str, Any]] = []
     provider_issues: list[dict[str, Any]] = []
@@ -114,18 +147,29 @@ def sync_order_fees(
             for batch in _chunks(account_rows, 400):
                 provider_attempted = True
                 order_ids = [str(item["order_id"]) for item in batch]
-                query_start, query_end = _provider_dates(start, end)
-                before_provider_call()
+                query_start, query_end = _provider_dates(
+                    int(batch[0]["oldest_event_time_ms"] if target is not None else start),
+                    int(batch[0]["newest_event_time_ms"] + 1 if target is not None else end),
+                )
+                if target is None:
+                    before_provider_call()
+                else:
+                    provider_call_count += 1
                 try:
                     terminal_rows, terminal_diagnostics = provider.fetch_terminal_orders(
                         futu_account_id=futu_account_id,
                         order_ids=order_ids,
                         start=query_start,
                         end=query_end,
+                        **({"exact": True} if target is not None else {}),
                     )
                 except Exception as exc:
                     provider_issues.extend(
-                        _issue(item, "provider_order_query_failed", error=exc)
+                        _issue(
+                            item,
+                            _provider_failure_reason("provider_order_query_failed", exc),
+                            error=exc,
+                        )
                         for item in batch
                     )
                     continue
@@ -143,7 +187,10 @@ def sync_order_fees(
                     continue
                 fee_call_count += 1
                 admitted_ids = [str(item["order_id"]) for item in admitted]
-                before_provider_call()
+                if target is None:
+                    before_provider_call()
+                else:
+                    provider_call_count += 1
                 try:
                     fee_rows, fee_diagnostics = provider.fetch_order_fees(
                         futu_account_id=futu_account_id,
@@ -151,7 +198,11 @@ def sync_order_fees(
                     )
                 except Exception as exc:
                     provider_issues.extend(
-                        _issue(item, "provider_fee_query_failed", error=exc)
+                        _issue(
+                            item,
+                            _provider_failure_reason("provider_fee_query_failed", exc),
+                            error=exc,
+                        )
                         for item in admitted
                     )
                     continue
@@ -165,7 +216,12 @@ def sync_order_fees(
                 for item in admitted:
                     fee = fee_map.get(str(item["order_id"]))
                     if not isinstance(fee, Mapping):
-                        provider_issues.append(_issue(item, "order_fee_missing"))
+                        provider_issues.append(
+                            _issue(
+                                item,
+                                "fee_pending" if target is not None else "order_fee_missing",
+                            )
+                        )
                         continue
                     try:
                         amount = quantize_money(
@@ -205,6 +261,7 @@ def sync_order_fees(
         actual_fees=actual,
         apply=apply,
         applied_at_ms=int(observed_at_ms),
+        target_identity=target,
     )
     issues = _dedupe_issues(
         [*selection_issues, *provider_issues, *migration.get("unresolved", [])]
@@ -217,6 +274,7 @@ def sync_order_fees(
         "schema_version": "order_fee_sync_receipt.v1",
         "account": account_value,
         "futu_account_id": str(futu_account_id or "").strip() or None,
+        "target_identity_sha256": _identity_hash(target) if target is not None else None,
         "start_ms": start,
         "end_exclusive_ms": end,
         "applied": bool(apply),
@@ -238,8 +296,9 @@ def _select_candidates(
     repo: Any,
     *,
     account: str,
-    start_ms: int,
-    end_exclusive_ms: int,
+    start_ms: int | None,
+    end_exclusive_ms: int | None,
+    target_identity: tuple[str, str, str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     candidate = getattr(repo, "primary_repo", repo)
     trade_rows = list(candidate.list_trade_events())
@@ -268,7 +327,9 @@ def _select_candidates(
         if zero_option_fee_lifecycle_reason(event):
             continue
         if normalize_broker(event.contract_key.broker) != "富途":
-            if _in_range(event.event_time_ms, start_ms, end_exclusive_ms):
+            if target_identity is None and _in_range(
+                event.event_time_ms, int(start_ms or 0), int(end_exclusive_ms or 0)
+            ):
                 issues.append(
                     {
                         "event_kind": "option_trade",
@@ -285,7 +346,9 @@ def _select_candidates(
             raw.get("order_id"),
         )
         if identity is None:
-            if _in_range(event.event_time_ms, start_ms, end_exclusive_ms):
+            if target_identity is None and _in_range(
+                event.event_time_ms, int(start_ms or 0), int(end_exclusive_ms or 0)
+            ):
                 issues.append(
                     {
                         "event_kind": "option_trade",
@@ -304,7 +367,9 @@ def _select_candidates(
             continue
         if normalize_broker(row.get("broker")) != "富途":
             instant = int(row.get("trade_time_ms") or 0)
-            if _in_range(instant, start_ms, end_exclusive_ms):
+            if target_identity is None and _in_range(
+                instant, int(start_ms or 0), int(end_exclusive_ms or 0)
+            ):
                 issues.append(
                     {
                         "event_kind": "assigned_stock_sale",
@@ -321,7 +386,9 @@ def _select_candidates(
         )
         instant = int(row.get("trade_time_ms") or 0)
         if identity is None:
-            if _in_range(instant, start_ms, end_exclusive_ms):
+            if target_identity is None and _in_range(
+                instant, int(start_ms or 0), int(end_exclusive_ms or 0)
+            ):
                 issues.append(
                     {
                         "event_kind": "assigned_stock_sale",
@@ -333,9 +400,17 @@ def _select_candidates(
         grouped.setdefault(identity, []).append(("assigned_stock_sale", row))
 
     candidates: list[dict[str, Any]] = []
+    target_seen = False
     for identity, typed_rows in grouped.items():
         times = [_time_ms(value) for _kind, value in typed_rows]
-        if not any(_in_range(value, start_ms, end_exclusive_ms) for value in times):
+        if target_identity is not None:
+            if identity != target_identity:
+                continue
+            target_seen = True
+        elif not any(
+            _in_range(value, int(start_ms or 0), int(end_exclusive_ms or 0))
+            for value in times
+        ):
             continue
         base = {
             "broker": identity[0],
@@ -344,9 +419,13 @@ def _select_candidates(
             "order_id": identity[3],
             "identity_sha256": _identity_hash(identity),
             "oldest_event_time_ms": min(times),
+            "newest_event_time_ms": max(times),
             "row_count": len(typed_rows),
         }
-        if min(times) < start_ms or max(times) >= end_exclusive_ms:
+        if target_identity is None and (
+            min(times) < int(start_ms or 0)
+            or max(times) >= int(end_exclusive_ms or 0)
+        ):
             issues.append(
                 {
                     **_redacted(base),
@@ -385,6 +464,10 @@ def _select_candidates(
             quantity = int(stock[0].get("shares") or 0)
             currencies = {str(stock[0].get("currency") or "").strip().upper()}
         if all(fact.basis == FeeBasis.ACTUAL for fact in facts):
+            if target_identity is not None:
+                issues.append(
+                    _issue({**base, "event_kind": kind}, "already_actual")
+                )
             continue
         if min(times) < _PROVIDER_CUTOFF_MS:
             issues.append({**_redacted(base), "reason": "provider_date_unsupported"})
@@ -405,6 +488,14 @@ def _select_candidates(
             }
         )
     candidates.sort(key=lambda item: str(item["sort_key"]))
+    if target_identity is not None and not target_seen:
+        issues.append(
+            {
+                "event_kind": "order_group",
+                "identity_sha256": _identity_hash(target_identity),
+                "reason": "target_order_group_missing",
+            }
+        )
     return candidates, issues
 
 
@@ -487,8 +578,24 @@ def _provider_dates(start_ms: int, end_exclusive_ms: int) -> tuple[str, str]:
 
 
 def _identity(broker: Any, account: Any, futu_account_id: Any, order_id: Any) -> tuple[str, str, str, str] | None:
-    values = tuple(str(value or "").strip() for value in (broker, account, futu_account_id, order_id))
+    values = (
+        normalize_broker(broker),
+        str(account or "").strip(),
+        str(futu_account_id or "").strip(),
+        str(order_id or "").strip(),
+    )
     return (values[0], values[1].lower(), values[2], values[3]) if all(values) else None
+
+
+def _target_identity(value: Sequence[str] | None) -> tuple[str, str, str, str] | None:
+    if value is None:
+        return None
+    if isinstance(value, (str, bytes)) or len(value) != 4:
+        raise ValueError("fee sync target identity must contain four fields")
+    target = _identity(*value)
+    if target is None:
+        raise ValueError("fee sync target identity is incomplete")
+    return target
 
 
 def _identity_hash(identity: Sequence[str]) -> str:
@@ -541,6 +648,10 @@ def _issue(item: Mapping[str, Any], reason: str, *, error: Exception | None = No
     return out
 
 
+def _provider_failure_reason(default: str, error: Exception) -> str:
+    return "provider_rate_limited" if isinstance(error, FutuGatewayRateLimitError) else default
+
+
 def _dedupe_issues(items: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     seen: set[str] = set()
     out: list[dict[str, Any]] = []
@@ -578,4 +689,4 @@ def canonical_decimal(value: Decimal) -> str:
     return format(value.quantize(Decimal("0.000001")), "f")
 
 
-__all__ = ["sync_order_fees"]
+__all__ = ["fee_target_from_trusted_payload", "sync_order_fees"]
