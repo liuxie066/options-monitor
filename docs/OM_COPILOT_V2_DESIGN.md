@@ -1,10 +1,10 @@
-# OM Copilot v2 Architecture / Scene v4 Contract
+# OM Copilot v2 Architecture / Scene v5 Contract
 
 The product architecture remains v2. The general `om_chat` runtime Scene and
-prompt contract are versioned independently and are currently `v4`.
+prompt contract are versioned independently and are currently `v5`.
 
 The generic Agent runtime has been replaced by Pi Agent Core. This document
-continues to own the Copilot product boundary and Scene v4 contract; the
+continues to own the Copilot product boundary and Scene v5 contract; the
 current model/tool loop, session, admission and rollback implementation is
 specified in [PI_AGENT_CORE_INTEGRATION.md](PI_AGENT_CORE_INTEGRATION.md).
 
@@ -49,11 +49,14 @@ descriptions from `agent_tool_registry.py` and `agent_tools/`.
 ## Invariants
 
 - There is one general Scene: `om_chat`.
-- The `om_chat` Scene is `v4` and compiles one ordered five-fragment prompt
+- The `om_chat` Scene is `v5` and compiles one ordered five-fragment prompt
   pack. Repository operator instructions are not runtime prompt input.
 - Service does not classify free text into OM business tasks.
 - Service does not parse month, symbol, account, or intent from free text.
 - Host owns execution governance; Agent owns generic model/tool iteration.
+- After the Agent selects an option-performance read tool, Host may bind only
+  the unique current-message period attestation defined below. This is an
+  input-authority fence, not Service routing or financial interpretation.
 - Agent and Engine contain no OM task routing or strategy-specific branches.
 - Copilot receives canonical pure-read tools only. The `portfolio` toolset is an
   optional read boundary, disabled by default and projected only when
@@ -116,6 +119,266 @@ Host responsibilities:
 Host must not classify business intent, choose evidence recipes, interpret
 financial data, or rewrite the model's answer into a second answer system.
 
+## Deterministic Option-Performance Input Binding
+
+### Goal, Non-Goals, And Success Signals
+
+The goal is to prevent a correct natural-period request from failing because
+the model chose the right read tool but supplied a conflicting period payload.
+For example, `期权8月收益` must execute as the attested natural month rather
+than fail because the model proposed `mtd`.
+
+Success requires all of the following:
+
+- an unambiguous current-message month or year request reaches the canonical
+  performance owner, when a performance view is materialized, with the matching
+  `period` plus `month` or `year`;
+- the sanitized model-proposed input and the effective input are both
+  auditable, including when preparation rejects the call before execution;
+- ambiguous, malformed, or future selectors still fail before any business
+  read, while unrelated text retains generic MTD/YTD behavior;
+- successful observations returned to the model expose the effective bound
+  period scope rather than the conflicting proposal;
+- direct Tool Gateway behavior and canonical performance calculations remain
+  unchanged;
+- model-visible tool descriptions state the valid parameter combinations for
+  both performance reads and answer submission.
+
+This work does not add a general intent router, a second answer renderer, a new
+tool or event store, or a provider-specific strict-tool runtime. Host does not
+calculate income, translate a natural month into MTD, or choose a performance
+tool for the model.
+
+### Current Facts And Constraints
+
+- The current-message fence already parses closed MTD/YTD cutoffs and natural
+  month/year selectors for `option_performance_report` and `analysis_query`.
+- It currently compares the model proposal with that attestation and rejects a
+  mismatch, although the attested values are already known deterministically.
+- A pre-execution rejection records the failure observation but not the model's
+  sanitized business-tool arguments, so the exact bad proposal cannot later be
+  reconstructed from the run.
+- The canonical period owner accepts `mtd`, `ytd`, `month`, and `year`; it owns
+  calendar-window semantics and remains the final validator.
+- Current contracts freeze `operating_date` from one `report_now_ms` in
+  Asia/Shanghai; Host must not substitute an ambient machine-local date when
+  that authority is missing or malformed.
+- Result admission requires an empty claim list in `conceptual` mode and at
+  least one evidence claim in `evidence` mode. The validator enforces this, but
+  the projected `submit_answer` description must make the coupling explicit.
+
+### Chosen Design And Data Flow
+
+The existing closed selector parser remains the sole attestation source. Once
+the Agent calls `option_performance_report` or `analysis_query`, Host performs:
+
+```text
+model-selected read tool + model arguments
+-> bounded model-input audit projection
+-> current-message option-period attestation
+-> reconcile with trusted fixed scope
+-> bind attested period fields into a copy of model arguments
+-> ordinary payload preparation, normalization, and fixed-scope merge
+-> canonical tool validation and execution
+-> evidence admission
+```
+
+Binding is limited to `period`, `as_of_date`, `month`, and `year`. Host replaces
+those fields with the attested values and removes incompatible sibling selector
+fields. Account, broker, config, analysis view, SQL, and every other model or
+fixed-scope field are preserved.
+
+Authority precedence is:
+
+```text
+trusted fixed scope > current-message attestation > model proposal/default
+```
+
+For these two option-performance-capable tools, a trusted fixed `month` denotes
+the complete scope `period=month, month=<fixed>`. If the current message has no
+selector, that fixed scope is bound. If the message attests the same month,
+execution continues; a different month, a year, or an MTD/YTD cutoff conflicts
+and returns `INPUT_ERROR` before the business read. Invalid, ambiguous, or
+future current-message selectors also reject instead of falling back to the
+fixed month. Binding never overwrites trusted fixed scope.
+
+After the authoritative scope is selected, Host copies the model arguments,
+replaces the four period fields, removes incompatible siblings, and only then
+runs ordinary tool preparation. A conflicting or empty model-proposed period
+sibling therefore cannot reject a selector that Host already knows exactly.
+
+Attestation has four closed states:
+
+- `none`: no option-performance selector or selector-like text is present;
+- `unique_valid`: exactly one supported selector is present and may be bound;
+- `invalid_or_ambiguous`: selector-like option-performance text is malformed,
+  incomplete, conflicting, or contains multiple natural selectors;
+- `future`: the selector resolves after the frozen Asia/Shanghai
+  `operating_date`.
+
+`invalid_or_ambiguous` and `future` reject before the business read. The
+malformed boundary is exact: it must match one of the two existing
+option-performance phrase orderings (`期权 <selector> 收益` or
+`<selector> 期权收益`) while the isolated selector token fails the closed valid
+selector grammar. Text that does not match either performance phrase ordering
+is `none`; Host does not add a general Chinese date or intent parser. Explicit
+MTD/YTD cutoffs must not be after `operating_date`.
+
+Period attestation requires a valid contract `operating_date`, or a valid
+frozen `report_now_ms` from which Host derives the same Asia/Shanghai date. If
+neither is available, Host returns `INPUT_ERROR` before binding or reading; it
+never falls back to the ambient process date. This intentionally makes a legacy
+or damaged persisted run non-resumable for this read instead of changing its
+calendar scope.
+
+The accepted selector states are:
+
+| Current-message selector | Effective performance input |
+|---|---|
+| explicit MTD cutoff | `period=mtd`, matching `as_of_date` |
+| explicit YTD cutoff | `period=ytd`, matching `as_of_date` |
+| one natural month | `period=month`, canonical `month=YYYY-MM` |
+| one natural year | `period=year`, canonical integer `year` |
+| no attested natural selector | existing generic MTD/YTD behavior; unauthorized `as_of_date` is removed |
+
+Multiple natural selectors, invalid dates, future periods, and selector-like
+text outside the closed grammar remain rejected before execution. The parser is
+not broadened to infer arbitrary phrasing. Direct `./om-agent` calls remain
+governed by the tool schema and canonical period owner without this
+conversation-only binding.
+
+For `analysis_query`, the bound top-level period fields constrain canonical
+performance materialization when performance views are selected and retain
+their existing filter meaning for other views. Host does not inspect SQL or
+choose/rewrite views, so this does not add an analysis router. An observation
+can support a performance claim only when its ordinary source, scope, coverage,
+and freshness contracts establish that authority.
+
+For business read calls, trace extends the existing audit sanitizer with one
+bounded input projection used identically for `model_input` and `tool_input`:
+
+- recognized schema fields other than free-form query text retain their values
+  after the existing secret/path redaction and cursor hashing;
+- `sql` and `query` retain only `{type, length, sha256}`;
+- unsupported field names remain visible, while their values retain only type,
+  length where applicable, and SHA-256;
+- the complete projection uses the existing 4,000-token observation ceiling;
+  an oversized field or projection collapses to the same metadata shape.
+
+The event records:
+
+- `model_input`: the bounded projection of arguments as the model proposed them;
+- `model_input_hash`: a stable hash of the complete model proposal;
+- `tool_input`: the effective bound payload only after ordinary tool preparation
+  succeeds, through the same bounded projection;
+- the existing error code and message when preparation or attestation rejects.
+
+A rejected call keeps these diagnostics in its existing `tool_result` event;
+no synthetic successful `tool_call` is created. Secrets and configured paths
+remain redacted, cursor-like values remain hashed, input projection depth and
+size remain bounded, and raw SQL/free text, answer text, prompts, messages, and
+private reasoning remain absent. `submit_answer` continues to log only mode,
+status, references, admission outcome, and approved-answer hash.
+
+The two business-read audit states are:
+
+1. rejected before execution, including attestation, fixed-scope reconciliation,
+   or ordinary preparation: sanitized `model_input` and `model_input_hash`, with
+   no `tool_input`;
+2. execution attempted: sanitized `model_input`, `model_input_hash`, and the
+   effective bound `tool_input` sent to the canonical tool, whether the returned
+   observation succeeds or fails.
+
+The projected direct-report schema states that `month` is valid only with
+`period=month`, `year` only with `period=year`, and `as_of_date` only with an
+explicit MTD/YTD cutoff. For `analysis_query`, the same combinations apply only
+when materializing option-performance views; `month` retains its existing
+filter meaning for other views. The projected `submit_answer` description
+states that `conceptual` requires `claims=[]`, while `evidence` requires at
+least one claim referencing successful current-request observations. Existing
+prompt rules remain the general behavioral owner; no question-specific prompt
+is added.
+
+### Failure Behavior And State Transitions
+
+Binding does not introduce a new run state. A call remains either rejected
+before execution, executed with a failed observation, or executed with a
+successful evidence observation. Only the last state can support factual
+claims.
+
+If a natural-period payload lacks a matching attestation, or attestation is
+invalid, ambiguous, future, or conflicts with trusted scope, Host returns the
+existing recoverable `INPUT_ERROR` observation with the sanitized model input
+attached to the trace. `none` still permits generic MTD/YTD without a cutoff and
+removes an unauthorized model-proposed `as_of_date`. The model may repair the
+call within existing budgets. If no admissible evidence exists, the model may
+submit a conceptual missing-evidence explanation with empty claims; Host does
+not manufacture an answer on its behalf.
+
+### Implementation Slices
+
+1. Replace comparison-only option-period fencing with narrow pre-normalization
+   binding at the existing Host ownership point, enforce trusted-scope
+   precedence, and preserve fail-closed cases.
+2. Extend the existing audit sanitizer with the bounded input projection and add
+   `model_input` alongside effective `tool_input` in existing business read
+   events, including pre-execution rejection, without persisting SQL or unknown
+   field values.
+3. Align the projected performance and `submit_answer` descriptions with their
+   validators, and align the linked Pi integration owner with this binding
+   contract.
+4. Add focused Host, trace-redaction, schema-description, and result-admission
+   regressions; then run the existing Copilot and Agent contract checks.
+
+### Validation Plan
+
+- Prove `期权8月收益` executes with the canonical natural-month input even when
+  the model proposes MTD, and prove the same behavior for natural year and
+  explicit MTD/YTD cutoffs.
+- Cover both `option_performance_report` and `analysis_query`.
+- Prove the returned observation exposes the bound period scope, followed by a
+  source-declared evidence claim that `submit_answer` accepts and a terminal
+  `answered` result without `ANSWER_ADMISSION_FAILED`.
+- Prove ambiguous, future, and malformed selectors, including `期权13月收益`,
+  perform no business read; unrelated text preserves generic MTD/YTD behavior.
+- Prove fixed month scope alone binds `period=month`, equal message attestation
+  succeeds, and a different month/year or MTD/YTD message scope rejects before
+  the read.
+- Prove bare-month resolution across January and the Asia/Shanghai day boundary,
+  and prove future MTD/YTD cutoffs reject before the read.
+- Prove missing or malformed `operating_date` falls back only to a valid frozen
+  `report_now_ms`; when both are unusable, the call rejects without a read.
+- Prove successful traces contain sanitized model/effective inputs and rejected
+  traces retain sanitized model input without creating a successful tool call.
+- Prove every pre-execution rejection has no `tool_input`, while successful and
+  failed execution attempts record the effective bound input.
+- Prove configured paths remain redacted, cursors remain hashed, and rejected
+  answer bodies, SQL, unknown free text, and PII-like marker strings are not
+  persisted verbatim.
+- Prove exact safe period fields remain visible, SQL/query and unsupported values
+  use the declared metadata shape, and an oversized projection stays within the
+  4,000-token ceiling.
+- Assert the projected parameter-combination guidance and the
+  `conceptual`/`evidence` claim rules.
+- Run focused Copilot, result-admission, Pi bridge, and Agent contract tests,
+  followed by repository guards required by the touched import boundaries and
+  `git diff --check`.
+
+### Risks, Rejected Alternatives, And Open Questions
+
+The main risk is accidentally turning a closed authority fence into business
+intent routing. The boundary is therefore enforced by the existing narrow
+grammar, only after model tool selection, and only over four period fields.
+
+Rejected alternatives are: asking the model to retry the same already-known
+selector indefinitely; generating a Host fallback answer; translating a
+natural period into generic MTD/YTD dates; adding a broad natural-language
+router; adding a new audit database or event type; and extending the Pi provider
+bridge with strict-tool controls before current evidence requires it.
+
+No open product choice remains for this slice. Broader selector coverage or a
+provider-level strict schema is separate work triggered by measured failures.
+
 ## Scene And Prompt
 
 The only Scene is declared in:
@@ -132,7 +395,7 @@ It declares:
 - model/tool/context/time budgets;
 - conversation limits.
 
-The ordered v4 prompt pack is:
+The ordered v5 prompt pack is:
 
 ```text
 base_behavior.md
@@ -163,22 +426,35 @@ The fragments define general behavior only:
 
 Question-specific prompts, tool lists, and renderers are prohibited.
 
-Runtime context slots have only two authorities:
+Runtime context slots have three authorities:
 
 ```text
 reference:
   reference_year
+  operating_date
 
 fixed_tool_scope:
   config_key
   symbol
   month
+
+host_only_tool_scope:
+  report_now_ms
+  config_path
+  authenticated_channel
+  authenticated_sender_id
+  authenticated_conversation_id
 ```
 
-Only fields declared as `fixed_tool_scope` can override model-provided tool
-arguments. `reference_year` is model context only. Undeclared contract input
-cannot silently acquire tool authority. Runtime values are rendered as
-JSON-encoded data, not interpolated instructions.
+Among execution-contract slots, only fields declared as `fixed_tool_scope` can
+override model-provided tool arguments; `host_only_tool_scope` fields are added
+by Host and are not model-controlled. The sole conversation-derived override is
+the closed option-period attestation defined above, which is not a contract
+slot. `reference_year` is model context only; `operating_date` is also the
+Host's frozen calendar authority for that attestation, but neither field
+directly becomes a tool argument. Undeclared contract input cannot silently
+acquire tool authority. Runtime values are rendered as JSON-encoded data, not
+interpolated instructions.
 
 The result admission boundary rejects known unparsed tool protocols, unbalanced
 fences, malformed whole-response JSON containers, and malformed raw object or
@@ -366,7 +642,10 @@ The static Scene fingerprint is separate from the per-turn dynamic
 fingerprint.
 
 Run records aggregate model turns, tool calls, retries, token usage, status, and
-termination reason. Trace payloads are sanitized execution facts, not reasoning.
+termination reason. Business read events retain sanitized model-proposed input
+and effective input when available, including the proposal attached to a
+pre-execution rejection. Trace payloads are sanitized execution facts, not
+reasoning.
 
 Public progress is derived from stable events and exposes only labels such as:
 
@@ -417,7 +696,7 @@ that the Service is explicitly forbidden to perform.
 | Empty question | `needs_clarification` before Host |
 | Model not configured | `not_ready`, no tool call |
 | Contract or Scene invalid | explicit failure |
-| Tool arguments invalid | recoverable observation with repair hint |
+| Tool arguments invalid | bind a unique attested option-period scope; otherwise return a recoverable observation with repair hint |
 | Tool unavailable or data missing | explicit gap preserved |
 | Repeated identical call | duplicate call rejected |
 | Provider timeout/error | categorized event and bounded failure |
@@ -498,7 +777,7 @@ configured at runtime and must not assume a provider.
 | Phase | Deliverable | Exit gate |
 |---|---|---|
 | P0 | Stable rebuild baseline | Focused tests, guards, dependency graph, and diff checks pass. |
-| P1 | Production answer-quality baseline | The configured production model produces sanitized v4 traces and human scores. |
+| P1 | Production answer-quality baseline | The configured production model produces sanitized eval-v4 traces and human scores. |
 | P2 | Structured memory | Existing pinned state and episodes remain injectable without request-path model calls or memory writes. |
 | P3 | Durable run control | Interrupted reads resume safely and cancellation stops further work. |
 | P4 | Trace/model protocol | Iteration identity, usage, termination, and failure categories are persisted. |
@@ -526,7 +805,7 @@ The rebuild is complete only when:
 - explicit operations use one deterministic audited Control contract;
 - deterministic Copilot, Control, channel, config, and architecture tests pass;
 - production real-model questions produce useful, factual conclusions;
-- three independent real-model acceptance runs use the expected stable v4
+- three independent real-model acceptance runs use the expected stable Scene v5
   prompt/tool fingerprints and pass every format and safety hard gate;
 - quantitative persona cases use relevant supported evidence, avoid false
   precision and emotional language, and permit wait/no-trade conclusions;

@@ -1615,15 +1615,27 @@ cutoff forms. A natural selector counts only in the report slot
 strike, or narrative date/year never authorizes report scope. A second
 period-like report phrase makes the request ambiguous and is rejected. A bare
 month resolves to the most recent non-future occurrence relative to
-`operating_date`; `上月` crosses a year boundary normally. The model proposes
-the exact canonical arguments, then the Host verifies equality with the single
-attested selector before any business read, including an `analysis_query` that
-materializes option performance. Conflicting or future selectors
-are also rejected. The Host does not rewrite a natural period into MTD/YTD,
-and direct Tool Gateway calls remain outside this current-message fence. The
-canonical period owner rejects selector fields that do not belong to the
-chosen period. `range`, `start_date`, `end_date`, quote-refresh, and
-`include_rows` arguments remain outside the Copilot tool schema.
+`operating_date`; `上月` crosses a year boundary normally. After the model
+selects `option_performance_report` or `analysis_query`, Host binds the single
+attested scope into a copy of the model arguments before tool-specific
+normalization. Binding replaces only `period`, `as_of_date`, `month`, and `year`
+and removes incompatible siblings; it never chooses a tool, view, or SQL.
+A trusted fixed `month` denotes `period=month` and has precedence: absent or
+equal message scope succeeds, while a different natural period or MTD/YTD
+cutoff conflicts. Malformed, ambiguous, future, and fixed-scope-conflicting
+selectors are rejected before any business read. A no-selector request retains
+generic MTD/YTD behavior and removes an unauthorized cutoff. The Host does not
+rewrite a natural period into MTD/YTD, and direct Tool Gateway calls remain
+outside this current-message fence. The canonical period owner rejects selector
+fields that do not belong to the chosen period. `range`, `start_date`,
+`end_date`, quote-refresh, and `include_rows` arguments remain outside the
+Copilot tool schema.
+
+Attestation requires a valid contract `operating_date` or a valid frozen
+`report_now_ms` from which Host derives the same Asia/Shanghai date. If both are
+missing or malformed, Host returns `INPUT_ERROR` before the business read and
+does not fall back to the machine-local date. A legacy interrupted run without
+either authority is therefore not resumable for an option-period read.
 
 Before `proposed`, cancellation wins and the current turn is not persisted.
 After `proposed`, the existing Host admission CAS remains the sole winner. The
@@ -1825,8 +1837,8 @@ ambiguous, eager remains available.
 | canonical output contracts | declare evidence type, deterministic projection, coverage, freshness, page/query scope, cursor TTL, and stable order |
 | `src/application/copilot/scene.py` | build the frozen authorized universe and loading mode without interpreting user intent; remove Scene-owned absolute context caps |
 | `src/application/copilot/service.py`, channel/local preparation facades, and `om_chat.scene.json` | freeze one injectable request instant, derive the existing reference year plus Asia/Shanghai operating date, render only the derived reference values, and retain the raw instant in Host-only scope |
-| `src/application/copilot/host.py` | freeze catalog/schema snapshot and request time, serve private activations, attest option-performance selectors, maintain current-request evidence, preserve final durable admission, and render only terminal-adjacent admission receipt categories |
-| `src/application/copilot/tools.py` | extend `compact_observation()` with deterministic source-declared coverage/freshness projection, retain month/year in request scope, scope/reset the frozen option-performance clock around the existing executor, and eliminate exhaustive claims from generic previews |
+| `src/application/copilot/host.py` | freeze catalog/schema snapshot and request time, serve private activations, attest and narrowly bind option-performance selectors after model tool selection, maintain current-request evidence, preserve final durable admission, and render only terminal-adjacent admission receipt categories |
+| `src/application/copilot/tools.py` | extend `compact_observation()` with deterministic source-declared coverage/freshness projection, retain month/year in request scope, provide the bounded model/effective input audit projection, scope/reset the frozen option-performance clock around the existing executor, and eliminate exhaustive claims from generic previews |
 | `src/application/copilot/result_admission.py` | validate `submit_answer` claims against Host evidence and append non-removable coverage banners; retain existing final result checks |
 | `domain/domain/performance/period.py`, `src/application/performance/service.py`, and the existing option-performance facades | restore canonical month/year windows, propagate only their exact selectors, and serialize the aggregate coverage/freshness envelope once |
 | `src/application/ledger/repository.py`, `queries.py`, and `api.py` | migrate and query the canonical trade-event stream; own `ingest_seq`, normalized market/effect projections, snapshot fencing, keyset SQL, cursor validation/encoding, and the public ledger facade |
@@ -1844,7 +1856,7 @@ registry is permitted by this design.
 |---|---|
 | Catalog ownership | every scene-visible tool has valid canonical summary/evidence metadata; hash is deterministic; missing metadata fails scene preparation |
 | Contract inventory | CI walks the canonical scene allowlist and fails any visible tool without an output contract, coverage/freshness resolver, and explicit pagination mode; no manual readiness matrix exists |
-| Intent boundary | conceptual fixture reaches `submit_answer` without a business tool; factual fixtures select tools through the Pi main model; Host has no general keyword router, and its closed option-performance selector fence only validates model-proposed arguments against the current message |
+| Intent boundary | conceptual fixture reaches `submit_answer` without a business tool; factual fixtures select tools through the Pi main model; Host has no general keyword router, and only after model selection its closed option-performance fence binds the four attested period fields without choosing a tool, view, or SQL |
 | Activation | exact names only, two-toolset/six-tool maximum, hash/allowlist enforcement, idempotent no-op, two successful replacements, one repair, and atomic apply failure all pass |
 | Control | Host rejects unauthorized preview schemas by channel/spec/arguments; a model fixture verifies explicit-action instructions before preview selection; sole-call and deterministic confirm/apply/readback behavior are unchanged |
 | Projection | every allowlisted output contract reports coverage/freshness; `total_count`/`omitted_count` may be null but then cannot support a complete/full-query claim |
@@ -1853,7 +1865,7 @@ registry is permitted by this design.
 | Cursor secret | an inbound-only runtime fixture pages successfully with the fixed domain derivation; no dedicated cursor credential is registered or bound; a missing inbound key makes `events` fail explicitly; neither master nor child key appears in Node/model/metrics or upgrader state, and an intentional inbound-key change deterministically invalidates old cursors |
 | Evidence scope | observation IDs are globally unique and valid only in the current external request; pre-run committed-prefix compaction cannot grant old IDs current authority; old-page follow-up re-calls the canonical tool |
 | Answer admission | conceptual/evidence modes, every claim kind/scope, mutually exclusive private result fields, one plain-final repair and one submission repair in either order, mixed-batch consumption of every represented class, second same-class safe failure with no commit, shared-budget exhaustion before either repair, canonical retryable rejection only, callback cancellation through Python `run.cancel`, identical terminal arbitration after both prompts, cancel/propose race, exact approved-text/hash comparison, and unchanged fail-closed handling of missing/malformed declarations pass |
-| Option-performance selector scope | the real Copilot Host callback proves exact MTD/YTD cutoffs, explicit/bare/relative months, explicit years, cross-year resolution from one frozen `operating_date`, and rejection of wrong, future, multiple, or conflicting selectors before any business read; direct Tool Gateway behavior remains unchanged |
+| Option-performance selector scope | the real Copilot Host callback proves a conflicting model proposal is replaced by exact MTD/YTD, explicit/bare/relative month, or explicit-year attestation before normalization; fixed month alone and equal message scope succeed; malformed, future, multiple, fixed-scope-conflicting, and missing-frozen-clock cases reject before any business read; returned evidence exposes the bound scope; direct Tool Gateway behavior remains unchanged |
 | Admission receipt | each allowlisted terminal-adjacent rejection group renders only its frozen text plus public `run_id`; unknown reasons use the generic receipt; a prior rejection followed by model, tool, schema, budget, or cancellation failure preserves that real outcome and leaks no raw reason or rejected content |
 | Context | 69/70/75 percent boundaries, committed-prefix-only pre-run compact, untouched open suffix, same-model compact, <=50 percent target, failed compact rollback, and exact pre-provider rejection before every main call pass at 128k and smaller fixtures |
 | Session | internal directory/finalizer groups and repair prompts are absent; canonical assistant answer appears once; business tool groups remain complete |
@@ -1861,7 +1873,7 @@ registry is permitted by this design.
 | Provider profiles | for every configured model/provider profile, a follow-up turn whose durable history contains now-deactivated canonical tool call/result groups succeeds while the active schema set is replaced; any failure blocks directory enablement with no automatic eager fallback |
 | Context migration | source and fixture search finds no Scene/process absolute context cap; the closed Python/Node payload uses only `model.context_window_tokens`; a 128k model with a formerly smaller Scene fixture is admitted by the single authority |
 | Prompt budget | static prompt chars/tokens do not exceed baseline; directory-mode fixed plus active-schema tokens are measured against eager baseline |
-| Audit/privacy | required structured metrics exist; raw prompts/results/cursors/private schemas/secrets/reasoning are absent |
+| Audit/privacy | required structured metrics exist; bounded `model_input` and effective `tool_input` retain safe period fields, hash SQL/query and unsupported values, and stay within the observation-token ceiling; raw prompts/results/cursors/private schemas/secrets/reasoning are absent |
 | Regression | focused Pi contract tests, Copilot Host/Service tests, agent plugin contract/smoke, full Python suite, locked Node tests, and clean-archive smoke pass |
 
 The historical one-character incident is a required regression fixture: a very
@@ -1876,10 +1888,11 @@ completion must never become an admitted answer.
 - Keep the single Pi main model responsible for exact tool selection.
 - Keep Host authority deterministic and narrow. Its only business-input
   attestation is the Copilot-only closed option-performance selector fence in
-  13.11: validate the model-proposed MTD/YTD cutoff or one natural month/year
-  against the current message and frozen `operating_date`, reject ambiguous or
-  conflicting selectors before the read, and leave direct Tool Gateway calls
-  outside the fence. This is not a generic intent router.
+  13.11: after model tool selection, bind one current-message MTD/YTD cutoff or
+  natural month/year into the four period fields, honor trusted fixed month,
+  reject malformed, ambiguous, future, or conflicting selectors before the
+  read, and leave direct Tool Gateway calls outside the fence. This is not a
+  generic intent router.
 - Project the compact catalog from canonical metadata; do not duplicate it.
 - Preserve `run.start`; add the catalog and policy fields there, and keep only
   one absolute context-window authority.

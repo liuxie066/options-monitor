@@ -445,6 +445,33 @@ def test_event_cursor_is_exact_for_model_and_hashed_in_audit() -> None:
     assert cursor not in json.dumps(audit, sort_keys=True)
 
 
+def test_tool_input_audit_keeps_supported_fields_and_hashes_free_form_values() -> None:
+    audit = copilot_tools.audit_tool_input(
+        "analysis_query",
+        {
+            "period": "mtd",
+            "sql": "select private_value from option_period_performance",
+            "unsupported_secret": "do-not-store",
+        },
+        model_proposal=True,
+    )
+
+    assert audit["period"] == "mtd"
+    assert set(audit["sql"]) == {"type", "length", "sha256"}
+    assert set(audit["unsupported_secret"]) == {"type", "length", "sha256"}
+    serialized = json.dumps(audit, sort_keys=True)
+    assert "private_value" not in serialized
+    assert "do-not-store" not in serialized
+    assert copilot_tools.conservative_json_tokens(audit) <= copilot_tools.MAX_OBSERVATION_TOKENS
+    oversized = copilot_tools.audit_tool_input(
+        "analysis_query",
+        {"views": ["x" * 1_000 for _ in range(30)]},
+        model_proposal=True,
+    )
+    assert set(oversized["views"]) == {"type", "length", "sha256"}
+    assert copilot_tools.conservative_json_tokens(oversized) <= copilot_tools.MAX_OBSERVATION_TOKENS
+
+
 def test_event_cursor_only_input_selects_events_and_enforces_its_limit() -> None:
     from jsonschema import Draft202012Validator
 
@@ -969,6 +996,21 @@ def test_analysis_query_has_no_fake_default_query() -> None:
     assert definition.safe_default_input == {}
 
 
+def test_option_period_tool_parameters_explain_valid_combinations() -> None:
+    descriptions = {
+        item["name"]: item
+        for item in copilot_tools.tool_descriptions(
+            ("option_performance_report", "analysis_query")
+        )
+    }
+    report_properties = descriptions["option_performance_report"]["input_schema"]["properties"]
+    analysis_properties = descriptions["analysis_query"]["input_schema"]["properties"]
+
+    assert "month requires month" in report_properties["period"]["description"]
+    assert "only when period is mtd or ytd" in report_properties["as_of_date"]["description"]
+    assert "required when period=month" in analysis_properties["month"]["description"]
+
+
 def test_model_may_answer_directly_without_tools() -> None:
     requests: list[ModelRequest] = []
 
@@ -1428,7 +1470,7 @@ def test_undeclared_contract_input_cannot_override_model_tool_arguments(monkeypa
     [
         (
             "8月期权收益率，总计，不分账号",
-            {"period": "month", "month": "2026-08"},
+            {"period": "mtd", "as_of_date": ""},
             {"period": "month", "month": "2026-08"},
         ),
         (
@@ -1438,7 +1480,7 @@ def test_undeclared_contract_input_cannot_override_model_tool_arguments(monkeypa
         ),
         (
             "期权8月收益",
-            {"period": "month", "month": "2026-08"},
+            {"period": "mtd"},
             {"period": "month", "month": "2026-08"},
         ),
         (
@@ -1447,23 +1489,43 @@ def test_undeclared_contract_input_cannot_override_model_tool_arguments(monkeypa
             {"period": "month", "month": "2026-08"},
         ),
         (
+            "期权10月收益",
+            {"period": "month", "month": "2026-10"},
+            {"period": "month", "month": "2025-10"},
+        ),
+        (
             "2025年期权收益",
-            {"period": "year", "year": 2025},
+            {"period": "mtd", "month": "2026-08"},
             {"period": "year", "year": 2025},
         ),
         (
             "截至2026-08-23的8月期权收益率，总计，不分账号",
-            {"period": "mtd", "as_of_date": "2026-08-23"},
+            {"period": "month", "month": "2026-08"},
             {"period": "mtd", "as_of_date": "2026-08-23"},
         ),
         (
             "截至2026-08-23查询YTD期权收益率",
-            {"period": "ytd", "as_of_date": "2026-08-23"},
+            {"period": "mtd", "as_of_date": "2026-08-22"},
             {"period": "ytd", "as_of_date": "2026-08-23"},
         ),
         (
             "不要再用截至2026-08-23的旧口径，查当前 MTD",
             {"period": "mtd"},
+            {"period": "mtd"},
+        ),
+        (
+            "7月 mtd 的期权收益",
+            {"period": "mtd"},
+            {"period": "mtd"},
+        ),
+        (
+            "查当前 MTD",
+            {"as_of_date": "2026-08-23"},
+            {"period": "mtd"},
+        ),
+        (
+            "查当前 MTD",
+            {"as_of_date": ""},
             {"period": "mtd"},
         ),
     ],
@@ -1505,6 +1567,108 @@ def test_host_constrains_option_performance_cutoff_before_business_read(
         )
         if key in calls[0]
     } == expected_scope
+    tool_event = next(
+        event
+        for event in result.events
+        if event.type == "tool_call"
+        and event.payload.get("tool_name") == "option_performance_report"
+    )
+    assert tool_event.payload["model_input_hash"].startswith("sha256:")
+    assert tool_event.payload["model_input"] == copilot_tools.audit_tool_input(
+        "option_performance_report",
+        arguments,
+        model_proposal=True,
+    )
+    assert {
+        key: tool_event.payload["tool_input"][key]
+        for key in expected_scope
+    } == expected_scope
+
+
+def test_incident_natural_month_binding_reaches_answered_with_admitted_evidence(
+    monkeypatch,
+) -> None:
+    calls: list[dict] = []
+
+    def process(_start, *, on_tool_call, on_proposed, **_kwargs):
+        observation = on_tool_call(
+            {
+                "call_id": "performance_read",
+                "tool_name": "option_performance_report",
+                "arguments": {"period": "mtd", "as_of_date": ""},
+            }
+        )
+        admitted = on_tool_call(
+            {
+                "call_id": "answer_submit",
+                "tool_name": "submit_answer",
+                "arguments": {
+                    "mode": "evidence",
+                    "status": "complete",
+                    "answer_markdown": "结论：已按 2026 年 8 月自然月口径读取期权收益。",
+                    "claims": [
+                        {
+                            "text": "已按 2026 年 8 月自然月口径读取期权收益",
+                            "kind": "historical_fact",
+                            "observation_ids": [observation["ref"]],
+                            "required_scope": "point",
+                        }
+                    ],
+                },
+            }
+        )
+        proposal = {
+            "status": "answered",
+            "text": admitted["approved_answer"]["text"],
+            "control_request": None,
+            "termination_reason": "stop",
+            "usage": {},
+        }
+        decision = on_proposed(proposal)
+        return {"ok": True, "result": {**proposal, "committed": decision == "commit"}}
+
+    monkeypatch.setattr("src.application.copilot.host.run_pi_agent", process)
+    monkeypatch.setattr(
+        copilot_tools,
+        "call_read_tool",
+        lambda _name, payload, **_kwargs: (
+            calls.append(dict(payload))
+            or {
+                "ok": True,
+                "data": {
+                    "status": "complete",
+                    "period": {"kind": "month", "month": "2026-08"},
+                    "coverage": {"status": "complete", "complete_for": "point"},
+                    "freshness": {
+                        "status": "historical",
+                        "as_of": "2026-08-31T23:59:59+08:00",
+                    },
+                },
+            }
+        ),
+    )
+
+    result = run_contract(
+        _contract("期权8月收益"),
+        model_settings=_TEST_MODEL,
+    )
+
+    assert result.status == "answered"
+    assert result.error is None
+    assert calls == [
+        {
+            "config_key": "us",
+            "period": "month",
+            "month": "2026-08",
+            "include_rows": False,
+        }
+    ]
+    assert any(
+        event.type == "tool_result"
+        and event.payload.get("tool_name") == "submit_answer"
+        and event.payload.get("status") == "answer_accepted"
+        for event in result.events
+    )
 
 
 def test_host_resolves_previous_month_across_year_from_frozen_clock(monkeypatch) -> None:
@@ -1545,6 +1709,159 @@ def test_host_resolves_previous_month_across_year_from_frozen_clock(monkeypatch)
     assert calls[0]["month"] == "2025-12"
 
 
+@pytest.mark.parametrize("question", ["期权收益", "期权8月收益"])
+def test_host_fixed_month_scope_binds_the_complete_period(monkeypatch, question: str) -> None:
+    request = replace(
+        _request(question),
+        explicit_scope=CopilotScope(config_key="us", month="2026-08"),
+    )
+    contract = prepare_contract(
+        request,
+        reference_year=2026,
+        report_now_ms=1788319188212,
+    )
+    assert not isinstance(contract, AppResult)
+    calls: list[dict] = []
+    turns = iter(
+        (
+            ModelTurn(
+                tool_calls=(
+                    _call(
+                        "option_performance_report",
+                        {"period": "mtd", "as_of_date": ""},
+                    ),
+                )
+            ),
+            ModelTurn(text="结论：已按固定自然月查询。"),
+        )
+    )
+    monkeypatch.setattr(
+        copilot_tools,
+        "call_read_tool",
+        lambda _name, payload, **_kwargs: (
+            calls.append(dict(payload)) or {"ok": True, "data": {"summary": []}}
+        ),
+    )
+
+    result = run_contract(contract, model_runner=lambda _request: next(turns))
+
+    assert result.status == "answered"
+    assert calls[0]["period"] == "month"
+    assert calls[0]["month"] == "2026-08"
+    assert "as_of_date" not in calls[0]
+
+
+def test_host_rejects_message_scope_conflicting_with_fixed_month(monkeypatch) -> None:
+    request = replace(
+        _request("期权7月收益"),
+        explicit_scope=CopilotScope(config_key="us", month="2026-08"),
+    )
+    contract = prepare_contract(request, reference_year=2026, report_now_ms=1788319188212)
+    assert not isinstance(contract, AppResult)
+    calls: list[dict] = []
+
+    def model(request: ModelRequest) -> ModelTurn:
+        if not any(item.get("role") == "tool" for item in request.messages):
+            return ModelTurn(
+                tool_calls=(
+                    _call(
+                        "option_performance_report",
+                        {"period": "month", "month": "2026-07"},
+                    ),
+                )
+            )
+        return ModelTurn(text="结论：消息范围与固定范围冲突，未读取数据。")
+
+    monkeypatch.setattr(
+        copilot_tools,
+        "call_read_tool",
+        lambda _name, payload, **_kwargs: (
+            calls.append(dict(payload)) or {"ok": True, "data": {"summary": []}}
+        ),
+    )
+
+    result = run_contract(contract, model_runner=model)
+
+    assert result.status == "answered"
+    assert calls == []
+
+
+def test_host_uses_frozen_report_instant_when_operating_date_is_malformed(monkeypatch) -> None:
+    contract = _contract("期权9月收益")
+    contract = replace(
+        contract,
+        input={
+            **contract.input,
+            "operating_date": "invalid",
+            # 2026-09-01 16:30 UTC is already 2026-09-02 in Asia/Shanghai.
+            "report_now_ms": 1788280200000,
+        },
+    )
+    calls: list[dict] = []
+    turns = iter(
+        (
+            ModelTurn(
+                tool_calls=(
+                    _call("option_performance_report", {"period": "mtd"}),
+                )
+            ),
+            ModelTurn(text="结论：已按冻结时钟解析自然月。"),
+        )
+    )
+    monkeypatch.setattr(
+        copilot_tools,
+        "call_read_tool",
+        lambda _name, payload, **_kwargs: (
+            calls.append(dict(payload)) or {"ok": True, "data": {"summary": []}}
+        ),
+    )
+
+    result = run_contract(contract, model_runner=lambda _request: next(turns))
+
+    assert result.status == "answered"
+    assert calls[0]["period"] == "month"
+    assert calls[0]["month"] == "2026-09"
+
+
+@pytest.mark.parametrize(
+    "clock_input",
+    [
+        {"operating_date": None, "report_now_ms": None},
+        {"operating_date": "invalid", "report_now_ms": "invalid"},
+        {"operating_date": "invalid", "report_now_ms": True},
+    ],
+)
+def test_host_rejects_option_period_read_without_valid_frozen_clock(
+    monkeypatch,
+    clock_input: dict,
+) -> None:
+    contract = _contract("期权8月收益")
+    contract = replace(contract, input={**contract.input, **clock_input})
+    calls: list[dict] = []
+
+    def model(request: ModelRequest) -> ModelTurn:
+        if not any(item.get("role") == "tool" for item in request.messages):
+            return ModelTurn(
+                tool_calls=(
+                    _call("option_performance_report", {"period": "mtd"}),
+                )
+            )
+        return ModelTurn(text="结论：缺少可验证的冻结时钟，未读取数据。")
+
+    monkeypatch.setattr(
+        copilot_tools,
+        "call_read_tool",
+        lambda _name, payload, **_kwargs: (
+            calls.append(dict(payload)) or {"ok": True, "data": {"summary": []}}
+        ),
+    )
+
+    result = run_contract(contract, model_runner=model)
+
+    assert result.status == "answered"
+    assert calls == []
+
+
 def test_host_attests_and_freezes_analysis_option_performance(monkeypatch) -> None:
     calls: list[tuple[dict, int | None]] = []
     contract = _contract("期权8月收益")
@@ -1556,8 +1873,8 @@ def test_host_attests_and_freezes_analysis_option_performance(monkeypatch) -> No
                         "analysis_query",
                         {
                             "view": "option_period_performance",
-                            "period": "month",
-                            "month": "2026-08",
+                            "period": "mtd",
+                            "as_of_date": "",
                         },
                     ),
                 )
@@ -1635,14 +1952,6 @@ def test_host_rejects_analysis_option_performance_without_report_selector(monkey
     ("question", "arguments"),
     [
         (
-            "期权8月收益",
-            {"period": "mtd"},
-        ),
-        (
-            "期权10月收益",
-            {"period": "month", "month": "2026-10"},
-        ),
-        (
             "期权8月收益和9月期权收益",
             {"period": "month", "month": "2026-08"},
         ),
@@ -1650,17 +1959,15 @@ def test_host_rejects_analysis_option_performance_without_report_selector(monkey
             "分析2026年8月到期的期权收益",
             {"period": "month", "month": "2026-08"},
         ),
-        (
-            "截至2026-08-23的8月期权收益率，总计，不分账号",
-            {"period": "mtd", "as_of_date": "2026-08-22"},
-        ),
-        (
-            "截至2026-08-23的8月期权收益率，总计，不分账号",
-            {"period": "mtd"},
-        ),
+        ("期权收益", {"month": "2026-08"}),
+        ("期权收益", {"year": 2026}),
         (
             "截至2026-02-30的2月期权收益率",
             {"period": "mtd", "as_of_date": "2026-02-30"},
+        ),
+        (
+            "截至2026-09-03查询MTD期权收益率",
+            {"period": "ytd"},
         ),
         (
             "截至2026-08-23的7月期权收益率",
@@ -1690,10 +1997,7 @@ def test_host_rejects_analysis_option_performance_without_report_selector(monkey
             "Option performance as of 2026-08-23",
             {"period": "mtd", "as_of_date": "2026-08-23"},
         ),
-        (
-            "截至2026-08-23的8月期权收益率",
-            {"period": "month", "month": "2026-08"},
-        ),
+        ("期权13月收益", {"period": "mtd"}),
         (
             "不要再用截至2026-08-23的旧口径，查当前 MTD",
             {"period": "mtd", "as_of_date": "2026-08-23"},
@@ -1737,6 +2041,9 @@ def test_host_rejects_unapproved_option_performance_cutoff_without_evidence(
     ]
     assert len(performance_results) == 1
     assert performance_results[0].payload["ok"] is False
+    assert performance_results[0].payload["model_input_hash"].startswith("sha256:")
+    assert "model_input" in performance_results[0].payload
+    assert "tool_input" not in performance_results[0].payload
     assert not any(
         event.type == "tool_call"
         and event.payload.get("tool_name") == "option_performance_report"
@@ -1744,7 +2051,7 @@ def test_host_rejects_unapproved_option_performance_cutoff_without_evidence(
     )
 
 
-def test_rejected_cutoff_observation_cannot_support_submit_answer(monkeypatch) -> None:
+def test_rejected_period_observation_cannot_support_submit_answer(monkeypatch) -> None:
     captured: dict[str, dict] = {}
     calls: list[dict] = []
 
@@ -1753,7 +2060,7 @@ def test_rejected_cutoff_observation_cannot_support_submit_answer(monkeypatch) -
             {
                 "call_id": "cutoff_rejected",
                 "tool_name": "option_performance_report",
-                "arguments": {"period": "mtd", "as_of_date": "2026-08-22"},
+                "arguments": {"period": "mtd"},
             }
         )
         captured["rejected"] = rejected
@@ -1795,7 +2102,7 @@ def test_rejected_cutoff_observation_cannot_support_submit_answer(monkeypatch) -
     )
 
     run_contract(
-        _contract("截至2026-08-23的8月期权收益率"),
+        _contract("期权13月收益"),
         model_settings=_TEST_MODEL,
     )
 
@@ -2055,6 +2362,14 @@ def test_identical_call_can_retry_once_after_transient_tool_error(monkeypatch) -
     assert calls == 2
     assert result.status == "answered"
     assert "运行正常" in result.user_response
+    failed_event = next(
+        event
+        for event in result.events
+        if event.type == "tool_result" and event.payload.get("ok") is False
+    )
+    assert failed_event.payload["model_input"] == {"config_key": "us"}
+    assert failed_event.payload["model_input_hash"].startswith("sha256:")
+    assert failed_event.payload["tool_input"] == {"config_key": "us"}
 
 
 def test_tool_failure_is_recoverable(monkeypatch) -> None:

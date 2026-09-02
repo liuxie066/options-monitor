@@ -3639,8 +3639,12 @@ ANALYSIS_QUERY_TOOL = build_agent_tool(
             "maximum": MAX_QUERY_LIMIT,
             "description": "Maximum rows returned",
         },
-        "period": {"type": "string", "enum": ["mtd", "ytd", "month", "year"]},
-        "as_of_date": "optional YYYY-MM-DD cutoff for mtd/ytd",
+        "period": {
+            "type": "string",
+            "enum": ["mtd", "ytd", "month", "year"],
+            "description": "For option-performance views, choose one period: mtd/ytd use an optional as_of_date; month requires month; year requires year.",
+        },
+        "as_of_date": "optional YYYY-MM-DD cutoff only for mtd/ytd option-performance views",
         "year": {
             "type": ["integer", "string"],
             "description": "optional natural year YYYY when period=year",
@@ -3652,7 +3656,7 @@ ANALYSIS_QUERY_TOOL = build_agent_tool(
             "items": {"type": "string"},
             "description": "optional materialization account filters",
         },
-        "month": "optional materialization month filter",
+        "month": "optional materialization month filter; for option-performance views it is required when period=month",
         "months": {
             "type": ["string", "array"],
             "items": {"type": "string"},

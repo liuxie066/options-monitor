@@ -868,6 +868,9 @@ def test_s8_submit_answer_closed_schema_is_not_a_plain_final_contract():
     assert "不得复用历史会话 observation" in description["description"]
     assert "historical + as_of" in description["description"]
     assert "historical_fact" in description["description"]
+    assert "conceptual 模式必须传 claims=[]" in description["description"]
+    assert "evidence 模式必须至少提交一条 claim" in description["description"]
+    assert "成功读取返回的 observation ID" in description["description"]
 
     runtime = (REPO / "agent-runtime/main.ts").read_text(encoding="utf-8")
     assert "call the required read-only business tool first" in runtime
