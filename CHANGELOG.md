@@ -2,11 +2,20 @@
 
 ## Unreleased
 
+## 3.4.3 - 2026-09-03
+
 ### Breaking Changes
 - Removed the generic `analysis_catalog` and `analysis_query` tools from Tool Gateway and Copilot; current reads use canonical typed tools, while unsupported cross-view aggregation remains unavailable.
 
+### New Features
+- Added an audited CNY aggregate for option net cash flow, summing validated event-time conversions while keeping native-currency metrics available when CNY evidence is incomplete.
+
+### Improvements
+- Reduced required-data CSV projection validation overhead by building each canonical row once while preserving fail-closed schema and enrichment semantics.
+
 ### Bug Fixes
 - Queried and persisted actual option fees by the specific broker order after automatic trade intake, with exact account isolation, terminal-order evidence, and recent-history retry instead of a full-ledger fee scan.
+- Scoped Strategy Lab formal-point positions, marks, and position-derived FX to the point market, rejecting unknown or cross-market evidence.
 
 ## 3.4.2 - 2026-09-02
 

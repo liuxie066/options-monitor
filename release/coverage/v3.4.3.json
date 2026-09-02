@@ -1,0 +1,171 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.4.3",
+  "base": {
+    "tag": "v3.4.2",
+    "commit": "68b370f6ef8144f468a0b8f7036b212e84986239"
+  },
+  "reviewed_head": "7d5052269abcbcb8a300f4fec6fac1e3c874ea6e",
+  "commits": [
+    {
+      "sha": "d052d7b5753559935bd51d9fac94109c887634ef",
+      "subject": "fix(trades): query fees for recorded orders"
+    },
+    {
+      "sha": "32bc15b4cf1649c7f62b83de5efc442ac8df3426",
+      "subject": "refactor(agent): remove generic analysis tools"
+    },
+    {
+      "sha": "214181f129354cf970bf5fee10598efc0605f9cc",
+      "subject": "Merge pull request #222 from liuxie066/codex/fix-auto-fee-query-window"
+    },
+    {
+      "sha": "b6947dd94888d736a2a67a3cc6c713155536c584",
+      "subject": "chore(agent): merge latest main"
+    },
+    {
+      "sha": "93bee485b8fc8359a6b1ba434d4ee3ab44939547",
+      "subject": "Merge pull request #223 from liuxie066/codex/refactor-analysis-tool-removal"
+    },
+    {
+      "sha": "15e826bb215aeae95ce7a178ef0c7ad052f0a340",
+      "subject": "fix(strategy-lab): scope position evidence by market"
+    },
+    {
+      "sha": "f3cd50c883f085a62d196942a7ddfad0270010b2",
+      "subject": "Merge pull request #224 from liuxie066/codex/fix-strategy-lab-market-scope"
+    },
+    {
+      "sha": "b911eea619b27974246c42caecc8bc1e472a44ef",
+      "subject": "perf(required-data): optimize projection validation"
+    },
+    {
+      "sha": "79db01435328df890264131317c8b26de229e17e",
+      "subject": "Merge pull request #225 from liuxie066/codex/optimize-required-data-projection"
+    },
+    {
+      "sha": "4716bf127b5cb3da657bd420053ca25709a079b3",
+      "subject": "feat(option-performance): add audited CNY cash total"
+    },
+    {
+      "sha": "7d5052269abcbcb8a300f4fec6fac1e3c874ea6e",
+      "subject": "Merge pull request #226 from liuxie066/codex/option-performance-cny-summary"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Breaking Changes",
+      "text": "Removed the generic `analysis_catalog` and `analysis_query` tools from Tool Gateway and Copilot; current reads use canonical typed tools, while unsupported cross-view aggregation remains unavailable.",
+      "commits": [
+        "32bc15b4cf1649c7f62b83de5efc442ac8df3426",
+        "93bee485b8fc8359a6b1ba434d4ee3ab44939547"
+      ]
+    },
+    {
+      "category": "New Features",
+      "text": "Added an audited CNY aggregate for option net cash flow, summing validated event-time conversions while keeping native-currency metrics available when CNY evidence is incomplete.",
+      "commits": [
+        "4716bf127b5cb3da657bd420053ca25709a079b3",
+        "7d5052269abcbcb8a300f4fec6fac1e3c874ea6e"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Reduced required-data CSV projection validation overhead by building each canonical row once while preserving fail-closed schema and enrichment semantics.",
+      "commits": [
+        "b911eea619b27974246c42caecc8bc1e472a44ef",
+        "79db01435328df890264131317c8b26de229e17e"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Queried and persisted actual option fees by the specific broker order after automatic trade intake, with exact account isolation, terminal-order evidence, and recent-history retry instead of a full-ledger fee scan.",
+      "commits": [
+        "d052d7b5753559935bd51d9fac94109c887634ef",
+        "214181f129354cf970bf5fee10598efc0605f9cc"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Scoped Strategy Lab formal-point positions, marks, and position-derived FX to the point market, rejecting unknown or cross-market evidence.",
+      "commits": [
+        "15e826bb215aeae95ce7a178ef0c7ad052f0a340",
+        "f3cd50c883f085a62d196942a7ddfad0270010b2"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "b6947dd94888d736a2a67a3cc6c713155536c584",
+      "reason": "Synchronized the analysis-tool removal branch with current main; it adds no separate user-visible behavior beyond the mapped PR changes."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "d052d7b5753559935bd51d9fac94109c887634ef",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/222"
+      ]
+    },
+    {
+      "commit": "32bc15b4cf1649c7f62b83de5efc442ac8df3426",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/223"
+      ]
+    },
+    {
+      "commit": "214181f129354cf970bf5fee10598efc0605f9cc",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/222"
+      ]
+    },
+    {
+      "commit": "b6947dd94888d736a2a67a3cc6c713155536c584",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/223"
+      ]
+    },
+    {
+      "commit": "93bee485b8fc8359a6b1ba434d4ee3ab44939547",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/223"
+      ]
+    },
+    {
+      "commit": "15e826bb215aeae95ce7a178ef0c7ad052f0a340",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/224"
+      ]
+    },
+    {
+      "commit": "f3cd50c883f085a62d196942a7ddfad0270010b2",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/224"
+      ]
+    },
+    {
+      "commit": "b911eea619b27974246c42caecc8bc1e472a44ef",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/225"
+      ]
+    },
+    {
+      "commit": "79db01435328df890264131317c8b26de229e17e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/225"
+      ]
+    },
+    {
+      "commit": "4716bf127b5cb3da657bd420053ca25709a079b3",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/226"
+      ]
+    },
+    {
+      "commit": "7d5052269abcbcb8a300f4fec6fac1e3c874ea6e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/226"
+      ]
+    }
+  ]
+}
