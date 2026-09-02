@@ -751,13 +751,6 @@ def _lot_fields(row: Mapping[str, Any]) -> dict[str, Any]:
     return dict(fields) if isinstance(fields, Mapping) else dict(row)
 
 
-def _event_time(row: Mapping[str, Any]) -> int:
-    try:
-        return int(row.get("event_time_ms") or row.get("trade_time_ms") or 0)
-    except (TypeError, ValueError):
-        return 0
-
-
 def _event_type(row: Mapping[str, Any]) -> str:
     payload = row.get("raw_payload")
     payload = payload if isinstance(payload, Mapping) else {}

@@ -340,10 +340,6 @@ def fetch_market_exchange_rates(timeout_sec: float = 8.0) -> dict[str, Any] | No
     return None
 
 
-def _cache_from_observation(observation: Mapping[str, Any]) -> dict[str, Any]:
-    return dict(observation)
-
-
 def save_exchange_rate_observation(
     path: Path,
     payload: Mapping[str, Any],

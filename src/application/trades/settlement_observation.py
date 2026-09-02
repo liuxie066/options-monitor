@@ -1040,28 +1040,6 @@ def _normal_order_facts(
     return False, True
 
 
-def _looks_like_stock_settlement(
-    row: dict[str, Any],
-    *,
-    lifecycle_case: dict[str, Any],
-) -> bool:
-    return (
-        _stock_settlement_candidate(
-            row,
-            lifecycle_case=lifecycle_case,
-            account=str(
-                lifecycle_case.get("account") or ""
-            ).strip().lower(),
-            futu_account_id=str(
-                lifecycle_case.get("futu_account_id") or ""
-            ).strip(),
-            timezone=ZoneInfo("UTC"),
-            settlement_deadline_ms=2**63 - 1,
-        )
-        is not None
-    )
-
-
 def _stock_settlement_candidate(
     row: dict[str, Any],
     *,
