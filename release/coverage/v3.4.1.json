@@ -1,0 +1,73 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.4.1",
+  "base": {
+    "tag": "v3.4.0",
+    "commit": "0ede5a012c60721bfe8013ebc4010ee77502afc6"
+  },
+  "reviewed_head": "cffb8d9748c010b67118ac4007dac43df2cd6674",
+  "commits": [
+    {
+      "sha": "bcda419b224f4e981db8918fa63bcb2a858dec24",
+      "subject": "fix(copilot): repair natural-period evidence admission"
+    },
+    {
+      "sha": "4d27682d6e72ade25188bc25d5c03a6a080ab25c",
+      "subject": "Merge pull request #216 from liuxie066/codex/copilot-natural-period-evidence-receipts"
+    },
+    {
+      "sha": "6500c339d09d0ca85b1dd93f431105ca056d2e03",
+      "subject": "docs(worktree): require terminal closeout"
+    },
+    {
+      "sha": "cffb8d9748c010b67118ac4007dac43df2cd6674",
+      "subject": "Merge pull request #217 from liuxie066/codex/worktree-auto-close-contract"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Restored natural-month and natural-year option-performance reports across the CLI, Assistant, Analysis, and Copilot with canonical coverage and freshness evidence.",
+      "commits": [
+        "bcda419b224f4e981db8918fa63bcb2a858dec24",
+        "4d27682d6e72ade25188bc25d5c03a6a080ab25c"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Replaced Copilot's generic answer-admission failure receipt with categorized evidence diagnostics and enforced frozen period selection for option-performance answers.",
+      "commits": [
+        "bcda419b224f4e981db8918fa63bcb2a858dec24",
+        "4d27682d6e72ade25188bc25d5c03a6a080ab25c"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "6500c339d09d0ca85b1dd93f431105ca056d2e03",
+      "reason": "Tightened the repository-local agent closeout contract only; it does not change installed runtime, public CLI, configuration, data, or production behavior."
+    },
+    {
+      "commit": "cffb8d9748c010b67118ac4007dac43df2cd6674",
+      "reason": "Merge commit for the repository-local agent closeout contract; the underlying documentation-only change has no independent release impact."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "bcda419b224f4e981db8918fa63bcb2a858dec24",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/216"]
+    },
+    {
+      "commit": "4d27682d6e72ade25188bc25d5c03a6a080ab25c",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/216"]
+    },
+    {
+      "commit": "6500c339d09d0ca85b1dd93f431105ca056d2e03",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/217"]
+    },
+    {
+      "commit": "cffb8d9748c010b67118ac4007dac43df2cd6674",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/217"]
+    }
+  ]
+}
