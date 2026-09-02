@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 3.4.0 - 2026-09-02
+
+### Breaking Changes
+- Replaced the public option-performance report with four MTD/YTD metrics and removed legacy custom periods plus activity, cash, PnL, capital, valuation, and assigned-stock fields.
+
+### Improvements
+- Unified option-performance calculations on canonical ledger cash facts, fee allocation, and average occupied capital while keeping CSP, CC, Combo Yield, and Wheel as grouping dimensions only.
+- Added a product-facing terminology reference for CSP, CC, bullish risk reversal, collar, and Wheel strategy relationships.
+
 ## 3.3.1 - 2026-09-01
 
 ### Improvements
