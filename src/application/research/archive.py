@@ -1970,20 +1970,6 @@ def _archive_prune_remote_receipts(
     }
 
 
-def _planned_delete_runs(payload: dict[str, Any]) -> list[str]:
-    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
-    cleanup = data.get("output_runs_cleanup") if isinstance(data, dict) else {}
-    rows = cleanup.get("delete_runs") if isinstance(cleanup, dict) else []
-    out: list[str] = []
-    for row in rows if isinstance(rows, list) else []:
-        if not isinstance(row, dict):
-            continue
-        raw_path = str(row.get("path") or "").rstrip("/")
-        if raw_path:
-            out.append(Path(raw_path).name)
-    return out
-
-
 def _validate_cleanup_preview(
     payload: dict[str, Any],
     *,

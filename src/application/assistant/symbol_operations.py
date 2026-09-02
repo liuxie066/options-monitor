@@ -379,26 +379,6 @@ def _load_config_for_payload(payload: dict[str, Any]) -> tuple[Any, dict[str, An
     return _load_config(AssistantRequest(text="", sender_id="", channel="local", config_key=config_key, config_path=config.get("config_path")))
 
 
-def _load_config_for_symbol_request(request: AssistantRequest, *, arguments: dict[str, Any]) -> tuple[Any, dict[str, Any], str | None]:
-    _require_runtime_config_scope(request)
-    current_path, current_cfg = _load_config(request)
-    target_market = _symbol_market_from_arguments(arguments, config=current_cfg)
-    if target_market is None:
-        return current_path, current_cfg, request.config_key
-
-    current_market = infer_runtime_config_market(
-        config_key=request.config_key,
-        config_path=current_path,
-        config=current_cfg,
-    )
-    if current_market == target_market:
-        return current_path, current_cfg, target_market
-
-    target_path = _runtime_config_path_for_market(request=request, current_path=current_path, target_market=target_market)
-    target_cfg = _read_runtime_config(target_path)
-    return target_path, target_cfg, target_market
-
-
 def _load_config(request: AssistantRequest) -> tuple[Any, dict[str, Any]]:
     _require_runtime_config_scope(request)
     config_path = resolve_runtime_config_path(config_key=request.config_key, config_path=request.config_path)
@@ -511,21 +491,6 @@ def _optional_path(raw: Any) -> Path | None:
     return _resolve_path(text) if text else None
 
 
-def _symbol_market_from_arguments(arguments: dict[str, Any], *, config: dict[str, Any]) -> str | None:
-    raw_symbol = str(arguments.get("symbol") or "").strip()
-    if not raw_symbol:
-        return None
-    calibrated = calibrate_symbol(raw_symbol, config=config)
-    if calibrated.status != "ok":
-        calibrated = calibrate_symbol(raw_symbol)
-    market = str(calibrated.market or "").strip().upper()
-    if market == "US":
-        return "us"
-    if market == "HK":
-        return "hk"
-    return None
-
-
 def _yaml_symbol_market(
     arguments: dict[str, Any],
     *,
@@ -550,25 +515,6 @@ def _yaml_symbol_market(
         if inferred in {"us", "hk"}:
             return inferred
     return None
-
-
-def _runtime_config_path_for_market(
-    *,
-    request: AssistantRequest,
-    current_path: Any,
-    target_market: str,
-) -> Any:
-    if request.config_path:
-        sibling = current_path.with_name(f"config.{target_market}.json")
-        if sibling.exists():
-            return sibling
-        raise AgentToolError(
-            code="NEEDS_CLARIFICATION",
-            message=f"监控标的属于 {target_market.upper()}，但没有找到对应 runtime config。",
-            hint=f"请传入 config.{target_market}.json 的 --config-path，或先构建对应市场配置。",
-            details={"requested_market": target_market, "current_config_path": str(current_path)},
-        )
-    return resolve_runtime_config_path(config_key=target_market, config_path=None)
 
 
 def _require_runtime_config_scope(request: AssistantRequest) -> None:

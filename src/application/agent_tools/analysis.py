@@ -1468,13 +1468,6 @@ def _float_or_none(value: Any) -> float | None:
         return None
 
 
-def _rounded_float_or_none(value: Any) -> float | None:
-    number = _float_or_none(value)
-    if number is None:
-        return None
-    return _round_public_float(number)
-
-
 def _round_public_float(value: float) -> float:
     return round(float(value), 6)
 
