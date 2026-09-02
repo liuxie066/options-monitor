@@ -603,9 +603,11 @@ PORTFOLIO_SERVICE_URL=http://127.0.0.1:8765 ./om-agent run --tool portfolio_cash
 
 The report has four metrics only: `option_net_cashflow`,
 `sell_option_win_rate`, `buy_option_win_rate`, and `option_return`. Amounts stay
-in native currency. PnL, stock cash, assignment settlement, and CNY conversion
-are outside this module. The two portfolio bridge routes therefore return
-explicit unavailable states until independent authoritative sources exist.
+in native currency, plus one root CNY cash-flow total backed only by persisted
+event-time `cash_conversion.v1` evidence; report reads never fetch current FX.
+PnL, stock cash, and assignment settlement are outside this module. The two
+portfolio bridge routes therefore return explicit unavailable states until
+independent authoritative sources exist.
 
 Missing actual fee evidence remains explicit and must never become zero. A configured
 account scope with no events is an observed zero; an unconfigured account is rejected.

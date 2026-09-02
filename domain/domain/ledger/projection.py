@@ -65,6 +65,7 @@ class ProjectionResult:
     allocations: list[OptionEconomicAllocation] = field(default_factory=list)
     diagnostics: list[LedgerDiagnostic] = field(default_factory=list)
     effective_open_events: tuple[TradeEvent, ...] = field(default_factory=tuple, repr=False)
+    effective_cash_events: tuple[TradeEvent, ...] = field(default_factory=tuple, repr=False)
 
     @property
     def has_errors(self) -> bool:
@@ -101,6 +102,7 @@ class ResumableProjectionResult:
     diagnostics: tuple[LedgerDiagnostic, ...]
     transitions: tuple[ProjectionTransition, ...]
     effective_open_events: tuple[TradeEvent, ...] = ()
+    effective_cash_events: tuple[TradeEvent, ...] = ()
     requires_full_replay: bool = False
     full_replay_reason: str | None = None
 
@@ -120,6 +122,7 @@ class ResumableProjectionResult:
             allocations=list(self.allocations),
             diagnostics=list(self.diagnostics),
             effective_open_events=self.effective_open_events,
+            effective_cash_events=self.effective_cash_events,
         )
 
 
@@ -254,6 +257,7 @@ def project_resumable_trade_events(
             allocations,
             economic_diagnostics,
             effective_open_events,
+            effective_cash_events,
             economic_accumulator,
         ) = _project_effective_economic_allocations(
             validated_events,
@@ -277,6 +281,19 @@ def project_resumable_trade_events(
             accumulator.open_events_by_lot_id[lot_id]
             for lot_id in sorted(accumulator.open_events_by_lot_id)
             if lot_id in accumulator.lots_by_id
+        )
+        effective_cash_events = tuple(
+            {
+                event.event_id: event
+                for event in (
+                    *effective_open_events,
+                    *(
+                        item.event
+                        for item in transitions
+                        if item.allocation is not None
+                    ),
+                )
+            }.values()
         )
 
     active_lots = tuple(
@@ -329,6 +346,7 @@ def project_resumable_trade_events(
         diagnostics=tuple(diagnostics),
         transitions=tuple(transitions),
         effective_open_events=effective_open_events,
+        effective_cash_events=effective_cash_events,
         requires_full_replay=requires_full_replay,
         full_replay_reason=state_failure_reason,
     )
@@ -644,6 +662,9 @@ def _force_full_result(
         effective_open_events=tuple(
             item.open_event for item in (state.active_lots if state else ())
         ),
+        effective_cash_events=tuple(
+            item.open_event for item in (state.active_lots if state else ())
+        ),
         requires_full_replay=True,
         full_replay_reason=reason,
     )
@@ -657,6 +678,7 @@ def _project_effective_economic_allocations(
 ) -> tuple[
     list[OptionEconomicAllocation],
     list[LedgerDiagnostic],
+    tuple[TradeEvent, ...],
     tuple[TradeEvent, ...],
     _ProjectionAccumulator,
 ]:
@@ -810,10 +832,28 @@ def _project_effective_economic_allocations(
             item.allocation_id,
         )
     )
+    effective_cash_event_ids = {
+        *(event.event_id for event in effective_events.values()),
+        *(allocation.close_event_id for allocation in allocations),
+    }
+    effective_cash_events_by_id = {
+        event.event_id: event
+        for event in surviving
+        if event.event_id in effective_cash_event_ids
+    }
+    effective_cash_events_by_id.update(
+        {event.event_id: event for event in effective_events.values()}
+    )
     return (
         allocations,
         diagnostics,
         tuple(effective_events[lot_id] for lot_id in sorted(effective_events)),
+        tuple(
+            sorted(
+                effective_cash_events_by_id.values(),
+                key=lambda event: (event.event_time_ms, event.event_id),
+            )
+        ),
         replay,
     )
 

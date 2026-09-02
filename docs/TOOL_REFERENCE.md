@@ -96,9 +96,10 @@
 - `portfolio_pnl_bridge`
 - `portfolio_cash_bridge`
 
-`option_performance_report` 提供 MTD/YTD/自然月/自然年的期权净现金流、卖出期权胜率、买入
-期权胜率和期权收益率。金额保持原币；正股交易、指派/行权交割现金、PnL、CNY
-换算和行情刷新不属于该报告。
+`option_performance_report` 提供 MTD/YTD/自然月/自然年的期权净现金流、卖出期权
+胜率、买入期权胜率和期权收益率。现金流保留原币明细，并提供由事件发生时已落库
+`cash_conversion.v1` 证据汇总的 CNY 总额；读取时不查当前汇率。正股交易、指派/行权
+交割现金、PnL 和行情刷新不属于该报告。
 
 ### 持仓、现金与组合
 

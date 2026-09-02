@@ -344,7 +344,8 @@ def _render_option_performance(data: dict[str, Any]) -> str:
 
 
 def _canonical_cashflow_text(value: Any) -> str:
-    by_currency = _dict(_dict(value).get("by_currency"))
+    cashflow = _dict(value)
+    by_currency = _dict(cashflow.get("by_currency"))
     parts: list[str] = []
     for currency, raw in sorted(by_currency.items()):
         components = _dict(raw)
@@ -354,6 +355,14 @@ def _canonical_cashflow_text(value: Any) -> str:
             amount = _float_or_none(metric.get("amount"))
             component_text.append(f"{label} {amount:,.2f}" if amount is not None else f"{label} -")
         parts.append(f"{str(currency).upper()} " + "，".join(component_text))
+    cny_total = _dict(cashflow.get("cny_total"))
+    if cny_total:
+        amount = _float_or_none(cny_total.get("amount"))
+        status = str(cny_total.get("status") or "").strip()
+        if amount is not None:
+            parts.append(f"折合 CNY 合计 ¥{amount:,.2f}")
+        elif status == "partial":
+            parts.append("折合 CNY 合计 -（折算证据不完整）")
     return "；".join(parts) if parts else "-"
 
 
