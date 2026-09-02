@@ -181,7 +181,6 @@ TEST_RULES: tuple[TestRule, ...] = (
             "tests/test_assistant_runtime.py",
             "tests/test_cli_operator_commands.py",
             "tests/test_inbound_control.py",
-            "tests/test_analysis_tools.py",
             "tests/test_agent_plugin_contract.py",
             "tests/test_agent_plugin_smoke.py",
             "tests/test_candidate_filter_trace.py",
@@ -192,7 +191,7 @@ TEST_RULES: tuple[TestRule, ...] = (
             "tests/test_assistant_permission_request.py tests/test_cli_operator_commands.py "
             "tests/test_assistant_diagnostics.py tests/test_architecture_guards.py",
             "./.venv/bin/python -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py "
-            "tests/test_candidate_filter_trace.py tests/test_analysis_tools.py",
+            "tests/test_candidate_filter_trace.py",
         ),
     ),
     TestRule(

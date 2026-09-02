@@ -54,7 +54,6 @@
   "tool_selection": {
     "mode": "toolsets",
     "names": [
-      "analysis",
       "candidate",
       "close_advice",
       "config",

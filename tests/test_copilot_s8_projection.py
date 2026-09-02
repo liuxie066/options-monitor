@@ -379,15 +379,15 @@ def test_tool_failure_never_receives_success_coverage() -> None:
 def test_failed_tool_observation_recursively_bounds_schema_error_details() -> None:
     invalid_value = "错" * 100_000
     response = copilot_tools.call_read_tool(
-        "analysis_catalog",
-        {"config_key": invalid_value},
-        allowed_tools=("analysis_catalog",),
+        "option_positions_read",
+        {"config_key": invalid_value, "action": "list"},
+        allowed_tools=("option_positions_read",),
     )
 
     observation = copilot_tools.compact_observation(
-        "analysis_catalog",
+        "option_positions_read",
         response,
-        {"config_key": invalid_value},
+        {"config_key": invalid_value, "action": "list"},
     )
 
     assert observation["ok"] is False

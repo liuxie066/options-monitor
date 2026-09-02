@@ -245,7 +245,6 @@ def _futu_doctor_ok(**kwargs: Any) -> dict[str, Any]:
 
 
 def _patch_agent_tool_dependencies(monkeypatch, **overrides: Any) -> None:
-    import src.application.agent_tools.analysis as analysis_tools
     import src.application.agent_tools.diagnostics as diagnostics_tools
     import src.application.agent_tools.materialization as materialization_tools
     import src.application.agent_tools.positions as positions_tools
@@ -256,7 +255,7 @@ def _patch_agent_tool_dependencies(monkeypatch, **overrides: Any) -> None:
         "build_ready_futu_broker_gateway": (diagnostics_tools,),
         "load_option_positions_repo": (diagnostics_tools,),
         "load_portfolio_context": (materialization_tools,),
-        "refresh_assigned_stock_quotes": (analysis_tools, positions_tools),
+        "refresh_assigned_stock_quotes": (positions_tools,),
         "repo_base": (runtime_tools,),
         "check_version_update": (runtime_tools,),
         "update_local_version": (runtime_tools,),

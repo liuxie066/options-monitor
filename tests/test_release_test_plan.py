@@ -69,7 +69,7 @@ def test_release_test_plan_maps_assistant_changes_to_minimal_runtime_gate() -> N
         changed_files=[
             "docs/OM_COPILOT_V2_DESIGN.md",
             "src/application/assistant/runtime.py",
-            "src/application/agent_tools/analysis.py",
+            "src/application/agent_tool_registry.py",
         ],
         mode="standard",
         version="1.2.184",
@@ -85,7 +85,7 @@ def test_release_test_plan_maps_assistant_changes_to_minimal_runtime_gate() -> N
     ) in plan["commands"]
     assert (
         "./.venv/bin/python -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py "
-        "tests/test_candidate_filter_trace.py tests/test_analysis_tools.py"
+        "tests/test_candidate_filter_trace.py"
     ) in plan["commands"]
     assert all("test_assistant_agent_eval.py" not in command for command in plan["commands"])
     assert all("test_assistant_evidence_session.py" not in command for command in plan["commands"])

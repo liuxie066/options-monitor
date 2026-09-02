@@ -26,6 +26,8 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "close_advice" in tool_names
     assert "get_close_advice" in tool_names
     assert "monthly_income_report" not in tool_names
+    assert "analysis_catalog" not in tool_names
+    assert "analysis_query" not in tool_names
     assert "option_performance_report" in tool_names
     assert "option_positions_read" in tool_names
     assert "runtime_status" in tool_names
@@ -284,8 +286,6 @@ def test_agent_tool_output_contracts_advertise_model_visible_data_shape() -> Non
     assert "strategies" in tools["symbol_config_read"]["output_contract"]["model_preview_fields"]
     assert tools["query_cash_headroom"]["risk_level"] == "read_only"
     assert tools["query_cash_headroom"]["side_effects"] == []
-    assert "view_names[]" in tools["analysis_catalog"]["output_contract"]["fact_fields"]
-    assert "investigation_recipes[].name" not in tools["analysis_catalog"]["output_contract"]["fact_fields"]
     assert tools["portfolio_query"]["output_contract"]["freshness_fields"] == [
         "freshness.status",
         "freshness.trust_status",
@@ -588,6 +588,18 @@ def test_removed_strategy_replay_tool_returns_unknown_tool(monkeypatch) -> None:
     monkeypatch.delenv("OM_AGENT_ENABLE_WRITE_TOOLS", raising=False)
 
     out = run_tool("strategy_replay_analyze", {"rows": []})
+    assert out["ok"] is False
+    assert out["error"]["code"] == "INPUT_ERROR"
+    assert "unknown tool" in out["error"]["message"]
+
+
+@pytest.mark.parametrize("tool_name", ("analysis_catalog", "analysis_query"))
+def test_removed_analysis_tools_return_unknown_tool(monkeypatch, tool_name: str) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    monkeypatch.delenv("OM_AGENT_ENABLE_WRITE_TOOLS", raising=False)
+
+    out = run_tool(tool_name, {})
     assert out["ok"] is False
     assert out["error"]["code"] == "INPUT_ERROR"
     assert "unknown tool" in out["error"]["message"]

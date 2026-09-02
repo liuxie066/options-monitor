@@ -72,7 +72,7 @@
 - [Tool Reference](TOOL_REFERENCE.md)：公开工具分类、风险 metadata 和常用示例。
 - [OM Capability Surfaces](OM_AGENT_CAPABILITY_MAP.md)：Tool Gateway、Control、Copilot 的能力边界。
 - [Inbound Control](INBOUND_CONTROL.md)：确定性 Control、pending operation 和 channel 安全。
-- [OM Copilot v2 / Scene v4](OM_COPILOT_V2_DESIGN.md)：当前产品/Scene 合同；底层模型工具循环已经切换到 Pi Agent Core。
+- [OM Copilot v2 / Scene v5](OM_COPILOT_V2_DESIGN.md)：当前产品/Scene 合同；底层模型工具循环已经切换到 Pi Agent Core。
 - [Pi Agent Core Integration](PI_AGENT_CORE_INTEGRATION.md)：已发布 Pi Agent Core runtime、会话、工具准入和回滚边界。
 - [Agent Handbook](AGENT_WIKI.md)：本地 agent 的任务 playbook、模块地图和验证矩阵。
 - [Session Summary](SESSION_SUMMARY.md)：仅在显式 handoff 时使用的模板。

@@ -71,6 +71,80 @@ descriptions from `agent_tool_registry.py` and `agent_tools/`.
 - Missing data is explicit. A tool failure is not converted into an invented
   financial conclusion.
 - Trace records execution facts and failures, never private chain-of-thought.
+## Typed-Tool-Only Product Boundary
+
+OM Copilot exposes canonical typed read tools rather than an embedded SQL/BI
+workspace. Pi Agent Core remains the only model/tool loop; Host enforces scope,
+allowlists, budgets, cancellation, audit, and answer admission. Business
+calculation stays with each canonical tool owner.
+
+The retired `analysis_catalog` and `analysis_query` names are absent from both
+Copilot and `./om-agent`. There is no compatibility alias, replacement DSL,
+generic aggregation tool, session adapter, or second Scene. The current
+`om_chat` identifier remains `v5`.
+
+### Exit Inventory And Result
+
+The breaking exit was accepted by product/operations owner `liuxie`. The
+inventory covered source, tests, scripts, living docs, configs, service
+templates, and repository-root entry points at
+`origin/main@68b370f6` on 2026-09-02T20:00:18+08:00. No service or runtime-config
+caller was found. Repository-independent Tool Gateway telemetry was not
+available, so absence of an unknown external caller was never assumed.
+
+| Eager Scene business projection | Business tool count | Serialized business schema | Business catalog hash |
+|---|---:|---:|---|
+| Before removal | 20 | 24,869 UTF-8 bytes | `sha256:6927c37523411c6104c0ae910078546c77a4f190e1327a2a4a4fabcf57a12d46` |
+| Current | 18 | 21,256 UTF-8 bytes | `sha256:be4977e39e2173d8b25a95677f878ad7113d4a2e7dc8ca347f29956d17094b62` |
+
+These measurements cover the business tools selected by the Scene before Host
+adds protocol tools. The current local eager provider projection is 19 tools
+and 22,626 UTF-8 bytes after adding `submit_answer`; channel runs may also add
+Control preview. Runtime rollout verification uses
+`scene_prepared.tool_count` and `scene_prepared.tool_schema_sha256`, not the
+business catalog hash in this table.
+
+The business schema payload is 3,613 bytes smaller. This is a payload
+measurement, not a claim about wall-clock latency. The retired database was in
+memory, so the change does not reduce persistent storage.
+
+Against the pinned base, production source and scripts are 4,131 lines smaller
+net; tests are 1,409 lines smaller net, for a combined 5,540-line reduction.
+
+### Supported And Removed Capabilities
+
+| Need | Current owner and boundary |
+|---|---|
+| Period option income and cash components | `option_performance_report`; aggregate evidence only for Copilot. |
+| Position facts | `option_positions_read action=list`; only declared bounded rows. |
+| Option event history | `option_positions_read action=events`; canonical pagination applies. |
+| Symbol configuration | `symbol_config_read`; one symbol per read. |
+| Close advice | `close_advice_read`; strict owner. |
+| Runtime and delivery diagnosis | Runtime and notification-perception tools; declared facts only. |
+| Operation evidence | `operation_timeline`; raw operation facts rather than a derived upgrade summary. |
+
+In the Copilot model projection, symbol performance attribution, bulk
+configuration comparison, expiration buckets, grouped lifecycles, replay
+views, derived upgrade summaries, arbitrary SQL, cross-view joins, and exact
+aggregates over incomplete position coverage are intentionally unavailable. A
+typed tool is not expanded merely to preserve an old view. A recurring missing
+need requires a separate requirement at the canonical business owner.
+
+### Failure And Compatibility Behavior
+
+- Calling a retired name returns the existing unknown-tool or allowlist failure,
+  with no implicit substitute and no side effect.
+- Partial, stale, missing, paginated, or insufficiently projected evidence must
+  produce a narrowed or incomplete answer, never an inferred exact aggregate.
+- Persisted conversation history is preserved but unsupported as current
+  evidence. Old observations cannot satisfy current-request admission; if a
+  provider rejects old tool history, the operator starts a new conversation.
+- A rollout must not mix workers with different catalogs. Deployment and
+  per-instance hash verification remain separately authorized operations.
+
+Pi Agent Core, deterministic Control, account/config isolation, write authority,
+persistent stores, Tick, ledger, and canonical calculation contracts are
+unchanged.
 
 ## UI Boundary
 
@@ -130,9 +204,8 @@ than fail because the model proposed `mtd`.
 
 Success requires all of the following:
 
-- an unambiguous current-message month or year request reaches the canonical
-  performance owner, when a performance view is materialized, with the matching
-  `period` plus `month` or `year`;
+- an unambiguous current-message month or year request reaches
+  `option_performance_report` with the matching `period` plus `month` or `year`;
 - the sanitized model-proposed input and the effective input are both
   auditable, including when preparation rejects the call before execution;
 - ambiguous, malformed, or future selectors still fail before any business
@@ -142,7 +215,7 @@ Success requires all of the following:
 - direct Tool Gateway behavior and canonical performance calculations remain
   unchanged;
 - model-visible tool descriptions state the valid parameter combinations for
-  both performance reads and answer submission.
+  the performance read and answer submission.
 
 This work does not add a general intent router, a second answer renderer, a new
 tool or event store, or a provider-specific strict-tool runtime. Host does not
@@ -151,8 +224,8 @@ tool for the model.
 
 ### Current Facts And Constraints
 
-- The current-message fence already parses closed MTD/YTD cutoffs and natural
-  month/year selectors for `option_performance_report` and `analysis_query`.
+- The current-message fence parses closed MTD/YTD cutoffs and natural month/year
+  selectors for `option_performance_report`.
 - It currently compares the model proposal with that attestation and rejects a
   mismatch, although the attested values are already known deterministically.
 - A pre-execution rejection records the failure observation but not the model's
@@ -170,7 +243,7 @@ tool for the model.
 ### Chosen Design And Data Flow
 
 The existing closed selector parser remains the sole attestation source. Once
-the Agent calls `option_performance_report` or `analysis_query`, Host performs:
+the Agent calls `option_performance_report`, Host performs:
 
 ```text
 model-selected read tool + model arguments
@@ -185,8 +258,8 @@ model-selected read tool + model arguments
 
 Binding is limited to `period`, `as_of_date`, `month`, and `year`. Host replaces
 those fields with the attested values and removes incompatible sibling selector
-fields. Account, broker, config, analysis view, SQL, and every other model or
-fixed-scope field are preserved.
+fields. Account, broker, config, and every other model or fixed-scope field are
+preserved.
 
 Authority precedence is:
 
@@ -194,7 +267,7 @@ Authority precedence is:
 trusted fixed scope > current-message attestation > model proposal/default
 ```
 
-For these two option-performance-capable tools, a trusted fixed `month` denotes
+For this option-performance tool, a trusted fixed `month` denotes
 the complete scope `period=month, month=<fixed>`. If the current message has no
 selector, that fixed scope is bound. If the message attests the same month,
 execution continues; a different month, a year, or an MTD/YTD cutoff conflicts
@@ -247,13 +320,6 @@ not broadened to infer arbitrary phrasing. Direct `./om-agent` calls remain
 governed by the tool schema and canonical period owner without this
 conversation-only binding.
 
-For `analysis_query`, the bound top-level period fields constrain canonical
-performance materialization when performance views are selected and retain
-their existing filter meaning for other views. Host does not inspect SQL or
-choose/rewrite views, so this does not add an analysis router. An observation
-can support a performance claim only when its ordinary source, scope, coverage,
-and freshness contracts establish that authority.
-
 For business read calls, trace extends the existing audit sanitizer with one
 bounded input projection used identically for `model_input` and `tool_input`:
 
@@ -291,9 +357,7 @@ The two business-read audit states are:
 
 The projected direct-report schema states that `month` is valid only with
 `period=month`, `year` only with `period=year`, and `as_of_date` only with an
-explicit MTD/YTD cutoff. For `analysis_query`, the same combinations apply only
-when materializing option-performance views; `month` retains its existing
-filter meaning for other views. The projected `submit_answer` description
+explicit MTD/YTD cutoff. The projected `submit_answer` description
 states that `conceptual` requires `claims=[]`, while `evidence` requires at
 least one claim referencing successful current-request observations. Existing
 prompt rules remain the general behavioral owner; no question-specific prompt
@@ -335,7 +399,7 @@ not manufacture an answer on its behalf.
 - Prove `期权8月收益` executes with the canonical natural-month input even when
   the model proposes MTD, and prove the same behavior for natural year and
   explicit MTD/YTD cutoffs.
-- Cover both `option_performance_report` and `analysis_query`.
+- Cover `option_performance_report`.
 - Prove the returned observation exposes the bound period scope, followed by a
   source-declared evidence claim that `submit_answer` accepts and a terminal
   `answered` result without `ANSWER_ADMISSION_FAILED`.
@@ -683,7 +747,7 @@ control: independent
 
 The same conversation permits one active Agent run. Expired leases are removed
 so process failure cannot permanently block a session. Control remains outside
-the read-analysis lane and must not wait behind a long analysis.
+the read lane and must not wait behind a long model run.
 
 `heavy_analysis` is not introduced until measured production contention proves a
 separate lane is necessary; adding it now would require business classification

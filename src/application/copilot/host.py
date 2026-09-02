@@ -853,7 +853,7 @@ def run_contract(
                 ).encode("utf-8")
             ).hexdigest()
             prepared_arguments = dict(arguments)
-            if tool_name in {"analysis_query", "option_performance_report"}:
+            if tool_name == "option_performance_report":
                 binding_error = _bind_option_performance_scope(
                     prepared_arguments,
                     user_message=str(contract.input.get("user_message") or ""),
@@ -894,7 +894,7 @@ def run_contract(
                 "allowed_tools": tuple(manifest.allowed_tools),
             }
             if (
-                tool_name in {"analysis_query", "option_performance_report"}
+                tool_name == "option_performance_report"
                 and manifest.fixed_tool_input.get("report_now_ms") is not None
             ):
                 call_kwargs["now_ms"] = int(manifest.fixed_tool_input["report_now_ms"])
