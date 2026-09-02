@@ -7,6 +7,7 @@ from decimal import Decimal
 from typing import Any, Callable, Iterable, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
+from domain.domain.ledger.cash_facts import cash_facts_for_trade_event
 from domain.domain.ledger.economics import OptionEconomicAllocation, fee_fact_for_event
 from domain.domain.ledger.events import LedgerDiagnostic, TradeEvent, lot_id_for_open_event
 from domain.domain.ledger.fees import FeeBasis, FeeFact
@@ -14,6 +15,7 @@ from domain.domain.ledger.lots import PositionLot
 from domain.domain.ledger.position_fields import strategy_metadata_fields_from_payload
 from domain.domain.ledger.projection import ProjectionResult
 from domain.domain.money import quantize_money, to_decimal
+from domain.domain.performance.cash_conversion import validate_observed_cash_conversion
 from domain.domain.performance.models import (
     CAPITAL_DAYS_QUANTUM,
     MILLISECONDS_PER_DAY,
@@ -216,6 +218,20 @@ def reduce_option_performance(
         statistic_days=period.statistic_days,
         scoped_missing=(reason for reason in diagnostic_missing if reason != "strategy_attribution_conflict"),
     )
+    cny_total = _cny_cashflow_total(
+        ordered_facts,
+        events=projection.effective_cash_events,
+    )
+    cny_missing = set(cny_total["missing"])
+    bundle = {
+        **bundle,
+        "option_net_cashflow": {
+            **bundle["option_net_cashflow"],
+            "cny_total": cny_total,
+        },
+        "status": MetricStatus.PARTIAL if cny_missing else bundle["status"],
+        "missing": tuple(sorted({*bundle["missing"], *cny_missing})),
+    }
     partial_breakdown_missing = {
         reason
         for rows in breakdowns.values()
@@ -763,6 +779,89 @@ def _cashflow_for_currency(
             split_unknown=unresolved,
         ),
     }
+
+
+def _cny_cashflow_total(
+    facts: Sequence[WeightedOptionFact],
+    *,
+    events: Sequence[TradeEvent],
+) -> dict[str, Any]:
+    missing = {reason for fact in facts for reason in fact.cash_missing}
+    events_by_id = {event.event_id: event for event in events}
+    amount = Decimal(0)
+    component_keys: set[tuple[str, str]] = set()
+    for fact in facts:
+        if fact.state == "failed":
+            continue
+        components = (
+            (fact.open_event_id, "option_trade_cash_gross", fact.opening_option_cash),
+            (
+                fact.open_event_id,
+                "option_fee_cash",
+                -fact.opening_actual_fee if fact.opening_actual_fee is not None else None,
+            ),
+            (fact.terminal_event_id, "option_trade_cash_gross", fact.terminal_option_cash),
+            (
+                fact.terminal_event_id,
+                "option_fee_cash",
+                -fact.terminal_actual_fee if fact.terminal_actual_fee is not None else None,
+            ),
+        )
+        for event_id, fact_kind, native_amount in components:
+            if not event_id or native_amount is None:
+                continue
+            component_keys.add((event_id, fact_kind))
+    for event_id, fact_kind in sorted(component_keys):
+        amount_cny, issue = _validated_cny_amount(
+            events_by_id.get(event_id),
+            fact_kind=fact_kind,
+        )
+        if amount_cny is None:
+            missing.add(issue or "cash_conversion_missing")
+            continue
+        amount = quantize_money(amount + amount_cny)
+    return {
+        "currency": "CNY",
+        "amount": None if missing else amount,
+        "status": MetricStatus.PARTIAL if missing else MetricStatus.OBSERVED,
+        "missing": tuple(sorted(missing)),
+    }
+
+
+def _validated_cny_amount(
+    event: TradeEvent | None,
+    *,
+    fact_kind: str,
+) -> tuple[Decimal | None, str | None]:
+    if event is None:
+        return None, "cash_conversion_event_missing"
+    cash_fact = next(
+        (
+            item
+            for item in cash_facts_for_trade_event(event)
+            if item.fact_kind == fact_kind
+        ),
+        None,
+    )
+    if cash_fact is None or cash_fact.amount is None or not cash_fact.currency:
+        return None, "option_cash_missing"
+    conversion = cash_fact.cash_conversion
+    if not isinstance(conversion, Mapping):
+        return None, "cash_conversion_missing"
+    status = str(conversion.get("status") or "").strip().lower()
+    if status != "observed":
+        state = "pending" if status == "pending" else "invalid"
+        return None, f"cash_conversion_{state}"
+    amount_cny, issue = validate_observed_cash_conversion(
+        conversion,
+        cash_fact_id=cash_fact.fact_id,
+        native_amount=cash_fact.amount,
+        native_currency=cash_fact.currency,
+        effective_at_ms=cash_fact.effective_at_ms,
+    )
+    if amount_cny is None or issue is not None:
+        return None, f"cash_conversion_corrupt:{issue or 'unknown'}"
+    return amount_cny, None
 
 
 def _cash_component(
