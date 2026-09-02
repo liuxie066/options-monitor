@@ -97,7 +97,7 @@ def call_read_tool(
         return _tool_error(tool_name, "INPUT_ERROR", f"unknown tool: {tool_name}")
     if not definition.is_pure_read():
         return _tool_error(tool_name, "POLICY_ERROR", f"tool is not pure read-only: {tool_name}")
-    if tool_name in {"analysis_query", "option_performance_report"} and now_ms is not None:
+    if tool_name == "option_performance_report" and now_ms is not None:
         from src.application.agent_tools.materialization_impl import (
             option_performance_report_now_ms,
         )
@@ -396,7 +396,7 @@ def audit_tool_input(
     projected = {
         str(name): (
             _audit_value_metadata(field_value)
-            if name in {"query", "sql"} or name not in supported_fields
+            if name == "query" or name not in supported_fields
             else audit_tool_event_payload({"value": field_value})["value"]
         )
         for name, field_value in value.items()

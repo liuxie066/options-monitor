@@ -20,7 +20,7 @@ deployed version and configured provider.
 
 This document is the implementation authority for OM's Pi Agent Core runtime.
 [OM_COPILOT_V2_DESIGN.md](OM_COPILOT_V2_DESIGN.md) continues to own the product
-and Scene v4 contract; it no longer describes a separate legacy model/tool
+and Scene v5 contract; it no longer describes a separate legacy model/tool
 runtime.
 
 ## 1. Product Requirement
@@ -805,8 +805,9 @@ leave too little room for a complete answer.
 
 The motivating incident was not a Feishu rendering defect. For production run
 `run_6908584d4259`, the request for monthly option income produced one compact
-`option_performance_report` observation of 5,435 characters and one
-`analysis_catalog` observation of 96,219 characters. The provider stopped for
+`option_performance_report` observation of 5,435 characters and one observation
+from the then-exposed, now-retired `analysis_catalog` tool of 96,219
+characters. The provider stopped for
 length after emitting one token, `我`, and the existing admission path accepted
 that non-empty text as an answer. The incident exposed four separate contract
 gaps:
@@ -1203,12 +1204,12 @@ when the canonical owner can prove all of these invariants for the cursor TTL:
 - later calls can apply the same authority scope, filters, boundary, and order.
 
 A mutable position projection, current runtime view, or newly materialized
-analysis view defaults to `none`. If its bounded page omits rows, the result is
+mutable view defaults to `none`. If its bounded page omits rows, the result is
 `needs_narrowing`; S8 does not add a generic snapshot store to make it pageable.
 The transaction-detail use case must use a canonical ledger/event owner whose
-contract proves the invariants above; it must not page through
-`analysis_query`. Offset paging and a model-supplied list of seen IDs remain
-forbidden.
+contract proves the invariants above. For option events, that owner is
+`option_positions_read action=events`. Offset paging and a model-supplied list
+of seen IDs remain forbidden.
 
 An eligible keyset order includes a unique tie-breaker, for example:
 
@@ -1602,8 +1603,8 @@ and is never rendered to the model. The same instant is supplied internally to
 option-performance period normalization; it is not a model tool argument or a
 new Node protocol field. The Copilot read-call path sets one
 option-performance-only request `ContextVar` around the existing generic
-`execute_tool()` call for both the direct report and `analysis_query`, which can
-materialize that report, and resets its token in `finally`. The existing
+`execute_tool()` call for `option_performance_report` and resets its token in
+`finally`. The existing
 materializer uses that value only when its explicit `now_ms` test injection is
 absent. Registry input validation, generic response wrapping, and every other
 tool remain unchanged.
@@ -1616,10 +1617,10 @@ strike, or narrative date/year never authorizes report scope. A second
 period-like report phrase makes the request ambiguous and is rejected. A bare
 month resolves to the most recent non-future occurrence relative to
 `operating_date`; `上月` crosses a year boundary normally. After the model
-selects `option_performance_report` or `analysis_query`, Host binds the single
+selects `option_performance_report`, Host binds the single
 attested scope into a copy of the model arguments before tool-specific
 normalization. Binding replaces only `period`, `as_of_date`, `month`, and `year`
-and removes incompatible siblings; it never chooses a tool, view, or SQL.
+and removes incompatible siblings; it never chooses a tool.
 A trusted fixed `month` denotes `period=month` and has precedence: absent or
 equal message scope succeeds, while a different natural period or MTD/YTD
 cutoff conflicts. Malformed, ambiguous, future, and fixed-scope-conflicting

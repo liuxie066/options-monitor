@@ -6,7 +6,6 @@ import hashlib
 import json
 
 from src.application.agent_tools import (
-    analysis,
     candidate,
     close_advice,
     config,
@@ -30,7 +29,6 @@ AGENT_TOOL_MODULES: tuple[ModuleType, ...] = (
     daily_brief,
     runtime,
     config,
-    analysis,
     materialization,
     candidate,
     positions,

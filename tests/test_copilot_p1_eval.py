@@ -31,13 +31,13 @@ def _scene_event() -> AppEvent:
         "2026-07-11T00:00:00+00:00",
         {
             "scene": "om_chat",
-            "scene_version": "v3",
+            "scene_version": "v5",
             "fragments": [
                 {"path": "prompts/base_behavior.md", "sha256": "a" * 64, "chars": 100},
                 {"path": "prompts/soul.md", "sha256": "b" * 64, "chars": 100},
             ],
             "compiled_prompt_sha256": "c" * 64,
-            "selected_toolsets": ["analysis"],
+            "selected_toolsets": ["positions"],
             "tool_count": 1,
             "tool_schema_sha256": "d" * 64,
         },
@@ -195,7 +195,7 @@ def test_p1_eval_runs_fixed_questions_with_follow_up_context(monkeypatch, tmp_pa
     assert payload["scene_provenance_consistent"] is True
     assert payload["scene_fingerprints"] == [
         {
-            "scene_version": "v3",
+            "scene_version": "v5",
             "compiled_prompt_sha256": "c" * 64,
             "tool_schema_sha256": "d" * 64,
         }
@@ -236,7 +236,7 @@ def test_p1_eval_treats_host_observation_continuation_as_read_only(monkeypatch, 
     assert payload["structural_pass"] is True
 
 
-def test_p1_eval_rejects_generic_analysis_for_primary_mtd_performance(monkeypatch, tmp_path) -> None:
+def test_p1_eval_rejects_wrong_primary_tool_for_mtd_performance(monkeypatch, tmp_path) -> None:
     def run_channel_request(**kwargs):
         question = kwargs["user_message"]
         needs_read = next(
@@ -250,7 +250,7 @@ def test_p1_eval_rejects_generic_analysis_for_primary_mtd_performance(monkeypatc
                 "run_1",
                 "tool_call",
                 "2026-07-11T00:00:00+00:00",
-                {"tool_name": "analysis_query", "tool_input": {"config_key": "us"}},
+                {"tool_name": "option_positions_read", "tool_input": {"config_key": "us"}},
             )
         ])]
         return AppResult(status="answered", user_response=_response(question), events=events)
@@ -264,7 +264,7 @@ def test_p1_eval_rejects_generic_analysis_for_primary_mtd_performance(monkeypatc
 
     operation_review = next(item for item in payload["cases"] if item["name"] == "operation_review")
     mtd_income = next(item for item in payload["cases"] if item["name"] == "july_mtd_option_income")
-    assert operation_review["tool_names"] == ["analysis_query"]
+    assert operation_review["tool_names"] == ["option_positions_read"]
     assert operation_review["checks"]["read_observation_used"] is True
     assert operation_review["checks"]["required_primary_tool_used"] is True
     assert mtd_income["checks"]["required_primary_tool_used"] is False
@@ -448,14 +448,14 @@ def test_p1_eval_records_model_runtime_and_tool_metrics(monkeypatch, tmp_path) -
                 "run_1",
                 "tool_call",
                 "2026-07-11T00:00:00+00:00",
-                {"tool_name": "analysis_query", "tool_input": {"config_key": "us"}},
+                {"tool_name": "option_positions_read", "tool_input": {"config_key": "us"}},
             ),
             AppEvent(
                 "evt_2",
                 "run_1",
                 "tool_result",
                 "2026-07-11T00:00:01+00:00",
-                {"tool_name": "analysis_query", "ok": True, "status": "complete"},
+                {"tool_name": "option_positions_read", "ok": True, "status": "complete"},
             ),
         ]
         return AppResult(status="answered", user_response="结论：测试回答", events=events)
@@ -475,7 +475,7 @@ def test_p1_eval_records_model_runtime_and_tool_metrics(monkeypatch, tmp_path) -
     assert payload["answer_quality_pass"] is None
     assert payload["cases"][0]["tool_metrics"]["tool_call_count"] == 1
     assert payload["cases"][0]["evidence_pass"] is True
-    assert payload["cases"][0]["scene_provenance"]["scene_version"] == "v3"
+    assert payload["cases"][0]["scene_provenance"]["scene_version"] == "v5"
 
 
 def test_p1_eval_applies_complete_human_review_scores(monkeypatch, tmp_path) -> None:

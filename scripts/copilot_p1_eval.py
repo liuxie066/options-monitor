@@ -694,7 +694,7 @@ def _scene_provenance(events: list[dict[str, Any]]) -> dict[str, Any] | None:
     fragments = payload.get("fragments")
     if (
         payload.get("scene") != "om_chat"
-        or payload.get("scene_version") != "v3"
+        or payload.get("scene_version") != "v5"
         or not _is_sha256(payload.get("compiled_prompt_sha256"))
         or not _is_sha256(payload.get("tool_schema_sha256"))
         or not isinstance(payload.get("selected_toolsets"), list)
