@@ -27,7 +27,7 @@ from src.infrastructure.feishu_ws_client import feishu_event_model_to_payload
 def _message_payload(
     *,
     sender: str = "ou_1",
-    text: str = "/income sy 2026-05",
+    text: str = "/income sy ytd",
     message_id: str = "msg_1",
 ) -> dict[str, Any]:
     return {
@@ -150,7 +150,7 @@ def test_feishu_ws_delegates_to_inbound_and_replies(tmp_path: Path) -> None:
     assert calls == [
         (
             "option_performance_report",
-            {"config_key": "us", "account": "sy", "period": "month", "month": "2026-05"},
+            {"config_key": "us", "account": "sy", "period": "ytd"},
         )
     ]
     assert reactions[0]["message_id"] == "msg_1"

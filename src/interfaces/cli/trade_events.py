@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 import json
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from src.application.ledger.api import (
     ledger_store_payload,
@@ -13,7 +14,6 @@ from src.application.ledger.api import (
 )
 from src.application.account_config import resolve_account_broker_binding_sets
 from src.application.agent_tool_config import load_runtime_config
-from domain.domain.performance.period import PeriodRequest, normalize_period
 from src.infrastructure.futu_history_deals import OpenDHistoryDealClient
 from src.application.trades.order_fee_sync import sync_order_fees
 from src.application.trades.review import (
@@ -322,11 +322,28 @@ def _run_fee_sync(
         raise SystemExit(f"fee sync broker binding is unavailable for account={account}")
     if str(binding.trd_env or "").upper() != "REAL":
         raise SystemExit("fee sync requires a REAL broker account binding")
-    window = normalize_period(
-        PeriodRequest(
-            period="range",
-            start_date=args.start_date,
-            end_date=args.end_date,
+    try:
+        start_date = date.fromisoformat(args.start_date)
+        end_date = date.fromisoformat(args.end_date)
+    except ValueError as exc:
+        raise SystemExit("start-date and end-date must be YYYY-MM-DD") from exc
+    if start_date > end_date:
+        raise SystemExit("start-date must be on or before end-date")
+    reporting_tz = ZoneInfo("Asia/Shanghai")
+    now_local = datetime.now(reporting_tz)
+    if end_date > now_local.date():
+        raise SystemExit("end-date cannot be in the future")
+    start_ms = int(datetime.combine(start_date, time.min, tzinfo=reporting_tz).timestamp() * 1000)
+    end_exclusive_ms = (
+        int(now_local.timestamp() * 1000) + 1
+        if end_date == now_local.date()
+        else int(
+            datetime.combine(
+                end_date + timedelta(days=1),
+                time.min,
+                tzinfo=reporting_tz,
+            ).timestamp()
+            * 1000
         )
     )
     client = OpenDHistoryDealClient(host=binding.host, port=binding.port)
@@ -334,8 +351,8 @@ def _run_fee_sync(
         receipt = sync_order_fees(
             repo,
             account=account,
-            start_ms=window.effective_start_at_ms,
-            end_exclusive_ms=window.effective_end_exclusive_at_ms,
+            start_ms=start_ms,
+            end_exclusive_ms=end_exclusive_ms,
             provider=client,
             apply=write_requested,
             observed_at_ms=int(datetime.now(timezone.utc).timestamp() * 1000),
@@ -343,7 +360,17 @@ def _run_fee_sync(
         )
     finally:
         client.close()
-    receipt["period"] = window.to_dict()
+    receipt["period"] = {
+        "kind": "range",
+        "reporting_timezone": "Asia/Shanghai",
+        "requested_start_date": start_date.isoformat(),
+        "requested_end_date": end_date.isoformat(),
+        "effective_start_at_ms": start_ms,
+        "effective_end_exclusive_at_ms": end_exclusive_ms,
+        "valuation_open_at_ms": start_ms - 1,
+        "valuation_end_at_ms": end_exclusive_ms - 1,
+        "status": "partial_current" if end_date == now_local.date() else "complete_past",
+    }
     receipt["ledger_store"] = ledger_store_payload(_data_config, repo)
     receipt = attach_write_contract(
         receipt,

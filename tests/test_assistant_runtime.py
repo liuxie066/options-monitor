@@ -120,87 +120,63 @@ def test_duplicate_freeform_message_reuses_audited_response(monkeypatch, tmp_pat
     assert second.meta["idempotent_replay"] is True
 
 
-def test_option_performance_renderer_separates_profit_cash_and_assignment() -> None:
-    def metric(amount: float | None, *, status: str = "observed") -> dict[str, Any]:
-        return {
-            "by_currency": {"USD": amount} if amount is not None else {},
-            "cny": None,
-            "status": status,
-            "missing": ["evidence:test"] if status == "partial" else [],
-            "fx_fact_ids": [],
-        }
-
+def test_option_performance_renderer_uses_only_canonical_metrics() -> None:
     text = render_canonical_tool_result(
         renderer_key="option_performance",
         tool_result={"ok": True},
         data={
             "period": {
                 "kind": "mtd",
-                "requested_start_date": "2026-07-01",
-                "requested_end_date": "2026-07-23",
-                "status": "partial_current",
+                "start_date": "2026-07-01",
+                "as_of_date": "2026-07-23",
             },
-            "scope": {"account": None, "accounts": ["lx", "sy"]},
-            "activity": {
-                "premium_collected_gross": metric(800),
-                "premium_paid_gross": metric(None, status="not_observed"),
-                "contracts_opened": 3,
-                "contracts_closed": 2,
-                "assigned_stock_shares_opened": 100,
-                "assigned_stock_shares_sold": 50,
+            "scope": {"accounts": ["lx", "sy"], "brokers": ["futu"]},
+            "option_net_cashflow": {
+                "by_currency": {
+                    "USD": {
+                        "total": {"amount": 799.65, "status": "observed", "missing": []},
+                        "open": {"amount": 500, "status": "observed", "missing": []},
+                        "terminated": {"amount": 299.65, "status": "observed", "missing": []},
+                    }
+                }
             },
-            "cash": {
-                "total_cash_change_net": metric(-4500),
-                "option_trade_cash_gross": metric(800),
-                "option_fee_cash": metric(-0.35),
-                "option_net_cashflow": metric(799.65),
-                "stock_settlement_cash_gross": metric(-10000),
-                "stock_settlement_fee_cash": metric(None, status="partial"),
-                "assigned_stock_sale_cash_gross": metric(5500),
-                "assigned_stock_sale_fee_cash": metric(-2.15),
+            "sell_option_win_rate": {
+                "winning_contracts": 3,
+                "eligible_contracts": 4,
+                "rate": 0.75,
+                "status": "observed",
             },
-            "pnl": {
-                "period_total_gross": metric(900),
-                "period_total_net": metric(None, status="partial"),
-                "realized_gross": metric(750),
-                "realized_net": metric(745),
-                "option_realized_gross": metric(250),
-                "option_realized_net": metric(249),
-                "assigned_stock_realized_gross": metric(500),
-                "assigned_stock_realized_net": metric(496),
+            "buy_option_win_rate": {
+                "winning_contracts": 0,
+                "eligible_contracts": 0,
+                "rate": None,
+                "status": "not_applicable",
             },
-            "cashflow_return": {
-                "capital_days_by_currency": {"USD": 100000.0},
-                "period_return": {"by_currency": {"USD": 0.12}, "status": "observed", "missing": []},
-                "annualized_return": {"by_currency": {"USD": 1.46}, "status": "observed", "missing": []},
-            },
-            "assignment_lifecycle": {
-                "ending_lots": [{"stock_lot_id": "lot-1"}],
-                "sales": [{"stock_event_id": "sale-1"}],
-                "review": [{"status": "missing_fee"}],
-                "unsupported_inventory": [],
+            "option_return": {
+                "by_currency": {
+                    "USD": {
+                        "rate": 0.12,
+                        "annualized_rate": 0.24,
+                        "status": "observed",
+                        "missing": [],
+                    }
+                }
             },
             "quality": {
-                "missing": ["stock_settlement_fee_cash:assign-1"],
-                "warnings": [],
+                "status": "partial",
+                "missing": ["terminal_evidence_missing"],
             },
         },
     )
 
-    assert text.startswith("期权收益统计完成（全部账户（lx、sy），MTD")
-    assert "截至当前" in text
-    assert "已实现 PnL（合计）" in text
-    assert "纯期权已实现 PnL" in text
-    assert "指派股票已实现 PnL" in text
-    assert "指派股票卖出回款" in text
-    assert "期权费用现金：USD -0.35" in text
-    assert "期权净现金流：USD 799.65" in text
-    assert "期间现金流收益率：USD 12.00%" in text
-    assert "年化现金流收益率：USD 146.00%" in text
-    assert "担保资本天数：USD 100,000.00" in text
-    assert "指派股票卖出费用：USD -2.15" in text
-    assert "证据不完整" in text
-    assert "不直接等于 PnL" in text
+    assert text.startswith("期权收益统计完成（lx、sy；broker futu，MTD，2026-07-01 至 2026-07-23）")
+    assert "期权净现金流：USD 合计 799.65，未终止 500.00，已终止 299.65" in text
+    assert "卖方胜率：75.00%（3/4 张）" in text
+    assert "买方胜率：-（0/0 张）（不适用）" in text
+    assert "期权收益率：USD 期间 12.00%，年化 24.00%" in text
+    assert "terminal_evidence_missing" in text
+    assert "不提供 option PnL" in text
+    assert "权利金" not in text
 
 
 def test_position_exit_renderer_uses_only_strict_close_contract() -> None:

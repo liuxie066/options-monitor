@@ -18,7 +18,6 @@ from src.application.ledger.api import (
     list_position_rows,
     open_position_ledger_from_runtime_config,
 )
-from src.application.ledger.api import open_performance_evidence_repository
 from src.application.agent_tool_config import load_runtime_config
 from src.application.agent_tool_contracts import AgentToolError, mask_path
 from src.application.quality.gate import QualityGateBlocked, assert_quality_allows
@@ -48,77 +47,60 @@ _OPTION_PERFORMANCE_OUTPUT_CONTRACT: dict[str, Any] = {
     "coverage": "source_declared",
     "freshness": "source_declared",
     "pagination": {"mode": "none"},
-    "schema_version": "option_performance_report.output.v1",
-    "source_label": "OM 本地账本 + 显式估值/汇率证据",
+    "source_label": "OM 本地 canonical trade_events ledger",
     "fact_fields": [
         "period.kind",
-        "period.requested_start_date",
-        "period.requested_end_date",
+        "period.start_date",
+        "period.as_of_date",
+        "period.start_at_ms",
+        "period.end_exclusive_at_ms",
+        "period.statistic_days",
         "scope.accounts",
         "scope.brokers",
-        "activity.premium_collected_gross",
-        "activity.premium_paid_gross",
-        "activity.assigned_stock_shares_opened",
-        "activity.assigned_stock_shares_sold",
-        "cash.option_trade_cash_gross",
-        "cash.option_fee_cash",
-        "cash.option_net_cashflow",
-        "cash.stock_settlement_cash_gross",
-        "cash.stock_settlement_fee_cash",
-        "cash.assigned_stock_sale_cash_gross",
-        "cash.assigned_stock_sale_fee_cash",
-        "cash.total_cash_change_net",
-        "pnl.realized_gross",
-        "pnl.realized_net",
-        "pnl.option_realized_gross",
-        "pnl.option_realized_net",
-        "pnl.assigned_stock_realized_gross",
-        "pnl.assigned_stock_realized_net",
-        "pnl.period_total_gross",
-        "pnl.period_total_net",
-        "capital.period_realized_net_annualized_efficiency",
-        "capital.period_total_net_annualized_efficiency",
-        "cashflow_return.capital_basis",
-        "cashflow_return.period_duration_days",
-        "cashflow_return.capital_days_by_currency",
-        "cashflow_return.average_incremental_capital_by_currency",
-        "cashflow_return.period_return",
-        "cashflow_return.annualized_return",
-        "cashflow_return.coverage",
-        "assignment_lifecycle.period",
-        "breakdowns.monthly",
+        "option_net_cashflow",
+        "sell_option_win_rate",
+        "buy_option_win_rate",
+        "option_return",
+        "breakdowns.opening_years",
+        "breakdowns.opening_months",
         "breakdowns.accounts",
+        "breakdowns.currencies",
+        "breakdowns.leg_types",
+        "breakdowns.attribution_strategies",
+        "breakdowns.parent_universes",
         "breakdowns.symbols",
-        "presentation",
     ],
     "missing_data_fields": [
         "quality.missing",
-        "quality.warnings",
-        "capital.coverage.missing",
-        "cashflow_return.coverage.missing_by_currency",
-        "cashflow_return.coverage.global_missing",
-        "assignment_lifecycle.review",
+        "quality.diagnostics",
+        "option_net_cashflow.by_currency.*.*.missing",
+        "sell_option_win_rate.missing",
+        "buy_option_win_rate.missing",
+        "option_return.by_currency.*.missing",
     ],
     "freshness_fields": [
-        "freshness.status",
-        "freshness.as_of",
-        "period.status",
-        "evidence.schema_state",
-        "evidence.collection.status",
+        "period.freshness_status",
+        "period.as_of_date",
+        "quality.ledger_input_hash",
     ],
     "model_preview_fields": [
-        "presentation",
         "period",
         "scope",
-        "evidence",
+        "option_net_cashflow",
+        "sell_option_win_rate",
+        "buy_option_win_rate",
+        "option_return",
+        "quality",
     ],
     "model_value_fields": [
-        "presentation",
         "period",
         "scope",
-        "evidence.schema_state",
+        "option_net_cashflow",
+        "sell_option_win_rate",
+        "buy_option_win_rate",
+        "option_return",
     ],
-    "model_missing_data_fields": ["presentation.limitations"],
+    "model_missing_data_fields": ["quality.missing", "quality.diagnostics"],
 }
 
 _OPTION_POSITIONS_LIST_OUTPUT_CONTRACT: dict[str, Any] = {
@@ -288,7 +270,6 @@ def _option_performance_report_tool(
         resolve_public_data_config_path=resolve_public_data_config_path,
         normalize_broker=normalize_broker,
         resolve_option_positions_repo=resolve_option_positions_repo,
-        open_performance_evidence_repository=open_performance_evidence_repository,
         build_option_period_performance=build_option_period_performance,
         repo_base=repo_base,
         mask_path=mask_path,
@@ -573,16 +554,6 @@ def _wheel_call_linkage_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], l
     return _wheel_result(_run)
 
 
-_OPTION_PERFORMANCE_PERIOD_FIELDS = frozenset(
-    {"as_of_date", "month", "year", "start_date", "end_date"}
-)
-_OPTION_PERFORMANCE_PERIOD_FIELDS_BY_KIND = {
-    "mtd": frozenset({"as_of_date"}),
-    "ytd": frozenset({"as_of_date"}),
-    "month": frozenset({"month"}),
-    "year": frozenset({"year"}),
-    "range": frozenset({"start_date", "end_date"}),
-}
 _OPTION_PERFORMANCE_COPILOT_ALL_SCOPE_MARKERS = frozenset({"all", ":all", "__omit__"})
 
 
@@ -597,29 +568,20 @@ def _normalize_option_performance_copilot_input(payload: Mapping[str, Any]) -> d
             raise ValueError(f"{name} must be non-empty when provided")
         if stripped.lower() in _OPTION_PERFORMANCE_COPILOT_ALL_SCOPE_MARKERS:
             normalized.pop(name)
-    period_value = normalized.get("period")
-    if not isinstance(period_value, str) or period_value not in _OPTION_PERFORMANCE_PERIOD_FIELDS_BY_KIND:
-        return normalized
-    relevant = _OPTION_PERFORMANCE_PERIOD_FIELDS_BY_KIND[period_value]
-    for name in _OPTION_PERFORMANCE_PERIOD_FIELDS - relevant:
-        normalized.pop(name, None)
-    for name in relevant:
-        value = normalized.get(name)
-        if name in normalized and isinstance(value, str) and not value.strip():
-            raise ValueError(f"{name} must be non-empty when provided")
+    as_of_date = normalized.get("as_of_date")
+    if "as_of_date" in normalized and isinstance(as_of_date, str) and not as_of_date.strip():
+        raise ValueError("as_of_date must be non-empty when provided")
     return normalized
 
 
 OPTION_PERFORMANCE_REPORT_TOOL = build_agent_tool(
     name="option_performance_report",
-    catalog_summary="读取期权表现汇总与收益分解。",
+    catalog_summary="读取 MTD/YTD 期权四指标与明细分解。",
     description=(
-        "Primary read-only option performance report. Separates premium activity, cash movement, realized PnL, "
-        "period total PnL, assigned-stock lifecycle, and capital efficiency. Supports MTD, YTD, natural month, "
-        "natural year, and explicit date ranges. Omit account or broker to aggregate all matching ledger facts; "
-        "native-currency amounts remain authoritative and CNY is null when FX evidence is incomplete. "
-        "cash.option_trade_cash_gross is signed option-trade cash only and excludes assigned-stock settlement "
-        "and sale cash."
+        "Read-only MTD or YTD option performance from the canonical ledger. Reports native-currency "
+        "option net cash flow, sell-option and buy-option win rates, and return on average occupied "
+        "capital. Stock trades, assignment settlement cash, PnL, FX conversion, and quote refresh are "
+        "outside this report."
     ),
     requires=("runtime_config", "sqlite_data_config"),
     capabilities=("option_performance", "income_report", "option_positions", "read_only"),
@@ -631,15 +593,10 @@ OPTION_PERFORMANCE_REPORT_TOOL = build_agent_tool(
         "broker": "optional broker filter; omitted aggregates all brokers",
         "period": {
             "type": "string",
-            "enum": ["mtd", "ytd", "month", "year", "range"],
+            "enum": ["mtd", "ytd"],
         },
         "as_of_date": {"type": ["string", "null"], "format": "date"},
-        "month": {"type": ["string", "null"], "pattern": r"^\d{4}-(0[1-9]|1[0-2])$"},
-        "year": {"type": ["integer", "string", "null"]},
-        "start_date": {"type": ["string", "null"], "format": "date"},
-        "end_date": {"type": ["string", "null"], "format": "date"},
         "include_rows": {"type": "boolean"},
-        "refresh_quotes": {"type": "boolean"},
     },
     handler=_option_performance_report_tool,
     pure_read=True,
@@ -647,11 +604,10 @@ OPTION_PERFORMANCE_REPORT_TOOL = build_agent_tool(
         "config_key": "us",
         "period": "mtd",
         "include_rows": False,
-        "refresh_quotes": True,
     },
     examples=(
         {"input": {"period": "ytd", "as_of_date": "2026-07-17"}},
-        {"input": {"period": "month", "month": "2026-06", "include_rows": True}},
+        {"input": {"period": "mtd", "include_rows": True}},
     ),
     output_contract=_OPTION_PERFORMANCE_OUTPUT_CONTRACT,
     copilot_input_fields=(
@@ -660,12 +616,7 @@ OPTION_PERFORMANCE_REPORT_TOOL = build_agent_tool(
         "broker",
         "period",
         "as_of_date",
-        "month",
-        "year",
-        "start_date",
-        "end_date",
         "include_rows",
-        "refresh_quotes",
     ),
     copilot_input_schema={
         "type": "object",
@@ -679,14 +630,9 @@ OPTION_PERFORMANCE_REPORT_TOOL = build_agent_tool(
                 "type": "string",
                 "description": "Optional broker filter. Omit or use all for all brokers.",
             },
-            "period": {"type": "string", "enum": ["mtd", "ytd", "month", "year", "range"]},
+            "period": {"type": "string", "enum": ["mtd", "ytd"]},
             "as_of_date": {"type": "string", "format": "date"},
-            "month": {"type": "string", "pattern": r"^\d{4}-(0[1-9]|1[0-2])$"},
-            "year": {"type": ["integer", "string"]},
-            "start_date": {"type": "string", "format": "date"},
-            "end_date": {"type": "string", "format": "date"},
             "include_rows": {"type": "boolean"},
-            "refresh_quotes": {"type": "boolean"},
         },
         "additionalProperties": False,
     },

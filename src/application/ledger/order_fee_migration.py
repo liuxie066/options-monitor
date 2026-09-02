@@ -13,15 +13,10 @@ from domain.domain.fee_calc import (
     estimate_futu_executed_option_fee,
 )
 from domain.domain.ledger import TradeEvent, fee_fact_for_event
+from domain.domain.ledger.cash_facts import cash_facts_for_trade_event
+from domain.domain.ledger.fees import FeeBasis, FeeComponent
+from domain.domain.money import canonical_decimal_text, quantize_money, to_decimal
 from domain.domain.option_position_identity import normalize_broker
-from domain.domain.performance.engine import cash_facts_for_trade_event
-from domain.domain.performance.models import (
-    FeeBasis,
-    FeeComponent,
-    canonical_decimal_text,
-    quantize_money,
-    to_decimal,
-)
 from src.application.cash_conversion import build_cash_conversion
 from src.application.ledger.current_decision_projection import (
     capture_current_decision_projection_fence,

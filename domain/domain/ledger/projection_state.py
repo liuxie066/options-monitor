@@ -4,7 +4,7 @@ import hashlib
 import json
 import math
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Any, Iterable
 
 from domain.domain.ledger.events import (
@@ -15,6 +15,11 @@ from domain.domain.ledger.events import (
 from domain.domain.ledger.economics import fee_fact_for_event
 from domain.domain.ledger.identity import ContractKey
 from domain.domain.ledger.lots import PositionLot
+from domain.domain.ledger.position_fields import (
+    POSITION_LOT_STRATEGY_PATCH_FIELDS,
+    strategy_metadata_fields_from_payload,
+)
+from domain.domain.money import canonical_decimal_text, to_decimal
 
 
 RESUMABLE_PROJECTION_STATE_SCHEMA = "resumable_projection_state.v1"
@@ -72,10 +77,10 @@ _EVENT_KEYS = {
     "lot_id",
     "raw_payload",
 }
-_ECONOMIC_STRATEGY_KEYS = (
-    "strategy",
-    "leg_role",
-    "strategy_group_id",
+_ECONOMIC_STRATEGY_KEYS = tuple(
+    key
+    for key in POSITION_LOT_STRATEGY_PATCH_FIELDS
+    if key != "strategy_snapshot"
 )
 
 
@@ -103,21 +108,14 @@ def _contract_key_from_dict(payload: Any) -> ContractKey:
 def _decimal_text(value: Decimal) -> str:
     if not isinstance(value, Decimal) or not value.is_finite():
         raise ValueError("allocated_open_fee must be a finite Decimal")
-    if value == 0:
-        return "0"
-    rendered = format(value, "f")
-    if "." in rendered:
-        rendered = rendered.rstrip("0").rstrip(".")
-    return rendered
+    return canonical_decimal_text(value, field_name="allocated_open_fee")
 
 
 def _parse_decimal(value: Any) -> Decimal:
     try:
-        parsed = Decimal(str(value))
-    except (InvalidOperation, ValueError) as exc:
+        parsed = to_decimal(value, field_name="allocated_open_fee")
+    except (TypeError, ValueError) as exc:
         raise ValueError("allocated_open_fee must be decimal text") from exc
-    if not parsed.is_finite():
-        raise ValueError("allocated_open_fee must be finite")
     return parsed
 
 
@@ -164,13 +162,9 @@ def _resumable_open_event(event: TradeEvent) -> TradeEvent:
     resumable_payload: dict[str, Any] = {
         "fee_provenance": fee_provenance,
     }
-    snapshot = raw_payload.get("strategy_snapshot")
-    snapshot_payload = snapshot if isinstance(snapshot, dict) else {}
+    strategy_metadata = strategy_metadata_fields_from_payload(raw_payload)
     for key in _ECONOMIC_STRATEGY_KEYS:
-        value = snapshot_payload.get(key)
-        if value in (None, ""):
-            value = raw_payload.get(key)
-        text = str(value or "").strip()
+        text = str(strategy_metadata.get(key) or "").strip()
         if text:
             resumable_payload[key] = text
     return TradeEvent(

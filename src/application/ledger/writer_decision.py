@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from domain.domain.ledger.position_fields import strategy_metadata_fields_from_payload
+
 from .writer_common import (
     Any,
     LegacySettlementSemanticUnavailable,
@@ -37,6 +39,15 @@ def _projection_mode_for_events(
     if force_full or any(
         str(getattr(item, "event_type", "") or "").strip().lower()
         not in _APPEND_SAFE_EVENT_TYPES
+        for item in events
+    ) or any(
+        str(
+            strategy_metadata_fields_from_payload(
+                getattr(item, "raw_payload", None)
+            ).get("strategy")
+            or ""
+        ).strip().lower()
+        == "combo_yield"
         for item in events
     ):
         return "forced_full"

@@ -4,15 +4,9 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any
 
-from src.application.agent_tool_config import load_runtime_config, repo_base
-from src.application.agent_tool_contracts import AgentToolError, mask_path
+from src.application.agent_tool_config import load_runtime_config
+from src.application.agent_tool_contracts import AgentToolError
 from src.application.agent_tools.base import AgentTool, build_agent_tool
-from src.application.agent_tools.materialization_impl import option_performance_report_tool
-from src.application.agent_tools.runtime_helpers import normalize_broker, resolve_public_data_config_path
-from src.application.ledger.api import (
-    open_performance_evidence_repository,
-    open_position_ledger_from_data_config as resolve_option_positions_repo,
-)
 from src.application.portfolio_cash_bridge import build_portfolio_cash_bridge
 from src.application.portfolio_assignment_scenario import (
     AssignmentScenarioInputError,
@@ -24,9 +18,7 @@ from src.application.portfolio_management import (
     portfolio_management_failure_code,
     resolve_portfolio_management_client,
 )
-from src.application.performance.service import build_option_period_performance
 from src.infrastructure.portfolio_management_client import (
-    SERVICE_URL_ENV,
     PortfolioManagementClient,
     PortfolioManagementError,
     PortfolioManagementHTTPError,
@@ -330,15 +322,6 @@ def _read_capital_facts(*, account: str, period: str, as_of_month: str) -> dict[
 
 
 
-def _read_cash_facts(*, account: str, period: str, as_of_month: str) -> dict[str, Any]:
-    del account, period, as_of_month
-    raise AgentToolError(
-        code="CAPABILITY_UNAVAILABLE",
-        message="portfolio cash facts are not onboarded",
-        details={"capability": "portfolio_cash_facts", "endpoint": None},
-    )
-
-
 def _read_bridge_fact(
     reader,
     *,
@@ -359,66 +342,6 @@ def _read_bridge_fact(
         }
 
 
-def _read_option_performance(
-    *,
-    account: str,
-    period: str,
-    end_date: str,
-) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    return option_performance_report_tool(
-        {
-            "config_key": "us",
-            "period": period,
-            "as_of_date": end_date,
-            "account": account,
-            "include_rows": False,
-            "refresh_quotes": False,
-        },
-        load_runtime_config=load_runtime_config,
-        resolve_public_data_config_path=resolve_public_data_config_path,
-        normalize_broker=normalize_broker,
-        resolve_option_positions_repo=resolve_option_positions_repo,
-        open_performance_evidence_repository=open_performance_evidence_repository,
-        build_option_period_performance=build_option_period_performance,
-        repo_base=repo_base,
-        mask_path=mask_path,
-    )
-
-
-def _bridge_option_reports(
-    *,
-    accounts: list[str],
-    period: str,
-    facts_by_account: dict[str, dict[str, Any]],
-) -> tuple[dict[str, dict[str, Any]], list[str], dict[str, Any]]:
-    reports: dict[str, dict[str, Any]] = {}
-    warnings: list[str] = []
-    meta: dict[str, Any] = {}
-    for account in accounts:
-        facts = facts_by_account.get(account) or {}
-        end_date = str((facts.get("period") or {}).get("end_date") or "")
-        if str(facts.get("status") or "") != "ok" or not end_date:
-            continue
-        try:
-            report, report_warnings, report_meta = _read_option_performance(
-                account=account, period=period, end_date=end_date
-            )
-        except AgentToolError as exc:
-            reports[account] = {
-                "quality": {
-                    "status": "not_observed",
-                    "missing": [f"option_performance_report: {exc.message}"],
-                }
-            }
-            warnings.append(f"{account}: {exc.message}")
-            continue
-        reports[account] = report
-        warnings.extend(f"{account}: {item}" for item in report_warnings if str(item).strip())
-        if not meta:
-            meta = dict(report_meta)
-    return reports, warnings, meta
-
-
 def _portfolio_pnl_bridge(payload: dict[str, Any]):
     period, as_of_month, accounts = _bridge_scope(payload)
     facts = {
@@ -431,49 +354,30 @@ def _portfolio_pnl_bridge(payload: dict[str, Any]):
         )
         for account in accounts
     }
-    reports, warnings, meta = _bridge_option_reports(
-        accounts=accounts, period=period, facts_by_account=facts
-    )
     return (
         build_portfolio_pnl_bridge(
             period=period,
             as_of_month=as_of_month,
             accounts=accounts,
             capital_facts_by_account=facts,
-            option_reports_by_account=reports,
             observed_at=datetime.now(timezone.utc).isoformat(),
         ),
-        list(dict.fromkeys(warnings)),
-        meta,
+        [],
+        {},
     )
 
 
 def _portfolio_cash_bridge(payload: dict[str, Any]):
     period, as_of_month, accounts = _bridge_scope(payload)
-    facts = {
-        account: _read_bridge_fact(
-            _read_cash_facts,
-            account=account,
-            period=period,
-            as_of_month=as_of_month,
-            unavailable_reason="portfolio_cash_facts_not_onboarded",
-        )
-        for account in accounts
-    }
-    reports, warnings, meta = _bridge_option_reports(
-        accounts=accounts, period=period, facts_by_account=facts
-    )
     return (
         build_portfolio_cash_bridge(
             period=period,
             as_of_month=as_of_month,
             accounts=accounts,
-            cash_facts_by_account=facts,
-            option_reports_by_account=reports,
             observed_at=datetime.now(timezone.utc).isoformat(),
         ),
-        list(dict.fromkeys(warnings)),
-        meta,
+        [],
+        {},
     )
 
 
@@ -584,12 +488,22 @@ PORTFOLIO_QUERY_TOOL = build_agent_tool(
     ),
 )
 
-def _bridge_tool(*, name: str, description: str, handler, schema_version: str, evidence_field: str, catalog_summary: str) -> AgentTool:
+def _bridge_tool(
+    *,
+    name: str,
+    description: str,
+    handler,
+    schema_version: str,
+    evidence_field: str,
+    catalog_summary: str,
+    requires: tuple[str, ...],
+    source_label: str,
+) -> AgentTool:
     return build_agent_tool(
         name=name,
         catalog_summary=catalog_summary,
         description=description,
-        requires=("portfolio-management loopback HTTP API", "runtime_config", "sqlite_data_config"),
+        requires=requires,
         capabilities=("portfolio_read", name, "cross_product_read", "read_only"),
         input_schema={
             "period": {"type": "string", "enum": ["mtd", "ytd"], "required": True},
@@ -618,7 +532,7 @@ def _bridge_tool(*, name: str, description: str, handler, schema_version: str, e
             "freshness": "source_declared",
             "pagination": {"mode": "none"},
             "schema_version": schema_version,
-            "source_label": "portfolio-management facts + option_performance_report",
+            "source_label": source_label,
             "primary_rows": "accounts",
             "fact_fields": [
                 "status",
@@ -640,25 +554,29 @@ def _bridge_tool(*, name: str, description: str, handler, schema_version: str, e
 PORTFOLIO_PNL_BRIDGE_TOOL = _bridge_tool(
     name="portfolio_pnl_bridge",
     description=(
-        "Build an MTD or YTD total-assets PnL bridge. It decomposes portfolio period PnL into option "
-        "period-total net PnL and portfolio/other PnL. Assignment principal never enters the PnL equation."
+        "Build an MTD or YTD total-assets PnL bridge from portfolio-management capital facts. "
+        "Option PnL remains explicitly unavailable until a separate authoritative source exists."
     ),
     handler=_portfolio_pnl_bridge,
     schema_version="portfolio.pnl_bridge.v1",
     evidence_field="accounts[].option_pnl_evidence",
-    catalog_summary="读取组合期间损益桥接及期权分解。",
+    catalog_summary="读取组合期间损益桥接；期权盈亏分解当前不可用。",
+    requires=("portfolio-management loopback HTTP API",),
+    source_label="portfolio-management capital facts; option PnL unavailable",
 )
 
 PORTFOLIO_CASH_BRIDGE_TOOL = _bridge_tool(
     name="portfolio_cash_bridge",
     description=(
-        "Build an MTD or YTD cash-balance bridge from portfolio-management cash facts and complete OM option "
-        "cash movement. It never substitutes total assets for cash and missing cash facts remain unavailable."
+        "Report that the MTD or YTD cash-balance bridge is unavailable until authoritative portfolio cash "
+        "facts and combined option/assignment lifecycle cash are onboarded."
     ),
     handler=_portfolio_cash_bridge,
     schema_version="portfolio.cash_bridge.v1",
     evidence_field="accounts[].option_cash_evidence",
-    catalog_summary="读取组合现金余额桥接及期权现金变动。",
+    catalog_summary="读取组合现金桥能力状态；当前明确不可用。",
+    requires=(),
+    source_label="capability status only; cash facts unavailable",
 )
 
 PORTFOLIO_ASSIGNMENT_SCENARIO_TOOL = build_agent_tool(

@@ -578,6 +578,67 @@ def strategy_metadata_fields_from_payload(
     return out
 
 
+def apply_strategy_metadata_patch(
+    payload: dict[str, Any] | None,
+    patch: dict[str, Any],
+    *,
+    include_legacy: bool = False,
+) -> dict[str, Any]:
+    """Apply explicit strategy metadata set/clear semantics to one payload.
+
+    A present ``None``/empty value is a durable clear, including the fallback
+    copy inside ``strategy_snapshot``.  Keeping this operation in the ledger
+    domain prevents publication and report projections from interpreting the
+    same adjustment differently.
+    """
+
+    out = dict(payload or {})
+    keys = (
+        *POSITION_LOT_STRATEGY_PATCH_FIELDS,
+        *(LEGACY_POSITION_LOT_PATCH_FIELDS if include_legacy else ()),
+    )
+    snapshot_value = out.get("strategy_snapshot")
+    snapshot = dict(snapshot_value) if isinstance(snapshot_value, dict) else {}
+
+    if "strategy_snapshot" in patch:
+        value = patch.get("strategy_snapshot")
+        if isinstance(value, dict) and value:
+            snapshot = (
+                dict(value)
+                if include_legacy
+                else strip_retired_strategy_metadata(dict(value))
+            )
+        else:
+            snapshot = {}
+        if snapshot:
+            out["strategy_snapshot"] = dict(snapshot)
+        else:
+            out.pop("strategy_snapshot", None)
+
+    for key in keys:
+        if key == "strategy_snapshot" or key not in patch:
+            continue
+        value = patch.get(key)
+        if value in (None, ""):
+            out.pop(key, None)
+            snapshot.pop(key, None)
+            continue
+        text = str(value).strip()
+        if not text:
+            out.pop(key, None)
+            snapshot.pop(key, None)
+            continue
+        out[key] = text
+        if snapshot:
+            snapshot[key] = text
+
+    if snapshot:
+        out["strategy_snapshot"] = snapshot
+    else:
+        out.pop("strategy_snapshot", None)
+    return out
+
+
 def upsert_note_kv(note: str | None, kv: dict[str, Any]) -> str:
     raw = str(note or "").strip()
     pairs: list[tuple[str, str]] = []

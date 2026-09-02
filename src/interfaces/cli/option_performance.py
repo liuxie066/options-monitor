@@ -67,19 +67,11 @@ def add_option_performance_commands(subparsers: argparse._SubParsersAction) -> N
     _add_config_scope_args(report)
     report.add_argument(
         "--period",
-        choices=["mtd", "ytd", "month", "year", "range"],
+        choices=["mtd", "ytd"],
         default="mtd",
     )
     report.add_argument("--as-of-date", default=None, help="MTD/YTD inclusive YYYY-MM-DD")
-    report.add_argument("--month", default=None, help="natural month YYYY-MM")
-    report.add_argument("--year", default=None, help="natural year YYYY")
-    report.add_argument("--start-date", default=None, help="range start YYYY-MM-DD")
-    report.add_argument("--end-date", default=None, help="range end YYYY-MM-DD")
     report.add_argument("--include-rows", action="store_true")
-    refresh = report.add_mutually_exclusive_group()
-    refresh.add_argument("--refresh-quotes", dest="refresh_quotes", action="store_true")
-    refresh.add_argument("--no-refresh-quotes", dest="refresh_quotes", action="store_false")
-    report.set_defaults(refresh_quotes=True)
 
     evidence = sub.add_parser("evidence", help="validate, import, or capture performance evidence")
     evidence_sub = evidence.add_subparsers(dest="evidence_command", required=True)
@@ -139,12 +131,7 @@ def _report_payload(args: argparse.Namespace) -> dict[str, Any]:
         **_scope_payload(args),
         "period": args.period,
         "as_of_date": args.as_of_date,
-        "month": args.month,
-        "year": args.year,
-        "start_date": args.start_date,
-        "end_date": args.end_date,
         "include_rows": bool(args.include_rows),
-        "refresh_quotes": bool(args.refresh_quotes),
     }
 
 
@@ -324,7 +311,6 @@ def handle_option_performance_command(args: argparse.Namespace) -> dict[str, Any
             resolve_public_data_config_path=resolve_public_data_config_path,
             normalize_broker=normalize_broker,
             resolve_option_positions_repo=open_position_ledger_from_data_config,
-            open_performance_evidence_repository=open_performance_evidence_repository,
             build_option_period_performance=build_option_period_performance,
             repo_base=repo_base,
             mask_path=mask_path,

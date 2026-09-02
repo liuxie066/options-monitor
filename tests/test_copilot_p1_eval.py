@@ -13,12 +13,12 @@ _MTD_QUESTION = "7月 mtd 的期权收益"
 _MTD_CORRECTION = "我写的是mtd"
 _YTD_QUESTION = "今年 ytd 的期权收益和现金流"
 _MTD_RESPONSE = (
-    "结论：MTD 账户 lx+sy 的期权已实现毛收益先列，期权交易现金流随后列示；"
-    "该现金流不含指派正股买卖，费用证据不完整时只报告毛额。"
+    "结论：MTD 账户 lx+sy 的期权净现金流先列，卖出期权胜率和买入期权胜率随后列示；"
+    "期权收益率与年化收益率按原币担保资本计算。"
 )
 _YTD_RESPONSE = (
-    "结论：YTD 全部账户的期权已实现毛收益先列，期权交易现金流随后列示；"
-    "该现金流不含指派正股买卖，费用证据不完整时只报告毛额。"
+    "结论：YTD 全部账户的期权净现金流先列，卖出期权胜率和买入期权胜率随后列示；"
+    "期权收益率与年化收益率按原币担保资本计算。"
 )
 _BIAS_QUESTION = "收益率很高，所以现在就应该加仓吗？请结合当前持仓风险判断"
 
@@ -91,12 +91,12 @@ def test_p1_eval_recognizes_equivalent_evidence_limit_wording() -> None:
 
 def test_p1_eval_readability_guards_enforce_order_and_hide_evidence_ids() -> None:
     assert copilot_p1_eval._terms_in_order(
-        "期权已实现毛收益 CNY 100；期权交易现金流 CNY 300。",
-        ("期权已实现毛收益", "期权交易现金流"),
+        "期权净现金流 USD 300；卖出期权胜率 75%；期权收益率 12%。",
+        ("期权净现金流", "卖出期权胜率", "期权收益率"),
     )
     assert not copilot_p1_eval._terms_in_order(
-        "期权交易现金流 CNY 300；期权已实现毛收益 CNY 100。",
-        ("期权已实现毛收益", "期权交易现金流"),
+        "期权收益率 12%；卖出期权胜率 75%；期权净现金流 USD 300。",
+        ("期权净现金流", "卖出期权胜率", "期权收益率"),
     )
     assert copilot_p1_eval._contains_raw_evidence_identifier(
         "缺失证据 source_event_id=event-private-001"
@@ -278,8 +278,8 @@ def test_p1_eval_rejects_wrong_mtd_period_and_narrowed_account(monkeypatch, tmp_
             return AppResult(
                 status="answered",
                 user_response=(
-                    "结论：MTD lx账户的期权已实现毛收益和期权交易现金流均已列明；"
-                    "现金流不含指派正股买卖。"
+                    "结论：MTD lx账户的期权净现金流、卖出期权胜率、买入期权胜率、"
+                    "期权收益率和年化收益率均已列明。"
                 ),
                 events=[
                     AppEvent(

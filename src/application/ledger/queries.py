@@ -312,7 +312,9 @@ def assigned_stock_event_log(repo: Any) -> AssignedStockEventLog:
 def trade_event_log(repo: Any) -> list[dict[str, Any]]:
     sqlite_repo = require_option_positions_event_read_repo(repo)
     events = sqlite_repo.list_trade_events()
-    return events if isinstance(events, list) else []
+    if not isinstance(events, list):
+        raise TypeError("trade event repository must return a list")
+    return events
 
 
 def trade_event_page(
