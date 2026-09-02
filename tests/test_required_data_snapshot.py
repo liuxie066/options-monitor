@@ -62,6 +62,20 @@ def test_consumer_csv_projection_equal_frame_skips_cell_fallback(
     )
 
 
+def test_consumer_csv_projection_preserves_mixed_dtype_row_canonicalization() -> None:
+    rows = [{"symbol": "NVDA", "in_the_money": True}]
+    frame = _csv_roundtrip_frame(rows)
+    frame["in_the_money"] = frame["in_the_money"].astype("string")
+
+    _validate_consumer_csv_projection(
+        rows=rows,
+        frame=frame,
+        csv=None,
+        symbol="NVDA",
+        raw_meta={},
+    )
+
+
 def _workspace(tmp_path: Path, run_id: str = "run-1") -> tuple[Path, Path]:
     run_dir = tmp_path / "output_runs" / run_id
     root = run_dir / "required_data"
