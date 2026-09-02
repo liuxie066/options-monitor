@@ -1,0 +1,75 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.4.2",
+  "base": {
+    "tag": "v3.4.1",
+    "commit": "305263a6f4e12248081974ac31ef3f412aef780f"
+  },
+  "reviewed_head": "78bb791f59d1fe2dc9e0bfcf49556b697800e6d7",
+  "commits": [
+    {
+      "sha": "d6d6ed64510bdf47501b3da6d5795b60351a7704",
+      "subject": "fix(copilot): bind period inputs before tool execution"
+    },
+    {
+      "sha": "0db7aab61cf082c42e5b2cf37a22bda0a7672123",
+      "subject": "Merge pull request #219 from liuxie066/fix-copilot-period-input-binding"
+    },
+    {
+      "sha": "350be7ac999455c444ef985aa5b81f1cccd773ae",
+      "subject": "refactor(cleanup): remove unused private helpers"
+    },
+    {
+      "sha": "78bb791f59d1fe2dc9e0bfcf49556b697800e6d7",
+      "subject": "Merge pull request #220 from liuxie066/codex/dead-code-cleanup"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Bound Copilot option-performance period inputs to the current request before tool execution and recorded model-selected versus effective inputs, preventing valid natural-month and natural-year answers from failing evidence admission.",
+      "commits": [
+        "d6d6ed64510bdf47501b3da6d5795b60351a7704",
+        "0db7aab61cf082c42e5b2cf37a22bda0a7672123"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "350be7ac999455c444ef985aa5b81f1cccd773ae",
+      "reason": "Removed unreachable private helpers only; no user-visible, configuration, runtime, or operational behavior changed."
+    },
+    {
+      "commit": "78bb791f59d1fe2dc9e0bfcf49556b697800e6d7",
+      "reason": "Merge commit for the internal dead-code cleanup in PR #220; it adds no separate user-visible behavior."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "d6d6ed64510bdf47501b3da6d5795b60351a7704",
+      "references": [
+        "docs/OM_COPILOT_V2_DESIGN.md",
+        "https://github.com/liuxie066/options-monitor/pull/219"
+      ]
+    },
+    {
+      "commit": "0db7aab61cf082c42e5b2cf37a22bda0a7672123",
+      "references": [
+        "docs/OM_COPILOT_V2_DESIGN.md",
+        "https://github.com/liuxie066/options-monitor/pull/219"
+      ]
+    },
+    {
+      "commit": "350be7ac999455c444ef985aa5b81f1cccd773ae",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/220"
+      ]
+    },
+    {
+      "commit": "78bb791f59d1fe2dc9e0bfcf49556b697800e6d7",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/220"
+      ]
+    }
+  ]
+}
