@@ -39,8 +39,9 @@ backfill 时才会产生提示。旧 `trade_intake.holdings_sync.enabled` 只保
   `202 Accepted` 只表示接受提示，不表示持仓已经同步。
 - PM 调用失败不会回滚或改写 OM 已记录的成交、期权或生命周期事实；PM 的既有
   早晚全量同步仍是最终对账兜底。
-- 成交写入时冻结公式费用；history backfill 随后复用同一个 OpenD context，
-  按 canonical `(broker, account, futu_account_id, order_id)` 查询终态订单和实际费用。
+- 成交写入时冻结公式费用；持久化成功后按该成交的 canonical
+  `(broker, account, futu_account_id, order_id)` 精确查询终态订单和实际费用。
+  当次尚未取得 actual 时，recent history backfill 只重试本次窗口内成交携带的同一订单。
 
 ## 订单费用同步
 
@@ -66,6 +67,111 @@ sale 订单均不写入。actual zero 是完整证据。
 dry-run 不创建审计表。历史回补负责补 actual；仍取不到 actual 的旧裸费用只冻结一次
 当前公式版本，后续读取不随费率变化重算。OpenD 不可用、查询失败或证据不一致时保留
 estimated/missing 和显式诊断，不回退到 raw deal fee 字段。
+
+### 自动单订单费用补全
+
+自动路径的目标是让每笔 broker 成交在 durable ledger 写入后，以该成交携带的特定
+`order_id` 补全 actual fee；成功信号是终态、账户、币种和完整成交数量均可证明，
+`order_fee_query([order_id])` 返回该订单费用，ledger enrichment transaction 写后读回为
+actual。费用补全失败不得回滚、重复或改写已经持久化的成交，也不得把 estimated/missing
+解释成零费用。
+
+自动路径不扫描 2018 年以来的 ledger 候选，不维护 round-robin cursor，也不把历史
+`fees-sync` 作为成交后的默认动作。缺少 canonical order identity 的手工事件、超过 recent
+backfill 覆盖期的历史修复、费用公式调整、绩效口径变更和新增持久重试队列不在该路径内；
+人工 `./om trade-events fees-sync` 继续负责显式日期范围的历史预览与受控写入。
+
+```text
+trusted push or recent history deal
+  -> durable inbox and canonical ledger write, then settle intake result
+  -> exact account + futu_account_id + order_id target
+  -> source-local in-memory target queue
+  -> exact current-order query; narrow history-order fallback when needed
+  -> terminal / currency / complete dealt quantity admission
+  -> order_fee_query([order_id])
+  -> exact-only ledger enrichment transaction and readback
+```
+
+`src/application/trades/auto_intake.py` 为每个 source 持有一个进程内队列和 enqueue helper。
+Push callback 只在成交 Inbox 已 settle 后，从可信 `_trade_intake_source` 和 canonical ledger
+结果构造完整 `(broker, account, futu_account_id, order_id)` target，并调用该 helper；费用失败
+不会把已成功处理的 Inbox 改回 retryable。source loop 顺序消费并去重 target，provider 查询
+不持有共享 `process_lock`，也不与 backfill 并发使用同一个可变 OpenD client。进程退出时未
+消费的 target 不单独持久化，由 recent history backfill 恢复。
+
+当前订单接口以 `refresh_cache=true` 按 `order_id` 精确过滤，覆盖全部未完成订单以及 24 小时内
+已成交或已撤订单。当前查询未命中或返回受控 provider 错误，且目标来自更早的有效 backfill
+payload 时，按该订单完整
+ledger 组的最早和最晚成交时间生成不超过 provider 360 天上限的窄 history-order 窗口，再在
+本地只接受同一 `order_id`；不会退回无目标的长时间历史扫描。两种查询都失败或限流时 fail
+closed，保留 estimated/missing。
+
+首次尝试发生在成交持久化和 Inbox settle 之后；`FILLED_PART` 等非终态只记录
+`terminal_pending`，不查询或写入最终费用。`FILLED_ALL` 或有成交数量的部分撤单只有在
+provider `dealt_qty` 与 canonical ledger 订单组数量完全一致、币种一致时才进入费用查询。
+这样同一订单的多笔成交不会在订单尚未结束时冻结不完整费用。provider 已终态但暂未返回
+费用行时记录 `fee_pending`，后续 recent backfill 继续尝试，不能解释成零费用。
+
+Recent history backfill 先从本轮 broker payload 派生明确携带的 canonical order identity；
+只有新结果为 `applied`，或 duplicate 分支能由完整 ledger key 或 `applied/reconciled` processed
+state 证明此前已经持久化时才收集 target。普通股票、failed、unresolved 和缺少持久化证据的
+重复项不会触发 fee 查询。完成本轮业务处理并释放 `process_lock` 后，同一订单去重并调用由
+auto intake 注入的 enqueue helper。
+`run_history_backfill()` 不再查询费用，也不在 diagnostics 返回 raw target identity。已经具备
+一致 actual fee 的订单在 provider 调用前跳过。该重试使用既有 lookback/checkpoint 覆盖，
+不增加持久队列或状态表；旧 checkpoint 中的 fee cursor 自然保留但不再读取或更新。
+
+`src/application/trades/order_fee_sync.py` 继续拥有完整订单组选择、terminal admission 和 fee
+enrichment 编排。现有内部 `sync_order_fees` 增加可选 exact target 模式：按完整 canonical
+identity 读取跨日期边界的完整订单组；该模式的 `start_ms`/`end_exclusive_ms` 可省略且不参与
+选择或写入，history-order fallback 日期只从目标组的最早和最晚 event time 生成，也不使用
+日期 cursor 或 `max_orders`。缺省模式仍要求有效日期范围并保持人工 `fees-sync` 语义，不新增
+平行公开入口。当前全量 ledger 读取保持 O(n)，只有实测成为瓶颈后才增加索引。
+
+`src/application/ledger/order_fee_migration.py` 是 enrichment implementation owner；
+`src/application/ledger/api.py` 继续作为应用层公开边界。现有 `enrich_order_fees` 增加相同的
+exact target 约束：该模式可省略日期范围，只构建该订单的 actual unit，禁止运行范围内 legacy
+formula freeze pass，也不为无关订单产生 audit 或 unresolved outcome；写入仍复用旧 JSON
+比较交换、SQLite transaction、投影重放和写后读回。
+`src/infrastructure/futu_history_deals.py` 复用现有 gateway 和状态规范化，负责 exact
+current-order、窄 history-order fallback 和 fee query。无需新增 domain entity、配置键、数据库
+schema 或依赖；若实现产生新的 import edge，按仓库约定重新生成两份 dependency graph。
+
+自动尝试结果写入既有 trade-intake audit 和 listener `last_fee_sync` 子状态，至少区分
+`actual`、`already_actual`、`terminal_pending`、`terminal_order_missing`、`fee_pending`、
+`provider_rate_limited`、provider 查询失败和 evidence conflict。成功数以 ledger
+`committed`/`no_op` 结果为准，不以 provider observation 数冒充写入成功。audit/status 只保存
+identity hash、reason、error type 和计数，不透传 raw `order_id`、provider 异常文本或 missing
+列表。
+
+顶层 backfill `ok` 仍只证明 history、durable inbox 与 lifecycle 完整，不会因费用暂缺而谎称
+成交失败。`last_fee_sync` 表示该 source 最近一次完成的非空 queue drain cycle，包含 attempt
+时间和仅属于该 cycle 的 actual、pending、failed 计数，不表示当前 backlog 或进程累计值。
+无 target 的空 cycle 不覆盖旧状态；新的无失败 cycle 清除上一次 fee error。
+`runtime_status.fee_failed_source_count` 只统计各 source 最近 cycle 仍有失败的数量，并同时暴露
+脱敏的 fee actual、pending、failed 计数，避免仅凭 `listener_status=listening` 推断 actual fee
+已补齐。
+
+实现先给现有 fee sync 和 ledger enrichment 增加 exact target 模式，并用跨窗口完整订单组、
+无关订单字节及 audit 不变、终态、数量、币种和 already-actual 用例锁定写入门；再增加 exact
+current-order 和窄 history-order fallback，由 auto intake 的 enqueue helper 把 push 与 backfill
+target 接到 source-local 队列，并删除 backfill 自动全历史 fee scan 与 cursor；最后补充 queue
+drain cycle status 和 runtime status 安全聚合。
+
+验证覆盖单笔成交成功、部分成交不写、部分撤单数量一致、超过 24 小时的 checkpoint 恢复、
+duplicate push/backfill 重试、双账户相同 order ID 隔离、无关 estimated 订单不查询不改写、
+provider 失败不回滚成交或改变 settled Inbox、同一订单并发重试幂等、成功清除旧 fee error、
+空 backfill 不覆盖旧状态和双账户状态聚合。实现后运行 fee sync、trade intake、agent facade
+相关测试、guardrails 与 `git diff --check`。
+
+订单费用接口同一账户每 30 秒最多调用 10 次。复用的 source provider client 跨调用维护该
+`order_fee_query` 预算；自动路径顺序处理特定订单，第 11 次及 provider 自身限流均 fail closed，
+不 sleep 持锁，也不以并发、盲重试或批量历史扫描绕过。current-order 强制刷新若被独立限流，
+同样保留 estimated/missing 等待 backfill。
+
+保留风险是 provider 不可用超过现有回补覆盖期，或订单长时间保持部分成交且在变为终态前已
+离开 backfill 窗口时，不会自动补齐。该情况由 partial 指标和历史 `fees-sync` 显式处理；只有
+观测到持续积压后才由 trade-intake owner 设计 durable fee retry，不为当前缺陷预建状态机。
 
 ## Push 来源身份
 

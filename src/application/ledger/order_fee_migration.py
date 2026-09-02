@@ -72,7 +72,9 @@ class ActualOrderFee:
         if currency not in {"CNY", "HKD", "USD"}:
             raise ValueError("fee observation currency is invalid")
         return cls(
-            broker=_required_text(value.get("broker"), field="broker"),
+            broker=normalize_broker(
+                _required_text(value.get("broker"), field="broker")
+            ),
             account=_required_text(value.get("account"), field="account").lower(),
             futu_account_id=_required_text(
                 value.get("futu_account_id"), field="futu_account_id"
@@ -123,11 +125,12 @@ def enrich_order_fees(
     repo: Any,
     *,
     account: str,
-    start_ms: int,
-    end_exclusive_ms: int,
+    start_ms: int | None = None,
+    end_exclusive_ms: int | None = None,
     actual_fees: Sequence[Mapping[str, Any] | ActualOrderFee] = (),
     apply: bool = False,
     applied_at_ms: int,
+    target_identity: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Freeze legacy estimates and upgrade admitted order groups to actual fees."""
 
@@ -135,10 +138,16 @@ def enrich_order_fees(
     if not isinstance(candidate, SQLiteOptionPositionsRepository):
         raise TypeError("order fee enrichment requires the canonical SQLite ledger")
     account_value = _required_text(account, field="account").lower()
-    start = _positive_int(start_ms, field="start_ms")
-    end = _positive_int(end_exclusive_ms, field="end_exclusive_ms")
-    if end <= start:
-        raise ValueError("fee enrichment range must be positive")
+    target = _target_identity(target_identity)
+    if target is None:
+        start = _positive_int(start_ms, field="start_ms")
+        end = _positive_int(end_exclusive_ms, field="end_exclusive_ms")
+        if end <= start:
+            raise ValueError("fee enrichment range must be positive")
+    else:
+        start = end = None
+        if target[1] != account_value:
+            raise ValueError("fee enrichment target account is outside scope")
     observations = tuple(
         item if isinstance(item, ActualOrderFee) else ActualOrderFee.from_mapping(item)
         for item in actual_fees
@@ -149,6 +158,8 @@ def enrich_order_fees(
     wrong_account = [item.identity for item in observations if item.account != account_value]
     if wrong_account:
         raise ValueError("actual fee observation account is outside scope")
+    if target is not None and any(item.identity != target for item in observations):
+        raise ValueError("actual fee observation is outside target scope")
 
     units, unresolved, passive_outcomes, basis_before = _build_units(
         candidate,
@@ -157,6 +168,7 @@ def enrich_order_fees(
         end_exclusive_ms=end,
         actual_fees=observations,
         applied_at_ms=int(applied_at_ms),
+        target_identity=target,
     )
     outcomes: list[dict[str, Any]] = [dict(item) for item in passive_outcomes]
     if not apply:
@@ -215,10 +227,11 @@ def _build_units(
     repo: SQLiteOptionPositionsRepository,
     *,
     account: str,
-    start_ms: int,
-    end_exclusive_ms: int,
+    start_ms: int | None,
+    end_exclusive_ms: int | None,
     actual_fees: Sequence[ActualOrderFee],
     applied_at_ms: int,
+    target_identity: tuple[str, str, str, str] | None = None,
 ) -> tuple[
     tuple[_Unit, ...],
     tuple[dict[str, Any], ...],
@@ -263,11 +276,48 @@ def _build_units(
         if str(row.get("account") or "").strip().lower() == account
         and str(row.get("event_type") or "").strip().lower() == "sale"
     ]
+    if target_identity is not None:
+        option_events = [
+            event
+            for event in option_events
+            if _order_identity(
+                event.contract_key.broker,
+                event.contract_key.account,
+                (event.raw_payload or {}).get("futu_account_id"),
+                (event.raw_payload or {}).get("order_id"),
+            )
+            == target_identity
+        ]
+        stock_events = [
+            event
+            for event in stock_events
+            if _order_identity(
+                event.get("broker"),
+                event.get("account"),
+                event.get("futu_account_id"),
+                event.get("order_id"),
+            )
+            == target_identity
+        ]
+    scoped_times = [
+        *(_event_time_ms(event) for event in option_events),
+        *(_event_time_ms(event) for event in stock_events),
+    ]
+    count_start = (
+        min(scoped_times)
+        if target_identity is not None and scoped_times
+        else start_ms
+    )
+    count_end = (
+        max(scoped_times) + 1
+        if target_identity is not None and scoped_times
+        else end_exclusive_ms
+    )
     basis_before = _fee_basis_event_counts(
         option_events,
         stock_events,
-        start_ms=start_ms,
-        end_exclusive_ms=end_exclusive_ms,
+        start_ms=int(count_start or 1),
+        end_exclusive_ms=int(count_end or 2),
     )
     option_groups = _group_options_by_order(option_events)
     stock_groups = _group_stocks_by_order(stock_events)
@@ -303,7 +353,10 @@ def _build_units(
             unresolved.append(_order_issue(observation, "order_quantity_changed_after_admission"))
             continue
         times = [_event_time_ms(item) for item in rows]
-        if min(times) < start_ms or max(times) >= end_exclusive_ms:
+        if target_identity is None and (
+            min(times) < int(start_ms or 0)
+            or max(times) >= int(end_exclusive_ms or 0)
+        ):
             unresolved.append(
                 {
                     **_order_issue(observation, "order_group_outside_requested_range"),
@@ -366,6 +419,9 @@ def _build_units(
                     "after_basis": [FeeBasis.ACTUAL.value],
                 }
             )
+
+    if target_identity is not None:
+        return tuple(units), tuple(unresolved), tuple(passive_outcomes), basis_before
 
     for event in option_events:
         zero_reason = zero_option_fee_lifecycle_reason(event)
@@ -1017,8 +1073,8 @@ def _insert_audit(
 def _receipt(
     *,
     account: str,
-    start_ms: int,
-    end_exclusive_ms: int,
+    start_ms: int | None,
+    end_exclusive_ms: int | None,
     applied: bool,
     units: Sequence[_Unit],
     outcomes: Sequence[Mapping[str, Any]],
@@ -1226,13 +1282,26 @@ def _option_contract_identity(event: TradeEvent) -> tuple[Any, ...]:
 def _order_identity(
     broker: Any, account: Any, futu_account_id: Any, order_id: Any
 ) -> tuple[str, str, str, str] | None:
-    values = tuple(
-        str(value or "").strip()
-        for value in (broker, account, futu_account_id, order_id)
+    values = (
+        normalize_broker(broker),
+        str(account or "").strip(),
+        str(futu_account_id or "").strip(),
+        str(order_id or "").strip(),
     )
     if not all(values):
         return None
     return values[0], values[1].lower(), values[2], values[3]
+
+
+def _target_identity(value: Sequence[str] | None) -> tuple[str, str, str, str] | None:
+    if value is None:
+        return None
+    if isinstance(value, (str, bytes)) or len(value) != 4:
+        raise ValueError("fee enrichment target identity must contain four fields")
+    target = _order_identity(*value)
+    if target is None:
+        raise ValueError("fee enrichment target identity is incomplete")
+    return target
 
 
 def _unit_identity(prefix: str, identity: Sequence[str]) -> str:

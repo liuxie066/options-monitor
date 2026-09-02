@@ -50,9 +50,11 @@ class _Provider:
         self.dealt_qty = dealt_qty
         self.terminal_calls = 0
         self.fee_calls = 0
+        self.terminal_kwargs: list[dict] = []
 
     def fetch_terminal_orders(self, **kwargs):  # type: ignore[no-untyped-def]
         self.terminal_calls += 1
+        self.terminal_kwargs.append(dict(kwargs))
         order_id = kwargs["order_ids"][0]
         return {
             order_id: {
@@ -204,6 +206,109 @@ def test_order_backed_expiry_reaches_actual_fee_provider(tmp_path: Path) -> None
 
     assert receipt["actual_observation_count"] == 1
     assert provider.terminal_calls == provider.fee_calls == 1
+
+
+def test_exact_fee_sync_changes_only_target_order_without_date_range(
+    tmp_path: Path,
+) -> None:
+    repo = _repo_with_bare_option_event(tmp_path)
+    target = TradeEvent.from_dict(repo.list_trade_events()[0])
+    repo.upsert_trade_event(
+        replace(
+            target,
+            event_id="event-2",
+            lot_id="lot-2",
+            raw_payload={"futu_account_id": "123", "order_id": "order-2"},
+        )
+    )
+    with repo._connect() as conn:  # noqa: SLF001 - byte-level isolation proof
+        other_before = conn.execute(
+            "SELECT event_json FROM trade_events WHERE event_id = ?",
+            ("event-2",),
+        ).fetchone()["event_json"]
+    provider = _Provider()
+
+    receipt = sync_order_fees(
+        repo,
+        account="lx",
+        provider=provider,
+        apply=True,
+        observed_at_ms=EVENT_MS + 10,
+        target_identity=("富途", "lx", "123", "order-1"),
+    )
+
+    events = {
+        row["event_id"]: TradeEvent.from_dict(row)
+        for row in repo.list_trade_events()
+    }
+    assert fee_fact_for_event(events["event-1"]).basis.value == "actual"
+    assert fee_fact_for_event(events["event-2"]).basis.value == "missing"
+    assert receipt["start_ms"] is receipt["end_exclusive_ms"] is None
+    assert receipt["migration"]["newly_frozen_estimated_event_count"] == 0
+    assert provider.terminal_kwargs[0]["exact"] is True
+    with repo._connect() as conn:  # noqa: SLF001 - byte-level isolation proof
+        assert conn.execute(
+            "SELECT event_json FROM trade_events WHERE event_id = ?",
+            ("event-2",),
+        ).fetchone()["event_json"] == other_before
+        assert conn.execute(
+            "SELECT COUNT(*) FROM broker_fee_enrichment_audit"
+        ).fetchone()[0] == 1
+
+
+def test_exact_fee_sync_uses_complete_order_group_across_dates(tmp_path: Path) -> None:
+    repo = _repo_with_bare_option_event(tmp_path)
+    first = TradeEvent.from_dict(repo.list_trade_events()[0])
+    repo.upsert_trade_event(
+        replace(
+            first,
+            event_id="event-2",
+            event_time_ms=EVENT_MS + 86_400_000,
+            lot_id="lot-2",
+        )
+    )
+    provider = _Provider(dealt_qty="2")
+
+    receipt = sync_order_fees(
+        repo,
+        account="lx",
+        provider=provider,
+        apply=True,
+        observed_at_ms=EVENT_MS + 86_400_010,
+        target_identity=("富途", "lx", "123", "order-1"),
+    )
+
+    events = [TradeEvent.from_dict(row) for row in repo.list_trade_events()]
+    assert receipt["migration"]["status_counts"] == {"committed": 1}
+    assert all(fee_fact_for_event(event).basis.value == "actual" for event in events)
+    assert provider.terminal_kwargs[0]["start"] != provider.terminal_kwargs[0]["end"]
+
+
+def test_exact_fee_sync_skips_provider_when_target_is_already_actual(
+    tmp_path: Path,
+) -> None:
+    repo = _repo_with_bare_option_event(tmp_path)
+    sync_order_fees(
+        repo,
+        account="lx",
+        provider=_Provider(),
+        apply=True,
+        observed_at_ms=EVENT_MS + 10,
+        target_identity=("富途", "lx", "123", "order-1"),
+    )
+    provider = _Provider()
+
+    receipt = sync_order_fees(
+        repo,
+        account="lx",
+        provider=provider,
+        apply=True,
+        observed_at_ms=EVENT_MS + 20,
+        target_identity=("富途", "lx", "123", "order-1"),
+    )
+
+    assert provider.terminal_calls == provider.fee_calls == 0
+    assert receipt["reason_counts"] == {"already_actual": 1}
 
 
 def test_expiry_without_executed_order_is_frozen_as_actual_zero(
@@ -903,28 +1008,63 @@ def test_migration_rollback_receipt_redacts_exception_message(
     assert "secret-order-id" not in str(receipt)
 
 
-def test_listener_fee_status_surfaces_latest_redacted_provider_error() -> None:
-    from src.application.trades.auto_intake import _update_status_from_backfill
+def test_listener_fee_cycle_counts_ledger_outcomes_and_redacts_errors() -> None:
+    from src.application.trades.auto_intake import _run_fee_sync_cycle
 
-    status = _update_status_from_backfill(
-        {},
-        {
-            "diagnostics": {
-                "fee_sync": [
-                    {
-                        "selected_order_count": 1,
-                        "actual_observation_count": 0,
-                        "issues": [
-                            {
-                                "reason": "provider_fee_query_failed",
-                                "error_type": "TimeoutError",
-                            }
-                        ],
-                    }
-                ]
-            }
-        },
+    receipts = iter(
+        [
+            {
+                "target_identity_sha256": "actual-hash",
+                "reason_counts": {},
+                "migration": {"status_counts": {"committed": 1}},
+            },
+            {
+                "target_identity_sha256": "pending-hash",
+                "reason_counts": {"fee_pending": 1},
+            },
+        ]
     )
 
-    assert status["last_fee_sync"]["last_error"] == "provider_fee_query_failed"
-    assert status["last_fee_sync"]["last_error_type"] == "TimeoutError"
+    def sync_fn(*_args, **_kwargs):
+        target = _kwargs["target_identity"]
+        if target[-1] == "order-secret":
+            raise RuntimeError("secret-order-id=/private/path")
+        return next(receipts)
+
+    status, rows = _run_fee_sync_cycle(
+        repo=object(),
+        provider=object(),
+        targets=[
+            ("富途", "lx", "123", "order-actual"),
+            ("富途", "lx", "123", "order-pending"),
+            ("富途", "lx", "123", "order-secret"),
+        ],
+        apply_changes=True,
+        observed_at_ms=EVENT_MS,
+        sync_fn=sync_fn,
+    )
+
+    assert status == {
+        "attempted_at_ms": EVENT_MS,
+        "target_count": 3,
+        "actual_count": 1,
+        "already_actual_count": 0,
+        "pending_count": 1,
+        "failed_count": 1,
+        "reason_counts": {"fee_pending": 1, "fee_sync_failed": 1},
+        "last_error": "fee_sync_failed",
+        "last_error_type": "RuntimeError",
+    }
+    assert "secret-order-id" not in str(rows)
+
+
+def test_empty_backfill_does_not_overwrite_last_fee_cycle() -> None:
+    from src.application.trades.auto_intake import _update_status_from_backfill
+
+    last_fee_sync = {"actual_count": 1, "last_error": None}
+    status = _update_status_from_backfill(
+        {"last_fee_sync": last_fee_sync},
+        {"diagnostics": {}, "applied_count": 0},
+    )
+
+    assert status["last_fee_sync"] == last_fee_sync

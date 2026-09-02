@@ -63,6 +63,16 @@ def lookup_deal_state_entry(state: dict[str, Any] | None, deal_id: str | None) -
     return None
 
 
+def is_durable_processed_deal(state: dict[str, Any] | None, deal_id: str | None) -> bool:
+    entry = lookup_deal_state_entry(state, deal_id)
+    if entry is None:
+        return False
+    bucket, payload = entry
+    return bucket == "processed_deal_ids" and str(
+        payload.get("status") or ""
+    ).strip().lower() in {"applied", "reconciled"}
+
+
 def is_retryable_unresolved_deal(state: dict[str, Any] | None, deal_id: str | None) -> bool:
     item = lookup_deal_state_entry(state, deal_id)
     if item is None:

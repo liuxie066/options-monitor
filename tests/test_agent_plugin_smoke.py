@@ -2320,6 +2320,15 @@ def test_runtime_status_reads_account_trade_intake_sources(tmp_path: Path) -> No
                 "status": "listening",
                 "last_push_received_utc": "2026-01-01T00:01:00+00:00",
                 "last_push_deal_id": "lx-deal-1",
+                "last_fee_sync": {
+                    "attempted_at_ms": 1_767_225_780_000,
+                    "actual_count": 1,
+                    "already_actual_count": 0,
+                    "pending_count": 1,
+                    "failed_count": 1,
+                    "last_error": "provider_order_query_failed",
+                    "last_error_type": "ConnectionError",
+                },
             }
         ),
         encoding="utf-8",
@@ -2346,6 +2355,15 @@ def test_runtime_status_reads_account_trade_intake_sources(tmp_path: Path) -> No
                 "last_push_received_utc": "2026-01-01T00:02:00+00:00",
                 "last_push_deal_id": "sy-deal-1",
                 "last_backfill_applied_count": 1,
+                "last_fee_sync": {
+                    "attempted_at_ms": 1_767_225_720_000,
+                    "actual_count": 0,
+                    "already_actual_count": 1,
+                    "pending_count": 0,
+                    "failed_count": 0,
+                    "last_error": None,
+                    "last_error_type": None,
+                },
             }
         ),
         encoding="utf-8",
@@ -2388,6 +2406,25 @@ def test_runtime_status_reads_account_trade_intake_sources(tmp_path: Path) -> No
     assert trade["summary"]["receipt_confirmed_count"] == 1
     assert trade["summary"]["last_push_deal_id"] == "sy-deal-1"
     assert trade["summary"]["last_backfill_applied_count"] == 1
+    assert trade["summary"]["fee_actual_count"] == 1
+    assert trade["summary"]["fee_already_actual_count"] == 1
+    assert trade["summary"]["fee_pending_count"] == 1
+    assert trade["summary"]["fee_failed_count"] == 1
+    assert trade["summary"]["fee_failed_source_count"] == 1
+    assert trade["summary"]["last_fee_attempted_at_ms"] == 1_767_225_780_000
+    assert trade["summary"]["last_fee_error"] == "provider_order_query_failed"
+    assert trade["summary"]["last_fee_error_type"] == "ConnectionError"
+
+
+def test_trade_intake_summary_reports_single_fee_failed_source() -> None:
+    import src.application.agent_tools.runtime_status_impl as runtime_status
+
+    summary = runtime_status._trade_intake_summary(
+        {},
+        {"last_fee_sync": {"failed_count": 2}},
+    )
+
+    assert summary["fee_failed_source_count"] == 1
 
 
 def test_runtime_status_reconciliation_preview_skips_historical_audit(
