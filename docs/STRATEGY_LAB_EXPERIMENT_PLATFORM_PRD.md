@@ -3,7 +3,7 @@
 - **产品名称**：Strategy Lab
 - **产品范围**：用真实证据完成策略假设的历史研究、未来隐藏验证和可审计回执
 - **MVP Recipe**：Cash-Secured Put (CSP) 期权持仓市值集中度
-- **产品状态**：Phase 3 本地实现完成；远端自然 Tick 隔离门槛已通过；待 Phase 4 真实 20 日 / 10 日验收
+- **产品状态**：Phase 3 本地实现完成；远端自然 Tick 隔离门槛已通过；Phase 4 正式点持仓证据范围待修复后重新积累
 
 本文是 Strategy Lab 的产品权威。技术架构、代码复用和删除范围见
 [系统设计](STRATEGY_LAB_EXPERIMENT_PLATFORM_SYSTEM_DESIGN.md)；当前遗留实现与重建差距见
@@ -438,7 +438,10 @@ option_position_concentration_after
   / (全部已有期权绝对市值 + candidate_option_market_value_cny)
 ```
 
-计算包含同一账户全部未平仓期权，多空使用绝对市值、不相互抵消，按 underlying 分组并统一换算 CNY。
+计算包含同一账户、同一正式点市场的全部当前持有期权仓位，多空使用绝对市值、不相互抵消，按
+underlying 分组并统一换算 CNY。其他市场仓位不进入该正式点的分子、分母、mark 覆盖或因这些仓位
+额外产生的 FX 要求；正式点市场自身的候选换算 FX 仍是必需证据。prepared context 的账户身份、完整性
+和 `decision_snapshot_actionable` 仍按账户整体校验；任何当前持仓若无法识别市场，不能被静默忽略。
 不包含股票持仓、潜在接货金额或全部 Short Put 名义敞口。
 
 ### 12.4 安全边界
@@ -573,14 +576,17 @@ Research Archive 保存可供多种实验复用且事后不能可靠重建的事
 - accepted / rejected 候选及理由；
 - 合约、Bid、Ask、Bid/Ask Volume、Last、Volume、OI、IV、Greeks；
 - Strike、到期日、Multiplier、DTE、标的价格和 quote time；
-- 同账户全部未平仓期权 identity / 数量、推荐时点可用的 mark 和 FX；
+- 同账户、同正式点市场的全部当前持有期权 identity / 数量、推荐时点可用的 mark，以及这些持仓和正式点
+  候选换算所需的 FX；
 - 来源、接收时间、内容 hash 和数据状态。
 
 DTE、Mid、Spread、收益率和集中度等可重算值不重复保存。Tick 内的切换顺序固定为：扫描前 prepared
 context 只冻结持仓 identity / 数量和 FX；生产扫描及 required-data / opening artifact 持久化后，
-recommendation-point 路径按同一 run、account、formal point time 从这些既有 artifact 绑定每个持仓合约的
-exact mark ref/hash；Formal Corpus 必须从同一 prepared context 和冻结 required-data artifacts 重新构造
-binding 并与 point 中的值精确比较，通过后才封存。它不调用 provider，也不从其他 repository 补值。
+recommendation-point 路径按同一 run、account、market、formal point time 从这些既有 artifact 绑定当前
+正式点市场的每个持仓合约 exact mark ref/hash；Formal Corpus 必须从同一 prepared context 和冻结
+required-data artifacts 重新构造 binding 并与 point 中的值精确比较，通过后才封存。它不调用 provider，
+也不从其他市场、其他 run 或其他 repository 补值。进入 binding 的持仓必须同时满足 underlying identity
+市场、持仓 currency 和 mark market code 与正式点市场一致；冲突或未知值一律使该点不可评价。
 
 mark 必须复用现有 performance evidence 的唯一规范化口径：优先按 requested instrument key、其次按持仓
 已有 market code 精确匹配；缺 market code 时才以 option type、到期日、Strike、Multiplier 和非空代码

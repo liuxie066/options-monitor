@@ -18,6 +18,7 @@ from domain.domain.performance.models import (
     ValuationMarkFact,
     canonical_decimal_text,
 )
+from domain.domain.symbol_identity import resolve_symbol_identity
 from src.application.candidate_snapshot_contract import (
     CandidateSnapshotContractError,
     utc_timestamp,
@@ -706,13 +707,28 @@ def build_option_position_evidence_binding(
     ):
         _fail("option_position_evidence_missing", "prepared position facts are unavailable")
 
-    positions: list[OptionValuationPosition] = []
+    selected_positions: list[OptionValuationPosition] = []
     for row in position_rows:
         if not isinstance(row, Mapping):
             _fail("option_position_evidence_missing", "prepared option lot is invalid")
         if str(row.get("status") or "").strip().lower() != "open":
             continue
-        positions.append(_prepared_position(row, account=account))
+        position = _prepared_position(row, account=account)
+        identity = resolve_symbol_identity(position.instrument.symbol)
+        if identity is None or identity.currency != position.instrument.currency:
+            _fail(
+                "option_position_evidence_missing",
+                f"{position.instrument.symbol} market identity conflicts with its currency",
+            )
+        if position.market_code:
+            code_identity = resolve_symbol_identity(position.market_code)
+            if code_identity is None or code_identity.market != identity.market:
+                _fail(
+                    "option_position_evidence_missing",
+                    f"{position.instrument.symbol} market code conflicts with its identity",
+                )
+        if identity.market == market:
+            selected_positions.append(position)
     rows_by_symbol: dict[str, tuple[list[dict[str, Any]], dict[str, Any]]] = {}
     for symbol, raw_entry in required_data_entries.items():
         entry, csv_bytes = raw_entry
@@ -729,7 +745,7 @@ def build_option_position_evidence_binding(
 
     marks_by_instrument: dict[str, dict[str, Any]] = {}
     market_code_by_instrument: dict[str, str] = {}
-    for position in positions:
+    for position in selected_positions:
         source = rows_by_symbol.get(position.instrument.symbol)
         if source is None:
             _fail(
@@ -751,14 +767,21 @@ def build_option_position_evidence_binding(
         if existing is not None and existing != mark:
             _fail("option_position_evidence_conflict", "one instrument has conflicting marks")
         marks_by_instrument[fact.instrument_key] = mark
-        market_code_by_instrument[fact.instrument_key] = _text(
+        market_code = _text(
             fact.raw.get("market_code"),
             "option mark market_code",
         )
+        code_identity = resolve_symbol_identity(market_code)
+        if code_identity is None or code_identity.market != market:
+            _fail(
+                "option_position_evidence_missing",
+                f"{position.instrument.symbol} option mark market code conflicts with the formal point",
+            )
+        market_code_by_instrument[fact.instrument_key] = market_code
 
     rates = cny_per_currency_rates_from_option_context(payload)
     required_currencies = {
-        position.instrument.currency for position in positions
+        position.instrument.currency for position in selected_positions
     } | {"USD" if market == "US" else "HKD"}
     if not required_currencies.issubset(rates):
         _fail("option_position_evidence_missing", "prepared FX facts are incomplete")
@@ -822,7 +845,7 @@ def build_option_position_evidence_binding(
             "contracts_open": position.contracts_open,
             "market_code": market_code_by_instrument[position.instrument.instrument_key],
         }
-        for position in positions
+        for position in selected_positions
     ]
     binding: dict[str, Any] = {
         "schema_version": _OPTION_POSITION_EVIDENCE_SCHEMA,
@@ -870,6 +893,9 @@ def validate_option_position_evidence_binding(
     expected_recommendation_point_id: str,
     expected_market: str | None = None,
 ) -> dict[str, Any]:
+    expected_market_value = (
+        _market(expected_market) if expected_market is not None else None
+    )
     if not isinstance(value, Mapping) or set(value) != _OPTION_POSITION_EVIDENCE_FIELDS:
         _fail("option_position_evidence_invalid", "option position evidence fields are invalid")
     item = dict(value)
@@ -935,6 +961,7 @@ def validate_option_position_evidence_binding(
                 f"option position is invalid: {exc}",
             )
         _text(row.get("broker"), "position broker")
+        identity = resolve_symbol_identity(instrument.symbol)
         if (
             instrument.instrument_key != row.get("instrument_key")
             or row.get("symbol") != instrument.symbol
@@ -949,9 +976,18 @@ def validate_option_position_evidence_binding(
             or row.get("contracts_open") != contracts_open
             or contracts_open <= 0
             or isinstance(row.get("contracts_open"), bool)
+            or identity is None
+            or identity.currency != instrument.currency
+            or (
+                expected_market_value is not None
+                and identity.market != expected_market_value
+            )
         ):
             _fail("option_position_evidence_invalid", "option position fields conflict")
         code = _text(row.get("market_code"), "position market_code")
+        code_identity = resolve_symbol_identity(code)
+        if code_identity is None or code_identity.market != identity.market:
+            _fail("option_position_evidence_invalid", "option market code conflicts")
         existing_code = market_codes.get(instrument.instrument_key)
         if existing_code is not None and existing_code != code:
             _fail("option_position_evidence_invalid", "option market code conflicts")
@@ -1050,7 +1086,7 @@ def validate_option_position_evidence_binding(
     market_currency = {
         "HK": "HKD",
         "US": "USD",
-    }.get(_market(expected_market) if expected_market is not None else None)
+    }.get(expected_market_value)
     if market_currency is not None:
         required_currencies.add(market_currency)
     fx_currencies: set[str] = set()
