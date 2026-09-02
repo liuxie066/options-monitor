@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Breaking Changes
+- Made automatic version recommendations fail closed when compatibility-sensitive public-contract files change without a declared breaking impact, made the final release gate enforce that declared breaking changes use the next major version while major releases require a declared breaking change, and required an additional explicit confirmation before writing a MAJOR version upgrade.
+
 ## 3.4.0 - 2026-09-02
 
 ### Breaking Changes

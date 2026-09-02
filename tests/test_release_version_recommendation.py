@@ -190,7 +190,7 @@ def test_duplicate_unreleased_is_malformed() -> None:
     assert parsed["reason_code"] == "MALFORMED_UNRELEASED_SECTION"
 
 
-def test_sensitive_path_sets_review_flag(tmp_path: Path) -> None:
+def test_sensitive_path_requires_explicit_compatibility_decision(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     _write_unreleased(repo, "### New Features\n- New tool behavior.")
     path = repo / "src" / "application" / "agent_tools" / "new_tool.py"
@@ -199,9 +199,25 @@ def test_sensitive_path_sets_review_flag(tmp_path: Path) -> None:
 
     result = recommend_release_version(base_dir=repo)
 
-    assert result["status"] == "recommended"
+    assert result["status"] == "needs_input"
+    assert result["reason_code"] == "COMPATIBILITY_REVIEW_REQUIRED"
     assert result["review_flags"] == ["COMPATIBILITY_SENSITIVE_PATH_CHANGED"]
     assert result["evidence"]["sensitive_paths"] == ["src/application/agent_tools/new_tool.py"]
+
+
+def test_sensitive_path_with_breaking_change_recommends_major(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    _write_unreleased(repo, "### Breaking Changes\n- Removed a public tool field.")
+    path = repo / "src" / "application" / "agent_tools" / "tool_contract.py"
+    path.parent.mkdir(parents=True)
+    path.write_text("VALUE = 1\n", encoding="utf-8")
+
+    result = recommend_release_version(base_dir=repo)
+
+    assert result["status"] == "recommended"
+    assert result["recommendation"]["bump"] == "major"
+    assert result["recommendation"]["target_version"] == "2.0.0"
+    assert result["review_flags"] == ["COMPATIBILITY_SENSITIVE_PATH_CHANGED"]
 
 
 def test_recommendation_digest_changes_with_untracked_content(tmp_path: Path) -> None:
@@ -274,6 +290,30 @@ def test_auto_preview_then_confirm_apply_end_to_end(tmp_path: Path) -> None:
     )
     assert retried["status"] == "already_at_target"
     assert retried["write"]["changed"] is False
+
+
+def test_auto_major_apply_requires_specific_confirmation(tmp_path: Path) -> None:
+    from src.application.version_check import update_local_version
+
+    repo = _repo(tmp_path)
+    _write_unreleased(repo, "### Breaking Changes\n- Removed a public command.")
+    preview = update_local_version(base_dir=repo, bump="auto", apply=False)
+    apply_args = {
+        "base_dir": repo,
+        "bump": "auto",
+        "apply": True,
+        "recommendation_digest": preview["recommendation_digest"],
+        "expected_base_version": preview["base"]["version"],
+        "expected_target_version": preview["recommendation"]["target_version"],
+    }
+
+    with pytest.raises(ValueError, match="confirm_major=true"):
+        update_local_version(**apply_args)
+
+    applied = update_local_version(**apply_args, confirm_major=True)
+
+    assert applied["status"] == "applied"
+    assert (repo / "VERSION").read_text(encoding="utf-8").strip() == "2.0.0"
 
 
 def test_auto_apply_fails_stale_when_workspace_changes_after_preview(tmp_path: Path) -> None:

@@ -15,7 +15,7 @@ from src.application.release_delta_coverage import (
     validate_release_delta_coverage,
 )
 from src.application.release_notes import parse_version_categories, render_release_notes
-from src.application.release_target import VERSION_RE
+from src.application.release_target import VERSION_RE, bump_version, parse_version
 
 
 def repo_base() -> Path:
@@ -38,6 +38,28 @@ def changelog_section(changelog_text: str, version: str) -> str:
     if parsed["status"] != "ok":
         return ""
     return "\n".join([parsed["section_heading"], parsed["canonical_text"]]).strip()
+
+
+def validate_major_version_policy(*, base_tag: str, version: str, evidence: dict[str, object]) -> None:
+    base_version = base_tag.removeprefix("v")
+    base = parse_version(base_version)
+    target = parse_version(version)
+    breaking = bool(evidence.get("breaking_changes"))
+    expected = parse_version(bump_version(base_version, "major"))
+    if breaking and (target.major, target.minor, target.patch) != (
+        expected.major,
+        expected.minor,
+        expected.patch,
+    ):
+        raise SystemExit(
+            f"[RELEASE_ERROR] BREAKING_CHANGES_REQUIRE_MAJOR: "
+            f"release after {base_tag} must use {expected.major}.0.0 when Breaking Changes is non-empty"
+        )
+    if not breaking and target.major != base.major:
+        raise SystemExit(
+            "[RELEASE_ERROR] MAJOR_RELEASE_REQUIRES_BREAKING_CHANGES: "
+            "a MAJOR version change requires a non-empty Breaking Changes section"
+        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -98,6 +120,11 @@ def main() -> int:
             )
         except ReleaseDeltaCoverageError as exc:
             raise SystemExit(f"[RELEASE_ERROR] {exc.reason_code}: {exc.message}") from exc
+        validate_major_version_policy(
+            base_tag=coverage_summary["base_tag"],
+            version=version,
+            evidence=parsed["evidence"],
+        )
 
     if args.render_notes_out:
         out_path = Path(args.render_notes_out).expanduser().resolve()

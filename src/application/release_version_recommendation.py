@@ -21,10 +21,15 @@ from src.application.release_notes import parse_unreleased_categories
 SCHEMA_VERSION = "release_version_recommendation.v1"
 DIGEST_SCHEMA_VERSION = "release_version_recommendation.digest.v1"
 SENSITIVE_PATH_PATTERNS = (
+    "om",
+    "om-agent",
     "src/interfaces/**",
     "src/application/agent_tools/**",
+    "src/application/agent_tool_registry.py",
     "src/application/config*.py",
     "src/application/layered_config.py",
+    "src/application/release_*.py",
+    "src/application/version_check.py",
     "domain/domain/ledger/**",
     "src/application/positions/**",
     "src/application/trades/**",
@@ -135,6 +140,29 @@ def recommend_release_version(
                 details={"evidence": evidence, "workspace": workspace, "base": base_data},
             )
 
+        sensitive_paths = sorted(path for path in workspace["changed_files"] if _is_sensitive_path(path))
+        evidence["sensitive_paths"] = sensitive_paths
+        review_flags: list[str] = []
+        if sensitive_paths:
+            review_flags.append("COMPATIBILITY_SENSITIVE_PATH_CHANGED")
+        if workspace["detached"]:
+            review_flags.append("DETACHED_HEAD")
+        if sensitive_paths and not evidence["breaking_changes"]:
+            raise RecommendationFailure(
+                status="needs_input",
+                reason_code="COMPATIBILITY_REVIEW_REQUIRED",
+                message=(
+                    "compatibility-sensitive files changed without a declared Breaking Change; "
+                    "confirm compatibility and use an explicit minor/patch bump, or declare the breaking impact"
+                ),
+                details={
+                    "base": base_data,
+                    "workspace": workspace,
+                    "evidence": evidence,
+                    "review_flags": review_flags,
+                },
+            )
+
         bump = _classify(evidence)
         target_version = bump_version(latest.version, bump)
         if any(identity.version == target_version for identity in identities):
@@ -143,14 +171,6 @@ def recommend_release_version(
                 reason_code="TARGET_TAG_ALREADY_EXISTS",
                 message=f"target tag v{target_version} already exists on remote",
             )
-
-        sensitive_paths = sorted(path for path in workspace["changed_files"] if _is_sensitive_path(path))
-        evidence["sensitive_paths"] = sensitive_paths
-        review_flags: list[str] = []
-        if sensitive_paths:
-            review_flags.append("COMPATIBILITY_SENSITIVE_PATH_CHANGED")
-        if workspace["detached"]:
-            review_flags.append("DETACHED_HEAD")
 
         recommendation = {
             "bump": bump,

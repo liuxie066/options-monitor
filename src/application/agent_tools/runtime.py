@@ -339,8 +339,10 @@ VERSION_UPDATE_TOOL = build_agent_tool(
     name="version_update",
     description=(
         "Preview or update local VERSION. bump=auto recommends major|minor|patch from CHANGELOG.md Unreleased "
-        "(Breaking Changes, New Features, Improvements, Bug Fixes) and remote stable tags; remote access is used "
-        "only in auto mode. Does not create git tags, commit, push, or run release workflows."
+        "(Breaking Changes, New Features, Improvements, Bug Fixes) and remote stable tags. Auto mode returns "
+        "needs_input when compatibility-sensitive files changed without a declared Breaking Change; use an "
+        "explicit minor/patch bump only after confirming compatibility. Remote access is used only in auto mode. "
+        "Does not create git tags, commit, push, or run release workflows."
     ),
     requires=("local_repo", "git_remote"),
     capabilities=("version_update", "local_write", "release_metadata"),
@@ -358,6 +360,10 @@ VERSION_UPDATE_TOOL = build_agent_tool(
         "expected_target_version": "required semver target for apply=true with bump=auto",
         "apply": "optional bool; default false previews only",
         "confirm": "required true when apply=true",
+        "confirm_major": {
+            "type": "boolean",
+            "description": "required true in addition to confirm when apply=true crosses a MAJOR version",
+        },
         "allow_downgrade": "optional bool; default false rejects lower manual target versions",
     },
     handler=_version_update_tool,

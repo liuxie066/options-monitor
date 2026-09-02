@@ -158,6 +158,7 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert version_update["requires_confirm"] is True
     assert version_update["safe_default_input"] == {"bump": "patch", "apply": False}
     assert "target_version" in version_update["input_schema"]
+    assert "confirm_major" in version_update["input_schema"]
     assert "version" not in version_update["input_schema"]
     manage_symbols = next(item for item in spec["tools"] if item["name"] == "manage_symbols")
     assert manage_symbols["risk_level"] == "local_write"

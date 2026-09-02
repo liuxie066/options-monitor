@@ -10,6 +10,7 @@ from src.application.release_target import (
     VERSION_RE,
     bump_version as _bump_version,
     compare_versions,
+    parse_version,
     parse_release_tags,
 )
 from src.application.release_version_recommendation import (
@@ -44,6 +45,7 @@ def update_local_version(
     target_version: str | None = None,
     bump: str | None = None,
     apply: bool = False,
+    confirm_major: bool = False,
     allow_downgrade: bool = False,
     remote_name: str = "origin",
     recommendation_digest: str | None = None,
@@ -61,6 +63,7 @@ def update_local_version(
         return _update_local_version_auto(
             base=base,
             apply=apply,
+            confirm_major=confirm_major,
             remote_name=remote_name,
             recommendation_digest=recommendation_digest,
             expected_base_version=expected_base_version,
@@ -80,6 +83,8 @@ def update_local_version(
     cmp = compare_versions(current_version, next_version)
     if cmp > 0 and not allow_downgrade:
         raise ValueError(f"target version {next_version} is lower than current VERSION {current_version}")
+    if apply and parse_version(next_version).major > parse_version(current_version).major and not confirm_major:
+        raise ValueError("confirm_major=true is required before applying a MAJOR version upgrade")
 
     changed = current_version != next_version
     if apply and changed:
@@ -111,6 +116,7 @@ def _update_local_version_auto(
     *,
     base: Path,
     apply: bool,
+    confirm_major: bool,
     remote_name: str,
     recommendation_digest: str | None,
     expected_base_version: str | None,
@@ -183,6 +189,9 @@ def _update_local_version_auto(
                 "recommendation_digest": actual_digest or None,
             },
         )
+
+    if parse_version(actual_target).major > parse_version(current_version).major and not confirm_major:
+        raise ValueError("confirm_major=true is required before applying a MAJOR version upgrade")
 
     _write_version_atomic(version_path, expected_target)
     applied = dict(recomputed)
