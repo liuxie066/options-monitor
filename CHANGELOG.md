@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 3.4.1 - 2026-09-02
+
 ### Improvements
 - Restored natural-month and natural-year option-performance reports across the CLI, Assistant, Analysis, and Copilot with canonical coverage and freshness evidence.
 
