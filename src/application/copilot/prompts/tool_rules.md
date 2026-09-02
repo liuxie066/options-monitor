@@ -22,8 +22,6 @@
   state. Never make partial or unknown evidence complete or exhaustive. For
   more detail, call the same tool with narrower arguments; do not invent paging,
   cached rows, totals, or freshness.
-- `analysis_catalog` is schema metadata, not business evidence. Use it only
-  before `analysis_query` only when its view or field is unknown.
 - A failed tool does not end the task. Correct its input, use other evidence,
   or disclose the gap. Retry identical input only after a transient failure.
 - Submit every ordinary final answer through `submit_answer` as the sole call.

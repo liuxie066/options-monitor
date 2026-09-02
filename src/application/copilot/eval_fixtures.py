@@ -134,87 +134,50 @@ def _fixture_observations(fixture_id: str | None) -> list[dict[str, Any]]:
         ]
     if fixture_id == "current_option_exposure_model_ready":
         return [
-            {
-                "tool_name": "analysis_catalog",
-                "ok": True,
-                "summary": "eval-only analysis catalog exposes current exposure views.",
-                "facts": [
-                    "eval_only=true",
-                    "views=open_option_exposure,expiration_risk_buckets",
-                ],
-                "data": {"eval_only": True, "view_count": 2},
-                "error": None,
-                "evidence_ok": True,
-                "claimable": False,
-            },
-            {
-                "tool_name": "analysis_query",
-                "ok": True,
-                "summary": "eval-only analysis query has current open exposure rows.",
-                "facts": [
-                    "open_option_exposure.cash_secured_amount_by_symbol_currency: 0700.HK/HKD=180000, FUTU/HKD=30000",
-                    "open_option_exposure.contracts_open_by_symbol_currency_option_type_side: 0700.HK/HKD/put/short=4, FUTU/HKD/put/short=1",
-                    "expiration_risk_buckets.cash_secured_amount_by_expiration_bucket_currency: 30-60d/HKD=210000",
-                ],
-                "data": {"eval_only": True, "row_count": 3},
-                "error": None,
-                "evidence_ok": True,
-            },
-            {
-                "tool_name": "option_positions_read",
-                "ok": True,
-                "summary": "eval-only current open positions show 0700.HK and FUTU short put exposure.",
-                "facts": [
-                    "position.cash_secured_amount_by_symbol_currency: 0700.HK/HKD=180000, FUTU/HKD=30000",
-                    "position.contracts_open_by_symbol_currency_option_type_side: 0700.HK/HKD/put/short=4, FUTU/HKD/put/short=1",
-                    "position[1]: account=lx, symbol=0700.HK, option_type=put, side=short, contracts_open=4, cash_secured_amount=180000 HKD",
-                    "position[2]: account=lx, symbol=FUTU, option_type=put, side=short, contracts_open=1, cash_secured_amount=30000 HKD",
-                ],
-                "data": {"eval_only": True, "row_count": 2},
-                "error": None,
-                "evidence_ok": True,
-            },
-        ]
-    if fixture_id == "june_income_attribution_basic":
-        return [
-            {
-                "tool_name": "analysis_catalog",
-                "ok": True,
-                "summary": "eval-only analysis catalog exposes option performance attribution views.",
-                "facts": [
-                    "eval_only=true",
-                    "views=option_period_performance,option_cash_components,symbol_performance_attribution",
-                ],
-                "data": {"eval_only": True, "view_count": 3},
-                "error": None,
-                "evidence_ok": True,
-                "claimable": False,
-            },
-            {
-                "tool_name": "analysis_query",
-                "ok": True,
-                "summary": "eval-only analysis query has canonical June MTD option-performance rows.",
-                "facts": [
-                    "period_kind=mtd as_of_date=2026-06-30 accounts=lx option_net_cashflow_by_currency.USD.total.amount=1200",
-                    "period_kind=mtd currency=USD state=terminated amount=800 status=observed",
-                    "symbol=NVDA option_net_cashflow_by_currency.USD.total.amount=800 sell_option_win_rate=0.75",
-                ],
-                "data": {"eval_only": True, "row_count": 3},
-                "error": None,
-                "evidence_ok": True,
-            },
-            {
-                "tool_name": "option_performance_report",
-                "ok": True,
-                "summary": "eval-only option performance exposes canonical cashflow, win-rate, and return metrics.",
-                "facts": [
-                    "period.kind=mtd period.as_of_date=2026-06-30 scope.accounts=lx",
-                    "option_net_cashflow.by_currency.USD.total.amount=1200 sell_option_win_rate.rate=0.75 option_return.by_currency.USD.rate=0.12",
-                ],
-                "data": {"eval_only": True, "row_count": 1},
-                "error": None,
-                "evidence_ok": True,
-            },
+            _fixture_observation(
+                "option_positions_read",
+                {
+                    "source": {"label": "eval-only canonical position fixture"},
+                    "scope": {"action": "list", "account": "lx", "status": "open"},
+                    "evidence_scope": {
+                        "ledger_positions": "observed",
+                        "broker_settlement": "not_observed",
+                        "market_price": "not_observed",
+                        "margin_state": "not_observed",
+                    },
+                    "freshness": {"kind": "historical"},
+                    "row_count": 2,
+                    "rows": [
+                        {
+                            "account": "lx",
+                            "symbol": "0700.HK",
+                            "option_type": "put",
+                            "side": "short",
+                            "strike": 450,
+                            "expiration_ymd": "2026-10-30",
+                            "expiration_state": "future",
+                            "state_warning": None,
+                            "contracts_open": 4,
+                            "status": "open",
+                            "cash_secured_amount_role": "assignment_collateral_not_profit",
+                        },
+                        {
+                            "account": "lx",
+                            "symbol": "FUTU",
+                            "option_type": "put",
+                            "side": "short",
+                            "strike": 30,
+                            "expiration_ymd": "2026-10-30",
+                            "expiration_state": "future",
+                            "state_warning": None,
+                            "contracts_open": 1,
+                            "status": "open",
+                            "cash_secured_amount_role": "assignment_collateral_not_profit",
+                        },
+                    ],
+                },
+                {"action": "list", "account": "lx", "status": "open"},
+            ),
         ]
     return [
         {
@@ -229,3 +192,15 @@ def _fixture_observations(fixture_id: str | None) -> list[dict[str, Any]]:
 
 def _with_tool_view_context(item: dict[str, Any]) -> dict[str, Any]:
     return dict(item)
+
+
+def _fixture_observation(
+    tool_name: str,
+    data: dict[str, Any],
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    from src.application.copilot.tools import compact_observation
+
+    observation = compact_observation(tool_name, {"ok": True, "data": data}, payload)
+    observation["eval_only"] = True
+    return observation

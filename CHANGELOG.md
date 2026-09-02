@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Breaking Changes
+- Removed the generic `analysis_catalog` and `analysis_query` tools from Tool Gateway and Copilot; current reads use canonical typed tools, while unsupported cross-view aggregation remains unavailable.
+
 ## 3.4.2 - 2026-09-02
 
 ### Bug Fixes
