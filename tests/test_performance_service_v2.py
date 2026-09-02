@@ -13,6 +13,8 @@ from src.application.performance.service import (
     OptionPerformanceReadError,
     build_option_period_performance,
 )
+from src.application.copilot import tools as copilot_tools
+from src.application.copilot.result_admission import admit_submit_answer
 
 
 _TZ = ZoneInfo("Asia/Shanghai")
@@ -127,6 +129,32 @@ def _contains_not_observed(value: object) -> bool:
     return value == "not_observed"
 
 
+def _admission_evidence(observation: dict) -> dict:
+    return {
+        "ok": True,
+        "authorized_read": True,
+        "observation_status": observation["status"],
+        "coverage": observation["coverage"],
+        "freshness": observation["freshness"],
+    }
+
+
+def _submit(*, kind: str, status: str = "complete", text: str = "期权收益已确认") -> dict:
+    return {
+        "mode": "evidence",
+        "status": status,
+        "answer_markdown": text,
+        "claims": [
+            {
+                "text": text,
+                "kind": kind,
+                "observation_ids": ["obv_report"],
+                "required_scope": "full_query",
+            }
+        ],
+    }
+
+
 def test_service_reads_one_tuple_and_serializes_only_the_canonical_contract() -> None:
     repo = _Repo(
         [
@@ -152,6 +180,8 @@ def test_service_reads_one_tuple_and_serializes_only_the_canonical_contract() ->
     assert set(report) == {
         "period",
         "scope",
+        "coverage",
+        "freshness",
         "option_net_cashflow",
         "sell_option_win_rate",
         "buy_option_win_rate",
@@ -166,10 +196,85 @@ def test_service_reads_one_tuple_and_serializes_only_the_canonical_contract() ->
         "brokers": ["富途"],
     }
     assert report["period"]["freshness_status"] == "historical"
+    assert report["coverage"] == {
+        "status": "complete",
+        "complete_for": "full_query",
+        "included_count": 1,
+        "total_count": 1,
+        "omitted_count": 0,
+    }
+    assert report["freshness"] == {
+        "status": "historical",
+        "as_of": "2026-09-02T23:59:59.999+08:00",
+    }
     assert len(report["quality"]["ledger_input_hash"]) == 64
     assert set(report["rows"][0]) == _ROW_FIELDS
     assert report["option_net_cashflow"]["by_currency"]["USD"]["total"]["amount"] == 100.0
     assert not _contains_not_observed(report)
+
+
+def test_real_report_evidence_is_admitted_only_for_supported_time_claims() -> None:
+    repo = _Repo(
+        [
+            _event("open", "open", "2026-09-01T10:00:00").to_dict(),
+            _event(
+                "close",
+                "close",
+                "2026-09-02T10:00:00",
+                target_lot_id="lot-1",
+            ).to_dict(),
+        ]
+    )
+    report = build_option_period_performance(
+        repo,
+        period=_period(),
+        config_key="us",
+        configured_accounts=("lx",),
+    )
+    observation = copilot_tools.compact_observation(
+        "option_performance_report",
+        {"ok": True, "data": report},
+        {"period": "mtd", "as_of_date": "2026-09-02"},
+    )
+    registry = {"obv_report": _admission_evidence(observation)}
+
+    assert observation["coverage"]["complete_for"] == "full_query"
+    assert observation["freshness"]["status"] == "historical"
+    assert admit_submit_answer(
+        _submit(kind="historical_fact"),
+        registry,
+    )["observation"]["ok"] is True
+    assert admit_submit_answer(
+        _submit(kind="current_fact"),
+        registry,
+    )["observation"]["reason"] == "claim_freshness_not_supported"
+
+
+def test_current_real_report_supports_current_claim_and_empty_is_not_zero_profit() -> None:
+    current_period = normalize_performance_period(
+        {"period": "month", "month": "2026-09"},
+        report_now_ms=_ms("2026-09-02T12:00:00"),
+    )
+    report = build_option_period_performance(
+        _Repo([]),
+        period=current_period,
+        config_key="us",
+        configured_accounts=("lx",),
+    )
+    observation = copilot_tools.compact_observation(
+        "option_performance_report",
+        {"ok": True, "data": report},
+        {"period": "month", "month": "2026-09"},
+    )
+    registry = {"obv_report": _admission_evidence(observation)}
+
+    assert observation["freshness"]["status"] == "current"
+    assert observation["value"]["sell_option_win_rate"]["status"] == "not_applicable"
+    assert observation["value"]["sell_option_win_rate"]["rate"] is None
+    assert admit_submit_answer(
+        _submit(kind="current_fact", text="当前期间没有可计入卖方胜率的合约"),
+        registry,
+    )["observation"]["ok"] is True
 
 
 def test_service_fails_before_read_when_scope_is_unproved() -> None:
@@ -260,6 +365,23 @@ def test_service_does_not_publish_internal_failed_fact_states(
     assert report["rows"] == []
     assert report["quality"]["status"] == "partial"
     assert report["quality"]["missing"] == ["economic_adjust_invalid"]
+    assert report["coverage"]["status"] == "complete"
+    assert report["coverage"]["complete_for"] == "full_query"
+    observation = copilot_tools.compact_observation(
+        "option_performance_report",
+        {"ok": True, "data": report},
+        {"period": "mtd", "as_of_date": "2026-09-02"},
+    )
+    registry = {"obv_report": _admission_evidence(observation)}
+    assert observation["status"] == "partial"
+    assert admit_submit_answer(
+        _submit(kind="historical_fact"),
+        registry,
+    )["observation"]["reason"] == "answer_status_overstates_evidence"
+    assert admit_submit_answer(
+        _submit(kind="historical_fact", status="partial"),
+        registry,
+    )["observation"]["ok"] is True
 
 
 def test_service_classifies_tuple_and_control_graph_failures() -> None:

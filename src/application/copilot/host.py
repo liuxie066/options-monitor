@@ -7,9 +7,10 @@ import re
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
-from datetime import date
+from datetime import date, datetime
 from threading import Lock
 from typing import Any, Callable, Mapping
+from zoneinfo import ZoneInfo
 
 from src.application.agent_tool_registry import get_tool_definition
 from src.application.agent_tool_config import resolve_runtime_config_path
@@ -68,12 +69,37 @@ _OPTION_PERFORMANCE_CUTOFF_INDICATOR = re.compile(
     r"(?<!\d)\d{4}年\d{1,2}月\d{1,2}日|"
     r"(?<!\d)\d{1,2}月\d{1,2}日"
 )
+_OPTION_PERFORMANCE_NATURAL_SELECTOR = (
+    r"20\d{2}-(?:0[1-9]|1[0-2])|"
+    r"20\d{2}年(?:0?[1-9]|1[0-2])月|"
+    r"上月|(?:0?[1-9]|1[0-2])月|20\d{2}年?"
+)
+_OPTION_PERFORMANCE_NATURAL_SLOTS = (
+    re.compile(rf"期权\s*({_OPTION_PERFORMANCE_NATURAL_SELECTOR})\s*收益率?"),
+    re.compile(rf"({_OPTION_PERFORMANCE_NATURAL_SELECTOR})\s*期权收益率?"),
+)
+_ANSWER_ADMISSION_CATEGORIES = {
+    "claim_scope_not_covered": "coverage",
+    "coverage_unknown": "coverage",
+    "answer_status_overstates_evidence": "overstatement",
+    "narrowing_status_required": "overstatement",
+    "claim_freshness_not_supported": "freshness",
+    "observation_outside_request": "authority",
+    "observation_not_authoritative": "authority",
+}
+_ANSWER_ADMISSION_RECEIPTS = {
+    "coverage": "请求的数据覆盖不足，未发送未经校验的答案。",
+    "overstatement": "答案超出已有证据，未发送未经校验的答案。",
+    "freshness": "答案时间与证据时间不一致，未发送未经校验的答案。",
+    "authority": "引用证据不属于当前请求或权威性不足，未发送未经校验的答案。",
+}
 
 
 def _constrain_option_performance_cutoff(
     payload: dict[str, Any],
     *,
     user_message: str,
+    operating_date: date,
 ) -> str | None:
     period_match = _OPTION_PERFORMANCE_PERIOD_CUTOFF.fullmatch(user_message)
     if period_match is not None:
@@ -100,12 +126,83 @@ def _constrain_option_performance_cutoff(
         ):
             return "option performance cutoff is not authorized by the current message"
         return None
+    natural_selectors = [
+        match.group(1)
+        for pattern in _OPTION_PERFORMANCE_NATURAL_SLOTS
+        for match in pattern.finditer(user_message)
+    ]
+    if len(natural_selectors) > 1:
+        return "option performance period is ambiguous in the current message"
+    if natural_selectors:
+        expected = _natural_option_performance_scope(
+            natural_selectors[0],
+            operating_date=operating_date,
+        )
+        if expected is None:
+            return "option performance period is not authorized by the current message"
+        if any(
+            str(payload.get(key)) != str(value)
+            if key == "year"
+            else payload.get(key) != value
+            for key, value in expected.items()
+        ) or any(
+            payload.get(key) not in (None, "")
+            for key in ({"as_of_date", "month", "year"} - set(expected))
+        ):
+            return "option performance period is not authorized by the current message"
+        return None
+    if payload.get("period") in {"month", "year"}:
+        return "option performance period is not authorized by the current message"
     if payload.get("period") not in {"mtd", "ytd"} or payload.get("as_of_date") in (None, ""):
         return None
     if _OPTION_PERFORMANCE_CUTOFF_INDICATOR.search(user_message):
         return "option performance cutoff is not authorized by the current message"
     payload.pop("as_of_date", None)
     return None
+
+
+def _natural_option_performance_scope(
+    selector: str,
+    *,
+    operating_date: date,
+) -> dict[str, Any] | None:
+    if selector == "上月":
+        year = operating_date.year - (operating_date.month == 1)
+        month = 12 if operating_date.month == 1 else operating_date.month - 1
+        return {"period": "month", "month": f"{year:04d}-{month:02d}"}
+    if match := re.fullmatch(r"(20\d{2})-(0[1-9]|1[0-2])", selector):
+        year, month = int(match.group(1)), int(match.group(2))
+        if (year, month) > (operating_date.year, operating_date.month):
+            return None
+        return {"period": "month", "month": f"{year:04d}-{month:02d}"}
+    if match := re.fullmatch(r"(20\d{2})年(0?[1-9]|1[0-2])月", selector):
+        year, month = int(match.group(1)), int(match.group(2))
+        if (year, month) > (operating_date.year, operating_date.month):
+            return None
+        return {"period": "month", "month": f"{year:04d}-{month:02d}"}
+    if match := re.fullmatch(r"(0?[1-9]|1[0-2])月", selector):
+        month = int(match.group(1))
+        year = operating_date.year - (month > operating_date.month)
+        return {"period": "month", "month": f"{year:04d}-{month:02d}"}
+    if match := re.fullmatch(r"(20\d{2})年?", selector):
+        year = int(match.group(1))
+        if year > operating_date.year:
+            return None
+        return {"period": "year", "year": year}
+    return None
+
+
+def _contract_operating_date(contract: ExecutionContract) -> date:
+    try:
+        return date.fromisoformat(str(contract.input.get("operating_date") or ""))
+    except ValueError:
+        report_now_ms = contract.input.get("report_now_ms")
+        if report_now_ms is not None:
+            return datetime.fromtimestamp(
+                int(report_now_ms) / 1000,
+                tz=ZoneInfo("Asia/Shanghai"),
+            ).date()
+        return date.today()
 
 
 @contextmanager
@@ -373,7 +470,7 @@ def run_contract(
     retained_decision: str | None = None
     approved_answer_text: str | None = None
     approved_answer_hash: str | None = None
-    last_answer_rejection_reason: str | None = None
+    pending_answer_admission_category: str | None = None
     local_admission_state = "open"
 
     def cancellation_requested() -> bool:
@@ -389,12 +486,13 @@ def run_contract(
             return local_admission_state == "cancel"
 
     def on_process_event(event: dict[str, Any]) -> None:
-        nonlocal latest_retry_count, latest_usage, turn_count
+        nonlocal latest_retry_count, latest_usage, pending_answer_admission_category, turn_count
         event_type = str(event.get("event_type") or "")
         data = dict(event.get("data") or {})
         if event_type == "agent_start":
             record_event("agent_started", {})
         elif event_type == "turn_start":
+            pending_answer_admission_category = None
             turn_count += 1
             record_event("model_turn_started", {"iteration": turn_count})
         elif event_type == "model_turn_completed":
@@ -470,10 +568,12 @@ def run_contract(
             )
 
     def on_tool_call(call: dict[str, Any]) -> dict[str, Any]:
-        nonlocal observation_count, active_evidence_tokens, last_answer_rejection_reason
+        nonlocal observation_count, active_evidence_tokens, pending_answer_admission_category
         tool_name = str(call.get("tool_name") or "")
         call_id = str(call.get("call_id") or "")
         arguments = dict(call.get("arguments") or {})
+        if tool_name != "submit_answer":
+            pending_answer_admission_category = None
 
         def unavailable(code: str, message: str) -> dict[str, Any]:
             observation = _tool_error(tool_name, code, message)
@@ -599,7 +699,11 @@ def run_contract(
                 if isinstance(observation, dict)
                 else "invalid_result"
             )
-            last_answer_rejection_reason = rejection_reason or None
+            pending_answer_admission_category = (
+                None
+                if isinstance(observation, dict) and observation.get("ok") is True
+                else _ANSWER_ADMISSION_CATEGORIES.get(rejection_reason, "generic")
+            )
             event_log.record(
                 "tool_result",
                 {
@@ -707,10 +811,11 @@ def run_contract(
                     "INPUT_ERROR",
                     payload_error or "tool input could not be prepared",
                 )
-            if tool_name == "option_performance_report":
+            if tool_name in {"analysis_query", "option_performance_report"}:
                 cutoff_error = _constrain_option_performance_cutoff(
                     payload,
                     user_message=str(contract.input.get("user_message") or ""),
+                    operating_date=_contract_operating_date(contract),
                 )
                 if cutoff_error:
                     return reject("INPUT_ERROR", cutoff_error)
@@ -726,11 +831,15 @@ def run_contract(
             )
 
         try:
-            response = copilot_tools.call_read_tool(
-                tool_name,
-                payload,
-                allowed_tools=tuple(manifest.allowed_tools),
-            )
+            call_kwargs: dict[str, Any] = {
+                "allowed_tools": tuple(manifest.allowed_tools),
+            }
+            if (
+                tool_name in {"analysis_query", "option_performance_report"}
+                and manifest.fixed_tool_input.get("report_now_ms") is not None
+            ):
+                call_kwargs["now_ms"] = int(manifest.fixed_tool_input["report_now_ms"])
+            response = copilot_tools.call_read_tool(tool_name, payload, **call_kwargs)
         except SystemExit:
             response = {
                 "ok": False,
@@ -1024,7 +1133,7 @@ def run_contract(
 
     error = dict(process_result.get("error") or {})
     source_code = str(error.get("code") or "INTERNAL_ERROR")
-    if source_code == "MODEL_ERROR" and last_answer_rejection_reason:
+    if source_code == "MODEL_ERROR" and pending_answer_admission_category:
         source_code = "ANSWER_ADMISSION_FAILED"
         error = {
             "code": source_code,
@@ -1048,6 +1157,12 @@ def run_contract(
         "source_code": source_code,
         "stage": str(error.get("stage") or "runtime"),
         "retryable": bool(error.get("retryable")),
+        **(
+            {"admission_category": pending_answer_admission_category}
+            if source_code == "ANSWER_ADMISSION_FAILED"
+            and pending_answer_admission_category
+            else {}
+        ),
         **({"session_commit_outcome": "unknown"} if unknown_commit else {}),
     }
     if source_code == "CANCELLED":
@@ -1063,6 +1178,7 @@ def run_contract(
             event_log,
             error,
             unknown_commit=unknown_commit,
+            answer_admission_category=pending_answer_admission_category,
         )
     )
 
@@ -1402,6 +1518,7 @@ def _process_error_result(
     error: dict[str, Any],
     *,
     unknown_commit: bool,
+    answer_admission_category: str | None = None,
 ) -> AppResult:
     source_code = str(error.get("code") or "INTERNAL_ERROR")
     public_code = _PROCESS_ERROR_CODES.get(source_code, "INTERNAL_ERROR")
@@ -1413,13 +1530,18 @@ def _process_error_result(
         "MODEL_ERROR": "Copilot 模型暂时不可用。",
         "TOOL_ERROR": "Copilot 读取数据失败。",
         "BUDGET_EXHAUSTED": "Copilot 未能在本次运行预算内完成回答。",
-        "ANSWER_ADMISSION_FAILED": "Copilot 已读取数据，但答案未通过证据校验。",
+        "ANSWER_ADMISSION_FAILED": _ANSWER_ADMISSION_RECEIPTS.get(
+            str(answer_admission_category or ""),
+            "Copilot 已读取数据，但答案未通过证据校验。",
+        ),
         "INTERNAL_ERROR": (
             "会话暂时繁忙，请稍后重试。"
             if retryable_session
             else "Copilot 运行失败。"
         ),
     }[public_code]
+    if public_code == "ANSWER_ADMISSION_FAILED":
+        response = f"{response}运行 ID：{run_id}"
     trace = {
         **contract.decision_trace,
         "pi_process": {

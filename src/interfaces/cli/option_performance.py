@@ -67,10 +67,12 @@ def add_option_performance_commands(subparsers: argparse._SubParsersAction) -> N
     _add_config_scope_args(report)
     report.add_argument(
         "--period",
-        choices=["mtd", "ytd"],
+        choices=["mtd", "ytd", "month", "year"],
         default="mtd",
     )
     report.add_argument("--as-of-date", default=None, help="MTD/YTD inclusive YYYY-MM-DD")
+    report.add_argument("--month", default=None, help="Natural month YYYY-MM")
+    report.add_argument("--year", default=None, help="Natural year YYYY")
     report.add_argument("--include-rows", action="store_true")
 
     evidence = sub.add_parser("evidence", help="validate, import, or capture performance evidence")
@@ -131,6 +133,8 @@ def _report_payload(args: argparse.Namespace) -> dict[str, Any]:
         **_scope_payload(args),
         "period": args.period,
         "as_of_date": args.as_of_date,
+        "month": args.month,
+        "year": args.year,
         "include_rows": bool(args.include_rows),
     }
 

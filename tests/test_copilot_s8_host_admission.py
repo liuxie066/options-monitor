@@ -5,6 +5,8 @@ from src.application.copilot.host import run_contract
 from tests.copilot_pi_test_support import _TEST_MODEL
 from tests.test_copilot_phase1 import _contract
 
+import pytest
+
 
 def _run_answered_host(monkeypatch, prompt: str, tool_flow) -> object:
     def process(_start, *, on_tool_call, on_proposed, **_kwargs):
@@ -162,8 +164,193 @@ def test_host_reports_rejected_answer_as_admission_failure_not_model_outage(monk
 
     assert result.ok is False
     assert result.error == {"code": "ANSWER_ADMISSION_FAILED"}
-    assert result.user_response == "Copilot 已读取数据，但答案未通过证据校验。"
+    assert result.user_response == (
+        "答案时间与证据时间不一致，未发送未经校验的答案。"
+        f"运行 ID：{result.run_id}"
+    )
     assert any(event.type == "answer_admission_failed" for event in result.events)
+
+
+@pytest.mark.parametrize(
+    ("observation", "claim", "submit_status", "expected_reason", "receipt"),
+    [
+        (
+            {
+                "status": "complete",
+                "coverage": {"status": "complete", "complete_for": "point"},
+                "freshness": {"status": "current", "as_of": "2026-09-02T09:00:00+08:00"},
+            },
+            {"kind": "current_fact", "required_scope": "full_query"},
+            "complete",
+            "claim_scope_not_covered",
+            "请求的数据覆盖不足，未发送未经校验的答案。",
+        ),
+        (
+            {
+                "status": "partial",
+                "coverage": {"status": "complete", "complete_for": "full_query"},
+                "freshness": {"status": "current", "as_of": "2026-09-02T09:00:00+08:00"},
+            },
+            {"kind": "current_fact", "required_scope": "full_query"},
+            "complete",
+            "answer_status_overstates_evidence",
+            "答案超出已有证据，未发送未经校验的答案。",
+        ),
+        (
+            None,
+            {"kind": "current_fact", "required_scope": "point"},
+            "complete",
+            "observation_outside_request",
+            "引用证据不属于当前请求或权威性不足，未发送未经校验的答案。",
+        ),
+    ],
+)
+def test_host_returns_safe_admission_receipt_categories(
+    monkeypatch,
+    observation: dict | None,
+    claim: dict,
+    submit_status: str,
+    expected_reason: str,
+    receipt: str,
+) -> None:
+    if observation is not None:
+        monkeypatch.setattr(
+            copilot_tools,
+            "call_read_tool",
+            lambda *_args, **_kwargs: {"ok": True, "data": {}},
+        )
+        monkeypatch.setattr(
+            copilot_tools,
+            "compact_observation",
+            lambda *_args, **_kwargs: {
+                "tool_name": "runtime_status",
+                "ok": True,
+                "value": {},
+                **observation,
+            },
+        )
+
+    def process(_start, *, on_tool_call, **_kwargs):
+        evidence_id = "missing_observation"
+        if observation is not None:
+            evidence_id = on_tool_call(
+                {
+                    "call_id": "read_for_receipt",
+                    "tool_name": "runtime_status",
+                    "arguments": {"config_key": "us"},
+                }
+            )["ref"]
+        rejected = on_tool_call(
+            {
+                "call_id": "rejected_receipt",
+                "tool_name": "submit_answer",
+                "arguments": {
+                    "mode": "evidence",
+                    "status": submit_status,
+                    "answer_markdown": "未经校验的结论",
+                    "claims": [
+                        {
+                            "text": "未经校验的结论",
+                            "observation_ids": [evidence_id],
+                            **claim,
+                        }
+                    ],
+                },
+            }
+        )
+        assert rejected["observation"]["reason"] == expected_reason
+        return {
+            "ok": False,
+            "error": {
+                "code": "MODEL_ERROR",
+                "stage": "model",
+                "message": "aborted after rejection",
+                "retryable": False,
+            },
+        }
+
+    monkeypatch.setattr("src.application.copilot.host.run_pi_agent", process)
+    result = run_contract(_contract("检查回执分类"), model_settings=_TEST_MODEL)
+
+    assert result.error == {"code": "ANSWER_ADMISSION_FAILED"}
+    assert result.user_response == f"{receipt}运行 ID：{result.run_id}"
+    assert expected_reason not in result.user_response
+
+
+def test_stale_rejection_does_not_relabel_a_later_model_failure(monkeypatch) -> None:
+    def process(_start, *, on_tool_call, on_event, **_kwargs):
+        rejected = on_tool_call(
+            {
+                "call_id": "stale_rejection",
+                "tool_name": "submit_answer",
+                "arguments": {
+                    "mode": "evidence",
+                    "status": "complete",
+                    "answer_markdown": "无证据结论",
+                    "claims": [
+                        {
+                            "text": "无证据结论",
+                            "kind": "current_fact",
+                            "observation_ids": ["missing"],
+                            "required_scope": "point",
+                        }
+                    ],
+                },
+            }
+        )
+        assert rejected["observation"]["reason"] == "observation_outside_request"
+        on_event({"event_type": "turn_start", "data": {}})
+        return {
+            "ok": False,
+            "error": {
+                "code": "MODEL_ERROR",
+                "stage": "model",
+                "message": "real later model failure",
+                "retryable": False,
+            },
+        }
+
+    monkeypatch.setattr("src.application.copilot.host.run_pi_agent", process)
+    result = run_contract(_contract("检查真实错误分类"), model_settings=_TEST_MODEL)
+
+    assert result.error == {"code": "MODEL_ERROR"}
+    assert result.user_response == "Copilot 模型暂时不可用。"
+
+
+def test_unknown_admission_reason_uses_generic_safe_receipt(monkeypatch) -> None:
+    def process(_start, *, on_tool_call, **_kwargs):
+        rejected = on_tool_call(
+            {
+                "call_id": "generic_rejection",
+                "tool_name": "submit_answer",
+                "arguments": {
+                    "mode": "conceptual",
+                    "status": "complete",
+                    "answer_markdown": "无效答案",
+                    "claims": [],
+                    "unexpected": True,
+                },
+            }
+        )
+        assert rejected["observation"]["reason"] == "answer_schema_invalid"
+        return {
+            "ok": False,
+            "error": {
+                "code": "MODEL_ERROR",
+                "stage": "model",
+                "message": "aborted after rejection",
+                "retryable": False,
+            },
+        }
+
+    monkeypatch.setattr("src.application.copilot.host.run_pi_agent", process)
+    result = run_contract(_contract("检查通用回执"), model_settings=_TEST_MODEL)
+
+    assert result.error == {"code": "ANSWER_ADMISSION_FAILED"}
+    assert result.user_response == (
+        "Copilot 已读取数据，但答案未通过证据校验。"
+        f"运行 ID：{result.run_id}"
+    )
 
 
 def test_host_registers_evidence_budget_narrowing_as_diagnostic(monkeypatch) -> None:

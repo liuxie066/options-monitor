@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import date
+from datetime import datetime, timezone
 from typing import Any
 
 from src.application.agent_tool_contracts import AgentToolError
@@ -37,7 +37,7 @@ def run_channel_request(
     control_preview_specs: tuple[dict[str, object], ...] = (),
     control_context: tuple[dict[str, Any], ...] = (),
 ) -> AppResult:
-    year = reference_year or date.today().year
+    report_now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     effective_request_id = request_id or new_id("req")
     try:
         resolved_key, resolved_path, authority_scope = _resolve_authority_scope(
@@ -82,7 +82,11 @@ def run_channel_request(
             conversation_id=conversation_id,
         )
         try:
-            prepared = prepare_contract(request, reference_year=year)
+            prepared = prepare_contract(
+                request,
+                reference_year=reference_year,
+                report_now_ms=report_now_ms,
+            )
         except Exception:
             return _channel_prepare_failed(request)
         if isinstance(prepared, AppResult):

@@ -34,18 +34,72 @@ def test_normalize_mtd_and_ytd_windows() -> None:
     assert historical.status == "complete_past"
 
 
+def test_normalize_natural_month_and_year_windows() -> None:
+    past_month = normalize_performance_period(
+        {"period": "month", "month": "2026-06"},
+        report_now_ms=NOW_MS,
+    )
+    current_month = normalize_performance_period(
+        {"period": "month", "month": "2026-07"},
+        report_now_ms=NOW_MS,
+    )
+    past_year = normalize_performance_period(
+        {"period": "year", "year": 2025},
+        report_now_ms=NOW_MS,
+    )
+    current_year = normalize_performance_period(
+        {"period": "year", "year": "2026"},
+        report_now_ms=NOW_MS,
+    )
+
+    assert past_month.requested_end_date == "2026-06-30"
+    assert past_month.effective_end_exclusive_at_ms == _ms("2026-07-01T00:00:00")
+    assert past_month.status == "complete_past"
+    assert current_month.requested_end_date == "2026-07-17"
+    assert current_month.effective_end_exclusive_at_ms == NOW_MS + 1
+    assert current_month.status == "partial_current"
+    assert past_year.requested_end_date == "2025-12-31"
+    assert current_year.requested_end_date == "2026-07-17"
+
+
 @pytest.mark.parametrize(
     "period_request",
     [
-        PeriodRequest(period="month", month="2026-06"),
-        PeriodRequest(period="year", year=2026),
+        PeriodRequest(period="mtd", month="2026-06"),
+        PeriodRequest(period="month", month="2026-06", as_of_date="2026-06-30"),
+        PeriodRequest(period="year", year=2026, month="2026-06"),
         PeriodRequest(period="mtd", start_date="2026-06-01", end_date="2026-06-30"),
         PeriodRequest(period="invalid"),
     ],
 )
-def test_removed_period_inputs_are_rejected(period_request: PeriodRequest) -> None:
-    with pytest.raises(ValueError, match="mtd or ytd|does not accept"):
+def test_period_selector_mismatches_are_rejected(period_request: PeriodRequest) -> None:
+    with pytest.raises(ValueError, match="one of|does not accept"):
         normalize_performance_period(period_request, report_now_ms=NOW_MS)
+
+
+def test_future_natural_periods_are_rejected() -> None:
+    with pytest.raises(ValueError, match="future"):
+        normalize_performance_period(
+            {"period": "month", "month": "2026-08"},
+            report_now_ms=NOW_MS,
+        )
+    with pytest.raises(ValueError, match="future"):
+        normalize_performance_period(
+            {"period": "year", "year": 2027},
+            report_now_ms=NOW_MS,
+        )
+
+
+def test_previous_december_is_complete_at_frozen_new_year_midnight() -> None:
+    midnight = _ms("2027-01-01T00:00:00")
+    window = normalize_performance_period(
+        {"period": "month", "month": "2026-12"},
+        report_now_ms=midnight,
+    )
+
+    assert window.requested_end_date == "2026-12-31"
+    assert window.effective_end_exclusive_at_ms == midnight
+    assert window.status == "complete_past"
 
 
 def test_as_of_and_cutoff_validation() -> None:

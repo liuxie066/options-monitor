@@ -7,6 +7,7 @@ import pytest
 
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.agent_tools import positions
+from src.application.copilot import tools as copilot_tools
 from src.application.performance.service import OptionPerformanceReadError
 
 
@@ -26,6 +27,17 @@ def _report(*, include_rows: bool = False) -> dict[str, Any]:
             "config_key": "us",
             "accounts": ["lx"],
             "brokers": ["富途"],
+        },
+        "coverage": {
+            "status": "complete",
+            "complete_for": "full_query",
+            "included_count": 1,
+            "total_count": 1,
+            "omitted_count": 0,
+        },
+        "freshness": {
+            "status": "historical",
+            "as_of": "2026-09-02T23:59:59.999+08:00",
         },
         "option_net_cashflow": {"by_currency": {}},
         "sell_option_win_rate": {
@@ -128,6 +140,8 @@ def test_option_performance_report_is_the_canonical_payload_without_legacy_prese
     assert set(data) == {
         "period",
         "scope",
+        "coverage",
+        "freshness",
         "option_net_cashflow",
         "sell_option_win_rate",
         "buy_option_win_rate",
@@ -142,6 +156,7 @@ def test_option_performance_report_is_the_canonical_payload_without_legacy_prese
     assert calls["config_key"] == "us"
     assert calls["include_rows"] is True
     assert meta["freshness_status"] == "historical"
+    assert data["coverage"]["complete_for"] == "full_query"
     assert not _contains_not_observed(data)
 
 
@@ -182,6 +197,25 @@ def test_option_performance_report_rejects_removed_inputs(
         positions.OPTION_PERFORMANCE_REPORT_TOOL.call(payload)
 
     assert caught.value.code == "INPUT_ERROR"
+
+
+def test_option_performance_report_accepts_natural_periods(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _patch_dependencies(monkeypatch)
+
+    positions.OPTION_PERFORMANCE_REPORT_TOOL.call(
+        {"period": "month", "month": "2026-08", "include_rows": True}
+    )
+    assert calls["period"].kind == "month"
+    assert calls["period"].requested_end_date == "2026-08-31"
+    assert calls["include_rows"] is True
+
+    positions.OPTION_PERFORMANCE_REPORT_TOOL.call(
+        {"period": "year", "year": 2025}
+    )
+    assert calls["period"].kind == "year"
+    assert calls["period"].requested_end_date == "2025-12-31"
 
 
 def test_option_performance_report_translates_only_stable_read_reasons(
@@ -260,14 +294,24 @@ def test_option_performance_tool_schema_exposes_only_the_frozen_inputs() -> None
         "broker",
         "period",
         "as_of_date",
+        "month",
+        "year",
         "include_rows",
     }
-    assert tool.input_schema["period"]["enum"] == ["mtd", "ytd"]
+    assert tool.input_schema["period"]["enum"] == ["mtd", "ytd", "month", "year"]
     assert set(tool.copilot_input_fields) == {
         "config_key",
         "account",
         "broker",
         "period",
         "as_of_date",
-        "include_rows",
+        "month",
+        "year",
     }
+
+    payload, error = copilot_tools.build_tool_payload(
+        "option_performance_report",
+        {"period": "month", "month": "2026-08", "include_rows": True},
+    )
+    assert payload is None
+    assert "include_rows" in str(error)
