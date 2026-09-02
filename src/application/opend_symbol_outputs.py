@@ -1158,14 +1158,22 @@ def _validate_consumer_csv_projection(
         return
     multiplier_enriched = False
     for row_index in range(len(expected.index)):
-        for column in REQUIRED_DATA_COLUMNS:
-            expected_value = _canonical_csv_value(expected.iloc[row_index][column])
-            actual_value = _canonical_csv_value(frame.iloc[row_index][column])
+        # Preserve mixed-dtype row coercion while constructing each Series once.
+        expected_row = expected.iloc[row_index]
+        actual_row = frame.iloc[row_index]
+        for column, raw_value, csv_value in zip(
+            REQUIRED_DATA_COLUMNS,
+            expected_row,
+            actual_row,
+            strict=True,
+        ):
+            expected_value = _canonical_csv_value(raw_value)
+            actual_value = _canonical_csv_value(csv_value)
             if expected_value == actual_value:
                 continue
             if column == "multiplier" and _is_valid_multiplier_enrichment(
-                raw_value=expected.iloc[row_index][column],
-                csv_value=frame.iloc[row_index][column],
+                raw_value=raw_value,
+                csv_value=csv_value,
             ):
                 multiplier_enriched = True
                 continue
