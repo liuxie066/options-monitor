@@ -15,7 +15,8 @@ Replace the mixed performance report with one option-only statistical module tha
 - treats strategy as attribution and grouping rather than a second calculation system;
 - supports MTD, YTD, natural-month, and natural-year opening cohorts;
 - keeps the existing public entry names and read-only behavior while replacing the business payload;
-- removes PnL, stock, valuation, FX, and legacy compatibility behavior from the report path.
+- removes PnL, stock, valuation, read-time FX, and legacy compatibility behavior from the report
+  path while reusing persisted event-time conversion evidence for one CNY cash-flow total.
 
 ## Non-goals
 
@@ -23,7 +24,8 @@ Replace the mixed performance report with one option-only statistical module tha
 - Stock settlement principal, stock trades, stock fees, assigned-stock return, dividends, interest,
   margin movements, NAV, buying power, broker margin, or current holdings value.
 - Custom-range queries.
-- CNY conversion or cross-currency aggregation. Native currencies remain separate.
+- Read-time FX conversion, CNY return, or cross-currency rate aggregation. Native-currency cash and
+  return metrics remain separate.
 - Market marks, quote refresh, valuation evidence, or current-price collection.
 - Strategy-specific formulas or inference from matching symbol, trade date, strike, or expiration.
 - Data migration, report-version selection, legacy field aliases, or preservation of the old response
@@ -49,7 +51,9 @@ The refactor is complete only when all of the following are true:
    making `open` and `terminated` partial rather than being forced into either side.
 4. Parent totals and every dimension conserve contract counts, cash, and capital-days before rates are
    calculated.
-5. The report contains no stock, PnL, valuation, quote, FX, or legacy-period fields.
+5. The report contains no stock, PnL, valuation, quote, read-time FX, or legacy-period fields. Its
+   only cross-currency value is the root CNY net-cash-flow total backed by persisted event-time
+   `cash_conversion.v1` evidence.
 6. `./om option-performance report`, `option_performance_report`, and `/income` keep their names and
    produce the same canonical facts for equal inputs.
 7. Unsupported old parameters fail explicitly; none is silently ignored or translated.
@@ -75,6 +79,11 @@ contracts without reopening those completed boundaries:
 - `src.application.performance.service._serialize_report()` declares aggregate coverage and period
   freshness at the source; `compact_observation()` remains fail-closed for missing or malformed
   declarations.
+- Root `option_net_cashflow.cny_total` reuses persisted event-time `cash_conversion.v1` facts. It is
+  partial/null when any required conversion is absent or invalid; no report read fetches current FX.
+- Fee enrichment reuses an existing cash conversion only after validating it against the preceding
+  fee cash fact. A valid historical business-day carry-forward keeps the canonical seven-day window;
+  corrupt or unverifiable evidence is replaced by pending evidence rather than re-signed.
 - The Python Host retains only the terminal-adjacent admission category, clears it across model
   turns, and emits a coarse Chinese receipt plus `run_id` without exposing verifier internals.
 
@@ -102,8 +111,8 @@ Ownership boundaries:
   proportional allocation with deterministic rounding.
 - Fee provenance, fee facts, and domain money precision are ledger-owned or lower-level primitives.
   `domain.domain.ledger` must not import `domain.domain.performance`.
-- `domain.domain.performance` owns cohort selection, contract-share state, net cash flow,
-  capital-days, win counts, dimensions, aggregation, and quality.
+- `domain.domain.performance` owns cohort selection, contract-share state, native and persisted-FX CNY
+  net cash flow, capital-days, win counts, dimensions, aggregation, and quality.
 - `src.application.performance` loads the frozen event stream, normalizes scope, and calls the domain
   owner. It does not load assigned-stock rows, evidence repositories, marks, rates, or quotes.
 - Public adapters validate inputs and project the domain result. They do not calculate business facts.
@@ -282,6 +291,17 @@ terminated  -> amount, status, missing
 
 `amount` is null only when that component cannot be proved exactly. Component status does not
 implicitly downgrade a complete sibling component.
+
+The root additionally publishes one audited presentation total:
+
+```text
+cny_total -> currency=CNY, amount, status, missing
+```
+
+It validates and sums each included event cash fact's persisted `cash_conversion.v1` `amount_cny`
+once. Missing, pending, or invalid conversion evidence makes `amount=null` and `status=partial`; it
+never triggers a current-rate lookup. Breakdown bundles and native-currency returns do not add CNY
+variants.
 
 Sell-to-open and sell-to-close are positive option cash. Buy-to-open and buy-to-close are negative
 option cash. Fees are subtracted exactly once. Stock principal and every stock-side fee are excluded.
@@ -508,7 +528,10 @@ payload with an unobserved metric, bundle, or root quality.
 codes are `fee_missing`, `fee_estimated`, `exercise_fee_missing`, `terminal_evidence_missing`,
 `terminal_evidence_conflict`, `capital_identity_missing`, `capital_non_positive`, `currency_conflict`,
 `economic_adjust_invalid`, `economic_adjust_non_conserving`, and `strategy_attribution_conflict`.
-Diagnostics may add event/lot identities and details, but public adapters do not rename reason codes.
+The CNY total may additionally emit `cash_conversion_event_missing`, `cash_conversion_missing`,
+`cash_conversion_pending`, `cash_conversion_invalid`, `cash_conversion_corrupt:<issue>`, or
+`option_cash_missing`. Diagnostics may add event/lot identities and details, but public adapters do
+not rename reason codes.
 
 Public JSON uses strings for identities, dates, enums, currencies, and reason codes; integers for
 timestamps and contract counts; JSON numbers for money, capital, `statistic_days`, and rates; booleans
@@ -525,6 +548,7 @@ option_net_cashflow
     total       -> amount, status, missing
     open        -> amount, status, missing
     terminated  -> amount, status, missing
+  cny_total -> currency, amount, status, missing  # root only
 sell_option_win_rate
   winning_contracts, eligible_contracts, rate, status, missing
 buy_option_win_rate
@@ -646,6 +670,7 @@ option_net_cashflow
     total       -> amount, status, missing
     open        -> amount, status, missing
     terminated  -> amount, status, missing
+  cny_total -> currency=CNY, amount, status, missing
 sell_option_win_rate
   winning_contracts, eligible_contracts, rate, status, missing
 buy_option_win_rate
@@ -709,7 +734,7 @@ source; no branch relaxes `claim_scope_not_covered`,
   includes it.
 - One request must use one materialized event tuple and its `ledger_input_hash`; concurrent later
   writes may affect the next request but must not split one report across two ledger snapshots.
-- Missing actual fee: null only the affected cash-flow components and dependent return. Exclude only
+- Missing actual fee: null only the affected cash-flow components, CNY total, and dependent return. Exclude only
   buy-to-close or sell-to-close win outcomes whose net-cash test needs that fee; do not exclude a
   complete expiry-without-assignment, assignment, or worthless-expiry lifecycle outcome. A complete
   independent component remains observed. If an admitted close-based outcome is excluded, its metric
@@ -726,6 +751,15 @@ source; no branch relaxes `claim_scope_not_covered`,
   reinterpret either patch or repair it during a read.
 - Missing capital identity or non-positive required economic units: retain valid cash when complete,
   but return a partial/null return.
+- Missing, pending, or invalid persisted cash conversion: keep independently complete native metrics,
+  but publish `cny_total.amount=null` and `cny_total.status=partial`; never substitute current FX.
+- Persisted conversion validation is total for JSON-compatible mappings. Malformed identity fields,
+  extreme finite decimals, decimal overflow, and failed identity reconstruction become stable corrupt
+  evidence reasons; they must not abort the native-currency report.
+- Fee enrichment must validate a prior conversion against the prior fee cash fact before carrying its
+  rate forward. Invalid prior evidence must remain fail-closed, and a valid historical business-day
+  carry-forward must retain its canonical seven-day distance rule instead of being downgraded to the
+  ordinary booking window.
 - Strategy metadata missing or conflicting: preserve valid leg totals; make only the affected strategy
   view partial or unassigned as allowed by the deterministic defaults.
 - Currency conflict between an opening lot and a lifecycle event: fail the affected economic share;
@@ -744,7 +778,7 @@ groups. An unfiltered aggregate includes every relevant scoped degradation.
 ## External Consumers
 
 All in-repository consumers must switch atomically to the new canonical fields. No consumer may derive
-deleted PnL, stock cash, or CNY amounts from option net cash flow.
+deleted PnL or stock cash, or derive a CNY amount other than the canonical root `cny_total`.
 
 - The option-performance renderer, Control `/income`, Copilot projection, and Tool contract use the
   canonical fields without recalculation.
@@ -765,8 +799,8 @@ by quote or assigned-stock evidence.
 
 ## Implementation Ownership
 
-The implementation uses three narrow owners and changes no ledger, metric reducer, answer-admission
-rule, Node protocol, release artifact, or runtime configuration.
+The implementation uses four narrow owners and changes no Node protocol, release artifact, or runtime
+configuration.
 
 1. **Canonical natural periods and facade propagation.** The existing period owner validates `month`
    and `year` without accepting `range`. Shared materializer, Tool Gateway, CLI, `/income`, Control,
@@ -780,6 +814,9 @@ rule, Node protocol, release artifact, or runtime configuration.
    instant Host-only. A scoped `ContextVar` supplies that instant only to option performance. The Host
    attests the current-message selector before reading and renders only allowlisted, terminal-adjacent
    receipt categories plus public `run_id`.
+4. **Root CNY cash total.** The ledger projection exposes the effective cash events admitted by
+   canonical full replay. The metric reducer applies their persisted conversion evidence to weighted
+   cash components, and the existing renderer displays that one total without recalculation.
 
 ## Verification
 

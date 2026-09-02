@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -14,6 +14,7 @@ from domain.domain.performance.period import PeriodRequest, normalize_performanc
 from domain.domain.performance.weighted_reducer import (
     reduce_option_performance,
 )
+from src.application.cash_conversion import attach_trade_event_cash_conversions
 
 
 _TZ = ZoneInfo("Asia/Shanghai")
@@ -58,6 +59,7 @@ def _event(
     fee_basis: str | None = "actual",
     close_type: str | None = None,
     raw: dict | None = None,
+    fx_rate: float = 7,
 ) -> TradeEvent:
     payload = dict(raw or {})
     if fee_basis:
@@ -68,7 +70,7 @@ def _event(
         }
     if close_type:
         payload["close_type"] = close_type
-    return TradeEvent(
+    event = TradeEvent(
         event_id=event_id,
         event_type=event_type,
         event_time_ms=_ms(at),
@@ -82,6 +84,17 @@ def _event(
         lot_id=lot_id,
         target_lot_id=target_lot_id,
         raw_payload=payload,
+    )
+    return attach_trade_event_cash_conversions(
+        event,
+        fx_payload={
+            "rates": {"USDCNY": fx_rate},
+            "timestamp": datetime.fromtimestamp(
+                event.event_time_ms / 1000,
+                tz=timezone.utc,
+            ).isoformat(),
+        },
+        observed_at_ms=event.event_time_ms + 1,
     )
 
 
@@ -211,6 +224,50 @@ def test_weighted_partial_closes_conserve_contracts_cash_and_capital() -> None:
     assert option_return["capital_days"] > 0
     assert option_return["average_occupied_capital"] > 0
     assert option_return["status"] == MetricStatus.OBSERVED
+
+
+def test_cny_total_converts_each_event_once_after_contract_share_allocation() -> None:
+    events = [
+        _event(
+            "open",
+            "open",
+            "2026-09-01T10:00:00",
+            lot_id="lot-1",
+            contracts=2,
+            price=0.003333335,
+            fx_rate=7,
+        ),
+        _event(
+            "close-1",
+            "close",
+            "2026-09-01T11:00:00",
+            target_lot_id="lot-1",
+            price=0,
+            close_type="buy_to_close",
+            fx_rate=7,
+        ),
+        _event(
+            "close-2",
+            "close",
+            "2026-09-01T12:00:00",
+            target_lot_id="lot-1",
+            price=0,
+            close_type="buy_to_close",
+            fx_rate=7,
+        ),
+    ]
+
+    reduction = reduce_option_performance(
+        project_trade_events(events),
+        period=_period(),
+    )
+
+    assert reduction.bundle["option_net_cashflow"]["by_currency"]["USD"]["total"][
+        "amount"
+    ] == Decimal("0.666668")
+    assert reduction.bundle["option_net_cashflow"]["cny_total"]["amount"] == Decimal(
+        "4.666669"
+    )
 
 
 def test_fee_evidence_degrades_cash_without_overriding_lifecycle_win_rules() -> None:

@@ -121,7 +121,11 @@ def test_missing_fx_is_pending_but_zero_cash_needs_no_rate(tmp_path: Path, monke
         ("conversion_id", "cashfx_forged", "conversion_id_mismatch"),
         ("amount_cny", "999999", "fx_arithmetic_mismatch"),
         ("fx_rate", "-7.2", "fx_rate_invalid"),
+        ("fx_rate", "1e999999", "invalid_numeric_contract"),
+        ("native_amount", "1e999999", "invalid_numeric_contract"),
+        ("amount_cny", "1e999999", "invalid_numeric_contract"),
         ("method", "unknown", "fx_provenance_invalid"),
+        ("native_currency", "?", "identity_contract_mismatch"),
         ("rate_timestamp", "2026-07-10T02:00:00+00:00", "rate_timestamp_outside_booking_window"),
     ],
 )

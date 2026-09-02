@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, DecimalException
 from typing import Any, Mapping
 
 from domain.domain.performance.models import (
@@ -95,6 +95,26 @@ def validate_observed_cash_conversion(
     effective_at_ms: int,
 ) -> tuple[Decimal | None, str | None]:
     try:
+        return _validate_observed_cash_conversion(
+            conversion,
+            cash_fact_id=cash_fact_id,
+            native_amount=native_amount,
+            native_currency=native_currency,
+            effective_at_ms=effective_at_ms,
+        )
+    except (DecimalException, OverflowError, TypeError, ValueError):
+        return None, "invalid_numeric_contract"
+
+
+def _validate_observed_cash_conversion(
+    conversion: Mapping[str, Any],
+    *,
+    cash_fact_id: str,
+    native_amount: Any,
+    native_currency: str,
+    effective_at_ms: int,
+) -> tuple[Decimal | None, str | None]:
+    try:
         expected_amount = quantize_money(
             to_decimal(native_amount, field_name="native_amount")
         )
@@ -114,6 +134,10 @@ def validate_observed_cash_conversion(
         observed_at_ms = int(conversion.get("observed_at_ms") or 0)
     except (TypeError, ValueError):
         return None, "invalid_numeric_contract"
+    try:
+        conversion_currency = normalize_currency(conversion.get("native_currency"))
+    except ValueError:
+        return None, "identity_contract_mismatch"
 
     if (
         conversion.get("schema_version") != "cash_conversion.v1"
@@ -121,7 +145,7 @@ def validate_observed_cash_conversion(
         or str(conversion.get("cash_fact_id") or "") != str(cash_fact_id)
         or str(conversion.get("quote_currency") or "").strip().upper() != "CNY"
         or amount != expected_amount
-        or normalize_currency(conversion.get("native_currency")) != expected_currency
+        or conversion_currency != expected_currency
         or conversion_effective_at_ms != int(effective_at_ms)
         or conversion_effective_at_ms <= 0
         or observed_at_ms <= 0
@@ -134,7 +158,7 @@ def validate_observed_cash_conversion(
     if not rate_source_id:
         return None, "rate_source_id_missing"
     if amount == 0:
-        if method != "zero_identity" or amount_cny != 0:
+        if method != "zero_identity" or rate is not None or amount_cny != 0:
             return None, "zero_identity_mismatch"
     elif expected_currency == "CNY":
         if (

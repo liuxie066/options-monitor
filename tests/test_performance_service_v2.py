@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -9,6 +9,7 @@ import pytest
 import src.application.performance.service as performance_service
 from domain.domain.ledger import ContractKey, TradeEvent
 from domain.domain.performance.period import PeriodRequest, normalize_performance_period
+from src.application.cash_conversion import attach_trade_event_cash_conversions
 from src.application.performance.service import (
     OptionPerformanceReadError,
     build_option_period_performance,
@@ -64,6 +65,7 @@ def _event(
     *,
     target_lot_id: str | None = None,
     target_event_id: str | None = None,
+    fx_rate: float | None = 7.0,
 ) -> TradeEvent:
     key = ContractKey.from_values(
         broker="富途",
@@ -74,7 +76,7 @@ def _event(
         strike=100,
         expiration_ymd="2026-09-30",
     )
-    return TradeEvent(
+    event = TradeEvent(
         event_id=event_id,
         event_type=event_type,
         event_time_ms=_ms(at),
@@ -92,6 +94,19 @@ def _event(
             "close_type": "buy_to_close" if event_type == "close" else None,
             "fee_provenance": {"basis": "actual", "amount": 0, "source": "test"},
         },
+    )
+    if fx_rate is None:
+        return event
+    return attach_trade_event_cash_conversions(
+        event,
+        fx_payload={
+            "rates": {"USDCNY": fx_rate},
+            "timestamp": datetime.fromtimestamp(
+                event.event_time_ms / 1000,
+                tz=timezone.utc,
+            ).isoformat(),
+        },
+        observed_at_ms=event.event_time_ms + 1,
     )
 
 
@@ -164,6 +179,7 @@ def test_service_reads_one_tuple_and_serializes_only_the_canonical_contract() ->
                 "close",
                 "2026-09-02T10:00:00",
                 target_lot_id="lot-1",
+                fx_rate=7.2,
             ).to_dict(),
         ]
     )
@@ -210,7 +226,70 @@ def test_service_reads_one_tuple_and_serializes_only_the_canonical_contract() ->
     assert len(report["quality"]["ledger_input_hash"]) == 64
     assert set(report["rows"][0]) == _ROW_FIELDS
     assert report["option_net_cashflow"]["by_currency"]["USD"]["total"]["amount"] == 100.0
+    cny_total = report["option_net_cashflow"]["cny_total"]
+    assert cny_total["currency"] == "CNY"
+    assert cny_total["amount"] == 680.0
+    assert cny_total["status"] == "observed"
+    assert cny_total["missing"] == []
+    assert report["quality"]["status"] == "observed"
     assert not _contains_not_observed(report)
+
+
+def test_service_keeps_native_cash_when_cny_conversion_is_missing() -> None:
+    report = build_option_period_performance(
+        _Repo(
+            [
+                _event(
+                    "open",
+                    "open",
+                    "2026-09-01T10:00:00",
+                    fx_rate=None,
+                ).to_dict()
+            ]
+        ),
+        period=_period(),
+        config_key="us",
+        configured_accounts=("lx",),
+    )
+
+    assert report["option_net_cashflow"]["by_currency"]["USD"]["total"]["amount"] == 200.0
+    assert report["option_net_cashflow"]["cny_total"]["amount"] is None
+    assert report["option_net_cashflow"]["cny_total"]["status"] == "partial"
+    assert report["quality"]["status"] == "partial"
+    assert "cash_conversion_missing" in report["quality"]["missing"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "issue"),
+    [
+        ("native_currency", "?", "identity_contract_mismatch"),
+        ("native_amount", "1e999999", "invalid_numeric_contract"),
+    ],
+)
+def test_service_keeps_native_cash_when_cny_conversion_is_malformed(
+    field: str,
+    value: str,
+    issue: str,
+) -> None:
+    event = _event("open", "open", "2026-09-01T10:00:00")
+    raw_payload = dict(event.raw_payload)
+    conversions = dict(raw_payload["cash_conversions"])
+    gross = dict(conversions["option_trade_cash_gross"])
+    gross[field] = value
+    conversions["option_trade_cash_gross"] = gross
+    raw_payload["cash_conversions"] = conversions
+
+    report = build_option_period_performance(
+        _Repo([replace(event, raw_payload=raw_payload).to_dict()]),
+        period=_period(),
+        config_key="us",
+        configured_accounts=("lx",),
+    )
+
+    assert report["option_net_cashflow"]["by_currency"]["USD"]["total"]["amount"] == 200.0
+    assert report["option_net_cashflow"]["cny_total"]["amount"] is None
+    assert report["option_net_cashflow"]["cny_total"]["status"] == "partial"
+    assert f"cash_conversion_corrupt:{issue}" in report["quality"]["missing"]
 
 
 def test_real_report_evidence_is_admitted_only_for_supported_time_claims() -> None:
@@ -305,6 +384,7 @@ def test_service_reports_observed_empty_for_a_canonical_broker_with_no_matching_
     assert report["scope"]["brokers"] == ["ibkr"]
     assert report["quality"]["status"] == "observed"
     assert report["option_net_cashflow"]["by_currency"] == {}
+    assert report["option_net_cashflow"]["cny_total"]["amount"] == 0.0
 
 
 def test_service_canonicalizes_futu_broker_aliases_before_filtering() -> None:

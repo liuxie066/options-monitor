@@ -138,7 +138,13 @@ def test_option_performance_renderer_uses_only_canonical_metrics() -> None:
                         "open": {"amount": 500, "status": "observed", "missing": []},
                         "terminated": {"amount": 299.65, "status": "observed", "missing": []},
                     }
-                }
+                },
+                "cny_total": {
+                    "currency": "CNY",
+                    "amount": 5757.48,
+                    "status": "observed",
+                    "missing": [],
+                },
             },
             "sell_option_win_rate": {
                 "winning_contracts": 3,
@@ -170,7 +176,7 @@ def test_option_performance_renderer_uses_only_canonical_metrics() -> None:
     )
 
     assert text.startswith("期权收益统计完成（lx、sy；broker futu，MTD，2026-07-01 至 2026-07-23）")
-    assert "期权净现金流：USD 合计 799.65，未终止 500.00，已终止 299.65" in text
+    assert "期权净现金流：USD 合计 799.65，未终止 500.00，已终止 299.65；折合 CNY 合计 ¥5,757.48" in text
     assert "卖方胜率：75.00%（3/4 张）" in text
     assert "买方胜率：-（0/0 张）（不适用）" in text
     assert "期权收益率：USD 期间 12.00%，年化 24.00%" in text
