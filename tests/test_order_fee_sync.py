@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
 from domain.domain.ledger import ContractKey, TradeEvent, fee_fact_for_event
-from src.application.ledger.order_fee_migration import enrich_order_fees
+from domain.domain.performance.cash_conversion import (
+    HISTORICAL_BUSINESS_DAY_FX_CARRY_FORWARD_METHOD,
+    MAX_HISTORICAL_CARRY_FORWARD_DISTANCE_MS,
+    validate_observed_cash_conversion,
+)
+from src.application.cash_conversion import build_cash_conversion
+from src.application.ledger.order_fee_migration import _conversion_for_amount, enrich_order_fees
 from src.application.ledger.order_fee_semantics import zero_option_fee_lifecycle_reason
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.ledger.writer import persist_trade_event_object
@@ -309,6 +317,73 @@ def test_exact_fee_sync_skips_provider_when_target_is_already_actual(
 
     assert provider.terminal_calls == provider.fee_calls == 0
     assert receipt["reason_counts"] == {"already_actual": 1}
+
+
+def test_fee_enrichment_does_not_reissue_invalid_cash_conversion() -> None:
+    prior = build_cash_conversion(
+        cash_fact_id="option_fee_cash:event-1",
+        amount=Decimal("-1"),
+        currency="USD",
+        fx_payload={
+            "rates": {"USDCNY": "7.2"},
+            "timestamp": datetime.fromtimestamp(EVENT_MS / 1000, tz=timezone.utc).isoformat(),
+        },
+        effective_at_ms=EVENT_MS,
+        observed_at_ms=EVENT_MS + 1,
+    )
+    prior["fx_rate"] = "99"
+
+    conversion = _conversion_for_amount(
+        fact_id="option_fee_cash:event-1",
+        amount=Decimal("-1.23"),
+        currency="USD",
+        effective_at_ms=EVENT_MS,
+        previous=prior,
+        previous_amount=Decimal("-1"),
+        applied_at_ms=EVENT_MS + 10,
+    )
+    assert conversion["status"] == "pending"
+    assert conversion["amount_cny"] is None
+
+
+def test_fee_enrichment_preserves_valid_carry_forward_conversion() -> None:
+    rate_time_ms = EVENT_MS - 3 * 86_400_000
+    prior = build_cash_conversion(
+        cash_fact_id="option_fee_cash:event-1",
+        amount=Decimal("-1"),
+        currency="USD",
+        fx_payload={
+            "rates": {"USDCNY": "7.2"},
+            "timestamp": datetime.fromtimestamp(rate_time_ms / 1000, tz=timezone.utc).isoformat(),
+        },
+        effective_at_ms=EVENT_MS,
+        observed_at_ms=EVENT_MS + 1,
+        rate_source="pbc_central_parity",
+        rate_source_id="pbc:usd-cny:prior-business-day",
+        rate_evidence_fact_id="fxrate:pbc:usd-cny:prior-business-day",
+        method=HISTORICAL_BUSINESS_DAY_FX_CARRY_FORWARD_METHOD,
+        max_rate_distance_ms=MAX_HISTORICAL_CARRY_FORWARD_DISTANCE_MS,
+    )
+
+    conversion = _conversion_for_amount(
+        fact_id="option_fee_cash:event-1",
+        amount=Decimal("-1.23"),
+        currency="USD",
+        effective_at_ms=EVENT_MS,
+        previous=prior,
+        previous_amount=Decimal("-1"),
+        applied_at_ms=EVENT_MS + 10,
+    )
+    converted, issue = validate_observed_cash_conversion(
+        conversion,
+        cash_fact_id="option_fee_cash:event-1",
+        native_amount=Decimal("-1.23"),
+        native_currency="USD",
+        effective_at_ms=EVENT_MS,
+    )
+    assert issue is None
+    assert converted == Decimal("-8.856000")
+    assert conversion["method"] == HISTORICAL_BUSINESS_DAY_FX_CARRY_FORWARD_METHOD
 
 
 def test_expiry_without_executed_order_is_frozen_as_actual_zero(

@@ -39,7 +39,15 @@ def _report(*, include_rows: bool = False) -> dict[str, Any]:
             "status": "historical",
             "as_of": "2026-09-02T23:59:59.999+08:00",
         },
-        "option_net_cashflow": {"by_currency": {}},
+        "option_net_cashflow": {
+            "by_currency": {},
+            "cny_total": {
+                "currency": "CNY",
+                "amount": 0,
+                "status": "observed",
+                "missing": [],
+            },
+        },
         "sell_option_win_rate": {
             "winning_contracts": 0,
             "eligible_contracts": 0,
@@ -278,9 +286,38 @@ def test_option_performance_output_contract_has_only_the_new_business_fields() -
     assert "sell_option_win_rate" in contract["fact_fields"]
     assert "buy_option_win_rate" in contract["fact_fields"]
     assert "option_return" in contract["fact_fields"]
+    assert "option_net_cashflow.cny_total.missing" in contract["missing_data_fields"]
+    assert "option_net_cashflow.cny_total.missing" in contract["model_missing_data_fields"]
     serialized = str(contract)
     for removed in ("pnl.", "activity.", "assignment_lifecycle", "presentation", "refresh_quotes"):
         assert removed not in serialized
+
+
+def test_option_performance_observation_exposes_cny_conversion_gap() -> None:
+    report = _report()
+    report["option_net_cashflow"]["cny_total"] = {
+        "currency": "CNY",
+        "amount": None,
+        "status": "partial",
+        "missing": ["cash_conversion_missing"],
+    }
+    report["quality"] = {
+        **report["quality"],
+        "status": "partial",
+        "missing": ["cash_conversion_missing"],
+    }
+
+    observation = copilot_tools.compact_observation(
+        "option_performance_report",
+        {"ok": True, "data": report},
+        {"period": "mtd", "as_of_date": "2026-09-02"},
+    )
+
+    assert observation["status"] == "partial"
+    assert observation["value"]["option_net_cashflow"]["cny_total"]["amount"] is None
+    assert observation["missing_data"][
+        "option_net_cashflow.cny_total.missing"
+    ] == ["cash_conversion_missing"]
 
 
 def test_option_performance_tool_schema_exposes_only_the_frozen_inputs() -> None:

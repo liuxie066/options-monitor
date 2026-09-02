@@ -47,8 +47,8 @@ SCENARIOS = (
             ),
             ModelTurn(
                 text=(
-                    "结论：截至 2026-07-23，全部账户（lx、sy）MTD 期权净现金流为 USD 800。"
-                    "卖出期权胜率 75%，买入期权胜率不适用；"
+                    "结论：截至 2026-07-23，全部账户（lx、sy）MTD 期权净现金流为 USD 800，"
+                    "折合 CNY 5,760。卖出期权胜率 75%，买入期权胜率不适用；"
                     "期权收益率 12%，年化收益率 24%。"
                 )
             ),
@@ -70,7 +70,13 @@ SCENARIOS = (
                                 "open": {"amount": 300, "status": "observed", "missing": []},
                                 "terminated": {"amount": 500, "status": "observed", "missing": []},
                             }
-                        }
+                        },
+                        "cny_total": {
+                            "currency": "CNY",
+                            "amount": 5760,
+                            "status": "observed",
+                            "missing": [],
+                        },
                     },
                     "sell_option_win_rate": {
                         "winning_contracts": 3,
@@ -101,12 +107,19 @@ SCENARIOS = (
             "MTD",
             "全部账户",
             "期权净现金流",
+            "折合 CNY",
             "卖出期权胜率",
             "买入期权胜率",
             "期权收益率",
             "年化收益率",
         ),
-        forbidden_terms=("共 1 行", "分析完成", "source_event_id", "cash_conversion:", "CNY 折算为空"),
+        forbidden_terms=(
+            "共 1 行",
+            "分析完成",
+            "source_event_id",
+            "cash_conversion:",
+            "CNY 折算为空",
+        ),
         ordered_terms=("期权净现金流", "卖出期权胜率", "买入期权胜率", "期权收益率", "年化收益率"),
         max_response_chars=900,
     ),

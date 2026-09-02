@@ -15,12 +15,14 @@
   business records. Never include internal execution metadata.
 - For option performance, use `option_net_cashflow`, `sell_option_win_rate`,
   `buy_option_win_rate`, and `option_return` exactly as returned. Never
-  recalculate, convert, or relabel option net cash flow as PnL.
+  recalculate, convert, or relabel option net cash flow as PnL. Use
+  `option_net_cashflow.cny_total` only when the report returns it; never derive
+  another CNY value.
 - Option performance, including corrections and short follow-ups: explicitly
   state the absolute period and account scope before monetary facts. Then show
-  option net cash flow by native currency, followed by sell/buy win rates and
-  return. PnL, stock cash, assignment settlement, and CNY conversion are not
-  provided by this report.
+  option net cash flow by native currency and its CNY total, followed by
+  sell/buy win rates and return. PnL, stock cash, assignment settlement, and
+  read-time CNY conversion are not provided by this report.
 - Include only the detail needed to support the conclusion. Name important data
   gaps and uncertainty explicitly.
 - Direct tool execution in this environment is read-only. You cannot directly

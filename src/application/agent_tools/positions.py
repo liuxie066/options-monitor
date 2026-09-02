@@ -74,6 +74,7 @@ _OPTION_PERFORMANCE_OUTPUT_CONTRACT: dict[str, Any] = {
         "quality.missing",
         "quality.diagnostics",
         "option_net_cashflow.by_currency.*.*.missing",
+        "option_net_cashflow.cny_total.missing",
         "sell_option_win_rate.missing",
         "buy_option_win_rate.missing",
         "option_return.by_currency.*.missing",
@@ -100,7 +101,11 @@ _OPTION_PERFORMANCE_OUTPUT_CONTRACT: dict[str, Any] = {
         "buy_option_win_rate",
         "option_return",
     ],
-    "model_missing_data_fields": ["quality.missing", "quality.diagnostics"],
+    "model_missing_data_fields": [
+        "quality.missing",
+        "quality.diagnostics",
+        "option_net_cashflow.cny_total.missing",
+    ],
 }
 
 _OPTION_POSITIONS_LIST_OUTPUT_CONTRACT: dict[str, Any] = {
@@ -579,9 +584,9 @@ OPTION_PERFORMANCE_REPORT_TOOL = build_agent_tool(
     catalog_summary="读取 MTD/YTD 或自然月/自然年期权四指标与明细分解。",
     description=(
         "Read-only MTD, YTD, natural-month, or natural-year option performance from the canonical ledger. Reports native-currency "
-        "option net cash flow, sell-option and buy-option win rates, and return on average occupied "
-        "capital. Stock trades, assignment settlement cash, PnL, FX conversion, and quote refresh are "
-        "outside this report."
+        "option net cash flow plus an audited CNY total when persisted event-time conversions are complete, "
+        "sell-option and buy-option win rates, and return on average occupied capital. Stock trades, "
+        "assignment settlement cash, PnL, read-time FX conversion, and quote refresh are outside this report."
     ),
     requires=("runtime_config", "sqlite_data_config"),
     capabilities=("option_performance", "income_report", "option_positions", "read_only"),

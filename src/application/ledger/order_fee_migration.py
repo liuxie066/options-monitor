@@ -17,6 +17,12 @@ from domain.domain.ledger.cash_facts import cash_facts_for_trade_event
 from domain.domain.ledger.fees import FeeBasis, FeeComponent
 from domain.domain.money import canonical_decimal_text, quantize_money, to_decimal
 from domain.domain.option_position_identity import normalize_broker
+from domain.domain.performance.cash_conversion import (
+    HISTORICAL_BUSINESS_DAY_FX_CARRY_FORWARD_METHOD,
+    MAX_BOOKING_RATE_DISTANCE_MS,
+    MAX_HISTORICAL_CARRY_FORWARD_DISTANCE_MS,
+    validate_observed_cash_conversion,
+)
 from src.application.cash_conversion import build_cash_conversion
 from src.application.ledger.current_decision_projection import (
     capture_current_decision_projection_fence,
@@ -732,6 +738,7 @@ def _option_event_with_fee(
 ) -> TradeEvent:
     from dataclasses import replace
 
+    previous_fee = fee_fact_for_event(event)
     raw = dict(event.raw_payload or {})
     raw["fee_provenance"] = {
         "basis": basis.value,
@@ -746,6 +753,7 @@ def _option_event_with_fee(
     return _replace_option_fee_conversion(
         updated,
         prior_conversions=event.raw_payload.get("cash_conversions"),
+        previous_fee_amount=previous_fee.amount,
         applied_at_ms=applied_at_ms,
     )
 
@@ -758,6 +766,7 @@ def _stock_event_with_fee(
     provenance: Mapping[str, Any],
     applied_at_ms: int,
 ) -> dict[str, Any]:
+    previous_fee = _stock_fee_fact(event)
     out = dict(event)
     out["fees"] = float(amount) if basis == FeeBasis.ACTUAL else 0.0
     out["fee_provenance"] = {
@@ -773,6 +782,11 @@ def _stock_event_with_fee(
         currency=_event_currency(out),
         effective_at_ms=_event_time_ms(out),
         previous=prior,
+        previous_amount=(
+            -previous_fee.amount
+            if previous_fee.is_complete and previous_fee.amount is not None
+            else None
+        ),
         applied_at_ms=applied_at_ms,
     )
     out["cash_conversions"] = conversions
@@ -783,6 +797,7 @@ def _replace_option_fee_conversion(
     event: TradeEvent,
     *,
     prior_conversions: Any,
+    previous_fee_amount: Decimal | None,
     applied_at_ms: int,
 ) -> TradeEvent:
     from dataclasses import replace
@@ -805,6 +820,9 @@ def _replace_option_fee_conversion(
         currency=event.currency,
         effective_at_ms=event.event_time_ms,
         previous=conversions.get("option_fee_cash"),
+        previous_amount=(
+            -previous_fee_amount if previous_fee_amount is not None else None
+        ),
         applied_at_ms=applied_at_ms,
     )
     raw["cash_conversions"] = conversions
@@ -818,9 +836,22 @@ def _conversion_for_amount(
     currency: str,
     effective_at_ms: int,
     previous: Any,
+    previous_amount: Decimal | None,
     applied_at_ms: int,
 ) -> dict[str, Any]:
     prior = dict(previous) if isinstance(previous, Mapping) else {}
+    if prior and previous_amount is not None:
+        _, issue = validate_observed_cash_conversion(
+            prior,
+            cash_fact_id=fact_id,
+            native_amount=previous_amount,
+            native_currency=currency,
+            effective_at_ms=effective_at_ms,
+        )
+        if issue is not None:
+            prior = {}
+    else:
+        prior = {}
     fx_rate = prior.get("fx_rate")
     timestamp = prior.get("rate_timestamp")
     fx_payload = None
@@ -840,6 +871,12 @@ def _conversion_for_amount(
         rate_source_id=prior.get("rate_source_id"),
         rate_evidence_fact_id=prior.get("rate_evidence_fact_id"),
         method=prior.get("method"),
+        max_rate_distance_ms=(
+            MAX_HISTORICAL_CARRY_FORWARD_DISTANCE_MS
+            if prior.get("method")
+            == HISTORICAL_BUSINESS_DAY_FX_CARRY_FORWARD_METHOD
+            else MAX_BOOKING_RATE_DISTANCE_MS
+        ),
     )
 
 
