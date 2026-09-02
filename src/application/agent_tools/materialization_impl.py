@@ -5,7 +5,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from io import StringIO
 from pathlib import Path
-from typing import Any, Callable, Mapping, cast
+from typing import Any, Callable, cast
 import json
 import re
 import uuid
@@ -19,7 +19,11 @@ from domain.domain.close_advice import (
     STRICT_CLOSE_POLICY_VERSION,
 )
 from domain.domain.ledger.position_fields import normalize_account
-from domain.domain.performance.period import PeriodRequest, PeriodWindow, normalize_period
+from domain.domain.performance.period import (
+    PeriodRequest,
+    PeriodWindow,
+    normalize_performance_period,
+)
 from domain.domain.strategy_vocab import (
     STRATEGY_COMBO_YIELD,
     STRATEGY_COVERED_CALL,
@@ -445,12 +449,7 @@ _OPTION_PERFORMANCE_INPUT_FIELDS = frozenset(
         "broker",
         "period",
         "as_of_date",
-        "month",
-        "year",
-        "start_date",
-        "end_date",
         "include_rows",
-        "refresh_quotes",
     }
 )
 
@@ -464,28 +463,32 @@ def normalize_option_performance_request(
     extras = sorted(str(key) for key in payload if key not in _OPTION_PERFORMANCE_INPUT_FIELDS)
     if extras:
         raise AgentToolError(
-            "INVALID_ARGUMENT",
+            "INPUT_ERROR",
             f"option_performance_report does not accept: {', '.join(extras)}",
         )
     config_key = str(payload.get("config_key") or "us").strip().lower()
     if config_key not in {"us", "hk"}:
-        raise AgentToolError("INVALID_ARGUMENT", "config_key must be us or hk")
-    for field in ("include_rows", "refresh_quotes"):
-        value = payload.get(field)
-        if value is not None and not isinstance(value, bool):
-            raise AgentToolError("INVALID_ARGUMENT", f"{field} must be a boolean")
+        raise AgentToolError("INPUT_ERROR", "config_key must be us or hk")
+    include_rows = payload.get("include_rows")
+    if include_rows is not None and not isinstance(include_rows, bool):
+        raise AgentToolError("INPUT_ERROR", "include_rows must be a boolean")
     try:
         period_request = PeriodRequest.from_mapping(payload)
-        window = normalize_period(period_request, now_ms=now_ms)
+        window = normalize_performance_period(
+            period_request,
+            report_now_ms=now_ms,
+        )
     except ValueError as exc:
-        raise AgentToolError("INVALID_ARGUMENT", str(exc)) from exc
+        raise AgentToolError("INPUT_ERROR", str(exc)) from exc
 
     raw_account = str(payload.get("account") or "").strip()
     account = normalize_account(raw_account) if raw_account else None
     if raw_account and not account:
-        raise AgentToolError("INVALID_ARGUMENT", "account is invalid")
+        raise AgentToolError("INPUT_ERROR", "account is invalid")
     raw_broker = str(payload.get("broker") or "").strip()
     broker = normalize_broker(raw_broker) if raw_broker else None
+    if raw_broker and not broker:
+        raise AgentToolError("INPUT_ERROR", "broker is invalid")
     normalized = {
         "config_key": config_key,
         "config_path": payload.get("config_path"),
@@ -494,346 +497,9 @@ def normalize_option_performance_request(
         "broker": broker,
         "period": period_request.period,
         "as_of_date": period_request.as_of_date,
-        "month": period_request.month,
-        "year": period_request.year,
-        "start_date": period_request.start_date,
-        "end_date": period_request.end_date,
-        "include_rows": bool(payload.get("include_rows", False)),
-        "refresh_quotes": bool(payload.get("refresh_quotes", True)),
+        "include_rows": bool(include_rows),
     }
     return normalized, window
-
-
-def _row_order_key(row: dict[str, Any]) -> tuple[int, str, str, str]:
-    try:
-        effective_at_ms = int(row.get("effective_at_ms") or 0)
-    except (TypeError, ValueError):
-        effective_at_ms = 0
-    return (
-        effective_at_ms,
-        str(row.get("fact_kind") or ""),
-        str(row.get("source_event_id") or ""),
-        str(row.get("allocation_id") or ""),
-    )
-
-
-_OPTION_TRADE_CASH_EXCLUDED_FIELDS = (
-    "cash.stock_settlement_cash_gross",
-    "cash.stock_settlement_fee_cash",
-    "cash.assigned_stock_sale_cash_gross",
-    "cash.assigned_stock_sale_fee_cash",
-)
-
-
-def _presentation_reason_category(value: Any) -> str:
-    prefix = str(value or "").strip().lower().split(":", 1)[0]
-    if prefix.startswith("cash_conversion"):
-        return "cash_conversion"
-    if prefix.startswith("fx"):
-        return "fx"
-    if "fee" in prefix:
-        return "fee"
-    if "valuation" in prefix or "mark" in prefix or "quote" in prefix:
-        return "valuation"
-    if prefix.startswith("missing_stock_settlement"):
-        return "stock_settlement"
-    if prefix.startswith("source_conflict"):
-        return "source_conflict"
-    if prefix.startswith("assigned_stock") or prefix.startswith("assignment"):
-        return "assigned_stock"
-    if prefix.startswith("capital"):
-        return "capital"
-    if prefix.startswith("realized") or prefix.startswith("missing_realized"):
-        return "realized_pnl"
-    if prefix in {"trade_events", "position_lots"}:
-        return prefix
-    return "other"
-
-
-def _presentation_reason_summary(values: Any) -> list[dict[str, Any]]:
-    counts: dict[str, int] = {}
-    for value in values if isinstance(values, (list, tuple)) else ():
-        category = _presentation_reason_category(value)
-        counts[category] = counts.get(category, 0) + 1
-    return [
-        {"category": category, "count": counts[category]}
-        for category in sorted(counts)
-    ]
-
-
-def _presentation_metric(value: Any) -> dict[str, Any]:
-    metric = value if isinstance(value, Mapping) else {}
-    by_currency = metric.get("by_currency")
-    return {
-        "by_currency": {
-            str(currency): amount
-            for currency, amount in sorted(
-                by_currency.items() if isinstance(by_currency, Mapping) else (),
-                key=lambda item: str(item[0]),
-            )
-        },
-        "cny": metric.get("cny"),
-        "status": str(metric.get("status") or "not_observed"),
-        "missing_summary": _presentation_reason_summary(metric.get("missing")),
-    }
-
-
-def _presentation_rate(value: Any) -> dict[str, Any]:
-    metric = value if isinstance(value, Mapping) else {}
-    by_currency = metric.get("by_currency")
-    return {
-        "by_currency": {
-            str(currency): amount
-            for currency, amount in sorted(
-                by_currency.items() if isinstance(by_currency, Mapping) else (),
-                key=lambda item: str(item[0]),
-            )
-        },
-        "status": str(metric.get("status") or "not_observed"),
-        "missing_summary": _presentation_reason_summary(metric.get("missing")),
-    }
-
-
-def _presentation_cashflow_coverage(value: Any) -> dict[str, Any]:
-    coverage = value if isinstance(value, Mapping) else {}
-    missing_by_currency = coverage.get("missing_by_currency")
-    reasons = [
-        str(reason)
-        for values in (
-            missing_by_currency.values() if isinstance(missing_by_currency, Mapping) else ()
-        )
-        for reason in (values if isinstance(values, list) else ())
-    ]
-    reasons.extend(
-        str(reason)
-        for reason in coverage.get("global_missing", [])
-        if str(reason)
-    )
-    return {
-        "status": str(coverage.get("status") or "not_observed"),
-        "missing_summary": _presentation_reason_summary(reasons),
-    }
-
-
-def _build_option_performance_presentation(data: Mapping[str, Any]) -> dict[str, Any]:
-    period = data.get("period") if isinstance(data.get("period"), Mapping) else {}
-    scope = data.get("scope") if isinstance(data.get("scope"), Mapping) else {}
-    activity = data.get("activity") if isinstance(data.get("activity"), Mapping) else {}
-    cash = data.get("cash") if isinstance(data.get("cash"), Mapping) else {}
-    pnl = data.get("pnl") if isinstance(data.get("pnl"), Mapping) else {}
-    cashflow_return = (
-        data.get("cashflow_return") if isinstance(data.get("cashflow_return"), Mapping) else {}
-    )
-    breakdowns = data.get("breakdowns") if isinstance(data.get("breakdowns"), Mapping) else {}
-    quality = data.get("quality") if isinstance(data.get("quality"), Mapping) else {}
-
-    account_rows: list[dict[str, Any]] = []
-    raw_account_rows = breakdowns.get("accounts") if isinstance(breakdowns, Mapping) else []
-    for raw_row in raw_account_rows if isinstance(raw_account_rows, list) else []:
-        if not isinstance(raw_row, Mapping):
-            continue
-        account = str(raw_row.get("account") or "").strip().lower()
-        if not account:
-            continue
-        row_pnl = raw_row.get("pnl") if isinstance(raw_row.get("pnl"), Mapping) else {}
-        row_cash = raw_row.get("cash") if isinstance(raw_row.get("cash"), Mapping) else {}
-        row_activity = raw_row.get("activity") if isinstance(raw_row.get("activity"), Mapping) else {}
-        row_cashflow = (
-            raw_row.get("cashflow_return")
-            if isinstance(raw_row.get("cashflow_return"), Mapping)
-            else {}
-        )
-        account_rows.append(
-            {
-                "account": account,
-                "option_realized_gross": _presentation_metric(row_pnl.get("option_realized_gross")),
-                "option_trade_cash_gross": _presentation_metric(row_cash.get("option_trade_cash_gross")),
-                "option_net_cashflow": _presentation_metric(row_cash.get("option_net_cashflow")),
-                "period_cashflow_return": _presentation_rate(row_cashflow.get("period_return")),
-                "annualized_cashflow_return": _presentation_rate(row_cashflow.get("annualized_return")),
-                "cashflow_capital_days_by_currency": dict(
-                    row_cashflow.get("capital_days_by_currency") or {}
-                ),
-                "cashflow_coverage": _presentation_cashflow_coverage(
-                    row_cashflow.get("coverage")
-                ),
-                "premium_collected_gross": _presentation_metric(row_activity.get("premium_collected_gross")),
-            }
-        )
-    account_rows.sort(key=lambda item: item["account"])
-
-    limitations = [
-        {
-            "kind": "missing_evidence",
-            **item,
-        }
-        for item in _presentation_reason_summary(quality.get("missing"))
-    ]
-    limitations.extend(
-        {
-            "kind": "warning",
-            **item,
-        }
-        for item in _presentation_reason_summary(quality.get("warnings"))
-    )
-    option_realized_net = _presentation_metric(pnl.get("option_realized_net"))
-    if option_realized_net["status"] != "observed":
-        limitations.append(
-            {
-                "kind": "metric_status",
-                "metric": "option_realized_net",
-                "status": option_realized_net["status"],
-                "missing_summary": option_realized_net["missing_summary"],
-            }
-        )
-    cashflow_coverage = _presentation_cashflow_coverage(cashflow_return.get("coverage"))
-    if cashflow_coverage["status"] == "partial":
-        limitations.append(
-            {
-                "kind": "metric_status",
-                "metric": "cashflow_return",
-                **cashflow_coverage,
-            }
-        )
-
-    return {
-        "schema_version": "option_performance_presentation.v1",
-        "period_scope": {
-            "period": {
-                key: period.get(key)
-                for key in (
-                    "kind",
-                    "requested_start_date",
-                    "requested_end_date",
-                    "status",
-                    "timezone",
-                )
-                if period.get(key) is not None
-            },
-            "scope": {
-                key: deepcopy(scope.get(key))
-                for key in ("account", "accounts", "broker", "brokers")
-                if scope.get(key) not in (None, "", [])
-            },
-        },
-        "reporting_basis": {
-            "primary": "gross",
-            "net_metric": "pnl.option_realized_net",
-            "net_evidence": option_realized_net,
-        },
-        "primary_metrics": {
-            "option_realized_gross": _presentation_metric(pnl.get("option_realized_gross")),
-            "option_trade_cash_gross": _presentation_metric(cash.get("option_trade_cash_gross")),
-        },
-        "account_rows": account_rows,
-        "supporting_metrics": {
-            "premium_collected_gross": _presentation_metric(activity.get("premium_collected_gross")),
-        },
-        "cashflow_return": {
-            "option_net_cashflow": _presentation_metric(cash.get("option_net_cashflow")),
-            "capital_basis": cashflow_return.get("capital_basis"),
-            "capital_days_by_currency": dict(
-                cashflow_return.get("capital_days_by_currency") or {}
-            ),
-            "period_return": _presentation_rate(cashflow_return.get("period_return")),
-            "annualized_return": _presentation_rate(cashflow_return.get("annualized_return")),
-            "coverage": cashflow_coverage,
-        },
-        "assigned_stock_impact": {
-            "assigned_stock_realized_gross": _presentation_metric(pnl.get("assigned_stock_realized_gross")),
-            "combined_realized_gross": _presentation_metric(pnl.get("realized_gross")),
-        },
-        "definitions": {
-            "option_realized_gross": "期权已实现毛收益，不含指派正股已实现收益。",
-            "option_trade_cash_gross": "期权交易产生的有符号现金流，不含指派正股结算和卖出现金。",
-            "option_net_cashflow": "期权交易现金与实际期权费用现金之和。",
-            "cashflow_return": "期权净现金流除以期内活跃期权的平均担保资本；由领域报告直接提供。",
-            "excluded_from_option_trade_cash_gross": list(_OPTION_TRADE_CASH_EXCLUDED_FIELDS),
-        },
-        "limitations": limitations,
-    }
-
-
-def _public_option_performance_report(
-    report: dict[str, Any],
-    *,
-    request: dict[str, Any],
-    cfg: dict[str, Any],
-) -> dict[str, Any]:
-    data = dict(report)
-    data["schema_version"] = "option_performance_report.output.v1"
-    data["assignment_lifecycle"] = data.pop("assigned_stock", {})
-    scope = dict(data.get("scope") or {})
-    scope["config_key"] = request["config_key"]
-    observed_accounts = {
-        str(item).strip().lower()
-        for item in scope.get("accounts") or []
-        if str(item).strip()
-    }
-    if request.get("account"):
-        scope["accounts"] = sorted({str(request["account"]), *observed_accounts})
-    else:
-        configured_accounts = set(accounts_from_config(cfg, fallback=()))
-        scope["accounts"] = sorted(configured_accounts | observed_accounts)
-    data["scope"] = scope
-
-    period = data.get("period") if isinstance(data.get("period"), Mapping) else {}
-    valuation_end_at_ms = period.get("valuation_end_at_ms")
-    freshness_status = {
-        "partial_current": "current",
-        "complete_past": "historical",
-        "partial_cutoff": "historical",
-    }.get(str(period.get("status") or ""))
-    if (
-        freshness_status
-        and isinstance(valuation_end_at_ms, int)
-        and not isinstance(valuation_end_at_ms, bool)
-    ):
-        data["freshness"] = {
-            "status": freshness_status,
-            "as_of": datetime.fromtimestamp(
-                valuation_end_at_ms / 1000,
-                tz=timezone.utc,
-            ).isoformat(),
-        }
-    data["coverage"] = {
-        "status": "complete",
-        "complete_for": "full_query",
-        "included_count": 1,
-        "total_count": 1,
-        "omitted_count": 0,
-        "has_more": False,
-    }
-
-    quality = dict(data.get("quality") or {})
-    diagnostics = [dict(item) for item in quality.get("diagnostics") or [] if isinstance(item, dict)]
-    if request["include_rows"]:
-        rows = sorted(
-            [dict(item) for item in data.get("rows") or [] if isinstance(item, dict)],
-            key=_row_order_key,
-        )
-        original_count = len(rows)
-        truncated = original_count > 1000
-        data["rows"] = rows[:1000]
-        if truncated:
-            diagnostics.append(
-                {
-                    "code": "rows_truncated",
-                    "original_count": original_count,
-                    "returned_count": 1000,
-                }
-            )
-        quality["rows_truncated"] = truncated
-        quality["row_count"] = len(data["rows"])
-        quality["row_count_before_limit"] = original_count
-    else:
-        data.pop("rows", None)
-        quality["rows_truncated"] = False
-        quality["row_count"] = 0
-    quality["diagnostics"] = diagnostics
-    data["quality"] = quality
-    data["presentation"] = _build_option_performance_presentation(data)
-    return data
 
 
 def option_performance_report_tool(
@@ -843,65 +509,60 @@ def option_performance_report_tool(
     resolve_public_data_config_path,
     normalize_broker,
     resolve_option_positions_repo,
-    open_performance_evidence_repository,
     build_option_period_performance,
     repo_base,
     mask_path,
     now_ms: int | None = None,
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    from src.application.agent_tool_contracts import AgentToolError
-    from src.application.quality.gate import QualityGateBlocked, assert_quality_allows
+    from src.application.performance.service import OptionPerformanceReadError
 
+    report_now_ms = int(
+        now_ms
+        if now_ms is not None
+        else datetime.now(timezone.utc).timestamp() * 1000
+    )
     request, window = normalize_option_performance_request(
         payload,
         normalize_broker=normalize_broker,
-        now_ms=now_ms,
+        now_ms=report_now_ms,
     )
     try:
-        assert_quality_allows(
-            "option_performance",
-            account=str(request.get("account") or "").strip().lower() or None,
-            market=str(request.get("config_key") or "").strip().lower() or None,
+        config_path, cfg = load_runtime_config(
+            config_key=request["config_key"],
+            config_path=request.get("config_path"),
         )
-    except QualityGateBlocked as exc:
+        portfolio_cfg = cfg.get("portfolio") if isinstance(cfg.get("portfolio"), dict) else {}
+        data_config_path = resolve_public_data_config_path(request, portfolio_cfg)
+        _resolved_data_config, repo = resolve_option_positions_repo(
+            base=repo_base(),
+            data_config=data_config_path,
+        )
+    except Exception as exc:
         raise AgentToolError(
-            code="QUALITY_GATE_BLOCKED",
-            message=str(exc),
-            details={
-                "consumer": exc.consumer,
-                "reason_code": exc.reason_code,
-                "blocked_by": list(exc.blocked_by),
-            },
+            code="READ_ERROR",
+            message="option performance ledger input is unavailable",
+            details={"reason_codes": ["ledger_read_failed"]},
         ) from exc
-    config_path, cfg = load_runtime_config(
-        config_key=request["config_key"],
-        config_path=request.get("config_path"),
-    )
-    portfolio_cfg = cfg.get("portfolio") if isinstance(cfg.get("portfolio"), dict) else {}
-    data_config_path = resolve_public_data_config_path(request, portfolio_cfg)
-    _resolved_data_config, repo = resolve_option_positions_repo(base=repo_base(), data_config=data_config_path)
-    evidence_repo = open_performance_evidence_repository(repo)
-    configured_accounts = set(accounts_from_config(cfg, fallback=()))
-    requested_account = str(request.get("account") or "")
-    scope_proven = requested_account in configured_accounts if requested_account else bool(configured_accounts)
-    report = build_option_period_performance(
-        repo,
-        period=window,
-        account=request.get("account"),
-        broker=request.get("broker"),
-        now_ms=now_ms,
-        include_rows=request["include_rows"],
-        evidence_repo=evidence_repo,
-        refresh_quotes=request["refresh_quotes"],
-        collection_cfg=cfg,
-        collection_base_dir=config_path.parent,
-        scope_proven=scope_proven,
-    )
-    data = _public_option_performance_report(report, request=request, cfg=cfg)
+    try:
+        data = build_option_period_performance(
+            repo,
+            period=window,
+            config_key=request["config_key"],
+            configured_accounts=accounts_from_config(cfg, fallback=()),
+            account=request.get("account"),
+            broker=request.get("broker"),
+            include_rows=request["include_rows"],
+        )
+    except OptionPerformanceReadError as exc:
+        raise AgentToolError(
+            code="READ_ERROR",
+            message="option performance ledger input is unavailable",
+            details={"reason_codes": list(exc.reason_codes)},
+        ) from exc
     return data, [], {
         "config_path": mask_path(config_path),
         "data_config": mask_path(data_config_path),
-        "period_status": window.status,
+        "freshness_status": data["period"]["freshness_status"],
     }
 
 
@@ -927,7 +588,6 @@ def capture_option_performance_evidence(
         "broker": payload.get("broker"),
         "period": "mtd",
         "include_rows": False,
-        "refresh_quotes": True,
     }
     request, window = normalize_option_performance_request(
         report_payload,

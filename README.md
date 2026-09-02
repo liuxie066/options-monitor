@@ -322,21 +322,14 @@ om option-performance report \
 om option-performance report \
   --config-key us \
   --account lx \
-  --period month \
-  --month 2026-06
+  --period ytd
 
 om-agent run --tool option_performance_report \
   --input-json '{"config_key":"us","account":"lx","period":"ytd","as_of_date":"2026-07-17"}'
 ```
 
-利润、现金与活动是不同口径：
-
-- `pnl` 回答利润；
-- `cash` 回答现金变化；
-- `activity` 回答权利金和合约活动；
-- `portfolio_pnl_bridge` 与 `portfolio_cash_bridge` 分别对接 PnL 和现金恒等式。
-
-交易现金的 CNY 金额在事件写入时按成交附近汇率证据冻结。旧事件没有合格快照时，原币金额保留，CNY 保持 `null/partial`，不会用当前汇率反推。历史 `monthly_income_report` 与 `option-positions report monthly-income` 已移除。
+报告只提供期权净现金流、卖出/买入期权胜率和期权收益率，支持 MTD/YTD，金额保持
+原币。正股交易、指派/行权交割现金、PnL、CNY 换算和行情刷新均不在该报告内。
 
 ### Research / Shadow Replay
 

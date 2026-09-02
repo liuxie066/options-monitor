@@ -1043,7 +1043,7 @@ def test_option_positions_cli_add_confirm_json_outputs_write_contract(monkeypatc
         "--multiplier",
         "100",
         "--exp",
-        "2026-06-29",
+        "2027-06-29",
         "--premium-per-share",
         "1.235",
         "--confirm",

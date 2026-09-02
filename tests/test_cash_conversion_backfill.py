@@ -12,7 +12,6 @@ from src.application.ledger.cash_conversion_migration import (
     correct_superseded_cash_conversions,
 )
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
-from src.application.performance.service import build_option_period_performance
 from src.infrastructure.performance_evidence_sqlite import PerformanceEvidenceSQLiteRepository
 
 
@@ -159,14 +158,6 @@ def test_backfill_dry_run_apply_and_second_apply_are_auditable_and_idempotent(
             "SELECT COUNT(*) FROM cash_conversion_backfill_audit"
         ).fetchone()[0]
     assert audit_count == 2
-    report = build_option_period_performance(
-        repo,
-        period={"period": "month", "month": "2026-07"},
-        account="lx",
-        now_ms=MIGRATION_MS,
-    )
-    assert report["cash"]["option_trade_cash_gross"]["cny"] == 1440.0
-    assert report["cash"]["option_fee_cash"]["cny"] == -7.2
 
 
 def test_backfill_preserves_observed_conversion_and_does_not_use_stale_fx(

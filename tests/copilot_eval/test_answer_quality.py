@@ -47,16 +47,9 @@ SCENARIOS = (
             ),
             ModelTurn(
                 text=(
-                    "结论：截至 2026-07-23，全部账户（lx、sy）MTD 期权已实现毛收益 "
-                    "CNY 2,100，期权交易现金流 CNY 5,600。\n\n"
-                    "| 账户 | 期权已实现毛收益 | 期权交易现金流 | 收取权利金 |\n"
-                    "|---|---:|---:|---:|\n"
-                    "| lx | CNY 700 | CNY 2,100 | CNY 2,800 |\n"
-                    "| sy | CNY 1,400 | CNY 3,500 | CNY 4,200 |\n"
-                    "| 合计 | CNY 2,100 | CNY 5,600 | CNY 7,000 |\n\n"
-                    "指派正股已实现毛收益另列为 CNY 3,500；计入后整体已实现毛收益为 "
-                    "CNY 5,600。\n"
-                    "口径：期权交易现金流不含指派正股买卖；净收益费用证据不完整，以上明确为毛额。"
+                    "结论：截至 2026-07-23，全部账户（lx、sy）MTD 期权净现金流为 USD 800。"
+                    "卖出期权胜率 75%，买入期权胜率不适用；"
+                    "期权收益率 12%，年化收益率 24%。"
                 )
             ),
         ),
@@ -66,87 +59,39 @@ SCENARIOS = (
                 "data": {
                     "period": {
                         "kind": "mtd",
-                        "requested_start_date": "2026-07-01",
-                        "requested_end_date": "2026-07-23",
-                        "status": "partial_current",
+                        "start_date": "2026-07-01",
+                        "as_of_date": "2026-07-23",
                     },
-                    "scope": {"account": None, "accounts": ["lx", "sy"]},
-                    "activity": {"premium_collected_gross": {"by_currency": {"USD": 1000}}},
-                    "cash": {
-                        "option_trade_cash_gross": {"by_currency": {"USD": 800}, "cny": 5600, "status": "observed"},
-                        "total_cash_change_net": {"by_currency": {"USD": -4500}},
-                        "stock_settlement_cash_gross": {"by_currency": {"USD": -10000}},
-                        "assigned_stock_sale_cash_gross": {"by_currency": {"USD": 5500}},
-                    },
-                    "pnl": {
-                        "realized_gross": {"by_currency": {"USD": 800}, "cny": 5600, "status": "observed"},
-                        "option_realized_gross": {"by_currency": {"USD": 300}, "cny": 2100, "status": "observed"},
-                        "assigned_stock_realized_gross": {
-                            "by_currency": {"USD": 500},
-                            "cny": 3500,
-                            "status": "observed",
-                        },
-                        "realized_net": {"by_currency": {"USD": 747}},
-                        "option_realized_net": {"by_currency": {"USD": 250}},
-                        "assigned_stock_realized_net": {"by_currency": {"USD": 497}},
-                    },
-                    "presentation": {
-                        "schema_version": "option_performance_presentation.v1",
-                        "reporting_basis": {
-                            "primary": "gross",
-                            "net_evidence": {"status": "partial", "missing_summary": [{"category": "fee", "count": 1}]},
-                        },
-                        "primary_metrics": {
-                            "option_realized_gross": {
-                                "by_currency": {"USD": 300},
-                                "cny": 2100,
-                                "status": "observed",
-                                "missing_summary": [],
-                            },
-                            "option_trade_cash_gross": {
-                                "by_currency": {"USD": 800},
-                                "cny": 5600,
-                                "status": "observed",
-                                "missing_summary": [],
-                            },
-                        },
-                        "account_rows": [
-                            {
-                                "account": "lx",
-                                "option_realized_gross": {"by_currency": {"USD": 100}, "cny": 700, "status": "observed"},
-                                "option_trade_cash_gross": {"by_currency": {"USD": 300}, "cny": 2100, "status": "observed"},
-                                "premium_collected_gross": {"by_currency": {"USD": 400}, "cny": 2800, "status": "observed"},
-                            },
-                            {
-                                "account": "sy",
-                                "option_realized_gross": {"by_currency": {"USD": 200}, "cny": 1400, "status": "observed"},
-                                "option_trade_cash_gross": {"by_currency": {"USD": 500}, "cny": 3500, "status": "observed"},
-                                "premium_collected_gross": {"by_currency": {"USD": 600}, "cny": 4200, "status": "observed"},
-                            },
-                        ],
-                        "supporting_metrics": {
-                            "premium_collected_gross": {
-                                "by_currency": {"USD": 1000},
-                                "cny": 7000,
-                                "status": "observed",
+                    "scope": {"accounts": ["lx", "sy"], "brokers": ["futu"]},
+                    "option_net_cashflow": {
+                        "by_currency": {
+                            "USD": {
+                                "total": {"amount": 800, "status": "observed", "missing": []},
+                                "open": {"amount": 300, "status": "observed", "missing": []},
+                                "terminated": {"amount": 500, "status": "observed", "missing": []},
                             }
-                        },
-                        "assigned_stock_impact": {
-                            "assigned_stock_realized_gross": {
-                                "by_currency": {"USD": 500},
-                                "cny": 3500,
-                                "status": "observed",
-                            },
-                            "combined_realized_gross": {
-                                "by_currency": {"USD": 800},
-                                "cny": 5600,
-                                "status": "observed",
-                            },
-                        },
-                        "limitations": [
-                            {"kind": "metric_status", "metric": "option_realized_net", "status": "partial"}
-                        ],
+                        }
                     },
+                    "sell_option_win_rate": {
+                        "winning_contracts": 3,
+                        "eligible_contracts": 4,
+                        "rate": 0.75,
+                        "status": "observed",
+                        "missing": [],
+                    },
+                    "buy_option_win_rate": {
+                        "winning_contracts": 0,
+                        "eligible_contracts": 0,
+                        "rate": None,
+                        "status": "not_applicable",
+                        "missing": [],
+                    },
+                    "option_return": {
+                        "by_currency": {
+                            "USD": {"rate": 0.12, "annualized_rate": 0.24, "status": "observed", "missing": []}
+                        }
+                    },
+                    "quality": {"status": "observed", "missing": []},
                 },
             }
         },
@@ -155,15 +100,14 @@ SCENARIOS = (
             "结论",
             "MTD",
             "全部账户",
-            "期权已实现毛收益",
-            "期权交易现金流",
-            "指派正股",
-            "收取权利金",
-            "不含指派正股买卖",
-            "费用证据不完整",
+            "期权净现金流",
+            "卖出期权胜率",
+            "买入期权胜率",
+            "期权收益率",
+            "年化收益率",
         ),
         forbidden_terms=("共 1 行", "分析完成", "source_event_id", "cash_conversion:", "CNY 折算为空"),
-        ordered_terms=("期权已实现毛收益", "期权交易现金流", "收取权利金", "口径"),
+        ordered_terms=("期权净现金流", "卖出期权胜率", "买入期权胜率", "期权收益率", "年化收益率"),
         max_response_chars=900,
     ),
     Scenario(
@@ -177,8 +121,8 @@ SCENARIOS = (
             ),
             ModelTurn(
                 text=(
-                    "结论：已按 MTD 重查；范围是全部账户（lx、sy）。先报告期权已实现毛收益，"
-                    "再报告期权交易现金流；该现金流不含指派正股买卖，指派正股影响另列。"
+                    "结论：已按 MTD 重查；范围是全部账户（lx、sy）。先报告期权净现金流，"
+                    "再报告卖出期权胜率、买入期权胜率、期权收益率和年化收益率。"
                 )
             ),
         ),
@@ -186,17 +130,19 @@ SCENARIOS = (
             "option_performance_report": {
                 "ok": True,
                 "data": {
-                    "period": {"kind": "mtd", "status": "partial_current"},
-                    "scope": {"account": None, "accounts": ["lx", "sy"]},
-                    "cash": {},
-                    "pnl": {},
-                    "assignment_lifecycle": {},
+                    "period": {"kind": "mtd", "start_date": "2026-07-01", "as_of_date": "2026-07-23"},
+                    "scope": {"accounts": ["lx", "sy"], "brokers": ["futu"]},
+                    "option_net_cashflow": {"by_currency": {}},
+                    "sell_option_win_rate": {"status": "not_applicable"},
+                    "buy_option_win_rate": {"status": "not_applicable"},
+                    "option_return": {"by_currency": {}},
+                    "quality": {"status": "observed", "missing": []},
                 },
             }
         },
         expected_tools=("option_performance_report",),
-        expected_terms=("结论", "MTD", "全部账户", "期权已实现毛收益", "期权交易现金流", "不含指派正股买卖"),
-        ordered_terms=("期权已实现毛收益", "期权交易现金流"),
+        expected_terms=("结论", "MTD", "全部账户", "期权净现金流", "卖出期权胜率", "买入期权胜率", "期权收益率", "年化收益率"),
+        ordered_terms=("期权净现金流", "卖出期权胜率", "买入期权胜率", "期权收益率", "年化收益率"),
         max_response_chars=500,
         context=(
             {"role": "user", "content": "7月 mtd 的期权收益"},
@@ -274,14 +220,22 @@ SCENARIOS = (
         turns=(
             ModelTurn(
                 tool_calls=(
-                    _call("option_performance_report", {"period": "month", "month": "2026-07"}, "partial_1"),
+                    _call("option_performance_report", {"period": "mtd", "as_of_date": "2026-07-31"}, "partial_1"),
                     _call("option_positions_read", {"action": "list", "status": "open"}, "partial_2"),
                 )
             ),
-            ModelTurn(text="结论：已确认本月权利金收入 800 美元；持仓数据源暂不可用，因此不能判断当前风险集中度。"),
+            ModelTurn(text="结论：已确认本月期权净现金流 800 美元；持仓数据源暂不可用，因此不能判断当前风险集中度。"),
         ),
         tool_results={
-            "option_performance_report": {"ok": True, "data": {"month": "2026-07", "premium": 800, "currency": "USD"}},
+            "option_performance_report": {
+                "ok": True,
+                "data": {
+                    "period": {"kind": "mtd", "start_date": "2026-07-01", "as_of_date": "2026-07-31"},
+                    "option_net_cashflow": {
+                        "by_currency": {"USD": {"total": {"amount": 800, "status": "observed", "missing": []}}}
+                    },
+                },
+            },
             "option_positions_read": {"ok": False, "error": {"code": "READ_ERROR", "message": "position store unavailable"}},
         },
         expected_tools=("option_performance_report", "option_positions_read"),
@@ -502,22 +456,30 @@ def test_freeform_loop_recovers_from_bad_arguments(monkeypatch) -> None:
 
     def call_tool(name: str, payload: dict[str, Any], *, allowed_tools: tuple[str, ...]) -> dict[str, Any]:
         calls.append(dict(payload))
-        if payload.get("month") == "2026-13":
-            return {"ok": False, "error": {"code": "INPUT_ERROR", "message": "invalid month"}}
-        return {"ok": True, "data": {"month": "2026-07", "premium": 800, "currency": "USD"}}
+        return {
+            "ok": True,
+            "data": {
+                "period": {"kind": "mtd"},
+                "option_net_cashflow": {
+                    "by_currency": {"USD": {"total": {"amount": 800, "status": "observed", "missing": []}}}
+                },
+            },
+        }
 
     turns = iter(
         (
             ModelTurn(tool_calls=(_call("option_performance_report", {"period": "month", "month": "2026-13"}, "retry_1"),)),
-            ModelTurn(tool_calls=(_call("option_performance_report", {"period": "month", "month": "2026-07"}, "retry_2"),)),
-            ModelTurn(text="结论：修正月份后确认 7月权利金收入为 800 美元。"),
+            ModelTurn(tool_calls=(_call("option_performance_report", {"period": "mtd"}, "retry_2"),)),
+            ModelTurn(text="结论：修正为 MTD 后确认期权净现金流为 800 美元。"),
         )
     )
     monkeypatch.setattr(copilot_tools, "call_read_tool", call_tool)
 
     result = run_contract(_contract("7月收益"), model_runner=lambda _request: next(turns))
 
-    assert [item["month"] for item in calls] == ["2026-13", "2026-07"]
+    assert len(calls) == 1
+    assert calls[0]["period"] == "mtd"
+    assert "month" not in calls[0]
     assert "修正" in result.user_response
     assert "800" in result.user_response
 

@@ -56,6 +56,12 @@ _OPTION_PERFORMANCE_CUTOFF = re.compile(
     r"(?P<month>0?[1-9]|1[0-2])月期权收益率"
     r"(?:\s*[，,]\s*总计)?(?:\s*[，,]\s*不分账号)?\s*[。.]?\s*$"
 )
+_OPTION_PERFORMANCE_PERIOD_CUTOFF = re.compile(
+    r"^\s*截至\s*(?P<date>\d{4}-\d{2}-\d{2})\s*(?:的|查询)?\s*"
+    r"(?P<period>MTD|YTD)\s*期权收益率"
+    r"(?:\s*[，,]\s*总计)?(?:\s*[，,]\s*不分账号)?\s*[。.]?\s*$",
+    re.IGNORECASE,
+)
 _OPTION_PERFORMANCE_CUTOFF_INDICATOR = re.compile(
     r"截至|截止到|截止|(?i:\bas\s+of\b)|"
     r"(?<!\d)\d{4}-\d{1,2}-\d{1,2}(?!\d)|"
@@ -69,6 +75,18 @@ def _constrain_option_performance_cutoff(
     *,
     user_message: str,
 ) -> str | None:
+    period_match = _OPTION_PERFORMANCE_PERIOD_CUTOFF.fullmatch(user_message)
+    if period_match is not None:
+        try:
+            cutoff = date.fromisoformat(period_match.group("date"))
+        except ValueError:
+            return "option performance cutoff is not authorized by the current message"
+        if (
+            payload.get("period") != period_match.group("period").lower()
+            or payload.get("as_of_date") != cutoff.isoformat()
+        ):
+            return "option performance cutoff is not authorized by the current message"
+        return None
     match = _OPTION_PERFORMANCE_CUTOFF.fullmatch(user_message)
     if match is not None:
         try:
@@ -82,7 +100,7 @@ def _constrain_option_performance_cutoff(
         ):
             return "option performance cutoff is not authorized by the current message"
         return None
-    if payload.get("period") != "mtd" or payload.get("as_of_date") in (None, ""):
+    if payload.get("period") not in {"mtd", "ytd"} or payload.get("as_of_date") in (None, ""):
         return None
     if _OPTION_PERFORMANCE_CUTOFF_INDICATOR.search(user_message):
         return "option performance cutoff is not authorized by the current message"

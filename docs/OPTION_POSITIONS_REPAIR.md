@@ -183,14 +183,14 @@ apply 后的效果：
 ./om option-positions history --record-id <record_id>
 ./om option-positions list --broker 富途 --account lx --status all
 ./om option-positions verify-projection
-./om option-performance report --config-key us --broker 富途 --account lx --period month --month 2026-04 --no-refresh-quotes
+./om option-performance report --config-key us --broker 富途 --account lx --period mtd
 ```
 
 你要确认四件事：
 - 事件链符合预期
 - 当前 lot 状态符合预期
 - replay projection 与当前 `position_lots` 一致
-- 当月 PnL、现金和 premium activity 没有被错误污染
+- MTD 期权净现金流、胜率和期权收益率与 ledger 事件一致
 
 ---
 

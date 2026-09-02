@@ -286,11 +286,7 @@ def _render_analysis_result_rows(*, data: dict[str, Any], rows: list[dict[str, A
     except Exception:
         row_count = len(rows)
     lines = [_analysis_result_summary_line(rows=rows, columns=columns, row_count=row_count)]
-    comparison = _analysis_result_comparison_line(rows=rows)
-    if comparison:
-        lines.append(comparison)
-    else:
-        lines.extend(_analysis_result_row_lines(rows=rows, columns=columns))
+    lines.extend(_analysis_result_row_lines(rows=rows, columns=columns))
     if bool(data.get("truncated")):
         lines.append("结果已截断，仅展示可用预览中的关键行。")
     lines.append(f"数据来源：{source}")
@@ -305,28 +301,6 @@ def _analysis_result_summary_line(*, rows: list[dict[str, Any]], columns: list[s
     if higher:
         return f"分析完成：共 {row_count} 行，当前对比里 {higher} 更高。"
     return f"分析完成：共 {row_count} 行。"
-
-
-def _analysis_result_comparison_line(*, rows: list[dict[str, Any]]) -> str:
-    row = rows[0] if rows else {}
-    higher = _analysis_first_value(rows, "higher_account")
-    diff_key = _analysis_first_existing_key(
-        row,
-        ("pnl_diff_cny", "cash_diff_cny", "diff_cny", "difference_cny", "pnl_diff", "amount_diff"),
-    )
-    if not higher or not diff_key:
-        return ""
-    parts: list[str] = []
-    month = _analysis_value(row.get("month"))
-    if month != "-":
-        parts.append(month)
-    left_key = _analysis_first_existing_key(row, ("lx_pnl_cny", "lx_cash_cny", "lx_amount"))
-    right_key = _analysis_first_existing_key(row, ("sy_pnl_cny", "sy_cash_cny", "sy_amount"))
-    if left_key and right_key:
-        parts.append(f"lx={_analysis_value(row.get(left_key))}")
-        parts.append(f"sy={_analysis_value(row.get(right_key))}")
-    parts.append(f"差额={_analysis_value(row.get(diff_key))}")
-    return f"关键差异：{higher} 更高（{'，'.join(parts)}）。"
 
 
 def _analysis_result_row_lines(*, rows: list[dict[str, Any]], columns: list[str]) -> list[str]:
@@ -345,26 +319,23 @@ def _analysis_result_display_columns(*, rows: list[dict[str, Any]], columns: lis
     if not columns and rows:
         columns = [str(key) for key in rows[0]]
     priority = [
-        "month",
+        "period_kind",
+        "as_of_date",
         "account",
         "symbol",
         "currency",
+        "state",
         "status",
-        "component",
-        "summary",
-        "period_total_pnl_net_cny",
-        "total_cash_change_cny",
         "amount",
-        "amount_gross",
-        "avg_rate",
+        "option_net_cashflow_by_currency",
+        "sell_option_win_rate",
+        "buy_option_win_rate",
+        "option_return_by_currency",
+        "summary",
     ]
     ordered = [column for column in priority if column in columns]
     ordered.extend(column for column in columns if column not in ordered)
     return ordered[:10]
-
-
-def _analysis_first_existing_key(row: dict[str, Any], keys: tuple[str, ...]) -> str:
-    return next((key for key in keys if key in row), "")
 
 
 def _analysis_first_value(rows: list[dict[str, Any]], key: str) -> str:
@@ -731,130 +702,74 @@ def _format_config_mapping(value: dict[str, Any]) -> str:
     return ", ".join(parts)
 
 
-def _performance_metric_text(value: Any) -> str:
-    metric = _dict(value)
-    by_ccy = _dict(metric.get("by_currency"))
-    cny = _float_or_none(metric.get("cny"))
-    parts: list[str] = []
-    if by_ccy:
-        parts.append(_format_performance_ccy_amounts(by_ccy))
-    if cny is not None:
-        parts.append(f"CNY {cny:,.2f}")
-    quality = _dict(metric.get("quality"))
-    status = str(metric.get("status") or quality.get("status") or "").strip()
-    text = " / ".join(parts) if parts else "-"
-    status_label = {
-        "partial": "证据不完整",
-        "not_observed": "未观测",
-        "not_applicable": "不适用",
-    }.get(status)
-    return f"{text}（{status_label}）" if status_label else text
-
-
-def _performance_metric_pair_text(gross: Any, net: Any) -> str:
-    return f"毛 {_performance_metric_text(gross)}；净 {_performance_metric_text(net)}"
-
-
-def _performance_rate_text(value: Any) -> str:
-    metric = _dict(value)
-    by_ccy = _dict(metric.get("by_currency"))
-    parts: list[str] = []
-    for currency, rate in sorted(by_ccy.items()):
-        try:
-            parts.append(f"{str(currency).upper()} {float(rate) * 100:.2f}%")
-        except (TypeError, ValueError):
-            continue
-    status = str(metric.get("status") or "").strip()
-    status_label = {
-        "partial": "证据不完整",
-        "not_observed": "未观测",
-        "not_applicable": "不适用",
-    }.get(status)
-    text = " / ".join(parts) if parts else "-"
-    return f"{text}（{status_label}）" if status_label else text
-
-
 def _render_option_performance(data: dict[str, Any]) -> str:
     period = _dict(data.get("period"))
     scope = _dict(data.get("scope"))
-    activity = _dict(data.get("activity"))
-    cash = _dict(data.get("cash"))
-    pnl = _dict(data.get("pnl"))
-    cashflow_return = _dict(data.get("cashflow_return"))
     quality = _dict(data.get("quality"))
-    lifecycle = _dict(data.get("assignment_lifecycle"))
-    account = str(scope.get("account") or "").strip()
     accounts = [str(item).strip() for item in _list(scope.get("accounts")) if str(item).strip()]
-    scope_label = account or (f"全部账户（{'、'.join(accounts)}）" if accounts else "全部账户")
+    brokers = [str(item).strip() for item in _list(scope.get("brokers")) if str(item).strip()]
+    scope_label = "、".join(accounts) if accounts else "全部账户"
+    if brokers:
+        scope_label += f"；broker {'、'.join(brokers)}"
     period_kind = str(period.get("kind") or "-").strip()
-    period_kind_label = {
-        "mtd": "MTD",
-        "ytd": "YTD",
-        "month": "自然月",
-        "year": "自然年",
-        "range": "日期范围",
-    }.get(period_kind, period_kind)
-    period_status_label = {
-        "partial_current": "截至当前",
-        "partial_cutoff": "截至指定时点",
-        "complete_past": "完整历史期间",
-    }.get(str(period.get("status") or "").strip(), "期间状态未知")
-    period_label = f"{period.get('requested_start_date') or '-'} 至 {period.get('requested_end_date') or '-'}"
+    period_kind_label = {"mtd": "MTD", "ytd": "YTD"}.get(period_kind, period_kind)
+    period_label = f"{period.get('start_date') or '-'} 至 {period.get('as_of_date') or '-'}"
     lines = [
-        f"期权收益统计完成（{scope_label}，{period_kind_label}，{period_label}，{period_status_label}）：",
-        "收益口径（期间总 PnL = 已实现 + 期末未实现 - 期初未实现，为期权与指派股票合计）：",
-        f"- 期间总 PnL：{_performance_metric_pair_text(pnl.get('period_total_gross'), pnl.get('period_total_net'))}",
-        f"- 已实现 PnL（合计）：{_performance_metric_pair_text(pnl.get('realized_gross'), pnl.get('realized_net'))}",
-        f"- 纯期权已实现 PnL（净值含实际期权费用）：{_performance_metric_pair_text(pnl.get('option_realized_gross'), pnl.get('option_realized_net'))}",
-        f"- 指派股票已实现 PnL（股票价差；净值含实际结算/卖出费用）：{_performance_metric_pair_text(pnl.get('assigned_stock_realized_gross'), pnl.get('assigned_stock_realized_net'))}",
-        "现金口径：",
-        f"- 总现金变动（净）：{_performance_metric_text(cash.get('total_cash_change_net'))}",
-        f"- 期权交易现金：{_performance_metric_text(cash.get('option_trade_cash_gross'))}",
-        f"- 期权费用现金：{_performance_metric_text(cash.get('option_fee_cash'))}",
-        f"- 指派/行权正股结算本金：{_performance_metric_text(cash.get('stock_settlement_cash_gross'))}",
-        f"- 指派/行权正股结算费用：{_performance_metric_text(cash.get('stock_settlement_fee_cash'))}",
-        f"- 指派股票卖出回款：{_performance_metric_text(cash.get('assigned_stock_sale_cash_gross'))}",
-        f"- 指派股票卖出费用：{_performance_metric_text(cash.get('assigned_stock_sale_fee_cash'))}",
-        "现金流收益率口径（仅期权净现金流 / 活跃期权平均担保资本）：",
-        f"- 期权净现金流：{_performance_metric_text(cash.get('option_net_cashflow'))}",
-        f"- 期间现金流收益率：{_performance_rate_text(cashflow_return.get('period_return'))}",
-        f"- 年化现金流收益率：{_performance_rate_text(cashflow_return.get('annualized_return'))}",
-        f"- 担保资本天数：{_format_performance_ccy_amounts(_dict(cashflow_return.get('capital_days_by_currency'))) or '-'}",
-        "活动口径：",
-        f"- 收到权利金：{_performance_metric_text(activity.get('premium_collected_gross'))}",
-        f"- 支付权利金：{_performance_metric_text(activity.get('premium_paid_gross'))}",
-        f"- 期权合约：开仓 {activity.get('contracts_opened', 0)} 张；平仓 {activity.get('contracts_closed', 0)} 张。",
-        f"- 指派股票：本期形成 {activity.get('assigned_stock_shares_opened', 0)} 股；卖出 {activity.get('assigned_stock_shares_sold', 0)} 股。",
+        f"期权收益统计完成（{scope_label}，{period_kind_label}，{period_label}）：",
+        f"- 期权净现金流：{_canonical_cashflow_text(data.get('option_net_cashflow'))}",
+        f"- 卖方胜率：{_canonical_win_rate_text(data.get('sell_option_win_rate'))}",
+        f"- 买方胜率：{_canonical_win_rate_text(data.get('buy_option_win_rate'))}",
+        f"- 期权收益率：{_canonical_option_return_text(data.get('option_return'))}",
     ]
-    ending_lots = _list(lifecycle.get("ending_lots"))
-    sales = _list(lifecycle.get("sales"))
-    review = _list(lifecycle.get("review"))
-    unsupported = _list(lifecycle.get("unsupported_inventory"))
-    lines.append(
-        f"指派状态：期末 lot {len(ending_lots)} 个，卖出记录 {len(sales)} 条，"
-        f"复核项 {len(review)} 条，不支持库存 {len(unsupported)} 条。"
-    )
     missing = [str(item) for item in _list(quality.get("missing")) if str(item)]
-    warnings = [str(item) for item in _list(quality.get("warnings")) if str(item)]
     if missing:
         lines.append("缺失证据：" + "；".join(missing[:6]))
-    if warnings:
-        lines.append("提示：" + "；".join(warnings[:6]))
-    lines.append(
-        "口径：权利金是交易活动；期权/股票已实现 PnL 才是实现利润；"
-        "指派结算本金和卖股回款是现金流，不直接等于 PnL，也不能与权利金重复相加。"
-    )
+    lines.append("口径：仅统计期权净现金流、卖方/买方胜率与按担保资本计算的期权收益率；不提供 option PnL。")
     return "\n".join(lines)
 
 
-def _format_performance_ccy_amounts(values: dict[str, Any]) -> str:
+def _canonical_cashflow_text(value: Any) -> str:
+    by_currency = _dict(_dict(value).get("by_currency"))
     parts: list[str] = []
-    for currency, amount in sorted(values.items()):
-        try:
-            parts.append(f"{str(currency).upper()} {float(amount):,.2f}")
-        except Exception:
-            continue
-    return " + ".join(parts) if parts else "-"
+    for currency, raw in sorted(by_currency.items()):
+        components = _dict(raw)
+        component_text = []
+        for key, label in (("total", "合计"), ("open", "未终止"), ("terminated", "已终止")):
+            metric = _dict(components.get(key))
+            amount = _float_or_none(metric.get("amount"))
+            component_text.append(f"{label} {amount:,.2f}" if amount is not None else f"{label} -")
+        parts.append(f"{str(currency).upper()} " + "，".join(component_text))
+    return "；".join(parts) if parts else "-"
+
+
+def _canonical_win_rate_text(value: Any) -> str:
+    metric = _dict(value)
+    rate = _float_or_none(metric.get("rate"))
+    winning = metric.get("winning_contracts", 0)
+    eligible = metric.get("eligible_contracts", 0)
+    status = str(metric.get("status") or "").strip()
+    rate_text = f"{rate * 100:.2f}%" if rate is not None else "-"
+    suffix = "（不适用）" if status == "not_applicable" else ("（证据不完整）" if status == "partial" else "")
+    return f"{rate_text}（{winning}/{eligible} 张）{suffix}"
+
+
+def _canonical_option_return_text(value: Any) -> str:
+    by_currency = _dict(_dict(value).get("by_currency"))
+    parts: list[str] = []
+    for currency, raw in sorted(by_currency.items()):
+        metric = _dict(raw)
+        rate = _float_or_none(metric.get("rate"))
+        annualized_rate = _float_or_none(metric.get("annualized_rate"))
+        status = str(metric.get("status") or "").strip()
+        period_text = f"{rate * 100:.2f}%" if rate is not None else "-"
+        annualized_text = f"{annualized_rate * 100:.2f}%" if annualized_rate is not None else "-"
+        text = f"期间 {period_text}，年化 {annualized_text}"
+        if status == "partial":
+            text += "（证据不完整）"
+        elif status == "not_applicable":
+            text += "（不适用）"
+        parts.append(f"{str(currency).upper()} {text}")
+    return " / ".join(parts) if parts else "-"
 
 
 def _format_ccy_amounts(values: dict[str, Any]) -> str:

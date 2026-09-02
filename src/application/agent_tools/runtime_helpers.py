@@ -4,6 +4,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+from domain.domain.option_position_identity import normalize_broker as normalize_position_broker
 from src.application.agent_tool_config import repo_base
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.config_sections import resolve_watchlist_config
@@ -20,7 +21,7 @@ from src.application.symbol_mutations import normalize_symbol_read
 
 
 def normalize_broker(value: Any) -> str:
-    return str(value or "富途").strip() or "富途"
+    return normalize_position_broker(str(value or "富途").strip()) or "富途"
 
 
 def symbol_fetch_config_map(cfg: dict[str, Any]) -> dict[str, dict[str, Any]]:

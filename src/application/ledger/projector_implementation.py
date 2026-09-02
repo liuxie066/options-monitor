@@ -30,13 +30,18 @@ _SEMANTIC_IMPORT_GRAPH: dict[str, tuple[str, ...]] = {
     ),
     "domain/domain/ledger/economics.py": (
         "domain/domain/ledger/events.py",
+        "domain/domain/ledger/fees.py",
         "domain/domain/ledger/identity.py",
         "domain/domain/ledger/lots.py",
-        "domain/domain/performance/models.py",
+        "domain/domain/ledger/position_fields.py",
+        "domain/domain/money.py",
     ),
     "domain/domain/ledger/events.py": (
         "domain/domain/ledger/identity.py",
         "domain/domain/option_position_identity.py",
+    ),
+    "domain/domain/ledger/fees.py": (
+        "domain/domain/money.py",
     ),
     "domain/domain/ledger/identity.py": (
         "domain/domain/option_position_identity.py",
@@ -51,6 +56,8 @@ _SEMANTIC_IMPORT_GRAPH: dict[str, tuple[str, ...]] = {
         "domain/domain/ledger/events.py",
         "domain/domain/ledger/identity.py",
         "domain/domain/ledger/lots.py",
+        "domain/domain/ledger/position_fields.py",
+        "domain/domain/money.py",
     ),
     "domain/domain/ledger/lots.py": (
         "domain/domain/ledger/events.py",
@@ -69,16 +76,13 @@ _SEMANTIC_IMPORT_GRAPH: dict[str, tuple[str, ...]] = {
         "domain/domain/ledger/identity.py",
         "domain/domain/ledger/invariants.py",
         "domain/domain/ledger/lots.py",
+        "domain/domain/ledger/position_fields.py",
         "domain/domain/ledger/projection_state.py",
     ),
+    "domain/domain/money.py": (),
     "domain/domain/option_position_identity.py": (
         "domain/domain/expiration_dates.py",
         "domain/domain/symbol_identity.py",
-    ),
-    "domain/domain/performance/models.py": (
-        "domain/domain/ledger/identity.py",
-        "domain/domain/option_position_identity.py",
-        "domain/domain/trade_contract_identity.py",
     ),
     "domain/domain/symbol_identity.py": (),
     "domain/domain/strategy_vocab.py": (),
@@ -106,7 +110,7 @@ _SEMANTIC_IMPORT_GRAPH: dict[str, tuple[str, ...]] = {
 
 # Generated from the manifest and exact raw source bytes by
 # compute_projector_implementation_fingerprint().
-EXPECTED_PROJECTOR_IMPLEMENTATION_FINGERPRINT = "0d6a4e6608df0a8158c53c0af438afd50ff8eec89853a22f22feb8860772318b"
+EXPECTED_PROJECTOR_IMPLEMENTATION_FINGERPRINT = "c743ccb44308105d1ab9ae001091c9642ca916215a946f4af155d42aefb43039"
 
 
 class ProjectorImplementationUnavailable(RuntimeError):

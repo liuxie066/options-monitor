@@ -5,14 +5,17 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Mapping
 
-from domain.domain.ledger import TradeEvent, fee_fact_from_persisted_evidence
-from domain.domain.performance.engine import cash_facts_for_trade_event
+from domain.domain.ledger.cash_facts import cash_facts_for_trade_event
+from domain.domain.ledger.economics import fee_fact_from_persisted_evidence
+from domain.domain.ledger.events import TradeEvent
+from domain.domain.ledger.fees import FeeComponent
+from domain.domain.money import quantize_money, to_decimal
+from domain.domain.option_position_identity import normalize_currency
 from domain.domain.performance.cash_conversion import (
     MAX_BOOKING_RATE_DISTANCE_MS,
     cash_conversion_id,
     cash_conversion_identity,
 )
-from domain.domain.performance.models import FeeComponent, normalize_currency, quantize_money, to_decimal
 from src.infrastructure.exchange_rates import get_cached_exchange_rates
 
 

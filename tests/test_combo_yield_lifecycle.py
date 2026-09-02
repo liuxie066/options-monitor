@@ -236,7 +236,7 @@ def test_manual_open_invalidates_position_context_cache(tmp_path: Path) -> None:
         currency="USD",
         strike=100.0,
         multiplier=100,
-        expiration_ymd="2026-08-21",
+        expiration_ymd="2027-08-21",
         premium_per_share=2.0,
         underlying_share_locked=None,
         note=None,

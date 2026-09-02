@@ -183,7 +183,7 @@ def _fixture_observations(fixture_id: str | None) -> list[dict[str, Any]]:
                 "summary": "eval-only analysis catalog exposes option performance attribution views.",
                 "facts": [
                     "eval_only=true",
-                    "views=option_monthly_performance,option_pnl_components,option_activity_components",
+                    "views=option_period_performance,option_cash_components,symbol_performance_attribution",
                 ],
                 "data": {"eval_only": True, "view_count": 3},
                 "error": None,
@@ -193,11 +193,11 @@ def _fixture_observations(fixture_id: str | None) -> list[dict[str, Any]]:
             {
                 "tool_name": "analysis_query",
                 "ok": True,
-                "summary": "eval-only analysis query has June option-performance rows.",
+                "summary": "eval-only analysis query has canonical June MTD option-performance rows.",
                 "facts": [
-                    "month=2026-06 account=lx period_total_pnl_net_cny=400 premium_collected_cny=800 total_cash_change_cny=1200",
-                    "symbol=0700.HK pnl_component=assigned_stock_realized amount_cny=400",
-                    "symbol=NVDA activity_component=premium_collected amount_cny=800",
+                    "period_kind=mtd as_of_date=2026-06-30 accounts=lx option_net_cashflow_by_currency.USD.total.amount=1200",
+                    "period_kind=mtd currency=USD state=terminated amount=800 status=observed",
+                    "symbol=NVDA option_net_cashflow_by_currency.USD.total.amount=800 sell_option_win_rate=0.75",
                 ],
                 "data": {"eval_only": True, "row_count": 3},
                 "error": None,
@@ -206,10 +206,10 @@ def _fixture_observations(fixture_id: str | None) -> list[dict[str, Any]]:
             {
                 "tool_name": "option_performance_report",
                 "ok": True,
-                "summary": "eval-only option performance keeps PnL, cash, and premium activity separate.",
+                "summary": "eval-only option performance exposes canonical cashflow, win-rate, and return metrics.",
                 "facts": [
-                    "month=2026-06 account=lx period_total_pnl_net_cny=400 premium_collected_cny=800 total_cash_change_cny=1200",
-                    "premium_collected_cny=800 period_total_pnl_net_cny=400 total_cash_change_cny=1200",
+                    "period.kind=mtd period.as_of_date=2026-06-30 scope.accounts=lx",
+                    "option_net_cashflow.by_currency.USD.total.amount=1200 sell_option_win_rate.rate=0.75 option_return.by_currency.USD.rate=0.12",
                 ],
                 "data": {"eval_only": True, "row_count": 1},
                 "error": None,

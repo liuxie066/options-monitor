@@ -141,7 +141,7 @@ def test_executed_fee_readers_do_not_import_fee_formulas() -> None:
         ROOT / "domain" / "domain" / "assigned_stock.py",
         ROOT / "domain" / "domain" / "ledger" / "lots.py",
         ROOT / "domain" / "domain" / "ledger" / "projection.py",
-        ROOT / "domain" / "domain" / "performance" / "engine.py",
+        ROOT / "domain" / "domain" / "performance" / "weighted_reducer.py",
         ROOT / "src" / "application" / "cash_conversion.py",
         *sorted(
             (ROOT / "src" / "application" / "ledger").glob(

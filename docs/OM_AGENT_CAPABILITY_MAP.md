@@ -20,12 +20,10 @@ The `portfolio` toolset contains three pure-read tools. `portfolio_query` lets t
 same `om_chat` Copilot read portfolio-management `health`, `accounts`, `overview`,
 `holdings`, `cash`, `nav`, `distribution`, and `full_report` views over a GET-only
 loopback HTTP boundary. The two primary bridge tools keep independent accounting
-equations: `portfolio_pnl_bridge` combines PM `/api/v1/analysis/capital-facts` with
-`option_performance_report.pnl.period_total_net`, while `portfolio_cash_bridge`
-returns `portfolio_cash_facts_not_onboarded` without calling a placeholder
-endpoint until PM implements authoritative cash/MMF period facts. Both return MTD/YTD
-waterfall `steps[]` and Markdown `fallback_text`; missing or incomplete evidence
-remains unavailable instead of becoming zero. The old `portfolio_capital_bridge`
+routes but return explicit unavailable states: option performance no longer owns
+option PnL, and its net cash flow excludes assignment/stock cash required by a
+combined cash equation. They do not synthesize those missing authorities from
+the four option-performance metrics. The old `portfolio_capital_bridge`
 has been removed because it mixed total assets with legacy option cash
 semantics. None of the current tools exposes portfolio writes, accepts endpoint
 arguments, or adds a second Scene/Agent. The toolset is optional and defaults

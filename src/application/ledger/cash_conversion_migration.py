@@ -9,19 +9,19 @@ from typing import Any, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 from domain.domain.ledger import TradeEvent
+from domain.domain.ledger.cash_facts import cash_facts_for_trade_event
+from domain.domain.money import to_decimal
+from domain.domain.option_position_identity import normalize_currency
 from domain.domain.performance.cash_conversion import (
     HISTORICAL_BUSINESS_DAY_FX_CARRY_FORWARD_METHOD,
     MAX_HISTORICAL_CARRY_FORWARD_DISTANCE_MS,
     OFFICIAL_CARRY_FORWARD_SOURCES,
     validate_observed_cash_conversion,
 )
-from domain.domain.performance.engine import cash_facts_for_trade_event
 from domain.domain.performance.models import (
     EvidenceSelection,
     FXRateFact,
-    normalize_currency,
     select_fx_rate,
-    to_decimal,
 )
 from src.application.cash_conversion import (
     attach_assigned_stock_sale_cash_conversions,
