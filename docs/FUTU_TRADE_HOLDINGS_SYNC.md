@@ -43,6 +43,70 @@ backfill 时才会产生提示。旧 `trade_intake.holdings_sync.enabled` 只保
   `(broker, account, futu_account_id, order_id)` 精确查询终态订单和实际费用。
   当次尚未取得 actual 时，recent history backfill 只重试本次窗口内成交携带的同一订单。
 
+## 生命周期观察隔离与一次性历史修复
+
+`trade_intake.settlement_observation.enabled` 是 lifecycle settlement provider
+的唯一开关，默认值为 `true`。它不改变成交身份、Inbox 幂等、费用补全、投影、
+通知或 lifecycle 证据规则。
+
+开关为 `false` 时：
+
+- applied push、Inbox retry 和 recent history backfill 在 canonical ledger 写入前
+  仍必须完成启动 checkpoint seal；seal 失败时 payload 保持可重试且不写 ledger；
+- 新成交继续完成 durable Inbox、canonical ledger、readback 和现有回执，但不创建
+  lifecycle settlement broker/quote gateway，也不查询 lifecycle timing；
+- recent history backfill 继续按现有 6 小时窗口和 5 分钟间隔恢复 listener 漏推，
+  不扩展为长期历史扫描；
+- lifecycle due tick 继续执行本地计划。provider-required case 写入
+  `collector_disabled`，空集和本地可决 case 保持原结果，provider claim 与 attempt
+  均为零；
+- 新 lifecycle case 可以保持 `cause_pending` / `needs_review` 且暂时没有 timing；
+  不猜测到期、指派或行权终态，也不发送相应终态通知。
+
+该开关只隔离 lifecycle settlement 观察。Push 成交补全、recent history backfill
+和费用同步仍使用 Futu native SDK，不能据此宣称所有 native 崩溃风险均已消除。
+Python `except Exception` 也无法捕获 `SIGBUS` 等进程级信号。
+
+### 生产启用顺序
+
+发布、远端升级、生产配置修改、历史账本写入和恢复服务是独立授权边界。
+恢复 trade-intake 前必须：
+
+1. 升级时使用 `--no-restart-services --preserve-activation-state`，并读回确认
+   trade-intake 仍为 inactive。
+2. 在权威 `config.yaml` 显式设置
+   `trade_intake.settlement_observation.enabled=false`，重建并验证运行配置，
+   分别读回 lx 和 sy 的有效值为 `false`。
+3. 完成一次性历史修复的 preview、apply 和 readback，并确认不存在待发历史通知。
+4. 记录 `NRestarts` 基线后再恢复服务。第一次增加或出现状态 `135` 时立即停服，
+   核对备份、账本 readback、integrity、投影数量、notification pending 和
+   lifecycle claim，不等待重复崩溃。
+
+服务恢复后的最小 canary 是连续跨过至少两个 lifecycle tick，期间
+`NRestarts` 不增加，账本 integrity、投影数量和 notification pending
+没有非预期变化。该 canary 不是对所有 Futu SDK 路径的长期稳定性证明。
+
+### 一次性历史修复边界
+
+历史批量修复是独立的一次性运维工作单元，不加入 listener、定时器、配置生成器、
+公开 CLI 或长期脚本，也不增加 `force-provider` 类产品选项。它必须：
+
+- 显式接收账户、包含边界的日期范围、时区和目标类型；
+- 先执行只读 OpenD inventory 与 ledger diff，由操作员确认 frozen manifest；
+- 在 apply 前备份精确 SQLite 与 source Inbox，并取得独立的账本写入确认；
+- 只通过现有 canonical trade/lifecycle owner 应用精确 broker identity，不按
+  symbol、数量或推测成交时间模糊匹配；
+- 在常驻 collector 开关为 `false` 时使用任务自身的明确 provider 入口；
+- 抑制历史通知，写后执行 ledger readback、完整投影重放和 integrity check；
+- 在回执中记录 runner 代码哈希、manifest 哈希、通知抑制证据和每个 identity
+  的应用结果；重跑只跳过已经读回确认的同一 identity；
+- 遇到 OpenD 崩溃、超时或证据不完整时失败并保留备份与回执，不把未知结果
+  标记为已完成；执行后删除临时 runner。
+
+apply 前还需从生产只读盘点 effective flag、缺少 timing 的 case，以及
+pending、provider-finished、ambiguous 基线。具体账户、范围、时区、目标类型和
+通知抑制方法属于该一次性工作单元的运行输入，不固化为产品默认值。
+
 ## 订单费用同步
 
 OpenD 适配器只负责查询与规范化。账本应用层选择完整订单组，并在查询费用前校验
