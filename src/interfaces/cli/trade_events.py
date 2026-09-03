@@ -88,7 +88,10 @@ def main(argv: list[str] | None = None) -> int:
     p_void.add_argument("--format", choices=["text", "json"], default="text")
     _add_write_flags(p_void, high_risk=True)
 
-    p_repair = sub.add_parser("repair", help="void an event and append a corrected replacement event")
+    p_repair = sub.add_parser(
+        "repair",
+        help="repair an event; identity-only Futu order metadata is bound in place",
+    )
     p_repair.add_argument("--runtime-root", default=None, help="runtime root for active ledger store")
     p_repair.add_argument("event_id")
     p_repair.add_argument("--reason", default="manual_repair")
@@ -257,15 +260,29 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as exc:
             print(str(exc))
             return 2
+        identity_binding = payload.get("operation") == "futu_order_identity_binding"
+        write_applied = bool(payload.get("mode") == "applied") if identity_binding else should_apply
         payload["ledger_store"] = ledger_store
         payload = attach_write_contract(
             payload,
             dry_run=not should_apply,
-            write_applied=should_apply,
-            rollback_hint="void repair events or restore option_positions SQLite from backup",
+            write_applied=write_applied,
+            rollback_hint=(
+                "identity binding creates no backup or void event; restore a separately verified pre-write SQLite backup"
+                if identity_binding
+                else "void repair events or restore option_positions SQLite from backup"
+            ),
         )
         if args.format == "json":
             _print_json(payload)
+            return 0
+        if identity_binding:
+            state = str(payload.get("mode") or "").upper()
+            verb = "would bind" if payload.get("mode") == "dry_run" else "already bound" if payload.get("mode") == "no_op" else "bound"
+            print(
+                f"[{state}] {verb} Futu order identity event_id={args.event_id} "
+                f"futu_account_id={payload.get('futu_account_id')} order_id={payload.get('order_id')}"
+            )
             return 0
         if should_apply:
             print(

@@ -99,6 +99,32 @@ class TradeEventRepositoryMixin:
             )
         return True
 
+    def compare_and_swap_trade_event_order_identity_json(
+        self,
+        *,
+        event_id: str,
+        expected_event_json: str,
+        replacement_event_json: str,
+        updated_at_ms: int,
+        conn: sqlite3.Connection,
+    ) -> bool:
+        if conn is None or not conn.in_transaction:
+            raise ValueError("order identity binding requires an active transaction")
+        updated = conn.execute(
+            """
+            UPDATE trade_events
+            SET event_json = ?, updated_at_ms = ?
+            WHERE event_id = ? AND event_json = ?
+            """,
+            (
+                str(replacement_event_json),
+                int(updated_at_ms),
+                str(event_id),
+                str(expected_event_json),
+            ),
+        )
+        return int(updated.rowcount or 0) == 1
+
     def list_trade_events(self, *, conn: sqlite3.Connection | None = None) -> list[dict[str, Any]]:
         with self._optional_conn(conn) as active_conn:
             rows = active_conn.execute(
