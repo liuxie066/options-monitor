@@ -38,6 +38,60 @@ def _repo_with_open_event(tmp_path: Path):
     event_id = repo.list_trade_events()[0]["event_id"]
     return repo, event_id
 
+def _attach_opend_time_evidence(
+    repo,
+    *,
+    event_id: str,
+    trade_time_ms: int = 900,
+    quantity: int = 1,
+) -> None:
+    with repo._connect() as conn:  # noqa: SLF001 - exact persisted evidence fixture
+        row = conn.execute(
+            "SELECT event_json FROM trade_events WHERE event_id=?",
+            (event_id,),
+        ).fetchone()
+        payload = json.loads(str(row["event_json"]))
+        payload["raw_payload"]["opend_order_evidence"] = {
+            "schema_version": "opend_order_evidence.v1",
+            "provider": "opend",
+            "classification": "single_order",
+            "observed_at_ms": 3000,
+            "orders": [
+                {
+                    "futu_account_id": "123",
+                    "order_id": "order-1",
+                    "deal_ids": ["deal-1"],
+                    "quantity": quantity,
+                    "price": "3.930000",
+                    "trade_time_ms": trade_time_ms,
+                }
+            ],
+        }
+        payload["raw_payload"]["cash_conversions"] = {
+            "option_trade_cash_gross": {"status": "observed"}
+        }
+        conn.execute(
+            "UPDATE trade_events SET event_json=?, updated_at_ms=? WHERE event_id=?",
+            (json.dumps(payload, ensure_ascii=False), 1500, event_id),
+        )
+
+
+def _install_legacy_trade_time_immutable_trigger(repo) -> None:
+    with repo._connect() as conn:  # noqa: SLF001 - deployed-schema upgrade fixture
+        conn.execute("DROP TRIGGER trg_trade_events_query_projection_immutable")
+        conn.execute(
+            """
+            CREATE TRIGGER trg_trade_events_query_projection_immutable
+            BEFORE UPDATE OF event_json, trade_time_ms ON trade_events
+            WHEN NEW.trade_time_ms IS NOT OLD.trade_time_ms
+              OR json_extract(NEW.event_json, '$.event_time_ms')
+                 IS NOT json_extract(OLD.event_json, '$.event_time_ms')
+            BEGIN
+              SELECT RAISE(ABORT, 'trade event query projection is immutable');
+            END
+            """
+        )
+
 
 def _append_canonical_void_event(
     repo,
@@ -466,6 +520,168 @@ def test_trade_events_identity_repair_binds_in_place_with_downstream_and_is_idem
     assert no_op["mode"] == "no_op"
     assert no_op["write_applied"] is False
     assert stored_state() == (after_json, after_ingest_seq, after_lots, after_generation)
+
+
+def test_trade_events_opend_time_correction_updates_in_place_with_downstream_and_is_idempotent(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    import src.interfaces.cli.trade_events as cli
+    from src.application.ledger.position_projection_runtime import run_position_projection_forced_full
+
+    repo, event_id = _repo_with_open_event(tmp_path)
+    _attach_opend_time_evidence(repo, event_id=event_id)
+    run_position_projection_forced_full(repo)
+    lot = repo.list_position_lots()[0]
+    ledger_manual_trades.persist_manual_close_event(
+        repo,
+        record_id=lot["record_id"],
+        fields=lot["fields"],
+        contracts_to_close=1,
+        close_price=1.2,
+        close_reason="manual_buy_to_close",
+        as_of_ms=2000,
+    )
+    _install_legacy_trade_time_immutable_trigger(repo)
+    monkeypatch.setattr(
+        cli,
+        "resolve_option_positions_repo",
+        lambda **_kwargs: (tmp_path / "data.json", repo),
+    )
+
+    def stored_state() -> tuple[str, int, int, list[dict], int]:
+        with repo._connect() as conn:  # noqa: SLF001 - exact storage proof
+            row = conn.execute(
+                "SELECT event_json, trade_time_ms, ingest_seq FROM trade_events WHERE event_id=?",
+                (event_id,),
+            ).fetchone()
+        generation = int(repo.read_position_projection_source_state().get("source_generation") or 0)
+        return (
+            str(row["event_json"]),
+            int(row["trade_time_ms"]),
+            int(row["ingest_seq"]),
+            repo.list_position_lots(),
+            generation,
+        )
+
+    before_json, before_time, before_ingest_seq, before_lots, before_generation = stored_state()
+    args = [
+        "repair",
+        event_id,
+        "--trade-time-ms",
+        "900",
+        "--reason",
+        "OpenD stored evidence: order-1",
+        "--format",
+        "json",
+    ]
+
+    assert cli.main([*args, "--dry-run"]) == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert preview["operation"] == "opend_trade_time_correction"
+    assert preview["mode"] == "dry_run"
+    assert preview["before_trade_time_ms"] == 1000
+    assert preview["after_trade_time_ms"] == 900
+    assert preview["evidence_order_ids"] == ["order-1"]
+    assert preview["write_applied"] is False
+    assert stored_state() == (
+        before_json,
+        before_time,
+        before_ingest_seq,
+        before_lots,
+        before_generation,
+    )
+
+    assert cli.main([*args, "--confirm"]) == 0
+    applied = json.loads(capsys.readouterr().out)
+    after_json, after_time, after_ingest_seq, after_lots, after_generation = stored_state()
+    assert applied["mode"] == "applied"
+    assert applied["write_applied"] is True
+    assert applied["invalidated_cash_conversion_count"] == 1
+    assert after_time == 900
+    assert after_ingest_seq == before_ingest_seq
+    assert after_generation == before_generation + 1
+    assert len(repo.list_trade_events()) == 2
+    assert after_lots[0]["fields"]["opened_at"] == 900
+    before_without_time = deepcopy(before_lots)
+    after_without_time = deepcopy(after_lots)
+    before_without_time[0]["fields"].pop("opened_at")
+    after_without_time[0]["fields"].pop("opened_at")
+    assert after_without_time == before_without_time
+    after_payload = json.loads(after_json)
+    assert "cash_conversions" not in after_payload["raw_payload"]
+    provenance = after_payload["raw_payload"]["trade_time_correction_provenance"]
+    assert provenance["schema_version"] == "opend_trade_time_correction.v1"
+    assert provenance["invalidated_cash_conversion_keys"] == ["option_trade_cash_gross"]
+    assert provenance["expected_before_sha256"] == preview["expected_before_sha256"]
+    with repo._connect() as conn:  # noqa: SLF001 - deployed trigger upgrade proof
+        trigger_sql = str(
+            conn.execute(
+                "SELECT sql FROM sqlite_master WHERE name='trg_trade_events_query_projection_immutable'"
+            ).fetchone()["sql"]
+        )
+    assert "opend_trade_time_correction.v1" in trigger_sql
+
+    assert cli.main([*args, "--confirm"]) == 0
+    no_op = json.loads(capsys.readouterr().out)
+    assert no_op["mode"] == "no_op"
+    assert no_op["write_applied"] is False
+    assert stored_state() == (
+        after_json,
+        after_time,
+        after_ingest_seq,
+        after_lots,
+        after_generation,
+    )
+
+
+@pytest.mark.parametrize(
+    ("evidence_time_ms", "quantity", "requested_time_ms", "message"),
+    [
+        (900, 2, 900, "quantity does not match"),
+        (900, 1, 800, "earliest stored OpenD order time"),
+    ],
+)
+def test_trade_events_opend_time_correction_rejects_unmatched_evidence(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+    evidence_time_ms: int,
+    quantity: int,
+    requested_time_ms: int,
+    message: str,
+) -> None:
+    import src.interfaces.cli.trade_events as cli
+
+    repo, event_id = _repo_with_open_event(tmp_path)
+    _attach_opend_time_evidence(
+        repo,
+        event_id=event_id,
+        trade_time_ms=evidence_time_ms,
+        quantity=quantity,
+    )
+    monkeypatch.setattr(
+        cli,
+        "resolve_option_positions_repo",
+        lambda **_kwargs: (tmp_path / "data.json", repo),
+    )
+    before = repo.list_trade_events()
+
+    assert cli.main(
+        [
+            "repair",
+            event_id,
+            "--trade-time-ms",
+            str(requested_time_ms),
+            "--reason",
+            "OpenD stored evidence: order-1",
+            "--confirm",
+        ]
+    ) == 2
+
+    assert message in capsys.readouterr().out
+    assert repo.list_trade_events() == before
 
 
 @pytest.mark.parametrize(

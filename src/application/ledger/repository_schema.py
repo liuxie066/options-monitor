@@ -107,6 +107,7 @@ from .repository_trade_schema import (
     _TRADE_EVENT_PAGINATION_MISSING,
     _backfill_trade_event_pagination_schema,
     _create_index_if_table_empty,
+    _ensure_opend_trade_time_correction_guard,
     _ensure_trade_event_pagination_schema,
     _publish_trade_event_pagination_schema,
     _trade_event_pagination_missing_row,
