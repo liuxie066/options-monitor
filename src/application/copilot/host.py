@@ -69,7 +69,9 @@ _OPTION_PERFORMANCE_CUTOFF_INDICATOR = re.compile(
     r"(?<!\d)\d{4}年\d{1,2}月\d{1,2}日|"
     r"(?<!\d)\d{1,2}月\d{1,2}日"
 )
-_OPTION_PERFORMANCE_PERIOD_TOKEN = re.compile(r"\b(?:MTD|YTD)\b", re.IGNORECASE)
+_OPTION_PERFORMANCE_PERIOD_TOKEN = re.compile(
+    r"\b(?:MTD|YTD)\b", re.IGNORECASE | re.ASCII
+)
 _OPTION_PERFORMANCE_NATURAL_SELECTOR = (
     r"20\d{2}-(?:0[1-9]|1[0-2])|"
     r"20\d{2}年(?:0?[1-9]|1[0-2])月|"
