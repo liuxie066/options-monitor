@@ -2,10 +2,16 @@
 
 ## Unreleased
 
+## 3.4.4 - 2026-09-03
+
 ### Breaking Changes
 - Reject the retired `runtime.pipeline_symbol_max_workers` and `runtime.watchlist_max_workers` settings instead of silently ignoring them.
 
+### Improvements
+- Reduced batch manual-adjustment preflight to one current projection and one combined candidate projection, bounding full-history reads without changing atomic validation.
+
 ### Bug Fixes
+- Allowed audited metadata-only binding of missing Futu account and order identities on historical open events, preserving event identity and downstream close/adjust lineage for subsequent fee enrichment.
 - Bound Strategy Lab FX observation time to the sealed prepared-receipt timestamp instead of the earlier position snapshot, preserving strict temporal validation for natural formal points.
 - Added an audited OpenD-evidence repair for incorrect historical Futu trade times, preserving event identity and projection lineage while invalidating stale event-time cash conversions for explicit backfill.
 
