@@ -3,7 +3,7 @@
 - **产品名称**：Strategy Lab
 - **产品范围**：用真实证据完成策略假设的历史研究、未来隐藏验证和可审计回执
 - **MVP Recipe**：Cash-Secured Put (CSP) 期权持仓市值集中度
-- **产品状态**：Phase 3 本地实现完成；远端自然 Tick 隔离门槛已通过；Phase 4 正式点持仓证据范围待修复后重新积累
+- **产品状态**：Phase 3 本地实现完成；远端自然 Tick 隔离门槛已通过；待 Phase 4 真实数据验收
 
 本文是 Strategy Lab 的产品权威。技术架构、代码复用和删除范围见
 [系统设计](STRATEGY_LAB_EXPERIMENT_PLATFORM_SYSTEM_DESIGN.md)；当前遗留实现与重建差距见
