@@ -796,8 +796,9 @@ def build_option_position_evidence_binding(
         )
         observed_at_ms = int(
             datetime.fromisoformat(
-                str((payload.get("prepared_authority") or {}).get("source_observed_at") or "")
-                .replace("Z", "+00:00")
+                str(manifest.get("application_received_at_utc") or "").replace(
+                    "Z", "+00:00"
+                )
             ).astimezone(timezone.utc).timestamp()
             * 1000
         )

@@ -104,7 +104,9 @@ def _canonical_bytes(payload: Mapping[str, Any]) -> bytes:
 def _prepared_option_receipt(
     opening: Mapping[str, Any],
     *,
-    received_at: str = "2026-06-01T00:00:00Z",
+    received_at: str = "2026-07-21T14:00:01+00:00",
+    source_observed_at: str = "2026-07-21T13:59:59+00:00",
+    fx_timestamp: str = "2026-07-21T14:00:00+00:00",
     open_positions: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     payload = {
@@ -112,10 +114,11 @@ def _prepared_option_receipt(
             "schema_version": "prepared_option_positions_context",
             "fx_status": "ready",
             "fx_observation_sha256": "f" * 64,
-            "source_observed_at": "2026-07-21T14:00:00Z",
+            "source_observed_at": source_observed_at,
+            "application_received_at_utc": received_at,
         },
         "exchange_rates": {
-            "timestamp": "2026-07-21T14:00:00Z",
+            "timestamp": fx_timestamp,
             "rates": {"USDCNY": 7.2, "HKDCNY": 0.92},
         },
         "open_positions_min": open_positions or [],
@@ -356,6 +359,41 @@ def test_option_position_binding_uses_only_the_frozen_scan_batch() -> None:
             prepared_receipt=receipt,
             required_data_entries={},
             formal_time_bounds=(1_784_642_340_000, 1_784_642_405_000),
+        )
+
+
+def test_option_position_binding_uses_receipt_time_for_new_fx() -> None:
+    opening = {
+        "run_id": "new-fx-binding",
+        "account": "lx",
+        "account_config_sha256": CONFIG_HASH,
+    }
+    kwargs = {
+        "run_id": "new-fx-binding",
+        "account": "lx",
+        "market": "US",
+        "recommendation_point_id": "9" * 64,
+        "account_config_sha256": CONFIG_HASH,
+        "evidence_at_utc": "2026-07-21T14:00:02Z",
+        "required_data_entries": {},
+        "formal_time_bounds": (1_784_642_340_000, 1_784_642_405_000),
+    }
+
+    binding = build_option_position_evidence_binding(
+        **kwargs,
+        prepared_receipt=_prepared_option_receipt(opening),
+    )
+
+    assert binding["fx_rate_facts"][0]["effective_at_ms"] == 1_784_642_400_000
+    assert binding["fx_rate_facts"][0]["observed_at_ms"] == 1_784_642_401_000
+
+    with pytest.raises(RecommendationPointError, match="FX binding changed"):
+        build_option_position_evidence_binding(
+            **kwargs,
+            prepared_receipt=_prepared_option_receipt(
+                opening,
+                received_at="2026-07-21T13:59:59+00:00",
+            ),
         )
 
 
@@ -739,7 +777,12 @@ def test_best_effort_capture_builds_v2_from_strict_prepared_receipt(
         run_id=run_id,
         account="lx",
     )["owners"]["opening"]
-    receipt = _prepared_option_receipt(opening)
+    receipt = _prepared_option_receipt(
+        opening,
+        received_at="2026-06-01T00:00:00+00:00",
+        source_observed_at="2026-06-01T00:00:00+00:00",
+        fx_timestamp="2026-06-01T00:00:00+00:00",
+    )
     monkeypatch.setattr(
         mod,
         "find_prepared_option_positions_manifest",
@@ -774,7 +817,9 @@ def test_best_effort_capture_builds_v2_from_strict_prepared_receipt(
 
     late = _prepared_option_receipt(
         opening,
-        received_at="2026-06-01T00:00:01Z",
+        received_at="2026-06-01T00:00:01+00:00",
+        source_observed_at="2026-06-01T00:00:00+00:00",
+        fx_timestamp="2026-06-01T00:00:00+00:00",
     )
     with pytest.raises(RecommendationPointError) as raised:
         build_recommendation_point(

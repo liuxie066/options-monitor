@@ -1,7 +1,8 @@
 # Strategy Lab 统一策略实验平台系统设计
 
-- **状态**：Phase 3 本地实现完成；远端自然 Tick 隔离门槛已通过；Phase 4 正式点持仓证据范围待修复
-- **日期**：2026-09-02
+- **状态**：Phase 3 本地实现完成；远端自然 Tick 隔离门槛已通过；Phase 4 正式点 FX
+  时间归属已完成本地修复，待发布与 HK / US 自然交易窗口验收
+- **日期**：2026-09-03
 - **产品依据**：[Strategy Lab PRD](STRATEGY_LAB_EXPERIMENT_PLATFORM_PRD.md)
 - **首个 Recipe**：`sell_put_option_position_concentration`
 
@@ -239,6 +240,34 @@ binding 的持仓和 mark 列表为空，但仍保留正式点市场候选所需
 异步估值时点和证据合同，不扩展本次修复。现有 symbol alias fallback 可能把显式市场代码解析成另一市场；
 本修复以现有 identity 结果和 currency 一致性 fail closed，不在本 work unit 改写全局 alias 规则。修复后由
 自然正式点和 Corpus Health 回执验证同市场持仓的原批次覆盖率。
+
+#### 5.2.2 FX 事实的时间归属
+
+prepared context 中三个时间的职责不同：
+
+- `prepared_authority.source_observed_at` 是持仓 / ledger 决策快照的观测时间；它在 FX
+  读取之前冻结，不得作为 FX `observed_at_ms`；
+- `exchange_rates.timestamp` 是已绑定 FX observation 的时间，继续作为 FX
+  `effective_at_ms`；命中缓存时必须保留原 observation 时间；
+- prepared receipt 现有的 `application_received_at_utc` 在 FX 读取和 context 组装后产生，
+  作为该 FX observation 被本次 prepared context 接收的 `observed_at_ms`。
+
+`build_option_position_evidence_binding()` 是唯一修改 owner：它继续从同一份已封存
+prepared receipt 读取 FX 值和 `effective_at_ms`，但只从
+`prepared_receipt["manifest"]["application_received_at_utc"]` 构造 `observed_at_ms`。输入必须是现有
+`load_prepared_option_positions_context_receipt()` 返回的已验证 receipt；该 loader 已经校验
+manifest 与 payload authority 中的同名时间完全一致，builder 不重复 receipt 校验。
+现有 validator 继续要求
+`effective_at_ms <= observed_at_ms <= evidence_at_ms`；时钟顺序仍不合法时 fail closed，不用
+`max()` 修补，也不放宽校验。position source 的 manifest / payload hash 继续绑定这些
+时间，不增加 artifact 字段、schema、provider 调用或第二套 FX 事实。
+
+回归测试必须复现生产顺序：持仓 `source_observed_at` 早于新拉取的 FX
+`timestamp`，FX `timestamp` 早于 `application_received_at_utc`，且 receipt 早于正式点
+`evidence_at_utc`。该输入必须生成可验证 binding；FX 接收时间早于 effective time
+或晚于正式点时仍必须拒绝。共享 fixture 必须把同一 receipt time 同时写入
+manifest 和 payload authority，并使用生产实际的 aware UTC `+00:00` 格式重算 hash；不为旧
+fixture 增加 fallback。已封存的失败点不覆盖、不回填。
 
 ### 5.3 标准结果
 
@@ -626,7 +655,7 @@ MVP 保持 `blocked`；不在本设计中预建第二个 OpenD endpoint。
 | `src/application/tick_account_execution.py` | 取消 Strategy Lab 专用 `mark_evidence_accounts` 整仓刷新；不增加 Tick provider 调用 |
 | `src/application/prepared_option_positions_context.py` | 删除 Strategy Lab 触发的 `refresh_quotes=True` mark 路径和 prepared mark ready 要求；继续封存 position / FX 通用事实 |
 | `src/application/performance/evidence_collection.py` | 提升 `build_option_valuation_mark_fact()`，复用现有行匹配、mark 选择和 fact 构造；现有 performance 调用方改用同一实现 |
-| `src/application/recommendation_point.py` | 在共同 builder 内构造一次 `selected_positions`，据此组装并验证唯一 `option_position_evidence_binding`；不请求 provider |
+| `src/application/recommendation_point.py` | 在共同 builder 内构造一次 `selected_positions`，据此组装并验证唯一 `option_position_evidence_binding`；FX effective time 取 observation timestamp，observed time 取现有 prepared receipt 接收时间；不请求 provider |
 | `src/application/tick_notification_flow.py` | 固定“扫描 artifact durable -> recommendation point -> formal corpus”的调用顺序 |
 | `src/application/research/formal_corpus.py` | 从绑定的 prepared context 与冻结 required-data batch 重建 position / mark / FX binding，精确比较后封存；不调用 provider 或跨源回退 |
 
@@ -704,6 +733,10 @@ hash 与观测日期寻址，不写 ExperimentStore；过期只影响后续 prev
    - 一个 producer -> Formal Corpus 混合市场 fixture 能由共同 builder 精确重建并封存；
    midpoint、Last fallback、无价、crossed、重复匹配、多 lots、时间边界、deterministic hash 和 provider 调用数
    继续由现有测试证明，不为本修复重复建测试矩阵；
+   另修正现有共享 receipt fixture 的时间顺序，并只新增一个 FX 生产时序回归：新 FX
+   timestamp 晚于持仓 source time 时仍使用 manifest receipt time 构造合法 binding，同时断言 receipt
+   早于 effective time 仍被拒绝。receipt 晚于 evidence time 继续由现有正式点 receipt 时间测试覆盖，
+   producer 与 Formal Corpus verifier 共用 builder 由现有 Formal Corpus suite 覆盖，不新建重复时间矩阵；
 4. `evidence.py`：分钟 K 多页 / 顺序 / 重复 / receipt readiness、Bid crossing、正 / 零 / 非法 raw Bid
    Volume、request / receive tolerance；分别断言 call/envelope 无效不写 artifact、requested code 行缺陷写 invalid
    artifact、完整行写 available artifact，且 observed/fill time 使用 received time；到期查询必须绑定实际
@@ -809,9 +842,25 @@ Strategy Lab focused suite；后续切片不得负责修复上一切片留下的
 
 ### Phase 4：真实数据验收
 
-- 只在共同 `build_option_position_evidence_binding()` 及其 validator 修复正式点市场范围；使用一个
+- 已在共同 `build_option_position_evidence_binding()` 及其 validator 修复正式点市场范围；使用一个
   `selected_positions` 驱动 position / mark / FX 输出，并用最小混合市场、冲突、缺失和 Formal Corpus 集成
   回归证明 producer / verifier 合同一致；
+- 只在同一 builder 把 FX `observed_at_ms` 从持仓 source time 改为现有 prepared receipt
+  receive time，保留时序校验并增加一个生产顺序回归；不改 FX 采集、缓存、数据合同或历史点；
+- source delivery、release、upgrade 和 natural observation 是四个独立受控边界。升级后不手工
+  触发、不回填；`HK/lx` 验证 MVP 数据，`US/lx` 只验证通用正式点事实采集，不表示在 US
+  执行 MVP Recipe；
+- 每个市场只选择第一个“升级完成早于当日 expectation 封存及首个目标点”的完整自然
+  交易日；盘中升级的市场顺延到下一个交易日。当日验收要求唯一 expectation、day row
+  `complete`、所有应到 point 均为 `available`、每点 `source_commit_sha` 等于实际部署提交，且无
+  `FX binding changed`；
+- 静态 diff 和调用链必须证明本修复没有新增 provider 调用、snapshot 批次、锁或
+  cache 路径。自然交易日的 Tick service 必须 `Result=success`、退出码为 0、未超过现有
+  `tick-cron` 600 秒 deadline，且 required-data 批次正常封存；复用现有 audit / journal 记录
+  OpenD 调用数、snapshot 批次和耗时作为诊断，不对无可比基线的自然日耗时设“不得
+  增加”门槛。不为本修复新增遥测、状态或监控服务；
+- “FX defect passed”与“market-day health passed”分开报告。历史 incomplete / conflict 日保留后可能使顶层
+  Corpus Health 继续 `unhealthy`，不否定新日修复；正式研究 readiness 仍要求之后积累 20 个连续完整日；
 - 先确认 Research Archive readiness，再人工启动 20 日真实研究；
 - 只有可信 leader 才确认未来 10 日；
 - 到期后审计 Final Receipt 和生产 Tick 性能。
