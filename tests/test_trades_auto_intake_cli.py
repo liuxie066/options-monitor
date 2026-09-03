@@ -645,6 +645,174 @@ def test_source_loop_retries_checkpoint_before_building_settlement_gateway(
     ]
 
 
+def test_disabled_settlement_observation_retries_seal_without_gateways(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    order: list[str] = []
+    captured: dict[str, dict] = {}
+    checkpoint_attempts = 0
+
+    class Listener:
+        def __init__(self, *, on_deal, **_kwargs):
+            self.on_deal = on_deal
+
+        def start(self, **_kwargs):
+            self.on_deal({"deal_id": "deal-1"})
+
+        def check_health(self):
+            return None
+
+        def close(self):
+            return None
+
+    class History:
+        def __init__(self, **_kwargs):
+            return None
+
+        def close(self):
+            return None
+
+    class Stop:
+        stopped = False
+
+        def is_set(self):
+            return self.stopped
+
+        def set(self):
+            self.stopped = True
+
+        def wait(self, _seconds):
+            self.stopped = True
+            return True
+
+    def checkpoint(*_args, **_kwargs):
+        nonlocal checkpoint_attempts
+        checkpoint_attempts += 1
+        if checkpoint_attempts == 1:
+            order.append("checkpoint_failed")
+            raise OSError("disk full")
+        order.append("checkpoint")
+
+    def enqueue(*_args, payload, **_kwargs):
+        captured["payload"] = dict(payload)
+        order.append("enqueue")
+        return "inbox-1"
+
+    def retryable_rows(*_args, **_kwargs):
+        return [{
+            "inbox_id": "inbox-1",
+            "source": "push",
+            "payload": captured["payload"],
+        }]
+
+    def mark_retryable(*_args, **kwargs):
+        assert "OSError: disk full" in kwargs["error"]
+        order.append("retryable")
+
+    def process(*_args, **_kwargs):
+        order.append("process")
+        return {
+            "status": "skipped",
+            "reason": "not_option_deal",
+            "deal_id": "deal-1",
+        }
+
+    def reconcile_due(*_args, **kwargs):
+        assert kwargs["broker_gateway"] is None
+        assert kwargs["quote_gateway"] is None
+        assert kwargs["settlement_collector_factory"] is None
+        order.append("runtime")
+        return {
+            "seal_status": "not_required",
+            "run_seal": None,
+            "process_counters": kwargs["process_metrics"],
+        }
+
+    monkeypatch.setattr(auto_intake, "OpenDTradePushListener", Listener)
+    monkeypatch.setattr(auto_intake, "OpenDHistoryDealClient", History)
+    monkeypatch.setattr(
+        auto_intake,
+        "append_lifecycle_attempt_checkpoint_seal",
+        checkpoint,
+    )
+    monkeypatch.setattr(
+        auto_intake,
+        "build_futu_gateway",
+        lambda **_kwargs: pytest.fail("settlement gateway must stay disabled"),
+    )
+    monkeypatch.setattr(
+        auto_intake,
+        "ensure_lifecycle_timing_after_intake",
+        lambda *_args, **_kwargs: pytest.fail("lifecycle timing must stay disabled"),
+    )
+    monkeypatch.setattr(auto_intake, "enqueue_trade_payload", enqueue)
+    monkeypatch.setattr(auto_intake, "mark_trade_payload_retryable", mark_retryable)
+    monkeypatch.setattr(auto_intake, "list_retryable_trade_payloads", retryable_rows)
+    monkeypatch.setattr(auto_intake, "_process_payload", process)
+    monkeypatch.setattr(
+        auto_intake,
+        "settle_trade_payload_result",
+        lambda *_args, **_kwargs: order.append("settle"),
+    )
+    monkeypatch.setattr(auto_intake, "load_trade_intake_state", lambda *_args: {})
+    monkeypatch.setattr(
+        auto_intake,
+        "claim_trade_payload_refresh_intent",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        auto_intake,
+        "_dispatch_portfolio_refresh_intent",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        auto_intake,
+        "reconcile_due_lifecycle_cases_for_source",
+        reconcile_due,
+    )
+    monkeypatch.setattr(auto_intake, "trade_inbox_summary", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        auto_intake,
+        "_refresh_lifecycle_delivery_status",
+        lambda *_args, **_kwargs: None,
+    )
+    source = _listener_source(tmp_path, "lx", 11111)
+    for key in (
+        "state_path",
+        "audit_path",
+        "status_path",
+        "inbox_path",
+        "backfill_checkpoint_path",
+    ):
+        source[key] = tmp_path / source[key]
+    source["settlement_observation"] = {"enabled": False}
+
+    rc = auto_intake._run_listener_source_loop(
+        source=source,
+        repo=object(),
+        cfg={},
+        cfg_path=tmp_path / "config.json",
+        runtime_root=tmp_path,
+        runtime_root_source="test",
+        intake_cfg={"mode": "apply", "enabled": True},
+        apply_changes=True,
+        receipt_callback=lambda _context: {},
+        process_lock=threading.RLock(),
+        stop_event=Stop(),
+    )
+
+    assert rc == 0
+    assert order == [
+        "enqueue",
+        "checkpoint_failed",
+        "retryable",
+        "checkpoint",
+        "process",
+        "settle",
+        "runtime",
+    ]
+
 def test_reconcile_intake_sources_defaults_to_every_account(
     monkeypatch,
     tmp_path: Path,

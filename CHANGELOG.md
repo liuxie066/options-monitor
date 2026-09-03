@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Bug Fixes
+- Prevented disabled trade-intake settlement observation from eagerly constructing lifecycle Futu gateways or querying timing, while preserving checkpoint sealing, new fills, retryable Inbox rows, and recent missed-push recovery.
+
 ## 3.4.4 - 2026-09-03
 
 ### Breaking Changes

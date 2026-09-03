@@ -1428,6 +1428,12 @@ def _run_listener_source_loop(
     )
     account_mapping = dict(source.get("account_mapping") or {})
     futu_account_ids = list(source.get("futu_account_ids") or [])
+    settlement_observation = source.get("settlement_observation")
+    settlement_observation_enabled = (
+        bool(settlement_observation.get("enabled", True))
+        if isinstance(settlement_observation, dict)
+        else True
+    )
     status_state = _status_base_for_source(
         cfg_path=cfg_path,
         intake_cfg=intake_cfg,
@@ -1561,7 +1567,9 @@ def _run_listener_source_loop(
         **kwargs: Any,
     ) -> dict[str, Any]:
         if apply_changes:
-            _ensure_settlement_gateways()
+            _persist_checkpoint_if_pending()
+            if settlement_observation_enabled:
+                _ensure_settlement_gateways()
         result = _process_payload(
             payload,
             before_receipt_fn=lambda current: _attach_combo_reconciliation_after_open(
@@ -1572,7 +1580,7 @@ def _run_listener_source_loop(
             ),
             **kwargs,
         )
-        if not apply_changes:
+        if not apply_changes or not settlement_observation_enabled:
             return result
         try:
             timing = ensure_lifecycle_timing_after_intake(
@@ -1912,7 +1920,8 @@ def _run_listener_source_loop(
                     try:
                         _persist_checkpoint_if_pending()
                         checkpoint_completed = True
-                        _ensure_settlement_gateways()
+                        if settlement_observation_enabled:
+                            _ensure_settlement_gateways()
                         with process_lock:
                             due_result = (
                                 reconcile_due_lifecycle_cases_for_source(
@@ -1926,6 +1935,8 @@ def _run_listener_source_loop(
                                     apply_changes=True,
                                     settlement_collector_factory=(
                                         _settlement_collector_factory
+                                        if settlement_observation_enabled
+                                        else None
                                     ),
                                     process_metrics=(
                                         settlement_process_metrics
