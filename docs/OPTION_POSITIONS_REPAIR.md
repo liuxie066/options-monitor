@@ -113,7 +113,35 @@
 
 ---
 
-### 场景 D：Futu 当前期权条款与账本不同
+### 场景 D：历史 Futu 开仓缺少 OpenD 订单身份
+
+只适用于经济事实已正确、fee 尚非 actual 的 active option open 事件。人工核实
+OpenD 订单后先预览；`reason` 必须写明 OpenD 核对证据：
+
+```bash
+./om trade-events repair <open_event_id> \
+  --futu-account-id <numeric_account_id> \
+  --order-id <order_id> \
+  --reason "OpenD manual evidence: <reference>" \
+  --dry-run --format json
+```
+
+该命令不会自动创建数据库备份。生产执行前先另行创建并验证 SQLite 备份；确认 `event_id`、
+绑定前后身份和 `expected_before_sha256` 后再单独写入：
+
+```bash
+./om trade-events repair <open_event_id> \
+  --futu-account-id <numeric_account_id> \
+  --order-id <order_id> \
+  --reason "OpenD manual evidence: <reference>" \
+  --confirm --format json
+```
+
+该路径原地补录 metadata，不生成 void/replacement event，不能与 strike、price、contracts
+等其他 override 混用。写入后仍要单独 dry-run/apply `trade-events fees-sync`；本命令不连接 OpenD，
+也不自动补 fee。
+
+### 场景 E：Futu 当前期权条款与账本不同
 
 分红、拆并股等公司行动可能调整存量合约的 strike、multiplier 或其他交割条款。
 此时 Futu 的期权代码只用于定位合约；当前经济条款必须以该代码对应的 market
@@ -152,7 +180,7 @@ divergence，不会建议 `adjust-lot`。系统不会做模糊 strike 匹配，�
 
 ---
 
-### 场景 E：你怀疑投影脏了，但账本本身没问题
+### 场景 F：你怀疑投影脏了，但账本本身没问题
 
 默认只预览投影差异：
 

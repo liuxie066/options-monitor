@@ -62,6 +62,8 @@ from src.application.ledger.position_projection_runtime import (
     run_position_projection_forced_full,
     run_position_projection_in_transaction,
 )
+from src.application.ledger.interventions import persist_manual_order_identity_binding
+from src.application.ledger.order_fee_migration import enrich_order_fees
 from src.application.ledger.read_only_evidence import (
     open_trade_reconciliation_evidence_repo,
 )
@@ -2338,6 +2340,71 @@ def test_fence_finalizer_skips_unchanged_and_rebuilds_global_fanout_once(
     assert len(projection_dml) == len(accounts)
     assert all(
         read_current_decision_projection(repo, account=account, now_ms=13_000)[
+            "status"
+        ]
+        == "trusted"
+        for account in accounts
+    )
+
+
+def test_order_identity_binding_and_fee_enrichment_rebuild_every_clean_current_decision_account(
+    tmp_path: Path,
+) -> None:
+    accounts = ("lx", "sy")
+    repo = _repo(tmp_path, accounts=accounts)
+    for account in accounts:
+        _bootstrap(repo, account)
+    before_lots = repo.list_position_lots()
+
+    applied = persist_manual_order_identity_binding(
+        repo,
+        target_event_id="open-lx",
+        overrides={"futu_account_id": "123", "order_id": "order-1"},
+        repair_reason="OpenD manual evidence: deal-1",
+    )
+
+    assert applied["decision_projection"]["statuses"] == {
+        "lx": "published",
+        "sy": "published",
+    }
+    assert repo.list_position_lots() == before_lots
+    assert all(
+        read_current_decision_projection(repo, account=account, now_ms=20_000)[
+            "status"
+        ]
+        == "trusted"
+        for account in accounts
+    )
+
+    enriched = enrich_order_fees(
+        repo,
+        account="lx",
+        actual_fees=(
+            {
+                "broker": "富途",
+                "account": "lx",
+                "futu_account_id": "123",
+                "order_id": "order-1",
+                "fee_amount": "1.23",
+                "currency": "USD",
+                "event_kind": "option_trade",
+                "dealt_quantity": "1",
+                "observed_at_ms": 14_000,
+            },
+        ),
+        apply=True,
+        applied_at_ms=15_000,
+        target_identity=("富途", "lx", "123", "order-1"),
+    )
+
+    assert enriched["status_counts"] == {"committed": 1}
+    assert enriched["outcomes"][0]["decision_projection"]["statuses"] == {
+        "lx": "published",
+        "sy": "published",
+    }
+    assert repo.list_position_lots() == before_lots
+    assert all(
+        read_current_decision_projection(repo, account=account, now_ms=20_000)[
             "status"
         ]
         == "trusted"

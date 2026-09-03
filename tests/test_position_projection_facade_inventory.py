@@ -136,6 +136,11 @@ def test_projection_runtime_facade_modes_are_fully_inventoried() -> None:
                 "'forced_full'",
             ): 1,
             (
+                "src/application/ledger/interventions.py",
+                "persist_manual_order_identity_binding>_run",
+                "'forced_full'",
+            ): 1,
+            (
                 "src/application/ledger/manual_trades.py",
                 "persist_manual_adjust_events>_run",
                 "'fast_if_safe'",
