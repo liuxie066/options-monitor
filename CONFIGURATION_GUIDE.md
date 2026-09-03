@@ -90,6 +90,15 @@ portfolio_management:
 
 系统默认值在 `src/application/config_defaults.py::DEFAULT_CONFIG`。不需要把所有默认字段复制进 `config.yaml`。
 
+## Symbol 扫描并发
+
+Symbol pipeline 不提供 worker 数配置。它按输入顺序串行处理 Symbol，使受支持的
+Linux/macOS `scan-pipeline` 主线程中的 `runtime.symbol_timeout_sec` 能真正中断超时处理。
+整次 Tick 的 wall-clock 最终边界仍由 `tick-cron --timeout` 负责。
+
+不要设置 `runtime.pipeline_symbol_max_workers` 或 `runtime.watchlist_max_workers`；
+这两个键已退役，配置验证会要求删除。数据预取并发与账户并发是独立合同，不受影响。
+
 ## 账户
 
 支持两种账户类型：

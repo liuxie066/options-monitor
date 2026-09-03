@@ -190,9 +190,33 @@ def test_explicit_empty_cli_account_fails_before_run_artifacts(
     assert not (tmp_path / "output_runs").exists()
 
 
-def test_allow_stale_config_still_rejects_removed_runtime_fields_before_run_artifacts(
+@pytest.mark.parametrize(
+    ("runtime", "combo_yield", "extra_args", "error", "freshness_calls"),
+    (
+        (
+            {"pipeline_symbol_max_workers": 1},
+            None,
+            (),
+            "pipeline_symbol_max_workers is no longer supported",
+            1,
+        ),
+        (
+            {},
+            {"enabled": True, "output_mode": "separate"},
+            ("--allow-stale-config",),
+            "output_mode has been removed",
+            0,
+        ),
+    ),
+)
+def test_tick_rejects_retired_config_before_run_artifacts(
     monkeypatch,
     tmp_path: Path,
+    runtime: dict,
+    combo_yield: dict | None,
+    extra_args: tuple[str, ...],
+    error: str,
+    freshness_calls: int,
 ) -> None:
     import json
 
@@ -202,18 +226,16 @@ def test_allow_stale_config_still_rejects_removed_runtime_fields_before_run_arti
     config_path.write_text(
         json.dumps(
             {
-                "accounts": ["lx"],
-                "symbols": [
-                    {
-                        "symbol": "NVDA",
-                        "sell_put": {"enabled": False},
-                        "sell_call": {"enabled": False},
-                        "combo_yield": {
-                            "enabled": True,
-                            "output_mode": "separate",
-                        },
-                    }
-                ],
+                    "accounts": ["lx"],
+                    "runtime": runtime,
+                    "symbols": [
+                        {
+                            "symbol": "NVDA",
+                            "sell_put": {"enabled": False},
+                            "sell_call": {"enabled": False},
+                            **({"combo_yield": combo_yield} if combo_yield else {}),
+                        }
+                    ],
             }
         ),
         encoding="utf-8",
@@ -239,13 +261,8 @@ def test_allow_stale_config_still_rejects_removed_runtime_fields_before_run_arti
         "ensure_runtime_schedule_matches_market",
         lambda *_args, **_kwargs: {"market": "us"},
     )
-    monkeypatch.setattr(
-        mod,
-        "ensure_runtime_config_freshness",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("allow-stale-config must skip freshness only")
-        ),
-    )
+    freshness_events: list[int] = []
+    monkeypatch.setattr(mod, "ensure_runtime_config_freshness", lambda *_args, **_kwargs: freshness_events.append(1) or {"fresh": True})
     monkeypatch.setattr(
         mod,
         "RunLogger",
@@ -254,17 +271,18 @@ def test_allow_stale_config_still_rejects_removed_runtime_fields_before_run_arti
         ),
     )
 
-    with pytest.raises(SystemExit, match="output_mode has been removed"):
+    with pytest.raises(SystemExit, match=error):
         mod.main(
             [
                 "--config",
                 str(config_path),
                 "--market-config",
                 "us",
-                "--allow-stale-config",
+                *extra_args,
             ]
         )
 
+    assert len(freshness_events) == freshness_calls
     assert not (tmp_path / "output_runs").exists()
 
 
