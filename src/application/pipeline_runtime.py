@@ -279,21 +279,25 @@ def main(argv: list[str] | None = None) -> int:
     )
     shared_context_dir = Path(args.shared_context_dir).resolve() if getattr(args, "shared_context_dir", None) else None
 
+    cfg = load_runtime_pipeline_config(
+        base=repo_root,
+        config_path=cfg_path,
+        is_scheduled=is_scheduled,
+        log=log,
+        state_dir=state_dir,
+        config_payload=authority_config,
+    )
+
     if bool(getattr(args, "refresh_multiplier_cache", False)):
         try:
             from domain.domain.fetch_source import is_futu_fetch_source
             from src.application import multiplier_cache
 
             cache_path = multiplier_cache.default_cache_path(runtime_root)
-            cfg0 = (
-                dict(authority_config)
-                if authority_config is not None
-                else json.loads(cfg_path.read_text(encoding="utf-8"))
-            )
-            opend_kwargs = opend_fetch_kwargs(cfg0)
+            opend_kwargs = opend_fetch_kwargs(cfg)
             syms = [
                 item
-                for item in resolve_watchlist_config(cfg0)
+                for item in resolve_watchlist_config(cfg)
                 if is_futu_fetch_source((item.get("fetch") or {}).get("source"))
             ]
             cache = multiplier_cache.load_cache(cache_path)
@@ -320,14 +324,6 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:
             pass
 
-    cfg = load_runtime_pipeline_config(
-        base=repo_root,
-        config_path=cfg_path,
-        is_scheduled=is_scheduled,
-        log=log,
-        state_dir=state_dir,
-        config_payload=authority_config,
-    )
     py = sys.executable
 
     if "symbols" in cfg:
