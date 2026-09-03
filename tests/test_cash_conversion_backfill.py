@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -158,6 +159,64 @@ def test_backfill_dry_run_apply_and_second_apply_are_auditable_and_idempotent(
             "SELECT COUNT(*) FROM cash_conversion_backfill_audit"
         ).fetchone()[0]
     assert audit_count == 2
+
+
+def test_backfill_after_opend_time_correction_preserves_prior_audit(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "option_positions.sqlite3"
+    repo = SQLiteOptionPositionsRepository(db_path)
+    repo.upsert_trade_event(_event("open-1"))
+    evidence_repo = PerformanceEvidenceSQLiteRepository(db_path)
+    _import_rate(evidence_repo)
+    backfill_cash_conversions(
+        repo,
+        evidence_repo,
+        account="lx",
+        apply=True,
+        migrated_at_ms=MIGRATION_MS,
+    )
+
+    with repo._connect() as conn:  # noqa: SLF001 - exact audit recovery fixture
+        row = conn.execute(
+            "SELECT event_json FROM trade_events WHERE event_id='open-1'"
+        ).fetchone()
+        payload = json.loads(str(row["event_json"]))
+        payload["raw_payload"].pop("cash_conversions")
+        payload["raw_payload"]["trade_time_correction_provenance"] = {
+            "schema_version": "opend_trade_time_correction.v1",
+            "correction_id": "opend_trade_time_correction_test",
+            "provider": "opend",
+            "source": "manual_trade_event_repair",
+            "before_trade_time_ms": EVENT_MS - 1,
+            "after_trade_time_ms": EVENT_MS,
+            "invalidated_cash_conversion_keys": [
+                "option_fee_cash",
+                "option_trade_cash_gross",
+            ],
+        }
+        conn.execute(
+            "UPDATE trade_events SET event_json=? WHERE event_id='open-1'",
+            (json.dumps(payload, ensure_ascii=False, sort_keys=True),),
+        )
+
+    reapplied = backfill_cash_conversions(
+        repo,
+        evidence_repo,
+        account="lx",
+        apply=True,
+        migrated_at_ms=MIGRATION_MS + 1,
+    )
+
+    assert reapplied.changed_event_count == 1
+    assert reapplied.migrated_conversion_count == 2
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM cash_conversion_backfill_audit"
+        ).fetchone()[0] == 2
+        assert conn.execute(
+            "SELECT COUNT(*) FROM cash_conversion_trade_time_repair_audit"
+        ).fetchone()[0] == 2
 
 
 def test_backfill_preserves_observed_conversion_and_does_not_use_stale_fx(

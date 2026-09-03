@@ -90,7 +90,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p_repair = sub.add_parser(
         "repair",
-        help="repair an event; identity-only Futu order metadata is bound in place",
+        help="repair an event; verified Futu identity/time metadata is corrected in place",
     )
     p_repair.add_argument("--runtime-root", default=None, help="runtime root for active ledger store")
     p_repair.add_argument("event_id")
@@ -261,15 +261,17 @@ def main(argv: list[str] | None = None) -> int:
             print(str(exc))
             return 2
         identity_binding = payload.get("operation") == "futu_order_identity_binding"
-        write_applied = bool(payload.get("mode") == "applied") if identity_binding else should_apply
+        time_correction = payload.get("operation") == "opend_trade_time_correction"
+        in_place_repair = identity_binding or time_correction
+        write_applied = bool(payload.get("mode") == "applied") if in_place_repair else should_apply
         payload["ledger_store"] = ledger_store
         payload = attach_write_contract(
             payload,
             dry_run=not should_apply,
             write_applied=write_applied,
             rollback_hint=(
-                "identity binding creates no backup or void event; restore a separately verified pre-write SQLite backup"
-                if identity_binding
+                "in-place repair creates no backup or void event; restore a separately verified pre-write SQLite backup"
+                if in_place_repair
                 else "void repair events or restore option_positions SQLite from backup"
             ),
         )
@@ -282,6 +284,20 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 f"[{state}] {verb} Futu order identity event_id={args.event_id} "
                 f"futu_account_id={payload.get('futu_account_id')} order_id={payload.get('order_id')}"
+            )
+            return 0
+        if time_correction:
+            state = str(payload.get("mode") or "").upper()
+            verb = (
+                "would correct"
+                if payload.get("mode") == "dry_run"
+                else "already corrected"
+                if payload.get("mode") == "no_op"
+                else "corrected"
+            )
+            print(
+                f"[{state}] {verb} OpenD trade time event_id={args.event_id} "
+                f"from={payload.get('before_trade_time_ms')} to={payload.get('after_trade_time_ms')}"
             )
             return 0
         if should_apply:
