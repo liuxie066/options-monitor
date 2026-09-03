@@ -147,6 +147,139 @@ position-projection migration 的 `_write_connection()` 持有同一 `<db>.write
 `--request-id`。相同 request ID 与相同 intent 返回原结果；同一 ID 绑定不同 intent
 会 fail closed。确认前检查响应中的目标 SQLite、account、lot/event identity、数量和写入合同。
 
+## 批量 adjustment 投影成本
+
+### 目标、边界与成功信号
+
+`record_manual_position_adjustments()` 在一次原子批量写入前复用同一份 current projection，
+并把全部候选 adjustment 作为一个集合只预览一次，不按 adjustment 数量重复读取和投影完整
+`trade_events` 历史。
+
+成功信号：
+
+- 两项及更多 adjustment 的预检固定为一次 current preview 和一次 combined candidate preview；
+  全历史读取次数不随 batch cardinality 线性增长；
+- trusted checkpoint 下完整入口至多两次 full-prefix read：一次 combined candidate fallback 和一次
+  事务内最终 projection；checkpoint disabled 或 untrusted 时至多三次：current preview、combined candidate
+  preview 和事务内最终 projection 各一次；两种模式都不随 batch cardinality 增长；
+- preflight 返回字段、patch、event time 和写入结果保持兼容，forced-full 与优化路径的最终 lot
+  fingerprint 完全一致；
+- 任一 target、current fields、contract identity、patch 或 combined projection 无效时，整批零写入；
+  事务内仍重读当前 lot，并要求重读字段与 preflight advisory 字段逐字典相等，再完成最终 projection、
+  current-decision finalize 和 commit；
+- 完整 projection 缺少可恢复 state 时继续 fail closed，不发布 read model、不提交事务，也不新建
+  checkpoint；warning-only/no-state 行为只增加 characterization regression，不修改 runtime 源码；
+- Phase 3A 的 special Combo fixture 使用晚于既有历史且早于 expiration 的开仓时间，完整场景不再因
+  fixture 自身的 `economic_adjust_invalid` warning 中断。
+
+该实现没有让 adjustment 支持 tail projection，也没有达到 Phase 3A 冻结的 `500 ms`、`64 MiB` 和零
+full-prefix-read 门槛。本地 `1` warmup / `3` repetitions non-acceptance smoke 在 10,000 events / 100
+open lots 的两项 batch 上，fast 路径 wall/CPU P95 为 `0.880 s` / `0.863 s`、两次 full-prefix read，
+forced-full 路径为 `1.158 s` / `1.137 s`、三次 full-prefix read；最终 lot fingerprint 完全一致，fast
+路径 Python peak allocation 为 `79,110,743` bytes。该 smoke 只证明当前主机上的结构性收益，不是
+跨主机 acceptance 结论。
+
+当前仓库中该 batch facade 的唯一调用者是 Phase 3A benchmark；本分片只改善 admission/benchmark
+路径，不宣称生产 tick、通知或交易入口会因此加速。若未来接入生产 caller，必须先解决下述响应丢失
+后的批量重试风险。
+
+不修改 schema、公开 facade、CLI、config、正常 read path 或单笔 close path，不发布、部署或写入生产
+账本和运行环境。不处理通用事件 JSON 解码/复制成本，也不增加 cache、后台任务或新依赖。
+
+### 当前事实与选定方案
+
+原 batch command 对每个输入分别调用 `_preflight_lot_adjust()`。该函数先读取 trusted current
+projection，再对单个 `adjust` 候选调用 `preview_position_projection_append()`；领域 projector 把
+`adjust` 视为 control event，candidate tail 因此回退 full replay。事务内
+`persist_manual_adjust_events()` 又必须对最终事件集合重算一次投影。批量项越多，写前 full replay
+越多；单笔 close 和 current projection read 不经过这条重复链路，保持不动。
+
+当前实现保留 singular preflight 和事务 writer 的职责，只抽出一段共享的
+“基于已读取 current preview 构造一个 adjustment preflight result 与候选 event”逻辑：
+
+1. singular `_preflight_lot_adjust()` 读取一次 current preview，构造一个候选并预览一次；外部行为不变；
+2. 新的 batch preflight 读取一次 current preview，按既有顺序验证每个唯一 `record_id`、current
+   fields、open 状态和 contract identity，并构造各自 patch、event time 与候选 event；
+3. batch preflight 将全部候选 events 交给一次 `_preview_append_projection()`，沿用既有 error/ineligible
+   阻断规则；warning 保留在 preview 结果中，但不放宽事务内最终完整 projection 的发布条件；
+4. command 把每项 preflight 的 advisory current fields 和 event time 交给现有
+   `persist_manual_adjust_events()`；后者在同一 SQLite transaction 内重读目标，并在构造任何正式 event
+   前要求 `current_fields == fields`；任一字段漂移都 rollback，随后才检查 group collision、构造正式
+   events、发布最终 projection 和 current-decision，并一次 commit 或 rollback；
+5. 不把 advisory preview 对象或投影状态带入写事务，不降低 transaction-time revalidation。
+
+`ensure_projection_publishable()` 的 error/ineligible 规则只负责 preview 资格；事务内 `_run_full_path()`
+仍要求完整 resumable state。warning 导致 state 缺失时继续抛错并由 transaction rollback，不发布
+position lots，也不推进 trusted head。Phase 3A 当前中断来自 synthetic special Combo 开仓时间晚于
+expiration；只把该 fixture 的时间改为 `1_850_000_000_500` ms，使其晚于基线历史且早于
+`2028-12-15`，并用 regression 证明 warning-only/no-state 的 fail-closed 行为没有漂移。
+
+拒绝的替代方案：
+
+- 允许所有 `adjust` 直接 tail-resume：会扩大 domain control-event 契约，经济字段、合约身份和策略
+  metadata 的安全边界需要另行设计；没有当前收益证据时不做；
+- 修改 generic projector 为 streaming 或重写事件 codec：改动面远大于已定位的 batch 重复调用；
+- 为 warning 新增 allowlist、持久化 head diagnostics 或改变全局发布语义：当前 fixture 修正后没有必要；
+- 新增 repository latest-event query 以省掉 disabled/untrusted 下的 current full read：只少一次固定读取，
+  却扩大 persistence API，当前 benchmark-only 收益不成立；
+- 新增 batch projector、cache 或 checkpoint 类型：现有 preview 与 transaction runtime 足够表达本分片。
+
+### Owner、数据流与失败语义
+
+受影响 owner：
+
+- `src/application/ledger/commands.py`：batch 输入归一化、调用 batch preflight、组装兼容结果；
+- `src/application/ledger/preflight.py`：共享 adjustment 构造校验和一次 combined preview；
+- `src/application/ledger/manual_trades.py`：事务内 advisory/current exact-equality fence；
+- `scripts/benchmark_data_storage_projection.py`：只修正 synthetic special Combo event time；
+- `tests/test_position_projection_runtime.py`、`tests/test_research_performance_baseline.py`：行为、计数、
+  原子性、runtime characterization 和 fixture 回归。
+
+```text
+record_manual_position_adjustments(adjustments)
+  -> normalize batch + reject missing/duplicate record_id
+  -> current preview once
+  -> per target: current fields + identity + patch + candidate event
+  -> combined candidate preview once
+  -> persist_manual_adjust_events(existing transaction owner)
+       -> BEGIN IMMEDIATE + reread all targets
+       -> exact advisory/current fields fence
+       -> group collision checks + rebuild official events
+       -> final projection + current-decision finalize
+       -> commit | rollback
+```
+
+preflight 仍是 advisory；正式事务内的 `current_fields == fields` 是 batch 专属并发 fence，不新增 hash、
+版本列或通用比较 helper。combined preview 比逐项 preview 多检查 batch 内相互作用，只可能把失败提前到
+写事务前，不允许原先被拒绝的写入。重复 target、缺失 target、closed lot、identity mismatch、invalid
+patch、projection error、任一字段漂移和最终 projection/finalize 失败都保持整批零写入。
+
+批量写入在提交成功但响应丢失后重试，当前可能因相同 event ID 携带不同 `event_time` 而冲突；本分片不
+扩张为幂等协议改造。owner 为 `src/application/ledger/manual_trades.py`，影响是该 facade 暂不适合新增生产
+caller；在任何生产接入前，必须复用单笔 adjust 的 existing-event 语义并补响应丢失回归。
+
+### 实现与验证
+
+1. 在 `preflight.py` 复用现有校验构造共享 helper，增加 batch preflight；在 `commands.py` 仅替换
+   per-item preflight loop；在 `manual_trades.py` 增加 exact-equality fence。参数化验证一、二、三项 batch
+   在 trusted 模式分别保持至多两次 full-prefix read，在 disabled/untrusted 模式分别保持至多三次；
+   同时覆盖相同 `as_of_ms` 下的结果顺序，以及 trusted/disabled 模式的最终 fingerprint parity。
+2. 增加 duplicate target、单个 invalid item、transaction-time 任一字段漂移和 final projection/finalize
+   late failure 的 public batch facade 回归，全部断言 event、lot 和 current-decision 零写入；保留一条
+   warning-only/no-state forced-full 继续 fail closed 的 runtime characterization。只修正 special Combo
+   fixture 时间，并验证完整 fixture 零 diagnostics、可完成。
+3. 运行 focused tests、Ruff、dependency-graph check、guardrails、`git diff --check` 和完整 pytest；
+   再运行 Phase 3A `1` warmup / `3` repetitions smoke，比较 wall/CPU、allocation、full-prefix reads、
+   parity 和原子性。该 smoke 必须标记为 non-acceptance，不替代指定 reference host 上的正式 `5/30`。
+
+验收首先看结构性计数和正确性：full-prefix reads 对 batch cardinality 有界、fingerprint parity、任一
+失败零写入、warning/no-state 继续 fail closed。优化后绝对耗时和 peak allocation 如仍超过冻结门槛，
+只记录实测差距，不把结构性计数达标表述成 Phase 3A acceptance；只有出现真实生产调用压力或正式
+admission 需求，才重新评估 metadata-only tail support。
+
+开放项：无。批量响应丢失重试作为明确 deferred risk，在生产接入前解决。commit、push、merge、
+release、deploy 和生产写入继续是独立授权边界。
+
 ## Futu 订单身份补录
 
 ### 目标、边界与成功信号
