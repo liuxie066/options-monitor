@@ -964,6 +964,18 @@ def _validate_template_use(item: dict, *, templates: dict, symbol: str) -> None:
         die(f"{symbol}.use references unknown templates: {', '.join(unknown)}")
 
 
+def validate_retired_symbol_worker_config(cfg: dict) -> None:
+    runtime = cfg.get('runtime')
+    if not isinstance(runtime, dict):
+        return
+    for key in ('pipeline_symbol_max_workers', 'watchlist_max_workers'):
+        if key in runtime:
+            die(
+                f'runtime.{key} is no longer supported; Symbol scans are '
+                'serial under the hard timeout contract and have no worker setting'
+            )
+
+
 def validate_config(cfg: dict):
     try:
         normalize_portfolio_management_config(cfg)
@@ -1049,6 +1061,7 @@ def validate_config(cfg: dict):
     if runtime and not isinstance(runtime, dict):
         die('runtime must be an object')
     if isinstance(runtime, dict):
+        validate_retired_symbol_worker_config(cfg)
         st = runtime.get('symbol_timeout_sec', 120)
         pt = runtime.get('portfolio_timeout_sec', 60)
         try:

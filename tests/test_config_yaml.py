@@ -273,6 +273,20 @@ def test_runtime_config_rejects_retired_ai_decision_advice_key() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "key",
+    ("pipeline_symbol_max_workers", "watchlist_max_workers"),
+)
+def test_runtime_config_rejects_retired_symbol_worker_keys(key: str) -> None:
+    with pytest.raises(SystemExit, match=rf"runtime\.{key} is no longer supported"):
+        validate_config(
+            {
+                "symbols": [{"symbol": "NVDA"}],
+                "runtime": {key: 1},
+            }
+        )
+
+
 def test_yaml_config_resolves_user_overrides_and_defaults(tmp_path: Path) -> None:
     config_path = _write_yaml(tmp_path / "config.yaml", _minimal_yaml())
 

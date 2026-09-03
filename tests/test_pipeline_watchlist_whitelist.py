@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import threading
 import time
 from pathlib import Path
 
@@ -287,7 +286,7 @@ def test_watchlist_symbol_timeout_covers_the_whole_processor() -> None:
                 {"symbol": "MSFT", "sell_put": {"enabled": True}},
             ],
             "templates": {},
-            "runtime": {"pipeline_symbol_max_workers": 4},
+            "runtime": {},
         },
         report_dir=Path("."),
         is_scheduled=True,
@@ -604,68 +603,6 @@ def test_watchlist_fetch_stage_preserves_strategy_config_but_skips_scan_output()
     assert out == []
     assert seen == [(True, True, True)]
     assert summary_called == []
-
-
-def test_watchlist_pipeline_processes_symbols_in_parallel_when_configured() -> None:
-    from src.application.pipeline_watchlist import run_watchlist_pipeline
-
-    started: list[str] = []
-    lock = threading.Lock()
-    both_started = threading.Event()
-    warnings: list[str] = []
-
-    def _apply_profiles(item: dict, profiles: dict) -> dict:
-        return dict(item)
-
-    def _process_symbol(*args, **kwargs):
-        item = args[2]
-        symbol = str(item.get("symbol"))
-        with lock:
-            started.append(symbol)
-            if len(started) == 2:
-                both_started.set()
-        assert both_started.wait(1.0), "symbol processing did not overlap"
-        return [{"symbol": symbol, "strategy": "sell_put", "candidate_count": 1}]
-
-    def _build_ctx(**kwargs):
-        return ({}, None, None, None)
-
-    def _noop(*args, **kwargs):
-        return None
-
-    cfg = {
-        "symbols": [
-            {"symbol": "0700.HK", "sell_put": {"enabled": True}, "sell_call": {"enabled": False}},
-            {"symbol": "3690.HK", "sell_put": {"enabled": True}, "sell_call": {"enabled": False}},
-        ],
-        "templates": {},
-        "runtime": {"pipeline_symbol_max_workers": 2},
-    }
-
-    out = run_watchlist_pipeline(
-        py="python",
-        base=Path("."),
-        cfg=cfg,
-        report_dir=Path("."),
-        is_scheduled=True,
-        top_n=3,
-        symbol_timeout_sec=0,
-        portfolio_timeout_sec=1,
-        want_scan=True,
-        no_context=True,
-        symbols_arg=None,
-        log=lambda msg: warnings.append(msg),
-        want_fn=lambda _: True,
-        apply_profiles_fn=_apply_profiles,
-        process_symbol_fn=_process_symbol,
-        build_pipeline_context_fn=_build_ctx,
-        build_symbols_summary_fn=_noop,
-        build_symbols_digest_fn=_noop,
-    )
-
-    assert warnings == []
-    assert [row["symbol"] for row in out] == ["0700.HK", "3690.HK"]
-    assert sorted(started) == ["0700.HK", "3690.HK"]
 
 
 def test_resolve_watchlist_item_runtime_config_centralizes_template_expansion() -> None:
