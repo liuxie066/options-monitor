@@ -24,7 +24,8 @@ trade_events -> deterministic projection -> position_lots
 
 订单费用是同一成交事件的延迟证据，不另建费用事实账本。受控 fee enrichment 是唯一
 允许更新既有事件费用 provenance 的路径：按完整订单组执行 CAS、审计、读回并在同一
-事务重放受影响投影。其他模块不得直接改 `event_json`。
+事务重放受影响投影。其他模块不得直接改 `event_json`。下文“Futu 订单身份
+补录”定义一条同样受控的 metadata-only 例外。
 
 ## 模块所有权
 
@@ -145,6 +146,144 @@ position-projection migration 的 `_write_connection()` 持有同一 `<db>.write
 `add`、`assign`、`exercise` 的 preview、apply 和响应丢失后的重试必须复用同一个
 `--request-id`。相同 request ID 与相同 intent 返回原结果；同一 ID 绑定不同 intent
 会 fail closed。确认前检查响应中的目标 SQLite、account、lot/event identity、数量和写入合同。
+
+## Futu 订单身份补录
+
+### 目标、边界与成功信号
+
+历史手工 Futu 期权 open 事件可能已保留完整成交经济事实，但缺少 OpenD 费用查询所需的
+`raw_payload.futu_account_id` 和 `raw_payload.order_id`。本变更让操作员在人工核实 OpenD
+历史订单后，用现有 `trade-events repair` 原地绑定这两个身份，然后仍由现有
+`fees-sync` 查询并持久化 actual fee。
+
+成功必须同时满足：
+
+- dry-run 展示唯一目标、绑定前后身份和 `expected_before_sha256`，不写 SQLite；
+- apply 后仍是同一 `event_id` 和 `ingest_seq`，事件数量、合约、金额、数量、时间、
+  cash-conversion fact IDs、lot identity 和下游 close/adjust lineage 不变；
+- 原地更新造成的全局 position source generation 变化在同事务中发布，不留下新的
+  position 或 current-decision dirty state；
+- 带有有效下游 close/adjust 的 open 事件可补身份；经济或 lot-target override 仍走原有
+  void/replacement 路径及 downstream dependency 阻断；
+- 同一绑定重试为零 DML no-op；部分身份、冲突身份、目标已 void 或 CAS 冲突时零写入并失败；
+- 绑定后的同范围 `fees-sync` dry-run 选中该订单，actual fee 写入后再次 dry-run 收敛为 no-op。
+
+本变更不支持 close、expire-close、assignment、exercise 或 assigned-stock sale；不自动匹配 OpenD
+历史订单，不进行批量映射、部分身份补齐、事件时间纠正、经济事实更改、下游链重写、
+schema/config 变更或生产回填。账本与 OpenD 时间相差 12 小时等情况仍需操作员独立确认；
+近似时间、合约、数量或价格不会被代码提升成持久订单身份。
+
+### 当前事实与选定方案
+
+当前 `repair` 已接受 `--futu-account-id` 和 `--order-id`，但总是 void 原事件并追加
+replacement。这会被有效下游 close/adjust 正确拒绝，而强行 replacement 又会改变 event
+identity 并破坏指向原 event ID 的证据。另一个已验证的约束是：任何 `event_json` 更新都会推进
+全局 position source generation，所以只重建 position lots 不足以保持 current-decision 可信。
+
+选定的最小方案保留现有 CLI 和 application facade，在 ledger command 入口优先识别
+identity-only override，不进入 append-repair preflight：
+
+1. 对 `futu_account_id` 和 `order_id` 按原值校验且不静默 trim；前者必须是无前导零的正整数字符串，
+   后者必须非空且不含空白或控制字符。两字段必须同时显式提供。
+2. 有效 override key set 精确等于这两个身份字段时才走 identity-only；与任何经济、合约、
+   时间或 lot-target override 混用时继续原 void/replacement 语义。
+3. 目标必须是 active canonical Futu `open` 期权事件；首次绑定时 fee basis 必须尚非 actual。
+   相同 `(futu_account_id, order_id)` 被其他 active event 使用时首版直接拒绝，不实现多事件订单分配。
+4. 目标两个身份都缺失时允许绑定；两者都与输入相同时即使 fee 后来已为 actual 也返回 no-op；部分存在或
+   任一值冲突时 fail closed。目标已有相同身份但没有本功能 provenance 时仍是 no-op，不为补审计数据改写历史。
+5. identity-only 要求显式、非默认 `reason`引用人工 OpenD 核对证据。绑定自身不连接 provider；
+   REAL 账户范围、终态、币种、成交数量和 actual fee 仍由后续 `fees-sync` 验证。
+
+不新增 `bind-order-identity` 命令，因为它会重复现有参数、写入门禁和 facade。不让
+`fees-sync` 自动匹配缺身份事件，也不增加通用 event mutator 或新审计表。
+
+### 数据流、状态与失败语义
+
+```text
+om trade-events repair --futu-account-id ... --order-id ... --reason ...
+  -> trades.review / ledger.api（现有签名不变）
+  -> ledger.commands 优先选择 identity-only 或原 append-repair
+  -> dry-run: 构造 advisory preview，零写入
+  -> apply: db-path writer lock -> BEGIN IMMEDIATE
+            -> 重读原始 JSON 及有效 void 集，重做全部验证
+            -> capture global current-decision fence
+            -> old-JSON CAS + exact readback
+            -> forced-full position projection，要求 lot diff 为零
+            -> finalize current-decision projection -> commit
+  -> 现有 fees-sync 独立 dry-run/apply
+```
+
+apply 不使用 dry-run 结果作为事实；preview 明确标记为 advisory。事务内验证从原始存储 JSON 做
+copy-on-write，只允许以下路径变化：
+
+```text
+raw_payload.futu_account_id
+raw_payload.order_id
+raw_payload.order_identity_provenance
+```
+
+`order_identity_provenance` 不得覆盖已有同名数据，它记录 schema version、以
+`event_id + normalized futu_account_id + order_id` 确定性生成的 binding ID、来源
+`manual_trade_event_repair`、reason、绑定前两个空身份、`expected_before_sha256` 和首次
+`bound_at_ms`。apply 回执另返回实际 `after_sha256`；避免把时间字段包含在 dry-run 的预期 after hash 中。
+
+原始 SQL 由 trade-event repository 内一个窄 CAS 方法持有：
+`WHERE event_id = ? AND event_json = ?` 必须更新且只更新一行。intervention 持有策略、原始 JSON
+深度 diff、事务编排和读回校验；canonical codec 只用于验证结果，不用来重序列化无关的历史字段。
+CAS、读回、lot 零差异、current-decision finalize、foreign-key 检查或 commit 任一失败都回滚；不 retry。
+
+响应状态为 `dry_run`、`applied` 或 `no_op`。`no_op` 退出码为 0、`write_applied=false`、不推进
+source generation；验证失败或冲突退出码为 2。普通 void/replacement repair 的现有 JSON 响应保持不变，
+identity-only 的文本回执、help 和 rollback hint 必须明确不会生成 void/replacement event。
+
+### Owner 与实现分片
+
+- `src/interfaces/cli/trade_events.py`：保留现有参数和高风险写入门禁，修正 help、文本回执和真实
+  `write_applied` / rollback hint。
+- `src/application/trades/review.py` 和 `src/application/ledger/api.py`：保留现有公开签名与分层，不新增 facade。
+- `src/application/ledger/commands.py`：优先分流 identity-only 与原 append-repair，组装稳定响应。
+- `src/application/ledger/interventions.py`：持有目标状态机、allowlist diff、current-decision fence 和事务编排。
+- `src/application/ledger/repository_trade_events.py`：只新增目标化的 raw event JSON CAS，不提供通用 mutator。
+- `src/application/trades/order_fee_sync.py` 继续持有 provider 验证；
+  `src/application/ledger/order_fee_migration.py` 以原始 JSON 做 CAS 与 fee-only copy-on-write，并维护全局
+  trade-event current-decision fence。
+
+代码、CLI 回执、[Option Positions Repair](OPTION_POSITIONS_REPAIR.md) 和测试作为一个最小纵向分片交付，
+避免 ledger 已分流但 CLI 仍报 `void=None repair=None` 的中间状态。
+
+### 验证计划、风险与开放项
+
+最小回归覆盖：
+
+- 有 downstream close 的 open 事件：dry-run 零写入；apply 后只有三条 allowlist JSON 路径变化，
+  event count/ID/ingest sequence、完整 lot fingerprint、cash-conversion IDs 和 downstream lineage 不变；
+- 两个已初始化账户的 current-decision 在绑定后仍 clean，业务 payload 不变；强制 projection/finalize
+  失败时原 JSON、source generation 和读模型整体回滚；
+- 同一绑定再执行为零 DML no-op；单字段、空白、部分或冲突身份、重复 active identity、
+  已 void 目标、非 open、已有 actual fee 和 CAS 冲突都失败且零写入；
+- 身份参数与 strike 等任一经济 override 混用时，原有 void/replacement 行为和 downstream 阻断不变；
+- 原始 JSON 含 legacy top-level `fee_provenance` 或未知 raw keys 时不会被 codec 顺带规范化；
+- fake OpenD provider 验证绑定后 `fees-sync` 选中订单并写 actual fee，保留无关历史 JSON，且同范围
+  第二次 dry-run 与相同身份重试均为 no-op。
+
+实现验证运行 focused pytest、受影响文件 Ruff、`git diff --check`、文档/敏感产物 guardrails 和
+`./.venv/bin/python scripts/generate_dependency_graph.py --check`。
+
+残余风险：
+
+- identity-only 不加载 runtime config，所以不在绑定阶段证明 Futu account ID 属于账本 account；
+  owner 仍是 `order_fee_sync`，影响是错误但格式合法的身份可以被持久化。本分片用显式人工证据、
+  高风险确认、重复 identity 阻断和后续 `fees-sync` 缩小风险；如要由系统证明合约/方向/价格，
+  应作为 provider admission 的独立 hardening，不塞入本 repair。
+- 首版不允许覆盖或解绑，错误绑定不能用同一命令修正。owner 是后续 ledger repair 设计，影响是
+  提交后只能使用写前备份或另行授权的前向修复；本命令不会自动创建备份。生产使用必须逐笔 preview、
+  另行创建并验证备份、写后读回和
+  `fees-sync` dry-run，任一不一致立即停止。
+- 首版拒绝多事件共用订单身份；如未来出现经证明的合法 split-fill/order 组，owner 是
+  `order_fee_sync` 和 ledger identity contract，需单独设计分配与纠错，不放宽本分片。
+
+开放项：无。当前能力不需要新 schema、public command 或 provider capability。发布/升级和
+生产回填继续是独立授权边界。
 
 ## 读取语义
 

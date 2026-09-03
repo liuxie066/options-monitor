@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -16,6 +17,8 @@ from domain.domain.performance.cash_conversion import (
 from src.application.cash_conversion import build_cash_conversion
 from src.application.ledger.order_fee_migration import _conversion_for_amount, enrich_order_fees
 from src.application.ledger.order_fee_semantics import zero_option_fee_lifecycle_reason
+from src.application.ledger.interventions import persist_manual_order_identity_binding
+from src.application.ledger.position_projection_runtime import run_position_projection_forced_full
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.ledger.writer import persist_trade_event_object
 from src.application.trades import order_fee_sync as order_fee_sync_module
@@ -25,7 +28,11 @@ from src.application.trades.order_fee_sync import sync_order_fees
 EVENT_MS = 1_780_000_000_000
 
 
-def _repo_with_bare_option_event(tmp_path: Path) -> SQLiteOptionPositionsRepository:
+def _repo_with_bare_option_event(
+    tmp_path: Path,
+    *,
+    with_identity: bool = True,
+) -> SQLiteOptionPositionsRepository:
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     event = TradeEvent(
         event_id="event-1",
@@ -46,7 +53,11 @@ def _repo_with_bare_option_event(tmp_path: Path) -> SQLiteOptionPositionsReposit
         source="broker",
         multiplier=100,
         lot_id="lot-1",
-        raw_payload={"futu_account_id": "123", "order_id": "order-1"},
+        raw_payload=(
+            {"futu_account_id": "123", "order_id": "order-1"}
+            if with_identity
+            else {}
+        ),
     )
     repo.upsert_trade_event(event)
     return repo
@@ -194,6 +205,80 @@ def test_fee_sync_dry_run_is_read_only_and_apply_persists_actual_fee(
     assert event.raw_payload["fee_provenance"]["source"] == "opend.order_fee_query"
     with repo._connect() as conn:  # noqa: SLF001 - audit proof
         assert conn.execute("SELECT COUNT(*) FROM broker_fee_enrichment_audit").fetchone()[0] == 1
+
+
+def test_bound_order_identity_flows_into_existing_fee_sync(tmp_path: Path) -> None:
+    repo = _repo_with_bare_option_event(tmp_path, with_identity=False)
+    legacy_fee = {"basis": "missing", "reason": "legacy top-level evidence"}
+    with repo._connect() as conn:  # noqa: SLF001 - byte-level compatibility fixture
+        row = conn.execute(
+            "SELECT event_json FROM trade_events WHERE event_id = ?",
+            ("event-1",),
+        ).fetchone()
+        payload = json.loads(str(row["event_json"]))
+        payload["legacy_extension"] = {"keep": True}
+        payload["fee_provenance"] = legacy_fee
+        conn.execute(
+            "UPDATE trade_events SET event_json = ? WHERE event_id = ?",
+            (json.dumps(payload, ensure_ascii=False, sort_keys=True), "event-1"),
+        )
+    run_position_projection_forced_full(repo)
+    persist_manual_order_identity_binding(
+        repo,
+        target_event_id="event-1",
+        overrides={"futu_account_id": "123", "order_id": "order-1"},
+        repair_reason="OpenD manual evidence: deal-1",
+    )
+    kwargs = {
+        "account": "lx",
+        "start_ms": EVENT_MS - 1,
+        "end_exclusive_ms": EVENT_MS + 1,
+        "observed_at_ms": EVENT_MS + 10,
+        "allowed_futu_account_ids": ("123",),
+    }
+
+    preview = sync_order_fees(repo, provider=_Provider(), apply=False, **kwargs)
+    applied = sync_order_fees(repo, provider=_Provider(), apply=True, **kwargs)
+    converged_provider = _Provider()
+    converged = sync_order_fees(
+        repo,
+        provider=converged_provider,
+        apply=False,
+        **(kwargs | {"observed_at_ms": EVENT_MS + 20}),
+    )
+    with repo._connect() as conn:  # noqa: SLF001 - byte-level compatibility proof
+        row = conn.execute(
+            "SELECT event_json FROM trade_events WHERE event_id = ?",
+            ("event-1",),
+        ).fetchone()
+        after_sync_json = str(row["event_json"])
+        after_sync = json.loads(after_sync_json)
+    source_generation = repo.read_position_projection_source_state()["source_generation"]
+    retry = persist_manual_order_identity_binding(
+        repo,
+        target_event_id="event-1",
+        overrides={"futu_account_id": "123", "order_id": "order-1"},
+        repair_reason="OpenD manual evidence: deal-1",
+    )
+
+    assert preview["actual_observation_count"] == 1
+    assert applied["migration"]["status_counts"] == {"committed": 1}
+    assert converged["selected_order_count"] == 0
+    assert converged["actual_observation_count"] == 0
+    assert converged_provider.terminal_calls == converged_provider.fee_calls == 0
+    assert after_sync["legacy_extension"] == {"keep": True}
+    assert after_sync["fee_provenance"] == legacy_fee
+    assert after_sync["raw_payload"]["order_identity_provenance"]["source"] == (
+        "manual_trade_event_repair"
+    )
+    assert after_sync["raw_payload"]["fee_provenance"]["basis"] == "actual"
+    assert retry["mode"] == "no_op"
+    with repo._connect() as conn:  # noqa: SLF001 - no-op byte proof
+        assert conn.execute(
+            "SELECT event_json FROM trade_events WHERE event_id = ?",
+            ("event-1",),
+        ).fetchone()["event_json"] == after_sync_json
+    assert repo.read_position_projection_source_state()["source_generation"] == source_generation
 
 
 def test_order_backed_expiry_reaches_actual_fee_provider(tmp_path: Path) -> None:
