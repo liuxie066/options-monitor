@@ -302,8 +302,8 @@ release、deploy 和生产写入继续是独立授权边界。
 - 绑定后的同范围 `fees-sync` dry-run 选中该订单，actual fee 写入后再次 dry-run 收敛为 no-op。
 
 本变更不支持 close、expire-close、assignment、exercise 或 assigned-stock sale；不自动匹配 OpenD
-历史订单，不进行批量映射、部分身份补齐、事件时间纠正、经济事实更改、下游链重写、
-schema/config 变更或生产回填。账本与 OpenD 时间相差 12 小时等情况仍需操作员独立确认；
+历史订单，不进行批量映射、部分身份补齐、经济事实更改、下游链重写、
+schema/config 变更或生产回填。账本与 OpenD 时间不一致时必须走下述独立时间修正路径；
 近似时间、合约、数量或价格不会被代码提升成持久订单身份。
 
 ### 当前事实与选定方案
@@ -418,6 +418,24 @@ identity-only 的文本回执、help 和 rollback hint 必须明确不会生成 
 开放项：无。当前能力不需要新 schema、public command 或 provider capability。发布/升级和
 生产回填继续是独立授权边界。
 
+## OpenD 历史开仓时间修正
+
+`trade-events repair --trade-time-ms` 的 time-only 请求是第二个受控原位例外。它只接受未 void 的
+canonical Futu open，要求事件已保存 `opend_order_evidence.v1`，订单数量合计等于事件 contracts，
+且目标时间精确等于证据中最早订单的成交时间。命令不连接 provider，也不接受近似匹配或与其他
+override 混用。
+
+apply 在同一个 `BEGIN IMMEDIATE` 事务内以旧 JSON 和旧 SQL 时间做 CAS，保留 `event_id`、
+`ingest_seq`、lot identity 与 downstream lineage，只同步修改 SQL/JSON 时间并写入
+`opend_trade_time_correction.v1` provenance。SQLite immutable trigger 只在上述 provenance、已存
+OpenD 证据和最早成交时间同时吻合时放行；其他交易时间更新仍被拒绝。随后强制全量投影，并要求
+只有目标 lot 的 `opened_at` 改变，否则整体回滚。
+
+旧事件时间形成的 `cash_conversions` 会在同一 CAS 中移除并记录失效的 fact kind，避免错误时点的
+CNY 金额继续通过读取校验。批次时间修正后必须独立 dry-run/apply 现有
+`option-performance cash-conversion backfill`；旧 backfill audit 保留，新换算写入独立时间修正 audit，
+再验证月度报告。备份、生产写入和运行环境升级仍是独立授权边界。
+
 ## 读取语义
 
 运行时风险、Close Advice、Performance 和 Agent tools 从 canonical read model 读取：
@@ -452,8 +470,9 @@ Agent 通过 `option_positions_read action=events` 分页读取 canonical `trade
 不会插入正在进行的结果流，分页条数可以在 1–20 之间变化，也不会导致已返回成员重复。
 
 这个 snapshot 冻结的是成员集合、筛选字段和排序字段，不是整行 JSON 的历史版本。事件成员
-不可删除，`ingest_seq`、事件身份、交易时间、账户、市场、position effect 和合约筛选字段不可
-修改；价格等不参与查询的补充字段仍可按现有账本语义更新。完整 TradeEvent 的编码与验证继续
+不可删除，`ingest_seq`、事件身份、账户、市场、position effect 和合约筛选字段不可修改；交易
+时间只允许上述 OpenD 证据约束的原位修正，其他时间更新仍不可变。价格等不参与查询的补充字段
+仍可按现有账本语义更新。完整 TradeEvent 的编码与验证继续
 由 Python canonical codec 负责，SQLite 不实现第二套领域 JSON 校验器。
 
 旧库只声明新增列，不在普通启动时扫描回填。必须通过受控 position-projection migration 分批

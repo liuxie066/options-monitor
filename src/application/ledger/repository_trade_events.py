@@ -4,6 +4,7 @@ from .repository_schema import (
     Any,
     Sequence,
     TradeEventPaginationUnavailable,
+    _ensure_opend_trade_time_correction_guard,
     _trade_event_pagination_schema_ready,
     _trade_event_query_projections,
     encode_trade_event_for_storage,
@@ -121,6 +122,37 @@ class TradeEventRepositoryMixin:
                 int(updated_at_ms),
                 str(event_id),
                 str(expected_event_json),
+            ),
+        )
+        return int(updated.rowcount or 0) == 1
+
+    def compare_and_swap_trade_event_time(
+        self,
+        *,
+        event_id: str,
+        expected_event_json: str,
+        expected_trade_time_ms: int,
+        replacement_event_json: str,
+        replacement_trade_time_ms: int,
+        updated_at_ms: int,
+        conn: sqlite3.Connection,
+    ) -> bool:
+        if conn is None or not conn.in_transaction:
+            raise ValueError("trade time correction requires an active transaction")
+        _ensure_opend_trade_time_correction_guard(conn)
+        updated = conn.execute(
+            """
+            UPDATE trade_events
+            SET event_json = ?, trade_time_ms = ?, updated_at_ms = ?
+            WHERE event_id = ? AND event_json = ? AND trade_time_ms = ?
+            """,
+            (
+                str(replacement_event_json),
+                int(replacement_trade_time_ms),
+                int(updated_at_ms),
+                str(event_id),
+                str(expected_event_json),
+                int(expected_trade_time_ms),
             ),
         )
         return int(updated.rowcount or 0) == 1

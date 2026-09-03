@@ -141,7 +141,43 @@ OpenD 订单后先预览；`reason` 必须写明 OpenD 核对证据：
 等其他 override 混用。写入后仍要单独 dry-run/apply `trade-events fees-sync`；本命令不连接 OpenD，
 也不自动补 fee。
 
-### 场景 E：Futu 当前期权条款与账本不同
+### 场景 E：历史 Futu 开仓时间与 OpenD 证据不一致
+
+只适用于未 void 的 canonical Futu open 事件，包括已有下游 close 的已平仓 lot。事件必须已经保存
+`opend_order_evidence.v1`；修正时间只能等于证据中最早一笔订单的 `trade_time_ms`，不能人工指定
+其他时间。先核对目标、时间、订单 ID 和写前哈希：
+
+```bash
+./om trade-events repair <open_event_id> \
+  --trade-time-ms <earliest_opend_trade_time_ms> \
+  --reason "OpenD stored evidence: <order_ids>" \
+  --dry-run --format json
+```
+
+生产执行前另行创建并验证 SQLite 备份，再单独确认写入：
+
+```bash
+./om trade-events repair <open_event_id> \
+  --trade-time-ms <earliest_opend_trade_time_ms> \
+  --reason "OpenD stored evidence: <order_ids>" \
+  --confirm --format json
+```
+
+该路径保留 `event_id`、`ingest_seq`、lot identity 和 downstream lineage，只修正事件时间并强制全量
+重建投影。旧时间形成的 `cash_conversions` 会被移除，避免把错误时点的汇率继续当作有效证据；完成
+同一月份的时间修正后，必须先预览再回填该月份的历史换算：
+
+```bash
+./om option-performance cash-conversion backfill \
+  --config-key us --account lx --start-date 2026-05-01 --end-date 2026-05-31
+./om option-performance cash-conversion backfill \
+  --config-key us --account lx --start-date 2026-05-01 --end-date 2026-05-31 --apply
+```
+
+只在 dry-run 选出的事件与本次时间修正目标一致时 apply，并对其他账户分别执行。任一事件缺少 OpenD 证据、订单数量与事件数量不一致、目标时间不是证据最早
+成交时间、事件已 void 或投影出现额外变更时，命令都会失败且整个事务回滚。
+
+### 场景 F：Futu 当前期权条款与账本不同
 
 分红、拆并股等公司行动可能调整存量合约的 strike、multiplier 或其他交割条款。
 此时 Futu 的期权代码只用于定位合约；当前经济条款必须以该代码对应的 market
@@ -180,7 +216,7 @@ divergence，不会建议 `adjust-lot`。系统不会做模糊 strike 匹配，�
 
 ---
 
-### 场景 F：你怀疑投影脏了，但账本本身没问题
+### 场景 G：你怀疑投影脏了，但账本本身没问题
 
 默认只预览投影差异：
 

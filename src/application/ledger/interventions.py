@@ -46,6 +46,9 @@ from src.infrastructure.feishu_bitable import safe_float
 
 _ORDER_IDENTITY_OVERRIDE_KEYS = frozenset({"futu_account_id", "order_id"})
 _ORDER_IDENTITY_PROVENANCE_SCHEMA = "futu_order_identity_binding.v1"
+_OPEND_TRADE_TIME_OVERRIDE_KEYS = frozenset({"trade_time_ms"})
+_OPEND_TRADE_TIME_EVIDENCE_SCHEMA = "opend_order_evidence.v1"
+_OPEND_TRADE_TIME_PROVENANCE_SCHEMA = "opend_trade_time_correction.v1"
 
 
 def _canonical_trade_symbol(value: Any) -> str:
@@ -388,6 +391,11 @@ def is_order_identity_repair_request(overrides: dict[str, Any]) -> bool:
     return identity_requested and not (keys - _ORDER_IDENTITY_OVERRIDE_KEYS)
 
 
+def is_opend_trade_time_repair_request(overrides: dict[str, Any]) -> bool:
+    effective = _repair_override_payload(overrides)
+    return set(effective) == _OPEND_TRADE_TIME_OVERRIDE_KEYS
+
+
 def _normalized_order_identity(overrides: dict[str, Any]) -> tuple[str, str]:
     effective = _repair_override_payload(overrides)
     if set(effective) != _ORDER_IDENTITY_OVERRIDE_KEYS:
@@ -411,6 +419,13 @@ def _order_identity_reason(repair_reason: str) -> str:
     reason = str(repair_reason or "").strip()
     if reason == "manual_repair" or "opend" not in reason.lower():
         raise ValueError("order identity repair reason must reference the manual OpenD evidence")
+    return reason
+
+
+def _opend_trade_time_reason(repair_reason: str) -> str:
+    reason = str(repair_reason or "").strip()
+    if reason == "manual_repair" or "opend" not in reason.lower():
+        raise ValueError("trade time correction reason must reference the OpenD evidence")
     return reason
 
 
@@ -443,6 +458,13 @@ def _binding_id(event_id: str, futu_account_id: str, order_id: str) -> str:
     return f"order_identity_binding_{digest}"
 
 
+def _trade_time_correction_id(event_id: str, before_ms: int, after_ms: int) -> str:
+    digest = hashlib.sha256(
+        "\x1f".join((event_id, str(before_ms), str(after_ms))).encode("utf-8")
+    ).hexdigest()[:24]
+    return f"opend_trade_time_correction_{digest}"
+
+
 def _assert_identity_only_payload_change(
     before: dict[str, Any],
     after: dict[str, Any],
@@ -458,6 +480,82 @@ def _assert_identity_only_payload_change(
         after_raw.pop(key, None)
     if before_raw != after_raw:
         raise ValueError("order identity repair changed non-identity raw payload data")
+
+
+def _assert_trade_time_only_payload_change(
+    before: dict[str, Any],
+    after: dict[str, Any],
+) -> None:
+    before_outer = deepcopy(before)
+    after_outer = deepcopy(after)
+    before_outer.pop("event_time_ms", None)
+    after_outer.pop("event_time_ms", None)
+    before_raw = before_outer.pop("raw_payload", {})
+    after_raw = after_outer.pop("raw_payload", {})
+    if before_outer != after_outer or not isinstance(before_raw, dict) or not isinstance(after_raw, dict):
+        raise ValueError("trade time correction changed non-time event data")
+    if "cash_conversions" in after_raw:
+        raise ValueError("trade time correction retained stale cash conversions")
+    before_raw.pop("cash_conversions", None)
+    before_raw.pop("trade_time_correction_provenance", None)
+    after_raw.pop("trade_time_correction_provenance", None)
+    if before_raw != after_raw:
+        raise ValueError("trade time correction changed unrelated raw payload data")
+
+def _validated_opend_trade_time_evidence(
+    event: TradeEvent,
+    raw_payload: dict[str, Any],
+) -> tuple[int, list[str], int]:
+    evidence = raw_payload.get("opend_order_evidence")
+    if not isinstance(evidence, dict):
+        raise ValueError("trade time correction requires stored OpenD order evidence")
+    if str(evidence.get("provider") or "").strip().lower() != "opend":
+        raise ValueError("trade time correction evidence provider must be OpenD")
+    if str(evidence.get("schema_version") or "").strip() != _OPEND_TRADE_TIME_EVIDENCE_SCHEMA:
+        raise ValueError("trade time correction requires opend_order_evidence.v1")
+    orders = evidence.get("orders")
+    if not isinstance(orders, list) or not orders:
+        raise ValueError("trade time correction requires at least one OpenD order")
+    classification = str(evidence.get("classification") or "").strip()
+    if classification in {"single_order", "contract_lineage"} and len(orders) != 1:
+        raise ValueError("single-order OpenD evidence must contain exactly one order")
+    if classification == "multi_order_aggregate" and len(orders) < 2:
+        raise ValueError("multi_order_aggregate OpenD evidence must contain multiple orders")
+    if classification not in {
+        "single_order",
+        "contract_lineage",
+        "multi_order_aggregate",
+        "opend_price_override",
+    }:
+        raise ValueError("trade time correction OpenD evidence classification is unsupported")
+
+    order_ids: list[str] = []
+    trade_times: list[int] = []
+    quantity = 0
+    for order in orders:
+        if not isinstance(order, dict):
+            raise ValueError("trade time correction OpenD order must be an object")
+        order_id = str(order.get("order_id") or "").strip()
+        futu_account_id = str(order.get("futu_account_id") or "").strip()
+        raw_time = order.get("trade_time_ms")
+        raw_quantity = order.get("quantity")
+        if not order_id or not futu_account_id:
+            raise ValueError("trade time correction OpenD order identity is incomplete")
+        if isinstance(raw_time, bool) or not isinstance(raw_time, int) or raw_time <= 0:
+            raise ValueError("trade time correction OpenD order time is invalid")
+        if isinstance(raw_quantity, bool) or not isinstance(raw_quantity, int) or raw_quantity <= 0:
+            raise ValueError("trade time correction OpenD order quantity is invalid")
+        order_ids.append(order_id)
+        trade_times.append(raw_time)
+        quantity += raw_quantity
+    if len(order_ids) != len(set(order_ids)):
+        raise ValueError("trade time correction OpenD order ids must be unique")
+    if quantity != int(event.contracts):
+        raise ValueError("trade time correction OpenD quantity does not match the event")
+    observed_at_ms = evidence.get("observed_at_ms")
+    if isinstance(observed_at_ms, bool) or not isinstance(observed_at_ms, int) or observed_at_ms <= 0:
+        raise ValueError("trade time correction OpenD observation time is invalid")
+    return min(trade_times), sorted(order_ids), observed_at_ms
 
 
 def _order_identity_binding_plan(
@@ -704,6 +802,307 @@ def persist_manual_order_identity_binding(
                 }
             ).items()
             if key not in {"before_json", "after_json", "binding_status"}
+        }
+
+    return with_sqlite_repo_transaction(
+        repo,
+        _run,
+        require_projection_publication=True,
+    )
+
+
+def _opend_trade_time_correction_plan(
+    repo: Any,
+    *,
+    target_event_id: str,
+    overrides: dict[str, Any],
+    repair_reason: str,
+    conn: sqlite3.Connection | None = None,
+    corrected_at_ms: int | None = None,
+) -> dict[str, Any]:
+    effective = _repair_override_payload(overrides)
+    if set(effective) != _OPEND_TRADE_TIME_OVERRIDE_KEYS:
+        raise ValueError("OpenD trade time correction only accepts --trade-time-ms")
+    requested_time_ms = effective["trade_time_ms"]
+    if isinstance(requested_time_ms, bool) or not isinstance(requested_time_ms, int) or requested_time_ms <= 0:
+        raise ValueError("trade_time_ms must be a positive integer")
+    reason = _opend_trade_time_reason(repair_reason)
+    rows = _storage_trade_event_rows(repo, conn=conn)
+    target_id = str(target_event_id or "").strip()
+    target_row = next((item for item in rows if str(item.get("event_id") or "") == target_id), None)
+    if target_row is None:
+        raise ValueError(f"trade event not found: {target_event_id}")
+    payloads = [(item, _storage_payload(item)) for item in rows]
+    if target_id in {
+        target
+        for _row, payload in payloads
+        if (target := valid_void_target_event_id(payload))
+    }:
+        raise ValueError(f"trade event already voided: {target_id}")
+
+    before_json = str(target_row["event_json"])
+    before_payload = _storage_payload(target_row)
+    event, diagnostics = stored_trade_event_to_ledger_event(before_payload)
+    errors = [item.code for item in diagnostics if item.severity == "error"]
+    if event is None or errors:
+        raise ValueError(
+            "trade time correction requires a canonical trade event: "
+            f"{target_id}; diagnostics={','.join(errors) or 'event_decode_failed'}"
+        )
+    if event.event_type != "open":
+        raise ValueError("trade time correction only supports option open events")
+    if normalize_broker(event.contract_key.broker) != "富途":
+        raise ValueError("trade time correction only supports Futu events")
+    stored_time_ms = int(target_row.get("trade_time_ms") or 0)
+    if stored_time_ms != int(event.event_time_ms):
+        raise ValueError("trade event SQL and JSON times conflict")
+    raw_payload = before_payload.get("raw_payload") or {}
+    if not isinstance(raw_payload, dict):
+        raise ValueError("trade event raw_payload must be an object")
+    evidence_time_ms, evidence_order_ids, evidence_observed_at_ms = (
+        _validated_opend_trade_time_evidence(event, raw_payload)
+    )
+    if requested_time_ms != evidence_time_ms:
+        raise ValueError(
+            f"trade_time_ms must equal the earliest stored OpenD order time: {evidence_time_ms}"
+        )
+
+    expected_before_sha256 = _sha256_text(before_json)
+    common = {
+        "operation": "opend_trade_time_correction",
+        "target_event_id": target_id,
+        "target_lot_id": event.lot_id or f"lot_{event.event_id}",
+        "before_trade_time_ms": stored_time_ms,
+        "after_trade_time_ms": requested_time_ms,
+        "evidence_order_ids": evidence_order_ids,
+        "evidence_observed_at_ms": evidence_observed_at_ms,
+        "expected_before_sha256": expected_before_sha256,
+        "cash_conversion_backfill_required": (
+            stored_time_ms != requested_time_ms
+            or not isinstance(raw_payload.get("cash_conversions"), dict)
+        ),
+    }
+    if stored_time_ms == requested_time_ms:
+        return common | {
+            "correction_status": "no_op",
+            "before_json": before_json,
+            "after_json": before_json,
+            "after_sha256": expected_before_sha256,
+        }
+    if "trade_time_correction_provenance" in raw_payload:
+        raise ValueError("trade time correction provenance already exists")
+    if corrected_at_ms is None:
+        return common | {"correction_status": "ready", "before_json": before_json}
+
+    after_payload = deepcopy(before_payload)
+    after_payload["event_time_ms"] = requested_time_ms
+    after_raw = dict(raw_payload)
+    removed_conversions = after_raw.pop("cash_conversions", None)
+    invalidated_conversion_keys = (
+        sorted(str(key) for key in removed_conversions)
+        if isinstance(removed_conversions, dict)
+        else []
+    )
+    after_raw["trade_time_correction_provenance"] = {
+        "schema_version": _OPEND_TRADE_TIME_PROVENANCE_SCHEMA,
+        "correction_id": _trade_time_correction_id(target_id, stored_time_ms, requested_time_ms),
+        "source": "manual_trade_event_repair",
+        "provider": "opend",
+        "reason": reason,
+        "before_trade_time_ms": stored_time_ms,
+        "after_trade_time_ms": requested_time_ms,
+        "evidence_schema_version": _OPEND_TRADE_TIME_EVIDENCE_SCHEMA,
+        "evidence_order_ids": evidence_order_ids,
+        "evidence_observed_at_ms": evidence_observed_at_ms,
+        "expected_before_sha256": expected_before_sha256,
+        "invalidated_cash_conversion_keys": invalidated_conversion_keys,
+        "corrected_at_ms": int(corrected_at_ms),
+    }
+    after_payload["raw_payload"] = after_raw
+    _assert_trade_time_only_payload_change(before_payload, after_payload)
+    after_event, after_diagnostics = stored_trade_event_to_ledger_event(after_payload)
+    if after_event is None or any(item.severity == "error" for item in after_diagnostics):
+        raise ValueError("trade time correction produced an invalid canonical trade event")
+    after_json = json.dumps(after_payload, ensure_ascii=False, sort_keys=True)
+    return common | {
+        "correction_status": "ready",
+        "before_json": before_json,
+        "after_json": after_json,
+        "after_sha256": _sha256_text(after_json),
+        "corrected_at_ms": int(corrected_at_ms),
+        "invalidated_cash_conversion_count": (
+            len(invalidated_conversion_keys)
+        ),
+    }
+
+
+def preview_manual_opend_trade_time_correction(
+    repo: Any,
+    *,
+    target_event_id: str,
+    overrides: dict[str, Any],
+    repair_reason: str,
+) -> dict[str, Any]:
+    plan = _opend_trade_time_correction_plan(
+        repo,
+        target_event_id=target_event_id,
+        overrides=overrides,
+        repair_reason=repair_reason,
+    )
+    return {
+        key: value
+        for key, value in (
+            plan
+            | {
+                "mode": "no_op" if plan["correction_status"] == "no_op" else "dry_run",
+                "advisory": True,
+            }
+        ).items()
+        if key not in {"before_json", "after_json", "correction_status"}
+    }
+
+
+def _assert_only_target_lot_opened_at_changed(
+    before_lots: list[dict[str, Any]],
+    after_lots: list[dict[str, Any]],
+    *,
+    target_lot_id: str,
+    before_trade_time_ms: int,
+    after_trade_time_ms: int,
+) -> None:
+    before_by_id = {str(item.get("record_id") or ""): deepcopy(item) for item in before_lots}
+    after_by_id = {str(item.get("record_id") or ""): deepcopy(item) for item in after_lots}
+    if set(before_by_id) != set(after_by_id) or target_lot_id not in before_by_id:
+        raise ValueError("trade time correction changed position lot membership")
+    changed_ids = {
+        record_id
+        for record_id in before_by_id
+        if before_by_id[record_id] != after_by_id[record_id]
+    }
+    if changed_ids != {target_lot_id}:
+        raise ValueError("trade time correction changed an unexpected position lot")
+    before_target = before_by_id[target_lot_id]
+    after_target = after_by_id[target_lot_id]
+    before_fields = before_target.get("fields")
+    after_fields = after_target.get("fields")
+    if not isinstance(before_fields, dict) or not isinstance(after_fields, dict):
+        raise ValueError("trade time correction target lot fields are invalid")
+    if int(before_fields.get("opened_at") or 0) != before_trade_time_ms:
+        raise ValueError("trade time correction target lot has an unexpected opening time")
+    if int(after_fields.get("opened_at") or 0) != after_trade_time_ms:
+        raise ValueError("trade time correction target lot opening time was not updated")
+    before_fields.pop("opened_at", None)
+    after_fields.pop("opened_at", None)
+    if before_target != after_target:
+        raise ValueError("trade time correction changed non-time position lot data")
+
+
+def persist_manual_opend_trade_time_correction(
+    repo: Any,
+    *,
+    target_event_id: str,
+    overrides: dict[str, Any],
+    repair_reason: str,
+) -> dict[str, Any]:
+    def _run(sqlite_repo: Any, conn: sqlite3.Connection | None) -> dict[str, Any]:
+        if conn is None:
+            raise TypeError("trade time correction requires SQLite transaction authority")
+        applied_at_ms = now_ms()
+        plan = _opend_trade_time_correction_plan(
+            sqlite_repo,
+            target_event_id=target_event_id,
+            overrides=overrides,
+            repair_reason=repair_reason,
+            conn=conn,
+            corrected_at_ms=applied_at_ms,
+        )
+        if plan["correction_status"] == "no_op":
+            return {
+                key: value
+                for key, value in (plan | {"mode": "no_op", "advisory": False}).items()
+                if key not in {"before_json", "after_json", "correction_status"}
+            }
+
+        before_lots = sqlite_repo.list_position_lots(conn=conn)
+        before_fingerprint = position_lots_fingerprint(before_lots)
+        source_before = int(
+            sqlite_repo.read_position_projection_source_state(conn=conn).get("source_generation") or 0
+        )
+        fence = capture_trade_event_decision_projection_fence(sqlite_repo, conn=conn)
+        updated = sqlite_repo.compare_and_swap_trade_event_time(
+            event_id=plan["target_event_id"],
+            expected_event_json=plan["before_json"],
+            expected_trade_time_ms=plan["before_trade_time_ms"],
+            replacement_event_json=plan["after_json"],
+            replacement_trade_time_ms=plan["after_trade_time_ms"],
+            updated_at_ms=applied_at_ms,
+            conn=conn,
+        )
+        if not updated:
+            raise ValueError(f"trade time correction CAS conflict: {plan['target_event_id']}")
+        readback = next(
+            (
+                item
+                for item in _storage_trade_event_rows(sqlite_repo, conn=conn)
+                if str(item.get("event_id") or "") == plan["target_event_id"]
+            ),
+            None,
+        )
+        if (
+            readback is None
+            or str(readback.get("event_json") or "") != plan["after_json"]
+            or int(readback.get("trade_time_ms") or 0) != plan["after_trade_time_ms"]
+        ):
+            raise ValueError(f"trade time correction readback failed: {plan['target_event_id']}")
+
+        runtime = run_position_projection_in_transaction(
+            sqlite_repo,
+            (),
+            conn=conn,
+            mode="forced_full",
+        )
+        publication = runtime.publication
+        if publication.added or publication.removed or publication.changed != 1:
+            raise ValueError("trade time correction changed unexpected position lots")
+        after_lots = sqlite_repo.list_position_lots(conn=conn)
+        _assert_only_target_lot_opened_at_changed(
+            before_lots,
+            after_lots,
+            target_lot_id=plan["target_lot_id"],
+            before_trade_time_ms=plan["before_trade_time_ms"],
+            after_trade_time_ms=plan["after_trade_time_ms"],
+        )
+        after_fingerprint = position_lots_fingerprint(after_lots)
+        decision = (
+            finalize_current_decision_projection(
+                sqlite_repo,
+                fence=fence,
+                updated_at_ms=applied_at_ms,
+                conn=conn,
+            )
+            if fence is not None
+            else None
+        )
+        sqlite_repo.assert_foreign_keys_clean(conn=conn)
+        source_after = int(
+            sqlite_repo.read_position_projection_source_state(conn=conn).get("source_generation") or 0
+        )
+        return {
+            key: value
+            for key, value in (
+                plan
+                | {
+                    "mode": "applied",
+                    "advisory": False,
+                    "position_lot_count": int(runtime.position_lot_count),
+                    "position_lots_fingerprint_before": before_fingerprint,
+                    "position_lots_fingerprint_after": after_fingerprint,
+                    "projection_source_generation_before": source_before,
+                    "projection_source_generation_after": source_after,
+                    "decision_projection": decision,
+                }
+            ).items()
+            if key not in {"before_json", "after_json", "correction_status"}
         }
 
     return with_sqlite_repo_transaction(
