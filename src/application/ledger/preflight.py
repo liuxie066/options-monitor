@@ -634,6 +634,104 @@ def _preflight_lot_adjust(
     strategy_group_id: str | None = None,
     strategy_snapshot: dict[str, Any] | None = None,
 ) -> ManualAdjustPreflightResult:
+    result, adjust_event = _build_lot_adjust_preflight_candidate(
+        repo,
+        current=None,
+        record_id=record_id,
+        fields=fields,
+        contracts=contracts,
+        strike=strike,
+        expiration_ymd=expiration_ymd,
+        premium_per_share=premium_per_share,
+        multiplier=multiplier,
+        opened_at_ms=opened_at_ms,
+        as_of_ms=as_of_ms,
+        source=source,
+        operation_label=operation_label,
+        strategy=strategy,
+        leg_role=leg_role,
+        strategy_group_id=strategy_group_id,
+        strategy_snapshot=strategy_snapshot,
+    )
+    _preview_append_projection(
+        repo,
+        events=[adjust_event],
+        operation_label=operation_label,
+        details={"record_id": str(record_id or "").strip()},
+        candidate_error=(
+            "adjust_projection_invalid",
+            f"{operation_label} ledger preflight rejected projected adjust event",
+        ),
+    )
+    return result
+
+
+def _preflight_lot_adjustments(
+    repo: Any,
+    *,
+    adjustments: list[dict[str, Any]],
+    source: str,
+    operation_label: str,
+) -> list[ManualAdjustPreflightResult]:
+    if not adjustments:
+        raise ValueError("manual adjustment batch requires at least one adjustment")
+
+    record_ids = [str(item.get("record_id") or "").strip() for item in adjustments]
+    current = _preview_append_projection(
+        repo,
+        events=[],
+        operation_label=operation_label,
+        details={"record_ids": record_ids},
+    )
+    results: list[ManualAdjustPreflightResult] = []
+    candidate_events: list[TradeEvent] = []
+    for raw in adjustments:
+        item = dict(raw)
+        record_id = str(item.pop("record_id", "") or "").strip()
+        result, candidate_event = _build_lot_adjust_preflight_candidate(
+            repo,
+            current=current,
+            record_id=record_id,
+            source=source,
+            operation_label=operation_label,
+            **item,
+        )
+        results.append(result)
+        candidate_events.append(candidate_event)
+
+    _preview_append_projection(
+        repo,
+        events=candidate_events,
+        operation_label=operation_label,
+        details={"record_ids": record_ids},
+        candidate_error=(
+            "adjust_projection_invalid",
+            f"{operation_label} ledger preflight rejected projected adjust events",
+        ),
+    )
+    return results
+
+
+def _build_lot_adjust_preflight_candidate(
+    repo: Any,
+    *,
+    current: ProjectionPreviewResult | None,
+    record_id: str,
+    fields: dict[str, Any] | None,
+    contracts: int | None,
+    strike: float | None,
+    expiration_ymd: str | None,
+    premium_per_share: float | None,
+    multiplier: float | None,
+    opened_at_ms: int | None,
+    as_of_ms: int | None,
+    source: str,
+    operation_label: str,
+    strategy: str | None = None,
+    leg_role: str | None = None,
+    strategy_group_id: str | None = None,
+    strategy_snapshot: dict[str, Any] | None = None,
+) -> tuple[ManualAdjustPreflightResult, TradeEvent]:
     resolved_record_id = str(record_id or "").strip()
     if not resolved_record_id:
         raise LedgerPreflightError("record_id_required", f"{operation_label} ledger preflight requires record_id")
@@ -655,12 +753,13 @@ def _preflight_lot_adjust(
             details={"record_id": resolved_record_id, "contracts_open": current_open},
         )
 
-    current = _preview_append_projection(
-        repo,
-        events=[],
-        operation_label=operation_label,
-        details={"record_id": resolved_record_id},
-    )
+    if current is None:
+        current = _preview_append_projection(
+            repo,
+            events=[],
+            operation_label=operation_label,
+            details={"record_id": resolved_record_id},
+        )
     target_lots = [
         lot
         for lot in _preview_lots(current)
@@ -726,38 +825,31 @@ def _preflight_lot_adjust(
             "patch": patch,
         },
     )
-    _preview_append_projection(
-        repo,
-        events=[adjust_event],
-        operation_label=operation_label,
-        details={"record_id": resolved_record_id},
-        candidate_error=(
-            "adjust_projection_invalid",
-            f"{operation_label} ledger preflight rejected projected adjust event",
+    return (
+        ManualAdjustPreflightResult(
+            fields=current_fields,
+            patch_contract=patch_contract,
+            ledger_preflight=LedgerPreflightResult(
+                status="ok",
+                read_model="ledger_shadow",
+                fail_closed=False,
+                target_lot_id=resolved_record_id,
+                event_type="adjust",
+                contract_key=current_key.to_dict(),
+                contracts_open_before=int(target_lot.contracts_open),
+                contracts_open_after=effective_contracts_open(adjusted_fields),
+                event_time_ms=event_time_ms,
+                source_record_count=current.source_event_count,
+                imported_event_count=current.source_event_count,
+                projection_diagnostic_count=0,
+                reconciliation_issue_count=0,
+                details={
+                    "adjusted_contract_key": adjusted_key.to_dict(),
+                    **_preview_details(current),
+                },
+            ),
         ),
-    )
-    return ManualAdjustPreflightResult(
-        fields=current_fields,
-        patch_contract=patch_contract,
-        ledger_preflight=LedgerPreflightResult(
-            status="ok",
-            read_model="ledger_shadow",
-            fail_closed=False,
-            target_lot_id=resolved_record_id,
-            event_type="adjust",
-            contract_key=current_key.to_dict(),
-            contracts_open_before=int(target_lot.contracts_open),
-            contracts_open_after=effective_contracts_open(adjusted_fields),
-            event_time_ms=event_time_ms,
-            source_record_count=current.source_event_count,
-            imported_event_count=current.source_event_count,
-            projection_diagnostic_count=0,
-            reconciliation_issue_count=0,
-            details={
-                "adjusted_contract_key": adjusted_key.to_dict(),
-                **_preview_details(current),
-            },
-        ),
+        adjust_event,
     )
 
 
