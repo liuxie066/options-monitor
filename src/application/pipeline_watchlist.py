@@ -11,7 +11,6 @@ Design:
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -84,7 +83,6 @@ LIQUIDITY_COMMON_FIELDS = (
     'min_volume',
     'max_spread_ratio',
 )
-DEFAULT_PIPELINE_SYMBOL_MAX_WORKERS = 4
 _CAPTURE_STATUSES = frozenset(
     {"completed", "not_applicable", "failed", "incomplete", "unavailable"}
 )
@@ -141,25 +139,6 @@ def _enforce_symbol_timeout(
                 max(0.001, previous_remaining - elapsed),
                 previous_interval,
             )
-
-
-def _to_positive_int(value, default: int) -> int:
-    try:
-        parsed = int(value)
-    except Exception:
-        parsed = int(default)
-    return max(1, parsed)
-
-
-def _resolve_pipeline_symbol_max_workers(cfg: dict, symbol_count: int) -> int:
-    if symbol_count <= 1:
-        return 1
-    runtime = cfg.get('runtime') if isinstance(cfg.get('runtime'), dict) else {}
-    raw = runtime.get('pipeline_symbol_max_workers')
-    if raw is None:
-        raw = runtime.get('watchlist_max_workers')
-    workers = _to_positive_int(raw, DEFAULT_PIPELINE_SYMBOL_MAX_WORKERS)
-    return min(symbol_count, workers)
 
 
 def _parse_symbols_whitelist(symbols_arg: str | None) -> set[str] | None:
@@ -839,25 +818,8 @@ def run_watchlist_pipeline(
             return _failure_rows(item0, exc)
 
     summary_rows: list[dict] = []
-    max_workers = _resolve_pipeline_symbol_max_workers(cfg, len(watchlist_items))
-    if symbol_timeout_sec > 0:
-        # A hard POSIX timer is process-main-thread scoped. Keep symbol work
-        # sequential so the configured deadline covers fetch, scan, and writes.
-        max_workers = 1
-    if max_workers <= 1:
-        for item0 in watchlist_items:
-            summary_rows.extend(_process_item_with_timeout(item0))
-    else:
-        rows_by_index: dict[int, list[dict]] = {}
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_by_index = {
-                executor.submit(_process_item_with_timeout, item0): idx
-                for idx, item0 in enumerate(watchlist_items)
-            }
-            for future in as_completed(future_by_index):
-                rows_by_index[future_by_index[future]] = future.result()
-        for idx in range(len(watchlist_items)):
-            summary_rows.extend(rows_by_index.get(idx, []))
+    for item0 in watchlist_items:
+        summary_rows.extend(_process_item_with_timeout(item0))
 
     if want_fn('scan'):
         build_symbols_summary_fn(summary_rows)

@@ -24,7 +24,7 @@ from src.application.portfolio_management import (
 )
 
 
-SCHEDULED_CONFIG_VALIDATOR_VERSION = 'notification-renderer-v2'
+SCHEDULED_CONFIG_VALIDATOR_VERSION = 'runtime-config-v3'
 
 
 def data_config_candidates(*, base: Path) -> list[Path]:

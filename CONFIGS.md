@@ -60,6 +60,17 @@ env-file 不是合并进生成快照的配置层；它在进程启动或工具�
 Close Advice 详细固定规则见
 [Close Advice Contract](docs/CLOSE_ADVICE_CONTRACT.md)。
 
+## Symbol 并发配置
+
+Symbol 扫描在受支持的 `scan-pipeline` 主线程中串行执行，以保留
+`runtime.symbol_timeout_sec` 的可中断 deadline。以下旧键从配置合同中移除，且没有替代键：
+
+- `runtime.pipeline_symbol_max_workers`
+- `runtime.watchlist_max_workers`
+
+出现任一键时配置验证会失败；迁移方式是删除该键。account 与 required-data prefetch
+并发配置不受此变更影响。详细运行说明见 [Configuration Guide](CONFIGURATION_GUIDE.md)。
+
 ## 生成与验证
 
 ```bash

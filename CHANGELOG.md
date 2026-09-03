@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Breaking Changes
+- Reject the retired `runtime.pipeline_symbol_max_workers` and `runtime.watchlist_max_workers` settings instead of silently ignoring them.
+
 ## 3.4.3 - 2026-09-03
 
 ### Breaking Changes

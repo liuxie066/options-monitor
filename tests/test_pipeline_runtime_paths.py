@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import base64
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 
-def test_scan_pipeline_defaults_runtime_outputs_to_runtime_root(monkeypatch, tmp_path: Path) -> None:
+def test_scan_pipeline_uses_runtime_root_and_loaded_config_for_refresh(monkeypatch, tmp_path: Path) -> None:
+    from src.application import multiplier_cache
     from src.application import pipeline_runtime
     from src.application import pipeline_watchlist
 
@@ -14,22 +16,30 @@ def test_scan_pipeline_defaults_runtime_outputs_to_runtime_root(monkeypatch, tmp
     config_path = tmp_path / "config.us.json"
     config_path.write_text("{}", encoding="utf-8")
     captured: dict[str, object] = {}
+    events: list[str] = []
+    cfg = {
+        "symbols": [
+            {
+                "symbol": "MSFT",
+                "fetch": {"source": "opend"},
+                "sell_put": {"enabled": False},
+                "sell_call": {"enabled": False},
+            }
+        ],
+        "portfolio": {"broker": "富途", "data_config": "portfolio.runtime.json"},
+        "notifications": {"enabled": False},
+    }
 
     def _fake_load_config(**kwargs):
+        events.append("load")
         captured["load_config_base"] = kwargs["base"]
         captured["load_config_path"] = kwargs["config_path"]
-        return {
-            "symbols": [
-                {
-                    "symbol": "MSFT",
-                    "fetch": {"source": "opend"},
-                    "sell_put": {"enabled": False},
-                    "sell_call": {"enabled": False},
-                }
-            ],
-            "portfolio": {"broker": "富途", "data_config": "portfolio.runtime.json"},
-            "notifications": {"enabled": False},
-        }
+        return cfg
+
+    def _opend_kwargs(loaded: dict) -> dict:
+        assert loaded is cfg
+        events.append("opend_kwargs")
+        return {}
 
     def _fake_run_watchlist_pipeline_default(**kwargs):
         captured["pipeline_base"] = kwargs["base"]
@@ -40,6 +50,14 @@ def test_scan_pipeline_defaults_runtime_outputs_to_runtime_root(monkeypatch, tmp
 
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime_root))
     monkeypatch.setattr(pipeline_runtime, "load_runtime_pipeline_config", _fake_load_config)
+    monkeypatch.setattr(pipeline_runtime, "opend_fetch_kwargs", _opend_kwargs)
+    monkeypatch.setattr(multiplier_cache, "load_cache", lambda _path: {})
+    monkeypatch.setattr(multiplier_cache, "save_cache", lambda *_args: None)
+    monkeypatch.setattr(
+        multiplier_cache,
+        "refresh_via_opend",
+        lambda **_kwargs: events.append("refresh") or SimpleNamespace(ok=False, multiplier=None),
+    )
     monkeypatch.setattr(pipeline_watchlist, "run_watchlist_pipeline_default", _fake_run_watchlist_pipeline_default)
 
     rc = pipeline_runtime.main([
@@ -48,10 +66,12 @@ def test_scan_pipeline_defaults_runtime_outputs_to_runtime_root(monkeypatch, tmp
         "--stage",
         "fetch",
         "--no-context",
+        "--refresh-multiplier-cache",
     ])
 
     repo_root = Path(__file__).resolve().parents[1]
     assert rc == 0
+    assert events == ["load", "opend_kwargs", "refresh"]
     assert captured["load_config_base"] == repo_root
     assert captured["load_config_path"] == config_path.resolve()
     assert captured["pipeline_base"] == runtime_root.resolve()

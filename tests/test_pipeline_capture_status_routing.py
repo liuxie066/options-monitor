@@ -639,7 +639,7 @@ def _run_full_symbol_capture(
         base=tmp_path,
         cfg={
             "portfolio": {"account": "lx"},
-            "runtime": {"pipeline_symbol_max_workers": 1},
+            "runtime": {},
             "symbols": [
                 _symbol_config(
                     symbol,

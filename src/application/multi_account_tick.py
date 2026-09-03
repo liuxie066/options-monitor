@@ -15,7 +15,10 @@ from src.infrastructure.io_utils import (
 from src.infrastructure.run_log import RunLogger
 from src.application.account_config import resolve_configured_accounts
 from src.application.config_sections import resolve_watchlist_config
-from src.application.config_validator import validate_config
+from src.application.config_validator import (
+    validate_config,
+    validate_retired_symbol_worker_config,
+)
 from domain.domain.fetch_source import resolve_symbol_fetch_source
 
 from src.application.multi_tick.opend_guard import (
@@ -262,6 +265,8 @@ def main(argv: list[str] | None = None) -> int:
         require_sibling_external=True,
     )
     base_cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
+    if not isinstance(base_cfg, dict):
+        raise SystemExit(f'[CONFIG_ERROR] runtime config must be a JSON object: {cfg_path}')
     requested_market = str(getattr(args, 'market_config', 'auto') or 'auto').strip().lower()
     try:
         ensure_runtime_config_identity(
@@ -293,6 +298,8 @@ def main(argv: list[str] | None = None) -> int:
         # The emergency override skips source-freshness comparison only. It must
         # never revive schema fields removed by the currently running release.
         validate_config(deepcopy(base_cfg))
+    else:
+        validate_retired_symbol_worker_config(base_cfg)
     try:
         args.accounts = resolve_configured_accounts(base_cfg, args.accounts)
     except ValueError as exc:
