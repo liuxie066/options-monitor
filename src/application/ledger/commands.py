@@ -21,10 +21,13 @@ from domain.domain.trade_contract_identity import normalize_trade_side
 from src.application.ledger.interventions import (
     build_manual_repair_preview,
     build_manual_void_preview,
+    is_opend_trade_time_repair_request,
     is_order_identity_repair_request,
+    persist_manual_opend_trade_time_correction,
     persist_manual_order_identity_binding,
     persist_manual_repair_event,
     persist_manual_void_event,
+    preview_manual_opend_trade_time_correction,
     preview_manual_order_identity_binding,
 )
 from src.application.ledger.lot_resolver import (
@@ -2238,6 +2241,13 @@ def preview_trade_event_repair(
             overrides=overrides,
             repair_reason=reason,
         )
+    if is_opend_trade_time_repair_request(overrides):
+        return preview_manual_opend_trade_time_correction(
+            repo,
+            target_event_id=event_id,
+            overrides=overrides,
+            repair_reason=reason,
+        )
     from src.application.ledger.queries import trade_event_log, trade_event_projection_preview
 
     preview = build_manual_repair_preview(
@@ -2271,6 +2281,13 @@ def record_trade_event_repair(
 ) -> dict[str, Any]:
     if is_order_identity_repair_request(overrides):
         return persist_manual_order_identity_binding(
+            repo,
+            target_event_id=event_id,
+            overrides=overrides,
+            repair_reason=reason,
+        )
+    if is_opend_trade_time_repair_request(overrides):
+        return persist_manual_opend_trade_time_correction(
             repo,
             target_event_id=event_id,
             overrides=overrides,

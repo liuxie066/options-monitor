@@ -5,6 +5,9 @@
 ### Breaking Changes
 - Reject the retired `runtime.pipeline_symbol_max_workers` and `runtime.watchlist_max_workers` settings instead of silently ignoring them.
 
+### Bug Fixes
+- Added an audited OpenD-evidence repair for incorrect historical Futu trade times, preserving event identity and projection lineage while invalidating stale event-time cash conversions for explicit backfill.
+
 ## 3.4.3 - 2026-09-03
 
 ### Breaking Changes

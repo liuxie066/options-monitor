@@ -811,28 +811,7 @@ def _apply_plan(
         if correction
         else "cash_conversion_backfill_audit"
     )
-    primary_key = (
-        "UNIQUE(event_kind, event_id, cash_fact_id, rate_evidence_fact_id)"
-        if correction
-        else "PRIMARY KEY(event_kind, event_id, cash_fact_id)"
-    )
-    conn.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS {audit_table}(
-          batch_id TEXT NOT NULL,
-          event_kind TEXT NOT NULL,
-          event_id TEXT NOT NULL,
-          cash_fact_id TEXT NOT NULL,
-          previous_conversion_json TEXT,
-          new_conversion_json TEXT NOT NULL,
-          previous_event_sha256 TEXT NOT NULL,
-          new_event_sha256 TEXT NOT NULL,
-          rate_evidence_fact_id TEXT,
-          migrated_at_ms INTEGER NOT NULL,
-          {primary_key}
-        )
-        """
-    )
+    _ensure_cash_conversion_audit_table(conn, correction=correction)
     for event_change in plan.event_changes:
         table = "trade_events" if event_change.event_kind == "trade_event" else "assigned_stock_events"
         id_column = "event_id" if event_change.event_kind == "trade_event" else "stock_event_id"
@@ -869,21 +848,76 @@ def _apply_plan(
             if event_change.event_kind == "trade_event"
             else before_payload.get("cash_conversions", {})
         )
+        time_correction = (
+            before_payload.get("raw_payload", {}).get("trade_time_correction_provenance")
+            if event_change.event_kind == "trade_event"
+            else None
+        )
         previous_hash = hashlib.sha256(event_change.previous_json.encode("utf-8")).hexdigest()
         new_hash = hashlib.sha256(event_change.new_json.encode("utf-8")).hexdigest()
         for conversion_change in event_change.conversion_changes:
+            target_audit_table = audit_table
+            if not correction:
+                prior = conn.execute(
+                    """
+                    SELECT 1 FROM cash_conversion_backfill_audit
+                    WHERE event_kind=? AND event_id=? AND cash_fact_id=?
+                    """,
+                    (
+                        conversion_change.event_kind,
+                        conversion_change.event_id,
+                        conversion_change.cash_fact_id,
+                    ),
+                ).fetchone()
+                if prior is not None:
+                    fact_kind = conversion_change.cash_fact_id.split(":", 1)[0]
+                    invalidated = (
+                        time_correction.get("invalidated_cash_conversion_keys")
+                        if isinstance(time_correction, Mapping)
+                        else None
+                    )
+                    if (
+                        not isinstance(time_correction, Mapping)
+                        or str(time_correction.get("schema_version") or "")
+                        != "opend_trade_time_correction.v1"
+                        or str(time_correction.get("provider") or "") != "opend"
+                        or str(time_correction.get("source") or "")
+                        != "manual_trade_event_repair"
+                        or not str(time_correction.get("correction_id") or "").startswith(
+                            "opend_trade_time_correction_"
+                        )
+                        or int(time_correction.get("after_trade_time_ms") or 0)
+                        != int(before_payload.get("event_time_ms") or 0)
+                        or int(time_correction.get("before_trade_time_ms") or 0)
+                        == int(before_payload.get("event_time_ms") or 0)
+                        or not isinstance(invalidated, list)
+                        or fact_kind not in invalidated
+                    ):
+                        raise ValueError(
+                            "cash conversion backfill audit already exists without "
+                            "an OpenD trade-time correction"
+                        )
+                    target_audit_table = "cash_conversion_trade_time_repair_audit"
+                    _ensure_trade_time_repair_audit_table(conn)
             previous = None
             if isinstance(before_conversions, Mapping):
                 fact_kind = conversion_change.cash_fact_id.split(":", 1)[0]
                 previous = before_conversions.get(fact_kind)
+            columns = (
+                ""
+                if target_audit_table != "cash_conversion_trade_time_repair_audit"
+                else ", trade_time_correction_id"
+            )
+            placeholders = "" if not columns else ", ?"
+            values = () if not columns else (str(time_correction["correction_id"]),)
             conn.execute(
                 f"""
-                INSERT INTO {audit_table}(
+                INSERT INTO {target_audit_table}(
                   batch_id, event_kind, event_id, cash_fact_id,
                   previous_conversion_json, new_conversion_json,
                   previous_event_sha256, new_event_sha256,
-                  rate_evidence_fact_id, migrated_at_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  rate_evidence_fact_id, migrated_at_ms{columns}
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?{placeholders})
                 """,
                 (
                     batch_id,
@@ -900,8 +934,60 @@ def _apply_plan(
                     new_hash,
                     conversion_change.conversion.get("rate_evidence_fact_id"),
                     int(migrated_at_ms),
+                    *values,
                 ),
             )
+
+
+def _ensure_cash_conversion_audit_table(conn: Any, *, correction: bool) -> None:
+    audit_table = (
+        "cash_conversion_correction_audit"
+        if correction
+        else "cash_conversion_backfill_audit"
+    )
+    primary_key = (
+        "UNIQUE(event_kind, event_id, cash_fact_id, rate_evidence_fact_id)"
+        if correction
+        else "PRIMARY KEY(event_kind, event_id, cash_fact_id)"
+    )
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {audit_table}(
+          batch_id TEXT NOT NULL,
+          event_kind TEXT NOT NULL,
+          event_id TEXT NOT NULL,
+          cash_fact_id TEXT NOT NULL,
+          previous_conversion_json TEXT,
+          new_conversion_json TEXT NOT NULL,
+          previous_event_sha256 TEXT NOT NULL,
+          new_event_sha256 TEXT NOT NULL,
+          rate_evidence_fact_id TEXT,
+          migrated_at_ms INTEGER NOT NULL,
+          {primary_key}
+        )
+        """
+    )
+
+
+def _ensure_trade_time_repair_audit_table(conn: Any) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS cash_conversion_trade_time_repair_audit(
+          batch_id TEXT NOT NULL,
+          event_kind TEXT NOT NULL,
+          event_id TEXT NOT NULL,
+          cash_fact_id TEXT NOT NULL,
+          previous_conversion_json TEXT,
+          new_conversion_json TEXT NOT NULL,
+          previous_event_sha256 TEXT NOT NULL,
+          new_event_sha256 TEXT NOT NULL,
+          rate_evidence_fact_id TEXT,
+          migrated_at_ms INTEGER NOT NULL,
+          trade_time_correction_id TEXT NOT NULL,
+          UNIQUE(event_kind, event_id, cash_fact_id, trade_time_correction_id)
+        )
+        """
+    )
 
 
 def _result_from_plan(

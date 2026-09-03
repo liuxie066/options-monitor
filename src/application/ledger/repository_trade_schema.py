@@ -29,6 +29,8 @@ TRADE_EVENT_PAGINATION_TRIGGERS = (
     "trg_trade_events_delete_immutable",
 )
 
+_OPEND_TRADE_TIME_CORRECTION_SCHEMA = "opend_trade_time_correction.v1"
+
 _TRADE_EVENT_PAGINATION_MISSING = """
     ingest_seq IS NULL
     OR typeof(ingest_seq) != 'integer' OR ingest_seq < 1
@@ -140,6 +142,119 @@ def _trade_event_pagination_schema_ready(conn: sqlite3.Connection) -> bool:
     }
     return required.issubset(present) and _trade_event_pagination_missing_row(conn) is None
 
+
+def _publish_trade_event_query_projection_immutable_trigger(
+    conn: sqlite3.Connection,
+) -> None:
+    conn.execute("DROP TRIGGER IF EXISTS trg_trade_events_query_projection_immutable")
+    conn.execute(
+        f"""
+        CREATE TRIGGER trg_trade_events_query_projection_immutable
+        BEFORE UPDATE OF event_id, account, event_json, trade_time_ms,
+          market, position_effect ON trade_events
+        WHEN OLD.ingest_seq IS NOT NULL AND (
+          NEW.event_id IS NOT OLD.event_id
+          OR NEW.account IS NOT OLD.account
+          OR NEW.market IS NOT OLD.market
+          OR NEW.position_effect IS NOT OLD.position_effect
+          OR json_extract(NEW.event_json, '$.event_id')
+             IS NOT json_extract(OLD.event_json, '$.event_id')
+          OR json_extract(NEW.event_json, '$.event_type')
+             IS NOT json_extract(OLD.event_json, '$.event_type')
+          OR json_extract(NEW.event_json, '$.contract_key.account')
+             IS NOT json_extract(OLD.event_json, '$.contract_key.account')
+          OR json_extract(NEW.event_json, '$.contract_key.broker')
+             IS NOT json_extract(OLD.event_json, '$.contract_key.broker')
+          OR json_extract(NEW.event_json, '$.contract_key.underlying_symbol')
+             IS NOT json_extract(OLD.event_json, '$.contract_key.underlying_symbol')
+          OR json_extract(NEW.event_json, '$.contract_key.option_type')
+             IS NOT json_extract(OLD.event_json, '$.contract_key.option_type')
+          OR json_extract(NEW.event_json, '$.contract_key.strike')
+             IS NOT json_extract(OLD.event_json, '$.contract_key.strike')
+          OR json_extract(NEW.event_json, '$.contract_key.expiration_ymd')
+             IS NOT json_extract(OLD.event_json, '$.contract_key.expiration_ymd')
+          OR (
+            (
+              NEW.trade_time_ms IS NOT OLD.trade_time_ms
+              OR json_extract(NEW.event_json, '$.event_time_ms')
+                 IS NOT json_extract(OLD.event_json, '$.event_time_ms')
+            )
+            AND NOT (
+              NEW.trade_time_ms IS NOT OLD.trade_time_ms
+              AND json_extract(NEW.event_json, '$.event_time_ms')
+                  IS NOT json_extract(OLD.event_json, '$.event_time_ms')
+              AND json_type(
+                NEW.event_json,
+                '$.raw_payload.trade_time_correction_provenance'
+              ) IS 'object'
+              AND json_extract(
+                NEW.event_json,
+                '$.raw_payload.trade_time_correction_provenance.schema_version'
+              ) = '{_OPEND_TRADE_TIME_CORRECTION_SCHEMA}'
+              AND json_extract(
+                NEW.event_json,
+                '$.raw_payload.trade_time_correction_provenance.provider'
+              ) = 'opend'
+              AND json_extract(
+                NEW.event_json,
+                '$.raw_payload.trade_time_correction_provenance.source'
+              ) = 'manual_trade_event_repair'
+              AND json_type(
+                NEW.event_json,
+                '$.raw_payload.trade_time_correction_provenance.before_trade_time_ms'
+              ) IS 'integer'
+              AND CAST(json_extract(
+                NEW.event_json,
+                '$.raw_payload.trade_time_correction_provenance.before_trade_time_ms'
+              ) AS INTEGER) IS OLD.trade_time_ms
+              AND json_type(
+                NEW.event_json,
+                '$.raw_payload.trade_time_correction_provenance.after_trade_time_ms'
+              ) IS 'integer'
+              AND CAST(json_extract(
+                NEW.event_json,
+                '$.raw_payload.trade_time_correction_provenance.after_trade_time_ms'
+              ) AS INTEGER) IS NEW.trade_time_ms
+              AND json_extract(
+                NEW.event_json,
+                '$.raw_payload.opend_order_evidence.provider'
+              ) = 'opend'
+              AND json_extract(
+                NEW.event_json,
+                '$.raw_payload.opend_order_evidence.schema_version'
+              ) = 'opend_order_evidence.v1'
+              AND json_array_length(
+                NEW.event_json,
+                '$.raw_payload.opend_order_evidence.orders'
+              ) > 0
+              AND NEW.trade_time_ms = (
+                SELECT MIN(CAST(json_extract(value, '$.trade_time_ms') AS INTEGER))
+                FROM json_each(
+                  NEW.event_json,
+                  '$.raw_payload.opend_order_evidence.orders'
+                )
+              )
+            )
+          )
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'trade event query projection is immutable');
+        END
+        """
+    )
+
+
+def _ensure_opend_trade_time_correction_guard(conn: sqlite3.Connection) -> None:
+    row = conn.execute(
+        """
+        SELECT sql
+        FROM sqlite_master
+        WHERE type = 'trigger' AND name = 'trg_trade_events_query_projection_immutable'
+        """
+    ).fetchone()
+    if row is None or _OPEND_TRADE_TIME_CORRECTION_SCHEMA not in str(row["sql"] or ""):
+        _publish_trade_event_query_projection_immutable_trigger(conn)
+
 def _publish_trade_event_pagination_schema(conn: sqlite3.Connection) -> None:
     missing = _trade_event_pagination_missing_row(conn)
     if missing is not None:
@@ -189,41 +304,7 @@ def _publish_trade_event_pagination_schema(conn: sqlite3.Connection) -> None:
         END
         """
     )
-    conn.execute(
-        """
-        CREATE TRIGGER IF NOT EXISTS trg_trade_events_query_projection_immutable
-        BEFORE UPDATE OF event_id, account, event_json, trade_time_ms,
-          market, position_effect ON trade_events
-        WHEN OLD.ingest_seq IS NOT NULL AND (
-          NEW.event_id IS NOT OLD.event_id
-          OR NEW.account IS NOT OLD.account
-          OR NEW.trade_time_ms IS NOT OLD.trade_time_ms
-          OR NEW.market IS NOT OLD.market
-          OR NEW.position_effect IS NOT OLD.position_effect
-          OR json_extract(NEW.event_json, '$.event_id')
-             IS NOT json_extract(OLD.event_json, '$.event_id')
-          OR json_extract(NEW.event_json, '$.event_time_ms')
-             IS NOT json_extract(OLD.event_json, '$.event_time_ms')
-          OR json_extract(NEW.event_json, '$.event_type')
-             IS NOT json_extract(OLD.event_json, '$.event_type')
-          OR json_extract(NEW.event_json, '$.contract_key.account')
-             IS NOT json_extract(OLD.event_json, '$.contract_key.account')
-          OR json_extract(NEW.event_json, '$.contract_key.broker')
-             IS NOT json_extract(OLD.event_json, '$.contract_key.broker')
-          OR json_extract(NEW.event_json, '$.contract_key.underlying_symbol')
-             IS NOT json_extract(OLD.event_json, '$.contract_key.underlying_symbol')
-          OR json_extract(NEW.event_json, '$.contract_key.option_type')
-             IS NOT json_extract(OLD.event_json, '$.contract_key.option_type')
-          OR json_extract(NEW.event_json, '$.contract_key.strike')
-             IS NOT json_extract(OLD.event_json, '$.contract_key.strike')
-          OR json_extract(NEW.event_json, '$.contract_key.expiration_ymd')
-             IS NOT json_extract(OLD.event_json, '$.contract_key.expiration_ymd')
-        )
-        BEGIN
-          SELECT RAISE(ABORT, 'trade event query projection is immutable');
-        END
-        """
-    )
+    _publish_trade_event_query_projection_immutable_trigger(conn)
     projection_guard = """
       SELECT CASE
         WHEN json_valid(NEW.event_json) != 1
