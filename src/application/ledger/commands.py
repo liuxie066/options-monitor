@@ -54,6 +54,7 @@ from src.application.ledger.preflight import (
     _existing_open_event_result,
     _manual_open_ledger_inputs,
     _preflight_lot_adjust,
+    _preflight_lot_adjustments,
     _preflight_manual_repair_payload,
     _preflight_manual_void_payload,
     _preflight_open_event,
@@ -330,13 +331,16 @@ def record_manual_position_adjustments(
 ) -> list[ManualAdjustLedgerResult]:
     """Preflight and persist multiple lot adjustments atomically."""
 
-    prepared: list[dict[str, Any]] = []
-    preflight_results: list[Any] = []
+    normalized: list[dict[str, Any]] = []
+    seen_record_ids: set[str] = set()
     for raw in adjustments:
         item = dict(raw or {})
         record_id = str(item.pop("record_id", "") or "").strip()
         if not record_id:
             raise ValueError("manual adjustment batch requires record_id")
+        if record_id in seen_record_ids:
+            raise ValueError(f"manual adjustment batch contains duplicate record_id: {record_id}")
+        seen_record_ids.add(record_id)
         item.setdefault("fields", None)
         item.setdefault("contracts", None)
         item.setdefault("strike", None)
@@ -345,20 +349,21 @@ def record_manual_position_adjustments(
         item.setdefault("multiplier", None)
         item.setdefault("opened_at_ms", None)
         item.setdefault("as_of_ms", None)
-        preflight_result = _preflight_lot_adjust(
-            repo,
-            record_id=record_id,
-            source="manual_adjust_batch_preflight",
-            operation_label="manual adjustment batch",
-            **item,
-        )
+        normalized.append({"record_id": record_id, **item})
+
+    preflight_results = _preflight_lot_adjustments(
+        repo,
+        adjustments=normalized,
+        source="manual_adjust_batch_preflight",
+        operation_label="manual adjustment batch",
+    )
+    prepared: list[dict[str, Any]] = []
+    for item, preflight_result in zip(normalized, preflight_results, strict=True):
         event_time_ms = preflight_result.ledger_preflight.event_time_ms
         if event_time_ms is None:
             raise RuntimeError("manual adjustment batch preflight did not provide event_time_ms")
-        preflight_results.append(preflight_result)
         prepared.append(
             {
-                "record_id": record_id,
                 **item,
                 "fields": preflight_result.fields,
                 "as_of_ms": int(event_time_ms),

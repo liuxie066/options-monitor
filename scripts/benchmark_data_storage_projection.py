@@ -1742,7 +1742,7 @@ def _phase_3a_operation(repo: Any, *, key: str, spec: Mapping[str, Any]) -> Any:
         event = TradeEvent(
             event_id="bench-phase3a-special-call-open",
             event_type="open",
-            event_time_ms=1_900_000_000_500,
+            event_time_ms=1_850_000_000_500,
             contract_key=call_key,
             contracts=1,
             price=0.5,
