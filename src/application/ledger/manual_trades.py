@@ -662,6 +662,15 @@ def persist_manual_adjust_events(
             for row in current_rows
             if str(row.get("record_id") or "").strip()
         }
+        for record_id, fields, _item in validated:
+            current_fields = current_by_record_id.get(record_id)
+            if current_fields is None:
+                raise ValueError(f"manual adjustment batch target lot not found: {record_id}")
+            if current_fields != fields:
+                raise ValueError(
+                    "manual adjustment batch target fields changed since preflight: "
+                    f"{record_id}"
+                )
         desired_group_ids = {
             str(item.get("strategy_group_id") or "").strip()
             for _record_id, _fields, item in validated
@@ -690,9 +699,7 @@ def persist_manual_adjust_events(
 
         prepared: list[tuple[str, TradeEvent, PositionLotPatch]] = []
         for record_id, fields, item in validated:
-            current_fields = current_by_record_id.get(record_id)
-            if current_fields is None:
-                raise ValueError(f"manual adjustment batch target lot not found: {record_id}")
+            current_fields = current_by_record_id[record_id]
             event, patch_contract = _build_manual_adjust_event(
                 sqlite_repo,
                 record_id=record_id,

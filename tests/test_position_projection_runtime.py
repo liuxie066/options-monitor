@@ -1260,6 +1260,44 @@ def test_caller_owned_runtime_error_leaves_rollback_to_caller(tmp_path: Path) ->
     assert repo.list_trade_events() == []
 
 
+def test_warning_only_full_projection_without_state_remains_fail_closed(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    run_position_projection_forced_full(
+        repo,
+        [_event("open", "open", 1_000, lot_id="lot-a")],
+        seed_checkpoint=True,
+    )
+    before = {
+        "events": repo.list_trade_events(),
+        "lots": repo.list_position_lots(),
+        "source": repo.read_position_projection_source_state(),
+        "checkpoints": [dict(row) for row in _checkpoint_rows(repo)],
+    }
+    invalid_adjust = _event(
+        "adjust-too-late",
+        "adjust",
+        2_000_000_000_001,
+        target_lot_id="lot-a",
+        contracts=0,
+        raw_payload={
+            "patch": {
+                "opened_at": 2_000_000_000_000,
+                "last_action_at": 2_000_000_000_001,
+            }
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="publishable full projection lacks resumable state"):
+        run_position_projection_forced_full(repo, [invalid_adjust])
+
+    assert repo.list_trade_events() == before["events"]
+    assert repo.list_position_lots() == before["lots"]
+    assert repo.read_position_projection_source_state() == before["source"]
+    assert [dict(row) for row in _checkpoint_rows(repo)] == before["checkpoints"]
+
+
 def test_unavailable_implementation_keeps_full_projection_compatible(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

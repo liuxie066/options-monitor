@@ -89,6 +89,39 @@ def _small_spec(
     }
 
 
+def _phase_3a_batch_adjustments(
+    spec: dict[str, Any],
+    *,
+    cardinality: int,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "record_id": module._phase_3a_record_id(spec, index),
+            "premium_per_share": 1.25 + index,
+            "as_of_ms": 1_850_000_000_100,
+        }
+        for index in range(cardinality)
+    ]
+
+
+def _phase_3a_persisted_state(repo: Any) -> dict[str, list[tuple[Any, ...]]]:
+    tables = (
+        "trade_events",
+        "trade_event_ingest_sequence",
+        "position_lots",
+        "position_projection_source_state",
+        "position_projection_heads",
+        "position_projection_checkpoints",
+        "current_decision_input_generations",
+        "current_decision_projections",
+    )
+    with repo._connect() as conn:
+        return {
+            table: [tuple(row) for row in conn.execute(f"SELECT * FROM {table} ORDER BY 1")]
+            for table in tables
+        }
+
+
 def _timing_artifact(
     fixture_manifest: dict[str, Any],
     *,
@@ -1229,6 +1262,214 @@ def test_phase_3a_pair_uses_independent_identical_database_copies() -> None:
         "base_sqlite_sha256"
     ]
     assert result["parity"]["exact"] is True
+
+
+@pytest.mark.parametrize(("checkpoint_mode", "expected_full_reads"), [("enabled", 2), ("disabled", 3)])
+@pytest.mark.parametrize("cardinality", [1, 2, 3])
+def test_phase_3a_batch_adjust_full_prefix_reads_are_bounded(
+    checkpoint_mode: str,
+    expected_full_reads: int,
+    cardinality: int,
+) -> None:
+    from src.application.ledger.commands import record_manual_position_adjustments
+
+    spec = _small_spec(
+        key="phase_3a.runtime",
+        event_count=20,
+        lot_count=4,
+        account_count=1,
+    )
+    with module._temporary_phase_3a_base(spec, seed=module.SEED) as base:
+        with module._temporary_phase_3a_clone(
+            base,
+            checkpoint_mode=checkpoint_mode,
+        ) as context:
+            with module._instrument_phase_3a_repo(context["repo"]) as counters:
+                results = record_manual_position_adjustments(
+                    context["repo"],
+                    _phase_3a_batch_adjustments(spec, cardinality=cardinality),
+                )
+
+    assert counters["full_prefix_reader_calls"] == expected_full_reads
+    assert [result.ledger_preflight.target_lot_id for result in results] == [
+        module._phase_3a_record_id(spec, index) for index in range(cardinality)
+    ]
+
+
+def test_phase_3a_batch_adjust_same_time_preserves_order_and_parity() -> None:
+    from src.application.ledger.commands import record_manual_position_adjustments
+
+    spec = _small_spec(
+        key="phase_3a.runtime",
+        event_count=20,
+        lot_count=4,
+        account_count=1,
+    )
+    observed: dict[str, dict[str, Any]] = {}
+    with module._temporary_phase_3a_base(spec, seed=module.SEED) as base:
+        for checkpoint_mode in ("enabled", "disabled"):
+            with module._temporary_phase_3a_clone(
+                base,
+                checkpoint_mode=checkpoint_mode,
+            ) as context:
+                results = record_manual_position_adjustments(
+                    context["repo"],
+                    _phase_3a_batch_adjustments(spec, cardinality=3),
+                )
+                observed[checkpoint_mode] = {
+                    "target_lot_ids": [
+                        result.ledger_preflight.target_lot_id for result in results
+                    ],
+                    "event_times": [
+                        result.ledger_preflight.event_time_ms for result in results
+                    ],
+                    "fingerprint": module._phase_3a_lot_fingerprint(context["db_path"]),
+                }
+
+    assert observed["enabled"] == observed["disabled"]
+    assert observed["enabled"]["event_times"] == [1_850_000_000_100] * 3
+
+
+def test_phase_3a_batch_adjust_invalid_item_writes_nothing() -> None:
+    from src.application.ledger.commands import record_manual_position_adjustments
+
+    spec = _small_spec(
+        key="phase_3a.runtime",
+        event_count=20,
+        lot_count=4,
+        account_count=1,
+    )
+    with module._temporary_phase_3a_base(spec, seed=module.SEED) as base:
+        with module._temporary_phase_3a_clone(base, checkpoint_mode="disabled") as context:
+            repo = context["repo"]
+            before = _phase_3a_persisted_state(repo)
+            adjustments = _phase_3a_batch_adjustments(spec, cardinality=1)
+            adjustments.append(
+                {
+                    "record_id": "missing-lot",
+                    "premium_per_share": 9.5,
+                    "as_of_ms": 1_850_000_000_100,
+                }
+            )
+
+            with pytest.raises(ValueError, match="missing-lot"):
+                record_manual_position_adjustments(repo, adjustments)
+
+            assert _phase_3a_persisted_state(repo) == before
+
+
+def test_phase_3a_batch_adjust_duplicate_target_writes_nothing() -> None:
+    from src.application.ledger.commands import record_manual_position_adjustments
+
+    spec = _small_spec(
+        key="phase_3a.runtime",
+        event_count=20,
+        lot_count=4,
+        account_count=1,
+    )
+    with module._temporary_phase_3a_base(spec, seed=module.SEED) as base:
+        with module._temporary_phase_3a_clone(base, checkpoint_mode="disabled") as context:
+            repo = context["repo"]
+            before = _phase_3a_persisted_state(repo)
+            adjustment = _phase_3a_batch_adjustments(spec, cardinality=1)[0]
+
+            with pytest.raises(ValueError, match="duplicate record_id"):
+                record_manual_position_adjustments(repo, [adjustment, adjustment])
+
+            assert _phase_3a_persisted_state(repo) == before
+
+
+def test_phase_3a_batch_adjust_transaction_drift_writes_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.application.ledger.commands import record_manual_position_adjustments
+
+    spec = _small_spec(
+        key="phase_3a.runtime",
+        event_count=20,
+        lot_count=4,
+        account_count=1,
+    )
+    with module._temporary_phase_3a_base(spec, seed=module.SEED) as base:
+        with module._temporary_phase_3a_clone(base, checkpoint_mode="disabled") as context:
+            repo = context["repo"]
+            before = _phase_3a_persisted_state(repo)
+            original = repo.get_position_lots_by_ids
+
+            def drifted_rows(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+                rows = original(*args, **kwargs)
+                rows[0] = {
+                    **rows[0],
+                    "fields": {**rows[0]["fields"], "note": "concurrent drift"},
+                }
+                return rows
+
+            monkeypatch.setattr(repo, "get_position_lots_by_ids", drifted_rows)
+            with pytest.raises(ValueError, match="fields changed since preflight"):
+                record_manual_position_adjustments(
+                    repo,
+                    _phase_3a_batch_adjustments(spec, cardinality=2),
+                )
+
+            assert _phase_3a_persisted_state(repo) == before
+
+
+def test_phase_3a_batch_adjust_late_failure_rolls_back_everything(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.application.ledger.manual_trades as manual_trades
+    from src.application.ledger.commands import record_manual_position_adjustments
+
+    spec = _small_spec(
+        key="phase_3a.runtime",
+        event_count=20,
+        lot_count=4,
+        account_count=1,
+    )
+    with module._temporary_phase_3a_base(spec, seed=module.SEED) as base:
+        with module._temporary_phase_3a_clone(base, checkpoint_mode="disabled") as context:
+            repo = context["repo"]
+            before = _phase_3a_persisted_state(repo)
+
+            def fail_finalization(*_args: Any, **_kwargs: Any) -> None:
+                raise RuntimeError("synthetic late finalization failure")
+
+            monkeypatch.setattr(
+                manual_trades,
+                "_finish_trade_event_decision_projection",
+                fail_finalization,
+            )
+            with pytest.raises(RuntimeError, match="synthetic late finalization failure"):
+                record_manual_position_adjustments(
+                    repo,
+                    _phase_3a_batch_adjustments(spec, cardinality=2),
+                )
+
+            assert _phase_3a_persisted_state(repo) == before
+
+
+def test_phase_3a_special_combo_fixture_completes_without_diagnostics() -> None:
+    from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
+
+    spec = _small_spec(
+        key="phase_3a.runtime",
+        event_count=20,
+        lot_count=4,
+        account_count=1,
+    )
+    with module._temporary_phase_3a_base(spec, seed=module.SEED) as base:
+        with module._temporary_phase_3a_clone(base, checkpoint_mode="disabled") as context:
+            result = module._phase_3a_operation(
+                context["repo"],
+                key="special_combo_identity_membership",
+                spec=spec,
+            )
+            projection = project_stored_trade_events_to_position_lots(
+                context["repo"].list_trade_events()
+            )
+
+    assert result["event_created"] is True
+    assert not projection.diagnostics
 
 
 def test_parent_failure_leaves_absent_output_unmodified(tmp_path: Path) -> None:
