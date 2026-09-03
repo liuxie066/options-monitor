@@ -1,0 +1,171 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.4.4",
+  "base": {
+    "tag": "v3.4.3",
+    "commit": "21d1de0bd59d8c94e2a670993e12515cc6383b32"
+  },
+  "reviewed_head": "fb4680e8138ac5154341bf51689f041aed3a6974",
+  "commits": [
+    {
+      "sha": "f575b22ed902c4a03408efc0695d811560356a67",
+      "subject": "fix(ledger): bind historical Futu order identities"
+    },
+    {
+      "sha": "1cea914066bf969102e9fb784506bb73b755f4df",
+      "subject": "Merge pull request #228 from liuxie066/codex/futu-order-identity-backfill"
+    },
+    {
+      "sha": "e577685976efea16789ca72d8ab1b30f4cd31a03",
+      "subject": "perf(ledger): bound batch adjustment preflight"
+    },
+    {
+      "sha": "50bd4c33ff2e28a77e875f14e369e65e36521151",
+      "subject": "fix(config): reject ineffective symbol worker settings"
+    },
+    {
+      "sha": "7ddd7309a9922a81bf224f4aedf4a1556162568a",
+      "subject": "Merge pull request #229 from liuxie066/codex/ledger-batch-preflight-perf"
+    },
+    {
+      "sha": "3005552001a5f3df8c0e591f381d5ba6bb928fc4",
+      "subject": "chore(sync): merge latest main into symbol pipeline branch"
+    },
+    {
+      "sha": "b886dba0e360fc607d677992bc62ae1fb9c4457a",
+      "subject": "Merge pull request #230 from liuxie066/codex/refactor-symbol-pipeline-execution"
+    },
+    {
+      "sha": "b61dd8166b164a4dad35d3699ce2cd45a3512d14",
+      "subject": "fix(ledger): restore OpenD trade times"
+    },
+    {
+      "sha": "d25bf8b5c7ddd1c55aaf270b90b84acf74f654a9",
+      "subject": "Merge pull request #231 from liuxie066/codex/fix-opend-trade-time-repair-minimal"
+    },
+    {
+      "sha": "c800907e92ac31580320ac17e8132a36d7b78968",
+      "subject": "fix(strategy-lab): bind fx observation to receipt time"
+    },
+    {
+      "sha": "fb4680e8138ac5154341bf51689f041aed3a6974",
+      "subject": "Merge pull request #232 from liuxie066/codex/fix-strategy-lab-fx-time"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Breaking Changes",
+      "text": "Reject the retired `runtime.pipeline_symbol_max_workers` and `runtime.watchlist_max_workers` settings instead of silently ignoring them.",
+      "commits": [
+        "50bd4c33ff2e28a77e875f14e369e65e36521151",
+        "b886dba0e360fc607d677992bc62ae1fb9c4457a"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Reduced batch manual-adjustment preflight to one current projection and one combined candidate projection, bounding full-history reads without changing atomic validation.",
+      "commits": [
+        "e577685976efea16789ca72d8ab1b30f4cd31a03",
+        "7ddd7309a9922a81bf224f4aedf4a1556162568a"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Allowed audited metadata-only binding of missing Futu account and order identities on historical open events, preserving event identity and downstream close/adjust lineage for subsequent fee enrichment.",
+      "commits": [
+        "f575b22ed902c4a03408efc0695d811560356a67",
+        "1cea914066bf969102e9fb784506bb73b755f4df"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Bound Strategy Lab FX observation time to the sealed prepared-receipt timestamp instead of the earlier position snapshot, preserving strict temporal validation for natural formal points.",
+      "commits": [
+        "c800907e92ac31580320ac17e8132a36d7b78968",
+        "fb4680e8138ac5154341bf51689f041aed3a6974"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Added an audited OpenD-evidence repair for incorrect historical Futu trade times, preserving event identity and projection lineage while invalidating stale event-time cash conversions for explicit backfill.",
+      "commits": [
+        "b61dd8166b164a4dad35d3699ce2cd45a3512d14",
+        "d25bf8b5c7ddd1c55aaf270b90b84acf74f654a9"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "3005552001a5f3df8c0e591f381d5ba6bb928fc4",
+      "reason": "Synchronized the symbol-pipeline branch with current main; it adds no separate user-visible behavior beyond the mapped PR changes."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "f575b22ed902c4a03408efc0695d811560356a67",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/228"
+      ]
+    },
+    {
+      "commit": "1cea914066bf969102e9fb784506bb73b755f4df",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/228"
+      ]
+    },
+    {
+      "commit": "e577685976efea16789ca72d8ab1b30f4cd31a03",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/229"
+      ]
+    },
+    {
+      "commit": "50bd4c33ff2e28a77e875f14e369e65e36521151",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/230"
+      ]
+    },
+    {
+      "commit": "7ddd7309a9922a81bf224f4aedf4a1556162568a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/229"
+      ]
+    },
+    {
+      "commit": "3005552001a5f3df8c0e591f381d5ba6bb928fc4",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/230"
+      ]
+    },
+    {
+      "commit": "b886dba0e360fc607d677992bc62ae1fb9c4457a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/230"
+      ]
+    },
+    {
+      "commit": "b61dd8166b164a4dad35d3699ce2cd45a3512d14",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/231"
+      ]
+    },
+    {
+      "commit": "d25bf8b5c7ddd1c55aaf270b90b84acf74f654a9",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/231"
+      ]
+    },
+    {
+      "commit": "c800907e92ac31580320ac17e8132a36d7b78968",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/232"
+      ]
+    },
+    {
+      "commit": "fb4680e8138ac5154341bf51689f041aed3a6974",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/232"
+      ]
+    }
+  ]
+}
