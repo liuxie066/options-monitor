@@ -1457,6 +1457,21 @@ def test_undeclared_contract_input_cannot_override_model_tool_arguments(monkeypa
             {"period": "mtd"},
         ),
         (
+            "期权yTd收益",
+            {"period": "ytd"},
+            {"period": "ytd"},
+        ),
+        (
+            "MtD期权收益",
+            {"period": "mtd"},
+            {"period": "mtd"},
+        ),
+        (
+            "期权（YTD）收益",
+            {"period": "ytd"},
+            {"period": "ytd"},
+        ),
+        (
             "查当前 MTD",
             {"as_of_date": "2026-08-23"},
             {"period": "mtd"},
@@ -1850,6 +1865,10 @@ def test_host_rejects_option_period_read_without_valid_frozen_clock(
             {"period": "mtd", "as_of_date": "2026-08-23"},
         ),
         ("期权13月收益", {"period": "mtd"}),
+        ("期权mytd收益", {"period": "mtd"}),
+        ("期权ytdx收益", {"period": "ytd"}),
+        ("期权ytd2026收益", {"period": "ytd"}),
+        ("期权_ytd收益", {"period": "ytd"}),
         (
             "不要再用截至2026-08-23的旧口径，查当前 MTD",
             {"period": "mtd", "as_of_date": "2026-08-23"},

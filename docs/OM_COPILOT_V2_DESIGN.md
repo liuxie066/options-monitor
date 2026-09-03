@@ -206,6 +206,9 @@ Success requires all of the following:
 
 - an unambiguous current-message month or year request reaches
   `option_performance_report` with the matching `period` plus `month` or `year`;
+- a case-insensitive bare `MTD` or `YTD` token in an option-performance phrase
+  remains valid when it directly touches CJK text or punctuation, while an
+  ASCII identifier that merely contains `mtd` or `ytd` remains invalid;
 - the sanitized model-proposed input and the effective input are both
   auditable, including when preparation rejects the call before execution;
 - ambiguous, malformed, or future selectors still fail before any business
@@ -226,6 +229,9 @@ tool for the model.
 
 - The current-message fence parses closed MTD/YTD cutoffs and natural month/year
   selectors for `option_performance_report`.
+- The generic MTD/YTD token guard is lexical, not a calendar-period owner. It
+  currently uses Python's Unicode word boundary, which incorrectly rejects a
+  bare token adjacent to CJK text; this slice changes only that boundary.
 - It currently compares the model proposal with that attestation and rejects a
   mismatch, although the attested values are already known deterministically.
 - A pre-execution rejection records the failure observation but not the model's
@@ -312,7 +318,14 @@ The accepted selector states are:
 | explicit YTD cutoff | `period=ytd`, matching `as_of_date` |
 | one natural month | `period=month`, canonical `month=YYYY-MM` |
 | one natural year | `period=year`, canonical integer `year` |
+| bare `MTD` or `YTD` in a performance phrase | existing generic MTD/YTD behavior; surrounding whitespace is optional |
 | no attested natural selector | existing generic MTD/YTD behavior; unauthorized `as_of_date` is removed |
+
+Bare MTD/YTD detection is case-insensitive and treats only ASCII letters,
+digits, and underscore as identifier continuations. `期权ytd收益` and
+`mtd期权收益` are therefore valid, while `期权mytd收益` and `期权ytdx收益`
+remain invalid. Host does not rewrite the current message or add a second
+natural-language parser.
 
 Multiple natural selectors, invalid dates, future periods, and selector-like
 text outside the closed grammar remain rejected before execution. The parser is
@@ -393,6 +406,9 @@ not manufacture an answer on its behalf.
    contract.
 4. Add focused Host, trace-redaction, schema-description, and result-admission
    regressions; then run the existing Copilot and Agent contract checks.
+5. Change the existing Host `_OPTION_PERFORMANCE_PERIOD_TOKEN` guard to use
+   `re.ASCII | re.IGNORECASE`, and extend the existing public `run_contract`
+   parameter tables rather than adding a normalizer, parser, or test harness.
 
 ### Validation Plan
 
@@ -405,6 +421,9 @@ not manufacture an answer on its behalf.
   `answered` result without `ANSWER_ADMISSION_FAILED`.
 - Prove ambiguous, future, and malformed selectors, including `期权13月收益`,
   perform no business read; unrelated text preserves generic MTD/YTD behavior.
+- Through the public `run_contract` path, prove `期权yTd收益` and `MtD期权收益`
+  work without spaces, while ASCII-prefix, suffix, digit, and underscore
+  continuations reject with no business read.
 - Prove fixed month scope alone binds `period=month`, equal message attestation
   succeeds, and a different month/year or MTD/YTD message scope rejects before
   the read.
@@ -438,7 +457,9 @@ Rejected alternatives are: asking the model to retry the same already-known
 selector indefinitely; generating a Host fallback answer; translating a
 natural period into generic MTD/YTD dates; adding a broad natural-language
 router; adding a new audit database or event type; and extending the Pi provider
-bridge with strict-tool controls before current evidence requires it.
+bridge with strict-tool controls before current evidence requires it. Rewriting
+the user message to inject spaces is also rejected because it would make the
+audited input differ from the text the user sent.
 
 No open product choice remains for this slice. Broader selector coverage or a
 provider-level strict schema is separate work triggered by measured failures.
