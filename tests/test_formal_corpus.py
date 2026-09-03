@@ -60,6 +60,7 @@ def _prepared_receipt(
             "fx_status": "ready",
             "fx_observation_sha256": "c" * 64,
             "source_observed_at": observed_at,
+            "application_received_at_utc": observed_at,
         },
         "exchange_rates": {
             "timestamp": observed_at,
