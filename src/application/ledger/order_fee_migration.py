@@ -26,10 +26,11 @@ from domain.domain.performance.cash_conversion import (
 from src.application.cash_conversion import build_cash_conversion
 from src.application.ledger.current_decision_projection import (
     capture_current_decision_projection_fence,
+    capture_trade_event_decision_projection_fence,
     compact_assigned_stock_view,
     finalize_current_decision_projection,
 )
-from src.application.ledger.event_codec import encode_trade_event_for_storage
+from src.application.ledger.event_codec import stored_trade_event_to_ledger_event
 from src.application.ledger.order_fee_semantics import zero_option_fee_lifecycle_reason
 from src.application.ledger.position_projection_runtime import (
     run_position_projection_in_transaction,
@@ -244,15 +245,21 @@ def _build_units(
     tuple[dict[str, Any], ...],
     dict[str, dict[str, int]],
 ]:
-    trade_rows = repo.list_trade_events()
+    trade_rows = repo.list_position_projection_event_rows()
     stock_rows = repo.list_assigned_stock_events()
     trade_events: list[TradeEvent] = []
+    trade_event_json: dict[str, str] = {}
     unresolved: list[dict[str, Any]] = []
     passive_outcomes: list[dict[str, Any]] = []
     for row in trade_rows:
         try:
-            event = TradeEvent.from_dict(row)
-        except (TypeError, ValueError) as exc:
+            payload = json.loads(str(row.get("event_json") or ""))
+            if not isinstance(payload, dict):
+                raise TypeError("trade event JSON must be an object")
+            event, diagnostics = stored_trade_event_to_ledger_event(payload)
+            if event is None or any(item.severity == "error" for item in diagnostics):
+                raise ValueError("stored trade event is not canonical")
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
             unresolved.append(
                 {
                     "event_kind": "option_trade",
@@ -263,6 +270,7 @@ def _build_units(
             )
             continue
         trade_events.append(event)
+        trade_event_json[event.event_id] = str(row["event_json"])
     voided = {
         str(event.target_event_id)
         for event in trade_events
@@ -384,6 +392,7 @@ def _build_units(
                 option_group,
                 observation=observation,
                 applied_at_ms=applied_at_ms,
+                trade_event_json=trade_event_json,
             )
             event_kind = "option_trade"
         else:
@@ -461,6 +470,7 @@ def _build_units(
                     _trade_change(
                         event,
                         updated,
+                        before_json=trade_event_json[event.event_id],
                         before_basis=FeeBasis.MISSING.value,
                         after_basis=FeeBasis.ACTUAL.value,
                     ),
@@ -491,6 +501,7 @@ def _build_units(
         changes, reason = _estimated_option_changes(
             events,
             applied_at_ms=applied_at_ms,
+            trade_event_json=trade_event_json,
         )
         if changes:
             units.append(_Unit(identity=f"formula:option:{identity}", changes=tuple(changes)))
@@ -539,6 +550,7 @@ def _actual_option_changes(
     *,
     observation: ActualOrderFee,
     applied_at_ms: int,
+    trade_event_json: Mapping[str, str],
 ) -> tuple[list[_Change], str | None]:
     ordered = sorted(events, key=lambda item: (item.event_time_ms, item.event_id))
     allocations = _allocate(observation.amount, [event.contracts for event in ordered])
@@ -566,6 +578,7 @@ def _actual_option_changes(
             _trade_change(
                 event,
                 updated,
+                before_json=trade_event_json[event.event_id],
                 before_basis=before.basis.value,
                 after_basis=FeeBasis.ACTUAL.value,
                 observation=observation,
@@ -613,7 +626,10 @@ def _actual_stock_changes(
 
 
 def _estimated_option_changes(
-    events: Sequence[TradeEvent], *, applied_at_ms: int
+    events: Sequence[TradeEvent],
+    *,
+    applied_at_ms: int,
+    trade_event_json: Mapping[str, str],
 ) -> tuple[list[_Change], str | None]:
     ordered = sorted(events, key=lambda item: (item.event_time_ms, item.event_id))
     if any(normalize_broker(item.contract_key.broker) != "富途" for item in ordered):
@@ -669,6 +685,7 @@ def _estimated_option_changes(
             _trade_change(
                 event,
                 updated,
+                before_json=trade_event_json[event.event_id],
                 before_basis=FeeBasis.MISSING.value,
                 after_basis=FeeBasis.ESTIMATED.value,
             )
@@ -884,22 +901,56 @@ def _trade_change(
     before: TradeEvent,
     after: TradeEvent,
     *,
+    before_json: str,
     before_basis: str,
     after_basis: str,
     observation: ActualOrderFee | None = None,
 ) -> _Change:
+    after_json = _option_fee_after_json(before_json, after)
     return _Change(
         event_kind="option_trade",
         event_id=before.event_id,
         account=before.contract_key.account,
-        before_json=encode_trade_event_for_storage(before).event_json,
-        after_json=encode_trade_event_for_storage(after).event_json,
+        before_json=before_json,
+        after_json=after_json,
         before_basis=before_basis,
         after_basis=after_basis,
         provider_batch_id=observation.provider_batch_id if observation else None,
         provider_observed_at_ms=observation.observed_at_ms if observation else None,
         fee_details_sha256=observation.fee_details_sha256 if observation else None,
     )
+
+
+def _option_fee_after_json(before_json: str, after: TradeEvent) -> str:
+    try:
+        payload = json.loads(before_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError("stored trade event JSON is invalid") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("stored trade event JSON must be an object")
+    stored_raw = payload.get("raw_payload")
+    if stored_raw is not None and not isinstance(stored_raw, dict):
+        raise ValueError("stored trade event raw_payload must be an object")
+
+    after_payload = after.to_dict()
+    after_raw = dict(after_payload["raw_payload"])
+    raw_payload = dict(stored_raw or {})
+    for key in ("fee_provenance", "cash_conversions"):
+        if key in after_raw:
+            raw_payload[key] = after_raw[key]
+        else:
+            raw_payload.pop(key, None)
+    payload["fees"] = after_payload["fees"]
+    payload["raw_payload"] = raw_payload
+    result = _json(payload)
+    decoded, diagnostics = stored_trade_event_to_ledger_event(payload)
+    if (
+        decoded is None
+        or any(item.severity == "error" for item in diagnostics)
+        or decoded.to_dict() != after_payload
+    ):
+        raise ValueError("fee enrichment produced an invalid trade event")
+    return result
 
 
 def _stock_change(
@@ -934,7 +985,14 @@ def _apply_unit(
     if conn is None:
         raise TypeError("fee enrichment requires SQLite transaction authority")
     accounts = sorted({change.account for change in unit.changes})
-    fence = capture_current_decision_projection_fence(repo, accounts=accounts, conn=conn)
+    option_changed = any(change.event_kind == "option_trade" for change in unit.changes)
+    fence = (
+        capture_trade_event_decision_projection_fence(repo, conn=conn)
+        if option_changed
+        else capture_current_decision_projection_fence(repo, accounts=accounts, conn=conn)
+    )
+    if fence is None:
+        raise ValueError("fee enrichment projection fence is empty")
     _ensure_audit_table(conn)
     for change in unit.changes:
         table, column = (
@@ -957,7 +1015,6 @@ def _apply_unit(
             raise ValueError(f"fee enrichment update failed: {change.event_id}")
         _insert_audit(conn, unit=unit, change=change, applied_at_ms=applied_at_ms)
 
-    option_changed = any(change.event_kind == "option_trade" for change in unit.changes)
     projection = (
         run_position_projection_in_transaction(
             repo,

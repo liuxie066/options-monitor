@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from copy import deepcopy
+import hashlib
 import json
 import sqlite3
 from pathlib import Path
@@ -364,6 +366,344 @@ def test_trade_events_repair_rejects_open_event_with_downstream_close(monkeypatc
     assert "cannot repair an open event with downstream close/adjust dependencies" in out
     assert "explicit_target" in out
     assert repo.list_position_lots()[0]["fields"]["contracts_open"] == 0
+
+
+def test_trade_events_identity_repair_binds_in_place_with_downstream_and_is_idempotent(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    import src.interfaces.cli.trade_events as cli
+    from src.application.ledger.position_projection_runtime import run_position_projection_forced_full
+
+    repo, event_id = _repo_with_open_event(tmp_path)
+    with repo._connect() as conn:  # noqa: SLF001 - legacy byte-preservation fixture
+        row = conn.execute(
+            "SELECT event_json FROM trade_events WHERE event_id=?",
+            (event_id,),
+        ).fetchone()
+        payload = json.loads(str(row["event_json"]))
+        payload["fee_provenance"] = {
+            "basis": "estimated",
+            "source": "legacy_fee_estimate",
+        }
+        payload["raw_payload"]["unknown_legacy_key"] = {"keep": True}
+        conn.execute(
+            "UPDATE trade_events SET event_json=?, updated_at_ms=? WHERE event_id=?",
+            (json.dumps(payload, ensure_ascii=False), 1500, event_id),
+        )
+    run_position_projection_forced_full(repo)
+    lot = repo.list_position_lots()[0]
+    ledger_manual_trades.persist_manual_close_event(
+        repo,
+        record_id=lot["record_id"],
+        fields=lot["fields"],
+        contracts_to_close=1,
+        close_price=1.2,
+        close_reason="manual_buy_to_close",
+        as_of_ms=2000,
+    )
+    monkeypatch.setattr(cli, "resolve_option_positions_repo", lambda **_kwargs: (tmp_path / "data.json", repo))
+
+    def stored_state() -> tuple[str, int, list[dict], int]:
+        with repo._connect() as conn:  # noqa: SLF001 - exact storage proof
+            row = conn.execute(
+                "SELECT event_json, ingest_seq FROM trade_events WHERE event_id=?",
+                (event_id,),
+            ).fetchone()
+        generation = int(repo.read_position_projection_source_state().get("source_generation") or 0)
+        return str(row["event_json"]), int(row["ingest_seq"]), repo.list_position_lots(), generation
+
+    before_json, before_ingest_seq, before_lots, before_generation = stored_state()
+    args = [
+        "repair",
+        event_id,
+        "--futu-account-id",
+        "123",
+        "--order-id",
+        "order-1",
+        "--reason",
+        "OpenD manual evidence: deal-1",
+        "--format",
+        "json",
+    ]
+
+    assert cli.main([*args, "--dry-run"]) == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert preview["mode"] == "dry_run"
+    assert preview["advisory"] is True
+    assert preview["expected_before_sha256"] == hashlib.sha256(before_json.encode()).hexdigest()
+    assert preview["write_applied"] is False
+    assert stored_state() == (before_json, before_ingest_seq, before_lots, before_generation)
+
+    assert cli.main([*args, "--confirm"]) == 0
+    applied = json.loads(capsys.readouterr().out)
+    after_json, after_ingest_seq, after_lots, after_generation = stored_state()
+    assert applied["mode"] == "applied"
+    assert applied["write_applied"] is True
+    assert "void_event_id" not in applied and "repair_event_id" not in applied
+    assert after_ingest_seq == before_ingest_seq
+    assert after_lots == before_lots
+    assert after_generation == before_generation + 1
+    before_payload = json.loads(before_json)
+    after_payload = json.loads(after_json)
+    before_outer = deepcopy(before_payload)
+    after_outer = deepcopy(after_payload)
+    before_outer.pop("raw_payload")
+    after_outer.pop("raw_payload")
+    assert after_outer == before_outer
+    assert after_payload["fee_provenance"] == before_payload["fee_provenance"]
+    after_raw = deepcopy(after_payload["raw_payload"])
+    provenance = after_raw.pop("order_identity_provenance")
+    assert after_raw.pop("futu_account_id") == "123"
+    assert after_raw.pop("order_id") == "order-1"
+    assert after_raw == before_payload["raw_payload"]
+    assert provenance["expected_before_sha256"] == preview["expected_before_sha256"]
+    assert len(repo.list_trade_events()) == 2
+
+    assert cli.main([*args, "--confirm"]) == 0
+    no_op = json.loads(capsys.readouterr().out)
+    assert no_op["mode"] == "no_op"
+    assert no_op["write_applied"] is False
+    assert stored_state() == (after_json, after_ingest_seq, after_lots, after_generation)
+
+
+@pytest.mark.parametrize(
+    ("identity_args", "reason", "message"),
+    [
+        (["--futu-account-id", "123"], "OpenD manual evidence: deal-1", "requires both"),
+        (
+            ["--futu-account-id", "", "--order-id", ""],
+            "OpenD manual evidence: deal-1",
+            "requires both",
+        ),
+        (
+            ["--futu-account-id", "00123", "--order-id", "order-1"],
+            "OpenD manual evidence: deal-1",
+            "canonical positive integer",
+        ),
+        (
+            ["--futu-account-id", "123", "--order-id", "order 1"],
+            "OpenD manual evidence: deal-1",
+            "whitespace or control",
+        ),
+        (
+            ["--futu-account-id", "123", "--order-id", " order-1"],
+            "OpenD manual evidence: deal-1",
+            "whitespace or control",
+        ),
+        (
+            ["--futu-account-id", "123", "--order-id", "order-1"],
+            "manual_repair",
+            "manual OpenD evidence",
+        ),
+    ],
+)
+def test_trade_events_identity_repair_rejects_invalid_identity_without_writing(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+    identity_args: list[str],
+    reason: str,
+    message: str,
+) -> None:
+    import src.interfaces.cli.trade_events as cli
+
+    repo, event_id = _repo_with_open_event(tmp_path)
+    monkeypatch.setattr(cli, "resolve_option_positions_repo", lambda **_kwargs: (tmp_path / "data.json", repo))
+    before = repo.list_trade_events()
+
+    assert cli.main(
+        [
+            "repair",
+            event_id,
+            *identity_args,
+            "--reason",
+            reason,
+            "--confirm",
+        ]
+    ) == 2
+
+    assert message in capsys.readouterr().out
+    assert repo.list_trade_events() == before
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        ("partial", "partial or conflicting identity"),
+        ("actual", "actual fee evidence"),
+        ("duplicate", "already used by active event"),
+        ("voided", "already voided"),
+    ],
+)
+def test_trade_events_identity_repair_rejects_ineligible_state_without_writing(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+    case: str,
+    message: str,
+) -> None:
+    import src.interfaces.cli.trade_events as cli
+    from domain.domain.option_position_lots import OpenPositionCommand
+    from src.application.ledger.interventions import persist_manual_order_identity_binding
+
+    repo, event_id = _repo_with_open_event(tmp_path)
+    if case in {"partial", "actual"}:
+        with repo._connect() as conn:  # noqa: SLF001 - ineligible legacy-row fixture
+            row = conn.execute(
+                "SELECT event_json FROM trade_events WHERE event_id=?",
+                (event_id,),
+            ).fetchone()
+            payload = json.loads(str(row["event_json"]))
+            if case == "partial":
+                payload["raw_payload"]["futu_account_id"] = "123"
+            else:
+                payload["raw_payload"]["fee_provenance"] = {
+                    "basis": "actual",
+                    "amount": 0,
+                    "source": "test",
+                }
+            conn.execute(
+                "UPDATE trade_events SET event_json=? WHERE event_id=?",
+                (json.dumps(payload, ensure_ascii=False), event_id),
+            )
+    elif case == "duplicate":
+        ledger_manual_trades.persist_manual_open_event(
+            repo,
+            OpenPositionCommand(
+                broker="富途",
+                account="lx",
+                symbol="NVDA",
+                option_type="put",
+                side="short",
+                contracts=1,
+                currency="USD",
+                strike=100.0,
+                multiplier=100,
+                expiration_ymd="2026-04-29",
+                premium_per_share=2.0,
+                opened_at_ms=1100,
+            ),
+        )
+        other_event_id = next(
+            item["event_id"] for item in repo.list_trade_events() if item["event_id"] != event_id
+        )
+        persist_manual_order_identity_binding(
+            repo,
+            target_event_id=other_event_id,
+            overrides={"futu_account_id": "123", "order_id": "order-1"},
+            repair_reason="OpenD manual evidence: deal-1",
+        )
+    else:
+        _append_canonical_void_event(
+            repo,
+            target_event_id=event_id,
+            event_id="canonical-void-open",
+            event_time_ms=2000,
+        )
+    monkeypatch.setattr(cli, "resolve_option_positions_repo", lambda **_kwargs: (tmp_path / "data.json", repo))
+    before = repo.list_trade_events()
+
+    assert cli.main(
+        [
+            "repair",
+            event_id,
+            "--futu-account-id",
+            "123",
+            "--order-id",
+            "order-1",
+            "--reason",
+            "OpenD manual evidence: deal-1",
+            "--confirm",
+        ]
+    ) == 2
+
+    assert message in capsys.readouterr().out
+    assert repo.list_trade_events() == before
+
+
+def test_trade_events_identity_repair_rolls_back_projection_failure(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    import src.application.ledger.interventions as interventions
+    import src.interfaces.cli.trade_events as cli
+
+    repo, event_id = _repo_with_open_event(tmp_path)
+    monkeypatch.setattr(cli, "resolve_option_positions_repo", lambda **_kwargs: (tmp_path / "data.json", repo))
+    with repo._connect() as conn:  # noqa: SLF001 - rollback proof
+        before_json = str(
+            conn.execute(
+                "SELECT event_json FROM trade_events WHERE event_id=?",
+                (event_id,),
+            ).fetchone()["event_json"]
+        )
+    before_generation = repo.read_position_projection_source_state()["source_generation"]
+    monkeypatch.setattr(
+        interventions,
+        "run_position_projection_in_transaction",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("injected projection failure")),
+    )
+
+    assert cli.main(
+        [
+            "repair",
+            event_id,
+            "--futu-account-id",
+            "123",
+            "--order-id",
+            "order-1",
+            "--reason",
+            "OpenD manual evidence: deal-1",
+            "--confirm",
+        ]
+    ) == 2
+    assert "injected projection failure" in capsys.readouterr().out
+    with repo._connect() as conn:  # noqa: SLF001 - rollback proof
+        after_json = str(
+            conn.execute(
+                "SELECT event_json FROM trade_events WHERE event_id=?",
+                (event_id,),
+            ).fetchone()["event_json"]
+        )
+    assert after_json == before_json
+    assert repo.read_position_projection_source_state()["source_generation"] == before_generation
+
+
+def test_trade_events_identity_repair_rejects_cas_conflict_without_writing(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    import src.interfaces.cli.trade_events as cli
+
+    repo, event_id = _repo_with_open_event(tmp_path)
+    monkeypatch.setattr(cli, "resolve_option_positions_repo", lambda **_kwargs: (tmp_path / "data.json", repo))
+    monkeypatch.setattr(
+        type(repo),
+        "compare_and_swap_trade_event_order_identity_json",
+        lambda *_args, **_kwargs: False,
+    )
+    before = repo.list_trade_events()
+
+    assert cli.main(
+        [
+            "repair",
+            event_id,
+            "--futu-account-id",
+            "123",
+            "--order-id",
+            "order-1",
+            "--reason",
+            "OpenD manual evidence: deal-1",
+            "--confirm",
+        ]
+    ) == 2
+
+    assert "CAS conflict" in capsys.readouterr().out
+    assert repo.list_trade_events() == before
 
 
 def test_trade_events_repair_close_record_id_updates_canonical_target_lot(monkeypatch, tmp_path: Path, capsys) -> None:
