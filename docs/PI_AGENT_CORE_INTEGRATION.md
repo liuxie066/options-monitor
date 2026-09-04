@@ -524,6 +524,12 @@ The new identifier is:
 ).hexdigest()
 ```
 
+For Feishu, the authenticated sender remains part of the identity and
+`conversation_id` is `feishu:<chat_id>:<sender_id>` when `chat_id` is present.
+If `chat_id` is absent, the channel boundary uses `sender:<sender_id>` instead.
+A recreated Feishu chat has a new `chat_id` and therefore starts a fresh
+conversation Session; it is not an automatic reset of the prior Session.
+
 OM resolves the authority before acquiring the Host lease or opening Pi
 Session storage. Exactly one public data-scope input is accepted:
 
@@ -629,10 +635,11 @@ the user's goals and preferences, timestamp historical claims, preserve
 unresolved questions and Control state references, never promote remembered
 facts into current financial facts, and omit file-operation guidance.
 
-Compaction failure leaves the last commit marker active. If the unmodified
-context still fits, the run continues without a new checkpoint; if it does not
-fit, the run fails explicitly with `SESSION_ERROR` and does not call the main
-model with a truncated or guessed context.
+Failed or empty compaction leaves the last commit marker active, terminates the
+current request with `SESSION_ERROR`, and does not call the main model. When no
+eligible committed prefix exists, the request terminates with
+`BUDGET_EXHAUSTED`. Neither case continues merely because the unmodified
+candidate is at or below the 75% hard gate.
 
 ## 7. Tool And Control Bridge
 
@@ -1694,12 +1701,37 @@ The pre-run sequence is:
 2. when that candidate is at or above 70% and the committed Session has an
    eligible prefix, prepare Pi compaction from that prefix only;
 3. estimate the separate compaction provider input and reject it above the same
-   75% hard gate before calling the provider;
-4. after successful Pi compact, commit the compaction entry and marker using
-   the existing independent checkpoint, reload the committed prefix, then
-   reassemble the first main-call candidate; the target is at most 50%;
-5. if the candidate is above 75% after the one compact, or no safe compact call
-   can be made, return `BUDGET_EXHAUSTED` before starting the Agent.
+   75% hard gate before calling the provider or writing the Session;
+4. after successful Pi compact, assemble and estimate the first main-call
+   candidate from the in-memory summary and retained tail; the target is at
+   most 50%;
+5. if that candidate is above 75%, return `BUDGET_EXHAUSTED` without writing the
+   compaction result; otherwise commit the compaction entry and marker, reload
+   the committed prefix, and start the Agent. If no safe compact call can be
+   made, return `BUDGET_EXHAUSTED` before starting the Agent.
+
+The 50% value is a compaction target, not an admission threshold. A successfully
+compacted candidate above 50% and at or below 75% proceeds; only a candidate
+above 75% returns `BUDGET_EXHAUSTED`.
+
+The 70% trigger still fails closed when no eligible committed prefix exists,
+even when the assembled candidate is at or below 75%. This prevents the Runtime
+from pretending that an unsafe or unavailable maintenance action succeeded.
+
+The post-compact admission comparison has one owner in
+`agent-runtime/main.ts`; its focused regression coverage remains in
+`tests/test_pi_agent_process.py`. Maintaining this threshold does not require a
+Session generation, reset command, schema or configuration change, and it does
+not authorize the separate schema or rollout work described elsewhere in this
+section.
+
+The middle-band regression uses an existing loopback provider and the first
+main call's `context_budget_checked` event after compaction to prove
+`0.50 < estimated_input_tokens / effective_capacity_tokens <= 0.75`; the
+compaction-provider event is not substituted for that assertion. A separate
+fixture adds more committed history after one successful compaction and proves
+that a later request can commit a second compaction on the same Session. These
+checks require no test-only Runtime field or alternate estimator.
 
 Once the Agent starts, the Runtime reassembles and estimates the exact candidate
 before every main provider call, including after activation, tool results, or
@@ -1740,6 +1772,17 @@ A failed or empty compaction does not modify the committed Session. The bounded
 context contract fails the request closed even if the old
 context might appear to fit; there is no Session reset, outer provider retry,
 or alternate summarizer. This is an explicit S8 contract change.
+
+Two known failure-reporting limitations remain owned by
+`agent-runtime/main.ts`:
+
+- the 75% gate still blocks an oversized compaction request before network or
+  Session writes, but Pi's lazy stream currently normalizes that wrapper failure
+  and the public result is `SESSION_ERROR` rather than `BUDGET_EXHAUSTED`;
+- the compaction commit marker is the durability linearization point. If its
+  append succeeds and the following committed-state reload fails, the next run
+  can recover the checkpoint, but the failed run does not emit
+  `context_compaction_committed`.
 
 ### 13.14 Prompt, observability, and privacy
 
@@ -1868,7 +1911,7 @@ registry is permitted by this design.
 | Answer admission | conceptual/evidence modes, every claim kind/scope, mutually exclusive private result fields, one plain-final repair and one submission repair in either order, mixed-batch consumption of every represented class, second same-class safe failure with no commit, shared-budget exhaustion before either repair, canonical retryable rejection only, callback cancellation through Python `run.cancel`, identical terminal arbitration after both prompts, cancel/propose race, exact approved-text/hash comparison, and unchanged fail-closed handling of missing/malformed declarations pass |
 | Option-performance selector scope | the real Copilot Host callback proves a conflicting model proposal is replaced by exact MTD/YTD, explicit/bare/relative month, or explicit-year attestation before normalization; fixed month alone and equal message scope succeed; malformed, future, multiple, fixed-scope-conflicting, and missing-frozen-clock cases reject before any business read; returned evidence exposes the bound scope; direct Tool Gateway behavior remains unchanged |
 | Admission receipt | each allowlisted terminal-adjacent rejection group renders only its frozen text plus public `run_id`; unknown reasons use the generic receipt; a prior rejection followed by model, tool, schema, budget, or cancellation failure preserves that real outcome and leaks no raw reason or rejected content |
-| Context | 69/70/75 percent boundaries, committed-prefix-only pre-run compact, untouched open suffix, same-model compact, <=50 percent target, failed compact rollback, and exact pre-provider rejection before every main call pass at 128k and smaller fixtures |
+| Context | 69/70/75 percent boundaries, committed-prefix-only pre-run compact, untouched open suffix, same-model compact, 50 percent as a target rather than an admission gate, explicit proof that a post-compact candidate above 50 percent and at or below 75 percent proceeds, no-prefix failure at the 70 percent trigger, failed/oversized compact rollback, two successful compactions on one Session, and exact pre-provider rejection before every main call pass at 128k and smaller fixtures |
 | Session | internal directory/finalizer groups and repair prompts are absent; canonical assistant answer appears once; business tool groups remain complete |
 | Compatibility | eager mode keeps all business schemas while using the same projection, cursor, budget, compact, metrics, and answer-admission contract |
 | Provider profiles | for every configured model/provider profile, a follow-up turn whose durable history contains now-deactivated canonical tool call/result groups succeeds while the active schema set is replaced; any failure blocks directory enablement with no automatic eager fallback |
