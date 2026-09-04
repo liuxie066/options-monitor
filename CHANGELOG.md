@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 3.4.9 - 2026-09-05
+
 ### Improvements
 - Reduced scheduled Tick required-data latency by batching underlier observations per OpenD binding, reusing the frozen result across symbol workers, enforcing deadlines before provider calls, and avoiding redundant projection validation.
 
