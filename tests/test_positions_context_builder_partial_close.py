@@ -358,6 +358,55 @@ def test_build_context_scales_cash_secured_for_partial_close() -> None:
     assert ctx["open_positions_min"][0]["contracts_closed"] == 3
 
 
+def test_build_context_excludes_expired_put_after_one_day_settlement_buffer() -> None:
+    observed_at = datetime(2026, 9, 4, 1, 40, tzinfo=timezone.utc)
+    records = []
+    for record_id, expiration, secured in (
+        ("expired", "2026-03-30", 10_000),
+        ("expired-yesterday", "2026-09-03", 11_000),
+        ("expires-today", "2026-09-04", 12_000),
+    ):
+        records.append(
+            {
+                "record_id": record_id,
+                "fields": {
+                    "broker": "富途",
+                    "account": "lx",
+                    "symbol": "PDD",
+                    "status": "open",
+                    "side": "short",
+                    "option_type": "put",
+                    "contracts": 1,
+                    "contracts_open": 1,
+                    "cash_secured_amount": secured,
+                    "currency": "USD",
+                    "expiration": int(
+                        datetime.fromisoformat(expiration)
+                        .replace(tzinfo=timezone.utc)
+                        .timestamp()
+                        * 1000
+                    ),
+                },
+            }
+        )
+
+    ctx = build_context(
+        records,
+        broker="富途",
+        account="lx",
+        rates={"USDCNY": 7.2},
+        observed_at=observed_at,
+    )
+
+    assert [row["record_id"] for row in ctx["open_positions_min"]] == [
+        "expired",
+        "expired-yesterday",
+        "expires-today",
+    ]
+    assert ctx["cash_secured_total_by_ccy"] == {"USD": 23_000.0}
+    assert ctx["cash_secured_total_cny"] == 165_600.0
+
+
 def test_build_context_scales_locked_shares_for_partial_close() -> None:
     records = [
         {
