@@ -1554,7 +1554,7 @@ async function prepareSessionState(
     compactedMessages,
     tools,
   );
-  if (compactedTokens > effectiveCapacity * 0.50) {
+  if (compactedTokens > effectiveCapacity * 0.75) {
     throw new SafeRunFailure(
       safeError("BUDGET_EXHAUSTED", "budget", "compacted context exceeds input budget", false)
     );
