@@ -4,6 +4,11 @@
 
 ### Bug Fixes
 - Allowed long-lived Pi Agent sessions to continue after successful compaction when the rebuilt context is above the 50% target but within the 75% hard budget.
+
+## 3.4.5 - 2026-09-04
+
+### Bug Fixes
+- Accepted compact option-performance requests where MTD or YTD directly touches Chinese text or punctuation, while continuing to reject longer ASCII identifiers that merely contain those tokens.
 - Prevented disabled trade-intake settlement observation from eagerly constructing lifecycle Futu gateways or querying timing, while preserving checkpoint sealing, new fills, retryable Inbox rows, and recent missed-push recovery.
 
 ## 3.4.4 - 2026-09-03
