@@ -4351,6 +4351,73 @@ def test_blank_compaction_completion_keeps_previous_committed_branch(
     assert recovered["ok"] is True, recovered
 
 
+def test_compaction_above_target_below_hard_gate_is_admitted(tmp_path):
+    database = tmp_path / "midrange_compaction.sqlite3"
+    session_id = derive_pi_session_id(
+        "feishu", "midrange-compaction", "group-1", "key:us"
+    )
+    assert _run_session(
+        database,
+        session_id,
+        _start_payload(
+            session_id=session_id,
+            user_message="midrange-question",
+            debug={"fixture_response": "a" * 14_500, "delay_ms": 0},
+        ),
+        run_id="midrange_seed",
+    )["ok"]
+
+    events: list[dict] = []
+    with _loopback_server([
+        {"body": _chat_response(text="midrange-summary")},
+        {
+            "body": _chat_response(
+                tool_name="submit_answer",
+                tool_arguments=_submit_arguments("midrange-answer"),
+                call_id="answer_midrange",
+            )
+        },
+    ]) as (root, requests):
+        payload = _provider_payload(
+            "deepseek",
+            root,
+            session_id=session_id,
+            user_message="midrange-current-question",
+        )
+        payload["model"].update(
+            {"context_window_tokens": 8_000, "max_output_tokens": 2_048}
+        )
+        result = run_pi_agent(
+            payload,
+            request_id="req_midrange_compacted",
+            run_id="run_midrange_compacted",
+            timeout_seconds=6,
+            on_event=events.append,
+            on_tool_call=_approved_provider_tool_result,
+            on_proposed=lambda _proposal: "commit",
+            environ=_provider_env(database=database),
+        )
+
+    assert result["ok"] is True, result
+    assert len(requests) == 2
+    budget_checks = [
+        event["data"]
+        for event in events
+        if event["event_type"] == "context_budget_checked"
+    ]
+    assert len(budget_checks) == 2
+    main_check = budget_checks[-1]
+    ratio = (
+        main_check["estimated_input_tokens"]
+        / main_check["effective_capacity_tokens"]
+    )
+    assert 0.50 < ratio <= 0.75
+    assert sum(
+        entry["type"] == "compaction"
+        for entry in _session_entries(database, session_id)
+    ) == 1
+
+
 def test_oversized_compaction_candidate_keeps_previous_committed_branch(tmp_path):
     database = tmp_path / "oversized_compaction.sqlite3"
     session_id = derive_pi_session_id(

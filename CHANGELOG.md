@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Bug Fixes
+- Allowed long-lived Pi Agent sessions to continue after successful compaction when the rebuilt context is above the 50% target but within the 75% hard budget.
+
 ## 3.4.5 - 2026-09-04
 
 ### Bug Fixes
