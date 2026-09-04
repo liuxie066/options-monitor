@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 3.4.7 - 2026-09-04
+
+### Bug Fixes
+- Allowed the combined US/HK quality refresh to complete by giving the scheduled one-shot a ten-minute execution budget instead of terminating it after five minutes.
+
 ## 3.4.6 - 2026-09-04
 
 ### Improvements
