@@ -1,0 +1,44 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.4.8",
+  "base": {
+    "tag": "v3.4.7",
+    "commit": "8af462208c060d8304a7fa9a90820849fc505edd"
+  },
+  "reviewed_head": "cb9723beff91e78f90758924dd6d4bdf2be86bfb",
+  "commits": [
+    {
+      "sha": "9374ad5467f5ce36f8c6827e1ff407286248793b",
+      "subject": "perf(quality): push lifecycle evidence filters into sqlite"
+    },
+    {
+      "sha": "cb9723beff91e78f90758924dd6d4bdf2be86bfb",
+      "subject": "Merge pull request #242 from liuxie066/codex/quality-refresh-evidence-pushdown"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Reduced quality-refresh ledger work by filtering lifecycle case, account, and symbol evidence in SQLite before JSON decoding, preserving existing report semantics.",
+      "commits": [
+        "9374ad5467f5ce36f8c6827e1ff407286248793b",
+        "cb9723beff91e78f90758924dd6d4bdf2be86bfb"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "9374ad5467f5ce36f8c6827e1ff407286248793b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/242"
+      ]
+    },
+    {
+      "commit": "cb9723beff91e78f90758924dd6d4bdf2be86bfb",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/242"
+      ]
+    }
+  ]
+}
