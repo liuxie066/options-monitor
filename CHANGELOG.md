@@ -2,8 +2,14 @@
 
 ## Unreleased
 
+## 3.4.6 - 2026-09-04
+
+### Improvements
+- Added flushed expiry-maintenance stage markers and Python fatal-signal stack dumps so native crashes can be localized without changing settlement behavior.
+
 ### Bug Fixes
 - Allowed long-lived Pi Agent sessions to continue after successful compaction when the rebuilt context is above the 50% target but within the 75% hard budget.
+- Stopped expired short puts from consuming collateral after the one-natural-day assignment settlement buffer while retaining them in lifecycle views.
 
 ## 3.4.5 - 2026-09-04
 

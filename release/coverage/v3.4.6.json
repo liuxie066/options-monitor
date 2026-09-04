@@ -1,0 +1,115 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.4.6",
+  "base": {
+    "tag": "v3.4.5",
+    "commit": "309a9390ec2a16200bbba85f72d5a761191a5c87"
+  },
+  "reviewed_head": "5be90d50999ba8496f9389f39cb6e455c954c970",
+  "commits": [
+    {
+      "sha": "6e0591defd5ca480eaf0b04bea289e95622affae",
+      "subject": "fix(agent): admit compacted sessions within hard budget"
+    },
+    {
+      "sha": "b3578dbb759e5e95fea3f2cf917cc5210c98d576",
+      "subject": "chore(git): merge main into Pi session fix"
+    },
+    {
+      "sha": "597b2d198c47362ecd6585b59c0e98d9a0d25fa0",
+      "subject": "Merge pull request #237 from liuxie066/codex/fix-pi-session-compaction-gate"
+    },
+    {
+      "sha": "ee23bbee1874d38c7c10c90da4e89e1090500b38",
+      "subject": "fix(positions): stop settled puts consuming collateral"
+    },
+    {
+      "sha": "9c4a48c659fbd0031e1ec1b3b70535811ac6256f",
+      "subject": "Merge pull request #238 from liuxie066/codex/fix-expired-put-collateral-buffer"
+    },
+    {
+      "sha": "df771089020f6de91e859a5d33398c4347b6931d",
+      "subject": "fix(positions): capture auto-close crash context"
+    },
+    {
+      "sha": "5be90d50999ba8496f9389f39cb6e455c954c970",
+      "subject": "Merge pull request #239 from liuxie066/codex/diagnose-sigbus-telemetry"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Added flushed expiry-maintenance stage markers and Python fatal-signal stack dumps so native crashes can be localized without changing settlement behavior.",
+      "commits": [
+        "df771089020f6de91e859a5d33398c4347b6931d",
+        "5be90d50999ba8496f9389f39cb6e455c954c970"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Allowed long-lived Pi Agent sessions to continue after successful compaction when the rebuilt context is above the 50% target but within the 75% hard budget.",
+      "commits": [
+        "6e0591defd5ca480eaf0b04bea289e95622affae",
+        "597b2d198c47362ecd6585b59c0e98d9a0d25fa0"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Stopped expired short puts from consuming collateral after the one-natural-day assignment settlement buffer while retaining them in lifecycle views.",
+      "commits": [
+        "ee23bbee1874d38c7c10c90da4e89e1090500b38",
+        "9c4a48c659fbd0031e1ec1b3b70535811ac6256f"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "b3578dbb759e5e95fea3f2cf917cc5210c98d576",
+      "reason": "Branch synchronization merge; it adds no behavior beyond the separately dispositioned parent commits."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "6e0591defd5ca480eaf0b04bea289e95622affae",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/237"
+      ]
+    },
+    {
+      "commit": "b3578dbb759e5e95fea3f2cf917cc5210c98d576",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/237"
+      ]
+    },
+    {
+      "commit": "597b2d198c47362ecd6585b59c0e98d9a0d25fa0",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/237"
+      ]
+    },
+    {
+      "commit": "ee23bbee1874d38c7c10c90da4e89e1090500b38",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/238"
+      ]
+    },
+    {
+      "commit": "9c4a48c659fbd0031e1ec1b3b70535811ac6256f",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/238"
+      ]
+    },
+    {
+      "commit": "df771089020f6de91e859a5d33398c4347b6931d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/239"
+      ]
+    },
+    {
+      "commit": "5be90d50999ba8496f9389f39cb6e455c954c970",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/239"
+      ]
+    }
+  ]
+}
