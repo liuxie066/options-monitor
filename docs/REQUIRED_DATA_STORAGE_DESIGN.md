@@ -1,8 +1,9 @@
 # Required Data Storage Design
 
-> Status: source contract and shared projection-validation optimization
-> implemented. Commit, release, deployment, and any production history cleanup
-> remain separate operator actions.
+> Status: storage contract and the first shared projection-validation optimization
+> are implemented. The scheduled Tick latency design passed Planreview with
+> residual risks and is frozen for implementation. Commit, release, deployment,
+> and any production history cleanup remain separate operator actions.
 
 ## Goal
 
@@ -399,6 +400,375 @@ mixed-dtype row coercion; remove the Series only if a separately approved
 canonical-type contract change makes that safe. The integrity tests remain the
 authority for fail-closed behavior. No open product, schema, architecture,
 permission, or production question remains.
+
+## Scheduled Tick required-data latency
+
+### Goal and success signals
+
+Reduce the three largest confirmed required-data delays in the scheduled US Tick
+without changing strategy coverage, data freshness, evidence authority, or hard
+timeout safety:
+
+1. one opening warmup planning failure must not prevent later symbols from warming;
+2. underlier snapshot and market-state observations must be fetched in bounded
+   batches per OpenD binding instead of opening one gateway and making two calls
+   per symbol;
+3. the common multiplier-only projection mismatch must avoid the full row-by-row
+   fallback while preserving its exact fail-closed semantics for every other case.
+
+Source-level success requires deterministic tests proving warmup continuation,
+batched provider call counts and response reconciliation, unchanged projection
+failure behavior, and an additional material reduction in the projection
+validator's host-local median. The initial target is at least 60% below the
+current 254-row common-path median on the same host; the observed prototype moved
+from about 28.4 ms to 5.9 ms. This timing is diagnostic evidence, not a portable
+CI gate.
+
+After a separately authorized release and production upgrade, one natural
+two-account US scheduled run should reach `delivery_confirmed` within 480 seconds
+and finish within 540 seconds, leaving at least 60 seconds before the existing
+600-second wrapper deadline. A source change or fixture benchmark cannot claim
+that operational target in advance.
+
+### Non-goals and safety boundaries
+
+- Do not increase Symbol, prefetch, or account concurrency and do not weaken the
+  existing killable hard-timeout boundary.
+- Do not increase the 600-second wrapper deadline in this work unit.
+- Do not reduce expiration, strike, option-type, position, or strategy coverage.
+- Do not weaken formal prefetch failure, quote freshness, snapshot completeness,
+  manifest, receipt, multiplier-attestation, or evidence checks.
+- Do not add a provider fallback, retry hierarchy, cache layer, configuration key,
+  worker pool, scheduler, or new persisted schema.
+- Do not change candidate ranking, Close Advice policy, IV/Greeks availability
+  semantics, pending-delivery recovery, notification content, ledger, trades, or
+  broker-facing behavior.
+- Do not refactor account pipelines or post-delivery sidecars in this work unit.
+- Do not modify runtime configuration, send a notification, commit, push, release,
+  deploy, or run a production Tick without separate authorization.
+
+### Current facts and constraints
+
+The 2026-09-04 production run `20260904T134008Z-6031b7` reached the wrapper's
+600-second deadline before its already-committed `lx` delivery attempt. Its
+required-data prefetch took about 414 seconds and recorded about 221 seconds of
+option-chain rate-gate wait across 69 OpenD option-chain calls. The opening
+warmup had stopped after the first symbol planning failure, so later symbols did
+not receive the intended chain-cache warming.
+
+The warm-cache run `20260904T140012Z-80d3e8` made no option-chain OpenD calls but
+still took about 444 seconds. Required-data prefetch took about 205 seconds,
+including roughly 95 seconds of planning and 46 seconds around seal, publication,
+and validation. Account pipelines and downstream delivery work remain measurable
+but are not among the three selected required-data root causes.
+
+`_warm_required_data_chain_cache_inprocess()` currently builds every symbol plan
+inside one outer exception boundary. A projection failure or unresolved symbol
+identity returns a degraded summary immediately, even though later symbols are
+independent and the warmup is best-effort work before the formal run.
+
+`build_required_data_fetch_plan()` resolves one underlier observation per symbol.
+The current OpenD facade creates and closes a gateway for that symbol, calls
+`get_snapshot([code])`, then calls `get_market_state([code])`. The prefetch
+orchestrator already owns a run-scoped `spot_observation_cache`, but it is filled
+only as each symbol plan is built. Nine symbols therefore cause nine gateway
+lifecycles and eighteen serial provider calls before option-chain work begins.
+Expiration discovery separately opens one gateway and makes one provider call
+per symbol; those calls remain serial in this work unit. The selected batch
+change removes the underlier-observation calls, not all planning I/O.
+
+`_validate_consumer_csv_projection()` already keeps the exact `DataFrame.equals()`
+fast path and caches each mixed-dtype row before its canonical fallback. A current
+CPU smoke still attributes about 41% of cumulative time to this validator. The
+dominant normal mismatch is an attested `multiplier` enrichment; all other
+columns normally match exactly. An `itertuples()` replacement was rejected by an
+existing mixed-dtype boolean regression and is not semantically safe.
+
+Relevant source paths are unchanged between the deployed v3.4.7 behavior used
+for the timing evidence and current `origin/main` at design time. Provider wall
+time remains environment-dependent; deterministic tests can prove request count
+and behavior, not the production latency target.
+
+### Chosen design
+
+#### 1. Continue warmup planning after one symbol fails
+
+Keep account/config assembly and the union symbol plan under the existing outer
+failure boundary because those failures invalidate the whole warmup scope. Move
+only per-symbol plan construction, projection validation, identity resolution,
+and shard creation into a per-symbol exception boundary.
+
+For a failed symbol:
+
+- mark the existing summary `degraded` and retain the existing bounded
+  `reason_codes` mechanism;
+- build every request and expiration shard in a local `symbol_tasks` list, then
+  extend the global task list only after the whole symbol succeeds;
+- add no partial tasks for a failed symbol and continue with the next symbol
+  while the planning deadline has not been reached;
+- do not manufacture expirations, reuse another symbol's plan, or convert a
+  provider/planning failure into `success_empty`;
+- leave the later formal prefetch unchanged and fail closed there if required
+  data is still unavailable.
+
+Check the existing worker deadline between symbol plans as well as between
+fetch shards. When planning reaches it, preserve the current
+`deadline_reached` status and skip the remaining work. At finalization, any
+planning reason or failed shard keeps the summary `degraded`; later successful
+symbols must not overwrite an earlier failure with `ready`.
+
+No new summary field, state, retry, thread, process, or persistent artifact is
+needed. Shard fetch failures and the supervisor deadline retain their current
+behavior.
+
+#### 2. Batch run-scoped underlier observations by physical binding
+
+Freeze one in-memory planning identity for each symbol before provider I/O. The
+identity contains the normalized symbol, canonical `(source, host, port)`
+physical binding, trading date, provider code, and market. The same identity is
+used to group batch requests, construct the `SpotObservationCacheKey`, and build
+the later per-symbol fetch plan; the planner must not read the clock again for
+that symbol.
+
+Identity construction is isolated per symbol. An invalid symbol or trading-date
+failure is recorded for warmup and does not prevent other identities from being
+grouped. Formal prefetch retains its existing fail-closed behavior for any
+required symbol whose planning identity cannot be established.
+
+Only an identity whose source satisfies the existing
+`is_futu_fetch_source()` contract enters the OpenD batch path. A non-OpenD
+compatibility source keeps its current single-symbol routing and is outside this
+work unit's provider-call and latency acceptance; the batch facade must not
+reinterpret it as OpenD.
+
+Add one batch facade beside `get_underlier_observation_opend()` in
+`src/application/opend_market_snapshot_fetching.py`. For each canonical physical
+binding, the caller opens one ready gateway and partitions requested codes by
+market as a provider batch constraint; market is not part of the physical
+binding identity. Each code chunk uses the existing market-snapshot rate limiter
+for two independently attempted calls:
+
+```text
+get_snapshot(requested_codes)
+get_market_state(requested_codes)
+```
+
+Both endpoints are attempted when the other fails and the caller's absolute
+deadline still permits another call. After the allowed calls finish, the facade
+freezes one normalization time for that chunk, indexes responses by exact
+normalized code, rejects duplicate rows for that code, ignores unexpected rows
+as non-authoritative, and calls the existing
+`normalize_underlier_observation()` once per requested code. A missing snapshot
+or market-state row therefore produces a typed unavailable observation rather
+than borrowing another row or a stale price.
+
+The existing `resolve_opend_batch_config()` is the only batch-size authority.
+Formal prefetch passes its already resolved `market_snapshot` size; warmup
+resolves the same configuration and passes the same scalar. Requests larger
+than that value are split without adding another default or configuration key.
+
+Gateway construction and execution are isolated per physical binding. Failure
+of one binding creates typed unavailable observations only for its exact frozen
+identities, closes that gateway best-effort, and continues with the next binding.
+Partial valid rows within a successful binding remain usable per code.
+
+Warmup passes its existing `stop_monotonic` into prefill. Before opening a
+binding, starting a chunk, or starting either endpoint, prefill checks the
+remaining time and caps that rate-limited call's `max_wait_sec` to the smaller of
+the configured limit and the remaining duration. It starts no new provider call
+after the deadline; the deadline overrides the ordinary two-endpoint attempt
+rule. Formal prefetch has no new local deadline and retains the existing wrapper
+as its killable process boundary.
+
+The pre-planning path returns the existing
+`SpotObservationCacheKey -> OpeningUnderlierObservation | None` mapping. Its
+cache reader accepts an identity-valid typed unavailable observation; it requires
+a positive finite price only when the cached observation claims `status=ready`.
+Every identity attempted by the batch path receives a typed observation, so the
+later planner consumes that authority and the fetch request carries it even when
+unavailable. It must not perform a second spot request for a batch-attempted
+identity. The legacy single-symbol resolution path remains only for a symbol
+that never obtained a valid frozen batch identity; it is not a retry for a batch
+exception or partial response.
+
+Both formal prefetch and opening warmup run the prefill after the union symbol
+plan is resolved and before per-symbol strategy/expiration planning. Their
+projection and expiration contracts remain unchanged. The implementation adds
+no production metric or persisted summary field; fake-gateway tests directly
+assert provider call counts and requested codes. Production validation uses the
+existing stage latency. More detailed planning metrics belong to a separate
+observability work unit if post-change evidence shows they are necessary.
+
+#### 3. Short-circuit the attested multiplier-only projection path
+
+Keep the current full-frame `equals()` fast path first. When it fails, compare
+the non-`multiplier` columns with pandas' exact frame equality. If those columns
+are exactly equal, inspect only the single resolved `multiplier` column using
+the existing `_canonical_csv_value()` and
+`_is_valid_multiplier_enrichment()` functions. A
+valid enrichment still invokes the existing metadata-binding check before
+returning when `csv is not None`; blob-byte validation with `csv=None` preserves
+the current behavior. `chain_multiplier` and `snapshot_multiplier` stay in the
+exactly equal non-`multiplier` subset and are never accepted as enrichment.
+
+If any non-multiplier column is not exactly equal, or multiplier values do not
+all satisfy the current equal-or-attested-enrichment rule, use the existing
+row-cached canonical fallback unchanged. The new branch is therefore only a
+shortcut for the common case; mixed dtypes, canonical-but-not-exact values,
+invalid enrichment, row identity, error messages, and trust-boundary validation
+remain owned by the current fallback and tests.
+
+Do not cache validation results or remove validation at receipt publication,
+manifest sealing, recovery, or blob resolution.
+
+### Owners, data flow, and state transitions
+
+| Owner | Contract in this work unit |
+|---|---|
+| `src/application/multi_tick/required_data_prefetch.py` | Continue best-effort warmup with atomic per-symbol tasks; group frozen identities, isolate gateway lifetime per binding, and prefill the cache before warmup and formal planning |
+| `src/application/required_data_planning.py` | Freeze each symbol's planning identity once, build and consume the existing spot-observation cache, accept identity-valid typed unavailable values, and keep formal projection fail closed |
+| `src/application/opend_market_snapshot_fetching.py` | Own batched OpenD snapshot/state calls, independent endpoint failure handling, exact code reconciliation, and normalization |
+| `src/application/opend_symbol_outputs.py` | Add only the multiplier-only shortcut and retain the complete canonical fallback |
+| Existing receipt, manifest, frozen batch, strategy, and notification owners | Unchanged; consume the same planned and validated facts |
+
+```text
+union symbol plan
+  -> freeze per-symbol identity and trading date once
+  -> batch underlier observations per canonical physical binding and market chunk
+  -> existing run-scoped spot_observation_cache
+  -> per-symbol expiration and strategy planning
+  -> opening warmup: continue independent symbols on planning failure
+  -> formal prefetch: existing fail-closed required-data barrier
+  -> quote receipt and manifest validation
+  -> exact frame equality
+       -> multiplier-only shortcut when all other columns exactly match
+       -> existing row-cached canonical fallback otherwise
+  -> unchanged account pipelines and delivery authority
+```
+
+No durable state transition changes. Warmup remains best effort and reports
+`degraded`; formal prefetch still determines readiness; sealing and notification
+eligibility still depend on the existing validated terminal manifest.
+
+### Failure behavior
+
+| Scenario | Required behavior |
+|---|---|
+| Warmup configuration or union-plan failure | Preserve current whole-warmup degraded return |
+| One warmup symbol plan or identity fails | Discard its local task list, retain degraded status, and continue later symbols while planning time remains |
+| Warmup planning reaches its deadline | Preserve `deadline_reached`; do not begin another symbol or any expired shard |
+| One prefill symbol identity fails | Exclude only that symbol from batching; continue grouping other symbols; formal planning remains fail closed |
+| A prefill identity has a non-OpenD source | Keep its existing single-symbol route; never send it to the OpenD batch facade |
+| One gateway binding fails | Cache typed unavailable values only for that binding and continue independent bindings |
+| Batch snapshot or market-state call raises | Attempt the other endpoint, then cache affected typed unavailable observations; no batch retry or stale price |
+| Warmup batch deadline is exhausted | Start no new binding, chunk, or endpoint; leave unattempted identities unfilled and let the existing supervisor remain the final kill boundary |
+| Batch response omits a requested code | Only that code is unavailable; other exact single rows remain usable |
+| Batch response duplicates a requested code | Reject that code as unavailable; never choose an arbitrary row |
+| Batch response includes an unexpected code | Ignore it as non-authoritative; never populate another symbol's cache entry |
+| Observation is stale, closed, suspended, or invalid | Preserve `normalize_underlier_observation()` status and the formal planner's existing fail-closed outcome |
+| Batch-attempted observation is unavailable | Pass the typed observation through planning and fetch; perform zero secondary spot calls |
+| Non-multiplier projection differs | Execute the unchanged canonical fallback and reject any real drift |
+| Multiplier enrichment lacks valid attestation | Preserve the existing `SourceReceiptError`; no receipt or manifest authority is created |
+| Optimization raises unexpectedly | Preserve the existing exception boundary; do not turn failure into an empty candidate result |
+
+### Rejected alternatives
+
+- Reusing one gateway while retaining eighteen serial observation calls is a
+  smaller diff but does not remove the measured planning bottleneck and is
+  unlikely to create enough deadline margin.
+- Increasing worker concurrency or the wrapper timeout hides the slow call shape
+  and conflicts with the current hard-timeout safety boundary.
+- Serial retry after a batch error restores the old worst-case delay and adds
+  retry behavior without evidence that it is needed. The existing single-symbol
+  path remains only for identities that could not enter the batch path.
+- Batching option-contract snapshots, changing pipeline architecture, moving
+  sidecars out of process, or adding a global deadline is broader work with
+  different owners and failure contracts.
+- Replacing the projection fallback with `itertuples()` is faster but changes
+  supported mixed-dtype canonicalization.
+
+### Implementation slices
+
+1. **Warmup isolation:** change only the per-symbol planning boundary and add a
+   local task commit plus a planning deadline check. Regressions cover failure in
+   a symbol's second request after its first request was built, later-symbol
+   continuation, degraded final status, and unchanged shard-count invariants.
+2. **Batched underlier observations:** first add the batch facade and exact-code
+   reconciliation tests, then add frozen-identity/cache prefill and wire it into
+   warmup and formal prefetch. Tests cover per-symbol identity failure, one and
+   multiple bindings, mixed OpenD/non-OpenD sources, market partitions,
+   configured batch-size splitting, absolute warmup deadline enforcement,
+   independent endpoint failures, partial/duplicate/unexpected responses,
+   unavailable-cache hits, zero secondary spot calls, exact gateway call/code
+   counts, closure, and formal fail-closed behavior.
+3. **Projection shortcut:** add the multiplier-only branch before the existing
+   fallback. Tests cover valid enrichment, invalid/unattested enrichment,
+   `csv=Path` and `csv=None`, exact `chain_multiplier` and
+   `snapshot_multiplier`, non-multiplier drift, null/numeric equivalence, and the
+   existing mixed-dtype boolean case.
+
+Each slice reuses current owners and adds no new module, dependency, schema,
+configuration, command, or service.
+
+### Validation plan
+
+- Run focused tests for warmup, planning, market-snapshot reconciliation, and
+  projection integrity:
+
+  ```bash
+  ./.venv/bin/python -m pytest \
+    tests/test_required_data_prefetch_inprocess.py \
+    tests/test_required_data_fetch_planning.py \
+    tests/test_market_snapshot_fetching.py \
+    tests/test_required_data_snapshot.py \
+    tests/test_required_data_output_integrity.py
+  ```
+
+- Run Ruff on every changed Python and test file. Regenerate and verify the
+  dependency graph only if imports change.
+- Repeat the paired host-local 254-row validator measurement against the current
+  row-cached baseline; require identical results and at least 60% lower median on
+  the multiplier-only common path.
+- Run the canonical required-data benchmark first as a reduced smoke for timing
+  diagnosis and then with its formal warmup/repetition counts for deterministic
+  fixture, retained-byte, allocation, cleanup, and blob-resolution acceptance.
+  Do not treat smoke timing as production acceptance.
+- Run the relevant Tick integration tests, repository wording/sensitive-artifact
+  guardrails, `git diff --check`, and the full pytest suite before implementation
+  is called complete.
+- Production timing and delivery confirmation require a later, separately
+  authorized release, upgrade, and natural scheduled run.
+
+### Risks and open questions
+
+- A provider-level batch exception has a wider observation blast radius than a
+  single-symbol call. The chosen bounded behavior is per-binding fail-closed
+  without a serial retry; the other endpoint, other bindings, and partial valid
+  rows still survive. Owner: batched observation facade and focused
+  reconciliation tests.
+- Warmup's absolute stop time can truncate a batch between its two endpoints.
+  The partial rows normalize as unavailable and no new call starts after the
+  deadline. Owner: warmup supervisor contract and deterministic clock tests.
+- The expected wall-time gain from fewer OpenD calls is not provable on fixtures.
+  Owner: later production verification after separate release and upgrade
+  authorization.
+- Batch size follows the existing OpenD snapshot limit. One gateway is reused per
+  canonical physical binding, while codes are conservatively partitioned by
+  market because live mixed-market batch behavior is not established. Owner:
+  current OpenD fetch configuration and gateway contract.
+- Option-expiration discovery still opens one gateway and makes one serial call
+  per symbol. Owner: required-data planning; revisit only if post-change planning
+  remains a top-three hotspot.
+- The projection shortcut addresses the confirmed CPU hotspot but not every
+  operation inside the observed 46-second seal/publication interval. Owner:
+  canonical benchmark and any later profile based on post-change evidence.
+- Account pipelines and post-delivery work remain outside this scope. Revisit
+  only if the three fixes pass and a natural production run still misses the
+  540-second target.
+- Performance work lowers timeout probability but does not repair the existing
+  scheduler-target-commit-before-provider-attempt window. Canonical notification
+  success remains `delivery_confirmed`; timeout recovery belongs to the
+  notification/scheduler owner and requires a separate work unit.
 
 ## Risks and deferred work
 
