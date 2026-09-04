@@ -1,0 +1,61 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.4.5",
+  "base": {
+    "tag": "v3.4.4",
+    "commit": "1b270f8827bfe9168bc8d33b290909d27cad5048"
+  },
+  "reviewed_head": "a35537822a145c4833995d8d027ba15d3eed596c",
+  "commits": [
+    {
+      "sha": "20f81ae56e4d422bb97dc5d62810a75049438d6f",
+      "subject": "fix(copilot): accept compact MTD YTD queries"
+    },
+    {
+      "sha": "0c5ece8c5f124261a0eec47fb2edeb7d28e697ea",
+      "subject": "Merge pull request #234 from liuxie066/codex/fix-copilot-period-token-spacing"
+    },
+    {
+      "sha": "a35537822a145c4833995d8d027ba15d3eed596c",
+      "subject": "fix(trades): honor disabled lifecycle settlement observation (#235)"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Accepted compact option-performance requests where MTD or YTD directly touches Chinese text or punctuation, while continuing to reject longer ASCII identifiers that merely contain those tokens.",
+      "commits": [
+        "20f81ae56e4d422bb97dc5d62810a75049438d6f",
+        "0c5ece8c5f124261a0eec47fb2edeb7d28e697ea"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Prevented disabled trade-intake settlement observation from eagerly constructing lifecycle Futu gateways or querying timing, while preserving checkpoint sealing, new fills, retryable Inbox rows, and recent missed-push recovery.",
+      "commits": [
+        "a35537822a145c4833995d8d027ba15d3eed596c"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "20f81ae56e4d422bb97dc5d62810a75049438d6f",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/234"
+      ]
+    },
+    {
+      "commit": "0c5ece8c5f124261a0eec47fb2edeb7d28e697ea",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/234"
+      ]
+    },
+    {
+      "commit": "a35537822a145c4833995d8d027ba15d3eed596c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/235"
+      ]
+    }
+  ]
+}
