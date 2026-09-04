@@ -275,6 +275,11 @@ def build_context(
             locked_shares_by_symbol[symbol] = locked_shares_by_symbol.get(symbol, 0) + int(locked)
 
         if side == "short" and option_type == "put":
+            if (
+                it.expiration_date is not None
+                and (as_of_date - it.expiration_date).days > 1
+            ):
+                continue
             cash_secured = compute_short_put_cash_secured(
                 contracts_open=contracts_open,
                 contracts_total=contracts_total,

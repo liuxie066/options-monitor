@@ -170,7 +170,7 @@ annualized_net_return = period_net_return * 365 / DTE
   才能达到一张合约时，候选因资金证据不足 fail closed。
 - 保留当前现金组成：明确的分币种 cash 加 OpenD `fund_assets`。
 - 已知限制：OpenD `fund_assets` 是聚合基金资产，无法区分普通基金与货币基金；本策略接受当前口径。
-- 已有开放 Short Put 先按 gross `strike * multiplier` 扣除担保占用，不抵扣历史权利金。
+- 已有开放 Short Put 先按 gross `strike * multiplier` 扣除担保占用，不抵扣历史权利金。到期日和随后一个自然日仍计入，以覆盖指派结算窗口；自到期后第二个自然日起，过期 lot 可继续保留在生命周期视图中，但不再作为当前期权担保占用。
 - 不额外读取或扣除待成交挂单、`frozen_cash`；操作员负责避免候选间重复使用。
 
 ```text
@@ -436,7 +436,7 @@ hash 有效的 snapshot；不允许调用方传任意文件系统路径。
 | C06 | CSP 先用同币种现金，不足部分按新鲜 OpenD 汇率折算其他币种 | §5.3 |
 | C07 | 跨币种资金不保留 0.95 或其他安全折扣 | §5.3 |
 | C08 | 现金组成保留当前 `cash_by_currency + fund_assets` 口径，货币基金算入 | §5.3 |
-| C09 | 已有 Short Put 按 gross strike notional 占用担保，不抵扣历史权利金 | §5.3 |
+| C09 | 已有 Short Put 在到期后一日缓冲期结束前按 gross strike notional 占用担保 | §5.3 |
 | C10 | 不考虑 CSP 待成交挂单或 frozen cash，候选共享资金不可相加 | §5.3 |
 | C11 | 每张候选按一张合约计算，最大张数用资金或股票整除 multiplier | §5.3、§6.3 |
 | C12 | CC 使用 OpenD qty/can_sell_qty 和 SQLite 已开放 Short Call 锁定 | §6.3 |
