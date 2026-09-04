@@ -1,0 +1,50 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.4.9",
+  "base": {
+    "tag": "v3.4.8",
+    "commit": "30389b3ee41479e2036064b6bff1fb6593fdb88a"
+  },
+  "reviewed_head": "66bb881204b8638d0e82a4ad3771fee3c79fec0c",
+  "commits": [
+    {
+      "sha": "802d6961afd6c24deccc2cbb3acc94831e64dc10",
+      "subject": "perf(required-data): reduce prefetch latency"
+    },
+    {
+      "sha": "66bb881204b8638d0e82a4ad3771fee3c79fec0c",
+      "subject": "Merge pull request #244 from liuxie066/codex/fix-required-data-latency"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Reduced scheduled Tick required-data latency by batching underlier observations per OpenD binding, reusing the frozen result across symbol workers, enforcing deadlines before provider calls, and avoiding redundant projection validation.",
+      "commits": [
+        "802d6961afd6c24deccc2cbb3acc94831e64dc10"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "66bb881204b8638d0e82a4ad3771fee3c79fec0c",
+      "reason": "Merge-only integration commit; the user-visible change is mapped to its parent implementation commit."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "802d6961afd6c24deccc2cbb3acc94831e64dc10",
+      "references": [
+        "docs/REQUIRED_DATA_STORAGE_DESIGN.md",
+        "https://github.com/liuxie066/options-monitor/pull/244"
+      ]
+    },
+    {
+      "commit": "66bb881204b8638d0e82a4ad3771fee3c79fec0c",
+      "references": [
+        "docs/REQUIRED_DATA_STORAGE_DESIGN.md",
+        "https://github.com/liuxie066/options-monitor/pull/244"
+      ]
+    }
+  ]
+}
