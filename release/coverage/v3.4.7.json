@@ -1,0 +1,33 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.4.7",
+  "base": {
+    "tag": "v3.4.6",
+    "commit": "66a009b3e059b641058860d30d39e07fed281641"
+  },
+  "reviewed_head": "23562beb3b0b6289f45af2819bb73be67705b552",
+  "commits": [
+    {
+      "sha": "23562beb3b0b6289f45af2819bb73be67705b552",
+      "subject": "fix(service): allow quality refresh to complete"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Allowed the combined US/HK quality refresh to complete by giving the scheduled one-shot a ten-minute execution budget instead of terminating it after five minutes.",
+      "commits": [
+        "23562beb3b0b6289f45af2819bb73be67705b552"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "23562beb3b0b6289f45af2819bb73be67705b552",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/241"
+      ]
+    }
+  ]
+}

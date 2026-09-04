@@ -1495,7 +1495,7 @@ def render_service_bundle(
                         *quality_config_args,
                         "--no-deep",
                     ],
-                    timeout_start_sec=300,
+                    timeout_start_sec=600,
                 ),
                 install_path=f"/etc/systemd/system/{quality_refresh_service}",
                 kind="systemd_service",

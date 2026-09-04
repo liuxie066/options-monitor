@@ -721,7 +721,7 @@ def test_render_systemd_bundle_can_include_quality_monitoring(tmp_path: Path) ->
     assert "Type=simple" in quality_http
     assert "Restart=always" in quality_http
     assert str(repo / "om") + " quality refresh --config-key us --config-key hk --no-deep" in refresh
-    assert "TimeoutStartSec=300" in refresh
+    assert "TimeoutStartSec=600" in refresh
     assert "OnUnitActiveSec=15min" in refresh_timer
     assert str(repo / "om") + " quality recheck-due --config-key us --config-key hk" in recheck
     assert "After=network-online.target options-monitor-opend.service" in recheck
