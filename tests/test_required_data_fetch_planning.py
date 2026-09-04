@@ -1095,6 +1095,77 @@ def test_required_data_plan_memoizes_missing_spot_by_binding_and_date(
     )
 
 
+def test_required_data_plan_consumes_typed_unavailable_prefill_without_io(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.opend_utils as opend_utils
+    import src.application.required_data_planning as mod
+    from src.application.opening_quote_evidence import (
+        OPENING_UNDERLIER_OBSERVATION_SCHEMA,
+        OpeningUnderlierObservation,
+    )
+
+    identity = mod.freeze_required_data_planning_identity(
+        base=tmp_path,
+        symbol="NVDA",
+        source="futu",
+        host="OpenD.EXAMPLE",
+        port=11111,
+    )
+    unavailable = OpeningUnderlierObservation(
+        schema_version=OPENING_UNDERLIER_OBSERVATION_SCHEMA,
+        code="US.NVDA",
+        market="US",
+        last_price=None,
+        update_time=None,
+        observed_at_utc=None,
+        age_seconds=None,
+        market_state=None,
+        sec_status=None,
+        suspension=None,
+        status="data_unavailable",
+        reason_code="underlier_identity_mismatch",
+    )
+    spot_cache = {identity.cache_key: unavailable}
+
+    monkeypatch.setattr(
+        opend_utils,
+        "get_trading_date",
+        lambda _market: pytest.fail("planning identity re-read the clock"),
+    )
+    monkeypatch.setattr(
+        mod,
+        "get_underlier_spot",
+        lambda *_args, **_kwargs: pytest.fail("cached observation refetched spot"),
+    )
+    monkeypatch.setattr(
+        mod,
+        "list_option_expirations",
+        lambda *_args, **_kwargs: ["2026-05-15"],
+    )
+
+    plan = mod.build_required_data_fetch_plan(
+        base=tmp_path,
+        required_data_dir=tmp_path,
+        symbol="NVDA",
+        limit_expirations=0,
+        want_put=True,
+        want_call=False,
+        sell_put_cfg={"enabled": True, "min_dte": 7, "max_dte": 45},
+        sell_call_cfg={"enabled": False},
+        fetch_source="futu",
+        fetch_host="OpenD.EXAMPLE",
+        fetch_port=11111,
+        spot_observation_cache=spot_cache,
+        planning_identity=identity,
+    )
+
+    assert plan.underlier_observation is unavailable
+    assert plan.spot_observation_complete is False
+    assert plan.projection_outcome == "provider_error"
+
+
 def test_required_data_plan_rejects_cached_discovery_date_drift_without_io(
     monkeypatch,
     tmp_path: Path,

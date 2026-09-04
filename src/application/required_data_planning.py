@@ -12,6 +12,7 @@ from domain.domain.candidate_defaults import (
     CandidateWindowDefaults,
     resolve_candidate_window,
 )
+from domain.domain.fetch_source import normalize_fetch_source
 from src.application import opend_utils
 from src.application.opend_market_snapshot_fetching import (
     get_underlier_observation as get_underlier_spot,
@@ -48,6 +49,58 @@ DEFAULT_SELL_CALL_SPOT_FALLBACK_MIN_PCT = 0.03
 DEFAULT_FETCH_NEAR_BOUND_EXPAND_PCT = 0.20
 DEFAULT_COMBO_YIELD_CALL_FETCH_MAX_PCT = 0.40
 DEFAULT_COMBO_YIELD_CALL_STRIKE_BUFFER_PCT = 0.02
+
+
+@dataclass(frozen=True)
+class RequiredDataPlanningIdentity:
+    symbol: str
+    source: str
+    host: str
+    port: int
+    trading_date: str
+    provider_code: str
+    market: str
+
+    @property
+    def cache_key(self) -> SpotObservationCacheKey:
+        return (
+            self.symbol,
+            self.source,
+            self.host,
+            self.port,
+            self.trading_date,
+        )
+
+    @property
+    def binding_key(self) -> tuple[str, str, int]:
+        return (self.source, self.host, self.port)
+
+
+def freeze_required_data_planning_identity(
+    *,
+    base: Path,
+    symbol: str,
+    source: str,
+    host: str,
+    port: int,
+) -> RequiredDataPlanningIdentity:
+    underlier = opend_utils.normalize_underlier(symbol, base_dir=base)
+    trading_date = _strict_iso_expiration(
+        opend_utils.get_trading_date(underlier.market).isoformat()
+    )
+    if trading_date is None:
+        raise ValueError(
+            f"invalid expiration-discovery trading date for {symbol}"
+        )
+    return RequiredDataPlanningIdentity(
+        symbol=underlier.symbol.upper(),
+        source=normalize_fetch_source(source),
+        host=_physical_host(host or "127.0.0.1"),
+        port=int(port),
+        trading_date=trading_date,
+        provider_code=underlier.code.upper(),
+        market=underlier.market.upper(),
+    )
 
 
 class RequiredDataPlanningError(RuntimeError):
@@ -606,15 +659,26 @@ def _cached_spot_observation(
         OpeningUnderlierObservation | None,
     ],
     cache_key: SpotObservationCacheKey,
+    expected_code: str | None = None,
+    expected_market: str | None = None,
 ) -> OpeningUnderlierObservation | None:
     cached = cache[cache_key]
     if cached is None:
         return None
     if not isinstance(cached, OpeningUnderlierObservation):
         raise RuntimeError("spot-observation cache contains an invalid value")
-    spot = _safe_float(cached.last_price)
-    if spot is None or not math.isfinite(spot) or spot <= 0:
+    if (
+        expected_code is not None
+        and cached.code != str(expected_code).strip().upper()
+    ) or (
+        expected_market is not None
+        and cached.market != str(expected_market).strip().upper()
+    ):
         raise RuntimeError("spot-observation cache contains an invalid value")
+    if cached.status == "ready":
+        spot = _safe_float(cached.last_price)
+        if spot is None or not math.isfinite(spot) or spot <= 0:
+            raise RuntimeError("spot-observation cache contains an invalid value")
     return cached
 
 
@@ -1057,8 +1121,22 @@ def build_required_data_fetch_plan(
     expiration_max_wait_sec: float = 30.0,
     expiration_window_sec: float = 30.0,
     expiration_max_calls: int = 60,
+    planning_identity: RequiredDataPlanningIdentity | None = None,
 ) -> RequiredDataFetchPlanBundle:
     assert_strategy_config_resolved(symbol_cfg)
+    if planning_identity is not None:
+        underlier = opend_utils.normalize_underlier(symbol, base_dir=base)
+        if (
+            planning_identity.symbol != underlier.symbol.upper()
+            or planning_identity.source != normalize_fetch_source(fetch_source)
+            or planning_identity.host != _physical_host(fetch_host)
+            or planning_identity.port != int(fetch_port)
+            or planning_identity.provider_code != underlier.code.upper()
+            or planning_identity.market != underlier.market.upper()
+            or _strict_iso_expiration(planning_identity.trading_date)
+            != planning_identity.trading_date
+        ):
+            raise RuntimeError("required-data planning identity mismatch")
     ready_position_requirements = _validate_ready_position_requirements(
         position_requirements,
         symbol=symbol,
@@ -1102,6 +1180,10 @@ def build_required_data_fetch_plan(
         candidate_date = _strict_iso_expiration(candidate_key[4])
         if (
             candidate_date is None
+            or (
+                planning_identity is not None
+                and candidate_date != planning_identity.trading_date
+            )
             or not _expiration_discovery_cache_identity_matches(
                 cache_key=candidate_key,
                 result=candidate_result,
@@ -1126,24 +1208,31 @@ def build_required_data_fetch_plan(
             discovery_cache_key = candidate_key
             expiration_discovery = candidate_result
     else:
-        try:
-            frozen_trading_date = (
-                _freeze_expiration_discovery_trading_date(
-                    base=base,
-                    symbol=symbol,
+        if planning_identity is not None:
+            frozen_trading_date = planning_identity.trading_date
+        else:
+            try:
+                frozen_trading_date = (
+                    _freeze_expiration_discovery_trading_date(
+                        base=base,
+                        symbol=symbol,
+                    )
                 )
-            )
-        except Exception as exc:
-            trading_date_resolution_error = exc
+            except Exception as exc:
+                trading_date_resolution_error = exc
     underlier_observation: OpeningUnderlierObservation | None = None
     spot_reference: float | None = None
     if frozen_trading_date is not None:
-        spot_cache_key = _spot_observation_cache_key(
-            symbol=symbol,
-            source=fetch_source,
-            host=fetch_host,
-            port=fetch_port,
-            trading_date=frozen_trading_date,
+        spot_cache_key = (
+            planning_identity.cache_key
+            if planning_identity is not None
+            else _spot_observation_cache_key(
+                symbol=symbol,
+                source=fetch_source,
+                host=fetch_host,
+                port=fetch_port,
+                trading_date=frozen_trading_date,
+            )
         )
         if (
             spot_observation_cache is not None
@@ -1152,6 +1241,16 @@ def build_required_data_fetch_plan(
             underlier_observation = _cached_spot_observation(
                 cache=spot_observation_cache,
                 cache_key=spot_cache_key,
+                expected_code=(
+                    planning_identity.provider_code
+                    if planning_identity is not None
+                    else None
+                ),
+                expected_market=(
+                    planning_identity.market
+                    if planning_identity is not None
+                    else None
+                ),
             )
         else:
             underlier_observation = _resolve_underlier_observation(

@@ -15,7 +15,7 @@ from domain.services import (
     ToolExecutionService,
     adapt_opend_tool_payload,
 )
-from domain.domain.fetch_source import resolve_symbol_fetch_source
+from domain.domain.fetch_source import is_futu_fetch_source, resolve_symbol_fetch_source
 from domain.domain.symbol_identity import resolve_symbol_identity
 from domain.storage.repositories import state_repo
 from src.application.config_sections import (
@@ -31,6 +31,12 @@ from src.application.earnings_calendar import (
 from src.application.multi_tick.prefetch_coordinator import PrefetchCoordinator
 from src.application.multi_tick.prefetch_coordinator import PrefetchCoordinatorResult
 from src.application.opend_fetch_config import resolve_opend_batch_config, resolve_opend_fetch_config
+from src.application.opend_fetch_config import OpenDEndpointRateLimit
+from src.application import opend_utils
+from src.application.opend_market_snapshot_fetching import (
+    get_underlier_observations_opend,
+)
+from src.application.opening_quote_evidence import normalize_underlier_observation
 from src.application.opend_symbol_fetching import fetch_symbol
 from src.application.opend_symbol_outputs import (
     finalize_required_data_quote_candidate,
@@ -51,15 +57,18 @@ from src.application.required_data_fetching import (
 )
 from src.application.required_data_planning import (
     RequiredDataFetchPlanBundle,
+    RequiredDataPlanningIdentity,
     _merge_same_side_plans as _merge_required_data_side_plans,
     _merge_side_plans as _merge_required_data_fetch_specs,
     build_required_data_fetch_plan,
+    freeze_required_data_planning_identity,
 )
 from src.application.required_data_plan_identity import (
     build_required_data_fetch_binding,
     build_required_data_expected_fetch_contract,
 )
 from src.application.required_data_prefetch_planning import (
+    _has_any_market_demand,
     build_cross_account_prefetch_config,
     build_prefetch_budget_plan,
     build_prefetch_symbol_plan,
@@ -75,6 +84,7 @@ from src.application.combo_yield_config import (
     resolve_combo_yield_cfg,
 )
 from src.infrastructure.futu_gateway_pool import ThreadLocalFutuGatewayPool
+from src.infrastructure import futu_gateway
 from src.infrastructure.futu_gateway import retry_futu_gateway_call
 from src.infrastructure.io_utils import has_shared_required_data as _has_shared_required_data
 from src.infrastructure.opend_retcodes import classify_opend_error
@@ -141,6 +151,167 @@ def _resolve_opend_fetch_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+PlanningIdentityKey = tuple[str, str, str, int]
+
+
+def _planning_identity_key(
+    symbol_cfg: dict[str, Any],
+    *,
+    base: Path,
+) -> PlanningIdentityKey:
+    fetch_cfg = _as_dict(symbol_cfg.get("fetch"))
+    source, _decision = resolve_symbol_fetch_source(fetch_cfg)
+    underlier = opend_utils.normalize_underlier(
+        str(symbol_cfg.get("symbol") or ""),
+        base_dir=base,
+    )
+    return (
+        underlier.symbol.upper(),
+        source,
+        str(fetch_cfg.get("host") or "127.0.0.1").strip().lower(),
+        _to_int(fetch_cfg.get("port") or 11111, 11111),
+    )
+
+
+def _planning_identity_for_symbol_cfg(
+    symbol_cfg: dict[str, Any],
+    *,
+    base: Path,
+    identities: dict[PlanningIdentityKey, RequiredDataPlanningIdentity],
+) -> RequiredDataPlanningIdentity | None:
+    try:
+        return identities.get(_planning_identity_key(symbol_cfg, base=base))
+    except Exception:
+        return None
+
+
+def _prefill_spot_observation_cache(
+    *,
+    symbol_cfgs: list[dict[str, Any]],
+    base: Path,
+    opend_fetch_cfg: dict[str, Any],
+    snapshot_batch_size: int,
+    spot_observation_cache: dict[tuple[Any, ...], Any],
+    stop_monotonic: float | None = None,
+) -> tuple[
+    dict[PlanningIdentityKey, RequiredDataPlanningIdentity],
+    set[str],
+]:
+    identities: dict[PlanningIdentityKey, RequiredDataPlanningIdentity] = {}
+    identity_failed_symbols: set[str] = set()
+    for merged_cfg in symbol_cfgs:
+        source_cfgs = merged_cfg.get("_prefetch_source_symbol_cfgs")
+        items = (
+            [item for item in source_cfgs if isinstance(item, dict)]
+            if isinstance(source_cfgs, list)
+            else [merged_cfg]
+        )
+        for symbol_cfg in items:
+            symbol = str(symbol_cfg.get("symbol") or "").strip()
+            if not (
+                _has_any_market_demand(symbol_cfg)
+                or bool(symbol_cfg.get("_close_advice_position_requirements"))
+            ):
+                continue
+            fetch_cfg = _as_dict(symbol_cfg.get("fetch"))
+            source, _decision = resolve_symbol_fetch_source(fetch_cfg)
+            if not is_futu_fetch_source(source):
+                continue
+            try:
+                identity = freeze_required_data_planning_identity(
+                    base=base,
+                    symbol=symbol,
+                    source=source,
+                    host=str(fetch_cfg.get("host") or "127.0.0.1"),
+                    port=_to_int(fetch_cfg.get("port") or 11111, 11111),
+                )
+            except Exception:
+                identity_failed_symbols.add(symbol.upper())
+                continue
+            identities[
+                (
+                    identity.symbol,
+                    identity.source,
+                    identity.host,
+                    identity.port,
+                )
+            ] = identity
+
+    by_binding: dict[
+        tuple[str, str, int],
+        list[RequiredDataPlanningIdentity],
+    ] = {}
+    for identity in identities.values():
+        by_binding.setdefault(identity.binding_key, []).append(identity)
+
+    snapshot_cfg = _as_dict(opend_fetch_cfg.get("market_snapshot"))
+    snapshot_limit = OpenDEndpointRateLimit(
+        window_sec=float(snapshot_cfg.get("window_sec") or 30.0),
+        max_calls=int(snapshot_cfg.get("max_calls") or 60),
+        max_wait_sec=float(snapshot_cfg.get("max_wait_sec") or 30.0),
+    )
+    for (_source, host, port), binding_identities in sorted(by_binding.items()):
+        if stop_monotonic is not None and time.monotonic() >= stop_monotonic:
+            break
+        try:
+            gateway = futu_gateway.build_ready_futu_quote_gateway(
+                host=host,
+                port=port,
+                is_option_chain_cache_enabled=False,
+            )
+        except Exception:
+            for identity in binding_identities:
+                spot_observation_cache[identity.cache_key] = (
+                    normalize_underlier_observation(
+                        code=identity.provider_code,
+                        market=identity.market,
+                        snapshot_row=None,
+                        market_state_row=None,
+                    )
+                )
+            continue
+        try:
+            by_market: dict[str, list[RequiredDataPlanningIdentity]] = {}
+            for identity in binding_identities:
+                by_market.setdefault(identity.market, []).append(identity)
+            for market, market_identities in sorted(by_market.items()):
+                if (
+                    stop_monotonic is not None
+                    and time.monotonic() >= stop_monotonic
+                ):
+                    break
+                try:
+                    observations = get_underlier_observations_opend(
+                        gateway,
+                        [item.provider_code for item in market_identities],
+                        market=market,
+                        base_dir=base,
+                        snapshot_limit=snapshot_limit,
+                        snapshot_batch_size=snapshot_batch_size,
+                        stop_monotonic=stop_monotonic,
+                    )
+                except Exception:
+                    observations = {
+                        identity.provider_code: normalize_underlier_observation(
+                            code=identity.provider_code,
+                            market=identity.market,
+                            snapshot_row=None,
+                            market_state_row=None,
+                        )
+                        for identity in market_identities
+                    }
+                for identity in market_identities:
+                    observation = observations.get(identity.provider_code)
+                    if observation is not None:
+                        spot_observation_cache[identity.cache_key] = observation
+        finally:
+            try:
+                gateway.close()
+            except Exception:
+                pass
+    return identities, identity_failed_symbols
+
+
 def _build_prefetch_fetch_plan(
     symbol_cfg: dict[str, Any],
     *,
@@ -149,6 +320,9 @@ def _build_prefetch_fetch_plan(
     opend_fetch_cfg: dict[str, Any],
     expiration_discovery_cache: dict[tuple[Any, ...], Any] | None = None,
     spot_observation_cache: dict[tuple[Any, ...], Any] | None = None,
+    planning_identities: (
+        dict[PlanningIdentityKey, RequiredDataPlanningIdentity] | None
+    ) = None,
 ) -> RequiredDataFetchPlanBundle:
     source_cfgs = symbol_cfg.get("_prefetch_source_symbol_cfgs")
     if isinstance(source_cfgs, list) and len(source_cfgs) > 1:
@@ -160,6 +334,11 @@ def _build_prefetch_fetch_plan(
                 opend_fetch_cfg=opend_fetch_cfg,
                 expiration_discovery_cache=expiration_discovery_cache,
                 spot_observation_cache=spot_observation_cache,
+                planning_identity=_planning_identity_for_symbol_cfg(
+                    item,
+                    base=base,
+                    identities=planning_identities or {},
+                ),
             )
             for item in source_cfgs
             if isinstance(item, dict)
@@ -313,6 +492,11 @@ def _build_prefetch_fetch_plan(
         opend_fetch_cfg=opend_fetch_cfg,
         expiration_discovery_cache=expiration_discovery_cache,
         spot_observation_cache=spot_observation_cache,
+        planning_identity=_planning_identity_for_symbol_cfg(
+            symbol_cfg,
+            base=base,
+            identities=planning_identities or {},
+        ),
     )
 
 
@@ -324,6 +508,7 @@ def _build_single_prefetch_fetch_plan(
     opend_fetch_cfg: dict[str, Any],
     expiration_discovery_cache: dict[tuple[Any, ...], Any] | None = None,
     spot_observation_cache: dict[tuple[Any, ...], Any] | None = None,
+    planning_identity: RequiredDataPlanningIdentity | None = None,
 ) -> RequiredDataFetchPlanBundle:
     symbol = str(symbol_cfg.get("symbol") or "").strip()
     fetch_cfg = _as_dict(symbol_cfg.get("fetch"))
@@ -371,6 +556,7 @@ def _build_single_prefetch_fetch_plan(
         expiration_max_wait_sec=float(expiration_cfg.get("max_wait_sec") or 30.0),
         expiration_window_sec=float(expiration_cfg.get("window_sec") or 30.0),
         expiration_max_calls=int(expiration_cfg.get("max_calls") or 60),
+        planning_identity=planning_identity,
     )
 
 
@@ -1331,41 +1517,81 @@ def _warm_required_data_chain_cache_inprocess(
         expiration_discovery_cache: dict[tuple[Any, ...], Any] = {}
         spot_observation_cache: dict[tuple[Any, ...], Any] = {}
         shared_required = Path(base) / "output_shared" / "required_data"
+        planning_identities, identity_failed = _prefill_spot_observation_cache(
+            symbol_cfgs=symbol_plan.symbol_cfgs,
+            base=base,
+            opend_fetch_cfg=opend_fetch_cfg,
+            snapshot_batch_size=resolve_opend_batch_config(
+                union_cfg
+            ).market_snapshot,
+            spot_observation_cache=spot_observation_cache,
+            stop_monotonic=stop_monotonic,
+        )
+        if identity_failed:
+            add_reason("plan_identity_error")
+            summary["status"] = "degraded"
+        if time.monotonic() >= stop_monotonic:
+            summary["status"] = "deadline_reached"
+            add_reason("worker_deadline_reached")
+            publish_progress()
+            return summary
         tasks: list[tuple[str, Any, Any, str]] = []
         for symbol_cfg in symbol_plan.symbol_cfgs:
-            fetch_plan = _build_prefetch_fetch_plan(
-                symbol_cfg,
-                base=base,
-                shared_required=shared_required,
-                opend_fetch_cfg=opend_fetch_cfg,
-                expiration_discovery_cache=expiration_discovery_cache,
-                spot_observation_cache=spot_observation_cache,
-            )
-            if fetch_plan.projection_outcome == "success_empty":
+            if time.monotonic() >= stop_monotonic:
+                summary["status"] = "deadline_reached"
+                add_reason("worker_deadline_reached")
+                break
+            if str(symbol_cfg.get("symbol") or "").strip().upper() in identity_failed:
                 continue
-            if fetch_plan.projection_outcome != "success_rows":
-                raise RuntimeError(
-                    f"plan_projection_{fetch_plan.projection_outcome or 'invalid'}"
+            symbol_tasks: list[tuple[str, Any, Any, str]] = []
+            try:
+                fetch_plan = _build_prefetch_fetch_plan(
+                    symbol_cfg,
+                    base=base,
+                    shared_required=shared_required,
+                    opend_fetch_cfg=opend_fetch_cfg,
+                    expiration_discovery_cache=expiration_discovery_cache,
+                    spot_observation_cache=spot_observation_cache,
+                    planning_identities=planning_identities,
                 )
-            identity = resolve_symbol_identity(fetch_plan.symbol)
-            if identity is None:
-                raise RuntimeError("symbol_identity_unavailable")
-            for spec in fetch_plan.merged_specs:
-                request = build_fetch_request_from_spec(
-                    spec=spec,
-                    chain_cache=True,
-                    chain_cache_force_refresh=False,
-                    opend_fetch_config=flat_opend_cfg,
-                    spot_override=fetch_plan.spot_reference,
-                    underlier_observation=(
-                        fetch_plan.underlier_observation.to_dict()
-                        if fetch_plan.underlier_observation is not None
-                        else None
-                    ),
-                    fetch_spot_if_missing=False,
+                if fetch_plan.projection_outcome == "success_empty":
+                    continue
+                if fetch_plan.projection_outcome != "success_rows":
+                    raise RuntimeError(
+                        f"plan_projection_{fetch_plan.projection_outcome or 'invalid'}"
+                    )
+                identity = resolve_symbol_identity(fetch_plan.symbol)
+                if identity is None:
+                    raise RuntimeError("symbol_identity_unavailable")
+                for spec in fetch_plan.merged_specs:
+                    request = build_fetch_request_from_spec(
+                        spec=spec,
+                        chain_cache=True,
+                        chain_cache_force_refresh=False,
+                        opend_fetch_config=flat_opend_cfg,
+                        spot_override=fetch_plan.spot_reference,
+                        underlier_observation=(
+                            fetch_plan.underlier_observation.to_dict()
+                            if fetch_plan.underlier_observation is not None
+                            else None
+                        ),
+                        fetch_spot_if_missing=False,
+                    )
+                    for expiration in request.explicit_expirations or []:
+                        symbol_tasks.append(
+                            (fetch_plan.symbol, request, identity, expiration)
+                        )
+            except Exception as exc:
+                code = str(exc).strip()
+                add_reason(
+                    code
+                    if code.startswith("plan_")
+                    or code == "symbol_identity_unavailable"
+                    else "plan_error"
                 )
-                for expiration in request.explicit_expirations or []:
-                    tasks.append((fetch_plan.symbol, request, identity, expiration))
+                summary["status"] = "degraded"
+                continue
+            tasks.extend(symbol_tasks)
     except Exception as exc:
         code = str(exc).strip()
         add_reason(code if code.startswith("plan_") or code == "symbol_identity_unavailable" else "plan_error")
@@ -1456,7 +1682,11 @@ def _warm_required_data_chain_cache_inprocess(
         gateway_pool.close_registered()
 
     if summary["status"] != "deadline_reached":
-        summary["status"] = "degraded" if summary["failed_shards"] else "ready"
+        summary["status"] = (
+            "degraded"
+            if summary["failed_shards"] or summary["reason_codes"]
+            else "ready"
+        )
     publish_progress()
     return summary
 
@@ -1681,6 +1911,18 @@ def _prefetch_required_data_unlocked(
     expiration_fetch_cfg = opend_fetch_cfg["option_expiration"]
     expiration_discovery_cache: dict[tuple[Any, ...], Any] = {}
     spot_observation_cache: dict[tuple[Any, ...], Any] = {}
+    planning_identities, _identity_failed = _prefill_spot_observation_cache(
+        symbol_cfgs=fetch_syms,
+        base=base,
+        opend_fetch_cfg=opend_fetch_cfg,
+        snapshot_batch_size=batch_cfg.market_snapshot,
+        spot_observation_cache=spot_observation_cache,
+    )
+    if _identity_failed:
+        raise RuntimeError(
+            "global required-data planning identity incomplete for: "
+            + ", ".join(sorted(_identity_failed))
+        )
     fetch_plan_cache: dict[int, RequiredDataFetchPlanBundle] = {
         id(symbol_cfg): _build_prefetch_fetch_plan(
             symbol_cfg,
@@ -1689,6 +1931,7 @@ def _prefetch_required_data_unlocked(
             opend_fetch_cfg=opend_fetch_cfg,
             expiration_discovery_cache=expiration_discovery_cache,
             spot_observation_cache=spot_observation_cache,
+            planning_identities=planning_identities,
         )
         for symbol_cfg in fetch_syms
     }
@@ -1854,6 +2097,17 @@ def _prefetch_required_data_unlocked(
         ]
         if fetch_kwargs.get("spot_override") is not None:
             cmd.extend(['--spot', str(fetch_kwargs["spot_override"])])
+        if isinstance(fetch_kwargs.get("underlier_observation"), dict):
+            cmd.extend(
+                [
+                    '--underlier-observation-json',
+                    json.dumps(
+                        fetch_kwargs["underlier_observation"],
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                ]
+            )
         if fetch_kwargs.get("min_dte") is not None:
             cmd.extend(['--min-dte', str(fetch_kwargs["min_dte"])])
         if fetch_kwargs.get("max_dte") is not None:
@@ -1889,7 +2143,7 @@ def _prefetch_required_data_unlocked(
                 capture_output=True,
                 text=True,
                 idempotency_scope='required_data_prefetch',
-                force_refresh=bool(force_refresh),
+                force_refresh=True,
             )
         )
         if bool(payload.get("ok")):
