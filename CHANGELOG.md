@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 3.4.8 - 2026-09-04
+
+### Improvements
+- Reduced quality-refresh ledger work by filtering lifecycle case, account, and symbol evidence in SQLite before JSON decoding, preserving existing report semantics.
+
 ## 3.4.7 - 2026-09-04
 
 ### Bug Fixes
