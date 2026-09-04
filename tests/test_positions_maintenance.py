@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 
-def test_position_maintenance_filters_account_and_broker_in_dry_run(monkeypatch, tmp_path: Path) -> None:
+def test_position_maintenance_filters_account_and_broker_in_dry_run(monkeypatch, tmp_path: Path, capsys) -> None:
     from src.application.positions import maintenance as mod
 
     data_config = tmp_path / "data.json"
@@ -95,6 +95,11 @@ def test_position_maintenance_filters_account_and_broker_in_dry_run(monkeypatch,
     assert (report_dir / "auto_close_summary.txt").exists()
     assert result["receipt"]["status"] == "skipped"
     assert result["receipt"]["reason"] == "dry_run"
+    stages = capsys.readouterr().err.splitlines()
+    assert stages[0] == "[AUTO_CLOSE_STAGE] account=lx stage=account_started"
+    assert "[AUTO_CLOSE_STAGE] account=lx stage=ledger_open_started" in stages
+    assert "[AUTO_CLOSE_STAGE] account=lx stage=assignment_quote_refresh_started" in stages
+    assert stages[-1] == "[AUTO_CLOSE_STAGE] account=lx stage=account_finished"
 
 
 @pytest.mark.parametrize(
