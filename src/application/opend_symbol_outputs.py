@@ -1156,6 +1156,33 @@ def _validate_consumer_csv_projection(
         )
     if frame.equals(expected):
         return
+    exact_columns = [
+        column for column in REQUIRED_DATA_COLUMNS if column != "multiplier"
+    ]
+    if frame[exact_columns].equals(expected[exact_columns]):
+        multiplier_enriched = False
+        for raw_value, csv_value in zip(
+            expected["multiplier"],
+            frame["multiplier"],
+            strict=True,
+        ):
+            if _canonical_csv_value(raw_value) == _canonical_csv_value(csv_value):
+                continue
+            if _is_valid_multiplier_enrichment(
+                raw_value=raw_value,
+                csv_value=csv_value,
+            ):
+                multiplier_enriched = True
+                continue
+            break
+        else:
+            if multiplier_enriched and csv is not None:
+                _validate_quote_cache_metadata_binding(
+                    csv=csv,
+                    symbol=symbol,
+                    raw_meta=raw_meta,
+                )
+            return
     multiplier_enriched = False
     for row_index in range(len(expected.index)):
         # Preserve mixed-dtype row coercion while constructing each Series once.

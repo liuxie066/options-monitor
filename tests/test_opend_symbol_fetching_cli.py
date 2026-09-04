@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 import importlib
@@ -92,6 +94,68 @@ def test_cli_forwards_explicit_trading_date_to_fetch_request(monkeypatch) -> Non
     assert request.explicit_expirations == ["2026-08-07"]
     assert request.trading_date == "2026-07-27"
     assert request.include_realized_volatility is True
+
+
+@pytest.mark.parametrize(
+    ("status", "last_price"),
+    [("ready", 180.0), ("data_unavailable", None)],
+)
+def test_cli_forwards_frozen_underlier_observation_without_refetch(
+    monkeypatch,
+    status: str,
+    last_price: float | None,
+) -> None:
+    mod = _mod()
+    captured: list[object] = []
+    observation = {
+        "schema_version": "opening_underlier_observation.v1",
+        "code": "US.NVDA",
+        "market": "US",
+        "last_price": last_price,
+        "update_time": None,
+        "observed_at_utc": None,
+        "age_seconds": None,
+        "market_state": None,
+        "sec_status": None,
+        "suspension": None,
+        "status": status,
+        "reason_code": None if status == "ready" else "snapshot_row_missing",
+    }
+
+    monkeypatch.setattr(
+        mod,
+        "fetch_symbol_request",
+        lambda request: captured.append(request)
+        or {
+            "symbol": request.symbol,
+            "rows": [],
+            "expiration_count": 0,
+            "meta": {},
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "save_outputs",
+        lambda *args, **kwargs: (Path("raw"), Path("csv")),
+    )
+    monkeypatch.setattr(mod, "append_metrics_json", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "prog",
+            "--symbols",
+            "NVDA",
+            "--underlier-observation-json",
+            json.dumps(observation),
+            "--quiet",
+        ],
+    )
+
+    mod.main()
+
+    request = _request(captured[0])
+    assert request.underlier_observation == observation
+    assert request.fetch_spot_if_missing is False
 
 
 def test_cli_passes_snapshot_batch_and_fallback_args_to_fetch_symbol(monkeypatch) -> None:

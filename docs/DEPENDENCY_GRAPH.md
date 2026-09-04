@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 1009 (`src`: 541, `domain`: 78, `scripts`: 12, `tests`: 378)
-- Internal import edges: 6765 total, 2936 production/script edges excluding tests
+- Internal import edges: 6780 total, 2944 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,9 +31,9 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|445| domain
+  application -->|446| domain
   application -->|4| domain_services
-  application -->|147| infrastructure
+  application -->|149| infrastructure
   application -->|41| storage
   domain_services -->|5| domain
   domain_services -->|2| storage
@@ -46,7 +46,7 @@ flowchart LR
   scripts -->|4| domain
   scripts -->|2| infrastructure
   storage -->|1| domain
-  tests -->|2833| application
+  tests -->|2840| application
   tests -->|429| domain
   tests -->|2| domain_services
   tests -->|233| infrastructure
@@ -59,9 +59,9 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 445 |
+| application | domain | 446 |
 | interfaces | application | 164 |
-| application | infrastructure | 147 |
+| application | infrastructure | 149 |
 | scripts | application | 45 |
 | application | storage | 41 |
 | infrastructure | application | 11 |
@@ -79,7 +79,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 2833 |
+| tests | application | 2840 |
 | tests | domain | 429 |
 | tests | interfaces | 245 |
 | tests | infrastructure | 233 |
@@ -93,7 +93,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 
 | from | to | imports |
 |---|---|---|
-| src.application | domain.domain | 227 |
+| src.application | domain.domain | 228 |
 | src.interfaces | src.application | 129 |
 | src.application | src.infrastructure | 105 |
 | src.application.ledger | domain.domain | 65 |
@@ -102,12 +102,12 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | scripts | src.application | 34 |
 | src.application | domain.storage | 32 |
 | src.application | domain.domain.engine | 28 |
+| src.application.multi_tick | src.application | 25 |
 | src.application.trades | domain.domain | 25 |
 | src.application.positions | src.application | 24 |
 | src.application | src.application.ledger | 23 |
 | src.application.trades | src.application | 22 |
 | src.application.inbound | src.application | 21 |
-| src.application.multi_tick | src.application | 20 |
 | src.application.trades | src.application.ledger | 19 |
 | src.application | domain.domain.ledger | 17 |
 | src.application | src.application.multi_tick | 16 |
@@ -116,11 +116,11 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application.positions | domain.domain | 13 |
 | src.application.trades | src.infrastructure | 12 |
 | src.application | src.application.positions | 11 |
+| src.application.multi_tick | src.infrastructure | 11 |
 | src.infrastructure | src.application | 11 |
 | src.interfaces | src.application.trades | 11 |
 | domain.domain.ledger | domain.domain | 11 |
 | src.application.ledger | src.infrastructure | 9 |
-| src.application.multi_tick | src.infrastructure | 9 |
 | src.interfaces | src.application.research | 9 |
 | src.application.trades | domain.domain.ledger | 8 |
 | src.application | src.application.trades | 7 |
@@ -189,22 +189,22 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.infrastructure.io_utils | 44 |
 | domain.domain.option_position_identity | 44 |
 | domain.domain.decision_state_fingerprint | 39 |
-| src.infrastructure.futu_gateway | 26 |
+| src.infrastructure.futu_gateway | 27 |
 | domain.domain.engine | 25 |
 | src.application.settings | 23 |
+| src.application.opend_fetch_config | 23 |
 | domain.domain.ledger | 23 |
-| domain.domain.trade_contract_identity | 22 |
 
 ### Highest Fan-Out Production Modules
 
 | module | outgoing imports |
 |---|---|
+| src.application.multi_tick.required_data_prefetch | 34 |
 | src.application.ledger.api | 32 |
 | src.application.trades.auto_intake | 32 |
 | src.application.pipeline_watchlist | 29 |
 | src.interfaces.cli.main | 29 |
 | src.application.multi_account_tick | 28 |
-| src.application.multi_tick.required_data_prefetch | 27 |
 | src.interfaces.cli.option_positions | 27 |
 | src.application.ledger.writer_common | 26 |
 | src.application.tick_notification_flow | 26 |

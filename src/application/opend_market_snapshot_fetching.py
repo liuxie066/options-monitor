@@ -4,6 +4,7 @@ import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+import time
 from typing import Any, Callable
 
 from src.application.opening_quote_evidence import (
@@ -260,9 +261,96 @@ def get_underlier_observation_opend(
     )
 
 
-def _single_provider_row(value: Any, *, expected_code: str) -> dict[str, Any] | None:
+def get_underlier_observations_opend(
+    gateway: Any,
+    underlier_codes: list[str],
+    *,
+    market: str,
+    base_dir: Path,
+    snapshot_limit: OpenDEndpointRateLimit,
+    snapshot_batch_size: int,
+    stop_monotonic: float | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
+    now_utc: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+    rate_limited_call: Callable[..., Any] = rate_limited_opend_call,
+) -> dict[str, OpeningUnderlierObservation]:
+    """Fetch exact run-scoped underlier observations in bounded batches."""
+
+    codes = list(
+        dict.fromkeys(
+            code
+            for raw_code in underlier_codes
+            if (code := str(raw_code or "").strip().upper())
+        )
+    )
+    batch_size = max(1, int(snapshot_batch_size))
+    observations: dict[str, OpeningUnderlierObservation] = {}
+
+    def _limited(call: Callable[[], Any]) -> Any:
+        kwargs = snapshot_limit.call_kwargs()
+        if stop_monotonic is not None:
+            remaining = stop_monotonic - monotonic()
+            if remaining <= 0:
+                raise TimeoutError("underlier observation deadline reached")
+            kwargs["max_wait_sec"] = min(float(kwargs["max_wait_sec"]), remaining)
+
+        def _call_before_deadline() -> Any:
+            if stop_monotonic is not None and monotonic() >= stop_monotonic:
+                raise TimeoutError("underlier observation deadline reached")
+            return call()
+
+        return rate_limited_call(
+            base_dir=Path(base_dir),
+            endpoint="market_snapshot",
+            **kwargs,
+            call=_call_before_deadline,
+        )
+
+    for start in range(0, len(codes), batch_size):
+        if stop_monotonic is not None and monotonic() >= stop_monotonic:
+            break
+        batch = codes[start : start + batch_size]
+        snapshot: Any = None
+        market_state: Any = None
+        try:
+            snapshot = _limited(lambda batch0=batch: gateway.get_snapshot(batch0))
+        except Exception:
+            pass
+        if stop_monotonic is None or monotonic() < stop_monotonic:
+            try:
+                market_state = _limited(
+                    lambda batch0=batch: gateway.get_market_state(batch0)
+                )
+            except Exception:
+                pass
+        observed_at = now_utc()
+        expected_codes = frozenset(batch)
+        snapshot_rows = _provider_rows_by_code(
+            snapshot,
+            expected_codes=expected_codes,
+        )
+        market_state_rows = _provider_rows_by_code(
+            market_state,
+            expected_codes=expected_codes,
+        )
+        for code in batch:
+            observations[code] = normalize_underlier_observation(
+                code=code,
+                market=market,
+                snapshot_row=snapshot_rows.get(code),
+                market_state_row=market_state_rows.get(code),
+                now_utc=observed_at,
+            )
+    return observations
+
+
+def _provider_rows_by_code(
+    value: Any,
+    *,
+    expected_codes: frozenset[str],
+) -> dict[str, dict[str, Any]]:
     if value is None:
-        return None
+        return {}
     rows: list[dict[str, Any]] = []
     if isinstance(value, list):
         rows = [dict(item) for item in value if isinstance(item, dict)]
@@ -273,13 +361,26 @@ def _single_provider_row(value: Any, *, expected_code: str) -> dict[str, Any] | 
             raw_rows = value.to_dict("records")
         if isinstance(raw_rows, list):
             rows = [dict(item) for item in raw_rows if isinstance(item, dict)]
-    matches = [
-        row
-        for row in rows
-        if str(row.get("code") or "").strip().upper()
-        == str(expected_code or "").strip().upper()
-    ]
-    return matches[0] if len(matches) == 1 else None
+    normalized_rows: list[dict[str, Any]] = []
+    for row in rows:
+        code = str(row.get("code") or "").strip().upper()
+        if not code:
+            continue
+        normalized_rows.append({**row, "code": code})
+    indexed: dict[str, dict[str, Any]] = {}
+    _merge_snapshot_records(
+        records=normalized_rows,
+        requested_codes=expected_codes,
+        returned_codes=set(),
+        duplicate_codes=set(),
+        snap_map=indexed,
+    )
+    return indexed
+
+
+def _single_provider_row(value: Any, *, expected_code: str) -> dict[str, Any] | None:
+    code = str(expected_code or "").strip().upper()
+    return _provider_rows_by_code(value, expected_codes=frozenset({code})).get(code)
 
 
 def _increment_metric(metrics: dict[str, Any] | None, key: str, value: int = 1) -> None:
