@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,15 @@ from src.application.positions.maintenance_receipt import (
 from src.application.runtime_config_freshness import infer_runtime_config_market
 from src.application.runtime_config_paths import resolve_data_config_ref
 from src.infrastructure.futu_gateway import build_ready_futu_quote_gateway
+
+
+def _emit_auto_close_stage(account: str | None, stage: str) -> None:
+    account_label = str(account or "-").strip().lower() or "-"
+    print(
+        f"[AUTO_CLOSE_STAGE] account={account_label} stage={stage}",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def _bool_config(data: dict[str, Any], key: str, default: bool) -> bool:
@@ -520,8 +530,10 @@ def run_expired_position_maintenance_for_account(
     dry_run: bool = False,
     send_receipt: bool = True,
 ) -> dict[str, Any]:
+    _emit_auto_close_stage(account, "account_started")
     auto_cfg = _auto_close_config(cfg)
     if not auto_cfg["enabled"]:
+        _emit_auto_close_stage(account, "account_skipped_disabled")
         return {"mode": "skipped", "reason": "auto_close_disabled"}
 
     portfolio_cfg = cfg.get("portfolio") if isinstance(cfg, dict) else {}
@@ -532,6 +544,7 @@ def run_expired_position_maintenance_for_account(
     data_config = resolve_data_config_path(base=base, data_config=data_config_ref)
     ts = int(as_of_ms if as_of_ms is not None else datetime.now(timezone.utc).timestamp() * 1000)
     if data_config_ref and not data_config.exists():
+        _emit_auto_close_stage(account, "account_failed_missing_data_config")
         result: dict[str, Any] = {
             "mode": "error",
             "reason": "missing_data_config",
@@ -571,17 +584,22 @@ def run_expired_position_maintenance_for_account(
         return result
 
     config_source_path = cfg.get("config_source_path") if isinstance(cfg, dict) else None
+    _emit_auto_close_stage(account, "ledger_open_started")
     repo = open_position_ledger(
         data_config,
         config_path=config_source_path,
     )
+    _emit_auto_close_stage(account, "ledger_open_finished")
     ledger_store = ledger_store_payload(data_config, repo)
-    projection_refresh = (
-        None
-        if dry_run
-        else _refresh_position_projection_before_auto_close(repo)
-    )
+    if dry_run:
+        projection_refresh = None
+        _emit_auto_close_stage(account, "projection_refresh_skipped_dry_run")
+    else:
+        _emit_auto_close_stage(account, "projection_refresh_started")
+        projection_refresh = _refresh_position_projection_before_auto_close(repo)
+        _emit_auto_close_stage(account, "projection_refresh_finished")
     market_filter = _auto_close_market_filter(cfg)
+    _emit_auto_close_stage(account, "positions_load_started")
     positions = _open_positions_for_account(
         _load_expiry_close_position_lots(repo),
         account=account,
@@ -589,6 +607,7 @@ def run_expired_position_maintenance_for_account(
         market=market_filter,
         symbol_aliases=_symbol_aliases(cfg),
     )
+    _emit_auto_close_stage(account, "positions_load_finished")
     positions = _mark_manual_expiry_review_required(positions, cfg=cfg, account=account)
     initial_decisions = [
         _payload(item)
@@ -598,6 +617,7 @@ def run_expired_position_maintenance_for_account(
             grace_days=int(auto_cfg["grace_days"]),
         )
     ]
+    _emit_auto_close_stage(account, "assignment_quote_refresh_started")
     positions, expiry_assignment_quote_refresh = _refresh_expiry_assignment_quote_evidence(
         positions,
         cfg=cfg,
@@ -605,6 +625,7 @@ def run_expired_position_maintenance_for_account(
         base=base,
         eligible_record_ids=_missing_assignment_spot_record_ids(initial_decisions),
     )
+    _emit_auto_close_stage(account, "assignment_quote_refresh_finished")
     if dry_run:
         decisions = [
             _payload(item)
@@ -616,7 +637,9 @@ def run_expired_position_maintenance_for_account(
         ]
         applied: list[dict[str, Any]] = []
         errors: list[str] = []
+        _emit_auto_close_stage(account, "record_close_skipped_dry_run")
     else:
+        _emit_auto_close_stage(account, "record_close_started")
         decisions, applied, errors = _expired_close_run_payloads(
             record_expired_position_closes(
                 repo,
@@ -627,6 +650,7 @@ def run_expired_position_maintenance_for_account(
                 projection_refresh=projection_refresh,
             )
         )
+        _emit_auto_close_stage(account, "record_close_finished")
     to_close = [
         item
         for item in decisions
@@ -681,12 +705,14 @@ def run_expired_position_maintenance_for_account(
         result["projection_refresh"] = projection_refresh.to_dict()
     result["summary_text"] = _write_auto_close_summary(report_dir, result)
     if send_receipt:
+        _emit_auto_close_stage(account, "receipt_started")
         result["receipt"] = safe_send_auto_close_receipt(
             base=base,
             config=cfg,
             dry_run=dry_run,
             result=result,
         )
+        _emit_auto_close_stage(account, "receipt_finished")
     else:
         result["receipt"] = {
             "enabled": bool(auto_cfg["receipt"].get("enabled", True)),
@@ -695,4 +721,5 @@ def run_expired_position_maintenance_for_account(
             "delivery_confirmed": False,
             "message_id": None,
         }
+    _emit_auto_close_stage(account, "account_finished")
     return result
