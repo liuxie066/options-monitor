@@ -15,6 +15,9 @@ from src.application.required_data_prefetch_planning import strategy_prefetch_kw
 from src.infrastructure.private_storage import exclusive_private_file_lock
 
 
+_REAL_PREFILL_SPOT_OBSERVATION_CACHE = mod._prefill_spot_observation_cache
+
+
 class _Gateway:
     def __init__(self, *, host: str = "127.0.0.1", port: int = 11111) -> None:
         self.host = host
@@ -33,6 +36,11 @@ def _keep_prefetch_planning_offline(monkeypatch: pytest.MonkeyPatch) -> None:
     import src.application.required_data_planning as planning
 
     monkeypatch.setattr(planning, "get_underlier_spot", lambda *args, **kwargs: 100.0)
+    monkeypatch.setattr(
+        mod,
+        "_prefill_spot_observation_cache",
+        lambda **_kwargs: ({}, set()),
+    )
     monkeypatch.setattr(
         planning,
         "list_option_expirations",
@@ -835,6 +843,8 @@ def test_inprocess_artifact_failure_does_not_poison_healthy_gateway(
 
 
 def test_prefetch_required_data_subprocess_mode_preserves_existing_dispatch(tmp_path: Path, monkeypatch) -> None:
+    from src.application.opening_quote_evidence import OpeningUnderlierObservation
+
     watchlist = [
         {"symbol": "AAPL", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 8}, "sell_put": {"enabled": True, "min_dte": 1, "max_dte": 60, "max_strike": 200}},
         {"symbol": "MSFT", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 8}, "sell_put": {"enabled": True, "min_dte": 1, "max_dte": 60, "max_strike": 500}},
@@ -862,6 +872,36 @@ def test_prefetch_required_data_subprocess_mode_preserves_existing_dispatch(tmp_
 
     monkeypatch.setattr(mod, "resolve_watchlist_config", lambda cfg: watchlist)
     monkeypatch.setattr(mod, "has_shared_required_data", lambda symbol, root: False)
+    monkeypatch.setattr(
+        mod,
+        "_prefill_spot_observation_cache",
+        _REAL_PREFILL_SPOT_OBSERVATION_CACHE,
+    )
+    monkeypatch.setattr(
+        "src.infrastructure.futu_gateway.build_ready_futu_quote_gateway",
+        lambda **_kwargs: _Gateway(),
+    )
+    monkeypatch.setattr(
+        mod,
+        "get_underlier_observations_opend",
+        lambda _gateway, codes, **kwargs: {
+            code: OpeningUnderlierObservation(
+                schema_version="opening_underlier_observation.v1",
+                code=code,
+                market=str(kwargs["market"]),
+                last_price=100.0,
+                update_time=None,
+                observed_at_utc=None,
+                age_seconds=None,
+                market_state="MORNING",
+                sec_status="NORMAL",
+                suspension=False,
+                status="ready",
+                reason_code=None,
+            )
+            for code in codes
+        },
+    )
     monkeypatch.setattr(mod.ToolExecutionService, "execute", fake_execute)
     finalized: list[dict[str, object]] = []
     _patch_success_finalizer(monkeypatch, finalized)
@@ -876,6 +916,7 @@ def test_prefetch_required_data_subprocess_mode_preserves_existing_dispatch(tmp_
     assert result["execution_mode"] == "subprocess"
     assert result["fetched_ok"] == 3
     assert len(execute_calls) == 3
+    assert all(getattr(intent, "force_refresh") is True for intent in execute_calls)
     assert len(finalized) == 3
     assert {str(item["mode"]) for item in finalized} == {"subprocess"}
     assert all(item.get("payload") is None for item in finalized)
@@ -885,6 +926,12 @@ def test_prefetch_required_data_subprocess_mode_preserves_existing_dispatch(tmp_
         assert "--snapshot-fallback-max-codes" in cmd
         assert "--snapshot-fallback-batch-size" in cmd
         assert "--trading-date" in cmd
+        assert "--underlier-observation-json" in cmd
+        observation = json.loads(
+            cmd[cmd.index("--underlier-observation-json") + 1]
+        )
+        assert observation["schema_version"] == "opening_underlier_observation.v1"
+        assert observation["status"] == "ready"
         trading_date_arg = cmd[cmd.index("--trading-date") + 1]
         date.fromisoformat(trading_date_arg)
 
@@ -2555,6 +2602,163 @@ def test_strategy_prefetch_kwargs_requests_combo_put_and_call_when_sell_put_disa
     assert out["include_realized_volatility"] is True
 
 
+def test_spot_prefill_batches_by_binding_and_market(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pandas as pd
+    import src.application.opend_utils as opend_utils
+
+    calls: list[tuple[str, str, list[str]]] = []
+
+    class Gateway(_Gateway):
+        def get_snapshot(self, codes):  # type: ignore[no-untyped-def]
+            calls.append((self.host, "snapshot", list(codes)))
+            return pd.DataFrame([{"code": code} for code in codes])
+
+        def get_market_state(self, codes):  # type: ignore[no-untyped-def]
+            calls.append((self.host, "state", list(codes)))
+            return pd.DataFrame(
+                [{"code": code, "market_state": "MORNING"} for code in codes]
+            )
+
+    gateways = {
+        host: Gateway(host=host)
+        for host in ("opend.example", "other.example")
+    }
+    monkeypatch.setattr(
+        opend_utils,
+        "get_trading_date",
+        lambda _market: date(2026, 9, 4),
+    )
+    monkeypatch.setattr(
+        "src.infrastructure.futu_gateway.build_ready_futu_gateway",
+        lambda **kwargs: gateways[kwargs["host"]],
+    )
+    configs = [
+        {
+            "symbol": symbol,
+            "fetch": {
+                "source": source,
+                "host": "OpenD.EXAMPLE",
+                "port": 11111,
+            },
+            "sell_put": {"enabled": True},
+        }
+        for symbol, source in (
+            ("NVDA", "futu"),
+            ("AAPL", "opend"),
+            ("0700.HK", "futu"),
+            ("MSFT", "other"),
+        )
+    ]
+    configs.append(
+        {
+            "symbol": "GOOG",
+            "fetch": {
+                "source": "futu",
+                "host": "Other.EXAMPLE",
+                "port": 11111,
+            },
+            "sell_put": {"enabled": True},
+        }
+    )
+    configs.append(
+        {
+            "symbol": "TSLA",
+            "fetch": {
+                "source": "futu",
+                "host": "OpenD.EXAMPLE",
+                "port": 11111,
+            },
+        }
+    )
+    cache: dict[tuple[object, ...], object] = {}
+
+    identities, identity_failed = _REAL_PREFILL_SPOT_OBSERVATION_CACHE(
+        symbol_cfgs=configs,
+        base=tmp_path,
+        opend_fetch_cfg={
+            "market_snapshot": {
+                "window_sec": 30.0,
+                "max_calls": 60,
+                "max_wait_sec": 30.0,
+            }
+        },
+        snapshot_batch_size=200,
+        spot_observation_cache=cache,
+    )
+
+    assert identity_failed == set()
+    assert len(identities) == 4
+    assert calls == [
+        ("opend.example", "snapshot", ["HK.00700"]),
+        ("opend.example", "state", ["HK.00700"]),
+        ("opend.example", "snapshot", ["US.NVDA", "US.AAPL"]),
+        ("opend.example", "state", ["US.NVDA", "US.AAPL"]),
+        ("other.example", "snapshot", ["US.GOOG"]),
+        ("other.example", "state", ["US.GOOG"]),
+    ]
+    assert len(cache) == 4
+    assert all(value.status == "data_unavailable" for value in cache.values())
+    assert all(gateway.close_calls == 1 for gateway in gateways.values())
+
+
+def test_formal_prefetch_fails_closed_on_planning_identity_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    symbol_cfg = {"symbol": "NVDA", "sell_put": {"enabled": True}}
+    monkeypatch.setattr(mod, "resolve_templates_config", lambda _cfg: {})
+    monkeypatch.setattr(
+        mod,
+        "resolve_watchlist_config",
+        lambda _cfg: [symbol_cfg],
+    )
+    monkeypatch.setattr(mod, "apply_profiles", lambda item, _profiles: item)
+    monkeypatch.setattr(
+        mod,
+        "build_prefetch_symbol_plan",
+        lambda _items: SimpleNamespace(symbol_cfgs=[symbol_cfg]),
+    )
+    monkeypatch.setattr(
+        mod,
+        "_resolve_opend_fetch_cfg",
+        lambda _cfg: {
+            "option_chain": {},
+            "market_snapshot": {},
+            "option_expiration": {},
+            "history_kline": {},
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "resolve_opend_batch_config",
+        lambda _cfg: SimpleNamespace(market_snapshot=200),
+    )
+    monkeypatch.setattr(
+        mod,
+        "_prefill_spot_observation_cache",
+        lambda **_kwargs: ({}, {"NVDA"}),
+    )
+    monkeypatch.setattr(
+        mod,
+        "_build_prefetch_fetch_plan",
+        lambda *_args, **_kwargs: pytest.fail("formal planning continued"),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="planning identity incomplete for: NVDA",
+    ):
+        mod._prefetch_required_data_unlocked(
+            vpy=tmp_path / "python",
+            base=tmp_path,
+            cfg={},
+            shared_required=tmp_path / "required_data",
+        )
+
+
 def test_opening_chain_warmup_reuses_exact_plan_and_accounts_for_each_shard(
     tmp_path: Path,
     monkeypatch,
@@ -2671,6 +2875,190 @@ def test_opening_chain_warmup_reuses_exact_plan_and_accounts_for_each_shard(
         "failed_shards",
         "deadline_skipped_shards",
     )) == summary["planned_shards"]
+
+
+def test_opening_chain_warmup_discards_failed_symbol_tasks_and_continues(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.application.opening_quote_evidence import OpeningUnderlierObservation
+
+    first_cfg = {
+        "symbol": "AAPL",
+        "fetch": {"source": "futu", "host": "broken.example"},
+        "sell_put": {"enabled": True},
+    }
+    second_cfg = {
+        "symbol": "NVDA",
+        "fetch": {"source": "futu", "host": "ready.example"},
+        "sell_put": {"enabled": True},
+    }
+    first_spec = object()
+    failing_spec = object()
+    second_spec = object()
+    fetched: list[str] = []
+    prefill_statuses: list[tuple[str, str]] = []
+    request_refetch_flags: list[bool] = []
+
+    monkeypatch.setattr(
+        mod,
+        "build_account_runtime_config",
+        lambda **kwargs: {"account": kwargs["account"]},
+    )
+    monkeypatch.setattr(
+        mod,
+        "build_cross_account_prefetch_config",
+        lambda **_kwargs: {"symbols": [first_cfg, second_cfg]},
+    )
+    monkeypatch.setattr(mod, "resolve_templates_config", lambda _cfg: {})
+    monkeypatch.setattr(mod, "resolve_watchlist_config", lambda cfg: cfg["symbols"])
+    monkeypatch.setattr(mod, "apply_profiles", lambda item, _profiles: item)
+    monkeypatch.setattr(
+        mod,
+        "build_prefetch_symbol_plan",
+        lambda _items: SimpleNamespace(symbol_cfgs=[first_cfg, second_cfg]),
+    )
+    monkeypatch.setattr(mod, "_resolve_opend_fetch_cfg", lambda _cfg: {})
+    monkeypatch.setattr(mod, "_flat_opend_fetch_config", lambda _cfg: {})
+    monkeypatch.setattr(
+        mod,
+        "_prefill_spot_observation_cache",
+        _REAL_PREFILL_SPOT_OBSERVATION_CACHE,
+    )
+
+    def build_prefill_gateway(**kwargs):  # type: ignore[no-untyped-def]
+        if kwargs["host"] == "broken.example":
+            raise RuntimeError("binding unavailable")
+        return _Gateway(host=kwargs["host"], port=kwargs["port"])
+
+    monkeypatch.setattr(
+        "src.infrastructure.futu_gateway.build_ready_futu_quote_gateway",
+        build_prefill_gateway,
+    )
+    monkeypatch.setattr(
+        mod,
+        "get_underlier_observations_opend",
+        lambda _gateway, codes, **kwargs: {
+            code: OpeningUnderlierObservation(
+                schema_version="opening_underlier_observation.v1",
+                code=code,
+                market=str(kwargs["market"]),
+                last_price=100.0,
+                update_time=None,
+                observed_at_utc=None,
+                age_seconds=None,
+                market_state="MORNING",
+                sec_status="NORMAL",
+                suspension=False,
+                status="ready",
+                reason_code=None,
+            )
+            for code in codes
+        },
+    )
+
+    def build_plan(symbol_cfg, **kwargs):  # type: ignore[no-untyped-def]
+        is_first = symbol_cfg is first_cfg
+        identity = next(
+            identity
+            for identity in kwargs["planning_identities"].values()
+            if identity.symbol == symbol_cfg["symbol"]
+        )
+        observation = kwargs["spot_observation_cache"][identity.cache_key]
+        prefill_statuses.append((symbol_cfg["symbol"], observation.status))
+        return SimpleNamespace(
+            symbol=symbol_cfg["symbol"],
+            projection_outcome="success_rows",
+            merged_specs=(
+                [first_spec, failing_spec] if is_first else [second_spec]
+            ),
+            spot_reference=100.0,
+            underlier_observation=observation,
+        )
+
+    monkeypatch.setattr(mod, "_build_prefetch_fetch_plan", build_plan)
+
+    def build_request(*, spec, **kwargs):  # type: ignore[no-untyped-def]
+        if spec is failing_spec:
+            raise RuntimeError("second request failed")
+        request_refetch_flags.append(bool(kwargs["fetch_spot_if_missing"]))
+        symbol = "AAPL" if spec is first_spec else "NVDA"
+        return SimpleNamespace(
+            symbol=symbol,
+            host="127.0.0.1",
+            port=11111,
+            option_types="put",
+            side_strike_windows={"put": {"max_strike": 100.0}},
+            trading_date="2026-09-04",
+            max_wait_sec=30.0,
+            option_chain_window_sec=30.0,
+            option_chain_max_calls=10,
+            explicit_expirations=["2026-10-16"],
+        )
+
+    monkeypatch.setattr(mod, "build_fetch_request_from_spec", build_request)
+    monkeypatch.setattr(
+        mod,
+        "resolve_symbol_identity",
+        lambda symbol: SimpleNamespace(futu_code=f"US.{symbol}"),
+    )
+
+    class Pool:
+        def get_gateway(self, **_kwargs):
+            return object()
+
+        def mark_success(self):
+            pass
+
+        def mark_failure(self, _error):
+            pass
+
+        def close_registered(self):
+            pass
+
+    monkeypatch.setattr(mod, "ThreadLocalFutuGatewayPool", Pool)
+
+    def fetch_option_chains(*, request, **_kwargs):  # type: ignore[no-untyped-def]
+        fetched.append(request.symbol)
+        expiration = request.expirations[0]
+        return SimpleNamespace(
+            opend_call_count=1,
+            rate_gate_wait_sec=0.0,
+            expiration_statuses={expiration: "fetched"},
+            error_code=None,
+            source_outcome="success_rows",
+            errors=[],
+            to_meta=lambda: {"status": "fetched"},
+        )
+
+    monkeypatch.setattr(mod, "fetch_option_chains", fetch_option_chains)
+    stop = (
+        datetime.now(timezone.utc) + timedelta(seconds=30)
+    ).isoformat().replace("+00:00", "Z")
+
+    summary = mod._warm_required_data_chain_cache_inprocess(
+        base=tmp_path,
+        base_cfg={},
+        cfg_path=tmp_path / "config.us.json",
+        accounts=["lx", "sy"],
+        markets_to_run=["US"],
+        symbols_arg=None,
+        next_formal_target_utc=stop,
+        worker_stop_at_utc=stop,
+        lock_release_by_utc=stop,
+    )
+
+    assert fetched == ["NVDA"]
+    assert prefill_statuses == [
+        ("AAPL", "data_unavailable"),
+        ("NVDA", "ready"),
+    ]
+    assert request_refetch_flags == [False, False]
+    assert summary["status"] == "degraded"
+    assert summary["planned_symbols"] == 1
+    assert summary["planned_shards"] == 1
+    assert summary["fetched_shards"] == 1
+    assert "plan_error" in summary["reason_codes"]
 
 
 def test_opening_chain_warmup_supervisor_stops_child_waiting_on_prefetch_lock(

@@ -19,6 +19,11 @@ def _keep_prefetch_planning_offline(monkeypatch: pytest.MonkeyPatch) -> None:
         "src.application.required_data_planning.list_option_expirations",
         lambda *_args, **_kwargs: ["2026-12-18"],
     )
+    monkeypatch.setattr(
+        prefetch_mod,
+        "_prefill_spot_observation_cache",
+        lambda **_kwargs: ({}, set()),
+    )
 
     def _cache_miss(**_kwargs) -> None:
         raise FileNotFoundError("fixture cache miss")

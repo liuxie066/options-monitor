@@ -45,6 +45,11 @@ def main() -> None:
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=11111)
     ap.add_argument("--spot", type=float, default=None, help="override spot if OpenD has no quote right")
+    ap.add_argument(
+        "--underlier-observation-json",
+        default=None,
+        help="Frozen OpeningUnderlierObservation JSON from the parent plan",
+    )
     ap.add_argument("--quiet", action="store_true", help="quiet mode: suppress non-critical prints")
     ap.add_argument("--no-retry", action="store_true", help="Disable OpenD retries/backoff")
     ap.add_argument("--retry-max-attempts", type=int, default=4)
@@ -87,6 +92,15 @@ def main() -> None:
     if args.chain_cache:
         prune_chain_cache(base, int(args.chain_cache_keep_days))
 
+    underlier_observation = None
+    if args.underlier_observation_json is not None:
+        try:
+            underlier_observation = json.loads(args.underlier_observation_json)
+        except (TypeError, ValueError) as exc:
+            ap.error(f"invalid --underlier-observation-json: {exc}")
+        if not isinstance(underlier_observation, dict):
+            ap.error("--underlier-observation-json must decode to an object")
+
     batch_cfg = OpenDBatchConfig.from_values(
         market_snapshot=args.snapshot_batch_size,
         market_snapshot_fallback_max_codes=args.snapshot_fallback_max_codes,
@@ -105,6 +119,8 @@ def main() -> None:
                 host=args.host,
                 port=args.port,
                 spot_override=args.spot,
+                underlier_observation=underlier_observation,
+                fetch_spot_if_missing=underlier_observation is None,
                 base_dir=base,
                 chain_cache=bool(args.chain_cache),
                 chain_cache_force_refresh=bool(args.chain_cache_force_refresh),

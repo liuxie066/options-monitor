@@ -76,6 +76,57 @@ def test_consumer_csv_projection_preserves_mixed_dtype_row_canonicalization() ->
     )
 
 
+def test_consumer_csv_projection_shortcuts_multiplier_only_enrichment(
+    monkeypatch,
+) -> None:
+    rows = [{"symbol": "NVDA", "multiplier": None}]
+    frame = _csv_roundtrip_frame(rows)
+    frame.loc[0, "multiplier"] = 100.0
+    seen: list[object] = []
+
+    def canonical(value: object) -> tuple[str, object]:
+        seen.append(value)
+        return ("null", None) if value is None or value != value else ("number", float(value))
+
+    monkeypatch.setattr(
+        "src.application.opend_symbol_outputs._canonical_csv_value",
+        canonical,
+    )
+
+    _validate_consumer_csv_projection(
+        rows=rows,
+        frame=frame,
+        csv=None,
+        symbol="NVDA",
+        raw_meta={},
+    )
+
+    assert len(seen) == 2
+
+
+def test_consumer_csv_projection_keeps_multiplier_evidence_columns_exact() -> None:
+    rows = [
+        {
+            "symbol": "NVDA",
+            "multiplier": None,
+            "chain_multiplier": 100,
+            "snapshot_multiplier": 100,
+        }
+    ]
+    frame = _csv_roundtrip_frame(rows)
+    frame.loc[0, "multiplier"] = 100.0
+    frame.loc[0, "chain_multiplier"] = 200.0
+
+    with pytest.raises(SourceReceiptError, match="canonical projections differ"):
+        _validate_consumer_csv_projection(
+            rows=rows,
+            frame=frame,
+            csv=None,
+            symbol="NVDA",
+            raw_meta={},
+        )
+
+
 def _workspace(tmp_path: Path, run_id: str = "run-1") -> tuple[Path, Path]:
     run_dir = tmp_path / "output_runs" / run_id
     root = run_dir / "required_data"
