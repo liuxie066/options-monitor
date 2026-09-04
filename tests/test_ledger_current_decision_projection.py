@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import json
+import sqlite3
 from copy import deepcopy
 from pathlib import Path
 
@@ -631,6 +633,135 @@ def test_projection_codec_reader_oracle_and_corruption_are_fail_closed(
     unavailable = read_current_decision_projection(repo, account="lx", now_ms=30_000)
     assert unavailable["status"] == "data_unavailable"
     assert unavailable["payload"] is None
+
+
+def test_lifecycle_evidence_filters_before_json_decode_and_preserves_query_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "ledger.sqlite3"
+    sqlite3.connect(db_path).close()
+    repo = open_trade_reconciliation_evidence_repo(db_path)
+    assert repo.list_trade_lifecycle_evidence(case_id="missing") == []
+
+    def encoded(evidence_id: str, case_id: str, account: str, symbol: str) -> str:
+        return json.dumps(
+            {
+                "evidence_id": evidence_id,
+                "case_id": case_id,
+                "account": account,
+                "symbol": symbol,
+            }
+        )
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE trade_lifecycle_evidence (
+              evidence_id TEXT PRIMARY KEY,
+              case_id TEXT,
+              account TEXT,
+              symbol TEXT,
+              raw_json TEXT NOT NULL,
+              created_at_ms INTEGER NOT NULL
+            )
+            """
+        )
+        conn.executemany(
+            """
+            INSERT INTO trade_lifecycle_evidence (
+              evidence_id, case_id, account, symbol, raw_json, created_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "evidence-b",
+                    "case-a",
+                    "lx",
+                    "NVDA",
+                    encoded("evidence-b", "case-a", "lx", "NVDA"),
+                    2_000,
+                ),
+                (
+                    "evidence-a",
+                    "case-a",
+                    "lx",
+                    "NVDA",
+                    encoded("evidence-a", "case-a", "lx", "NVDA"),
+                    2_000,
+                ),
+                (
+                    "evidence-other",
+                    "case-b",
+                    "sy",
+                    "AAPL",
+                    encoded("evidence-other", "case-b", "sy", "AAPL"),
+                    1_000,
+                ),
+                ("evidence-corrupt-match", "case-a", "lx", "NVDA", "{", 3_000),
+                ("evidence-corrupt-other", "case-b", "sy", "AAPL", "{", 3_000),
+            ],
+        )
+
+    statements: list[str] = []
+    original_connect = repo._connect  # noqa: SLF001 - query contract oracle
+
+    def traced_connect():
+        conn = original_connect()
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(repo, "_connect", traced_connect)
+    original_loads = json.loads
+    decode_count = 0
+
+    def counting_loads(value):
+        nonlocal decode_count
+        decode_count += 1
+        return original_loads(value)
+
+    monkeypatch.setattr(json, "loads", counting_loads)
+
+    filtered = repo.list_trade_lifecycle_evidence(
+        case_id=" case-a ",
+        account="LX",
+        symbol=" nvda ",
+    )
+    assert [item["evidence_id"] for item in filtered] == ["evidence-a", "evidence-b"]
+    assert [item["_ledger_created_at_ms"] for item in filtered] == [2_000, 2_000]
+    assert decode_count == 3
+    filtered_sql = " ".join(
+        next(item for item in statements if "FROM trade_lifecycle_evidence" in item).split()
+    )
+    assert "WHERE case_id = 'case-a' AND account = 'lx' AND symbol = 'NVDA'" in filtered_sql
+    assert "ORDER BY created_at_ms ASC, evidence_id ASC" in filtered_sql
+
+    statements.clear()
+    decode_count = 0
+    assert repo.list_trade_lifecycle_evidence(case_id="   ") == []
+    assert decode_count == 0
+    whitespace_sql = " ".join(
+        next(item for item in statements if "FROM trade_lifecycle_evidence" in item).split()
+    )
+    assert "WHERE case_id = ''" in whitespace_sql
+
+    statements.clear()
+    decode_count = 0
+    unfiltered = repo.list_trade_lifecycle_evidence()
+    assert {item["evidence_id"] for item in unfiltered} == {
+        "evidence-a",
+        "evidence-b",
+        "evidence-other",
+    }
+    assert decode_count == 5
+    unfiltered_sql = " ".join(
+        next(item for item in statements if "FROM trade_lifecycle_evidence" in item).split()
+    )
+    assert " WHERE " not in f" {unfiltered_sql} "
+    assert "ORDER BY" not in unfiltered_sql
+
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM trade_lifecycle_evidence").fetchone()[0] == 5
 
 
 def test_reader_is_one_transaction_account_isolated_and_now_is_read_only(

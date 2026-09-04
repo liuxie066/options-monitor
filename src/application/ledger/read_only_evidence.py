@@ -267,28 +267,33 @@ class _ReadOnlyTradeReconciliationEvidenceRepository:
         account: str | None = None,
         symbol: str | None = None,
     ) -> list[dict[str, Any]]:
-        rows = self._read_json_column(
-            "trade_lifecycle_evidence",
-            "raw_json",
-            created_at_field="_ledger_created_at_ms",
-        )
+        clauses: list[str] = []
+        params: list[Any] = []
         if case_id:
-            rows = [item for item in rows if str(item.get("case_id") or "") == str(case_id)]
+            clauses.append("case_id = ?")
+            params.append(str(case_id).strip())
         if account:
-            rows = [
-                item
-                for item in rows
-                if str(item.get("account") or "").strip().lower()
-                == str(account).strip().lower()
-            ]
+            clauses.append("account = ?")
+            params.append(str(account).strip().lower())
         if symbol:
-            rows = [
-                item
-                for item in rows
-                if str(item.get("symbol") or "").strip().upper()
-                == str(symbol).strip().upper()
-            ]
-        return rows
+            clauses.append("symbol = ?")
+            params.append(str(symbol).strip().upper())
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        order = "ORDER BY created_at_ms ASC, evidence_id ASC" if clauses else ""
+        with closing(self._connect()) as conn:
+            if not self._table_exists(conn, "trade_lifecycle_evidence"):
+                return []
+            return self._read_json_query_from_conn(
+                conn,
+                f"""
+                SELECT raw_json, created_at_ms
+                FROM trade_lifecycle_evidence
+                {where}
+                {order}
+                """,
+                tuple(params),
+                created_at_field="_ledger_created_at_ms",
+            )
 
     def list_trade_lifecycle_allocations(
         self,
