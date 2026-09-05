@@ -1,0 +1,118 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.4.10",
+  "base": {
+    "tag": "v3.4.9",
+    "commit": "fc1e8f9e3faed4a8fb507e53d52c609d47b90dca"
+  },
+  "reviewed_head": "5d8fdb965676c960edefa444f441ac2df670bb26",
+  "commits": [
+    {
+      "sha": "03513b01203e42ed772ae136574b9e5bd64ad1ef",
+      "subject": "fix(lint): repair invalid exports and enforce F822"
+    },
+    {
+      "sha": "9f6770b98d654b32a54139f8c1a1970846b1a6e1",
+      "subject": "Merge pull request #246 from liuxie066/codex/fix-invalid-exports-f822"
+    },
+    {
+      "sha": "2a5c7da50cae91d722595d0954384c01868f32fb",
+      "subject": "refactor(startup): defer research side-lane imports"
+    },
+    {
+      "sha": "f2489c017cf8903991e59bc5242fe2899301ccce",
+      "subject": "Merge pull request #247 from liuxie066/codex/tighten-cli-tick-research-startup"
+    },
+    {
+      "sha": "4890102f202c5acf1ad31039f6a4508e350291a3",
+      "subject": "refactor(strategy-lab): simplify internals"
+    },
+    {
+      "sha": "5d8fdb965676c960edefa444f441ac2df670bb26",
+      "subject": "Merge pull request #248 from liuxie066/codex/refactor-strategy-lab-internals"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Simplified Strategy Lab by separating recipe readiness from candidate construction, moving deterministic single-recommendation evaluation into the domain owner, and removing obsolete recommendation-point envelope branches without migrating current facts.",
+      "commits": [
+        "4890102f202c5acf1ad31039f6a4508e350291a3"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Prevented optional Research and Strategy Lab import failures from blocking unrelated CLI commands or production Tick startup by deferring side-lane imports.",
+      "commits": [
+        "2a5c7da50cae91d722595d0954384c01868f32fb"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Bounded low-priority Strategy Lab OpenD provider units with a fail-closed deadline so experiment work cannot wait indefinitely and consume scheduled Tick capacity.",
+      "commits": [
+        "4890102f202c5acf1ad31039f6a4508e350291a3"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "03513b01203e42ed772ae136574b9e5bd64ad1ef",
+      "reason": "Repository-internal export and lint enforcement; documented CLI, tool, configuration, and runtime behavior are unchanged."
+    },
+    {
+      "commit": "9f6770b98d654b32a54139f8c1a1970846b1a6e1",
+      "reason": "Merge-only integration commit; the internal lint repair is classified on its parent implementation commit."
+    },
+    {
+      "commit": "f2489c017cf8903991e59bc5242fe2899301ccce",
+      "reason": "Merge-only integration commit; the user-visible startup fix is mapped to its parent implementation commit."
+    },
+    {
+      "commit": "5d8fdb965676c960edefa444f441ac2df670bb26",
+      "reason": "Merge-only integration commit; the Strategy Lab changes are mapped to their parent implementation commit."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "03513b01203e42ed772ae136574b9e5bd64ad1ef",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/246"
+      ]
+    },
+    {
+      "commit": "9f6770b98d654b32a54139f8c1a1970846b1a6e1",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/246"
+      ]
+    },
+    {
+      "commit": "2a5c7da50cae91d722595d0954384c01868f32fb",
+      "references": [
+        "docs/ARCHITECTURE.md#research-side-lane-startup-boundary",
+        "https://github.com/liuxie066/options-monitor/pull/247"
+      ]
+    },
+    {
+      "commit": "f2489c017cf8903991e59bc5242fe2899301ccce",
+      "references": [
+        "docs/ARCHITECTURE.md#research-side-lane-startup-boundary",
+        "https://github.com/liuxie066/options-monitor/pull/247"
+      ]
+    },
+    {
+      "commit": "4890102f202c5acf1ad31039f6a4508e350291a3",
+      "references": [
+        "docs/STRATEGY_LAB_EXPERIMENT_PLATFORM_SYSTEM_DESIGN.md",
+        "https://github.com/liuxie066/options-monitor/pull/248"
+      ]
+    },
+    {
+      "commit": "5d8fdb965676c960edefa444f441ac2df670bb26",
+      "references": [
+        "docs/STRATEGY_LAB_EXPERIMENT_PLATFORM_SYSTEM_DESIGN.md",
+        "https://github.com/liuxie066/options-monitor/pull/248"
+      ]
+    }
+  ]
+}
