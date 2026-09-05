@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Improvements
+- Simplified Strategy Lab by separating recipe readiness from candidate construction, moving deterministic single-recommendation evaluation into the domain owner, and removing obsolete recommendation-point envelope branches without migrating current facts.
+
+### Bug Fixes
+- Bounded low-priority Strategy Lab OpenD provider units with a fail-closed deadline so experiment work cannot wait indefinitely and consume scheduled Tick capacity.
+
 ## 3.4.9 - 2026-09-05
 
 ### Improvements

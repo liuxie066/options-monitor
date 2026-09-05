@@ -15,15 +15,14 @@ from src.application.strategy_lab.contracts import (
     build_strategy_lab_timer_binding,
     canonical_sha256,
 )
-from src.application.strategy_lab.recipe import (
+from src.application.strategy_lab.readiness import (
     _history_k_authority,
     _terminal_fx_bindings,
-    build_concentration_arms,
     build_validation_plan,
-    project_validation_arms,
     select_engineering_canary_window,
     select_research_window,
 )
+from src.application.strategy_lab.recipe import build_concentration_arms, project_validation_arms
 from src.application.strategy_lab.service import preview_engineering_canary, preview_experiment
 from tests.candidate_evidence_helpers import seal_opening_candidate_fixture
 
@@ -54,16 +53,12 @@ def _formal_point() -> dict[str, object]:
         "recommendation_point_id": "p" * 64,
         "content_sha256": "f" * 64,
         "captured_at_utc": "2026-08-26T01:42:15Z",
-        "source_binding": {
-            "scheduled_scan_target_market": "2026-08-26T01:40:00Z"
-        },
+        "source_binding": {"scheduled_scan_target_market": "2026-08-26T01:40:00Z"},
         "recommendation_point": {
             "opening_snapshot_sha256": "o" * 64,
             "scheduled_scan_target_market": "2026-08-26T01:40:00Z",
             "decision_at_utc": "2026-08-26T01:41:00Z",
-            "formal_point_time_coherence": {
-                "maximum_observed_at_utc": "2026-08-26T01:42:00Z"
-            },
+            "formal_point_time_coherence": {"maximum_observed_at_utc": "2026-08-26T01:42:00Z"},
             "producer_accepted_candidate_ids": ["baseline", "lower-concentration", "other"],
             "prepared_context_manifest_ref": "output_runs/run/accounts/lx/prepared.json",
             "prepared_context_manifest_sha256": "m" * 64,
@@ -207,9 +202,7 @@ def test_recipe_rejects_mismatched_hk_put_contract_identity(
     recommendation = formal_point["recommendation_point"]
     assert isinstance(recommendation, dict)
     recommendation["opening_snapshot_sha256"] = opening["content_sha256"]
-    recommendation["producer_accepted_candidate_ids"] = [
-        item["candidate_id"] for item in decisions
-    ]
+    recommendation["producer_accepted_candidate_ids"] = [item["candidate_id"] for item in decisions]
     formal_point["opening_snapshot"] = opening
     monkeypatch.setattr(
         recipe,
@@ -245,7 +238,7 @@ def _trading_dates(count: int) -> list[str]:
 def test_validation_plan_freezes_exact_10_sessions_without_evaluation_time(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import src.application.strategy_lab.recipe as recipe
+    import src.application.strategy_lab.readiness as recipe
 
     dates: list[str] = []
     current = date(2026, 9, 1)
@@ -256,9 +249,7 @@ def test_validation_plan_freezes_exact_10_sessions_without_evaluation_time(
     sessions = [
         {
             "trading_date": trading_date,
-            "trade_date_type": (
-                "MORNING" if index == 1 else "AFTERNOON" if index == 2 else "WHOLE"
-            ),
+            "trade_date_type": ("MORNING" if index == 1 else "AFTERNOON" if index == 2 else "WHOLE"),
         }
         for index, trading_date in enumerate(dates)
     ]
@@ -347,9 +338,7 @@ def test_validation_plan_freezes_exact_10_sessions_without_evaluation_time(
     assert first == second
     assert first["selected_trading_dates"] == dates
     assert [len(item["minute_grid_utc"]) for item in frozen[:3]] == [330, 150, 180]
-    assert frozen[0]["breaks_utc"] == [
-        {"start_utc": "2026-09-01T04:00:00Z", "end_utc": "2026-09-01T05:00:00Z"}
-    ]
+    assert frozen[0]["breaks_utc"] == [{"start_utc": "2026-09-01T04:00:00Z", "end_utc": "2026-09-01T05:00:00Z"}]
     assert frozen[1]["session_endpoint_utc"].endswith("04:00:00Z")
     assert "occurred_at_utc" not in first
 
@@ -368,7 +357,7 @@ def test_validation_plan_freezes_exact_10_sessions_without_evaluation_time(
 def test_window_uses_newest_mature_20_and_never_skips_a_hole(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import src.application.strategy_lab.recipe as recipe
+    import src.application.strategy_lab.readiness as recipe
 
     dates = _trading_dates(24)
     monkeypatch.setattr(
@@ -391,11 +380,7 @@ def test_window_uses_newest_mature_20_and_never_skips_a_hole(
         _calendar: object,
     ):
         if trading_date in dates[-2:]:
-            return None, (
-                "research_outcome_immature"
-                if trading_date == dates[-2]
-                else "research_point_post_cutoff"
-            )
+            return None, ("research_outcome_immature" if trading_date == dates[-2] else "research_point_post_cutoff")
         return {"trading_date": trading_date, "points": []}, None
 
     monkeypatch.setattr(recipe, "_load_window_day", load_day)
@@ -449,7 +434,7 @@ def test_window_uses_newest_mature_20_and_never_skips_a_hole(
 def test_engineering_canary_uses_exact_latest_two_without_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import src.application.strategy_lab.recipe as recipe
+    import src.application.strategy_lab.readiness as recipe
 
     dates = _trading_dates(3)
     monkeypatch.setattr(
@@ -687,7 +672,7 @@ def test_window_day_rejects_every_authoritative_time_after_exact_cutoff(
     monkeypatch: pytest.MonkeyPatch,
     path: tuple[str, ...],
 ) -> None:
-    import src.application.strategy_lab.recipe as recipe
+    import src.application.strategy_lab.readiness as recipe
 
     cutoff = datetime(2026, 8, 26, 3, tzinfo=timezone.utc)
     expectation, loaded = _window_day_artifacts(cutoff.isoformat().replace("+00:00", "Z"))
@@ -707,16 +692,10 @@ def test_window_day_rejects_every_authoritative_time_after_exact_cutoff(
             "snapshot_ref": "old.json",
             "snapshot_content_sha256": "a" * 64,
             "snapshot_file_sha256": "b" * 64,
-            "trading_sessions": [
-                {"trading_date": "2026-08-26", "trade_date_type": "WHOLE"}
-            ],
+            "trading_sessions": [{"trading_date": "2026-08-26", "trade_date_type": "WHOLE"}],
         },
     )
-    current = {
-        "trading_sessions": [
-            {"trading_date": "2026-08-26", "trade_date_type": "WHOLE"}
-        ]
-    }
+    current = {"trading_sessions": [{"trading_date": "2026-08-26", "trade_date_type": "WHOLE"}]}
 
     day, reason = recipe._load_window_day(
         {"runtime_root": Path("/not-read"), "artifact_root": Path("/not-read")},
@@ -733,7 +712,7 @@ def test_window_day_rejects_every_authoritative_time_after_exact_cutoff(
 def test_window_day_classifies_future_missing_target_before_point_load(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import src.application.strategy_lab.recipe as recipe
+    import src.application.strategy_lab.readiness as recipe
 
     cutoff = datetime(2026, 8, 26, 3, tzinfo=timezone.utc)
     expectation, loaded = _window_day_artifacts("2026-08-26T02:00:00Z")
@@ -768,9 +747,7 @@ def test_window_day_classifies_future_missing_target_before_point_load(
             "snapshot_ref": "old.json",
             "snapshot_content_sha256": "a" * 64,
             "snapshot_file_sha256": "b" * 64,
-            "trading_sessions": [
-                {"trading_date": "2026-08-26", "trade_date_type": "WHOLE"}
-            ],
+            "trading_sessions": [{"trading_date": "2026-08-26", "trade_date_type": "WHOLE"}],
         },
     )
     monkeypatch.setattr(
@@ -778,11 +755,7 @@ def test_window_day_classifies_future_missing_target_before_point_load(
         "build_concentration_arms",
         lambda *_args, **_kwargs: {"arms": [{"candidate": {"expiration": "2026-08-01"}}]},
     )
-    current = {
-        "trading_sessions": [
-            {"trading_date": "2026-08-26", "trade_date_type": "WHOLE"}
-        ]
-    }
+    current = {"trading_sessions": [{"trading_date": "2026-08-26", "trade_date_type": "WHOLE"}]}
     context = {"runtime_root": Path("/not-read"), "artifact_root": Path("/not-read")}
 
     day, reason = recipe._load_window_day(
@@ -835,7 +808,7 @@ def test_window_day_classifies_future_missing_target_before_point_load(
 def test_window_day_uses_expectation_calendar_and_compares_only_session_semantics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import src.application.strategy_lab.recipe as recipe
+    import src.application.strategy_lab.readiness as recipe
 
     timestamp = "2026-08-26T03:00:00Z"
     cutoff = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
@@ -850,9 +823,7 @@ def test_window_day_uses_expectation_calendar_and_compares_only_session_semantic
             "snapshot_ref": "old.json",
             "snapshot_content_sha256": "a" * 64,
             "snapshot_file_sha256": "b" * 64,
-            "trading_sessions": [
-                {"trading_date": "2026-08-26", "trade_date_type": "WHOLE"}
-            ],
+            "trading_sessions": [{"trading_date": "2026-08-26", "trade_date_type": "WHOLE"}],
         },
     )
     monkeypatch.setattr(
@@ -863,9 +834,7 @@ def test_window_day_uses_expectation_calendar_and_compares_only_session_semantic
     current = {
         "market_calendar_version": "new.v2",
         "snapshot_content_sha256": "c" * 64,
-        "trading_sessions": [
-            {"trading_date": "2026-08-26", "trade_date_type": "WHOLE"}
-        ],
+        "trading_sessions": [{"trading_date": "2026-08-26", "trade_date_type": "WHOLE"}],
     }
     context = {"runtime_root": Path("/not-read"), "artifact_root": Path("/not-read")}
 
@@ -966,7 +935,7 @@ def _ready_receipt(
 def test_history_k_uses_one_deterministic_exact_probe_and_quota_rule(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import src.application.strategy_lab.recipe as recipe
+    import src.application.strategy_lab.readiness as recipe
 
     calls: list[dict[str, object]] = []
 
@@ -1025,7 +994,7 @@ def test_history_k_blocks_incomplete_receipt_semantics(
     field: str,
     value: bool,
 ) -> None:
-    import src.application.strategy_lab.recipe as recipe
+    import src.application.strategy_lab.readiness as recipe
 
     def read_receipt(_root: object, **kwargs: object) -> dict[str, object]:
         receipt = _ready_receipt(str(kwargs["probe_sha256"]))
@@ -1058,7 +1027,7 @@ class _Bundle:
 def test_terminal_fx_freezes_exact_fact_and_blocks_stale(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import src.application.strategy_lab.recipe as recipe
+    import src.application.strategy_lab.readiness as recipe
 
     observation_ms = 1_777_593_600_000
     fresh = FXRateFact(

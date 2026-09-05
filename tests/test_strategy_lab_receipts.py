@@ -51,6 +51,27 @@ def _comparison() -> dict[str, object]:
     }
 
 
+def _leader_conclusion(
+    comparison: dict[str, object] | None = None,
+) -> dict[str, object]:
+    selected = comparison or _comparison()
+    return {
+        "status": "leader",
+        "reason_code": None,
+        "leader": {
+            "variant_id": selected["variant_id"],
+            "near_return_threshold": selected["near_return_threshold"],
+            "mean_daily_annualized_return_delta": selected["mean_daily_annualized_return_delta"],
+            "mean_daily_pnl_delta_cny": selected["mean_daily_pnl_delta_cny"],
+            "expected_point_count": selected["expected_point_count"],
+            "effective_point_count": selected["effective_point_count"],
+            "top1_change_count": selected["top1_change_count"],
+            "comparison_sha256": canonical_sha256(selected),
+        },
+        "passing_variant_ids": [selected["variant_id"]],
+    }
+
+
 def _observation(key: str) -> dict[str, object]:
     return {
         "observation_key": key,
@@ -71,12 +92,14 @@ def test_research_receipt_is_deterministic_and_explicitly_provisional() -> None:
         _experiment(),
         [_observation("z"), _observation("a")],
         [_comparison()],
+        _leader_conclusion(),
         "2026-08-30T01:00:00Z",
     )
     second = build_research_receipt(
         _experiment(),
         [_observation("a"), _observation("z")],
         [_comparison()],
+        _leader_conclusion(),
         "2026-08-30T01:00:00Z",
     )
 
@@ -93,6 +116,12 @@ def test_research_receipt_is_deterministic_and_explicitly_provisional() -> None:
         _experiment(),
         [_observation("a")],
         [failed],
+        {
+            "status": "no_leader",
+            "reason_code": "no_challenger_passed",
+            "leader": None,
+            "passing_variant_ids": [],
+        },
         "2026-08-30T01:00:00Z",
     )
     assert no_leader["conclusion"] == {
@@ -104,7 +133,13 @@ def test_research_receipt_is_deterministic_and_explicitly_provisional() -> None:
 
 
 def test_receipt_publish_is_write_once_readback_verified_and_private(tmp_path: Path) -> None:
-    payload = build_research_receipt(_experiment(), [_observation("a")], [_comparison()], "2026-08-30T01:00:00Z")
+    payload = build_research_receipt(
+        _experiment(),
+        [_observation("a")],
+        [_comparison()],
+        _leader_conclusion(),
+        "2026-08-30T01:00:00Z",
+    )
 
     first = publish_receipt(tmp_path, "experiment-1", "research", payload)
     second = publish_receipt(tmp_path, "experiment-1", "research", payload)
@@ -256,7 +291,13 @@ def test_published_receipt_is_attached_after_process_restart(tmp_path: Path) -> 
         payload={},
         occurred_at_utc="2026-08-30T01:00:00Z",
     )
-    payload = build_research_receipt(complete, [_observation("a")], [_comparison()], complete["updated_at_utc"])
+    payload = build_research_receipt(
+        complete,
+        [_observation("a")],
+        [_comparison()],
+        _leader_conclusion(),
+        complete["updated_at_utc"],
+    )
     published = publish_receipt(tmp_path, complete["experiment_id"], "research", payload)
 
     restarted = ExperimentStore(tmp_path / "experiments.sqlite3")

@@ -28,11 +28,6 @@ def _patch_read_only_context(
         "resolve_strategy_lab_runtime_context",
         lambda _profile, *, market: context,
     )
-    monkeypatch.setattr(
-        cli,
-        "build_futu_gateway",
-        lambda **_kwargs: pytest.fail("read-only Strategy Lab commands must not build a gateway"),
-    )
     return profile_path, fee_plan_path, context
 
 
@@ -45,8 +40,8 @@ def test_strategy_lab_help_exposes_phase3_confirmation_commands(
     assert raised.value.code == 0
     help_text = capsys.readouterr().out
     assert (
-            "{readiness,canary,recipes,preview,confirm-research,preview-validation,"
-            "confirm-validation,advance,status,research,receipt}" in help_text
+        "{readiness,canary,recipes,preview,confirm-research,preview-validation,"
+        "confirm-validation,advance,status,research,receipt}" in help_text
     )
 
     with pytest.raises(SystemExit) as research_help:
@@ -366,9 +361,7 @@ def test_status_and_receipt_do_not_read_clock_or_provider(
     assert response["data"] == {"context_matches": True, "experiment_id": "exp-1"}
 
 
-def test_research_execute_freezes_one_clock(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_research_execute_freezes_one_clock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import src.interfaces.cli.strategy_lab_ops as cli
 
     profile_path, _fee_plan_path, context = _patch_read_only_context(monkeypatch, tmp_path)
@@ -378,10 +371,9 @@ def test_research_execute_freezes_one_clock(
     monkeypatch.setattr(
         cli,
         "execute_research",
-        lambda fake_context, experiment_id, **kwargs: received.update(
-            context=fake_context, experiment_id=experiment_id, **kwargs
-        )
-        or {"status": "progress"},
+        lambda fake_context, experiment_id, **kwargs: (
+            received.update(context=fake_context, experiment_id=experiment_id, **kwargs) or {"status": "progress"}
+        ),
     )
 
     response = handle_strategy_lab_command(

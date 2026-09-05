@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from src.application.candidate_snapshot_contract import utc_timestamp
-from src.application.strategy_lab.comparison import select_research_leader
 from src.application.strategy_lab.contracts import (
     RESEARCH_SESSIONS,
     canonical_sha256,
@@ -98,6 +97,7 @@ def build_research_receipt(
     experiment: object,
     observations: object,
     comparisons: object,
+    conclusion: object,
     concluded_at_utc: object,
 ) -> dict[str, Any]:
     if not isinstance(experiment, Mapping):
@@ -128,7 +128,21 @@ def build_research_receipt(
     ):
         _fail("receipt_input_invalid", "research window is not exactly 20 sessions")
     canonical_comparisons = _canonical_comparisons(comparisons)
-    conclusion = select_research_leader(canonical_comparisons)
+    if not isinstance(conclusion, Mapping):
+        _fail("receipt_input_invalid", "research conclusion is invalid")
+    canonical_conclusion = dict(conclusion)
+    status = canonical_conclusion.get("status")
+    leader = canonical_conclusion.get("leader")
+    if (
+        status not in {"leader", "no_leader", "insufficient_evidence"}
+        or (status == "leader") != isinstance(leader, Mapping)
+        or not isinstance(canonical_conclusion.get("passing_variant_ids"), list)
+    ):
+        _fail("receipt_input_invalid", "research conclusion is invalid")
+    if isinstance(leader, Mapping):
+        matches = [item for item in canonical_comparisons if item.get("variant_id") == leader.get("variant_id")]
+        if len(matches) != 1 or leader.get("comparison_sha256") != canonical_sha256(matches[0]):
+            _fail("receipt_input_invalid", "research leader binding is invalid")
     return {
         "kind": "research",
         "experiment_id": experiment_id,
@@ -140,7 +154,7 @@ def build_research_receipt(
         "research_window": research_window,
         "observations": _canonical_observations(observations),
         "comparisons": canonical_comparisons,
-        "conclusion": conclusion,
+        "conclusion": canonical_conclusion,
         "provisional": True,
         "fill_declaration": "simulated_fill_not_real_trade",
         "concluded_at_utc": utc_timestamp(concluded_at_utc, "concluded_at_utc"),

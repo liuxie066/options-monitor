@@ -1,13 +1,13 @@
 # Strategy Lab 统一策略实验平台系统设计
 
-- **状态**：Phase 3 本地实现完成；远端自然 Tick 隔离门槛已通过；Phase 4 正式点 FX
-  时间归属已完成本地修复，待发布与 HK / US 自然交易窗口验收
-- **日期**：2026-09-03
+- **状态**：首条实验链路与内部重构已实现；第二轮 DeepReview 无中高问题，待源码交付授权
+- **日期**：2026-09-05
 - **产品依据**：[Strategy Lab PRD](STRATEGY_LAB_EXPERIMENT_PLATFORM_PRD.md)
 - **首个 Recipe**：`sell_put_option_position_concentration`
 
 本文定义首条可行产品链路的技术边界、函数归属和代码处理方式。旧 Top1 loop、多代
-ExperimentStore 和 recorder 产品壳已删除，不是本文要求兼容的已发布产品。
+ExperimentStore 和 recorder 产品壳已删除，不是本文要求兼容的已发布产品。当前重构只调整
+内部 owner 和执行效率；20 日研究、10 日隐藏验证、确认、回执、资金口径和生产隔离行为保持不变。
 
 ## 1. 设计目标
 
@@ -33,27 +33,56 @@ Recipe preview
 6. 首次完成前不引入 Strategy Lab 的 schema、Recipe 或合同版本体系；
 7. MVP 全局最多一个未终态实验，且不能增加生产 Tick 的 OpenD 调用数；
 8. 正式点只绑定同账户、同市场的当前持有期权仓位，不要求取得其他市场的同期行情。
+9. Recipe 独占实验参数、候选构造和变体优先级；通用评价只比较标准经济结果，不识别集中度阈值；
+10. 收益计算和评价是无 I/O 的纯函数；OpenD、artifact 和 SQLite 分别保留单一读写 owner；
+11. 一次推进复用同一锁定作用域内的研究投影；锁外判断不能替代锁内权威重读；
+12. 行为 hash 只绑定会改变实验输入解释、结果或选择的 owner，不因 CLI、状态展示和存储实现改动失效。
+
+### 1.1 本次重构成功信号
+
+- 集中度 Recipe 对同一 fixture 产生与重构前相同的 arms、单推荐结果、比较、leader 和回执业务字段；
+  experiment id、source commit、behavior manifest 和对应 hash 等 provenance 只要求存在且内部一致，不与旧值逐字节相等；
+- DTE 或 Delta Recipe 可复用同一个比较器，不修改比较器、收益公式或 Receipt builder；
+- 生产只接受唯一完整正式点 envelope；旧的非正式 V1 / V2 生成、校验开关和无调用 helper 被删除，
+  但当前正式点 identity、ref 和 hash 不改变，已积累正式事实无需迁移或清空；
+- 20 日研究推进不删除锁内权威重读或改变 `research_evidence_busy`；provider 仍每次最多一个逻辑单元；
+- SQLite 的确认、revision、幂等、write-once、batch complete 与 terminal fill 原子性全部保持；
+- Strategy Lab 相关 focused tests、完整生命周期 fixture、依赖边界检查和项目 Guardrails 通过。
+
+### 1.2 非目标
+
+- 不新增 Recipe 插件框架、Protocol、DSL、事件总线、任务队列、通用 repository 或迁移层；
+- 不在本次实现 DTE / Delta Recipe，只证明公共评价不再阻止它们；
+- 不改变 PRD 的评价口径、20 / 10 日窗口、OpenD 低优先级策略或线上配置；
+- 不删除 Research Archive、required-data、Shadow Replay、Candidate Engine、SQLite 安全校验和当前正式事实；
+- 不为了缩短文件机械拆分所有函数；只移动有明确新 owner 的纯计算和研究 / 验证用例。
 
 ## 2. 总体架构
 
 ```mermaid
 flowchart TB
-    CLI["./om strategy-lab"] --> S["StrategyLabService"]
-    TIMER["独立 advance timer"] --> S
+    CLI["./om strategy-lab"] --> F["Strategy Lab Facade"]
+    TIMER["独立 advance timer"] --> F
 
-    S --> R["Recipe Catalog\n固定 Python 注册"]
-    S --> E["Evidence Gateway"]
-    S --> C["Single Recommendation Comparison"]
-    S --> ST[("ExperimentStore\n3 张 SQLite 表")]
-    S --> RC["不可变 JSON Receipts"]
+    F --> RS["Research Use Case"]
+    F --> VS["Validation Use Case"]
+    RS --> RP["Concentration Recipe"]
+    VS --> RP
+    RS --> CORE["Pure Evaluation Core\nCSP economics / Top1 comparison"]
+    VS --> CORE
+    RS --> EG["Evidence I/O"]
+    VS --> EG
+    RS --> ST[("ExperimentStore\n3 张 SQLite 表")]
+    VS --> ST
+    F --> RC["不可变 JSON Receipts"]
 
-    CE["Candidate Engine"] --> R
-    RA["Research Archive"] --> E
-    OD["OpenD\n低优先级调用"] --> COORD["OpenD endpoint coordinator\n生产容量保留 / 实验零等待"] --> E
-    FX["FX / Fee-plan"] --> E
+    CE["Candidate Engine"] --> RP
+    RA["Research Archive"] --> EG
+    OD["OpenD\n低优先级调用"] --> COORD["OpenD endpoint coordinator\n生产容量保留 / 实验零等待"] --> EG
+    FX["FX / Fee-plan"] --> CORE
 
     TICK["生产 Tick / Scheduler"] --> RA
-    TICK --> BUSY["Tick busy / 下一调度点\n只读探针"] --> S
+    TICK --> BUSY["Tick busy / 下一调度点\n只读探针"] --> F
     RC -. "MVP 外的独立授权" .-> DELIVERY["配置 / 交付 / 发布"]
 ```
 
@@ -62,25 +91,30 @@ flowchart TB
 ```text
 interfaces/cli
   -> application/strategy_lab/service.py
-       -> recipe.py / evidence.py / comparison.py / receipts.py
-       -> domain Candidate Engine / concentration / performance models
+       -> research / validation use cases
+       -> recipe.py / evidence.py / receipts.py
+       -> domain strategy_lab_evaluation / Candidate Engine / concentration
        -> infrastructure ExperimentStore / Futu gateway / Research Archive
 ```
 
-`domain/domain/` 不依赖 `src/`。CLI 不编排实验步骤；provider adapter 不判断实验输赢；Store
-不计算 Recipe 或评价结果。Strategy Lab 不取得 Tick market lock；实验进程只能根据只读 busy / schedule
-状态和低优先级配额决定“立即执行或让路”。
+`domain/domain/` 不依赖 `src/`。CLI 和 facade 不实现阶段循环；Recipe 不访问 provider 或 Store；
+Evidence I/O 不计算收益或选择 leader；provider adapter 不判断实验输赢；Store 不计算 Recipe、报价
+crossing 或评价结果。Strategy Lab 不取得 Tick market lock；实验进程只能根据只读 busy / schedule 状态和
+低优先级配额决定“立即执行或让路”。
 
 ## 3. 最小代码结构
 
 ```text
 src/application/strategy_lab/
   contracts.py       # 冻结 spec、标准结果和状态常量
-  recipe.py          # Recipe 目录与首个集中度 Recipe
-  evidence.py        # Archive 读取、分钟 K、隐藏报价和到期事实
-  comparison.py      # 单推荐替换评价合同
-  service.py         # preview、确认、推进、状态和恢复
-  receipts.py        # Research / Final Receipt 构造与校验
+  recipe.py          # 首个集中度 Recipe；参数、arms 和变体顺序
+  readiness.py       # Evidence readiness；不进入 Recipe
+  evidence.py        # Archive 读取、分钟 K、隐藏报价和到期事实；不计算经济结果
+  service.py         # 公开 facade 与现有 research / validation use cases
+  receipts.py        # Research / Final Receipt 校验、构造和发布
+
+domain/domain/
+  strategy_lab_evaluation.py  # CSP 纯数值 economics 和通用 Top1 比较纯函数
 
 src/infrastructure/strategy_lab/
   experiment_store.py
@@ -92,8 +126,10 @@ src/interfaces/cli/
   strategy_lab_ops.py
 ```
 
-当前不建立每个 Recipe 子目录、插件接口、抽象 repository 层或 DSL。第二个 Recipe 真正出现，
-且单文件职责已经混乱时，再按行为拆分。
+删除原 application comparison 模块，调用方直接依赖 domain owner；不保留转发 facade。
+当前不建立每个 Recipe 子目录、注册表、插件接口、抽象 repository 层或 DSL。第二个 Recipe 真正实现时，
+再决定是否需要普通字典分派。本次不预设 `research.py` / `validation.py`：只有移动完整 use case 能减少
+`service.py` 的 imports、依赖和重复数据访问时才提取文件，不能为了缩短行数机械搬家。
 
 ## 4. 应用服务合同
 
@@ -101,17 +137,19 @@ CLI 和将来的 MCP 只能调用以下应用函数：
 
 | 函数 | 输入 | 输出 | 是否写入 |
 |---|---|---|---|
-| `resolve_strategy_lab_runtime_context(profile, market)` | 受控 profile、market | runtime / artifact / Store / config、limiter、Tick busy binding | 否 |
-| `resolve_strategy_lab_context(profile)` | 受控 profile | runtime / artifact / Store、HK/lx config、OpenD、limiter、Tick schedule binding | 否 |
+| `resolve_strategy_lab_runtime_context(profile, market)` | 受控 profile、market | runtime / artifact / Store / config、limiter | 否 |
+| `resolve_strategy_lab_context(profile)` | 受控 profile | runtime / artifact / Store、HK/lx config、OpenD、共享 endpoint 的 Tick lock 集合 | 否 |
 | `list_recipes()` | context | Recipe、参数、readiness | 否 |
+| `preview_engineering_canary(context, occurred_at_utc)` | runtime context、冻结时间 | 非权威两日投影预览 | 否 |
 | `preview_experiment(request)` | hypothesis、Recipe、参数、market、account | 完整 spec、readiness、`spec_sha256` | 否 |
 | `refresh_history_k_readiness(request, confirmed_probe_sha256, actor, occurred_at_utc)` | preview 生成的 option code、OpenD underlier quota identity 与确认 hash | 不可变 readiness receipt | 是 |
 | `confirm_research(request, confirmed_preview_sha256, actor, idempotency_key)` | 原 preview 请求和确认 hash | experiment id、状态 | 是 |
+| `execute_research(experiment_id, actor, occurred_at_utc)` | experiment id、actor、一次冻结时间 | 最多推进一个 provider 单元的研究摘要 | 是 |
 | `get_experiment_status(experiment_id)` | experiment id | 状态、进度、阻塞、下一动作 | 否 |
 | `preview_validation(experiment_id, requested_start)` | experiment id、起始交易日 | leader、10 日窗口、schedule / config / behavior hashes、preview hash | 否 |
 | `confirm_validation(experiment_id, requested_start, confirmed_preview_sha256, actor, idempotency_key)` | 原 preview 请求和确认 hash | 锁定的 10 日窗口 | 是 |
-| `advance_experiment(experiment_id, occurred_at_utc)` | experiment id、一次冻结时间 | 推进摘要 | 是 |
-| `advance_scheduled(occurred_at_utc)` | 一次冻结时间 | 无活动实验时 no-op；否则推进全局唯一实验 | 是 |
+| `advance_experiment(experiment_id, occurred_at_utc, provider_capable=False)` | experiment id、一次冻结时间、provider 能力 | 验证推进摘要 | 是 |
+| `advance_scheduled(occurred_at_utc, provider_capable=False)` | 一次冻结时间、受控 provider 能力 | 仅推进验证阶段；其他状态 no-op | 是 |
 | `read_receipt(experiment_id, kind)` | experiment id、receipt kind | artifact、hash | 否 |
 
 约束：
@@ -126,12 +164,16 @@ CLI 和将来的 MCP 只能调用以下应用函数：
   并用传入的同一时间完成全部阶段判断；它不取得 Tick market lock；
 - `advance_scheduled()` 从冻结 calendar 和 `occurred_at_utc` 解析墙钟 slot；先恢复已有 started batch 的
   durable artifact，再只处理仍在 tolerance 内的当前 slot，不为历史 slot 请求报价或写 gap；
+- `execute_research()` 保持人工显式入口；`advance_scheduled()` 不自动推进 `research_running` 或
+  `research_complete`，避免把人工研究变成定时 provider 调用；
 - Tick guard 和低优先级准入成功后才能创建 started batch；`start_observation()` 返回是否由本次调用新建，
   只有新建者可以访问 provider；
+- readiness、research、validation 和 outcome 在构造 gateway 前都调用同一个 `_provider_guard()`；它检查
+  context 冻结的全部 `tick_lock_paths`、对应市场的对称保护窗口和低优先级额度；
 - 每次确认和推进都重新计算冻结 owner manifest 的 `evaluator_behavior_sha256`；不匹配返回
   `evaluator_behavior_mismatch`，不迁移旧实验；`source_commit_sha` 只追加到审计事件，不参与准入；
-- `list_recipes()`、两种 preview、`get_experiment_status()` 和 `read_receipt()` 的 provider 调用数必须为
-  0；只有显式 history-K readiness refresh 和 advance 可以调用 OpenD；
+- `list_recipes()`、两种 preview、canary、`get_experiment_status()` 和 `read_receipt()` 的 provider 调用数必须为
+  0；只有显式 history-K readiness refresh、人工 research execute 和 provider-capable advance 可以调用 OpenD；
 - `get_experiment_status()` 和 `read_receipt()` 不请求 OpenD、不刷新事实、不写状态；
 - `get_experiment_status()` 和 `read_receipt()` 只解析 runtime / artifact / Store authority，不要求当前账户、
   ledger 或 OpenD config 仍可用；status 返回分类进度、静态 blocker 和唯一 next action，provider/Tick 的
@@ -140,39 +182,37 @@ CLI 和将来的 MCP 只能调用以下应用函数：
 - 所有应用错误返回稳定 reason code，不把异常文本当产品合同。
 
 两个 context resolver 都是普通函数，不新增 context class，也不从 cwd、localhost 或隐式默认值猜运行环境。
-共享 runtime resolver 只读取 runtime root、artifact root、Store path、指定 market config、limiter root 和
-Tick busy binding，Research owner 和历史只读入口可独立使用；产品 resolver 在其上增加 account、OpenD endpoint 和 schedule
-约束。共享 resolver 不读取旧 `strategy_lab_top1` profile。
+共享 runtime resolver 只读取 runtime root、artifact root、Store path、指定 market config 和 limiter root，
+Research owner 和历史只读入口可独立使用；产品 resolver 在其上增加 account、OpenD endpoint 和 schedule
+约束。产品 resolver 读取 profile 中全部 market runtime configs，复用现有
+`resolve_shared_futu_quote_route()`；只有所有启用市场都明确解析到同一个 quote endpoint，且该 endpoint 与
+HK/lx 的 Futu binding 完全相同，才把这些市场对应的 `runtime/locks/tick-<market>.lock` 冻结为
+`tick_lock_paths`。missing、conflict、endpoint 不同或 config 缺失均 fail closed，不访问 provider。MVP 不
+实现任意 endpoint 拓扑；未来真正需要多 endpoint 时再改为逐 endpoint 分组。共享 resolver 不读取旧
+`strategy_lab_top1` profile。
 
 ## 5. Recipe 和评价合同
 
-### 5.1 Recipe 注册
+### 5.1 Recipe owner
 
-`recipe.py` 使用一个普通字典注册 Recipe：
-
-```python
-RECIPES = {
-    "sell_put_option_position_concentration": build_concentration_arms,
-}
-```
-
-同文件提供的最小函数：
+MVP 只有一个可执行 Recipe，服务直接调用它，不保留没有消费者的 `RECIPES` 注册表。同文件提供的最小函数：
 
 | 函数 | 职责 |
 |---|---|
 | `describe_recipe(recipe_id)` | 返回问题、参数、支持范围、Evidence 和安全要求 |
-| `check_recipe_readiness(recipe_id, context)` | 只读判断 `available / blocked / unsupported / disabled` |
 | `build_concentration_arms(formal_point, parameters)` | 从同一点 accepted 候选构造 baseline / challenger |
-| `build_single_recommendation_result(arm, fill, outcome)` | 生成标准结果 |
+| `variant_preference(recipe_id)` | 返回当前 Recipe 冻结的 variant 顺序和参数 |
 
-不建立 class、Protocol 或插件接口。服务按固定键调用函数；第二个 Recipe 出现后再判断是否需要抽象。
+不建立 class、Protocol 或插件接口。未知 `recipe_id` 由应用边界返回 `unsupported`；第二个 Recipe 真正实现后，
+若直接分派开始重复，再增加普通字典。
 
-`check_recipe_readiness()` 先在冻结 `maturity_cutoff_utc` 上，从后向前选择最近连续 20 个满足以下条件的
-正式交易日：formal expectation / point 完整，Recipe 能构造全部 arms，且实际入选 arms 的到期 outcome
-均已成熟。它随后枚举这些 arms 的确切期权代码，只读校验未过期的 targeted history-K readiness receipt、
-账户 fee-plan 和 Evidence Source Gate。receipt 必须匹配 endpoint、权限身份和样本范围，且当前 exact-code
-映射到的唯一 security quota identity 数量不超过 receipt 已证明的 quota 边界；任一项未证明时返回
-`blocked`，不调用 provider，也不先创建实验再等待 30～45 日。
+Recipe 不读取 Formal Corpus、fee-plan、scheduler、readiness receipt、Store 或 provider。Research use case
+调用应用层 `check_recipe_readiness()`：它先在冻结 `maturity_cutoff_utc` 上，从后向前选择最近连续 20 个满足
+以下条件的正式交易日：formal expectation / point 完整，Recipe 能构造全部 arms，且实际入选 arms 的到期
+outcome 均已成熟。随后枚举这些 arms 的确切期权代码，只读校验未过期的 targeted history-K readiness
+receipt、账户 fee-plan 和 Evidence Source Gate。receipt 必须匹配 endpoint、权限身份和样本范围，且当前
+exact-code 映射到的唯一 security quota identity 数量不超过 receipt 已证明的 quota 边界；任一项未证明时
+返回 `blocked`，不调用 provider，也不先创建实验再等待 30～45 日。
 
 当 preview 因 receipt 缺失而 `blocked` 时，仍返回不含 provider 结果的 exact-code probe request 及 hash，
 供操作员确认；该 hash 不等于研究确认 hash，也不创建实验。
@@ -206,7 +246,8 @@ security identity 与 quota code 完全相同。已有 receipt、保护窗口和
    "option_market_concentration", near_return_threshold=...)`；
 5. 排序第一名为 challenger，保留候选、持仓、mark、FX 和排名输入的 ref/hash。
 
-三个固定变体使用 `0.002 / 0.004 / 0.006`。它们是持有期净收益率带，不是年化收益率差。
+三个固定变体及冻结 preference 均为升序 `0.002 / 0.004 / 0.006`。它们是持有期净收益率带，不是年化
+收益率差。年化收益和 CNY PnL 完全相同时必须选择 `0.002`，逐字复现当前比较器的第三排序键。
 
 Recipe 不增加指派后股票集中度、全部 Short Put 名义敞口或其他新安全门槛。baseline 和 challenger
 都必须来自生产 accepted 集合。不得从 performance-evidence repository、其他 run 或后来的 quote
@@ -271,18 +312,41 @@ fixture 增加 fallback。已封存的失败点不覆盖、不回填。
 
 ### 5.3 标准结果
 
-`build_single_recommendation_result()` 只接受已经规范化的 arm、fill 和 outcome，不访问 provider。
-输出 PRD 定义的 `single_recommendation_result`。CSP 资金分母和损益公式只有这一处实现。
+拟新增的 domain/domain/strategy_lab_evaluation.py 只提供纯数值函数：
+
+```text
+calculate_csp_economics(
+    opening_net, strike, multiplier, underlying_close,
+    opening_fx, terminal_fx, terminal_fee, holding_days,
+) -> economic_pnl_cny, annualized_return, return_capital_basis_cny, terminal_intrinsic_loss
+```
+
+输入是 application 已完成 evidence/schema 校验后的 `Decimal` 和正整数天数；domain 不读取 arm、fill、outcome、
+Recipe、artifact ref/hash 或 reason code，也不导入 `src/`。非法分母或天数抛出明确的 domain value error。
+`evidence.build_single_recommendation_result()` 继续是 application envelope owner：它校验 fill/outcome/evidence，
+处理 `no_fill / not_evaluable`，调用上述函数，并组装 PRD 的 `single_recommendation_result`。CSP 资金分母和
+损益公式只在 domain 函数中实现；application 直接使用其返回的 `terminal_intrinsic_loss`，不根据 strike 和
+underlying close 重算。
+
+标准结果的公共比较字段固定为：point / day、baseline 或 challenger、`variant_id`、候选 identity、
+fill / outcome / safety 状态、`annualized_return`、`economic_pnl_cny` 和 evidence refs。
+`evidence.build_comparison_projection()` 先拒绝 fill / outcome / safety 不合法的结果，再收窄为
+`recommendation_point_id / trading_day /
+variant_id / candidate_identity / status / annualized_return / economic_pnl_cny`。其中 `status` 只能是已验证可评价的
+`available` 或 `no_fill`；`candidate_identity` 沿用现有 candidate ref 的稳定 identity，只用于计算
+`top1_change_count`。domain 不读取其他 envelope 字段。application 在
+集中度 Recipe 的结果 envelope 和回执中原样附加 `near_return_threshold` 用于审计。
 
 `no_fill` 输出零 PnL 和零年化收益率，资金分母与持有天数为空；`pending_outcome` 保持等待；
 `not_evaluable` 不参与计算且不能改写为零。
 
 ### 5.4 单推荐替换评价
 
-`comparison.py` 只暴露：
+拟新增的 domain/domain/strategy_lab_evaluation.py 暴露：
 
 ```text
-compare_single_recommendations(expected_points, baseline_results, challenger_results)
+compare_single_recommendations(expected_points, baseline_projections, challenger_projections)
+select_research_leader(variant_comparisons, variant_preference)
 ```
 
 它依次完成：
@@ -294,8 +358,21 @@ compare_single_recommendations(expected_points, baseline_results, challenger_res
 5. 冻结窗口内各日等权平均；
 6. 应用两条判断：平均年化收益率 delta 大于零，平均 CNY PnL delta 不小于零。
 
-不实现 Student-t、最差 20%、加权总分或自动显著性判断。研究阶段先按年化收益率改善、再按
-CNY PnL 改善，从通过变体中选择唯一 leader；隐藏验证只评价锁定 leader。
+比较器只消费 §5.3 的最小数值投影，并要求同一批 challenger 的 `variant_id` 一致；不读取
+`near_return_threshold`，也不导入 Recipe
+常量。它比较 baseline / challenger 的 `candidate_identity` 生成逐点变化标记和 `top1_change_count`，不由
+service 另行统计。leader 选择先按年化收益率改善、再按 CNY PnL 改善，完全相同时使用 Recipe 传入的冻结
+`variant_preference`，不在通用函数中猜参数含义。应用层随后把获胜 `variant_id` 对应的 Recipe 参数原样
+加入 leader 和 Receipt，以保持当前集中度回执字段不变。
+
+不实现 Student-t、最差 20%、加权总分、自动显著性判断或用户提供公式。隐藏验证只评价锁定 leader。
+
+### 5.5 正式点身份不变量
+
+V1 / V2 envelope 删除不等于改变正式点身份。`build_recommendation_point_id()` 的 canonical identity payload
+必须继续包含历史字面量 `"recommendation_point.v1"`；该字面量只表示稳定 identity namespace，不表示仍支持
+V1 envelope。实现时把它改名为明确的 identity namespace 常量，但值不变，并用一个现有 V3 正式点的固定
+输入 / point id 向量证明重构前后完全一致。
 
 ## 6. Evidence 设计
 
@@ -307,7 +384,7 @@ CNY PnL 改善，从通过变体中选择唯一 leader；隐藏验证只评价�
 | 推荐时刻 | 合约报价、Greeks、OI、DTE、标的价 | Research Archive | 只读 required-data / opening snapshot |
 | 推荐时刻 | 同账户、同市场全部当前持有期权 identity / 数量、mark、FX | Formal Point artifact | 只读同 point 绑定事实；不跨市场或 repository 回退 |
 | 20 日研究 | 入选 arm 的期权 1 分钟 K | OpenD | 闭市后按需请求 |
-| 10 日验证 | 锁定 arm 的 Bid / Bid Volume | OpenD | 盘中每分钟一个批次 |
+| 10 日验证 | 锁定 arm 的 `bid` / `bid_vol` | OpenD | 盘中每分钟一个批次 |
 | 到期 | 标的未复权日收盘、FX、费用 | OpenD / performance evidence / fee-plan | 成熟后按需补全 |
 
 Evidence cutover 只走一条路径：
@@ -392,8 +469,8 @@ arm。任务晚于 `slot + tolerance` 才醒来时不请求 provider，也不用
    `start_observation()` 返回 created 标志，只有本次新建者可以继续调用 provider；
 4. 一次调用现有 `fetch_option_snapshots()`，固定 `max_wait_sec=0`、`no_retry=True`、
    `snapshot_fallback_max_codes=0`、一个明确 batch size 和进程级硬 timeout；去重后不得超过单批上限；
-5. 对每个 arm 使用冻结 `sell_limit` 判断 `bid >= sell_limit and raw_bid_vol > 0`；Bid 和 raw Bid Volume
-   必须来自同一 snapshot 且为有限正值。raw Bid Volume 只证明最优买价存在非零挂量，不换算为合约张数，
+5. 对每个 arm 使用冻结 `sell_limit` 判断 `bid >= sell_limit and bid_vol > 0`；`bid` 和 `bid_vol`
+   必须来自同一 snapshot 且为有限正值。`bid_vol` 只证明最优买价存在非零挂量，不换算为合约张数，
    不估算可成交规模或滑点；
 6. 按下方证据分支校验 provider envelope。`observation_slot_utc` 只作 identity；artifact 的
    `observed_at_utc` 和 crossing 的 `fill_time` 均使用真实 `received_at_utc`；
@@ -412,7 +489,7 @@ provider envelope 只走以下三条分支：
 | 条件 | 处理 |
 |---|---|
 | 调用报错或超时、`opend_call_count != 1`、request / receive UTC 缺失或不可解析、任一时间超出冻结 tolerance、存在未请求或重复代码 | 不发布 artifact，started row 保持原样 |
-| exact query identity、单次调用和时间 envelope 有效，但 requested code 缺行，或 Bid / raw Bid Volume / source time 非法 | 为每个缺陷 code 写明确 invalid row，发布不可评价的 complete batch artifact |
+| exact query identity、单次调用和时间 envelope 有效，但 requested code 缺行，或 `bid` / `bid_vol` / source time 非法 | 为每个缺陷 code 写明确 invalid row，发布不可评价的 complete batch artifact |
 | envelope 与报价行均有效 | 发布 complete batch artifact；application/evidence 层从 readback artifact 计算 crossing 集合 |
 
 缺少 requested code 是可枚举的行级缺陷；未请求或重复代码破坏 query identity，不能封存为该 query 的事实。
@@ -432,7 +509,7 @@ terminal fill。
 
 `preview_validation()` 只从已完成研究和本地冻结事实构造 leader、未来窗口及其 binding，不访问 provider。
 第二次确认重新生成 preview，并把 schedule、account config、timer 和 behavior hashes 固化进 validation
-binding。实时 snapshot 的 Bid、raw Bid Volume 或 source time 缺失 / 非法时，只影响对应 slot 的
+binding。实时 snapshot 的 `bid`、`bid_vol` 或 source time 缺失 / 非法时，只影响对应 slot 的
 可评价性，不在确认前新增一个无法独立证明 volume 单位的 readiness 子流程。
 
 ### 6.4 到期结果
@@ -476,7 +553,9 @@ MVP 不抓期权逐笔、不模拟提前平仓，也不计算指派后的持股�
 - event 以 `(experiment_id, sequence)` 排序，只追加；
 - 状态更新使用 `revision` compare-and-set，并在同一 SQLite 事务提交事件。
 
-### 7.2 Store 函数
+### 7.2 关键 Store 函数
+
+下表覆盖本次重构会直接使用或保护的函数，不把内部私有 helper 当公开清单：
 
 | 函数 | 行为 |
 |---|---|
@@ -484,12 +563,17 @@ MVP 不抓期权逐笔、不模拟提前平仓，也不计算指派后的持股�
 | `create_experiment()` | 写冻结 spec 和首个事件 |
 | `get_active_experiment()` | 返回全局唯一未终态实验；没有则返回空 |
 | `get_experiment()` | 读取状态与引用 |
+| `list_events()` | 只读返回实验审计事件 |
 | `append_event_and_transition()` | 校验旧状态、revision 后追加事件并推进 |
+| `confirm_validation()` | 在事务内消费第二次确认并冻结验证窗口 |
 | `start_observation()` | 在一个事务保存 batch started 与 exact arm/query manifest，返回 `(observation, created)`；只有 `created=true` 的调用方可以访问 provider |
 | `complete_observation(..., artifact_ref, artifact_sha256, artifact_received_at_utc, crossing_arm_ids)` | artifact durable 后在一个事务完成 batch，并为 application/evidence 已判定 crossing 的 arm 插入唯一 `observed_fill` |
 | `put_observation()` | 写 research / outcome 事实及窗口终点的 `no_fill / not_evaluable`；终态 fill 必须引用不可变 projection artifact |
-| `list_observations()` | 按 point / arm / kind 读取 |
-| `attach_receipt()` | 仅在不可变 receipt 已 readback 验证后绑定 ref/hash |
+| `get_observation()` | 按稳定 observation key 精确读取一条事实 |
+| `list_observations()` | 完整回执需要时读取全部；推进和状态按 kind / status / key 精确读取或计数 |
+| `complete_validation_collection()` | 在事务内确认所有 terminal fill 完整后进入等待 outcome |
+| `attach_research_receipt_and_transition()` | 仅在 Research Receipt 已 readback 后绑定并推进 |
+| `attach_final_receipt_and_transition()` | 仅在 Final Receipt 已 readback 后绑定并终结 |
 
 `complete_observation()` 不读取 artifact，也不计算 Bid crossing。application/evidence 必须先 readback 同一
 artifact，并只传其中满足条件的 `(recommendation_point_id, arm_id)` 集合。Store 在一个
@@ -503,8 +587,10 @@ artifact，并只传其中满足条件的 `(recommendation_point_id, arm_id)` �
    集合任一不同均返回 `validation_batch_manifest_conflict`；
 5. 若任一 arm 已绑定其他 terminal fill，整个事务失败，不留下 complete batch 或部分 fills。
 
-Store 只负责 identity、原子性和冲突校验；报价规范化、invalid row 和 crossing 判定仍归
-application/evidence owner。
+Store 只负责 schema、identity、原子性、幂等和冲突校验；状态迁移、observation kind 与 payload 的业务
+合法性继续由现有模块级无 I/O validator 定义，并由 Store 在 `BEGIN IMMEDIATE` 内对新鲜状态调用。本次
+不移动这些 validator，不改变 import 方向，也不得把校验移到事务外。报价规范化、invalid row、crossing、
+收益和 leader 判定不属于 Store。
 
 写路径复用 `connect_private_sqlite()`、`secure_sqlite_artifacts()`、现有跨进程 writer lock、SQLite WAL 和
 `BEGIN IMMEDIATE`；writer lock 负责串行写入，WAL 只负责隔离短生命周期 reader 与连续 writer；
@@ -513,15 +599,16 @@ application/evidence owner。
 `strategy_lab_schema`、`schema_state()`、`migrate()`、generation、capability、corpus、feature 或
 Top1 专用表。
 
-旧库不在应用启动时自动删除或覆盖。实施部署前由操作员确认一个明确旧路径；停止旧服务后移动到
-隔离备份或删除，再让新 Store 在新路径首次创建。该操作不属于普通 schema migration。
+本次重构不改变 Store 路径、schema 或现有三表内容，不移动、删除或迁移运行数据。任何生产数据处理都不
+属于本 work unit，并继续要求单独授权。
 
 ## 8. 状态推进与调度
 
 ### 8.1 状态 owner
 
-`StrategyLabService.advance_experiment()` 是唯一状态推进 owner；调度入口只调用
-`advance_scheduled(occurred_at_utc)` 查找全局唯一活动实验：
+`execute_research()` 是人工研究推进入口；`service.advance_experiment()` 是验证阶段推进 facade。调度入口只
+调用 `advance_scheduled(occurred_at_utc, provider_capable=...)` 查找全局唯一活动实验，并且仅在
+`validation_collecting / waiting_outcome` 状态推进；研究状态稳定返回 `no_advanceable_experiment`：
 
 ```text
 research_running
@@ -534,46 +621,55 @@ research_running
 
 `blocked` 是可重试的阶段结果，不伪造成功状态；冻结窗口不可恢复缺失生成
 `insufficient_evidence` 回执并结束。所有阶段先读 Store，再检查已有 artifact/observation，最后才发起
-缺少的 provider 调用。无活动实验时调度成功 no-op。
+缺少的 provider 调用。无活动实验或活动实验不在验证阶段时，调度成功 no-op。
 
-每次确认 / advance 都按冻结 manifest 重算 `evaluator_behavior_sha256`。manifest 直接列出本实验调用的
-Recipe、comparison/economics、fill/outcome、Candidate Engine ranking profile、集中度、fee/FX 合同的文件
-内容 hash；聚合 hash 由 canonical JSON 计算，不扫描全仓，也不引入版本表。行为 hash 不一致返回
+每次确认 / advance 都按冻结 manifest 重算 `evaluator_behavior_sha256`。manifest 直接列出会改变冻结输入
+解释、候选构造、fill / outcome、CSP economics、Top1 comparison 或 leader 选择的源文件内容 hash；聚合
+hash 由 canonical JSON 计算，不扫描全仓，也不引入版本表。行为 hash 不一致返回
 `evaluator_behavior_mismatch`；仅 `source_commit_sha` 改变不阻断，但追加审计事件。历史研究允许不同
 formal point 绑定各自生产 config / source hashes；未来验证在第二次确认时冻结 schedule、account-config
 和 timer binding，后来 formal point 不匹配即 `validation_source_binding_mismatch`，不自动换配置或迁移。
 
-MVP manifest 固定覆盖以下文件，每项只保存路径和文件 SHA-256：
+重构后 manifest 固定覆盖以下语义 owner，每项只保存路径和文件 SHA-256：
 
 - 现有：`src/application/strategy_lab/contracts.py`
 - 现有：`src/application/strategy_lab/recipe.py`
-- 现有：`src/application/strategy_lab/comparison.py`
 - 现有：`src/application/strategy_lab/evidence.py`
-- 现有：`src/application/strategy_lab/readiness.py`
-- 现有：`src/application/strategy_lab/service.py`
-- 现有：`src/application/strategy_lab/receipts.py`
-- 现有：`src/infrastructure/strategy_lab/experiment_store.py`
+- 拟新增语义 owner：domain/domain/strategy_lab_evaluation.py
 - 现有：`domain/domain/engine/candidate_engine.py`
 - 现有：`domain/domain/short_vol_assessment.py`
 - 现有：`domain/domain/option_lifecycle.py`
 - 现有：`domain/domain/fee_calc.py`
 - 现有：`domain/domain/performance/models.py`
-- 现有：`src/application/performance/account_fee_plan.py`
-- 现有：`src/infrastructure/performance_evidence_sqlite.py`
-- 现有：`src/application/opend_market_snapshot_fetching.py`
-- 现有：`src/infrastructure/futu_gateway.py`
 - 现有：`src/application/opening_candidate_snapshot.py`
+- 现有：`src/application/opend_market_snapshot_fetching.py`
+- 现有：`src/application/performance/evidence_collection.py`
 - 现有：`src/application/prepared_option_positions_context.py`
 - 现有：`src/application/recommendation_point.py`
 - 现有：`src/application/research/formal_corpus.py`
 
 固定参数和公式输入由 canonical spec 覆盖；timer unit、冻结 schedule 和 account config 由独立 binding
 hash 覆盖。新增实际执行 owner 时必须先更新固定清单和设计，不能运行时递归发现依赖、生成 AST 图或
-建立版本表。prepared context 同时生成并校验 Recipe 直接使用的 position / FX 事实，因此采用整个文件
-hash。`required_data_snapshot.py` 和 coordinator 只决定不可变输入是否可用或调用是否获准；其 artifact
-ref/hash、provider response 和 blocker 均作为输入事实保存，不在 evaluator 中重新解释。通知、日志、CLI
-adapter 和文档不属于行为 manifest。opening snapshot loader 也采用整个文件 hash，因此物理编码调整会
-保守阻断当前实验；MVP 接受该取舍，不增加函数级源码分析。
+建立版本表。prepared context、opening snapshot loader、snapshot 规范化和 valuation mark builder 都直接
+改变 Recipe 使用的事实，因此采用整个文件 hash；物理编码调整可能保守阻断当前实验，MVP 接受该取舍，
+不增加函数级源码分析。
+
+从当前 21 项清单移除的 8 项及理由固定如下：
+
+| 移除项 | 理由 |
+|---|---|
+| 原 application comparison 模块 | 由新的 domain 纯计算 owner 替代，原文件删除 |
+| `src/application/strategy_lab/readiness.py` | 只决定能否取证，不解释已冻结证据的经济结果 |
+| `src/application/strategy_lab/service.py` | 只编排 use case；结果选择迁出后不拥有评价语义 |
+| `src/application/strategy_lab/receipts.py` | 只校验、组装和发布已计算结论，不再选择 leader |
+| `src/infrastructure/strategy_lab/experiment_store.py` | 只持久化和原子校验，不计算实验结果 |
+| `src/application/performance/account_fee_plan.py` | 确认时把严格 fee-plan fact 和 hash 冻结进 spec |
+| `src/infrastructure/performance_evidence_sqlite.py` | 只提供已冻结进 spec 的 FX / fee 输入事实 |
+| `src/infrastructure/futu_gateway.py` | 只传输 provider 请求；有语义的 snapshot 规范化仍绑定 application adapter |
+
+通知、日志、CLI adapter 和文档也不属于行为 manifest。上述移除只在对应语义已由 spec、observation 或
+新 owner 的测试证明后执行；无法证明时保守保留。清单变化必然改变 `behavior_manifest` 和聚合 hash，不能
+要求重构前后 provenance 值相等。
 
 ### 8.2 运行隔离
 
@@ -616,10 +712,37 @@ adapter 和文档不属于行为 manifest。opening snapshot loader 也采用整
 MVP 全局只有一个实验且窗口固定 10 日，恢复直接线性扫描真实 started rows；不增加 recovery cursor、索引表
 或批次调度状态。
 
-保护窗口和生产预留容量在实施前由 OpenD PoC 与当前 Tick 调用计划确定为代码常量，不增加用户配置。
+保护窗口、生产预留容量和单元 deadline 沿用本文已冻结的代码常量，不增加用户配置。
 并发测试必须覆盖两个方向：Tick 已运行时实验立即让路；实验已开始后 Tick 仍取得自己的锁且不会
 `SKIP_LOCKED`，实验在硬超时内结束。若共享 endpoint 的低优先级协议无法证明这一点，
 MVP 保持 `blocked`；不在本设计中预建第二个 OpenD endpoint。
+
+#### 8.2.1 共享 endpoint 准入与人工研究 deadline
+
+MVP 复用 `src/application/futu_quote_routing.py` 的 `resolve_shared_futu_quote_route()`，不新增 endpoint registry：
+
+1. `resolve_strategy_lab_context()` 读取 service profile 中全部启用市场的 runtime config；route 必须为 `ok`，
+   且唯一 host/port 与 HK/lx Strategy Lab binding 相同；否则 context fail closed；
+2. context 生成这些市场对应的不可变 `tick_lock_paths`。`_provider_guard()` 对任一路径 busy 或任一对应市场
+   进入对称保护窗口都立即返回，不构造 gateway；
+3. readiness 的公开 facade 收回 `service.py`，CLI 不再自行构造 gateway 或只传 HK lock；底层 readiness
+   publisher 在 gateway factory 执行前再次检查全部 `tick_lock_paths`；research、validation 和 outcome 复用
+   同一 guard；
+4. 每个 provider 请求仍走现有 `try_low_priority_opend_call()`，保留生产额度且 `max_wait_sec=0`。
+
+人工 `research execute` 和 readiness refresh 没有 systemd `TimeoutStartSec`，因此在
+`opend_call_coordinator.py` 增加一个最小的 `run_interruptible_opend_unit(call, timeout_seconds=10)`：仅在
+主线程且平台支持 `SIGALRM / setitimer` 时执行，保存并恢复调用方已有 timer；不具备可中断 deadline 时在
+gateway factory 前返回稳定 blocker。deadline 包住 gateway 构造、完整分页 / quota 请求和 close，不包 Store
+或 artifact 写入；超时后不发布 artifact，既有 started/write-once 语义不变。scheduled validation 继续以
+原生 systemd `TimeoutStartSec=10` 作为进程级边界，不用 Python deadline 替代它。
+
+固定不变量为：单个实验 provider 单元 deadline `10s` 小于 Tick 对称保护窗口 `20s`，因此在合法窗口开始的
+实验单元必须在下一正式 Tick 前终止。Implementation 必须用主线程阻塞 fake 证明超时后在 deadline 容差内
+返回、调用方原 timer 完整恢复，并用只读 OpenD 超时 smoke 证明当前 Futu SDK 路径可被中断；任一证据
+不成立时，人工 provider-capable 路径保持 `blocked`，不把信号定时器当成已证明的硬隔离。这里复用 stdlib 和
+现有 limiter，不引入 worker、进程池、新 service、
+全局 OpenD 锁或第二套 coordinator。
 
 ## 9. 代码处理清单
 
@@ -632,6 +755,7 @@ MVP 保持 `blocked`；不在本设计中预建第二个 OpenD endpoint。
 | `src/application/research/formal_corpus.py` | expectation、formal point、健康读取与 immutable refs |
 | `src/application/opening_candidate_snapshot.py` | 紧凑 snapshot loader、校验和语义 hash |
 | `src/application/opend_market_snapshot_fetching.py` | `fetch_option_snapshots()` |
+| `src/application/futu_quote_routing.py` | `resolve_shared_futu_quote_route()` 证明 profile 中启用市场共享唯一 quote endpoint |
 | `src/infrastructure/futu_gateway.py` | `request_history_kline()` 与 snapshot gateway |
 | `domain/domain/performance/models.py` | `FXRateFact`、`select_fx_rate()` |
 | `domain/domain/fee_calc.py` | 现有 Futu option fee 计算 |
@@ -647,11 +771,11 @@ MVP 保持 `blocked`；不在本设计中预建第二个 OpenD endpoint。
 |---|---|
 | `src/interfaces/cli/main.py` | 注册根级 `strategy-lab` 命令 |
 | `src/interfaces/cli/research.py` | 删除旧 `research strategy-lab` 路由；增加 Research owner 的 `corpus-calendar refresh` 运维入口 |
-| `src/application/service_deploy.py` | Slice 1 删除 recorder/Top1 units；Phase 3 再最小扩展现有 `_systemd_timer()` 以生成唯一 Strategy Lab advance unit |
-| `src/interfaces/cli/service_ops.py` | Slice 1 删除 recorder/Top1 参数；Phase 3 再增加唯一 advance 开关 |
+| `src/application/service_deploy.py` | 生成当前唯一 Strategy Lab advance unit，不恢复 recorder / Top1 units |
+| `src/interfaces/cli/service_ops.py` | 保留当前唯一 advance 开关，不恢复 recorder / Top1 参数 |
 | `src/application/service_drift.py` | 从现有 profile 的 advance timer 名称恢复 opt-in，确保受控重渲染不误删唯一 timer/service |
 | `src/application/tick_cron.py` | 只暴露非持有式 busy / schedule 探针；不改变 Tick 自己的 lock / `SKIP_LOCKED` 行为 |
-| `src/application/opend_call_coordinator.py` | 在现有 limiter 上增加最小 `try_low_priority_opend_call()`，零等待且保留生产容量 |
+| `src/application/opend_call_coordinator.py` | 保留现有零等待 limiter；增加只包人工 provider 逻辑单元的 10 秒可中断 deadline helper |
 | `src/application/tick_account_execution.py` | 取消 Strategy Lab 专用 `mark_evidence_accounts` 整仓刷新；不增加 Tick provider 调用 |
 | `src/application/prepared_option_positions_context.py` | 删除 Strategy Lab 触发的 `refresh_quotes=True` mark 路径和 prepared mark ready 要求；继续封存 position / FX 通用事实 |
 | `src/application/performance/evidence_collection.py` | 提升 `build_option_valuation_mark_fact()`，复用现有行匹配、mark 选择和 fact 构造；现有 performance 调用方改用同一实现 |
@@ -662,21 +786,25 @@ MVP 保持 `blocked`；不在本设计中预建第二个 OpenD endpoint。
 如果 Research Archive 当前已有所需字段，不修改 writer。仅当确切持仓合约能进入原 snapshot batch 且
 预计调用数不增加时才扩展原 batch；禁止额外刷新或为 Recipe 复制第二份候选 / 持仓事实。
 
-### 9.3 新增或全量替换
+### 9.3 当前重构映射
 
 | 文件 | 处理 |
 |---|---|
-| `src/application/strategy_lab/contracts.py` | 最小状态、canonical hash、冻结确认和研究结果合同 |
-| `src/application/strategy_lab/recipe.py` | 首个集中度 Recipe、20 日 preview 和标准结果投影 |
-| `src/application/strategy_lab/evidence.py` | source-bound 历史 K / 到期证据，以及隐藏 batch envelope 规范化、crossing 和 terminal projection |
-| `src/application/strategy_lab/comparison.py` | 可复用单推荐替换评价与唯一 leader 选择 |
-| `src/application/strategy_lab/service.py` | 唯一应用编排 owner；完成 preview、确认、研究执行、隐藏验证、outcome 和状态读取 |
-| `src/application/strategy_lab/receipts.py` | Research / Final Receipt 的不可变发布与 Store-bound 公共读取；Final Receipt 由 Phase 3 完成 |
-| `src/application/performance/account_fee_plan.py` | Phase 1 已迁出的严格 account fee-plan fact loader |
-| `src/infrastructure/strategy_lab/experiment_store.py` | 三表 Store；Phase 3 只增加 batch started/complete 与唯一 terminal fill 原子合同 |
-| `src/interfaces/cli/strategy_lab_ops.py` | 根级 CLI 适配；暴露研究与验证 preview/confirm、research execute、advance、status、两类 receipt 和 readiness |
+| domain/domain/strategy_lab_evaluation.py（拟新增） | 唯一纯计算 owner；只承接 CSP 数值 economics、最小数值投影比较和 leader 选择，不依赖 `src/` |
+| `src/application/strategy_lab/recipe.py` | 只保留 Recipe 描述、集中度候选构造和升序 variant preference；移出 readiness 编排，删除无消费者的 `RECIPES` |
+| `src/application/strategy_lab/readiness.py` | 保留 targeted history-K publisher；在 gateway factory 前重检全部共享 endpoint Tick locks，不承担 CLI/context 编排 |
+| `src/application/strategy_lab/evidence.py` | 继续拥有 fill/outcome/evidence 校验、标准 result envelope 和最小比较投影；只把 CSP 数值公式移到 domain |
+| `src/application/strategy_lab/service.py` | 保留全部公开 facade；解析共享 Futu route 和全部 Tick locks，统一 provider guard，承接 readiness facade；消费 evidence 投影并调用纯评价核心，只消除同一锁定作用域内的确证重复计算 |
+| `src/application/strategy_lab/receipts.py` | 保留 artifact 发布/读取；接收已经计算的 comparisons 和 conclusion，只校验、组装和封存 |
+| `src/infrastructure/strategy_lab/experiment_store.py` | 原样保留三表、模块级 validator、事务、CAS、唯一约束和读取合同；本次不新增 schema 或索引 |
+| `src/application/recommendation_point.py` | 只接受并生成当前完整正式 envelope；保留 point identity 不变，删除 V1 / V2 envelope 路径、旧开关和无调用 binding helper |
+| `src/interfaces/cli/strategy_lab_ops.py` | readiness 调用 service facade，不再自行构造 gateway 或只绑定 HK Tick lock；保留现有公共命令 |
+| tests/test_strategy_lab_lifecycle.py（拟新增） | 最小 20 + 10 日生命周期；每日一个正式点，复用真实 Store / artifact owner 与 fake provider |
 
-### 9.4 删除
+只有在完成上述修改后仍存在可独立命名、依赖单向且能减少 imports 的完整 use case，才把它从 `service.py`
+提取为 `research.py` 或 `validation.py`；文件拆分不是本次验收条件。
+
+### 9.4 已完成的历史删除
 
 | 删除目标 | 原因 |
 |---|---|
@@ -687,13 +815,23 @@ MVP 保持 `blocked`；不在本设计中预建第二个 OpenD endpoint。
 | recorder 与 Top1 service/timer | Slice 1 已删除；只保留显式 opt-in 的唯一 Strategy Lab advance service/timer |
 | 只覆盖上述旧入口、迁移和状态表的测试/fixture | Slice 1 已随 owner 删除 |
 | Store `_gap_observation()`、`expire_started_observation()`、`materialize_elapsed_observation_gap()`，以及 `hidden_quote` kind / `gap` status | 过期 slot 不物化，完整批次不复制逐 arm Store 行 |
-| service `_validation_batch_lock_path()`、`_freeze_current_batch()`、逐日 gap recovery 和对应分支 | 一个 advance lock 已串行化唯一实验；恢复只扫描 started rows |
+| service 旧 batch lock / freeze batch、逐日 gap recovery 和对应分支 | 当前只保留 `_validation_experiment_lock_path()` 串行化验证推进；恢复只扫描 started rows |
 | evidence `hidden_quote_rows()` 与旧的独立 observed-fill artifact 构造 | crossing 由 batch artifact 直接绑定；只有 `no_fill / not_evaluable` 生成 terminal projection artifact |
 | 断言 gap 物化、`hidden_quote` 行、batch lock 或 `lock_held` 的测试 | 用 start/complete 原子性、artifact recovery 和 terminal projection 测试替换，不保留兼容断言 |
 
+### 9.5 本次重构删除
+
+| 删除目标 | 原因 |
+|---|---|
+| 原 application comparison 模块 | 计算迁到 domain owner 后直接删除，不保留转发文件 |
+| `recommendation_point` 的 V1 / V2 envelope 生成、校验、选择开关及仅测试调用 | 生产和 Formal Corpus 已只接受完整正式 envelope；不改变当前 point identity |
+| `point_binding_from_recommendation_point()` 及三组无生产调用的 binding field 常量 | 仓库内无调用方 |
+| `recipe.py` 的 `RECIPES` 字典和导出 | 当前只有一个 Recipe 且没有消费者 |
+
 删除以引用清单为准；Research Archive、Shadow Replay、required-data 和 Candidate Engine
 继续保留。calendar refresh 和 fee-plan 读取已分别迁到 Formal Corpus 与 performance owner，
-不依赖已删除的旧产品壳。Strategy Lab 尚未形成可用版本，上述过渡实现不做数据或 API 迁移。
+不依赖已删除的旧产品壳。当前完整正式点、ExperimentStore 三表、回执和自然积累数据不删除、不迁移；
+重构前后相同输入必须保持相同 point identity、实验结论和回执语义。
 
 ## 10. Receipt 与 artifact
 
@@ -722,8 +860,13 @@ hash 与观测日期寻址，不写 ExperimentStore；过期只影响后续 prev
 
 ### 11.1 最小确定性测试
 
-1. `comparison.py`：完整配对、同合约 delta 零、缺点、`no_fill` 和两条判断；
-2. `recipe.py`：三个收益带、完整 accepted 集合、同 formal point 绑定、成熟 20 日窗口和缺失 fail closed；
+1. 拟新增的 domain/domain/strategy_lab_evaluation.py：CSP 正常 / 指派、intrinsic loss、非法分母和天数、
+   完整配对、同候选 delta 零、不同候选但经济结果相同时 `top1_change_count` 为正、缺点和两条
+   判断，以及不含 `near_return_threshold` 的 DTE / Delta 形状最小数值投影；domain
+   测试不构造 artifact ref、reason code 或 application result envelope；
+2. `recipe.py`：三个收益带、完整 accepted 集合、同 formal point 绑定和缺失 fail closed；三个 variant 经济
+   结果精确相同时断言 preference 按 `0.002 / 0.004 / 0.006` 选择 `0.002`；20 日 maturity、fee-plan 和
+   readiness 组合由 application readiness 测试覆盖，不再写成 Recipe 职责；
 3. mark binding 保留现有基础覆盖，并只新增五个回归断言：
    - mixed HK/US prepared rows + HK required-data batch 时，positions、marks 和由持仓产生的 FX 只含 HK；
    - 未知 market，或任一 position 的 identity / currency / 原始 market code 冲突时在筛选前 fail closed；同市场
@@ -737,10 +880,11 @@ hash 与观测日期寻址，不写 ExperimentStore；过期只影响后续 prev
    timestamp 晚于持仓 source time 时仍使用 manifest receipt time 构造合法 binding，同时断言 receipt
    早于 effective time 仍被拒绝。receipt 晚于 evidence time 继续由现有正式点 receipt 时间测试覆盖，
    producer 与 Formal Corpus verifier 共用 builder 由现有 Formal Corpus suite 覆盖，不新建重复时间矩阵；
-4. `evidence.py`：分钟 K 多页 / 顺序 / 重复 / receipt readiness、Bid crossing、正 / 零 / 非法 raw Bid
-   Volume、request / receive tolerance；分别断言 call/envelope 无效不写 artifact、requested code 行缺陷写 invalid
+4. `evidence.py`：分钟 K 多页 / 顺序 / 重复 / receipt readiness、Bid crossing、正 / 零 / 非法 `bid_vol`、
+   request / receive tolerance；分别断言 call/envelope 无效不写 artifact、requested code 行缺陷写 invalid
    artifact、完整行写 available artifact，且 observed/fill time 使用 received time；到期查询必须绑定实际
-   `history_kline` endpoint 与 source authority hash；
+   `history_kline` endpoint 与 source authority hash；比较投影必须保留稳定 candidate identity，并在
+   fill / outcome / safety 任一非法时拒绝生成；
 5. `ExperimentStore`：初始化、全局单活动实验、两次确认幂等、revision 冲突、start 的 `created` 返回、
    started 重试与内容冲突、complete 与 crossing fills 原子提交、equal retry、不同 crossing/artifact conflict、
    事务失败无单边状态、每 arm 唯一 terminal fill、重启恢复；
@@ -750,17 +894,29 @@ hash 与观测日期寻址，不写 ExperimentStore；过期只影响后续 prev
 7. behavior manifest：逐一替换固定清单中每个 owner 的内容都会改变聚合 hash；改变 prepared position /
    FX producer、hidden batch / terminal fill、formal mark binding、corpus completeness 或 candidate loader 语义
    必须 mismatch；
-   修改通知、ledger 或文档不会改变聚合 hash；
+   修改 `opend_market_snapshot_fetching.py` 或 `performance/evidence_collection.py` 必须改变聚合 hash；修改
+   service、Store、Futu transport、通知、ledger、CLI 或文档不会改变聚合 hash；
 8. Research 运维：`corpus-calendar refresh` 保留当前 immutable binding 语义，fee-plan loader 严格校验三项
    account facts；
 9. service deploy：唯一 timer 含冻结的全部 `OnCalendar`、`AccuracySec=1s`、`Persistent=false`，不含
    `OnUnitActiveSec`，且旧 recorder / Top1 timer 不再生成；
 10. Tick / OpenD：Evidence Source Gate 证明 provider 调用数不增加；准入失败不创建 started row；同 slot 并发
     只有一个 provider 调用；真实 artifact lock 不死锁；Tick 持锁时实验立即让路，实验已启动时 Tick 不
-    `SKIP_LOCKED`，历史 / outcome 查询在每个 Tick 对称保护窗口内也让路，实验在硬超时内结束；
-11. 终态隔离 fixture：同一 Store 先保留研究阶段 `single_result`，再注入 10 日验证证据；终态比较和
-    Final Receipt 只消费冻结 validation plan 对应的结果，低优先级拒绝和短暂 provider 失败返回可重试
-    blocker。该 fixture 不替代下述完整生命周期与自然运行验收。
+    `SKIP_LOCKED`。根据 service profile 中的 OpenD endpoint identity 找出共享该 endpoint 的 HK / US Tick，
+    对应任一 Tick 持锁或处于保护窗口时，readiness、research、validation 和 outcome 都不得访问 provider；
+    endpoint 关系未经证明时保持 provider path `blocked`，不默认所有市场共享或互相独立；
+    deadline helper 用主线程阻塞 fake 断言在 `10s` 加小容差内返回稳定 reason code、不发布 artifact、
+    恢复既有 signal handler / timer；非主线程与不支持平台必须在 call 前拒绝。只读 OpenD timeout smoke
+    不通过时，人工 provider-capable 路径不能启用；
+11. 完整生命周期 fixture：通过公开 service facade 建立真实临时 Store 和 artifact，贯穿两次确认、研究
+    推进、leader、隐藏验证、outcome 和 Final Receipt；使用 20 + 10 日、每日一个正式点，以冻结 fixture
+    提供只读上游事实并替换 provider 与时钟，不直接插入 `single_result`、`validation_fill` 或终态状态。另保留现有小型 Store 原子性和
+    validation failure matrix，不复制成新的 fixture 平台；
+12. recommendation point：生产调用始终构造当前正式合同；旧 envelope 被拒绝，不保留兼容开关；
+    固定 V3 输入的 point id 与重构前完全相同，identity payload 仍绑定 `"recommendation_point.v1"` namespace；
+13. golden projection：冻结 arms、single results、variant comparisons、leader、Receipt 业务字段和 refs；
+    provenance 字段只断言存在、hash 可重算且相互一致，不固定旧 manifest、behavior hash、source commit、
+    experiment id 或运行时间。
 
 ### 11.2 集成验收
 
@@ -787,82 +943,80 @@ hash 与观测日期寻址，不写 ExperimentStore；过期只影响后续 prev
 OpenD 的 HK 期权分钟 K 权限、过期合约覆盖、零成交 bar 行为和尾延迟，以及远端 systemd 并发行为，
 必须由 PoC / 自然运行记录证明；在此之前保持 readiness blocker，不写成已知事实。
 
-## 12. 实施顺序
+## 12. 当前重构实施切片
 
-### Phase 1：先保住 owner 和生产优先级
+### Safety prerequisite：关闭 OpenD 隔离门禁
 
-- 迁出 `corpus-calendar refresh`、严格 account fee-plan loader 和共享
-  `resolve_strategy_lab_runtime_context(profile, market)`；Research calendar 不依赖旧 Top1 profile，产品
-  `resolve_strategy_lab_context(profile)` 已切换到普通 HK / `lx` profile；
-- 在现有 coordinator 增加低优先级零等待准入，先用 fake provider 覆盖生产容量保留、busy / guard、零等待
-  和双向并发；
-- 再实现显式 targeted history-K readiness refresh，先通过 fake provider 测试，再完成权限 / quota / 过期
-  合约单日真实 PoC，冻结 receipt 有效期、保护窗口和生产预留常量；
-- 建立 Evidence Source Gate：复用现有 mark 规范化，先实现 recommendation point 的新 binding 和完整
-  fail-closed / 零 provider 测试，再移除 Tick 的 Strategy Lab 专用整仓 quote refresh，并证明 Tick OpenD
-  调用数、snapshot 批次数和 deadline 不变差；
-- 验收：calendar / fee-plan / context owner 已保留；2026-08-31 HK 自然 Tick 已证明 Strategy Lab 不增加
-  provider 调用且不造成锁等待，Phase 1 隔离门槛通过。
+- `resolve_strategy_lab_context()` 复用 `resolve_shared_futu_quote_route()`，证明 profile 中全部启用市场共享的
+  quote endpoint 与 Strategy Lab binding 一致，并生成全部对应 `tick_lock_paths`；无法证明时 fail closed；
+- readiness public facade 归 application service；readiness publisher、research、validation 和 outcome 在 gateway
+  构造前统一检查全部 Tick locks、对应 schedule 保护窗口和现有零等待 limiter；
+- 人工 readiness / research provider 单元通过 `run_interruptible_opend_unit(..., timeout_seconds=10)`；非主线程或
+  非 `SIGALRM` 平台在 gateway 前返回 `opend_low_priority_deadline_unavailable`，provider 与写入均为 0；已开始
+  单元超时返回 `opend_low_priority_timeout`，关闭 gateway 且不发布 artifact、不写完成 observation；
+- scheduled validation 保留 native systemd deadline，不新增 service、进程池、全局 OpenD 锁或 endpoint registry；
+- 验收：共享 endpoint 的 HK 或 US 任一 Tick busy 都让路；route missing/conflict/mismatch 不能构造 gateway；
+  主线程阻塞 fake 证明 deadline 和原 timer 恢复，只读 OpenD timeout smoke 通过后才启用人工
+  provider-capable 路径；deadline 超时不发布 artifact；非共享 endpoint 拓扑保持 blocked，留待真实需求再实现。
 
-### Phase 2：替换产品壳并完成 20 日研究
+### Slice 1：冻结行为并删除无用兼容
 
-- 建立三表 Store、根级 CLI、contracts、service、只读 Recipe 目录和确认重建 preview 合同；
-- 实现成熟 20 日选择、集中度 Recipe、完整分页分钟 K、标准结果、比较器和 write-once Research Receipt；
-- 旧 calendar / fee-plan / context 引用切换完成后，删除旧 CLI、Top1 目录、recorder 入口、旧服务定义和
-  只服务旧合同的测试；
-- Phase 2 本地实现已完成：三表 Store/context 切换、旧产品壳删除、Recipe、preview、确认、研究执行、
-  source-bound evidence、比较器和 Research Receipt 均已落地；
-- 验收：旧入口不存在；固定 20 日 fixture 产生唯一 leader 或确定性无 leader；全局第二个活动实验被
-  拒绝；不迁移旧数据。
+- 增加一条 20 + 10 日、每日一个正式点的完整本地生命周期 fixture，贯穿研究确认、leader、验证确认、到期
+  和 Final Receipt；provider 使用确定性 fake，Store、artifact、hash 和公开 service facade 使用真实 owner；
+- golden 只冻结业务投影和 refs；provenance 只校验存在、可重算和内部一致；
+- 删除仓库内无调用的 point binding helper 和 `RECIPES`；
+- 将 recommendation point 收敛为唯一完整正式 envelope，删除 V1 / V2 envelope 生成、校验和可选开关；
+  identity namespace 常量仍为 `"recommendation_point.v1"`，point id 固定向量不变，Formal Corpus 已积累事实
+  无需迁移或回填；
+- 验收：重构前 golden fixture 固定，旧 envelope 不再由生产代码接受，现有正式点仍能被 Formal Corpus 和
+  Recipe 读取，生产 Tick 调用仍明确请求完整正式合同。
 
-### Phase 3：10 日隐藏验证与到期
+### Slice 2：建立最小纯计算核心
 
-按以下顺序实施，不保留过渡实现兼容：
+- 只把 CSP 数值 economics（包含 intrinsic loss）、带 candidate identity 的最小数值投影通用比较和
+  leader 选择迁到拟新增的
+  domain/domain/strategy_lab_evaluation.py；删除 application `comparison.py`；
+- `evidence.build_single_recommendation_result()` 保留 evidence/schema 校验、状态分支、reason code 和完整
+  result envelope，只调用 domain economics；同文件的 `build_comparison_projection()` 删除比较不需要的
+  application 字段，service 只消费投影；
+- Recipe 提供 `variant_id -> 参数` 和冻结升序 preference；公共 result builder、比较器和 leader selector 不再
+  导入或校验集中度阈值；
+- service 计算 comparisons / conclusion，Receipt builder 只校验、组装和发布；validation plan 和当前集中度
+  输出字段保持不变；加入平局和非集中度 variant fixture；
+- 按 §8.1 的 15 个语义 owner 同步调整 behavior manifest，保留 snapshot 规范化和 mark builder，逐 owner
+  扰动测试证明边界；
+- 验收：集中度 golden 业务投影不变，domain import boundary 通过，DTE / Delta 形状的 variant 可复用比较器。
 
-1. **隐藏验证核心原子切换**：在同一个确认边界内同时修改 Store、evidence、service 和旧断言。内部按
-   Store → evidence → service 顺序编辑，但不把中间状态作为可交付切片：删除 gap / `hidden_quote` 合同与 API、
-   `hidden_quote_rows()`、独立 observed-fill artifact、experiment + batch 锁组合和 `lock_held`；实现
-   `start_observation()` 的 created 结果、§7.2 的 batch complete + crossing fills 单事务、§6.3 的三分支
-   envelope、真实 received/fill time、batch crossing / 窗口终点 projection、单 advance lock、started artifact
-   恢复和当前 slot 编排。切片结束必须通过 Store / evidence / service / CLI focused tests 与模块导入检查；
-2. **唯一 timer/service 与 Tick 并发验收**：扩展现有 systemd helper 生成唯一 advance timer/service，不改变 Tick
-   自己的锁和 `SKIP_LOCKED` 语义。运行 admission fail-no-row、provider once、真实 artifact lock、timer 合同和
-   Tick 双向并发测试；
-3. **Outcome 与 Final Receipt**：复用到期事实和标准结果，完成 `waiting_outcome -> completed` 与三态 Final
-   Receipt。用一个冻结 10 日 fixture 验证完整、缺失和 challenger 不通过三条终态。
+### Slice 3：收窄编排，不改变并发语义
 
-Phase 3 本地实现已完成：隐藏批次、唯一 advance timer/service、Tick 双向并发、到期结果、三态 Final
-Receipt 和冻结 10 日终态 fixture 均已落地。该结论只表示源码与确定性测试完成，不替代 Phase 4 的真实
-20 日研究、未来 10 日隐藏验证或到期回执审计。
+- 把 readiness 组合移出 Recipe，把 leader 选择移出 Receipt；公共 facade、`research execute`、canary 和
+  scheduled-validation 行为保持；
+- 只消除同一锁定作用域内重复构造的 projection。research action 锁取得后继续从 Store 权威重读并校验
+  action 未变化，保留 `research_evidence_busy`；不增加内存索引、全局 research lock 或 Store schema/index；
+- 只有整个阶段 use case 移动后确实减少 dependencies 和 imports 时才提取 `research.py` / `validation.py`；
+- provider 返回后仍先 durable 再写 Store；ExperimentStore 代码和事务语义本 Slice 原样保留；
+- 验收：并发 research 双推进仍只有一个 provider owner，锁内数据变化能被发现；完整 focused suite、全量
+  pytest、dependency graph check 和 Guardrails 通过。
 
-核心原子切换内部先删除被替换路径及其旧断言，再增加最小新实现；不得通过保留旧 helper、kind、status 或
-测试来兼容尚未发布的 Phase 3 代码。第一个切片结束时 `rg` 不得再发现 gap Store API、`hidden_quote` kind、
-batch-lock helper 或 `lock_held` 生产引用。三个切片的每个确认边界都必须保持仓库可导入，并通过完整
-Strategy Lab focused suite；后续切片不得负责修复上一切片留下的断链。
+安全前置与三个切片都可独立验证，不引入中间兼容 facade。Implementation、validation 和 Deepreview
+必须在同一专用 worktree、相同 review base 上完成。commit、push、merge、release、upgrade 和生产数据
+操作仍是独立授权边界。
 
-### Phase 4：真实数据验收
+## 13. 失败语义、风险和未决事项
 
-- 已在共同 `build_option_position_evidence_binding()` 及其 validator 修复正式点市场范围；使用一个
-  `selected_positions` 驱动 position / mark / FX 输出，并用最小混合市场、冲突、缺失和 Formal Corpus 集成
-  回归证明 producer / verifier 合同一致；
-- 只在同一 builder 把 FX `observed_at_ms` 从持仓 source time 改为现有 prepared receipt
-  receive time，保留时序校验并增加一个生产顺序回归；不改 FX 采集、缓存、数据合同或历史点；
-- source delivery、release、upgrade 和 natural observation 是四个独立受控边界。升级后不手工
-  触发、不回填；`HK/lx` 验证 MVP 数据，`US/lx` 只验证通用正式点事实采集，不表示在 US
-  执行 MVP Recipe；
-- 每个市场只选择第一个“升级完成早于当日 expectation 封存及首个目标点”的完整自然
-  交易日；盘中升级的市场顺延到下一个交易日。当日验收要求唯一 expectation、day row
-  `complete`、所有应到 point 均为 `available`、每点 `source_commit_sha` 等于实际部署提交，且无
-  `FX binding changed`；
-- 静态 diff 和调用链必须证明本修复没有新增 provider 调用、snapshot 批次、锁或
-  cache 路径。自然交易日的 Tick service 必须 `Result=success`、退出码为 0、未超过现有
-  `tick-cron` 600 秒 deadline，且 required-data 批次正常封存；复用现有 audit / journal 记录
-  OpenD 调用数、snapshot 批次和耗时作为诊断，不对无可比基线的自然日耗时设“不得
-  增加”门槛。不为本修复新增遥测、状态或监控服务；
-- “FX defect passed”与“market-day health passed”分开报告。历史 incomplete / conflict 日保留后可能使顶层
-  Corpus Health 继续 `unhealthy`，不否定新日修复；正式研究 readiness 仍要求之后积累 20 个连续完整日；
-- 先确认 Research Archive readiness，再人工启动 20 日真实研究；
-- 只有可信 leader 才确认未来 10 日；
-- 到期后审计 Final Receipt 和生产 Tick 性能。
+- **行为 hash 漏绑风险**：缩小清单前必须从实际 `Recipe -> result -> comparison -> leader` 调用链枚举 owner；
+  任一影响结果的依赖未绑定都阻塞 Slice 2，不以“减少误阻断”为由漏掉语义 owner。
+- **在途实验风险**：manifest 清单变化会使旧 behavior hash mismatch。代码可以交付，但任何部署前必须用
+  `get_active_experiment()` 的只读入口证明不存在未终态实验；本次不新增 cancel / close 或迁移路径。
+- **事务竞态风险**：Store validator、锁内权威重读和 `BEGIN IMMEDIATE` 原样保留；为减少读取而将校验移到
+  锁外或事务外都视为失败。
+- **OpenD 隔离证据缺口**：当前 profile 到 HK / US Tick lock 的 endpoint 关系必须在 Implementation 前从真实
+  resolver 和 deployment profile 证明。无法枚举同 endpoint 的全部 Tick owner 或无法证明 bounded provider
+  path 时，只阻断 provider-capable execution / 后续部署，不通过新增全局锁猜测关系。
+- **共享正式点风险**：recommendation point 属于 Tick 和 Formal Corpus 的共同边界，不按 Strategy Lab 私有
+  代码处理；只有当前生产和 Formal Corpus 调用都被测试证明时才能删除旧 envelope 分支。
+- **文件拆分收益不确定**：`research.py` / `validation.py` 不以行数为成功指标；若移出阶段函数不能同时减少
+  service imports、双向依赖和重复装载，则保留函数在 service，避免纯搬家。
 
-每个 Phase 是独立确认边界。MCP、Skill、飞书、并行实验、自动采用和版本迁移均不在本设计中。
+MCP、Skill、飞书、并行实验、自动采用、版本迁移和 `close_experiment` 继续由后续需求 owner 负责，不进入
+本次重构。当前 work unit 只交付源码与测试；部署、生产 Store 检查和自然窗口验收仍需后续独立授权。

@@ -14,9 +14,9 @@ import pytest
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from src.application.candidate_snapshot_manifest import load_candidate_snapshot_bundle
 from src.application.recommendation_point import (
-    build_formal_point_time_coherence,
     build_option_position_evidence_binding,
-    capture_scheduled_recommendation_point,
+    build_recommendation_point,
+    build_recommendation_point_id,
 )
 from src.application.research.formal_corpus import (
     FormalCorpusError,
@@ -142,10 +142,7 @@ def _seal(
 
 
 def test_persistent_lock_is_not_a_formal_corpus_artifact(tmp_path: Path) -> None:
-    lock = (
-        tmp_path
-        / "output_shared/research/formal_corpus/v1/hk/lx/.locks/expectations/2026-08-26.lock"
-    )
+    lock = tmp_path / "output_shared/research/formal_corpus/v1/hk/lx/.locks/expectations/2026-08-26.lock"
     with exclusive_private_file_lock(lock):
         pass
 
@@ -181,9 +178,7 @@ def test_market_calendar_uses_neutral_strategy_lab_artifact_path(
 
     binding = result["binding"]
     assert binding == read_market_calendar_binding(artifact_root, market="HK")
-    assert str(binding["snapshot_ref"]).startswith(
-        "capabilities/market-calendar/hk/snapshots/"
-    )
+    assert str(binding["snapshot_ref"]).startswith("capabilities/market-calendar/hk/snapshots/")
     assert (artifact_root / "capabilities/market-calendar/hk/current.json").is_file()
     assert not (artifact_root / "strategy_lab").exists()
     assert not (artifact_root / "top1").exists()
@@ -220,9 +215,7 @@ def test_market_calendar_uses_neutral_strategy_lab_artifact_path(
     assert current["snapshot_content_sha256"] != binding["snapshot_content_sha256"]
     assert old["snapshot_ref"] == binding["snapshot_ref"]
     assert old["snapshot_file_sha256"] == binding["snapshot_file_sha256"]
-    assert old["trading_sessions"] == [
-        {"trading_date": "2026-08-26", "trade_date_type": "WHOLE"}
-    ]
+    assert old["trading_sessions"] == [{"trading_date": "2026-08-26", "trade_date_type": "WHOLE"}]
 
 
 def test_expectation_lock_is_idempotent_and_conflicts_on_denominator_change(
@@ -232,11 +225,7 @@ def test_expectation_lock_is_idempotent_and_conflicts_on_denominator_change(
         results = list(pool.map(lambda _: _seal(tmp_path), range(2)))
 
     assert {result["status"] for result in results} == {"published", "idempotent"}
-    files = list(
-        tmp_path.glob(
-            "output_shared/research/formal_corpus/v1/hk/lx/expectations/2026-08-26/*.json"
-        )
-    )
+    files = list(tmp_path.glob("output_shared/research/formal_corpus/v1/hk/lx/expectations/2026-08-26/*.json"))
     assert len(files) == 1
 
     later_retry = _seal(tmp_path, sealed_at_utc="2026-08-26T01:00:30Z")
@@ -255,9 +244,7 @@ def test_expectation_lock_is_idempotent_and_conflicts_on_denominator_change(
             account="lx",
             trading_date="2026-08-26",
             run_id="conflicted-expectation",
-            scheduled_scan_target_market=first[
-                "scheduled_scan_targets_market"
-            ][0],
+            scheduled_scan_target_market=first["scheduled_scan_targets_market"][0],
             captured_at_utc="2026-08-26T02:00:02Z",
             producer_behavior_version="recommendation_point.v3",
             reason_code="formal_point_evidence_missing",
@@ -294,11 +281,7 @@ def test_profile_seals_hk_and_us_before_recipe_store(
 
     def load_config(*, config_path, expected_market):
         schedule = _schedule()
-        schedule["timezone"] = (
-            "Asia/Hong_Kong"
-            if expected_market == "hk"
-            else "America/New_York"
-        )
+        schedule["timezone"] = "Asia/Hong_Kong" if expected_market == "hk" else "America/New_York"
         return Path(config_path), {
             "accounts": ["user1"] if expected_market == "hk" else ["user2"],
             "schedule": schedule,
@@ -336,10 +319,7 @@ def test_profile_seals_hk_and_us_before_recipe_store(
         occurred_at_utc="2026-08-25T12:01:00Z",
     )
 
-    assert [
-        (item["market"], item["account"], item["status"])
-        for item in first["results"]
-    ] == [
+    assert [(item["market"], item["account"], item["status"]) for item in first["results"]] == [
         ("HK", "user1", "idempotent"),
         ("US", "user2", "published"),
     ]
@@ -353,12 +333,7 @@ def test_point_retry_preserves_first_capture_and_gzip_is_transparent(
     tmp_path: Path,
 ) -> None:
     expectation = _seal(tmp_path)
-    payload = json.loads(
-        (
-            tmp_path
-            / expectation["artifact_ref"]
-        ).read_text(encoding="utf-8")
-    )
+    payload = json.loads((tmp_path / expectation["artifact_ref"]).read_text(encoding="utf-8"))
     target = payload["scheduled_scan_targets_market"][0]
     common = {
         "market": "HK",
@@ -417,11 +392,7 @@ def test_health_is_unhealthy_for_zero_or_incomplete_facts(tmp_path: Path) -> Non
     assert incomplete["days"][0]["status"] == "incomplete"
     assert incomplete["points_missing"] == 1
 
-    unexpected = (
-        tmp_path
-        / "output_shared/research/formal_corpus/v1/hk/lx/points/2026-08-26"
-        / ("f" * 64)
-    )
+    unexpected = tmp_path / "output_shared/research/formal_corpus/v1/hk/lx/points/2026-08-26" / ("f" * 64)
     unexpected.mkdir(parents=True)
     conflicted = build_corpus_health_receipt(tmp_path, market="HK", account="lx")
     assert conflicted["days"][0]["status"] == "conflict"
@@ -496,9 +467,7 @@ def test_health_uses_calendar_denominator_and_exposes_point_diagnostics(
     assert health["continuous_complete_trading_days"] == 0
     assert health["status"] == "unhealthy"
     assert health["days"][-1]["points"][0] == {
-        "recommendation_point_id": health["days"][-1]["points"][0][
-            "recommendation_point_id"
-        ],
+        "recommendation_point_id": health["days"][-1]["points"][0]["recommendation_point_id"],
         "status": "available",
         "reason_code": None,
         "captured_at_utc": "2026-08-26T02:00:02Z",
@@ -518,6 +487,7 @@ def test_health_normalizes_storage_root_and_fails_closed_without_capacity(
     monkeypatch,
 ) -> None:
     from src.application.research import formal_corpus as mod
+
     _seal(tmp_path)
     monkeypatch.setattr(
         mod,
@@ -537,9 +507,7 @@ def test_health_normalizes_storage_root_and_fails_closed_without_capacity(
             "point": {
                 "captured_at_utc": "2026-08-26T02:00:02Z",
                 "recommendation_point": {
-                    "formal_point_time_coherence": {
-                        "maximum_observed_at_utc": "2026-08-26T02:00:00Z"
-                    }
+                    "formal_point_time_coherence": {"maximum_observed_at_utc": "2026-08-26T02:00:00Z"}
                 },
             },
         },
@@ -567,9 +535,7 @@ def test_health_normalizes_storage_root_and_fails_closed_without_capacity(
     monkeypatch.setattr(
         mod.shutil,
         "disk_usage",
-        lambda _path: type(
-            "Usage", (), {"total": 100 * 1024**3, "free": 9 * 1024**3}
-        )(),
+        lambda _path: type("Usage", (), {"total": 100 * 1024**3, "free": 9 * 1024**3})(),
     )
     critical = build_corpus_health_receipt(
         artifact_root,
@@ -623,12 +589,7 @@ def test_health_window_reads_only_twenty_mature_days_and_current(
             market_calendar_sha256="a" * 64,
             sealed_at_utc=f"{trading_date}T01:00:00Z",
         )
-    unexpected = (
-        tmp_path
-        / "output_shared/research/formal_corpus/v1/hk/lx/points"
-        / mature_dates[0]
-        / ("f" * 64)
-    )
+    unexpected = tmp_path / "output_shared/research/formal_corpus/v1/hk/lx/points" / mature_dates[0] / ("f" * 64)
     unexpected.mkdir(parents=True)
     monkeypatch.setattr(
         mod,
@@ -651,9 +612,7 @@ def test_health_window_reads_only_twenty_mature_days_and_current(
             "point": {
                 "captured_at_utc": f"{trading_date}T02:00:02Z",
                 "recommendation_point": {
-                    "formal_point_time_coherence": {
-                        "maximum_observed_at_utc": f"{trading_date}T02:00:00Z"
-                    }
+                    "formal_point_time_coherence": {"maximum_observed_at_utc": f"{trading_date}T02:00:00Z"}
                 },
             },
         }
@@ -662,9 +621,7 @@ def test_health_window_reads_only_twenty_mature_days_and_current(
     monkeypatch.setattr(
         mod.shutil,
         "disk_usage",
-        lambda _path: type(
-            "Usage", (), {"total": 100 * 1024**3, "free": 20 * 1024**3}
-        )(),
+        lambda _path: type("Usage", (), {"total": 100 * 1024**3, "free": 20 * 1024**3})(),
     )
     window = build_corpus_health_receipt(
         tmp_path,
@@ -718,6 +675,7 @@ def test_health_window_rejects_out_of_coverage_before_artifact_reads(
             "trading_dates": ["2026-08-01", "2026-08-23"],
         },
     )
+
     def unexpected_read(*_args, **_kwargs):
         raise AssertionError("artifacts must not be read outside calendar coverage")
 
@@ -764,6 +722,7 @@ def test_ready_point_reloads_and_materializes_recipe_projection(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    from src.application import recommendation_point as point_mod
     from src.application.research import formal_corpus as mod
 
     expectation = _seal(tmp_path)
@@ -777,22 +736,12 @@ def test_ready_point_reloads_and_materializes_recipe_projection(
         sealed_at="2026-08-26T02:00:01Z",
         manifest_sealed_at="2026-08-26T02:00:02Z",
     )
-    _publication, point = capture_scheduled_recommendation_point(
-        tmp_path,
-        run_id,
-        "lx",
-        {
-            "should_run_scan": True,
-            "scheduled_scan_target_market": target,
-            "now_utc": "2026-08-26T02:00:01Z",
-        },
-        source_commit_sha="c" * 40,
-    )
-    opening = load_candidate_snapshot_bundle(
+    bundle = load_candidate_snapshot_bundle(
         base=tmp_path,
         run_id=run_id,
         account="lx",
-    )["owners"]["opening"]
+    )
+    opening = bundle["owners"]["opening"]
     required_bytes = b'{"fixture":true}\n'
     required_hash = hashlib.sha256(required_bytes).hexdigest()
     open_positions = [
@@ -810,15 +759,8 @@ def test_ready_point_reloads_and_materializes_recipe_projection(
         ),
     ]
     receipt = _prepared_receipt(opening, open_positions=open_positions)
-    target_ms = int(
-        datetime.fromisoformat(target.replace("Z", "+00:00")).timestamp() * 1000
-    )
-    sealed_ms = int(
-        datetime.fromisoformat(
-            str(opening["sealed_at_utc"]).replace("Z", "+00:00")
-        ).timestamp()
-        * 1000
-    )
+    target_ms = int(datetime.fromisoformat(target.replace("Z", "+00:00")).timestamp() * 1000)
+    sealed_ms = int(datetime.fromisoformat(str(opening["sealed_at_utc"]).replace("Z", "+00:00")).timestamp() * 1000)
     required_entries = {
         "0700.HK": (
             {
@@ -839,7 +781,7 @@ def test_ready_point_reloads_and_materializes_recipe_projection(
         run_id=run_id,
         account="lx",
         market="HK",
-        recommendation_point_id=point["recommendation_point_id"],
+        recommendation_point_id=build_recommendation_point_id("HK", "lx", target),
         account_config_sha256=opening["account_config_sha256"],
         evidence_at_utc=opening["sealed_at_utc"],
         prepared_receipt=receipt,
@@ -858,29 +800,26 @@ def test_ready_point_reloads_and_materializes_recipe_projection(
             }
         },
     }
-    prepared_ref = evidence["position_source"]["manifest_ref"]
-    point.update(
-        {
-            "schema_version": "recommendation_point.v3",
-            "required_data_manifest_ref": "required/manifest.json",
-            "required_data_manifest_sha256": required_hash,
-            "prepared_context_manifest_ref": prepared_ref,
-            "prepared_context_manifest_sha256": hashlib.sha256(
-                receipt["manifest_bytes"]
-            ).hexdigest(),
-            "prepared_context_payload_sha256": hashlib.sha256(
-                receipt["payload_bytes"]
-            ).hexdigest(),
-            "option_position_evidence_binding": evidence,
-            "formal_point_time_coherence": build_formal_point_time_coherence(
-                opening,
-                required_manifest,
-                evidence,
-            ),
-        }
+    monkeypatch.setattr(
+        point_mod,
+        "_required_data_binding",
+        lambda _opening: ("required/manifest.json", required_hash),
     )
-    point["content_sha256"] = canonical_sha256(
-        {key: value for key, value in point.items() if key != "content_sha256"}
+    point = build_recommendation_point(
+        {
+            "should_run_scan": True,
+            "scheduled_scan_target_market": target,
+            "now_utc": "2026-08-26T02:00:01Z",
+        },
+        bundle["manifest"],
+        opening,
+        terminal_manifest_sha256=hashlib.sha256(_canonical_bytes(bundle["manifest"])).hexdigest(),
+        source_commit_sha="c" * 40,
+        prepared_option_receipt=receipt,
+        required_data_manifest=required_manifest,
+        required_data_entries=required_entries,
+        required_data_manifest_ref="required/manifest.json",
+        required_data_manifest_sha256=required_hash,
     )
     monkeypatch.setattr(
         mod,
@@ -925,20 +864,12 @@ def test_ready_point_reloads_and_materializes_recipe_projection(
     )
     alternate_evidence["position_source"] = dict(evidence["position_source"])
     alternate_evidence["content_sha256"] = canonical_sha256(
-        {
-            key: value
-            for key, value in alternate_evidence.items()
-            if key != "content_sha256"
-        }
+        {key: value for key, value in alternate_evidence.items() if key != "content_sha256"}
     )
     alternate_point = dict(point)
     alternate_point["option_position_evidence_binding"] = alternate_evidence
     alternate_point["content_sha256"] = canonical_sha256(
-        {
-            key: value
-            for key, value in alternate_point.items()
-            if key != "content_sha256"
-        }
+        {key: value for key, value in alternate_point.items() if key != "content_sha256"}
     )
     tampered_root = tmp_path / "tampered-corpus"
     _seal(tampered_root)
@@ -955,13 +886,16 @@ def test_ready_point_reloads_and_materializes_recipe_projection(
         recommendation_point=alternate_point,
     )
     assert rejected["reason_code"] == "formal_point_evidence_missing"
-    assert mod.load_formal_point(
-        tampered_root,
-        market="HK",
-        account="lx",
-        trading_date="2026-08-26",
-        recommendation_point_id=point["recommendation_point_id"],
-    )["status"] == "not_evaluable"
+    assert (
+        mod.load_formal_point(
+            tampered_root,
+            market="HK",
+            account="lx",
+            trading_date="2026-08-26",
+            recommendation_point_id=point["recommendation_point_id"],
+        )["status"]
+        == "not_evaluable"
+    )
 
     published = capture_formal_point_attempt(
         tmp_path,
@@ -986,9 +920,7 @@ def test_ready_point_reloads_and_materializes_recipe_projection(
     assert loaded["status"] == "available"
     artifact = tmp_path / published["artifact_ref"]
     tampered = json.loads(gzip.decompress(artifact.read_bytes()))
-    tampered["required_data_symbols"][0][
-        "source_observed_at"
-    ] = "2026-06-01T00:00:10Z"
+    tampered["required_data_symbols"][0]["source_observed_at"] = "2026-06-01T00:00:10Z"
     tampered["content_sha256"] = canonical_sha256(
         {key: value for key, value in tampered.items() if key != "content_sha256"}
     )
@@ -1003,9 +935,7 @@ def test_ready_point_reloads_and_materializes_recipe_projection(
         + "\n"
     ).encode()
     artifact.unlink()
-    artifact.with_name(f"{tampered['content_sha256']}.json.gz").write_bytes(
-        gzip.compress(tampered_bytes, mtime=0)
-    )
+    artifact.with_name(f"{tampered['content_sha256']}.json.gz").write_bytes(gzip.compress(tampered_bytes, mtime=0))
     with pytest.raises(FormalCorpusError) as raised:
         mod.load_formal_point(
             tmp_path,

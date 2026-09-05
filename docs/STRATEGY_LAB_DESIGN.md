@@ -45,7 +45,7 @@ dataset、mark、outcome 和 candidate-impact 继续使用 `./om research shadow
 | targeted history-K readiness | `src/application/strategy_lab/readiness.py` | 显式 PoC、低优先级零等待准入、不可变 receipt |
 | Recipe 目录与实验 preview | `src/application/strategy_lab/recipe.py`、`src/application/strategy_lab/service.py` | 固定集中度 Recipe；只读冻结 20 日窗口、证据和 hash，不创建 provider gateway |
 | 研究证据与单推荐结果 | `src/application/strategy_lab/evidence.py` | 分钟 K 模拟成交、到期结果、冻结费用/FX；query/artifact 绑定 OpenD source authority；artifact-first、低优先级、一次一个 provider 单元 |
-| Top1 Comparison | `src/application/strategy_lab/comparison.py` | 可复用的单推荐替换比较；按日等权比较年化收益率和 CNY 收益金额 |
+| Top1 Comparison | `domain/domain/strategy_lab_evaluation.py` | 可复用的单推荐替换比较；按日等权比较年化收益率和 CNY 收益金额 |
 | Research Receipt | `src/application/strategy_lab/receipts.py` | provisional、write-once-or-verify；公共读取反查 Store ref/hash；明确模拟成交不是实际交易 |
 | 10 日隐藏验证 | `src/application/strategy_lab/service.py`、`src/application/strategy_lab/evidence.py` | 冻结分钟网格；批量 Bid / Bid Volume；每批最多一次低优先级零等待 provider 调用；缺失证据 fail closed |
 | Final Receipt | `src/application/strategy_lab/receipts.py` | 两次确认、锁定 leader、fill/outcome 引用、按日比较、安全状态和三态结论；write-once-or-verify |
