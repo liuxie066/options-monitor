@@ -100,6 +100,233 @@ Scene selection or channel Scene allowlist exists. Host-backed channel runs
 persist their session, run, and event lifecycle in the Copilot Host store and a
 sanitized summary in the inbound audit record.
 
+## Release Reproducibility And Copilot Exception Evidence
+
+This contract has two goals: every Release must consume one reviewed Python
+dependency set, and an unexpected Copilot read-tool exception must retain enough
+sanitized evidence to identify the failed stage and cause. Success means all
+formal Release, install, and upgrade paths reach the same lock; an injected tool
+exception retains its type, bounded redacted reason, run identity, and tool-call
+identity in the durable event stream while ordinary CLI, model, channel, progress,
+and final-answer surfaces keep the current generic failure.
+
+This contract does not pin the Python interpreter patch version, add package
+artifact hashes, change the locked Pi runtime, migrate package managers, publish
+or deploy a release, persist tracebacks, instrument other exception classes, or
+add a logging or event subsystem. Cache-tamper detection, artifact integrity, and
+future Python-minor qualification remain separate work.
+
+### Current Facts And Constraints
+
+Python dependency intent is split across `requirements/runtime.txt`,
+`requirements/server.txt`, and `requirements/dev.txt`. The current constraint
+files pin only selected direct packages: the Futu SDK and multiple transitive
+packages can resolve differently at different times. Guardrails installs the dev
+requirements through those partial constraints; the reusable Release workflow
+first runs the Agent plugin installer and then installs an unconstrained `pytest`.
+The release-tag installer and both pip and uv service-upgrade paths consume the
+same partial constraint family.
+
+Service upgrade already hashes the requirement and constraint include graph when
+it chooses a reusable environment. That cache prevents redundant installation for
+identical declarations, but it cannot make a ranged dependency deterministic.
+The existing include traversal follows nested `-r` and `-c` references, so it can
+incorporate a release lock without another cache or resolver abstraction.
+
+`execute_tool` currently catches an unexpected tool implementation exception and
+returns `INTERNAL_ERROR` with the exception type and text in its message. Copilot
+Host therefore rarely reaches its existing `except Exception` branch around
+`call_read_tool`; compacting the returned error discards the cause only after raw
+text has crossed the shared tool response boundary. The failed `tool_result` event
+retains the generic observation, sanitized inputs, and `tool_call_id`, while
+`AppEvent` supplies `run_id`. A cancellation detected after the call currently
+returns before this failed event is recorded.
+
+### Release Dependency Contract
+
+`constraints/release.txt` is the sole owner of reviewed Python package versions.
+It contains the complete exact runtime, server, and dev/test dependency union,
+including transitive packages. Marker-qualified alternatives are allowed only
+where universal resolution needs them. The requirement files remain the
+human-readable dependency-intent owners. `packaging` becomes a direct runtime
+requirement because the release checker runs under the runtime/server environment
+before service activation and uses its standard PEP 508 name, requirement,
+version, specifier, and marker implementations.
+
+The existing top-level requirement file and the top-level, runtime, server, and
+dev constraint files remain as transparent compatibility entry points.
+`requirements.txt` contains comments and one direct `-r requirements/runtime.txt`;
+`constraints.txt` contains comments and one direct `-c constraints/release.txt`;
+each file under `constraints/` contains comments and one direct `-c release.txt`.
+They contain no package entry, resolver option, or second include. Existing
+commands therefore keep their public shape while Guardrails, release-tag
+installation, and service upgrade select versions from one source:
+
+```text
+requirements/dev.txt + requirements/server.txt
+-> explicit universal lock refresh
+-> constraints/release.txt
+-> compatibility constraint includes
+-> Guardrails / reusable Release / install.sh / pip-or-uv service upgrade
+```
+
+A maintainer refreshes the lock explicitly at the supported generation floor:
+
+```bash
+uv pip compile --universal --python-version 3.12 \
+  --output-file constraints/release.txt \
+  requirements/dev.txt requirements/server.txt
+```
+
+`uv` remains a generation tool rather than a runtime dependency. Refreshing the
+lock is the only normal path for upgrading `futu-api` or another Python package;
+installer comments and operator documentation no longer describe floating SDK
+upgrades as expected behavior.
+
+The existing `scripts/release_check.py` owns dependency-lock semantics. Its normal
+release check always performs structural validation. Its exact
+`--dependency-lock-only` mode performs that validation plus clean installed-closure
+and `pip check` validation, then exits without requiring VERSION or CHANGELOG work.
+Both modes use the declared `packaging` dependency rather than a local requirement
+or marker parser. Every non-comment, nonblank release-lock line must be one
+parseable PEP 508 package requirement with exactly one `==` version and an
+optional valid marker. Includes, resolver or index options, editable or direct
+URL/path requirements, hashes, and every other specifier are rejected on all
+marker branches. Marker applicability is evaluated only for installed-closure
+comparison. The shared checks also reject:
+
+- overlapping active entries for the same normalized name;
+- a direct requirement missing from the lock or pinned outside its declared
+  specifier;
+- a compatibility requirement or constraint containing anything other than
+  comments and its one direct relative include, or an include with a missing
+  target or cycle; pip and uv must both accept every compatibility path;
+- a package missing from or added to the clean installed closure, except the
+  explicit bootstrap-tool allowlist for `pip`, `setuptools`, and `wheel`;
+- an installed version different from the applicable locked version, or any
+  `pip check` failure.
+
+Here, stale means a structural mismatch between dependency intent, the applicable
+lock, and the clean installed closure. It never means that a package index offers
+a newer version.
+
+The reusable Release workflow adds an unconditional dependency job with
+`ubuntu-latest` and `macos-latest`, both on Python 3.12. Each matrix leg creates a
+fresh virtual environment, installs `requirements/dev.txt` and
+`requirements/server.txt` constrained by `constraints/release.txt`, and runs the
+dependency-lock-only check. The publishing job depends on both legs, including
+when `run_regression_gates=false`; its own install also uses the same lock and the
+unconstrained `pip install pytest` step is removed. Changes to the top-level
+requirement/constraint entry points or files under `requirements/**` and
+`constraints/**` select the existing `service_release` release-test-plan gate.
+
+Python 3.12 on Linux and macOS is the qualified Release dependency matrix. The
+public runtime floor remains Python 3.12, so a later compatible interpreter may
+consume the same lock and fail closed on incompatibility, but this unit makes no
+claim that future Python minors were Release-qualified.
+
+A missing, structurally stale, incompatible, or incomplete lock fails before
+publication. Installers and both pip and uv service-upgrade modes reach the lock
+through the compatibility constraints; neither may resolve without it. A failed
+service-upgrade install retains the current pre-activation behavior and cannot
+switch the active release symlink. Because service-upgrade dependency hashing
+already traverses nested requirement and constraint includes, changing the lock
+changes the reusable-environment identity without a second cache mechanism.
+
+### Copilot Tool-Exception Contract
+
+`execute_tool` gains the keyword-only `raise_unexpected` behavior that re-raises
+only its unexpected `Exception` branch. Its default is `False` for the Tool
+Gateway and every existing caller. `call_read_tool` passes
+`raise_unexpected=True` for Copilot reads, including the time-bound
+option-performance branch, so Host catches the original exception. `AgentToolError`
+remains a declared tool failure and `SystemExit` remains `CONFIG_ERROR`.
+
+Host builds the same generic `TOOL_EXCEPTION` response and model observation, then
+adds these facts only to a copy used for the existing failed `tool_result` event:
+
+- `failure_stage=tool_execution`;
+- `exception_type`, normalized to one control-safe line and limited to 120 Unicode
+  code points;
+- `exception_reason`, passed through the existing redactor, normalized to one
+  control-safe line, and limited to 240 Unicode code points.
+
+The formatter uses a primitive `exc.args` value directly only when it is the sole
+argument; multi-argument exceptions use a guarded `str(exc)` so common system
+errors keep their descriptive reason. After redaction, every non-printable
+character is replaced before the value is truncated. The complete formatting and
+redaction path catches `BaseException`; any failure records the type and a fixed
+unavailable-reason marker instead of masking `TOOL_EXCEPTION`. The event payload
+is derived from a copy and never mutates the generic `failed_observation` returned
+to the Agent.
+
+The event's existing `run_id`, `tool_call_id`, and `tool_name` are the correlation
+contract. Ordinary Copilot output stays generic. Explicit local operator
+diagnostics, `--include-events` and `./om copilot events`, may display the bounded
+redacted fields. Resume recovery continues to ignore failed tool events, so those
+fields cannot become model evidence on a later run. The existing redactor removes
+recognized secret forms and absolute local path prefixes; a basename may remain.
+
+The failure flow is:
+
+```text
+call_read_tool raises
+-> Host captures type and bounded redacted reason
+-> generic TOOL_EXCEPTION response and model observation
+-> event-only copy adds internal diagnostic fields
+-> durable Host event store persists the failed tool_result
+-> post-call cancellation may return CANCELLED
+```
+
+The failed event is committed before the post-call cancellation check. A cancel
+request that wins after the tool call therefore changes the returned observation
+to `CANCELLED` without erasing the diagnostic event for the completed failure.
+Observation-normalization failures remain outside this slice.
+
+### Implementation And Validation
+
+The work has two independently verifiable behavior slices:
+
+1. Add and validate the universal Release lock. Route the existing constraint
+   entry points, reusable Release installs, and release-test-plan selection through
+   it; declare the checker's `packaging` runtime dependency and update the Futu
+   upgrade wording. Prove exact/direct compatibility, marker handling, stale extra
+   and missing packages, pip and uv nested constraints, service-upgrade hash
+   invalidation, both Python 3.12 matrix legs, and `pip check`. A runtime/server-only
+   environment must run the normal release check through metadata validation
+   without relying on dev dependencies.
+2. Let Copilot reads re-raise only unexpected tool implementation exceptions to
+   Host. Persist the event-only diagnostic copy before cancellation while keeping
+   the Tool Gateway and model observation unchanged. Through the public
+   `run_contract` facade, inject a real implementation exception and prove retry,
+   cancellation, durable `CopilotHostStore` readback, default generic output,
+   opt-in operator visibility, failed-event recovery exclusion, redaction and
+   bounds, multi-argument errors, non-printable Unicode, and a pathological
+   `__str__` fallback.
+
+The first slice stays with `scripts/release_check.py`, the existing Release
+workflow, compatibility constraint files, `release_test_plan`, installers, and
+their current test owners. The second stays with `tool_execution`, Copilot tools
+and Host, and `tests/test_copilot_phase1.py`; it introduces no public tool schema or
+event type. Focused checks are followed by Ruff, the complete pytest suite,
+dependency-graph checking, and `git diff --check`. Regenerate dependency-graph
+artifacts only if the import graph changes.
+
+Operational wording belongs in `docs/RELEASE_PROCESS.md` and
+`docs/DEPLOY_LINUX_MAC.md`; Copilot trace wording belongs in
+`docs/OM_COPILOT_V2_DESIGN.md`. These documents point to the same owners rather
+than define a second lock or diagnostic contract.
+
+One universal lock remains the minimum design. Platform-specific locks are added
+only after a demonstrated resolver conflict. Manual mutation of a cached shared
+virtual environment can still evade the current marker/executable cache check;
+track that separate integrity hardening at `src/application/service_upgrade.py`.
+Artifact hashes, wheel-only installation, build-isolation integrity, and future
+Python-minor matrices remain Release supply-chain follow-up work. A novel unlabeled
+secret can evade the current denylist, but the new cause is visible only through
+explicit local operator event output and remains bounded. No unresolved product or
+permission choice remains for these slices.
+
 ## Research, Shadow Replay, And Strategy Lab
 
 Research and Shadow Replay are an independent offline evidence/replay module,

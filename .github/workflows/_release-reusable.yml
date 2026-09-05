@@ -19,7 +19,33 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  dependency-lock:
+    name: Dependency lock (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install exact release dependency closure
+        run: |
+          python -m venv .release-venv
+          ./.release-venv/bin/python -m pip install --upgrade pip
+          ./.release-venv/bin/python -m pip install -r requirements/dev.txt -r requirements/server.txt -c constraints/release.txt
+
+      - name: Validate dependency lock
+        run: ./.release-venv/bin/python scripts/release_check.py --dependency-lock-only
+
   release:
+    needs: dependency-lock
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -42,7 +68,7 @@ jobs:
       - name: Install dependencies
         run: |
           bash scripts/install_agent_plugin.sh
-          ./.venv/bin/pip install pytest
+          ./.venv/bin/pip install -r requirements/dev.txt -r requirements/server.txt -c constraints/release.txt
 
       - name: Prepare Pi runtime
         if: ${{ inputs.run_regression_gates }}

@@ -50,9 +50,10 @@ def _write_upgrade_release_skeleton(path: Path, version: str) -> None:
     (path / "requirements").mkdir(exist_ok=True)
     (path / "constraints").mkdir(exist_ok=True)
     (path / "requirements.txt").write_text("-r requirements/runtime.txt\n", encoding="utf-8")
-    (path / "constraints.txt").write_text("-c constraints/runtime.txt\n", encoding="utf-8")
+    (path / "constraints.txt").write_text("-c constraints/release.txt\n", encoding="utf-8")
     (path / "requirements" / "runtime.txt").write_text("", encoding="utf-8")
-    (path / "constraints" / "runtime.txt").write_text("", encoding="utf-8")
+    (path / "constraints" / "release.txt").write_text("", encoding="utf-8")
+    (path / "constraints" / "runtime.txt").write_text("-c release.txt\n", encoding="utf-8")
     (path / "agent-runtime").mkdir(exist_ok=True)
     (path / "agent-runtime" / "package-lock.json").write_text('{"lockfileVersion":3}\n', encoding="utf-8")
     (path / "scripts").mkdir(exist_ok=True)
@@ -76,7 +77,7 @@ def _write_systemd_units_from_bundle(bundle: dict, systemd_root: Path, *, skip: 
 def _write_runtime_target_with_server_deps(path: Path) -> None:
     _write_upgrade_release_skeleton(path, "1.0.1")
     (path / "requirements" / "server.txt").write_text("", encoding="utf-8")
-    (path / "constraints" / "server.txt").write_text("", encoding="utf-8")
+    (path / "constraints" / "server.txt").write_text("-c release.txt\n", encoding="utf-8")
 
 
 def _create_fake_venv_python_at(venv_dir: Path) -> None:
@@ -109,7 +110,7 @@ def _fake_git_cache_materialize(command: list[str], *, version: str = "1.0.1") -
         target = Path(command[command.index("-C") + 1])
         _write_upgrade_release_skeleton(target, version)
         (target / "requirements" / "server.txt").write_text("", encoding="utf-8")
-        (target / "constraints" / "server.txt").write_text("", encoding="utf-8")
+        (target / "constraints" / "server.txt").write_text("-c release.txt\n", encoding="utf-8")
         return subprocess.CompletedProcess(command, 0, stdout="extracted\n", stderr="")
     return None
 

@@ -184,6 +184,33 @@ VERSION="$(cat VERSION)"
 
 ---
 
+## Python 依赖锁
+
+`requirements/dev.txt` 与 `requirements/server.txt`（经 `runtime.txt`）声明依赖意图；根
+`requirements.txt` 只兼容转发到 `requirements/runtime.txt`。`constraints/release.txt` 是发布所用完整
+Python 依赖闭包的唯一版本真源。其余 constraints 文件只保留原安装命令的兼容入口，并且必须各自只转发到该锁文件。
+
+修改任何 Python 依赖后，用 Python 3.12 语义显式刷新锁：
+
+```bash
+uv pip compile --universal --python-version 3.12 \
+  --output-file constraints/release.txt \
+  requirements/dev.txt requirements/server.txt
+```
+
+`scripts/release_check.py` 的常规模式会离线检查锁文件结构、兼容入口及直接依赖覆盖。
+发布工作流还会在 Linux 与 macOS 的全新 Python 3.12 环境安装完整闭包，并执行：
+
+```bash
+./.release-venv/bin/python scripts/release_check.py --dependency-lock-only
+```
+
+该模式同时核对已安装包集合、精确版本和 `pip check`。当前公开运行下限仍为 Python 3.12；
+发布门禁明确资格化的是 Linux 与 macOS 上的 Python 3.12。依赖是否需要刷新只由 requirements 或
+lock 的显式变更决定，不查询包索引来把“存在更新版本”判为过期。
+
+---
+
 ## 发布前检查
 
 先用只读 advisor 看本次变更建议跑哪些检查：

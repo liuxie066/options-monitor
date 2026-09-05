@@ -51,7 +51,10 @@ python3.12 -m venv .venv
 ./.venv/bin/pip install -r requirements/dev.txt -c constraints/dev.txt
 ```
 
-`futu-api` / `yfinance` 这类数据源 SDK 不在 constraints 中精确锁死；`requirements/runtime.txt` 只声明最低能力版本，升级时应安装当前可用版本并通过发布验证。
+`requirements/*.txt` 声明依赖意图和最低能力；`constraints/release.txt` 精确锁定发布所用的完整
+Python 依赖闭包。`constraints.txt` 及 `constraints/runtime.txt`、`dev.txt`、`server.txt` 都只是兼容入口，
+最终指向同一份 release lock。包括 `futu-api` 在内的依赖升级必须显式刷新该锁并通过发布验证，
+安装或升级时不会自行选择仓库中更新的版本。
 
 ## 3. Linux: systemd
 

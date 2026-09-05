@@ -1,5 +1,7 @@
 pandas
 pyyaml
 scipy
+# Minimum supported SDK intent; the exact release version lives in constraints/release.txt.
 futu-api>=10.9.6908
 jsonschema>=4.23,<5
+packaging
