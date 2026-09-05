@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 import json
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
@@ -36,6 +37,37 @@ class _Audit:
 
     def guard_mark_success(self) -> None:
         self.successes += 1
+
+
+def test_formal_archive_import_failure_is_degraded_per_account(monkeypatch, tmp_path: Path) -> None:
+    import src.application.tick_notification_flow as mod
+
+    bundle = _request(tmp_path, run_id="formal-import-failure", accounts=("lx", "sy"))
+    monkeypatch.setattr(mod, "source_commit_sha", lambda _base: "a" * 40)
+    monkeypatch.setattr(
+        mod,
+        "capture_scheduled_recommendation_point",
+        lambda _base, _run_id, account, _decision, **_kwargs: (
+            "created",
+            {"recommendation_point_id": f"point-{account}"},
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "src.application.research.formal_corpus", None)
+
+    mod._observe_recommendation_points(bundle.request)
+
+    failures = [
+        event
+        for event in bundle.request.audit_helper.events
+        if event["action"] == "formal_point_archive_failed"
+    ]
+    captures = [
+        event
+        for event in bundle.request.audit_helper.events
+        if event["action"] == "recommendation_point_captured"
+    ]
+    assert [event["extra"]["account"] for event in failures] == ["lx", "sy"]
+    assert [event["extra"]["account"] for event in captures] == ["lx", "sy"]
 
 
 def _brief(
