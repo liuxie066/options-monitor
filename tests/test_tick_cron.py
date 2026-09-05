@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -182,6 +183,27 @@ def test_formal_expectation_failure_does_not_block_tick(tmp_path, capsys) -> Non
 
     assert rc == 0
     assert capsys.readouterr().err.strip() == "FORMAL_EXPECTATION_DEGRADED"
+
+
+def test_default_formal_expectation_import_failure_does_not_block_tick(monkeypatch, tmp_path, capsys) -> None:
+    from src.application.tick_cron import run_tick_cron
+
+    calls: list[list[str]] = []
+    monkeypatch.setitem(sys.modules, "src.application.research.formal_corpus", None)
+
+    rc = run_tick_cron(
+        market="hk",
+        accounts=["lx"],
+        config_path=str(tmp_path / "config.hk.json"),
+        lock_path=str(tmp_path / "tick.lock"),
+        run_cmd=lambda command, **_kwargs: calls.append(command) or subprocess.CompletedProcess(command, 0),
+        preflight_config_fn=None,
+        environ={"OM_RUNTIME_ROOT": str(tmp_path)},
+    )
+
+    assert rc == 0
+    assert len(calls) == 1
+    assert capsys.readouterr().err.strip() == "FORMAL_EXPECTATION_DEGRADED_formal_expectation_failed"
 
 
 def test_run_tick_cron_reports_locked_without_running(monkeypatch, tmp_path, capsys) -> None:

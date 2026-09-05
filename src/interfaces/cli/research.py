@@ -8,7 +8,7 @@ from typing import Any, Callable
 
 from src.application.agent_tool_config import repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_response
-from src.application.research.facade import run_research_collect
+from src.application.research import run_research_collect
 
 
 def _add_candidate_impact_args(parser: Any) -> None:

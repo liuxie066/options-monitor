@@ -34,7 +34,6 @@ from src.application.secret_store import (
 )
 from src.application.settings import build_effective_env
 from src.application.payload_helpers import first_text as _first_text
-from src.application.strategy_lab.contracts import build_strategy_lab_timer_binding
 
 
 ServiceTarget = Literal["systemd", "launchd"]
@@ -1275,6 +1274,8 @@ def render_service_bundle(
             )
 
         if include_strategy_lab_advance:
+            from src.application.strategy_lab.contracts import build_strategy_lab_timer_binding
+
             binding = build_strategy_lab_timer_binding()
             advance_service = str(binding["service_name"])
             advance_timer = str(binding["timer_name"])

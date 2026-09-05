@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 1009 (`src`: 541, `domain`: 78, `scripts`: 12, `tests`: 378)
-- Internal import edges: 6780 total, 2944 production/script edges excluding tests
+- Python files scanned: 1011 (`src`: 542, `domain`: 78, `scripts`: 12, `tests`: 379)
+- Internal import edges: 6785 total, 2947 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -46,7 +46,7 @@ flowchart LR
   scripts -->|4| domain
   scripts -->|2| infrastructure
   storage -->|1| domain
-  tests -->|2840| application
+  tests -->|2842| application
   tests -->|429| domain
   tests -->|2| domain_services
   tests -->|233| infrastructure
@@ -79,7 +79,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 2840 |
+| tests | application | 2842 |
 | tests | domain | 429 |
 | tests | interfaces | 245 |
 | tests | infrastructure | 233 |
@@ -98,7 +98,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application | src.infrastructure | 105 |
 | src.application.ledger | domain.domain | 65 |
 | src.application.ledger | domain.domain.ledger | 47 |
-| src.application.research | src.application | 35 |
+| src.application.research | src.application | 36 |
 | scripts | src.application | 34 |
 | src.application | domain.storage | 32 |
 | src.application | domain.domain.engine | 28 |
@@ -181,7 +181,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 |---|---|
 | src.application.agent_tool_contracts | 96 |
 | domain.domain.symbol_identity | 71 |
-| src.application.agent_tool_config | 62 |
+| src.application.agent_tool_config | 63 |
 | src.application.ledger.api | 58 |
 | domain.domain.ledger.position_fields | 50 |
 | src.application.payload_helpers | 48 |
@@ -202,8 +202,8 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.application.multi_tick.required_data_prefetch | 34 |
 | src.application.ledger.api | 32 |
 | src.application.trades.auto_intake | 32 |
+| src.interfaces.cli.main | 30 |
 | src.application.pipeline_watchlist | 29 |
-| src.interfaces.cli.main | 29 |
 | src.application.multi_account_tick | 28 |
 | src.interfaces.cli.option_positions | 27 |
 | src.application.ledger.writer_common | 26 |

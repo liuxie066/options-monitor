@@ -159,6 +159,131 @@ Shadow Replay = counterfactual replay engine
 Strategy Lab = strategy evolution product surface
 ```
 
+### Research Side-Lane Startup Boundary
+
+Research, Shadow Replay, Strategy Lab, and Formal Corpus execution must not be a
+startup prerequisite for an ordinary CLI command or for importing the production
+Tick entry points. They may load only after the selected command or Tick sidecar
+actually needs them. This keeps a broken optional side lane from preventing an
+unrelated operator command, Tick process, or cron wrapper from starting.
+
+After an ordinary CLI import and parser build, the only permitted side-lane module
+names are the `src.application.research` package node and
+`src.application.research.redaction`. The latter is a pure shared sanitizer used by
+Copilot and support-bundle code. Every other `src.application.research.*` module and
+all `src.application.shadow_replay.*` and `src.application.strategy_lab.*` modules
+are forbidden until the selected command needs them. Tick entry-point imports must
+load none of those modules. Moving the sanitizer to another package is not required
+without a separate ownership need.
+
+The boundary is enforced at five seams:
+
+- `src.application.research.__init__` binds two lazy forwarding functions without
+  importing the Research facade or service.
+- `src.interfaces.cli.research` binds the package-level Research collect forwarder.
+- `src.interfaces.cli.strategy_lab_parser` owns argparse registration, while
+  `strategy_lab_ops` retains Strategy Lab execution and Futu access.
+- `service_deploy` and `service_drift` import Strategy Lab contract values only
+  inside the operations that consume them.
+- `tick_notification_flow` and `tick_cron` import Formal Corpus only inside their
+  existing degraded, non-blocking call boundaries.
+
+`src.application.recommendation_point` has no Research, Shadow Replay, or Strategy
+Lab import and must remain independent. The generated dependency graph records
+imports at any nesting level, so it documents ownership but cannot enforce this
+startup boundary by itself.
+
+The Research package keeps its existing `research_tool` and
+`run_research_collect` package-level exports through two module-bound,
+signature-preserving forwarding functions. Each function imports its canonical
+owner only when called, and both names remain in the literal `__all__`, so the
+package stays lazy without violating the repository-wide F822 export contract. The
+Research CLI binds the `run_research_collect` forwarder under the same name so
+existing injection and monkeypatch seams remain valid. Call behavior and signatures
+are compatibility requirements; wrapper-to-owner function-object identity is not.
+
+The CLI keeps its existing commands, arguments, help, responses, and module exports.
+Strategy Lab parser construction moves to a lightweight interface module;
+`strategy_lab_ops` re-exports the parser function and retains the execution handler
+and its module-level dependency names. `src.interfaces.cli.main` imports only the
+lightweight parser during registration and loads the handler after `strategy-lab`
+is selected. The two ordinary service owners import Strategy Lab contract values
+inside the operations that use them.
+
+Tick keeps both Formal Corpus side effects and their present failure semantics:
+
+```text
+import multi_account_tick / tick_notification_flow / tick_cron
+-> no Research, Shadow Replay, Strategy Lab, or Formal Corpus execution import
+
+scheduled notification reaches recommendation-point archiving
+-> load Formal Corpus inside the existing per-account archive try block
+-> archive success, or audit formal_point_archive_failed and continue
+
+tick-cron has OM_RUNTIME_ROOT and an unscoped symbol set
+-> call a lightweight default function that loads Formal Corpus inside the existing try block
+-> seal expectations, or emit FORMAL_EXPECTATION_DEGRADED* and launch Tick
+```
+
+The cron callable contract remains unchanged: omitting
+`seal_formal_expectations_fn` selects the lazy default, an injected callable is used
+as supplied, and explicit `None` disables sealing. A missing or broken Formal Corpus
+module therefore follows the same degraded path as any other sealing failure.
+
+No plugin registry, two-pass CLI dispatcher, new configuration, package-wide move,
+or public command change is part of this boundary. Formal Corpus capture is not
+removed or made optional beyond its existing best-effort contract.
+
+Success requires all of the following:
+
+- a fresh interpreter can import `src.interfaces.cli.main`, build global help, and
+  parse a non-research command without loading outside the two permitted Research
+  names;
+- a fresh interpreter can import `multi_account_tick`, `tick_notification_flow`,
+  and `tick_cron` without loading any side-lane module;
+- Research and Strategy Lab commands still load their owners when selected and
+  retain their existing behavior and injection seams;
+- scheduled recommendation-point archiving and cron expectation sealing retain
+  their success and degraded paths, including per-account archive failures and
+  explicit cron sealing disablement;
+- a startup-specific regression guard fails when a forbidden transitive dependency
+  returns, while the generated dependency graph remains current and cycle-free.
+
+Validation is split into two independently verifiable behavior slices:
+
+1. Defer Formal Corpus imports to the existing notification archive and cron
+   failure boundaries. Verify the three Tick imports, per-account degraded audit,
+   default sealing failure, and explicit `None` behavior in isolation.
+2. Make ordinary CLI startup side-lane-free by replacing the Research package's
+   eager re-exports with bound lazy forwarders, preserving its package exports and
+   Research monkeypatch seam, deferring the two service-contract imports, and
+   separating Strategy Lab parser registration from handler loading. Verify global
+   help, one non-research command, Research and Strategy Lab invocation, package
+   forwarder loading, F822, and the permitted module ceiling.
+
+The startup guard runs each entry point in a fresh subprocess and inspects
+`sys.modules`; a direct-import AST check is insufficient because it misses package
+initializers and transitive imports. A package-export regression also proves that
+importing `src.application.research` does not load the facade or service, that each
+bound forwarder loads and calls its owner only on invocation, and that the literal
+`__all__` passes F822. Existing Research, Strategy Lab, Tick cron,
+notification-flow, and recommendation-point tests preserve the public and runtime
+contracts. The CLI guard treats the permitted names as a ceiling, so a later
+dependency reduction remains valid. Focused tests are followed by the complete
+pytest suite, Ruff, dependency graph `--check`, and `git diff --check`. If the parser
+split changes the generated graph, regenerate both dependency-graph files before
+rerunning `--check`.
+
+The main compatibility risk is changing import-time names that current tests patch.
+Bound package forwarders, the same-name Research CLI binding, the Strategy Lab
+parser re-export, and the unchanged Strategy Lab execution module preserve those
+names. The package wrappers preserve the existing call signatures, but not identity
+with their canonical owner functions; repository-external identity comparison is
+not observable locally and is not treated as a supported contract. A deferred import
+moves an import error from process startup to feature invocation; that is intentional
+for CLI commands. Tick imports and calls remain inside their current degraded
+boundaries so a failure cannot stop later accounts or the Tick subprocess.
+
 ## Inbound Flow
 
 Remote messages intentionally separate channel transport from application
