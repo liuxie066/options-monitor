@@ -9,6 +9,22 @@ import pytest
 BASE = Path(__file__).resolve().parents[1]
 
 
+def test_diagnostics_module_keeps_current_exports() -> None:
+    module_name = "src.application.agent_tools.diagnostics"
+    expected = {
+        "HEALTHCHECK_TOOL",
+        "OPERATION_TIMELINE_TOOL",
+        "RUNTIME_STATUS_TOOL",
+        "TOOLS",
+    }
+    module = __import__(module_name, fromlist=["*"])
+    namespace: dict[str, object] = {}
+    exec(f"from {module_name} import *", namespace)
+
+    assert set(module.__all__) == expected
+    assert set(namespace) - {"__builtins__"} == expected
+
+
 def test_agent_spec_uses_symbols_public_name() -> None:
     from src.application.tool_execution import build_tool_manifest as build_spec
 

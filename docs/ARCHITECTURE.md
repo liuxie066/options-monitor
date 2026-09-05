@@ -23,6 +23,41 @@ Rules:
 - Public behavior should enter through `./om`, `./om-agent`, or
   documented `python -m src.application...` entry points.
 
+## Python Export Contract And Static Gate
+
+Every module that defines `__all__` owns a literal list containing only names
+bound in that module. Ruff rule `F822` enforces this repository-wide through the
+existing `ruff check .` Makefile and CI commands.
+
+The public current-decision export contract belongs to
+`src.application.ledger.current_decision_projection`. Its 44-name export set
+aggregates the existing common, assigned-stock, lifecycle, combo, quality,
+payload, oracle, migration, and runtime owners. The facade binds each name to
+the canonical object from its owner module and retains its other explicit
+bindings.
+
+`src.application.ledger.current_decision_runtime` exports its 15 bound runtime
+and compatibility names. Internal bootstrap code continues to import the two
+runtime operations it uses directly. The diagnostics module exports its four
+current tool names; retired tools are not kept as unbound compatibility names.
+
+The import path is:
+
+```text
+public consumer -> current_decision_projection facade -> current_decision_* owners
+ledger bootstrap -> explicit runtime imports
+```
+
+Contract tests freeze the exact export-name sets without making list order part
+of the API. They also execute wildcard imports and verify every facade binding
+against its canonical owner by object identity. Validate the contract with:
+
+```bash
+./.venv/bin/python -m pytest -q tests/test_ledger_module_facades.py tests/test_agent_plugin_contract.py
+./.venv/bin/python -c 'exec("from src.application.agent_tools.diagnostics import *"); exec("from src.application.ledger.current_decision_runtime import *"); exec("from src.application.ledger.current_decision_projection import *")'
+./.venv/bin/python -m ruff check .
+```
+
 ## Main Entry Points
 
 `./om` is the human CLI. It forwards to `src.interfaces.cli.main`.
