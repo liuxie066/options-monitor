@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any, Callable
 
 from src.application.account_config import accounts_from_config_path
-from src.application.research.formal_corpus import seal_profile_formal_expectations
 from src.application.runtime_config_freshness import (
     RuntimeConfigFreshnessError,
     RuntimeConfigIdentityError,
@@ -50,6 +49,12 @@ _MARKET_DEFAULTS = {
         "trigger_timezone": "America/New_York",
     },
 }
+
+
+def _seal_formal_expectations(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    from src.application.research.formal_corpus import seal_profile_formal_expectations
+
+    return seal_profile_formal_expectations(*args, **kwargs)
 
 
 def _normalize_market(market: str) -> str:
@@ -238,7 +243,7 @@ def run_tick_cron(
     dry_run_command: bool = False,
     run_cmd: Callable[..., subprocess.CompletedProcess[Any]] | None = None,
     preflight_config_fn: Callable[..., Any] | None = _preflight_runtime_config,
-    seal_formal_expectations_fn: Callable[..., dict[str, Any]] | None = seal_profile_formal_expectations,
+    seal_formal_expectations_fn: Callable[..., dict[str, Any]] | None = _seal_formal_expectations,
     stdout: Any = None,
     stderr: Any = None,
     environ: dict[str, str] | None = None,

@@ -27,7 +27,6 @@ from src.application.service_deploy import (
     render_service_bundle,
 )
 from src.application.secret_store import credential_spec
-from src.application.strategy_lab.contracts import STRATEGY_LAB_ADVANCE_TIMER
 
 
 SYSTEMD_REQUIRED_MAINTENANCE_UNITS = (
@@ -1500,6 +1499,8 @@ def _expected_bundle_from_profile(
         quality_monitoring.get("enabled")
         or any(name.startswith("options-monitor-quality-") for name in services)
     )
+    from src.application.strategy_lab.contracts import STRATEGY_LAB_ADVANCE_TIMER
+
     include_strategy_lab_advance = STRATEGY_LAB_ADVANCE_TIMER in services
     include_feishu_agent_credential = bool(
         feishu_agent_credential.get("enabled")
