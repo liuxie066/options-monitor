@@ -812,7 +812,8 @@ def test_option_performance_internal_clock_is_reset_after_each_read(monkeypatch)
 
     seen: list[int | None] = []
 
-    def fake_execute(_name: str, _payload: dict) -> dict:
+    def fake_execute(_name: str, _payload: dict, **kwargs) -> dict:
+        assert kwargs == {"raise_unexpected": True}
         seen.append(materialization_impl._OPTION_PERFORMANCE_REPORT_NOW_MS.get())
         return {"ok": True, "data": {}}
 
@@ -2295,6 +2296,244 @@ def test_identical_call_can_retry_once_after_transient_tool_error(monkeypatch) -
     assert failed_event.payload["model_input"] == {"config_key": "us"}
     assert failed_event.payload["model_input_hash"].startswith("sha256:")
     assert failed_event.payload["tool_input"] == {"config_key": "us"}
+
+
+def test_execute_tool_reraises_unexpected_errors_only_for_explicit_host_callers(monkeypatch) -> None:
+    from src.application import agent_tool_registry
+    from src.application.tool_execution import execute_tool
+
+    definition = agent_tool_registry.get_tool_definition("runtime_status")
+    assert definition is not None
+
+    def fail(_payload: dict) -> tuple[dict, list[str], dict]:
+        raise RuntimeError("boom")
+
+    monkeypatch.setitem(
+        agent_tool_registry.AGENT_TOOL_REGISTRY,
+        "runtime_status",
+        replace(definition, handler=fail),
+    )
+
+    wrapped = execute_tool("runtime_status", {"config_key": "us"})
+    assert wrapped["ok"] is False
+    assert wrapped["error"]["code"] == "INTERNAL_ERROR"
+    with pytest.raises(RuntimeError, match="boom"):
+        execute_tool("runtime_status", {"config_key": "us"}, raise_unexpected=True)
+
+
+def test_unexpected_tool_reason_is_redacted_persisted_and_hidden_by_default(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from src.application import agent_tool_registry
+    from src.application.copilot.contracts import to_payload
+    from src.interfaces.cli.copilot_ops import _successful_observations
+
+    definition = agent_tool_registry.get_tool_definition("runtime_status")
+    assert definition is not None
+    attempts = 0
+
+    def flaky(_payload: dict) -> tuple[dict, list[str], dict]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("token=super-secret\n" + "原因" * 180)
+        return {"status": "healthy"}, [], {}
+
+    monkeypatch.setitem(
+        agent_tool_registry.AGENT_TOOL_REGISTRY,
+        "runtime_status",
+        replace(definition, handler=flaky),
+    )
+
+    def model(request: ModelRequest) -> ModelTurn:
+        tool_messages = [item for item in request.messages if item.get("role") == "tool"]
+        if not tool_messages:
+            return ModelTurn(tool_calls=(_call("runtime_status", {"config_key": "us"}, "failure_1"),))
+        first = json.loads(tool_messages[0]["content"])
+        assert first["code"] == "TOOL_EXCEPTION"
+        assert first["message"] == "tool raised an exception"
+        assert "super-secret" not in tool_messages[0]["content"]
+        assert "RuntimeError" not in tool_messages[0]["content"]
+        if len(tool_messages) == 1:
+            return ModelTurn(tool_calls=(_call("runtime_status", {"config_key": "us"}, "retry_1"),))
+        return ModelTurn(text="结论：重试后运行正常。")
+
+    store = CopilotHostStore(tmp_path / "copilot.db")
+    result = run_contract(
+        _contract("检查运行状态"),
+        model_runner=model,
+        host_store=store,
+        session_key="local:test",
+    )
+
+    assert attempts == 2
+    assert result.status == "answered"
+    failed = next(
+        event
+        for event in result.events
+        if event.type == "tool_result" and event.payload.get("ok") is False
+    )
+    assert failed.run_id == result.run_id
+    assert failed.payload["tool_call_id"] == "failure_1"
+    assert failed.payload["tool_name"] == "runtime_status"
+    assert failed.payload["failure_stage"] == "tool_execution"
+    assert failed.payload["exception_type"] == "RuntimeError"
+    assert "***REDACTED***" in failed.payload["exception_reason"]
+    assert "super-secret" not in failed.payload["exception_reason"]
+    assert "\n" not in failed.payload["exception_reason"]
+    assert len(failed.payload["exception_reason"]) <= 240
+
+    default_payload = to_payload(result)
+    assert "events" not in default_payload
+    assert "super-secret" not in json.dumps(default_payload, ensure_ascii=False)
+    explicit_payload = to_payload(result, include_events=True)
+    assert "exception_reason" in json.dumps(explicit_payload, ensure_ascii=False)
+
+    persisted = list(CopilotHostStore(tmp_path / "copilot.db").run_events(result.run_id))
+    persisted_failure = next(
+        event
+        for event in persisted
+        if event["type"] == "tool_result" and event["payload"].get("ok") is False
+    )
+    assert persisted_failure["payload"]["exception_type"] == "RuntimeError"
+    recovered = _successful_observations(persisted)
+    assert recovered
+    assert all(item.get("ok") is True for item in recovered)
+    assert all("exception_reason" not in item for item in recovered)
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_reason"),
+    [
+        (
+            FileNotFoundError(2, "No such file or directory", "/private/secret/missing.json"),
+            "No such file or directory",
+        ),
+        (RuntimeError("bad-\udcff-\u202e-tail"), "bad- - -tail"),
+    ],
+    ids=("multi-argument", "non-printable"),
+)
+def test_exception_reason_is_descriptive_printable_and_durable(
+    monkeypatch,
+    tmp_path,
+    failure: Exception,
+    expected_reason: str,
+) -> None:
+    from src.application import agent_tool_registry
+
+    definition = agent_tool_registry.get_tool_definition("runtime_status")
+    assert definition is not None
+
+    def fail(_payload: dict) -> tuple[dict, list[str], dict]:
+        raise failure
+
+    monkeypatch.setitem(
+        agent_tool_registry.AGENT_TOOL_REGISTRY,
+        "runtime_status",
+        replace(definition, handler=fail),
+    )
+
+    def model(request: ModelRequest) -> ModelTurn:
+        tool_messages = [item for item in request.messages if item.get("role") == "tool"]
+        if not tool_messages:
+            return ModelTurn(tool_calls=(_call("runtime_status", {"config_key": "us"}),))
+        observation = json.loads(tool_messages[0]["content"])
+        assert observation["code"] == "TOOL_EXCEPTION"
+        assert observation["message"] == "tool raised an exception"
+        return ModelTurn(text="结论：当前工具异常，无法完成检查。")
+
+    store_path = tmp_path / "copilot.db"
+    result = run_contract(
+        _contract("检查运行状态"),
+        model_runner=model,
+        host_store=CopilotHostStore(store_path),
+        session_key="local:test",
+    )
+
+    assert result.status == "answered"
+    persisted = CopilotHostStore(store_path).run_events(result.run_id)
+    failed = next(
+        event
+        for event in persisted
+        if event["type"] == "tool_result" and event["payload"].get("ok") is False
+    )
+    reason = failed["payload"]["exception_reason"]
+    assert expected_reason in reason
+    assert all(character.isprintable() for character in reason)
+    if isinstance(failure, FileNotFoundError):
+        assert "missing.json" in reason
+        assert "/private/" not in reason
+
+
+def test_exception_reason_fallback_survives_broken_exception_string(monkeypatch) -> None:
+    from src.application import agent_tool_registry
+
+    definition = agent_tool_registry.get_tool_definition("runtime_status")
+    assert definition is not None
+
+    class BrokenText:
+        def __str__(self) -> str:
+            raise KeyboardInterrupt
+
+    class BrokenReasonError(Exception):
+        pass
+
+    def fail(_payload: dict) -> tuple[dict, list[str], dict]:
+        raise BrokenReasonError(BrokenText())
+
+    monkeypatch.setitem(
+        agent_tool_registry.AGENT_TOOL_REGISTRY,
+        "runtime_status",
+        replace(definition, handler=fail),
+    )
+
+    def model(request: ModelRequest) -> ModelTurn:
+        if not any(item.get("role") == "tool" for item in request.messages):
+            return ModelTurn(tool_calls=(_call("runtime_status", {"config_key": "us"}),))
+        return ModelTurn(text="结论：当前工具异常，无法完成检查。")
+
+    result = run_contract(_contract("检查运行状态"), model_runner=model)
+    failed = next(event for event in result.events if event.type == "tool_result")
+
+    assert result.status == "answered"
+    assert failed.payload["exception_type"] == "BrokenReasonError"
+    assert failed.payload["exception_reason"] == "exception reason unavailable"
+
+
+def test_tool_failure_event_is_recorded_before_post_execution_cancellation(monkeypatch) -> None:
+    from src.application import agent_tool_registry
+
+    definition = agent_tool_registry.get_tool_definition("runtime_status")
+    assert definition is not None
+    executed = False
+
+    def fail(_payload: dict) -> tuple[dict, list[str], dict]:
+        nonlocal executed
+        executed = True
+        raise RuntimeError("provider timed out")
+
+    monkeypatch.setitem(
+        agent_tool_registry.AGENT_TOOL_REGISTRY,
+        "runtime_status",
+        replace(definition, handler=fail),
+    )
+
+    result = run_contract(
+        _contract("检查运行状态"),
+        model_runner=lambda _request: ModelTurn(
+            tool_calls=(_call("runtime_status", {"config_key": "us"}),)
+        ),
+        is_cancelled=lambda: executed,
+    )
+
+    assert result.status == "cancelled"
+    failed = next(
+        event
+        for event in result.events
+        if event.type == "tool_result" and event.payload.get("failure_stage") == "tool_execution"
+    )
+    assert failed.payload["exception_reason"] == "provider timed out"
 
 
 def test_tool_failure_is_recoverable(monkeypatch) -> None:

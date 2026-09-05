@@ -1,7 +1,2 @@
-# Runtime constraints for stable core packages.
-# Market-data/source SDKs are intentionally lower-bounded in requirements/runtime.txt
-# instead of pinned here, so API fixes and new OpenD capabilities can be picked up
-# during normal upgrades after validation.
-pandas==3.0.2
-pyyaml==6.0.3
-scipy==1.18.0
+# Backward-compatible runtime constraint entry point.
+-c release.txt

@@ -891,6 +891,7 @@ def run_contract(
                 ),
             )
 
+        exception_diagnostic: dict[str, str] | None = None
         try:
             call_kwargs: dict[str, Any] = {
                 "allowed_tools": tuple(manifest.allowed_tools),
@@ -906,7 +907,8 @@ def run_contract(
                 "ok": False,
                 "error": {"code": "CONFIG_ERROR", "message": "tool configuration rejected"},
             }
-        except Exception:
+        except Exception as exc:
+            exception_diagnostic = _unexpected_exception_diagnostic(exc)
             response = {
                 "ok": False,
                 "error": {"code": "TOOL_EXCEPTION", "message": "tool raised an exception"},
@@ -919,8 +921,6 @@ def run_contract(
                 "OBSERVATION_ERROR",
                 "tool result could not be normalized",
             )
-        if cancellation_requested():
-            return _tool_error(tool_name, "CANCELLED", "run cancelled during tool execution")
         # Failed reads are visible diagnostics but never become evidence.
         if not isinstance(observation, dict) or observation.get("ok") is not True:
             failed_observation = redact_value(
@@ -945,18 +945,28 @@ def run_contract(
                             failed_observation,
                             tool_name=tool_name,
                         )
+                    event_payload = {
+                        **failed_observation,
+                        "tool_call_id": call_id,
+                        **audit_inputs,
+                    }
+                    if exception_diagnostic is not None:
+                        event_payload.update(
+                            {
+                                "failure_stage": "tool_execution",
+                                **exception_diagnostic,
+                            }
+                        )
                     event_log.record(
                         "tool_result",
-                        copilot_tools.audit_tool_event_payload(
-                            {
-                                **failed_observation,
-                                "tool_call_id": call_id,
-                                **audit_inputs,
-                            }
-                        ),
+                        copilot_tools.audit_tool_event_payload(event_payload),
                         str(failed_observation.get("ref") or "") or None,
                     )
+            if cancellation_requested():
+                return _tool_error(tool_name, "CANCELLED", "run cancelled during tool execution")
             return failed_observation
+        if cancellation_requested():
+            return _tool_error(tool_name, "CANCELLED", "run cancelled during tool execution")
         with run_lock:
             if not tool_events_open or finalized:
                 return _tool_error(tool_name, "CANCELLED", "run is no longer active")
@@ -1551,6 +1561,38 @@ def _tool_error(tool_name: str, code: str, message: str) -> dict[str, Any]:
         "message": message,
         "retryable": False,
     }
+
+
+def _unexpected_exception_diagnostic(exc: Exception) -> dict[str, str]:
+    try:
+        exception_type = _bounded_diagnostic_text(type(exc).__name__, limit=120)
+    except BaseException:
+        exception_type = "Exception"
+    try:
+        first_arg = exc.args[0] if exc.args else None
+        if len(exc.args) == 1 and (first_arg is None or isinstance(first_arg, (str, int, float, bool))):
+            raw_reason = str(first_arg)
+        else:
+            raw_reason = str(exc)
+        redacted_reason = redact_value(raw_reason)
+        if not isinstance(redacted_reason, str):
+            raise TypeError("redacted exception reason is not text")
+        exception_reason = (
+            _bounded_diagnostic_text(redacted_reason, limit=240)
+            or "exception reason unavailable"
+        )
+    except BaseException:
+        exception_reason = "exception reason unavailable"
+    return {
+        "exception_type": exception_type or "Exception",
+        "exception_reason": exception_reason,
+    }
+
+
+def _bounded_diagnostic_text(value: str, *, limit: int) -> str:
+    printable = "".join(character if character.isprintable() else " " for character in value)
+    single_line = " ".join(printable.split())
+    return single_line[:limit]
 
 
 def _failed_result(

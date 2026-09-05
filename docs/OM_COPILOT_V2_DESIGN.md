@@ -359,6 +359,13 @@ size remain bounded, and raw SQL/free text, answer text, prompts, messages, and
 private reasoning remain absent. `submit_answer` continues to log only mode,
 status, references, admission outcome, and approved-answer hash.
 
+An unexpected read-tool implementation exception also keeps the model,
+ordinary reply, and public progress surfaces on generic `TOOL_EXCEPTION` text.
+Only the failed `tool_result` audit copy adds `failure_stage=tool_execution` and
+bounded, single-line, redacted `exception_type` / `exception_reason` fields.
+Operators can inspect them explicitly through local `--include-events` output or
+`./om copilot events`; failed events remain excluded from resume evidence.
+
 The two business-read audit states are:
 
 1. rejected before execution, including attestation, fixed-scope reconciliation,

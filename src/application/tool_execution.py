@@ -14,7 +14,12 @@ def build_tool_manifest() -> dict[str, Any]:
     return build_agent_spec()
 
 
-def execute_tool(tool_name: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+def execute_tool(
+    tool_name: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    raise_unexpected: bool = False,
+) -> dict[str, Any]:
     name = str(tool_name or "").strip()
     definition = get_tool_definition(name)
     if definition is None:
@@ -56,6 +61,8 @@ def execute_tool(tool_name: str, payload: dict[str, Any] | None = None) -> dict[
             error=build_error_payload(err),
         )
     except Exception as exc:
+        if raise_unexpected:
+            raise
         err = AgentToolError(
             code="INTERNAL_ERROR",
             message=f"{type(exc).__name__}: {exc}",

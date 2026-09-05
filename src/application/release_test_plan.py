@@ -91,7 +91,11 @@ TEST_RULES: tuple[TestRule, ...] = (
         name="service_release",
         patterns=(
             ".github/workflows/**",
+            "constraints.txt",
+            "constraints/**",
             "release/coverage/**",
+            "requirements.txt",
+            "requirements/**",
             "scripts/install*",
             "scripts/release_preflight.sh",
             "scripts/release_check.py",

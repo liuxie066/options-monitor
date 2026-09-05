@@ -103,8 +103,8 @@ def call_read_tool(
         )
 
         with option_performance_report_now_ms(now_ms):
-            return execute_tool(tool_name, payload)
-    return execute_tool(tool_name, payload)
+            return execute_tool(tool_name, payload, raise_unexpected=True)
+    return execute_tool(tool_name, payload, raise_unexpected=True)
 
 
 def tool_descriptions(

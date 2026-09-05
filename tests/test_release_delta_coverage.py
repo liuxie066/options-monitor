@@ -191,6 +191,7 @@ def test_release_check_cli_enforces_delta_coverage(
 ) -> None:
     repo, _manifest = _prepared_repo(tmp_path)
     monkeypatch.setattr(release_check, "repo_base", lambda: repo)
+    monkeypatch.setattr(release_check, "validate_dependency_lock", lambda _base: {})
     monkeypatch.setattr(
         sys,
         "argv",

@@ -1,2 +1,2 @@
--c runtime.txt
-lark-oapi==1.6.5
+# Backward-compatible server constraint entry point.
+-c release.txt

@@ -35,6 +35,18 @@ def test_release_test_plan_maps_service_changes_without_retired_event_suite() ->
     assert {rule["name"] for rule in plan["matched_rules"]} >= {"service_release"}
 
 
+@pytest.mark.parametrize(
+    "changed_file",
+    ["requirements.txt", "requirements/runtime.txt", "constraints.txt", "constraints/release.txt"],
+)
+def test_release_test_plan_maps_dependency_inputs_to_release_gate(changed_file: str) -> None:
+    from src.application.release_test_plan import build_release_test_plan
+
+    plan = build_release_test_plan(changed_files=[changed_file], mode="standard")
+
+    assert "service_release" in {rule["name"] for rule in plan["matched_rules"]}
+
+
 def test_release_test_plan_maps_service_deploy_support_to_both_runtime_gates() -> None:
     from src.application.release_test_plan import build_release_test_plan
 

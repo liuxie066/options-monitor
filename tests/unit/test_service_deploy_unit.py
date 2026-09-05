@@ -2107,7 +2107,7 @@ def test_service_upgrade_dependency_hash_changes_with_dependency_files(tmp_path:
     _write_runtime_target_with_server_deps(target)
 
     before = _dependency_hash(target, include_server=True)
-    (target / "constraints" / "server.txt").write_text("lark-oapi==1.6.6\n", encoding="utf-8")
+    (target / "constraints" / "release.txt").write_text("lark-oapi==1.6.6\n", encoding="utf-8")
     after = _dependency_hash(target, include_server=True)
 
     assert before != after
