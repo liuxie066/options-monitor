@@ -109,10 +109,7 @@ from src.interfaces.cli.settings_ops import (
     handle_settings_command,
     inspect_effective_settings,
 )
-from src.interfaces.cli.strategy_lab_ops import (
-    add_strategy_lab_commands,
-    handle_strategy_lab_command,
-)
+from src.interfaces.cli.strategy_lab_parser import add_strategy_lab_commands
 from src.interfaces.cli.setup_ops import add_setup_commands, handle_setup_command, run_setup_check
 
 
@@ -273,6 +270,8 @@ def main(argv: list[str] | None = None) -> int:
             ))
 
         if args.command == "strategy-lab":
+            from src.interfaces.cli.strategy_lab_ops import handle_strategy_lab_command
+
             return _print(handle_strategy_lab_command(args))
 
         if args.command in {"scan", "close-advice", "notify"}:

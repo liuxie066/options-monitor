@@ -69,7 +69,6 @@ from src.application.recommendation_point import (
     RecommendationPointError,
     capture_scheduled_recommendation_point,
 )
-from src.application.research.formal_corpus import capture_formal_point_attempt
 from src.application.scheduled_notification import (
     PreparedPerAccountMessages,
     build_per_account_delivery_batch,
@@ -928,6 +927,8 @@ def _archive_formal_point(
         .isoformat()
     )
     try:
+        from src.application.research.formal_corpus import capture_formal_point_attempt
+
         result = capture_formal_point_attempt(
             request.base,
             request.base,
