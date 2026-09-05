@@ -466,7 +466,6 @@ TOOLS: tuple[AgentTool, ...] = (
 
 __all__ = [
     "HEALTHCHECK_TOOL",
-    "OPENCLAW_READINESS_TOOL",
     "OPERATION_TIMELINE_TOOL",
     "RUNTIME_STATUS_TOOL",
     "TOOLS",
