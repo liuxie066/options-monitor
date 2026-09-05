@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import math
+import signal
+import threading
+import time
+from numbers import Real
 from pathlib import Path
 from typing import Any, Callable
 
 from src.application.option_chain_fetching import FileRateLimiter
 from src.infrastructure.opend_retcodes import classify_opend_error
+
+
+INTERRUPTIBLE_OPEND_UNIT_TIMEOUT_SECONDS = 10.0
 
 
 def opend_endpoint_limiter_state_path(base_dir: Path, endpoint: str) -> Path:
@@ -39,6 +47,81 @@ def rate_limited_opend_call(
 
 class LowPriorityOpenDCallDeferred(RuntimeError):
     reason_code = "opend_low_priority_deferred"
+
+
+class InterruptibleOpenDCallError(RuntimeError):
+    def __init__(self, reason_code: str, message: str) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
+
+
+class _OpenDUnitDeadline(BaseException):
+    pass
+
+
+def run_interruptible_opend_unit(
+    call: Callable[[], Any],
+    *,
+    timeout_seconds: float = INTERRUPTIBLE_OPEND_UNIT_TIMEOUT_SECONDS,
+) -> Any:
+    """Bound one manual OpenD unit without adding a worker process."""
+
+    if (
+        isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, Real)
+        or not math.isfinite(float(timeout_seconds))
+        or float(timeout_seconds) <= 0
+    ):
+        raise ValueError("OpenD unit timeout must be positive and finite")
+    if (
+        threading.current_thread() is not threading.main_thread()
+        or not hasattr(signal, "SIGALRM")
+        or not hasattr(signal, "ITIMER_REAL")
+        or not hasattr(signal, "setitimer")
+        or not hasattr(signal, "getitimer")
+    ):
+        raise InterruptibleOpenDCallError(
+            "opend_low_priority_deadline_unavailable",
+            "interruptible OpenD deadline is unavailable",
+        )
+
+    alarm = signal.SIGALRM
+    timer = signal.ITIMER_REAL
+    previous_handler = signal.getsignal(alarm)
+    previous_timer = signal.getitimer(timer)
+    started = time.monotonic()
+    timed_out = False
+
+    def on_deadline(_signum: int, _frame: object) -> None:
+        nonlocal timed_out
+        timed_out = True
+        signal.setitimer(timer, 0.05)
+        raise _OpenDUnitDeadline
+
+    try:
+        signal.signal(alarm, on_deadline)
+        signal.setitimer(timer, float(timeout_seconds))
+        try:
+            result = call()
+        except _OpenDUnitDeadline:
+            raise InterruptibleOpenDCallError(
+                "opend_low_priority_timeout",
+                "interruptible OpenD unit exceeded its deadline",
+            ) from None
+        if timed_out:
+            raise InterruptibleOpenDCallError(
+                "opend_low_priority_timeout",
+                "interruptible OpenD unit exceeded its deadline",
+            )
+        return result
+    finally:
+        signal.setitimer(timer, 0.0)
+        elapsed = time.monotonic() - started
+        signal.signal(alarm, previous_handler)
+        delay, interval = previous_timer
+        if delay > 0:
+            delay = max(0.000001, delay - elapsed)
+        signal.setitimer(timer, delay, interval)
 
 
 def try_low_priority_opend_call(
@@ -81,8 +164,11 @@ def try_low_priority_opend_call(
 
 
 __all__ = [
+    "INTERRUPTIBLE_OPEND_UNIT_TIMEOUT_SECONDS",
+    "InterruptibleOpenDCallError",
     "LowPriorityOpenDCallDeferred",
     "opend_endpoint_limiter_state_path",
     "rate_limited_opend_call",
+    "run_interruptible_opend_unit",
     "try_low_priority_opend_call",
 ]

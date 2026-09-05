@@ -80,7 +80,10 @@ def _validation_store(
         new_state="awaiting_validation_confirmation",
         receipt_ref="experiments/experiment-1/receipts/research.json",
         receipt_sha256="d" * 64,
-        leader={"variant_id": "challenger_0.002"},
+        leader={
+            "variant_id": "challenger_0.002",
+            "near_return_threshold": 0.002,
+        },
         actor="tester",
         occurred_at_utc="2026-08-30T00:02:00Z",
         payload={"status": "leader"},
@@ -618,7 +621,8 @@ def test_provider_batch_starts_before_one_zero_wait_snapshot_and_completes(
         "artifact_root": tmp_path / "artifacts",
         "opend_limiter_root": tmp_path / "runtime",
         "opend_binding": {"host": "127.0.0.1", "port": 11111},
-        "tick_lock_path": tmp_path / "tick.lock",
+        "tick_markets": ("hk",),
+        "tick_lock_paths": (tmp_path / "tick.lock",),
     }
     seen: list[str] = []
 
@@ -687,7 +691,8 @@ def test_direct_advance_stops_before_started_row_or_gateway(tmp_path: Path, monk
             "artifact_root": tmp_path / "artifacts",
             "opend_limiter_root": tmp_path / "runtime",
             "opend_binding": {"host": "127.0.0.1", "port": 11111},
-            "tick_lock_path": tmp_path / "tick.lock",
+            "tick_markets": ("hk",),
+            "tick_lock_paths": (tmp_path / "tick.lock",),
         },
         store,
         experiment,
@@ -732,7 +737,8 @@ def test_started_batch_binds_artifact_from_audited_prior_source_commit(
             "artifact_root": tmp_path / "artifacts",
             "opend_limiter_root": tmp_path / "runtime",
             "opend_binding": {"host": "127.0.0.1", "port": 11111},
-            "tick_lock_path": tmp_path / "tick.lock",
+            "tick_markets": ("hk",),
+            "tick_lock_paths": (tmp_path / "tick.lock",),
         },
         store,
         experiment,
@@ -811,7 +817,13 @@ def test_tick_busy_has_priority_over_calendar_protection(tmp_path: Path, monkeyp
         "next_systemd_tick_target_utc",
         lambda *_args: pytest.fail("busy Tick must short-circuit calendar calculation"),
     )
-    assert service._tick_guard({"tick_lock_path": tmp_path / "tick.lock"}, "2026-09-01T02:00:00Z") == "tick_busy"
+    assert (
+        service._tick_guard(
+            {"tick_markets": ("hk",), "tick_lock_paths": (tmp_path / "tick.lock",)},
+            "2026-09-01T02:00:00Z",
+        )
+        == "tick_busy"
+    )
 
 
 @pytest.mark.parametrize("minute", [10, 20, 30, 40, 50])
@@ -823,7 +835,7 @@ def test_history_provider_guard_yields_at_each_late_hk_tick(
     monkeypatch.setattr(service, "tick_cron_is_busy", lambda _path: False)
     assert (
         service._provider_guard(
-            {"tick_lock_path": tmp_path / "tick.lock"},
+            {"tick_markets": ("hk",), "tick_lock_paths": (tmp_path / "tick.lock",)},
             f"2026-09-01T08:{minute:02d}:00Z",
         )
         == "tick_protection_window"
@@ -834,7 +846,13 @@ def test_history_provider_guard_allows_first_post_tick_slot(tmp_path: Path, monk
     import src.application.strategy_lab.service as service
 
     monkeypatch.setattr(service, "tick_cron_is_busy", lambda _path: False)
-    assert service._provider_guard({"tick_lock_path": tmp_path / "tick.lock"}, "2026-09-01T09:00:00Z") is None
+    assert (
+        service._provider_guard(
+            {"tick_markets": ("hk",), "tick_lock_paths": (tmp_path / "tick.lock",)},
+            "2026-09-01T09:00:00Z",
+        )
+        is None
+    )
 
 
 def test_history_provider_guard_yields_to_friday_us_tick_on_hk_saturday(
@@ -844,7 +862,10 @@ def test_history_provider_guard_yields_to_friday_us_tick_on_hk_saturday(
 
     monkeypatch.setattr(service, "tick_cron_is_busy", lambda _path: False)
     assert (
-        service._provider_guard({"tick_lock_path": tmp_path / "tick.lock"}, "2026-09-04T17:00:00Z")
+        service._provider_guard(
+            {"tick_markets": ("hk", "us"), "tick_lock_paths": (tmp_path / "hk.lock", tmp_path / "us.lock")},
+            "2026-09-04T17:00:00Z",
+        )
         == "tick_protection_window"
     )
 
@@ -873,7 +894,8 @@ def test_real_tick_lock_blocks_batch_before_store_or_provider(tmp_path: Path, mo
                 "artifact_root": tmp_path / "artifacts",
                 "opend_limiter_root": tmp_path / "runtime",
                 "opend_binding": {"host": "127.0.0.1", "port": 11111},
-                "tick_lock_path": lock_path,
+                "tick_markets": ("hk",),
+                "tick_lock_paths": (lock_path,),
             },
             store,
             experiment,
@@ -944,7 +966,8 @@ def test_tick_runs_while_strategy_lab_provider_is_in_flight(tmp_path: Path, monk
                         "artifact_root": tmp_path / "artifacts",
                         "opend_limiter_root": tmp_path / "runtime",
                         "opend_binding": {"host": "127.0.0.1", "port": 11111},
-                        "tick_lock_path": lock_path,
+                        "tick_markets": ("hk",),
+                        "tick_lock_paths": (lock_path,),
                     },
                     store,
                     experiment,

@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.fee_calc import calc_futu_hk_terminal_fee
+from domain.domain.strategy_lab_evaluation import calculate_csp_economics
 from domain.domain.symbol_identity import OPTION_CODE_RE, resolve_symbol_identity
 from src.application.opend_call_coordinator import (
     LowPriorityOpenDCallDeferred,
@@ -1162,6 +1163,77 @@ def _rate(binding: Mapping[str, Any]) -> Decimal:
     return _decimal(_mapping(fact, "FX fact").get("rate"), "FX rate", positive=True)
 
 
+def _finite_number(value: object, label: str) -> float:
+    if isinstance(value, bool) or value in (None, ""):
+        _fail("research_evidence_invalid", f"{label} is invalid")
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise StrategyLabEvidenceError(
+            "research_evidence_invalid",
+            f"{label} is invalid",
+        ) from exc
+    if not number.is_finite():
+        _fail("research_evidence_invalid", f"{label} is invalid")
+    return float(number)
+
+
+def build_comparison_projection(result: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate one result envelope and keep only generic comparison fields."""
+
+    item = _mapping(result, "single recommendation result")
+    arm = item.get("arm")
+    fill_status = item.get("fill_status")
+    outcome_status = item.get("outcome_status")
+    if (
+        arm not in {"baseline", "challenger"}
+        or item.get("safety_status") != "pass"
+        or fill_status not in {"simulated_fill", "observed_fill", "no_fill"}
+        or (fill_status == "no_fill") != (outcome_status == "not_applicable")
+        or (fill_status != "no_fill" and outcome_status != "available")
+    ):
+        reason = (
+            "comparison_result_not_evaluable"
+            if fill_status == "not_evaluable" or outcome_status in {"pending_outcome", "not_evaluable"}
+            else "comparison_result_invalid"
+        )
+        _fail(reason, "single recommendation result cannot be compared")
+    variant_id = item.get("variant_id")
+    if (arm == "baseline" and variant_id is not None) or (
+        arm == "challenger" and (not isinstance(variant_id, str) or not variant_id)
+    ):
+        _fail("comparison_result_invalid", "result variant identity is invalid")
+    candidate_ref = item.get("candidate_ref")
+    candidate_identity = (
+        candidate_ref
+        if isinstance(candidate_ref, str) and candidate_ref
+        else canonical_sha256(candidate_ref)
+        if isinstance(candidate_ref, Mapping) and candidate_ref
+        else item.get("candidate_id")
+    )
+    if not isinstance(candidate_identity, str) or not candidate_identity:
+        _fail("comparison_result_invalid", "result candidate identity is invalid")
+    return {
+        "recommendation_point_id": _text(
+            item.get("recommendation_point_id"),
+            "recommendation_point_id",
+        ),
+        "trading_day": _text(item.get("trading_day"), "trading_day"),
+        "arm": arm,
+        "variant_id": variant_id,
+        "candidate_identity": candidate_identity,
+        "status": "no_fill" if fill_status == "no_fill" else "available",
+        "annualized_return": _finite_number(
+            item.get("annualized_return"),
+            "annualized_return",
+        ),
+        "economic_pnl_cny": _finite_number(
+            item.get("economic_pnl_cny"),
+            "economic_pnl_cny",
+        ),
+    }
+
+
 def build_single_recommendation_result(
     arm: Mapping[str, Any],
     fill: Mapping[str, Any],
@@ -1304,12 +1376,16 @@ def build_single_recommendation_result(
         )
         expiration = date.fromisoformat(_text(candidate.get("expiration"), "expiration"))
         holding_days = (expiration - fill_time.astimezone(_HK_TZ).date()).days
-        intrinsic = max(strike - close, Decimal("0")) * multiplier
-        capital_cny = (strike * multiplier - opening_net) * opening_fx
-        pnl_cny = opening_net * opening_fx - (intrinsic + terminal_fee) * terminal_fx
-        if holding_days <= 0 or capital_cny <= 0:
-            raise ValueError("result denominator is invalid")
-        annualized = pnl_cny / capital_cny * Decimal(365) / Decimal(holding_days)
+        economics = calculate_csp_economics(
+            opening_net,
+            strike,
+            multiplier,
+            close,
+            opening_fx,
+            terminal_fx,
+            terminal_fee,
+            holding_days,
+        )
     except (KeyError, TypeError, ValueError, StrategyLabEvidenceError, InvalidOperation):
         return {
             **identity,
@@ -1334,13 +1410,16 @@ def build_single_recommendation_result(
         "fill_time": _utc_text(fill_time),
         "outcome_status": "available",
         "outcome_evidence_ref": outcome_evidence_ref,
-        "economic_pnl_cny": round(float(pnl_cny), 6),
-        "annualized_return": round(float(annualized), 12),
-        "return_capital_basis_cny": round(float(capital_cny), 6),
+        "economic_pnl_cny": round(float(economics["economic_pnl_cny"]), 6),
+        "annualized_return": round(float(economics["annualized_return"]), 12),
+        "return_capital_basis_cny": round(
+            float(economics["return_capital_basis_cny"]),
+            6,
+        ),
         "holding_calendar_days": holding_days,
         "reason_codes": [],
         "opening_net_premium": float(opening_net),
-        "terminal_intrinsic_loss": float(intrinsic),
+        "terminal_intrinsic_loss": float(economics["terminal_intrinsic_loss"]),
         "terminal_fee": float(terminal_fee),
         **fill_declaration,
     }
@@ -1351,6 +1430,7 @@ __all__ = [
     "MAX_EVIDENCE_BYTES",
     "StrategyLabEvidenceError",
     "build_hidden_batch_manifest",
+    "build_comparison_projection",
     "build_expiry_close_query",
     "build_single_recommendation_result",
     "build_validation_fill_evidence",

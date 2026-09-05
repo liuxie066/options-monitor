@@ -7,15 +7,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
-from src.application.agent_tool_config import load_runtime_config
 from src.application.agent_tool_contracts import AgentToolError, build_response
-from src.application.opend_fetch_config import resolve_opend_fetch_limits
 from src.application.service_deploy import load_service_profile
 from src.application.strategy_lab.contracts import STRATEGY_LAB_ADVANCE_SERVICE
 from src.application.strategy_lab.readiness import (
     HistoryKReadinessError,
     preview_history_k_readiness,
-    refresh_history_k_readiness,
 )
 from src.application.strategy_lab.service import (
     StrategyLabContextError,
@@ -31,12 +28,9 @@ from src.application.strategy_lab.service import (
     preview_experiment,
     preview_validation,
     read_receipt,
+    refresh_history_k_readiness,
     resolve_strategy_lab_context,
     resolve_strategy_lab_runtime_context,
-)
-from src.infrastructure.futu_gateway import (
-    FutuGatewayError,
-    build_futu_gateway,
 )
 from src.interfaces.cli.strategy_lab_parser import add_strategy_lab_commands
 
@@ -213,29 +207,14 @@ def handle_strategy_lab_command(args: argparse.Namespace) -> dict[str, Any]:
             message="history-K readiness refresh requires confirmed probe hash, actor, and --write",
         )
     try:
-        _config_path, config = load_runtime_config(
-            config_path=context["config_hk"],
-            expected_market="hk",
-        )
-        limit = resolve_opend_fetch_limits(config).history_kline
-        binding = context["opend_binding"]
         receipt = refresh_history_k_readiness(
-            context["artifact_root"],
-            gateway_factory=lambda: build_futu_gateway(
-                host=str(binding["host"]),
-                port=int(binding["port"]),
-                is_option_chain_cache_enabled=False,
-            ),
+            context,
             request=preview["probe_request"],
             confirmed_probe_sha256=args.confirmed_probe_sha256,
             actor=args.actor,
             occurred_at_utc=occurred_at_utc,
-            limiter_root=context["opend_limiter_root"],
-            tick_lock_path=context["tick_lock_path"],
-            window_sec=limit.window_sec,
-            max_calls=limit.max_calls,
         )
-    except (HistoryKReadinessError, FutuGatewayError) as exc:
+    except (HistoryKReadinessError, StrategyLabServiceError) as exc:
         raise AgentToolError(
             code=str(getattr(exc, "reason_code", getattr(exc, "code", "ERROR"))),
             message=str(exc),
