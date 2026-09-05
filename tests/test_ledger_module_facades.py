@@ -83,6 +83,91 @@ PUBLIC_SYMBOLS = {
     },
 }
 
+CURRENT_DECISION_RUNTIME_EXPORTS = {
+    "CURRENT_DECISION_READ_SCHEMA",
+    "CurrentDecisionAccountFence",
+    "CurrentDecisionProjectionError",
+    "CurrentDecisionProjectionFence",
+    "advance_assigned_stock_fact_for_trade_events",
+    "build_current_decision_projection",
+    "capture_current_decision_projection_fence",
+    "capture_trade_event_decision_projection_fence",
+    "current_decision_projection_row",
+    "defer_current_decision_projection",
+    "finalize_current_decision_projection",
+    "read_current_assigned_stock_fact",
+    "read_current_decision_projection",
+    "validate_assigned_stock_fact",
+    "verify_current_decision_projection",
+}
+
+CURRENT_DECISION_EXPORT_OWNERS = {
+    "src.application.ledger.current_decision_common": {
+        "CURRENT_ASSIGNED_STOCK_SCHEMA",
+        "CURRENT_COMBO_GROUP_FACT_SCHEMA",
+        "CURRENT_COMBO_SCHEMA",
+        "CURRENT_DECISION_MIGRATION_INVENTORY_SCHEMA",
+        "CURRENT_DECISION_PROJECTION_SCHEMA",
+        "CURRENT_DECISION_READ_SCHEMA",
+        "CURRENT_LIFECYCLE_QUALITY_SCHEMA",
+        "LIFECYCLE_CASE_DECISION_FACT_SCHEMA",
+        "CurrentDecisionAccountFence",
+        "CurrentDecisionProjectionError",
+        "CurrentDecisionProjectionFence",
+    },
+    "src.application.ledger.current_decision_assigned_stock": {
+        "advance_assigned_stock_fact_for_trade_events",
+        "compact_assigned_stock_view",
+        "empty_assigned_stock_fact",
+        "update_assigned_stock_fact",
+        "validate_assigned_stock_fact",
+    },
+    "src.application.ledger.current_decision_lifecycle": {
+        "advance_lifecycle_case_decision_fact",
+        "build_initial_lifecycle_case_decision_fact",
+        "build_lifecycle_case_decision_fact",
+        "validate_lifecycle_case_decision_fact",
+    },
+    "src.application.ledger.current_decision_combo": {
+        "build_current_combo_facts",
+        "validate_current_combo_facts",
+    },
+    "src.application.ledger.current_decision_quality": {
+        "build_lifecycle_quality_fact",
+        "validate_lifecycle_quality_fact",
+    },
+    "src.application.ledger.current_decision_payload": {
+        "build_current_decision_projection",
+        "build_current_decision_projection_payload",
+        "current_decision_projection_row",
+        "encode_current_decision_projection",
+        "encode_lifecycle_case_decision_fact",
+        "read_lifecycle_case_decision_fact",
+        "validate_current_decision_projection_payload",
+        "write_lifecycle_case_decision_fact",
+    },
+    "src.application.ledger.current_decision_oracle": {
+        "preview_current_decision_projection_oracle",
+    },
+    "src.application.ledger.current_decision_migration": {
+        "apply_current_decision_projection_migration",
+        "build_current_decision_projection_migration_inventory",
+        "current_decision_projection_migration_status",
+        "verify_current_decision_projection_migration",
+    },
+    "src.application.ledger.current_decision_runtime": {
+        "capture_current_decision_projection_fence",
+        "capture_trade_event_decision_projection_fence",
+        "defer_current_decision_projection",
+        "finalize_current_decision_projection",
+        "read_current_assigned_stock_fact",
+        "read_current_decision_projection",
+        "verify_current_decision_projection",
+    },
+}
+
+CURRENT_DECISION_FACADE_EXPORTS = set().union(*CURRENT_DECISION_EXPORT_OWNERS.values())
+
 LEDGER_ROOT = Path(__file__).resolve().parents[1] / "src/application/ledger"
 
 
@@ -92,10 +177,27 @@ def test_ledger_facades_keep_existing_production_imports() -> None:
         assert not (names - set(vars(module))), module_name
 
 
-def test_current_decision_facade_binds_every_declared_export() -> None:
-    module = import_module("src.application.ledger.current_decision_projection")
+def test_current_decision_modules_keep_export_contracts() -> None:
+    runtime_name = "src.application.ledger.current_decision_runtime"
+    facade_name = "src.application.ledger.current_decision_projection"
+    runtime = import_module(runtime_name)
+    facade = import_module(facade_name)
 
-    assert set(module.__all__) <= set(vars(module))
+    assert set(runtime.__all__) == CURRENT_DECISION_RUNTIME_EXPORTS
+    assert set(facade.__all__) == CURRENT_DECISION_FACADE_EXPORTS
+
+    for module_name, expected in (
+        (runtime_name, CURRENT_DECISION_RUNTIME_EXPORTS),
+        (facade_name, CURRENT_DECISION_FACADE_EXPORTS),
+    ):
+        namespace: dict[str, object] = {}
+        exec(f"from {module_name} import *", namespace)
+        assert set(namespace) - {"__builtins__"} == expected
+
+    for owner_name, names in CURRENT_DECISION_EXPORT_OWNERS.items():
+        owner = import_module(owner_name)
+        for name in names:
+            assert getattr(facade, name) is getattr(owner, name)
 
 
 def test_repository_facade_keeps_core_aggregate_reads(tmp_path) -> None:
