@@ -33,6 +33,19 @@ def _profile(tmp_path: Path) -> dict[str, object]:
     }
 
 
+def _futu_config(*, market: str = "hk", host: str = "127.0.0.1", port: int = 11111) -> dict[str, object]:
+    return {
+        "_generated": {"market": market},
+        "accounts": ["lx"],
+        "symbols": [
+            {
+                "symbol": "0700.HK" if market == "hk" else "NVDA",
+                "fetch": {"source": "opend", "host": host, "port": port},
+            }
+        ],
+    }
+
+
 def test_account_fee_plan_owner_keeps_strict_auditable_facts(tmp_path: Path) -> None:
     path = tmp_path / "fee-plan.json"
     payload = {
@@ -68,7 +81,7 @@ def test_strategy_lab_context_owner_resolves_only_controlled_profile_paths(
     monkeypatch.setattr(
         service,
         "load_runtime_config",
-        lambda **_kwargs: (Path(profile["config_paths"]["hk"]), {"accounts": ["lx"]}),
+        lambda **_kwargs: (Path(profile["config_paths"]["hk"]), _futu_config()),
     )
     monkeypatch.setattr(
         service,
@@ -89,7 +102,8 @@ def test_strategy_lab_context_owner_resolves_only_controlled_profile_paths(
     assert (context["market"], context["account"]) == ("hk", "lx")
     assert context["opend_binding"] == {"host": "127.0.0.1", "port": 11111}
     assert context["opend_limiter_root"] == tmp_path / "runtime"
-    assert context["tick_lock_path"] == tmp_path / "runtime/locks/tick-hk.lock"
+    assert context["tick_markets"] == ("hk",)
+    assert context["tick_lock_paths"] == (tmp_path / "runtime/locks/tick-hk.lock",)
     assert ledger_calls[0]["runtime_root"] == tmp_path / "runtime"
 
     with pytest.raises(StrategyLabContextError, match="absolute path"):
@@ -119,10 +133,7 @@ def test_strategy_lab_context_binds_ledger_to_profile_runtime_root(
         "load_runtime_config",
         lambda **_kwargs: (
             config_path,
-            {
-                "accounts": ["lx"],
-                "portfolio": {"data_config": str(data_config)},
-            },
+            {**_futu_config(), "portfolio": {"data_config": str(data_config)}},
         ),
     )
     monkeypatch.setattr(
@@ -133,9 +144,7 @@ def test_strategy_lab_context_binds_ledger_to_profile_runtime_root(
 
     context = resolve_strategy_lab_context(profile)
 
-    assert context["ledger_path"] == (
-        profile_runtime / "output_shared/state/option_positions.sqlite3"
-    ).resolve()
+    assert context["ledger_path"] == (profile_runtime / "output_shared/state/option_positions.sqlite3").resolve()
 
 
 @pytest.mark.parametrize(
@@ -178,12 +187,84 @@ def test_strategy_lab_runtime_context_uses_ordinary_profile(tmp_path: Path) -> N
 
     context = resolve_strategy_lab_runtime_context(profile, market="hk")
 
-    assert context["artifact_root"] == (
-        tmp_path / "runtime/output_shared/research/strategy_lab"
-    )
+    assert context["artifact_root"] == (tmp_path / "runtime/output_shared/research/strategy_lab")
     assert context["store_path"] == context["artifact_root"] / "experiments.sqlite3"
     assert context["config_path"] == tmp_path / "runtime/config.hk.json"
     assert not context["config_path"].exists()
+
+
+def test_strategy_lab_context_binds_every_market_sharing_the_opend_endpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.application.strategy_lab.service as service
+
+    profile = _profile(tmp_path)
+    profile["markets"] = ["hk", "us"]
+    profile["config_paths"] = {
+        "hk": str(tmp_path / "runtime/config.hk.json"),
+        "us": str(tmp_path / "runtime/config.us.json"),
+    }
+    monkeypatch.setattr(
+        service,
+        "load_runtime_config",
+        lambda *, expected_market, **_kwargs: (
+            Path(profile["config_paths"][expected_market]),
+            _futu_config(market=expected_market),
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "infer_futu_portfolio_settings",
+        lambda _config, *, account: {"host": "127.0.0.1", "port": 11111},
+    )
+
+    context = resolve_strategy_lab_context(profile)
+
+    assert context["tick_markets"] == ("hk", "us")
+    assert context["tick_lock_paths"] == (
+        tmp_path / "runtime/locks/tick-hk.lock",
+        tmp_path / "runtime/locks/tick-us.lock",
+    )
+
+
+@pytest.mark.parametrize(
+    ("us_host", "portfolio_host"),
+    [("other", "127.0.0.1"), ("127.0.0.1", "portfolio")],
+)
+def test_strategy_lab_context_rejects_split_or_mismatched_opend_routes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    us_host: str,
+    portfolio_host: str,
+) -> None:
+    import src.application.strategy_lab.service as service
+
+    profile = _profile(tmp_path)
+    profile["markets"] = ["hk", "us"]
+    profile["config_paths"] = {
+        "hk": str(tmp_path / "runtime/config.hk.json"),
+        "us": str(tmp_path / "runtime/config.us.json"),
+    }
+    monkeypatch.setattr(
+        service,
+        "load_runtime_config",
+        lambda *, expected_market, **_kwargs: (
+            Path(profile["config_paths"][expected_market]),
+            _futu_config(
+                market=expected_market,
+                host=us_host if expected_market == "us" else "127.0.0.1",
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "infer_futu_portfolio_settings",
+        lambda _config, *, account: {"host": portfolio_host, "port": 11111},
+    )
+
+    with pytest.raises(StrategyLabContextError):
+        resolve_strategy_lab_context(profile)
 
 
 def test_research_corpus_calendar_owner_requires_write_and_closes_gateway(

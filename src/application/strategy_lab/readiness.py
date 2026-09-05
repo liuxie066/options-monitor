@@ -12,15 +12,50 @@ from typing import Any, Callable, NoReturn
 from zoneinfo import ZoneInfo
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
+from domain.domain.option_lifecycle import expiration_observation_start_ms
+from domain.domain.performance.models import select_fx_rate
 from domain.domain.symbol_identity import OPTION_CODE_RE, resolve_symbol_identity
 from src.application.account_config import normalize_account_label
 from src.application.candidate_snapshot_contract import utc_timestamp
 from src.application.opend_call_coordinator import (
+    INTERRUPTIBLE_OPEND_UNIT_TIMEOUT_SECONDS,
+    InterruptibleOpenDCallError,
     LowPriorityOpenDCallDeferred,
+    run_interruptible_opend_unit,
     try_low_priority_opend_call,
 )
+from src.application.performance.account_fee_plan import load_account_fee_plan_receipt
+from src.application.research.formal_corpus import (
+    FormalCorpusError,
+    load_formal_expectation,
+    load_formal_point,
+    read_expectation_bound_market_calendar_snapshot,
+    read_market_calendar_binding,
+)
+from src.application.recommendation_point import build_recommendation_point_id
+from src.application.scan_scheduler import (
+    scheduled_scan_targets_for_date,
+    scheduled_session_slots_for_date,
+)
 from src.application.shadow_replay.common import render_json_text
-from src.application.tick_cron import tick_cron_is_busy
+from src.application.strategy_lab.contracts import (
+    ACCOUNT,
+    HIDDEN_SNAPSHOT_BATCH_CEILING,
+    RESEARCH_SESSIONS,
+    TICK_PROTECTION_SECONDS,
+    VALIDATION_SESSIONS,
+    VALIDATION_WAKE_TOLERANCE_SECONDS,
+    build_strategy_lab_timer_binding,
+)
+from src.application.strategy_lab.recipe import (
+    StrategyLabRecipeError,
+    build_concentration_arms,
+    project_validation_arms,
+    validate_recipe_leader,
+)
+from src.infrastructure.performance_evidence_sqlite import (
+    PerformanceEvidenceSQLiteRepository,
+)
 from src.infrastructure.private_storage import (
     atomic_write_private_text,
     exclusive_private_file_lock,
@@ -272,7 +307,13 @@ def _quota_observation(value: object, sample_quota_code: str) -> dict[str, objec
     used = value.get("used_quota")
     remaining = value.get("remain_quota")
     details = value.get("detail_list")
-    if type(used) is not int or used < 0 or type(remaining) is not int or remaining < 0 or not isinstance(details, list):
+    if (
+        type(used) is not int
+        or used < 0
+        or type(remaining) is not int
+        or remaining < 0
+        or not isinstance(details, list)
+    ):
         _fail("history_k_probe_invalid_response", "history K-line quota facts are invalid")
     if any(not isinstance(item, Mapping) or not str(item.get("code") or "").strip() for item in details):
         _fail("history_k_probe_invalid_response", "history K-line quota details are invalid")
@@ -420,7 +461,9 @@ def _read_receipt_path(
             or _binding(payload.get("opend_binding")) != _binding(expected_opend_binding)
         ):
             raise ValueError("receipt identity changed")
-        expires = datetime.fromisoformat(_timestamp(payload.get("expires_at_utc"), "expires_at_utc").replace("Z", "+00:00"))
+        expires = datetime.fromisoformat(
+            _timestamp(payload.get("expires_at_utc"), "expires_at_utc").replace("Z", "+00:00")
+        )
         current = datetime.fromisoformat(_timestamp(as_of_utc, "as_of_utc").replace("Z", "+00:00"))
         if expires <= current:
             _fail("history_k_readiness_expired", "history-K readiness receipt expired")
@@ -469,7 +512,7 @@ def refresh_history_k_readiness(
     actor: object,
     occurred_at_utc: object,
     limiter_root: str | Path,
-    tick_lock_path: str | Path,
+    provider_guard: Callable[[], str | None],
     window_sec: float,
     max_calls: int,
     monotonic: Callable[[], float] = time.monotonic,
@@ -504,28 +547,42 @@ def refresh_history_k_readiness(
                 expected_opend_binding=probe_request["opend_binding"],
                 as_of_utc=occurred_text,
             )
-        local = occurred.astimezone(_HK_TZ)
-        if local.weekday() < 5 and local.time() < HISTORY_K_POC_NOT_BEFORE_HK:
-            _fail("tick_protection_window", "history-K PoC is allowed only after the HK Tick window")
-        if tick_cron_is_busy(tick_lock_path):
-            _fail("tick_busy", "HK Tick is running")
-        provider_gateway = gateway
-        owns_gateway = False
+        blocker = provider_guard()
+        if blocker is not None:
+            _fail(blocker, "Strategy Lab provider guard blocked history-K readiness")
+
+        def probe_with_owned_gateway() -> dict[str, object]:
+            assert gateway_factory is not None
+            provider_gateway = gateway_factory()
+            try:
+                return _probe_provider(
+                    gateway=provider_gateway,
+                    probe_request=probe_request,
+                    limiter_root=private_path(limiter_root),
+                    window_sec=float(window_sec),
+                    max_calls=max_calls,
+                    monotonic=monotonic,
+                )
+            finally:
+                provider_gateway.close()
+
         try:
             if gateway_factory is not None:
-                provider_gateway = gateway_factory()
-                owns_gateway = True
-            observation = _probe_provider(
-                gateway=provider_gateway,
-                probe_request=probe_request,
-                limiter_root=private_path(limiter_root),
-                window_sec=float(window_sec),
-                max_calls=max_calls,
-                monotonic=monotonic,
-            )
-        finally:
-            if owns_gateway and provider_gateway is not None:
-                provider_gateway.close()
+                observation = run_interruptible_opend_unit(
+                    probe_with_owned_gateway,
+                    timeout_seconds=INTERRUPTIBLE_OPEND_UNIT_TIMEOUT_SECONDS,
+                )
+            else:
+                observation = _probe_provider(
+                    gateway=gateway,
+                    probe_request=probe_request,
+                    limiter_root=private_path(limiter_root),
+                    window_sec=float(window_sec),
+                    max_calls=max_calls,
+                    monotonic=monotonic,
+                )
+        except InterruptibleOpenDCallError as exc:
+            _fail(exc.reason_code, str(exc))
         payload: dict[str, object] = {
             "schema": HISTORY_K_READINESS_SCHEMA,
             "probe_sha256": probe_hash,
@@ -537,7 +594,10 @@ def refresh_history_k_readiness(
             "provider_observation": observation,
             "actor": actor_text,
             "observed_at_utc": occurred_text,
-            "expires_at_utc": (occurred + HISTORY_K_READINESS_TTL).astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "expires_at_utc": (occurred + HISTORY_K_READINESS_TTL)
+            .astimezone(timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z"),
         }
         payload["content_sha256"] = canonical_sha256(payload)
         content = render_json_text(payload)
@@ -552,6 +612,601 @@ def refresh_history_k_readiness(
         )
 
 
+def _blocked(reason_code: str, message: str, **facts: Any) -> dict[str, Any]:
+    return {
+        "status": "blocked",
+        "blockers": [{"reason_code": reason_code, "message": message}],
+        **facts,
+    }
+
+
+def _expiration_is_mature(expiration: object, cutoff_ms: int) -> bool:
+    observed = expiration_observation_start_ms(str(expiration or ""), "HK")
+    return observed is not None and observed < cutoff_ms
+
+
+def _after_cutoff(value: object, cutoff: datetime) -> bool:
+    if not isinstance(value, str):
+        return True
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    return parsed.tzinfo is None or parsed.astimezone(timezone.utc) > cutoff
+
+
+def _calendar_session(calendar: Mapping[str, Any], trading_date: str) -> dict[str, Any] | None:
+    sessions = calendar.get("trading_sessions")
+    if not isinstance(sessions, list):
+        return None
+    found = [dict(item) for item in sessions if isinstance(item, Mapping) and item.get("trading_date") == trading_date]
+    return found[0] if len(found) == 1 else None
+
+
+def _utc_text(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _slot_breaks(slots: list[datetime]) -> list[dict[str, str]]:
+    return [
+        {"start_utc": _utc_text(previous + timedelta(minutes=1)), "end_utc": _utc_text(current)}
+        for previous, current in zip(slots, slots[1:])
+        if current - previous > timedelta(minutes=1)
+    ]
+
+
+def build_validation_plan(
+    context: Mapping[str, Any],
+    experiment: Mapping[str, Any],
+    research_receipt: Mapping[str, Any],
+    research_confirmation: Mapping[str, Any],
+    *,
+    requested_start: str,
+    occurred_at_utc: str,
+    schedule: Mapping[str, Any],
+    account_run_config_sha256: str,
+    provider_source: Mapping[str, Any],
+    timer_binding: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the exact provider-free 10-session validation plan."""
+
+    try:
+        start = date.fromisoformat(requested_start)
+        occurred = datetime.fromisoformat(occurred_at_utc.replace("Z", "+00:00"))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise StrategyLabRecipeError(
+            "validation_plan_invalid", "validation start or evaluation time is invalid"
+        ) from exc
+    if start.isoformat() != requested_start or occurred.tzinfo is None:
+        raise StrategyLabRecipeError("validation_plan_invalid", "validation start or evaluation time is not canonical")
+    spec = experiment.get("spec")
+    leader = validate_recipe_leader(experiment.get("leader"))
+    conclusion = research_receipt.get("conclusion")
+    if (
+        not isinstance(spec, Mapping)
+        or research_receipt.get("experiment_id") != experiment.get("experiment_id")
+        or research_receipt.get("spec_sha256") != experiment.get("spec_sha256")
+        or not isinstance(conclusion, Mapping)
+        or conclusion.get("status") != "leader"
+        or conclusion.get("leader") != leader
+        or canonical_sha256(experiment.get("behavior_manifest")) != experiment.get("evaluator_behavior_sha256")
+        or not isinstance(account_run_config_sha256, str)
+        or len(account_run_config_sha256) != 64
+    ):
+        raise StrategyLabRecipeError("validation_plan_invalid", "research or evaluator binding changed")
+    if schedule.get("timezone") != "Asia/Hong_Kong" or not bool(schedule.get("enabled", True)):
+        raise StrategyLabRecipeError("validation_plan_invalid", "HK schedule is unavailable")
+    try:
+        calendar = read_market_calendar_binding(context["artifact_root"], market="HK")
+    except Exception as exc:
+        raise StrategyLabRecipeError("market_calendar_binding_unavailable", str(exc)) from exc
+    trading_dates = calendar.get("trading_dates")
+    if not isinstance(trading_dates, list) or requested_start not in trading_dates:
+        raise StrategyLabRecipeError("validation_plan_invalid", "requested start is not a frozen trading session")
+    offset = trading_dates.index(requested_start)
+    selected_dates = trading_dates[offset : offset + VALIDATION_SESSIONS]
+    if len(selected_dates) != VALIDATION_SESSIONS:
+        raise StrategyLabRecipeError("validation_plan_invalid", "market calendar does not cover 10 validation sessions")
+    sessions: list[dict[str, Any]] = []
+    try:
+        for trading_date in selected_dates:
+            session = _calendar_session(calendar, trading_date)
+            if session is None:
+                raise ValueError(f"calendar session is missing: {trading_date}")
+            trade_date_type = str(session["trade_date_type"])
+            targets = scheduled_scan_targets_for_date(dict(schedule), trading_date, trade_date_type=trade_date_type)
+            slots = scheduled_session_slots_for_date(dict(schedule), trading_date, trade_date_type=trade_date_type)
+            if not targets or not slots:
+                raise ValueError(f"validation session is empty: {trading_date}")
+            target_values = [_utc_text(value) for value in targets]
+            sessions.append(
+                {
+                    "trading_date": trading_date,
+                    "session": session,
+                    "scheduled_scan_targets_utc": target_values,
+                    "expected_recommendation_point_ids": [
+                        build_recommendation_point_id("HK", ACCOUNT, value) for value in target_values
+                    ],
+                    "minute_grid_utc": [_utc_text(value) for value in slots],
+                    "breaks_utc": _slot_breaks(slots),
+                    "session_endpoint_utc": _utc_text(slots[-1] + timedelta(minutes=1)),
+                }
+            )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise StrategyLabRecipeError("validation_plan_invalid", str(exc)) from exc
+    first_target = datetime.fromisoformat(sessions[0]["scheduled_scan_targets_utc"][0].replace("Z", "+00:00"))
+    if occurred.astimezone(timezone.utc) >= first_target:
+        raise StrategyLabRecipeError("validation_preview_blocked", "the first validation target has already begun")
+    timer = dict(timer_binding)
+    provider = dict(provider_source)
+    provider_authority = {key: provider.get(key) for key in ("provider", "endpoint", "opend_binding")}
+    if (
+        timer != build_strategy_lab_timer_binding()
+        or set(provider)
+        != {
+            "provider",
+            "endpoint",
+            "opend_binding",
+            "source_authority_sha256",
+        }
+        or provider_authority["provider"] != "futu_opend"
+        or provider_authority["endpoint"] != "market_snapshot"
+        or provider_authority["opend_binding"] != context.get("opend_binding")
+        or provider.get("source_authority_sha256") != canonical_sha256(provider_authority)
+        or bool(set(account_run_config_sha256) - set("0123456789abcdef"))
+    ):
+        raise StrategyLabRecipeError("validation_plan_invalid", "validation runtime binding is invalid")
+    schedule_copy = dict(schedule)
+    return {
+        "experiment_id": experiment["experiment_id"],
+        "research_receipt": {
+            "receipt_ref": experiment["research_receipt_ref"],
+            "receipt_sha256": experiment["research_receipt_sha256"],
+        },
+        "research_confirmation": dict(research_confirmation),
+        "leader": leader,
+        "recipe": spec.get("recipe"),
+        "scope": spec.get("scope"),
+        "requested_start": requested_start,
+        "selected_trading_dates": selected_dates,
+        "market_calendar": {
+            "market_calendar_version": calendar["market_calendar_version"],
+            "snapshot_ref": calendar["snapshot_ref"],
+            "snapshot_content_sha256": calendar["snapshot_content_sha256"],
+            "snapshot_file_sha256": calendar["snapshot_file_sha256"],
+            "sessions": sessions,
+        },
+        "schedule": {
+            "config": schedule_copy,
+            "schedule_config_sha256": canonical_sha256(schedule_copy),
+        },
+        "account_run_config_sha256": account_run_config_sha256,
+        "provider_source": provider,
+        "timer_binding": timer,
+        "timer_binding_sha256": canonical_sha256(timer),
+        "behavior_manifest": experiment["behavior_manifest"],
+        "evaluator_behavior_sha256": experiment["evaluator_behavior_sha256"],
+        "source_commit_sha": experiment["source_commit_sha"],
+        "hidden_snapshot_batch_ceiling": HIDDEN_SNAPSHOT_BATCH_CEILING,
+        "validation_wake_tolerance_seconds": VALIDATION_WAKE_TOLERANCE_SECONDS,
+        "tick_protection_seconds": TICK_PROTECTION_SECONDS,
+    }
+
+
+def _load_window_day(
+    context: Mapping[str, Any],
+    trading_date: str,
+    cutoff: datetime,
+    cutoff_ms: int,
+    calendar: Mapping[str, Any],
+    *,
+    require_mature_outcomes: bool = True,
+) -> tuple[dict[str, Any] | None, str | None]:
+    runtime_root = context["runtime_root"]
+    try:
+        expectation = load_formal_expectation(
+            runtime_root,
+            market="HK",
+            account=ACCOUNT,
+            trading_date=trading_date,
+        )
+    except FormalCorpusError as exc:
+        return None, exc.reason_code
+    if expectation.get("status") != "available":
+        return None, str(expectation.get("reason_code") or "formal_expectation_missing")
+    expectation_payload = expectation["expectation"]
+    if _after_cutoff(expectation_payload.get("sealed_at_utc"), cutoff):
+        return None, "research_point_post_cutoff"
+    try:
+        bound_calendar = read_expectation_bound_market_calendar_snapshot(
+            context["artifact_root"],
+            market="HK",
+            market_calendar_version=expectation_payload["market_calendar_version"],
+            market_calendar_sha256=expectation_payload["market_calendar_sha256"],
+        )
+    except (FormalCorpusError, KeyError) as exc:
+        return None, str(getattr(exc, "reason_code", "market_calendar_binding_unavailable"))
+    bound_session = _calendar_session(bound_calendar, trading_date)
+    current_session = _calendar_session(calendar, trading_date)
+    if bound_session is None or current_session is None:
+        return None, "market_calendar_binding_changed"
+    if bound_session["trade_date_type"] != current_session["trade_date_type"]:
+        return None, "market_calendar_session_changed"
+    targets = expectation_payload["scheduled_scan_targets_market"]
+    expected = expectation_payload["expected_recommendation_point_ids"]
+    points: list[dict[str, Any]] = []
+    for target, point_id in zip(targets, expected, strict=True):
+        if _after_cutoff(target, cutoff):
+            return None, "research_point_post_cutoff"
+        try:
+            loaded = load_formal_point(
+                runtime_root,
+                market="HK",
+                account=ACCOUNT,
+                trading_date=trading_date,
+                recommendation_point_id=point_id,
+            )
+        except FormalCorpusError as exc:
+            return None, exc.reason_code
+        if loaded.get("status") != "available":
+            return None, str(loaded.get("reason_code") or "formal_point_evidence_missing")
+        point = loaded["point"]
+        recommendation = point["recommendation_point"]
+        opening = point["opening_snapshot"]
+        coherence = recommendation["formal_point_time_coherence"]
+        authoritative_times = (
+            point["captured_at_utc"],
+            point["source_binding"]["scheduled_scan_target_market"],
+            recommendation["scheduled_scan_target_market"],
+            recommendation["decision_at_utc"],
+            opening["sealed_at_utc"],
+            coherence["maximum_observed_at_utc"],
+        )
+        if any(_after_cutoff(value, cutoff) for value in authoritative_times):
+            return None, "research_point_post_cutoff"
+        try:
+            arms = build_concentration_arms(
+                point,
+                {
+                    "formal_point_ref": loaded["artifact_ref"],
+                    "formal_point_file_sha256": loaded["artifact_file_sha256"],
+                },
+            )
+        except StrategyLabRecipeError as exc:
+            return None, exc.reason_code
+        if require_mature_outcomes and any(
+            not _expiration_is_mature(arm["candidate"].get("expiration"), cutoff_ms) for arm in arms["arms"]
+        ):
+            return None, "research_outcome_immature"
+        points.append(arms)
+    return (
+        {
+            "trading_date": trading_date,
+            "expectation_ref": expectation["artifact_ref"],
+            "expectation_content_sha256": expectation["artifact_content_sha256"],
+            "expectation_file_sha256": expectation["artifact_file_sha256"],
+            "market_calendar_binding": {
+                "market_calendar_version": bound_calendar["market_calendar_version"],
+                "snapshot_ref": bound_calendar["snapshot_ref"],
+                "snapshot_content_sha256": bound_calendar["snapshot_content_sha256"],
+                "snapshot_file_sha256": bound_calendar["snapshot_file_sha256"],
+                "session": bound_session,
+            },
+            "points": points,
+        },
+        None,
+    )
+
+
+def select_research_window(
+    context: Mapping[str, Any],
+    maturity_cutoff_utc: str,
+) -> dict[str, Any]:
+    try:
+        cutoff = datetime.fromisoformat(maturity_cutoff_utc.replace("Z", "+00:00")).astimezone(timezone.utc)
+        calendar = read_market_calendar_binding(context["artifact_root"], market="HK")
+    except Exception as exc:
+        return _blocked("market_calendar_binding_unavailable", str(exc), sessions=[])
+    cutoff_ms = int(cutoff.timestamp() * 1000)
+    cutoff_date = cutoff.astimezone(_HK_TZ).date().isoformat()
+    dates = [value for value in calendar["trading_dates"] if value <= cutoff_date]
+    if len(dates) < RESEARCH_SESSIONS:
+        return _blocked("research_corpus_warming", "fewer than 20 trading sessions", sessions=[])
+    skipped_newer_suffix = 0
+    skipped_suffix_reason = "research_outcome_immature"
+    for end in range(len(dates) - 1, RESEARCH_SESSIONS - 2, -1):
+        selected_dates = dates[end - RESEARCH_SESSIONS + 1 : end + 1]
+        sessions: list[dict[str, Any]] = []
+        invalid: list[tuple[int, str]] = []
+        for index, trading_date in enumerate(selected_dates):
+            day, reason = _load_window_day(
+                context,
+                trading_date,
+                cutoff,
+                cutoff_ms,
+                calendar,
+            )
+            if day is not None:
+                sessions.append(day)
+            else:
+                invalid.append((index, reason or "research_window_coverage_missing"))
+        if invalid:
+            first_invalid = invalid[0][0]
+            if [index for index, _reason in invalid] == list(range(first_invalid, RESEARCH_SESSIONS)) and all(
+                reason in {"research_outcome_immature", "research_point_post_cutoff"} for _index, reason in invalid
+            ):
+                skipped_newer_suffix += 1
+                if any(reason == "research_point_post_cutoff" for _index, reason in invalid):
+                    skipped_suffix_reason = "research_point_post_cutoff"
+                continue
+            index, reason = invalid[0]
+            return _blocked(
+                reason,
+                f"research session is incomplete: {selected_dates[index]}",
+                sessions=sessions,
+                selected_trading_dates=selected_dates,
+            )
+        return {
+            "status": "available",
+            "blockers": [],
+            "selected_trading_dates": selected_dates,
+            "ignored_immature_window_count": skipped_newer_suffix,
+            "market_calendar": {
+                "market_calendar_version": calendar["market_calendar_version"],
+                "snapshot_ref": calendar["snapshot_ref"],
+                "snapshot_content_sha256": calendar["snapshot_content_sha256"],
+                "snapshot_file_sha256": calendar["snapshot_file_sha256"],
+            },
+            "sessions": sessions,
+        }
+    return _blocked(
+        skipped_suffix_reason,
+        "no mature 20-session research window is available",
+        sessions=[],
+    )
+
+
+def select_engineering_canary_window(
+    context: Mapping[str, Any],
+    observed_at_utc: str,
+) -> dict[str, Any]:
+    try:
+        cutoff = datetime.fromisoformat(observed_at_utc.replace("Z", "+00:00")).astimezone(timezone.utc)
+        calendar = read_market_calendar_binding(context["artifact_root"], market="HK")
+    except Exception as exc:
+        return _blocked("market_calendar_binding_unavailable", str(exc), sessions=[])
+    cutoff_ms = int(cutoff.timestamp() * 1000)
+    cutoff_date = cutoff.astimezone(_HK_TZ).date().isoformat()
+    if not calendar["coverage_start"] <= cutoff_date <= calendar["coverage_end"]:
+        return _blocked(
+            "market_calendar_binding_unavailable",
+            "HK observation date is outside calendar coverage",
+            sessions=[],
+        )
+    dates = [value for value in calendar["trading_dates"] if value <= cutoff_date]
+    if len(dates) < 2:
+        return _blocked("research_corpus_warming", "fewer than 2 trading sessions", sessions=[])
+    selected_dates = dates[-2:]
+    sessions: list[dict[str, Any]] = []
+    for trading_date in selected_dates:
+        day, reason = _load_window_day(
+            context,
+            trading_date,
+            cutoff,
+            cutoff_ms,
+            calendar,
+            require_mature_outcomes=False,
+        )
+        if day is None:
+            return _blocked(
+                reason or "research_window_coverage_missing",
+                f"engineering canary session is incomplete: {trading_date}",
+                sessions=sessions,
+                selected_trading_dates=selected_dates,
+            )
+        sessions.append(day)
+    return {
+        "status": "available",
+        "blockers": [],
+        "selected_trading_dates": selected_dates,
+        "sessions": sessions,
+    }
+
+
+def _all_arms(window: Mapping[str, Any]) -> list[dict[str, Any]]:
+    return [
+        arm
+        for session in window.get("sessions", [])
+        for point in session.get("points", [])
+        for arm in point.get("arms", [])
+    ]
+
+
+def _terminal_fx_bindings(
+    context: Mapping[str, Any],
+    arms: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    bundle = PerformanceEvidenceSQLiteRepository(context["ledger_path"]).read_all()
+    if bundle.schema_state != "initialized_v1":
+        return [], [{"reason_code": "terminal_fx_unavailable", "message": bundle.schema_state}]
+    bindings: list[dict[str, Any]] = []
+    blockers: list[dict[str, str]] = []
+    identities = sorted({(str(arm["candidate"]["expiration"]), str(arm["candidate"]["currency"])) for arm in arms})
+    for expiration, currency in identities:
+        observation_ms = expiration_observation_start_ms(expiration, "HK")
+        if observation_ms is None:
+            blockers.append({"reason_code": "terminal_fx_unavailable", "message": f"invalid expiry: {expiration}"})
+            continue
+        selection = select_fx_rate(
+            bundle.fx_rates,
+            base_currency=currency,
+            quote_currency="CNY",
+            at_ms=observation_ms,
+        )
+        if selection.status != "selected" or selection.fact is None:
+            blockers.append(
+                {
+                    "reason_code": "terminal_fx_unavailable",
+                    "message": f"{currency} FX is {selection.status} at {expiration}",
+                }
+            )
+            continue
+        fact = selection.fact
+        payload = fact.normalized_payload(include_fact_id=True)
+        bindings.append(
+            {
+                "expiration": expiration,
+                "currency": currency,
+                "observation_start_ms": observation_ms,
+                "fact_ref": {"kind": "fx_rate", "fact_id": fact.fact_id},
+                "fact_sha256": canonical_sha256(payload),
+                "fact": payload,
+            }
+        )
+    return bindings, blockers
+
+
+def resolve_terminal_fx_binding(
+    context: Mapping[str, Any], *, expiration: str, currency: str
+) -> tuple[dict[str, Any] | None, dict[str, str] | None]:
+    """Resolve one expiry-date FX fact from the existing evidence owner."""
+
+    bindings, blockers = _terminal_fx_bindings(
+        context,
+        [{"candidate": {"expiration": expiration, "currency": currency}}],
+    )
+    return (bindings[0], None) if bindings else (None, blockers[0])
+
+
+def _history_k_authority(
+    context: Mapping[str, Any],
+    arms: list[dict[str, Any]],
+    *,
+    maturity_cutoff_utc: str,
+    occurred_at_utc: str,
+) -> tuple[dict[str, Any] | None, list[dict[str, str]]]:
+    tuples: set[tuple[str, str, str]] = set()
+    for arm in arms:
+        candidate = arm["candidate"]
+        contract = str(candidate.get("contract_symbol") or "").upper()
+        identity = resolve_symbol_identity(contract)
+        sample_date = str(candidate.get("sample_trading_date") or arm.get("trading_date") or "")
+        if identity is None or identity.market != "HK" or not sample_date:
+            return None, [{"reason_code": "history_k_projection_incomplete", "message": contract or "missing contract"}]
+        tuples.add((identity.futu_code, contract, sample_date))
+    ordered = sorted(tuples)
+    if not ordered:
+        return None, [{"reason_code": "history_k_projection_incomplete", "message": "no arms"}]
+    representative = ordered[0]
+    try:
+        probe_request = build_history_k_probe_request(
+            market="HK",
+            account=ACCOUNT,
+            opend_binding=context["opend_binding"],
+            contract_symbol=representative[1],
+            underlier_code=representative[0],
+            sample_date=representative[2],
+            as_of_utc=maturity_cutoff_utc,
+        )
+    except HistoryKReadinessError as exc:
+        return None, [{"reason_code": exc.reason_code, "message": str(exc)}]
+    probe_sha256 = canonical_sha256(probe_request)
+    authority: dict[str, Any] = {
+        "queries": [
+            {"security_quota_identity": item[0], "contract_symbol": item[1], "sample_date": item[2]} for item in ordered
+        ],
+        "representative": {
+            "security_quota_identity": representative[0],
+            "contract_symbol": representative[1],
+            "sample_date": representative[2],
+        },
+        "probe_request": probe_request,
+        "probe_sha256": probe_sha256,
+        "required_unique_security_identity_count": len({item[0] for item in ordered}),
+        "quota_rule": "required_unique_security_identity_count <= provider_observation.quota.remain_quota",
+    }
+    try:
+        receipt = read_history_k_readiness_receipt(
+            context["artifact_root"],
+            probe_sha256=probe_sha256,
+            expected_opend_binding=context["opend_binding"],
+            as_of_utc=occurred_at_utc,
+        )
+    except HistoryKReadinessError as exc:
+        return authority, [{"reason_code": exc.reason_code, "message": str(exc)}]
+    observation = receipt.get("provider_observation")
+    quota = observation.get("quota") if isinstance(observation, Mapping) else None
+    remaining = quota.get("remain_quota") if isinstance(quota, Mapping) else None
+    ready = (
+        isinstance(observation, Mapping)
+        and observation.get("readiness_status") == "ready"
+        and observation.get("pagination_complete") is True
+        and observation.get("no_trade_bar_semantics_observed") is True
+        and isinstance(quota, Mapping)
+        and quota.get("sample_quota_code_counted") is True
+        and quota.get("sample_quota_code") == representative[0]
+        and type(remaining) is int
+        and authority["required_unique_security_identity_count"] <= remaining
+    )
+    authority["receipt"] = {
+        "receipt_ref": receipt.get("receipt_ref"),
+        "content_sha256": receipt.get("content_sha256"),
+        "receipt_file_sha256": receipt.get("receipt_file_sha256"),
+        "observed_at_utc": receipt.get("observed_at_utc"),
+        "expires_at_utc": receipt.get("expires_at_utc"),
+        "observed_remaining_quota": remaining,
+    }
+    if not ready:
+        return authority, [
+            {"reason_code": "history_k_readiness_insufficient", "message": "targeted readiness proof is incomplete"}
+        ]
+    return authority, []
+
+
+def check_recipe_readiness(
+    context: Mapping[str, Any],
+    request: Mapping[str, Any],
+    *,
+    occurred_at_utc: str,
+) -> dict[str, Any]:
+    window = select_research_window(context, str(request["maturity_cutoff_utc"]))
+    blockers = list(window.get("blockers", []))
+    try:
+        fee_plan = load_account_fee_plan_receipt(Path(str(request["fee_plan_receipt_path"])))
+        if (fee_plan["market"], fee_plan["account"]) != ("HK", ACCOUNT):
+            raise ValueError("fee-plan identity changed")
+    except Exception as exc:
+        fee_plan = None
+        blockers.append({"reason_code": "account_fee_plan_unavailable", "message": str(exc)})
+    arms = _all_arms(window)
+    for session in window.get("sessions", []):
+        for point in session.get("points", []):
+            for arm in point.get("arms", []):
+                arm["trading_date"] = session["trading_date"]
+                arm["candidate"]["sample_trading_date"] = session["trading_date"]
+    terminal_fx, fx_blockers = _terminal_fx_bindings(context, arms) if arms else ([], [])
+    blockers.extend(fx_blockers)
+    history_k, history_blockers = (
+        _history_k_authority(
+            context,
+            arms,
+            maturity_cutoff_utc=str(request["maturity_cutoff_utc"]),
+            occurred_at_utc=occurred_at_utc,
+        )
+        if arms
+        else (None, [])
+    )
+    blockers.extend(history_blockers)
+    return {
+        "status": "available" if not blockers else "blocked",
+        "blockers": blockers,
+        "window": window,
+        "fee_plan": fee_plan,
+        "terminal_fx_bindings": terminal_fx,
+        "history_k_authority": history_k,
+    }
+
+
 __all__ = [
     "HISTORY_K_LOW_PRIORITY_CALLS_PER_WINDOW",
     "HISTORY_K_MAX_PAGES",
@@ -560,7 +1215,12 @@ __all__ = [
     "HISTORY_K_READINESS_TTL",
     "HistoryKReadinessError",
     "build_history_k_probe_request",
+    "build_validation_plan",
+    "check_recipe_readiness",
     "preview_history_k_readiness",
     "read_history_k_readiness_receipt",
     "refresh_history_k_readiness",
+    "resolve_terminal_fx_binding",
+    "select_engineering_canary_window",
+    "select_research_window",
 ]

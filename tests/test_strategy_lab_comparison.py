@@ -1,9 +1,21 @@
 from __future__ import annotations
 
-from src.application.strategy_lab.comparison import (
+from decimal import Decimal
+
+import pytest
+
+from domain.domain.strategy_lab_evaluation import (
+    calculate_csp_economics,
     compare_single_recommendations,
     select_research_leader,
 )
+from src.application.strategy_lab.evidence import (
+    StrategyLabEvidenceError,
+    build_comparison_projection,
+)
+
+
+PREFERENCE = ("threshold_0.002", "threshold_0.004", "threshold_0.006")
 
 
 def _result(
@@ -15,22 +27,17 @@ def _result(
     pnl: float,
     candidate: str,
     variant: str = "threshold_0.002",
-    threshold: float = 0.002,
     fill_status: str = "simulated_fill",
 ) -> dict[str, object]:
     return {
         "recommendation_point_id": point_id,
         "trading_day": trading_day,
         "arm": arm,
-        "recipe_id": "sell_put_option_position_concentration",
-        "variant_id": "baseline" if arm == "baseline" else variant,
-        "near_return_threshold": None if arm == "baseline" else threshold,
-        "candidate_ref": candidate,
-        "fill_status": fill_status,
-        "outcome_status": "available",
+        "variant_id": None if arm == "baseline" else variant,
+        "candidate_identity": candidate,
+        "status": "no_fill" if fill_status == "no_fill" else "available",
         "annualized_return": annualized,
         "economic_pnl_cny": pnl,
-        "safety_status": "pass",
     }
 
 
@@ -39,7 +46,6 @@ def _comparison(
     annualized_delta: float = 0.01,
     pnl_delta: float = 1.0,
     variant: str = "threshold_0.002",
-    threshold: float = 0.002,
 ) -> dict[str, object]:
     expected = [{"recommendation_point_id": "point-1", "trading_day": "2026-08-01"}]
     baseline = [
@@ -61,7 +67,6 @@ def _comparison(
             pnl=10.0 + pnl_delta,
             candidate="challenger",
             variant=variant,
-            threshold=threshold,
         )
     ]
     return compare_single_recommendations(expected, baseline, challenger)
@@ -125,7 +130,7 @@ def test_complete_twenty_day_window_produces_one_provisional_leader() -> None:
     ]
 
     comparison = compare_single_recommendations(expected, baseline, challenger)
-    selected = select_research_leader([comparison])
+    selected = select_research_leader([comparison], PREFERENCE)
 
     assert comparison["effective_point_count"] == 20
     assert len(comparison["daily_aggregates"]) == 20
@@ -159,7 +164,6 @@ def test_comparison_passes_only_on_positive_return_and_nonnegative_pnl() -> None
         candidate="same",
         fill_status="no_fill",
     )
-    baseline["outcome_status"] = challenger["outcome_status"] = "not_applicable"
     no_fill = compare_single_recommendations(expected, [baseline], [challenger])
     assert no_fill["status"] == "complete"
     assert no_fill["passed"] is False
@@ -193,16 +197,10 @@ def test_missing_duplicate_or_not_evaluable_point_is_insufficient() -> None:
         compare_single_recommendations(expected, baseline + baseline, challenger)["reason_code"]
         == "comparison_duplicate_point"
     )
-    challenger[0]["fill_status"] = "not_evaluable"
+    challenger[0]["status"] = "not_evaluable"
     assert (
         compare_single_recommendations(expected, baseline, challenger)["reason_code"]
-        == "comparison_result_not_evaluable"
-    )
-    challenger[0]["fill_status"] = "simulated_fill"
-    challenger[0]["outcome_status"] = "not_applicable"
-    assert (
-        compare_single_recommendations(expected, baseline, challenger)["reason_code"]
-        == "comparison_result_invalid"
+        == "comparison_point_identity_mismatch"
     )
 
 
@@ -211,23 +209,21 @@ def test_leader_order_is_return_then_pnl_then_threshold() -> None:
         annualized_delta=0.01,
         pnl_delta=100,
         variant="threshold_0.002",
-        threshold=0.002,
     )
     higher_return = _comparison(
         annualized_delta=0.02,
         pnl_delta=1,
         variant="threshold_0.006",
-        threshold=0.006,
     )
     tied_return_higher_pnl = _comparison(
         annualized_delta=0.02,
         pnl_delta=2,
         variant="threshold_0.004",
-        threshold=0.004,
     )
 
     selected = select_research_leader(
-        [lower_return, higher_return, tied_return_higher_pnl]
+        [lower_return, higher_return, tied_return_higher_pnl],
+        PREFERENCE,
     )
 
     assert selected["status"] == "leader"
@@ -236,14 +232,17 @@ def test_leader_order_is_return_then_pnl_then_threshold() -> None:
 
     tie_low_threshold = dict(tied_return_higher_pnl)
     tie_low_threshold["variant_id"] = "threshold_0.002_tie"
-    tie_low_threshold["near_return_threshold"] = 0.002
-    selected = select_research_leader([tied_return_higher_pnl, tie_low_threshold])
+    selected = select_research_leader(
+        [tied_return_higher_pnl, tie_low_threshold],
+        ("threshold_0.002_tie", "threshold_0.004"),
+    )
     assert selected["leader"]["variant_id"] == "threshold_0.002_tie"
 
 
 def test_no_leader_and_insufficient_are_deterministic() -> None:
     no_leader = select_research_leader(
-        [_comparison(annualized_delta=0, pnl_delta=0)]
+        [_comparison(annualized_delta=0, pnl_delta=0)],
+        PREFERENCE,
     )
     assert no_leader == {
         "status": "no_leader",
@@ -252,7 +251,52 @@ def test_no_leader_and_insufficient_are_deterministic() -> None:
         "passing_variant_ids": [],
     }
     insufficient = select_research_leader(
-        [{"status": "insufficient_evidence", "reason_code": "missing"}]
+        [{"status": "insufficient_evidence", "reason_code": "missing"}],
+        PREFERENCE,
     )
     assert insufficient["status"] == "insufficient_evidence"
     assert insufficient["leader"] is None
+
+
+def test_non_concentration_variant_uses_the_same_comparator() -> None:
+    comparison = _comparison(variant="dte_30_45")
+    selected = select_research_leader([comparison], ("dte_30_45",))
+
+    assert comparison["variant_id"] == "dte_30_45"
+    assert selected["leader"]["variant_id"] == "dte_30_45"
+
+
+def test_application_projection_rejects_non_evaluable_result() -> None:
+    with pytest.raises(StrategyLabEvidenceError) as raised:
+        build_comparison_projection(
+            {
+                "recommendation_point_id": "point-1",
+                "trading_day": "2026-08-01",
+                "arm": "challenger",
+                "variant_id": "dte_30_45",
+                "candidate_ref": "candidate-1",
+                "fill_status": "not_evaluable",
+                "outcome_status": "not_evaluable",
+                "safety_status": "pass",
+                "annualized_return": None,
+                "economic_pnl_cny": None,
+            }
+        )
+    assert raised.value.reason_code == "comparison_result_not_evaluable"
+
+
+def test_csp_economics_uses_cny_cash_basis_and_intrinsic_loss() -> None:
+    result = calculate_csp_economics(
+        Decimal("200"),
+        Decimal("100"),
+        Decimal("100"),
+        Decimal("90"),
+        Decimal("0.92"),
+        Decimal("0.93"),
+        Decimal("10"),
+        30,
+    )
+
+    assert result["terminal_intrinsic_loss"] == Decimal("1000")
+    assert result["return_capital_basis_cny"] == Decimal("9016.00")
+    assert result["economic_pnl_cny"] == Decimal("-755.30")

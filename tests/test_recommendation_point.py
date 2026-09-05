@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Mapping
 
 import pytest
@@ -21,9 +22,7 @@ from src.application.opening_candidate_snapshot import (
 )
 from src.application.recommendation_point import (
     RECOMMENDATION_POINT_FILE,
-    RECOMMENDATION_POINT_SCHEMA_V1,
-    RECOMMENDATION_POINT_SCHEMA_V2,
-    RECOMMENDATION_POINT_SCHEMA_V3,
+    RECOMMENDATION_POINT_SCHEMA,
     RecommendationPointError,
     build_formal_point_time_coherence,
     build_option_position_evidence_binding,
@@ -31,7 +30,6 @@ from src.application.recommendation_point import (
     build_recommendation_point_id,
     capture_scheduled_recommendation_point,
     load_recommendation_point,
-    point_binding_from_recommendation_point,
     publish_recommendation_point,
     validate_option_position_evidence_binding,
     validate_recommendation_point,
@@ -293,17 +291,11 @@ def test_option_position_binding_uses_only_the_frozen_scan_batch() -> None:
     assert len(binding["open_option_positions"]) == 2
     assert len(binding["valuation_mark_facts"]) == 1
     assert binding["valuation_mark_facts"][0]["price"] == "2.2"
-    assert binding["valuation_mark_facts"][0]["source"] == (
-        "required_data_snapshot"
-    )
+    assert binding["valuation_mark_facts"][0]["source"] == ("required_data_snapshot")
     tampered = json.loads(json.dumps(binding))
     tampered["valuation_mark_facts"][0]["source_artifact_sha256"] = "c" * 64
     tampered["content_sha256"] = canonical_sha256(
-        {
-            key: value
-            for key, value in tampered.items()
-            if key != "content_sha256"
-        }
+        {key: value for key, value in tampered.items() if key != "content_sha256"}
     )
     with pytest.raises(RecommendationPointError, match="option mark binding changed"):
         validate_option_position_evidence_binding(
@@ -331,11 +323,7 @@ def test_option_position_binding_uses_only_the_frozen_scan_batch() -> None:
         }
     )
     cross_market["content_sha256"] = canonical_sha256(
-        {
-            key: value
-            for key, value in cross_market.items()
-            if key != "content_sha256"
-        }
+        {key: value for key, value in cross_market.items() if key != "content_sha256"}
     )
     with pytest.raises(RecommendationPointError, match="option position fields conflict"):
         validate_option_position_evidence_binding(
@@ -555,7 +543,10 @@ def test_option_position_binding_rejects_cross_market_snapshot_code() -> None:
 def _build_from_bundle(
     base: Path,
     run_id: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    from src.application import recommendation_point as mod
+
     bundle = load_candidate_snapshot_bundle(base=base, run_id=run_id, account="lx")
     manifest_bytes = read_account_run_state_bytes_safely(
         base=base,
@@ -563,14 +554,35 @@ def _build_from_bundle(
         account="lx",
         name=CANDIDATE_SNAPSHOT_MANIFEST_FILE,
     )
+    opening = bundle["owners"]["opening"]
+    sealed_at = str(opening["sealed_at_utc"])
+    required_manifest = {"run_id": run_id, "symbols": {}}
+    required_bytes = _canonical_bytes(required_manifest)
+    required_hash = hashlib.sha256(required_bytes).hexdigest()
+    required_ref = "required/manifest.json"
+    monkeypatch.setattr(
+        mod,
+        "_required_data_binding",
+        lambda _opening: (required_ref, required_hash),
+    )
     point = build_recommendation_point(
         _scheduler(),
         bundle["manifest"],
-        bundle["owners"]["opening"],
+        opening,
         terminal_manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
         source_commit_sha=SOURCE_SHA,
+        prepared_option_receipt=_prepared_option_receipt(
+            opening,
+            received_at=sealed_at,
+            source_observed_at=sealed_at,
+            fx_timestamp=sealed_at,
+        ),
+        required_data_manifest=required_manifest,
+        required_data_entries={},
+        required_data_manifest_ref=required_ref,
+        required_data_manifest_sha256=required_hash,
     )
-    return point, bundle["owners"]["opening"]
+    return point, opening
 
 
 def _seal_partial_fixture(
@@ -696,33 +708,69 @@ def _seal_partial_fixture(
 
 
 def test_point_identity_canonicalizes_target() -> None:
-    assert build_recommendation_point_id("US", "lx", TARGET) == (
-        build_recommendation_point_id("US", "lx", TARGET_UTC)
-    )
-    assert build_recommendation_point_id("US", "lx", TARGET) != (
-        build_recommendation_point_id("HK", "lx", TARGET)
-    )
-    assert build_recommendation_point_id("US", "lx", TARGET) != (
-        build_recommendation_point_id("US", "sy", TARGET)
-    )
+    assert build_recommendation_point_id("US", "lx", TARGET) == (build_recommendation_point_id("US", "lx", TARGET_UTC))
+    assert build_recommendation_point_id("US", "lx", TARGET) != (build_recommendation_point_id("HK", "lx", TARGET))
+    assert build_recommendation_point_id("US", "lx", TARGET) != (build_recommendation_point_id("US", "sy", TARGET))
     assert build_recommendation_point_id("US", "lx", TARGET) != (
         build_recommendation_point_id("US", "lx", "2026-07-21T14:30:00Z")
     )
-    assert build_recommendation_point_id(
-        "US", "lx", TARGET, schema_version=RECOMMENDATION_POINT_SCHEMA_V1
-    ) == build_recommendation_point_id(
-        "US", "lx", TARGET, schema_version=RECOMMENDATION_POINT_SCHEMA_V2
+    assert build_recommendation_point_id("US", "lx", TARGET) == (
+        "8f0d2e6571197375a7d3423e997eb53b709e81dd0daab0464220be9a5af86ce7"
     )
 
 
 def test_clean_point_capture_is_manifest_bound_rankable_and_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    from src.application import recommendation_point as mod
+
     run_id = "clean-point"
     seal_opening_candidate_fixture(
         tmp_path,
         run_id=run_id,
         accepted_rows=[_candidate()],
+    )
+    opening = load_candidate_snapshot_bundle(
+        base=tmp_path,
+        run_id=run_id,
+        account="lx",
+    )["owners"]["opening"]
+    sealed_at = str(opening["sealed_at_utc"])
+    required_manifest = {"run_id": run_id, "symbols": {}}
+    required_bytes = _canonical_bytes(required_manifest)
+    required_hash = hashlib.sha256(required_bytes).hexdigest()
+    required_ref = "required/manifest.json"
+    receipt = _prepared_option_receipt(
+        opening,
+        received_at=sealed_at,
+        source_observed_at=sealed_at,
+        fx_timestamp=sealed_at,
+    )
+    monkeypatch.setattr(
+        mod,
+        "find_prepared_option_positions_manifest",
+        lambda **_kwargs: tmp_path / "prepared_option_positions_context.json",
+    )
+    monkeypatch.setattr(
+        mod,
+        "_required_data_binding",
+        lambda _opening: (required_ref, required_hash),
+    )
+    monkeypatch.setattr(
+        mod,
+        "load_required_data_snapshot_manifest_snapshot",
+        lambda **_kwargs: (required_manifest, tmp_path, required_bytes),
+    )
+    monkeypatch.setattr(
+        mod,
+        "resolve_frozen_required_data_csv_bytes_batch",
+        lambda **_kwargs: SimpleNamespace(entries={}, unavailable={}),
+    )
+    monkeypatch.setattr(
+        mod,
+        "load_prepared_option_positions_context_receipt",
+        lambda **_kwargs: receipt,
     )
 
     publication, point = capture_scheduled_recommendation_point(
@@ -742,13 +790,16 @@ def test_clean_point_capture_is_manifest_bound_rankable_and_idempotent(
     assert [row["candidate_id"] for row in bundle["owners"]["opening"]["ranked_candidates"]] == point[
         "producer_accepted_candidate_ids"
     ]
-    assert capture_scheduled_recommendation_point(
-        tmp_path,
-        run_id,
-        "lx",
-        _scheduler(),
-        source_commit_sha=SOURCE_SHA,
-    )[0] == "idempotent"
+    assert (
+        capture_scheduled_recommendation_point(
+            tmp_path,
+            run_id,
+            "lx",
+            _scheduler(),
+            source_commit_sha=SOURCE_SHA,
+        )[0]
+        == "idempotent"
+    )
 
     conflict = dict(point)
     conflict["decision_at_utc"] = "2026-07-21T14:00:31Z"
@@ -758,90 +809,6 @@ def test_clean_point_capture_is_manifest_bound_rankable_and_idempotent(
     with pytest.raises(RecommendationPointError) as raised:
         publish_recommendation_point(tmp_path, conflict)
     assert raised.value.reason_code == "official_point_conflict"
-
-
-def test_best_effort_capture_builds_v2_from_strict_prepared_receipt(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    from src.application import recommendation_point as mod
-
-    run_id = "strict-v2-point"
-    seal_opening_candidate_fixture(
-        tmp_path,
-        run_id=run_id,
-        accepted_rows=[_candidate()],
-    )
-    opening = load_candidate_snapshot_bundle(
-        base=tmp_path,
-        run_id=run_id,
-        account="lx",
-    )["owners"]["opening"]
-    receipt = _prepared_option_receipt(
-        opening,
-        received_at="2026-06-01T00:00:00+00:00",
-        source_observed_at="2026-06-01T00:00:00+00:00",
-        fx_timestamp="2026-06-01T00:00:00+00:00",
-    )
-    monkeypatch.setattr(
-        mod,
-        "find_prepared_option_positions_manifest",
-        lambda **_kwargs: tmp_path / "prepared_option_positions_context.json",
-    )
-    monkeypatch.setattr(
-        mod,
-        "load_prepared_option_positions_context_receipt",
-        lambda **_kwargs: receipt,
-    )
-
-    publication, point = capture_scheduled_recommendation_point(
-        tmp_path,
-        run_id,
-        "lx",
-        _scheduler(now_utc="2026-06-01T00:00:01Z"),
-        source_commit_sha=SOURCE_SHA,
-        require_option_market_evidence=True,
-    )
-
-    assert publication == "published"
-    assert point["schema_version"] == "recommendation_point.v2"
-    assert point["option_market_evidence_ref"].endswith(
-        "/prepared_option_positions_context.json"
-    )
-    assert point["option_market_evidence_manifest_sha256"] == hashlib.sha256(
-        receipt["manifest_bytes"]
-    ).hexdigest()
-    assert point["option_market_evidence_payload_sha256"] == receipt[
-        "manifest"
-    ]["payload_sha256"]
-
-    late = _prepared_option_receipt(
-        opening,
-        received_at="2026-06-01T00:00:01+00:00",
-        source_observed_at="2026-06-01T00:00:00+00:00",
-        fx_timestamp="2026-06-01T00:00:00+00:00",
-    )
-    with pytest.raises(RecommendationPointError) as raised:
-        build_recommendation_point(
-            _scheduler(),
-            load_candidate_snapshot_bundle(
-                base=tmp_path,
-                run_id=run_id,
-                account="lx",
-            )["manifest"],
-            opening,
-            terminal_manifest_sha256=hashlib.sha256(
-                read_account_run_state_bytes_safely(
-                    base=tmp_path,
-                    run_id=run_id,
-                    account="lx",
-                    name=CANDIDATE_SNAPSHOT_MANIFEST_FILE,
-                )
-            ).hexdigest(),
-            source_commit_sha=SOURCE_SHA,
-            prepared_option_receipt=late,
-        )
-    assert raised.value.reason_code == "option_market_evidence_time_conflict"
 
 
 def test_formal_capture_preserves_frozen_required_data_failure_reason(
@@ -889,27 +856,32 @@ def test_formal_capture_preserves_frozen_required_data_failure_reason(
             "lx",
             _scheduler(now_utc="2026-06-01T00:00:01Z"),
             source_commit_sha=SOURCE_SHA,
-            require_formal_contract=True,
         )
     assert raised.value.reason_code == "required_data_snapshot_unavailable"
 
 
-def test_clean_no_candidate_point_is_valid(tmp_path: Path) -> None:
+def test_clean_no_candidate_point_is_valid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     run_id = "no-candidate"
     seal_opening_candidate_fixture(tmp_path, run_id=run_id)
 
-    point, opening = _build_from_bundle(tmp_path, run_id)
+    point, opening = _build_from_bundle(tmp_path, run_id, monkeypatch)
 
     assert point["terminal_sell_put_status"] == "no_candidate"
     assert point["producer_accepted_candidate_ids"] == []
     assert opening["ranked_candidates"] == []
 
 
-def test_failed_sibling_preserves_candidate_but_is_not_rankable(tmp_path: Path) -> None:
+def test_failed_sibling_preserves_candidate_but_is_not_rankable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     run_id = "failed-sibling"
     _seal_partial_fixture(tmp_path, run_id=run_id, sibling_failed=True)
 
-    point, opening = _build_from_bundle(tmp_path, run_id)
+    point, opening = _build_from_bundle(tmp_path, run_id, monkeypatch)
 
     assert point["terminal_sell_put_status"] == "data_unavailable"
     assert len(point["producer_accepted_candidate_ids"]) == 1
@@ -918,22 +890,24 @@ def test_failed_sibling_preserves_candidate_but_is_not_rankable(tmp_path: Path) 
 
 def test_partial_completed_scope_stays_partial_when_subset_is_rankable(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     run_id = "partial-completed"
     _seal_partial_fixture(tmp_path, run_id=run_id, sibling_failed=False)
 
-    point, opening = _build_from_bundle(tmp_path, run_id)
+    point, opening = _build_from_bundle(tmp_path, run_id, monkeypatch)
 
     assert point["terminal_sell_put_status"] == "partial_data"
     assert len(point["producer_accepted_candidate_ids"]) == 1
-    assert [row["candidate_id"] for row in opening["ranked_candidates"]] == point[
-        "producer_accepted_candidate_ids"
-    ]
+    assert [row["candidate_id"] for row in opening["ranked_candidates"]] == point["producer_accepted_candidate_ids"]
 
 
 def test_builder_rejects_missing_scheduler_identity_and_manifest_hash(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from src.application import recommendation_point as mod
+
     run_id = "invalid-builder"
     seal_opening_candidate_fixture(tmp_path, run_id=run_id)
     bundle = load_candidate_snapshot_bundle(base=tmp_path, run_id=run_id, account="lx")
@@ -946,6 +920,28 @@ def test_builder_rejects_missing_scheduler_identity_and_manifest_hash(
         name=CANDIDATE_SNAPSHOT_MANIFEST_FILE,
     )
     manifest_sha = hashlib.sha256(manifest_bytes).hexdigest()
+    sealed_at = str(opening["sealed_at_utc"])
+    required_manifest = {"run_id": run_id, "symbols": {}}
+    required_bytes = _canonical_bytes(required_manifest)
+    required_hash = hashlib.sha256(required_bytes).hexdigest()
+    required_ref = "required/manifest.json"
+    monkeypatch.setattr(
+        mod,
+        "_required_data_binding",
+        lambda _opening: (required_ref, required_hash),
+    )
+    formal_kwargs = {
+        "prepared_option_receipt": _prepared_option_receipt(
+            opening,
+            received_at=sealed_at,
+            source_observed_at=sealed_at,
+            fx_timestamp=sealed_at,
+        ),
+        "required_data_manifest": required_manifest,
+        "required_data_entries": {},
+        "required_data_manifest_ref": required_ref,
+        "required_data_manifest_sha256": required_hash,
+    }
 
     for scheduler in (
         _scheduler(should_run_scan=False),
@@ -959,6 +955,7 @@ def test_builder_rejects_missing_scheduler_identity_and_manifest_hash(
                 opening,
                 terminal_manifest_sha256=manifest_sha,
                 source_commit_sha=SOURCE_SHA,
+                **formal_kwargs,
             )
         assert raised.value.reason_code == "official_point_identity_missing"
     with pytest.raises(RecommendationPointError) as raised:
@@ -968,6 +965,7 @@ def test_builder_rejects_missing_scheduler_identity_and_manifest_hash(
             opening,
             terminal_manifest_sha256="d" * 64,
             source_commit_sha=SOURCE_SHA,
+            **formal_kwargs,
         )
     assert raised.value.reason_code == "official_point_invalid"
     with pytest.raises(RecommendationPointError) as raised:
@@ -977,35 +975,34 @@ def test_builder_rejects_missing_scheduler_identity_and_manifest_hash(
             opening,
             terminal_manifest_sha256=manifest_sha,
             source_commit_sha="not-a-commit",
+            **formal_kwargs,
         )
     assert raised.value.reason_code == "official_point_source_unavailable"
     for field in ("account_config_sha256", "strategy_policy_sha256"):
         mismatched_manifest = dict(manifest)
         mismatched_manifest[field] = "e" * 64
         mismatched_manifest["content_sha256"] = canonical_sha256(
-            {
-                key: value
-                for key, value in mismatched_manifest.items()
-                if key != "content_sha256"
-            }
+            {key: value for key, value in mismatched_manifest.items() if key != "content_sha256"}
         )
         with pytest.raises(RecommendationPointError) as raised:
             build_recommendation_point(
                 _scheduler(),
                 mismatched_manifest,
                 opening,
-                terminal_manifest_sha256=hashlib.sha256(
-                    _canonical_bytes(mismatched_manifest)
-                ).hexdigest(),
+                terminal_manifest_sha256=hashlib.sha256(_canonical_bytes(mismatched_manifest)).hexdigest(),
                 source_commit_sha=SOURCE_SHA,
+                **formal_kwargs,
             )
         assert raised.value.reason_code == "official_point_invalid"
 
 
-def test_validator_rejects_contract_and_content_drift(tmp_path: Path) -> None:
+def test_validator_rejects_contract_and_content_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     run_id = "invalid-point"
     seal_opening_candidate_fixture(tmp_path, run_id=run_id, accepted_rows=[_candidate()])
-    point, _opening = _build_from_bundle(tmp_path, run_id)
+    point, _opening = _build_from_bundle(tmp_path, run_id, monkeypatch)
 
     extra = {**point, "unexpected": True}
     bad_ref = {**point, "opening_snapshot_ref": "../opening_candidate_snapshot.json"}
@@ -1018,11 +1015,7 @@ def test_validator_rejects_contract_and_content_drift(tmp_path: Path) -> None:
     )
     bad_identity = {**point, "recommendation_point_id": "e" * 64}
     bad_identity["content_sha256"] = canonical_sha256(
-        {
-            key: value
-            for key, value in bad_identity.items()
-            if key != "content_sha256"
-        }
+        {key: value for key, value in bad_identity.items() if key != "content_sha256"}
     )
     drift = {**point, "content_sha256": "d" * 64}
     for invalid in (extra, bad_ref, bad_status, bad_identity, drift):
@@ -1031,13 +1024,16 @@ def test_validator_rejects_contract_and_content_drift(tmp_path: Path) -> None:
         assert raised.value.reason_code == "official_point_invalid"
 
 
-def test_v3_validator_recomputes_formal_point_time_coherence(tmp_path: Path) -> None:
+def test_validator_recomputes_formal_point_time_coherence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     run_id = "invalid-coherence"
     seal_opening_candidate_fixture(tmp_path, run_id=run_id, accepted_rows=[_candidate()])
-    point, _opening = _build_from_bundle(tmp_path, run_id)
+    point, _opening = _build_from_bundle(tmp_path, run_id, monkeypatch)
     point.update(
         {
-            "schema_version": RECOMMENDATION_POINT_SCHEMA_V3,
+            "schema_version": RECOMMENDATION_POINT_SCHEMA,
             "required_data_manifest_ref": "output_runs/run/required.json",
             "required_data_manifest_sha256": "1" * 64,
             "prepared_context_manifest_ref": "output_runs/run/prepared.json",
@@ -1055,29 +1051,22 @@ def test_v3_validator_recomputes_formal_point_time_coherence(tmp_path: Path) -> 
             },
         }
     )
-    point["content_sha256"] = canonical_sha256(
-        {key: value for key, value in point.items() if key != "content_sha256"}
-    )
+    point["content_sha256"] = canonical_sha256({key: value for key, value in point.items() if key != "content_sha256"})
 
     with pytest.raises(RecommendationPointError) as raised:
         validate_recommendation_point(point)
     assert raised.value.reason_code == "official_point_invalid"
 
 
-def test_load_rejects_noncanonical_persisted_bytes(tmp_path: Path) -> None:
+def test_load_rejects_noncanonical_persisted_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     run_id = "noncanonical-load"
     seal_opening_candidate_fixture(tmp_path, run_id=run_id)
-    point, _opening = _build_from_bundle(tmp_path, run_id)
+    point, _opening = _build_from_bundle(tmp_path, run_id, monkeypatch)
     assert publish_recommendation_point(tmp_path, point) == "published"
-    path = (
-        tmp_path
-        / "output_runs"
-        / run_id
-        / "accounts"
-        / "lx"
-        / "state"
-        / RECOMMENDATION_POINT_FILE
-    )
+    path = tmp_path / "output_runs" / run_id / "accounts" / "lx" / "state" / RECOMMENDATION_POINT_FILE
     path.write_text(json.dumps(point), encoding="utf-8")
 
     with pytest.raises(RecommendationPointError) as raised:

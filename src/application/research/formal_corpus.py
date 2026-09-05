@@ -27,7 +27,7 @@ from src.application.prepared_option_positions_context import (
     load_prepared_option_positions_context_receipt,
 )
 from src.application.recommendation_point import (
-    RECOMMENDATION_POINT_SCHEMA_V3,
+    RECOMMENDATION_POINT_SCHEMA,
     RecommendationPointError,
     build_formal_point_time_coherence,
     build_option_position_evidence_binding,
@@ -61,9 +61,7 @@ FORMAL_POINT_TIME_COHERENCE_SCHEMA = "formal_point_time_coherence.v1"
 FORMAL_POINT_MAX_SKEW_MS = 300_000
 MARKET_CALENDAR_POINTER_SCHEMA = "sell_put_top1_market_calendar_pointer.v1"
 MARKET_CALENDAR_SNAPSHOT_SCHEMA = "sell_put_top1_market_calendar_snapshot.v2"
-_MARKET_CALENDAR_SOURCE_RECEIPT_SCHEMA = (
-    "sell_put_top1_market_calendar_source_receipt.v1"
-)
+_MARKET_CALENDAR_SOURCE_RECEIPT_SCHEMA = "sell_put_top1_market_calendar_source_receipt.v1"
 
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
 _SEGMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
@@ -91,9 +89,7 @@ _CALENDAR_SNAPSHOT_FIELDS = frozenset(
         "content_sha256",
     }
 )
-_CALENDAR_SOURCE_FIELDS = frozenset(
-    {"retcode", "rows", "coverage_complete", "pagination_complete", "page_count"}
-)
+_CALENDAR_SOURCE_FIELDS = frozenset({"retcode", "rows", "coverage_complete", "pagination_complete", "page_count"})
 _CALENDAR_SOURCE_ROW_FIELDS = frozenset({"time", "trade_date_type"})
 _CALENDAR_SESSION_TYPES = frozenset({"WHOLE", "MORNING", "AFTERNOON"})
 _EXPECTATION_FIELDS = frozenset(
@@ -185,9 +181,7 @@ def _day(value: Any) -> str:
     try:
         parsed = date.fromisoformat(text)
     except ValueError as exc:
-        raise FormalCorpusError(
-            "formal_corpus_input_invalid", "trading_date must be an ISO date"
-        ) from exc
+        raise FormalCorpusError("formal_corpus_input_invalid", "trading_date must be an ISO date") from exc
     if parsed.isoformat() != text:
         _fail("formal_corpus_input_invalid", "trading_date must be canonical")
     return text
@@ -226,13 +220,7 @@ def _render(payload: Mapping[str, Any]) -> bytes:
 
 
 def _corpus_root(runtime_root: str | Path) -> Path:
-    return (
-        _runtime_root(runtime_root)
-        / "output_shared"
-        / "research"
-        / "formal_corpus"
-        / FORMAL_CORPUS_VERSION
-    )
+    return _runtime_root(runtime_root) / "output_shared" / "research" / "formal_corpus" / FORMAL_CORPUS_VERSION
 
 
 def _runtime_root(value: str | Path) -> Path:
@@ -251,9 +239,7 @@ def _calendar_market(value: Any) -> str:
 
 def _relative_ref(value: Any, label: str) -> str:
     ref = _text(value, label)
-    if ref.startswith("/") or "\\" in ref or any(
-        part in {"", ".", ".."} for part in ref.split("/")
-    ):
+    if ref.startswith("/") or "\\" in ref or any(part in {"", ".", ".."} for part in ref.split("/")):
         _fail("corpus_input_invalid", f"{label} must be a safe relative POSIX path")
     return ref
 
@@ -263,10 +249,7 @@ def _calendar_pointer_ref(market: str) -> str:
 
 
 def _calendar_snapshot_ref(market: str, content_sha256: str) -> str:
-    return (
-        f"capabilities/market-calendar/{market.lower()}/snapshots/"
-        f"{content_sha256}.json"
-    )
+    return f"capabilities/market-calendar/{market.lower()}/snapshots/{content_sha256}.json"
 
 
 def _read_canonical_calendar_artifact(
@@ -329,9 +312,7 @@ def _validate_calendar_snapshot(
         _hash(item["source_receipt_sha256"], "source_receipt_sha256")
         _timestamp(item["observed_at_utc"], "observed_at_utc")
         _hash(item["content_sha256"], "content_sha256")
-        content = {
-            key: value for key, value in item.items() if key != "content_sha256"
-        }
+        content = {key: value for key, value in item.items() if key != "content_sha256"}
         if canonical_sha256(content) != item["content_sha256"]:
             raise ValueError("snapshot content hash does not match")
     except (FormalCorpusError, KeyError, TypeError, ValueError) as exc:
@@ -397,10 +378,7 @@ def read_expectation_bound_market_calendar_snapshot(
     ref = _calendar_snapshot_ref(market, content_hash)
     payload, content = _read_canonical_calendar_artifact(artifact_root, ref)
     item = _validate_calendar_snapshot(payload, expected_market=market)
-    if (
-        item["content_sha256"] != content_hash
-        or item["market_calendar_version"] != version
-    ):
+    if item["content_sha256"] != content_hash or item["market_calendar_version"] != version:
         _fail(
             "market_calendar_binding_unavailable",
             "expectation-bound market calendar identity does not match",
@@ -419,9 +397,7 @@ def read_market_calendar_binding(
     market: str,
 ) -> dict[str, Any]:
     market = _calendar_market(market)
-    payload, content = _read_canonical_calendar_artifact(
-        artifact_root, _calendar_pointer_ref(market)
-    )
+    payload, content = _read_canonical_calendar_artifact(artifact_root, _calendar_pointer_ref(market))
     try:
         if set(payload) != _CALENDAR_POINTER_FIELDS:
             raise ValueError("pointer keys are invalid")
@@ -430,16 +406,10 @@ def read_market_calendar_binding(
         if payload["market"] != market:
             raise ValueError("pointer market does not match")
         snapshot_ref = _relative_ref(payload["snapshot_ref"], "snapshot_ref")
-        snapshot_content_hash = _hash(
-            payload["snapshot_content_sha256"], "snapshot_content_sha256"
-        )
-        snapshot_file_hash = _hash(
-            payload["snapshot_file_sha256"], "snapshot_file_sha256"
-        )
+        snapshot_content_hash = _hash(payload["snapshot_content_sha256"], "snapshot_content_sha256")
+        snapshot_file_hash = _hash(payload["snapshot_file_sha256"], "snapshot_file_sha256")
         _hash(payload["content_sha256"], "content_sha256")
-        pointer_body = {
-            key: value for key, value in payload.items() if key != "content_sha256"
-        }
+        pointer_body = {key: value for key, value in payload.items() if key != "content_sha256"}
         if canonical_sha256(pointer_body) != payload["content_sha256"]:
             raise ValueError("pointer content hash does not match")
         if content != _render(payload):
@@ -500,9 +470,7 @@ def _normalized_calendar_source_receipt(
             if session_type not in _CALENDAR_SESSION_TYPES:
                 raise ValueError("receipt trade date type is invalid")
             seen.add(trading_date)
-            sessions.append(
-                {"trading_date": trading_date, "trade_date_type": session_type}
-            )
+            sessions.append({"trading_date": trading_date, "trade_date_type": session_type})
     except (FormalCorpusError, KeyError, TypeError, ValueError) as exc:
         raise FormalCorpusError(
             "market_calendar_source_invalid",
@@ -514,9 +482,7 @@ def _normalized_calendar_source_receipt(
         "market": market,
         "coverage_start": coverage_start,
         "coverage_end": coverage_end,
-        "trading_sessions": sorted(
-            sessions, key=lambda value: value["trading_date"]
-        ),
+        "trading_sessions": sorted(sessions, key=lambda value: value["trading_date"]),
     }
 
 
@@ -590,9 +556,7 @@ def refresh_market_calendar_binding(
             "trading_sessions": sessions,
             "source_receipt_sha256": source_receipt_sha256,
         }
-        if current is not None and all(
-            current[key] == value for key, value in expected.items()
-        ):
+        if current is not None and all(current[key] == value for key, value in expected.items()):
             return {"status": "unchanged", "binding": current}
     snapshot: dict[str, Any] = {
         "schema_version": MARKET_CALENDAR_SNAPSHOT_SCHEMA,
@@ -616,9 +580,7 @@ def refresh_market_calendar_binding(
     }
     pointer["content_sha256"] = canonical_sha256(pointer)
     try:
-        _publish_exact_calendar_artifact(
-            artifact_root, snapshot_ref, snapshot_content
-        )
+        _publish_exact_calendar_artifact(artifact_root, snapshot_ref, snapshot_content)
         atomic_write_private_text(pointer_path, _render(pointer).decode("utf-8"))
         binding = read_market_calendar_binding(artifact_root, market=market)
     except (FormalCorpusError, OSError, ValueError) as exc:
@@ -660,10 +622,7 @@ def formal_corpus_present(
         return True
     if not path.is_dir():
         return False
-    return any(
-        owner.is_symlink() or owner.exists()
-        for owner in (path / "expectations", path / "points")
-    )
+    return any(owner.is_symlink() or owner.exists() for owner in (path / "expectations", path / "points"))
 
 
 def _relative(runtime_root: str | Path, path: Path) -> str:
@@ -711,10 +670,7 @@ def _validate_expectation(
     point_ids = item.get("expected_recommendation_point_ids")
     if not isinstance(raw_targets, list) or not isinstance(point_ids, list):
         _fail("formal_corpus_artifact_invalid", "expectation targets must be lists")
-    targets = [
-        _timestamp(value, f"scheduled_scan_targets_market[{index}]")
-        for index, value in enumerate(raw_targets)
-    ]
+    targets = [_timestamp(value, f"scheduled_scan_targets_market[{index}]") for index, value in enumerate(raw_targets)]
     if targets != sorted(set(targets)):
         _fail("formal_corpus_artifact_invalid", "expectation targets are not canonical")
     if point_ids != [build_recommendation_point_id(market, account, target) for target in targets]:
@@ -839,9 +795,7 @@ def seal_formal_day_expectation(
     try:
         targets = [
             utc_timestamp(value, "scheduled_scan_target_market")
-            for value in scheduled_scan_targets_for_date(
-                dict(schedule), trading_date, trade_date_type=trade_date_type
-            )
+            for value in scheduled_scan_targets_for_date(dict(schedule), trading_date, trade_date_type=trade_date_type)
         ]
     except (CandidateSnapshotContractError, TypeError, ValueError) as exc:
         raise FormalCorpusError("formal_corpus_input_invalid", "schedule is invalid") from exc
@@ -869,27 +823,16 @@ def seal_formal_day_expectation(
     payload["content_sha256"] = canonical_sha256(payload)
     content = _render(payload)
     directory = _expectation_dir(_corpus_root(runtime_root), market, account, trading_date)
-    lock = (
-        _corpus_root(runtime_root)
-        / market.lower()
-        / account
-        / ".locks"
-        / "expectations"
-        / f"{trading_date}.lock"
-    )
+    lock = _corpus_root(runtime_root) / market.lower() / account / ".locks" / "expectations" / f"{trading_date}.lock"
     with exclusive_private_file_lock(lock):
         existing = _expectation_artifacts(runtime_root, market, account, trading_date)
         if len(existing) > 1:
             item, old_content, old_path = existing[0]
-            return _expectation_result(
-                runtime_root, item, old_content, old_path, status="conflict"
-            )
+            return _expectation_result(runtime_root, item, old_content, old_path, status="conflict")
         if existing:
             item, old_content, old_path = existing[0]
             if _expectation_denominator(item) == _expectation_denominator(payload):
-                return _expectation_result(
-                    runtime_root, item, old_content, old_path, status="idempotent"
-                )
+                return _expectation_result(runtime_root, item, old_content, old_path, status="idempotent")
         ensure_private_directory(directory)
         path = directory / f"{payload['content_sha256']}.json"
         atomic_write_private_text(path, content.decode("utf-8"))
@@ -949,9 +892,7 @@ def _validate_formal_point(
     binding = _validate_source_binding(item.get("source_binding"))
     if binding["market"] != market or binding["account"] != account:
         _fail("formal_corpus_artifact_invalid", "formal point binding identity changed")
-    if build_recommendation_point_id(
-        market, account, binding["scheduled_scan_target_market"]
-    ) != point_id:
+    if build_recommendation_point_id(market, account, binding["scheduled_scan_target_market"]) != point_id:
         _fail("formal_corpus_artifact_invalid", "formal point target identity changed")
     point = item.get("recommendation_point")
     validated_point: dict[str, Any] | None = None
@@ -962,7 +903,7 @@ def _validate_formal_point(
             validated_point = validate_recommendation_point(point)
         except RecommendationPointError as exc:
             raise FormalCorpusError("formal_corpus_artifact_invalid", str(exc)) from exc
-        if validated_point["schema_version"] != RECOMMENDATION_POINT_SCHEMA_V3:
+        if validated_point["schema_version"] != RECOMMENDATION_POINT_SCHEMA:
             _fail("formal_corpus_artifact_invalid", "formal point contract is unsupported")
         if (
             validated_point["market"],
@@ -996,9 +937,7 @@ def _validate_formal_point(
         _fail("formal_corpus_artifact_invalid", "opening snapshot must be an object")
     if item["status"] == "ready" and not isinstance(opening, Mapping):
         _fail("formal_corpus_artifact_invalid", "ready opening snapshot is missing")
-    if isinstance(opening, Mapping) and (
-        opening.get("content_sha256") != binding["opening_snapshot_sha256"]
-    ):
+    if isinstance(opening, Mapping) and (opening.get("content_sha256") != binding["opening_snapshot_sha256"]):
         _fail("formal_corpus_artifact_invalid", "opening snapshot hash changed")
     if isinstance(opening, Mapping):
         try:
@@ -1032,10 +971,7 @@ def _validate_formal_point(
             _timestamp(row["source_observed_at"], "source_observed_at")
             _hash(row["payload_sha256"], "payload_sha256")
         elif row["status"] == "failed":
-            if any(
-                row[field] is not None
-                for field in ("source_observed_at", "payload_sha256", "scan_blob_ref")
-            ):
+            if any(row[field] is not None for field in ("source_observed_at", "payload_sha256", "scan_blob_ref")):
                 _fail("formal_corpus_artifact_invalid", "failed required-data symbol has evidence")
         else:
             _fail("formal_corpus_artifact_invalid", "required-data symbol status is invalid")
@@ -1110,11 +1046,7 @@ def _point_day_layout_conflicts(
     if directory.is_symlink() or not directory.is_dir():
         return True
     entries = list(directory.iterdir())
-    actual = {
-        path.name
-        for path in entries
-        if path.is_dir() and not path.is_symlink() and _HASH.fullmatch(path.name)
-    }
+    actual = {path.name for path in entries if path.is_dir() and not path.is_symlink() and _HASH.fullmatch(path.name)}
     return len(actual) != len(entries) or bool(actual - set(expected_point_ids))
 
 
@@ -1177,7 +1109,7 @@ def capture_formal_point_attempt(
     if recommendation_point is not None:
         try:
             point = validate_recommendation_point(recommendation_point)
-            if point["schema_version"] != RECOMMENDATION_POINT_SCHEMA_V3:
+            if point["schema_version"] != RECOMMENDATION_POINT_SCHEMA:
                 raise RecommendationPointError(
                     "formal_point_contract_unsupported",
                     "formal corpus requires recommendation_point.v3",
@@ -1188,9 +1120,7 @@ def capture_formal_point_attempt(
                 point["run_id"],
                 point["scheduled_scan_target_market"],
             ) != (market, account, run_id, target):
-                raise RecommendationPointError(
-                    "formal_point_evidence_missing", "recommendation point identity changed"
-                )
+                raise RecommendationPointError("formal_point_evidence_missing", "recommendation point identity changed")
             opening = load_opening_candidate_snapshot(
                 base=Path(source_root),
                 run_id=run_id,
@@ -1208,11 +1138,9 @@ def capture_formal_point_attempt(
             opening_snapshot = dict(opening)
             required_ref, required_hash = _required_data_binding(opening)
             required_path = private_path(source_root).joinpath(*required_ref.split("/"))
-            required_manifest, required_root, required_bytes = (
-                load_required_data_snapshot_manifest_snapshot(
-                    manifest_path=required_path,
-                    expected_run_id=run_id,
-                )
+            required_manifest, required_root, required_bytes = load_required_data_snapshot_manifest_snapshot(
+                manifest_path=required_path,
+                expected_run_id=run_id,
             )
             if (
                 sha256_bytes(required_bytes) != required_hash
@@ -1220,9 +1148,7 @@ def capture_formal_point_attempt(
                 or point["required_data_manifest_sha256"] != required_hash
             ):
                 raise ValueError("required-data manifest binding changed")
-            prepared_path = private_path(source_root).joinpath(
-                *point["prepared_context_manifest_ref"].split("/")
-            )
+            prepared_path = private_path(source_root).joinpath(*point["prepared_context_manifest_ref"].split("/"))
             receipt = load_prepared_option_positions_context_receipt(
                 manifest_path=prepared_path,
                 expected_base=Path(source_root),
@@ -1248,15 +1174,9 @@ def capture_formal_point_attempt(
             )
             if required_batch.unavailable:
                 raise ValueError("required-data snapshot batch is incomplete")
-            target_ms = int(
-                datetime.fromisoformat(target.replace("Z", "+00:00")).timestamp()
-                * 1000
-            )
+            target_ms = int(datetime.fromisoformat(target.replace("Z", "+00:00")).timestamp() * 1000)
             sealed_at = utc_timestamp(opening["sealed_at_utc"], "opening sealed_at_utc")
-            sealed_ms = int(
-                datetime.fromisoformat(sealed_at.replace("Z", "+00:00")).timestamp()
-                * 1000
-            )
+            sealed_ms = int(datetime.fromisoformat(sealed_at.replace("Z", "+00:00")).timestamp() * 1000)
             expected_evidence = build_option_position_evidence_binding(
                 run_id=run_id,
                 account=account,
@@ -1274,12 +1194,8 @@ def capture_formal_point_attempt(
                 "recommendation_point_content_sha256": point["content_sha256"],
                 "opening_snapshot_sha256": point["opening_snapshot_sha256"],
                 "required_data_manifest_sha256": required_hash,
-                "prepared_context_manifest_sha256": point[
-                    "prepared_context_manifest_sha256"
-                ],
-                "prepared_context_payload_sha256": point[
-                    "prepared_context_payload_sha256"
-                ],
+                "prepared_context_manifest_sha256": point["prepared_context_manifest_sha256"],
+                "prepared_context_payload_sha256": point["prepared_context_payload_sha256"],
             }
             symbols = [
                 {
@@ -1347,13 +1263,7 @@ def capture_formal_point_attempt(
     content = _render(payload)
     directory = _point_dir(_corpus_root(runtime_root), market, account, trading_date, point_id)
     lock = (
-        _corpus_root(runtime_root)
-        / market.lower()
-        / account
-        / ".locks"
-        / "points"
-        / trading_date
-        / f"{point_id}.lock"
+        _corpus_root(runtime_root) / market.lower() / account / ".locks" / "points" / trading_date / f"{point_id}.lock"
     )
     with exclusive_private_file_lock(lock):
         existing = _point_artifacts(runtime_root, market, account, trading_date, point_id)
@@ -1387,9 +1297,7 @@ def _point_result(
     return {
         "operation": "capture_formal_point_attempt",
         "status": status,
-        "reason_code": (
-            "formal_corpus_conflict" if status == "conflict" else payload["reason_code"]
-        ),
+        "reason_code": ("formal_corpus_conflict" if status == "conflict" else payload["reason_code"]),
         "market": payload["market"],
         "account": payload["account"],
         "trading_date": payload["trading_date"],
@@ -1500,8 +1408,7 @@ def build_corpus_health_receipt(
         )
     normalized_runtime_root = _runtime_root(runtime_root)
     observed_at = _timestamp(
-        observed_at_utc
-        or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        observed_at_utc or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "observed_at_utc",
     )
     local_date = (
@@ -1510,9 +1417,7 @@ def build_corpus_health_receipt(
         .date()
         .isoformat()
     )
-    calendar_root = (
-        normalized_runtime_root / "output_shared" / "research" / "strategy_lab"
-    )
+    calendar_root = normalized_runtime_root / "output_shared" / "research" / "strategy_lab"
     try:
         calendar = read_market_calendar_binding(calendar_root, market=market)
     except FormalCorpusError:
@@ -1528,9 +1433,7 @@ def build_corpus_health_receipt(
                 f"{market} observation date is outside calendar coverage",
             )
         trading_dates = list(calendar["trading_dates"])
-        selected_dates = [
-            value for value in trading_dates if value < local_date
-        ][-mature_day_limit:]
+        selected_dates = [value for value in trading_dates if value < local_date][-mature_day_limit:]
         if local_date in trading_dates:
             selected_dates.append(local_date)
 
@@ -1562,9 +1465,7 @@ def build_corpus_health_receipt(
     for trading_date in candidate_dates:
         expectation_dates.add(trading_date)
         try:
-            expectations = _expectation_artifacts(
-                runtime_root, market, account, trading_date
-            )
+            expectations = _expectation_artifacts(runtime_root, market, account, trading_date)
         except FormalCorpusError:
             expectations = []
             conflict = True
@@ -1575,11 +1476,7 @@ def build_corpus_health_receipt(
                 {
                     "trading_date": trading_date,
                     "status": "conflict" if conflict else "missing",
-                    "reason_code": (
-                        "formal_corpus_conflict"
-                        if conflict
-                        else "formal_expectation_missing"
-                    ),
+                    "reason_code": ("formal_corpus_conflict" if conflict else "formal_expectation_missing"),
                     "market_calendar_version": None,
                     "market_calendar_sha256": None,
                     "schedule_config_sha256": None,
@@ -1593,9 +1490,7 @@ def build_corpus_health_receipt(
             continue
         expectation = expectations[0][0]
         expected = list(expectation["expected_recommendation_point_ids"])
-        conflict |= _point_day_layout_conflicts(
-            runtime_root, market, account, trading_date, expected
-        )
+        conflict |= _point_day_layout_conflicts(runtime_root, market, account, trading_date, expected)
         captured = not_evaluable = missing = 0
         points: list[dict[str, Any]] = []
         for point_id in expected:
@@ -1614,11 +1509,7 @@ def build_corpus_health_receipt(
                     "point": None,
                 }
             point = loaded.get("point")
-            recommendation_point = (
-                point.get("recommendation_point")
-                if isinstance(point, Mapping)
-                else None
-            )
+            recommendation_point = point.get("recommendation_point") if isinstance(point, Mapping) else None
             coherence = (
                 recommendation_point.get("formal_point_time_coherence")
                 if isinstance(recommendation_point, Mapping)
@@ -1629,19 +1520,11 @@ def build_corpus_health_receipt(
                     "recommendation_point_id": point_id,
                     "status": loaded["status"],
                     "reason_code": loaded.get("reason_code"),
-                    "captured_at_utc": (
-                        point.get("captured_at_utc")
-                        if isinstance(point, Mapping)
-                        else None
-                    ),
+                    "captured_at_utc": (point.get("captured_at_utc") if isinstance(point, Mapping) else None),
                     "source_observed_at_utc": (
-                        coherence.get("maximum_observed_at_utc")
-                        if isinstance(coherence, Mapping)
-                        else None
+                        coherence.get("maximum_observed_at_utc") if isinstance(coherence, Mapping) else None
                     ),
-                    "time_coherence": (
-                        dict(coherence) if isinstance(coherence, Mapping) else None
-                    ),
+                    "time_coherence": (dict(coherence) if isinstance(coherence, Mapping) else None),
                 }
             )
             if loaded["status"] == "available":
@@ -1652,11 +1535,13 @@ def build_corpus_health_receipt(
                 missing += 1
             else:
                 conflict = True
-        day_status = "conflict" if conflict else "complete" if (
-            expectation["sealed_before_first_target"]
-            and expected
-            and captured == len(expected)
-        ) else "incomplete"
+        day_status = (
+            "conflict"
+            if conflict
+            else "complete"
+            if (expectation["sealed_before_first_target"] and expected and captured == len(expected))
+            else "incomplete"
+        )
         days.append(
             {
                 "trading_date": trading_date,
@@ -1664,7 +1549,9 @@ def build_corpus_health_receipt(
                 "reason_code": (
                     "formal_corpus_conflict"
                     if conflict
-                    else None if day_status == "complete" else "formal_day_incomplete"
+                    else None
+                    if day_status == "complete"
+                    else "formal_day_incomplete"
                 ),
                 "market_calendar_version": expectation["market_calendar_version"],
                 "market_calendar_sha256": expectation["market_calendar_sha256"],
@@ -1678,11 +1565,7 @@ def build_corpus_health_receipt(
         )
     if selected_dates is None and point_root.is_dir() and not point_root.is_symlink():
         for directory in point_root.iterdir():
-            if (
-                directory.is_symlink()
-                or not directory.is_dir()
-                or directory.name not in expectation_dates
-            ):
+            if directory.is_symlink() or not directory.is_dir() or directory.name not in expectation_dates:
                 layout_conflicts += 1
     elif selected_dates is not None:
         for trading_date in selected_dates:
@@ -1702,9 +1585,7 @@ def build_corpus_health_receipt(
                 start = existing_dates[0]
                 end = max(
                     existing_dates[-1],
-                    local_date
-                    if local_date in trading_dates
-                    else existing_dates[-1],
+                    local_date if local_date in trading_dates else existing_dates[-1],
                 )
             elif local_date in trading_dates:
                 start = end = local_date
@@ -1724,12 +1605,8 @@ def build_corpus_health_receipt(
                         "trading_date": value,
                         "status": "missing",
                         "reason_code": "formal_expectation_missing",
-                        "market_calendar_version": calendar[
-                            "market_calendar_version"
-                        ],
-                        "market_calendar_sha256": calendar[
-                            "snapshot_content_sha256"
-                        ],
+                        "market_calendar_version": calendar["market_calendar_version"],
+                        "market_calendar_sha256": calendar["snapshot_content_sha256"],
                         "schedule_config_sha256": None,
                         "expected_point_count": 0,
                         "captured_point_count": 0,
@@ -1739,9 +1616,7 @@ def build_corpus_health_receipt(
                     }
             days = [rows_by_date[value] for value in sorted(rows_by_date)]
             suffix = 0
-            for value in reversed(
-                [item for item in denominator if item < local_date]
-            ):
+            for value in reversed([item for item in denominator if item < local_date]):
                 if rows_by_date[value]["status"] != "complete":
                     break
                 suffix += 1
@@ -1755,9 +1630,7 @@ def build_corpus_health_receipt(
             if root.is_dir() and not root.is_symlink():
                 for pattern in ("**/*.json", "**/*.json.gz"):
                     artifact_files.update(
-                        path
-                        for path in root.glob(pattern)
-                        if path.is_file() and not path.is_symlink()
+                        path for path in root.glob(pattern) if path.is_file() and not path.is_symlink()
                     )
     else:
         for trading_date in selected_dates:
@@ -1786,11 +1659,7 @@ def build_corpus_health_receipt(
         total_bytes = int(disk.total)
         free_bytes = int(disk.free)
         critical_floor = max((total_bytes + 19) // 20, 10 * 1024**3)
-        critical_reasons = (
-            ["current_free_space_below_critical_floor"]
-            if free_bytes < critical_floor
-            else []
-        )
+        critical_reasons = ["current_free_space_below_critical_floor"] if free_bytes < critical_floor else []
         capacity = {
             "status": "critical" if critical_reasons else "insufficient_history",
             "filesystem_capacity_bytes": total_bytes,
@@ -1815,10 +1684,7 @@ def build_corpus_health_receipt(
         "layout_conflicts": layout_conflicts,
     }
     available_points = [
-        (day["trading_date"], point)
-        for day in days
-        for point in day["points"]
-        if point["status"] == "available"
+        (day["trading_date"], point) for day in days for point in day["points"] if point["status"] == "available"
     ]
     latest_success = max(
         available_points,
@@ -1841,9 +1707,7 @@ def build_corpus_health_receipt(
         if latest_source is not None
         else None
     )
-    complete_dates = [
-        item["trading_date"] for item in days if item["status"] == "complete"
-    ]
+    complete_dates = [item["trading_date"] for item in days if item["status"] == "complete"]
     capacity_status = capacity["status"]
     healthy = bool(
         calendar is not None
@@ -1872,9 +1736,7 @@ def build_corpus_health_receipt(
         "latest_successful_point": (
             {
                 "trading_date": latest_success[0],
-                "recommendation_point_id": latest_success[1][
-                    "recommendation_point_id"
-                ],
+                "recommendation_point_id": latest_success[1]["recommendation_point_id"],
                 "captured_at_utc": latest_success[1]["captured_at_utc"],
             }
             if latest_success is not None
@@ -1911,9 +1773,7 @@ def seal_profile_formal_expectations(
     results: list[dict[str, Any]] = []
     if not isinstance(markets, list) or not isinstance(accounts, list) or not isinstance(config_paths, Mapping):
         _fail("formal_corpus_input_invalid", "service profile scope is invalid")
-    account_values = list(
-        dict.fromkeys(_identity("HK", value)[1] for value in accounts)
-    )
+    account_values = list(dict.fromkeys(_identity("HK", value)[1] for value in accounts))
     if not account_values:
         return {"status": "not_applicable", "results": []}
     for market_key in ("hk", "us"):
@@ -1928,9 +1788,7 @@ def seal_profile_formal_expectations(
                 expected_market=market_key,
             )
             configured_accounts = set(accounts_from_config(config, fallback=()))
-            market_accounts = [
-                account for account in account_values if account in configured_accounts
-            ]
+            market_accounts = [account for account in account_values if account in configured_accounts]
             schedule = config.get("schedule")
             if not isinstance(schedule, Mapping):
                 raise ValueError(f"{market} runtime schedule is missing")
@@ -1950,11 +1808,7 @@ def seal_profile_formal_expectations(
                     f"{market} trading date is outside calendar coverage",
                 )
             session = next(
-                (
-                    row["trade_date_type"]
-                    for row in calendar["trading_sessions"]
-                    if row["trading_date"] == trading_date
-                ),
+                (row["trade_date_type"] for row in calendar["trading_sessions"] if row["trading_date"] == trading_date),
                 None,
             )
             if session is None:
@@ -1989,18 +1843,14 @@ def seal_profile_formal_expectations(
                     "market": market,
                     "account": account,
                     "status": "not_evaluable",
-                    "reason_code": str(
-                        getattr(exc, "reason_code", "market_calendar_binding_unavailable")
-                    ),
+                    "reason_code": str(getattr(exc, "reason_code", "market_calendar_binding_unavailable")),
                     "message": str(exc),
                 }
                 for account in market_accounts
             )
     return {
         "status": (
-            "ok"
-            if all(item.get("status") not in {"conflict", "not_evaluable"} for item in results)
-            else "degraded"
+            "ok" if all(item.get("status") not in {"conflict", "not_evaluable"} for item in results) else "degraded"
         ),
         "results": results,
     }

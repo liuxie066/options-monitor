@@ -9,9 +9,11 @@ from pathlib import Path
 import pytest
 
 from src.application.opend_call_coordinator import (
+    InterruptibleOpenDCallError,
     LowPriorityOpenDCallDeferred,
     opend_endpoint_limiter_state_path,
     rate_limited_opend_call,
+    run_interruptible_opend_unit,
     try_low_priority_opend_call,
 )
 from src.application.option_chain_fetching import OptionChainRateLimitExceeded
@@ -26,6 +28,69 @@ def _low_priority_call(base_dir: Path, call):  # noqa: ANN001, ANN202
         production_reserve_calls=1,
         call=call,
     )
+
+
+def test_interruptible_opend_unit_times_out_and_restores_alarm() -> None:
+    import signal
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    signal.setitimer(signal.ITIMER_REAL, 1.0)
+    started = time.monotonic()
+    try:
+        with pytest.raises(InterruptibleOpenDCallError) as raised:
+            run_interruptible_opend_unit(lambda: time.sleep(1.0), timeout_seconds=0.05)
+        remaining, interval = signal.getitimer(signal.ITIMER_REAL)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0.0)
+
+    assert raised.value.reason_code == "opend_low_priority_timeout"
+    assert time.monotonic() - started < 0.5
+    assert signal.getsignal(signal.SIGALRM) is previous_handler
+    assert 0.1 < remaining < 1.0
+    assert interval == 0.0
+
+
+def test_interruptible_opend_unit_refuses_worker_thread_before_call() -> None:
+    calls: list[str] = []
+    errors: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            run_interruptible_opend_unit(lambda: calls.append("called"))
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    thread.join(timeout=1.0)
+
+    assert not thread.is_alive()
+    assert calls == []
+    assert len(errors) == 1
+    assert isinstance(errors[0], InterruptibleOpenDCallError)
+    assert errors[0].reason_code == "opend_low_priority_deadline_unavailable"
+
+
+def test_interruptible_opend_unit_also_interrupts_blocking_cleanup() -> None:
+    closed = False
+
+    def blocked_unit() -> None:
+        nonlocal closed
+        try:
+            time.sleep(1.0)
+        finally:
+            try:
+                time.sleep(1.0)
+            finally:
+                closed = True
+
+    started = time.monotonic()
+    with pytest.raises(InterruptibleOpenDCallError) as raised:
+        run_interruptible_opend_unit(blocked_unit, timeout_seconds=0.05)
+
+    assert raised.value.reason_code == "opend_low_priority_timeout"
+    assert time.monotonic() - started < 0.5
+    assert closed is True
 
 
 def test_low_priority_call_defers_without_using_production_reserve(
