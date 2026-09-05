@@ -65,7 +65,7 @@ from src.application.notification_delivery_adapter import (
 )
 from src.application.candidate_snapshot_contract import utc_timestamp
 from src.application.recommendation_point import (
-    RECOMMENDATION_POINT_SCHEMA_V3,
+    RECOMMENDATION_POINT_SCHEMA,
     RecommendationPointError,
     capture_scheduled_recommendation_point,
 )
@@ -250,10 +250,7 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
         )
         return rc
 
-    if (
-        daily_brief_prep.blocked_error_code
-        and not bool(prepared_messages.threshold_met)
-    ):
+    if daily_brief_prep.blocked_error_code and not bool(prepared_messages.threshold_met):
         _observe_recommendation_points_best_effort(request)
         _run_post_delivery_sidecars_best_effort(request)
         return finish_retry_blocker(daily_brief_prep.blocked_error_code)
@@ -506,9 +503,7 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
         send_attempted_count = execution.send_attempted_count
         send_confirmed_count = len(sent_accounts)
         retry_attempt_count = execution.retry_attempt_count
-        provider_retry_attempt_count = (
-            execution.provider_retry_attempt_count
-        )
+        provider_retry_attempt_count = execution.provider_retry_attempt_count
         outer_retry_attempt_count = execution.outer_retry_attempt_count
         fallback_attempt_count = execution.fallback_attempt_count
         ambiguous_send_count = execution.ambiguous_send_count + sum(
@@ -570,9 +565,7 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
             request.runlog.safe_event(
                 "run_end",
                 "skip",
-                data=_safe_runlog_data(
-                    {"would_send_accounts": would_send_accounts, "delivery_only": True}
-                ),
+                data=_safe_runlog_data({"would_send_accounts": would_send_accounts, "delivery_only": True}),
             )
             request.audit_helper.guard_mark_success()
             request.complete_tick_idempotency_fn(
@@ -675,9 +668,7 @@ def _validate_scheduled_scan_targets(request: TickNotificationRequest) -> None:
         if str(account or "").strip()
     }
     scanned_accounts = {
-        str(account or "").strip().lower()
-        for account in request.ran_pipeline_accounts
-        if str(account or "").strip()
+        str(account or "").strip().lower() for account in request.ran_pipeline_accounts if str(account or "").strip()
     }
     missing = sorted(account for account in scanned_accounts if not targets.get(account))
     if not missing:
@@ -783,9 +774,7 @@ def _run_post_delivery_sidecars_best_effort(
 
 
 def _observe_recommendation_points(request: TickNotificationRequest) -> None:
-    markets = {
-        str(market or "").strip().lower() for market in request.markets_to_run
-    }
+    markets = {str(market or "").strip().lower() for market in request.markets_to_run}
     if (
         request.delivery_only
         or str(request.trigger_kind or "manual").strip().lower() != "scheduled"
@@ -797,16 +786,13 @@ def _observe_recommendation_points(request: TickNotificationRequest) -> None:
     targets = request.scheduled_scan_targets_by_account or {}
     eligible: list[tuple[str, Mapping[str, Any]]] = []
     ran_accounts = dict.fromkeys(
-        str(raw_account or "").strip().lower()
-        for raw_account in request.ran_pipeline_accounts
+        str(raw_account or "").strip().lower() for raw_account in request.ran_pipeline_accounts
     )
     for account in ran_accounts:
         decision = decisions.get(account)
         committed_target = _canonical_recommendation_target(targets.get(account))
         scheduler_target = _canonical_recommendation_target(
-            decision.get("scheduled_scan_target_market")
-            if isinstance(decision, Mapping)
-            else None
+            decision.get("scheduled_scan_target_market") if isinstance(decision, Mapping) else None
         )
         if (
             not account
@@ -852,7 +838,6 @@ def _observe_recommendation_points(request: TickNotificationRequest) -> None:
                 account,
                 decision,
                 source_commit_sha=source_sha,
-                require_formal_contract=True,
             )
         except RecommendationPointError as exc:
             _audit_recommendation_point(
@@ -914,17 +899,12 @@ def _archive_formal_point(
     recommendation_point: Mapping[str, Any] | None = None,
     reason_code: str | None = None,
 ) -> None:
-    target = _canonical_recommendation_target(
-        decision.get("scheduled_scan_target_market")
-    )
+    target = _canonical_recommendation_target(decision.get("scheduled_scan_target_market"))
     if target is None:
         return
     timezone_name = "Asia/Hong_Kong" if market == "HK" else "America/New_York"
     trading_date = (
-        datetime.fromisoformat(target.replace("Z", "+00:00"))
-        .astimezone(ZoneInfo(timezone_name))
-        .date()
-        .isoformat()
+        datetime.fromisoformat(target.replace("Z", "+00:00")).astimezone(ZoneInfo(timezone_name)).date().isoformat()
     )
     try:
         from src.application.research.formal_corpus import capture_formal_point_attempt
@@ -937,10 +917,8 @@ def _archive_formal_point(
             trading_date=trading_date,
             run_id=request.run_id,
             scheduled_scan_target_market=target,
-            captured_at_utc=datetime.now(timezone.utc).isoformat().replace(
-                "+00:00", "Z"
-            ),
-            producer_behavior_version=RECOMMENDATION_POINT_SCHEMA_V3,
+            captured_at_utc=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            producer_behavior_version=RECOMMENDATION_POINT_SCHEMA,
             recommendation_point=recommendation_point,
             reason_code=reason_code,
         )
@@ -950,21 +928,14 @@ def _archive_formal_point(
             "formal_point_archive_failed",
             status="degraded",
             account=account,
-            reason_code=str(
-                getattr(exc, "reason_code", "formal_point_archive_failed")
-            ),
+            reason_code=str(getattr(exc, "reason_code", "formal_point_archive_failed")),
             message=str(exc),
         )
         return
     _audit_recommendation_point(
         request,
         "formal_point_archived",
-        status=(
-            "ok"
-            if result.get("status") != "conflict"
-            and result.get("reason_code") is None
-            else "degraded"
-        ),
+        status=("ok" if result.get("status") != "conflict" and result.get("reason_code") is None else "degraded"),
         account=account,
         reason_code=result.get("reason_code"),
         publication=str(result.get("status") or ""),
@@ -1132,9 +1103,7 @@ def _prepare_daily_brief_notification(
             == FEISHU_APP_NOTIFICATION_PROVIDER
         )
         ran_pipeline_accounts = {
-            str(value or "").strip().lower()
-            for value in request.ran_pipeline_accounts
-            if str(value or "").strip()
+            str(value or "").strip().lower() for value in request.ran_pipeline_accounts if str(value or "").strip()
         }
         scan_targets = {
             str(account).strip().lower(): str(target).strip()
@@ -1233,7 +1202,10 @@ def _prepare_daily_brief_notification(
                 if pipeline_reliable:
                     persisted = persist_daily_decision_brief_success(base=request.base, brief=brief)
                     previous = persisted.get("previous_successful_brief")
-                    if isinstance(previous, dict) and previous.get("market_trading_date") == persisted["brief"]["market_trading_date"]:
+                    if (
+                        isinstance(previous, dict)
+                        and previous.get("market_trading_date") == persisted["brief"]["market_trading_date"]
+                    ):
                         diff = diff_daily_decision_briefs(previous, persisted["brief"])
                     if scheduled_trigger and blocked_retry_envelope is None:
                         recorded = record_daily_decision_brief_candidates(
@@ -1246,24 +1218,16 @@ def _prepare_daily_brief_notification(
                             candidate_identities=persisted["current_candidate_identities"],
                         )
                         pending = list(recorded["pending_candidate_identities"])
-                    if (
-                        fixed_target
-                        and blocked_retry_envelope is None
-                        and not request.no_send
-                    ):
+                    if fixed_target and blocked_retry_envelope is None and not request.no_send:
                         record_daily_decision_brief_fixed_recovery(
                             base=request.base,
                             account=account,
                             market=market,
-                            market_trading_date=str(
-                                persisted["brief"]["market_trading_date"]
-                            ),
+                            market_trading_date=str(persisted["brief"]["market_trading_date"]),
                             scheduled_target_market=fixed_target,
                             revision=int(persisted["current_revision"]),
                             brief_digest=str(persisted["current_brief_digest"]),
-                            candidate_identities=persisted[
-                                "current_candidate_identities"
-                            ],
+                            candidate_identities=persisted["current_candidate_identities"],
                         )
                     if scheduled_trigger:
                         commit_started = monotonic()
@@ -1272,9 +1236,7 @@ def _prepare_daily_brief_notification(
                                 request,
                                 account=account,
                                 target=scan_targets[account],
-                                brief_digest=str(
-                                    persisted["current_brief_digest"]
-                                ),
+                                brief_digest=str(persisted["current_brief_digest"]),
                             )
                         finally:
                             record_tick_latency(
@@ -1304,30 +1266,23 @@ def _prepare_daily_brief_notification(
                 action = str(decision["action"])
                 existing_retry = None
                 if scheduled_trigger and not multi_market:
-                    existing_retry = (
-                        blocked_retry
-                        or read_retryable_daily_decision_brief_delivery(
-                            base=request.base,
-                            account=account,
-                            market=market,
-                            market_trading_date=str(brief["market_trading_date"]),
-                        )
+                    existing_retry = blocked_retry or read_retryable_daily_decision_brief_delivery(
+                        base=request.base,
+                        account=account,
+                        market=market,
+                        market_trading_date=str(brief["market_trading_date"]),
                     )
-                existing_envelope = (
-                    existing_retry.get("envelope")
-                    if isinstance(existing_retry, dict)
-                    else None
-                )
+                existing_envelope = existing_retry.get("envelope") if isinstance(existing_retry, dict) else None
                 pending_delivery_status = (
-                    "existing_pending_preserved"
-                    if isinstance(existing_envelope, Mapping)
-                    else "not_applicable"
+                    "existing_pending_preserved" if isinstance(existing_envelope, Mapping) else "not_applicable"
                 )
-                should_prepare = not (
-                    isinstance(existing_retry, dict)
-                    and isinstance(existing_envelope, dict)
-                )
-                if not multi_market and not request.no_send and should_prepare and action in {"fixed_report", "candidate_alert", "fixed_failure"}:
+                should_prepare = not (isinstance(existing_retry, dict) and isinstance(existing_envelope, dict))
+                if (
+                    not multi_market
+                    and not request.no_send
+                    and should_prepare
+                    and action in {"fixed_report", "candidate_alert", "fixed_failure"}
+                ):
                     render_context = _daily_brief_render_context(request, scheduler_decision=scheduler)
                     if action == "fixed_failure":
                         message = render_fixed_failure(
@@ -1351,11 +1306,7 @@ def _prepare_daily_brief_notification(
                         )
                     else:
                         assert persisted is not None
-                        identities = (
-                            persisted["current_candidate_identities"]
-                            if action == "fixed_report"
-                            else pending
-                        )
+                        identities = persisted["current_candidate_identities"] if action == "fixed_report" else pending
                         rendered_combo_rows = select_rendered_combo_candidate_rows(
                             persisted["brief"],
                             delivery_kind=action,
@@ -1363,11 +1314,9 @@ def _prepare_daily_brief_notification(
                             diff=diff,
                             limits=daily_limits,
                         )
-                        rendered_combo_identities = (
-                            combo_candidate_identities_for_rendered_rows(
-                                persisted["brief"],
-                                rendered_combo_rows,
-                            )
+                        rendered_combo_identities = combo_candidate_identities_for_rendered_rows(
+                            persisted["brief"],
+                            rendered_combo_rows,
                         )
                         render_context.update(
                             combo_exposure_render_context(
@@ -1377,9 +1326,7 @@ def _prepare_daily_brief_notification(
                                 )
                             )
                         )
-                        render_context["rendered_combo_candidate_identities"] = (
-                            rendered_combo_identities
-                        )
+                        render_context["rendered_combo_candidate_identities"] = rendered_combo_identities
                         if action == "fixed_report":
                             message = render_fixed_report(
                                 persisted["brief"],
@@ -1434,14 +1381,11 @@ def _prepare_daily_brief_notification(
                 retry = None
                 retired_classification: str | None = None
                 if scheduled_trigger and not multi_market:
-                    retry = (
-                        blocked_retry
-                        or read_retryable_daily_decision_brief_delivery(
-                            base=request.base,
-                            account=account,
-                            market=market,
-                            market_trading_date=str(brief["market_trading_date"]),
-                        )
+                    retry = blocked_retry or read_retryable_daily_decision_brief_delivery(
+                        base=request.base,
+                        account=account,
+                        market=market,
+                        market_trading_date=str(brief["market_trading_date"]),
                     )
                     envelope = retry.get("envelope")
                     if isinstance(envelope, dict):
@@ -1486,18 +1430,22 @@ def _prepare_daily_brief_notification(
                         "pending_delivery_status": pending_delivery_status,
                         "retry_reason": retry.get("reason") if isinstance(retry, dict) else None,
                         "selected_delivery_kind": (
-                            selected_envelope.get("delivery_kind")
-                            if isinstance(selected_envelope, dict)
-                            else None
+                            selected_envelope.get("delivery_kind") if isinstance(selected_envelope, dict) else None
                         ),
-                        "delivery_key": selected_envelope.get("delivery_key") if isinstance(selected_envelope, dict) else None,
-                        "message_sha256": selected_envelope.get("message_sha256") if isinstance(selected_envelope, dict) else None,
+                        "delivery_key": selected_envelope.get("delivery_key")
+                        if isinstance(selected_envelope, dict)
+                        else None,
+                        "message_sha256": selected_envelope.get("message_sha256")
+                        if isinstance(selected_envelope, dict)
+                        else None,
                         "rendered_transport_sha256": (
                             selected_envelope.get("rendered_transport_sha256")
                             if isinstance(selected_envelope, dict)
                             else None
                         ),
-                        "message_chars": len(str(selected_envelope.get("rendered_message") or "")) if isinstance(selected_envelope, dict) else 0,
+                        "message_chars": len(str(selected_envelope.get("rendered_message") or ""))
+                        if isinstance(selected_envelope, dict)
+                        else 0,
                         "render_limits": dict(daily_limits),
                         "error_code": (
                             "legacy_ai_payload_retired"
@@ -1739,7 +1687,6 @@ def _write_daily_brief_failure_artifact(
     return relative, hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-
 def _daily_brief_envelope_audit(account: str, market: str, envelope: dict[str, Any], *, retry: bool) -> dict[str, Any]:
     return {
         "account": account,
@@ -1771,6 +1718,7 @@ def _daily_brief_retired_envelope_audit(
         "blocked": True,
     }
 
+
 def _daily_brief_render_context(
     request: TickNotificationRequest,
     *,
@@ -1778,7 +1726,9 @@ def _daily_brief_render_context(
 ) -> dict[str, Any]:
     schedule = request.base_cfg.get(request.scheduler_schedule_key) if isinstance(request.base_cfg, dict) else {}
     schedule_map = schedule if isinstance(schedule, dict) else {}
-    scheduler = scheduler_decision or (request.scheduler_decision if isinstance(request.scheduler_decision, dict) else {})
+    scheduler = scheduler_decision or (
+        request.scheduler_decision if isinstance(request.scheduler_decision, dict) else {}
+    )
     user_timezone = getattr(request.bj_tz, "key", None) or str(request.bj_tz)
     trigger_kind = str(request.trigger_kind or "scheduled").strip().lower()
     return {
@@ -1916,6 +1866,7 @@ def _confirm_daily_brief_execution(
                 }
             )
     return confirmed_accounts, failures
+
 
 def _audit_notification_perception(request: TickNotificationRequest, event: dict[str, Any]) -> None:
     try:

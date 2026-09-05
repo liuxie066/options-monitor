@@ -77,21 +77,15 @@ OBSERVATION_STATUSES = frozenset(
 EVALUATOR_OWNER_PATHS = (
     "src/application/strategy_lab/contracts.py",
     "src/application/strategy_lab/recipe.py",
-    "src/application/strategy_lab/comparison.py",
     "src/application/strategy_lab/evidence.py",
-    "src/application/strategy_lab/readiness.py",
-    "src/application/strategy_lab/service.py",
-    "src/application/strategy_lab/receipts.py",
-    "src/infrastructure/strategy_lab/experiment_store.py",
+    "domain/domain/strategy_lab_evaluation.py",
     "domain/domain/engine/candidate_engine.py",
     "domain/domain/short_vol_assessment.py",
     "domain/domain/option_lifecycle.py",
     "domain/domain/fee_calc.py",
     "domain/domain/performance/models.py",
-    "src/application/performance/account_fee_plan.py",
-    "src/infrastructure/performance_evidence_sqlite.py",
     "src/application/opend_market_snapshot_fetching.py",
-    "src/infrastructure/futu_gateway.py",
+    "src/application/performance/evidence_collection.py",
     "src/application/opening_candidate_snapshot.py",
     "src/application/prepared_option_positions_context.py",
     "src/application/recommendation_point.py",
@@ -159,8 +153,7 @@ def build_evaluator_behavior_manifest(repo_root: str | Path) -> list[dict[str, s
 def evaluator_behavior_sha256(manifest: object) -> str:
     if (
         not isinstance(manifest, list)
-        or [item.get("path") for item in manifest if isinstance(item, dict)]
-        != list(EVALUATOR_OWNER_PATHS)
+        or [item.get("path") for item in manifest if isinstance(item, dict)] != list(EVALUATOR_OWNER_PATHS)
         or any(
             not isinstance(item, dict)
             or set(item) != {"path", "sha256"}

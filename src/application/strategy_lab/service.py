@@ -16,12 +16,19 @@ from src.application.account_config import (
 )
 from src.application.account_run import build_account_runtime_config
 from src.application.futu_portfolio_context import infer_futu_portfolio_settings
+from src.application.futu_quote_routing import (
+    normalize_futu_quote_endpoint,
+    resolve_shared_futu_quote_route,
+)
 from src.application.ledger.api import resolve_position_ledger_sqlite_path
 from src.application.candidate_snapshot_contract import utc_timestamp
 from src.application.opend_fetch_config import OpenDEndpointRateLimit, resolve_opend_fetch_limits
 from src.application.opend_market_snapshot_fetching import fetch_option_snapshots
 from src.application.opend_call_coordinator import (
+    INTERRUPTIBLE_OPEND_UNIT_TIMEOUT_SECONDS,
+    InterruptibleOpenDCallError,
     LowPriorityOpenDCallDeferred,
+    run_interruptible_opend_unit,
     try_low_priority_opend_call,
 )
 from src.application.research.formal_corpus import (
@@ -31,7 +38,10 @@ from src.application.research.formal_corpus import (
 )
 from src.application.service_deploy import next_systemd_tick_target_utc
 from src.application.source_identity import source_commit_sha
-from src.application.strategy_lab.comparison import compare_single_recommendations
+from domain.domain.strategy_lab_evaluation import (
+    compare_single_recommendations,
+    select_research_leader,
+)
 from src.application.strategy_lab.contracts import (
     ACCOUNT,
     HIDDEN_SNAPSHOT_BATCH_CEILING,
@@ -48,6 +58,7 @@ from src.application.strategy_lab.contracts import (
 )
 from src.application.strategy_lab.evidence import (
     StrategyLabEvidenceError,
+    build_comparison_projection,
     build_hidden_batch_manifest,
     build_expiry_close_query,
     build_single_recommendation_result,
@@ -64,13 +75,18 @@ from src.application.strategy_lab.evidence import (
 )
 from src.application.strategy_lab.recipe import (
     StrategyLabRecipeError,
+    describe_recipe,
+    variant_preference,
+)
+from src.application.strategy_lab.readiness import (
+    HISTORY_K_POC_NOT_BEFORE_HK,
+    HistoryKReadinessError,
     build_validation_plan,
     check_recipe_readiness,
-    describe_recipe,
+    refresh_history_k_readiness as _refresh_history_k_readiness,
     resolve_terminal_fx_binding,
     select_engineering_canary_window,
 )
-from src.application.strategy_lab.readiness import HISTORY_K_POC_NOT_BEFORE_HK
 from src.application.strategy_lab.receipts import (
     StrategyLabReceiptError,
     build_research_receipt,
@@ -144,7 +160,6 @@ def resolve_strategy_lab_runtime_context(
         "artifact_root": artifact_root,
         "store_path": artifact_root / "experiments.sqlite3",
         "opend_limiter_root": runtime_root,
-        "tick_lock_path": runtime_root / "locks" / f"tick-{market_key}.lock",
     }
 
 
@@ -180,6 +195,34 @@ def resolve_strategy_lab_context(profile: Mapping[str, Any]) -> dict[str, Any]:
     port = binding.get("port")
     if not isinstance(host, str) or not host.strip() or type(port) is not int or not 0 < port <= 65535:
         _fail("Strategy Lab HK OpenD binding is missing or invalid")
+    markets = profile.get("markets")
+    if (
+        not isinstance(markets, list)
+        or not markets
+        or any(market not in {"hk", "us"} for market in markets)
+        or len(set(markets)) != len(markets)
+    ):
+        _fail("Strategy Lab service profile markets are invalid")
+    route_inputs: list[tuple[str, Mapping[str, Any]]] = []
+    for market in sorted(markets):
+        if market == "hk":
+            market_config = config
+        else:
+            market_runtime = resolve_strategy_lab_runtime_context(profile, market=market)
+            try:
+                _market_path, market_config = load_runtime_config(
+                    config_path=market_runtime["config_path"],
+                    expected_market=market,
+                )
+            except (AgentToolError, OSError, ValueError) as exc:
+                raise StrategyLabContextError(str(exc)) from exc
+        route_inputs.append((market, market_config))
+    route = resolve_shared_futu_quote_route(route_inputs)
+    if not route.ok:
+        _fail(f"Strategy Lab shared OpenD quote route is {route.status}")
+    portfolio_endpoint = normalize_futu_quote_endpoint({"host": host, "port": port})
+    if (route.host, route.port) != portfolio_endpoint:
+        _fail("Strategy Lab OpenD binding does not match the shared quote route")
     artifact_root = runtime["artifact_root"]
     return {
         "profile": dict(profile),
@@ -188,12 +231,13 @@ def resolve_strategy_lab_context(profile: Mapping[str, Any]) -> dict[str, Any]:
         "config_hk": config_hk,
         "market": "hk",
         "account": account,
-        "opend_binding": {"host": host.strip(), "port": port},
+        "opend_binding": {"host": route.host, "port": route.port},
         "ledger_path": ledger_path,
         "store_path": runtime["store_path"],
         "artifact_root": artifact_root,
         "opend_limiter_root": runtime_root,
-        "tick_lock_path": runtime_root / "locks" / "tick-hk.lock",
+        "tick_markets": tuple(sorted(markets)),
+        "tick_lock_paths": tuple(runtime_root / "locks" / f"tick-{market}.lock" for market in sorted(markets)),
     }
 
 
@@ -908,12 +952,66 @@ def _observed_source_commits(store: ExperimentStore, experiment: Mapping[str, An
     return commits
 
 
-def _provider_guard(context: Mapping[str, Any], occurred_at_utc: str) -> str | None:
+def _provider_guard(
+    context: Mapping[str, Any],
+    occurred_at_utc: str,
+    history_k: bool = True,
+) -> str | None:
+    blocker = _tick_guard(context, occurred_at_utc)
+    if blocker is not None:
+        return blocker
+    if not history_k:
+        return None
     occurred = datetime.fromisoformat(occurred_at_utc.replace("Z", "+00:00"))
     local = occurred.astimezone(_HK_TZ)
     if local.weekday() < 5 and local.time() < HISTORY_K_POC_NOT_BEFORE_HK:
         return "tick_protection_window"
-    return _tick_guard(context, occurred_at_utc)
+    return None
+
+
+def refresh_history_k_readiness(
+    context: Mapping[str, Any],
+    *,
+    request: object,
+    confirmed_probe_sha256: object,
+    actor: object,
+    occurred_at_utc: object,
+) -> dict[str, object]:
+    """Run the confirmed history-K probe through the shared provider boundary."""
+
+    occurred = _occurred_at(occurred_at_utc)
+    try:
+        _config_path, config = load_runtime_config(
+            config_path=context["config_hk"],
+            expected_market="hk",
+        )
+        limit = resolve_opend_fetch_limits(config).history_kline
+        binding = context["opend_binding"]
+        return _refresh_history_k_readiness(
+            context["artifact_root"],
+            gateway_factory=lambda: build_futu_gateway(
+                host=str(binding["host"]),
+                port=int(binding["port"]),
+                is_option_chain_cache_enabled=False,
+            ),
+            request=request,
+            confirmed_probe_sha256=confirmed_probe_sha256,
+            actor=actor,
+            occurred_at_utc=occurred,
+            limiter_root=context["opend_limiter_root"],
+            provider_guard=lambda: _provider_guard(context, occurred),
+            window_sec=limit.window_sec,
+            max_calls=limit.max_calls,
+        )
+    except StrategyLabServiceError:
+        raise
+    except HistoryKReadinessError as exc:
+        raise StrategyLabServiceError(exc.reason_code, str(exc)) from exc
+    except (AgentToolError, FutuGatewayError, OSError, ValueError) as exc:
+        raise StrategyLabServiceError(
+            str(getattr(exc, "reason_code", getattr(exc, "code", "history_k_probe_failed"))),
+            str(exc),
+        ) from exc
 
 
 def _put_action(
@@ -953,6 +1051,32 @@ def _put_action(
     )
 
 
+def _compare_result_sets(
+    expected: list[dict[str, str]],
+    baseline: list[Mapping[str, Any]],
+    challenger: list[Mapping[str, Any]],
+) -> dict[str, Any]:
+    try:
+        baseline_projection = [build_comparison_projection(item) for item in baseline]
+        challenger_projection = [build_comparison_projection(item) for item in challenger]
+    except StrategyLabEvidenceError as exc:
+        return {
+            "status": "insufficient_evidence",
+            "reason_code": exc.reason_code,
+            "passed": False,
+            "daily_aggregates": [],
+        }
+    return compare_single_recommendations(
+        expected,
+        baseline_projection,
+        challenger_projection,
+    )
+
+
+def _recipe_variants() -> list[dict[str, Any]]:
+    return variant_preference(RECIPE_ID)
+
+
 def _comparisons(spec: Mapping[str, Any], observations: list[dict[str, Any]]) -> list[dict[str, Any]]:
     projection = load_research_projection(spec)
     expected = [
@@ -964,17 +1088,42 @@ def _comparisons(spec: Mapping[str, Any], observations: list[dict[str, Any]]) ->
     ]
     results = [item["payload"] for item in observations if item["kind"] == "single_result"]
     baseline = [item for item in results if item.get("arm") == "baseline"]
-    variants = sorted(
-        {str(item["variant_id"]) for item in results if item.get("arm") == "challenger" and item.get("variant_id")}
-    )
+    variants = {
+        str(item["variant_id"]) for item in results if item.get("arm") == "challenger" and item.get("variant_id")
+    }
+    configuration = {item["variant_id"]: item for item in _recipe_variants()}
     comparisons: list[dict[str, Any]] = []
-    for variant in variants:
+    for variant in sorted(
+        variants,
+        key=lambda value: list(configuration).index(value) if value in configuration else len(configuration),
+    ):
         challenger = [item for item in results if item.get("variant_id") == variant]
-        comparison = compare_single_recommendations(expected, baseline, challenger)
+        comparison = _compare_result_sets(expected, baseline, challenger)
         comparison.setdefault("variant_id", variant)
-        comparison.setdefault("near_return_threshold", challenger[0]["near_return_threshold"])
+        if variant in configuration:
+            comparison.update(configuration[variant])
         comparisons.append(comparison)
     return comparisons
+
+
+def _select_recipe_leader(comparisons: list[dict[str, Any]]) -> dict[str, Any]:
+    variants = _recipe_variants()
+    generic = [
+        {key: value for key, value in comparison.items() if key != "near_return_threshold"}
+        for comparison in comparisons
+    ]
+    conclusion = select_research_leader(
+        generic,
+        [item["variant_id"] for item in variants],
+    )
+    if conclusion["status"] != "leader":
+        return conclusion
+    leader = dict(conclusion["leader"])
+    selected = next(item for item in comparisons if item["variant_id"] == leader["variant_id"])
+    parameters = next(item for item in variants if item["variant_id"] == leader["variant_id"])
+    leader.update(parameters)
+    leader["comparison_sha256"] = canonical_sha256(selected)
+    return {**conclusion, "leader": leader}
 
 
 def _conclude_research(
@@ -986,14 +1135,15 @@ def _conclude_research(
 ) -> dict[str, Any]:
     observations = store.list_observations(experiment["experiment_id"])
     comparisons = _comparisons(experiment["spec"], observations)
+    conclusion = _select_recipe_leader(comparisons)
     receipt = build_research_receipt(
         experiment,
         observations,
         comparisons,
+        conclusion,
         experiment["updated_at_utc"],
     )
     published = publish_receipt(context["artifact_root"], experiment["experiment_id"], "research", receipt)
-    conclusion = receipt["conclusion"]
     leader = conclusion["leader"] if conclusion["status"] == "leader" else None
     new_state = "awaiting_validation_confirmation" if leader is not None else "completed"
     attached = store.attach_research_receipt_and_transition(
@@ -1119,23 +1269,24 @@ def execute_research(
                     _config_path, config = load_runtime_config(config_path=context["config_hk"], expected_market="hk")
                     limit = resolve_opend_fetch_limits(config).history_kline
                     binding = context["opend_binding"]
-                    gateway = build_futu_gateway(
-                        host=str(binding["host"]),
-                        port=int(binding["port"]),
-                        is_option_chain_cache_enabled=False,
-                    )
-                    try:
-                        if locked_action["action"] == "collect_history_k":
-                            payload = collect_research_fill_evidence(
-                                gateway,
-                                locked_action["query"],
-                                limiter_root=context["opend_limiter_root"],
-                                window_sec=limit.window_sec,
-                                max_calls=limit.max_calls,
-                            )
-                        else:
+
+                    def collect_provider_evidence() -> dict[str, Any]:
+                        gateway = build_futu_gateway(
+                            host=str(binding["host"]),
+                            port=int(binding["port"]),
+                            is_option_chain_cache_enabled=False,
+                        )
+                        try:
+                            if locked_action["action"] == "collect_history_k":
+                                return collect_research_fill_evidence(
+                                    gateway,
+                                    locked_action["query"],
+                                    limiter_root=context["opend_limiter_root"],
+                                    window_sec=limit.window_sec,
+                                    max_calls=limit.max_calls,
+                                )
                             query = locked_action["query"]
-                            payload = resolve_expiry_outcome(
+                            return resolve_expiry_outcome(
                                 gateway,
                                 query,
                                 query["fee_plan"],
@@ -1144,27 +1295,34 @@ def execute_research(
                                 window_sec=limit.window_sec,
                                 max_calls=limit.max_calls,
                             )
-                        item = _observe_source_commit(
-                            store,
-                            item,
-                            current_source,
-                            actor=actor_text,
-                            occurred_at_utc=occurred,
-                        )
-                        publish_evidence_artifact(
-                            context["artifact_root"],
-                            locked_action["artifact_kind"],
-                            locked_action["query_sha256"],
-                            payload,
-                            query=locked_action["query"],
-                            observed_at_utc=occurred,
-                            producer_source_commit_sha=current_source,
-                        )
-                    finally:
-                        gateway.close()
+                        finally:
+                            gateway.close()
+
+                    payload = run_interruptible_opend_unit(
+                        collect_provider_evidence,
+                        timeout_seconds=INTERRUPTIBLE_OPEND_UNIT_TIMEOUT_SECONDS,
+                    )
+                    publish_evidence_artifact(
+                        context["artifact_root"],
+                        locked_action["artifact_kind"],
+                        locked_action["query_sha256"],
+                        payload,
+                        query=locked_action["query"],
+                        observed_at_utc=occurred,
+                        producer_source_commit_sha=current_source,
+                    )
+                    item = _observe_source_commit(
+                        store,
+                        item,
+                        current_source,
+                        actor=actor_text,
+                        occurred_at_utc=occurred,
+                    )
                     provider_units = 1
             except BlockingIOError:
                 return _blocked(item, "research_evidence_busy")
+            except InterruptibleOpenDCallError as exc:
+                return _blocked(item, exc.reason_code)
             except StrategyLabEvidenceError as exc:
                 if exc.reason_code in {"opend_low_priority_deferred", "research_provider_failed"}:
                     return _blocked(item, exc.reason_code)
@@ -1611,10 +1769,21 @@ def _complete_batch_from_artifact(
 
 
 def _tick_guard(context: Mapping[str, Any], occurred_at_utc: str) -> str | None:
-    if tick_cron_is_busy(context["tick_lock_path"]):
-        return "tick_busy"
+    lock_paths = context.get("tick_lock_paths")
+    markets = context.get("tick_markets")
+    if (
+        not isinstance(lock_paths, tuple)
+        or not lock_paths
+        or not isinstance(markets, tuple)
+        or not markets
+        or len(lock_paths) != len(markets)
+    ):
+        raise StrategyLabServiceError("strategy_lab_context_invalid", "Strategy Lab Tick guard is invalid")
+    for lock_path in lock_paths:
+        if tick_cron_is_busy(lock_path):
+            return "tick_busy"
     occurred = datetime.fromisoformat(occurred_at_utc.replace("Z", "+00:00"))
-    for market in ("hk", "us"):
+    for market in markets:
         target = next_systemd_tick_target_utc(market, occurred - timedelta(seconds=TICK_PROTECTION_SECONDS))
         if abs((target - occurred).total_seconds()) <= TICK_PROTECTION_SECONDS:
             return "tick_protection_window"
@@ -1674,7 +1843,7 @@ def _advance_current_batch(
         raise StrategyLabServiceError("validation_batch_manifest_conflict", "hidden artifact has no started batch")
     if not provider_capable:
         return {"status": "blocked", "reason_code": "advance_external_timeout_required"}
-    blocker = _tick_guard(context, occurred_at_utc)
+    blocker = _provider_guard(context, occurred_at_utc, False)
     if blocker is not None:
         return {"status": "blocked", "reason_code": blocker}
     reserve = snapshot_limit.max_calls - min(
@@ -1893,7 +2062,17 @@ def _finalize_validation(
     leader = item["leader"]
     baseline = [value for value in results if value.get("arm") == "baseline"]
     challenger = [value for value in results if value.get("variant_id") == leader["variant_id"]]
-    comparison = compare_single_recommendations(_validation_expected_points(plan), baseline, challenger)
+    comparison = _compare_result_sets(
+        _validation_expected_points(plan),
+        baseline,
+        challenger,
+    )
+    comparison.update(
+        {
+            "variant_id": leader["variant_id"],
+            "near_return_threshold": leader["near_return_threshold"],
+        }
+    )
     conclusion = (
         "challenger_passed"
         if comparison.get("status") == "complete" and comparison.get("passed") is True
@@ -2327,6 +2506,7 @@ __all__ = [
     "preview_experiment",
     "preview_validation",
     "read_receipt",
+    "refresh_history_k_readiness",
     "resolve_strategy_lab_context",
     "resolve_strategy_lab_runtime_context",
 ]

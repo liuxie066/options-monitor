@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import sqlite3
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -36,7 +37,8 @@ def _context(tmp_path: Path) -> dict[str, object]:
         "config_hk": tmp_path / "config.hk.json",
         "opend_binding": {"host": "127.0.0.1", "port": 11111},
         "opend_limiter_root": tmp_path,
-        "tick_lock_path": tmp_path / "tick.lock",
+        "tick_markets": ("hk",),
+        "tick_lock_paths": (tmp_path / "tick.lock",),
     }
 
 
@@ -46,17 +48,10 @@ def _spec() -> dict[str, object]:
         "source_commit_sha": "b" * 40,
         "behavior_manifest": manifest,
         "evaluator_behavior_sha256": canonical_sha256(manifest),
-        "history_k_authority": {
-            "probe_request": {
-                "opend_binding": {"host": "127.0.0.1", "port": 11111}
-            }
-        },
+        "history_k_authority": {"probe_request": {"opend_binding": {"host": "127.0.0.1", "port": 11111}}},
         "research_window": {
             "selected_trading_dates": [f"2026-08-{day:02d}" for day in range(1, 21)],
-            "sessions": [
-                {"trading_date": f"2026-08-{day:02d}", "points": []}
-                for day in range(1, 21)
-            ],
+            "sessions": [{"trading_date": f"2026-08-{day:02d}", "points": []} for day in range(1, 21)],
         },
     }
 
@@ -129,15 +124,11 @@ def _patch_behavior(monkeypatch: pytest.MonkeyPatch, *, matches: bool = True) ->
     monkeypatch.setattr(
         service,
         "evaluator_behavior_sha256",
-        lambda _manifest: canonical_sha256(_spec()["behavior_manifest"])
-        if matches
-        else "f" * 64,
+        lambda _manifest: canonical_sha256(_spec()["behavior_manifest"]) if matches else "f" * 64,
     )
 
 
-def test_confirm_rebuilds_exact_preview_and_is_idempotent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_confirm_rebuilds_exact_preview_and_is_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import src.application.strategy_lab.service as service
 
     context = _context(tmp_path)
@@ -246,9 +237,7 @@ def test_validation_preview_hash_excludes_time_and_confirmation_is_idempotent(
         "idempotency_key": "validation-confirm-1",
         "occurred_at_utc": "2026-08-31T00:00:00Z",
     }
-    confirmed = confirm_validation(
-        context, "experiment-1", "2026-09-01", **command
-    )
+    confirmed = confirm_validation(context, "experiment-1", "2026-09-01", **command)
     retried = confirm_validation(
         context,
         "experiment-1",
@@ -314,9 +303,7 @@ def test_status_missing_store_is_read_only(tmp_path: Path) -> None:
     assert not Path(context["store_path"]).exists()
 
 
-def test_status_reports_deterministic_progress_and_next_action(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_status_reports_deterministic_progress_and_next_action(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import src.application.strategy_lab.service as service
     import src.infrastructure.strategy_lab.experiment_store as store_module
 
@@ -414,9 +401,7 @@ def test_status_blocks_changed_evaluator_without_provider_or_write(
     assert ExperimentStore(context["store_path"]).get_experiment("experiment-1") == before
 
 
-def test_behavior_mismatch_precedes_provider_and_state_write(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_behavior_mismatch_precedes_provider_and_state_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import src.application.strategy_lab.service as service
 
     context = _context(tmp_path)
@@ -435,9 +420,7 @@ def test_behavior_mismatch_precedes_provider_and_state_write(
     assert ExperimentStore(context["store_path"]).get_experiment("experiment-1") == before
 
 
-def test_execute_consumes_at_most_one_provider_unit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_execute_consumes_at_most_one_provider_unit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import src.application.strategy_lab.service as service
 
     context = _context(tmp_path)
@@ -473,11 +456,9 @@ def test_execute_consumes_at_most_one_provider_unit(
     def publish(*_args: object, **_kwargs: object) -> dict[str, object]:
         with sqlite3.connect(context["store_path"]) as connection:
             payload = connection.execute(
-                "SELECT payload_json FROM experiment_events "
-                "WHERE event_type = 'source_commit_observed'"
+                "SELECT payload_json FROM experiment_events WHERE event_type = 'source_commit_observed'"
             ).fetchone()
-        assert payload is not None
-        assert json.loads(payload[0])["payload"] == {"source_commit_sha": "c" * 40}
+        assert payload is None
         return {}
 
     monkeypatch.setattr(service, "publish_evidence_artifact", publish)
@@ -514,11 +495,70 @@ def test_execute_consumes_at_most_one_provider_unit(
     assert result["provider_logical_units"] == 1
     assert gateway_calls == [1]
     assert len(ExperimentStore(context["store_path"]).list_observations("experiment-1")) == 1
+    with sqlite3.connect(context["store_path"]) as connection:
+        payload = connection.execute(
+            "SELECT payload_json FROM experiment_events WHERE event_type = 'source_commit_observed'"
+        ).fetchone()
+    assert payload is not None
+    assert json.loads(payload[0])["payload"] == {"source_commit_sha": "c" * 40}
 
 
-def test_tick_blocker_constructs_no_gateway_or_observation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_execute_timeout_closes_gateway_without_publishing_or_store_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    import src.application.strategy_lab.service as service
+
+    context = _context(tmp_path)
+    _create(context)
+    _patch_behavior(monkeypatch)
+    monkeypatch.setattr(service, "source_commit_sha", lambda _root: "b" * 40)
+    monkeypatch.setattr(service, "_provider_guard", lambda *_args: None)
+    monkeypatch.setattr(service, "load_runtime_config", lambda **_kwargs: (Path("config"), {}))
+    monkeypatch.setattr(
+        service,
+        "resolve_opend_fetch_limits",
+        lambda _config: SimpleNamespace(history_kline=SimpleNamespace(window_sec=30, max_calls=20)),
+    )
+    monkeypatch.setattr(service, "INTERRUPTIBLE_OPEND_UNIT_TIMEOUT_SECONDS", 0.05)
+    gateway = SimpleNamespace(closed=False)
+
+    def close() -> None:
+        gateway.closed = True
+
+    gateway.close = close
+    monkeypatch.setattr(service, "build_futu_gateway", lambda **_kwargs: gateway)
+    monkeypatch.setattr(
+        service,
+        "collect_research_fill_evidence",
+        lambda *_args, **_kwargs: time.sleep(1.0),
+    )
+    monkeypatch.setattr(
+        service,
+        "publish_evidence_artifact",
+        lambda *_args, **_kwargs: pytest.fail("timed-out evidence must not be published"),
+    )
+    action = {
+        "action": "collect_history_k",
+        "query_sha256": "a" * 64,
+        "observation_key": "history_k_query:" + "a" * 64,
+        "kind": "history_k_query",
+        "artifact_kind": "history_k",
+        "query": _provider_query(),
+        "lock_path": str(tmp_path / "query.lock"),
+    }
+    monkeypatch.setattr(service, "next_missing_research_evidence", lambda *_args: action)
+
+    result = execute_research(context, "experiment-1", actor="tester", occurred_at_utc=NOW)
+
+    assert result["reason_code"] == "opend_low_priority_timeout"
+    assert gateway.closed is True
+    store = ExperimentStore(context["store_path"])
+    assert store.list_observations("experiment-1") == []
+    assert store.get_experiment("experiment-1")["revision"] == 0
+
+
+def test_tick_blocker_constructs_no_gateway_or_observation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import src.application.strategy_lab.service as service
 
     context = _context(tmp_path)
@@ -549,9 +589,7 @@ def test_tick_blocker_constructs_no_gateway_or_observation(
     assert ExperimentStore(context["store_path"]).get_experiment("experiment-1")["revision"] == 0
 
 
-def test_provider_binding_drift_blocks_before_gateway(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_provider_binding_drift_blocks_before_gateway(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import src.application.strategy_lab.service as service
 
     context = _context(tmp_path)
@@ -582,9 +620,7 @@ def test_provider_binding_drift_blocks_before_gateway(
     assert ExperimentStore(context["store_path"]).list_observations("experiment-1") == []
 
 
-def test_concurrent_execute_uses_one_provider_unit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_concurrent_execute_uses_one_provider_unit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import src.application.strategy_lab.service as service
 
     context = _context(tmp_path)
@@ -600,16 +636,27 @@ def test_concurrent_execute_uses_one_provider_unit(
     )
     gateway = SimpleNamespace(close=lambda: None)
     monkeypatch.setattr(service, "build_futu_gateway", lambda **_kwargs: gateway)
-    entered = threading.Event()
-    release = threading.Event()
     published = threading.Event()
+    concurrent_results: list[dict[str, object]] = []
+    concurrent_errors: list[BaseException] = []
     provider_calls = 0
 
     def collect(*_args: object, **_kwargs: object) -> dict[str, object]:
         nonlocal provider_calls
         provider_calls += 1
-        entered.set()
-        assert release.wait(2)
+
+        def run_concurrent() -> None:
+            try:
+                concurrent_results.append(
+                    execute_research(context, "experiment-1", actor="second", occurred_at_utc=NOW)
+                )
+            except BaseException as exc:  # pragma: no cover - surfaced below
+                concurrent_errors.append(exc)
+
+        thread = threading.Thread(target=run_concurrent)
+        thread.start()
+        thread.join(timeout=2)
+        assert not thread.is_alive()
         return {"status": "available", "bars": []}
 
     monkeypatch.setattr(service, "collect_research_fill_evidence", collect)
@@ -650,26 +697,15 @@ def test_concurrent_execute_uses_one_provider_unit(
 
     monkeypatch.setattr(service, "next_missing_research_evidence", next_action)
 
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        first = pool.submit(
-            execute_research, context, "experiment-1", actor="first", occurred_at_utc=NOW
-        )
-        assert entered.wait(2)
-        second = pool.submit(
-            execute_research, context, "experiment-1", actor="second", occurred_at_utc=NOW
-        )
-        second_result = second.result(timeout=2)
-        release.set()
-        first_result = first.result(timeout=2)
+    first_result = execute_research(context, "experiment-1", actor="first", occurred_at_utc=NOW)
 
-    assert second_result["reason_code"] == "research_evidence_busy"
+    assert concurrent_errors == []
+    assert concurrent_results[0]["reason_code"] == "research_evidence_busy"
     assert first_result["provider_logical_units"] == 1
     assert provider_calls == 1
 
 
-def test_concurrent_complete_execute_converges_on_one_receipt(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_concurrent_complete_execute_converges_on_one_receipt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import src.application.strategy_lab.service as service
 
     context = _context(tmp_path)
@@ -688,9 +724,7 @@ def test_concurrent_complete_execute_converges_on_one_receipt(
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(
             pool.map(
-                lambda actor: execute_research(
-                    context, "experiment-1", actor=actor, occurred_at_utc=NOW
-                ),
+                lambda actor: execute_research(context, "experiment-1", actor=actor, occurred_at_utc=NOW),
                 ("first", "second"),
             )
         )
@@ -702,9 +736,12 @@ def test_concurrent_complete_execute_converges_on_one_receipt(
     store = ExperimentStore(context["store_path"])
     assert store.get_experiment("experiment-1")["state"] == "completed"
     with sqlite3.connect(context["store_path"]) as connection:
-        assert connection.execute(
-            "SELECT COUNT(*) FROM experiment_events WHERE event_type = 'research_materialized'"
-        ).fetchone()[0] == 1
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM experiment_events WHERE event_type = 'research_materialized'"
+            ).fetchone()[0]
+            == 1
+        )
 
 
 def test_research_complete_publishes_and_attaches_leader_receipt(
@@ -758,9 +795,7 @@ def test_research_complete_publishes_and_attaches_leader_receipt(
         "secure_sqlite_artifacts",
         lambda *_args, **_kwargs: pytest.fail("receipt must not repair Store files"),
     )
-    assert read_receipt(context, "experiment-1")["receipt"]["concluded_at_utc"] == complete[
-        "updated_at_utc"
-    ]
+    assert read_receipt(context, "experiment-1")["receipt"]["concluded_at_utc"] == complete["updated_at_utc"]
 
     attached = ExperimentStore(context["store_path"]).get_experiment("experiment-1")
     assert attached is not None
@@ -794,9 +829,7 @@ def test_public_completion_preserves_numbers_and_selects_real_leader(
     for day in range(1, 21):
         trading_day = f"2026-08-{day:02d}"
         point_id = f"point-{day:02d}"
-        expected_points.append(
-            {"recommendation_point_id": point_id, "trading_day": trading_day}
-        )
+        expected_points.append({"recommendation_point_id": point_id, "trading_day": trading_day})
         for arm, variant, threshold, annualized, pnl in (
             ("baseline", None, None, 0.10, 100.0),
             ("challenger", "challenger_0.002", 0.002, 0.12, 101.0),
@@ -866,7 +899,18 @@ def test_orphan_receipt_is_not_public_before_store_attach(tmp_path: Path) -> Non
         payload={"observation_count": 0},
         occurred_at_utc=NOW,
     )
-    receipt = build_research_receipt(complete, [], [], complete["updated_at_utc"])
+    receipt = build_research_receipt(
+        complete,
+        [],
+        [],
+        {
+            "status": "insufficient_evidence",
+            "reason_code": "variant_comparison_invalid",
+            "leader": None,
+            "passing_variant_ids": [],
+        },
+        complete["updated_at_utc"],
+    )
     publish_receipt(context["artifact_root"], "experiment-1", "research", receipt)
 
     with pytest.raises(StrategyLabServiceError) as raised:

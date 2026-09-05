@@ -23,8 +23,10 @@ import src.infrastructure.strategy_lab.experiment_store as store_module
 NOW = "2026-08-30T01:00:00Z"
 
 
-def test_behavior_manifest_owns_provider_admission_and_pagination() -> None:
-    assert "src/application/strategy_lab/readiness.py" in EVALUATOR_OWNER_PATHS
+def test_behavior_manifest_tracks_semantics_not_orchestration() -> None:
+    assert "domain/domain/strategy_lab_evaluation.py" in EVALUATOR_OWNER_PATHS
+    assert "src/application/strategy_lab/readiness.py" not in EVALUATOR_OWNER_PATHS
+    assert "src/application/strategy_lab/service.py" not in EVALUATOR_OWNER_PATHS
 
 
 def test_behavior_manifest_fails_closed_when_slice2_owner_is_absent(tmp_path: Path) -> None:
@@ -52,20 +54,28 @@ def test_final_receipt_attach_is_atomic_idempotent_and_immutable(tmp_path: Path)
     }
     outcome_sha = canonical_sha256(outcome_query)
     outcome = store.put_observation(
-        created["experiment_id"], observation_key=f"expiry_close_query:{outcome_sha}",
-        kind="expiry_close_query", status="not_evaluable",
+        created["experiment_id"],
+        observation_key=f"expiry_close_query:{outcome_sha}",
+        kind="expiry_close_query",
+        status="not_evaluable",
         payload={
             "query": outcome_query,
             "query_sha256": outcome_sha,
             "payload": {"status": "not_evaluable", "reason_code": "terminal_gap"},
         },
-        artifact_ref="evidence/expiry.json", artifact_sha256="b" * 64,
+        artifact_ref="evidence/expiry.json",
+        artifact_sha256="b" * 64,
         created_at_utc=NOW,
     )
     result = store.put_observation(
-        created["experiment_id"], observation_key="single_result:point-1:baseline",
-        recommendation_point_id="point-1", arm_id="baseline", kind="single_result",
-        status="no_fill", payload={"status": "no_fill"}, created_at_utc=NOW,
+        created["experiment_id"],
+        observation_key="single_result:point-1:baseline",
+        recommendation_point_id="point-1",
+        arm_id="baseline",
+        kind="single_result",
+        status="no_fill",
+        payload={"status": "no_fill"},
+        created_at_utc=NOW,
     )
     assert outcome["artifact_ref"] == "evidence/expiry.json"
     assert result["status"] == "no_fill"

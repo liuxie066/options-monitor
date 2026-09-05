@@ -3,6 +3,7 @@ from __future__ import annotations
 import fcntl
 import json
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -84,7 +85,7 @@ def _refresh(tmp_path: Path, gateway: Any, *, occurred_at_utc: str = OBSERVED) -
         actor="operator:lx",
         occurred_at_utc=occurred_at_utc,
         limiter_root=tmp_path / "runtime",
-        tick_lock_path=tmp_path / "runtime/locks/tick-hk.lock",
+        provider_guard=lambda: None,
         window_sec=30.0,
         max_calls=10,
     )
@@ -125,6 +126,40 @@ def test_preview_is_provider_free_and_refresh_paginates_then_reuses_receipt(
 
     repeated = _refresh(tmp_path, ExplodingGateway())
     assert repeated == receipt
+
+
+def test_gateway_factory_timeout_closes_without_publishing_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.application.strategy_lab.readiness as readiness
+
+    class BlockingGateway(FakeGateway):
+        def request_history_kline(self, **_kwargs: object) -> dict[str, object]:
+            time.sleep(1.0)
+            return {}
+
+    gateway = BlockingGateway()
+    preview = _preview()
+    monkeypatch.setattr(readiness, "INTERRUPTIBLE_OPEND_UNIT_TIMEOUT_SECONDS", 0.05)
+
+    with pytest.raises(HistoryKReadinessError) as raised:
+        refresh_history_k_readiness(
+            tmp_path / "artifacts",
+            gateway_factory=lambda: gateway,
+            request=preview["probe_request"],
+            confirmed_probe_sha256=preview["probe_sha256"],
+            actor="operator:lx",
+            occurred_at_utc=OBSERVED,
+            limiter_root=tmp_path / "runtime",
+            provider_guard=lambda: None,
+            window_sec=30.0,
+            max_calls=10,
+        )
+
+    assert raised.value.reason_code == "opend_low_priority_timeout"
+    assert gateway.closed is True
+    assert list((tmp_path / "artifacts/readiness/history-k").glob("*/*.json")) == []
 
 
 def test_probe_rejects_contract_and_quota_code_from_different_securities() -> None:
@@ -176,7 +211,7 @@ def test_running_history_k_probe_does_not_hold_the_tick_lock(
     assert results[0]["provider_observation"]["readiness_status"] == "ready"
 
 
-def test_refresh_fails_closed_for_confirmation_tick_and_protection_window(
+def test_refresh_fails_closed_for_confirmation_and_provider_guard(
     tmp_path: Path,
 ) -> None:
     preview = _preview()
@@ -189,27 +224,28 @@ def test_refresh_fails_closed_for_confirmation_tick_and_protection_window(
             actor="operator:lx",
             occurred_at_utc=OBSERVED,
             limiter_root=tmp_path / "runtime",
-            tick_lock_path=tmp_path / "runtime/locks/tick-hk.lock",
+            provider_guard=lambda: None,
             window_sec=30.0,
             max_calls=10,
         )
     assert mismatch.value.reason_code == "history_k_probe_confirmation_mismatch"
 
-    tick_lock = tmp_path / "runtime/locks/tick-hk.lock"
-    tick_lock.parent.mkdir(parents=True)
+    preview = _preview()
     gateway = FakeGateway()
-    with tick_lock.open("a+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        with pytest.raises(HistoryKReadinessError) as busy:
-            _refresh(tmp_path, gateway)
+    with pytest.raises(HistoryKReadinessError) as busy:
+        refresh_history_k_readiness(
+            tmp_path / "artifacts",
+            gateway=gateway,
+            request=preview["probe_request"],
+            confirmed_probe_sha256=preview["probe_sha256"],
+            actor="operator:lx",
+            occurred_at_utc=OBSERVED,
+            limiter_root=tmp_path / "runtime",
+            provider_guard=lambda: "tick_busy",
+            window_sec=30.0,
+            max_calls=10,
+        )
     assert busy.value.reason_code == "tick_busy"
-    assert gateway.calls == []
-
-    protected_time = "2026-08-31T08:00:00Z"
-    gateway = FakeGateway()
-    with pytest.raises(HistoryKReadinessError) as protected:
-        _refresh(tmp_path, gateway, occurred_at_utc=protected_time)
-    assert protected.value.reason_code == "tick_protection_window"
     assert gateway.calls == []
 
 
@@ -263,12 +299,29 @@ def _profile(tmp_path: Path) -> dict[str, object]:
 def _patch_context_owners(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import src.application.strategy_lab.service as service
 
+    def config(market: str) -> dict[str, object]:
+        return {
+            "_generated": {"market": market},
+            "accounts": ["lx"],
+            "symbols": [
+                {
+                    "symbol": "0700.HK" if market == "hk" else "NVDA",
+                    "fetch": {"source": "opend", **BINDING},
+                }
+            ],
+            "runtime": {
+                "opend_rate_limits": {
+                    "history_kline": {"window_sec": 30, "max_calls": 10, "max_wait_sec": 30},
+                }
+            },
+        }
+
     monkeypatch.setattr(
         service,
         "load_runtime_config",
-        lambda **_kwargs: (
+        lambda *, expected_market, **_kwargs: (
             tmp_path / "runtime/config.hk.json",
-            {"accounts": ["lx"]},
+            config(expected_market),
         ),
     )
     monkeypatch.setattr(
@@ -287,6 +340,7 @@ def test_public_cli_previews_without_provider_then_refreshes_confirmed_probe(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    import src.application.strategy_lab.service as service
     import src.interfaces.cli.strategy_lab_ops as cli
 
     _patch_context_owners(tmp_path, monkeypatch)
@@ -311,7 +365,7 @@ def test_public_cli_previews_without_provider_then_refreshes_confirmed_probe(
     def explode(**_kwargs: object) -> None:
         raise AssertionError("preview must not build an OpenD gateway")
 
-    monkeypatch.setattr(cli, "build_futu_gateway", explode)
+    monkeypatch.setattr(service, "build_futu_gateway", explode)
     preview_response = handle_strategy_lab_command(parse_args(command))
     probe_hash = preview_response["data"]["probe_sha256"]
     assert preview_response["ok"] is True
@@ -320,21 +374,7 @@ def test_public_cli_previews_without_provider_then_refreshes_confirmed_probe(
         handle_strategy_lab_command(parse_args([*command, "--write"]))
 
     gateway = FakeGateway()
-    monkeypatch.setattr(cli, "build_futu_gateway", lambda **_kwargs: gateway)
-    monkeypatch.setattr(
-        cli,
-        "load_runtime_config",
-        lambda **_kwargs: (
-            tmp_path / "runtime/config.hk.json",
-            {
-                "runtime": {
-                    "opend_rate_limits": {
-                        "history_kline": {"window_sec": 30, "max_calls": 10, "max_wait_sec": 30},
-                    }
-                }
-            },
-        ),
-    )
+    monkeypatch.setattr(service, "build_futu_gateway", lambda **_kwargs: gateway)
     response = handle_strategy_lab_command(
         parse_args(
             [
@@ -356,12 +396,19 @@ def test_public_cli_checks_tick_before_building_gateway(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    import src.application.strategy_lab.service as service
     import src.interfaces.cli.strategy_lab_ops as cli
 
     _patch_context_owners(tmp_path, monkeypatch)
 
+    profile = _profile(tmp_path)
+    profile["markets"] = ["hk", "us"]
+    profile["config_paths"] = {
+        "hk": str(tmp_path / "runtime/config.hk.json"),
+        "us": str(tmp_path / "runtime/config.us.json"),
+    }
     profile_path = tmp_path / "service.profile.json"
-    profile_path.write_text(json.dumps(_profile(tmp_path)), encoding="utf-8")
+    profile_path.write_text(json.dumps(profile), encoding="utf-8")
     command = [
         "strategy-lab",
         "readiness",
@@ -377,34 +424,16 @@ def test_public_cli_checks_tick_before_building_gateway(
     ]
     monkeypatch.setattr(cli, "_now_utc", lambda: OBSERVED)
     preview = handle_strategy_lab_command(parse_args(command))["data"]
-    monkeypatch.setattr(
-        cli,
-        "load_runtime_config",
-        lambda **_kwargs: (
-            tmp_path / "runtime/config.hk.json",
-            {
-                "runtime": {
-                    "opend_rate_limits": {
-                        "history_kline": {
-                            "window_sec": 30,
-                            "max_calls": 10,
-                            "max_wait_sec": 30,
-                        },
-                    }
-                }
-            },
-        ),
-    )
 
     def explode(**_kwargs: object) -> None:
         raise AssertionError("busy Tick must be checked before OpenD startup")
 
-    monkeypatch.setattr(cli, "build_futu_gateway", explode)
-    tick_lock = tmp_path / "runtime/locks/tick-hk.lock"
+    monkeypatch.setattr(service, "build_futu_gateway", explode)
+    tick_lock = tmp_path / "runtime/locks/tick-us.lock"
     tick_lock.parent.mkdir(parents=True)
     with tick_lock.open("a+", encoding="utf-8") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        with pytest.raises(AgentToolError, match="HK Tick is running"):
+        with pytest.raises(AgentToolError, match="provider guard blocked"):
             handle_strategy_lab_command(
                 parse_args(
                     [
