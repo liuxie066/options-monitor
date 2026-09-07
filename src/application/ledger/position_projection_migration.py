@@ -42,6 +42,10 @@ from src.application.ledger.repository import (
     _position_lot_contract_scalars,
 )
 from src.application.ledger.sqlite_row_codec import position_lot_row_to_record
+from src.application.ledger.repository_trade_schema import (
+    EXECUTION_IDENTITY_INDEXES,
+    _execution_identity_index_ready,
+)
 from src.application.source_identity import source_commit_sha
 from src.infrastructure.private_storage import (
     private_path,
@@ -364,6 +368,7 @@ def _inventory_from_conn(
 ) -> dict[str, Any]:
     event_columns = set(_column_names(conn, "trade_events"))
     lot_columns = set(_column_names(conn, "position_lots"))
+    stock_columns = set(_column_names(conn, "assigned_stock_events"))
     event_fp_columns = tuple(
         name
         for name in ("event_id", "account", "event_json", "trade_time_ms")
@@ -394,6 +399,13 @@ def _inventory_from_conn(
         columns=lot_fp_columns or ("rowid",),
         order_by="record_id" if "record_id" in lot_columns else "rowid",
     )
+    stock_fp, stock_count, stock_bytes = _row_fingerprint(
+        conn,
+        table="assigned_stock_events",
+        columns=tuple(name for name in ("stock_event_id", "account", "event_json", "trade_time_ms")
+                      if name in stock_columns) or ("rowid",),
+        order_by="stock_event_id" if "stock_event_id" in stock_columns else "rowid",
+    )
     indexes = _object_names(conn, "index")
     triggers = _object_names(conn, "trigger")
     columns = _column_contract(conn)
@@ -410,7 +422,14 @@ def _inventory_from_conn(
         for value in section.values()
     ):
         reasons.append("normalized_columns_incomplete")
-    missing_indexes = sorted(set(REQUIRED_INDEXES) - indexes)
+    execution_tables = [table for table in EXECUTION_IDENTITY_INDEXES if _table_exists(conn, table)]
+    required_indexes = {*REQUIRED_INDEXES, *(EXECUTION_IDENTITY_INDEXES[table][0] for table in execution_tables)}
+    missing_indexes = sorted(required_indexes - indexes)
+    if any(
+        EXECUTION_IDENTITY_INDEXES[table][0] in indexes and not _execution_identity_index_ready(conn, table)
+        for table in execution_tables
+    ):
+        reasons.append("execution_identity_index_definition_mismatch")
     missing_triggers = sorted(set(REQUIRED_TRIGGERS) - triggers)
     if missing_indexes:
         reasons.append("required_indexes_missing")
@@ -421,20 +440,24 @@ def _inventory_from_conn(
         "projector_schema": POSITION_PROJECTION_SCHEMA,
         "loaded_projector_implementation_fingerprint": implementation,
         "sqlite_schema_cookie": _schema_cookie(conn),
+        "assigned_stock_events_present": bool(stock_columns),
         "counts": {
             "trade_events": event_count,
             "position_lots": lot_count,
+            **({"assigned_stock_events": stock_count} if stock_columns else {}),
         },
         "fingerprints": {
             "trade_events": event_fp,
             "position_lots": lot_fp,
             "trade_event_stream_bytes": event_bytes,
             "position_lot_stream_bytes": lot_bytes,
+            "assigned_stock_events": stock_fp,
+            "assigned_stock_stream_bytes": stock_bytes,
         },
         "accounts": accounts,
         "column_contract": columns,
         "required_indexes": {
-            "present": sorted(set(REQUIRED_INDEXES) & indexes),
+            "present": sorted(required_indexes & indexes),
             "missing": missing_indexes,
         },
         "required_triggers": {
@@ -537,6 +560,9 @@ def apply_position_projection_migration(
                 "cpu_ns": time.process_time_ns() - index_cpu_start,
             }
             _fail(failure_hook, "after_indexes")
+            repo.invalidate_position_projection_checkpoints(
+                reason="projection_maintenance_rebuild", conn=conn,
+            )
             runtime = run_position_projection_in_transaction(
                 repo,
                 (),
@@ -865,6 +891,8 @@ def _verify_from_conn(
         ),
         "trade_events_fingerprint": inventory["fingerprints"]["trade_events"],
         "position_lots_fingerprint": inventory["fingerprints"]["position_lots"],
+        "assigned_stock_events_present": inventory["assigned_stock_events_present"],
+        "assigned_stock_events_fingerprint": inventory["fingerprints"]["assigned_stock_events"],
     }
     return {
         "schema_version": VERIFY_SCHEMA,

@@ -88,6 +88,7 @@ def test_missing_schema_read_and_dry_run_do_not_mutate_database(tmp_path: Path) 
     repo = PerformanceEvidenceSQLiteRepository(path)
 
     assert repo.read_all().schema_state == "not_initialized"
+    assert repo.read_fx_rates().schema_state == "not_initialized"
     assert not path.exists()
 
     result = repo.import_envelope(_envelope(marks=[_mark()], rates=[_rate()]), apply=False, migrated_at_ms=NOW_MS)
@@ -139,6 +140,61 @@ def test_read_all_validates_persisted_corrections_independent_of_fact_id_order(t
     bundle = repo.read_all()
     assert bundle.schema_state == "initialized_v1"
     assert {fact.fact_id for fact in bundle.fx_rates} == {"fx_z_parent", "fx_a_child"}
+    assert repo.read_fx_rates().fx_rates == bundle.fx_rates
+    assert repo.freeze_cash_fx_daily_rates(migrated_at_ms=NOW_MS) == bundle.fx_rates
+
+
+def test_fx_reads_skip_invalid_valuation_records_and_preview_has_no_writes(tmp_path, monkeypatch):
+    from src.application.cash_conversion import load_cash_fx_payload
+    from src.infrastructure import performance_evidence_sqlite as module
+
+    repo = PerformanceEvidenceSQLiteRepository(tmp_path / "evidence.sqlite3")
+    repo.import_envelope(_envelope(marks=[_mark()], rates=[_rate()]), apply=True, migrated_at_ms=NOW_MS)
+    expected = repo.read_all().fx_rates
+    with sqlite3.connect(repo.db_path) as conn:
+        conn.execute("UPDATE performance_valuation_marks SET price_text='999'")
+    assert repo.read_all().schema_state == "unsupported_schema"
+    with pytest.raises(ValueError, match="valuation normalized payload mismatch"):
+        repo.import_envelope(_envelope(), apply=True, migrated_at_ms=NOW_MS)
+    before = repo.db_path.read_bytes()
+    statements = []
+    original = module.PerformanceEvidenceSQLiteRepository._connect_readonly
+
+    def traced_readonly(self):
+        conn = original(self)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    def unexpected_mark(_row):
+        raise AssertionError("FX paths must not decode valuation marks")
+
+    monkeypatch.setattr(module.PerformanceEvidenceSQLiteRepository, "_connect_readonly", traced_readonly)
+    monkeypatch.setattr(module, "_mark_from_row", unexpected_mark)
+    assert repo.read_fx_rates().fx_rates == expected
+    assert load_cash_fx_payload(repo, persist=False)["fx_rate_facts"] == expected
+    assert repo.db_path.read_bytes() == before
+    with sqlite3.connect(repo.db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.set_trace_callback(statements.append)
+        assert repo.freeze_cash_fx_daily_rates(migrated_at_ms=NOW_MS, conn=conn) == expected
+        assert conn.in_transaction
+        conn.rollback()
+    assert not any("FROM performance_valuation_marks" in sql for sql in statements)
+
+
+@pytest.mark.parametrize("damage", ["value", "column"])
+def test_fx_read_unavailable_bundle_preserves_full_reader_error_contract(tmp_path, damage):
+    repo = PerformanceEvidenceSQLiteRepository(tmp_path / "evidence.sqlite3")
+    repo.import_envelope(_envelope(rates=[_rate()]), apply=True, migrated_at_ms=NOW_MS)
+    with sqlite3.connect(repo.db_path) as conn:
+        conn.execute("UPDATE performance_fx_rate_facts SET rate_text='99'" if damage == "value" else
+                     "ALTER TABLE performance_fx_rate_facts RENAME COLUMN raw_json TO missing_raw_json")
+    before = repo.db_path.read_bytes()
+    fx, full = repo.read_fx_rates(), repo.read_all()
+    assert fx.schema_state == full.schema_state == "unsupported_schema"
+    assert fx.message == full.message
+    assert fx.fx_rates == ()
+    assert repo.db_path.read_bytes() == before
 
 
 def test_batch_conflict_rolls_back_migration_and_all_facts(tmp_path: Path) -> None:

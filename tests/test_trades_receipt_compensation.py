@@ -417,3 +417,77 @@ def test_receipt_compensation_apply_requires_matching_dry_run_hash(
             expected_payload_hash="0" * 64,
             route_resolver=_route,
         )
+
+
+def _core_compensation_input(tmp_path, monkeypatch, *, namespace="futu.deal", outcome="no_route"):
+    from src.application.ledger.repository import SQLiteOptionPositionsRepository
+    from tests.test_trade_receipt_recovery import _payload, _processor, _successful_sender
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    calls = []
+    payload = {**_payload("777"), "external_id_namespace": namespace}
+    def sender(**kwargs):
+        result = _successful_sender(calls)(**kwargs)
+        if outcome == "unknown":
+            result.update(delivery_confirmed=False, message_id=None, error_code="SEND_UNCONFIRMED")
+        return result
+
+    result = _processor(tmp_path, repo, monkeypatch, sender, routed=outcome != "no_route")(payload)
+    assert result["status"] == "applied"
+    assert len(calls) == int(outcome != "no_route")
+    return {
+        "base": tmp_path, "config": {}, "repo": repo, "account": "lx",
+        "sources": [{"id": "lx", "account": "lx", "state_path": tmp_path / "state.json",
+                     "audit_path": tmp_path / "audit.jsonl", "receipt": {"enabled": True}}],
+        "deal_ids": ["futu:lx:123:777"], "reason": SKIPPED_NO_ROUTE_REASON,
+        "route_resolver": _route, "normalize_fn": lambda send_result: send_result,
+    }
+
+
+def test_real_core_no_route_receipt_compensation_uses_proven_execution_alias_once(tmp_path, monkeypatch):
+    kwargs = _core_compensation_input(tmp_path, monkeypatch)
+    state_before = (tmp_path / "state.json").read_bytes()
+    state = json.loads(state_before)
+    assert len(state["processed_deal_ids"]) == 1
+    assert next(iter(state["processed_deal_ids"])).startswith("execution:v1:")
+    repo = kwargs["repo"]
+    economics_before = repo.list_trade_events(), repo.list_position_lots()
+    calls = []
+
+    def sender(**kw):
+        calls.append(kw)
+        return {"command_ok": True, "delivery_confirmed": True, "message_id": "offline-compensation", "returncode": 0}
+
+    preview = compensate_trade_intake_receipts(**kwargs, apply_changes=False)
+    assert preview["status"] == "ready"
+    assert not Path(preview["record_path"]).exists()
+    assert (tmp_path / "state.json").read_bytes() == state_before
+    with pytest.raises(ValueError, match="payload changed after dry-run"):
+        compensate_trade_intake_receipts(**kwargs, apply_changes=True, expected_payload_hash="stale", send_fn=sender)
+    result = compensate_trade_intake_receipts(**kwargs, apply_changes=True,
+                                            expected_payload_hash=preview["payload_hash"], send_fn=sender)
+    assert result["status"] == "confirmed"
+    assert json.loads(Path(result["record_path"]).read_text())["message_id"] == "offline-compensation"
+    replay = compensate_trade_intake_receipts(**kwargs, apply_changes=True,
+                                            expected_payload_hash=preview["payload_hash"], send_fn=sender)
+    assert replay["status"] == "duplicate_suppressed"
+    assert len(calls) == 1
+    assert (repo.list_trade_events(), repo.list_position_lots()) == economics_before
+    assert (tmp_path / "state.json").read_bytes() == state_before
+
+
+@pytest.mark.parametrize("case", ["namespace", "physical_account", "already_sent", "unknown", "ambiguous_alias"])
+def test_compensation_does_not_guess_execution_alias_or_override_receipt_evidence(tmp_path, monkeypatch, case):
+    kwargs = _core_compensation_input(tmp_path, monkeypatch,
+                                     namespace="file.deal" if case == "namespace" else "futu.deal",
+                                     outcome=case if case in {"already_sent", "unknown"} else "no_route")
+    if case == "physical_account":
+        kwargs["deal_ids"] = ["futu:lx:124:777"]
+    if case == "ambiguous_alias":
+        path = tmp_path / "state.json"
+        state = json.loads(path.read_text())
+        state["processed_deal_ids"]["futu:lx:123:777"] = next(iter(state["processed_deal_ids"].values()))
+        path.write_text(json.dumps(state))
+    with pytest.raises(ValueError, match="missing deal_id|delivery-confirmed|unsent no-route marker|ambiguous identities"):
+        compensate_trade_intake_receipts(**kwargs, apply_changes=False)
+    assert not (tmp_path / "receipt_compensations").exists()

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from domain.domain.ledger import ContractKey, TradeEvent
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.ledger.writer import persist_trade_event_object
@@ -13,6 +15,48 @@ from src.application.trades.combo_reconciliation import (
 
 
 BASE_TIME_MS = 1_785_312_000_000
+
+
+@pytest.mark.parametrize("competing_leg", [False, True])
+def test_auto_combo_rechecks_unique_match_at_the_durable_writer(tmp_path, monkeypatch, competing_leg):
+    import src.application.trades.combo_reconciliation as module
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    for event in (
+        _event("call-open", "call-lot", option_type="call", side="long", strike=110, event_time_ms=BASE_TIME_MS + 1_000),
+        _event("put-open", "put-lot", option_type="put", side="short", strike=100, event_time_ms=BASE_TIME_MS + 2_000),
+    ):
+        persist_trade_event_object(repo, event)
+    original = repo.list_trade_events()
+    exposure = {
+        "candidate_exposure_id": "exposure-1", "candidate_occurrence_id": "occurrence-1",
+        "account": "lx", "market": "US", "currency": "USD", "multiplier": 100,
+        "put_contract_key": {"underlying_symbol": "NVDA", "option_type": "put", "expiration_ymd": "2026-08-21", "strike": 100},
+        "call_contract_key": {"underlying_symbol": "NVDA", "option_type": "call", "expiration_ymd": "2026-08-21", "strike": 110},
+        "generated_at_ms": BASE_TIME_MS, "valid_until_ms": BASE_TIME_MS + 10_000,
+        "delivery_confirmed": True,
+    }
+    monkeypatch.setattr(module, "read_combo_candidate_exposures", lambda **_kwargs: {"available": True, "exposures": [exposure]})
+    actual_adopt = module.adopt_post_trade_combo_pair
+
+    def adopt_after_new_fill(**kwargs):
+        if competing_leg:
+            persist_trade_event_object(repo, _event("call-open-2", "call-lot-2", option_type="call", side="long", strike=110, event_time_ms=BASE_TIME_MS + 2_500))
+        return actual_adopt(**kwargs)
+
+    monkeypatch.setattr(module, "adopt_post_trade_combo_pair", adopt_after_new_fill)
+    result = module.reconcile_account_post_trade_combos(
+        repo=repo, runtime_root=tmp_path, account="lx", runtime_environment="opend:127.0.0.1:11111",
+        mode="auto", effective_now_ms=BASE_TIME_MS + 3_000,
+    )
+    assert result["auto_adoption_count"] == (0 if competing_leg else 1)
+    assert result["auto_adoption_error_count"] == (1 if competing_leg else 0)
+    events = repo.list_trade_events()
+    assert [event for event in events if event["event_id"] in {"call-open", "put-open"}] == original
+    assert len(repo.list_strategy_group_identities(account="lx")) == (0 if competing_leg else 1)
+    if competing_leg:
+        assert len(events) == 3
+        assert "no longer a unique delivered match" in result["auto_adoption_errors"][0]["error"]
 
 
 def _event(

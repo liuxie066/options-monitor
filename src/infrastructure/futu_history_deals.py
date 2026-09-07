@@ -8,9 +8,11 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from domain.domain.option_position_identity import normalize_currency
+from domain.domain.trade_account_identity import extract_visible_account_fields
 from src.infrastructure.futu_gateway import (
     FutuGatewayError,
     FutuGatewayRateLimitError,
@@ -235,30 +237,36 @@ def _query_history_deals(
         lookback_hours=lookback_hours,
         now=now,
     )
+    request_id = str(uuid4())
     rows: list[dict[str, Any]] = []
     account_results: list[dict[str, Any]] = []
     for raw_acc_id in futu_account_ids:
         acc_id_text = str(raw_acc_id or "").strip()
         if not acc_id_text:
             continue
+        account_result: dict[str, Any] = {
+            "request_id": f"{request_id}:{acc_id_text}",
+            "futu_account_id": acc_id_text,
+            "trd_env": "REAL",
+            "requested_start_utc": window_start_utc,
+            "requested_end_utc": window_end_utc,
+            "covered_start_utc": None,
+            "covered_end_utc": None,
+            "coverage_status": "unknown",
+            "coverage_complete": None,
+            "pagination_complete": None,
+            "page_count": None,
+            "truncated": None,
+            "ret": None,
+            "row_count": 0,
+            "accepted_row_count": 0,
+        }
         try:
             acc_id = int(acc_id_text)
         except ValueError:
-            account_results.append(
-                {
-                    "futu_account_id": acc_id_text,
-                    "ret": None,
-                    "row_count": 0,
-                    "skipped": True,
-                    "reason": "non_numeric_account_id",
-                }
-            )
+            account_result.update(skipped=True, reason="non_numeric_account_id")
+            account_results.append(account_result)
             continue
-        account_result = {
-            "futu_account_id": acc_id_text,
-            "ret": 0,
-            "row_count": 0,
-        }
         try:
             result = gateway.get_history_deals(
                 start=start_date,
@@ -267,22 +275,86 @@ def _query_history_deals(
                 acc_id=acc_id,
             )
             account_rows = _gateway_rows(result)
-        except FutuGatewayUnreachableError:
-            raise
         except Exception as exc:
+            if isinstance(exc, FutuGatewayUnreachableError) and not account_results:
+                raise
             account_result["ret"] = None
             account_result["error"] = str(exc)
+            account_result["error_type"] = type(exc).__name__
             account_results.append(account_result)
             continue
+        account_result["ret"] = result.get("retcode", 0) if isinstance(result, dict) else 0
+        if isinstance(result, dict):
+            for key in ("coverage_complete", "pagination_complete", "page_count", "truncated"):
+                account_result[key] = result.get(key)
+            if result.get("error"):
+                account_result["error"] = str(result["error"])
+        if account_result["ret"] not in (0, "0"):
+            account_result.setdefault("error", f"history_query_returned:{account_result['ret']}")
+        if (
+            account_result["coverage_complete"] is False
+            or account_result["pagination_complete"] is False
+            or account_result["truncated"] is True
+        ):
+            account_result["coverage_status"] = "partial"
+        elif (
+            account_result["coverage_complete"] is True
+            and account_result["pagination_complete"] is True
+            and not account_result.get("error")
+        ):
+            account_result.update(
+                coverage_status="complete",
+                covered_start_utc=window_start_utc,
+                covered_end_utc=window_end_utc,
+            )
         for item in account_rows:
             payload = dict(item)
-            payload.setdefault("futu_account_id", acc_id_text)
-            payload.setdefault("trd_acc_id", acc_id_text)
+            conflicts = [
+                key for key, value in extract_visible_account_fields(payload).items()
+                if value != acc_id_text
+            ]
+            bindings = {
+                "environment": "REAL",
+                "broker_account_id": f"futu:REAL:{acc_id_text}",
+                "external_id_namespace": "futu.deal",
+                "futu_account_id": acc_id_text,
+                "trd_acc_id": acc_id_text,
+            }
+            if any(str(payload.get(key) or "").strip() for key in ("order_id", "orderID", "orderId", "external_order_id")):
+                bindings["external_order_namespace"] = "futu.order"
+            for key, value in {**bindings, "trd_env": "REAL", "execution_id_namespace": "futu.deal"}.items():
+                actual = str(payload.get(key) or "").strip()
+                if actual and actual != value:
+                    conflicts.append(key)
+            if conflicts:
+                account_result.setdefault("rejected_rows", []).append(
+                    {"reason": "history_source_identity_conflict", "fields": sorted(set(conflicts)), "payload": payload}
+                )
+                account_result.update(
+                    coverage_status="partial", coverage_complete=False,
+                    covered_start_utc=None, covered_end_utc=None,
+                    error="history_source_identity_conflict",
+                )
+                continue
+            payload.update(bindings)
             rows.append(payload)
         account_result["row_count"] = len(account_rows)
+        account_result["accepted_row_count"] = len(account_rows) - len(account_result.get("rejected_rows", []))
         account_results.append(account_result)
 
+    statuses = {item["coverage_status"] for item in account_results}
     diagnostics = {
+        "schema_version": "futu_history_query_receipt.v1",
+        "request_id": request_id,
+        "dataset": "executions",
+        "trd_env": "REAL",
+        "observed_at_utc": datetime.now(timezone.utc).isoformat(),
+        "coverage_status": (
+            "complete" if statuses == {"complete"}
+            else "partial" if "partial" in statuses or "complete" in statuses
+            else "unknown"
+        ),
+        "provider_timezone": "Asia/Hong_Kong",
         "start_date": start_date,
         "end_date": end_date,
         "window_start_utc": window_start_utc,

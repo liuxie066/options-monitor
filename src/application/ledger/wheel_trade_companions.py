@@ -310,8 +310,9 @@ def append_and_verify_wheel_intent_consumption(
     ):
         raise ValueError("Wheel Call intent linkage verification failed")
     account = _event_account(linked_event)
+    rows = repo.read_lifecycle_account_rows(account=account, conn=conn)
     batches = _wheel_batches_from_rows(
-        repo.read_lifecycle_account_rows(account=account, conn=conn),
+        rows,
         account=account,
         as_of_ms=max(_event_time_ms(linked_event), 1),
     )
@@ -320,11 +321,20 @@ def append_and_verify_wheel_intent_consumption(
         for batch in batches
         if batch["stock_lot_id"] == intent_event["stock_lot_id"]
     ]
+    summaries = project_wheel_call_intents(
+        rows.get("account_wheel_events") or [], account=account,
+        stock_lot_id=str(intent_event["stock_lot_id"]),
+        as_of_ms=max(_event_time_ms(linked_event), 1),
+        known_trade_event_ids={str(row.get("event_id") or "") for row in rows.get("trade_events") or []},
+    )
+    intent = next((row for row in summaries if row["intent_id"] == intent_event["intent_id"]), None)
     if (
         len(matches) != 1
         or matches[0]["integrity_status"] != "trusted"
         or lot_id not in matches[0]["active_call_lot_ids"]
-        or intent_event["intent_id"] in matches[0]["active_intent_ids"]
+        or intent is None
+        or intent["status"] not in {"active", "consumed"}
+        or (intent_event["intent_id"] in matches[0]["active_intent_ids"]) != (int(intent.get("remaining_contracts") or 0) > 0)
     ):
         raise ValueError("Wheel Call intent projection verification failed")
 

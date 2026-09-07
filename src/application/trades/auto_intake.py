@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 import contextlib
+from dataclasses import replace
 import hashlib
 import json
 import os
@@ -12,6 +13,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable
 
 repo_base = Path(__file__).resolve().parents[3]
@@ -33,6 +35,7 @@ from src.application.trades.state import (
     append_trade_intake_audit,
     is_durable_processed_deal,
     load_trade_intake_state,
+    update_trade_intake_state_entries,
     upsert_deal_state,
     write_trade_intake_state,
 )
@@ -40,6 +43,7 @@ from src.application.wheel.config import resolve_wheel_config
 from src.application.trades.backfill import payload_deal_id, run_history_backfill
 from src.application.trades.order_fee_sync import (
     fee_target_from_trusted_payload,
+    recover_order_fee_targets,
     sync_order_fees,
 )
 from src.application.trades.deal_identity import broker_deal_key_from_payload
@@ -74,13 +78,22 @@ from src.application.trades.receipt_compensation import (
     LEGACY_FALSE_OUTBOX_REASON,
     compensate_trade_intake_receipts,
 )
+from src.application.trades.inbox_authority import resolve_execution_inbox_path
 from src.application.trades.inbox import (
+    TRADE_INTAKE_ADAPTER_VERSIONS,
+    claim_trade_payload,
+    read_trade_payload,
+    resume_trade_payload,
+    save_trade_payload_result,
+    trade_payload_commit_scope,
     claim_trade_payload_refresh_intent,
     enqueue_trade_payload,
     list_retryable_trade_payloads,
+    list_unclaimed_trade_payload_refresh_intents,
     mark_trade_payload_retryable,
-    record_trade_payload_refresh_intent,
+    mark_trade_payload_review,
     settle_trade_payload_result,
+    trade_payload_evidence_ref,
     trade_inbox_revision,
     trade_inbox_summary,
 )
@@ -88,6 +101,7 @@ from src.application.opend_fetch_config import opend_fetch_kwargs
 from src.application.futu_quote_routing import resolve_futu_quote_route
 from src.application.ledger.api import (
     open_position_ledger_from_runtime_config,
+    resolve_position_ledger_sqlite_path,
     record_trade_event_with_wheel_intent,
 )
 from src.application.runtime_paths import resolve_runtime_root
@@ -109,6 +123,14 @@ from src.infrastructure.futu_gateway import build_futu_gateway
 
 
 TRADE_INTAKE_AUTH_REQUIRED_EXIT_CODE = 78
+
+
+def _append_evidence_ref(value: Any, evidence_ref: str) -> Any:
+    if value is None:
+        return [evidence_ref]
+    if not isinstance(value, list):
+        return value
+    return [*value, evidence_ref] if evidence_ref not in value else list(value)
 
 
 def _wheel_intent_coverage_fact(
@@ -145,6 +167,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--port", type=int, default=None)
     ap.add_argument("--once", action="store_true", help="Validate config and exit")
     ap.add_argument("--deal-json", default=None, help="Replay a single normalized/raw deal payload from a JSON file")
+    ap.add_argument("--execution-file", help="Import bounded UTF-8 trade_execution.v1 JSONL; preview by default")
+    ap.add_argument("--inbox-id", help="Preview or resume one saved Inbox entry; no broker history query")
     ap.add_argument("--retry-failed", action="store_true", help="Allow --deal-json replay of a previously failed deal_id")
     ap.add_argument("--reconcile-state", action="store_true", help="Reconcile historical failed/unresolved deal state from ledger/audit evidence")
     ap.add_argument(
@@ -283,22 +307,99 @@ def _process_payload(
     retry_failed_deal: bool = False,
     source: str = "push",
     allow_external_lookup: bool = True,
+    inbox_path: Path | None = None,
 ) -> dict[str, Any]:
+    inbox_path = Path(inbox_path or Path(state_path).with_name("trade_intake_inbox.sqlite3"))
+    if apply_changes:
+        inbox_path = resolve_execution_inbox_path(repo, inbox_path)
+    input_errors = (payload.get("_trade_intake_file_errors") or
+                    payload.get("_trade_intake_source_identity_errors"))
+    review_reason = ("source_identity_needs_review" if payload.get("_trade_intake_source_identity_errors")
+                     else "file_input_needs_review")
+    claim = None
+    if apply_changes:
+        key = ("" if (payload.get("_trade_intake_file_identity_unbound") or payload.get("_trade_intake_source_identity_errors")) else
+               broker_deal_key_from_payload(payload, account_mapping=account_mapping))
+        inbox_id = enqueue_trade_payload(
+            inbox_path,
+            payload=payload,
+            source=source,
+            broker_deal_key=key,
+            repo=repo,
+            adapter_version=TRADE_INTAKE_ADAPTER_VERSIONS.get(
+                str(source or "").strip().lower(), "legacy/unversioned"
+            ),
+        )
+        evidence_ref = trade_payload_evidence_ref(inbox_id)
+        nested_execution = payload.get("execution_input")
+        if isinstance(nested_execution, dict):
+            payload = {
+                **payload,
+                "execution_input": {
+                    **nested_execution,
+                    "evidence_refs": _append_evidence_ref(
+                        nested_execution.get("evidence_refs"), evidence_ref
+                    ),
+                },
+            }
+        else:
+            payload = {
+                **payload,
+                "evidence_refs": _append_evidence_ref(payload.get("evidence_refs"), evidence_ref),
+            }
+        stored = read_trade_payload(inbox_path, inbox_id=inbox_id)
+        if input_errors:
+            mark_trade_payload_review(inbox_path, inbox_id=inbox_id, errors=input_errors, repo=repo)
+            return {"status": "unresolved", "reason": review_reason, "inbox_id": inbox_id,
+                    "diagnostics": {"errors": input_errors, "retryable": False}}
+        if retry_failed_deal:
+            resume_trade_payload(inbox_path, inbox_id=inbox_id, operator="manual-retry", repo=repo)
+        claim = claim_trade_payload(inbox_path, inbox_id=inbox_id, repo=repo,
+                                    owner=f"listener:{os.getpid()}")
+        if claim is None:
+            status = str((stored or {}).get("status") or "identity_needs_review")
+            saved = dict((stored or {}).get("result") or {})
+            return {**saved, "status": "skipped" if status == "handled" else "unresolved",
+                    "reason": "duplicate" if status == "handled" else f"inbox_{status}",
+                    "deal_id": payload_deal_id(payload),
+                    "inbox_id": inbox_id, "diagnostics": {"retryable": status == "pending"}}
+        retry_failed_deal = retry_failed_deal or (
+            str(claim.get("result_status") or "").strip().lower() == "failed"
+            and str(claim.get("result_reason") or "").startswith("exception:")
+        )
+        payload = {**payload, "_trade_intake_delivery_purpose": claim["delivery_purpose"]}
+    elif input_errors:
+        return {"status": "unresolved", "reason": review_reason,
+                "diagnostics": {"errors": input_errors, "retryable": False}}
+
     opend_config = opend_fetch_kwargs(config) if isinstance(config, dict) else None
-    normalize_fn = normalize_trade_deal
-    if isinstance(config, dict):
-        normalize_fn = lambda raw, *, futu_account_mapping=None: normalize_trade_deal(
-            raw,
-            futu_account_mapping=futu_account_mapping,
-            repo_base=repo_base,
-            runtime_root=runtime_root,
-            config_path=config_path,
-            config=config,
-            host=host,
-            port=port,
-            opend_fetch_config=opend_config,
+    def normalize_fn(raw: dict[str, Any], *, futu_account_mapping=None):
+        deal = normalize_trade_deal(
+            raw, futu_account_mapping=futu_account_mapping, repo_base=repo_base,
+            runtime_root=runtime_root, config_path=config_path, config=config,
+            host=host, port=port, opend_fetch_config=opend_config,
             allow_opend_refresh=bool(allow_external_lookup),
         )
+        associations = dict((claim or {}).get("associations") or {})
+        if not associations:
+            return deal
+        execution = dict(deal.execution_input or {})
+        changes = {}
+        for field, value in associations.items():
+            if field not in {"position_effect", "external_order_id", "external_order_namespace"} or not value:
+                continue
+            current = execution.get(field)
+            if current and current != value:
+                raise ValueError(f"trade claim association conflict: {field}")
+            execution[field] = value
+            attribute = {"position_effect": "position_effect", "external_order_id": "order_id"}.get(field)
+            if attribute:
+                existing = getattr(deal, attribute)
+                if existing and existing != value:
+                    raise ValueError(f"trade claim association conflict: {field}")
+                changes[attribute] = value
+        return replace(deal, execution_input=execution, **changes)
+
     def _enrich_payload(raw: dict[str, Any]) -> Any:
         return enrich_trade_push_payload_with_account_id(
             raw,
@@ -317,38 +418,62 @@ def _process_payload(
                 deal_account,
             ).get("enabled_for_new_lifecycle")
         )
-        if not (
-            apply_changes
-            and isinstance(config, dict)
-            and str(getattr(deal, "position_effect", "") or "").lower()
-            == "open"
-            and str(getattr(deal, "side", "") or "").lower() == "sell"
-            and str(getattr(deal, "option_type", "") or "").lower() == "call"
-        ):
-            return resolve_trade_deal(
-                deal,
-                **kwargs,
-                wheel_start_enabled=wheel_start_enabled,
+        resolve_kwargs = {**kwargs, "wheel_start_enabled": wheel_start_enabled,
+                          "retry_with_new_associations": bool((claim or {}).get("new_associations"))}
+        if (apply_changes and allow_external_lookup and isinstance(config, dict)
+                and str(getattr(deal, "position_effect", "") or "").lower() == "open"
+                and str(getattr(deal, "side", "") or "").lower() == "sell"
+                and str(getattr(deal, "option_type", "") or "").lower() == "call"):
+            coverage_fact = _wheel_intent_coverage_fact(repo=kwargs["repo"], deal=deal, config=config)
+            resolve_kwargs["persist_trade_event_fn"] = lambda active_repo, active_deal: (
+                record_trade_event_with_wheel_intent(active_repo, active_deal, coverage_fact)
             )
-        coverage_fact = _wheel_intent_coverage_fact(
-            repo=kwargs["repo"],
-            deal=deal,
-            config=config,
-        )
-        return resolve_trade_deal(
-            deal,
-            **kwargs,
-            wheel_start_enabled=wheel_start_enabled,
-            persist_trade_event_fn=lambda active_repo, active_deal: (
-                record_trade_event_with_wheel_intent(
-                    active_repo,
-                    active_deal,
-                    coverage_fact,
-                )
-            ),
-        )
+        scope = (trade_payload_commit_scope(inbox_path, claim=claim, repo=repo)
+                 if claim is not None else contextlib.nullcontext())
+        with scope:
+            resolved = resolve_trade_deal(deal, **resolve_kwargs)
+            if (claim is not None and claim.get("receipt_recovery_allowed")
+                    and resolved.reason == "ledger_recorded" and resolved.action == "open"):
+                resolved = replace(resolved, status="applied", reason="applied_open",
+                                   diagnostics={**resolved.diagnostics, "recovered_from_ledger": True})
+            return resolved
 
-    return process_trade_payload(
+    def _before_receipt(current: dict[str, Any]) -> dict[str, Any]:
+        if before_receipt_fn is not None:
+            current = before_receipt_fn(current) or current
+        if claim is not None:
+            save_trade_payload_result(inbox_path, claim=claim, result=current)
+        return current
+
+    def _write_state(path: Path, current: dict[str, Any]) -> Path:
+        scope = (trade_payload_commit_scope(inbox_path, claim=claim, repo=repo)
+                 if claim is not None else contextlib.nullcontext())
+        with scope:
+            if claim is None:
+                return write_trade_intake_state(path, current)
+            return update_trade_intake_state_entries(
+                path,
+                current,
+                deal_ids=(
+                    str(claim.get("broker_deal_key") or ""),
+                    payload_deal_id(payload),
+                ),
+            )
+
+    def _receipt(context: dict[str, Any]) -> dict[str, Any] | None:
+        if claim is not None and claim.get("association_enrichment"):
+            return {"status": "skipped", "reason": "execution_association_enrichment", "delivery_confirmed": False}
+        if claim is not None and claim["delivery_purpose"] == "historical":
+            return {"status": "skipped", "reason": "historical_import", "delivery_confirmed": False}
+        if claim is not None and not claim.get("receipt_recovery_allowed"):
+            return {"status": "skipped", "reason": "legacy_receipt_history_unproven", "delivery_confirmed": False}
+        if on_result_fn is None:
+            return None
+        return on_result_fn({**context, "inbox_path": inbox_path, "inbox_claim": claim,
+                             "inbox_id": claim["inbox_id"] if claim else None})
+
+    try:
+        result = process_trade_payload(
         payload,
         repo=repo,
         state_path=state_path,
@@ -356,18 +481,31 @@ def _process_payload(
         account_mapping=account_mapping,
         apply_changes=apply_changes,
         load_trade_intake_state_fn=load_trade_intake_state,
-        write_trade_intake_state_fn=write_trade_intake_state,
+        write_trade_intake_state_fn=_write_state,
         upsert_deal_state_fn=upsert_deal_state,
         append_trade_intake_audit_fn=append_trade_intake_audit,
         enrich_trade_payload_fn=_enrich_payload if allow_external_lookup else None,
         normalize_trade_deal_fn=normalize_fn,
         resolve_trade_deal_fn=_resolve_with_wheel_intent,
-        before_receipt_fn=before_receipt_fn,
-        on_result_fn=on_result_fn,
-        portfolio_management_enabled=is_portfolio_management_enabled(config),
+        before_receipt_fn=_before_receipt,
+        on_result_fn=_receipt,
+        portfolio_management_enabled=(
+            is_portfolio_management_enabled(config)
+            and (claim is None or (claim["delivery_purpose"] == "live"
+                                   and not claim.get("association_enrichment")))
+        ),
         retry_failed_deal=retry_failed_deal,
         source=source,
     )
+    except Exception as exc:
+        if claim is not None:
+            mark_trade_payload_retryable(inbox_path, inbox_id=claim["inbox_id"],
+                                         error=f"{type(exc).__name__}: {exc}", claim=claim)
+        raise
+    if claim is not None:
+        settle_trade_payload_result(inbox_path, inbox_id=claim["inbox_id"], result=result, claim=claim)
+        result["inbox_id"] = claim["inbox_id"]
+    return result
 
 
 def _bind_push_payload_to_source(
@@ -564,8 +702,11 @@ def main(argv: list[str] | None = None) -> int:
         runtime_root=runtime_root,
         runtime_root_source=runtime_resolution.source,
     )
-    if args.retry_failed and not args.deal_json:
-        print("--retry-failed requires --deal-json replay")
+    if sum(bool(value) for value in (args.deal_json, args.execution_file, args.inbox_id)) > 1:
+        print("--deal-json, --execution-file and --inbox-id are mutually exclusive")
+        return 2
+    if args.retry_failed and not (args.deal_json or args.inbox_id):
+        print("--retry-failed requires --deal-json or --inbox-id replay")
         return 2
     state_operation = bool(args.reconcile_state or args.compensate_receipts)
     if args.expected_payload_hash and not args.compensate_receipts:
@@ -599,6 +740,8 @@ def main(argv: list[str] | None = None) -> int:
                 ("--mode", bool(args.mode)),
                 ("--once", bool(args.once)),
                 ("--deal-json", bool(args.deal_json)),
+                ("--execution-file", bool(args.execution_file)),
+                ("--inbox-id", bool(args.inbox_id)),
                 ("--retry-failed", bool(args.retry_failed)),
                 ("--state-path", args.state_path is not None),
                 ("--audit-path", args.audit_path is not None),
@@ -716,6 +859,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
+    if (args.execution_file or args.inbox_id) and args.mode is None:
+        intake_cfg["mode"] = "dry-run"
     apply_changes = intake_cfg["mode"] == "apply"
     control = write_control(
         apply=apply_changes,
@@ -729,8 +874,69 @@ def main(argv: list[str] | None = None) -> int:
             "and may send receipts; use --confirm or --yes"
         )
         return 2
-    if args.deal_json:
-        payload = json.loads(Path(args.deal_json).read_text(encoding="utf-8"))
+    if args.execution_file:
+        from src.application.trades.file_intake import run_execution_file
+        if apply_changes:
+            _data_config, repo = open_position_ledger_from_runtime_config(base=runtime_root, cfg=cfg, data_config=args.data_config)
+        else:
+            repo = _ReplayRepo()
+        bindings = [
+            {"broker_id": "futu", "external_account_id": physical, "environment": "REAL",
+             "broker_account_id": f"futu:REAL:{physical}", "account_label": label}
+            for physical, label in intake_cfg["account_mapping"].items()
+        ]
+        def process_file_row(payload: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+            selected = (sources[0] if payload.get("_trade_intake_file_errors") else
+                        _select_source_for_payload(sources, payload=payload,
+                                                   account_mapping=intake_cfg["account_mapping"], require_match=False))
+            return _process_payload(
+                payload, repo=repo, state_path=Path(selected["state_path"]),
+                inbox_path=Path(selected["inbox_path"]), audit_path=Path(selected["audit_path"]),
+                account_mapping=intake_cfg["account_mapping"],
+                futu_account_ids=list(selected.get("futu_account_ids") or []),
+                host=str(selected.get("host") or "127.0.0.1"), port=int(selected.get("port") or 11111),
+                config=cfg, config_path=cfg_path, runtime_root=runtime_root, **kwargs,
+            )
+        try:
+            result = run_execution_file(args.execution_file, process_payload_fn=process_file_row,
+                                        configured_accounts=bindings, dry_run=not apply_changes)
+        except ValueError as exc:
+            print(json.dumps({"status": "rejected", "reason": str(exc)}, ensure_ascii=False))
+            return 2
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    saved_inbox = None
+    if args.inbox_id:
+        ledger_path = resolve_position_ledger_sqlite_path(
+            base=runtime_root, cfg=cfg, data_config=args.data_config,
+        )
+        try:
+            inbox_paths = {
+                resolve_execution_inbox_path(SimpleNamespace(db_path=ledger_path), item["inbox_path"])
+                for item in sources
+            }
+        except ValueError as exc:
+            print(str(exc))
+            return 2
+        matches = [(path, read_trade_payload(path, inbox_id=args.inbox_id, read_only=True))
+                   for path in sorted(inbox_paths)]
+        matches = [(path, saved) for path, saved in matches if saved is not None]
+        if len(matches) != 1:
+            print("saved Inbox entry must resolve to exactly one configured source")
+            return 2
+        saved_inbox_path, saved_inbox = matches[0]
+        if not apply_changes:
+            from src.application.notification_delivery_adapter import notification_target_reference
+            preview = dict(saved_inbox)
+            receipt = dict(preview.get("receipt") or {})
+            if isinstance(receipt.get("route"), dict):
+                receipt["route"] = dict(receipt["route"])
+                receipt["route"]["target"] = notification_target_reference(receipt["route"].get("target"))
+            preview["receipt"] = receipt
+            print(json.dumps(preview, ensure_ascii=False, indent=2))
+            return 0
+    if args.deal_json or saved_inbox:
+        payload = saved_inbox["payload"] if saved_inbox else json.loads(Path(args.deal_json).read_text(encoding="utf-8"))
         manual_source = _select_source_for_payload(
             sources,
             payload=payload,
@@ -762,6 +968,7 @@ def main(argv: list[str] | None = None) -> int:
                 payload,
                 repo=repo,
                 state_path=manual_state_path,
+                inbox_path=saved_inbox_path if saved_inbox else manual_source.get("inbox_path"),
                 audit_path=manual_audit_path,
                 account_mapping=manual_account_mapping,
                 futu_account_ids=manual_futu_account_ids,
@@ -791,10 +998,17 @@ def main(argv: list[str] | None = None) -> int:
                     ),
                 ),
                 on_result_fn=receipt_callback,
-                retry_failed_deal=bool(args.retry_failed),
-                source="manual",
-                allow_external_lookup=bool(apply_changes),
+                retry_failed_deal=bool(args.retry_failed or args.inbox_id),
+                source=str(saved_inbox["source"]) if saved_inbox else "manual",
+                allow_external_lookup=bool(apply_changes and not args.inbox_id),
             )
+            if (apply_changes and saved_inbox and saved_inbox["delivery_purpose"] == "live"
+                    and is_portfolio_management_enabled(cfg)):
+                _dispatch_portfolio_refresh_intent(
+                    claim_trade_payload_refresh_intent(saved_inbox_path, inbox_id=args.inbox_id),
+                    config=cfg,
+                    audit_path=manual_audit_path,
+                )
         if apply_changes:
             _write_listener_status(
                 manual_status_path,
@@ -960,6 +1174,9 @@ def _build_receipt_callback(
             ),
             deal=context.get("deal"),
             result=result,
+            inbox_path=context.get("inbox_path"),
+            inbox_id=context.get("inbox_id"),
+            inbox_claim=context.get("inbox_claim"),
             payload=(
                 context.get("effective_payload")
                 if isinstance(context.get("effective_payload"), dict)
@@ -1163,8 +1380,10 @@ def _select_source_for_payload(
     if len(sources) == 1:
         return sources[0]
 
-    futu_account_id = extract_primary_account_id(payload) or ""
-    account = str(payload.get("account") or payload.get("internal_account") or "").strip().lower()
+    execution = payload.get("execution_input") if isinstance(payload.get("execution_input"), dict) else payload
+    account_ref = execution.get("broker_account_ref") or {}
+    futu_account_id = str(account_ref.get("external_account_id") or extract_primary_account_id(payload) or "")
+    account = str(account_ref.get("account_label") or payload.get("account") or payload.get("internal_account") or "").strip().lower()
     mapped_account = str(account_mapping.get(futu_account_id) or "").strip().lower() if futu_account_id else ""
     if account and mapped_account and account != mapped_account:
         raise SystemExit("deal-json payload account conflicts with futu_account_id mapping; pass a consistent payload or --host/--port")
@@ -1414,6 +1633,8 @@ def _run_listener_source_loop(
     inbox_path = source.get("inbox_path") or Path(state_path).with_name(
         "trade_intake_inbox.sqlite3"
     )
+    if apply_changes:
+        inbox_path = resolve_execution_inbox_path(repo, inbox_path)
     backfill_checkpoint_path = source.get(
         "backfill_checkpoint_path"
     ) or Path(state_path).with_name("trade_intake_backfill_checkpoint.json")
@@ -1441,9 +1662,17 @@ def _run_listener_source_loop(
         runtime_root=runtime_root,
         runtime_root_source=runtime_root_source,
     )
+    status_state["execution_inbox_path"] = str(inbox_path)
     inbox_summary_cache: dict[str, Any] = {}
     lifecycle_delivery_snapshot_cache: dict[str, Any] = {}
+    inbox_wakeup = threading.Event()
     fee_target_queue: queue.SimpleQueue[tuple[str, str, str, str]] = queue.SimpleQueue()
+    try:
+        previous_status = json.loads(Path(status_path).read_text(encoding="utf-8"))
+        status_state["fee_recovery_cursors"] = dict(previous_status.get("fee_recovery_cursors") or {})
+    except (OSError, ValueError, AttributeError):
+        pass
+    last_fee_recovery_monotonic = None
 
     def _enqueue_fee_target(target: tuple[str, str, str, str]) -> None:
         fee_target_queue.put(target)
@@ -1616,44 +1845,24 @@ def _run_listener_source_loop(
         inbox_id: str,
         intake_source: str,
     ) -> dict[str, Any]:
-        try:
-            with process_lock:
-                result = _process_payload_with_lifecycle_runtime(
-                    payload,
-                    repo=repo,
-                    state_path=state_path,
-                    audit_path=audit_path,
-                    account_mapping=account_mapping,
-                    futu_account_ids=futu_account_ids,
-                    apply_changes=apply_changes,
-                    host=host,
-                    port=port,
-                    config=cfg,
-                    config_path=cfg_path,
-                    runtime_root=runtime_root,
-                    on_result_fn=receipt_callback,
-                    source=intake_source,
-                )
-        except Exception as exc:
-            error = f"{type(exc).__name__}: {exc}"
-            mark_trade_payload_retryable(
-                inbox_path,
-                inbox_id=inbox_id,
-                error=error,
+        with process_lock:
+            result = _process_payload_with_lifecycle_runtime(
+                payload,
+                repo=repo,
+                state_path=state_path,
+                inbox_path=Path(inbox_path),
+                audit_path=audit_path,
+                account_mapping=account_mapping,
+                futu_account_ids=futu_account_ids,
+                apply_changes=apply_changes,
+                host=host,
+                port=port,
+                config=cfg,
+                config_path=cfg_path,
+                runtime_root=runtime_root,
+                on_result_fn=receipt_callback,
+                source=intake_source,
             )
-            raise
-        intent = result.get("portfolio_refresh_intent")
-        if apply_changes and isinstance(intent, dict):
-            record_trade_payload_refresh_intent(
-                inbox_path,
-                inbox_id=inbox_id,
-                intent=intent,
-            )
-        settle_trade_payload_result(
-            inbox_path,
-            inbox_id=inbox_id,
-            result=result,
-        )
         if apply_changes:
             fee_target = _durable_fee_target(
                 payload=payload,
@@ -1663,24 +1872,24 @@ def _run_listener_source_loop(
             )
             if fee_target is not None:
                 _enqueue_fee_target(fee_target)
-            _dispatch_portfolio_refresh_intent(
-                claim_trade_payload_refresh_intent(
-                    inbox_path,
-                    inbox_id=inbox_id,
-                ),
-                config=cfg,
-                audit_path=audit_path,
-            )
+            if is_portfolio_management_enabled(cfg):
+                _dispatch_portfolio_refresh_intent(
+                    claim_trade_payload_refresh_intent(
+                        inbox_path,
+                        inbox_id=inbox_id,
+                    ),
+                    config=cfg,
+                    audit_path=audit_path,
+                )
         return result
 
     def _on_deal(payload: dict[str, Any]) -> None:
         push_received_at = utc_now()
         try:
-            payload = _bind_push_payload_to_source(
-                payload,
-                source=source,
-                received_at_utc=push_received_at,
-            )
+            if not payload.get("_trade_intake_source_identity_errors"):
+                payload = _bind_push_payload_to_source(
+                    payload, source=source, received_at_utc=push_received_at,
+                )
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
             append_trade_intake_audit(
@@ -1718,15 +1927,15 @@ def _run_listener_source_loop(
                 f"deal_id={payload_deal_id(payload) or '-'} error={error}"
             )
             return
-        canonical_deal_key = broker_deal_key_from_payload(
-            payload,
-            account_mapping=account_mapping,
-        )
+        canonical_deal_key = ("" if payload.get("_trade_intake_source_identity_errors") else
+                              broker_deal_key_from_payload(payload, account_mapping=account_mapping))
         inbox_id = enqueue_trade_payload(
             inbox_path,
             payload=payload,
             source="push",
             broker_deal_key=canonical_deal_key,
+            repo=repo,
+            adapter_version=TRADE_INTAKE_ADAPTER_VERSIONS["push"],
         )
         if not canonical_deal_key:
             append_trade_intake_audit(
@@ -1759,57 +1968,9 @@ def _run_listener_source_loop(
                 stage="push_identity_needs_review",
             )
             return
-        try:
-            result = _process_inbox_payload(
-                payload,
-                inbox_id=inbox_id,
-                intake_source="push",
-            )
-        except Exception as exc:
-            error = f"{type(exc).__name__}: {exc}"
-            status_state.update(
-                {
-                    "last_error": error,
-                    "last_error_at": utc_now(),
-                    "last_push_received_utc": push_received_at,
-                    "last_push_deal_id": payload_deal_id(payload) or None,
-                    "inbox": current_inbox_summary(),
-                }
-            )
-            _write_listener_status(
-                status_path,
-                status_state,
-                status="listening",
-                stage="deal_queued_after_callback_error",
-            )
-            _log(
-                f"[WARN] trade push queued for retry source={source.get('id')} "
-                f"deal_id={payload_deal_id(payload) or '-'} error={error}"
-            )
-            return
-        status_state.update(
-            {
-                "last_push_received_utc": push_received_at,
-                "last_push_deal_id": result.get("deal_id") or payload_deal_id(payload) or None,
-                "last_deal_result": _result_summary(result),
-                "last_receipt_result": _receipt_summary(result.get("receipt")),
-                "inbox": current_inbox_summary(),
-                "last_combo_reconciliation": (
-                    dict(result.get("combo_reconciliation"))
-                    if isinstance(result.get("combo_reconciliation"), dict)
-                    else status_state.get("last_combo_reconciliation")
-                ),
-            }
-        )
-        _refresh_lifecycle_delivery_status(
-            status_state,
-            repo=repo,
-            account=str(source.get("account") or ""),
-            dispatcher_status_fn=lifecycle_dispatcher_status_fn,
-            snapshot_cache=lifecycle_delivery_snapshot_cache,
-        )
-        _write_listener_status(status_path, status_state, status="listening", stage="deal_processed")
-        _log(_format_result_summary(result))
+        inbox_wakeup.set()
+        status_state.update({"last_push_received_utc": push_received_at,
+                             "last_push_deal_id": payload_deal_id(payload) or None})
 
     listener = None
     history_client = None
@@ -1848,6 +2009,22 @@ def _run_listener_source_loop(
                 reconnect_delay_sec = reconnect_floor_sec
                 now_mono = time.monotonic()
                 fee_targets = _drain_fee_target_queue(fee_target_queue)
+                if apply_changes and (last_fee_recovery_monotonic is None
+                                      or now_mono - last_fee_recovery_monotonic >= 60):
+                    cursors = status_state.setdefault("fee_recovery_cursors", {})
+                    try:
+                        for recovery_account in sorted(set(account_mapping.values())):
+                            recovery = recover_order_fee_targets(
+                                repo, account=recovery_account, allowed_futu_account_ids=futu_account_ids,
+                                selection_after=cursors.get(recovery_account), max_orders=20,
+                            )
+                            fee_targets = sorted(set(fee_targets) | set(recovery["targets"]))
+                            cursors[recovery_account] = recovery["selection_cursor"]["after"]
+                            status_state.setdefault("fee_recovery", {})[recovery_account] = {
+                                key: recovery[key] for key in ("candidate_count", "issues")}
+                    except Exception as exc:
+                        status_state["last_fee_recovery_error"] = f"{type(exc).__name__}: {exc}"
+                    last_fee_recovery_monotonic = now_mono
                 if fee_targets:
                     fee_status, fee_receipts = _run_fee_sync_cycle(
                         repo=repo,
@@ -1876,26 +2053,51 @@ def _run_listener_source_loop(
                         restart_count=restart_count,
                     )
                 inbox_retry_due = (
-                    last_inbox_retry_monotonic is None
+                    inbox_wakeup.is_set()
+                    or last_inbox_retry_monotonic is None
                     or now_mono - last_inbox_retry_monotonic >= 60
                 )
                 if inbox_retry_due:
+                    inbox_wakeup.clear()
                     retry_rows = list_retryable_trade_payloads(
                         inbox_path,
                         retry_delay_sec=60,
+                        account_ids=futu_account_ids,
                     )
                     for retry_row in retry_rows:
                         try:
-                            _process_inbox_payload(
+                            result = _process_inbox_payload(
                                 dict(retry_row["payload"]),
                                 inbox_id=str(retry_row["inbox_id"]),
                                 intake_source=str(retry_row.get("source") or "inbox_retry"),
                             )
+                            status_state["last_deal_result"] = _result_summary(result)
+                            status_state["last_receipt_result"] = _receipt_summary(result.get("receipt"))
+                            _log(_format_result_summary(result))
                         except Exception as exc:
                             status_state["last_inbox_retry_error"] = (
                                 f"{type(exc).__name__}: {exc}"
                             )
                             break
+                    if apply_changes and is_portfolio_management_enabled(cfg):
+                        try:
+                            refresh_intents: dict[str, dict[str, str]] = {}
+                            for candidate in list_unclaimed_trade_payload_refresh_intents(
+                                inbox_path, account_mapping={
+                                    physical: label for physical, label in account_mapping.items()
+                                    if physical in futu_account_ids
+                                },
+                            ):
+                                intent = claim_trade_payload_refresh_intent(
+                                    inbox_path, inbox_id=candidate["inbox_id"],
+                                )
+                                if intent is not None:
+                                    refresh_intents.setdefault(intent["account"], intent)
+                            for intent in refresh_intents.values():
+                                _dispatch_portfolio_refresh_intent(intent, config=cfg, audit_path=audit_path)
+                            status_state.pop("last_portfolio_refresh_recovery_error", None)
+                        except Exception as exc:
+                            status_state["last_portfolio_refresh_recovery_error"] = f"{type(exc).__name__}: {exc}"
                     last_inbox_retry_monotonic = now_mono
                     status_state["inbox"] = current_inbox_summary()
                     if (
@@ -2101,7 +2303,8 @@ def _run_listener_source_loop(
                     )
                     _write_listener_status(status_path, status_state, status="listening", stage="heartbeat", restart_count=restart_count)
                     last_heartbeat_monotonic = now_mono
-                if stop.wait(5):
+                inbox_wakeup.wait(1)
+                if stop.wait(0):
                     break
         except KeyboardInterrupt:
             stop.set()

@@ -14,10 +14,14 @@ from src.application.ledger.api import (
 from src.application.trades.deal_identity import (
     active_ledger_events,
     completed_ledger_deal_keys,
-    structured_deal_ids_from_assigned_stock_event,
+    structured_deal_keys_from_assigned_stock_event,
     structured_deal_keys_from_ledger_event,
 )
-from src.application.trades.state import load_trade_intake_state, upsert_deal_state, write_trade_intake_state
+from src.application.trades.state import (
+    load_trade_intake_state,
+    update_trade_intake_state_entries,
+    upsert_deal_state,
+)
 
 
 TERMINAL_EVIDENCE_REASONS = {
@@ -112,7 +116,7 @@ def reconcile_trade_intake_state(
     deal_ids: list[str] | None = None,
     apply_changes: bool = False,
     load_state_fn: Callable[[str | Path], dict[str, Any]] = load_trade_intake_state,
-    write_state_fn: Callable[[str | Path, dict[str, Any]], Any] = write_trade_intake_state,
+    update_state_fn: Callable[..., Any] = update_trade_intake_state_entries,
 ) -> dict[str, Any]:
     state_file = Path(state_path)
     audit_file = Path(audit_path) if audit_path else None
@@ -261,9 +265,15 @@ def reconcile_trade_intake_state(
 
     writable_actions = [item for item in actions if item.get("write_state")]
     backup_path: Path | None = None
+    final_state = new_state
     if apply_changes and writable_actions:
         backup_path = _backup_state_file(state_file)
-        write_state_fn(state_file, new_state)
+        update_state_fn(
+            state_file,
+            new_state,
+            deal_ids=[str(item["deal_id"]) for item in writable_actions],
+        )
+        final_state = load_state_fn(state_file)
 
     return {
         "ok": True,
@@ -271,7 +281,7 @@ def reconcile_trade_intake_state(
         "audit_path": str(audit_file) if audit_file else None,
         "requested_deal_ids": requested,
         "pending_before": _bucket_counts(state),
-        "pending_after": _bucket_counts(new_state),
+        "pending_after": _bucket_counts(final_state),
         "planned_count": len(writable_actions),
         "applied_count": len(writable_actions) if apply_changes else 0,
         "state_written": bool(apply_changes and writable_actions),
@@ -405,7 +415,7 @@ def _deal_ids_from_assigned_stock_event(event: dict[str, Any]) -> list[str]:
     external_key = str(event.get("external_event_key") or "").strip()
     if external_key:
         return [external_key]
-    return sorted(structured_deal_ids_from_assigned_stock_event(event))
+    return sorted(structured_deal_keys_from_assigned_stock_event(event))
 
 
 def _completed_lifecycle_cases_by_deal(repo: Any) -> dict[str, list[dict[str, Any]]]:

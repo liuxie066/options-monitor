@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -24,6 +26,7 @@ from src.application.quality.model import (
 )
 from src.application.trades.lifecycle import PENDING_STATUSES
 from src.application.quality.opend_position_adapter import OpenDOptionSnapshot
+from domain.domain.position_snapshot import position_snapshot_scope_errors
 
 
 def _decimal(value: Any) -> Decimal | None:
@@ -386,6 +389,56 @@ def _pending_lifecycle_coverage(
     }
 
 
+def _snapshot_source_errors(
+    snapshot: OpenDOptionSnapshot, *, account: str, market: str, now: datetime,
+) -> list[str]:
+    errors: list[str] = []
+    if not snapshot.complete or not snapshot.refresh_cache:
+        errors.append("snapshot_incomplete_or_cached")
+    if snapshot.account.lower() != account.lower():
+        errors.append("snapshot_account_mismatch")
+    if snapshot.market.lower() != market.lower():
+        errors.append("snapshot_market_mismatch")
+    if snapshot.environment != "REAL":
+        errors.append("snapshot_environment_mismatch")
+    if snapshot.snapshot_input:
+        errors.extend(position_snapshot_scope_errors(
+            snapshot.snapshot_input, account_label=account, environment="REAL",
+            market=market, asset_type="option", now_utc=now,
+        ))
+        physical_id = str((snapshot.snapshot_input.get("broker_account_ref") or {}).get("external_account_id") or "")
+        fingerprint = "sha256:" + hashlib.sha256(physical_id.encode("utf-8")).hexdigest()
+        if fingerprint != snapshot.account_fingerprint:
+            errors.append("snapshot_physical_account_mismatch")
+    else:
+        try:
+            observed = datetime.fromisoformat(snapshot.observed_at_utc.replace("Z", "+00:00"))
+            age = (now - observed).total_seconds()
+            if age < 0 or age > 300:
+                errors.append("snapshot_observed_at_utc_stale_or_future")
+        except (ValueError, TypeError):
+            errors.append("snapshot_observed_at_utc_invalid")
+    return sorted(set(errors))
+
+
+def _comparison_rows(snapshot: OpenDOptionSnapshot) -> list[dict[str, Any]]:
+    if not snapshot.snapshot_input:
+        return snapshot.rows
+    rows: list[dict[str, Any]] = []
+    for row in snapshot.snapshot_input.get("rows") or []:
+        instrument = row["instrument_ref"]
+        if instrument["asset_type"] != "option":
+            continue
+        rows.append({
+            "code": instrument.get("source_code") or f"{instrument['market']}.{instrument['symbol']}",
+            "stock_owner": instrument["symbol"], "option_type": instrument["option_type"],
+            "strike_time": instrument["expiration_ymd"], "option_strike_price": instrument["strike"],
+            "options_per_contract": instrument["multiplier"],
+            "qty": row["quantity"], "position_side": row["position_side"],
+        })
+    return rows
+
+
 def build_position_dataset(
     *,
     snapshot: OpenDOptionSnapshot,
@@ -404,7 +457,8 @@ def build_position_dataset(
     next_authoritative_refresh_due_utc: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     scope = {"account": account, "market": market}
-    source_ok = bool(snapshot.complete and snapshot.refresh_cache and snapshot.environment == "REAL")
+    source_errors = _snapshot_source_errors(snapshot, account=account, market=market, now=now)
+    source_ok = not source_errors
     source_check = check_result(
         check_id="OM-POS-001",
         status="pass" if source_ok else "unknown",
@@ -417,6 +471,7 @@ def build_position_dataset(
             "refresh_cache": snapshot.refresh_cache,
             "environment": snapshot.environment,
             "row_count": len(snapshot.rows),
+            "snapshot_errors": source_errors,
         },
         expected={"complete": True, "refresh_cache": True, "environment": "REAL"},
         evidence_refs=[],
@@ -455,7 +510,8 @@ def build_position_dataset(
         account=account,
         market=market,
     )
-    broker, broker_errors = normalize_opend_positions(snapshot.rows, market=market)
+    broker_rows = _comparison_rows(snapshot)
+    broker, broker_errors = normalize_opend_positions(broker_rows, market=market)
     normalization_errors = [*local_errors, *broker_errors]
     raw_comparison = {
         key: {
@@ -468,7 +524,7 @@ def build_position_dataset(
     contract_terms_drifts = _contract_terms_drifts(
         local=local,
         broker=broker,
-        broker_rows=snapshot.rows,
+        broker_rows=broker_rows,
         raw_comparison=raw_comparison,
     )
     lifecycle_coverage, lifecycle_case_ids = _pending_lifecycle_coverage(
@@ -721,7 +777,11 @@ def build_opend_runtime_check(
     snapshot: OpenDOptionSnapshot,
     observed_at_utc: str,
 ) -> dict[str, Any]:
-    ok = snapshot.complete and snapshot.refresh_cache and snapshot.environment == "REAL"
+    errors = _snapshot_source_errors(
+        snapshot, account=snapshot.account, market=snapshot.market,
+        now=datetime.fromisoformat(observed_at_utc.replace("Z", "+00:00")),
+    )
+    ok = not errors
     return check_result(
         check_id="RT-OM-004",
         status="pass" if ok else "unknown",
@@ -733,6 +793,7 @@ def build_opend_runtime_check(
             "complete": snapshot.complete,
             "refresh_cache": snapshot.refresh_cache,
             "environment": snapshot.environment,
+            "snapshot_errors": errors,
         },
         expected={"complete": True, "refresh_cache": True, "environment": "REAL"},
         evidence_refs=[],

@@ -15,10 +15,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import math
+import re
 from pathlib import Path
 import sys
 from typing import Any, Callable, Mapping
 from urllib import request as urllib_request
+from zoneinfo import ZoneInfo
 
 from src.infrastructure.io_utils import atomic_write_json
 
@@ -258,7 +260,7 @@ def _validated_rates(value: Any) -> dict[str, float] | None:
             return None
         if not (0 < number < 1000):
             return None
-        out[key] = round(number, 4)
+        out[key] = number
     return out
 
 
@@ -313,31 +315,63 @@ def fetch_market_exchange_rates(timeout_sec: float = 8.0) -> dict[str, Any] | No
 
     errors: list[str] = []
     try:
-        rates = _parse_tencent(_http_get(_TENCENT_URL, timeout_sec=timeout_sec))
-        if rates is not None:
-            return {
-                "source": TENCENT_EXCHANGE_RATE_SOURCE,
-                "rates": rates,
-                "timestamp": _utc_now().isoformat(),
-            }
+        text = _http_get(_TENCENT_URL, timeout_sec=timeout_sec)
+        observation = _market_observation(text, source=TENCENT_EXCHANGE_RATE_SOURCE, rates=_parse_tencent(text))
+        if observation is not None:
+            return observation
         errors.append("tencent:invalid")
     except Exception as exc:
         errors.append(f"tencent:{type(exc).__name__}")
 
     try:
-        rates = _parse_sina(_http_get(_SINA_URL, headers=_SINA_HEADERS, timeout_sec=timeout_sec))
-        if rates is not None:
-            return {
-                "source": SINA_EXCHANGE_RATE_SOURCE,
-                "rates": rates,
-                "timestamp": _utc_now().isoformat(),
-            }
+        text = _http_get(_SINA_URL, headers=_SINA_HEADERS, timeout_sec=timeout_sec)
+        observation = _market_observation(text, source=SINA_EXCHANGE_RATE_SOURCE, rates=_parse_sina(text))
+        if observation is not None:
+            return observation
         errors.append("sina:invalid")
     except Exception as exc:
         errors.append(f"sina:{type(exc).__name__}")
 
     _warn(None, f"[WARN] market FX fetch failed: {'; '.join(errors)}")
     return None
+
+
+def _market_observation(text: str, *, source: str, rates: dict[str, float] | None) -> dict[str, Any] | None:
+    if rates is None:
+        return None
+    timestamps: dict[str, str] = {}
+    shanghai = ZoneInfo("Asia/Shanghai")
+    observed_at = _utc_now()
+    for line in text.splitlines():
+        pair = next((pair for pair in _REQUIRED_RATES if pair.lower() in line.lower()), None)
+        if pair is None:
+            continue
+        try:
+            fields = line.split('"')[1].split("~" if source == TENCENT_EXCHANGE_RATE_SOURCE else ",")
+            if source == TENCENT_EXCHANGE_RATE_SOURCE:
+                quote_time = datetime.strptime(fields[5], "%Y%m%d%H%M%S").replace(tzinfo=shanghai)
+            else:
+                # Only explicit provider date/time fields establish a quote day.
+                dates = [field.strip() for field in fields if re.fullmatch(r"\d{4}-\d{2}-\d{2}", field.strip())]
+                times = [field.strip() for field in fields if re.fullmatch(r"\d{2}:\d{2}:\d{2}", field.strip())]
+                if len(dates) != 1 or len(times) != 1:
+                    return None
+                quote_time = datetime.fromisoformat(f"{dates[0]}T{times[0]}").replace(tzinfo=shanghai)
+        except (IndexError, ValueError):
+            return None
+        if quote_time.date() != observed_at.astimezone(shanghai).date() or quote_time > observed_at:
+            return None
+        timestamps[pair] = quote_time.astimezone(timezone.utc).isoformat()
+    if any(pair not in timestamps for pair in _REQUIRED_RATES):
+        return None
+    return {
+        "source": source,
+        "rates": rates,
+        "timestamp": min(timestamps.values()),
+        "quote_timestamps": timestamps,
+        "observed_at": observed_at.isoformat(),
+        "raw_quotes": text,
+    }
 
 
 def save_exchange_rate_observation(

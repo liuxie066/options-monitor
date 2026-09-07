@@ -214,6 +214,49 @@ def test_assignment_zero_close_price_and_strategy_metadata_are_stable() -> None:
     assert allocation.allocation_id == second.allocations[0].allocation_id
 
 
+def test_conflicting_close_strategy_metadata_cannot_override_open_metadata() -> None:
+    result = project_trade_events(
+        [
+            _event(
+                "open",
+                "open",
+                price=2,
+                basis="actual",
+                raw={
+                    "strategy_snapshot": {
+                        "strategy": "sell_put",
+                        "leg_role": "put",
+                        "strategy_group_id": "g1",
+                    }
+                },
+            ),
+            _event(
+                "close",
+                "close",
+                price=1,
+                time_ms=2,
+                basis="actual",
+                target_lot_id="lot-1",
+                raw={
+                    "strategy": "wheel",
+                    "strategy_snapshot": {
+                        "strategy": "combo_yield",
+                        "leg_role": "funding_put",
+                        "strategy_group_id": "other",
+                    },
+                },
+            ),
+        ]
+    )
+
+    allocation = result.allocations[0]
+    assert (allocation.strategy, allocation.leg_role, allocation.strategy_group_id) == (
+        "sell_put",
+        "put",
+        "g1",
+    )
+
+
 def test_voided_close_produces_no_allocation() -> None:
     key = _key()
     close = _event("close", "close", price=1, time_ms=2, target_lot_id="lot-1")

@@ -268,9 +268,12 @@ def test_public_single_writer_and_fifo_use_bounded_fast_runtime_when_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repo = _repo(tmp_path)
+    persist_trade_event_object(
+        repo,
+        _event("open", "open", 1_000, lot_id="lot-a", contracts=2),
+    )
     run_position_projection_forced_full(
         repo,
-        [_event("open", "open", 1_000, lot_id="lot-a", contracts=2)],
         seed_checkpoint=True,
     )
     _enable(repo)

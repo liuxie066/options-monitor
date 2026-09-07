@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from dataclasses import replace
 
 import pytest
 
@@ -23,6 +24,67 @@ from src.application.wheel import (
     end_wheel_lifecycle,
     reject_wheel_call_linkage,
 )
+
+
+def _partial_call_fill() -> NormalizedTradeDeal:
+    return NormalizedTradeDeal(
+        broker="富途", futu_account_id="REAL_1", internal_account="lx",
+        deal_id="partial-call-1", order_id="bound-call-order", symbol="NVDA",
+        option_type="call", side="sell", position_effect="open", contracts=1,
+        price=2, strike=110, multiplier=100, multiplier_source="broker",
+        expiration_ymd="2026-08-21", currency="USD", trade_time_ms=5_000,
+        raw_payload={},
+    )
+
+
+def test_two_partial_fills_consume_one_wheel_intent_without_changing_trade_amounts(tmp_path):
+    repo, _, stock_lot_id = _assign_short_put(tmp_path, wheel_start_enabled=True, contracts=2)
+    created, coverage = _create_call_intent(repo, stock_lot_id, contracts=2, broker_order_id="bound-call-order")
+    first_deal = _partial_call_fill()
+    first = persist_trade_event_with_wheel_intent(repo, first_deal, coverage).to_dict()
+    partial = build_wheel_read_model(repo, "lx", 5_000)["batches"][0]
+    assert first["wheel_linkage_status"] == "matched_intent"
+    assert partial["active_intent_ids"] == [created["intent_id"]]
+    assert partial["active_intent_reserved_shares"] == 100
+    second = persist_trade_event_with_wheel_intent(repo, replace(first_deal, deal_id="partial-call-2", trade_time_ms=6_000), coverage).to_dict()
+    completed = build_wheel_read_model(repo, "lx", 6_000)["batches"][0]
+    assert second["wheel_linkage_status"] == "matched_intent"
+    assert completed["active_intent_ids"] == []
+    assert completed["active_intent_reserved_shares"] == 0
+    consumed = [event for event in repo.list_wheel_events(account="lx") if event["event_type"] == "wheel_call_intent_consumed"]
+    assert [event["payload"]["contracts"] for event in consumed] == [1, 1]
+    fills = [event for event in repo.list_trade_events() if event["event_type"] == "open" and event["option_type"] == "call"]
+    assert sum(event["contracts"] * event["price"] * event["multiplier"] for event in fills) == 400
+    assert all(event["raw_payload"]["source_stock_lot_id"] == stock_lot_id for event in fills)
+
+
+@pytest.mark.parametrize("order_id", [None, "another-order"])
+def test_bound_wheel_order_does_not_consume_another_fill(tmp_path, order_id):
+    repo, _, stock_lot_id = _assign_short_put(tmp_path, wheel_start_enabled=True)
+    created, coverage = _create_call_intent(repo, stock_lot_id, broker_order_id="bound-call-order")
+    result = persist_trade_event_with_wheel_intent(repo, replace(_partial_call_fill(), order_id=order_id), coverage).to_dict()
+    assert result["wheel_linkage_status"] == "no_matching_intent"
+    assert not [event for event in repo.list_wheel_events(account="lx") if event["event_type"] == "wheel_call_intent_consumed"]
+    assert created["intent_id"] in build_wheel_read_model(repo, "lx", 5_000)["batches"][0]["active_intent_ids"]
+    assert any(event["event_id"] == result["event_id"] for event in repo.list_trade_events())
+
+
+def test_wheel_intent_replay_uses_stable_request_and_preserves_accepted_capacity(tmp_path):
+    repo, _, stock_lot_id = _assign_short_put(tmp_path, wheel_start_enabled=True)
+    created, coverage = _create_call_intent(repo, stock_lot_id)
+    before = repo.list_wheel_events(account="lx")
+    original = next(event["payload"] for event in before if event["event_type"] == "wheel_call_intent_created")
+    replay = create_wheel_call_intent(
+        repo, candidate_snapshot={}, account="lx", stock_lot_id=stock_lot_id,
+        final_candidate_id=original["final_candidate_id"], expected_snapshot_hash=original["snapshot_hash"],
+        expected_batch_generation_hash=original["batch_generation_hash"],
+        expires_at_ms=original["expires_at_ms"], request_id=original["request_id"], actor=original["actor"],
+        coverage_fact={**coverage, "capacity_identity_hash": "refreshed-capacity", "shares_available_for_cover": 0},
+        new_intent_enabled=True, apply_changes=True, as_of_ms=6_000,
+    )
+    assert replay["status"] == "idempotent"
+    assert replay["event_id"] == created["event_id"]
+    assert repo.list_wheel_events(account="lx") == before
 
 
 def _assign_short_put(
@@ -70,6 +132,8 @@ def _create_call_intent(
     stock_lot_id: str,
     *,
     new_intent_enabled: bool = True,
+    contracts: int = 1,
+    broker_order_id: str | None = None,
 ) -> tuple[dict, dict]:
     batch = build_wheel_read_model(repo, "lx", 3_000)["batches"][0]
     snapshot = {
@@ -85,7 +149,7 @@ def _create_call_intent(
                     "stock_lot_id": stock_lot_id,
                     "strike": 110,
                     "expiration_ymd": "2026-08-21",
-                    "granted_contracts": 1,
+                    "granted_contracts": contracts,
                     "multiplier": 100,
                 },
             }
@@ -96,10 +160,10 @@ def _create_call_intent(
         "symbol": "NVDA",
         "capacity_identity_hash": "capacity-1",
         "status": "available",
-        "shares_eligible": 100,
+        "shares_eligible": contracts * 100,
         "shares_locked": 0,
         "shares_reserved": 0,
-        "shares_available_for_cover": 100,
+        "shares_available_for_cover": contracts * 100,
     }
     created = create_wheel_call_intent(
         repo,
@@ -114,6 +178,7 @@ def _create_call_intent(
         actor="tester",
         coverage_fact=coverage,
         new_intent_enabled=new_intent_enabled,
+        broker_order_id=broker_order_id,
         apply_changes=True,
         as_of_ms=4_000,
     )
@@ -799,3 +864,35 @@ def test_wheel_start_failure_rolls_back_assignment(
 
     assert [item["event_type"] for item in repo.list_trade_events()] == ["open"]
     assert repo.get_position_lot_fields(put_lot_id)["status"] == "open"
+
+
+@pytest.mark.parametrize("namespace", ["futu.order", "external-file.order"])
+def test_bound_wheel_order_requires_proven_order_namespace(tmp_path, namespace):
+    from src.application.ledger.api import record_trade_event_with_wheel_intent
+    from src.application.trades.normalizer import normalize_trade_deal
+
+    repo, _, stock_lot_id = _assign_short_put(tmp_path, wheel_start_enabled=True)
+    created, coverage = _create_call_intent(repo, stock_lot_id, broker_order_id="bound-call-order")
+    deal = normalize_trade_deal({
+        "schema_version": "trade_execution.v1",
+        "broker_account_ref": {"broker_id": "futu", "external_account_id": "REAL_1",
+                               "environment": "REAL", "broker_account_id": "futu:REAL:REAL_1",
+                               "account_label": "lx"},
+        "instrument_ref": {"asset_type": "option", "market": "US", "symbol": "NVDA",
+                           "currency": "USD", "option_type": "call", "strike": "110",
+                           "expiration_ymd": "2026-08-21", "multiplier": "100"},
+        "external_id_namespace": "futu.deal", "external_execution_id": "scope-fill",
+        "external_order_namespace": namespace, "external_order_id": "bound-call-order",
+        "side": "sell", "position_effect": "open", "quantity": "1", "price": "2",
+        "currency": "USD", "occurred_at_utc": "1970-01-01T00:00:05Z",
+    })
+    result = record_trade_event_with_wheel_intent(repo, deal, coverage).to_dict()
+    matched = namespace == "futu.order"
+    assert result["wheel_linkage_status"] == ("matched_intent" if matched else "no_matching_intent")
+    consumed = [event for event in repo.list_wheel_events(account="lx")
+                if event["event_type"] == "wheel_call_intent_consumed"]
+    assert len(consumed) == int(matched)
+    event = next(event for event in repo.list_trade_events() if event["event_id"] == result["event_id"])
+    assert event["contracts"] * event["price"] * event["multiplier"] == 200
+    assert bool(event["raw_payload"].get("source_stock_lot_id")) is matched
+    assert (created["intent_id"] in build_wheel_read_model(repo, "lx", 5_000)["batches"][0]["active_intent_ids"]) is not matched

@@ -22,7 +22,7 @@ from src.application.ledger.position_projection_runtime import run_position_proj
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.ledger.writer import persist_trade_event_object
 from src.application.trades import order_fee_sync as order_fee_sync_module
-from src.application.trades.order_fee_sync import sync_order_fees
+from src.application.trades.order_fee_sync import recover_order_fee_targets, sync_order_fees
 
 
 EVENT_MS = 1_780_000_000_000
@@ -32,12 +32,13 @@ def _repo_with_bare_option_event(
     tmp_path: Path,
     *,
     with_identity: bool = True,
+    event_time_ms: int = EVENT_MS,
 ) -> SQLiteOptionPositionsRepository:
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     event = TradeEvent(
         event_id="event-1",
         event_type="open",
-        event_time_ms=EVENT_MS,
+        event_time_ms=event_time_ms,
         contract_key=ContractKey.from_values(
             broker="富途",
             account="lx",
@@ -1228,3 +1229,58 @@ def test_empty_backfill_does_not_overwrite_last_fee_cycle() -> None:
     )
 
     assert status["last_fee_sync"] == last_fee_sync
+
+
+@pytest.mark.parametrize("failure", ["pending", "query_failed"])
+def test_fee_recovery_reopens_old_pending_order_from_ledger(tmp_path: Path, failure: str) -> None:
+    old_event_ms = int(datetime(2020, 1, 2, tzinfo=timezone.utc).timestamp() * 1000)
+    repo = _repo_with_bare_option_event(tmp_path, event_time_ms=old_event_ms)
+    selection = recover_order_fee_targets(repo, account="lx", allowed_futu_account_ids=["123"], max_orders=1)
+    target = selection["targets"][0]
+
+    class PendingProvider(_Provider):
+        def fetch_order_fees(self, **kwargs):
+            if failure == "query_failed":
+                raise RuntimeError("temporary failure")
+            return {}, {}
+
+    first = sync_order_fees(repo, account="lx", provider=PendingProvider(), apply=True, observed_at_ms=EVENT_MS, target_identity=target)
+    assert first["actual_observation_count"] == 0
+    restarted = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    retry = recover_order_fee_targets(
+        restarted, account="lx", allowed_futu_account_ids=["123"],
+        selection_after=selection["selection_cursor"]["after"], max_orders=1,
+    )
+    assert retry["targets"] == [target]
+    provider = _Provider()
+    sync_order_fees(restarted, account="lx", provider=provider, apply=True, observed_at_ms=EVENT_MS + 1, target_identity=target)
+
+    final = restarted.list_trade_events()
+    assert len(final) == 1
+    assert final[0]["event_id"] == "event-1"
+    assert fee_fact_for_event(TradeEvent.from_dict(final[0])).basis.value == "actual"
+    assert provider.terminal_kwargs[0]["start"].startswith("2020-01-02")
+    assert recover_order_fee_targets(restarted, account="lx")["targets"] == []
+
+
+def test_fee_recovery_round_robin_preserves_scope_and_retries_pending(tmp_path: Path) -> None:
+    repo = _repo_with_bare_option_event(tmp_path)
+    event = TradeEvent.from_dict(repo.list_trade_events()[0])
+    for number, physical_account in ((2, "123"), (3, "456")):
+        repo.upsert_trade_event(replace(
+            event, event_id=f"event-{number}", lot_id=f"lot-{number}",
+            event_time_ms=EVENT_MS + number,
+            raw_payload={"futu_account_id": physical_account, "order_id": f"order-{number}"},
+        ))
+    cursor = None
+    order_ids = []
+    for _ in range(3):
+        recovered = recover_order_fee_targets(
+            SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3"),
+            account="lx", allowed_futu_account_ids=["123"], selection_after=cursor, max_orders=1,
+        )
+        assert recovered["candidate_count"] == 2
+        order_ids.append(recovered["targets"][0][3])
+        cursor = recovered["selection_cursor"]["after"]
+    assert order_ids == ["order-1", "order-2", "order-1"]
+    assert recover_order_fee_targets(repo, account="sy")["targets"] == []

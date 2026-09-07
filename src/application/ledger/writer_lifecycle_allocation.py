@@ -506,7 +506,7 @@ def apply_lifecycle_allocation_atomically(
             existing_by_id=existing_by_id,
             frozen_at_ms=observed_at_ms,
         )
-        fx_payload = load_cash_fx_payload(sqlite_repo)
+        fx_payload = load_cash_fx_payload(sqlite_repo, conn=conn)
         projection_rows = [
             _event_with_existing_cash_conversions(item, existing_by_id[item.event_id])
             if item.event_id in existing_by_id

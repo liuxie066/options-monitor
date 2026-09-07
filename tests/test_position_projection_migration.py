@@ -198,6 +198,7 @@ def test_inventory_and_shadow_are_read_only_and_apply_verifies(tmp_path: Path) -
     assert inventory["schema_version"] == module.INVENTORY_SCHEMA
     assert inventory["read_only"] is True
     assert inventory["counts"] == {"trade_events": 1, "position_lots": 0}
+    assert inventory["assigned_stock_events_present"] is False
     assert _persistent_artifact_sizes(path) == before
     with sqlite3.connect(path) as conn:
         assert "account" not in {row[1] for row in conn.execute("PRAGMA table_info(trade_events)")}
@@ -206,6 +207,7 @@ def test_inventory_and_shadow_are_read_only_and_apply_verifies(tmp_path: Path) -
     assert applied["write_applied"] is True
     assert applied["checkpoint_mode"] == "disabled"
     assert applied["projection"]["checkpoint_written"] is True
+    assert "idx_trade_events_execution_identity_v1" in applied["indexes_created"]
 
     after_apply = _persistent_artifact_sizes(path)
     verified = module.verify_position_projection_migration(path, shadow=True)
@@ -223,6 +225,134 @@ def test_inventory_and_shadow_are_read_only_and_apply_verifies(tmp_path: Path) -
         "sample_limit"
     ]
     assert status["runtime_telemetry"]["mode_counts"]["full"] >= 1
+
+
+@pytest.mark.parametrize("stock", [False, True])
+def test_execution_index_builder_rejects_bad_identity_and_preserves_safe_legacy_read(tmp_path, stock):
+    from src.application.ledger.api import execution_identity_from_input
+    from src.application.ledger.repository_trade_schema import EXECUTION_IDENTITY_INDEXES
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    execution = {"broker_account_ref": {"broker_id": "futu", "external_account_id": "123", "environment": "REAL"},
+                 "external_id_namespace": "futu.deal", "external_execution_id": "old-fill"}
+    identity = execution_identity_from_input(execution)
+    metadata = {"execution_input": execution, "execution_id": identity}
+    event = ({"stock_event_id": "old", "account": "lx", "trade_time_ms": 1_000, **metadata}
+             if stock else {**_event("old"), "raw_payload": metadata})
+    table, key = ("assigned_stock_events", "stock_event_id") if stock else ("trade_events", "event_id")
+    put = repo.upsert_assigned_stock_event if stock else repo.upsert_trade_event
+    read = repo.list_assigned_stock_events_for_execution if stock else repo.list_trade_events_for_execution
+    put(event)
+    bad_metadata = [
+        {"execution_id": identity}, {"execution_id": identity, "execution_input": {}},
+        {"execution_id": "wrong", "execution_input": execution},
+        {"execution_id": 0}, {"execution_id": []}, {"execution_id": True},
+    ]
+    for raw in bad_metadata:
+        bad = {**event, **raw} if stock else {**event, "raw_payload": raw}
+        if stock and "execution_input" not in raw:
+            bad.pop("execution_input", None)
+        with pytest.raises(ValueError, match="identity_metadata_mismatch"):
+            put(bad)
+    # An old store may contain metadata accepted before the lookup invariant existed.
+    corrupt = {**metadata, "execution_id": "wrong"}
+    old = {**event, **corrupt} if stock else {**event, "raw_payload": corrupt}
+    with repo._writer_connection(begin_immediate=True) as conn:
+        conn.execute(f"DROP INDEX {EXECUTION_IDENTITY_INDEXES[table][0]}")
+        conn.execute(f"UPDATE {table} SET event_json=? WHERE {key}=?", (json.dumps(old), "old"))
+    assert len(read(identity)) == 1
+    inventory = module.build_position_projection_migration_inventory(repo.db_path)
+    for apply in (lambda: repo.build_position_projection_indexes(),
+                  lambda: module.apply_position_projection_migration(repo.db_path, inventory)):
+        with pytest.raises(ValueError, match="identity_metadata_mismatch"):
+            apply()
+        with repo._connect() as conn:
+            assert conn.execute("SELECT 1 FROM sqlite_master WHERE name=?", (EXECUTION_IDENTITY_INDEXES[table][0],)).fetchone() is None
+            assert json.loads(conn.execute(f"SELECT event_json FROM {table} WHERE {key}='old'").fetchone()[0]) == old
+        assert len(read(identity)) == 1
+
+
+def test_execution_index_builder_owns_atomicity_and_requires_outer_transaction(tmp_path, monkeypatch):
+    from src.application.ledger.repository_trade_schema import EXECUTION_IDENTITY_INDEXES
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    with repo._writer_connection(begin_immediate=True) as conn:
+        for name, _path in EXECUTION_IDENTITY_INDEXES.values():
+            conn.execute(f"DROP INDEX {name}")
+    with repo._connect() as conn:
+        with pytest.raises(ValueError, match="active transaction"):
+            repo.build_position_projection_indexes(conn=conn)
+    original = repo._connect
+
+    def failing_connection():
+        conn = original()
+        conn.set_authorizer(lambda action, name, *_args: sqlite3.SQLITE_DENY
+                            if action == sqlite3.SQLITE_CREATE_INDEX and name == EXECUTION_IDENTITY_INDEXES["assigned_stock_events"][0]
+                            else sqlite3.SQLITE_OK)
+        return conn
+
+    with monkeypatch.context() as patch:
+        patch.setattr(repo, "_connect", failing_connection)
+        with pytest.raises(sqlite3.DatabaseError):
+            repo.build_position_projection_indexes()
+    with repo._connect() as conn:
+        names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+    assert not names.intersection(name for name, _path in EXECUTION_IDENTITY_INDEXES.values())
+    assert len(repo.build_position_projection_indexes()) == 2
+    assert repo.build_position_projection_indexes() == ()
+
+
+def test_migration_manifest_and_activation_bind_assigned_stock_facts_and_keep_disabled(tmp_path):
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    repo.upsert_trade_event(_event())
+    inventory = module.build_position_projection_migration_inventory(repo.db_path)
+    repo.upsert_assigned_stock_event({"stock_event_id": "stock-1", "account": "lx", "trade_time_ms": 1_000})
+    with pytest.raises(ValueError, match="stale"):
+        module.apply_position_projection_migration(repo.db_path, inventory)
+    applied = module.apply_position_projection_migration(repo.db_path, module.build_position_projection_migration_inventory(repo.db_path))
+    assert applied["checkpoint_mode"] == "disabled"
+    shadow = module.verify_position_projection_migration(repo.db_path, shadow=True)
+    assert shadow["status"] == "pass"
+    module.activate_position_projection_checkpoints(repo.db_path, acceptance_manifest=_acceptance(shadow), shadow_manifest=shadow)
+    inventory = module.build_position_projection_migration_inventory(repo.db_path)
+
+    def fail_before_commit(stage):
+        if stage == "before_commit":
+            raise RuntimeError("injected maintenance failure")
+
+    with pytest.raises(RuntimeError, match="injected"):
+        module.apply_position_projection_migration(repo.db_path, inventory, failure_hook=fail_before_commit)
+    assert module.position_projection_migration_status(repo.db_path)["checkpoint_mode"] == "enabled"
+    assert module.verify_position_projection_migration(repo.db_path, shadow=True)["status"] == "pass"
+    applied = module.apply_position_projection_migration(repo.db_path, module.build_position_projection_migration_inventory(repo.db_path))
+    assert applied["checkpoint_mode"] == "disabled"
+    shadow = module.verify_position_projection_migration(repo.db_path, shadow=True)
+    assert shadow["status"] == "pass", shadow["reasons"]
+    repo.upsert_assigned_stock_event({"stock_event_id": "stock-2", "account": "lx", "trade_time_ms": 2_000})
+    with pytest.raises(ValueError, match="stale|binding"):
+        module.activate_position_projection_checkpoints(repo.db_path, acceptance_manifest=_acceptance(shadow), shadow_manifest=shadow)
+    assert module.position_projection_migration_status(repo.db_path)["checkpoint_mode"] == "disabled"
+
+
+@pytest.mark.parametrize("table", ["trade_events", "assigned_stock_events"])
+def test_execution_candidate_and_writer_queries_use_same_nonunique_index(tmp_path, table):
+    from src.application.ledger.repository_trade_schema import EXECUTION_IDENTITY_INDEXES, _execution_candidate_rows
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    name, path = EXECUTION_IDENTITY_INDEXES[table]
+    with repo._connect() as conn:
+        statements = []
+        conn.set_trace_callback(statements.append)
+        assert _execution_candidate_rows(conn, table, "execution:v1:target") == []
+        query = next(sql for sql in statements if sql.startswith("SELECT event_json"))
+        plans = [conn.execute("EXPLAIN QUERY PLAN " + query).fetchall(), conn.execute(
+            f"EXPLAIN QUERY PLAN SELECT event_json FROM {table} WHERE json_extract(event_json, '{path}')=?",
+            ("execution:v1:target",),
+        ).fetchall()]
+        for plan in plans:
+            assert any("SEARCH" in row[3] and name in row[3] for row in plan)
+            assert not any(f"SCAN {table}" in row[3] for row in plan)
+        assert next(row[2] for row in conn.execute(f"PRAGMA index_list({table})") if row[1] == name) == 0
 
 
 def test_apply_rejects_stale_and_wrong_store_manifests(tmp_path: Path) -> None:
@@ -249,12 +379,13 @@ def test_apply_rejects_stale_and_wrong_store_manifests(tmp_path: Path) -> None:
         module.apply_position_projection_migration(second, first_manifest)
 
 
-def test_apply_failure_rolls_back_schema_backfill_and_projection(tmp_path: Path) -> None:
+@pytest.mark.parametrize("failure_stage", ["after_backfill", "after_indexes", "projection:after_checkpoint_insert"])
+def test_apply_failure_rolls_back_schema_backfill_and_projection(tmp_path: Path, failure_stage: str) -> None:
     path = _legacy_store(tmp_path)
     inventory = module.build_position_projection_migration_inventory(path)
 
     def fail(stage: str) -> None:
-        if stage == "after_backfill":
+        if stage == failure_stage:
             raise RuntimeError("injected")
 
     with pytest.raises(RuntimeError, match="injected"):

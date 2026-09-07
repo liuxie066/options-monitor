@@ -25,7 +25,7 @@ from .repository_schema import (
     option_positions_bootstrap_from_feishu_enabled,
 )
 
-from .repository_core import RepositoryCoreMixin
+from .repository_core import RepositoryCoreMixin, with_sqlite_repo_writer_lock
 from .repository_projection import PositionProjectionRepositoryMixin
 from .repository_trade_events import TradeEventRepositoryMixin
 from .repository_assigned_stock import AssignedStockRepositoryMixin
