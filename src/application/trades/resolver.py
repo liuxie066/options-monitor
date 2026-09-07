@@ -3,9 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
+from domain.domain.trade_contract_identity import contract_key
+
 from src.application.ledger.api import (
     BrokerTradeOperation,
     CloseTargetResolution,
+    execution_identity_from_input,
     LotCloseMatch as CloseMatch,
     LotCloseResolutionError,
     list_close_lot_candidates,
@@ -13,7 +16,7 @@ from src.application.ledger.api import (
     resolve_broker_trade_close_targets,
     summarize_broker_trade_close_candidates,
 )
-from src.application.trades.deal_identity import broker_deal_key
+from src.application.trades.deal_identity import broker_deal_key, completed_ledger_execution_events
 from src.application.trades.normalizer import NormalizedTradeDeal
 from src.application.trades.lifecycle import (
     LifecycleTradeResolution,
@@ -281,7 +284,15 @@ def match_close_positions(repo: OptionPositionsRepoLike, deal: NormalizedTradeDe
 
 def match_close_targets(repo: OptionPositionsRepoLike, deal: NormalizedTradeDeal) -> CloseTargetResolution:
     try:
-        return resolve_broker_trade_close_targets(repo, deal=deal)
+        resolution = resolve_broker_trade_close_targets(repo, deal=deal)
+        for match in resolution.matches:
+            fields = match.candidate.raw_fields
+            if deal.multiplier is not None and fields.get("multiplier") is not None:
+                if float(fields["multiplier"]) != deal.multiplier:
+                    raise ValueError("unsupported_contract_multiplier")
+            if fields.get("deliverable"):
+                raise ValueError("unsupported_contract_deliverable")
+        return resolution
     except LotCloseResolutionError as exc:
         if exc.code == "invalid_quantity":
             raise ValueError("contracts must be > 0 for close matching") from exc
@@ -303,9 +314,115 @@ def resolve_trade_deal(
     apply_changes: bool,
     persist_trade_event_fn=None,
     retry_failed_deal: bool = False,
+    retry_with_new_associations: bool = False,
     wheel_start_enabled: bool = False,
 ) -> IntakeResolution:
     persist_fn = persist_trade_event_fn or record_normalized_trade_event
+    execution = deal.execution_input
+    if execution:
+        strict = bool(deal.raw_payload.get("instrument_ref") or deal.raw_payload.get("execution_input"))
+        errors = list(execution.get("errors") or [])
+        admission_errors = errors if strict else [
+            error for error in errors if error.startswith(("invalid:", "unsupported:"))
+            or error == "missing:instrument_ref.asset_type"
+        ]
+        ref = execution.get("broker_account_ref") or {}
+        instrument = execution.get("instrument_ref") or {}
+        if ref.get("environment") not in (None, "REAL"):
+            admission_errors.append("unsupported:ledger_environment")
+        if instrument.get("deliverable"):
+            admission_errors.append("unsupported:ledger_deliverable")
+        events_fn = getattr(repo, "list_trade_events", None)
+        events = list(events_fn()) if callable(events_fn) else []
+        stock_events_fn = getattr(repo, "list_assigned_stock_events", None)
+        stock_events = list(stock_events_fn()) if callable(stock_events_fn) else []
+        incoming_contract = contract_key(deal.symbol, deal.option_type, deal.expiration_ymd, deal.strike)
+        for event in [*events, *stock_events]:
+            fields = event.get("contract_key") or event
+            if str(fields.get("account") or "").lower() != deal.internal_account:
+                continue
+            raw = event if event.get("stock_event_id") else event.get("raw_payload") or {}
+            stored_ref = (raw.get("execution_input") or {}).get("broker_account_ref") or {}
+            physical_ids = (raw.get("futu_account_id"), stored_ref.get("external_account_id"))
+            if any(physical and str(physical) != str(deal.futu_account_id) for physical in physical_ids):
+                admission_errors.append("unsupported:multiple_physical_accounts_in_projection")
+            if (instrument.get("asset_type") == "option" and deal.multiplier is not None
+                    and contract_key(fields.get("underlying_symbol"), fields.get("option_type"),
+                                     fields.get("expiration_ymd"), fields.get("strike")) == incoming_contract
+                    and event.get("multiplier") is not None
+                    and float(event["multiplier"]) != deal.multiplier):
+                admission_errors.append("unsupported:ledger_contract_multiplier")
+        if admission_errors:
+            return _failure(status="unresolved", action=None, reason="execution_admission_failed",
+                            deal=deal, diagnostics={"retryable": False, "errors": admission_errors})
+        try:
+            recorded = completed_ledger_execution_events(events, deal)
+        except ValueError as exc:
+            return _failure(status="unresolved", action=None, reason=str(exc), deal=deal,
+                            diagnostics={"retryable": False})
+        if recorded:
+            effective_actions = {
+                "close" if event.get("event_type") in {"close", "expire_close", "assignment", "exercise"}
+                else event.get("event_type")
+                for event in recorded
+            }
+            if len(effective_actions) != 1 or None in effective_actions:
+                return _failure(status="unresolved", action=None, reason="trade_execution_applied_action_conflict",
+                                deal=deal, diagnostics={"retryable": False})
+            effective_action = effective_actions.pop()
+            if execution.get("external_order_id") and execution.get("external_order_namespace"):
+                legacy_rows = [row for row in recorded if not execution_identity_from_input(
+                    (row.get("raw_payload") or {}).get("execution_input"),
+                )]
+                if legacy_rows:
+                    # The complete legacy group is already proven above; only its
+                    # existing durable order binding can be read back without migration.
+                    if len(legacy_rows) != len(recorded) or any(
+                        str((row.get("raw_payload") or {}).get(field) or "").strip() != execution[source_field]
+                        for row in legacy_rows
+                        for field, source_field in (
+                            ("order_id", "external_order_id"),
+                            ("external_order_namespace", "external_order_namespace"),
+                        )
+                    ):
+                        return _failure(
+                            status="unresolved", action=None, reason="legacy_execution_evidence_required", deal=deal,
+                            diagnostics={"retryable": False, "errors": ["legacy_order_binding_not_proven"]},
+                        )
+                elif apply_changes:
+                    from src.application.ledger.api import reconcile_normalized_execution_order_identity
+                    try:
+                        recorded = reconcile_normalized_execution_order_identity(repo, deal)
+                    except ValueError as exc:
+                        return _failure(status="unresolved", action=None, reason=str(exc), deal=deal,
+                                        diagnostics={"retryable": False})
+                    if not recorded:
+                        return _failure(
+                            status="unresolved", action=None, reason="trade_execution_order_binding_event_missing", deal=deal,
+                            diagnostics={"retryable": False},
+                        )
+            notifications_fn = getattr(repo, "list_trade_lifecycle_notifications", None)
+            from src.application.ledger.api import futu_compatibility_source_key
+            original = recorded[0]
+            original_raw = original.get("raw_payload") or {}
+            source_key = futu_compatibility_source_key(
+                account=original.get("account"),
+                futu_account_id=original_raw.get("futu_account_id"),
+                source_deal_id=original_raw.get("source_deal_id"),
+                execution_input=original_raw.get("execution_input"),
+            )
+            notifications = (notifications_fn(case_id=f"close:{source_key}")
+                             if effective_action == "close" and callable(notifications_fn) else [])
+            return _failure(
+                status="skipped", action=effective_action, reason="ledger_recorded", deal=deal,
+                operations=[BrokerTradeOperation(
+                    action=str(event.get("event_type") or deal.position_effect or "recorded"),
+                    event_id=event.get("event_id"),
+                    record_id=event.get("target_lot_id") or event.get("lot_id"),
+                    result={"event": dict(event), "replayed": True,
+                            **({"notification_outbox_id": notifications[0]["outbox_id"]} if notifications else {})},
+                ) for event in recorded],
+            )
     state_entry = _deal_state_entry(state, deal)
     economic_hash = lifecycle_deal_economic_hash(deal)
     if state_entry is not None and economic_hash:
@@ -331,6 +448,13 @@ def resolve_trade_deal(
             )
     can_retry_existing_deal = _state_entry_is_retryable_unresolved(state_entry) or (
         retry_failed_deal and _state_entry_is_failed(state_entry)
+    ) or (
+        retry_with_new_associations
+        and broker_deal_key(deal).startswith("execution:v1:")
+        and state_entry is not None
+        and (state_entry[0], state_entry[1].get("status")) in {
+            ("unresolved_deal_ids", "unresolved"), ("failed_deal_ids", "failed"),
+        }
     )
     if state_entry is not None and not can_retry_existing_deal:
         return _failure(status="skipped", action=None, reason="duplicate_deal_id", deal=deal)
@@ -524,17 +648,7 @@ def _deal_state_entry(
 ) -> tuple[str, dict[str, Any]] | None:
     scoped_key = broker_deal_key(deal)
     entry = lookup_deal_state_entry(state, scoped_key)
-    if entry is not None:
-        return entry
-    legacy_key = str(deal.deal_id or "").strip()
-    if not legacy_key or legacy_key == scoped_key:
-        return None
-    legacy = lookup_deal_state_entry(state, legacy_key)
-    if legacy is None:
-        return None
-    payload_account = str(legacy[1].get("account") or "").strip().lower()
-    deal_account = str(deal.internal_account or "").strip().lower()
-    return legacy if payload_account and payload_account == deal_account else None
+    return entry
 
 
 def _state_entry_is_retryable_unresolved(

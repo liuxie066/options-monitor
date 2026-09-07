@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from .external_event_key import ensure_execution_writer_guard
+from .repository_trade_schema import _execution_candidate_rows, validated_execution_identity_metadata
+
 from .repository_schema import (
     Any,
     Mapping,
@@ -12,6 +15,25 @@ from .repository_schema import (
 )
 
 class AssignedStockRepositoryMixin:
+    def compare_and_swap_assigned_stock_order_identity_json(
+        self,
+        *,
+        event_id: str,
+        expected_event_json: str,
+        replacement_event_json: str,
+        updated_at_ms: int,
+        conn: sqlite3.Connection,
+    ) -> bool:
+        if conn is None or not conn.in_transaction:
+            raise ValueError("stock order identity binding requires an active transaction")
+        validated_execution_identity_metadata(json.loads(replacement_event_json))
+        updated = conn.execute(
+            "UPDATE assigned_stock_events SET event_json = ?, updated_at_ms = ? "
+            "WHERE stock_event_id = ? AND event_json = ?",
+            (replacement_event_json, int(updated_at_ms), event_id, expected_event_json),
+        )
+        return int(updated.rowcount or 0) == 1
+
     def upsert_assigned_stock_event(self, event: dict[str, Any], *, conn: sqlite3.Connection | None = None) -> bool:
         if not isinstance(event, dict):
             raise TypeError("assigned stock event must be a JSON object")
@@ -34,6 +56,17 @@ class AssignedStockRepositoryMixin:
         event_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         ts = int(now_ms())
         with self._optional_conn(conn, commit=True) as active_conn:
+            execution_id = validated_execution_identity_metadata(payload)
+            if execution_id:
+                if payload.get("execution_id") != execution_id:
+                    raise ValueError("trade_execution_identity_metadata_mismatch")
+                ensure_execution_writer_guard(active_conn)
+                duplicate_execution = active_conn.execute(
+                    "SELECT stock_event_id FROM assigned_stock_events WHERE json_extract(event_json, '$.execution_id') = ? AND stock_event_id != ?",
+                    (execution_id, stock_event_id),
+                ).fetchone()
+                if duplicate_execution is not None:
+                    raise ValueError("trade execution already has an assigned stock event")
             existing = active_conn.execute(
                 "SELECT event_json FROM assigned_stock_events WHERE stock_event_id = ?",
                 (stock_event_id,),
@@ -71,6 +104,17 @@ class AssignedStockRepositoryMixin:
             if isinstance(item, dict):
                 out.append(item)
         return out
+
+    def list_assigned_stock_events_for_execution(
+        self, execution_id: str, *, conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        with self._optional_conn(conn) as active_conn:
+            if not self._table_exists("assigned_stock_events", conn=active_conn):
+                return []
+            rows = _execution_candidate_rows(active_conn, "assigned_stock_events", execution_id)
+            if rows is None:
+                return self.list_assigned_stock_events(conn=active_conn)
+        return [json.loads(row["event_json"]) for row in rows]
 
     def list_assigned_stock_events_for_account(
         self,

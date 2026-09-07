@@ -17,6 +17,7 @@ from domain.domain.performance.models import (
     validate_evidence_facts,
 )
 from src.infrastructure.private_storage import connect_private_sqlite, private_path, secure_sqlite_artifacts
+from domain.domain.performance.cash_conversion import DAILY_CASH_FX_POLICY, cash_fx_daily_facts
 
 _SCHEMA_COMPONENT = "option_performance_evidence"
 _SCHEMA_VERSION = 1
@@ -184,6 +185,46 @@ class PerformanceEvidenceSQLiteRepository:
         except (sqlite3.DatabaseError, ValueError, json.JSONDecodeError) as exc:
             return EvidenceReadBundle(schema_state="unsupported_schema", message=str(exc))
 
+    def read_fx_rates(self) -> EvidenceReadBundle:
+        state = self.schema_state()
+        if state != "initialized_v1":
+            return EvidenceReadBundle(schema_state=state)
+        try:
+            with self._connect_readonly() as conn:
+                return EvidenceReadBundle("initialized_v1", fx_rates=self._read_fx_rates_conn(conn))
+        except (sqlite3.DatabaseError, ValueError, json.JSONDecodeError) as exc:
+            return EvidenceReadBundle(schema_state="unsupported_schema", message=str(exc))
+
+    def freeze_cash_fx_daily_rates(
+        self,
+        candidates: Iterable[FXRateFact] = (),
+        *,
+        migrated_at_ms: int,
+        conn: sqlite3.Connection | None = None,
+    ) -> tuple[FXRateFact, ...]:
+        """The existing FX primary key chooses one first observation per day/pair."""
+        if conn is None:
+            active = connect_private_sqlite(self.db_path, isolation_level=None)
+            try:
+                active.execute("BEGIN IMMEDIATE")
+                result = self.freeze_cash_fx_daily_rates(candidates, migrated_at_ms=migrated_at_ms, conn=active)
+                active.commit()
+                return result
+            except Exception:
+                active.rollback()
+                raise
+            finally:
+                active.close()
+                secure_sqlite_artifacts(self.db_path)
+        migrate_evidence_schema(conn, migrated_at_ms=int(migrated_at_ms))
+        existing = self._read_fx_rates_conn(conn)
+        fact_ids = {fact.fact_id for fact in existing}
+        for fact in cash_fx_daily_facts((*existing, *tuple(candidates))):
+            if fact.quality.get("cash_fx_policy") == DAILY_CASH_FX_POLICY and fact.fact_id not in fact_ids:
+                _insert_rate(conn, fact)
+                fact_ids.add(fact.fact_id)
+        return self._read_fx_rates_conn(conn)
+
     def import_envelope(
         self,
         value: EvidenceEnvelope | dict[str, Any],
@@ -261,6 +302,11 @@ class PerformanceEvidenceSQLiteRepository:
         rates = tuple(_rate_from_row(row) for row in conn.execute(_FX_SELECT).fetchall())
         validate_evidence_facts((), (), existing_marks=marks, existing_rates=rates)
         return EvidenceReadBundle("initialized_v1", valuation_marks=marks, fx_rates=rates)
+
+    def _read_fx_rates_conn(self, conn: sqlite3.Connection) -> tuple[FXRateFact, ...]:
+        rates = tuple(_rate_from_row(row) for row in conn.execute(_FX_SELECT).fetchall())
+        validate_evidence_facts((), (), existing_rates=rates)
+        return rates
 
 
 _MARK_SELECT = """

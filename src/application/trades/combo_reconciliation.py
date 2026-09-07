@@ -120,6 +120,8 @@ def reconcile_account_post_trade_combos(
                     actor="trade_intake:auto_combo_reconciliation",
                     apply_changes=True,
                     effective_now_ms=effective_now_ms,
+                    require_unique_auto_match=True,
+                    exposures=[exposures_by_id[key] for key in sorted(exposures_by_id)],
                 )
             except Exception as exc:
                 auto_adoption_errors.append(

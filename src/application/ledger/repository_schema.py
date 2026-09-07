@@ -119,6 +119,7 @@ from .repository_trade_schema import (
 
 def initialize_ledger_connection(conn: sqlite3.Connection) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
+    conn.create_function("om_execution_writer_v1", 0, lambda: 1)
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA recursive_triggers=ON")
     row = conn.execute("PRAGMA foreign_keys").fetchone()

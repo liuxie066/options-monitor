@@ -12,6 +12,9 @@ from domain.domain.ledger import (
     project_resumable_trade_events,
     project_trade_events,
 )
+from domain.domain.performance.period import PeriodWindow
+from domain.domain.performance.weighted_reducer import reduce_option_performance
+from domain.domain.strategy_membership import resolve_strategy_metadata
 from src.application.ledger.publisher import (
     ResumablePublicationState,
     project_stored_trade_events_to_position_lots,
@@ -457,6 +460,153 @@ def test_resume_preserves_fee_snapshot_and_skips_verification_history() -> None:
     assert full.allocations[-1].strategy == "sell_put"
     assert full.allocations[-1].leg_role == "funding_put"
     assert full.allocations[-1].strategy_group_id == "group-a"
+
+
+@pytest.mark.parametrize(
+    ("field_name", "top_value", "snapshot_value"),
+    [
+        ("strategy", "sell_put", "sell_call"),
+        ("leg_role", "funding_put", "short_call"),
+        ("strategy_group_id", "group-a", "group-b"),
+        ("source_stock_lot_id", "stock-a", "stock-b"),
+        ("expiry_structure", "same_expiry", "staggered_expiry"),
+    ],
+)
+def test_resumable_state_preserves_supported_strategy_metadata_conflicts(
+    field_name: str,
+    top_value: str,
+    snapshot_value: str,
+) -> None:
+    payload = {
+        "strategy": "sell_put",
+        field_name: top_value,
+        "strategy_snapshot": {field_name: snapshot_value},
+    }
+    seed = project_resumable_trade_events(
+        [
+            _event(
+                "open-conflict",
+                "open",
+                1,
+                key=_key(),
+                contracts=2,
+                price=2,
+                lot_id="lot-conflict",
+                raw_payload=payload,
+            )
+        ],
+        entry_mode="full",
+    )
+    assert seed.eligible is True
+    assert seed.state is not None
+
+    restored = ResumableProjectionState.from_json_bytes(
+        seed.state.to_json_bytes()
+    )
+    restored_payload = restored.active_lots[0].open_event.raw_payload
+
+    expected_issue = f"strategy_metadata_conflict:open-conflict:{field_name}"
+    assert resolve_strategy_metadata(
+        payload,
+        source_id="open-conflict",
+    ).issues == (expected_issue,)
+    assert resolve_strategy_metadata(
+        restored_payload,
+        source_id="open-conflict",
+    ).issues == (expected_issue,)
+
+
+@pytest.mark.parametrize("strategy", ["sell_put", "csp"])
+@pytest.mark.parametrize("close_contracts", [1, 2])
+def test_expiry_conflict_resume_matches_full_for_partial_and_final_close(
+    strategy: str,
+    close_contracts: int,
+) -> None:
+    key = _key()
+    opened = _event(
+        "open-expiry-conflict",
+        "open",
+        1,
+        key=key,
+        contracts=2,
+        price=2,
+        lot_id="lot-expiry-conflict",
+        raw_payload={
+            "strategy": strategy,
+            "expiry_structure": "same_expiry",
+            "strategy_snapshot": {
+                "strategy": "sell_put",
+                "expiry_structure": "staggered_expiry",
+            },
+        },
+    )
+    closed = _event(
+        "close-expiry-conflict",
+        "close",
+        2,
+        key=key,
+        contracts=close_contracts,
+        price=1,
+        target_lot_id="lot-expiry-conflict",
+    )
+    full = project_resumable_trade_events([opened, closed], entry_mode="full")
+    seed = project_resumable_trade_events([opened], entry_mode="full")
+    assert full.eligible is True
+    assert seed.eligible is True
+    assert seed.state is not None
+    restored = ResumableProjectionState.from_json_bytes(
+        seed.state.to_json_bytes()
+    )
+    resumed = project_resumable_trade_events(
+        [closed],
+        initial_state=restored,
+        entry_mode="tail",
+    )
+
+    assert resumed.eligible is True
+    assert [item.to_dict() for item in resumed.allocations] == [
+        item.to_dict() for item in full.allocations
+    ]
+    assert full.allocations[0].strategy is None
+    assert resumed.allocations[0].strategy is None
+    assert bool(resumed.active_lots) is (close_contracts == 1)
+    restored_metadata = resolve_strategy_metadata(
+        restored.active_lots[0].open_event.raw_payload,
+        source_id=opened.event_id,
+    )
+    assert restored_metadata.issues == (
+        "strategy_metadata_conflict:open-expiry-conflict:expiry_structure",
+    )
+
+    period = PeriodWindow(
+        kind="mtd",
+        reporting_timezone="Asia/Shanghai",
+        requested_start_date="1970-01-01",
+        requested_end_date="1970-01-01",
+        effective_start_at_ms=0,
+        effective_end_exclusive_at_ms=3,
+        valuation_open_at_ms=0,
+        valuation_end_at_ms=2,
+        status="partial_current",
+    )
+    full_facts = reduce_option_performance(
+        full.to_projection_result(),
+        period=period,
+    ).facts
+    assert full_facts
+    assert all(
+        "strategy_attribution_conflict" in fact.missing
+        for fact in full_facts
+    )
+    resumed_facts = reduce_option_performance(
+        resumed.to_projection_result(),
+        period=period,
+    ).facts
+    assert [
+        (fact.contracts, fact.missing) for fact in resumed_facts
+    ] == [
+        (fact.contracts, fact.missing) for fact in full_facts
+    ]
 
 
 def test_seeded_valid_sequences_resume_at_every_prefix() -> None:

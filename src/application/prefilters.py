@@ -47,10 +47,19 @@ def apply_prefilters(
                 authority_status = str(
                     authority.get("status") if isinstance(authority, dict) else ""
                 ).strip().lower()
+                snapshot_input = portfolio_ctx.get("position_snapshot_input")
+                stock_context_available = (
+                    "position_snapshot_input" not in portfolio_ctx
+                    or (
+                        isinstance(snapshot_input, dict)
+                        and snapshot_input.get("errors") == []
+                    )
+                )
                 if (
                     portfolio_source != "futu"
                     or not isinstance(authority, dict)
                     or authority_status != "available"
+                    or not stock_context_available
                 ):
                     want_call = False
                     call_skip_reason = "covered_call_portfolio_context_unavailable"

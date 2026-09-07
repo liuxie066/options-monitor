@@ -177,9 +177,11 @@ def _build_plan(
     if not state_path.is_file():
         raise ValueError(f"trade intake state does not exist: {state_path}")
     state = load_trade_intake_state(state_path)
+    events = active_ledger_events(_list_trade_events(repo))
     state_rows = {
         deal_id: _validated_compensable_state_row(
             state,
+            events=events,
             deal_id=deal_id,
             account=account_value,
             reason=reason_value,
@@ -187,7 +189,6 @@ def _build_plan(
         for deal_id in canonical_ids
     }
 
-    events = active_ledger_events(_list_trade_events(repo))
     members = [
         _build_member(
             events,
@@ -299,14 +300,22 @@ def _canonical_deal_ids(
 def _validated_compensable_state_row(
     state: dict[str, Any],
     *,
+    events: list[dict[str, Any]],
     deal_id: str,
     account: str,
     reason: str,
 ) -> dict[str, Any]:
-    entry = lookup_deal_state_entry(state, deal_id)
-    if entry is None:
+    keys = {deal_id}
+    for event in events:
+        aliases = structured_deal_keys_from_ledger_event(event)
+        if deal_id in aliases:
+            keys.update(key for key in aliases if key.startswith("execution:v1:"))
+    entries = [entry for key in keys if (entry := lookup_deal_state_entry(state, key)) is not None]
+    if not entries:
         raise ValueError(f"trade intake state is missing deal_id={deal_id}")
-    bucket, row = entry
+    if len(entries) != 1:
+        raise ValueError(f"trade intake state has ambiguous identities: {deal_id}")
+    bucket, row = entries[0]
     if bucket != "processed_deal_ids":
         raise ValueError(
             f"receipt compensation requires processed state: {deal_id} bucket={bucket}"

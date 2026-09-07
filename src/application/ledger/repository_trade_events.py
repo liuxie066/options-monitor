@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+from .external_event_key import (
+    applied_execution_association_conflicts,
+    ensure_execution_writer_guard,
+    require_same_execution,
+)
+from .repository_trade_schema import _execution_candidate_rows, validated_execution_identity_metadata
+from domain.domain.trade_execution import execution_economic_content
+
 from .repository_schema import (
     Any,
     Sequence,
@@ -32,6 +40,35 @@ class TradeEventRepositoryMixin:
         )
         ts = int(now_ms())
         with self._optional_conn(conn, commit=True) as active_conn:
+            incoming_raw = encoded.payload.get("raw_payload", {})
+            execution_id = validated_execution_identity_metadata(incoming_raw)
+            if execution_id:
+                if incoming_raw.get("execution_id") != execution_id:
+                    raise ValueError("trade_execution_identity_metadata_mismatch")
+                ensure_execution_writer_guard(active_conn)
+                existing_executions = active_conn.execute(
+                    "SELECT event_json FROM trade_events WHERE json_extract(event_json, '$.raw_payload.execution_id') = ? AND event_id != ?",
+                    (execution_id, encoded.event_id),
+                ).fetchall()
+                for row in existing_executions:
+                    stored = json.loads(str(row["event_json"]))
+                    stored_raw = stored.get("raw_payload") or {}
+                    require_same_execution(stored_raw.get("execution_input") or {}, incoming_raw["execution_input"])
+                    if applied_execution_association_conflicts(
+                        None, execution_id, execution_economic_content(incoming_raw["execution_input"]),
+                        applied_events=[stored],
+                    ):
+                        raise ValueError("trade_execution_applied_association_conflict")
+                    previous = stored_raw.get("broker_deal_completion") or {}
+                    candidate = incoming_raw.get("broker_deal_completion") or {}
+                    if (
+                        not previous or not candidate
+                        or previous.get("split_count") != candidate.get("split_count")
+                        or previous.get("expected_contracts") != candidate.get("expected_contracts")
+                        or previous.get("split_index") == candidate.get("split_index")
+                        or stored.get("target_lot_id") == encoded.payload.get("target_lot_id")
+                    ):
+                        raise ValueError("trade execution already has an applied event")
             existing = active_conn.execute(
                 """
                 SELECT account, event_json, ingest_seq, market, position_effect
@@ -111,6 +148,7 @@ class TradeEventRepositoryMixin:
     ) -> bool:
         if conn is None or not conn.in_transaction:
             raise ValueError("order identity binding requires an active transaction")
+        validated_execution_identity_metadata(json.loads(replacement_event_json).get("raw_payload") or {})
         updated = conn.execute(
             """
             UPDATE trade_events
@@ -139,6 +177,7 @@ class TradeEventRepositoryMixin:
     ) -> bool:
         if conn is None or not conn.in_transaction:
             raise ValueError("trade time correction requires an active transaction")
+        validated_execution_identity_metadata(json.loads(replacement_event_json).get("raw_payload") or {})
         _ensure_opend_trade_time_correction_guard(conn)
         updated = conn.execute(
             """
@@ -172,6 +211,15 @@ class TradeEventRepositoryMixin:
             if isinstance(item, dict):
                 out.append(trade_event_application_payload(item))
         return out
+
+    def list_trade_events_for_execution(
+        self, execution_id: str, *, conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        with self._optional_conn(conn) as active_conn:
+            rows = _execution_candidate_rows(active_conn, "trade_events", execution_id)
+            if rows is None:
+                return self.list_trade_events(conn=active_conn)
+        return [trade_event_application_payload(json.loads(row["event_json"])) for row in rows]
 
     def list_trade_events_page(
         self,

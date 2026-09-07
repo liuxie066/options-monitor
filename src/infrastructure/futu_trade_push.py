@@ -8,6 +8,7 @@ import queue
 import sys
 import threading
 from typing import Any, Callable
+from domain.domain.trade_account_identity import extract_visible_account_fields
 
 from src.infrastructure.futu_gateway import FutuGatewayUnreachableError
 from src.infrastructure.opend_watchdog import classify_watchdog_result, port_open
@@ -87,7 +88,68 @@ class OpenDTradePushListener:
                 last_error = exc
         if ctx is None:
             raise RuntimeError(f"failed to initialize OpenSecTradeContext: {last_error}")
-        return ctx, DealHandler(self.on_deal)
+        environments: dict[str, str] = {}
+        ambiguous_accounts: set[str] = set()
+        try:
+            ret, accounts = ctx.get_acc_list()
+            if ret == 0 and hasattr(accounts, "to_dict"):
+                for account in accounts.to_dict("records"):
+                    physical = str(account.get("acc_id") or "").strip()
+                    environment = str(account.get("trd_env") or "").rsplit(".", 1)[-1].upper()
+                    if physical and environment in {"REAL", "SIMULATE"}:
+                        if physical in environments and environments[physical] != environment:
+                            ambiguous_accounts.add(physical)
+                        environments[physical] = environment
+        except Exception:
+            # Missing account evidence remains unbound; never infer REAL from an account ID.
+            pass
+
+        def receive(row: dict[str, Any]) -> None:
+            visible = extract_visible_account_fields(row)
+            physical_ids = {value for key, value in visible.items() if key != "account"}
+            physical = next(iter(physical_ids)) if len(physical_ids) == 1 else ""
+            environment = environments.get(physical)
+            errors: list[str] = []
+            if not physical_ids:
+                errors.append("missing:push_physical_account")
+            elif len(physical_ids) != 1:
+                errors.append("conflict:push_physical_account")
+            if physical in ambiguous_accounts:
+                errors.append("conflict:source_account_environment")
+            elif physical and not environment:
+                errors.append("missing:source_account_environment")
+            expected = {
+                "broker_account_id": f"futu:{environment}:{physical}",
+                "external_id_namespace": "futu.deal",
+                "execution_id_namespace": "futu.deal",
+                "external_order_namespace": "futu.order",
+                "order_id_namespace": "futu.order",
+            }
+            for key, value in expected.items():
+                supplied = str(row.get(key) or "").strip()
+                if supplied and supplied != value:
+                    errors.append(f"conflict:push_{key}")
+            for key in ("environment", "trd_env"):
+                supplied = str(row.get(key) or "").strip().rsplit(".", 1)[-1].upper()
+                if environment and supplied and supplied != environment:
+                    errors.append(f"conflict:push_{key}")
+            payload = dict(row)
+            if errors:
+                payload["_trade_intake_source_identity_errors"] = sorted(set(errors))
+                payload["_trade_intake_source_account_evidence"] = {
+                    "source": "get_acc_list", "host": self.host, "port": self.port,
+                    "visible_account_fields": visible,
+                    "physical_account_id": physical or None,
+                    "environment": None if physical in ambiguous_accounts else environment,
+                }
+            else:
+                payload.update(environment=environment,
+                               broker_account_id=expected["broker_account_id"],
+                               external_id_namespace="futu.deal")
+                if any(row.get(key) not in (None, "") for key in ("order_id", "orderID", "orderId")):
+                    payload["external_order_namespace"] = "futu.order"
+            self.on_deal(payload)
+        return ctx, DealHandler(receive)
 
     def start(self, *, cancel_event: threading.Event | None = None) -> None:
         results: queue.Queue[tuple[str, Any, Any]] = queue.Queue(maxsize=1)

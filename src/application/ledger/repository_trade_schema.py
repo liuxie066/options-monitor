@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from domain.domain.trade_execution import execution_identity_from_input
 from .repository_common import (
     Any,
+    Mapping,
     _add_column_if_missing,
     encode_trade_event_for_storage,
     json,
@@ -11,6 +13,66 @@ from .repository_common import (
     trade_event_position_effect,
     valid_void_target_event_id,
 )
+
+EXECUTION_IDENTITY_INDEXES = {
+    "trade_events": ("idx_trade_events_execution_identity_v1", "$.raw_payload.execution_id"),
+    "assigned_stock_events": ("idx_assigned_stock_execution_identity_v1", "$.execution_id"),
+}
+
+
+def validated_execution_identity_metadata(raw: Mapping[str, Any]) -> str:
+    """A declared lookup key must describe the persisted execution input."""
+    identity = execution_identity_from_input(raw.get("execution_input"))
+    declared = raw.get("execution_id")
+    if declared not in (None, "") and (
+        not isinstance(declared, str) or declared != identity
+    ):
+        raise ValueError("trade_execution_identity_metadata_mismatch")
+    return identity
+
+
+def _execution_identity_index_sql(table: str) -> str:
+    name, path = EXECUTION_IDENTITY_INDEXES[table]
+    return f"CREATE INDEX {name} ON {table}(json_extract(event_json, '{path}'))"
+
+
+def _execution_identity_index_ready(conn: sqlite3.Connection, table: str) -> bool:
+    name, _path = EXECUTION_IDENTITY_INDEXES[table]
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND name=? AND tbl_name=?",
+        (name, table),
+    ).fetchone()
+    return row is not None and row[0] == _execution_identity_index_sql(table)
+
+
+def _execution_candidate_rows(
+    conn: sqlite3.Connection, table: str, execution_id: str,
+) -> list[sqlite3.Row] | None:
+    if not _execution_identity_index_ready(conn, table):
+        return None
+    _name, path = EXECUTION_IDENTITY_INDEXES[table]
+    identity = f"json_extract(event_json, '{path}')"
+    key = "event_id" if table == "trade_events" else "stock_event_id"
+    # ponytail: scan legacy candidates; migrate their identities only with verified evidence.
+    return conn.execute(
+        f"SELECT event_json FROM {table} WHERE {identity}=? OR {identity} IS NULL OR {identity}='' "
+        f"ORDER BY trade_time_ms ASC, {key} ASC",
+        (execution_id,),
+    ).fetchall()
+
+
+def _validate_execution_identity_rows(conn: sqlite3.Connection, table: str) -> None:
+    if table not in EXECUTION_IDENTITY_INDEXES:
+        raise ValueError("unsupported execution table")
+    for row in conn.execute(f"SELECT event_json FROM {table}"):
+        event = json.loads(row[0])
+        if not isinstance(event, dict):
+            raise ValueError("execution event must be a JSON object")
+        raw = event if table == "assigned_stock_events" else event.get("raw_payload") or {}
+        if not isinstance(raw, dict):
+            raise ValueError("execution payload must be a JSON object")
+        validated_execution_identity_metadata(raw)
+
 
 TRADE_EVENT_PAGINATION_INDEXES = (
     "idx_trade_events_pagination_missing",

@@ -17,6 +17,7 @@ from domain.domain.option_position_identity import normalize_broker
 from domain.domain.performance.models import FeeBasis, FeeComponent, quantize_money, to_decimal
 from src.application.ledger.api import (
     enrich_order_fees,
+    futu_order_namespace_issue,
     zero_option_fee_lifecycle_reason,
 )
 from src.infrastructure.futu_gateway import FutuGatewayRateLimitError
@@ -33,10 +34,15 @@ def fee_target_from_trusted_payload(
     source = payload.get("_trade_intake_source")
     if not isinstance(source, Mapping) or source.get("schema_version") != "trade_intake_source.v1":
         return None
+    if futu_order_namespace_issue(payload):
+        return None
+    execution = payload.get("execution_input")
     order_id = str(
         payload.get("order_id")
         or payload.get("orderID")
         or payload.get("orderId")
+        or payload.get("external_order_id")
+        or (execution.get("external_order_id") if isinstance(execution, Mapping) else None)
         or ""
     ).strip()
     return _identity(
@@ -45,6 +51,45 @@ def fee_target_from_trusted_payload(
         source.get("futu_account_id"),
         order_id,
     )
+
+
+def recover_order_fee_targets(
+    repo: Any,
+    *,
+    account: str,
+    allowed_futu_account_ids: Sequence[str] | None = None,
+    selection_after: str | None = None,
+    max_orders: int | None = None,
+) -> dict[str, Any]:
+    """Rebuild pending order targets from durable fee facts, without a lookback."""
+
+    account_value = str(account or "").strip().lower()
+    if not account_value:
+        raise ValueError("fee recovery account is required")
+    candidates, issues = _select_candidates(
+        repo,
+        account=account_value,
+        start_ms=None,
+        end_exclusive_ms=None,
+    )
+    if allowed_futu_account_ids is not None:
+        allowed = {str(value or "").strip() for value in allowed_futu_account_ids}
+        allowed.discard("")
+        if not allowed:
+            raise ValueError("allowed_futu_account_ids must not be empty")
+        candidates = [item for item in candidates if item["futu_account_id"] in allowed]
+    selected, cursor = _cursor_select(
+        candidates, selection_after=selection_after, limit=max_orders
+    )
+    return {
+        "targets": [
+            (item["broker"], item["account"], item["futu_account_id"], item["order_id"])
+            for item in selected
+        ],
+        "selection_cursor": cursor,
+        "candidate_count": len(candidates),
+        "issues": issues,
+    }
 
 
 def sync_order_fees(
@@ -239,6 +284,7 @@ def sync_order_fees(
                             "account": item["account"],
                             "futu_account_id": item["futu_account_id"],
                             "order_id": item["order_id"],
+                            "external_order_namespace": "futu.order",
                             "fee_amount": canonical_decimal(amount),
                             "currency": item["provider_currency"],
                             "event_kind": item["event_kind"],
@@ -328,7 +374,7 @@ def _select_candidates(
             continue
         if normalize_broker(event.contract_key.broker) != "富途":
             if target_identity is None and _in_range(
-                event.event_time_ms, int(start_ms or 0), int(end_exclusive_ms or 0)
+                event.event_time_ms, start_ms, end_exclusive_ms
             ):
                 issues.append(
                     {
@@ -345,9 +391,16 @@ def _select_candidates(
             raw.get("futu_account_id"),
             raw.get("order_id"),
         )
+        namespace_issue = futu_order_namespace_issue(raw)
+        if namespace_issue:
+            if ((target_identity is None or identity == target_identity)
+                    and _in_range(event.event_time_ms, start_ms, end_exclusive_ms)):
+                issues.append({"event_kind": "option_trade", "event_id": event.event_id,
+                               "reason": namespace_issue})
+            continue
         if identity is None:
             if target_identity is None and _in_range(
-                event.event_time_ms, int(start_ms or 0), int(end_exclusive_ms or 0)
+                event.event_time_ms, start_ms, end_exclusive_ms
             ):
                 issues.append(
                     {
@@ -368,7 +421,7 @@ def _select_candidates(
         if normalize_broker(row.get("broker")) != "富途":
             instant = int(row.get("trade_time_ms") or 0)
             if target_identity is None and _in_range(
-                instant, int(start_ms or 0), int(end_exclusive_ms or 0)
+                instant, start_ms, end_exclusive_ms
             ):
                 issues.append(
                     {
@@ -384,10 +437,17 @@ def _select_candidates(
             row.get("futu_account_id"),
             row.get("order_id"),
         )
+        namespace_issue = futu_order_namespace_issue(row)
+        if namespace_issue:
+            if ((target_identity is None or identity == target_identity)
+                    and _in_range(int(row.get("trade_time_ms") or 0), start_ms, end_exclusive_ms)):
+                issues.append({"event_kind": "assigned_stock_sale", "event_id": _row_id(row),
+                               "reason": namespace_issue})
+            continue
         instant = int(row.get("trade_time_ms") or 0)
         if identity is None:
             if target_identity is None and _in_range(
-                instant, int(start_ms or 0), int(end_exclusive_ms or 0)
+                instant, start_ms, end_exclusive_ms
             ):
                 issues.append(
                     {
@@ -408,7 +468,7 @@ def _select_candidates(
                 continue
             target_seen = True
         elif not any(
-            _in_range(value, int(start_ms or 0), int(end_exclusive_ms or 0))
+            _in_range(value, start_ms, end_exclusive_ms)
             for value in times
         ):
             continue
@@ -423,8 +483,8 @@ def _select_candidates(
             "row_count": len(typed_rows),
         }
         if target_identity is None and (
-            min(times) < int(start_ms or 0)
-            or max(times) >= int(end_exclusive_ms or 0)
+            (start_ms is not None and min(times) < start_ms)
+            or (end_exclusive_ms is not None and max(times) >= end_exclusive_ms)
         ):
             issues.append(
                 {
@@ -625,8 +685,10 @@ def _row_id(value: Mapping[str, Any]) -> str:
     return str(value.get("stock_event_id") or value.get("event_id") or "").strip()
 
 
-def _in_range(value: int, start_ms: int, end_exclusive_ms: int) -> bool:
-    return start_ms <= int(value) < end_exclusive_ms
+def _in_range(value: int, start_ms: int | None, end_exclusive_ms: int | None) -> bool:
+    return (start_ms is None or start_ms <= int(value)) and (
+        end_exclusive_ms is None or int(value) < end_exclusive_ms
+    )
 
 
 def _redacted(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -689,4 +751,4 @@ def canonical_decimal(value: Decimal) -> str:
     return format(value.quantize(Decimal("0.000001")), "f")
 
 
-__all__ = ["fee_target_from_trusted_payload", "sync_order_fees"]
+__all__ = ["fee_target_from_trusted_payload", "recover_order_fee_targets", "sync_order_fees"]
