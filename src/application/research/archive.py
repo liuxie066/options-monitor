@@ -16,7 +16,6 @@ from src.application.candidate_evidence_history import (
     NOT_SCANNED,
     summarize_run_candidate_evidence,
 )
-from src.application.shadow_replay import build_shadow_replay_dataset, mark_shadow_replay_dataset
 from src.application.required_data_blobs import (
     RequiredDataBlobError,
     load_required_data_scan_blob,
@@ -44,8 +43,7 @@ from pathlib import Path
 
 runtime = Path(sys.argv[1])
 since_raw = sys.argv[2] if len(sys.argv) > 2 else ""
-require_replay = (sys.argv[3].strip().lower() in {"1", "true", "yes"}) if len(sys.argv) > 3 else False
-run_ids_raw = sys.argv[4] if len(sys.argv) > 4 else ""
+run_ids_raw = sys.argv[3] if len(sys.argv) > 3 else ""
 run_ids_payload = json.loads(run_ids_raw) if run_ids_raw else None
 if run_ids_payload is not None and not isinstance(run_ids_payload, list):
     raise ValueError("run ids must be a JSON list")
@@ -121,19 +119,6 @@ def critical_files(run_dir):
         "state_files": state_files,
     }
 
-def has_replay_evidence(critical):
-    if any(
-        path.endswith("candidate_snapshot_manifest.v2.json")
-        for path in critical["candidate_manifest_files"]
-    ):
-        return False
-    return bool(
-        critical["candidate_manifest_files"]
-        or critical["candidate_snapshot_files"]
-        or critical["candidate_status_files"]
-        or critical["trace_files"]
-    )
-
 def file_manifest(run_dir):
     rows = []
     for path in sorted(item for item in run_dir.rglob("*") if item.is_file() and not item.is_symlink()):
@@ -193,13 +178,9 @@ if runs_root.exists() and runs_root.is_dir():
         critical = critical_files(item)
         files = file_manifest(item)
         blob_refs, blob_status, blob_error = scan_blob_refs(item)
-        has_replay = has_replay_evidence(critical)
-        if require_replay and not has_replay:
-            continue
         runs.append({
             "run_id": item.name,
             "mtime": st.st_mtime,
-            "has_replay_evidence": has_replay,
             "has_legacy_candidate_metadata": bool(critical["legacy_candidate_files"]),
             "ran_scan": ran_scan(item),
             "scheduler": scheduler_summary(item),
@@ -214,84 +195,8 @@ paths = {}
 for rel in ("output_shared/research", "output_shared/required_data", "logs"):
     path = runtime / rel
     paths[rel] = {"exists": path.exists(), "is_dir": path.is_dir()}
-receipt_root = runtime / "output_shared/research/shadow_replay/receipts"
-receipts = []
-if receipt_root.exists() and receipt_root.is_dir() and not receipt_root.is_symlink():
-    for path in sorted(receipt_root.glob("*.json")):
-        if path.is_symlink() or not path.is_file():
-            continue
-        digest = hashlib.sha256()
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-        stat = path.stat()
-        receipts.append({
-            "path": str(path.relative_to(runtime)),
-            "size_bytes": stat.st_size,
-            "mtime": stat.st_mtime,
-            "sha256": digest.hexdigest(),
-        })
-print(json.dumps({"runtime_root": str(runtime), "runs_root": str(runs_root), "source_host": socket.getfqdn(), "require_replay_evidence": require_replay, "runs": runs, "shadow_replay_receipts": receipts, "paths": paths}))
+print(json.dumps({"runtime_root": str(runtime), "runs_root": str(runs_root), "source_host": socket.getfqdn(), "runs": runs, "paths": paths}))
 """.strip()
-
-REMOTE_RECEIPT_PRUNE_SCRIPT = r"""
-import hashlib
-import json
-import sys
-import time
-from pathlib import Path
-
-runtime = Path(sys.argv[1])
-keep_days = max(0, int(sys.argv[2]))
-keep_count = max(1, int(sys.argv[3]))
-confirm = sys.argv[4] == "confirm"
-expected = sys.argv[5].strip().lower() if len(sys.argv) > 5 else ""
-root = runtime / "output_shared/research/shadow_replay/receipts"
-blockers = []
-rows = []
-if root.is_symlink():
-    blockers.append("receipt_root_is_symlink")
-elif root.exists() and not root.is_dir():
-    blockers.append("receipt_root_is_not_directory")
-elif root.is_dir():
-    for path in root.iterdir():
-        if path.suffix != ".json":
-            continue
-        if path.is_symlink() or not path.is_file():
-            blockers.append("unsafe_receipt_entry:" + path.name)
-            continue
-        stat = path.stat()
-        rows.append({"path": str(path.relative_to(runtime)), "size_bytes": stat.st_size, "mtime": stat.st_mtime, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
-rows.sort(key=lambda row: (row["mtime"], row["path"]), reverse=True)
-cutoff = time.time() - keep_days * 86400
-candidates = [row for index, row in enumerate(rows) if index >= keep_count and row["mtime"] < cutoff]
-stable_candidates = [{key: row[key] for key in ("path", "size_bytes", "sha256")} for row in candidates]
-plan = {"schema_version": "shadow_replay_receipt_prune.v1", "runtime_root": str(runtime), "keep_days": keep_days, "keep_count": keep_count, "candidates": stable_candidates}
-plan_sha256 = hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
-payload = {**plan, "plan_sha256": plan_sha256, "blockers": blockers, "changed": False, "deleted_paths": []}
-if confirm:
-    if blockers:
-        payload.update({"ok": False, "status": "blocked"})
-    elif expected != plan_sha256:
-        payload.update({"ok": False, "status": "plan_changed"})
-    else:
-        verified = True
-        for row in stable_candidates:
-            path = runtime / row["path"]
-            if path.is_symlink() or not path.is_file() or path.stat().st_size != row["size_bytes"] or hashlib.sha256(path.read_bytes()).hexdigest() != row["sha256"]:
-                verified = False
-                break
-        if not verified:
-            payload.update({"ok": False, "status": "content_changed"})
-        else:
-            for row in stable_candidates:
-                (runtime / row["path"]).unlink()
-            payload.update({"ok": True, "status": "applied", "changed": bool(stable_candidates), "deleted_paths": [row["path"] for row in stable_candidates]})
-else:
-    payload.update({"ok": not blockers, "status": "preview" if not blockers else "blocked"})
-print(json.dumps(payload, sort_keys=True))
-""".strip()
-
 
 def archive_root_for(repo_root: Path, *, remote: str = DEFAULT_REMOTE, archive_root: str | Path | None = None) -> Path:
     base = repo_root.resolve()
@@ -322,7 +227,6 @@ def archive_inventory(
         "summary": {
             "run_count": len(runs),
             "verified_run_count": sum(1 for item in runs if item.get("verified")),
-            "replay_evidence_run_count": sum(1 for item in runs if item.get("has_replay_evidence")),
             "manifest_count": len(manifests),
             "latest_inventory_path": str(root / "manifests" / "inventory.latest.json"),
             "latest_inventory_exists": bool(latest),
@@ -343,7 +247,6 @@ def archive_pull(
     remote_runtime_root: str | Path = DEFAULT_REMOTE_RUNTIME_ROOT,
     since_days: int | None = None,
     run_ids: list[str] | tuple[str, ...] | None = None,
-    require_replay_evidence: bool = False,
     include_logs: bool = True,
     write: bool = False,
     rsync_path: str = "rsync",
@@ -362,7 +265,6 @@ def archive_pull(
         source=source,
         since_days=since_days,
         run_ids=run_ids,
-        require_replay_evidence=require_replay_evidence,
         run_cmd=run_cmd,
     )
     if source_inventory_metadata.get("source_host"):
@@ -513,7 +415,6 @@ def archive_pull(
                 source=source,
                 since_days=since_days,
                 selected_runs=selected_runs,
-                require_replay_evidence=require_replay_evidence,
                 include_logs=include_logs,
                 scan_blob_refs=scan_blob_refs,
                 operations=operations,
@@ -534,7 +435,6 @@ def archive_pull(
         "archive_root": str(root),
         "source": _source_summary(source),
         "since_days": since_days,
-        "require_replay_evidence": bool(require_replay_evidence),
         "selected_run_ids": selected_runs,
         "include_logs": bool(include_logs),
         "scan_blob_refs": scan_blob_refs,
@@ -575,7 +475,6 @@ def archive_verify(
         rel: _dir_payload(root / rel, base=base)
         for rel in (*SYNC_RELATIVE_DIRS, LOGS_RELATIVE_DIR)
     }
-    shadow_replay_receipts = _shadow_replay_receipt_inventory(root)
     data = {
         "schema_version": SCHEMA_VERSION,
         "action": "verify",
@@ -590,218 +489,15 @@ def archive_verify(
             "deletion_verified_run_count": sum(
                 1 for item in runs if item.get("deletion_verified")
             ),
-            "replay_evidence_run_count": sum(1 for item in runs if item.get("has_replay_evidence")),
             "shared_existing_count": sum(1 for item in shared.values() if item.get("exists")),
         },
         "runs": runs,
         "shared": shared,
-        "shadow_replay_receipts": shadow_replay_receipts,
     }
     manifests = root / "manifests"
     manifests.mkdir(parents=True, exist_ok=True)
     _write_json(manifests / "inventory.latest.json", data)
     return data
-
-
-def _shadow_replay_receipt_inventory(root: Path) -> list[dict[str, Any]]:
-    receipt_root = root / "output_shared/research/shadow_replay/receipts"
-    if receipt_root.is_symlink() or not receipt_root.is_dir():
-        return []
-    rows: list[dict[str, Any]] = []
-    for path in sorted(receipt_root.glob("*.json")):
-        if path.is_symlink() or not path.is_file():
-            continue
-        stat = path.stat()
-        digest = hashlib.sha256()
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-        rows.append(
-            {
-                "path": path.relative_to(root).as_posix(),
-                "size_bytes": stat.st_size,
-                "mtime": stat.st_mtime,
-                "sha256": digest.hexdigest(),
-            }
-        )
-    return rows
-
-
-def archive_build_datasets(
-    *,
-    repo_root: str | Path,
-    remote: str = DEFAULT_REMOTE,
-    archive_root: str | Path | None = None,
-    dataset_root: str | Path | None = None,
-    market: str | None = None,
-    run_ids: list[str] | tuple[str, ...] | None = None,
-    latest_scanned: bool = False,
-    mark_from_run_required_data: bool = True,
-    write: bool = False,
-) -> dict[str, Any]:
-    base = Path(repo_root).expanduser().resolve()
-    root = archive_root_for(base, remote=remote, archive_root=archive_root)
-    inventory = _load_latest_inventory(root) or archive_verify(repo_root=base, remote=remote, archive_root=root)
-    runs = [item for item in inventory.get("runs", []) if isinstance(item, dict)]
-    selected = _select_verified_runs(runs, run_ids=run_ids, require_replay=True)
-    market_filter = _filter_runs_by_market(selected, archive_root=root, market=market)
-    selected = market_filter["selected"]
-    if latest_scanned and selected:
-        selected = sorted(selected, key=lambda item: str(item.get("mtime_utc") or ""), reverse=True)[:1]
-    ds_root = _resolve_path(dataset_root, base=base) if dataset_root else (
-        base / "output_shared" / "research" / "shadow_replay" / "datasets"
-    ).resolve()
-    plans: list[dict[str, Any]] = []
-    built: list[dict[str, Any]] = []
-    prefix = _dataset_prefix(remote=remote, market=market)
-    for item in selected:
-        run_id = str(item.get("run_id") or "").strip()
-        dataset_id = _safe_label(f"{prefix}-{run_id}")
-        plan = {
-            "run_id": run_id,
-            "dataset_id": dataset_id,
-            "dataset_dir": str((ds_root / dataset_id).resolve()),
-            "source_run_dir": str((root / "output_runs" / run_id).resolve()),
-            "source_run_required_data_dir": str((root / "output_runs" / run_id / "required_data").resolve()),
-            "mark_from_run_required_data": bool(mark_from_run_required_data),
-            "inferred_market": item.get("inferred_market"),
-        }
-        plans.append(plan)
-        if not write:
-            continue
-        try:
-            manifest = build_shadow_replay_dataset(
-                repo_root=base,
-                runs_root=root / "output_runs",
-                run_id=run_id,
-                dataset_root=ds_root,
-                dataset_id=dataset_id,
-            )
-            if mark_from_run_required_data:
-                manifest = {
-                    **manifest,
-                    "post_build_marking": _mark_dataset_from_run_required_data(
-                        repo_root=base,
-                        dataset_dir=Path(str(manifest.get("dataset_dir") or plan["dataset_dir"])),
-                        required_data_dir=root / "output_runs" / run_id / "required_data",
-                        as_of=str(item.get("mtime_utc") or ""),
-                    ),
-                }
-            built.append(manifest)
-        except ValueError as exc:
-            built.append({"run_id": run_id, "dataset_id": dataset_id, "ok": False, "error": str(exc)})
-    ok = (
-        all(bool(item.get("schema_version")) and _post_build_marking_ok(item) for item in built)
-        if write
-        else True
-    )
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "action": "build-datasets",
-        "ok": bool(ok),
-        "changed": bool(write and built),
-        "dry_run": not bool(write),
-        "remote": _safe_label(remote or DEFAULT_REMOTE),
-        "mark_from_run_required_data": bool(mark_from_run_required_data),
-        "market_filter": {
-            "requested_market": _normalize_market(market),
-            "selected_run_count": len(selected),
-            "skipped_run_count": len(market_filter["skipped"]),
-            "skipped_runs": market_filter["skipped"],
-        },
-        "archive_root": str(root),
-        "dataset_root": str(ds_root),
-        "selected_run_ids": [item["run_id"] for item in plans],
-        "plans": plans,
-        "built": built,
-    }
-
-
-def _mark_dataset_from_run_required_data(
-    *,
-    repo_root: Path,
-    dataset_dir: Path,
-    required_data_dir: Path,
-    as_of: str,
-) -> dict[str, Any]:
-    required_root = required_data_dir.resolve()
-    blob_refs, blob_status, blob_error = _run_scan_blob_refs(
-        required_root.parent
-    )
-    base_payload = {
-        "required_data_root": str(required_root),
-        "dataset_dir": str(dataset_dir.resolve()),
-        "scan_blob_refs": blob_refs,
-        "scan_blob_reference_status": blob_status,
-    }
-    if blob_error:
-        base_payload["scan_blob_reference_error"] = blob_error
-    if not required_root.exists() or not required_root.is_dir():
-        return {**base_payload, "ok": True, "status": "skipped", "reason": "run_required_data_missing"}
-    if not _has_required_data_csv(required_root):
-        return {**base_payload, "ok": True, "status": "skipped", "reason": "run_required_data_csv_missing"}
-    try:
-        marking = mark_shadow_replay_dataset(
-            dataset=dataset_dir,
-            required_data_root=required_root,
-            as_of=as_of or None,
-            repo_root=repo_root,
-            write=True,
-            replace=False,
-        )
-    except Exception as exc:
-        return {
-            **base_payload,
-            "ok": False,
-            "status": "error",
-            "reason": "mark_from_run_required_data_failed",
-            "error": f"{type(exc).__name__}: {exc}",
-        }
-    payload = {
-        **base_payload,
-        "ok": True,
-        "status": "marked",
-        "reason": "marked_from_run_required_data",
-        "summary": marking.get("summary") if isinstance(marking.get("summary"), dict) else {},
-    }
-    _annotate_dataset_manifest(dataset_dir, "mark_from_run_required_data", payload)
-    return payload
-
-
-def _has_required_data_csv(required_root: Path) -> bool:
-    manifest_path = (
-        required_root.parent
-        / "state"
-        / "required_data_snapshot_manifest.json"
-    )
-    if manifest_path.exists() or manifest_path.is_symlink():
-        return True
-    parsed = required_root / "parsed"
-    source = parsed if parsed.exists() and parsed.is_dir() else required_root
-    return any(path.is_file() for path in source.glob("*_required_data.csv"))
-
-
-def _annotate_dataset_manifest(dataset_dir: Path, key: str, payload: dict[str, Any]) -> None:
-    manifest_path = dataset_dir / "manifest.json"
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return
-    if not isinstance(manifest, dict):
-        return
-    post_build = manifest.get("post_build")
-    if not isinstance(post_build, dict):
-        post_build = {}
-    post_build[str(key)] = payload
-    manifest["post_build"] = post_build
-    _write_json(manifest_path, manifest)
-
-
-def _post_build_marking_ok(item: dict[str, Any]) -> bool:
-    marking = item.get("post_build_marking")
-    if not isinstance(marking, dict):
-        return True
-    return bool(marking.get("ok"))
 
 
 def archive_prune_remote(
@@ -815,7 +511,6 @@ def archive_prune_remote(
     keep_days: int = 3,
     keep_count: int = 30,
     include_logs: bool = True,
-    scope: str = "output-runs",
     confirm: bool = False,
     run_cmd: Callable[..., Any] = subprocess.run,
 ) -> dict[str, Any]:
@@ -836,44 +531,35 @@ def archive_prune_remote(
         }
     source_identity = latest.get("source_identity")
     source_identity = source_identity if isinstance(source_identity, dict) else {}
-    normalized_scope = str(scope or "output-runs").strip().lower()
-    if normalized_scope not in {"output-runs", "shadow-replay-receipts"}:
-        raise AgentToolError(code="INPUT_ERROR", message=f"unsupported archive prune scope: {scope}")
     source = {
         "kind": "ssh",
         "ssh_target": target,
         "runtime_root": str(remote_runtime_root),
     }
-    dry_operation: dict[str, Any] | None = None
-    dry_payload: dict[str, Any] = {}
-    preview_validation: dict[str, Any] = {}
-    planned_delete_runs: list[str] | None = None
-    if normalized_scope == "output-runs":
-        dry_command = _remote_cleanup_command(
-            ssh_target=target,
-            remote_repo_root=remote_repo_root,
-            remote_runtime_root=remote_runtime_root,
-            keep_days=keep_days,
-            keep_count=keep_count,
-            include_logs=include_logs,
-            confirm=False,
-        )
-        dry_operation = _run_command(
-            dry_command,
-            run_cmd=run_cmd,
-            timeout=600,
-            stdout_limit=2_000_000,
-        )
-        dry_payload = _parse_cli_json(dry_operation.get("stdout"))
-        preview_validation = _validate_cleanup_preview(
-            dry_payload,
-            remote_runtime_root=remote_runtime_root,
-        )
-        planned_delete_runs = list(preview_validation.get("planned_delete_run_ids") or [])
+    dry_command = _remote_cleanup_command(
+        ssh_target=target,
+        remote_repo_root=remote_repo_root,
+        remote_runtime_root=remote_runtime_root,
+        keep_days=keep_days,
+        keep_count=keep_count,
+        include_logs=include_logs,
+        confirm=False,
+    )
+    dry_operation = _run_command(
+        dry_command,
+        run_cmd=run_cmd,
+        timeout=600,
+        stdout_limit=2_000_000,
+    )
+    dry_payload = _parse_cli_json(dry_operation.get("stdout"))
+    preview_validation = _validate_cleanup_preview(
+        dry_payload,
+        remote_runtime_root=remote_runtime_root,
+    )
+    planned_delete_runs = list(preview_validation.get("planned_delete_run_ids") or [])
     remote_inventory_operation, remote_inventory = _remote_inventory(
         source,
         since_days=None,
-        require_replay_evidence=False,
         run_cmd=run_cmd,
         run_ids=planned_delete_runs,
     )
@@ -913,24 +599,6 @@ def archive_prune_remote(
         and str(source_identity.get("source_host") or "").strip()
         == current_source_host
     )
-    if normalized_scope == "shadow-replay-receipts":
-        return _archive_prune_remote_receipts(
-            root=root,
-            remote=remote,
-            target=target,
-            remote_runtime_root=remote_runtime_root,
-            keep_days=keep_days,
-            keep_count=keep_count,
-            confirm=confirm,
-            latest=latest,
-            remote_inventory=remote_inventory,
-            remote_inventory_operation=remote_inventory_operation,
-            remote_inventory_ok=remote_inventory_ok,
-            source_binding_ok=source_binding_ok,
-            run_cmd=run_cmd,
-        )
-    assert dry_operation is not None
-    assert planned_delete_runs is not None
     planned_delete_run_set = set(planned_delete_runs)
     current_runs = {
         str(item.get("run_id")): item
@@ -1068,7 +736,6 @@ def _select_source_runs(
     source: dict[str, Any],
     since_days: int | None,
     run_ids: list[str] | tuple[str, ...] | None,
-    require_replay_evidence: bool,
     run_cmd: Callable[..., Any],
 ) -> tuple[
     list[str],
@@ -1081,14 +748,12 @@ def _select_source_runs(
         runs = _source_run_dirs(
             Path(source["runtime_root"]) / "output_runs",
             since_days=since_days,
-            require_replay_evidence=require_replay_evidence,
             run_ids=explicit if run_ids is not None else None,
         )
         return [str(item["run_id"]) for item in runs], None, runs, {}
     operation, payload = _remote_inventory(
         source,
         since_days=since_days,
-        require_replay_evidence=require_replay_evidence,
         run_cmd=run_cmd,
         run_ids=explicit if run_ids is not None else None,
     )
@@ -1201,7 +866,6 @@ def _remote_inventory(
     source: dict[str, Any],
     *,
     since_days: int | None,
-    require_replay_evidence: bool,
     run_cmd: Callable[..., Any],
     run_ids: list[str] | tuple[str, ...] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -1218,7 +882,6 @@ def _remote_inventory(
         return _remote_inventory_once(
             source,
             since_days=since_days,
-            require_replay_evidence=require_replay_evidence,
             run_cmd=run_cmd,
             run_ids=selected_run_ids,
         )
@@ -1229,7 +892,6 @@ def _remote_inventory(
         operation, payload = _remote_inventory_once(
             source,
             since_days=since_days,
-            require_replay_evidence=require_replay_evidence,
             run_cmd=run_cmd,
             run_ids=selected_run_ids[start : start + REMOTE_INVENTORY_RUN_BATCH_SIZE],
         )
@@ -1276,7 +938,6 @@ def _remote_inventory_once(
     source: dict[str, Any],
     *,
     since_days: int | None,
-    require_replay_evidence: bool,
     run_cmd: Callable[..., Any],
     run_ids: list[str] | None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -1287,7 +948,6 @@ def _remote_inventory_once(
             shlex.quote(REMOTE_INVENTORY_SCRIPT),
             shlex.quote(str(source["runtime_root"])),
             shlex.quote("" if since_days is None else str(max(0, int(since_days)))),
-            shlex.quote("1" if require_replay_evidence else "0"),
             shlex.quote("" if run_ids is None else json.dumps(run_ids)),
         ]
     )
@@ -1309,7 +969,6 @@ def _source_run_dirs(
     runs_root: Path,
     *,
     since_days: int | None,
-    require_replay_evidence: bool = False,
     run_ids: list[str] | tuple[str, ...] | None = None,
 ) -> list[dict[str, Any]]:
     if not runs_root.exists() or not runs_root.is_dir():
@@ -1330,14 +989,10 @@ def _source_run_dirs(
         critical = _critical_files(item)
         files = _file_manifest(item)
         blob_refs, blob_status, blob_error = _run_scan_blob_refs(item)
-        has_replay = _has_replay_evidence(critical)
-        if require_replay_evidence and not has_replay:
-            continue
         out.append(
             {
                 "run_id": item.name,
                 "mtime": mtime,
-                "has_replay_evidence": has_replay,
                 "has_legacy_candidate_metadata": bool(
                     critical["legacy_candidate_files"]
                 ),
@@ -1432,7 +1087,6 @@ def _sync_manifest(
     source: dict[str, Any],
     since_days: int | None,
     selected_runs: list[str],
-    require_replay_evidence: bool,
     include_logs: bool,
     scan_blob_refs: list[dict[str, Any]],
     operations: list[dict[str, Any]],
@@ -1449,7 +1103,6 @@ def _sync_manifest(
         "archive_root_display": _display_path(archive_root, base=repo_root),
         "source": _source_summary(source),
         "since_days": since_days,
-        "require_replay_evidence": bool(require_replay_evidence),
         "selected_run_ids": selected_runs,
         "include_logs": bool(include_logs),
         "scan_blob_refs": scan_blob_refs,
@@ -1496,7 +1149,6 @@ def _run_inventory(
             run_id=run_dir.name,
             runs_root=runs_root,
         )
-        has_replay = _has_replay_evidence(critical)
         has_candidate_history_metadata = any(
             row.get("status") != NOT_SCANNED
             for row in classification.get("accounts") or []
@@ -1521,7 +1173,6 @@ def _run_inventory(
                 "content_digest": _content_digest(file_manifest),
                 "verified": bool(files) and not has_partial,
                 "partial_artifact_detected": has_partial,
-                "has_replay_evidence": has_replay,
                 "has_candidate_history_metadata": has_candidate_history_metadata,
                 "has_legacy_candidate_metadata": bool(
                     critical["legacy_candidate_files"]
@@ -1569,7 +1220,6 @@ def _critical_files(run_dir: Path) -> dict[str, Any]:
             "*_candidates_reject_log.csv",
             "*_reject_log.csv",
             "*_pair_diagnostics.csv",
-            "*_rank_shadow.csv",
             "*_put_universe.csv",
             "*_put_universe_labeled.csv",
             "*_put_universe_cash_filtered.csv",
@@ -1585,23 +1235,6 @@ def _critical_files(run_dir: Path) -> dict[str, Any]:
         "legacy_candidate_files": legacy_candidate_files,
         "state_files": state_files,
     }
-
-
-def _has_replay_evidence(critical: dict[str, Any]) -> bool:
-    if any(
-        str(path).endswith("candidate_snapshot_manifest.v2.json")
-        for path in critical.get("candidate_manifest_files") or []
-    ):
-        return False
-    return any(
-        bool(critical.get(key))
-        for key in (
-            "candidate_manifest_files",
-            "candidate_snapshot_files",
-            "candidate_status_files",
-            "trace_files",
-        )
-    )
 
 
 def _relative_matches(root: Path, patterns: tuple[str, ...]) -> list[str]:
@@ -1631,141 +1264,6 @@ def _manifest_inventory(root: Path) -> list[dict[str, Any]]:
     for path in sorted(manifests.glob("*.json"), key=lambda item: (item.stat().st_mtime, item.name), reverse=True):
         out.append({"path": str(path), "name": path.name, "mtime_utc": _mtime_utc(path), "size_bytes": _file_size(path)})
     return out
-
-
-def _select_verified_runs(
-    runs: list[dict[str, Any]],
-    *,
-    run_ids: list[str] | tuple[str, ...] | None,
-    require_replay: bool,
-) -> list[dict[str, Any]]:
-    wanted = {_safe_run_id(value) for value in (run_ids or []) if str(value or "").strip()}
-    selected: list[dict[str, Any]] = []
-    for item in runs:
-        run_id = str(item.get("run_id") or "")
-        if wanted and run_id not in wanted:
-            continue
-        if not item.get("verified"):
-            continue
-        if require_replay and not item.get("has_replay_evidence"):
-            continue
-        selected.append(item)
-    return selected
-
-
-def _filter_runs_by_market(
-    runs: list[dict[str, Any]],
-    *,
-    archive_root: Path,
-    market: str | None,
-) -> dict[str, Any]:
-    requested = _normalize_market(market)
-    if requested is None:
-        return {"selected": runs, "skipped": []}
-    selected: list[dict[str, Any]] = []
-    skipped: list[dict[str, Any]] = []
-    for item in runs:
-        run_id = str(item.get("run_id") or "").strip()
-        inferred = _infer_run_market(item, run_dir=archive_root / "output_runs" / run_id)
-        if inferred == requested:
-            selected.append({**item, "inferred_market": inferred})
-            continue
-        skipped.append(
-            {
-                "run_id": run_id,
-                "inferred_market": inferred,
-                "reason": "market_mismatch" if inferred in {"us", "hk"} else "market_unknown_or_mixed",
-            }
-        )
-    return {"selected": selected, "skipped": skipped}
-
-
-def _normalize_market(market: str | None) -> str | None:
-    text = str(market or "").strip().lower()
-    return text if text in {"us", "hk"} else None
-
-
-def _infer_run_market(item: dict[str, Any], *, run_dir: Path) -> str:
-    critical = item.get("critical_files") if isinstance(item.get("critical_files"), dict) else _critical_files(run_dir)
-    markets: set[str] = set()
-    candidate_evidence = item.get("candidate_evidence")
-    if isinstance(candidate_evidence, dict):
-        for account in candidate_evidence.get("accounts") or []:
-            if not isinstance(account, dict):
-                continue
-            markets.update(
-                str(value).strip().lower()
-                for value in account.get("markets") or []
-                if str(value).strip().lower() in {"us", "hk"}
-            )
-    raw_trace_files = critical.get("trace_files") if isinstance(critical, dict) else None
-    if isinstance(raw_trace_files, list):
-        markets.update(_infer_markets_from_trace_files(run_dir, raw_trace_files))
-    if len(markets) > 1:
-        return "mixed"
-    if markets:
-        return next(iter(markets))
-    return "unknown"
-
-
-def _infer_markets_from_trace_files(run_dir: Path, trace_files: list[Any]) -> set[str]:
-    markets: set[str] = set()
-    run_root = run_dir.resolve()
-    for raw in trace_files:
-        path = (run_root / str(raw)).resolve()
-        try:
-            path.relative_to(run_root)
-        except ValueError:
-            continue
-        try:
-            if not path.is_file():
-                continue
-            with path.open("r", encoding="utf-8") as fh:
-                for line in fh:
-                    text = line.strip()
-                    if not text:
-                        continue
-                    try:
-                        row = json.loads(text)
-                    except json.JSONDecodeError:
-                        continue
-                    if not isinstance(row, dict):
-                        continue
-                    market = _infer_market_from_trace_row(row)
-                    if market is not None:
-                        markets.add(market)
-                    if len(markets) > 1:
-                        return markets
-        except OSError:
-            continue
-    return markets
-
-
-def _infer_market_from_trace_row(row: dict[str, Any]) -> str | None:
-    values = [
-        str(row.get("symbol") or "").strip(),
-        str(row.get("underlying_symbol") or "").strip(),
-        str(row.get("contract_symbol") or "").strip(),
-        str(row.get("option_symbol") or "").strip(),
-    ]
-    non_empty = [value.upper() for value in values if value]
-    if not non_empty:
-        return None
-    if any(_looks_like_hk_identifier(value) for value in non_empty):
-        return "hk"
-    if any(_looks_like_us_identifier(value) for value in non_empty):
-        return "us"
-    return None
-
-
-def _looks_like_hk_identifier(value: str) -> bool:
-    return value.endswith(".HK") or value.startswith("HK.") or ".HK_" in value or ".HK-" in value
-
-
-def _looks_like_us_identifier(value: str) -> bool:
-    if _looks_like_hk_identifier(value):
-        return False
-    return any("A" <= char <= "Z" for char in value)
 
 
 def _remote_cleanup_command(
@@ -1806,168 +1304,6 @@ def _remote_cleanup_command(
         args.extend(["--confirm", "--yes"])
     remote_command = "cd " + shlex.quote(str(remote_repo_root)) + " && " + " ".join(shlex.quote(arg) for arg in args)
     return ["ssh", ssh_target, remote_command]
-
-
-def _remote_receipt_prune_command(
-    *,
-    ssh_target: str,
-    remote_runtime_root: str | Path,
-    keep_days: int,
-    keep_count: int,
-    confirm: bool,
-    expected_plan_sha256: str = "",
-) -> list[str]:
-    args = [
-        "python3",
-        "-c",
-        REMOTE_RECEIPT_PRUNE_SCRIPT,
-        str(remote_runtime_root),
-        str(max(0, int(keep_days))),
-        str(max(1, int(keep_count))),
-        "confirm" if confirm else "preview",
-        str(expected_plan_sha256 or ""),
-    ]
-    return ["ssh", ssh_target, " ".join(shlex.quote(arg) for arg in args)]
-
-
-def _receipt_rows_by_path(rows: Any) -> dict[str, dict[str, Any]]:
-    if not isinstance(rows, list):
-        return {}
-    return {
-        str(row.get("path")): row
-        for row in rows
-        if isinstance(row, dict) and row.get("path")
-    }
-
-
-def _receipt_identity(row: dict[str, Any] | None) -> tuple[Any, Any] | None:
-    if not row:
-        return None
-    return row.get("size_bytes"), row.get("sha256")
-
-
-def _archive_prune_remote_receipts(
-    *,
-    root: Path,
-    remote: str,
-    target: str,
-    remote_runtime_root: str | Path,
-    keep_days: int,
-    keep_count: int,
-    confirm: bool,
-    latest: dict[str, Any],
-    remote_inventory: dict[str, Any],
-    remote_inventory_operation: dict[str, Any],
-    remote_inventory_ok: bool,
-    source_binding_ok: bool,
-    run_cmd: Callable[..., Any],
-) -> dict[str, Any]:
-    latest_rows = _receipt_rows_by_path(latest.get("shadow_replay_receipts"))
-    local_rows = _receipt_rows_by_path(_shadow_replay_receipt_inventory(root))
-    remote_rows = _receipt_rows_by_path(remote_inventory.get("shadow_replay_receipts"))
-    preview_operation = _run_command(
-        _remote_receipt_prune_command(
-            ssh_target=target,
-            remote_runtime_root=remote_runtime_root,
-            keep_days=keep_days,
-            keep_count=keep_count,
-            confirm=False,
-        ),
-        run_cmd=run_cmd,
-        timeout=600,
-        stdout_limit=2_000_000,
-    )
-    preview = _parse_cli_json(preview_operation.get("stdout"))
-    candidates = preview.get("candidates") if isinstance(preview.get("candidates"), list) else []
-    unverified: list[str] = []
-    for row in candidates:
-        path = str(row.get("path") or "") if isinstance(row, dict) else ""
-        identity = _receipt_identity(row if isinstance(row, dict) else None)
-        if not path or not identity or not (
-            identity == _receipt_identity(latest_rows.get(path))
-            == _receipt_identity(local_rows.get(path))
-            == _receipt_identity(remote_rows.get(path))
-        ):
-            unverified.append(path or "<invalid>")
-    plan_sha256 = str(preview.get("plan_sha256") or "").strip().lower()
-    preview_valid = (
-        preview.get("schema_version") == "shadow_replay_receipt_prune.v1"
-        and preview.get("status") == "preview"
-        and preview.get("ok") is True
-        and not preview.get("blockers")
-        and len(plan_sha256) == 64
-        and all(character in "0123456789abcdef" for character in plan_sha256)
-        and str(preview.get("runtime_root") or "").rstrip("/")
-        == str(remote_runtime_root).rstrip("/")
-        and preview.get("keep_days") == max(0, int(keep_days))
-        and preview.get("keep_count") == max(1, int(keep_count))
-    )
-    guard = {
-        "verified_inventory_path": str(root / "manifests" / "inventory.latest.json"),
-        "source_binding_ok": source_binding_ok,
-        "remote_inventory_ok": remote_inventory_ok,
-        "planned_delete_paths": [str(row.get("path")) for row in candidates if isinstance(row, dict)],
-        "unverified_delete_paths": unverified,
-        "plan_sha256": plan_sha256 or None,
-        "confirmable": bool(preview_operation.get("ok")) and preview_valid and source_binding_ok and not unverified,
-    }
-    operations = [remote_inventory_operation, preview_operation]
-    if confirm and guard["confirmable"]:
-        apply_operation = _run_command(
-            _remote_receipt_prune_command(
-                ssh_target=target,
-                remote_runtime_root=remote_runtime_root,
-                keep_days=keep_days,
-                keep_count=keep_count,
-                confirm=True,
-                expected_plan_sha256=plan_sha256,
-            ),
-            run_cmd=run_cmd,
-            timeout=600,
-            stdout_limit=2_000_000,
-        )
-        apply_payload = _parse_cli_json(apply_operation.get("stdout"))
-        planned_paths = guard["planned_delete_paths"]
-        apply_operation["ok"] = (
-            bool(apply_operation.get("ok"))
-            and apply_payload.get("ok") is True
-            and apply_payload.get("status") == "applied"
-            and apply_payload.get("plan_sha256") == plan_sha256
-            and apply_payload.get("deleted_paths") == planned_paths
-        )
-        operations.append(apply_operation)
-    elif confirm:
-        return {
-            "schema_version": SCHEMA_VERSION,
-            "action": "prune-remote",
-            "scope": "shadow-replay-receipts",
-            "ok": False,
-            "changed": False,
-            "dry_run": False,
-            "status": "remote_prune_guard_failed",
-            "remote": _safe_label(remote or DEFAULT_REMOTE),
-            "archive_root": str(root),
-            "deletion_guard": guard,
-            "operations": operations,
-        }
-    ok = all(bool(item.get("ok")) for item in operations)
-    apply_payload = _parse_cli_json(operations[-1].get("stdout")) if len(operations) == 3 else {}
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "action": "prune-remote",
-        "scope": "shadow-replay-receipts",
-        "ok": ok,
-        "changed": bool(confirm and ok and apply_payload.get("changed")),
-        "dry_run": not confirm,
-        "remote": _safe_label(remote or DEFAULT_REMOTE),
-        "archive_root": str(root),
-        "remote_runtime_root": str(remote_runtime_root),
-        "keep_days": max(0, int(keep_days)),
-        "keep_count": max(1, int(keep_count)),
-        "deletion_guard": guard,
-        "operations": operations,
-        "remote_cleanup_preview": preview,
-    }
 
 
 def _validate_cleanup_preview(
@@ -2231,13 +1567,6 @@ def _safe_run_id(value: Any) -> str:
     return text
 
 
-def _dataset_prefix(*, remote: str, market: str | None) -> str:
-    parts = [_safe_label(remote or DEFAULT_REMOTE)]
-    if market:
-        parts.append(_safe_label(market))
-    return "-".join(parts)
-
-
 def _validate_ssh_target(value: str | None) -> str:
     text = str(value or "").strip()
     if not text:
@@ -2264,7 +1593,6 @@ def _source_summary(source: dict[str, Any]) -> dict[str, Any]:
 
 
 __all__ = [
-    "archive_build_datasets",
     "archive_inventory",
     "archive_prune_remote",
     "archive_pull",

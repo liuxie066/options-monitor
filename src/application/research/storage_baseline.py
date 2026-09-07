@@ -1593,7 +1593,7 @@ def _extract_research_archive_references(
                     path_value=relpath,
                     digest=item.get("sha256"),
                     size=item.get("size_bytes"),
-                    artifact_class="immutable_replay_authority",
+                    artifact_class="immutable_run_authority",
                     market=_first_text(run, ("market",)),
                     known_files=known_files,
                 )
@@ -1627,7 +1627,7 @@ def _extract_parallel_file_map_references(
                             path_value=raw_path,
                             digest=hashes.get(name),
                             size=sizes.get(name) if isinstance(sizes, Mapping) else None,
-                            artifact_class="experiment_or_research_artifact",
+                            artifact_class="research_artifact",
                             market=_first_text(value, ("market",)),
                             known_files=known_files,
                         )
@@ -1850,11 +1850,11 @@ def _artifact_class_for_reference(relpath: str | None) -> str:
         return "unclassified_manifest_reference"
     storage_class = _storage_class(relpath)
     if storage_class == "sealed_run_artifact":
-        return "immutable_replay_authority"
+        return "immutable_run_authority"
     if storage_class == "immutable_shared_partition":
         return storage_class
     if storage_class == "research_artifact":
-        return "experiment_or_research_artifact"
+        return "research_artifact"
     return "unclassified_manifest_reference"
 
 

@@ -171,7 +171,7 @@ def build_historical_cleanup_preview(
         },
         {
             "class": "research_generation_roots",
-            "reason": "permanent_logical_replay_roots",
+            "reason": "preserved_research_roots",
         },
     ]
     status = "ready_for_authorization" if ready else "not_ready"

@@ -785,11 +785,11 @@ def run_healthcheck_tool(
             "checks": checks,
             "tools": tools,
             "side_lanes": {
-                "research_shadow_replay": {
+                "research": {
                     "available": True,
                     "agent_tool": False,
                     "entrypoint": "./om research ...",
-                    "mode": "offline_evidence_and_replay",
+                    "mode": "read_only_evidence",
                 }
             },
             "summary": {

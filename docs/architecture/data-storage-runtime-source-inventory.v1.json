@@ -251,32 +251,6 @@
       ]
     },
     {
-      "id": "research_replay_roots",
-      "kind": "call",
-      "symbols": [
-        "build_shadow_replay_dataset",
-        "validate_dataset_integrity"
-      ],
-      "classifiers": [
-        {
-          "path_glob": "src/application/**",
-          "owner": "strategy_lab_and_shadow_replay",
-          "operation": "manifest",
-          "history_dimension": "research_generation",
-          "path_class": "offline",
-          "later_phase": "phase_6_to_7"
-        },
-        {
-          "path_glob": "src/interfaces/**",
-          "owner": "research_cli",
-          "operation": "manifest",
-          "history_dimension": "research_generation",
-          "path_class": "offline",
-          "later_phase": "phase_6_to_7"
-        }
-      ]
-    },
-    {
       "id": "runtime_root_literals",
       "kind": "literal",
       "values": [
@@ -348,12 +322,6 @@
       "locator": "b64decode",
       "owner": "required_data_snapshot",
       "reason": "legacy inline-payload compatibility consumer"
-    },
-    {
-      "path": "src/application/shadow_replay/common.py",
-      "locator": "validate_dataset_integrity",
-      "owner": "shadow_replay",
-      "reason": "offline replay integrity authority"
     },
     {
       "path": "src/application/research/archive.py",
