@@ -660,7 +660,18 @@ def test_main_uses_env_runtime_root_for_stateful_tick_flows(monkeypatch, tmp_pat
     assert captured["guard_vpy"] == Path(sys.executable)
 
 
-def test_main_scheduler_skip_does_not_create_output_run_workspace(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize(
+    "blocked_reason",
+    [
+        "non-trading day: US (weekend)",
+        "non-trading day: US (calendar override)",
+    ],
+)
+def test_main_scheduler_skip_does_not_create_output_run_workspace(
+    monkeypatch,
+    tmp_path,
+    blocked_reason: str,
+) -> None:
     import json
     from zoneinfo import ZoneInfo
 
@@ -714,7 +725,7 @@ def test_main_scheduler_skip_does_not_create_output_run_workspace(monkeypatch, t
             "schema_version": "1.0",
             "should_run_scan": False,
             "is_notify_window_open": False,
-            "reason": "当前运行点已处理，等待下一个运行点。",
+            "reason": blocked_reason,
         }
         return TickSchedulerOutcome(
             should_continue=True,
@@ -743,6 +754,7 @@ def test_main_scheduler_skip_does_not_create_output_run_workspace(monkeypatch, t
     monkeypatch.setattr(mod.state_repo, "claim_idempotency_record", lambda *args, **kwargs: {"claimed": True})
     monkeypatch.setattr(mod, "run_tick_guard_flow", _run_tick_guard_flow)
     monkeypatch.setattr(mod, "build_tick_scheduler_context", _scheduler_context)
+    monkeypatch.setenv("OM_TRIGGER_SOURCE", "cron")
     monkeypatch.setattr(
         mod,
         "prepare_tick_run_workspace",
@@ -757,6 +769,13 @@ def test_main_scheduler_skip_does_not_create_output_run_workspace(monkeypatch, t
         mod,
         "run_tick_notification_flow",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("skip must not run notification flow")),
+    )
+    monkeypatch.setattr(
+        mod,
+        "warm_required_data_chain_cache",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("trading-day block must not warm")
+        ),
     )
 
     rc = mod.main(["--config", str(cfg), "--accounts", "lx"])
@@ -795,11 +814,13 @@ def test_daily_brief_trigger_kind_distinguishes_schedule_manual_and_force() -> N
     ("notification_rc", "smoke"),
     [(0, False), (1, False), (0, True)],
 )
+@pytest.mark.parametrize("market", ["US", "HK"])
 def test_main_scheduler_no_scan_warms_only_after_successful_delivery(
     monkeypatch,
     tmp_path,
     notification_rc: int,
     smoke: bool,
+    market: str,
 ) -> None:
     import json
     from zoneinfo import ZoneInfo
@@ -809,14 +830,16 @@ def test_main_scheduler_no_scan_warms_only_after_successful_delivery(
     from src.application.tick_guard_flow import TickGuardOutcome
     from src.application.tick_scheduler_context import TickSchedulerContext, TickSchedulerOutcome
 
-    cfg = tmp_path / "config.us.json"
+    schedule_key = "schedule_hk" if market == "HK" else "schedule"
+    symbol = "0700.HK" if market == "HK" else "NVDA"
+    cfg = tmp_path / f"config.{market.lower()}.json"
     cfg.write_text(
         json.dumps(
             {
-                "_generated": {"schema_version": "1.0", "generator": "options-monitor", "source_format": "yaml", "market": "us"},
+                "_generated": {"schema_version": "1.0", "generator": "options-monitor", "source_format": "yaml", "market": market.lower()},
                 "accounts": ["lx"],
-                "symbols": [{"symbol": "NVDA", "broker": "US"}],
-                "schedule": {"enabled": True, "cron_interval_min": 10},
+                "symbols": [{"symbol": symbol, "broker": market}],
+                schedule_key: {"enabled": True, "cron_interval_min": 10},
                 "notifications": {"daily_brief": {"enabled": True}},
                 "portfolio": {},
             }
@@ -837,16 +860,28 @@ def test_main_scheduler_no_scan_warms_only_after_successful_delivery(
     def guard(request):
         return TickGuardOutcome(True, 0, request.base_cfg, request.accounts, request.default_account, ZoneInfo("Asia/Shanghai"))
 
+    market_times = (
+        {
+            "now_market": "2026-07-21T09:30:05+08:00",
+            "now_beijing": "2026-07-21T09:30:05+08:00",
+            "run_window_start_beijing": "2026-07-21T09:30:00+08:00",
+            "next_run_market": "2026-07-21T09:40:00+08:00",
+        }
+        if market == "HK"
+        else {
+            "now_market": "2026-07-21T09:30:05-04:00",
+            "now_beijing": "2026-07-21T21:30:05+08:00",
+            "run_window_start_beijing": "2026-07-21T21:30:00+08:00",
+            "next_run_market": "2026-07-21T09:40:00-04:00",
+        }
+    )
     decision = {
         "schema_kind": "scheduler_decision",
         "schema_version": "1.0",
         "should_run_scan": False,
         "is_notify_window_open": False,
         "in_run_window": True,
-        "now_market": "2026-07-21T09:30:05-04:00",
-        "now_beijing": "2026-07-21T21:30:05+08:00",
-        "run_window_start_beijing": "2026-07-21T21:30:00+08:00",
-        "next_run_market": "2026-07-21T09:40:00-04:00",
+        **market_times,
         "reason": "当前没有待执行运行点。",
     }
 
@@ -855,10 +890,10 @@ def test_main_scheduler_no_scan_warms_only_after_successful_delivery(
             True,
             0,
             TickSchedulerContext(
-                markets_to_run=["US"],
-                scheduler_markets=["US"],
+                markets_to_run=[market],
+                scheduler_markets=[market],
                 state_path=runtime_root / "output_shared/state/scheduler_state.json",
-                scheduler_schedule_key="schedule",
+                scheduler_schedule_key=schedule_key,
                 scheduler_ms=1,
                 scheduler_decision=decision,
                 scheduler_view=SchedulerDecisionView.from_payload(decision),
@@ -912,53 +947,199 @@ def test_main_scheduler_no_scan_warms_only_after_successful_delivery(
     if notification_rc == 0 and not smoke:
         assert order.index("notification") < order.index("warmup")
         assert order.index("warmup") < order.index("opening_chain_warmup")
-        assert captured["warmup"]["next_formal_target_utc"] == "2026-07-21T13:40:00Z"
+        expected_target = (
+            "2026-07-21T01:40:00Z"
+            if market == "HK"
+            else "2026-07-21T13:40:00Z"
+        )
+        assert captured["warmup"]["next_formal_target_utc"] == expected_target
     else:
         assert "warmup" not in order
     assert not (runtime_root / "output_runs").exists()
 
 
-def test_opening_chain_warmup_context_requires_first_us_no_scan_window() -> None:
-    from src.application import multi_account_tick as mod
+@pytest.mark.parametrize(
+    ("market", "schedule_key"),
+    [("US", "schedule"), ("HK", "schedule_hk"), ("HK", "schedule")],
+)
+def test_opening_chain_warmup_context_requires_first_no_scan_window(
+    market: str,
+    schedule_key: str,
+) -> None:
+    from datetime import datetime, timedelta, timezone
+    from zoneinfo import ZoneInfo
 
-    decision = {
-        "in_run_window": True,
-        "should_run_scan": False,
-        "now_beijing": "2026-12-21T22:30:05+08:00",
-        "run_window_start_beijing": "2026-12-21T22:30:00+08:00",
-        "next_run_market": "2026-12-21T09:40:00-05:00",
+    from src.application import multi_account_tick as mod
+    from src.application.scan_scheduler import decide
+
+    schedule = {
+        "enabled": True,
+        "timezone": (
+            "Asia/Hong_Kong" if market == "HK" else "America/New_York"
+        ),
+        "beijing_timezone": "Asia/Shanghai",
+        "cron_interval_min": 10,
+        "run_window": {"start": "09:30", "end": "16:00", "breaks": []},
+        "run_points": {
+            "start_plus_min": 10,
+            "hourly_minute": 0,
+            "end_minus_min": 10,
+        },
     }
+    now_utc = datetime(
+        2026,
+        12,
+        21,
+        1 if market == "HK" else 14,
+        30,
+        5,
+        tzinfo=timezone.utc,
+    )
+    decision = decide(
+        schedule,
+        {},
+        now_utc,
+        account="lx",
+        schedule_key=schedule_key,
+    ).__dict__
 
     context = mod._opening_chain_warmup_context(
         trigger_kind="scheduled",
-        scheduler_markets=["US"],
-        base_cfg={"schedule": {"cron_interval_min": 10}},
-        scheduler_schedule_key="schedule",
+        scheduler_markets=[market],
+        base_cfg={schedule_key: schedule},
+        scheduler_schedule_key=schedule_key,
         account_ids=["lx", "sy"],
         scheduler_decisions_by_account={"lx": decision, "sy": dict(decision)},
     )
 
+    target_hour = "01" if market == "HK" else "14"
     assert context == {
-        "next_formal_target_utc": "2026-12-21T14:40:00Z",
-        "worker_stop_at_utc": "2026-12-21T14:37:50Z",
-        "lock_release_by_utc": "2026-12-21T14:38:00Z",
+        "next_formal_target_utc": f"2026-12-21T{target_hour}:40:00Z",
+        "worker_stop_at_utc": f"2026-12-21T{target_hour}:37:50Z",
+        "lock_release_by_utc": f"2026-12-21T{target_hour}:38:00Z",
     }
+    cutoff_beijing = (
+        datetime.fromisoformat(decision["next_run_market"])
+        - timedelta(seconds=130)
+    ).astimezone(ZoneInfo("Asia/Shanghai"))
     assert (
         mod._opening_chain_warmup_context(
             trigger_kind="scheduled",
-            scheduler_markets=["US"],
-            base_cfg={"schedule": {"cron_interval_min": 10}},
-            scheduler_schedule_key="schedule",
+            scheduler_markets=[market],
+            base_cfg={schedule_key: schedule},
+            scheduler_schedule_key=schedule_key,
             account_ids=["lx"],
             scheduler_decisions_by_account={
                 "lx": {
                     **decision,
-                    "now_beijing": "2026-12-21T22:50:00+08:00",
+                    "now_beijing": cutoff_beijing.isoformat(),
                 }
             },
         )
         is None
     )
+    next_target = datetime.fromisoformat(decision["next_run_market"])
+    run_start = datetime.fromisoformat(
+        decision["run_window_start_beijing"]
+    )
+    valid_args = {
+        "trigger_kind": "scheduled",
+        "scheduler_markets": [market],
+        "base_cfg": {schedule_key: schedule},
+        "scheduler_schedule_key": schedule_key,
+        "account_ids": ["lx", "sy"],
+        "scheduler_decisions_by_account": {
+            "lx": decision,
+            "sy": dict(decision),
+        },
+    }
+    rejected = [
+        {"trigger_kind": "manual"},
+        {"trigger_kind": "force"},
+        {"scheduler_markets": [market, "US" if market == "HK" else "HK"]},
+        {"account_ids": ["lx", "missing"]},
+        {
+            "scheduler_decisions_by_account": {
+                "lx": {**decision, "should_run_scan": True},
+                "sy": dict(decision),
+            }
+        },
+        {
+            "scheduler_decisions_by_account": {
+                "lx": decision,
+                "sy": {
+                    **decision,
+                    "next_run_market": (
+                        next_target + timedelta(minutes=10)
+                    ).isoformat(),
+                },
+            }
+        },
+        {
+            "scheduler_decisions_by_account": {
+                "lx": {
+                    **decision,
+                    "now_beijing": (
+                        run_start + timedelta(minutes=10)
+                    ).isoformat(),
+                },
+                "sy": dict(decision),
+            }
+        },
+    ]
+    for override in rejected:
+        assert (
+            mod._opening_chain_warmup_context(
+                **{**valid_args, **override},  # type: ignore[arg-type]
+            )
+            is None
+        )
+
+
+def test_hk_opening_chain_warmup_rejects_lunch_and_afternoon_decisions() -> None:
+    from datetime import datetime, timezone
+
+    from src.application import multi_account_tick as mod
+    from src.application.scan_scheduler import decide
+
+    schedule = {
+        "enabled": True,
+        "timezone": "Asia/Hong_Kong",
+        "beijing_timezone": "Asia/Shanghai",
+        "cron_interval_min": 10,
+        "run_window": {
+            "start": "09:30",
+            "end": "16:00",
+            "breaks": [{"start": "12:00", "end": "13:00"}],
+        },
+        "run_points": {
+            "start_plus_min": 10,
+            "hourly_minute": 0,
+            "end_minus_min": 10,
+        },
+    }
+    for now_utc in (
+        datetime(2026, 12, 21, 4, 30, tzinfo=timezone.utc),
+        datetime(2026, 12, 21, 5, 30, tzinfo=timezone.utc),
+    ):
+        decision = decide(
+            schedule,
+            {},
+            now_utc,
+            account="lx",
+            schedule_key="schedule_hk",
+        ).__dict__
+        assert (
+            mod._opening_chain_warmup_context(
+                trigger_kind="scheduled",
+                scheduler_markets=["HK"],
+                base_cfg={"schedule_hk": schedule},
+                scheduler_schedule_key="schedule_hk",
+                account_ids=["lx"],
+                scheduler_decisions_by_account={"lx": decision},
+            )
+            is None
+        )
 
 
 def test_duplicate_unsupported_tick_failure_returns_nonzero_without_rerun(monkeypatch, tmp_path) -> None:

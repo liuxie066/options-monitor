@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Improvements
+- Reduced overlapping put/call required-data chain requests by partitioning expirations at the shared merger, and reused the existing opening warmer for scheduled HK ticks while preserving fresh formal quotes.
+
 ## 3.4.10 - 2026-09-05
 
 ### Improvements

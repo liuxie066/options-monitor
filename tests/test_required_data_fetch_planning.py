@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
@@ -827,6 +828,158 @@ def test_put_and_call_same_expirations_merge_into_single_request(monkeypatch, tm
         side_plan["required_exact_strikes_by_expiration"] == {}
         for side_plan in plan.to_debug_dict()["side_plans"]
     )
+
+
+def test_partial_put_call_overlap_fetches_each_expiration_once() -> None:
+    import src.application.required_data_planning as mod
+    from src.application.opend_symbol_chain_fetching import (
+        OptionExpirationDiscoveryResult,
+    )
+    from src.application.required_data_plan_identity import (
+        build_required_data_expected_fetch_contract,
+    )
+
+    expirations = [
+        "2026-09-18",
+        "2026-08-21",
+        "2026-10-16",
+        "2026-11-20",
+        "2026-12-18",
+    ]
+    put = mod.OptionSideFetchPlan(
+        option_type="put",
+        min_dte=20,
+        max_dte=150,
+        explicit_expirations=list(expirations),
+        strike_window=mod.StrikeWindowPlan(
+            min_strike=400.0,
+            max_strike=460.0,
+            source="fixture.put",
+        ),
+        planning_reason="fixture put",
+        required_exact_strikes_by_expiration={
+            "2026-08-21": [420.0],
+            "2026-09-18": [425.0],
+            "2026-12-18": [430.0],
+        },
+    )
+    call = mod.OptionSideFetchPlan(
+        option_type="call",
+        min_dte=20,
+        max_dte=150,
+        explicit_expirations=list(reversed(expirations[:4])),
+        strike_window=mod.StrikeWindowPlan(
+            min_strike=500.0,
+            max_strike=560.0,
+            source="fixture.call",
+        ),
+        planning_reason="fixture call",
+        required_exact_strikes_by_expiration={"2026-09-18": [520.0]},
+    )
+    original = [put.to_debug_dict(), call.to_debug_dict()]
+
+    specs = mod._merge_side_plans(
+        symbol="0700.HK",
+        limit_expirations=5,
+        host="127.0.0.1",
+        port=11111,
+        side_plans=[put, call],
+        trading_date=date(2026, 7, 27),
+    )
+
+    assert sum(len(spec.explicit_expirations) for spec in specs) == 5
+    assert [spec.option_types for spec in specs] == [
+        ("put", "call"),
+        ("put",),
+    ]
+    assert specs[0].explicit_expirations == expirations[:4]
+    assert [
+        side.explicit_expirations for side in specs[0].side_plans
+    ] == [expirations[:4], expirations[:4]]
+    assert specs[0].side_plans[0].required_exact_strikes_by_expiration == {
+        "2026-08-21": [420.0],
+        "2026-09-18": [425.0],
+    }
+    assert specs[0].side_plans[1].required_exact_strikes_by_expiration == {
+        "2026-09-18": [520.0]
+    }
+    assert specs[1].explicit_expirations == ["2026-12-18"]
+    assert specs[1].side_plans[0].required_exact_strikes_by_expiration == {
+        "2026-12-18": [430.0]
+    }
+    assert [put.to_debug_dict(), call.to_debug_dict()] == original
+
+    bundle = mod.RequiredDataFetchPlanBundle(
+        symbol="0700.HK",
+        spot_reference=None,
+        side_plans=[put, call],
+        merged_specs=specs,
+        expiration_discovery=OptionExpirationDiscoveryResult(
+            outcome="success_rows",
+            reason_code=None,
+            expirations=sorted(expirations),
+            observed_at_utc="2026-07-27T01:00:00Z",
+            completed_at_utc="2026-07-27T01:00:01Z",
+            request_identity={
+                "symbol": "0700.HK",
+                "underlier": "HK.00700",
+                "source": "opend",
+                "host": "127.0.0.1",
+                "port": 11111,
+                "trading_date": "2026-07-27",
+            },
+        ),
+        projection_outcome="success_rows",
+        projected_expirations=list(expirations),
+    )
+    contract = build_required_data_expected_fetch_contract(
+        symbol="0700.HK",
+        fetch_plan=bundle.to_debug_dict(),
+        source="opend",
+        host="127.0.0.1",
+        port=11111,
+    )
+    assert contract["fetch_plan"]["merged_requests"][0][
+        "explicit_expirations"
+    ] == expirations[:4]
+
+    same_set_put = replace(
+        put,
+        explicit_expirations=list(expirations[:4]),
+        required_exact_strikes_by_expiration={
+            "2026-08-21": [420.0],
+            "2026-09-18": [425.0],
+        },
+    )
+    same_specs = mod._merge_side_plans(
+        symbol="0700.HK",
+        limit_expirations=4,
+        host="127.0.0.1",
+        port=11111,
+        side_plans=[same_set_put, call],
+        trading_date=date(2026, 7, 27),
+    )
+    assert len(same_specs) == 1
+    assert same_specs[0].option_types == ("put", "call")
+    assert same_specs[0].explicit_expirations == expirations[:4]
+    assert bundle.expiration_discovery is not None
+    same_contract = build_required_data_expected_fetch_contract(
+        symbol="0700.HK",
+        fetch_plan=replace(
+            bundle,
+            side_plans=[same_set_put, call],
+            merged_specs=same_specs,
+            expiration_discovery=replace(
+                bundle.expiration_discovery,
+                expirations=sorted(expirations[:4]),
+            ),
+            projected_expirations=list(expirations[:4]),
+        ).to_debug_dict(),
+        source="opend",
+        host="127.0.0.1",
+        port=11111,
+    )
+    assert len(same_contract["fetch_plan"]["merged_requests"]) == 1
 
 
 def test_put_and_call_different_expirations_split_requests(monkeypatch, tmp_path: Path) -> None:

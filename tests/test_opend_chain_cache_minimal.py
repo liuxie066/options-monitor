@@ -369,6 +369,220 @@ def test_option_chain_single_side_request_passes_option_type_to_opend(tmp_path: 
     assert captured[0]["option_type"] == "PUT"
 
 
+def test_partitioned_incident_plan_makes_17_calls_for_21_side_date_scopes(
+    tmp_path: Path,
+) -> None:
+    import pandas as pd
+
+    from src.application.opend_symbol_fetching import fetch_symbol
+    from src.application.required_data_planning import (
+        OptionSideFetchPlan,
+        StrikeWindowPlan,
+        _merge_side_plans,
+    )
+
+    calls: list[dict[str, Any]] = []
+    snapshot_calls: list[list[str]] = []
+
+    class _Gateway:
+        def get_option_chain(self, **kwargs):  # noqa: ANN001, ANN201
+            calls.append(dict(kwargs))
+            underlier = str(kwargs["code"])
+            expiration = str(kwargs["start"])
+            requested = kwargs.get("option_type")
+            sides = [str(requested)] if requested else ["PUT", "CALL"]
+            return pd.DataFrame([
+                {
+                    "code": f"{underlier}.{expiration}.{side[0]}100",
+                    "strike_time": expiration,
+                    "strike_price": 100,
+                    "option_type": side,
+                    "option_standard_type": "STANDARD",
+                    "stock_owner": underlier,
+                    "stock_type": "DRVT",
+                    "suspension": False,
+                    "lot_size": 100,
+                }
+                for side in sides
+            ])
+
+        def get_snapshot(self, codes):  # noqa: ANN001, ANN201
+            snapshot_calls.append(list(codes))
+            return pd.DataFrame(
+                [
+                    {
+                        "code": code,
+                        "last_price": 1.0,
+                        "bid_price": 0.9,
+                        "ask_price": 1.1,
+                        "bid_vol": 10,
+                        "ask_vol": 12,
+                        "price_spread": 0.01,
+                        "sec_status": "NORMAL",
+                        "suspension": False,
+                        "option_contract_multiplier": 100,
+                    }
+                    for code in codes
+                ]
+            )
+
+    def side_plan(option_type: str, expirations: list[str]) -> OptionSideFetchPlan:
+        return OptionSideFetchPlan(
+            option_type=cast(Any, option_type),
+            min_dte=1,
+            max_dte=365,
+            explicit_expirations=expirations,
+            strike_window=StrikeWindowPlan(
+                min_strike=80.0,
+                max_strike=120.0,
+                source=f"fixture.{option_type}",
+            ),
+            planning_reason=f"fixture {option_type}",
+        )
+
+    shared = [
+        "2026-08-21",
+        "2026-09-18",
+        "2026-10-16",
+        "2026-11-20",
+    ]
+    symbol_plans = [
+        (
+            "0700.HK",
+            [side_plan("put", [*shared, "2026-12-18"]), side_plan("call", shared)],
+        ),
+        ("9988.HK", [side_plan("put", ["2026-08-28", "2026-09-25", "2026-10-30", "2026-11-27"])]),
+        ("9999.HK", [side_plan("put", ["2026-08-14", "2026-09-11", "2026-10-09", "2026-11-13"])]),
+        ("1211.HK", [side_plan("call", ["2026-08-07", "2026-09-04", "2026-10-02", "2026-11-06"])]),
+    ]
+    gateway = _Gateway()
+    covered_scopes: set[tuple[str, str, str]] = set()
+    for symbol, side_plans in symbol_plans:
+        specs = _merge_side_plans(
+            symbol=symbol,
+            limit_expirations=0,
+            host="127.0.0.1",
+            port=11111,
+            side_plans=side_plans,
+        )
+        for spec in specs:
+            result = fetch_symbol(
+                symbol,
+                host="127.0.0.1",
+                port=11111,
+                spot_override=100.0,
+                fetch_spot_if_missing=False,
+                base_dir=tmp_path,
+                option_types=",".join(spec.option_types),
+                side_strike_windows=spec.side_strike_windows,
+                min_dte=spec.min_dte,
+                max_dte=spec.max_dte,
+                explicit_expirations=spec.explicit_expirations,
+                trading_date="2026-07-01",
+                no_retry=True,
+                chain_cache=False,
+                max_wait_sec=1,
+                option_chain_window_sec=0.01,
+                option_chain_max_calls=100,
+                snapshot_max_wait_sec=1,
+                snapshot_window_sec=0.01,
+                snapshot_max_calls=100,
+                gateway=gateway,
+            )
+            assert result["meta"]["status"] == "ok"
+            assert result["meta"]["snapshot_complete"] is True
+            request_scopes = {
+                (symbol, option_type, expiration)
+                for option_type in spec.option_types
+                for expiration in spec.explicit_expirations
+            }
+            result_scopes = {
+                (
+                    symbol,
+                    str(row["option_type"]).lower(),
+                    str(row["expiration"]),
+                )
+                for row in result["rows"]
+            }
+            assert result_scopes == request_scopes
+            covered_scopes.update(result_scopes)
+
+    expected_scopes = {
+        (symbol, plan.option_type, expiration)
+        for symbol, side_plans in symbol_plans
+        for plan in side_plans
+        for expiration in plan.explicit_expirations
+    }
+    assert len(expected_scopes) == 21
+    assert covered_scopes == expected_scopes
+    assert len(calls) == 17
+    assert sum(len(codes) for codes in snapshot_calls) == 21
+
+
+def test_put_only_warm_cache_has_full_or_partial_formal_reuse_by_scope(
+    tmp_path: Path,
+) -> None:
+    from src.application.option_chain_fetching import (
+        OptionChainFetchRequest,
+        fetch_option_chains,
+    )
+
+    calls: list[dict[str, Any]] = []
+
+    class _Gateway:
+        def get_option_chain(self, **kwargs):  # noqa: ANN001, ANN201
+            calls.append(dict(kwargs))
+            expiration = str(kwargs["start"])
+            requested = kwargs.get("option_type")
+            sides = [str(requested)] if requested else ["PUT", "CALL"]
+            return [
+                {
+                    "code": f"HK.00700.{expiration}.{side[0]}100",
+                    "strike_time": expiration,
+                    "strike_price": 100,
+                    "option_type": side,
+                }
+                for side in sides
+            ]
+
+    expirations = [
+        "2026-08-21",
+        "2026-09-18",
+        "2026-10-16",
+        "2026-11-20",
+        "2026-12-18",
+    ]
+
+    def fetch(requested_expirations: list[str], option_types: str):
+        return fetch_option_chains(
+            gateway=_Gateway(),
+            request=OptionChainFetchRequest(
+                symbol="0700.HK",
+                underlier_code="HK.00700",
+                expirations=requested_expirations,
+                option_types=option_types,
+                base_dir=tmp_path,
+                asof_date="2026-07-27",
+                chain_cache=True,
+                max_calls=100,
+                no_retry=True,
+            ),
+            retry_call=lambda _name, fn, **_kwargs: fn(),
+        )
+
+    warm = fetch(expirations, "put")
+    matching_formal = fetch(expirations, "put")
+    mismatched_formal = fetch(expirations[:4], "put,call")
+    exclusive_formal = fetch(expirations[4:], "put")
+
+    assert warm.opend_call_count == 5
+    assert matching_formal.opend_call_count == 0
+    assert matching_formal.from_cache_expirations == expirations
+    assert mismatched_formal.opend_call_count == 4
+    assert exclusive_formal.opend_call_count == 0
+    assert len(calls) == 9
+
+
 def test_option_chain_legacy_option_type_fallback_records_rate_limit() -> None:
 
     from src.application.option_chain_fetching import OptionChainFetchRequest, _fetch_one_chain
