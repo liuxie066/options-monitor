@@ -5,12 +5,17 @@ import json
 from datetime import datetime, timezone
 from decimal import Decimal, DecimalException
 from typing import Any, Mapping
+from dataclasses import replace
+from zoneinfo import ZoneInfo
 
 from domain.domain.performance.models import (
     canonical_decimal_text,
+    EvidenceSelection,
+    FXRateFact,
     normalize_currency,
     quantize_money,
     to_decimal,
+    select_fx_rate,
 )
 
 
@@ -27,6 +32,104 @@ FOREIGN_METHODS = {
     "historical_fx_evidence_backfill",
     HISTORICAL_BUSINESS_DAY_FX_CARRY_FORWARD_METHOD,
 }
+DAILY_CASH_FX_POLICY = "shanghai_first_observed.v1"
+DAILY_CASH_FX_METHOD = "shanghai_daily_fx"
+FOREIGN_METHODS.add(DAILY_CASH_FX_METHOD)
+_SHANGHAI = ZoneInfo("Asia/Shanghai")
+_MARKET_FX_SOURCES = frozenset({"tencent_quote", "sina_quote"})
+
+
+def cash_fx_date(timestamp_ms: int) -> str:
+    return datetime.fromtimestamp(int(timestamp_ms) / 1000, tz=_SHANGHAI).date().isoformat()
+
+
+def fixed_cash_fx_fact(fact: FXRateFact) -> FXRateFact | None:
+    """Construct a day identity only from a dated, same-day market observation."""
+    provider = str(fact.quality.get("provider_source") or fact.source)
+    day = cash_fx_date(fact.effective_at_ms)
+    if (
+        provider not in _MARKET_FX_SOURCES
+        or fact.quote_currency != "CNY"
+        or fact.quality.get("source_timestamp_verified") is not True
+        or cash_fx_date(fact.observed_at_ms) != day
+        or fact.effective_at_ms > fact.observed_at_ms
+    ):
+        return None
+    identity = f"cashfxday:{DAILY_CASH_FX_POLICY}:{day}:{fact.base_currency}:{fact.quote_currency}"
+    return replace(
+        fact,
+        fact_id=identity,
+        source_id=identity,
+        source=provider,
+        revision=1,
+        supersedes_fact_id=None,
+        quality={**fact.quality, "cash_fx_policy": DAILY_CASH_FX_POLICY, "cash_fx_date": day},
+        raw={**fact.raw, "selected_fx_fact": fact.normalized_payload()},
+    )
+
+
+def cash_fx_daily_facts(facts: list[FXRateFact] | tuple[FXRateFact, ...]) -> tuple[FXRateFact, ...]:
+    by_id = {fact.fact_id: fact for fact in facts}
+    for fact in sorted(facts, key=lambda item: (item.observed_at_ms, 0 if item.quality.get("provider_source", item.source) == "tencent_quote" else 1, str(item.fact_id))):
+        if fact.quality.get("cash_fx_policy") != DAILY_CASH_FX_POLICY:
+            fixed = fixed_cash_fx_fact(fact)
+            if fixed is not None:
+                by_id.setdefault(fixed.fact_id, fixed)
+    return tuple(by_id.values())
+
+
+def select_cash_fx_rate(
+    facts: list[FXRateFact] | tuple[FXRateFact, ...],
+    *,
+    base_currency: str,
+    at_ms: int,
+) -> EvidenceSelection:
+    """Cash uses the Shanghai day; valuation selectors retain instant semantics."""
+    day = cash_fx_date(at_ms)
+    matching = [fact for fact in facts if fact.base_currency == normalize_currency(base_currency) and fact.quote_currency == "CNY"]
+    fixed = [
+        fact for fact in matching
+        if fact.quality.get("cash_fx_policy") == DAILY_CASH_FX_POLICY
+        and fact.quality.get("cash_fx_date") == day
+        and fact.supersedes_fact_id is None
+    ]
+    if fixed:
+        anchor = min(fixed, key=lambda fact: (fact.observed_at_ms, str(fact.fact_id)))
+        lineage = {anchor.fact_id: anchor}
+        corrections = [
+            fact for fact in matching
+            if fact.source in OFFICIAL_CARRY_FORWARD_SOURCES
+            and cash_fx_date(fact.effective_at_ms) == day
+        ]
+        # Later quotes cannot replace the day anchor without explicit correction lineage.
+        while additions := [
+            fact for fact in corrections
+            if fact.fact_id not in lineage and fact.supersedes_fact_id in lineage
+        ]:
+            lineage.update((fact.fact_id, fact) for fact in additions)
+        selection = select_fx_rate(
+            list(lineage.values()), base_currency=base_currency,
+            at_ms=max(fact.effective_at_ms for fact in lineage.values()),
+            max_staleness_ms=MAX_BOOKING_RATE_DISTANCE_MS,
+        )
+        return replace(
+            selection, at_ms=int(at_ms),
+            staleness_ms=abs(int(at_ms) - selection.fact.effective_at_ms) if selection.fact else None,
+            reason="cash_fx_daily_corrected" if selection.fact != anchor else "cash_fx_daily_fixed",
+        )
+    official = [fact for fact in matching if fact.source in OFFICIAL_CARRY_FORWARD_SOURCES]
+    same_day = [fact for fact in official if cash_fx_date(fact.effective_at_ms) == day]
+    if same_day:
+        return select_fx_rate(same_day, base_currency=base_currency, at_ms=max(fact.effective_at_ms for fact in same_day), max_staleness_ms=MAX_BOOKING_RATE_DISTANCE_MS)
+    carried = [
+        fact for fact in official
+        if fact.quality.get("official") is True
+        and isinstance(fact.quality.get("carry_forward_dates"), (list, tuple))
+        and day in fact.quality["carry_forward_dates"]
+    ]
+    if carried:
+        return select_fx_rate(carried, base_currency=base_currency, at_ms=int(at_ms), max_staleness_ms=MAX_HISTORICAL_CARRY_FORWARD_DISTANCE_MS)
+    return EvidenceSelection(None, "missing", int(at_ms), reason="no fixed Shanghai-day FX or explicit official carry date")
 
 
 def cash_conversion_identity(
@@ -178,6 +281,14 @@ def _validate_observed_cash_conversion(
         rate_timestamp_ms = _timestamp_ms(conversion.get("rate_timestamp"))
         if rate_timestamp_ms is None:
             return None, "rate_timestamp_invalid"
+        if method == DAILY_CASH_FX_METHOD and (
+            conversion.get("fx_policy") != DAILY_CASH_FX_POLICY
+            or conversion.get("cash_fx_date") != cash_fx_date(conversion_effective_at_ms)
+            or cash_fx_date(rate_timestamp_ms) != cash_fx_date(conversion_effective_at_ms)
+            or not str(conversion.get("rate_evidence_fact_id") or "").strip()
+            or rate_source not in _MARKET_FX_SOURCES
+        ):
+            return None, "fx_provenance_invalid"
         if method == HISTORICAL_BUSINESS_DAY_FX_CARRY_FORWARD_METHOD and (
             rate_timestamp_ms > conversion_effective_at_ms
             or rate_source not in OFFICIAL_CARRY_FORWARD_SOURCES
@@ -222,11 +333,17 @@ def _timestamp_ms(value: Any) -> int | None:
 
 
 __all__ = [
+    "DAILY_CASH_FX_METHOD",
+    "DAILY_CASH_FX_POLICY",
     "HISTORICAL_BUSINESS_DAY_FX_CARRY_FORWARD_METHOD",
     "MAX_BOOKING_RATE_DISTANCE_MS",
     "MAX_HISTORICAL_CARRY_FORWARD_DISTANCE_MS",
     "OFFICIAL_CARRY_FORWARD_SOURCES",
     "cash_conversion_id",
     "cash_conversion_identity",
+    "cash_fx_daily_facts",
+    "cash_fx_date",
+    "fixed_cash_fx_fact",
+    "select_cash_fx_rate",
     "validate_observed_cash_conversion",
 ]

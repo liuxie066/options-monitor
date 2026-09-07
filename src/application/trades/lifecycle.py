@@ -26,6 +26,7 @@ from domain.domain.trade_contract_identity import canonical_contract_symbol, nor
 from src.application.ledger.api import (
     accept_option_close_evidence,
     BrokerTradeOperation,
+    futu_compatibility_source_key,
     canonical_source_economic_payload,
     canonical_source_payload_hash,
     LegacySettlementSemanticUnavailable,
@@ -36,7 +37,6 @@ from src.application.ledger.api import (
     record_lifecycle_observation_attempt_atomically,
 )
 from domain.domain.symbol_identity import symbol_market
-from src.application.trades.deal_identity import broker_deal_key
 from src.application.trades.lifecycle_reconciliation import (
     reconcile_lifecycle_evidence,
 )
@@ -121,7 +121,7 @@ def lifecycle_deal_economic_hash(
         }
     else:
         return None
-    source_key = str(broker_deal_key(deal) or "").strip()
+    source_key = _futu_source_key(deal)
     if not source_key:
         return None
     canonical = canonical_source_economic_payload(
@@ -142,7 +142,7 @@ def _resolve_zero_price_option_close(
     if not apply_changes:
         return _preview_zero_price_option_close(deal, repo=repo)
 
-    source_event_id = str(broker_deal_key(deal) or "").strip()
+    source_event_id = _futu_source_key(deal)
     evidence = _evidence_from_deal(
         deal,
         evidence_type="option_zero_price_close",
@@ -1020,13 +1020,22 @@ def _case_from_option_deal(deal: NormalizedTradeDeal) -> dict[str, Any]:
     }
 
 
+def _futu_source_key(deal: NormalizedTradeDeal) -> str:
+    return futu_compatibility_source_key(
+        account=deal.internal_account,
+        futu_account_id=deal.futu_account_id,
+        source_deal_id=deal.deal_id,
+        execution_input=deal.execution_input,
+    )
+
+
 def _evidence_from_deal(
     deal: NormalizedTradeDeal,
     *,
     evidence_type: str,
     case_id: str | None,
 ) -> dict[str, Any]:
-    source_event_id = str(broker_deal_key(deal) or "").strip()
+    source_event_id = _futu_source_key(deal)
     evidence_id = _stable_id("ev", f"{evidence_type}|{source_event_id or deal.to_dict()}")
     raw = deal.to_dict()
     out = {

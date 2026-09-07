@@ -20,7 +20,11 @@ from domain.domain.ledger.position_fields import (
 )
 from domain.domain.option_position_identity import normalize_currency
 from src.application.ledger.api import (
+    applied_execution_association_conflicts,
     assigned_stock_event_log,
+    broker_external_event_key,
+    broker_execution_identity,
+    execution_identity_from_input,
     compact_assigned_stock_view,
     LotCloseResolutionError,
     preview_manual_assignment,
@@ -36,6 +40,11 @@ from src.application.ledger.api import (
     read_current_position_projection,
     record_assigned_stock_event,
     resolve_manual_position_close_target,
+    with_sqlite_repo_writer_lock,
+)
+from domain.domain.trade_execution import (
+    conflicting_execution_associations,
+    execution_economic_content,
 )
 from src.application.cash_conversion import (
     attach_assigned_stock_sale_cash_conversions,
@@ -118,6 +127,9 @@ def _assigned_stock_report(
 
 
 def _assigned_stock_sale_event_id(payload: dict[str, Any]) -> str:
+    execution_id = execution_identity_from_input(payload.get("execution_input"))
+    if execution_id:
+        return f"assigned-stock-sale-{execution_id.rsplit(':', 1)[-1]}"
     source_deal_id = str(payload.get("source_deal_id") or "").strip()
     if source_deal_id:
         return f"assigned-stock-sale-{source_deal_id}"
@@ -164,6 +176,7 @@ def _build_assigned_stock_sale_event(
     futu_account_id: str | None,
     order_id: str | None,
     source: str,
+    execution_input: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload = {
         "event_type": "sale",
@@ -184,6 +197,9 @@ def _build_assigned_stock_sale_event(
     }
     if isinstance(fee_provenance, dict):
         payload["fee_provenance"] = dict(fee_provenance)
+    if execution_identity_from_input(execution_input):
+        payload["execution_input"] = dict(execution_input or {})
+        payload["execution_id"] = execution_identity_from_input(execution_input)
     payload["stock_event_id"] = _assigned_stock_sale_event_id(payload)
     return payload
 
@@ -301,17 +317,57 @@ def _broker_assigned_stock_sale_match(repo: Any, deal: Any) -> dict[str, Any]:
         as_of_ms=trade_time_ms,
     )
     source_deal_id = str(getattr(deal, "deal_id", None) or "").strip()
+    execution_id = broker_execution_identity(deal)
+    physical_account = str(getattr(deal, "futu_account_id", None) or "").strip()
+    def same_source(event: dict[str, Any]) -> bool:
+        stored_id = execution_identity_from_input(event.get("execution_input"))
+        if stored_id and execution_id:
+            return stored_id == execution_id
+        if execution_id and not broker_external_event_key(deal).startswith("futu:"):
+            return False
+        return bool(
+            source_deal_id and physical_account
+            and normalize_account(event.get("account")) == account
+            and normalize_broker(event.get("broker")) == broker
+            and str(event.get("futu_account_id") or "").strip() == physical_account
+            and str(event.get("source_deal_id") or "").strip() == source_deal_id
+        )
     existing_by_source = next(
         (
             event
             for event in existing_events
             if isinstance(event, dict)
-            and str(event.get("source_deal_id") or "").strip()
-            and str(event.get("source_deal_id") or "").strip() == source_deal_id
+            and same_source(event)
         ),
         None,
     )
     if existing_by_source is not None:
+        stored_execution = existing_by_source.get("execution_input")
+        stored_id = execution_identity_from_input(stored_execution)
+        if execution_id or stored_id:
+            if not execution_id or not stored_id:
+                raise BrokerAssignedStockSaleMatchError(
+                    "source_conflict", "legacy_execution_evidence_required",
+                    diagnostics={"selector": selector, "existing_event": dict(existing_by_source)},
+                )
+            incoming_content = execution_economic_content(deal.execution_input)
+            stored_content = execution_economic_content(stored_execution)
+            if stored_id != execution_id or incoming_content["errors"] or stored_content["errors"] or stored_content["economic"] != incoming_content["economic"] or conflicting_execution_associations(stored_content, incoming_content):
+                raise BrokerAssignedStockSaleMatchError(
+                    "source_conflict", "trade_execution_economic_conflict",
+                    diagnostics={"selector": selector, "existing_event": dict(existing_by_source)},
+                )
+            if applied_execution_association_conflicts(
+                None, execution_id, incoming_content, applied_events=[existing_by_source],
+            ):
+                raise BrokerAssignedStockSaleMatchError(
+                    "source_conflict", "trade_execution_applied_association_conflict",
+                    diagnostics={"selector": selector, "existing_event": dict(existing_by_source)},
+                )
+            before_report = _assigned_stock_report(
+                repo, account=existing_by_source["account"], broker=existing_by_source["broker"],
+                assigned_stock_events=existing_events, as_of_ms=trade_time_ms,
+            )
         target_stock_lot_id = str(existing_by_source.get("target_stock_lot_id") or "").strip()
         lot = _find_assigned_stock_lot(before_report, target_stock_lot_id)
         if lot is None:
@@ -347,6 +403,7 @@ def _broker_assigned_stock_sale_match(repo: Any, deal: Any) -> dict[str, Any]:
         return {
             "lot": lot,
             "existing_events": existing_events,
+            "existing_sale_event": dict(existing_by_source),
             "before_report": before_report,
             "selector": selector,
             "shares": int(shares or 0),
@@ -365,6 +422,11 @@ def _broker_assigned_stock_sale_match(repo: Any, deal: Any) -> dict[str, Any]:
             },
         }
 
+    if getattr(deal, "position_effect", None) == "open":
+        raise BrokerAssignedStockSaleMatchError(
+            "unsupported_deal", "a stock opening execution cannot sell an assigned stock lot",
+            diagnostics={"selector": selector, "position_effect": "open"},
+        )
     identity_candidates: list[dict[str, Any]] = []
     for row in before_report.get("assigned_stock_lots") or []:
         if not isinstance(row, dict):
@@ -906,6 +968,8 @@ def _execute_assigned_stock_sale(
     futu_account_id: str | None = None,
     order_id: str | None = None,
     source: str,
+    execution_input: dict[str, Any] | None = None,
+    existing_sale_event: dict[str, Any] | None = None,
     existing_events: list[dict[str, Any]] | None = None,
     before_report: dict[str, Any] | None = None,
     match_diagnostics: dict[str, Any] | None = None,
@@ -964,7 +1028,19 @@ def _execute_assigned_stock_sale(
         futu_account_id=futu_account_id,
         order_id=order_id,
         source=source,
+        execution_input=execution_input,
     )
+    if existing_sale_event is not None:
+        for key in ("target_stock_lot_id", "broker", "symbol", "side", "shares", "price", "currency", "trade_time_ms", "source_deal_id", "futu_account_id"):
+            if existing_sale_event.get(key) != sale_event.get(key):
+                raise ValueError(f"assigned stock sale conflict: {key}")
+        old_order = existing_sale_event.get("order_id")
+        if old_order and sale_event.get("order_id") and old_order != sale_event["order_id"]:
+            raise ValueError("assigned stock sale conflict: order_id")
+        # Keep the original lot, fee and FX references on equivalent evidence replay.
+        sale_event = dict(existing_sale_event)
+        account = str(sale_event["account"])
+        broker = str(sale_event["broker"])
     existing_same = next(
         (
             event
@@ -981,7 +1057,7 @@ def _execute_assigned_stock_sale(
     else:
         sale_event = attach_assigned_stock_sale_cash_conversions(
             sale_event,
-            fx_payload=load_cash_fx_payload(repo),
+            fx_payload=load_cash_fx_payload(repo, persist=False),
             observed_at_ms=utc_now_ms(),
         )
     if existing_same is not None:
@@ -1038,6 +1114,7 @@ def _execute_assigned_stock_sale(
         sale_event=sale_event,
         assigned_stock_after=assigned_stock_after,
     )
+    payload["sale_event"] = result["sale_event"]
     created = bool(result["created"])
     return _apply_result_payload(
         repo,
@@ -1088,6 +1165,13 @@ def execute_broker_assigned_stock_sale(
     *,
     dry_run: bool,
 ) -> dict[str, Any]:
+    with with_sqlite_repo_writer_lock(repo):
+        return _execute_broker_assigned_stock_sale_locked(repo, deal, dry_run=dry_run)
+
+
+def _execute_broker_assigned_stock_sale_locked(
+    repo: Any, deal: Any, *, dry_run: bool,
+) -> dict[str, Any]:
     if getattr(deal, "option_type", None):
         raise BrokerAssignedStockSaleMatchError(
             "unsupported_deal",
@@ -1101,6 +1185,11 @@ def execute_broker_assigned_stock_sale(
             diagnostics={"side": getattr(deal, "side", None)},
         )
     match = _broker_assigned_stock_sale_match(repo, deal)
+    execution = getattr(deal, "execution_input", {}) or {}
+    if not dry_run and match.get("existing_sale_event") and execution.get("external_order_id") and execution.get("external_order_namespace"):
+        from src.application.ledger.api import reconcile_normalized_execution_order_identity
+        reconcile_normalized_execution_order_identity(repo, deal)
+        match = _broker_assigned_stock_sale_match(repo, deal)
     lot = dict(match["lot"])
     return _execute_assigned_stock_sale(
         repo,
@@ -1122,6 +1211,8 @@ def execute_broker_assigned_stock_sale(
         futu_account_id=str(getattr(deal, "futu_account_id", "") or "") or None,
         order_id=str(getattr(deal, "order_id", "") or "") or None,
         source="broker",
+        execution_input=dict(getattr(deal, "execution_input", {}) or {}),
+        existing_sale_event=match.get("existing_sale_event"),
         existing_events=list(match.get("existing_events") or []),
         before_report=dict(match.get("before_report") or {}),
         match_diagnostics=dict(match.get("diagnostics") or {}),

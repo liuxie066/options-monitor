@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from domain.domain.ledger import TradeEvent
+from domain.domain.trade_execution import futu_order_namespace_issue as futu_order_namespace_issue
 
 
 def is_unexecuted_expire_close(event: TradeEvent) -> bool:

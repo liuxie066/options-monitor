@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from domain.domain.ledger import position_lots_fingerprint
+from domain.domain.trade_execution import execution_economic_content, normalize_execution_input
+from .event_codec import trade_event_application_payload, valid_void_target_event_id
+
 from .writer_common import (
     Any,
     ContractKey,
@@ -71,6 +75,14 @@ from .writer_lifecycle_support import (
     _existing_combo_adoption_leg,
 )
 from .order_fee_semantics import zero_option_fee_lifecycle_reason
+from .external_event_key import (
+    applied_execution_association_conflicts,
+    broker_deal_completion_payload,
+    broker_execution_identity,
+    execution_identity_from_input,
+    futu_compatibility_source_key,
+    require_same_execution,
+)
 
 
 def rebuild_position_lots_from_trade_events(repo: Any) -> ProjectionRefreshResult:
@@ -120,7 +132,7 @@ def persist_trade_event_object(repo: Any, event: Any) -> LedgerWriteResult:
             existing_by_id=existing_by_id,
             frozen_at_ms=observed_at_ms,
         )
-        fx_payload = load_cash_fx_payload(sqlite_repo)
+        fx_payload = load_cash_fx_payload(sqlite_repo, conn=conn)
         storage_events = [
             _event_with_existing_cash_conversions(item, existing_by_id[item.event_id])
             if item.event_id in existing_by_id
@@ -142,7 +154,7 @@ def persist_trade_event_object(repo: Any, event: Any) -> LedgerWriteResult:
             mode=_projection_mode_for_events(storage_events),
         )
         result = {
-            "event_id": event.event_id,
+            "event_id": storage_events[0].event_id,
             "record_id": _event_position_record_id(storage_events[0]),
             "created": any(runtime.created_flags),
             "position_lot_count": int(runtime.position_lot_count),
@@ -201,7 +213,7 @@ def persist_trade_event_with_combo_identity(
         else:
             storage_event = attach_trade_event_cash_conversions(
                 storage_event,
-                fx_payload=load_cash_fx_payload(sqlite_repo),
+                fx_payload=load_cash_fx_payload(sqlite_repo, conn=conn),
                 observed_at_ms=observed_at_ms,
             )
         group_id = str(intent.get("group_id") or "").strip()
@@ -1105,13 +1117,18 @@ def _normal_close_notification_intent(
         return None
     first = rows[0]
     raw = dict(first.raw_payload or {})
+    if raw.get("_trade_intake_delivery_purpose") == "historical":
+        return None
     source_deal_id = str(raw.get("source_deal_id") or "").strip()
     futu_account_id = str(raw.get("futu_account_id") or "").strip()
     account = str(first.contract_key.account or "").strip().lower()
     if not source_deal_id or not futu_account_id or not account:
         return None
-    broker_deal_key = (
-        f"futu:{account}:{futu_account_id}:{source_deal_id}"
+    broker_deal_key = futu_compatibility_source_key(
+        account=account,
+        futu_account_id=futu_account_id,
+        source_deal_id=source_deal_id,
+        execution_input=raw.get("execution_input"),
     )
     case_id = f"close:{broker_deal_key}"
     ordered = sorted(
@@ -1266,7 +1283,7 @@ def persist_trade_event_objects_atomically(
             existing_by_id=existing_by_id,
             frozen_at_ms=observed_at_ms,
         )
-        fx_payload = load_cash_fx_payload(sqlite_repo)
+        fx_payload = load_cash_fx_payload(sqlite_repo, conn=conn)
         storage_events = [
             _event_with_existing_cash_conversions(event, existing_by_id[event.event_id])
             if event.event_id in existing_by_id
@@ -1503,12 +1520,162 @@ def persist_trade_event_with_wheel_intent(
         wheel_intent_coverage_fact=coverage_fact,
     )[0]
 
+
+def _enrich_execution_order_identity(
+    repo: Any, rows: list[dict[str, Any]], execution: dict[str, Any], *, conn: Any,
+    assigned_stock: bool = False,
+) -> list[dict[str, Any]]:
+    order_id = execution.get("external_order_id")
+    namespace = execution.get("external_order_namespace")
+    if not order_id or not namespace:
+        return rows
+    execution_id = execution_identity_from_input(execution)
+    content = execution_economic_content(execution)
+    if content["errors"] or applied_execution_association_conflicts(
+        None, execution_id, content, applied_events=rows,
+    ):
+        raise ValueError("trade_execution_applied_association_conflict")
+    table, id_column = ("assigned_stock_events", "stock_event_id") if assigned_stock else ("trade_events", "event_id")
+    plans = []
+    now = utc_now_ms()
+    for row in rows:
+        raw = row if assigned_stock else row.get("raw_payload") or {}
+        stored_execution = raw.get("execution_input") or {}
+        require_same_execution(stored_execution, execution)
+        if all((raw.get("order_id"), stored_execution.get("external_order_id"),
+                stored_execution.get("external_order_namespace"))):
+            continue
+        physical = str((execution.get("broker_account_ref") or {}).get("external_account_id") or "")
+        if str(raw.get("futu_account_id") or "") != physical:
+            raise ValueError("trade_execution_order_binding_account_mismatch")
+        event_id = str(row[id_column])
+        stored = conn.execute(f"SELECT event_json FROM {table} WHERE {id_column} = ?", (event_id,)).fetchone()
+        if stored is None:
+            raise ValueError("trade_execution_order_binding_event_missing")
+        before_json = str(stored["event_json"])
+        after = json.loads(before_json)
+        after_raw = after if assigned_stock else after["raw_payload"]
+        after_execution = after_raw["execution_input"]
+        changes = {}
+        for fields, name, value, prefix in (
+            (after_raw, "order_id", order_id, ""),
+            (after_raw, "external_order_namespace", namespace, ""),
+            (after_execution, "external_order_id", order_id, "execution_input."),
+            (after_execution, "external_order_namespace", namespace, "execution_input."),
+        ):
+            if not fields.get(name):
+                changes[prefix + name] = {"before": fields.get(name), "after": value}
+                fields[name] = value
+        provenance = list(after_raw.get("execution_order_identity_enrichments") or [])
+        provenance.append({
+            "source": "normalized_execution_input", "execution_id": execution_id,
+            "changes": changes, "bound_at_ms": now,
+            "evidence_refs": list(execution.get("evidence_refs") or []),
+        })
+        after_raw["execution_order_identity_enrichments"] = provenance
+        plans.append((event_id, before_json, json.dumps(after, ensure_ascii=False, sort_keys=True)))
+    if not plans:
+        return rows
+    before_fingerprint = position_lots_fingerprint(repo.list_position_lots(conn=conn))
+    fence = capture_trade_event_decision_projection_fence(repo, conn=conn)
+    cas = (repo.compare_and_swap_assigned_stock_order_identity_json if assigned_stock
+           else repo.compare_and_swap_trade_event_order_identity_json)
+    for event_id, before_json, after_json in plans:
+        if not cas(event_id=event_id, expected_event_json=before_json, replacement_event_json=after_json,
+                   updated_at_ms=now, conn=conn):
+            raise ValueError("trade_execution_order_binding_cas_conflict")
+        readback = conn.execute(f"SELECT event_json FROM {table} WHERE {id_column} = ?", (event_id,)).fetchone()
+        if readback is None or readback["event_json"] != after_json:
+            raise ValueError("trade_execution_order_binding_readback_failed")
+    if not assigned_stock:
+        runtime = run_position_projection_in_transaction(repo, (), conn=conn, mode="forced_full")
+        publication = runtime.publication
+        if publication.added or publication.changed or publication.removed:
+            raise ValueError("trade_execution_order_binding_changed_position_lots")
+    if position_lots_fingerprint(repo.list_position_lots(conn=conn)) != before_fingerprint:
+        raise ValueError("trade_execution_order_binding_changed_position_lots")
+    if fence is not None:
+        finalize_current_decision_projection(repo, fence=fence, updated_at_ms=now, conn=conn)
+    by_id = {event_id: json.loads(after_json) for event_id, _before_json, after_json in plans}
+    return [
+        (by_id[row[id_column]] if assigned_stock else trade_event_application_payload(by_id[row[id_column]]))
+        if row[id_column] in by_id else row
+        for row in rows
+    ]
+
+
+def reconcile_normalized_execution_order_identity(repo: Any, deal: Any) -> list[dict[str, Any]]:
+    """Enrich a complete applied execution from compatible, explicit source order facts."""
+    execution = dict(getattr(deal, "execution_input", {}) or {})
+    execution_id = execution_identity_from_input(execution)
+    if not execution_id:
+        return []
+
+    def _run(sqlite_repo: Any, conn: Any) -> list[dict[str, Any]]:
+        if conn is None:
+            raise TypeError("execution order enrichment requires SQLite transaction authority")
+        if (execution.get("instrument_ref") or {}).get("asset_type") == "stock":
+            rows = [row for row in sqlite_repo.list_assigned_stock_events(conn=conn)
+                    if execution_identity_from_input(row.get("execution_input")) == execution_id]
+            if not rows:
+                return []
+            if len(rows) != 1 or Decimal(str(rows[0].get("shares"))) != Decimal(execution["quantity"]):
+                raise ValueError("trade_execution_split_incomplete")
+            return _enrich_execution_order_identity(sqlite_repo, rows, execution, conn=conn, assigned_stock=True)
+        if not any(execution_identity_from_input((row.get("raw_payload") or {}).get("execution_input")) == execution_id
+                   for row in sqlite_repo.list_trade_events(conn=conn)):
+            return []
+        rows = _events_for_storage(sqlite_repo, _trade_event_from_normalized_deal(deal), conn=conn)
+        return [trade_event_application_payload(encode_trade_event_for_storage(row).payload) for row in rows]
+
+    return with_sqlite_repo_transaction(repo, _run, require_projection_publication=True)
+
+
 def _events_for_storage(
     repo: Any,
     event: Any,
     *,
     conn: Any | None = None,
 ) -> list[Any]:
+    execution = dict(getattr(event, "raw_payload", {}) or {}).get("execution_input")
+    execution_id = execution_identity_from_input(execution)
+    if execution_id:
+        # ponytail: scan existing event metadata; index this lookup if intake volume warrants it.
+        ledger_rows = repo.list_trade_events(conn=conn)
+        existing = [
+            row for row in ledger_rows
+            if execution_identity_from_input((row.get("raw_payload") or {}).get("execution_input")) == execution_id
+            or str(row.get("event_id") or "") == str(event.event_id)
+        ]
+        if existing:
+            for row in existing:
+                stored = (row.get("raw_payload") or {}).get("execution_input")
+                if not isinstance(stored, dict):
+                    raise ValueError("legacy_execution_evidence_required")
+                require_same_execution(stored, execution)
+            if applied_execution_association_conflicts(
+                None, execution_id, execution_economic_content(execution), applied_events=existing,
+            ):
+                raise ValueError("trade_execution_applied_association_conflict")
+            completions = [(row.get("raw_payload") or {}).get("broker_deal_completion") or {} for row in existing]
+            if len(existing) > 1 or any(completions):
+                counts = {int(item.get("split_count") or 0) for item in completions}
+                indexes = {int(item.get("split_index") or 0) for item in completions}
+                expected = {int(item.get("expected_contracts") or 0) for item in completions}
+                allocated = sum(int(item.get("allocated_contracts") or 0) for item in completions)
+                if counts != {len(existing)} or indexes != set(range(1, len(existing) + 1)) or expected != {allocated} or allocated != sum(int(row.get("contracts") or 0) for row in existing):
+                    raise ValueError("trade_execution_split_incomplete")
+            voided = {valid_void_target_event_id(row) for row in ledger_rows}
+            if any(row["event_id"] in voided for row in existing):
+                raise ValueError("trade_execution_split_incomplete")
+            if sum(Decimal(str(row["contracts"])) for row in existing) != Decimal(execution["quantity"]):
+                raise ValueError("trade_execution_split_incomplete")
+            existing = _enrich_execution_order_identity(repo, existing, execution, conn=conn)
+            target = str(getattr(event, "target_lot_id", None) or "")
+            matching = [row for row in existing if not target or str(row.get("target_lot_id") or "") == target]
+            if not matching:
+                raise ValueError("trade_execution_target_conflict")
+            return [_canonical_storage_event(row) for row in matching]
     if hasattr(event, "event_type") and not hasattr(event, "position_effect"):
         if bool(getattr(event, "is_close", False)) and not getattr(event, "target_lot_id", None):
             return _canonical_close_events_for_storage(repo, event, conn=conn)
@@ -1548,6 +1715,14 @@ def _events_for_storage(
             "target_lot_id": match.record_id,
             "close_target_resolution": resolution_payload,
         }
+        if execution_id:
+            match_payload["broker_deal_completion"] = broker_deal_completion_payload(
+                source_deal_id=str(payload.get("source_deal_id") or "").strip(),
+                expected_contracts=int(event.contracts),
+                split_count=len(resolution.matches),
+                split_index=index + 1,
+                allocated_contracts=int(match.contracts_to_close),
+            )
         source_event_id = getattr(match.candidate, "source_event_id", None)
         if source_event_id not in (None, ""):
             match_payload["close_target_source_event_id"] = source_event_id
@@ -1605,6 +1780,14 @@ def _canonical_close_events_for_storage(
             "target_lot_id": match.record_id,
             "close_target_resolution": resolution_payload,
         }
+        if execution_identity_from_input(raw_payload.get("execution_input")):
+            raw_payload["broker_deal_completion"] = broker_deal_completion_payload(
+                source_deal_id=str(raw_payload.get("source_deal_id") or "").strip(),
+                expected_contracts=int(event.contracts),
+                split_count=len(resolution.matches),
+                split_index=index + 1,
+                allocated_contracts=int(match.contracts_to_close),
+            )
         source_event_id = getattr(match.candidate, "source_event_id", None)
         if source_event_id not in (None, ""):
             raw_payload["close_target_source_event_id"] = source_event_id
@@ -1626,6 +1809,17 @@ def _trade_event_from_normalized_deal(deal: Any) -> TradeEvent:
         dict(getattr(deal, "raw_payload", {}) or {})
     )
     raw_payload.pop("fields", None)
+    execution_id = broker_execution_identity(deal)
+    standard_input = raw_payload.get("schema_version") == "trade_execution.v1" or any(
+        key in raw_payload for key in ("instrument_ref", "broker_account_ref", "execution_input")
+    )
+    if standard_input or execution_id:
+        execution = getattr(deal, "execution_input", None) or raw_payload.get("execution_input") or raw_payload
+        # Revalidate source economics before any write; split DTO quantities are allocations.
+        errors = normalize_execution_input(execution)["errors"]
+        errors.extend(execution.get("errors") or [])
+        if errors:
+            raise ValueError(f"trade_execution_input_invalid:{','.join(dict.fromkeys(errors))}")
     source_deal_id = str(getattr(deal, "deal_id", "") or "").strip()
     event_id = broker_external_event_key(deal)
     event_type = _event_type_from_position_effect(position_effect, raw_payload=raw_payload)
@@ -1639,6 +1833,9 @@ def _trade_event_from_normalized_deal(deal: Any) -> TradeEvent:
         raw_payload.setdefault("futu_account_id", futu_account_id)
     if event_id:
         raw_payload.setdefault("external_event_key", event_id)
+    if execution_id:
+        raw_payload["execution_id"] = execution_id
+        raw_payload["execution_input"] = dict(deal.execution_input)
     raw_payload.setdefault("side", trade_side)
     order_id = str(getattr(deal, "order_id", "") or "").strip()
     if order_id:

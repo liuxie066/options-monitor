@@ -11,7 +11,8 @@ from src.infrastructure.futu_history_deals import (
     fetch_opend_history_deals,
     history_deal_query_dates,
 )
-from src.infrastructure.futu_gateway import FutuGatewayTransientError
+from src.infrastructure.futu_gateway import FutuGatewayTransientError, FutuGatewayUnreachableError
+from src.application.trades.backfill import _history_query_complete
 
 
 @pytest.fixture(autouse=True)
@@ -34,6 +35,117 @@ def test_history_deal_query_dates_uses_hong_kong_trade_date_window() -> None:
     assert end_date == "2026-06-03 02:00:00"
     assert start_utc == "2026-06-02T12:00:00+00:00"
     assert end_utc == "2026-06-02T18:00:00+00:00"
+
+
+@pytest.mark.parametrize(
+    ("coverage", "status", "complete"),
+    [
+        ({"coverage_complete": True, "pagination_complete": True, "page_count": 2}, "complete", True),
+        ({"coverage_complete": False, "pagination_complete": False, "page_count": 1}, "partial", False),
+        ({"coverage_complete": True, "pagination_complete": True, "truncated": True}, "partial", False),
+        ({"coverage_complete": True}, "unknown", False),
+        ({}, "unknown", False),
+    ],
+)
+@pytest.mark.parametrize("payload_rows", [[], [{"deal_id": "d1"}]])
+def test_history_receipt_preserves_provider_coverage(coverage, status, complete, payload_rows):
+    client = OpenDHistoryDealClient(host="127.0.0.1", port=11111)
+    client._gateway = SimpleNamespace(
+        get_history_deals=lambda **_kwargs: {"retcode": 0, "rows": payload_rows, **coverage}
+    )
+
+    rows, diagnostics = client.fetch(
+        futu_account_ids=["123"],
+        lookback_hours=6,
+        now=datetime(2026, 6, 3, 6, 0, tzinfo=timezone.utc),
+    )
+
+    receipt = diagnostics["account_results"][0]
+    assert len(rows) == len(payload_rows)
+    assert receipt["row_count"] == len(payload_rows)
+    assert receipt["coverage_status"] == diagnostics["coverage_status"] == status
+    assert receipt["requested_end_utc"] == "2026-06-03T06:00:00+00:00"
+    assert receipt["covered_end_utc"] == (receipt["requested_end_utc"] if complete else None)
+    assert receipt["trd_env"] == "REAL"
+    assert _history_query_complete(diagnostics, expected_account_ids=["123"]) is complete
+
+
+@pytest.mark.parametrize("error_type", [RuntimeError, FutuGatewayUnreachableError])
+def test_history_receipt_preserves_successful_account_when_another_fails(error_type):
+    def query(**kwargs):
+        if kwargs["acc_id"] == 456:
+            raise error_type("query failed")
+        return {"retcode": 0, "rows": [{"deal_id": "d1"}], "coverage_complete": True, "pagination_complete": True}
+
+    client = OpenDHistoryDealClient(host="127.0.0.1", port=11111)
+    client._gateway = SimpleNamespace(get_history_deals=query, close=lambda: None)
+    rows, diagnostics = client.fetch(
+        futu_account_ids=["123", "456"], lookback_hours=6,
+        now=datetime(2026, 6, 3, 6, 0, tzinfo=timezone.utc),
+    )
+
+    assert len(rows) == 1
+    assert diagnostics["coverage_status"] == "partial"
+    assert diagnostics["account_results"][0]["coverage_status"] == "complete"
+    assert diagnostics["account_results"][1]["coverage_status"] == "unknown"
+    assert diagnostics["account_results"][1]["error"] == "query failed"
+    assert not _history_query_complete(diagnostics, expected_account_ids=["123", "456"])
+
+
+@pytest.mark.parametrize("diagnostics", [{}, {"account_results": []}, {"account_results": [{"futu_account_id": "123", "ret": 0}]}])
+def test_history_query_missing_receipt_is_unknown(diagnostics):
+    assert not _history_query_complete(diagnostics, expected_account_ids=["123"])
+
+
+def test_history_query_cannot_hide_a_failed_or_missing_account():
+    success = {"futu_account_id": "123", "ret": 0, "coverage_status": "complete", "coverage_complete": True, "pagination_complete": True}
+    assert not _history_query_complete({"account_results": [success]}, expected_account_ids=["123", "456"])
+    assert not _history_query_complete(
+        {"account_results": [success, {"futu_account_id": "123", "ret": -1}]},
+        expected_account_ids=["123"],
+    )
+
+
+@pytest.mark.parametrize("field,value", [
+    ("futu_account_id", "456"), ("acc_id", "456"),
+    ("environment", "SIMULATE"), ("trd_env", "SIMULATE"),
+    ("broker_account_id", "futu:REAL:456"),
+    ("external_id_namespace", "other.deal"),
+    ("external_order_namespace", "other.order"),
+])
+def test_history_adapter_rejects_conflicting_source_identity(field, value):
+    original = {"deal_id": "d1", "order_id": "o1", field: value}
+    client = OpenDHistoryDealClient(host="127.0.0.1", port=11111)
+    client._gateway = SimpleNamespace(
+        get_history_deals=lambda **_kwargs: {
+            "retcode": 0, "rows": [original], "coverage_complete": True, "pagination_complete": True,
+        },
+    )
+    rows, diagnostics = client.fetch(futu_account_ids=["123"], lookback_hours=6)
+
+    assert rows == []
+    receipt = diagnostics["account_results"][0]
+    assert receipt["coverage_status"] == "partial"
+    assert receipt["covered_end_utc"] is None
+    assert receipt["row_count"] == 1
+    assert receipt["accepted_row_count"] == 0
+    assert receipt["rejected_rows"][0]["payload"] == original
+    assert field in receipt["rejected_rows"][0]["fields"]
+    assert not _history_query_complete(diagnostics, expected_account_ids=["123"])
+
+
+def test_history_adapter_binds_namespaces_from_provider_scope():
+    client = OpenDHistoryDealClient(host="127.0.0.1", port=11111)
+    client._gateway = SimpleNamespace(get_history_deals=lambda **_kwargs: {
+        "retcode": 0, "rows": [{"deal_id": "d1", "order_id": "o1"}],
+        "coverage_complete": True, "pagination_complete": True,
+    })
+    rows, diagnostics = client.fetch(futu_account_ids=["123"], lookback_hours=6)
+    assert rows[0]["environment"] == "REAL"
+    assert rows[0]["broker_account_id"] == "futu:REAL:123"
+    assert rows[0]["external_id_namespace"] == "futu.deal"
+    assert rows[0]["external_order_namespace"] == "futu.order"
+    assert diagnostics["coverage_status"] == "complete"
 
 
 def test_fetch_opend_history_deals_adds_account_fields_and_diagnostics(monkeypatch) -> None:
@@ -79,11 +191,24 @@ def test_fetch_opend_history_deals_adds_account_fields_and_diagnostics(monkeypat
             "code": "HK.TCH260605P440000",
             "futu_account_id": "123",
             "trd_acc_id": "123",
+            "environment": "REAL",
+            "broker_account_id": "futu:REAL:123",
+            "external_id_namespace": "futu.deal",
         }
     ]
     assert diagnostics["start_date"] == "2026-06-03 08:00:00"
     assert diagnostics["end_date"] == "2026-06-03 14:00:00"
-    assert diagnostics["account_results"] == [{"futu_account_id": "123", "ret": 0, "row_count": 1}]
+    receipt = diagnostics["account_results"][0]
+    assert receipt["futu_account_id"] == "123"
+    assert receipt["ret"] == 0
+    assert receipt["row_count"] == 1
+    assert receipt["coverage_status"] == "complete"
+    assert receipt["coverage_complete"] is True
+    assert receipt["pagination_complete"] is True
+    assert receipt["page_count"] == 1
+    assert receipt["covered_start_utc"] == diagnostics["window_start_utc"]
+    assert receipt["covered_end_utc"] == diagnostics["window_end_utc"]
+    assert receipt["request_id"].startswith(diagnostics["request_id"])
     assert calls[0] == {"init": {"host": "127.0.0.1", "port": 11111}}
     assert calls[-1] == {"closed": True}
 
@@ -121,15 +246,13 @@ def test_fetch_opend_history_deals_skips_non_numeric_account_ids(monkeypatch) ->
     )
 
     assert rows == []
-    assert diagnostics["account_results"] == [
-        {
-            "futu_account_id": "REAL_123",
-            "ret": None,
-            "row_count": 0,
-            "skipped": True,
-            "reason": "non_numeric_account_id",
-        }
-    ]
+    receipt = diagnostics["account_results"][0]
+    assert receipt["futu_account_id"] == "REAL_123"
+    assert receipt["ret"] is None
+    assert receipt["row_count"] == 0
+    assert receipt["skipped"] is True
+    assert receipt["reason"] == "non_numeric_account_id"
+    assert receipt["coverage_status"] == "unknown"
     assert calls == []
 
 

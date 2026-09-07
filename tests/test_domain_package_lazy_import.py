@@ -26,3 +26,21 @@ assert 'pandas' not in sys.modules
         timeout=30,
     )
     assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_import_strategy_membership_does_not_cycle_through_ledger_facade() -> None:
+    base = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from domain.domain.strategy_membership import resolve_strategy_metadata; "
+            "assert resolve_strategy_metadata({'strategy': 'csp'}).metadata.strategy == 'sell_put'",
+        ],
+        cwd=base,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
