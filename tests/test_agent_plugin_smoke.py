@@ -314,7 +314,8 @@ def test_healthcheck_works_with_explicit_config_path(monkeypatch, tmp_path: Path
     assert "runtime_runs" in out["data"]["tools"]
     assert "candidate_filter_explain" in out["data"]["tools"]
     assert "research" not in out["data"]["tools"]
-    assert out["data"]["side_lanes"]["research_shadow_replay"]["agent_tool"] is False
+    assert out["data"]["side_lanes"]["research"]["agent_tool"] is False
+    assert out["data"]["side_lanes"]["research"]["mode"] == "read_only_evidence"
     assert any(item["name"] == "opend_readiness" and item["status"] == "ok" for item in out["data"]["checks"])
     assert any(item["name"] == "account_mapping" and item["status"] == "ok" for item in out["data"]["checks"])
     primary = next(item for item in out["data"]["checks"] if item["name"] == "account_primary_paths")

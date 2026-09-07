@@ -51,7 +51,7 @@ run tick --experience --no-send
 | Combo 已复用 CSP / CC 容量并自行计算组合经济指标 | `src/application/combo_yield_steps.py`、`src/application/cc_lp_steps.py` | 只替换容量输入，不复制 Combo 公式或报价规则 |
 | 开仓快照当前要求 physical account 与五类依赖 | `src/application/opening_candidate_snapshot.py`、`src/application/candidate_snapshot_contract.py` | 体验快照需有明确的非 physical 合同，不能伪造依赖 |
 | pipeline runtime 会生成 alert、notification compatibility bundle，并可能追加 cash footer | `src/application/pipeline_runtime.py` | `--no-send` 不等于这些内部步骤零调用，体验模式必须显式跳过 |
-| 候选由 run-scoped manifest 提交并被只读工具和正式研究链路共同消费 | `src/application/candidate_snapshot_manifest.py`、`src/application/candidate_evidence_history.py`、`src/application/shadow_replay/` | 体验结果可供本地解释，但不得贡献正式 replay、Combo capture 或 recommendation evidence |
+| 候选由 run-scoped manifest 提交并被只读工具和 Research 归档共同消费 | `src/application/candidate_snapshot_manifest.py`、`src/application/candidate_evidence_history.py`、`src/application/research/` | 体验结果可供本地解释，但不得贡献正式候选 evidence |
 
 现有美股开盘前 option-chain warmup 只服务 scheduled trigger。体验模式仅允许手动入口，因此不进入
 该 warmup，也不修改其行为。
@@ -286,9 +286,6 @@ Wheel 继续使用默认值。
 | Consumer | 体验结果行为 |
 |---|---|
 | `candidate_evidence_history` | 分类为拟新增的 `non_contributing_experience`，`contributes_evidence=false` |
-| Shadow Replay candidate / rank capture | 不摄取候选、决策或排名事实 |
-| Combo Funding Put capture | fail closed |
-| scheduled Recommendation Point | fail closed |
 | research archive | 识别体验版 artifact 后可以归档，但 classification 必须显示非正式、不可贡献 evidence |
 | trade intent、ledger/lifecycle、broker consumer | 在任何副作用前 fail closed |
 
@@ -345,7 +342,7 @@ Wheel 继续使用默认值。
 | `src/application/combo_yield_steps.py`、`cc_lp_steps.py` | 传递并复用对应短腿 demo capacity，不改组合公式 |
 | candidate snapshot、manifest、status owner | 发布显式体验版本、体验依赖集合与跨 owner 一致性验证 |
 | candidate explain、rank、brief 读取面 | 读取并展示体验版本与四个字段 |
-| `candidate_evidence_history.py`、`shadow_replay/`、`recommendation_point.py` | 隔离正式 evidence；要求可执行结果的入口 fail closed |
+| `candidate_evidence_history.py`、`research/archive.py` | 隔离正式 evidence；体验 artifact 只能以非正式分类归档 |
 | `research/archive.py` | 识别体验版 manifest / status artifact 并归档，但保持非正式分类 |
 
 不新增 `ExperienceContext` 类、domain entity、数据库 migration、配置 schema、provider adapter、扫描器、
@@ -372,7 +369,7 @@ Wheel 继续使用默认值。
 | AC-03 | 覆盖部分证据、必要证据缺失、Combo 非正/缺失 bid/ask、休市；断言状态不混淆且无报价 fallback |
 | AC-04 | 表驱动覆盖 REAL、缺少 `--no-send`、scheduled/cron、smoke 冲突；断言 workspace 与 candidate artifact 不存在 |
 | AC-05 | broker spy 只允许 `get_acc_list()`；父、子进程的 portfolio、option positions、alert、notification bundle、cash footer、trade intake、ledger、lifecycle、broker write 均为零调用；覆盖显示名与元数据降级 |
-| AC-06 | 体验 manifest 对 Candidate Evidence、Shadow Replay、Combo Funding Put 和 Recommendation Point 均不贡献正式事实；未指定 `--experience` 的现有 REAL/SIMULATE 测试保持原断言；Wheel owner 未进入 manifest |
+| AC-06 | 体验 manifest 不贡献正式 Candidate Evidence；未指定 `--experience` 的现有 REAL/SIMULATE 测试保持原断言；Wheel owner 未进入 manifest |
 
 同时扩展现有快照和读取面测试：
 
@@ -383,8 +380,7 @@ Wheel 继续使用默认值。
 - `tests/test_candidate_filter_trace.py` 与 candidate rank 相关测试；
 - `tests/test_daily_decision_brief_service.py`；
 - `tests/test_account_run.py`、`tests/test_pipeline_runtime_paths.py`；
-- `tests/test_candidate_evidence_history.py`、`tests/test_shadow_replay.py`；
-- `tests/test_recommendation_point.py`、`tests/test_combo_yield_research.py`。
+- `tests/test_candidate_evidence_history.py`。
 
 文档完成不授权代码、配置、通知、交易、发布或远端升级。进入实施前应先确认本设计，再把第 12 节
 转换为可执行开发计划。

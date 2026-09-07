@@ -106,19 +106,18 @@ healthcheck 会额外给出本地 `ledger_store` 和 `option_positions_bootstrap
 
 ---
 
-## 6. 收集 Research / Shadow Replay 证据
+## 6. 收集与归档 Research 证据
 
-如果目标是让 MacBook 上的 Codex 分析线上版本质量、持仓/交易一致性，或多账户策略影响，使用独立的 Research / Shadow Replay 侧线：
+如果目标是让 MacBook 上的 Codex 分析线上版本质量、持仓/交易一致性，或多账户策略影响，使用独立的 Research 侧线：
 
 ```bash
 ./om research collect --config-key us --scope full --output both --no-write-outputs
-./om research shadow-replay status --min-sample 30
-./om research shadow-replay candidate-impact-report --params <params.json> --market us --start-date <YYYY-MM-DD> --account lx --min-sample 30
-./om research shadow-replay build --run-id <run-id>
-./om research shadow-replay run-data-plan
+./om research archive inventory --remote prod
+./om research archive pull --remote prod --ssh-target <host>
+./om research archive verify --remote prod
 ```
 
-Research 不属于 `./om-agent` manifest，也不能修改 runtime config、交易状态或通知，但它不是统一的“零写入”命令组：`collect --no-write-outputs` 和 status 等是只读；Shadow Replay dataset build、mark/settle 和带输出路径的 report 会写本地 research artifacts。执行前应查看具体子命令的 `--help` 和输出参数。Strategy Lab 当前暴露根级 Recipe、preview、确认、状态、显式 `research execute`、Research Receipt 和 readiness；`recipes`、`preview`、`status`、`receipt` 只读。20 日研究执行每次最多取一个 provider 逻辑证据单元，10 日隐藏验证尚未实现，边界见 [Strategy Lab 当前实现清单](STRATEGY_LAB_DESIGN.md)。线上调度系统的状态需要通过 `scheduler_evidence` 或 `--scheduler-evidence-json` 传入。
+Research 不属于 `./om-agent` manifest，也不能修改 runtime config、交易状态或通知，但它不是统一的“零写入”命令组：`collect --no-write-outputs`、archive inventory 和 archive verify 是只读；archive pull 只有显式 `--write` 才拉取并写入本地归档。执行前应查看具体子命令的 `--help` 和输出参数。线上调度系统的状态需要通过 `scheduler_evidence` 或 `--scheduler-evidence-json` 传入。
 
 ---
 

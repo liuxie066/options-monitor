@@ -99,20 +99,18 @@ Use the lowest-risk tool that can answer the question.
 | Did cron/tick decide to skip? | `scheduler_status`, `scheduler_decision.json` | Separates scheduler rules from cron execution |
 | Why did a symbol disappear? | `symbol_resolve` if identity is unclear, then `candidate_filter_explain` | Uses sealed snapshot and trace evidence instead of guessing from a terminal candidate list |
 | Why is candidate ranking odd? | `candidate_rank_explain` | Explains the sealed candidate snapshot ranking |
-| Is shadow replay evidence ready for tuning? | `research collect --scope candidate` | Offline candidate/reject universe readiness; no live config mutation |
 | Is candidate evidence complete enough for scan diagnosis? | `healthcheck` / `doctor` with `candidate_evidence` inputs | Diagnostic row-count/readiness check, not a strategy recommendation |
 | Is Cash-Secured Put (CSP) cash constrained? | `query_cash_headroom` | Account-aware cash and collateral view |
 | Is ledger projection trustworthy? | `option_positions_read action=inspect`, Research `ledger` scope | Reads canonical event/projection state |
 | Does close advice have inputs? | `prepare_close_advice_inputs`, then `close_advice` or `get_close_advice` | Keeps refresh and recommendation explicit |
 | What evidence should MacBook Codex analyze? | `research` | Builds a redacted evidence bundle and handoff |
 
-## 4. Research / Shadow Replay Workflow
+## 4. Research Workflow
 
-Research and Shadow Replay are an independent offline evidence/replay module.
-They are not Inbound Assistant core, not `./om-agent` tools, and not an online AI
-product feature. The online/Linux side collects redacted evidence. MacBook Codex
-reads the handoff and helps diagnose quality issues, ledger problems, and
-strategy-improvement directions.
+Research is an independent offline evidence module. It is not Inbound Assistant
+core, not an `./om-agent` tool, and not an online AI product feature. The
+online/Linux side collects redacted evidence. MacBook Codex reads the handoff and
+helps diagnose quality issues, ledger problems, and candidate behavior.
 
 ### Common Server Command
 
@@ -210,7 +208,7 @@ logical contents and projection/lifecycle bindings match the live ledger.
 This command is preview-only: it never moves, deletes, vacuums, or rewrites
 data, and it has no `--confirm` or `--delete` mode. Even a ready result only
 authorizes a later operator decision. Legacy required-data CSV/base64 files,
-ledger history rows, and research generation roots are explicitly excluded.
+ledger history rows, and the local Research archive are explicitly excluded.
 Actual cleanup requires separate authorization and an implemented write path.
 
 Sealed required-data snapshots also publish one deterministic gzip payload per
@@ -225,17 +223,15 @@ degraded telemetry and cannot change the sealed snapshot, barrier, or account
 result. Legacy/manual receipts without a blob reference and historical
 dual-output receipts remain readable and are never rewritten. A sealed reader
 falls back only when the reference is absent and fails closed instead of hiding
-a bad reference with legacy data. Shadow Replay surfaces payload-free
-`required_data_read_source_counts` and `required_data_legacy_read_count`;
-archive collection transfers only blob hashes reachable from selected run
-roots, never the whole shared blob store.
+a bad reference with legacy data. Archive collection transfers only blob hashes
+reachable from selected run roots, never the whole shared blob store.
 
 The frozen consumer boundary is deliberate: ordinary scan/filter steps receive
-the single frame materialized by the sealed snapshot resolver; Close Advice,
-Daily Brief, Shadow Replay, and Strategy Lab consume the same sealed bytes.
+the single frame materialized by the sealed snapshot resolver; Close Advice and
+Daily Brief consume the same sealed bytes.
 Prefetch, multiplier enrichment, coverage checks, quote-cache validation, and
 request-local materialization tools operate before sealing and therefore still
-use their producer workspace. Modern archive marking resolves the sealed
+use their producer workspace. Research archive collection resolves the sealed
 manifest/blob even when run-local raw/CSV shadows are absent; parsed CSV remains
 a historical fallback only.
 
@@ -320,13 +316,11 @@ ledgers and never applies a migration or enables a runtime store. The
 | Scope | Purpose |
 |---|---|
 | `ledger` | Trade intake, position maintenance, and ledger quality evidence |
-| `candidate` | Per-account candidate evidence, ranking samples, filter traces, Combo Yield pair rejection funnel / nearest misses, and shadow replay readiness |
+| `candidate` | Per-account candidate evidence, ranking samples, filter traces, and Combo Yield pair rejection funnel / nearest misses |
 | `quality` | Runtime freshness, latest run status, scheduler evidence, optional healthcheck |
 | `full` | Combined default |
 
 Research reads candidate facts only from manifest-bound opening/Combo/CC+LP snapshots. `candidate_filter_trace.jsonl` may supplement rejection evidence but cannot create a candidate universe. Historical CSV-only runs are reported as unsupported and their CSV bytes are never parsed.
-
-For offline strategy evidence review, inspect `candidate_evidence.shadow_replay` in the Research bundle, especially `review_readiness`. It is a readiness and analysis surface only; it cannot mutate scanner config. To compare how a concrete threshold hypothesis would change the observed candidate set, use `./om research shadow-replay candidate-impact-report --params <params.json>` or `--params-dir <dir>` against either an existing dataset or a `--profile-path` / date window; it writes paired JSON and Markdown candidate-impact reports. The underlying comparison stays inside `observed_run_universe`: if the requested start date has no scan artifacts, it must report coverage failure instead of reconstructing a historical option chain.
 
 Default runs do not write files. Writing reports through `./om research collect`
 requires `--write-outputs --confirm`. Default output locations are:
@@ -334,7 +328,6 @@ requires `--write-outputs --confirm`. Default output locations are:
 ```text
 output_shared/research/
 output_shared/state/current/research.current.json
-output_shared/research/shadow_replay/
 ```
 
 MacBook SSH pattern:
@@ -407,21 +400,27 @@ def rank_candidate_rows(rows: list[dict[str, Any]], *, mode: StrategyMode | str)
 
 For "why did this symbol/account not get a candidate", start from `candidate_filter_explain` and the manifest-bound snapshot/trace evidence. If the user gives a Chinese name or alias, resolve it with `symbol_resolve` or pass the raw alias to `candidate_filter_explain`; `account` is scan scope, not symbol identity. Both candidate explanation tools validate the terminal manifest before reading the opening owner. A missing manifest or a latest run that has started but is not terminal fails closed; the tools never skip it to explain an older snapshot. Only pass an explicit `run_id` for manual forensics of a known terminal run.
 
-For offline strategy evidence review, collect a candidate-scoped Research bundle first:
+For offline candidate evidence review, collect a candidate-scoped Research bundle first:
 
 ```bash
-./om research collect --config-key us --scope candidate --run-id <run-id> --output json --no-write-outputs --shadow-replay-min-sample 30
+./om research collect --config-key us --scope candidate --run-id <run-id> --output json --no-write-outputs
 ```
 
-Treat the shadow replay payload as offline evidence. If it lacks rejected samples, mark path snapshots, or outcome facts, it is not ready for manual strategy review and must not mutate production scanner config, Feishu, trade state, or notifications.
+Candidate evidence remains advisory and must not mutate production scanner config,
+Feishu, trade state, or notifications. Missing sealed snapshots or trace coverage
+must stay explicit instead of being reconstructed from historical option chains.
 
-When remote storage is constrained, use `./om research archive pull --remote prod --ssh-target <host> --require-replay-evidence` first. The default local archive is `output_shared/research/remote_archive/prod/`; `pull` is dry-run unless `--write` is passed. `--require-replay-evidence` filters out scheduler skip / tick heartbeat directories and selects runs with sealed candidate snapshots/status or `candidate_filter_trace.jsonl`; legacy candidate filenames are classification metadata only. After `./om research archive verify --remote prod`, use `./om research archive build-datasets --remote prod --market us --write` to create local Shadow Replay datasets; `--market` uses validated snapshot/manifest identity. Dataset build writes an initial scan-time mark from the archived run's sealed required-data snapshot; modern runs resolve the manifest/blob without requiring `required_data/parsed`, while historical runs may use their parsed CSV fallback. Final outcome evidence still requires later path/expiry marks and `settle`. `archive prune-remote` defaults to the `output-runs` scope. The separate `shadow-replay-receipts` scope requires the verified inventory, current local archive, and current remote path/size/hash to match, then repeats plan and content checks at confirmed apply time. Neither preview authorizes `--confirm`.
+When remote storage is constrained, use the shared Research archive surfaces:
 
-For an explicit local dataset, use `./om research shadow-replay build --run-id <run-id>`, then inspect `./om research shadow-replay status --min-sample 30 --min-mark-points 2 --mark-stale-hours 24` to see each dataset's next data-lifecycle action. `data_plan` contains only executable data-maintenance actions (`collect_marks` / `settle`), while `review_queue` lists datasets ready for explicit manual `analyze`. Use `./om research shadow-replay run-data-plan` as the independent low-frequency maintenance entry: it is dry-run by default with no receipt write, and only `--write` executes eligible `collect_marks` / `settle` actions and writes a compact v2 local receipt containing hashes, counts, action summaries, safety results, and non-plaintext exception evidence rather than duplicated full status payloads. It must not execute `analyze`; manual review stays on the explicit `analyze` command. Collect path samples with `./om research shadow-replay collect-marks --dataset <dataset-dir> --source local --write` or explicit OpenD sampling via `--source opend --write`. OpenD sampling refreshes local required-data cache before appending this point-in-time mark, and may update local OpenD rate-limit state / option-chain cache; it cannot recover past option marks that were never collected. OpenD preview without `--write` uses temporary paths and does not persist those files. You can still run the lower-level `mark`, `settle`, and `analyze` commands directly. Build, local collect, mark, and settle only write local replay evidence; OpenD collect also writes local evidence/cache files only. Missing required-data quotes are recorded as `missing_quote` evidence gaps and are not usable marks; expiry spot-only marks can be used for expiration outcome facts.
+```bash
+./om research archive inventory --remote prod
+./om research archive pull --remote prod --ssh-target <host>
+./om research archive verify --remote prod
+```
 
-Each Shadow Replay manifest binds an immutable generation under the dataset's `generations/` directory. Generations reuse content-addressed partitions under `partitions/sha256/`; the mutable JSONL files remain compatibility views, while Strategy Lab evidence stays bound to the exact generation it used. Do not delete old generation manifests or partitions directly; use the storage status and preview surfaces so referenced evidence remains recoverable.
-
-Use `outcome_by_bucket` from the analysis output to review DTE, Delta, IV/RV, spread, and concentration buckets before proposing filter or ranking changes.
+The default local archive is `output_shared/research/remote_archive/prod/`.
+`pull` is a dry run unless `--write` is passed; inventory and verify do not
+authorize a remote cleanup.
 
 ### Tick Runtime
 
@@ -464,7 +463,7 @@ replacement cannot split one run across two configs. Account labels are canonica
 run artifacts or config publication.
 
 After a scanned account commits its terminal candidate manifest, Tick publishes the account-scoped compact runtime
-snapshot above with write-once/adopt semantics. It is replay evidence and a shadow comparison surface only: legacy
+snapshot above with write-once/adopt semantics. It is diagnostic evidence and a comparison surface only: legacy
 files, `AccountResult`, ranking, notification, and delivery remain authoritative. Missing, malformed, or conflicting
 compact data is reported as account-scoped `data_unavailable` and never repaired or substituted into the legacy path;
 rollback is removal of the compact consumer/call, not a history rewrite or runtime-data deletion.
@@ -541,9 +540,9 @@ implementation generations match exactly.
 
 Ordinary append-safe writers may resume from the newest trusted checkpoint and
 apply only its ordered tail. Explicit rebuild, audit, historical allocation,
-Strategy Lab, backtest, void/repair, unsafe ordering, or any trust mismatch use
+offline research, void/repair, unsafe ordering, or any trust mismatch use
 the canonical full history. Therefore checkpoint activation does not reduce
-research or backtest fidelity and does not delete closed lots or events.
+forensic fidelity and does not delete closed lots or events.
 
 Checkpoint cadence is fixed in code: rotate after 100 tail events or 1 MiB of
 canonical tail bytes, whichever comes first. Ordinary writes between rotations
@@ -863,8 +862,8 @@ Use supported `gh release view --json` fields such as `tagName`, `name`, `url`, 
 | Change area | Suggested checks |
 |---|---|
 | Tool Gateway manifest/handler | `./.venv/bin/python -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py` |
-| Research / Shadow Replay / Strategy Lab | `./.venv/bin/python -m pytest tests/test_research.py tests/test_research_archive.py tests/test_shadow_replay.py tests/test_shadow_replay_candidate_impact.py tests/test_strategy_lab_store.py tests/test_strategy_lab_phase1_owners.py tests/test_strategy_lab_history_k_readiness.py tests/test_strategy_lab_evidence.py tests/test_strategy_lab_receipts.py tests/test_strategy_lab_validation.py tests/test_strategy_lab_cli.py tests/*/test_service_deploy_*.py` |
-| Candidate filter/rank | Candidate engine tests, candidate tool tests, focused trace/replay tests |
+| Research | `./.venv/bin/python -m pytest tests/test_research.py tests/test_research_archive.py` |
+| Candidate filter/rank | Candidate engine tests, candidate tool tests, and focused trace tests |
 | Tick orchestration | `./.venv/bin/python -m pytest tests/test_multi_tick_*.py tests/test_unified_tick_entrypoint.py` |
 | Close Advice frozen snapshot | `python3.12 -m pytest -q -p no:cacheprovider tests/test_close_advice_required_data.py tests/test_close_advice_runner.py tests/test_account_run.py tests/test_tick_account_execution_barrier.py` |
 | Notifications | `./.venv/bin/python -m pytest tests/test_notify_symbols_markdown.py tests/test_multi_tick_notify_format.py` |

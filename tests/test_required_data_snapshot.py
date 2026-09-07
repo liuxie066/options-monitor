@@ -953,39 +953,6 @@ def test_canonical_root_resolves_without_legacy_and_corruption_fails_closed(
     assert evidence["scan_blob_ref"] == entry["scan_blob_ref"]
     assert evidence["read_source"] == "canonical_blob"
 
-    dataset = tmp_path / "shadow-dataset"
-    dataset.mkdir()
-    (dataset / "candidate_snapshots.jsonl").write_text(
-        json.dumps(
-            {
-                "run_id": "run-1",
-                "account": "lx",
-                "status": "accepted",
-                "symbol": "3690.HK",
-                "option_type": "put",
-                "contract_symbol": "3690.HK-P",
-                "expiration": "2026-08-28",
-                "strike": 100,
-            }
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    from src.application.shadow_replay import mark_shadow_replay_dataset
-
-    marking = mark_shadow_replay_dataset(
-        dataset=dataset,
-        required_data_root=root,
-        as_of=str(manifest["sealed_at_utc"]),
-        repo_root=tmp_path,
-        write=False,
-    )
-    assert marking["summary"]["matched_quote_count"] == 1
-    assert marking["summary"]["required_data_read_source_counts"] == {
-        "canonical_blob": 1,
-        "legacy_snapshot": 0,
-    }
-    assert marking["summary"]["required_data_legacy_read_count"] == 0
 
     blob_path = tmp_path / entry["scan_blob_ref"]["blob_relpath"]
     blob_path.write_bytes(b"corrupt")
@@ -1001,62 +968,6 @@ def test_canonical_root_resolves_without_legacy_and_corruption_fails_closed(
         )
 
 
-def test_shadow_mark_rows_are_identical_for_legacy_and_canonical_reads(
-    tmp_path: Path,
-) -> None:
-    from src.application.shadow_replay import mark_shadow_replay_dataset
-
-    root, manifest_path = _workspace(tmp_path)
-    _publish_quote(root, run_id="run-1", canonical_blob=True)
-    dataset = tmp_path / "shadow-parity"
-    dataset.mkdir()
-    (dataset / "candidate_snapshots.jsonl").write_text(
-        json.dumps(
-            {
-                "run_id": "run-1",
-                "account": "lx",
-                "status": "accepted",
-                "symbol": "3690.HK",
-                "option_type": "put",
-                "contract_symbol": "3690.HK-P",
-                "expiration": "2026-08-28",
-                "strike": 100,
-            }
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    mark_at = datetime.fromisoformat(_OBSERVED_AT.replace("Z", "+00:00"))
-    legacy = mark_shadow_replay_dataset(
-        dataset=dataset,
-        required_data_root=root,
-        as_of=_OBSERVED_AT,
-        repo_root=tmp_path,
-        write=False,
-    )
-    seal_required_data_snapshot(
-        manifest_path=manifest_path,
-        required_data_root=root,
-        run_id="run-1",
-        prefetch_summary=_summary("3690.HK"),
-        sealed_at=mark_at,
-    )
-    canonical = mark_shadow_replay_dataset(
-        dataset=dataset,
-        required_data_root=root,
-        as_of=_OBSERVED_AT,
-        repo_root=tmp_path,
-        write=False,
-    )
-
-    assert canonical["generated_mark_snapshots"] == legacy[
-        "generated_mark_snapshots"
-    ]
-    assert legacy["summary"]["required_data_legacy_read_count"] == 1
-    assert canonical["summary"]["required_data_read_source_counts"] == {
-        "canonical_blob": 1,
-        "legacy_snapshot": 0,
-    }
 
 
 def test_manifest_snapshot_returns_the_exact_validated_generation(

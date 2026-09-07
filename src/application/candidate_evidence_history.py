@@ -306,7 +306,6 @@ def load_account_candidate_evidence(
                 "limitations": [
                     "terminal_manifest_unavailable",
                     "combo_pair_diagnostics_unavailable",
-                    "strict_replay_authority_unavailable",
                 ],
                 "account_config_sha256": config_hash,
                 "markets": sorted(
@@ -397,7 +396,6 @@ def summarize_run_candidate_evidence(
         "run_id": _required(run_id, "run_id"),
         "accounts": [item.classification for item in evidence],
         "counts": counts,
-        "strict_replay_authority": strict,
         "reason_code": (
             "all_accounts_manifest_supported"
             if strict
@@ -424,7 +422,6 @@ def _result(
         **common,
         "status": status,
         "reason_code": reason_code,
-        "strict_replay_authority": status == SUPPORTED,
         "contributes_snapshot_facts": status in {SUPPORTED, SUPPORTED_LIMITED_LEGACY_SNAPSHOT},
         "contributes_evidence": status in {SUPPORTED, SUPPORTED_LIMITED_LEGACY_SNAPSHOT},
         "owner_snapshots": sorted((owners or {}).keys()),

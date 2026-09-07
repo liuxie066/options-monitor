@@ -217,44 +217,32 @@ Feishu / WeChat / Inbound
 
 ### 5. 研究与复盘
 
-定义：读取历史运行证据，形成可复盘 dataset，并在证据足够时评估策略质量、参数假设和策略进化建议。
+定义：收集、脱敏和归档历史运行证据，供本地人工分析线上质量、账本一致性和候选行为。
 
 包含模块：
 
+- Research evidence collection
 - Research Archive
-- Shadow Replay
-- Strategy Lab
-- Strategy Quality / Readiness Gates
 
 证据链路：
 
 ```text
-output_runs / required_data / sealed candidate snapshot / candidate trace / marks / outcomes
-  -> Research archive / evidence bundle
-  -> Shadow Replay dataset
-  -> readiness / candidate-impact
-  -> Strategy Lab Recipe research / hidden validation / receipt (under implementation)
-  -> human review / shadow rollout / manual promotion
+output_runs / required_data / sealed candidate snapshot / candidate trace
+  -> Research evidence bundle / remote archive
+  -> local human or Codex analysis
 ```
 
 边界：
 
-- 研究与复盘只产出建议和证据，不直接修改生产配置。
-- 参数假设讨论必须基于 replay / snapshot / trace / outcome 证据，而不是只看终态候选。
-- Research 是证据基础设施；Shadow Replay 是反事实复盘引擎；Strategy Lab 是策略进化产品入口。
-- Shadow Replay 直接提供 dataset、mark、outcome、候选影响和探索性复盘；Strategy Lab 不包装这些维护入口。
-- Strategy Lab 当前只实现了根级 history-K readiness、普通 HK / `lx` context 和三表 Store 基础；Recipe、preview、20 日研究、10 日隐藏验证和回执尚未完成。
-- Formal Strategy Lab 不声称绝对最优；只有冻结合同、完整事实和确定性评价满足门槛时才形成可采用建议。
-- 在线生产监控和离线策略研究保持分离。
+- Research 只提供证据，不直接修改生产配置、通知、账本或交易状态。
+- 候选判断必须基于 sealed snapshot、trace 和明确的数据缺口，不能从终态候选反推不存在的历史事实。
+- archive pull 默认只生成计划，只有显式 `--write` 才写本地归档；inventory 和 verify 检查本地归档。
 
 主要实现位置：
 
 - `src/application/research/`
-- `src/application/shadow_replay/`
-- `src/application/strategy_lab/`、`src/infrastructure/strategy_lab/`
-- `docs/STRATEGY_LAB_DESIGN.md`
-- `docs/SHADOW_REPLAY_RUNBOOK.md`
-- `docs/OPPORTUNITY_QUALITY.md`
+- `src/interfaces/cli/research.py`
+- `docs/AGENT_WIKI.md`
 
 ## 横向支撑能力
 
@@ -280,7 +268,7 @@ output_runs / required_data / sealed candidate snapshot / candidate trace / mark
 - Combo Yield 已有独立开仓编排模块，不再由 `sell_put_steps.py` 拥有组合收益的 trace、summary 和 alert 决策；Funding Put 仍通过显式依赖复用 CSP underwriting。
 - 已有两腿（含历史错期组合）可用精确 lot id 原子登记 `pair_intent_id` 和共享 `strategy_group_id`，不做启发式匹配。
 - Close Advice 已收敛为固定 `strict_profit_capture.v1`，不读取 `short_vol` thesis、事件、delta 或集中度。
-- Research / Shadow Replay 与生产执行保持分离。
+- Research 与生产执行保持分离。
 
 下一步目标：
 

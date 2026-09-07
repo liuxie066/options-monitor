@@ -8,16 +8,32 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from src.application.candidate_evidence_history import (
+    AccountCandidateEvidence,
+    load_run_candidate_evidence,
+)
+from src.application.candidate_filter_trace import (
+    infer_trace_scope_from_path,
+    read_candidate_filter_trace,
+)
+from src.application.cc_lp_candidate_snapshot import (
+    CC_LP_CANDIDATE_SNAPSHOT_FILE,
+    project_cc_lp_candidates,
+)
+from src.application.combo_yield_candidate_snapshot import (
+    COMBO_YIELD_CANDIDATE_SNAPSHOT_FILE,
+    project_combo_yield_candidates,
+    project_combo_yield_pair_diagnostics,
+)
+from src.application.opening_candidate_snapshot import (
+    OPENING_CANDIDATE_SNAPSHOT_FILE,
+    ranked_opening_candidates,
+    ranked_opening_candidate_decisions,
+    rejected_opening_candidate_decisions,
+)
 from src.application.research.redaction import redact_value
 from src.application.runtime_logs_cli import collect_runtime_logs
 from src.application.runtime_runs_cli import collect_runtime_runs
-from src.application.shadow_replay import summarize_shadow_replay_readiness
-from src.application.shadow_replay.capture import (
-    ShadowReplaySourceSelection,
-    candidate_replay_observations_from_selection,
-    mark_paths_from_selection,
-    outcome_paths_from_selection,
-)
 
 
 def collect_evidence(
@@ -42,9 +58,10 @@ def collect_evidence(
     source_refs = _source_refs(source_paths, base=base)
     tail_limit = _as_int(payload.get("tail_limit"), default=20, low=0, high=200)
     audit_tails = _audit_tails(source_paths, base=base, tail_limit=tail_limit)
+    selected_runs_root = _selected_runs_root(payload, base=base)
     runtime_runs = collect_runtime_runs(
         repo_root=base,
-        runs_root=payload.get("runs_root"),
+        runs_root=selected_runs_root,
         profile_path=_profile_path(payload),
         limit=_as_int(payload.get("runs_limit"), default=10, low=1, high=50),
         run_id=payload.get("run_id"),
@@ -52,7 +69,7 @@ def collect_evidence(
     )
     runtime_logs = collect_runtime_logs(
         repo_root=base,
-        runs_root=payload.get("runs_root"),
+        runs_root=selected_runs_root,
         profile_path=_profile_path(payload),
         run_id=payload.get("run_id"),
         run_dir=payload.get("run_dir"),
@@ -168,10 +185,7 @@ def _safe_input_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "max_run_age_minutes",
         "max_notification_chars",
         "trace_paths",
-        "mark_paths",
-        "outcome_paths",
         "candidate_report_dir",
-        "shadow_replay_min_sample",
         "profile_path",
         "output",
         "scope",
@@ -462,30 +476,37 @@ def _candidate_evidence(
     tail_limit: int,
     attribution: dict[str, Any],
 ) -> dict[str, Any]:
-    selection = _candidate_source_selection(
+    run_dir, runs_root, run_id = _candidate_source_context(
         payload,
         source_paths=source_paths,
         base=base,
     )
-    observations = candidate_replay_observations_from_selection(selection)
-    candidate_rows = list(observations["candidate_snapshots"])
-    filter_decisions = list(observations["filter_decisions"])
-    rank_rows = list(observations["rank_snapshots"])
-    trace_paths = list(observations["trace_paths"])[:20]
-    mark_paths = mark_paths_from_selection(selection)[:30]
-    outcome_paths = outcome_paths_from_selection(selection)[:30]
-    snapshot_sources = _candidate_snapshot_source_paths(
-        observations["account_evidence"]
+    account_evidence = (
+        load_run_candidate_evidence(base=base, run_id=run_id, runs_root=runs_root)
+        if run_id and runs_root is not None
+        else []
     )
+    candidate_rows, sealed_decisions, rank_rows = _candidate_facts(
+        account_evidence,
+        base=base,
+    )
+    trace_paths = _candidate_trace_paths(
+        payload,
+        run_dir=run_dir,
+        report_dir=source_paths.get("report_dir"),
+        base=base,
+    )[:20]
+    trace_decisions = _filter_decision_rows(trace_paths, base=base)
+    filter_decisions = _merge_filter_decisions(sealed_decisions + trace_decisions)
     candidate_reports = _candidate_snapshot_reports(
         candidate_rows,
-        account_evidence=observations["account_evidence"],
+        account_evidence=account_evidence,
         base=base,
     )
     reject_logs = _candidate_rejection_summaries(filter_decisions)
     filter_traces = [_trace_summary(path, base=base, limit=tail_limit) for path in trace_paths]
     combo_yield_pair_diagnostics = _combo_yield_pair_diagnostics_from_evidence(
-        observations["account_evidence"],
+        account_evidence,
         base=base,
     )
     ranking_limit = _as_int(payload.get("ranking_limit"), default=5, low=1, high=20)
@@ -494,18 +515,6 @@ def _candidate_evidence(
         limit=ranking_limit,
         attribution=attribution,
     )
-    shadow_replay = summarize_shadow_replay_readiness(
-        candidate_snapshots=candidate_rows,
-        filter_decisions=filter_decisions,
-        trace_paths=trace_paths,
-        mark_paths=mark_paths,
-        outcome_paths=outcome_paths,
-        source_paths=snapshot_sources,
-        candidate_evidence_coverage=observations["coverage"],
-        base=base,
-        min_sample=_as_int(payload.get("shadow_replay_min_sample"), default=30, low=1, high=10000),
-    )
-    shadow_replay_status = _first_shadow_replay_status(shadow_replay)
     total_candidate_rows = sum(int(item.get("row_count") or 0) for item in candidate_reports if item.get("exists"))
     total_reject_rows = sum(int(item.get("row_count") or 0) for item in reject_logs if item.get("exists"))
     return {
@@ -515,8 +524,6 @@ def _candidate_evidence(
         "filter_traces": filter_traces,
         "combo_yield_pair_diagnostics": combo_yield_pair_diagnostics,
         "ranking_evidence": ranking_evidence,
-        "compatibility": observations["coverage"],
-        "shadow_replay": shadow_replay,
         "summary": {
             "candidate_snapshot_file_count": sum(
                 len(item.get("owner_snapshots") or [])
@@ -535,7 +542,6 @@ def _candidate_evidence(
             ),
             "ranking_report_count": _nested(_dict_or_empty(ranking_evidence), "summary", "report_count"),
             "ranking_top_row_count": _nested(_dict_or_empty(ranking_evidence), "summary", "top_row_count"),
-            "shadow_replay_status": shadow_replay_status,
             "evidence_level": (
                 "candidate_and_trace"
                 if total_candidate_rows and any(item.get("exists") for item in filter_traces)
@@ -547,15 +553,6 @@ def _candidate_evidence(
             ),
         },
     }
-
-
-def _first_shadow_replay_status(profile: dict[str, Any]) -> str | None:
-    raw = profile.get("recommendations")
-    items = raw if isinstance(raw, list) else []
-    if not items or not isinstance(items[0], dict):
-        return None
-    status = str(items[0].get("status") or "").strip()
-    return status or None
 
 
 def _explicit_paths(value: Any, *, base: Path) -> list[Path]:
@@ -574,15 +571,37 @@ def _explicit_paths(value: Any, *, base: Path) -> list[Path]:
     return out
 
 
-def _candidate_source_selection(
+def _selected_runs_root(payload: dict[str, Any], *, base: Path) -> Any:
+    explicit = _explicit_run_context(payload, base=base)
+    return explicit[1] if explicit is not None else payload.get("runs_root")
+
+
+def _explicit_run_context(
+    payload: dict[str, Any], *, base: Path
+) -> tuple[Path, Path, str] | None:
+    run_dirs = _explicit_paths(payload.get("run_dir"), base=base)
+    if not run_dirs:
+        return None
+    run_dir = run_dirs[0]
+    if run_dir.parent.name != "output_runs":
+        raise ValueError("research candidate evidence requires canonical output_runs")
+    run_id = _text(payload.get("run_id"))
+    if run_id and run_id != run_dir.name:
+        raise ValueError("research run_id conflicts with run_dir")
+    return run_dir, run_dir.parent, run_dir.name
+
+
+def _candidate_source_context(
     payload: dict[str, Any],
     *,
     source_paths: dict[str, Path | None],
     base: Path,
-) -> ShadowReplaySourceSelection:
+) -> tuple[Path | None, Path | None, str | None]:
     runs_root = source_paths.get("runs_root")
-    explicit_run_dir = _explicit_paths(payload.get("run_dir"), base=base)
-    run_dir = explicit_run_dir[0] if explicit_run_dir else None
+    explicit = _explicit_run_context(payload, base=base)
+    if explicit is not None:
+        return explicit
+    run_dir = None
     run_id = _text(payload.get("run_id")) or None
     if run_dir is None and run_id and runs_root is not None:
         run_dir = (runs_root / run_id).resolve()
@@ -591,44 +610,194 @@ def _candidate_source_selection(
             source_paths.get("latest_scanned_run_dir")
             or source_paths.get("latest_run_dir")
         )
-    return ShadowReplaySourceSelection(
-        repo_root=base,
-        run_id=run_id or (run_dir.name if run_dir is not None else None),
-        runs_root=runs_root,
-        run_dir=run_dir,
-        report_dir=source_paths.get("report_dir"),
-        trace_paths=tuple(
-            _explicit_paths(
-                payload.get("trace_paths") or payload.get("trace_path"),
-                base=base,
-            )
-        ),
-        mark_paths=tuple(
-            _explicit_paths(
-                payload.get("mark_paths") or payload.get("mark_path"),
-                base=base,
-            )
-        ),
-        outcome_paths=tuple(
-            _explicit_paths(
-                payload.get("outcome_paths") or payload.get("outcome_path"),
-                base=base,
-            )
-        ),
-    )
+    return run_dir, runs_root, run_id or (run_dir.name if run_dir is not None else None)
 
 
-def _candidate_snapshot_source_paths(account_evidence: list[Any]) -> list[Path]:
+def _candidate_trace_paths(
+    payload: dict[str, Any],
+    *,
+    run_dir: Path | None,
+    report_dir: Path | None,
+    base: Path,
+) -> list[Path]:
+    explicit = [
+        path
+        for path in _explicit_paths(
+            payload.get("trace_paths") or payload.get("trace_path"),
+            base=base,
+        )
+        if path.is_file()
+    ]
+    if explicit:
+        return _unique_paths(explicit)
+    roots = [path for path in (run_dir, report_dir) if path is not None]
     paths: list[Path] = []
-    for evidence in account_evidence:
-        for owner in evidence.owners:
-            filenames = {
-                "opening": "opening_candidate_snapshot.json",
-                "sp_lc": "combo_yield_candidate_snapshot.json",
-                "cc_lp": "cc_lp_candidate_snapshot.json",
-            }
-            paths.append(evidence.account_dir / "state" / filenames[owner])
-    return _unique_paths(paths)
+    for root in roots:
+        paths.extend(root.glob("candidate_filter_trace.jsonl"))
+        accounts = root / "accounts"
+        if accounts.is_dir():
+            paths.extend(accounts.glob("*/candidate_filter_trace.jsonl"))
+    return _unique_paths([path.resolve() for path in paths if path.is_file()])
+
+
+def _candidate_facts(
+    evidence: list[AccountCandidateEvidence],
+    *,
+    base: Path,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    candidates: list[dict[str, Any]] = []
+    decisions: list[dict[str, Any]] = []
+    ranks: list[dict[str, Any]] = []
+    for item in evidence:
+        if not item.contributes_evidence:
+            continue
+        default_account = _text(item.classification.get("account")).lower() or None
+        for owner, snapshot in item.owners.items():
+            source_path = _owner_source_path(item, owner=owner, base=base)
+            account = _text(snapshot.get("account") or default_account).lower() or None
+            run_id = snapshot.get("run_id")
+            if owner == "opening":
+                for status, owner_decisions in (
+                    ("accepted", ranked_opening_candidate_decisions(snapshot)),
+                    ("rejected", rejected_opening_candidate_decisions(snapshot)),
+                ):
+                    for decision in owner_decisions:
+                        mode = _text(decision.get("strategy_mode")).lower()
+                        facts = dict(decision.get("normalized_input") or {})
+                        candidates.append(
+                            {
+                                **facts,
+                                "run_id": run_id,
+                                "account": account,
+                                "owner": owner,
+                                "strategy": _opening_strategy(mode),
+                                "mode": mode,
+                                "status": status,
+                                "source_path": source_path,
+                            }
+                        )
+                        if status != "rejected":
+                            continue
+                        opening = decision.get("opening_decision")
+                        rejects = opening.get("rejects") if isinstance(opening, dict) else []
+                        for reject in rejects or []:
+                            if not isinstance(reject, dict):
+                                continue
+                            decisions.append(
+                                {
+                                    **facts,
+                                    "run_id": run_id,
+                                    "account": account,
+                                    "function": _opening_strategy(mode),
+                                    "mode": mode,
+                                    "status": "rejected",
+                                    "stage": reject.get("stage"),
+                                    "rule": reject.get("reason"),
+                                    "metric_value": reject.get("metric_value"),
+                                    "threshold": reject.get("threshold"),
+                                    "message": reject.get("message"),
+                                    "source_path": source_path,
+                                }
+                            )
+                for ranked in ranked_opening_candidates(snapshot):
+                    mode = _text(ranked.get("strategy_mode")).lower()
+                    facts = dict(ranked.get("facts") or {})
+                    ranks.append(
+                        {
+                            "run_id": run_id,
+                            "account": account,
+                            "strategy": _opening_strategy(mode),
+                            "mode": mode,
+                            "rank": ranked.get("rank"),
+                            "symbol": facts.get("symbol"),
+                            "contract_symbol": facts.get("contract_symbol"),
+                            "rank_explanation": dict(ranked.get("ranking") or {}),
+                            "sealed_facts": facts,
+                            "source_path": source_path,
+                        }
+                    )
+                continue
+            projector = (
+                project_combo_yield_candidates
+                if owner == "sp_lc"
+                else project_cc_lp_candidates
+                if owner == "cc_lp"
+                else None
+            )
+            if projector is None:
+                continue
+            for row in projector(snapshot):
+                candidates.append(
+                    {
+                        **row,
+                        "run_id": row.get("run_id") or run_id,
+                        "account": _text(row.get("account") or account).lower() or None,
+                        "owner": owner,
+                        "status": "accepted",
+                        "source_path": source_path,
+                    }
+                )
+    return candidates, _merge_filter_decisions(decisions), ranks
+
+
+def _owner_source_path(
+    evidence: AccountCandidateEvidence,
+    *,
+    owner: str,
+    base: Path,
+) -> str:
+    filenames = {
+        "opening": OPENING_CANDIDATE_SNAPSHOT_FILE,
+        "sp_lc": COMBO_YIELD_CANDIDATE_SNAPSHOT_FILE,
+        "cc_lp": CC_LP_CANDIDATE_SNAPSHOT_FILE,
+    }
+    return _safe_rel(evidence.account_dir / "state" / filenames[owner], base=base)
+
+
+def _opening_strategy(mode: str) -> str:
+    if mode == "put":
+        return "sell_put"
+    if mode == "call":
+        return "sell_call"
+    raise ValueError(f"unsupported opening strategy mode: {mode}")
+
+
+def _filter_decision_rows(paths: list[Path], *, base: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for path in paths:
+        scope = infer_trace_scope_from_path(path)
+        for row in read_candidate_filter_trace(path):
+            item = dict(row)
+            item["source_path"] = _safe_rel(path, base=base)
+            item["run_id"] = item.get("run_id") or scope.get("run_id")
+            item["account"] = _text(item.get("account") or scope.get("account")).lower() or None
+            item["status"] = _text(item.get("status") or "rejected").lower()
+            item["rule"] = item.get("rule") or item.get("reject_rule") or item.get("reject_reason")
+            rows.append(item)
+    return _merge_filter_decisions(rows)
+
+
+def _merge_filter_decisions(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[tuple[str, ...], dict[str, Any]] = {}
+    unkeyed: list[dict[str, Any]] = []
+    for row in rows:
+        key = (
+            _text(row.get("run_id")),
+            _text(row.get("account")).lower(),
+            _text(row.get("symbol") or row.get("underlying_symbol")).upper(),
+            _text(row.get("contract_symbol") or row.get("option_symbol")).upper(),
+            _text(row.get("mode") or row.get("option_type")).lower(),
+            _text(row.get("status") or "rejected").lower(),
+            _text(row.get("rule") or row.get("reject_rule") or row.get("reject_reason")),
+        )
+        if not key[-1] or not (key[2] or key[3]):
+            unkeyed.append(row)
+            continue
+        target = merged.setdefault(key, dict(row))
+        for name, value in row.items():
+            if target.get(name) in (None, "") and value not in (None, ""):
+                target[name] = value
+    return [*merged.values(), *unkeyed]
 
 
 def _candidate_snapshot_reports(
@@ -656,7 +825,6 @@ def _candidate_snapshot_reports(
                 "symbol_counts": dict(symbol_counts.most_common()),
                 "status_counts": dict(status_counts.most_common()),
                 "owner_snapshots": sorted(evidence.owners),
-                "compatibility": dict(evidence.classification),
                 "sample_rows": account_rows[:5],
             }
         )
