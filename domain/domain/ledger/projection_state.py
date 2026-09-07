@@ -17,9 +17,9 @@ from domain.domain.ledger.identity import ContractKey
 from domain.domain.ledger.lots import PositionLot
 from domain.domain.ledger.position_fields import (
     POSITION_LOT_STRATEGY_PATCH_FIELDS,
-    strategy_metadata_fields_from_payload,
 )
 from domain.domain.money import canonical_decimal_text, to_decimal
+from domain.domain.strategy_membership import resolve_strategy_metadata
 
 
 RESUMABLE_PROJECTION_STATE_SCHEMA = "resumable_projection_state.v1"
@@ -81,7 +81,7 @@ _ECONOMIC_STRATEGY_KEYS = tuple(
     key
     for key in POSITION_LOT_STRATEGY_PATCH_FIELDS
     if key != "strategy_snapshot"
-)
+) + ("expiry_structure",)
 
 
 def _contract_key_from_dict(payload: Any) -> ContractKey:
@@ -162,11 +162,29 @@ def _resumable_open_event(event: TradeEvent) -> TradeEvent:
     resumable_payload: dict[str, Any] = {
         "fee_provenance": fee_provenance,
     }
-    strategy_metadata = strategy_metadata_fields_from_payload(raw_payload)
-    for key in _ECONOMIC_STRATEGY_KEYS:
-        text = str(strategy_metadata.get(key) or "").strip()
-        if text:
-            resumable_payload[key] = text
+    strategy_metadata = resolve_strategy_metadata(
+        raw_payload,
+        source_id=event.event_id,
+    )
+    if strategy_metadata.issues:
+        for key in _ECONOMIC_STRATEGY_KEYS:
+            text = str(raw_payload.get(key) or "").strip()
+            if text:
+                resumable_payload[key] = text
+        snapshot = raw_payload.get("strategy_snapshot")
+        if isinstance(snapshot, dict):
+            compact_snapshot = {
+                key: text
+                for key in _ECONOMIC_STRATEGY_KEYS
+                if (text := str(snapshot.get(key) or "").strip())
+            }
+            if compact_snapshot:
+                resumable_payload["strategy_snapshot"] = compact_snapshot
+    else:
+        for key in _ECONOMIC_STRATEGY_KEYS:
+            text = str(getattr(strategy_metadata.metadata, key) or "").strip()
+            if text:
+                resumable_payload[key] = text
     return TradeEvent(
         event_id=event.event_id,
         event_type=event.event_type,

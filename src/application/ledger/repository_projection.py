@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+from .repository_trade_schema import (
+    EXECUTION_IDENTITY_INDEXES,
+    _execution_identity_index_ready,
+    _execution_identity_index_sql,
+    _validate_execution_identity_rows,
+)
 from .repository_schema import (
     _backfill_trade_event_pagination_schema,
     _position_lot_contract_scalars,
@@ -138,6 +144,11 @@ class PositionProjectionRepositoryMixin:
     ) -> tuple[str, ...]:
         """Explicitly build normalized indexes for an already populated store."""
 
+        if conn is None:
+            with self._writer_connection(begin_immediate=True) as active_conn:
+                return self.build_position_projection_indexes(conn=active_conn)
+        if not conn.in_transaction:
+            raise ValueError("index maintenance requires an active transaction")
         definitions = (
             (
                 "idx_trade_events_trade_time",
@@ -159,10 +170,23 @@ class PositionProjectionRepositoryMixin:
                 "CREATE INDEX IF NOT EXISTS idx_position_lots_account_record ON position_lots(account, record_id)",
             ),
         )
-        with self._optional_conn(conn, commit=True) as active_conn:
+        with self._writer_lock(), self._optional_conn(conn) as active_conn:
+            execution_tables = [
+                table for table in EXECUTION_IDENTITY_INDEXES
+                if self._table_exists(table, conn=active_conn)
+            ]
+            for table in execution_tables:
+                _validate_execution_identity_rows(active_conn, table)
+            definitions += tuple(
+                (EXECUTION_IDENTITY_INDEXES[table][0], _execution_identity_index_sql(table))
+                for table in execution_tables
+            )
             before = {
                 str(row["name"]) for row in active_conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
             }
-            for _name, create_sql in definitions:
-                active_conn.execute(create_sql)
+            for name, create_sql in definitions:
+                if name not in before:
+                    active_conn.execute(create_sql)
+            if not all(_execution_identity_index_ready(active_conn, table) for table in execution_tables):
+                raise ValueError("execution identity index definition mismatch")
         return tuple(name for name, _sql in definitions if name not in before)

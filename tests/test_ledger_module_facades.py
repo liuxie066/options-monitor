@@ -209,6 +209,20 @@ def test_repository_facade_keeps_core_aggregate_reads(tmp_path) -> None:
     assert repo.list_assigned_stock_events() == []
 
 
+def test_ledger_writer_lock_does_not_open_an_outer_transaction(tmp_path) -> None:
+    api = import_module("src.application.ledger.api")
+    repository = import_module("src.application.ledger.repository")
+    repo = repository.SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    with api.with_sqlite_repo_writer_lock(repo):
+        with repo._writer_connection(begin_immediate=True) as conn:
+            assert conn.in_transaction
+            conn.execute("CREATE TABLE intake_lock_probe (value INTEGER)")
+        with repo._writer_connection(begin_immediate=True) as conn:
+            conn.execute("INSERT INTO intake_lock_probe VALUES (1)")
+    with repo._connect() as conn:
+        assert conn.execute("SELECT value FROM intake_lock_probe").fetchone()[0] == 1
+
+
 def test_giant_modules_are_thin_compatibility_facades() -> None:
     expected_definitions = {
         "repository.py": [

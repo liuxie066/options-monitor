@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from src.application.cash_conversion import (
+    attach_assigned_stock_sale_cash_conversions,
+    load_cash_fx_payload,
+)
+
 from .writer_common import (
     Any,
     ContractKey,
@@ -97,7 +102,24 @@ def record_assigned_stock_event_atomically(
             if begin.projection_present and begin.clean_at_start
             else None
         )
-        created = sqlite_repo.upsert_assigned_stock_event(event, conn=conn)
+        stock_event_id = str(event.get("stock_event_id") or event.get("event_id") or "").strip()
+        existing = next((
+            row for row in sqlite_repo.list_assigned_stock_events(conn=conn)
+            if str(row.get("stock_event_id") or row.get("event_id") or "") == stock_event_id
+        ), None)
+        storage_event = dict(event)
+        if existing is not None:
+            if "cash_conversions" in existing:
+                storage_event["cash_conversions"] = existing["cash_conversions"]
+            else:
+                storage_event.pop("cash_conversions", None)
+        elif event.get("price") is not None and event.get("currency"):
+            storage_event = attach_assigned_stock_sale_cash_conversions(
+                storage_event,
+                fx_payload=load_cash_fx_payload(sqlite_repo, conn=conn),
+                observed_at_ms=utc_now_ms(),
+            )
+        created = sqlite_repo.upsert_assigned_stock_event(storage_event, conn=conn)
         if prior is not None:
             stock_lot_id = str(
                 event.get("target_stock_lot_id")
@@ -146,6 +168,7 @@ def record_assigned_stock_event_atomically(
                 event.get("stock_event_id") or event.get("event_id") or ""
             ).strip(),
             "created": bool(created),
+            "sale_event": storage_event,
             "decision_projection": decision_projection,
         }
 

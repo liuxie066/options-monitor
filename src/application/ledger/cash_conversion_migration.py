@@ -3,25 +3,19 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Mapping, Sequence
-from zoneinfo import ZoneInfo
 
 from domain.domain.ledger import TradeEvent
 from domain.domain.ledger.cash_facts import cash_facts_for_trade_event
 from domain.domain.money import to_decimal
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.performance.cash_conversion import (
-    HISTORICAL_BUSINESS_DAY_FX_CARRY_FORWARD_METHOD,
-    MAX_HISTORICAL_CARRY_FORWARD_DISTANCE_MS,
-    OFFICIAL_CARRY_FORWARD_SOURCES,
+    cash_fx_daily_facts,
     validate_observed_cash_conversion,
 )
 from domain.domain.performance.models import (
-    EvidenceSelection,
     FXRateFact,
-    select_fx_rate,
 )
 from src.application.cash_conversion import (
     attach_assigned_stock_sale_cash_conversions,
@@ -29,10 +23,9 @@ from src.application.cash_conversion import (
 )
 from src.application.ledger.event_codec import encode_trade_event_for_storage, import_stored_trade_events
 from src.application.ledger.repository import SQLiteOptionPositionsRepository, with_sqlite_repo_transaction
+from src.infrastructure.performance_evidence_sqlite import PerformanceEvidenceSQLiteRepository
 
 
-_MAX_CASH_FX_STALENESS_MS = 24 * 60 * 60 * 1000
-_FX_EVIDENCE_TIMEZONE = ZoneInfo("Asia/Shanghai")
 _TRADE_CASH_FACT_KINDS = frozenset(
     {
         "option_trade_cash_gross",
@@ -189,7 +182,7 @@ def _migrate_cash_conversions(
         raise ValueError(
             "performance evidence schema must be initialized before cash conversion backfill"
         )
-    fx_rates = tuple(evidence.fx_rates)
+    fx_rates = cash_fx_daily_facts(tuple(evidence.fx_rates))
     scope = {
         "account": str(account or "").strip().lower() or None,
         "broker": str(broker or "").strip() or None,
@@ -223,9 +216,14 @@ def _migrate_cash_conversions(
         nonlocal batch_id
         if conn is None or not isinstance(sqlite_repo, SQLiteOptionPositionsRepository):
             raise TypeError("cash conversion backfill requires a transactional SQLite ledger")
+        fixed_rates = PerformanceEvidenceSQLiteRepository(sqlite_repo.db_path).freeze_cash_fx_daily_rates(
+            evidence.fx_rates,
+            migrated_at_ms=int(migrated_at_ms),
+            conn=conn,
+        )
         plan = _build_plan(
             sqlite_repo,
-            fx_rates=fx_rates,
+            fx_rates=fixed_rates,
             scope=scope,
             migrated_at_ms=int(migrated_at_ms),
             replace_superseded=replace_superseded,
@@ -531,95 +529,14 @@ def _conversion_from_evidence(
                 else f"identity:{native_currency}"
             ),
         )
-    selected = _select_cash_fx_rate(
-        fx_rates,
-        base_currency=native_currency,
-        at_ms=int(effective_at_ms),
-    )
-    if selected.fact is None:
-        pending = build_cash_conversion(
-            cash_fact_id=cash_fact_id,
-            amount=native_amount,
-            currency=native_currency,
-            fx_payload=None,
-            effective_at_ms=int(effective_at_ms),
-            observed_at_ms=int(migrated_at_ms),
-        )
-        pending["missing_reason"] = (
-            f"{native_currency}CNY event-time FX {selected.status}: "
-            f"{selected.reason or 'evidence unavailable'}"
-        )
-        return pending
-    rate = selected.fact
-    assert isinstance(rate, FXRateFact)
-    timestamp = datetime.fromtimestamp(
-        int(rate.effective_at_ms) / 1000,
-        tz=timezone.utc,
-    ).isoformat()
     return build_cash_conversion(
         cash_fact_id=cash_fact_id,
         amount=native_amount,
         currency=native_currency,
-        fx_payload={
-            "rates": {f"{native_currency}CNY": str(rate.rate)},
-            "timestamp": timestamp,
-            "source": rate.source,
-        },
+        fx_payload={"fx_rate_facts": tuple(fx_rates)},
         effective_at_ms=int(effective_at_ms),
-        observed_at_ms=int(rate.observed_at_ms),
-        rate_source=rate.source,
-        rate_source_id=rate.source_id,
-        rate_evidence_fact_id=str(rate.fact_id),
-        method=(
-            HISTORICAL_BUSINESS_DAY_FX_CARRY_FORWARD_METHOD
-            if int(selected.staleness_ms or 0) > _MAX_CASH_FX_STALENESS_MS
-            else "historical_fx_evidence_backfill"
-        ),
-        max_rate_distance_ms=(
-            MAX_HISTORICAL_CARRY_FORWARD_DISTANCE_MS
-            if int(selected.staleness_ms or 0) > _MAX_CASH_FX_STALENESS_MS
-            else _MAX_CASH_FX_STALENESS_MS
-        ),
+        observed_at_ms=int(migrated_at_ms),
     )
-
-
-def _select_cash_fx_rate(
-    fx_rates: Sequence[FXRateFact],
-    *,
-    base_currency: str,
-    at_ms: int,
-) -> EvidenceSelection:
-    selected = select_fx_rate(
-        list(fx_rates),
-        base_currency=base_currency,
-        at_ms=int(at_ms),
-        max_staleness_ms=_MAX_CASH_FX_STALENESS_MS,
-    )
-    if selected.status != "stale":
-        return selected
-
-    carried = select_fx_rate(
-        list(fx_rates),
-        base_currency=base_currency,
-        at_ms=int(at_ms),
-        max_staleness_ms=MAX_HISTORICAL_CARRY_FORWARD_DISTANCE_MS,
-    )
-    rate = carried.fact
-    if not isinstance(rate, FXRateFact):
-        return selected
-    carry_dates = rate.quality.get("carry_forward_dates")
-    event_date = datetime.fromtimestamp(
-        int(at_ms) / 1000,
-        tz=_FX_EVIDENCE_TIMEZONE,
-    ).date().isoformat()
-    if (
-        rate.source not in OFFICIAL_CARRY_FORWARD_SOURCES
-        or rate.quality.get("official") is not True
-        or not isinstance(carry_dates, (list, tuple))
-        or event_date not in {str(item) for item in carry_dates}
-    ):
-        return selected
-    return carried
 
 
 def _assigned_conversion_candidates(
@@ -628,50 +545,12 @@ def _assigned_conversion_candidates(
     fx_rates: Sequence[FXRateFact],
     migrated_at_ms: int,
 ) -> dict[str, dict[str, Any]]:
-    event_time_ms = int(event.get("trade_time_ms") or event.get("event_time_ms") or 0)
-    currency = normalize_currency(event.get("currency"))
-    selected = _select_cash_fx_rate(
-        fx_rates,
-        base_currency=currency,
-        at_ms=event_time_ms,
-    )
-    fx_payload: dict[str, Any] | None = None
-    rate: FXRateFact | None = selected.fact if isinstance(selected.fact, FXRateFact) else None
-    if rate is not None:
-        fx_payload = {
-            "rates": {f"{currency}CNY": str(rate.rate)},
-            "timestamp": datetime.fromtimestamp(
-                int(rate.effective_at_ms) / 1000,
-                tz=timezone.utc,
-            ).isoformat(),
-        }
     generated = attach_assigned_stock_sale_cash_conversions(
         event,
-        fx_payload=fx_payload,
-        observed_at_ms=int(rate.observed_at_ms if rate is not None else event_time_ms),
+        fx_payload={"fx_rate_facts": tuple(fx_rates)},
+        observed_at_ms=int(migrated_at_ms),
     ).get("cash_conversions")
-    if not isinstance(generated, Mapping):
-        return {}
-    out: dict[str, dict[str, Any]] = {}
-    for fact_kind, raw_conversion in generated.items():
-        if not isinstance(raw_conversion, Mapping):
-            continue
-        conversion = dict(raw_conversion)
-        native_amount = to_decimal(
-            conversion.get("native_amount"),
-            field_name="assigned stock cash amount",
-        )
-        if native_amount != 0 and currency != "CNY":
-            conversion = _conversion_from_evidence(
-                cash_fact_id=str(conversion.get("cash_fact_id") or ""),
-                amount=native_amount,
-                currency=currency,
-                effective_at_ms=event_time_ms,
-                fx_rates=fx_rates,
-                migrated_at_ms=int(migrated_at_ms),
-            )
-        out[str(fact_kind)] = conversion
-    return out
+    return dict(generated) if isinstance(generated, Mapping) else {}
 
 
 def _trade_event_in_scope(event: TradeEvent, scope: Mapping[str, Any]) -> bool:

@@ -3,8 +3,11 @@ from __future__ import annotations
 import hashlib
 from typing import Any, Callable, Mapping, Protocol, cast
 
+from domain.domain.trade_execution import normalize_execution_input
+
 from src.application.positions.context_cache import invalidate_option_positions_context_cache
 from src.application.trades.deal_identity import broker_deal_key
+from src.application.trades.inbox import TradePayloadClaimLost
 from src.application.trades.lifecycle import (
     lifecycle_deal_economic_hash,
 )
@@ -86,6 +89,7 @@ def _exception_result_dict(
     payload: dict[str, Any] | None = None,
     deal: object | None = None,
     stage: str,
+    retryable: bool = False,
 ) -> dict[str, Any]:
     action = None
     if deal is not None:
@@ -103,6 +107,7 @@ def _exception_result_dict(
             "exception_stage": str(stage),
             "exception_type": type(exc).__name__,
             "exception_message": str(exc),
+            "retryable": bool(retryable),
         },
     }
 
@@ -179,7 +184,9 @@ def _migrate_compatible_legacy_deal_state(
             if isinstance(item, dict)
             else ""
         )
-        if item_account == account:
+        if (item_account == account and isinstance(item, dict)
+                and str(item.get("futu_account_id") or "") == str(getattr(deal, "futu_account_id", "") or "")
+                and bool(item.get("futu_account_id"))):
             out[name][scoped_key] = dict(item)
             out[name].pop(legacy_key, None)
             break
@@ -214,7 +221,7 @@ def _is_ignored_non_option_result(result_dict: dict[str, Any]) -> bool:
 def _is_terminal_ledger_result(result_dict: dict[str, Any]) -> bool:
     status = str(result_dict.get("status") or "").strip().lower()
     reason = str(result_dict.get("reason") or "").strip().lower()
-    return status == "skipped" and reason == "lifecycle_already_written"
+    return status == "skipped" and reason in {"lifecycle_already_written", "ledger_recorded"}
 
 
 def _attach_projection_check_fields(out: dict[str, Any]) -> None:
@@ -367,6 +374,8 @@ def _finalize_trade_payload_result(
                 "source": source,
             }
         )
+    except TradePayloadClaimLost:
+        raise
     except Exception as exc:
         receipt_result = {
             "enabled": True,
@@ -522,8 +531,15 @@ def process_trade_payload(
             )
     try:
         deal = normalize_trade_deal_fn(effective_payload, futu_account_mapping=account_mapping)
+    except TradePayloadClaimLost:
+        raise
     except Exception as exc:
-        result_dict = _exception_result_dict(exc, payload=effective_payload, stage="normalize")
+        result_dict = _exception_result_dict(
+            exc,
+            payload=effective_payload,
+            stage="normalize",
+            retryable=True,
+        )
         append_trade_intake_audit_fn(
             audit_path,
             build_trade_intake_audit_event("failed", source=source, payload=effective_payload, result=result_dict),
@@ -560,6 +576,7 @@ def process_trade_payload(
         source=source,
         enabled=portfolio_management_enabled,
     )
+    resolve_returned = False
     try:
         result = resolve_trade_deal_fn(
             deal,
@@ -568,6 +585,7 @@ def process_trade_payload(
             apply_changes=apply_changes,
             retry_failed_deal=retry_failed_deal,
         )
+        resolve_returned = True
         result_dict = result.to_dict()
         result_dict = _attach_runtime_write_diagnostics(
             result_dict=result_dict,
@@ -577,8 +595,16 @@ def process_trade_payload(
         if portfolio_refresh_intent is not None:
             result_dict["portfolio_refresh_intent"] = portfolio_refresh_intent
         append_trade_intake_audit_fn(audit_path, build_trade_intake_audit_event("resolved", source=source, deal=deal, result=result_dict))
+    except TradePayloadClaimLost:
+        raise
     except Exception as exc:
-        result_dict = _exception_result_dict(exc, payload=effective_payload, deal=deal, stage="resolve")
+        result_dict = _exception_result_dict(
+            exc,
+            payload=effective_payload,
+            deal=deal,
+            stage="resolve" if not resolve_returned else "post_resolve",
+            retryable=not resolve_returned,
+        )
         if portfolio_refresh_intent is not None:
             result_dict["portfolio_refresh_intent"] = portfolio_refresh_intent
         append_trade_intake_audit_fn(
@@ -608,6 +634,11 @@ def process_trade_payload(
             on_result_fn=on_result_fn,
             source=source,
         )
+
+    if before_receipt_fn is not None:
+        enriched_result = before_receipt_fn(result_dict)
+        if isinstance(enriched_result, dict):
+            result_dict = enriched_result
 
     deal_key = broker_deal_key(deal)
     economic_payload_hash = lifecycle_deal_economic_hash(deal)
@@ -722,10 +753,6 @@ def process_trade_payload(
                 payload=payload,
             )
             write_trade_intake_state_fn(state_path, state)
-    if before_receipt_fn is not None:
-        enriched_result = before_receipt_fn(result_dict)
-        if isinstance(enriched_result, dict):
-            result_dict = enriched_result
     return _finalize_trade_payload_result(
         result_dict=result_dict,
         state=state,
@@ -759,6 +786,13 @@ def _build_portfolio_refresh_intent(
         not in {"futu", "富途"}
     ):
         return None
+    execution = getattr(deal, "execution_input", None)
+    if execution:
+        if not isinstance(execution, Mapping) or getattr(deal, "asset_type", None) != "stock":
+            return None
+        validated = normalize_execution_input(execution)
+        if execution.get("errors") or validated["errors"] or validated["instrument_ref"]["asset_type"] != "stock":
+            return None
     account = str(getattr(deal, "internal_account", "") or "").strip().lower()
     symbol = str(getattr(deal, "symbol", "") or "").strip()
     futu_account_id = str(getattr(deal, "futu_account_id", "") or "").strip()

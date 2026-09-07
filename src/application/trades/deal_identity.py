@@ -3,11 +3,18 @@ from __future__ import annotations
 from typing import Any, Iterable
 
 from src.application.ledger.api import (
+    applied_execution_association_conflicts,
     broker_external_event_key,
+    broker_execution_identity,
+    execution_identity_from_input,
     valid_void_target_event_id,
 )
 from src.application.trades.account_mapping import resolve_internal_account
 from domain.domain.trade_account_identity import extract_primary_account_id
+from domain.domain.trade_execution import (
+    conflicting_execution_associations,
+    execution_economic_content,
+)
 
 
 DEAL_ID_FIELDS = ("source_deal_id", "deal_id", "futu_deal_id")
@@ -16,7 +23,7 @@ DEAL_ID_FIELDS = ("source_deal_id", "deal_id", "futu_deal_id")
 def broker_deal_key(deal: Any) -> str:
     """Return the account-scoped durable identity for a normalized broker deal."""
 
-    return broker_external_event_key(deal)
+    return broker_execution_identity(deal) or broker_external_event_key(deal)
 
 
 def broker_deal_key_from_payload(
@@ -25,12 +32,26 @@ def broker_deal_key_from_payload(
     account_mapping: dict[str, str] | None,
 ) -> str:
     raw = payload if isinstance(payload, dict) else {}
+    execution = raw.get("execution_input") if isinstance(raw.get("execution_input"), dict) else raw
+    execution_id = execution_identity_from_input(execution)
+    if execution_id:
+        return execution_id
     deal_id = ""
     for key in ("deal_id", "dealID", "dealId", "id"):
         deal_id = str(raw.get(key) or "").strip()
         if deal_id:
             break
     futu_account_id = str(extract_primary_account_id(raw) or "").strip()
+    execution_id = execution_identity_from_input({
+        "broker_account_ref": {
+            "broker_id": "futu", "external_account_id": futu_account_id,
+            "environment": raw.get("environment") or raw.get("trd_env"),
+        },
+        "external_id_namespace": raw.get("external_id_namespace") or raw.get("execution_id_namespace"),
+        "external_execution_id": deal_id,
+    })
+    if execution_id:
+        return execution_id
     account = str(resolve_internal_account(futu_account_id, account_mapping) or "").strip()
     if deal_id and account and futu_account_id:
         return f"futu:{account}:{futu_account_id}:{deal_id}"
@@ -50,13 +71,13 @@ def structured_deal_ids_from_ledger_event(event: dict[str, Any]) -> set[str]:
 
 
 def structured_deal_keys_from_ledger_event(event: dict[str, Any]) -> set[str]:
-    """Return account-scoped broker identities, falling back only for legacy rows."""
+    """Return proven scoped identities; an unscoped deal ID is never a key."""
 
     raw = event.get("raw_payload")
     raw_payload = raw if isinstance(raw, dict) else {}
-    external_key = str(raw_payload.get("external_event_key") or "").strip()
-    if external_key:
-        return {external_key}
+    execution = raw_payload.get("execution_input") or {}
+    execution_id = execution_identity_from_input(execution)
+    keys = {execution_id} if execution_id else set()
     deal_ids = structured_deal_ids_from_ledger_event(event)
     account = str(
         event.get("account")
@@ -65,16 +86,32 @@ def structured_deal_keys_from_ledger_event(event: dict[str, Any]) -> set[str]:
         or ""
     ).strip().lower()
     futu_account_id = str(raw_payload.get("futu_account_id") or "").strip()
+    if execution_id:
+        ref = execution["broker_account_ref"]
+        if not (
+            ref.get("broker_id") == "futu"
+            and ref.get("external_account_id") == futu_account_id
+            and ref.get("environment") == "REAL"
+            and execution.get("external_id_namespace") == "futu.deal"
+            and str(execution.get("external_execution_id")) in deal_ids
+        ):
+            return keys
     if account and futu_account_id:
-        return {
+        keys.update({
             f"futu:{account}:{futu_account_id}:{deal_id}"
             for deal_id in deal_ids
-        }
-    return deal_ids
+        })
+    return keys
 
 
 def structured_deal_ids_from_assigned_stock_event(event: dict[str, Any]) -> set[str]:
     return _normalized_values(event.get(key) for key in DEAL_ID_FIELDS)
+
+
+def structured_deal_keys_from_assigned_stock_event(event: dict[str, Any]) -> set[str]:
+    return structured_deal_keys_from_ledger_event(
+        {"account": event.get("account"), "raw_payload": event}
+    )
 
 
 def active_ledger_events(events: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -109,6 +146,41 @@ def completed_ledger_deal_keys(events: Iterable[dict[str, Any]]) -> set[str]:
         events,
         identity_fn=structured_deal_keys_from_ledger_event,
     )
+
+
+def completed_ledger_execution_events(
+    events: Iterable[dict[str, Any]], deal: Any,
+) -> list[dict[str, Any]]:
+    """Resolve one proven execution to its unchanged, complete legacy event set."""
+    execution_id = broker_execution_identity(deal)
+    if not execution_id:
+        return []
+    legacy_key = broker_external_event_key(deal)
+    candidates = []
+    for event in active_ledger_events(events):
+        raw = event.get("raw_payload") or {}
+        stored_id = execution_identity_from_input(raw.get("execution_input"))
+        aliases = structured_deal_keys_from_ledger_event(event)
+        if stored_id == execution_id or legacy_key in aliases:
+            if stored_id and stored_id != execution_id:
+                raise ValueError("trade_execution_identity_conflict")
+            candidates.append(event)
+    if not candidates:
+        return []
+    from src.application.trades.normalizer import canonical_trade_execution_content
+
+    incoming = execution_economic_content(deal.execution_input)
+    if applied_execution_association_conflicts(None, execution_id, incoming, applied_events=candidates):
+        raise ValueError("trade_execution_applied_association_conflict")
+    for event in candidates:
+        stored = canonical_trade_execution_content(dict(event.get("raw_payload") or {}))
+        if stored.get("errors") or incoming.get("errors"):
+            raise ValueError("legacy_execution_evidence_required")
+        if stored["economic"] != incoming["economic"] or conflicting_execution_associations(stored, incoming):
+            raise ValueError("trade_execution_economic_conflict")
+    if not _completed_ledger_identities(candidates, identity_fn=lambda _event: {execution_id}):
+        raise ValueError("trade_execution_split_incomplete")
+    return candidates
 
 
 def _completed_ledger_identities(

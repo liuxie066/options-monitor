@@ -181,6 +181,11 @@ def test_projection_runtime_facade_modes_are_fully_inventoried() -> None:
                 "'forced_full'",
             ): 1,
             (
+                "src/application/ledger/writer_trade_events.py",
+                "_enrich_execution_order_identity",
+                "'forced_full'",
+            ): 1,
+            (
                 "src/application/ledger/writer_lifecycle_allocation.py",
                 "apply_lifecycle_allocation_atomically>_run",
                 "'forced_full'",

@@ -107,7 +107,7 @@ def test_retryable_disconnect_recovers_and_resets_to_floor(tmp_path: Path, monke
 
     assert rc == 0
     assert _Listener.starts == 2
-    assert waits == [5, 5]
+    assert waits == [5, 0]  # Reconnect backoff, then wakeable polling cancellation check.
 
 
 def test_retry_backoff_is_capped_at_sixty_seconds(tmp_path: Path, monkeypatch) -> None:

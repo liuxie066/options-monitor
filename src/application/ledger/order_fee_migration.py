@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Any, Mapping, Sequence
 
@@ -23,7 +23,7 @@ from domain.domain.performance.cash_conversion import (
     MAX_HISTORICAL_CARRY_FORWARD_DISTANCE_MS,
     validate_observed_cash_conversion,
 )
-from src.application.cash_conversion import build_cash_conversion
+from src.application.cash_conversion import build_cash_conversion, load_cash_fx_payload
 from src.application.ledger.current_decision_projection import (
     capture_current_decision_projection_fence,
     capture_trade_event_decision_projection_fence,
@@ -31,7 +31,7 @@ from src.application.ledger.current_decision_projection import (
     finalize_current_decision_projection,
 )
 from src.application.ledger.event_codec import stored_trade_event_to_ledger_event
-from src.application.ledger.order_fee_semantics import zero_option_fee_lifecycle_reason
+from src.application.ledger.order_fee_semantics import futu_order_namespace_issue, zero_option_fee_lifecycle_reason
 from src.application.ledger.position_projection_runtime import (
     run_position_projection_in_transaction,
 )
@@ -63,6 +63,9 @@ class ActualOrderFee:
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "ActualOrderFee":
+        namespace_issue = futu_order_namespace_issue(value)
+        if namespace_issue:
+            raise ValueError(namespace_issue)
         amount = _money(value.get("fee_amount"), field="fee_amount")
         if amount < 0:
             raise ValueError("fee_amount must be non-negative")
@@ -333,6 +336,14 @@ def _build_units(
         start_ms=int(count_start or 1),
         end_exclusive_ms=int(count_end or 2),
     )
+    for event in (*option_events, *stock_events):
+        raw = (event.raw_payload or {}) if isinstance(event, TradeEvent) else event
+        namespace_issue = futu_order_namespace_issue(raw)
+        if namespace_issue and (target_identity is not None or _in_range(event, start_ms, end_exclusive_ms)):
+            unresolved.append({
+                "event_kind": "option_trade" if isinstance(event, TradeEvent) else "assigned_stock_sale",
+                "event_id": _event_id(event), "reason": namespace_issue,
+            })
     option_groups = _group_options_by_order(option_events)
     stock_groups = _group_stocks_by_order(stock_events)
     units: list[_Unit] = []
@@ -984,6 +995,11 @@ def _apply_unit(
 ) -> dict[str, Any]:
     if conn is None:
         raise TypeError("fee enrichment requires SQLite transaction authority")
+    fx_payload = load_cash_fx_payload(repo, conn=conn)
+    unit = replace(unit, changes=tuple(
+        _fill_pending_fee_fx(change, fx_payload=fx_payload, applied_at_ms=applied_at_ms)
+        for change in unit.changes
+    ))
     accounts = sorted({change.account for change in unit.changes})
     option_changed = any(change.event_kind == "option_trade" for change in unit.changes)
     fence = (
@@ -1066,6 +1082,28 @@ def _apply_unit(
         ),
         "decision_projection": decision,
     }
+
+
+def _fill_pending_fee_fx(change: _Change, *, fx_payload: Mapping[str, Any] | None, applied_at_ms: int) -> _Change:
+    payload = json.loads(change.after_json)
+    raw = payload.get("raw_payload", {}) if change.event_kind == "option_trade" else payload
+    conversions = raw.get("cash_conversions", {})
+    key = "option_fee_cash" if change.event_kind == "option_trade" else "assigned_stock_sale_fee_cash"
+    conversion = conversions.get(key)
+    if not isinstance(conversion, Mapping) or conversion.get("status") != "pending":
+        return change
+    updated = build_cash_conversion(
+        cash_fact_id=conversion["cash_fact_id"],
+        amount=conversion["native_amount"],
+        currency=conversion["native_currency"],
+        fx_payload=fx_payload,
+        effective_at_ms=int(conversion["effective_at_ms"]),
+        observed_at_ms=int(applied_at_ms),
+    )
+    if updated["status"] == "observed":
+        conversions[key] = updated
+        return replace(change, after_json=_json(payload))
+    return change
 
 
 def _assigned_after_by_account(
@@ -1272,6 +1310,8 @@ def _group_options_by_order(
     grouped: dict[tuple[str, str, str, str], list[TradeEvent]] = {}
     for event in events:
         raw = event.raw_payload or {}
+        if futu_order_namespace_issue(raw):
+            continue
         identity = _order_identity(
             event.contract_key.broker,
             event.contract_key.account,
@@ -1288,6 +1328,8 @@ def _group_stocks_by_order(
 ) -> dict[tuple[str, str, str, str], tuple[dict[str, Any], ...]]:
     grouped: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
     for event in events:
+        if futu_order_namespace_issue(event):
+            continue
         identity = _order_identity(
             event.get("broker"),
             event.get("account"),

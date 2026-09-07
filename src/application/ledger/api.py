@@ -62,7 +62,14 @@ from src.application.ledger.event_codec import (
 from src.application.ledger.assigned_stock_projection import (
     project_assigned_stock_lifecycle_from_rows,
 )
-from src.application.ledger.external_event_key import broker_external_event_key
+from src.application.ledger.external_event_key import (
+    applied_execution_association_conflicts,
+    broker_external_event_key,
+    futu_compatibility_source_key,
+    broker_execution_identity,
+    execution_identity_from_input,
+    read_execution_event_candidates,
+)
 from src.application.ledger.read_only_evidence import (
     open_trade_reconciliation_evidence_repo,
 )
@@ -77,6 +84,7 @@ from src.application.ledger.order_fee_migration import (
     enrich_order_fees,
 )
 from src.application.ledger.order_fee_semantics import (
+    futu_order_namespace_issue,
     is_unexecuted_expire_close,
     zero_option_fee_lifecycle_reason,
 )
@@ -185,6 +193,7 @@ from src.application.ledger.writer import (
     _finish_trade_event_decision_projection as finalize_trade_event_decision_projection,
     persist_trade_event_with_wheel_intent as record_trade_event_with_wheel_intent,
 )
+from src.application.ledger.writer_trade_events import reconcile_normalized_execution_order_identity
 from src.application.ledger.current_decision_projection import (
     capture_trade_event_decision_projection_fence,
 )
@@ -242,6 +251,7 @@ from src.application.ledger.notification_outbox import (
 from src.application.ledger.repository import (
     POSITION_PROJECTION_SCHEMA,
     with_sqlite_repo_transaction,
+    with_sqlite_repo_writer_lock,
 )
 from src.application.ledger.writer import (
     record_lifecycle_attempt_audit_atomically,
@@ -284,7 +294,14 @@ __all__ = [
     "enrich_order_fees",
     "is_unexecuted_expire_close",
     "zero_option_fee_lifecycle_reason",
+    "futu_order_namespace_issue",
     "broker_external_event_key",
+    "reconcile_normalized_execution_order_identity",
+    "futu_compatibility_source_key",
+    "applied_execution_association_conflicts",
+    "read_execution_event_candidates",
+    "broker_execution_identity",
+    "execution_identity_from_input",
     "build_lifecycle_migration_inventory",
     "build_notification_intent",
     "canonical_payload_hash",
@@ -457,6 +474,7 @@ __all__ = [
     "verify_position_projection_migration",
     "verify_current_decision_projection",
     "with_sqlite_repo_transaction",
+    "with_sqlite_repo_writer_lock",
     "POSITION_FACT_SNAPSHOT_CONTRACT",
     "decision_state_snapshot_fingerprint",
     "LegacySettlementSemanticUnavailable",

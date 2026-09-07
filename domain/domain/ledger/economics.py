@@ -9,10 +9,8 @@ from domain.domain.ledger.events import TradeEvent
 from domain.domain.ledger.fees import FeeBasis, FeeComponent, FeeFact
 from domain.domain.ledger.identity import ContractKey
 from domain.domain.ledger.lots import PositionLot
-from domain.domain.ledger.position_fields import (
-    strategy_metadata_fields_from_payload,
-)
 from domain.domain.money import quantize_money, to_decimal
+from domain.domain.strategy_membership import resolve_strategy_metadata
 
 
 def _missing_fee_fact(
@@ -193,8 +191,10 @@ def _allocation_id(open_event_id: str, close_event_id: str, sequence: int) -> st
 def _strategy_value(open_event: TradeEvent, close_event: TradeEvent, key: str) -> str | None:
     for event in (close_event, open_event):
         payload = event.raw_payload if isinstance(event.raw_payload, dict) else {}
-        value = strategy_metadata_fields_from_payload(payload).get(key)
-        raw = str(value or "").strip()
+        resolved = resolve_strategy_metadata(payload, source_id=event.event_id)
+        if resolved.issues:
+            continue
+        raw = str(getattr(resolved.metadata, key) or "").strip()
         if raw:
             return raw
     return None

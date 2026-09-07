@@ -114,6 +114,8 @@ def adopt_post_trade_combo_pair(
     actor: str,
     apply_changes: bool = False,
     effective_now_ms: int | None = None,
+    require_unique_auto_match: bool = False,
+    exposures: Iterable[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """Validate and optionally adopt one exact post-trade Combo inference atomically."""
 
@@ -125,6 +127,7 @@ def adopt_post_trade_combo_pair(
     if apply_changes and not actor_value:
         raise ValueError("combo confirmation apply requires actor")
     decision_ms = int(effective_now_ms or now_ms())
+    exposure_rows = [dict(item) for item in exposures]
 
     def _run(sqlite_repo: Any, conn: Any) -> dict[str, Any]:
         if conn is None:
@@ -146,6 +149,24 @@ def adopt_post_trade_combo_pair(
             raise ValueError(f"combo inference is not confirmable: {status}")
         if int(inference.get("proposal_expires_at_ms") or 0) < decision_ms:
             raise ValueError("combo inference proposal has expired")
+        if require_unique_auto_match:
+            current_matches = _reconcile_with_repo(
+                sqlite_repo, conn=conn,
+                account=str(inference["account"]),
+                runtime_environment=str(inference["runtime_environment"]),
+                exposures=exposure_rows, persist=False,
+                effective_now_ms=decision_ms,
+            )
+            current_match = next((item for item in current_matches["inferences"] if item["inference_id"] == inference_value), None)
+            if not (
+                current_match
+                and current_match["input_snapshot_hash"] == hash_value
+                and current_match["status"] == "proposal_ready"
+                and current_match["evidence_grade"] == "exact_delivered_candidate"
+                and not current_match["alternative_inference_ids"]
+                and current_match["selected_in_one_optimum"] is True
+            ):
+                raise ValueError("combo auto adoption is no longer a unique delivered match")
         current = _validate_inference_against_current_ledger(
             sqlite_repo,
             conn=conn,

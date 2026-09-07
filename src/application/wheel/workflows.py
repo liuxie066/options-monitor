@@ -306,8 +306,6 @@ def create_wheel_call_intent(
                 or int(payload.get("expires_at_ms") or 0) != int(expires_at_ms)
                 or str(payload.get("broker_order_id") or "")
                 != str(broker_order_id or "").strip()
-                or str(payload.get("capacity_identity_hash") or "")
-                != str(coverage_fact.get("capacity_identity_hash") or "").strip()
             ):
                 raise ValueError("Wheel Call intent request identity conflicts")
             return _intent_result(

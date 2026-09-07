@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import math
+import re
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
@@ -9,11 +13,16 @@ from domain.domain.fetch_source import is_futu_fetch_source, normalize_fetch_sou
 from src.infrastructure.futu_gateway import build_ready_futu_broker_gateway
 from domain.domain.ledger.position_fields import normalize_account
 from domain.domain.option_position_identity import normalize_currency
+from domain.domain.position_snapshot import normalize_position_snapshot_input, position_snapshot_scope_errors
+from domain.domain.source_evidence import build_source_evidence
 from domain.domain.symbol_identity import (
     canonical_symbol,
     looks_like_option_contract_label,
     symbol_currency,
+    symbol_market,
 )
+from domain.domain.trade_contract_identity import normalize_contract_expiration
+from src.application.opend_normalize import normalize_opend_option_type
 from src.application.account_config import resolve_futu_account_ids
 from src.infrastructure.exchange_rates import (
     exchange_rate_observation_status,
@@ -23,7 +32,6 @@ from src.infrastructure.exchange_rates import (
 
 _VALID_TRD_ENVS = {"REAL", "SIMULATE"}
 _LONG_POSITION_SIDE = "LONG"
-_NON_STOCK_SEC_TYPES = {"DRVT", "FUTURE", "IDX", "NONE", "N/A"}
 _FUTU_CASH_FIELDS_BY_CCY = {
     "HKD": ("hk_cash",),
     "USD": ("us_cash",),
@@ -90,8 +98,126 @@ def _is_stock_position(row: Mapping[str, Any]) -> bool:
         return False
     sec_type = _pick(row, "sec_type", "secType", "security_type")
     if sec_type in (None, ""):
-        return True
-    return str(sec_type).strip().upper() not in _NON_STOCK_SEC_TYPES
+        code = str(_pick(row, "code", "stock_code", "symbol") or "").strip().upper()
+        return bool(re.fullmatch(r"US\.[A-Z][A-Z.\-]{0,9}|HK\.\d{4,5}|\d{4,5}\.HK|(?:SH|SZ)\.\d{6}", code))
+    return str(sec_type).strip().upper() in {"STOCK", "ETF", "EQUITY"}
+
+
+def build_futu_position_snapshot(
+    *, rows: list[dict[str, Any]], broker_account_ref: Mapping[str, Any],
+    markets: list[str], asset_types: list[str], observed_at_utc: str,
+    completeness: str = "unknown", filtered: bool = False,
+    source_as_of_utc: str | None = None, source_errors: list[str] | None = None,
+) -> dict[str, Any]:
+    """Map one explicitly scoped OpenD query; costs stay in their source rows."""
+    errors = list(source_errors or [])
+    mapped: list[dict[str, Any]] = []
+    account_id = str(broker_account_ref.get("external_account_id") or "")
+    environment = str(broker_account_ref.get("environment") or "").upper()
+    for index, row in enumerate(rows):
+        row_account = _pick(row, "acc_id", "account_id", "trade_acc_id", "trd_acc_id", "accID")
+        if row_account is not None and str(row_account) != account_id:
+            errors.append(f"position_row_account_mismatch:{index}")
+            continue
+        if _row_trd_env(row) not in (None, environment):
+            errors.append(f"position_row_environment_mismatch:{index}")
+            continue
+        code = str(_pick(row, "code", "stock_code", "symbol") or "").strip().upper()
+        sec_type = str(_pick(row, "sec_type", "secType", "security_type") or "").upper()
+        asset = "option" if _row_looks_like_option_position(row) or sec_type in {"DRVT", "OPTION"} else "stock" if _is_stock_position(row) else None
+        if asset is None:
+            errors.append(f"position_asset_type_unknown:{index}")
+            continue
+        if asset not in asset_types:
+            continue
+        raw_qty = _pick(row, "qty", "quantity", "hold_qty", "shares")
+        try:
+            quantity = Decimal(str(raw_qty))
+            if not quantity.is_finite() or isinstance(raw_qty, bool):
+                raise InvalidOperation
+        except (InvalidOperation, ValueError):
+            errors.append(f"position_quantity_invalid:{index}")
+            continue
+        if quantity == 0:
+            continue
+        symbol = canonical_symbol(_pick(row, "stock_owner", "owner_code", "underlying") or code)
+        row_market = str(symbol_market(symbol) or "").upper()
+        if row_market and row_market not in [value.upper() for value in markets]:
+            continue
+        instrument = {
+            "asset_type": asset, "symbol": symbol, "market": row_market,
+            "currency": _pick(row, "currency", "currency_code", "ccy") or symbol_currency(symbol),
+            "source_code": code, "source_security_type": sec_type or None,
+        }
+        if asset == "option":
+            instrument.update(
+                option_type=normalize_opend_option_type(row.get("option_type")),
+                strike=str(_pick(row, "option_strike_price", "strike_price")) if _pick(row, "option_strike_price", "strike_price") is not None else None,
+                expiration_ymd=normalize_contract_expiration(_pick(row, "strike_time", "expiration_ymd", "expiration")),
+                multiplier=next((str(row[name]) for name in ("options_per_contract", "option_contract_multiplier", "option_contract_size", "contract_multiplier", "lot_size", "multiplier") if _to_float(row.get(name)) is not None and float(row[name]) > 0), None),
+            )
+            if row.get("deliverable") is not None:
+                instrument["deliverable"] = row["deliverable"]
+        side = str(_pick(row, "position_side", "positionSide", "side") or "").lower()
+        if not side:
+            side = "short" if quantity < 0 else "long"
+        if quantity < 0 and side != "short":
+            errors.append(f"position_quantity_side_conflict:{index}")
+        sellable = _pick(row, "can_sell_qty", "can_sell_quantity", "sellable_qty")
+        mapped.append({
+            "instrument_ref": instrument, "position_side": side,
+            "quantity": format(abs(quantity), "f"),
+            "sellable_quantity": str(sellable) if sellable is not None else None,
+            "sellable_quantity_source": "opend.can_sell_qty" if sellable is not None else None,
+            "source_row": dict(row),
+        })
+    content = {
+        "source_id": "futu-opend.positions", "broker_account_ref": dict(broker_account_ref),
+        "scope": {"markets": markets, "asset_types": asset_types, "filtered": filtered},
+        "observed_at_utc": observed_at_utc, "source_as_of_utc": source_as_of_utc,
+        "completeness": completeness,
+        "quality": {"status": "ready" if completeness == "complete" and not errors else "unknown"},
+        "rows": mapped, "errors": errors, "evidence_refs": [],
+    }
+    content["snapshot_id"] = "opend-" + canonical_sha256({
+        **content, "rows": [{key: value for key, value in row.items() if key != "source_row"} for row in mapped],
+    })[:24]
+    try:
+        received_at_ms = int(
+            datetime.fromisoformat(observed_at_utc.replace("Z", "+00:00"))
+            .astimezone(timezone.utc)
+            .timestamp()
+            * 1000
+        )
+    except ValueError:
+        received_at_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    evidence = build_source_evidence(
+        source="opend",
+        source_id="futu-opend.positions",
+        account=str(broker_account_ref.get("account_label") or "") or None,
+        data_type="position",
+        source_record_identity=content["snapshot_id"],
+        payload_version="futu-opend-position.v1",
+        content_digest=hashlib.sha256(
+            json.dumps(
+                rows,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode()
+        ).hexdigest(),
+        received_at_ms=received_at_ms,
+        original_time=source_as_of_utc or observed_at_utc,
+        source_timezone="UTC",
+        adapter_version="om.futu-opend-position.v1",
+    )
+    content["evidence_refs"] = [evidence["evidence_id"]]
+    content["source_evidence"] = [evidence]
+    normalized = normalize_position_snapshot_input(content)
+    if normalized["errors"]:
+        normalized["source_payload"] = {"rows": rows}
+    return normalized
 
 
 def _dedup_balance_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -112,22 +238,29 @@ def _dedup_balance_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def _rows(data: Any) -> list[dict[str, Any]]:
+def _rows(data: Any, *, strict: bool = False) -> list[dict[str, Any]]:
     if hasattr(data, "to_dict"):
         try:
             recs = data.to_dict("records")
             if isinstance(recs, list):
+                if strict and any(not isinstance(row, dict) for row in recs):
+                    raise ValueError("position response contains malformed rows")
                 return [dict(r) for r in recs]
         except Exception:
-            pass
+            if strict:
+                raise ValueError("position response completeness is unknown") from None
     if isinstance(data, list):
         out: list[dict[str, Any]] = []
         for row in data:
             if isinstance(row, dict):
                 out.append(dict(row))
+            elif strict:
+                raise ValueError("position response contains malformed rows")
         return out
     if isinstance(data, dict):
         return [dict(data)]
+    if strict:
+        raise ValueError("position response completeness is unknown")
     return []
 
 
@@ -164,9 +297,10 @@ def _extract_average_cost(row: Mapping[str, Any]) -> float | None:
 
 def _to_int(value: Any) -> int | None:
     try:
-        if value in (None, "", "-"):
+        if isinstance(value, bool) or value in (None, "", "-"):
             return None
-        return int(float(value))
+        number = Decimal(str(value))
+        return int(number) if number.is_finite() else None
     except Exception:
         return None
 
@@ -354,7 +488,6 @@ def _filter_rows_for_account_ids(
     if not account_ids:
         return []
     out: list[dict[str, Any]] = []
-    saw_account_column = False
     for row in rows:
         row_env = _row_trd_env(row)
         if trd_env and row_env and row_env != trd_env:
@@ -373,11 +506,10 @@ def _filter_rows_for_account_ids(
         if not acc_id:
             out.append(row)
             continue
-        saw_account_column = True
         if acc_id not in account_ids:
             continue
         out.append(row)
-    return out if saw_account_column else rows
+    return out
 
 
 def _query_rows_for_account_id(
@@ -394,7 +526,7 @@ def _query_rows_for_account_id(
         kwargs["acc_id"] = _to_futu_acc_id(account_id)
         if trd_env:
             kwargs["trd_env"] = trd_env
-        return _rows(method(**kwargs))
+        return _rows(method(**kwargs), strict=method_name == "get_positions")
     except Exception as exc:
         raise ValueError(
             f"{method_name} failed for mapped account_id={account_id} via acc_id selector"
@@ -459,6 +591,7 @@ def build_futu_portfolio_context(
     trd_env: str | None = None,
     capacity_market: str | None = None,
     exchange_rate_observation: Mapping[str, Any] | None = None,
+    position_snapshot_input: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     cash_by_currency: dict[str, float] = {}
     cash_components_by_currency: dict[str, dict[str, float]] = {}
@@ -468,6 +601,19 @@ def build_futu_portfolio_context(
     stocks_by_symbol: dict[str, dict[str, Any]] = {}
     stock_cost_basis: dict[str, dict[str, float | int]] = {}
     stock_sellability: dict[str, dict[str, int | bool]] = {}
+    standard_snapshot = normalize_position_snapshot_input(position_snapshot_input) if position_snapshot_input is not None else None
+    if standard_snapshot is not None:
+        position_rows = [
+            {
+                **(dict(row.get("source_row") or {})),
+                "code": row["instrument_ref"]["symbol"], "sec_type": "STOCK",
+                "qty": row["quantity"], "position_side": row["position_side"].upper(),
+                "can_sell_qty": row.get("sellable_quantity"),
+                "currency": row["instrument_ref"]["currency"],
+            }
+            for row in standard_snapshot["rows"]
+            if row["instrument_ref"]["asset_type"] == "stock" and row.get("position_side") in {"long", "short"}
+        ]
 
     base_ccy = _normalize_currency(base_currency, fallback="CNY")
     deduped_balance_rows = _dedup_balance_rows(balance_rows)
@@ -618,13 +764,29 @@ def build_futu_portfolio_context(
         "source": "opend",
     }
     capacity_identity_hash = canonical_sha256(capacity_authority)
+    snapshot_errors = position_snapshot_scope_errors(
+        standard_snapshot, account_label=account_norm, external_account_id=physical_id,
+        environment=str(trd_env or ""), market=str(capacity_market or ""), asset_type="stock",
+        now_utc=datetime.now(timezone.utc),
+    ) if standard_snapshot is not None else []
+    if standard_snapshot is not None:
+        standard_snapshot["errors"] = snapshot_errors
+    stock_capacity_status = authority_status if not snapshot_errors else "unavailable"
     for stock in stocks_by_symbol.values():
         stock["futu_account_id"] = physical_id or None
         stock["trd_env"] = capacity_authority["trd_env"]
-        stock["market"] = capacity_authority["market"]
+        stock["market"] = str(symbol_market(stock["symbol"]) or "").lower()
         stock["source_observed_at"] = observed_at
         stock["capacity_identity_hash"] = capacity_identity_hash
-        stock["capacity_authority_status"] = authority_status
+        stock["capacity_authority_status"] = (
+            stock_capacity_status if stock["market"] == capacity_authority["market"] else "unavailable"
+        )
+        if standard_snapshot is not None:
+            stock["position_snapshot_id"] = standard_snapshot["snapshot_id"]
+            stock["position_snapshot_errors"] = snapshot_errors
+            if stock["capacity_authority_status"] != "available":
+                stock["can_sell_qty"] = None
+                stock["eligible_underlying_shares"] = None
 
     fx_payload = (
         dict(exchange_rate_observation)
@@ -664,6 +826,7 @@ def build_futu_portfolio_context(
         "cash_power_by_currency": cash_power_by_currency,
         "cash_power_source": "futu_net_cash_power",
         "stocks_by_symbol": stocks_by_symbol,
+        "position_snapshot_input": standard_snapshot,
         "exchange_rates": fx_payload,
         "exchange_rate_status": fx_status,
         "raw_selected_count": len(balance_rows) + len(position_rows),
@@ -713,14 +876,25 @@ def fetch_futu_portfolio_context(
             )
         )
         position_rows = _query_rows_for_account_ids(
-            gateway, "get_positions", account_ids, trd_env=trd_env
+            gateway, "get_positions", account_ids, trd_env=trd_env, refresh_cache=True
         )
     finally:
         gateway.close()
 
     balance_rows = _filter_rows_for_account_ids(balance_rows, account_ids, trd_env=trd_env)
-    position_rows = _filter_rows_for_account_ids(position_rows, account_ids, trd_env=trd_env)
     source_observed_at = datetime.now(timezone.utc).isoformat()
+    capacity_market = _runtime_market(cfg, fallback=base_currency)
+    snapshot_input = build_futu_position_snapshot(
+        rows=position_rows,
+        broker_account_ref={
+            "broker_account_id": f"futu:{trd_env}:{physical_account_id}", "broker_id": "futu",
+            "external_account_id": physical_account_id, "environment": trd_env,
+            "account_label": account,
+        },
+        markets=sorted({capacity_market.upper()} | {str(symbol_market(_pick(row, "code", "symbol", "stock_code")) or "").upper() for row in position_rows} - {""}),
+        asset_types=["stock"], observed_at_utc=source_observed_at, completeness="complete",
+    )
+    position_rows = _filter_rows_for_account_ids(position_rows, account_ids, trd_env=trd_env)
 
     return build_futu_portfolio_context(
         balance_rows=balance_rows,
@@ -732,8 +906,9 @@ def fetch_futu_portfolio_context(
         broker_account_identifiers=account_ids,
         futu_account_id=physical_account_id,
         trd_env=trd_env,
-        capacity_market=_runtime_market(cfg, fallback=base_currency),
+        capacity_market=capacity_market,
         exchange_rate_observation=exchange_rate_observation,
+        position_snapshot_input=snapshot_input,
     )
 
 
