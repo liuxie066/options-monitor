@@ -54,8 +54,7 @@ trade_events -> projection -> position_lots
 | 全部 CSP / CC 指派压力测试 | `om portfolio assignment-scenario` | 本 README 的“指派后资产分布” |
 | 本地 Copilot | `om copilot` | [Agent Integration](docs/AGENT_INTEGRATION.md) |
 | 结构化 Tool Gateway | `om-agent spec`、`om-agent run --tool <name> --input-json '<json>'` | [Tool Reference](docs/TOOL_REFERENCE.md) |
-| Shadow Replay | `om research` | [Shadow Replay Runbook](docs/SHADOW_REPLAY_RUNBOOK.md) |
-| Strategy Lab | `om strategy-lab`（Recipe、preview、确认、状态、显式研究执行、Research Receipt、readiness） | [Strategy Lab Current Contract](docs/STRATEGY_LAB_DESIGN.md) |
+| Research 取证与归档 | `om research` | [Agent Handbook](docs/AGENT_WIKI.md) |
 | 运行诊断、服务与版本升级 | `om status`、`om service`、`om update` | [RUNBOOK.md](RUNBOOK.md) |
 
 本表是主要能力索引，不是 CLI 或 Tool Gateway 的完整命令清单。人工操作入口以 `om --help` 为准；结构化工具名、输入 schema、风险级别和副作用以 `om-agent spec` 为准。
@@ -331,7 +330,7 @@ om-agent run --tool option_performance_report \
 报告只提供期权净现金流、卖出/买入期权胜率和期权收益率，支持 MTD/YTD，金额保持
 原币。正股交易、指派/行权交割现金、PnL、CNY 换算和行情刷新均不在该报告内。
 
-### Research / Shadow Replay
+### Research
 
 只收集并输出到终端、不写 evidence bundle：
 
@@ -343,26 +342,11 @@ om research collect \
   --no-write-outputs
 ```
 
-`om research` 各子命令的写入参数并不统一：`collect` 使用 `--write-outputs --confirm`，Shadow Replay 的部分动作使用 `--write`，dataset build 和 archive verify 也有自己的 artifact 语义。执行前先看子命令 `--help` 与 [Shadow Replay Runbook](docs/SHADOW_REPLAY_RUNBOOK.md)；不要把 Research 整体理解成“永远只读”。
-
-Strategy Lab 当前提供固定 Recipe 的 preview、两次显式确认、可恢复的本地 20 日研究、未来 10 日隐藏验证和两类回执：
-
-```bash
-om strategy-lab recipes --help
-om strategy-lab preview --help
-om strategy-lab confirm-research --help
-om strategy-lab preview-validation --help
-om strategy-lab confirm-validation --help
-om strategy-lab advance --help
-om strategy-lab status --help
-om strategy-lab research execute --help
-om strategy-lab receipt --help
-om strategy-lab readiness refresh-history-k --help
-```
-
-`research execute` 每次最多执行一个 OpenD 逻辑证据单元；需要重复显式调用直到完成。隐藏验证只由显式 opt-in
-的 systemd advance timer 取得 provider 权限，直接 `advance --experiment-id` 仅恢复已持久化证据。Strategy Lab
-不自动采用实验结果或修改生产配置。
+`om research collect` 默认不写 evidence bundle；写入需要同时使用
+`--write-outputs --confirm`。`archive pull` 默认只生成同步计划，只有 `--write`
+才拉取本地归档；`archive inventory` 与 `archive verify` 用于检查本地归档。执行前先看具体
+子命令的 `--help`，不要把 Research 整体理解成“永远只读”。Research 不自动修改生产配置、
+交易状态或通知。
 
 ### Tool Gateway
 

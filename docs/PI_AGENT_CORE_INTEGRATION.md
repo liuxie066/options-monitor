@@ -78,8 +78,7 @@ The integration does not add:
 - Pi coding-agent bash, filesystem, patching, or shell tools;
 - multiple Agents, subagents, planner roles, or business-specific Scenes;
 - cross-user learning, autonomous prompt mutation, or model-generated policy;
-- a new strategy-lab, backtest, or experiment engine; those remain separate OM
-  capabilities that may later be exposed as canonical tools;
+- a backtest or experiment engine;
 - direct model access to mutation tools;
 - in-place recovery of an interrupted Pi Agent loop;
 - production dual-run or automatic fallback to the legacy Engine.

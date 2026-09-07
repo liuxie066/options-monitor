@@ -7,18 +7,15 @@ import signal
 import subprocess
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from src.application.account_config import accounts_from_config_path
 from src.application.runtime_config_freshness import (
     RuntimeConfigFreshnessError,
     RuntimeConfigIdentityError,
     ensure_runtime_config_freshness,
     ensure_runtime_config_identity,
 )
-from src.application.runtime_paths import resolve_runtime_root
 
 
 @dataclass(frozen=True)
@@ -51,10 +48,6 @@ _MARKET_DEFAULTS = {
 }
 
 
-def _seal_formal_expectations(*args: Any, **kwargs: Any) -> dict[str, Any]:
-    from src.application.research.formal_corpus import seal_profile_formal_expectations
-
-    return seal_profile_formal_expectations(*args, **kwargs)
 
 
 def _normalize_market(market: str) -> str:
@@ -168,18 +161,6 @@ def _write_line(stream: Any, text: str) -> None:
         pass
 
 
-def tick_cron_is_busy(lock_path: str | Path) -> bool:
-    """Probe the Tick lock without waiting or retaining it."""
-
-    path = Path(lock_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a+", encoding="utf-8") as handle:
-        try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return True
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-    return False
 
 
 def _resolve_config_for_preflight(plan: TickCronPlan, *, cwd: str | Path | None) -> Path:
@@ -243,7 +224,6 @@ def run_tick_cron(
     dry_run_command: bool = False,
     run_cmd: Callable[..., subprocess.CompletedProcess[Any]] | None = None,
     preflight_config_fn: Callable[..., Any] | None = _preflight_runtime_config,
-    seal_formal_expectations_fn: Callable[..., dict[str, Any]] | None = _seal_formal_expectations,
     stdout: Any = None,
     stderr: Any = None,
     environ: dict[str, str] | None = None,
@@ -301,34 +281,6 @@ def run_tick_cron(
 
         env = dict(environ if environ is not None else os.environ)
         env.update(plan.trigger_env)
-        if (
-            seal_formal_expectations_fn is not None
-            and str(env.get("OM_RUNTIME_ROOT") or "").strip()
-            and not plan.symbols
-        ):
-            try:
-                repo_root = Path(cwd).expanduser() if cwd is not None else Path.cwd()
-                runtime_root = resolve_runtime_root(
-                    repo_root=repo_root,
-                    environ=env,
-                ).runtime_root
-                config_path = _resolve_config_for_preflight(plan, cwd=cwd)
-                formal_accounts = plan.accounts or accounts_from_config_path(config_path)
-                expectation = seal_formal_expectations_fn(
-                    runtime_root,
-                    profile={
-                        "markets": [plan.market],
-                        "accounts": formal_accounts,
-                        "config_paths": {plan.market: str(config_path)},
-                    },
-                    artifact_root=(runtime_root / "output_shared" / "research" / "strategy_lab"),
-                    occurred_at_utc=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-                )
-                if expectation.get("status") != "ok":
-                    _write_line(stderr, "FORMAL_EXPECTATION_DEGRADED")
-            except Exception as exc:
-                reason = str(getattr(exc, "reason_code", "formal_expectation_failed"))
-                _write_line(stderr, f"FORMAL_EXPECTATION_DEGRADED_{reason}")
         try:
             if run_cmd is None:
                 proc = _run_tick_process_group(

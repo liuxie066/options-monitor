@@ -16,7 +16,7 @@
 
 `insurance_underwriting` 是 CSP / CC 唯一的新开仓策略语义，不是整个开仓域的统一策略。新开仓配置不再接受 `return_first` 或 `short_vol`，也不再接受会改变正式排序的 `score_weights`。
 
-历史 artifact 和 Shadow Replay 可为离线开仓研究解释 `return_first` / `short_vol`，但这些兼容语义不能重新进入当前开仓配置或扫描分支。Close Advice 不读取这些 thesis，只使用固定 `strict_profit_capture.v1`。Combo Yield 仍只有独立开仓策略，不定义组合级退出动作。
+历史 artifact 可为离线开仓研究解释 `return_first` / `short_vol`，但这些兼容语义不能重新进入当前开仓配置或扫描分支。Close Advice 不读取这些 thesis，只使用固定 `strict_profit_capture.v1`。Combo Yield 仍只有独立开仓策略，不定义组合级退出动作。
 
 | Strategy Family | Opening Profile | Close Profile | Status |
 |---|---|---|---|
@@ -137,7 +137,7 @@ period_net_return = combo_net_credit / cash_required
 
 因此，通知里只出现：Funding Put 已通过 CSP underwriting、Call 通过独立期限/价格/delta/流动性过滤、两腿结构合法、并满足 60% 留存门槛的组合。每个标的只保留一个组合；被拒绝的 Call 和配对尝试进入 sealed Combo snapshot 的 `pair_evaluations`，不会进入通知。
 
-Combo Yield Funding Put 的扫描、标注、资金和 underwriting 在同一内存 DataFrame 上连续计算。Combo Yield 候选、Funding Put 决策、pair diagnostics 和 rank evidence 写入独立的 run/account 级 sealed snapshot（`combo_yield_candidate_snapshot.json`），其完整性由 `candidate_snapshot_manifest.v1.json` 提交；Agent、Daily Brief、Research 与 Shadow Replay 均只消费该 bundle，不从兼容 CSV 恢复候选事实。
+Combo Yield Funding Put 的扫描、标注、资金和 underwriting 在同一内存 DataFrame 上连续计算。Combo Yield 候选、Funding Put 决策、pair diagnostics 和 rank evidence 写入独立的 run/account 级 sealed snapshot（`combo_yield_candidate_snapshot.json`），其完整性由 `candidate_snapshot_manifest.v1.json` 提交；Agent、Daily Brief 与 Research 均只消费该 bundle，不从兼容 CSV 恢复候选事实。
 
 ### 候选身份、成交意图与回执
 
@@ -223,7 +223,6 @@ Combo Yield 仅支持 `same_expiry_pair`。`min_expiry_gap_days` / `max_expiry_g
 不在本轮实现：
 
 - 修改生产 `config.yaml` / `config.us.json` / `config.hk.json`
-- 重构 shadow replay 的历史策略画像
 
 ### 跨期收益与资金占用归因
 

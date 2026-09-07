@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import hashlib
 import json
-import os
-import runpy
 import shlex
 import subprocess
 import sys
@@ -82,109 +79,6 @@ def _write_run(root: Path, run_id: str = "run-1") -> Path:
     return run_dir
 
 
-def _write_state_only_run(root: Path, run_id: str = "run-state-only") -> Path:
-    run_dir = root / "output_runs" / run_id
-    state_dir = run_dir / "state"
-    state_dir.mkdir(parents=True)
-    (state_dir / "tick_metrics.json").write_text(
-        json.dumps(
-            {
-                "run_dir": str(run_dir),
-                "scheduler_decision": {"should_run_scan": False, "reason": "outside window"},
-                "accounts": [{"account": "lx", "ran_scan": False}],
-                "ran_scan": False,
-            }
-        ),
-        encoding="utf-8",
-    )
-    return run_dir
-
-
-def _write_hk_run(root: Path, run_id: str = "run-hk") -> Path:
-    run_dir = root / "output_runs" / run_id
-    account_dir = run_dir / "accounts" / "lx"
-    state_dir = run_dir / "state"
-    account_dir.mkdir(parents=True)
-    state_dir.mkdir(parents=True)
-    (state_dir / "last_run.json").write_text(json.dumps({"run_id": run_id, "status": "ok"}), encoding="utf-8")
-    (account_dir / "0700.hk_sell_put_candidates_labeled.csv").write_text(
-        (
-            "symbol,account,option_type,contract_symbol,dte,delta,strike,spot,annualized_net_return_on_cash_basis,"
-            "spread_ratio,open_interest,volume\n"
-            "0700.HK,lx,put,HK.TCH260619P400000,30,-0.2,400,450,0.12,0.10,500,20\n"
-        ),
-        encoding="utf-8",
-    )
-    (account_dir / "candidate_filter_trace.jsonl").write_text(
-        json.dumps(
-            {
-                "run_id": run_id,
-                "account": "lx",
-                "symbol": "0700.HK",
-                "function": "sell_put",
-                "mode": "put",
-                "contract_symbol": "HK.TCH260619P400000",
-                "status": "rejected",
-                "rule": "spread_too_wide",
-            }
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    seal_opening_candidate_fixture(
-        root,
-        run_id=run_id,
-        market="HK",
-        accepted_rows=[
-            {
-                "symbol": "0700.HK",
-                "account": "lx",
-                "option_type": "put",
-                "contract_symbol": "HK.TCH260619P400000",
-                "expiration": "2026-06-19",
-                "dte": 30,
-                "delta": -0.2,
-                "strike": 400,
-                "spot": 450,
-                "annualized_net_return_on_cash_basis": 0.12,
-                "spread_ratio": 0.10,
-                "open_interest": 500,
-                "volume": 20,
-            }
-        ],
-    )
-    return run_dir
-
-
-def _write_trace_only_run(root: Path, run_id: str = "run-trace-only") -> Path:
-    run_dir = root / "output_runs" / run_id
-    account_dir = run_dir / "accounts" / "lx"
-    state_dir = run_dir / "state"
-    account_dir.mkdir(parents=True)
-    state_dir.mkdir(parents=True)
-    (state_dir / "last_run.json").write_text(
-        json.dumps({"run_id": run_id, "status": "ok", "ran_scan": True}),
-        encoding="utf-8",
-    )
-    (account_dir / "candidate_filter_trace.jsonl").write_text(
-        json.dumps(
-            {
-                "run_id": run_id,
-                "account": "lx",
-                "symbol": "NVDA",
-                "function": "sell_put",
-                "mode": "put",
-                "contract_symbol": "NVDA260619P00100000",
-                "status": "rejected",
-                "rule": "spread_too_wide",
-            }
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    return run_dir
-
-
 def _fixed_now() -> datetime:
     return datetime(2026, 6, 4, 12, 0, tzinfo=timezone.utc)
 
@@ -208,17 +102,13 @@ def _verify_remote_archive(repo_root: Path, archive_root: Path) -> None:
 
 
 def _remote_inventory_payload(repo_root: Path, archive_root: Path) -> dict[str, Any]:
-    from src.application.research.archive import (
-        _run_inventory,
-        _shadow_replay_receipt_inventory,
-    )
+    from src.application.research.archive import _run_inventory
 
     return {
         "runtime_root": "/var/lib/options-monitor",
         "runs_root": "/var/lib/options-monitor/output_runs",
         "source_host": "prod.example",
         "runs": _run_inventory(archive_root / "output_runs", base=repo_root),
-        "shadow_replay_receipts": _shadow_replay_receipt_inventory(archive_root),
     }
 
 
@@ -227,42 +117,16 @@ def test_archive_verify_writes_latest_inventory(tmp_path: Path) -> None:
 
     archive_root = tmp_path / "archive"
     _write_run(archive_root)
-    receipt = archive_root / "output_shared/research/shadow_replay/receipts/data-plan.json"
-    receipt.parent.mkdir(parents=True)
-    receipt.write_text('{"schema_version":"shadow_replay_data_plan_receipt.v2"}', encoding="utf-8")
 
     data = archive_verify(repo_root=tmp_path, archive_root=archive_root, now_fn=_fixed_now)
 
     latest_path = archive_root / "manifests" / "inventory.latest.json"
     assert data["ok"] is True
     assert data["summary"]["verified_run_count"] == 1
-    assert data["summary"]["replay_evidence_run_count"] == 1
     assert data["runs"][0]["run_id"] == "run-1"
     assert data["runs"][0]["verified"] is True
-    assert data["runs"][0]["has_replay_evidence"] is True
-    assert data["shadow_replay_receipts"][0]["path"].endswith("data-plan.json")
-    assert len(data["shadow_replay_receipts"][0]["sha256"]) == 64
     assert latest_path.exists()
     assert json.loads(latest_path.read_text(encoding="utf-8"))["verified_at_utc"] == "2026-06-04T12:00:00Z"
-
-
-def test_experience_manifest_is_not_replay_evidence() -> None:
-    from src.application.research.archive import _has_replay_evidence
-
-    assert not _has_replay_evidence(
-        {
-            "candidate_manifest_files": [
-                "accounts/paper/state/candidate_snapshot_manifest.v2.json"
-            ],
-            "candidate_snapshot_files": [
-                "accounts/paper/state/opening_candidate_snapshot.json"
-            ],
-            "candidate_status_files": [
-                "accounts/paper/strategy_scan_status_index.v3.json"
-            ],
-            "trace_files": ["accounts/paper/reports/candidate_filter_trace.jsonl"],
-        }
-    )
 
 
 def test_archive_pull_defaults_to_rsync_dry_run_and_filters_local_runs(tmp_path: Path) -> None:
@@ -435,78 +299,6 @@ def test_archive_deduplicates_same_blob_with_runtime_local_publish_times(
     assert selected == [newer]
 
 
-def test_archive_pull_can_auto_select_local_replay_evidence_runs(tmp_path: Path) -> None:
-    from src.application.research.archive import archive_pull
-
-    source = tmp_path / "source"
-    _write_run(source, "run-1")
-    _write_state_only_run(source, "run-state-only")
-    calls: list[list[str]] = []
-
-    def _run_cmd(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
-        calls.append(command)
-        return subprocess.CompletedProcess(command, 0, stdout="dry\n", stderr="")
-
-    data = archive_pull(
-        repo_root=tmp_path,
-        archive_root=tmp_path / "archive",
-        source_root=source,
-        require_replay_evidence=True,
-        write=False,
-        run_cmd=_run_cmd,
-    )
-
-    assert data["ok"] is True
-    assert data["require_replay_evidence"] is True
-    assert data["selected_run_ids"] == ["run-1"]
-    assert any("output_runs/run-1" in command[-2] for command in calls)
-    assert not any("output_runs/run-state-only" in command[-2] for command in calls)
-
-
-def test_archive_pull_can_auto_select_remote_replay_evidence_runs_without_stdout_truncation(tmp_path: Path) -> None:
-    from src.application.research.archive import archive_pull
-
-    calls: list[list[str]] = []
-    inventory = {
-        "runtime_root": "/var/lib/options-monitor",
-        "runs_root": "/var/lib/options-monitor/output_runs",
-        "padding": "x" * 2_100_000,
-        "runs": [
-            {
-                "run_id": "run-scan",
-                "mtime": 1,
-                "has_replay_evidence": True,
-                "critical_files": {
-                    "candidate_manifest_files": [
-                        "accounts/lx/state/candidate_snapshot_manifest.v1.json"
-                    ]
-                },
-            }
-        ],
-    }
-
-    def _run_cmd(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
-        calls.append(command)
-        if command[0] == "ssh":
-            return subprocess.CompletedProcess(command, 0, stdout=json.dumps(inventory), stderr="")
-        return subprocess.CompletedProcess(command, 0, stdout="dry\n", stderr="")
-
-    data = archive_pull(
-        repo_root=tmp_path,
-        archive_root=tmp_path / "archive",
-        ssh_target="deploy@example",
-        require_replay_evidence=True,
-        write=False,
-        run_cmd=_run_cmd,
-    )
-
-    assert data["ok"] is True
-    assert data["selected_run_ids"] == ["run-scan"]
-    assert data["operations"][0]["stdout"].startswith("{")
-    assert "--dry-run" in calls[1]
-    assert "output_runs/run-scan" in calls[1][-2]
-
-
 def test_remote_inventory_script_applies_run_filter(tmp_path: Path) -> None:
     from src.application.research.archive import REMOTE_INVENTORY_SCRIPT
 
@@ -520,7 +312,6 @@ def test_remote_inventory_script_applies_run_filter(tmp_path: Path) -> None:
             REMOTE_INVENTORY_SCRIPT,
             str(tmp_path),
             "",
-            "0",
             json.dumps(["run-selected"]),
         ],
         check=True,
@@ -615,216 +406,6 @@ def test_archive_pull_treats_missing_optional_remote_dirs_as_skipped(tmp_path: P
     skipped = [item for item in data["operations"] if item.get("skipped")]
     assert data["ok"] is True
     assert skipped[0]["reason"] == "source_dir_missing"
-
-
-def test_archive_build_datasets_uses_verified_archive_runs(tmp_path: Path) -> None:
-    from src.application.research.archive import archive_build_datasets
-
-    archive_root = tmp_path / "archive"
-    _write_run(archive_root, "run-1")
-    _verify_remote_archive(tmp_path, archive_root)
-
-    data = archive_build_datasets(
-        repo_root=tmp_path,
-        archive_root=archive_root,
-        remote="prod",
-        market="us",
-        write=True,
-    )
-
-    dataset_dir = tmp_path / "output_shared" / "research" / "shadow_replay" / "datasets" / "prod-us-run-1"
-    assert data["ok"] is True
-    assert data["changed"] is True
-    assert data["selected_run_ids"] == ["run-1"]
-    assert (dataset_dir / "manifest.json").exists()
-    manifest = json.loads((dataset_dir / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["dataset_id"] == "prod-us-run-1"
-    assert manifest["summary"]["candidate_snapshot_count"] == 2
-
-
-def test_archive_build_marks_from_canonical_only_run_root(tmp_path: Path) -> None:
-    from src.application.research.archive import archive_build_datasets
-    from src.application.required_data_snapshot import seal_required_data_snapshot
-    from src.application.shadow_replay import (
-        mark_shadow_replay_dataset,
-        settle_shadow_replay_dataset,
-    )
-
-    archive_root = tmp_path / "archive"
-    run_dir = archive_root / "output_runs" / "run-1"
-    state_dir = run_dir / "state"
-    state_dir.mkdir(parents=True)
-    (state_dir / "last_run.json").write_text(
-        json.dumps({"run_id": "run-1", "status": "ok"}),
-        encoding="utf-8",
-    )
-    seal_opening_candidate_fixture(
-        archive_root,
-        run_id="run-1",
-        market="HK",
-        accepted_rows=[
-            {
-                "symbol": "3690.HK",
-                "account": "lx",
-                "option_type": "put",
-                "contract_symbol": "3690.HK-P",
-                "expiration": "2026-08-28",
-                "dte": 24,
-                "delta": -0.2,
-                "strike": 100,
-                "spot": 110,
-                "net_income": 120,
-                "multiplier": 100,
-                "annualized_net_return_on_cash_basis": 0.12,
-                "spread_ratio": 0.10,
-                "open_interest": 500,
-                "volume": 20,
-            }
-        ],
-    )
-    required_root = run_dir / "required_data"
-    (required_root / "raw").mkdir(parents=True)
-    (required_root / "parsed").mkdir(parents=True)
-    helpers = runpy.run_path(
-        str(Path(__file__).with_name("test_required_data_snapshot.py"))
-    )
-    helpers["_publish_quote"](
-        required_root,
-        run_id="run-1",
-        symbol="3690.HK",
-        canonical_blob=True,
-    )
-    snapshot = seal_required_data_snapshot(
-        manifest_path=run_dir / "state" / "required_data_snapshot_manifest.json",
-        required_data_root=required_root,
-        run_id="run-1",
-        prefetch_summary=helpers["_summary"]("3690.HK"),
-    )
-    entry = snapshot["symbols"]["3690.HK"]
-    (required_root / entry["raw_json_relpath"]).unlink()
-    (required_root / entry["required_data_csv_relpath"]).unlink()
-    _verify_remote_archive(tmp_path, archive_root)
-
-    data = archive_build_datasets(
-        repo_root=tmp_path,
-        archive_root=archive_root,
-        remote="prod",
-        write=True,
-    )
-
-    marking = data["built"][0]["post_build_marking"]
-    dataset_dir = Path(data["built"][0]["dataset_dir"])
-    verified_marking = mark_shadow_replay_dataset(
-        dataset=dataset_dir,
-        required_data_root=required_root,
-        as_of=entry["source_observed_at"],
-        repo_root=tmp_path,
-        write=True,
-        replace=True,
-        mark_time_basis="collection_time",
-        quote_collection_source="opend",
-    )
-    settlement = settle_shadow_replay_dataset(dataset=dataset_dir, write=True)
-    assert data["ok"] is True
-    assert marking["status"] == "marked"
-    assert marking["scan_blob_refs"] == [entry["scan_blob_ref"]]
-    assert marking["summary"]["required_data_read_source_counts"] == {
-        "canonical_blob": 1,
-        "legacy_snapshot": 0,
-    }
-    assert verified_marking["summary"]["usable_mark_snapshot_count"] == 1
-    assert settlement["summary"]["generated_outcome_fact_count"] == 1
-    telemetry = json.dumps(marking["summary"], sort_keys=True)
-    assert "raw_json_base64" not in telemetry
-    assert "required_data_csv_base64" not in telemetry
-    assert "provider_payload" not in telemetry
-
-
-def test_archive_build_datasets_filters_verified_runs_by_market(tmp_path: Path) -> None:
-    from src.application.research.archive import archive_build_datasets
-
-    archive_root = tmp_path / "archive"
-    _write_run(archive_root, "run-us")
-    _write_hk_run(archive_root, "run-hk")
-    _verify_remote_archive(tmp_path, archive_root)
-
-    data = archive_build_datasets(
-        repo_root=tmp_path,
-        archive_root=archive_root,
-        remote="prod",
-        market="us",
-        write=False,
-    )
-
-    assert data["ok"] is True
-    assert data["selected_run_ids"] == ["run-us"]
-    assert data["market_filter"]["requested_market"] == "us"
-    assert data["market_filter"]["skipped_run_count"] == 1
-    assert data["market_filter"]["skipped_runs"] == [
-        {"run_id": "run-hk", "inferred_market": "hk", "reason": "market_mismatch"}
-    ]
-
-
-def test_archive_build_datasets_infers_market_from_trace_only_run(tmp_path: Path) -> None:
-    from src.application.research.archive import archive_build_datasets, archive_verify
-
-    archive_root = tmp_path / "archive"
-    _write_trace_only_run(archive_root)
-    archive_verify(repo_root=tmp_path, archive_root=archive_root, now_fn=_fixed_now)
-
-    data = archive_build_datasets(
-        repo_root=tmp_path,
-        archive_root=archive_root,
-        remote="prod",
-        market="us",
-        write=False,
-    )
-
-    assert data["ok"] is True
-    assert data["selected_run_ids"] == ["run-trace-only"]
-    assert data["market_filter"]["skipped_runs"] == []
-
-
-def test_archive_build_datasets_marks_from_archived_run_required_data(tmp_path: Path) -> None:
-    from src.application.research.archive import archive_build_datasets, archive_verify
-
-    archive_root = tmp_path / "archive"
-    run_dir = _write_run(archive_root, "run-1")
-    parsed = run_dir / "required_data" / "parsed"
-    parsed.mkdir(parents=True)
-    (parsed / "NVDA_required_data.csv").write_text(
-        (
-            "symbol,option_type,contract_symbol,expiration,strike,bid,ask,last_price,multiplier\n"
-            "NVDA,put,NVDA260619P00100000,2026-06-19,100,1.0,1.4,1.2,100\n"
-        ),
-        encoding="utf-8",
-    )
-    (parsed / "AMD_required_data.csv").write_text(
-        (
-            "symbol,option_type,contract_symbol,expiration,strike,bid,ask,last_price,multiplier\n"
-            "AMD,put,AMD260619P00080000,2026-06-19,80,1.4,1.8,1.6,100\n"
-        ),
-        encoding="utf-8",
-    )
-    archive_verify(repo_root=tmp_path, archive_root=archive_root, now_fn=_fixed_now)
-
-    data = archive_build_datasets(
-        repo_root=tmp_path,
-        archive_root=archive_root,
-        remote="prod",
-        market="us",
-        write=True,
-    )
-
-    dataset_dir = tmp_path / "output_shared" / "research" / "shadow_replay" / "datasets" / "prod-us-run-1"
-    marks = [json.loads(line) for line in (dataset_dir / "mark_path_snapshots.jsonl").read_text(encoding="utf-8").splitlines()]
-    manifest = json.loads((dataset_dir / "manifest.json").read_text(encoding="utf-8"))
-
-    assert data["ok"] is True
-    assert data["built"][0]["post_build_marking"]["status"] == "marked"
-    assert data["built"][0]["post_build_marking"]["summary"]["generated_mark_snapshot_count"] == 2
-    assert len(marks) == 2
-    assert manifest["post_build"]["mark_from_run_required_data"]["status"] == "marked"
 
 
 def test_archive_prune_remote_requires_verified_delete_runs(tmp_path: Path) -> None:
@@ -964,105 +545,6 @@ def test_archive_prune_remote_runs_confirm_after_guard_passes(tmp_path: Path) ->
     assert json.loads(shlex.split(calls[1][-1])[-1]) == ["run-1"]
     assert "--confirm" in calls[2][-1]
     assert all("--cleanup-runtime-logs" not in call[-1] for call in calls)
-
-
-def test_archive_prune_remote_receipts_requires_three_way_content_match(
-    tmp_path: Path,
-) -> None:
-    from src.application.research.archive import archive_prune_remote
-
-    archive_root = tmp_path / "archive"
-    _write_run(archive_root, "run-1")
-    receipt = archive_root / "output_shared/research/shadow_replay/receipts/old.json"
-    receipt.parent.mkdir(parents=True)
-    receipt.write_text('{"schema_version":"shadow_replay_data_plan_receipt.v2"}', encoding="utf-8")
-    _verify_remote_archive(tmp_path, archive_root)
-    row = _remote_inventory_payload(tmp_path, archive_root)["shadow_replay_receipts"][0]
-    candidate = {key: row[key] for key in ("path", "size_bytes", "sha256")}
-    plan = {
-        "schema_version": "shadow_replay_receipt_prune.v1",
-        "runtime_root": "/var/lib/options-monitor",
-        "keep_days": 3,
-        "keep_count": 30,
-        "candidates": [candidate],
-    }
-    plan_sha256 = hashlib.sha256(
-        json.dumps(plan, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
-    preview = {
-        **plan,
-        "plan_sha256": plan_sha256,
-        "blockers": [],
-        "changed": False,
-        "deleted_paths": [],
-        "ok": True,
-        "status": "preview",
-    }
-    calls: list[list[str]] = []
-
-    def _run_cmd(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
-        calls.append(command)
-        if "shadow_replay_receipt_prune.v1" in command[-1]:
-            return subprocess.CompletedProcess(command, 0, stdout=json.dumps(preview), stderr="")
-        return subprocess.CompletedProcess(
-            command,
-            0,
-            stdout=json.dumps(_remote_inventory_payload(tmp_path, archive_root)),
-            stderr="",
-        )
-
-    data = archive_prune_remote(
-        repo_root=tmp_path,
-        archive_root=archive_root,
-        ssh_target="deploy@example",
-        scope="shadow-replay-receipts",
-        confirm=False,
-        run_cmd=_run_cmd,
-    )
-
-    assert data["ok"] is True
-    assert data["changed"] is False
-    assert data["scope"] == "shadow-replay-receipts"
-    assert data["deletion_guard"]["confirmable"] is True
-    assert data["deletion_guard"]["unverified_delete_paths"] == []
-    assert len(calls) == 2
-
-
-def test_remote_receipt_prune_script_rechecks_plan_before_apply(tmp_path: Path) -> None:
-    from src.application.research.archive import REMOTE_RECEIPT_PRUNE_SCRIPT
-
-    root = tmp_path / "output_shared/research/shadow_replay/receipts"
-    root.mkdir(parents=True)
-    old = root / "old.json"
-    newest = root / "new.json"
-    old.write_text('{"old":true}', encoding="utf-8")
-    newest.write_text('{"new":true}', encoding="utf-8")
-    old_time = datetime.now(timezone.utc).timestamp() - 3600
-    os.utime(old, (old_time, old_time))
-
-    preview_run = subprocess.run(
-        ["python3", "-c", REMOTE_RECEIPT_PRUNE_SCRIPT, str(tmp_path), "0", "1", "preview", ""],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    preview = json.loads(preview_run.stdout)
-    assert preview["status"] == "preview"
-    assert [row["path"] for row in preview["candidates"]] == [
-        "output_shared/research/shadow_replay/receipts/old.json"
-    ]
-
-    old.write_text('{"changed":true}', encoding="utf-8")
-    apply_run = subprocess.run(
-        ["python3", "-c", REMOTE_RECEIPT_PRUNE_SCRIPT, str(tmp_path), "0", "1", "confirm", preview["plan_sha256"]],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    applied = json.loads(apply_run.stdout)
-    assert applied["ok"] is False
-    assert applied["status"] == "plan_changed"
-    assert old.exists()
 
 
 def test_archive_prune_remote_rejects_malformed_cleanup_preview(tmp_path: Path) -> None:

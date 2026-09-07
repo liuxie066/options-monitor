@@ -134,32 +134,22 @@ Use the same launcher contract as Claude Code. For first-pass troubleshooting, p
 ./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
 ```
 
-For MacBook-side Codex diagnosis of online quality, candidate-scan behavior,
-or Strategy Lab analysis, use the independent Research / Shadow Replay side
-lane instead of `om-agent` and instead of calling an online AI provider:
+For MacBook-side Codex diagnosis of online quality or candidate-scan behavior,
+use the independent Research side lane instead of `om-agent` and instead of
+calling an online AI provider:
 
 ```bash
 ./om research collect --config-key us --scope full --output both --no-write-outputs
-./om research shadow-replay status --min-sample 30
-./om research shadow-replay candidate-impact-report --params <params.json> --market us --start-date <YYYY-MM-DD> --account lx --min-sample 30
-./om research shadow-replay build --run-id <run-id>
-./om research shadow-replay run-data-plan
+./om research archive inventory --remote prod
+./om research archive pull --remote prod --ssh-target <host>
+./om research archive verify --remote prod
 ```
 
-Research / Shadow Replay remains an offline evidence side lane. Strategy Lab is
-not an `om-agent` tool. Its current public surface is the root
-`./om strategy-lab` operator command group: Recipe listing, preview, explicit
-confirmation, status, bounded `research execute`, Research Receipt reading, and
-targeted readiness. Each research invocation consumes at most one provider logical
-evidence unit; Phase 2 has no timer or hidden validation. Shadow Replay
-directly owns exploratory dataset construction, maintenance, analysis, and
-candidate impact. See [Strategy Lab Current Implementation](STRATEGY_LAB_DESIGN.md).
-Use
-`review_readiness` to decide whether evidence is ready for manual strategy
-review, and use `candidate-impact` / `candidate-impact-report` to compare how
-explicit threshold variants would change the observed candidate set.
-This workflow must not call online AI providers, mutate runtime config, write
-trade state, or send notifications.
+Research remains an offline evidence side lane. `collect` can render a redacted
+handoff; archive inventory, pull, and verify preserve remote run evidence for local
+inspection. This workflow must not call online AI providers, mutate runtime config,
+write trade state, or send notifications. Archive pull is a dry run unless
+`--write` is supplied.
 
 ## Inbound Remote Messages
 

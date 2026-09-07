@@ -51,12 +51,6 @@ SERVICE_ACTIVATION_POLICIES = frozenset(
         SERVICE_ACTIVATION_POLICY_PRESERVE_EXISTING,
     }
 )
-RETIRED_PROFILE_KEYS = (
-    "strategy_lab_" + "recorder",
-    "strategy_lab_" + "top1",
-)
-
-
 def normalize_service_activation_policy(value: str | None) -> str:
     policy = str(value or SERVICE_ACTIVATION_POLICY_ENSURE_ACTIVE).strip().lower()
     if policy not in SERVICE_ACTIVATION_POLICIES:
@@ -1225,17 +1219,10 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
         }
 
     if isinstance(profile.get("services"), list) and not profile.get("services"):
-        profile_content_changed = any(
-            key in persisted_profile for key in RETIRED_PROFILE_KEYS
-        )
         return {
             "checked": True,
             "supported": True,
-            "reason": (
-                "retired_service_profile_keys_present"
-                if profile_content_changed
-                else "service_profile_has_no_services"
-            ),
+            "reason": "service_profile_has_no_services",
             "provider": provider,
             "profile_path": str(ctx["profile_path"]),
             "repo_root": str(ctx["repo_root"]),
@@ -1265,17 +1252,17 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
             "execution_drift_units": [],
             "required_units": [],
             "missing_required_units": [],
-            "profile_content_changed": profile_content_changed,
+            "profile_content_changed": False,
             "activation_policy": ctx.get("activation_policy"),
             "preserved_activation_states": ctx.get(
                 "preserved_activation_states", {}
             ),
             "manual_actions": [],
             "summary": {
-                "ok": not profile_content_changed,
-                "status": "warn" if profile_content_changed else "skipped",
+                "ok": True,
+                "status": "skipped",
                 "error_count": 0,
-                "warning_count": int(profile_content_changed),
+                "warning_count": 0,
             },
         }
     effective_profile, profile_compatibility_warnings = _effective_profile_with_legacy_feishu_credential(
@@ -1499,9 +1486,6 @@ def _expected_bundle_from_profile(
         quality_monitoring.get("enabled")
         or any(name.startswith("options-monitor-quality-") for name in services)
     )
-    from src.application.strategy_lab.contracts import STRATEGY_LAB_ADVANCE_TIMER
-
-    include_strategy_lab_advance = STRATEGY_LAB_ADVANCE_TIMER in services
     include_feishu_agent_credential = bool(
         feishu_agent_credential.get("enabled")
         or FEISHU_AGENT_CREDENTIAL_SERVICE in services
@@ -1547,7 +1531,6 @@ def _expected_bundle_from_profile(
         "wechat_clawbot_label": str(wechat_clawbot.get("label") or "default"),
         "wechat_clawbot_allowed_senders": wechat_clawbot_allowed_senders,
         "include_quality_monitoring": include_quality_monitoring,
-        "include_strategy_lab_advance": include_strategy_lab_advance,
         "include_feishu_agent_credential": include_feishu_agent_credential,
         "include_secret_credentials": include_secret_credentials,
         "secret_credential_delivery": (
@@ -1946,8 +1929,6 @@ def _execution_states(
 
 
 def _profile_content_changed(profile: dict[str, Any], bundle: dict[str, Any]) -> bool:
-    if any(key in profile for key in RETIRED_PROFILE_KEYS):
-        return True
     expected = _bundle_profile(bundle)
     keys = (
         "service_provider",
@@ -2148,54 +2129,6 @@ def _apply_service_drift(
     run_cmd: Callable[..., Any],
 ) -> dict[str, Any]:
     provider = str(ctx["provider"])
-    profile = ctx.get("profile_on_disk")
-    if (
-        isinstance(profile, dict)
-        and isinstance(profile.get("services"), list)
-        and not profile.get("services")
-        and before.get("profile_content_changed")
-    ):
-        canonical_profile = copy.deepcopy(profile)
-        for key in RETIRED_PROFILE_KEYS:
-            canonical_profile.pop(key, None)
-        try:
-            ctx["profile_path"].parent.mkdir(parents=True, exist_ok=True)
-            ctx["profile_path"].write_text(
-                json.dumps(canonical_profile, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
-        except Exception as exc:
-            errors = [
-                f"write {ctx['profile_path']}: {type(exc).__name__}: {exc}"
-            ]
-            profile_written = False
-        else:
-            errors = []
-            profile_written = True
-            ctx["profile"] = canonical_profile
-            ctx["profile_on_disk"] = dict(canonical_profile)
-            operations.append(
-                {
-                    "operation": "write_profile",
-                    "path": str(ctx["profile_path"]),
-                    "ok": True,
-                }
-            )
-        return {
-            "changed": profile_written,
-            "errors": errors,
-            "written_units": [],
-            "written_managed_files": [],
-            "retired_managed_files": [],
-            "enabled_timers": [],
-            "enabled_services": [],
-            "started_services": [],
-            "restarted_timers": [],
-            "preserved_activation_units": [],
-            "deferred_restart_units": [],
-            "retired_units": [],
-            "profile_written": profile_written,
-        }
     if provider != "systemd":
         return {
             "changed": False,

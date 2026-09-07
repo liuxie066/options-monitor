@@ -9,8 +9,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SIDE_LANE_PREFIXES = (
     "src.application.research",
-    "src.application.shadow_replay",
-    "src.application.strategy_lab",
 )
 
 
@@ -117,22 +115,3 @@ print(json.dumps({
         "collect_owner": "collect",
         "tool_owner": "tool",
     }
-
-
-def test_strategy_lab_handler_loads_after_command_selection() -> None:
-    result = json.loads(_run_python("""
-from contextlib import redirect_stdout
-from io import StringIO
-import json
-import sys
-
-from src.interfaces.cli.main import main
-
-owner = 'src.application.strategy_lab.service'
-before = owner in sys.modules
-with redirect_stdout(StringIO()):
-    rc = main(['strategy-lab', 'canary', '--profile-path', '/path/that/does/not/exist'])
-print(json.dumps({'before': before, 'after': owner in sys.modules, 'rc': rc}))
-"""))
-
-    assert result == {"before": False, "after": True, "rc": 2}

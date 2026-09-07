@@ -149,7 +149,6 @@ def test_classifies_valid_manifest_bundle_as_supported(tmp_path: Path) -> None:
     evidence = _classify(tmp_path)
 
     assert evidence.classification["status"] == SUPPORTED
-    assert evidence.classification["strict_replay_authority"] is True
     assert evidence.manifest["completion_reason"] == "no_applicable_scope"
 
 
@@ -189,7 +188,6 @@ def test_valid_v1_snapshot_and_immutable_config_are_limited(tmp_path: Path) -> N
     evidence = _classify(tmp_path)
 
     assert evidence.classification["status"] == SUPPORTED_LIMITED_LEGACY_SNAPSHOT
-    assert evidence.classification["strict_replay_authority"] is False
     assert evidence.classification["owner_snapshots"] == [owner]
     assert evidence.owners[owner]["ranked_pairs"][0]["symbol"] == "NVDA"
 
@@ -252,7 +250,7 @@ def test_run_summary_requires_every_account_to_be_modern_supported(tmp_path: Pat
 
     summary = summarize_run_candidate_evidence(base=tmp_path, run_id="run-1")
 
-    assert summary["strict_replay_authority"] is False
+    assert summary["reason_code"] == "candidate_evidence_coverage_incomplete"
     assert [row["status"] for row in summary["accounts"]] == [
         SUPPORTED,
         UNSUPPORTED_SNAPSHOT_MISSING,

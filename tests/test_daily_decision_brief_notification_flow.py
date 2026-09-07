@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import replace
 import json
 from pathlib import Path
-import sys
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
@@ -39,35 +38,6 @@ class _Audit:
         self.successes += 1
 
 
-def test_formal_archive_import_failure_is_degraded_per_account(monkeypatch, tmp_path: Path) -> None:
-    import src.application.tick_notification_flow as mod
-
-    bundle = _request(tmp_path, run_id="formal-import-failure", accounts=("lx", "sy"))
-    monkeypatch.setattr(mod, "source_commit_sha", lambda _base: "a" * 40)
-    monkeypatch.setattr(
-        mod,
-        "capture_scheduled_recommendation_point",
-        lambda _base, _run_id, account, _decision, **_kwargs: (
-            "created",
-            {"recommendation_point_id": f"point-{account}"},
-        ),
-    )
-    monkeypatch.setitem(sys.modules, "src.application.research.formal_corpus", None)
-
-    mod._observe_recommendation_points(bundle.request)
-
-    failures = [
-        event
-        for event in bundle.request.audit_helper.events
-        if event["action"] == "formal_point_archive_failed"
-    ]
-    captures = [
-        event
-        for event in bundle.request.audit_helper.events
-        if event["action"] == "recommendation_point_captured"
-    ]
-    assert [event["extra"]["account"] for event in failures] == ["lx", "sy"]
-    assert [event["extra"]["account"] for event in captures] == ["lx", "sy"]
 
 
 def _brief(
@@ -769,19 +739,11 @@ def test_commit_failure_prevents_provider_call_and_leaves_brief_recoverable(monk
     _patch_assembler(monkeypatch)
     calls: list[dict] = []
     _patch_sender(monkeypatch, calls=calls)
-    observer_calls: list[str] = []
-    monkeypatch.setattr(mod, "source_commit_sha", lambda _root: "c" * 40)
-    monkeypatch.setattr(
-        mod,
-        "capture_scheduled_recommendation_point",
-        lambda *_args, **_kwargs: observer_calls.append("observer"),
-    )
     bundle = _request(tmp_path, run_id="commit-fail")
     bundle.request = replace(bundle.request, commit_scan_targets_fn=lambda _targets: (_ for _ in ()).throw(OSError("state write failed")))
     with pytest.raises(OSError, match="state write failed"):
         mod.run_tick_notification_flow(bundle.request)
     assert calls == []
-    assert observer_calls == []
     pending = read_retryable_daily_decision_brief_delivery(
         base=tmp_path,
         account="lx",
@@ -810,32 +772,18 @@ def test_commit_failure_prevents_provider_call_and_leaves_brief_recoverable(monk
     assert confirmed["status"] == "confirmed"
 
 
-@pytest.mark.parametrize("observer_fails", (False, True))
-def test_recommendation_point_observer_runs_after_provider_and_is_best_effort(
+def test_post_delivery_sidecar_runs_after_provider_before_tick_completion(
     monkeypatch,
     tmp_path: Path,
-    observer_fails: bool,
 ) -> None:
     import src.application.tick_notification_flow as mod
 
     _patch_assembler(monkeypatch)
     order: list[str] = []
     _patch_sender(monkeypatch, order=order)
-    monkeypatch.setattr(mod, "source_commit_sha", lambda _root: "c" * 40)
-
-    def capture(*_args, **_kwargs):
-        order.append("observer")
-        if observer_fails:
-            raise mod.RecommendationPointError(
-                "required_data_snapshot_unavailable",
-                "injected observer failure",
-            )
-        return "published", {"recommendation_point_id": "p" * 64}
-
-    monkeypatch.setattr(mod, "capture_scheduled_recommendation_point", capture)
     bundle = _request(
         tmp_path,
-        run_id=f"observer-{observer_fails}",
+        run_id="sidecar-order",
         markets_to_run=("HK",),
     )
     complete_tick = bundle.request.complete_tick_idempotency_fn
@@ -855,23 +803,9 @@ def test_recommendation_point_observer_runs_after_provider_and_is_best_effort(
     assert order == [
         "commit",
         "provider",
-        "observer",
         "runtime_snapshot",
         "complete",
     ]
-    actions = [event["action"] for event in bundle.request.audit_helper.events]
-    assert (
-        "recommendation_point_gap"
-        if observer_fails
-        else "recommendation_point_captured"
-    ) in actions
-    if observer_fails:
-        gap = next(
-            event
-            for event in bundle.request.audit_helper.events
-            if event["action"] == "recommendation_point_gap"
-        )
-        assert gap["extra"]["reason_code"] == "required_data_snapshot_unavailable"
     latency_stages = [
         event.get("data", {}).get("stage")
         for event in bundle.request.runlog.events
@@ -881,7 +815,6 @@ def test_recommendation_point_observer_runs_after_provider_and_is_best_effort(
         "scheduler_target_commit",
         "daily_brief_prepare",
         "provider_delivery",
-        "recommendation_point_observer",
     ]
 
 
@@ -922,104 +855,6 @@ def test_post_delivery_sidecar_failure_is_degraded_before_tick_completion(
     assert degraded[0]["extra"] == {"exception_type": "OSError"}
 
 
-@pytest.mark.parametrize(
-        "case",
-        (
-            "manual",
-        "force",
-        "delivery_only",
-        "not_run",
-        "target_missing",
-        "target_mismatch",
-        "source_unavailable",
-    ),
-)
-def test_recommendation_point_observer_excludes_ineligible_paths(
-    monkeypatch,
-    tmp_path: Path,
-    case: str,
-) -> None:
-    import src.application.tick_notification_flow as mod
-
-    bundle = _request(
-        tmp_path,
-        run_id=f"observer-excluded-{case}",
-        delivery_only=case == "delivery_only",
-        trigger_kind=case if case in {"manual", "force"} else "scheduled",
-        markets_to_run=("HK",),
-    )
-    if case == "not_run":
-        bundle.request = replace(bundle.request, ran_pipeline_accounts=())
-    if case == "target_mismatch":
-        bundle.request = replace(
-            bundle.request,
-            scheduled_scan_targets_by_account={"lx": HALF_TARGET},
-        )
-    if case == "target_missing":
-        bundle.request = replace(
-            bundle.request,
-            scheduled_scan_targets_by_account={},
-        )
-    calls: list[str] = []
-    monkeypatch.setattr(
-        mod,
-        "source_commit_sha",
-        lambda _root: None if case == "source_unavailable" else "c" * 40,
-    )
-    monkeypatch.setattr(
-        mod,
-        "capture_scheduled_recommendation_point",
-        lambda *_args, **_kwargs: calls.append("capture"),
-    )
-
-    mod._observe_recommendation_points_best_effort(bundle.request)
-
-    assert calls == []
-
-
-@pytest.mark.parametrize("market", ("HK", "US"))
-def test_recommendation_point_observer_scopes_base_corpus_to_ran_accounts(
-    monkeypatch,
-    tmp_path: Path,
-    market: str,
-) -> None:
-    import src.application.tick_notification_flow as mod
-
-    bundle = _request(
-        tmp_path,
-        run_id="observer-account-isolation",
-        accounts=("user1", "user2"),
-        markets_to_run=(market,),
-    )
-    bundle.request = replace(
-        bundle.request,
-        ran_pipeline_accounts=("user1", "user1", "user2"),
-    )
-    calls: list[str] = []
-    monkeypatch.setattr(mod, "source_commit_sha", lambda _root: "c" * 40)
-
-    def capture(_base, _run_id, account, _decision, **_kwargs):
-        calls.append(account)
-        raise mod.RecommendationPointError(
-            "official_point_unavailable",
-            "injected account failure",
-        )
-
-    monkeypatch.setattr(mod, "capture_scheduled_recommendation_point", capture)
-
-    mod._observe_recommendation_points_best_effort(bundle.request)
-
-    assert calls == ["user1", "user2"]
-    point_events = [
-        event
-        for event in bundle.request.audit_helper.events
-        if event["action"].startswith("recommendation_point_")
-    ]
-    assert [event["extra"]["account"] for event in point_events] == [
-        "user1",
-        "user2",
-    ]
-    assert [event["status"] for event in point_events] == ["degraded", "degraded"]
 
 
 def test_provider_definite_failure_stays_pending_for_exact_delivery_only_retry(monkeypatch, tmp_path: Path) -> None:

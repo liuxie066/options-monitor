@@ -5,14 +5,13 @@
 
 ## 目标
 
-在不改变扫描、推荐、通知和实验事实语义的前提下，减少 scheduled Tick 对
+在不改变扫描、推荐、通知和证据事实语义的前提下，减少 scheduled Tick 对
 `output_runs/<run_id>` 的重复写入，并保持以下约束：
 
 - 不增加 OpenD 或其他 provider 请求；
 - 不增加 gzip、数据库或通用存储层；
 - 不把额外工作放进候选决策热路径；
-- Strategy Lab、Shadow Replay 和 Recommendation Point 继续读取完整、可验证的
-  opening candidate 与 required-data 权威事实；
+- Research 继续读取完整、可验证的 opening candidate 与 required-data 权威事实；
 - 新写入优化与历史数据清理保持分离。
 
 ## 成功信号
@@ -24,7 +23,7 @@
 - 落盘摘要继续保留所有现有外层字段，包括状态、message、symbol、source、耗时、receipt、统计、
   rate-limit、manifest binding、顶层 `errors` 和 audit envelope 中已有的外层错误字段。
 - `opening_candidate_snapshot.json` 的解析结果、该 snapshot 自身的 `content_sha256`、校验、
-  write-once/readback 和正式实验消费者行为不变；依赖物理文件 hash 的下游 provenance hash
+  write-once/readback 和 Research 消费行为不变；依赖物理文件 hash 的下游 provenance hash
   按新字节自洽更新。
 - 固定 fixture 的两类新文件都比当前编码明显更小；opening snapshot 的落盘字节必须精确等于
   约定的紧凑 JSON 编码；payload-dominant prefetch fixture 的实际精简文件必须小于同一完整
@@ -41,8 +40,8 @@
 - 不删除 opening snapshot 顶层与 `opening_decision` 之间的重复候选字段。
 - 不把 per-account prefetch summary 移到 run-level 共享路径。
 - 不给所有 JSON 增加 gzip，也不修改通用 JSON writer。
-- 不改 required-data canonical blob、receipt、manifest 或 Formal Corpus schema。
-- 不删除、迁移或重写任何历史 run、旧 context、Shadow Replay 或 canonical blob。
+- 不改 required-data canonical blob、receipt 或 manifest。
+- 不删除、迁移或重写任何历史 run、旧 context 或 canonical blob。
 - 不在本工作单元中 commit、push、merge、release、deploy 或升级运行环境。
 
 ## 当前事实和约束
@@ -50,8 +49,8 @@
 ### 容量证据
 
 2026-08-30 的只读实施输入记录了以下容量快照：运行目录约 19.1 GB，`output_runs` 约
-12.7 GB，最近交易日 44 个 run 增长约 596 MB，最近完整 run 约 38.5 MB。旧 Shadow Replay
-约 4.65 GB；Formal Corpus 和 canonical required-data blob 已经压缩并保持较小。
+12.7 GB，最近交易日 44 个 run 增长约 596 MB，最近完整 run 约 38.5 MB。旧离线回放
+artifact 约 4.65 GB；canonical required-data blob 已经压缩并保持较小。
 
 这些数字是选择优化目标的时点证据，不是运行时阈值、保留策略或源码验收常量。源码分支不重新
 测量或清理生产数据。
@@ -70,7 +69,7 @@ canonical required-data blob、quote receipt 和 terminal manifest 保存；将�
 
 失败或 partial provider payload 不一定生成 canonical blob/receipt。其嵌套 `meta.error_code`、
 `meta.errors` 可能只存在于 `audit[].payload`，而外层 envelope 通常只保留 status、message，只有
-rate-limit 会额外提升为外层 `error_code`。这些细分 provider 诊断不是现有持久化摘要合同或实验事实
+rate-limit 会额外提升为外层 `error_code`。这些细分 provider 诊断不是现有持久化摘要合同或 Research
 合同；本工作单元不新增字段提升协议。删除 payload 后仍必须保留所有既有外层错误状态和诊断字段，
 但不承诺保留 payload 内部的 provider 细分错误。
 
@@ -78,8 +77,7 @@ rate-limit 会额外提升为外层 `error_code`。这些细分 provider 诊断�
 
 - Daily Brief 使用 `symbols`、`results`、`errors` 和摘要状态生成 data gap；
 - runtime status 通用地展示落盘 JSON，不把 `audit[].payload` 当作运行判定；
-- receipt、manifest、required-data reader、Recommendation Point、Shadow Replay 和 Formal Corpus
-  都从各自 canonical owner 获取权威事实；
+- receipt、manifest、required-data reader 和 Research 都从各自 canonical owner 获取权威事实；
 - 当前仓库没有读取落盘 prefetch summary 中 `audit[].payload` 的调用者。
 
 仓库外的临时脚本无法由源码搜索证明。此设计明确把 `audit[].payload` 定义为 prefetch 内部计算
@@ -97,7 +95,7 @@ JSON，不依赖 snapshot 文件是否带缩进。
 读回校验，语义 binding 不变。历史漂亮 JSON 不重写，现有 loader 继续接受。
 
 opening snapshot 中候选 facts 的重复属于 `opening_candidate_snapshot.v1` 语义合同，已经被
-Recommendation Point、Shadow Replay 和 Formal Corpus 消费。本工作单元只改变物理编码。
+Research 消费。本工作单元只改变物理编码。
 
 ## 选择的设计
 
@@ -140,9 +138,8 @@ payload assembly、snapshot `content_sha256` 计算、validator、write-once、l
 
 hash 层级必须分别验收：相同语义 payload 的 opening snapshot `content_sha256` 保持不变；snapshot
 文件字节 `sha256` 必然变化，因此新 candidate manifest 的 owner file binding、manifest
-`content_sha256` 和文件 hash 也会变化。Recommendation Point 绑定 terminal manifest 的物理 hash，
-所以其 provenance 及 point `content_sha256` 也可能随之变化。这是预期的来源链更新，不是候选决策
-事实变化；测试应证明每一层 binding 自洽，不断言所有下游 hash 数值不变。
+`content_sha256` 和文件 hash 也会变化。这是预期的来源链更新，不是候选决策事实变化；测试应证明
+每一层 binding 自洽，不断言所有下游 hash 数值不变。
 
 状态顺序保持为：
 
@@ -166,7 +163,7 @@ assemble semantic payload
 | `src/application/required_data_snapshot.py` | 不修改；继续消费完整 prefetch 结果并封存 canonical facts |
 | `src/application/candidate_snapshot_manifest.py` | 不修改；继续绑定新文件字节 hash 与既有语义 hash |
 | `src/application/daily_decision_brief_service.py` | 不修改；继续从精简摘要读取现有状态字段 |
-| Recommendation Point / Shadow Replay / Formal Corpus | 不修改；继续校验更新后的 provenance hash，并从 canonical owner 消费事实 |
+| Research | 不修改；继续从 canonical owner 消费事实 |
 
 不改变 domain strategy、public CLI、runtime config、通知、ledger、trade 或 broker 合同。
 
@@ -204,8 +201,8 @@ assemble semantic payload
 
 - 只修改现有 encoder；
 - 扩充 opening snapshot 回归，证明 exact compact bytes、load/validate、snapshot semantic hash、
-  write-once replay，以及 candidate manifest binding 自洽；最终完整回归再证明 Recommendation Point
-  等下游 provenance hash 传播自洽；
+  write-once replay，以及 candidate manifest binding 自洽；最终完整回归再证明 Research
+  消费者可读取更新后的 bundle；
 - 添加历史 pretty snapshot + 匹配旧 raw hash manifest 的 fixture，证明
   `load_candidate_snapshot_bundle()` 接受完整历史 bundle；
 - 用同一 fixture 同时计算旧漂亮编码长度，证明新落盘字节明显减少。
@@ -242,8 +239,7 @@ Slice 2 最小证据：
   tests/test_candidate_snapshot_manifest.py
 ```
 
-Recommendation Point、Shadow Replay、Strategy Lab 和 Formal Corpus 的广泛消费者覆盖留给最终完整
-pytest，避免在 focused suite 重复运行同一证据。
+Research 消费者覆盖留给最终完整 pytest，避免在 focused suite 重复运行同一证据。
 
 最终验证：
 
@@ -276,8 +272,7 @@ pytest，避免在 focused suite 重复运行同一证据。
 - opening snapshot 仍重复候选语义 facts。Owner：opening candidate 合同；只有第一阶段收益不足且
   所有消费者迁移方案通过独立评审时再规范化。
 - 38.5 MB 到 27–30 MB/run 是估算，不是源码验收事实。Owner：另行授权的发布升级后自然交易日观察。
-- 旧 `output_runs` 和 Shadow Replay 仍占磁盘。Owner：operator cleanup/archive 流程；删除必须使用
-  现有 preview、核对 Formal Corpus/归档证据并取得单独授权。
+- 旧 `output_runs` 和离线研究 artifact 仍占磁盘。Owner：operator cleanup/archive 流程；删除必须使用
+  现有 preview、核对归档证据并取得单独授权。
 
-当前没有阻塞源码实现的 open question。生产容量、真实 Tick 时延和一个完整交易日的 Formal Corpus
-生成情况必须留到独立部署观察。
+当前没有阻塞源码实现的 open question。生产容量和真实 Tick 时延必须留到独立部署观察。
