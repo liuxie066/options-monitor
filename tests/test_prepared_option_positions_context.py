@@ -794,7 +794,7 @@ def test_one_ledger_freezes_account_isolated_option_contexts(
     ) == 3
 
 
-def test_prepare_never_collects_strategy_lab_option_marks(monkeypatch, tmp_path: Path) -> None:
+def test_prepare_does_not_refresh_option_quotes(monkeypatch, tmp_path: Path) -> None:
     from src.application.performance import evidence_collection
 
     run_id = "run-position-and-fx-only"
@@ -858,7 +858,7 @@ def test_prepare_never_collects_strategy_lab_option_marks(monkeypatch, tmp_path:
         expected_runtime_config=configs["lx"],
     )
 
-    assert "strategy_lab_option_market_evidence" not in payload
+    assert len(payload["open_positions_min"]) == 1
     assert PerformanceEvidenceSQLiteRepository(
         ledger_path
     ).read_all().valuation_marks == ()

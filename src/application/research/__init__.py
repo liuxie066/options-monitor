@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Offline evidence collection side lane for Research / Shadow Replay."""
+"""Offline evidence collection side lane for Research."""
 
 from datetime import datetime
 from pathlib import Path

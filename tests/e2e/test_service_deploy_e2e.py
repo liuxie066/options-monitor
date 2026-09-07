@@ -9,35 +9,26 @@ from tests.service_deploy_test_support import (
     _write_systemd_units_from_bundle,
 )
 
-def test_service_render_cli_omits_retired_strategy_lab_flags(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
+
+def test_removed_strategy_lab_cli_and_service_flag_are_rejected() -> None:
     from src.interfaces.cli.main import parse_args
 
-    with pytest.raises(SystemExit) as exc_info:
-        parse_args(["service", "render", "--help"])
-    assert exc_info.value.code == 0
-    help_text = capsys.readouterr().out
-    assert "--include-strategy-lab-advance" in help_text
-    retired_flags = (
-        "--include-strategy-lab-" + "recorder",
-        "--strategy-lab-" + "recorder-account",
-        "--include-strategy-lab-" + "top1",
-        "--strategy-lab-" + "top1-account",
-    )
-    assert all(flag not in help_text for flag in retired_flags)
-
-    for flag in retired_flags:
-        with pytest.raises(SystemExit):
-            parse_args([
+    with pytest.raises(SystemExit):
+        parse_args(["strategy-lab", "advance"])
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
                 "service",
                 "render",
                 "--target",
                 "systemd",
                 "--config-yaml",
                 "/tmp/config.yaml",
-                flag,
-            ])
+                "--include-strategy-lab-advance",
+            ]
+        )
+
+
 def test_cli_service_render_returns_json(capsys, tmp_path: Path) -> None:
     from src.interfaces.cli.main import main
 
@@ -56,7 +47,6 @@ def test_cli_service_render_returns_json(capsys, tmp_path: Path) -> None:
         str(tmp_path / "runtime" / "config.yaml"),
         "--env-file",
         str(tmp_path / "options-monitor.env"),
-        "--include-strategy-lab-advance",
         "--no-content",
     ])
 
@@ -65,11 +55,6 @@ def test_cli_service_render_returns_json(capsys, tmp_path: Path) -> None:
     assert payload["ok"] is True
     assert payload["data"]["summary"]["service_provider"] == "systemd"
     assert payload["data"]["env_file"] == str(tmp_path / "options-monitor.env")
-    assert any(
-        item["relative_path"]
-        == "systemd/options-monitor-strategy-lab-advance.timer"
-        for item in payload["data"]["files"]
-    )
     profile = next(item for item in payload["data"]["files"] if item["relative_path"] == "service.profile.json")
     assert profile.get("content") is None
     assert payload["data"]["files"][0].get("content") is None

@@ -19,8 +19,8 @@ entries.
   `raw_json_base64` and `required_data_csv_base64`.
 - After manifest seal and cleanup durability eligibility succeed, loose raw JSON
   and CSV shadows for new compact canonical entries are absent.
-- The shared frozen-batch facade, Shadow Replay, and archive dataset marking
-  continue to consume sealed blob bytes without a legacy read.
+- The shared frozen-batch facade and Research archive collection continue to
+  consume sealed blob bytes without a legacy read.
 - Failed, legacy-only, mismatched, unsafe, or unsealed entries are never
   deleted.
 - Re-entry is idempotent, and a cleanup failure cannot change candidate,
@@ -64,7 +64,7 @@ canonical blobs fail closed and must never fall back to legacy data.
 
 Formal account scans resolve one `FrozenRequiredDataBatch` and materialize CSV
 bytes into in-memory frames. Close Advice and Wheel consume the resolved
-snapshot or batch path; Shadow Replay and archive marking already prefer the
+snapshot or batch path; Research archive collection already prefers the
 sealed manifest/blob. Direct loose-CSV readers remain valid only for pre-seal
 producer work and explicit legacy/manual flows.
 
@@ -223,7 +223,6 @@ make persistent cleanup failures visible as capacity risk.
 | `src/application/tick_account_execution.py` | New-seal and recovery cleanup are isolated and emit one audit/runlog event |
 | `scripts/benchmark_required_data_scan_blobs.py` | Canonical formal evidence covers compact receipt, seal, durability, cleanup, and blob-only resolution |
 | `docs/AGENT_WIKI.md` | Defines canonical durable payloads and the remaining legacy read boundary |
-| `docs/SHADOW_REPLAY_RUNBOOK.md` | Modern archived runs mark from manifest/blob without parsed CSV |
 | `src/interfaces/cli/research.py` | Archive help names sealed required-data instead of a parsed-CSV requirement |
 
 No domain strategy module, Candidate Engine contract, public command, runtime
@@ -273,8 +272,8 @@ Minimum focused evidence:
 - cleanup failure leaves the sealed manifest available to account consumers;
 - both new-seal and `prefetch_done` recovery paths establish cleanup eligibility,
   retire compact shadows, and emit one truthful trigger-labelled event;
-- the shared frozen-batch facade and existing Shadow Replay/archive canonical-
-  only integration tests remain green;
+- the shared frozen-batch facade and Research archive canonical-only integration
+  tests remain green;
 - `benchmark_required_data_scan_blobs.py --profile canonical` exercises compact
   receipt -> seal -> durability eligibility -> cleanup -> blob-only resolution,
   requires exactly two retired shadows and no surviving raw/CSV shadow, and

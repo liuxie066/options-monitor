@@ -7,11 +7,9 @@ import re
 import shlex
 import subprocess
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 from json import JSONDecodeError
 from pathlib import Path
 from typing import Any, Callable, Literal, cast
-from zoneinfo import ZoneInfo
 
 from src.application.account_config import (
     accounts_from_config,
@@ -786,40 +784,6 @@ def _systemd_tick_calendar(market: str) -> str | None:
     return None
 
 
-def next_systemd_tick_target_utc(market: str, at_or_after_utc: datetime) -> datetime:
-    """Return the first canonical Tick target at or after one UTC instant."""
-
-    calendar = _systemd_tick_calendar(str(market or "").strip().lower())
-    if calendar is None or at_or_after_utc.tzinfo is None:
-        raise ValueError("Tick calendar request is invalid")
-    match = re.fullmatch(
-        r"Mon\.\.Fri \*-\*-\* (\d{2})\.\.(\d{2}):(\d{2})/(\d{2}):(\d{2}) (\S+)",
-        calendar,
-    )
-    if match is None:
-        raise ValueError("Tick systemd calendar is unsupported")
-    start_hour, end_hour, start_minute, minute_step, second = map(
-        int, match.groups()[:5]
-    )
-    if minute_step <= 0 or second not in range(60):
-        raise ValueError("Tick systemd calendar is invalid")
-    zone = ZoneInfo(match.group(6))
-    probe = at_or_after_utc.astimezone(timezone.utc)
-    local_day = probe.astimezone(zone).date()
-    for day_offset in range(8):
-        day = local_day + timedelta(days=day_offset)
-        if day.weekday() >= 5:
-            continue
-        for hour in range(start_hour, end_hour + 1):
-            for minute in range(start_minute, 60, minute_step):
-                candidate = datetime(
-                    day.year, day.month, day.day, hour, minute, second, tzinfo=zone
-                ).astimezone(timezone.utc)
-                if candidate >= probe:
-                    return candidate
-    raise ValueError("next Tick target is unavailable")
-
-
 def _launchd_plist(
     *,
     label: str,
@@ -986,7 +950,6 @@ def render_service_bundle(
     wechat_clawbot_label: str | None = None,
     wechat_clawbot_allowed_senders: str | None = None,
     include_quality_monitoring: bool = False,
-    include_strategy_lab_advance: bool = False,
     include_feishu_agent_credential: bool = False,
     include_secret_credentials: bool = False,
     secret_credential_delivery: str | None = DEFAULT_SECRET_CREDENTIAL_DELIVERY,
@@ -1001,8 +964,6 @@ def render_service_bundle(
     secret_delivery = normalize_secret_credential_delivery(secret_credential_delivery)
     if include_quality_monitoring and target_key != "systemd":
         raise ValueError("quality monitoring service rendering is currently supported only for systemd")
-    if include_strategy_lab_advance and target_key != "systemd":
-        raise ValueError("Strategy Lab advance service rendering is currently supported only for systemd")
     if include_feishu_agent_credential and target_key != "systemd":
         raise ValueError("Feishu Agent credential materialization is currently supported only for systemd")
     if include_secret_credentials and target_key != "systemd":
@@ -1271,50 +1232,6 @@ def render_service_bundle(
                 install_path=f"/etc/systemd/system/{auto_close_timer}",
                 kind="systemd_timer",
                 service_name=auto_close_timer,
-            )
-
-        if include_strategy_lab_advance:
-            from src.application.strategy_lab.contracts import build_strategy_lab_timer_binding
-
-            binding = build_strategy_lab_timer_binding()
-            advance_service = str(binding["service_name"])
-            advance_timer = str(binding["timer_name"])
-            add(
-                f"systemd/{advance_service}",
-                _systemd_unit(
-                    description="Options Monitor Strategy Lab advance",
-                    repo_root=repo,
-                    runtime_root=runtime,
-                    env_file=env_file_path,
-                    deploy_user=systemd_user,
-                    deploy_home=systemd_home,
-                    exec_args=[
-                        om,
-                        "strategy-lab",
-                        "advance",
-                        "--profile-path",
-                        str(runtime / "service.profile.json"),
-                        "--scheduled",
-                    ],
-                    timeout_start_sec=int(binding["timeout_start_sec"]),
-                ),
-                install_path=f"/etc/systemd/system/{advance_service}",
-                kind="systemd_service",
-                service_name=advance_service,
-            )
-            add(
-                f"systemd/{advance_timer}",
-                _systemd_timer(
-                    description="Options Monitor Strategy Lab advance timer",
-                    unit_name=advance_service,
-                    calendar=list(binding["calendars"]),
-                    accuracy_sec=str(binding["accuracy_sec"]),
-                    randomized_delay_sec=int(binding["randomized_delay_sec"]),
-                    persistent=bool(binding["persistent"]),
-                ),
-                install_path=f"/etc/systemd/system/{advance_timer}",
-                kind="systemd_timer",
-                service_name=advance_timer,
             )
 
         verify_service = "options-monitor-projection-verify.service"

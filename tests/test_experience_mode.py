@@ -29,10 +29,6 @@ from src.application.experience_mode import (
     resolve_experience_account_display_name,
     validate_experience_request,
 )
-from src.application.recommendation_point import (
-    RecommendationPointError,
-    capture_scheduled_recommendation_point,
-)
 from src.application.sell_put_cash import enrich_sell_put_candidates_with_cash
 from src.application.strategy_scan_status import (
     publish_strategy_scan_status,
@@ -318,15 +314,6 @@ def test_experience_bundle_is_readonly_only_and_non_contributing(tmp_path: Path)
         "experience_candidate_not_executable"
     )
     assert evidence.contributes_evidence is False
-    with pytest.raises(RecommendationPointError) as caught:
-        capture_scheduled_recommendation_point(
-            tmp_path,
-            RUN_ID,
-            ACCOUNT,
-            {},
-            source_commit_sha="e" * 40,
-        )
-    assert caught.value.reason_code == "experience_candidate_not_executable"
 
 
 def test_experience_bundle_rejects_owner_identity_rebinding(tmp_path: Path) -> None:

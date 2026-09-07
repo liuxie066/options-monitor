@@ -42,11 +42,9 @@
 - [Candidate Strategy](candidate_strategy.md)：当前候选筛选、排序和 trace。
 - [Futu Simulate Account Experience Scan PRD](FUTU_SIMULATE_ACCOUNT_EXPERIENCE_PRD.md)：
   面向富途模拟账户用户的 CSP、CC、Combo Yield 手动体验模式合同。
-- [Opportunity Quality](OPPORTUNITY_QUALITY.md)：Shadow Replay 和扫描质量判定口径。
+- [Opportunity Quality](OPPORTUNITY_QUALITY.md)：扫描质量与人工复盘判定口径。
 - [Notification Experience PRD](OPTION_NOTIFICATION_EXPERIENCE_PRD.md)：已发布的 scheduled report、增量提醒和主动查询合同。
 - [Wheel Strategy PRD](WHEEL_STRATEGY_PRD.md)：当前 Wheel 产品合同、批次级 CC 监控、共享覆盖和生命周期边界。
-- [Strategy Lab Current Implementation](STRATEGY_LAB_DESIGN.md)：Phase 3 本地实现、当前唯一入口和真实数据验收边界。
-- [Strategy Lab Experiment Platform PRD](STRATEGY_LAB_EXPERIMENT_PLATFORM_PRD.md)：首个可行产品的目标范围、20/10 日验收和后续接入边界。
 
 ## 技术架构与核心合同
 
@@ -56,7 +54,6 @@
 - [Tick Storage Efficiency Design](TICK_STORAGE_EFFICIENCY_DESIGN.md)：Tick prefetch 摘要投影、opening snapshot 物理编码和历史清理边界。
 - [Futu Simulate Account Experience Scan System Design](FUTU_SIMULATE_ACCOUNT_EXPERIENCE_SYSTEM_DESIGN.md)：
   模拟账户手动体验扫描的 owner、数据合同、副作用门禁和验收映射。
-- [Strategy Lab Experiment Platform System Design](STRATEGY_LAB_EXPERIMENT_PLATFORM_SYSTEM_DESIGN.md)：目标技术架构、当前 Phase 3 状态、函数清单、复用和删除边界。
 - [Ledger Architecture](LEDGER_ARCHITECTURE.md)：`trade_events -> position_lots`、lot identity 和恢复流程。
 - [Futu Trade And Holdings Sync](FUTU_TRADE_HOLDINGS_SYNC.md)：broker 成交摄取、持仓对账、生命周期同步和 fail-closed 边界。
 - [Close Advice Contract](CLOSE_ADVICE_CONTRACT.md)：严格止盈平仓、报价证据、状态机与通知边界。
@@ -83,7 +80,6 @@
 
 - [Guardrails](GUARDRAILS.md)：本地 hook 与 CI 门禁。
 - [Option Positions Repair](OPTION_POSITIONS_REPAIR.md)：账本错账的只读诊断、dry-run 和修复。
-- [Shadow Replay Runbook](SHADOW_REPLAY_RUNBOOK.md)：dataset、mark、settlement 和 review readiness。
 - [Release Process](RELEASE_PROCESS.md)：VERSION 驱动的发布流程。
 
 ## 迁移与历史兼容
@@ -96,9 +92,6 @@
 ## 退役与阶段性证据
 
 - [AI Decision Advice retirement](AI_DECISION_ADVICE_DESIGN.md)：已退役能力和残留兼容边界。
-- [CSP Top1 W0 preflight](performance/sell-put-top1-capability-preflight-20260814.md)：2026-08-14 的阶段性
-  只读证据；不代表当前 readiness，当前状态见 Strategy Lab Current Contract 和运行时回执。
-
 这些文件保留用于解释历史决策，不逐段更新成当前实现。
 
 ## 工作流证据

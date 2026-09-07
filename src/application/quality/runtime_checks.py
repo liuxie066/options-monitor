@@ -47,33 +47,17 @@ def build_runtime_checks(
         for item in service_rows
         if _is_nonfailed_timer_triggered_service(item, timer_names=timer_names)
     ]
-    auxiliary_service_rows = [item for item in service_rows if _is_auxiliary_unit(item)]
-    core_service_rows = [item for item in service_rows if not _is_auxiliary_unit(item)]
     service_statuses = {
         _effective_service_status(item, timer_names=timer_names)
         for item in service_rows
     }
-    core_service_statuses = {
-        _effective_service_status(item, timer_names=timer_names)
-        for item in core_service_rows
-    }
-    auxiliary_service_statuses = {
-        _effective_service_status(item, timer_names=timer_names)
-        for item in auxiliary_service_rows
-    }
-    if core_service_rows and core_service_statuses == {"ok"} and auxiliary_service_statuses - {"ok"}:
-        service_status, service_reason, service_message = (
-            "warn",
-            "OM_AUXILIARY_SERVICE_DEGRADED",
-            "Core OM services are active, but an auxiliary research service is degraded.",
-        )
-    elif core_service_rows and core_service_statuses == {"ok"}:
+    if service_rows and service_statuses == {"ok"}:
         service_status, service_reason, service_message = (
             "pass",
             "OM_SERVICES_ACTIVE",
             "Configured OM services are active.",
         )
-    elif core_service_rows and "warn" in core_service_statuses:
+    elif service_rows and "warn" in service_statuses:
         service_status, service_reason, service_message = (
             "fail",
             "OM_SERVICE_INACTIVE",
@@ -97,14 +81,6 @@ def build_runtime_checks(
                 "service_count": len(service_rows),
                 "statuses": sorted(service_statuses),
                 "normally_inactive_timer_service_count": len(inactive_oneshot_rows),
-                **(
-                    {
-                        "auxiliary_service_count": len(auxiliary_service_rows),
-                        "auxiliary_statuses": sorted(auxiliary_service_statuses),
-                    }
-                    if auxiliary_service_rows
-                    else {}
-                ),
             },
             expected={"statuses": ["ok"]},
             evidence_refs=[],
@@ -187,28 +163,14 @@ def build_runtime_checks(
             )
         )
 
-    auxiliary_timer_rows = [item for item in timer_rows if _is_auxiliary_unit(item)]
-    core_timer_rows = [item for item in timer_rows if not _is_auxiliary_unit(item)]
     timer_statuses = {str(item.get("status") or "").strip().lower() for item in timer_rows}
-    core_timer_statuses = {
-        str(item.get("status") or "").strip().lower() for item in core_timer_rows
-    }
-    auxiliary_timer_statuses = {
-        str(item.get("status") or "").strip().lower() for item in auxiliary_timer_rows
-    }
-    if core_timer_rows and core_timer_statuses == {"ok"} and auxiliary_timer_statuses - {"ok"}:
-        timer_status, timer_reason, timer_message = (
-            "warn",
-            "AUXILIARY_TIMER_DEGRADED",
-            "Core OM timers are active, but an auxiliary research timer is degraded.",
-        )
-    elif core_timer_rows and core_timer_statuses == {"ok"}:
+    if timer_rows and timer_statuses == {"ok"}:
         timer_status, timer_reason, timer_message = (
             "pass",
             "TIMERS_ACTIVE",
             "Configured OM timers are active.",
         )
-    elif core_timer_rows and "warn" in core_timer_statuses:
+    elif timer_rows and "warn" in timer_statuses:
         timer_status, timer_reason, timer_message = (
             "fail",
             "TIMER_INACTIVE",
@@ -231,14 +193,6 @@ def build_runtime_checks(
             observed={
                 "timer_count": len(timer_rows),
                 "statuses": sorted(timer_statuses),
-                **(
-                    {
-                        "auxiliary_timer_count": len(auxiliary_timer_rows),
-                        "auxiliary_statuses": sorted(auxiliary_timer_statuses),
-                    }
-                    if auxiliary_timer_rows
-                    else {}
-                ),
             },
             expected={"statuses": ["ok"]},
             evidence_refs=[],
@@ -271,11 +225,6 @@ def _effective_service_status(
     if _is_nonfailed_timer_triggered_service(row, timer_names=timer_names):
         return "ok"
     return str(row.get("status") or "").strip().lower()
-
-
-def _is_auxiliary_unit(row: dict[str, Any]) -> bool:
-    name = str(row.get("name") or "").strip().lower()
-    return name.startswith("options-monitor-strategy-lab-")
 
 
 def runtime_verdict(checks: list[dict[str, Any]]) -> str:

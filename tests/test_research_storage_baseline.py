@@ -114,7 +114,7 @@ def _write_research_manifest(
     path.write_text(
         json.dumps(
             {
-                "schema_version": "shadow_fixture.v1",
+                "schema_version": "research_fixture.v1",
                 "generation_id": "generation-1",
                 "market": "us",
                 "files": entries,
@@ -533,23 +533,23 @@ def test_required_data_root_relpath_resolves_manifest_references(
     assert result["research_storage"]["logical_referenced_bytes"] == 4
 
 
-def test_shadow_replay_integrity_file_map_counts_keyed_references(
+def test_integrity_file_map_counts_keyed_references(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     root = _make_runtime(tmp_path)
-    dataset = root / "output_shared/research/shadow_replay/dataset-1"
+    dataset = root / "output_shared/research/dataset-1"
     dataset.mkdir(parents=True)
-    (dataset / "candidate_snapshots.jsonl").write_bytes(b"{}\n")
+    (dataset / "payload.jsonl").write_bytes(b"{}\n")
     (dataset / "manifest.json").write_text(
         json.dumps(
             {
-                "schema_version": "shadow_replay_dataset.v1",
+                "schema_version": "research_dataset.v1",
                 "dataset_id": "dataset-1",
                 "integrity": {
                     "generation_id": "generation-1",
                     "files": {
-                        "candidate_snapshots.jsonl": {
+                        "payload.jsonl": {
                             "sha256": "e" * 64,
                             "bytes": 3,
                             "row_count": 1,
@@ -567,83 +567,6 @@ def test_shadow_replay_integrity_file_map_counts_keyed_references(
     assert research["protected_reference_failures"] == []
     assert research["logical_referenced_bytes"] == 3
     assert research["unique_declared_bytes"] == 3
-
-
-def test_shadow_replay_generation_partitions_are_reachable_and_classified(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    from src.application.shadow_replay.common import (
-        DATASET_FILES,
-        refresh_dataset_manifest,
-        write_jsonl,
-    )
-
-    root = _make_runtime(tmp_path)
-    dataset = root / "output_shared/research/shadow_replay/datasets/dataset-1"
-    for name in DATASET_FILES:
-        write_jsonl(
-            dataset / name,
-            (
-                [
-                    {
-                        "schema_version": "shadow_replay_candidate_snapshot.v1",
-                        "market": "US",
-                        "account": "lx",
-                        "decision_at_utc": "2026-08-17T00:00:00Z",
-                    }
-                ]
-                if name == DATASET_FILES[0]
-                else []
-            ),
-        )
-    refresh_dataset_manifest(dataset)
-
-    result = _collect(monkeypatch, tmp_path, root=root)
-    research = result["research_storage"]
-    classes = {
-        row["storage_class"]: row for row in result["runtime_storage"]["by_class"]
-    }
-
-    assert research["status"] == "complete"
-    assert research["protected_reference_failures"] == []
-    assert research["unmanifested_file_count"] == 0
-    assert classes["immutable_shared_partition"]["file_count"] == 1
-
-
-def test_combo_facet_parallel_file_and_hash_maps_are_joined(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    root = _make_runtime(tmp_path)
-    dataset = root / "output_shared/research/shadow_replay/dataset-1"
-    dataset.mkdir(parents=True)
-    facet_file = dataset / "combo_pair_decisions.jsonl"
-    facet_file.write_bytes(b"{}\n")
-    (dataset / "manifest.json").write_text(
-        json.dumps(
-            {
-                "schema_version": "shadow_replay_dataset.v1",
-                "combo_pair_facet": {
-                    "files": {
-                        facet_file.name: str(facet_file),
-                    },
-                    "file_sha256": {
-                        facet_file.name: "f" * 64,
-                    },
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    result = _collect(monkeypatch, tmp_path, root=root)
-    research = result["research_storage"]
-
-    assert research["protected_reference_failures"] == []
-    assert research["declared_hash_reference_count"] == 1
-    assert research["declared_hash_unknown_size_count"] == 1
-    assert research["unmanifested_file_count"] == 0
 
 
 def test_research_archive_inventory_binds_file_manifest_to_run_root(
