@@ -157,7 +157,7 @@ def _opening_chain_warmup_context(
     account_ids: list[str],
     scheduler_decisions_by_account: dict[str, dict[str, Any]],
 ) -> dict[str, str] | None:
-    if trigger_kind != "scheduled" or scheduler_markets != ["US"]:
+    if trigger_kind != "scheduled" or scheduler_markets not in (["US"], ["HK"]):
         return None
     schedule = base_cfg.get(scheduler_schedule_key)
     if not isinstance(schedule, dict):

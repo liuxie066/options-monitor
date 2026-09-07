@@ -270,13 +270,10 @@ def validate_required_data_expected_fetch_contract(
         raise ValueError(
             "success-rows required-data plan lacks expiration targets"
         )
-    if not _canonical_values_equal(
-        validated_nested_side_plans,
-        active_top_side_plans,
-    ):
-        raise ValueError(
-            "required-data nested and top-level side plans contradict"
-        )
+    _validate_side_plan_partitions(
+        nested_side_plans=validated_nested_side_plans,
+        top_side_plans=active_top_side_plans,
+    )
     plan_expirations = _unique_preserve_order(
         expiration
         for side_plan in validated_top_side_plans
@@ -346,6 +343,55 @@ def _canonical_sha256(value: Mapping[str, Any]) -> str:
         separators=(",", ":"),
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _validate_side_plan_partitions(
+    *,
+    nested_side_plans: list[dict[str, Any]],
+    top_side_plans: list[dict[str, Any]],
+) -> None:
+    top_by_side = {plan["option_type"]: plan for plan in top_side_plans}
+    expected_scopes = {
+        (plan["option_type"], expiration)
+        for plan in top_side_plans
+        for expiration in plan["explicit_expirations"]
+    }
+    actual_scopes: set[tuple[str, str]] = set()
+    for nested in nested_side_plans:
+        option_type = nested["option_type"]
+        top = top_by_side.get(option_type)
+        expirations = nested["explicit_expirations"]
+        if top is None or not set(expirations).issubset(
+            top["explicit_expirations"]
+        ):
+            raise ValueError(
+                "required-data nested and top-level side plans contradict"
+            )
+        expected = {
+            **top,
+            "explicit_expirations": list(expirations),
+            "expiration_count": len(expirations),
+            "required_exact_strikes_by_expiration": {
+                expiration: strikes
+                for expiration, strikes in top[
+                    "required_exact_strikes_by_expiration"
+                ].items()
+                if expiration in expirations
+            },
+        }
+        scopes = {(option_type, expiration) for expiration in expirations}
+        if actual_scopes.intersection(scopes) or not _canonical_values_equal(
+            nested,
+            expected,
+        ):
+            raise ValueError(
+                "required-data nested and top-level side plans contradict"
+            )
+        actual_scopes.update(scopes)
+    if actual_scopes != expected_scopes:
+        raise ValueError(
+            "required-data nested and top-level side plans contradict"
+        )
 
 
 def _validate_fetch_request_shape(
