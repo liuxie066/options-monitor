@@ -167,7 +167,7 @@ def test_auto_trade_intake_retry_failed_requires_deal_json(tmp_path: Path) -> No
     )
 
     assert result.returncode == 2
-    assert "--retry-failed requires --deal-json replay" in result.stdout
+    assert "--retry-failed requires --deal-json or --inbox-id replay" in result.stdout
 
 
 def test_auto_trade_intake_dry_run_flag_is_reconcile_state_only(tmp_path: Path) -> None:
@@ -806,10 +806,7 @@ def test_disabled_settlement_observation_retries_seal_without_gateways(
     assert order == [
         "enqueue",
         "checkpoint_failed",
-        "retryable",
         "checkpoint",
-        "process",
-        "settle",
         "runtime",
     ]
 
@@ -1199,7 +1196,7 @@ def test_listener_binds_push_source_before_enqueue(monkeypatch, tmp_path: Path) 
     monkeypatch.setattr(
         auto_intake,
         "enqueue_trade_payload",
-        lambda _path, *, payload, source, broker_deal_key: captured.update(
+        lambda _path, *, payload, source, broker_deal_key, **_kwargs: captured.update(
             payload=dict(payload),
             source=source,
             broker_deal_key=broker_deal_key,
@@ -1321,11 +1318,6 @@ def test_listener_retry_preserves_source_without_dry_run_refresh_side_effects(
     )
     monkeypatch.setattr(
         auto_intake,
-        "record_trade_payload_refresh_intent",
-        lambda *_args, **_kwargs: order.append("record"),
-    )
-    monkeypatch.setattr(
-        auto_intake,
         "settle_trade_payload_result",
         lambda *_args, **_kwargs: order.append("settle"),
     )
@@ -1370,7 +1362,7 @@ def test_listener_retry_preserves_source_without_dry_run_refresh_side_effects(
     )
 
     assert rc == 0
-    assert order == ["process:backfill", "settle"]
+    assert order == ["process:backfill"]
 
 
 def test_auto_trade_intake_open_dry_run_accepts_futu_option_code_with_lookup_fields(tmp_path: Path) -> None:
@@ -1422,3 +1414,218 @@ def test_auto_trade_intake_open_dry_run_accepts_futu_option_code_with_lookup_fie
     assert payload["status"] == "dry_run"
     assert payload["action"] == "open"
     assert payload["account"] == "user1"
+
+
+@pytest.mark.parametrize("wrong_label", [False, True])
+def test_execution_file_cli_preview_apply_and_saved_inbox_view(tmp_path, monkeypatch, capsys, wrong_label):
+    from src.application.ledger.repository import SQLiteOptionPositionsRepository
+    from src.interfaces.cli.main import main as public_main
+    monkeypatch.setattr("src.application.trades.process_supervisor.run_trade_intake_process", auto_intake.main)
+    def run(argv):
+        return public_main(["run", "trade-intake", *argv])
+
+    sources = [_listener_source(tmp_path, account, 11111 + index)
+               for index, account in enumerate(("lx", "sy"))]
+    cfg = {"enabled": True, "mode": "apply", "state_path": Path("state.json"),
+           "audit_path": Path("audit.jsonl"), "status_path": Path("status.json"),
+           "receipt": {"enabled": False}, "backfill": {"enabled": False},
+           "account_mapping": {"REAL_LX": "lx", "REAL_SY": "sy"},
+           "futu_account_ids": ["REAL_LX", "REAL_SY"], "sources": sources}
+    monkeypatch.setattr(auto_intake, "load_config", lambda **_: {})
+    monkeypatch.setattr(auto_intake, "resolve_trade_intake_config",
+                        lambda *_, **kwargs: {**cfg, "mode": kwargs.get("mode_override") or "apply"})
+    ledger_path = tmp_path / "ledger.sqlite3"
+    opened = []
+    def open_repo(**_):
+        opened.append(True)
+        return None, SQLiteOptionPositionsRepository(ledger_path)
+    monkeypatch.setattr(auto_intake, "open_position_ledger_from_runtime_config", open_repo)
+    monkeypatch.setattr(auto_intake, "resolve_position_ledger_sqlite_path", lambda **_: ledger_path)
+    row = {"schema_version": "trade_execution.v1",
+           "broker_account_ref": {"broker_id": "futu", "external_account_id": "REAL_LX",
+                                  "environment": "REAL", "broker_account_id": "futu:REAL:REAL_LX",
+                                  "account_label": "sy" if wrong_label else "lx"},
+           "instrument_ref": {"asset_type": "option", "market": "US", "symbol": "NVDA",
+                              "currency": "USD", "option_type": "put", "strike": "100",
+                              "expiration_ymd": "2026-09-18", "multiplier": "100"},
+           "external_id_namespace": "futu.deal", "external_execution_id": "file-cli",
+           "side": "sell", "position_effect": "open", "quantity": "1", "price": "2.50",
+           "currency": "USD", "occurred_at_utc": "2026-09-07T02:30:00Z"}
+    path = tmp_path / "executions.jsonl"
+    path.write_text(json.dumps(row) + "\n")
+    common = ["--config", str(tmp_path / "config.json"), "--runtime-root", str(tmp_path)]
+    assert run([*common, "--execution-file", str(path)]) == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert preview["dry_run"] is True
+    assert opened == [] and not ledger_path.exists()
+    assert run([*common, "--execution-file", str(path), "--mode", "apply"]) == 2
+    assert "use --confirm or --yes" in capsys.readouterr().out
+    assert opened == [] and not ledger_path.exists()
+    assert run([*common, "--execution-file", str(path), "--inbox-id", "unused"]) == 2
+    assert "mutually exclusive" in capsys.readouterr().out
+    assert run([*common, "--execution-file", str(path), "--mode", "apply", "--confirm"]) == 0
+    applied = json.loads(capsys.readouterr().out)
+    item = applied["results"][0]
+    repo = SQLiteOptionPositionsRepository(ledger_path)
+    assert len(repo.list_trade_events()) == (0 if wrong_label else 1)
+    assert item["status"] == ("unresolved" if wrong_label else "applied")
+    assert repo.list_trade_lifecycle_notifications() == []
+    before = ledger_path.read_bytes()
+    assert run([*common, "--inbox-id", item["inbox_id"]]) == 0
+    saved = json.loads(capsys.readouterr().out)
+    assert saved["inbox_id"] == item["inbox_id"]
+    assert saved["delivery_purpose"] == "historical"
+    assert ledger_path.read_bytes() == before
+    assert len(opened) == 1
+
+    assert run([*common, "--inbox-id", item["inbox_id"], "--mode", "apply"]) == 2
+    assert "use --confirm or --yes" in capsys.readouterr().out
+    if wrong_label:
+        with pytest.raises(SystemExit, match="account conflicts"):
+            run([*common, "--inbox-id", item["inbox_id"], "--mode", "apply", "--confirm"])
+        assert repo.list_trade_events() == []
+        return
+    assert run([*common, "--inbox-id", item["inbox_id"], "--mode", "apply", "--confirm"]) == 0
+    capsys.readouterr()
+    assert len(repo.list_trade_events()) == 1
+    if not wrong_label:
+        from src.application.trades.inbox import list_retryable_trade_payloads, read_trade_payload
+        from src.application.trades.inbox_authority import resolve_execution_inbox_path
+        class Crash(BaseException):
+            pass
+        dispatched = []
+        monkeypatch.setattr(auto_intake, "is_portfolio_management_enabled", lambda _: True)
+        class PMClient:
+            def request_holdings_refresh(self, **kwargs):
+                dispatched.append(kwargs)
+                raise TimeoutError("ambiguous test PM outcome")
+        monkeypatch.setattr(auto_intake, "resolve_portfolio_management_client", lambda *_, **__: PMClient())
+        stock = {**row, "external_execution_id": "stock-live-recovery", "side": "buy", "quantity": "100",
+                 "instrument_ref": {"asset_type": "stock", "market": "US", "symbol": "NVDA", "currency": "USD"}}
+        original_write = auto_intake.update_trade_intake_state_entries
+        def crash_after_state(path, state, **kwargs):
+            original_write(path, state, **kwargs)
+            raise Crash()
+        monkeypatch.setattr(auto_intake, "update_trade_intake_state_entries", crash_after_state)
+        with pytest.raises(Crash):
+            auto_intake._process_payload(
+                stock, repo=repo, state_path=tmp_path / "state/lx.json", audit_path=tmp_path / "audit/lx.jsonl",
+                account_mapping={"REAL_LX": "lx"}, futu_account_ids=["REAL_LX"], apply_changes=True,
+                host="127.0.0.1", port=11111, source="push", allow_external_lookup=False,
+            )
+        monkeypatch.setattr(auto_intake, "update_trade_intake_state_entries", original_write)
+        inbox = resolve_execution_inbox_path(repo, tmp_path / "unused.sqlite3")
+        pending = list_retryable_trade_payloads(inbox, retry_delay_sec=0)[0]
+        saved_args = [*common, "--inbox-id", pending["inbox_id"]]
+        assert run(saved_args) == 0
+        assert json.loads(capsys.readouterr().out)["portfolio_refresh_attempted_at_ms"] is None
+        assert run([*saved_args, "--mode", "apply"]) == 2
+        capsys.readouterr()
+        assert dispatched == []
+        monkeypatch.setattr(auto_intake, "is_portfolio_management_enabled", lambda _: False)
+        assert run([*saved_args, "--mode", "apply", "--confirm"]) == 0
+        capsys.readouterr()
+        saved = read_trade_payload(inbox, inbox_id=pending["inbox_id"])
+        assert saved["status"] == "handled" and saved["portfolio_refresh_attempted_at_ms"] is None
+        assert dispatched == []
+        monkeypatch.setattr(auto_intake, "is_portfolio_management_enabled", lambda _: True)
+        for _ in range(2):
+            assert run([*saved_args, "--mode", "apply", "--confirm"]) == 0
+            capsys.readouterr()
+        assert len(dispatched) == 1
+        saved = read_trade_payload(inbox, inbox_id=pending["inbox_id"])
+        assert saved["status"] == "handled"
+        assert saved["portfolio_refresh_attempted_at_ms"] is not None
+        historical = {**stock, "external_execution_id": "stock-file-no-pm"}
+        path.write_text(json.dumps(historical) + "\n")
+        assert run([*common, "--execution-file", str(path), "--mode", "apply", "--confirm"]) == 0
+        historical_result = json.loads(capsys.readouterr().out)["results"][0]
+        assert run([*common, "--inbox-id", historical_result["inbox_id"], "--mode", "apply", "--confirm"]) == 0
+        capsys.readouterr()
+        assert len(dispatched) == 1
+
+
+@pytest.mark.parametrize("entry", ["execution-file", "inbox-id"])
+def test_om_trade_intake_public_process_accepts_saved_input_flags(tmp_path, entry):
+    config_path = _write_runtime_config(tmp_path)
+    input_path = tmp_path / "executions.jsonl"
+    input_path.write_text(json.dumps({"schema_version": "trade_execution.v1"}) + "\n")
+    value = str(input_path) if entry == "execution-file" else "nonexistent-saved-entry"
+    command = [str(BASE / "om"), "run", "trade-intake", "--config", str(config_path),
+               "--runtime-root", str(tmp_path / "runtime"), f"--{entry}", value]
+    env = {**os.environ, "OM_PYTHON": sys.executable, "PYTHONDONTWRITEBYTECODE": "1"}
+    preview = subprocess.run(command, cwd=BASE, env=env, capture_output=True, text=True,
+                             check=False, timeout=AUTO_INTAKE_CLI_TIMEOUT_SEC)
+    assert "unrecognized arguments" not in preview.stderr
+    assert preview.returncode == (0 if entry == "execution-file" else 2), preview.stderr or preview.stdout
+    if entry == "execution-file":
+        assert json.loads(preview.stdout)["dry_run"] is True
+    else:
+        assert "saved Inbox entry must resolve" in preview.stdout
+    apply = subprocess.run([*command, "--mode", "apply"], cwd=BASE, env=env, capture_output=True,
+                           text=True, check=False, timeout=AUTO_INTAKE_CLI_TIMEOUT_SEC)
+    assert apply.returncode == 2
+    assert "use --confirm or --yes" in apply.stdout
+    assert not list((tmp_path / "runtime").rglob("*.sqlite3"))
+
+
+@pytest.mark.parametrize("failure", ["unresolved", "exception"])
+def test_listener_core_owns_one_durable_attempt(tmp_path, monkeypatch, failure):
+    from src.application.ledger.repository import SQLiteOptionPositionsRepository
+    from src.application.trades.inbox import (
+        list_retryable_trade_payloads,
+        read_trade_source_evidence,
+        trade_payload_evidence_ref,
+    )
+    from src.application.trades.inbox_authority import resolve_execution_inbox_path
+    stop = threading.Event()
+    payload = {"acc_id": "REAL_LX", "broker_account_id": "futu:REAL:REAL_LX", "environment": "REAL",
+               "external_id_namespace": "futu.deal", "deal_id": "listener-missing-multiplier",
+               "code": "US.NVDA260918P00100000", "qty": "1", "price": "2.50",
+               "trd_side": "SELL_SHORT", "create_time": "2026-09-07 10:30:00"}
+    class Listener:
+        def __init__(self, *, on_deal, **_):
+            self.on_deal = on_deal
+        def start(self, **_):
+            self.on_deal(payload)
+        def check_health(self):
+            stop.set()
+        def close(self):
+            pass
+    class History:
+        def __init__(self, **_):
+            pass
+        def close(self):
+            pass
+    monkeypatch.setattr(auto_intake, "OpenDTradePushListener", Listener)
+    monkeypatch.setattr(auto_intake, "OpenDHistoryDealClient", History)
+    monkeypatch.setattr(auto_intake, "append_lifecycle_attempt_checkpoint_seal", lambda *_, **__: None)
+    monkeypatch.setattr(auto_intake, "reconcile_due_lifecycle_cases_for_source", lambda *_, **__: {})
+    monkeypatch.setattr(auto_intake, "enrich_trade_push_payload_with_account_id", lambda raw, **_: raw)
+    monkeypatch.setattr("src.application.trades.normalizer.resolve_multiplier_with_source_and_diagnostics",
+                        lambda **_: (None, None, {}))
+    if failure == "exception":
+        monkeypatch.setattr(auto_intake, "save_trade_payload_result",
+                            lambda *_, **__: (_ for _ in ()).throw(OSError("result storage unavailable")))
+    source = _listener_source(tmp_path, "lx", 11111)
+    for key in ("state_path", "audit_path", "status_path", "inbox_path", "backfill_checkpoint_path"):
+        source[key] = tmp_path / source[key]
+    source["settlement_observation"] = {"enabled": False}
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    assert auto_intake._run_listener_source_loop(
+        source=source, repo=repo, cfg={}, cfg_path=tmp_path / "config.json", runtime_root=tmp_path,
+        runtime_root_source="test", intake_cfg={"mode": "apply", "enabled": True}, apply_changes=True,
+        receipt_callback=lambda _: {}, process_lock=threading.RLock(), stop_event=stop,
+    ) == 0
+    rows = list_retryable_trade_payloads(resolve_execution_inbox_path(repo, source["inbox_path"]), retry_delay_sec=0)
+    assert len(rows) == 1
+    assert rows[0]["attempt_count"] == 1
+    evidence = read_trade_source_evidence(
+        resolve_execution_inbox_path(repo, source["inbox_path"]),
+        evidence_ref=trade_payload_evidence_ref(rows[0]["inbox_id"]),
+        read_only=True,
+    )
+    assert evidence[0]["adapter_version"] == "om.trade-intake.push.v1"
+    assert repo.list_trade_events() == []
+    if failure == "exception":
+        assert "result storage unavailable" in rows[0]["last_error"]

@@ -31,6 +31,7 @@ from src.application.ledger.api import (
     validate_position_fact_snapshot_contract,
 )
 from src.application.source_receipts import sha256_bytes
+from src.application.cash_conversion import cash_fx_observation_facts
 from src.application.positions.context_builder import (
     build_shared_context,
     slice_shared_context_for_account,
@@ -84,49 +85,11 @@ def _fx_evidence_envelope(
     observation_status: str,
     captured_at_ms: int,
 ) -> EvidenceEnvelope:
-    provider_source = str(observation.get("source") or "").strip()
-    timestamp = str(observation.get("timestamp") or "").strip()
-    rates = observation.get("rates")
-    if not provider_source or not timestamp or not isinstance(rates, Mapping):
-        raise ValueError("FX evidence requires source, timestamp, and rates")
-    effective_at = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-    if effective_at.tzinfo is None:
-        effective_at = effective_at.replace(tzinfo=timezone.utc)
-    effective_at_ms = int(effective_at.astimezone(timezone.utc).timestamp() * 1000)
-    if effective_at_ms > int(captured_at_ms):
-        raise ValueError("FX evidence observation timestamp is in the future")
-    required_pairs = ("USDCNY", "HKDCNY")
-    if any(rates.get(pair) in (None, "") for pair in required_pairs):
-        raise ValueError("FX evidence observation is missing a required rate")
-    raw = dict(observation)
-    evidence_source = (
-        "cache_snapshot"
-        if observation_status == "unavailable_stale"
-        else "realtime_snapshot"
-    )
-    quality = {
-        "capture_path": "scheduled_tick",
-        "provider_source": provider_source,
-    }
-    if evidence_source == "cache_snapshot":
-        quality["stale_cache_fallback"] = True
-    facts = tuple(
-        FXRateFact(
-            fact_id=None,
-            base_currency=pair[:3],
-            quote_currency="CNY",
-            rate=rates[pair],
-            rate_kind="spot",
-            effective_at_ms=effective_at_ms,
-            observed_at_ms=int(captured_at_ms),
-            source=evidence_source,
-            source_id=f"{provider_source}:{pair}:{effective_at_ms}",
-            quality=quality,
-            raw=raw,
-        )
-        for pair in required_pairs
-    )
-    return EvidenceEnvelope(fx_rates=facts)
+    return EvidenceEnvelope(fx_rates=cash_fx_observation_facts(
+        observation,
+        observed_at_ms=int(captured_at_ms),
+        observation_status=observation_status,
+    ))
 
 
 def _reuse_existing_fx_facts(
@@ -151,6 +114,9 @@ def _reuse_existing_fx_facts(
         existing_payload = existing.normalized_payload(include_fact_id=False)
         incoming_payload.pop("observed_at_ms")
         existing_payload.pop("observed_at_ms")
+        for comparable in (incoming_payload, existing_payload):
+            comparable["raw"] = dict(comparable.get("raw") or {})
+            comparable["raw"].pop("observed_at", None)
         if same_observation and existing.source_identity != fact.source_identity:
             for field_name in ("source", "quality"):
                 incoming_payload.pop(field_name)
@@ -210,6 +176,11 @@ def _persist_fx_evidence(
                 result = evidence_repo.import_envelope(
                     retry_envelope,
                     apply=True,
+                    migrated_at_ms=int(migrated_at_ms),
+                )
+            if any(fact.quality.get("source_timestamp_verified") for fact in repo_envelope.fx_rates):
+                evidence_repo.freeze_cash_fx_daily_rates(
+                    repo_envelope.fx_rates,
                     migrated_at_ms=int(migrated_at_ms),
                 )
             inserted += int(result.inserted_count)

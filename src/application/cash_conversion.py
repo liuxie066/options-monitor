@@ -12,22 +12,82 @@ from domain.domain.ledger.fees import FeeComponent
 from domain.domain.money import quantize_money, to_decimal
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.performance.cash_conversion import (
+    DAILY_CASH_FX_METHOD,
+    DAILY_CASH_FX_POLICY,
+    HISTORICAL_BUSINESS_DAY_FX_CARRY_FORWARD_METHOD,
+    MAX_HISTORICAL_CARRY_FORWARD_DISTANCE_MS,
     MAX_BOOKING_RATE_DISTANCE_MS,
+    cash_fx_date,
     cash_conversion_id,
     cash_conversion_identity,
+    select_cash_fx_rate,
 )
+from domain.domain.performance.models import FXRateFact
 from src.infrastructure.exchange_rates import get_cached_exchange_rates
+from src.infrastructure.performance_evidence_sqlite import PerformanceEvidenceSQLiteRepository
 
 
-def load_cash_fx_payload(repo: Any) -> dict[str, Any] | None:
+def load_cash_fx_payload(repo: Any, *, conn: Any | None = None, persist: bool = True) -> dict[str, Any] | None:
     candidate = getattr(repo, "primary_repo", repo)
     db_path = getattr(candidate, "db_path", None)
     if db_path in (None, ""):
         return None
-    return get_cached_exchange_rates(
+    evidence_repo = PerformanceEvidenceSQLiteRepository(db_path)
+    if not persist:
+        return {"fx_rate_facts": evidence_repo.read_fx_rates().fx_rates}
+    observation = get_cached_exchange_rates(
         cache_path=(Path(db_path).expanduser().resolve().parent / "rate_cache.json"),
-        max_age_hours=24,
+        max_age_hours=None,
     )
+    now_ms = utc_now_ms()
+    try:
+        candidates = cash_fx_observation_facts(observation, observed_at_ms=now_ms) if observation else ()
+    except (TypeError, ValueError):
+        candidates = ()
+    try:
+        rates = evidence_repo.freeze_cash_fx_daily_rates(candidates, migrated_at_ms=now_ms, conn=conn)
+    except ValueError:
+        # Invalid FX evidence must leave CNY pending, without rejecting native cash.
+        rates = ()
+    return {"fx_rate_facts": rates}
+
+
+def cash_fx_observation_facts(
+    observation: Mapping[str, Any],
+    *,
+    observed_at_ms: int,
+    observation_status: str = "ready",
+) -> tuple[FXRateFact, ...]:
+    provider = str(observation.get("source") or "").strip()
+    rates = observation.get("rates")
+    timestamps = observation.get("quote_timestamps")
+    timestamps = timestamps if isinstance(timestamps, Mapping) else {}
+    if not provider or not isinstance(rates, Mapping) or any(rates.get(pair) in (None, "") for pair in ("USDCNY", "HKDCNY")):
+        raise ValueError("FX evidence requires a provider and both currency pairs")
+    captured = _payload_timestamp_ms({"timestamp": observation.get("observed_at")}) or int(observed_at_ms)
+    if captured > int(observed_at_ms):
+        raise ValueError("FX observation capture time is in the future")
+    facts = []
+    for pair in ("USDCNY", "HKDCNY"):
+        timestamp = timestamps.get(pair) or observation.get("timestamp")
+        effective = _payload_timestamp_ms({"timestamp": timestamp})
+        if effective is None or effective > captured:
+            raise ValueError("FX source timestamp is missing or in the future")
+        quality = {
+            "capture_path": "scheduled_tick",
+            "provider_source": provider,
+            "source_timestamp_verified": pair in timestamps,
+        }
+        if observation_status == "unavailable_stale":
+            quality["stale_cache_fallback"] = True
+        facts.append(FXRateFact(
+            fact_id=None,
+            base_currency=pair[:3], quote_currency="CNY", rate=rates[pair], rate_kind="spot",
+            effective_at_ms=effective, observed_at_ms=captured,
+            source="cache_snapshot" if observation_status == "unavailable_stale" else "realtime_snapshot",
+            source_id=f"{provider}:{pair}:{effective}", quality=quality, raw=dict(observation),
+        ))
+    return tuple(facts)
 
 
 def attach_trade_event_cash_conversions(
@@ -114,6 +174,29 @@ def build_cash_conversion(
 ) -> dict[str, Any]:
     native_amount = quantize_money(to_decimal(amount, field_name="cash conversion amount"))
     native_currency = normalize_currency(currency)
+    daily_selection = isinstance(fx_payload, Mapping) and "fx_rate_facts" in fx_payload
+    selected_rate = None
+    if daily_selection:
+        selection = select_cash_fx_rate(fx_payload["fx_rate_facts"], base_currency=native_currency, at_ms=int(effective_at_ms))
+        selected_rate = selection.fact
+        fx_payload = None
+        method = DAILY_CASH_FX_METHOD
+        if isinstance(selected_rate, FXRateFact):
+            fx_payload = {
+                "rates": {f"{native_currency}CNY": str(selected_rate.rate)},
+                "timestamp": datetime.fromtimestamp(selected_rate.effective_at_ms / 1000, tz=timezone.utc).isoformat(),
+            }
+            rate_source = selected_rate.source
+            rate_source_id = selected_rate.source_id
+            rate_evidence_fact_id = str(selected_rate.fact_id)
+            if (
+                selected_rate.quality.get("cash_fx_policy") != DAILY_CASH_FX_POLICY
+                or selected_rate.supersedes_fact_id is not None
+            ):
+                method = "historical_fx_evidence_backfill"
+                if cash_fx_date(selected_rate.effective_at_ms) != cash_fx_date(effective_at_ms):
+                    method = HISTORICAL_BUSINESS_DAY_FX_CARRY_FORWARD_METHOD
+                    max_rate_distance_ms = MAX_HISTORICAL_CARRY_FORWARD_DISTANCE_MS
     rate: Decimal | None = None
     conversion_method = str(method or "booking_fx_snapshot").strip()
     conversion_rate_source = str(rate_source or "rate_cache").strip()
@@ -157,7 +240,7 @@ def build_cash_conversion(
         rate_source_id=source_id,
         effective_at_ms=int(effective_at_ms),
     )
-    return {
+    result = {
         "schema_version": "cash_conversion.v1",
         "conversion_id": cash_conversion_id(identity),
         **identity,
@@ -170,6 +253,11 @@ def build_cash_conversion(
         "observed_at_ms": int(observed_at_ms),
         "missing_reason": None if status == "observed" else missing_reason or f"{native_currency}CNY booking FX unavailable",
     }
+    if conversion_method == DAILY_CASH_FX_METHOD:
+        result.update(fx_policy=DAILY_CASH_FX_POLICY, cash_fx_date=cash_fx_date(effective_at_ms))
+    if isinstance(selected_rate, FXRateFact):
+        result["rate_observed_at_ms"] = selected_rate.observed_at_ms
+    return result
 
 
 def utc_now_ms() -> int:

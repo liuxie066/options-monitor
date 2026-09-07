@@ -6,6 +6,7 @@ from typing import Any, Mapping, Sequence
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.engine.candidate_engine import build_candidate_rank_key
+from domain.domain.trade_execution import futu_order_namespace_issue
 
 
 WHEEL_EVENT_TYPES = frozenset(
@@ -720,6 +721,13 @@ def plan_wheel_call_intent_consume(
         or multiplier != int(payload.get("multiplier") or 0)
     ):
         raise ValueError("Wheel Call fill does not match the intent contract")
+    bound_order = str(payload.get("broker_order_id") or "").strip()
+    fill_payload = event.get("raw_payload") or {}
+    if bound_order and (
+        str(fill_payload.get("order_id") or "").strip() != bound_order
+        or futu_order_namespace_issue(fill_payload) is not None
+    ):
+        raise ValueError("Wheel Call fill does not match the bound order")
     _coverage_capacity(
         coverage_fact,
         account=str(batch.get("account") or ""),

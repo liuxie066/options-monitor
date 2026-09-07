@@ -3,6 +3,8 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+from collections.abc import Iterable
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -36,12 +38,56 @@ def load_trade_intake_state(path: str | Path) -> dict[str, Any]:
 def write_trade_intake_state(path: str | Path, state: dict[str, Any]) -> Path:
     p = Path(path)
     ensure_dir(p.parent)
+    with _trade_intake_state_lock(p):
+        _write_trade_intake_state_unlocked(p, state)
+    return p
+
+
+def update_trade_intake_state_entries(
+    path: str | Path,
+    state: dict[str, Any],
+    *,
+    deal_ids: Iterable[str],
+) -> Path:
+    """Apply only the active execution's state after reloading under the file lock."""
+
+    p = Path(path)
+    ensure_dir(p.parent)
+    keys = tuple(dict.fromkeys(str(value or "").strip() for value in deal_ids if str(value or "").strip()))
+    if not keys:
+        raise ValueError("at least one deal_id is required for state update")
+    with _trade_intake_state_lock(p):
+        latest = load_trade_intake_state(p)
+        for key in keys:
+            matches = [name for name in STATE_BUCKETS if key in (state.get(name) or {})]
+            if len(matches) > 1:
+                raise ValueError(f"deal state appears in multiple buckets: {key}")
+            for name in STATE_BUCKETS:
+                latest[name].pop(key, None)
+            if matches:
+                latest[matches[0]][key] = dict(state[matches[0]][key])
+        _write_trade_intake_state_unlocked(p, latest)
+    return p
+
+
+def _write_trade_intake_state_unlocked(p: Path, state: dict[str, Any]) -> None:
     body = empty_trade_intake_state()
     if isinstance(state, dict):
         for key in STATE_BUCKETS:
             body[key] = dict(state.get(key) or {})
     atomic_write_json(p, body)
-    return p
+
+
+@contextmanager
+def _trade_intake_state_lock(path: Path):
+    lock_path = Path(f"{path}.lock")
+    ensure_dir(lock_path.parent)
+    with lock_path.open("a+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def lookup_deal_state(state: dict[str, Any] | None, deal_id: str | None) -> dict[str, Any] | None:

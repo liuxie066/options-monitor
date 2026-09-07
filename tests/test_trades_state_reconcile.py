@@ -9,7 +9,11 @@ import pytest
 
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.ledger.source_consumption import build_source_consumption_claim
-from src.application.trades.state import load_trade_intake_state, write_trade_intake_state
+from src.application.trades.state import (
+    load_trade_intake_state,
+    update_trade_intake_state_entries,
+    write_trade_intake_state,
+)
 from src.application.trades.state_reconcile import (
     preview_trade_intake_reconciliation_from_sqlite,
     reconcile_trade_intake_state,
@@ -164,7 +168,7 @@ def test_readonly_sqlite_preview_reports_terminal_evidence_without_writing_state
         {
             "processed_deal_ids": {},
             "failed_deal_ids": {
-                "deal-close-1": {
+                "futu:lx:1001:deal-close-1": {
                     "status": "failed",
                     "action": "close",
                     "account": "lx",
@@ -188,6 +192,7 @@ def test_readonly_sqlite_preview_reports_terminal_evidence_without_writing_state
         "target_lot_id": "lot-1",
         "raw_payload": {
             "source_deal_id": "deal-close-1",
+            "futu_account_id": "1001",
             "record_id": "lot-1",
         },
     }
@@ -431,7 +436,7 @@ def test_reconcile_trade_intake_state_dry_run_keeps_file_unchanged(tmp_path: Pat
         {
             "processed_deal_ids": {},
             "failed_deal_ids": {
-                "deal-close-1": {"status": "failed", "action": "close", "account": "lx", "reason": "exception:LedgerPreflightError"}
+                "futu:lx:1001:deal-close-1": {"status": "failed", "action": "close", "account": "lx", "reason": "exception:LedgerPreflightError"}
             },
             "unresolved_deal_ids": {},
         },
@@ -444,7 +449,7 @@ def test_reconcile_trade_intake_state_dry_run_keeps_file_unchanged(tmp_path: Pat
                 "account": "lx",
                 "position_effect": "close",
                 "target_lot_id": "lot-1",
-                "raw_payload": {"source_deal_id": "deal-close-1", "record_id": "lot-1"},
+                "raw_payload": {"source_deal_id": "deal-close-1", "futu_account_id": "1001", "record_id": "lot-1"},
             }
         ]
     )
@@ -456,7 +461,7 @@ def test_reconcile_trade_intake_state_dry_run_keeps_file_unchanged(tmp_path: Pat
     assert out["pending_after"]["failed_deal_ids"] == 0
     assert out["actions"][0]["reason"] == "ledger_event_already_recorded"
     state = load_trade_intake_state(state_path)
-    assert "deal-close-1" in state["failed_deal_ids"]
+    assert "futu:lx:1001:deal-close-1" in state["failed_deal_ids"]
 
 
 def test_reconcile_trade_intake_state_marks_ledger_recorded_failed_deal_processed(tmp_path: Path) -> None:
@@ -466,7 +471,7 @@ def test_reconcile_trade_intake_state_marks_ledger_recorded_failed_deal_processe
         {
             "processed_deal_ids": {},
             "failed_deal_ids": {
-                "5646137975909129735": {
+                "futu:lx:1001:5646137975909129735": {
                     "status": "failed",
                     "action": "close",
                     "account": "lx",
@@ -486,6 +491,7 @@ def test_reconcile_trade_intake_state_marks_ledger_recorded_failed_deal_processe
                 "target_lot_id": "lot_manual-open-b36a7f9d4bdc7aa9",
                 "raw_payload": {
                     "source_deal_id": "5646137975909129735",
+                    "futu_account_id": "1001",
                     "record_id": "lot_manual-open-b36a7f9d4bdc7aa9",
                     "broker_close_type": "expiration_zero_close",
                 },
@@ -499,12 +505,78 @@ def test_reconcile_trade_intake_state_marks_ledger_recorded_failed_deal_processe
     assert out["applied_count"] == 1
     assert out["backup_path"]
     state = load_trade_intake_state(state_path)
-    assert "5646137975909129735" not in state["failed_deal_ids"]
-    processed = state["processed_deal_ids"]["5646137975909129735"]
+    assert "futu:lx:1001:5646137975909129735" not in state["failed_deal_ids"]
+    processed = state["processed_deal_ids"]["futu:lx:1001:5646137975909129735"]
     assert processed["status"] == "reconciled"
     assert processed["reason"] == "ledger_event_already_recorded"
     assert processed["applied_record_ids"] == ["lot_manual-open-b36a7f9d4bdc7aa9"]
     assert processed["diagnostics"]["reconciled_ledger_event_type"] == "expire_close"
+
+
+def test_reconcile_preserves_concurrent_unrelated_deal_state(tmp_path: Path) -> None:
+    state_path = tmp_path / "auto_trade_intake_state.json"
+    stale_key = "futu:lx:1001:stale"
+    concurrent_key = "futu:lx:1001:concurrent"
+    write_trade_intake_state(
+        state_path,
+        {
+            "processed_deal_ids": {},
+            "failed_deal_ids": {
+                stale_key: {
+                    "status": "failed",
+                    "action": "close",
+                    "account": "lx",
+                }
+            },
+            "unresolved_deal_ids": {},
+        },
+    )
+    repo = FakeRepo(
+        [
+            {
+                "event_id": "broker-expire-close-stale-lot-1",
+                "event_type": "expire_close",
+                "account": "lx",
+                "position_effect": "close",
+                "target_lot_id": "lot-1",
+                "raw_payload": {
+                    "source_deal_id": "stale",
+                    "futu_account_id": "1001",
+                    "record_id": "lot-1",
+                },
+            }
+        ]
+    )
+
+    def interleaved_update(path, state, *, deal_ids):
+        concurrent = load_trade_intake_state(path)
+        concurrent["processed_deal_ids"][concurrent_key] = {
+            "status": "applied",
+            "action": "open",
+            "account": "lx",
+        }
+        update_trade_intake_state_entries(
+            path,
+            concurrent,
+            deal_ids=[concurrent_key],
+        )
+        return update_trade_intake_state_entries(
+            path,
+            state,
+            deal_ids=deal_ids,
+        )
+
+    out = reconcile_trade_intake_state(
+        state_path=state_path,
+        repo=repo,
+        apply_changes=True,
+        update_state_fn=interleaved_update,
+    )
+
+    state = load_trade_intake_state(state_path)
+    assert stale_key in state["processed_deal_ids"]
+    assert concurrent_key in state["processed_deal_ids"]
+    assert out["pending_after"]["processed_deal_ids"] == 2
 
 
 def test_reconcile_trade_intake_state_ignores_same_deal_id_for_different_account(tmp_path: Path) -> None:
@@ -547,6 +619,32 @@ def test_reconcile_trade_intake_state_ignores_same_deal_id_for_different_account
     assert "same-deal-id" not in state["processed_deal_ids"]
 
 
+@pytest.mark.parametrize("event_kind", ["option", "assigned_stock_sale"])
+@pytest.mark.parametrize("ledger_physical_account", [None, "1001"])
+def test_reconcile_bare_deal_id_without_physical_scope_stays_pending(
+    tmp_path: Path, event_kind: str, ledger_physical_account: str | None,
+) -> None:
+    state_path = tmp_path / "state.json"
+    write_trade_intake_state(state_path, {
+        "processed_deal_ids": {}, "unresolved_deal_ids": {},
+        "failed_deal_ids": {"same-deal": {"status": "failed", "account": "lx"}},
+    })
+    evidence = {"account": "lx", "source_deal_id": "same-deal"}
+    if ledger_physical_account:
+        evidence["futu_account_id"] = ledger_physical_account
+    repo = FakeRepo(
+        [{"event_id": "open-1", "event_type": "open", "account": "lx", "raw_payload": evidence}]
+        if event_kind == "option" else [],
+        assigned_stock_events=[{**evidence, "stock_event_id": "sale-1"}]
+        if event_kind == "assigned_stock_sale" else [],
+    )
+
+    result = reconcile_trade_intake_state(state_path=state_path, repo=repo, apply_changes=True)
+    assert result["planned_count"] == 0
+    assert result["actions"][0]["action"] == "keep_pending"
+    assert "same-deal" in load_trade_intake_state(state_path)["failed_deal_ids"]
+
+
 def test_reconcile_trade_intake_state_uses_lifecycle_stock_settlement_source_event(tmp_path: Path) -> None:
     state_path = tmp_path / "auto_trade_intake_state.json"
     write_trade_intake_state(
@@ -555,7 +653,7 @@ def test_reconcile_trade_intake_state_uses_lifecycle_stock_settlement_source_eve
             "processed_deal_ids": {},
             "failed_deal_ids": {},
             "unresolved_deal_ids": {
-                "8433576313500456302": {
+                "futu:lx:1001:8433576313500456302": {
                     "status": "unresolved",
                     "action": "lifecycle",
                     "account": "lx",
@@ -575,6 +673,7 @@ def test_reconcile_trade_intake_state_uses_lifecycle_stock_settlement_source_eve
                 "target_lot_id": "lot-futu-1",
                 "raw_payload": {
                     "record_id": "lot-futu-1",
+                    "futu_account_id": "1001",
                     "stock_settlement": {
                         "source_event_id": "8433576313500456302",
                         "side": "buy",
@@ -590,8 +689,8 @@ def test_reconcile_trade_intake_state_uses_lifecycle_stock_settlement_source_eve
 
     assert out["planned_count"] == 1
     state = load_trade_intake_state(state_path)
-    assert "8433576313500456302" not in state["unresolved_deal_ids"]
-    processed = state["processed_deal_ids"]["8433576313500456302"]
+    assert "futu:lx:1001:8433576313500456302" not in state["unresolved_deal_ids"]
+    processed = state["processed_deal_ids"]["futu:lx:1001:8433576313500456302"]
     assert processed["reason"] == "ledger_event_already_recorded"
     assert processed["applied_record_ids"] == ["lot-futu-1"]
 
@@ -604,7 +703,7 @@ def test_reconcile_trade_intake_state_marks_assigned_stock_sale_event_processed(
             "processed_deal_ids": {},
             "failed_deal_ids": {},
             "unresolved_deal_ids": {
-                "6315806741161105994": {
+                "futu:lx:1001:6315806741161105994": {
                     "status": "unresolved",
                     "action": "assigned_stock_sale",
                     "account": "lx",
@@ -620,6 +719,7 @@ def test_reconcile_trade_intake_state_marks_assigned_stock_sale_event_processed(
             {
                 "stock_event_id": "assigned-stock-sale-6315806741161105994",
                 "source_deal_id": "6315806741161105994",
+                "futu_account_id": "1001",
                 "target_stock_lot_id": "assigned-stock-lot-a",
                 "account": "lx",
                 "symbol": "FUTU",
@@ -633,8 +733,8 @@ def test_reconcile_trade_intake_state_marks_assigned_stock_sale_event_processed(
     assert out["applied_count"] == 1
     assert out["actions"][0]["reason"] == "assigned_stock_sale_event_recorded"
     state = load_trade_intake_state(state_path)
-    assert "6315806741161105994" not in state["unresolved_deal_ids"]
-    processed = state["processed_deal_ids"]["6315806741161105994"]
+    assert "futu:lx:1001:6315806741161105994" not in state["unresolved_deal_ids"]
+    processed = state["processed_deal_ids"]["futu:lx:1001:6315806741161105994"]
     assert processed["status"] == "reconciled"
     assert processed["action"] == "assigned_stock_sale"
     assert processed["reason"] == "assigned_stock_sale_event_recorded"

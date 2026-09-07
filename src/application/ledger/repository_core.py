@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from .repository_trade_schema import EXECUTION_IDENTITY_INDEXES, _execution_identity_index_sql
 from .repository_schema import (
+    Any,
     Path,
     _add_column_if_missing,
     _create_index_if_table_empty,
@@ -19,6 +21,19 @@ from .repository_schema import (
     secure_sqlite_artifacts,
     sqlite3,
 )
+
+
+@contextmanager
+def with_sqlite_repo_writer_lock(repo: Any):
+    """Serialize compound intake work without opening a Ledger transaction."""
+    candidate = getattr(repo, "primary_repo", repo)
+    if isinstance(candidate, RepositoryCoreMixin):
+        with candidate._writer_lock():
+            yield candidate
+        return
+    # In-memory protocol repositories have no durable cross-process state.
+    yield candidate
+
 
 class RepositoryCoreMixin:
     def __init__(self, db_path: Path):
@@ -164,6 +179,11 @@ class RepositoryCoreMixin:
                 )
                 """
             )
+            for table, (index_name, _path) in EXECUTION_IDENTITY_INDEXES.items():
+                _create_index_if_table_empty(
+                    conn, index_name=index_name, table=table,
+                    create_sql=_execution_identity_index_sql(table),
+                )
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS wheel_events (

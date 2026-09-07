@@ -1,16 +1,15 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Mapping
 
 from domain.domain.symbol_identity import OPTION_CODE_RE, canonical_symbol
 from domain.domain.trade_contract_identity import normalize_contract_expiration
 from src.application.account_config import resolve_futu_account_ids
-from src.application.futu_portfolio_context import infer_futu_portfolio_settings
+from src.application.futu_portfolio_context import _is_stock_position, build_futu_position_snapshot, infer_futu_portfolio_settings
 from src.application.opend_normalize import normalize_opend_option_type
 from src.application.futu_quote_routing import resolve_futu_quote_route
 from src.infrastructure.futu_gateway import (
@@ -30,37 +29,30 @@ class OpenDOptionTermsEvidenceError(RuntimeError):
     code = "OPEND_OPTION_TERMS_EVIDENCE_INCOMPLETE"
 
 
-def _rows(value: Any) -> list[dict[str, Any]]:
+def _rows(value: Any, *, strict: bool = False) -> list[dict[str, Any]]:
     if hasattr(value, "to_dict"):
         try:
             records = value.to_dict("records")
         except Exception:
             records = None
         if isinstance(records, list):
+            if strict and any(not isinstance(item, dict) for item in records):
+                raise ValueError("OpenD position response contains malformed rows")
             return [dict(item) for item in records if isinstance(item, dict)]
     if isinstance(value, list):
+        if strict and any(not isinstance(item, dict) for item in value):
+            raise ValueError("OpenD position response contains malformed rows")
         return [dict(item) for item in value if isinstance(item, dict)]
     if isinstance(value, dict):
         return [dict(value)]
+    if strict:
+        raise ValueError("OpenD position response completeness is unknown")
     return []
 
 
 def _account_fingerprint(account_id: str) -> str:
     digest = hashlib.sha256(str(account_id).encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
-
-
-def _snapshot_id(*, account: str, observed_at_utc: str, rows: list[dict[str, Any]]) -> str:
-    safe = {
-        "account": account,
-        "observed_at_utc": observed_at_utc,
-        "row_count": len(rows),
-        "codes": sorted(str(row.get("code") or "") for row in rows),
-    }
-    digest = hashlib.sha256(
-        json.dumps(safe, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
-    return f"opend-{digest[:24]}"
 
 
 @dataclass(frozen=True)
@@ -77,6 +69,7 @@ class OpenDOptionSnapshot:
     trading_days: list[date]
     error_code: str | None = None
     error_message: str | None = None
+    snapshot_input: dict[str, Any] = field(default_factory=dict)
 
     def public_source_snapshot(self) -> dict[str, Any]:
         return {
@@ -88,6 +81,12 @@ class OpenDOptionSnapshot:
             "account_fingerprint": self.account_fingerprint,
             "environment": self.environment,
             "market": self.market,
+            **({
+                "scope": self.snapshot_input.get("scope"),
+                "completeness": self.snapshot_input.get("completeness"),
+                "quality": self.snapshot_input.get("quality"),
+                "source_as_of_utc": self.snapshot_input.get("source_as_of_utc"),
+            } if self.snapshot_input else {}),
         }
 
 
@@ -159,6 +158,7 @@ class OpenDOptionPositionAdapter:
             )
         broker_gateway = None
         quote_gateway = None
+        position_rows: list[dict[str, Any]] = []
         try:
             broker_gateway = build_ready_futu_broker_gateway(
                 host=host,
@@ -177,7 +177,14 @@ class OpenDOptionPositionAdapter:
                 trd_env=environment,
                 refresh_cache=True,
             )
-            position_rows = _rows(raw_positions)
+            position_rows = _rows(raw_positions, strict=True)
+            for row in position_rows:
+                row_account = next((row[key] for key in ("acc_id", "account_id", "trd_acc_id", "trade_acc_id", "accID") if row.get(key) is not None), None)
+                row_env = next((row[key] for key in ("trd_env", "trdEnv", "trade_env", "tradeEnv") if row.get(key) is not None), None)
+                if row_account is not None and str(row_account) != account_id:
+                    raise ValueError("OpenD position response account mismatch")
+                if row_env is not None and str(row_env).upper() != environment:
+                    raise ValueError("OpenD position response environment mismatch")
             option_rows = _option_rows_for_market(
                 position_rows,
                 market=market,
@@ -199,23 +206,43 @@ class OpenDOptionPositionAdapter:
                 quote_gateway,
                 option_rows,
             )
+            standard = build_futu_position_snapshot(
+                rows=option_rows,
+                broker_account_ref={
+                    "broker_account_id": f"futu:{environment}:{account_id}",
+                    "broker_id": "futu", "external_account_id": account_id,
+                    "environment": environment, "account_label": account,
+                },
+                markets=[market.upper()], asset_types=["option"],
+                observed_at_utc=observed_at_utc, completeness="complete",
+            )
             return OpenDOptionSnapshot(
                 account=account,
                 market=market,
                 environment=environment,
                 account_fingerprint=_account_fingerprint(account_id),
                 observed_at_utc=observed_at_utc,
-                snapshot_id=_snapshot_id(
-                    account=account,
-                    observed_at_utc=observed_at_utc,
-                    rows=option_rows,
-                ),
-                complete=True,
+                snapshot_id=standard["snapshot_id"],
+                complete=not standard["errors"],
                 refresh_cache=True,
                 rows=option_rows,
                 trading_days=trading_days,
+                snapshot_input=standard,
+                error_code="OPEND_POSITION_INPUT_INVALID" if standard["errors"] else None,
             )
         except Exception as exc:
+            standard = build_futu_position_snapshot(
+                rows=position_rows,
+                broker_account_ref={
+                    "broker_account_id": f"futu:{environment}:{account_id}",
+                    "broker_id": "futu", "external_account_id": account_id,
+                    "environment": environment, "account_label": account,
+                },
+                markets=[market.upper()], asset_types=["option"],
+                observed_at_utc=observed_at_utc, completeness="unknown",
+                source_errors=[getattr(exc, "code", None) or type(exc).__name__.upper()],
+            )
+            standard["source_payload"] = {"rows": position_rows}
             return OpenDOptionSnapshot(
                 account=account,
                 market=market,
@@ -229,6 +256,7 @@ class OpenDOptionPositionAdapter:
                 trading_days=[],
                 error_code=getattr(exc, "code", None) or type(exc).__name__.upper(),
                 error_message=str(exc),
+                snapshot_input=standard,
             )
         finally:
             if broker_gateway is not None:
@@ -253,6 +281,9 @@ def _option_rows_for_market(
     ambiguous_nonzero_codes: list[str] = []
     for row in rows:
         if not _looks_like_option(row):
+            sec_type = str(row.get("sec_type") or row.get("security_type") or "").upper()
+            if not _is_stock_position(row) and sec_type not in {"FUTURE", "IDX", "BOND", "WARRANT"} and _position_quantity(row) != 0:
+                ambiguous_nonzero_codes.append(str(row.get("code") or "unknown"))
             continue
         code = str(
             row.get("code") or row.get("symbol") or row.get("stock_code") or ""

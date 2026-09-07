@@ -12,7 +12,6 @@ from domain.domain.ledger.economics import OptionEconomicAllocation, fee_fact_fo
 from domain.domain.ledger.events import LedgerDiagnostic, TradeEvent, lot_id_for_open_event
 from domain.domain.ledger.fees import FeeBasis, FeeFact
 from domain.domain.ledger.lots import PositionLot
-from domain.domain.ledger.position_fields import strategy_metadata_fields_from_payload
 from domain.domain.ledger.projection import ProjectionResult
 from domain.domain.money import quantize_money, to_decimal
 from domain.domain.performance.cash_conversion import validate_observed_cash_conversion
@@ -22,6 +21,11 @@ from domain.domain.performance.models import (
     MetricStatus,
 )
 from domain.domain.performance.period import PeriodWindow
+from domain.domain.strategy_membership import (
+    OptionStrategyMembership,
+    resolve_option_strategy_membership,
+    resolve_strategy_metadata,
+)
 
 
 _REPORTING_TIMEZONE = ZoneInfo("Asia/Shanghai")
@@ -67,10 +71,7 @@ class WeightedOptionFact:
     broker: str
     symbol: str
     currency: str
-    leg_type: str
-    attribution_strategy: str
-    strategy_group_id: str | None
-    source_stock_lot_id: str | None
+    membership: OptionStrategyMembership
     opened_at_ms: int
     terminal_at_ms: int | None
     expiration_ymd: str
@@ -93,6 +94,22 @@ class WeightedOptionFact:
     cash_missing: tuple[str, ...] = field(default=(), repr=False)
     capital_missing: tuple[str, ...] = field(default=(), repr=False)
     win_missing: tuple[str, ...] = field(default=(), repr=False)
+
+    @property
+    def leg_type(self) -> str:
+        return self.membership.leg_type
+
+    @property
+    def attribution_strategy(self) -> str:
+        return self.membership.strategy
+
+    @property
+    def strategy_group_id(self) -> str | None:
+        return self.membership.strategy_group_id
+
+    @property
+    def source_stock_lot_id(self) -> str | None:
+        return self.membership.source_stock_lot_id
 
 
 @dataclass(frozen=True)
@@ -167,9 +184,20 @@ def reduce_option_performance(
 
     combo_group_counts: dict[str, int] = defaultdict(int)
     for event in projection.effective_open_events:
-        metadata = strategy_metadata_fields_from_payload(event.raw_payload)
-        group_id = str(metadata.get("strategy_group_id") or "").strip()
-        if str(metadata.get("strategy") or "").strip().lower() == "combo_yield" and group_id:
+        resolved_metadata = resolve_strategy_metadata(
+            event.raw_payload,
+            source_id=event.event_id,
+        )
+        metadata = resolved_metadata.metadata
+        group_id = metadata.strategy_group_id or ""
+        if (
+            not resolved_metadata.issues
+            and group_id
+            and (
+                metadata.strategy == "combo_yield"
+                or group_id.startswith("combo_yield:")
+            )
+        ):
             combo_group_counts[group_id] += 1
     valid_combo_group_ids = {
         group_id for group_id, count in combo_group_counts.items() if count == 2
@@ -189,21 +217,20 @@ def reduce_option_performance(
             facts.append(_failed_fact(lot, missing=tuple(sorted(lot_missing))))
             continue
         open_event = opens_by_lot[lot_id]
-        attribution_strategy, strategy_group_id, source_stock_lot_id, attribution_missing = _attribution_for_lot(
-            lot,
-            open_event,
+        membership = resolve_option_strategy_membership(
+            lot.contract_key,
+            open_event.raw_payload,
             valid_combo_group_ids=valid_combo_group_ids,
+            source_id=open_event.event_id,
         )
-        lot_missing.update(attribution_missing)
+        lot_missing.update(membership.issues)
         facts.extend(
             _facts_for_lot(
                 lot,
                 open_event,
                 allocations_by_lot.get(lot_id, ()),
                 period=period,
-                attribution_strategy=attribution_strategy,
-                strategy_group_id=strategy_group_id,
-                source_stock_lot_id=source_stock_lot_id,
+                membership=membership,
                 lot_missing=tuple(sorted(lot_missing)),
             )
         )
@@ -306,54 +333,13 @@ def _affected_lot_missing(
     return {key: tuple(sorted(value)) for key, value in affected.items()}
 
 
-def _attribution_for_lot(
-    lot: PositionLot,
-    event: TradeEvent,
-    *,
-    valid_combo_group_ids: set[str],
-) -> tuple[str, str | None, str | None, tuple[str, ...]]:
-    metadata = strategy_metadata_fields_from_payload(event.raw_payload)
-    strategy = str(metadata.get("strategy") or "").strip().lower()
-    role = str(metadata.get("leg_role") or "").strip().lower()
-    group_id = str(metadata.get("strategy_group_id") or "").strip() or None
-    stock_lot_id = str(metadata.get("source_stock_lot_id") or "").strip() or None
-    default = _default_attribution(lot)
-    if strategy == "combo_yield" and group_id in valid_combo_group_ids:
-        if role in {"funding_put", "participation_call"}:
-            return "csp_lc", group_id, None, ()
-        if role in {"short_call", "long_put"}:
-            return "cc_lp", group_id, None, ()
-    if strategy == "wheel" or role == "wheel_call" or stock_lot_id:
-        if (
-            strategy == "wheel"
-            and role == "wheel_call"
-            and stock_lot_id
-            and lot.contract_key.option_type == "call"
-            and lot.contract_key.position_side == "short"
-        ):
-            return "wheel", group_id, stock_lot_id, ()
-        return default, None, None, ("strategy_attribution_conflict",)
-    if strategy == "combo_yield" or (group_id and group_id.startswith("combo_yield:")):
-        return default, None, None, ("strategy_attribution_conflict",)
-    return default, None, None, ()
-
-
-def _default_attribution(lot: PositionLot) -> str:
-    key = lot.contract_key
-    if key.position_side == "short":
-        return "csp" if key.option_type == "put" else "cc"
-    return "unassigned"
-
-
 def _facts_for_lot(
     lot: PositionLot,
     open_event: TradeEvent,
     allocations: Iterable[OptionEconomicAllocation],
     *,
     period: PeriodWindow,
-    attribution_strategy: str,
-    strategy_group_id: str | None,
-    source_stock_lot_id: str | None,
+    membership: OptionStrategyMembership,
     lot_missing: tuple[str, ...],
 ) -> list[WeightedOptionFact]:
     admitted = sorted(
@@ -370,9 +356,7 @@ def _facts_for_lot(
             lot,
             allocation,
             period=period,
-            attribution_strategy=attribution_strategy,
-            strategy_group_id=strategy_group_id,
-            source_stock_lot_id=source_stock_lot_id,
+            membership=membership,
             lot_missing=lot_missing,
         )
         for allocation in admitted
@@ -385,9 +369,7 @@ def _facts_for_lot(
                 admitted,
                 remaining=remaining,
                 period=period,
-                attribution_strategy=attribution_strategy,
-                strategy_group_id=strategy_group_id,
-                source_stock_lot_id=source_stock_lot_id,
+                membership=membership,
                 lot_missing=lot_missing,
             )
         )
@@ -399,6 +381,7 @@ def _failed_fact(
     *,
     missing: tuple[str, ...],
 ) -> WeightedOptionFact:
+    membership = resolve_option_strategy_membership(lot.contract_key, None)
     return WeightedOptionFact(
         fact_id=f"failed:{lot.lot_id}",
         open_lot_id=lot.lot_id,
@@ -408,10 +391,7 @@ def _failed_fact(
         broker=lot.contract_key.broker,
         symbol=lot.contract_key.underlying_symbol,
         currency=lot.currency,
-        leg_type=_leg_type(lot),
-        attribution_strategy=_default_attribution(lot),
-        strategy_group_id=None,
-        source_stock_lot_id=None,
+        membership=membership,
         opened_at_ms=lot.opened_at_ms,
         terminal_at_ms=None,
         expiration_ymd=lot.contract_key.expiration_ymd,
@@ -442,9 +422,7 @@ def _terminated_fact(
     allocation: OptionEconomicAllocation,
     *,
     period: PeriodWindow,
-    attribution_strategy: str,
-    strategy_group_id: str | None,
-    source_stock_lot_id: str | None,
+    membership: OptionStrategyMembership,
     lot_missing: tuple[str, ...],
 ) -> WeightedOptionFact:
     terminal_kind = _terminal_kind(allocation)
@@ -466,9 +444,8 @@ def _terminated_fact(
             - allocation.allocated_open_fee.amount
             - allocation.close_fee.amount
         )
-    leg_type = _leg_type(lot)
     win_eligible, win, win_missing = _terminal_win(
-        leg_type,
+        membership.leg_type,
         terminal_kind=terminal_kind,
         net_cash=net_cash,
         cash_missing=cash_missing,
@@ -490,10 +467,7 @@ def _terminated_fact(
         broker=lot.contract_key.broker,
         symbol=lot.contract_key.underlying_symbol,
         currency=lot.currency,
-        leg_type=leg_type,
-        attribution_strategy=attribution_strategy,
-        strategy_group_id=strategy_group_id,
-        source_stock_lot_id=source_stock_lot_id,
+        membership=membership,
         opened_at_ms=lot.opened_at_ms,
         terminal_at_ms=allocation.closed_at_ms,
         expiration_ymd=lot.contract_key.expiration_ymd,
@@ -526,9 +500,7 @@ def _residual_fact(
     *,
     remaining: int,
     period: PeriodWindow,
-    attribution_strategy: str,
-    strategy_group_id: str | None,
-    source_stock_lot_id: str | None,
+    membership: OptionStrategyMembership,
     lot_missing: tuple[str, ...],
 ) -> WeightedOptionFact:
     total_open_cash = _opening_cash(lot, lot.contracts_opened)
@@ -580,10 +552,7 @@ def _residual_fact(
         broker=lot.contract_key.broker,
         symbol=lot.contract_key.underlying_symbol,
         currency=lot.currency,
-        leg_type=_leg_type(lot),
-        attribution_strategy=attribution_strategy,
-        strategy_group_id=strategy_group_id,
-        source_stock_lot_id=source_stock_lot_id,
+        membership=membership,
         opened_at_ms=lot.opened_at_ms,
         terminal_at_ms=None,
         expiration_ymd=lot.contract_key.expiration_ymd,
@@ -607,11 +576,6 @@ def _residual_fact(
         capital_missing=tuple(sorted(capital_missing)),
         win_missing=tuple(sorted(win_missing)),
     )
-
-
-def _leg_type(lot: PositionLot) -> str:
-    prefix = "sell" if lot.contract_key.position_side == "short" else "buy"
-    return f"{prefix}_{lot.contract_key.option_type}"
 
 
 def _opening_cash(lot: PositionLot, contracts: int) -> Decimal:
@@ -974,7 +938,7 @@ def _breakdowns(
         ("attribution_strategies", lambda fact: fact.attribution_strategy),
         (
             "parent_universes",
-            lambda fact: "csp" if fact.leg_type == "sell_put" else "cc" if fact.leg_type == "sell_call" else None,
+            lambda fact: fact.membership.parent_universe,
         ),
         ("symbols", lambda fact: fact.symbol),
     )
