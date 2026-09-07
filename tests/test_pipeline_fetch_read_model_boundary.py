@@ -1286,6 +1286,182 @@ def test_child_request_evidence_binds_actual_payload_and_rejects_collision() -> 
 
 
 @pytest.mark.parametrize(
+    ("call_expirations", "expected_requests"),
+    [
+        (["2026-09-18", "2026-08-21"], 1),
+        (["2026-09-18"], 2),
+    ],
+)
+def test_single_symbol_facade_preserves_complete_and_partial_overlap_evidence(
+    call_expirations: list[str],
+    expected_requests: int,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from src.application.opend_symbol_chain_fetching import (
+        OptionExpirationDiscoveryResult,
+    )
+    from src.application.required_data_planning import (
+        OptionSideFetchPlan,
+        RequiredDataFetchPlanBundle,
+        StrikeWindowPlan,
+        _merge_side_plans,
+    )
+    import src.application.required_data_steps as steps
+
+    expirations = ["2026-08-21", "2026-09-18"]
+    put_plan = OptionSideFetchPlan(
+        option_type="put",
+        min_dte=10,
+        max_dte=60,
+        explicit_expirations=list(expirations),
+        strike_window=StrikeWindowPlan(
+            min_strike=100.0,
+            max_strike=100.0,
+            source="test",
+            base_min_strike=100.0,
+            base_max_strike=100.0,
+        ),
+        planning_reason="single-symbol put demand",
+    )
+    call_plan = OptionSideFetchPlan(
+        option_type="call",
+        min_dte=10,
+        max_dte=60,
+        explicit_expirations=list(call_expirations),
+        strike_window=StrikeWindowPlan(
+            min_strike=130.0,
+            max_strike=130.0,
+            source="test",
+            base_min_strike=130.0,
+            base_max_strike=130.0,
+        ),
+        planning_reason="single-symbol call demand",
+    )
+    specs = _merge_side_plans(
+        symbol="NVDA",
+        limit_expirations=2,
+        host="127.0.0.1",
+        port=11111,
+        side_plans=[put_plan, call_plan],
+        trading_date=datetime.fromisoformat(_TEST_TRADING_DATE).date(),
+    )
+    fetch_plan = RequiredDataFetchPlanBundle(
+        symbol="NVDA",
+        spot_reference=120.0,
+        side_plans=[put_plan, call_plan],
+        merged_specs=specs,
+        expiration_discovery=OptionExpirationDiscoveryResult(
+            outcome="success_rows",
+            reason_code=None,
+            expirations=list(expirations),
+            observed_at_utc=_TEST_EVIDENCE_OBSERVED_AT.isoformat(),
+            completed_at_utc=_TEST_EVIDENCE_COMPLETED_AT.isoformat(),
+            request_identity={
+                "symbol": "NVDA",
+                "underlier": "US.NVDA",
+                "source": "opend",
+                "host": "127.0.0.1",
+                "port": 11111,
+                "trading_date": _TEST_TRADING_DATE,
+            },
+        ),
+        projection_outcome="success_rows",
+        projected_expirations=list(expirations),
+        require_realized_volatility=False,
+    )
+    requests: list[object] = []
+
+    def execute(*, base: Path, request):  # type: ignore[no-untyped-def]
+        del base
+        requests.append(request)
+        rows: list[dict[str, object]] = []
+        codes: list[str] = []
+        for expiration in request.explicit_expirations:
+            dte = (
+                datetime.fromisoformat(expiration).date()
+                - datetime.fromisoformat(_TEST_TRADING_DATE).date()
+            ).days
+            for option_type in request.option_types.split(","):
+                strike = 100.0 if option_type == "put" else 130.0
+                code = (
+                    f"US.NVDA.{expiration}."
+                    f"{'P' if option_type == 'put' else 'C'}{strike:g}"
+                )
+                child = _typed_success_row_payload(
+                    symbol="NVDA",
+                    expiration=expiration,
+                    dte=dte,
+                    contract_symbol=code,
+                    option_type=option_type,
+                    strike=strike,
+                )
+                rows.append(dict(child["rows"][0]))
+                codes.append(code)
+        payload = _typed_success_row_payload(
+            symbol="NVDA",
+            expiration=request.explicit_expirations[0],
+            dte=(
+                datetime.fromisoformat(request.explicit_expirations[0]).date()
+                - datetime.fromisoformat(_TEST_TRADING_DATE).date()
+            ).days,
+            contract_symbol=codes[0],
+        )
+        payload["expirations"] = list(request.explicit_expirations)
+        payload["expiration_count"] = len(request.explicit_expirations)
+        payload["rows"] = rows
+        meta = payload["meta"]
+        assert isinstance(meta, dict)
+        sorted_codes = sorted(codes)
+        meta.update(
+            {
+                "snapshot_requested_codes": len(sorted_codes),
+                "snapshot_returned_codes": len(sorted_codes),
+                "snapshot_requested_code_set": sorted_codes,
+                "snapshot_returned_code_set": sorted_codes,
+            }
+        )
+        return payload
+
+    monkeypatch.setattr(steps, "execute_required_data_opend", execute)
+    required, _state_dir = _make_dirs(tmp_path)
+    evidence = steps.ensure_required_data(
+        py="python3",
+        base=tmp_path,
+        symbol="NVDA",
+        required_data_dir=required,
+        limit_expirations=2,
+        want_put=True,
+        want_call=True,
+        timeout_sec=5,
+        is_scheduled=True,
+        fetch_source="opend",
+        fetch_host="127.0.0.1",
+        fetch_port=11111,
+        fetch_plan=fetch_plan,
+        source_producer_run_id=f"run-single-symbol-{expected_requests}",
+    )
+
+    assert isinstance(evidence, dict)
+    assert len(requests) == expected_requests
+    assert len(list(required.rglob("receipt.json"))) == 1
+    raw = json.loads(
+        (required / "raw" / "NVDA_required_data.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert len(raw["rows"]) == (4 if expected_requests == 1 else 3)
+    if expected_requests == 1:
+        assert requests[0].option_types == "put,call"  # type: ignore[attr-defined]
+        assert "requests" not in raw["meta"]
+        assert "request_index" not in raw["meta"]
+    else:
+        assert [
+            child["request_index"] for child in raw["meta"]["requests"]
+        ] == [0, 1]
+
+
+@pytest.mark.parametrize(
     ("invalid_time_kind", "error_match"),
     [
         (

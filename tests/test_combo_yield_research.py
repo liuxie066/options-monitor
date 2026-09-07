@@ -189,6 +189,52 @@ def _fake_capture_plan(**kwargs) -> RequiredDataFetchPlanBundle:
     )
 
 
+def test_combo_capture_union_partitions_partial_put_call_overlap() -> None:
+    from src.application.shadow_replay.combo_capture import _union_bundles
+
+    expirations = [
+        "2026-08-21",
+        "2026-09-18",
+        "2026-10-16",
+        "2026-11-20",
+        "2026-12-18",
+    ]
+    window = StrikeWindowPlan(min_strike=80, max_strike=140, source="test")
+
+    def bundle(option_type: str, dates: list[str]) -> RequiredDataFetchPlanBundle:
+        return RequiredDataFetchPlanBundle(
+            symbol="0700.HK",
+            spot_reference=110,
+            side_plans=[
+                OptionSideFetchPlan(
+                    option_type=option_type,
+                    min_dte=1,
+                    max_dte=180,
+                    explicit_expirations=dates,
+                    strike_window=window,
+                    planning_reason="test",
+                )
+            ],
+            merged_specs=[],
+        )
+
+    union = _union_bundles(
+        symbol="0700.HK",
+        bundles=[bundle("put", expirations), bundle("call", expirations[1:])],
+        host="127.0.0.1",
+        port=11111,
+    )
+
+    assert [spec.option_types for spec in union.merged_specs] == [
+        ("put",),
+        ("put", "call"),
+    ]
+    assert [spec.explicit_expirations for spec in union.merged_specs] == [
+        expirations[:1],
+        expirations[1:],
+    ]
+
+
 def test_proposed_rank_ignores_premium_funding_score_and_keeps_put_rank_dominant() -> None:
     policy = _policy()
     high_put = {
