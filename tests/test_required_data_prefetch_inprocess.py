@@ -1367,12 +1367,19 @@ def test_inprocess_multi_spec_executes_each_exact_request_and_finalizes_once(
 
     _patch_0700_plan_discovery(
         monkeypatch,
-        ["2026-06-29", "2026-07-17"],
+        [
+            "2026-06-29",
+            "2026-07-17",
+            "2026-07-31",
+            "2026-08-21",
+            "2026-09-04",
+        ],
         spot=444.8,
     )
     watchlist = [
         {
             "symbol": "0700.HK",
+            "broker": "HK",
             "fetch": {
                 "source": "futu",
                 "host": "127.0.0.1",
@@ -1381,13 +1388,14 @@ def test_inprocess_multi_spec_executes_each_exact_request_and_finalizes_once(
             "sell_put": {
                 "enabled": True,
                 "min_dte": 20,
-                "max_dte": 25,
+                "max_dte": 90,
                 "max_strike": 450,
             },
             "sell_call": {"enabled": False},
         },
         {
             "symbol": "0700.HK",
+            "broker": "HK",
             "fetch": {
                 "source": "futu",
                 "host": "127.0.0.1",
@@ -1396,21 +1404,81 @@ def test_inprocess_multi_spec_executes_each_exact_request_and_finalizes_once(
             "sell_put": {"enabled": False},
             "sell_call": {
                 "enabled": True,
-                "min_dte": 30,
-                "max_dte": 60,
+                "min_dte": 39,
+                "max_dte": 90,
                 "min_strike": 550,
             },
         },
     ]
-    gateway = _Gateway()
+    class FacadeGateway(_Gateway):
+        def __init__(self) -> None:
+            super().__init__()
+            self.chain_calls: list[dict[str, object]] = []
+            self.snapshot_calls: list[list[str]] = []
+
+        def get_option_chain(self, **kwargs: object):  # noqa: ANN201
+            import pandas as pd
+
+            self.chain_calls.append(dict(kwargs))
+            expiration = str(kwargs["start"])
+            requested_side = str(kwargs.get("option_type") or "").upper()
+            sides = [requested_side] if requested_side else ["PUT", "CALL"]
+            return pd.DataFrame(
+                [
+                    {
+                        "code": f"HK.00700.{expiration}.{side[0]}{strike:g}",
+                        "strike_time": expiration,
+                        "strike_price": strike,
+                        "option_type": side,
+                        "option_standard_type": "STANDARD",
+                        "stock_owner": "HK.00700",
+                        "stock_type": "DRVT",
+                        "suspension": False,
+                        "lot_size": 100,
+                    }
+                    for side, strike in (
+                        (side, 420.0 if side == "PUT" else 560.0)
+                        for side in sides
+                    )
+                ]
+            )
+
+        def get_snapshot(self, codes: list[str]):  # noqa: ANN201
+            import pandas as pd
+
+            self.snapshot_calls.append(list(codes))
+            return pd.DataFrame(
+                [
+                    {
+                        "code": code,
+                        "last_price": 1.0,
+                        "bid_price": 0.9,
+                        "ask_price": 1.1,
+                        "bid_vol": 10,
+                        "ask_vol": 12,
+                        "price_spread": 0.01,
+                        "sec_status": "NORMAL",
+                        "suspension": False,
+                        "option_contract_multiplier": 100,
+                    }
+                    for code in codes
+                ]
+            )
+
+    gateway = FacadeGateway()
     fetch_calls: list[dict[str, object]] = []
     merge_calls: list[list[dict[str, object]]] = []
     finalize_calls: list[dict[str, object]] = []
     save_calls: list[dict[str, object]] = []
 
-    def fake_fetch_symbol(symbol: str, **kwargs: object) -> dict[str, object]:
+    real_fetch_symbol = mod.fetch_symbol
+
+    def fetch_through_real_facade(
+        symbol: str,
+        **kwargs: object,
+    ) -> dict[str, object]:
         fetch_calls.append({"symbol": symbol, **kwargs})
-        return _strict_success_rows_for_fetch(symbol, kwargs)
+        return real_fetch_symbol(symbol, **kwargs)  # type: ignore[arg-type]
 
     original_merge = mod.merge_required_data_payloads
 
@@ -1436,8 +1504,64 @@ def test_inprocess_multi_spec_executes_each_exact_request_and_finalizes_once(
         "src.infrastructure.futu_gateway.build_ready_futu_gateway",
         lambda **kwargs: gateway,
     )
-    monkeypatch.setattr(mod, "resolve_watchlist_config", lambda cfg: watchlist)
-    monkeypatch.setattr(mod, "fetch_symbol", fake_fetch_symbol)
+    from src.application.short_vol_metrics import (
+        RealizedVolatilitySnapshot,
+        TermMatchedRVObservation,
+    )
+
+    def fetch_realized_volatility_snapshot(
+        _gateway: object,
+        *,
+        trading_day: date,
+        expirations: list[str],
+        **_kwargs: object,
+    ) -> RealizedVolatilitySnapshot:
+        terms = {
+            expiration: TermMatchedRVObservation(
+                schema_version="term_matched_rv.v1",
+                expiration=expiration,
+                status="ok",
+                reason=None,
+                term_matched_rv=0.22,
+                remaining_sessions=max(
+                    1,
+                    (date.fromisoformat(expiration) - trading_day).days,
+                ),
+                lookback_sessions=max(
+                    20,
+                    (date.fromisoformat(expiration) - trading_day).days,
+                ),
+                input_start="2026-01-02",
+                input_end=trading_day.isoformat(),
+                input_close_session_count=max(
+                    20,
+                    (date.fromisoformat(expiration) - trading_day).days,
+                )
+                + 1,
+                input_return_count=max(
+                    20,
+                    (date.fromisoformat(expiration) - trading_day).days,
+                ),
+                input_hash="a" * 64,
+            )
+            for expiration in expirations
+        }
+        return RealizedVolatilitySnapshot(
+            rv_20=0.20,
+            rv_60=0.24,
+            rv_120=0.28,
+            sample_count=120,
+            status="ok",
+            term_matched=terms,
+            qfq_history_evidence={"status": "ok"},
+            trading_calendar_evidence={"status": "ok"},
+        )
+
+    monkeypatch.setattr(
+        "src.application.opend_symbol_fetching.fetch_realized_volatility_snapshot",
+        fetch_realized_volatility_snapshot,
+    )
+    monkeypatch.setattr(mod, "fetch_symbol", fetch_through_real_facade)
     monkeypatch.setattr(mod, "merge_required_data_payloads", merge_once)
     monkeypatch.setattr(
         mod,
@@ -1451,29 +1575,151 @@ def test_inprocess_multi_spec_executes_each_exact_request_and_finalizes_once(
         lambda *args, **kwargs: None,
     )
     shared_required = tmp_path / "shared_required"
+    base_cfg = {
+        "symbols": watchlist,
+        "runtime": {
+            "opend_rate_limits": {
+                "option_chain": {
+                    "max_calls": 100,
+                    "window_sec": 0.01,
+                    "max_wait_sec": 1,
+                }
+            },
+            "prefetch": {
+                "execution_mode": "inprocess",
+                "max_workers": 1,
+            }
+        },
+    }
+    cfg_path = tmp_path / "config.hk.json"
+    account_configs = {
+        account: mod.build_account_runtime_config(
+            base_cfg=base_cfg,
+            cfg_path=cfg_path,
+            account=account,
+            markets_to_run=["HK"],
+        )
+        for account in ("lx", "sy")
+    }
+    formal_cfg = mod.build_cross_account_prefetch_config(
+        base_config=base_cfg,
+        account_configs=account_configs,
+        prepared_portfolio_contexts={
+            "lx": {
+                "portfolio_source_name": "futu",
+                "capacity_authority": {"status": "available"},
+                "stocks_by_symbol": {"0700.HK": {"avg_cost": 500.0}},
+            },
+            "sy": None,
+        },
+    )
+    cold_base = tmp_path / "cold"
+    cold_base.mkdir()
+    cold_required = cold_base / "required_data"
+    cold = mod.prefetch_required_data(
+        vpy=tmp_path / "python",
+        base=cold_base,
+        cfg=formal_cfg,
+        shared_required=cold_required,
+        producer_run_id="run-real-cold-two-spec",
+    )
+
+    assert cold["fetched_ok"] == 1, cold["results"]
+    assert [call["option_types"] for call in fetch_calls] == [
+        "put",
+        "put,call",
+    ]
+    assert len(gateway.chain_calls) == 5
+    assert sum(len(codes) for codes in gateway.snapshot_calls) == 9
+    assert len(merge_calls) == 1
+    assert len(finalize_calls) == 1
+    assert len(save_calls) == 1
+    assert len(list(cold_required.rglob("receipt.json"))) == 1
+    cold_raw = json.loads(
+        (cold_required / "raw" / "0700.HK_required_data.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert len(cold_raw["rows"]) == 9
+    assert [
+        child["request_index"] for child in cold_raw["meta"]["requests"]
+    ] == [0, 1]
+    fetch_calls.clear()
+    merge_calls.clear()
+    finalize_calls.clear()
+    save_calls.clear()
+    gateway.chain_calls.clear()
+    gateway.snapshot_calls.clear()
+    stop = (
+        datetime.now(timezone.utc) + timedelta(seconds=30)
+    ).isoformat().replace("+00:00", "Z")
+
+    warmup = mod._warm_required_data_chain_cache_inprocess(
+        base=tmp_path,
+        base_cfg=base_cfg,
+        cfg_path=cfg_path,
+        accounts=["lx", "sy"],
+        markets_to_run=["HK"],
+        symbols_arg=None,
+        next_formal_target_utc=stop,
+        worker_stop_at_utc=stop,
+        lock_release_by_utc=stop,
+    )
+
+    assert warmup["status"] == "ready"
+    assert warmup["planned_shards"] == 5
+    assert warmup["fetched_shards"] == 5
+    assert warmup["option_contract_snapshot_requested_codes"] == 0
+    assert len(gateway.chain_calls) == 5
+    assert all(call.get("option_type") == "PUT" for call in gateway.chain_calls)
+    assert gateway.snapshot_calls == []
+
+    matching_cfg = mod.build_cross_account_prefetch_config(
+        base_config=base_cfg,
+        account_configs=account_configs,
+        prepared_portfolio_contexts={"lx": None, "sy": None},
+    )
+    matching = mod.prefetch_required_data(
+        vpy=tmp_path / "python",
+        base=tmp_path,
+        cfg=matching_cfg,
+        shared_required=tmp_path / "matching_required",
+        producer_run_id="run-real-matching-warmup",
+    )
+
+    assert matching["fetched_ok"] == 1
+    assert [call["option_types"] for call in fetch_calls] == ["put"]
+    assert len(gateway.chain_calls) == 5
+    assert sum(len(codes) for codes in gateway.snapshot_calls) == 5
+    fetch_calls.clear()
+    merge_calls.clear()
+    finalize_calls.clear()
+    save_calls.clear()
+    gateway.snapshot_calls.clear()
 
     result = mod.prefetch_required_data(
         vpy=tmp_path / "python",
         base=tmp_path,
-        cfg={
-            "runtime": {
-                "prefetch": {
-                    "execution_mode": "inprocess",
-                    "max_workers": 1,
-                }
-            }
-        },
+        cfg=formal_cfg,
         shared_required=shared_required,
         producer_run_id="run-real-two-spec",
     )
 
-    assert result["fetched_ok"] == 1
+    assert result["fetched_ok"] == 1, result["results"]
     assert result["errors"] == 0
     assert len(fetch_calls) == 2
-    assert [call["option_types"] for call in fetch_calls] == ["put", "call"]
+    assert [call["option_types"] for call in fetch_calls] == [
+        "put",
+        "put,call",
+    ]
     assert [call["explicit_expirations"] for call in fetch_calls] == [
         ["2026-06-29"],
-        ["2026-07-17"],
+        [
+            "2026-07-17",
+            "2026-07-31",
+            "2026-08-21",
+            "2026-09-04",
+        ],
     ]
     assert [call["trading_date"] for call in fetch_calls] == [
         "2026-06-08",
@@ -1481,6 +1727,15 @@ def test_inprocess_multi_spec_executes_each_exact_request_and_finalizes_once(
     ]
     assert all(call["fetch_spot_if_missing"] is False for call in fetch_calls)
     assert all(call["gateway"] is gateway for call in fetch_calls)
+    assert len(gateway.chain_calls) == 9
+    assert [call.get("option_type") for call in gateway.chain_calls[5:]] == [
+        None,
+        None,
+        None,
+        None,
+    ]
+    assert len(gateway.snapshot_calls) == 2
+    assert sum(len(codes) for codes in gateway.snapshot_calls) == 9
     assert len(merge_calls) == 1
     assert len(finalize_calls) == 1
     assert len(save_calls) == 1
@@ -1492,6 +1747,10 @@ def test_inprocess_multi_spec_executes_each_exact_request_and_finalizes_once(
         )
     )
     children = raw["meta"]["requests"]
+    assert len(raw["rows"]) == 9
+    assert all(
+        row["opening_contract_status"] == "ready" for row in raw["rows"]
+    )
     planned = result["global_required_data_plan"]["symbols"][0][
         "fetch_plan"
     ]["merged_requests"]
@@ -3087,6 +3346,46 @@ def test_opening_chain_warmup_supervisor_stops_child_waiting_on_prefetch_lock(
     assert summary["status"] == "deadline_reached"
     assert summary["child_terminated"] is True
     assert "worker_deadline_reached" in summary["reason_codes"]
+    with exclusive_private_file_lock(lock_path):
+        pass
+
+
+def test_opening_chain_warmup_termination_releases_child_owned_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fork_context = mod.multiprocessing.get_context("fork")
+    marker = tmp_path / "provider-entered"
+
+    def block_in_provider(**_kwargs: object) -> dict[str, object]:
+        marker.write_text("entered", encoding="utf-8")
+        while True:
+            time.sleep(1)
+
+    monkeypatch.setattr(mod.multiprocessing, "get_context", lambda _mode: fork_context)
+    monkeypatch.setattr(
+        mod,
+        "_warm_required_data_chain_cache_inprocess",
+        block_in_provider,
+    )
+    now = datetime.now(timezone.utc)
+    worker_stop = (now + timedelta(seconds=0.5)).isoformat().replace("+00:00", "Z")
+    summary = mod.warm_required_data_chain_cache(
+        base=tmp_path,
+        base_cfg={"symbols": []},
+        cfg_path=tmp_path / "config.hk.json",
+        accounts=["lx"],
+        markets_to_run=["HK"],
+        symbols_arg=None,
+        next_formal_target_utc=(now + timedelta(seconds=130)).isoformat().replace("+00:00", "Z"),
+        worker_stop_at_utc=worker_stop,
+        lock_release_by_utc=(now + timedelta(seconds=120)).isoformat().replace("+00:00", "Z"),
+    )
+
+    assert marker.read_text(encoding="utf-8") == "entered"
+    assert summary["status"] == "deadline_reached"
+    assert summary["child_terminated"] is True
+    lock_path = tmp_path / "output_shared" / "state" / "required_data_prefetch.lock"
     with exclusive_private_file_lock(lock_path):
         pass
 

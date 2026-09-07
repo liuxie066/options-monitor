@@ -127,6 +127,49 @@ def _success_rows_plan() -> dict[str, object]:
     }
 
 
+def _partitioned_success_rows_plan() -> dict[str, object]:
+    plan = _success_rows_plan()
+    put, call = plan["side_plans"]
+    assert isinstance(put, dict) and isinstance(call, dict)
+    put["max_dte"] = 60
+    put["explicit_expirations"] = ["2026-08-21", "2026-09-18"]
+    put["expiration_count"] = 2
+    put["required_exact_strikes_by_expiration"] = {
+        "2026-08-21": [95.0],
+        "2026-09-18": [96.0],
+    }
+    call["explicit_expirations"] = ["2026-09-18"]
+    call["expiration_count"] = 1
+
+    put_shared = deepcopy(put)
+    put_shared["explicit_expirations"] = ["2026-09-18"]
+    put_shared["expiration_count"] = 1
+    put_shared["required_exact_strikes_by_expiration"] = {
+        "2026-09-18": [96.0]
+    }
+    shared = {
+        **_request(put_shared),
+        "option_types": ["put", "call"],
+        "explicit_expirations": ["2026-09-18"],
+        "min_dte": 20,
+        "max_dte": 60,
+        "side_strike_windows": {
+            "put": {"min_strike": 90.0, "max_strike": 100.0},
+            "call": {"min_strike": 120.0, "max_strike": 140.0},
+        },
+        "side_plans": [put_shared, deepcopy(call)],
+        "planning_reason": "shared expirations -> merged request",
+    }
+    put_only = deepcopy(put)
+    put_only["explicit_expirations"] = ["2026-08-21"]
+    put_only["expiration_count"] = 1
+    put_only["required_exact_strikes_by_expiration"] = {
+        "2026-08-21": [95.0]
+    }
+    plan["merged_requests"] = [shared, _request(put_only)]
+    return plan
+
+
 def _success_rows_plan_with_empty_top_side() -> dict[str, object]:
     plan = _success_rows_plan()
     side_plans = plan["side_plans"]
@@ -204,6 +247,30 @@ def test_expected_contract_accepts_empty_top_evidence_without_executable_child()
         "completion_unit": "request_option_type_expiration",
         "allow_proven_empty_scopes": True,
     }
+
+
+def test_expected_contract_accepts_exact_side_plan_partitions() -> None:
+    plan = _partitioned_success_rows_plan()
+
+    contract = _build(plan)
+
+    assert contract["fetch_plan"] == plan
+
+
+@pytest.mark.parametrize("mutation", ["missing", "duplicate"])
+def test_expected_contract_rejects_incomplete_or_duplicate_side_plan_partitions(
+    mutation: str,
+) -> None:
+    plan = _partitioned_success_rows_plan()
+    requests = plan["merged_requests"]
+    assert isinstance(requests, list)
+    if mutation == "missing":
+        requests.pop()
+    else:
+        requests.append(deepcopy(requests[-1]))
+
+    with pytest.raises(ValueError, match="nested and top-level"):
+        _build(plan)
 
 
 def test_expected_contract_accepts_closed_success_empty_projection() -> None:
