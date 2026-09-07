@@ -1044,14 +1044,41 @@ def _merge_side_plans(
 ) -> list[RequiredDataFetchSpec]:
     if not isinstance(include_realized_volatility, bool):
         raise TypeError("required-data RV authority must be a bool")
-    groups: dict[tuple[str, ...], list[OptionSideFetchPlan]] = {}
-    for plan in side_plans:
-        if not plan.explicit_expirations:
-            continue
-        key = tuple(plan.explicit_expirations)
-        groups.setdefault(key, []).append(plan)
+    active_plans = [plan for plan in side_plans if plan.explicit_expirations]
+    expirations = _unique_preserve_order(
+        [
+            expiration
+            for plan in active_plans
+            for expiration in plan.explicit_expirations
+        ]
+    )
+    groups: dict[tuple[int, ...], list[str]] = {}
+    for expiration in expirations:
+        key = tuple(
+            index
+            for index, plan in enumerate(active_plans)
+            if expiration in plan.explicit_expirations
+        )
+        groups.setdefault(key, []).append(expiration)
     merged: list[RequiredDataFetchSpec] = []
-    for expirations_key, plans in groups.items():
+    for plan_indexes, group_expirations in groups.items():
+        plans: list[OptionSideFetchPlan] = []
+        for index in plan_indexes:
+            plan = active_plans[index]
+            if plan.explicit_expirations != group_expirations:
+                plan = replace(
+                    plan,
+                    explicit_expirations=list(group_expirations),
+                    required_exact_strikes_by_expiration={
+                        expiration: list(
+                            plan.required_exact_strikes_by_expiration[expiration]
+                        )
+                        for expiration in sorted(group_expirations)
+                        if expiration
+                        in plan.required_exact_strikes_by_expiration
+                    },
+                )
+            plans.append(plan)
         option_types = tuple(plan.option_type for plan in plans)
         side_strike_windows = {
             plan.option_type: {
@@ -1067,7 +1094,7 @@ def _merge_side_plans(
                 host=host,
                 port=port,
                 option_types=option_types,
-                explicit_expirations=list(expirations_key),
+                explicit_expirations=list(group_expirations),
                 min_dte=min((plan.min_dte for plan in plans if plan.min_dte is not None), default=None),
                 max_dte=max((plan.max_dte for plan in plans if plan.max_dte is not None), default=None),
                 side_strike_windows=side_strike_windows,
