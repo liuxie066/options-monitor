@@ -2,25 +2,29 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from domain.domain.trade_account_identity import extract_primary_account_id
+from src.application.ledger.api import assigned_stock_event_log
+from src.application.portfolio_management import portfolio_management_enabled
 from src.application.trades.deal_identity import (
     broker_deal_key_from_payload,
-    completed_ledger_deal_ids,
     completed_ledger_deal_keys,
+    structured_deal_keys_from_assigned_stock_event,
 )
 from src.infrastructure.futu_history_deals import fetch_opend_history_deals
 from src.application.trades.order_fee_sync import fee_target_from_trusted_payload
 from src.application.trades.lifecycle_reconciliation import discover_lifecycle_cases
+from src.application.trades.inbox_authority import resolve_execution_inbox_path
 from src.application.trades.inbox import (
+    TRADE_INTAKE_ADAPTER_VERSIONS,
     claim_trade_payload_refresh_intent,
     enqueue_trade_payload,
     mark_trade_payload_handled,
-    mark_trade_payload_retryable,
-    record_trade_payload_refresh_intent,
-    settle_trade_payload_result,
+    read_trade_payload,
 )
 from src.application.trades.state import (
     append_trade_intake_audit,
@@ -28,15 +32,19 @@ from src.application.trades.state import (
     is_retryable_unresolved_deal,
     load_trade_intake_state,
     lookup_deal_state_entry,
+    update_trade_intake_state_entries,
     upsert_deal_state,
-    write_trade_intake_state,
 )
 from src.infrastructure.io_utils import atomic_write_json, read_json, utc_now
+from src.infrastructure.private_storage import exclusive_private_file_lock
 
 
 def payload_deal_id(payload: dict[str, Any] | None) -> str:
     if not isinstance(payload, dict):
         return ""
+    execution = payload.get("execution_input") if isinstance(payload.get("execution_input"), dict) else payload
+    if execution.get("external_execution_id"):
+        return str(execution["external_execution_id"]).strip()
     for key in ("deal_id", "dealID", "dealId", "id"):
         value = str(payload.get(key) or "").strip()
         if value:
@@ -68,6 +76,12 @@ def run_history_backfill(
     enqueue_fee_target_fn: Callable[[tuple[str, str, str, str]], Any] | None = None,
     now_fn: Callable[[], datetime] | None = None,
 ) -> dict[str, Any]:
+    refresh_enabled = bool(apply_changes and dispatch_portfolio_refresh_fn is not None
+                           and portfolio_management_enabled(config))
+    if apply_changes:
+        inbox_path = resolve_execution_inbox_path(
+            repo, inbox_path or state_path.with_name("trade_intake_inbox.sqlite3")
+        )
     started_at = utc_now()
     now = now_fn() if callable(now_fn) else datetime.now(timezone.utc)
     configured_lookback_hours = float(backfill_config.get("lookback_hours") or 6)
@@ -77,11 +91,29 @@ def run_history_backfill(
     )
     checkpoint = read_json(checkpoint_file, default={})
     checkpoint_payload = checkpoint if isinstance(checkpoint, dict) else {}
-    lookback_hours = _effective_lookback_hours(
-        configured_lookback_hours=configured_lookback_hours,
-        checkpoint=checkpoint_payload,
-        now=now,
+    scopes = _history_checkpoint_scopes(host=host, port=port, account_ids=futu_account_ids)
+    scoped_checkpoints = {
+        account_id: _scoped_checkpoint(checkpoint_payload, scope)
+        for account_id, scope in scopes.items()
+    }
+    lookback_hours = max(
+        (_effective_lookback_hours(configured_lookback_hours=configured_lookback_hours,
+                                  checkpoint=entry, now=now)
+         for entry in scoped_checkpoints.values()),
+        default=configured_lookback_hours,
     )
+    checkpoint_diagnostics = {
+        "checkpoint_path": str(checkpoint_file),
+        "checkpoint_scope_cursors": {
+            account_id: entry.get("last_successful_window_end_utc")
+            for account_id, entry in scoped_checkpoints.items()
+        },
+        "checkpoint_scopes": scopes,
+        "legacy_checkpoint_unverified": bool(
+            checkpoint_payload.get("last_successful_window_end_utc")
+            or checkpoint_payload.get("legacy_unverified")
+        ),
+    }
     append_trade_intake_audit(
         audit_path,
         {
@@ -90,10 +122,7 @@ def run_history_backfill(
             "started_at_utc": started_at,
             "lookback_hours": lookback_hours,
             "configured_lookback_hours": configured_lookback_hours,
-            "checkpoint_path": str(checkpoint_file),
-            "checkpoint_window_end_utc": checkpoint_payload.get(
-                "last_successful_window_end_utc"
-            ),
+            **checkpoint_diagnostics,
         },
     )
     try:
@@ -109,10 +138,7 @@ def run_history_backfill(
             {
                 "configured_lookback_hours": configured_lookback_hours,
                 "effective_lookback_hours": lookback_hours,
-                "checkpoint_path": str(checkpoint_file),
-                "checkpoint_window_end_utc": checkpoint_payload.get(
-                    "last_successful_window_end_utc"
-                ),
+                **checkpoint_diagnostics,
             }
         )
     except Exception as exc:
@@ -146,6 +172,7 @@ def run_history_backfill(
     unresolved_count = 0
     last_result: dict[str, Any] | None = None
     durable_queue_complete = True
+    durable_accounts = dict.fromkeys(scopes, True)
     portfolio_refresh_intents: dict[str, dict[str, str]] = {}
     fee_targets: set[tuple[str, str, str, str]] = set()
     try:
@@ -169,6 +196,8 @@ def run_history_backfill(
     lock_context = process_lock if process_lock is not None else contextlib.nullcontext()
     for payload in payloads:
         if not isinstance(payload, dict):
+            durable_queue_complete = False
+            durable_accounts = dict.fromkeys(scopes, False)
             continue
         payload = _bind_backfill_payload_to_source(
             payload,
@@ -185,6 +214,7 @@ def run_history_backfill(
             account_mapping=account_mapping,
         )
         inbox_id: str | None = None
+        claimed_intent: dict[str, str] | None = None
         if apply_changes:
             try:
                 inbox_id = enqueue_trade_payload(
@@ -193,9 +223,19 @@ def run_history_backfill(
                     payload=payload,
                     source="backfill",
                     broker_deal_key=deal_key,
+                    repo=repo,
+                    adapter_version=TRADE_INTAKE_ADAPTER_VERSIONS["backfill"],
                 )
             except Exception as exc:
                 durable_queue_complete = False
+                execution = payload.get("execution_input") if isinstance(payload.get("execution_input"), dict) else payload
+                raw_ref = execution.get("broker_account_ref")
+                ref = raw_ref if isinstance(raw_ref, dict) else {}
+                physical = str(ref.get("external_account_id") or extract_primary_account_id(payload) or "").strip()
+                if physical in durable_accounts:
+                    durable_accounts[physical] = False
+                else:
+                    durable_accounts = dict.fromkeys(scopes, False)
                 failed_count += 1
                 append_trade_intake_audit(
                     audit_path,
@@ -206,6 +246,13 @@ def run_history_backfill(
                         "error": f"{type(exc).__name__}: {exc}",
                     },
                 )
+                continue
+        if inbox_id:
+            inbox_row = read_trade_payload(inbox_path or state_path.with_name("trade_intake_inbox.sqlite3"),
+                                          inbox_id=inbox_id)
+            if (inbox_row or {}).get("status") == "conflict":
+                unresolved_count += 1
+                last_result = {"status": "unresolved", "reason": "inbox_conflict", "deal_id": deal_id}
                 continue
         append_trade_intake_audit(
             audit_path,
@@ -247,19 +294,19 @@ def run_history_backfill(
         )
         with lock_context:
             state = load_trade_intake_state(state_path)
-            duplicate_reason = _state_duplicate_reason(
-                state,
-                deal_key,
-                legacy_deal_id=deal_id,
+            canonical_execution = deal_key.startswith("execution:v1:")
+            # Standard executions must reach the core content check and durable receipt recovery.
+            duplicate_reason = (
+                None if canonical_execution
+                else _state_duplicate_reason(state, deal_key, legacy_deal_id=deal_id)
             )
             ledger_keys = _ledger_recorded_deal_keys(repo)
-            legacy_ledger_ids = _ledger_recorded_deal_ids(repo)
             if (
                 duplicate_reason is None
+                and not canonical_execution
                 and deal_key
                 and (
                     deal_key in ledger_keys
-                    or deal_id in legacy_ledger_ids
                 )
             ):
                 duplicate_reason = "ledger_event_already_recorded"
@@ -272,9 +319,7 @@ def run_history_backfill(
             if duplicate_reason is not None:
                 if fee_target is not None and (
                     deal_key in ledger_keys
-                    or deal_id in legacy_ledger_ids
                     or is_durable_processed_deal(state, deal_key)
-                    or is_durable_processed_deal(state, deal_id)
                 ):
                     fee_targets.add(fee_target)
                 skipped_duplicate_count += 1
@@ -305,7 +350,7 @@ def run_history_backfill(
                         inbox_path
                         or state_path.with_name("trade_intake_inbox.sqlite3"),
                         inbox_id=inbox_id,
-                    )
+                    ) if refresh_enabled else None
                     if intent is not None:
                         portfolio_refresh_intents.setdefault(
                             intent["account"],
@@ -329,6 +374,7 @@ def run_history_backfill(
                     runtime_root=runtime_root,
                     on_result_fn=on_result_fn,
                     source="backfill",
+                    inbox_path=inbox_path or state_path.with_name("trade_intake_inbox.sqlite3"),
                 )
             except Exception as exc:
                 failed_count += 1
@@ -341,13 +387,6 @@ def run_history_backfill(
                     "account": None,
                     "error": error,
                 }
-                if inbox_id:
-                    mark_trade_payload_retryable(
-                        inbox_path
-                        or state_path.with_name("trade_intake_inbox.sqlite3"),
-                        inbox_id=inbox_id,
-                        error=error,
-                    )
                 append_trade_intake_audit(
                     audit_path,
                     {
@@ -358,21 +397,7 @@ def run_history_backfill(
                     },
                 )
                 continue
-            if inbox_id:
-                intent = result.get("portfolio_refresh_intent")
-                if isinstance(intent, dict):
-                    record_trade_payload_refresh_intent(
-                        inbox_path
-                        or state_path.with_name("trade_intake_inbox.sqlite3"),
-                        inbox_id=inbox_id,
-                        intent=intent,
-                    )
-                settle_trade_payload_result(
-                    inbox_path
-                    or state_path.with_name("trade_intake_inbox.sqlite3"),
-                    inbox_id=inbox_id,
-                    result=result,
-                )
+            if inbox_id and refresh_enabled:
                 claimed_intent = claim_trade_payload_refresh_intent(
                     inbox_path
                     or state_path.with_name("trade_intake_inbox.sqlite3"),
@@ -400,7 +425,9 @@ def run_history_backfill(
                     "reason": result.get("reason"),
                 },
             )
-        elif status == "skipped" and str(result.get("reason") or "").strip() == "duplicate_deal_id":
+        elif status == "skipped" and str(result.get("reason") or "").strip() in {
+            "duplicate", "duplicate_deal_id", "ledger_recorded"
+        }:
             skipped_duplicate_count += 1
             append_trade_intake_audit(
                 audit_path,
@@ -408,7 +435,7 @@ def run_history_backfill(
                     "phase": "backfill_skipped_duplicate",
                     "source": "backfill",
                     "deal_id": result.get("deal_id") or deal_id or None,
-                    "reason": "duplicate_deal_id",
+                    "reason": result["reason"],
                 },
             )
         elif status == "unresolved":
@@ -456,23 +483,26 @@ def run_history_backfill(
         diagnostics,
         expected_account_ids=futu_account_ids,
     )
-    checkpoint_update = dict(checkpoint_payload)
-    if apply_changes and durable_queue_complete and history_query_complete:
-        window_end_utc = str(
-            diagnostics.get("window_end_utc")
-            or now.astimezone(timezone.utc).isoformat()
-        )
-        checkpoint_update.update(
-            {
-                "last_successful_window_end_utc": window_end_utc,
+    scope_updates = {}
+    for account_id, scope in scopes.items():
+        if (apply_changes and durable_accounts[account_id]
+                and _history_query_complete(diagnostics, expected_account_ids=[account_id])):
+            scope_updates[_checkpoint_scope_key(scope)] = {
+                "scope": scope,
+                "last_successful_window_end_utc": str(
+                    diagnostics.get("window_end_utc") or now.astimezone(timezone.utc).isoformat()
+                ),
                 "configured_lookback_hours": configured_lookback_hours,
                 "last_effective_lookback_hours": lookback_hours,
+                "updated_at_utc": utc_now(),
             }
-        )
-        checkpoint_advanced = True
-    if checkpoint_advanced:
-        checkpoint_update["updated_at_utc"] = utc_now()
-        atomic_write_json(checkpoint_file, checkpoint_update)
+    advanced_scopes = _advance_history_checkpoints(checkpoint_file, scope_updates) if scope_updates else set()
+    checkpoint_advanced = bool(advanced_scopes)
+    diagnostics["durable_account_results"] = durable_accounts
+    diagnostics["checkpoint_advanced_accounts"] = [
+        account_id for account_id, scope in scopes.items()
+        if _checkpoint_scope_key(scope) in advanced_scopes
+    ]
     diagnostics["history_query_complete"] = history_query_complete
     diagnostics["durable_queue_complete"] = durable_queue_complete
     diagnostics["checkpoint_advanced"] = checkpoint_advanced
@@ -673,6 +703,56 @@ def _lifecycle_discovery_accounts(
     return tuple(accounts)
 
 
+def _history_checkpoint_scopes(*, host: str, port: int, account_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """Scope the supported Futu REAL/unfiltered history query using its actual endpoint."""
+    return {
+        account_id: {
+            "broker": "futu", "host": str(host).strip().lower(), "port": int(port),
+            "physical_account_id": account_id, "environment": "REAL",
+            "dataset": "history-deals", "filter": "unfiltered",
+        }
+        for account_id in sorted({str(value).strip() for value in account_ids if str(value).strip()})
+    }
+
+
+def _checkpoint_scope_key(scope: dict[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(scope, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _scoped_checkpoint(checkpoint: dict[str, Any], scope: dict[str, Any]) -> dict[str, Any]:
+    entries = checkpoint.get("scopes")
+    entry = entries.get(_checkpoint_scope_key(scope)) if isinstance(entries, dict) else None
+    return entry if isinstance(entry, dict) and entry.get("scope") == scope else {}
+
+
+def _advance_history_checkpoints(path: Path, updates: dict[str, dict[str, Any]]) -> set[str]:
+    # Re-read under the existing file lock so concurrent sources cannot discard each other's cursors.
+    with exclusive_private_file_lock(path.with_suffix(path.suffix + ".lock")):
+        saved = read_json(path, default={})
+        current = dict(saved) if isinstance(saved, dict) else {}
+        saved_scopes = current.get("scopes")
+        entries = dict(saved_scopes) if isinstance(saved_scopes, dict) else {}
+        advanced = set()
+        if current.get("last_successful_window_end_utc"):
+            current = {"legacy_unverified": current}
+        for key, entry in updates.items():
+            previous = entries.get(key)
+            if isinstance(previous, dict) and previous.get("scope") == entry["scope"]:
+                try:
+                    old_end = datetime.fromisoformat(previous["last_successful_window_end_utc"].replace("Z", "+00:00"))
+                    new_end = datetime.fromisoformat(entry["last_successful_window_end_utc"].replace("Z", "+00:00"))
+                    if old_end >= new_end:
+                        continue
+                except (KeyError, TypeError, ValueError):
+                    pass
+            entries[key] = entry
+            advanced.add(key)
+        if advanced:
+            current.update(schema_version="trade_intake_backfill_checkpoint.v2", scopes=entries)
+            atomic_write_json(path, current)
+        return advanced
+
+
 def _effective_lookback_hours(
     *,
     configured_lookback_hours: float,
@@ -703,13 +783,14 @@ def _history_query_complete(
 ) -> bool:
     rows = diagnostics.get("account_results")
     if not isinstance(rows, list):
-        return True
+        return False
     expected = {
         str(value or "").strip()
         for value in expected_account_ids
         if str(value or "").strip()
     }
     successful: set[str] = set()
+    incomplete: set[str] = set()
     for raw in rows:
         if not isinstance(raw, dict):
             continue
@@ -719,9 +800,15 @@ def _history_query_complete(
             and not raw.get("skipped")
             and not str(raw.get("error") or "").strip()
             and raw.get("ret") in (0, "0")
+            and raw.get("coverage_status") == "complete"
+            and raw.get("coverage_complete") is True
+            and raw.get("pagination_complete") is True
+            and raw.get("truncated") is not True
         ):
             successful.add(account_id)
-    return not expected or expected.issubset(successful)
+        elif account_id:
+            incomplete.add(account_id)
+    return bool(expected) and expected.issubset(successful) and not expected.intersection(incomplete)
 
 
 def _state_duplicate_reason(
@@ -733,11 +820,6 @@ def _state_duplicate_reason(
     if is_retryable_unresolved_deal(state, deal_id):
         return None
     entry = lookup_deal_state_entry(state, deal_id)
-    legacy_key = str(legacy_deal_id or "").strip()
-    if entry is None and legacy_key and legacy_key != deal_id:
-        if is_retryable_unresolved_deal(state, legacy_key):
-            return None
-        entry = lookup_deal_state_entry(state, legacy_key)
     if entry is None:
         return None
     bucket, _payload = entry
@@ -766,45 +848,19 @@ def _record_ledger_duplicate_state(
             "diagnostics": {"source": "backfill", "reconciled_from": "ledger_duplicate_precheck"},
         },
     )
-    write_trade_intake_state(state_path, state)
+    update_trade_intake_state_entries(state_path, state, deal_ids=(deal_id,))
     return state
 
 
 def _ledger_recorded_deal_keys(repo: Any) -> set[str]:
     list_trade_events = getattr(repo, "list_trade_events", None)
-    if not callable(list_trade_events):
-        return set()
-    return completed_ledger_deal_keys(
+    keys = completed_ledger_deal_keys(
         item for item in list_trade_events() if isinstance(item, dict)
-    )
-
-
-def _ledger_recorded_deal_ids(repo: Any) -> set[str]:
-    list_trade_events = getattr(repo, "list_trade_events", None)
-    if not callable(list_trade_events):
-        return set()
-    return completed_ledger_deal_ids(
-        item
-        for item in list_trade_events()
-        if isinstance(item, dict) and not _has_canonical_broker_identity(item)
-    )
-
-
-def _has_canonical_broker_identity(event: dict[str, Any]) -> bool:
-    raw = event.get("raw_payload")
-    raw_payload = raw if isinstance(raw, dict) else {}
-    if str(raw_payload.get("external_event_key") or "").strip():
-        return True
-    account = str(
-        event.get("account")
-        or raw_payload.get("internal_account")
-        or raw_payload.get("account")
-        or ""
-    ).strip()
-    futu_account_id = str(
-        raw_payload.get("futu_account_id") or ""
-    ).strip()
-    return bool(account and futu_account_id)
+    ) if callable(list_trade_events) else set()
+    for event in assigned_stock_event_log(repo).events:
+        if str(event.get("event_type") or "").strip().lower() == "sale":
+            keys.update(structured_deal_keys_from_assigned_stock_event(event))
+    return keys
 
 
 def _bind_backfill_payload_to_source(

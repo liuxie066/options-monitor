@@ -195,14 +195,14 @@ def test_process_payload_appends_ledger_persist_audit_on_applied(monkeypatch, tm
     monkeypatch.setattr(intake, "upsert_deal_state", lambda state, **_kwargs: state)
     monkeypatch.setattr(intake, "append_trade_intake_audit", lambda _path, event: events.append(dict(event)))
     class _EnrichResult:
-        payload = {"deal_id": "deal-1"}
+        payload = {"deal_id": "deal-1", "futu_account_id": "REAL_1"}
         diagnostics = {"matched_via": "not_found"}
 
     monkeypatch.setattr(intake, "enrich_trade_push_payload_with_account_id", lambda payload, **kwargs: _EnrichResult())
-    monkeypatch.setattr(intake, "normalize_trade_deal", lambda payload, futu_account_mapping=None: deal)
+    monkeypatch.setattr(intake, "normalize_trade_deal", lambda payload, **kwargs: deal)
     monkeypatch.setattr(intake, "resolve_trade_deal", lambda *args, **kwargs: _Result())
     out = intake._process_payload(
-        {"deal_id": "deal-1"},
+        {"deal_id": "deal-1", "futu_account_id": "REAL_1"},
         repo=object(),
         state_path=tmp_path / "state.json",
         audit_path=tmp_path / "audit.jsonl",
@@ -260,6 +260,9 @@ def test_auto_intake_routes_short_call_open_through_wheel_intent_writer(
     )
 
     class _Result:
+        reason = "applied_open"
+        action = "open"
+
         def to_dict(self) -> dict:
             return {"status": "applied"}
 
@@ -281,7 +284,7 @@ def test_auto_intake_routes_short_call_open_through_wheel_intent_writer(
     monkeypatch.setattr(intake, "process_trade_payload", _process)
 
     out = intake._process_payload(
-        {"deal_id": "wheel-call-1"},
+        {"deal_id": "wheel-call-1", "futu_account_id": "REAL_1"},
         repo=repo,
         state_path=tmp_path / "state.json",
         audit_path=tmp_path / "audit.jsonl",
@@ -293,7 +296,8 @@ def test_auto_intake_routes_short_call_open_through_wheel_intent_writer(
         config={"accounts": {"lx": {}}},
     )
 
-    assert out == {"status": "applied"}
+    assert out["status"] == "applied"
+    assert out["inbox_id"]
     assert calls == [(repo, deal, coverage)]
 
 
@@ -700,6 +704,7 @@ def test_process_payload_records_retryable_unresolved_diagnostics(tmp_path: Path
                 "deal-retry-1": {
                     "status": "unresolved",
                     "account": "lx",
+                    "futu_account_id": "REAL_1",
                     "retryable": True,
                 "attempt_count": 2,
                 "receipt": {"status": "sent", "delivery_confirmed": True},
@@ -838,6 +843,7 @@ def test_process_payload_moves_terminal_lifecycle_retry_to_processed(
                     deal.deal_id: {
                         "status": "unresolved",
                         "account": "lx",
+                        "futu_account_id": "REAL_1",
                         "retryable": True,
                     "attempt_count": 7,
                 }
@@ -1222,6 +1228,7 @@ def test_process_payload_preserves_confirmed_receipt_on_duplicate_skip(tmp_path:
                 "status": "applied",
                 "action": "open",
                 "account": "lx",
+                "futu_account_id": "REAL_1",
                 "reason": "applied_open",
                 "receipt": {
                     "status": "sent",

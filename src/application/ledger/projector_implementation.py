@@ -33,8 +33,8 @@ _SEMANTIC_IMPORT_GRAPH: dict[str, tuple[str, ...]] = {
         "domain/domain/ledger/fees.py",
         "domain/domain/ledger/identity.py",
         "domain/domain/ledger/lots.py",
-        "domain/domain/ledger/position_fields.py",
         "domain/domain/money.py",
+        "domain/domain/strategy_membership.py",
     ),
     "domain/domain/ledger/events.py": (
         "domain/domain/ledger/identity.py",
@@ -58,6 +58,7 @@ _SEMANTIC_IMPORT_GRAPH: dict[str, tuple[str, ...]] = {
         "domain/domain/ledger/lots.py",
         "domain/domain/ledger/position_fields.py",
         "domain/domain/money.py",
+        "domain/domain/strategy_membership.py",
     ),
     "domain/domain/ledger/lots.py": (
         "domain/domain/ledger/events.py",
@@ -78,6 +79,7 @@ _SEMANTIC_IMPORT_GRAPH: dict[str, tuple[str, ...]] = {
         "domain/domain/ledger/lots.py",
         "domain/domain/ledger/position_fields.py",
         "domain/domain/ledger/projection_state.py",
+        "domain/domain/strategy_membership.py",
     ),
     "domain/domain/money.py": (),
     "domain/domain/option_position_identity.py": (
@@ -86,6 +88,10 @@ _SEMANTIC_IMPORT_GRAPH: dict[str, tuple[str, ...]] = {
     ),
     "domain/domain/symbol_identity.py": (),
     "domain/domain/strategy_vocab.py": (),
+    "domain/domain/strategy_membership.py": (
+        "domain/domain/ledger/identity.py",
+        "domain/domain/strategy_vocab.py",
+    ),
     "domain/domain/trade_contract_identity.py": (
         "domain/domain/expiration_dates.py",
         "domain/domain/option_position_identity.py",
@@ -110,7 +116,7 @@ _SEMANTIC_IMPORT_GRAPH: dict[str, tuple[str, ...]] = {
 
 # Generated from the manifest and exact raw source bytes by
 # compute_projector_implementation_fingerprint().
-EXPECTED_PROJECTOR_IMPLEMENTATION_FINGERPRINT = "92b2f82ba158ca26306491582ce58c89d6bed8e79df6b746464a83c26bab515c"
+EXPECTED_PROJECTOR_IMPLEMENTATION_FINGERPRINT = "3c2d21769fce0592b92b5ea468a21d62d150ad9d5c589929f7d2357fc621df18"
 
 
 class ProjectorImplementationUnavailable(RuntimeError):

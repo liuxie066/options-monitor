@@ -421,6 +421,9 @@ first; rates are never averaged.
 
 ## Dimensions and Strategy Attribution
 
+`domain/domain/strategy_membership.py` owns strategy metadata resolution, exclusive option-strategy
+membership, and CSP/CC parent-universe membership for every report consumer.
+
 The report supports these dimensions:
 
 - opening year and opening month, derived from the leg opening date;

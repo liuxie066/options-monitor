@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from copy import deepcopy
+from dataclasses import replace
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.ledger import ContractKey, TradeEvent
@@ -148,7 +149,7 @@ def test_position_divergence_is_transient_then_persistent_without_rewrite() -> N
     assert state["position_mismatches"]["us:lx"]["next_recheck_at_utc"] == "2026-07-13T10:01:00Z"
 
     dataset, _state = build_position_dataset(
-        snapshot=_snapshot(qty=2),
+        snapshot=replace(_snapshot(qty=2), observed_at_utc="2026-07-13T10:05:01Z"),
         local_lots=[_local_lot()],
         account="lx",
         market="us",

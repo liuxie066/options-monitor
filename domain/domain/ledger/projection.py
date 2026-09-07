@@ -26,12 +26,12 @@ from domain.domain.ledger.position_fields import (
     POSITION_LOT_STRATEGY_PATCH_FIELDS,
     apply_strategy_metadata_patch,
     decode_position_lot_patch,
-    strategy_metadata_fields_from_payload,
 )
 from domain.domain.ledger.projection_state import (
     ResumableLotState,
     ResumableProjectionState,
 )
+from domain.domain.strategy_membership import resolve_strategy_metadata
 
 
 @dataclass(frozen=True)
@@ -207,6 +207,7 @@ def project_resumable_trade_events(
     transitions: list[ProjectionTransition] = []
     retained_by_id: dict[str, PositionLot] = {}
     retained_order: list[str] = []
+    retained_open_events: dict[str, TradeEvent] = {}
     historical_close_event_ids: dict[str, list[str]] = {}
     for event, event_diagnostics in validated_events:
         if event.event_type == "void":
@@ -232,6 +233,11 @@ def project_resumable_trade_events(
                 allocations=allocations,
             )
 
+        tail_open_event = (
+            accumulator.open_events_by_lot_id.get(str(event.target_lot_id or ""))
+            if mode == "tail" and event.event_type in CLOSE_EVENT_TYPES
+            else None
+        )
         transition = _apply_event_transition(
             event,
             accumulator=accumulator,
@@ -245,6 +251,8 @@ def project_resumable_trade_events(
             if lot_id not in retained_by_id:
                 retained_order.append(lot_id)
             retained_by_id[lot_id] = transition.lot_after
+            if transition.finalized and tail_open_event is not None:
+                retained_open_events[lot_id] = tail_open_event
             if mode == "full" and event.event_type in CLOSE_EVENT_TYPES:
                 historical_close_event_ids.setdefault(lot_id, []).append(
                     event.event_id
@@ -277,11 +285,16 @@ def project_resumable_trade_events(
                     )
                 )
     else:
+        finalized_lot_ids = tuple(
+            lot_id
+            for lot_id in retained_order
+            if retained_by_id[lot_id].contracts_open == 0
+        )
         effective_open_events = tuple(
             accumulator.open_events_by_lot_id[lot_id]
             for lot_id in sorted(accumulator.open_events_by_lot_id)
             if lot_id in accumulator.lots_by_id
-        )
+        ) + tuple(retained_open_events[lot_id] for lot_id in finalized_lot_ids)
         effective_cash_events = tuple(
             {
                 event.event_id: event
@@ -313,6 +326,7 @@ def project_resumable_trade_events(
         )
         if mode == "full"
         else active_lots
+        + tuple(retained_by_id[lot_id] for lot_id in finalized_lot_ids)
     )
     diagnostics.extend(
         check_position_lot_invariants(list(retained_lots))
@@ -943,10 +957,16 @@ def _validate_combo_attribution(
         list[tuple[str, PositionLot, TradeEvent, str]],
     ] = {}
     for lot_id, event in events.items():
-        metadata = strategy_metadata_fields_from_payload(event.raw_payload)
-        strategy = str(metadata.get("strategy") or "").strip().lower()
-        group_id = str(metadata.get("strategy_group_id") or "").strip()
-        role = str(metadata.get("leg_role") or "").strip().lower()
+        resolved = resolve_strategy_metadata(
+            event.raw_payload,
+            source_id=event.event_id,
+        )
+        if resolved.issues:
+            continue
+        metadata = resolved.metadata
+        strategy = metadata.strategy
+        group_id = metadata.strategy_group_id or ""
+        role = metadata.leg_role
         canonical_roles = set().union(*_COMBO_ROLE_SETS.values())
         if (
             not group_id

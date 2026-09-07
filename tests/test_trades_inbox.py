@@ -14,8 +14,10 @@ from src.application.trades.inbox import (
     list_retryable_trade_payloads,
     mark_trade_payload_handled,
     mark_trade_payload_retryable,
+    read_trade_source_evidence,
     record_trade_payload_refresh_intent,
     settle_trade_payload_result,
+    trade_payload_evidence_ref,
     trade_inbox_revision,
     trade_inbox_summary,
 )
@@ -103,6 +105,52 @@ def test_trade_inbox_is_idempotent_and_retries_callback_exception(
     assert summary["pending_count"] == 0
     assert summary["handled_count"] == 1
     assert summary["max_attempt_count"] == 2
+
+
+def test_trade_inbox_migrates_old_evidence_without_guessing_adapter_version(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "inbox.sqlite3"
+    payload = {"deal_id": "legacy-deal"}
+    inbox_id = enqueue_trade_payload(
+        path,
+        payload=payload,
+        source="push",
+        broker_deal_key="futu:lx:REAL_1:legacy-deal",
+        adapter_version="om.trade-intake.push.v1",
+    )
+    with sqlite3.connect(path) as conn:
+        conn.create_function("trade_inbox_writer_version", 0, lambda: 1)
+        conn.execute(
+            "UPDATE trade_inbox_evidence SET evidence_id = NULL, evidence_json = NULL"
+        )
+
+    enqueue_trade_payload(
+        path,
+        payload=payload,
+        source="push",
+        broker_deal_key="futu:lx:REAL_1:legacy-deal",
+        adapter_version="om.trade-intake.push.v1",
+    )
+    evidence = read_trade_source_evidence(
+        path,
+        evidence_ref=trade_payload_evidence_ref(inbox_id),
+        read_only=True,
+    )
+    assert len(evidence) == 1
+    assert evidence[0]["adapter_version"] == "legacy/unversioned"
+    with sqlite3.connect(path) as conn:
+        plan = conn.execute(
+            """EXPLAIN QUERY PLAN
+            SELECT e.rowid
+            FROM trade_inbox_evidence e
+            LEFT JOIN trade_inbox i ON i.inbox_id = e.inbox_id
+            WHERE e.evidence_id IS NULL OR e.evidence_json IS NULL"""
+        ).fetchall()
+    assert any(
+        "idx_trade_inbox_evidence_missing_envelope" in str(row[-1])
+        for row in plan
+    )
 
 
 def test_trade_inbox_handles_lifecycle_pending_after_evidence_acceptance(
@@ -224,6 +272,7 @@ def test_trade_inbox_summary_cache_is_revision_gated(
         result={"status": "applied", "reason": "seed"},
     )
     with sqlite3.connect(path) as conn:
+        conn.create_function("trade_inbox_writer_version", 0, lambda: 1)
         conn.executemany(
             """
             INSERT INTO trade_inbox (
@@ -304,6 +353,7 @@ def test_trade_inbox_summary_cache_is_revision_gated(
     _cached_trade_inbox_summary(path, cache=cache)
     assert summary_reads == 3
     with sqlite3.connect(path) as conn:
+        conn.create_function("trade_inbox_writer_version", 0, lambda: 1)
         conn.execute(
             "DELETE FROM trade_inbox WHERE inbox_id = ?",
             (first_id,),

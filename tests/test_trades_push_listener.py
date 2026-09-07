@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 import sys
 import threading
 from types import SimpleNamespace
@@ -279,3 +280,127 @@ def test_listener_raises_typed_unreachable_when_port_closed(monkeypatch) -> None
     listener = OpenDTradePushListener(host="127.0.0.9", port=11119, on_deal=lambda payload: None)
     with pytest.raises(FutuGatewayUnreachableError):
         listener._build_default_context()
+
+
+def _mock_sdk_rows(monkeypatch, *, rows, accounts, stop=None):
+    class Frame:
+        def __init__(self, values):
+            self.values = values
+
+        def to_dict(self, orient):
+            assert orient == "records"
+            return self.values
+
+    class HandlerBase:
+        def on_recv_rsp(self, _rsp):
+            return 0, Frame(rows)
+
+    class Context:
+        def __init__(self, **_kwargs):
+            self.account_reads = 0
+
+        def get_acc_list(self):
+            self.account_reads += 1
+            return (0, Frame(accounts)) if accounts is not None else (-1, "unavailable")
+
+        def set_handler(self, handler):
+            self.handler = handler
+
+        def start(self):
+            self.handler.on_recv_rsp(None)
+            if stop is not None:
+                stop.set()
+
+        def close(self):
+            pass
+
+    monkeypatch.setitem(sys.modules, "futu", SimpleNamespace(
+        OpenSecTradeContext=Context, TradeDealHandlerBase=HandlerBase,
+    ))
+
+
+def test_push_binds_only_matching_account_snapshot_and_preserves_order_alias(monkeypatch):
+    row = {"acc_id": "000123", "deal_id": "fill-1", "orderID": "order-1", "trd_env": "TrdEnv.REAL"}
+    _mock_sdk_rows(monkeypatch, rows=[row], accounts=[{"acc_id": "000123", "trd_env": "REAL"}])
+    seen = []
+    listener = OpenDTradePushListener(host="127.0.0.1", port=11111, on_deal=seen.append)
+    ctx, handler = listener._build_default_context()
+    handler.on_recv_rsp(None)
+    assert ctx.account_reads == 1
+    assert seen == [{**row, "environment": "REAL", "broker_account_id": "futu:REAL:000123",
+                     "external_id_namespace": "futu.deal", "external_order_namespace": "futu.order"}]
+    assert "environment" not in row
+
+
+@pytest.mark.parametrize("field,value", [
+    ("environment", "SIMULATE"), ("trd_env", "TrdEnv.SIMULATE"),
+    ("broker_account_id", "futu:SIMULATE:123"),
+    ("external_id_namespace", "other.deal"), ("execution_id_namespace", "other.deal"),
+    ("external_order_namespace", "other.order"), ("order_id_namespace", "other.order"),
+])
+def test_push_known_identity_conflicts_are_retained_without_silent_overwrite(monkeypatch, field, value):
+    row = {"acc_id": "123", "deal_id": "fill-1", "order_id": "order-1", field: value}
+    _mock_sdk_rows(monkeypatch, rows=[row], accounts=[{"acc_id": "123", "trd_env": "REAL"}])
+    seen = []
+    listener = OpenDTradePushListener(host="127.0.0.1", port=11111, on_deal=seen.append)
+    _ctx, handler = listener._build_default_context()
+    handler.on_recv_rsp(None)
+    assert len(seen) == 1
+    assert {key: seen[0][key] for key in row} == row
+    assert f"conflict:push_{field}" in seen[0]["_trade_intake_source_identity_errors"]
+    assert seen[0]["_trade_intake_source_account_evidence"]["environment"] == "REAL"
+
+
+@pytest.mark.parametrize("row,accounts,error", [
+    ({"deal_id": "fill-1"}, [{"acc_id": "123", "trd_env": "REAL"}], "missing:push_physical_account"),
+    ({"deal_id": "fill-1", "account": "lx"}, [{"acc_id": "123", "trd_env": "REAL"}], "missing:push_physical_account"),
+    ({"deal_id": "fill-1", "acc_id": "123"}, None, "missing:source_account_environment"),
+    ({"deal_id": "fill-1", "acc_id": "123", "futu_account_id": "456"}, [], "conflict:push_physical_account"),
+    ({"deal_id": "fill-1", "acc_id": "123"}, [{"acc_id": "123", "trd_env": "REAL"}, {"acc_id": "123", "trd_env": "SIMULATE"}], "conflict:source_account_environment"),
+])
+def test_push_missing_or_ambiguous_physical_binding_is_not_inferred(monkeypatch, row, accounts, error):
+    _mock_sdk_rows(monkeypatch, rows=[row], accounts=accounts)
+    seen = []
+    _ctx, handler = OpenDTradePushListener(host="127.0.0.1", port=11111, on_deal=seen.append)._build_default_context()
+    handler.on_recv_rsp(None)
+    assert len(seen) == 1
+    assert {key: seen[0][key] for key in row} == row
+    assert error in seen[0]["_trade_intake_source_identity_errors"]
+    assert "environment" not in seen[0]
+    assert "broker_account_id" not in seen[0]
+
+
+@pytest.mark.parametrize("row", [
+    {"deal_id": "fill-1", "code": "US.NVDA260918P100000"},
+    {"deal_id": "fill-1", "acc_id": "123", "trd_env": "SIMULATE", "code": "US.NVDA260918P100000"},
+])
+def test_real_listener_source_loop_keeps_rejected_push_in_durable_review(monkeypatch, tmp_path, row):
+    import json
+    from src.application.ledger.repository import SQLiteOptionPositionsRepository
+    from src.application.trades import auto_intake
+
+    stop = threading.Event()
+    _mock_sdk_rows(monkeypatch, rows=[row], accounts=[{"acc_id": "123", "trd_env": "REAL"}], stop=stop)
+    monkeypatch.setattr(auto_intake, "OpenDHistoryDealClient", lambda **_kwargs: SimpleNamespace(close=lambda: None))
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    authoritative = tmp_path / "ledger.sqlite3.trade_intake_inbox.sqlite3"
+    source = {"id": "lx", "account": "lx", "host": "127.0.0.1", "port": 11111,
+              "state_path": tmp_path / "state.json", "audit_path": tmp_path / "audit.jsonl",
+              "status_path": tmp_path / "status.json", "inbox_path": authoritative,
+              "account_mapping": {"123": "lx"}, "futu_account_ids": ["123"],
+              "backfill": {"enabled": False}, "settlement_observation": {"enabled": False}}
+    result = auto_intake._run_listener_source_loop(
+        source=source, repo=repo, cfg={}, cfg_path=tmp_path / "config.json", runtime_root=tmp_path,
+        runtime_root_source="test", intake_cfg={"enabled": True, "mode": "apply", "backfill": {"enabled": False}},
+        apply_changes=True, receipt_callback=lambda _context: pytest.fail("rejected push must not send"),
+        process_lock=threading.RLock(), stop_event=stop,
+    )
+    assert result == 0
+    assert repo.list_trade_events() == []
+    with sqlite3.connect(authoritative) as conn:
+        stored = conn.execute("SELECT payload_json, status, broker_deal_key FROM trade_inbox").fetchall()
+    assert len(stored) == 1
+    payload = json.loads(stored[0][0])
+    assert {key: payload[key] for key in row} == row
+    assert stored[0][1:] == ("identity_needs_review", None)
+    assert "futu_account_id" not in payload

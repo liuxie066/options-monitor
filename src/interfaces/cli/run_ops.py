@@ -68,6 +68,8 @@ def add_run_commands(subparsers: Any) -> None:
     trade_intake.add_argument("--port", type=int, default=None)
     trade_intake.add_argument("--once", action="store_true")
     trade_intake.add_argument("--deal-json", default=None)
+    trade_intake.add_argument("--execution-file", default=None)
+    trade_intake.add_argument("--inbox-id", default=None)
     trade_intake.add_argument("--retry-failed", action="store_true")
     trade_intake.add_argument("--reconcile-state", action="store_true")
     trade_intake.add_argument("--compensate-receipts", action="store_true")
@@ -135,6 +137,10 @@ def _trade_intake_argv(args: argparse.Namespace) -> list[str]:
         intake_argv.append("--once")
     if args.deal_json:
         intake_argv.extend(["--deal-json", str(args.deal_json)])
+    if args.execution_file:
+        intake_argv.extend(["--execution-file", str(args.execution_file)])
+    if args.inbox_id:
+        intake_argv.extend(["--inbox-id", str(args.inbox_id)])
     if args.retry_failed:
         intake_argv.append("--retry-failed")
     if args.reconcile_state:

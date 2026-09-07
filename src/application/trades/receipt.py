@@ -14,6 +14,7 @@ from src.application.notification_delivery_adapter import (
 )
 from src.application.notification_shells import render_receipt
 from src.application.trades.deal_identity import broker_deal_key
+from src.application.trades.inbox import TradePayloadClaimLost
 from src.application.trades.lifecycle_outbox import (
     BATCH_RENDERER_VERSION,
     build_notification_batch_route,
@@ -37,6 +38,9 @@ def send_trade_intake_receipt(
     normalize_fn: Callable[..., dict[str, Any]] | None = None,
     route_resolver: Callable[..., dict[str, Any]] = resolve_notification_route_from_config,
     adapter_selector: Callable[[Any], Any] = select_notification_delivery_adapter,
+    inbox_path: Path | None = None,
+    inbox_id: str | None = None,
+    inbox_claim: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     cfg = dict(receipt_config or {})
     decision = decide_trade_intake_receipt(
@@ -75,6 +79,7 @@ def send_trade_intake_receipt(
         }
 
     message = build_trade_intake_receipt_message(deal=deal, result=result, payload=payload)
+    attempt = None
     try:
         if send_fn is None or normalize_fn is None:
             adapter = adapter_selector(provider)
@@ -83,6 +88,17 @@ def send_trade_intake_receipt(
         else:
             resolved_send_fn = send_fn
             resolved_normalize_fn = normalize_fn
+        if inbox_path is not None and inbox_id:
+            from src.application.trades.inbox import begin_trade_receipt_attempt
+            attempt = begin_trade_receipt_attempt(
+                inbox_path, inbox_id=inbox_id, message=message,
+                route={key: route.get(key) for key in ("provider", "channel", "target")},
+                claim=inbox_claim,
+            )
+            if not attempt["claimed"]:
+                return {"enabled": True, "status": "skipped",
+                        "reason": f"durable_receipt_{attempt['status']}",
+                        "delivery_confirmed": attempt["status"] == "sent", "message_id": None}
         send_result = resolved_send_fn(
             base=base,
             channel=str(channel),
@@ -91,6 +107,8 @@ def send_trade_intake_receipt(
             notifications=route.get("notifications") or {},
         )
         normalized = normalize_notification_delivery_result(send_result, normalize_fn=resolved_normalize_fn)
+    except TradePayloadClaimLost:
+        raise
     except subprocess.TimeoutExpired as exc:
         normalized = {
             "ok": False,
@@ -114,7 +132,7 @@ def send_trade_intake_receipt(
     command_ok = bool(normalized.get("command_ok") or normalized.get("ok"))
     delivery_confirmed = bool(normalized.get("delivery_confirmed") or (normalized.get("ok") and message_id))
     status = "sent" if delivery_confirmed else ("unconfirmed" if command_ok else "failed")
-    return {
+    receipt = {
         "enabled": True,
         "status": status,
         "reason": decision["reason"],
@@ -129,6 +147,18 @@ def send_trade_intake_receipt(
         "message_len": len(message),
         "send_message": _optional_str(normalized.get("message")),
     }
+    if attempt is not None and attempt.get("claimed"):
+        from src.application.trades.inbox import finish_trade_receipt_attempt
+        classification = classify_trade_lifecycle_delivery_result(normalized)
+        receipt.update(
+            delivery_outcome=classification["outcome"],
+            explicit_pre_acceptance_failure=classification["explicit_pre_acceptance_failure"],
+            classification_evidence=classification["classification_evidence"],
+            ambiguous_send=classification["outcome"] in {"unknown", "accepted"},
+        )
+        finish_trade_receipt_attempt(inbox_path, inbox_id=inbox_id,
+                                     attempt_id=attempt["attempt_id"], result=receipt)
+    return receipt
 
 
 def build_trade_lifecycle_notification_message(

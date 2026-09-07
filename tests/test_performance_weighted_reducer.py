@@ -7,7 +7,12 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from domain.domain.ledger import ContractKey, TradeEvent, project_trade_events
+from domain.domain.ledger import (
+    ContractKey,
+    TradeEvent,
+    project_resumable_trade_events,
+    project_trade_events,
+)
 from domain.domain.ledger.events import LedgerDiagnostic
 from domain.domain.performance.models import MetricStatus
 from domain.domain.performance.period import PeriodRequest, normalize_performance_period
@@ -456,6 +461,8 @@ def test_strategy_is_exclusive_grouping_and_parent_universes_only_include_seller
         "strategy_group_id": "combo_yield:cc-lp",
     }
     specs = [
+        ("standalone-csp", _key(side="short", option_type="put", strike=90), {}),
+        ("standalone-cc", _key(side="short", option_type="call", strike=140), {}),
         ("csp-put", _key(side="short", option_type="put", strike=100), {**common, "leg_role": "funding_put"}),
         ("csp-call", _key(side="long", option_type="call", strike=110), {**common, "leg_role": "participation_call"}),
         ("cc-call", _key(side="short", option_type="call", strike=120), {**cc_common, "leg_role": "short_call"}),
@@ -482,7 +489,9 @@ def test_strategy_is_exclusive_grouping_and_parent_universes_only_include_seller
     reduction = reduce_option_performance(projection, period=_period())
 
     assert sorted({fact.attribution_strategy for fact in reduction.facts}) == [
+        "cc",
         "cc_lp",
+        "csp",
         "csp_lc",
         "wheel",
     ]
@@ -496,7 +505,19 @@ def test_strategy_is_exclusive_grouping_and_parent_universes_only_include_seller
         row["key"]: row["option_net_cashflow"]["by_currency"]["USD"]["total"]["amount"]
         for row in reduction.breakdowns["parent_universes"]
     }
-    assert parents == {"cc": Decimal("200.000000"), "csp": Decimal("100.000000")}
+    assert parents == {"cc": Decimal("300.000000"), "csp": Decimal("200.000000")}
+    assert {
+        fact.open_event_id: fact.membership.parent_universe
+        for fact in reduction.facts
+    } == {
+        "cc-call": "cc",
+        "cc-put": None,
+        "csp-call": None,
+        "csp-put": "csp",
+        "standalone-cc": "cc",
+        "standalone-csp": "csp",
+        "wheel-call": "cc",
+    }
     assert all(
         fact.leg_type.startswith("sell_")
         for fact in reduction.facts
@@ -630,6 +651,68 @@ def test_strategy_conflict_only_degrades_the_attribution_view() -> None:
     assert strategy["key"] == "csp"
     assert strategy["status"] == MetricStatus.PARTIAL
     assert strategy["missing"] == ("strategy_attribution_conflict",)
+
+
+def test_conflicting_strategy_metadata_falls_back_to_base_leg_membership() -> None:
+    resumable = project_resumable_trade_events(
+        [
+            _event(
+                "open",
+                "open",
+                "2026-09-01T10:00:00",
+                lot_id="lot-1",
+                raw={
+                    "strategy_group_id": "combo_yield:other",
+                    "strategy_snapshot": {
+                        "strategy": "combo_yield",
+                        "strategy_group_id": "combo_yield:pair",
+                        "leg_role": "funding_put",
+                    },
+                },
+            )
+        ],
+        entry_mode="full",
+    )
+    assert resumable.state is not None
+    resumed = project_resumable_trade_events(
+        [],
+        initial_state=resumable.state,
+        entry_mode="tail",
+    )
+    projection = resumed.to_projection_result()
+
+    reduction = reduce_option_performance(projection, period=_period())
+    fact = reduction.facts[0]
+
+    assert resumed.eligible is True
+    assert projection.diagnostics == []
+    assert fact.attribution_strategy == "csp"
+    assert fact.membership.parent_universe == "csp"
+    assert fact.strategy_group_id is None
+    assert fact.membership.issues == ("strategy_attribution_conflict",)
+    cash_total = reduction.bundle["option_net_cashflow"]["by_currency"]["USD"]["total"]
+    assert cash_total["status"] == MetricStatus.OBSERVED
+
+
+def test_explicit_standalone_strategy_must_match_the_signed_leg() -> None:
+    projection = project_trade_events(
+        [
+            _event(
+                "open",
+                "open",
+                "2026-09-01T10:00:00",
+                key=_key(side="short", option_type="call"),
+                lot_id="lot-1",
+                raw={"strategy": "csp"},
+            )
+        ]
+    )
+
+    fact = reduce_option_performance(projection, period=_period()).facts[0]
+
+    assert fact.attribution_strategy == "cc"
+    assert fact.membership.parent_universe == "cc"
+    assert fact.membership.issues == ("strategy_attribution_conflict",)
 
 
 def test_diagnostics_are_filtered_after_projection_and_missing_dimensions_fail_safe() -> None:

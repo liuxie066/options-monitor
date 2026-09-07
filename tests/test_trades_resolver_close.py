@@ -161,6 +161,16 @@ def test_match_close_targets_exposes_strict_resolution_contract() -> None:
     assert resolution.to_dict()["contracts_to_close"] == 3
 
 
+@pytest.mark.parametrize("apply_changes", [False, True])
+def test_close_rejects_same_contract_with_different_multiplier(apply_changes):
+    repo = FakeRepo([_record("rec1", 100, 1)])
+    result = resolve_trade_deal(_deal(contracts=1, multiplier=10), repo=repo,
+                                state={}, apply_changes=apply_changes)
+    assert result.status == "unresolved"
+    assert "unsupported_contract_multiplier" in str(result.to_dict())
+    assert repo.updated == []
+
+
 def test_broker_close_target_resolution_does_not_cross_same_strike_different_expiry() -> None:
     may_exp = 1777420800000
     jun_exp = 1782691200000
@@ -284,7 +294,7 @@ def test_resolve_trade_close_skips_failed_deal_by_default() -> None:
     result = resolve_trade_deal(
         _deal(),
         repo=repo,
-        state={"failed_deal_ids": {"deal-close-1": {"status": "failed", "account": "lx", "reason": "exception:LedgerPreflightError"}}},
+        state={"failed_deal_ids": {"futu:lx:REAL_1:deal-close-1": {"status": "failed", "account": "lx", "reason": "exception:LedgerPreflightError"}}},
         apply_changes=False,
     )
 

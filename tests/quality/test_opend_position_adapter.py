@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 
 import src.application.quality.opend_position_adapter as adapter_module
 from src.application.quality.opend_position_adapter import (
     OpenDOptionPositionAdapter,
 )
+from src.application.quality.position_checks import build_position_dataset
 
 
 def _config() -> dict:
@@ -53,6 +56,18 @@ class _Gateway:
 
     def close(self) -> None:
         self.closed = True
+
+
+@pytest.mark.parametrize("response", [None, [None], [{"code": "US.NVDA", "qty": 100, "acc_id": "999"}], [{"code": "US.NVDA", "qty": 100, "trd_env": "SIMULATE"}]])
+def test_adapter_never_treats_unknown_or_wrong_account_response_as_empty(monkeypatch, response) -> None:
+    gateway = _Gateway(positions=[], snapshots={})
+    gateway.get_positions = lambda **kwargs: response
+    monkeypatch.setattr(adapter_module, "build_ready_futu_broker_gateway", lambda **kwargs: gateway)
+    monkeypatch.setattr(adapter_module, "build_ready_futu_quote_gateway", lambda **kwargs: gateway)
+    snapshot = OpenDOptionPositionAdapter().fetch(cfg=_config(), account="lx", market="us")
+    assert snapshot.complete is False
+    assert snapshot.snapshot_input["completeness"] == "unknown"
+    assert snapshot.snapshot_input["errors"]
 
 
 def test_adapter_scopes_contract_term_snapshot_to_requested_market(
@@ -390,3 +405,87 @@ def test_adapter_fails_closed_when_current_option_multiplier_fields_conflict(
     assert snapshot.error_code == "OPEND_OPTION_MULTIPLIER_EVIDENCE_INCOMPLETE"
     assert "1 non-zero option position" in str(snapshot.error_message)
     assert gateway.closed is True
+
+
+@pytest.mark.parametrize(("strike", "multiplier"), [("99.5", "100"), ("100", "101"), ("99.5", "101")])
+def test_adapter_snapshot_contract_drift_blocks_dataset_immediately(monkeypatch, strike, multiplier) -> None:
+    code = "US.NVDA260717P100000"
+    gateway = _Gateway(
+        positions=[{"code": code, "qty": -1, "position_side": "SHORT", "sec_type": "DRVT"}],
+        snapshots={code: {
+            "code": code, "stock_owner": "US.NVDA", "option_type": "PUT",
+            "strike_time": "2026-07-17", "option_strike_price": strike,
+            "option_contract_multiplier": multiplier, "option_valid": True,
+        }},
+    )
+    monkeypatch.setattr(adapter_module, "build_ready_futu_broker_gateway", lambda **kwargs: gateway)
+    monkeypatch.setattr(adapter_module, "build_ready_futu_quote_gateway", lambda **kwargs: gateway)
+    snapshot = OpenDOptionPositionAdapter().fetch(cfg=_config(), account="lx", market="us")
+    local_lot = {"record_id": "lot-nvda", "fields": {
+        "account": "lx", "broker": "富途", "symbol": "NVDA", "option_type": "put",
+        "side": "short", "contracts": 1, "contracts_open": 1, "contracts_closed": 0,
+        "strike": 100, "multiplier": 100, "expiration_ymd": "2026-07-17", "status": "open",
+    }}
+
+    dataset, _ = build_position_dataset(
+        snapshot=snapshot, local_lots=[local_lot], account="lx", market="us",
+        observed_at_utc=snapshot.observed_at_utc, now=datetime.now(timezone.utc), control_state={},
+    )
+
+    assert snapshot.complete is True
+    assert snapshot.snapshot_input["rows"][0]["instrument_ref"]["source_code"] == code
+    assert dataset["status"] == "untrusted"
+    assert dataset["usable_for"] == []
+    assert set(dataset["blocked_consumers"]) == {"option_position_report", "lifecycle", "close_advice"}
+    convergence = next(check for check in dataset["checks"] if check["check_id"] == "OM-POS-002")
+    assert convergence["reason_code"] == "POSITION_CONTRACT_TERMS_DRIFT"
+    assert convergence["observed"]["contract_terms_drifts"] == [{
+        "symbol": "NVDA", "option_type": "put", "expiration": "2026-07-17", "quantity": "-1",
+        "local_contracts": "100@100:-1", "opend_contracts": f"{strike}@{multiplier}:-1",
+        "broker_code": code, "mapping": "code_lineage",
+    }]
+
+
+@pytest.mark.parametrize("deliverable", [None, {}, {"symbol": "NVDA", "quantity": "10", "cash": "9000"}])
+def test_adapter_snapshot_rejects_unsupported_deliverable_before_dataset_comparison(monkeypatch, deliverable) -> None:
+    code = "US.NVDA260717P100000"
+    position = {"code": code, "qty": -1, "position_side": "SHORT", "sec_type": "DRVT"}
+    if deliverable is not None:
+        position["deliverable"] = deliverable
+    gateway = _Gateway(
+        positions=[position],
+        snapshots={code: {
+            "code": code, "stock_owner": "US.NVDA", "option_type": "PUT",
+            "strike_time": "2026-07-17", "option_strike_price": "100",
+            "option_contract_multiplier": "100", "option_valid": True,
+        }},
+    )
+    monkeypatch.setattr(adapter_module, "build_ready_futu_broker_gateway", lambda **kwargs: gateway)
+    monkeypatch.setattr(adapter_module, "build_ready_futu_quote_gateway", lambda **kwargs: gateway)
+    snapshot = OpenDOptionPositionAdapter().fetch(cfg=_config(), account="lx", market="us")
+    local = {"record_id": "ordinary-lot", "fields": {
+        "account": "lx", "broker": "富途", "symbol": "NVDA", "option_type": "put",
+        "side": "short", "contracts": 1, "contracts_open": 1, "strike": 100,
+        "multiplier": 100, "expiration_ymd": "2026-07-17", "status": "open",
+    }}
+    result, _ = build_position_dataset(
+        snapshot=snapshot, local_lots=[local], account="lx", market="us",
+        observed_at_utc=snapshot.observed_at_utc, now=datetime.now(timezone.utc), control_state={},
+    )
+    assert snapshot.snapshot_input["rows"][0]["instrument_ref"].get("deliverable") == deliverable
+    assert gateway.closed is True
+    if deliverable:
+        reason = "unsupported:rows.0.instrument_ref.deliverable"
+        assert snapshot.complete is False
+        assert snapshot.error_code == "OPEND_POSITION_INPUT_INVALID"
+        assert reason in snapshot.snapshot_input["errors"]
+        assert snapshot.snapshot_input["source_payload"]["rows"][0]["deliverable"] == deliverable
+        assert result["status"] == "unavailable"
+        assert result["usable_for"] == []
+        assert set(result["blocked_consumers"]) == {"option_position_report", "lifecycle", "close_advice"}
+        assert reason in result["checks"][0]["observed"]["snapshot_errors"]
+    else:
+        assert snapshot.complete is True
+        assert snapshot.snapshot_input["errors"] == []
+        assert result["status"] == "trusted"
+        assert set(result["usable_for"]) == {"option_position_report", "lifecycle", "close_advice"}

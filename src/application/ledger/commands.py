@@ -18,6 +18,7 @@ from domain.domain.ledger.position_fields import (
     strategy_metadata_fields_from_payload,
 )
 from domain.domain.trade_contract_identity import normalize_trade_side
+from src.application.ledger.external_event_key import broker_deal_completion_payload
 from src.application.ledger.interventions import (
     build_manual_repair_preview,
     build_manual_void_preview,
@@ -442,13 +443,13 @@ def persist_trade_close_events_with_ledger(
                 raw_payload.setdefault("broker_close_reason", broker_close_reason)
             split_deal = replace(split_deal, raw_payload=raw_payload)
         raw_payload = dict(getattr(split_deal, "raw_payload", {}) or {})
-        raw_payload["broker_deal_completion"] = {
-            "source_deal_id": source_deal_id or None,
-            "expected_contracts": expected_contracts,
-            "split_count": split_count,
-            "split_index": split_index,
-            "allocated_contracts": contracts_to_close,
-        }
+        raw_payload["broker_deal_completion"] = broker_deal_completion_payload(
+            source_deal_id=source_deal_id,
+            expected_contracts=expected_contracts,
+            split_count=split_count,
+            split_index=split_index,
+            allocated_contracts=contracts_to_close,
+        )
         split_deal = replace(split_deal, raw_payload=raw_payload)
         prepared.append((match, split_deal, ledger_preflight))
 

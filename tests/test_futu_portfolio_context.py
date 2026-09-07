@@ -9,6 +9,11 @@ FAKE_FUTU_ACC_ID_LX_SECONDARY = "123456789012345679"
 FAKE_FUTU_ACC_ID_SY = "123456789012345680"
 
 
+@pytest.fixture(autouse=True)
+def _offline_market_fx(monkeypatch):
+    monkeypatch.setattr("src.application.futu_portfolio_context._fetch_market_exchange_rate_observation", lambda: None)
+
+
 def test_resolve_trade_intake_futu_account_ids_uses_runtime_mapping() -> None:
     from src.application.account_config import resolve_trade_intake_futu_account_ids
 
@@ -186,7 +191,7 @@ def test_build_futu_portfolio_context_canonicalizes_alias_and_hk_prefixed_codes(
         balance_rows=[],
         position_rows=[
             {"code": "HK.09992", "qty": 100, "can_sell_qty": 80, "average_cost": 120, "currency": "HKD", "stock_name": "Pop Mart"},
-            {"symbol": "POP", "qty": 50, "can_sell_qty": 50, "average_cost": 125, "currency": "HKD"},
+            {"symbol": "POP", "qty": 50, "can_sell_qty": 50, "average_cost": 125, "currency": "HKD", "sec_type": "STOCK"},
         ],
         account="lx",
         market="富途",
@@ -505,9 +510,90 @@ def test_fetch_futu_portfolio_context_uses_account_settings_account_id_without_t
             "refresh_cache": True,
         }
     ]
-    assert captured["positions"] == [{"acc_id": int(FAKE_FUTU_ACC_ID_LX_PRIMARY), "trd_env": "REAL"}]
+    assert captured["positions"] == [{"acc_id": int(FAKE_FUTU_ACC_ID_LX_PRIMARY), "trd_env": "REAL", "refresh_cache": True}]
     assert out["cash_by_currency"] == {"USD": 2500.0}
     assert sorted(out["stocks_by_symbol"].keys()) == ["NVDA"]
+
+
+@pytest.mark.parametrize(
+    ("case", "position_rows", "expected_reason"),
+    [
+        ("valid_empty", [], "covered_call_underlying_not_held"),
+        ("missing_quantity", [{"code": "US.NVDA", "sec_type": "STOCK", "qty": None}], "covered_call_portfolio_context_unavailable"),
+        ("invalid_quantity", [{"code": "US.NVDA", "sec_type": "STOCK", "qty": "bad"}], "covered_call_portfolio_context_unavailable"),
+        ("partial", [], "covered_call_portfolio_context_unavailable"),
+        ("stale", [], "covered_call_portfolio_context_unavailable"),
+        ("scope_mismatch", [], "covered_call_portfolio_context_unavailable"),
+    ],
+)
+def test_fetch_futu_portfolio_context_preserves_stock_snapshot_quality_for_prefilter(
+    monkeypatch,
+    case: str,
+    position_rows: list[dict],
+    expected_reason: str,
+) -> None:
+    import src.application.futu_portfolio_context as fc
+    from src.application.prefilters import apply_prefilters
+
+    class _FakeGateway:
+        def get_account_balance(self, **_kwargs):
+            return [{"currency": "USD", "us_cash": 2500}]
+
+        def get_positions(self, **_kwargs):
+            return position_rows
+
+        def close(self):
+            return None
+
+    build_snapshot = fc.build_futu_position_snapshot
+
+    def _build_snapshot(**kwargs):
+        snapshot = build_snapshot(**kwargs)
+        if case == "partial":
+            snapshot["completeness"] = "partial"
+        elif case == "stale":
+            snapshot["source_as_of_utc"] = "2000-01-01T00:00:00+00:00"
+        elif case == "scope_mismatch":
+            snapshot["scope"]["markets"] = ["HK"]
+        return snapshot
+
+    monkeypatch.setattr(fc, "build_ready_futu_broker_gateway", lambda **_kwargs: _FakeGateway())
+    monkeypatch.setattr(fc, "build_futu_position_snapshot", _build_snapshot)
+    context = fc.fetch_futu_portfolio_context(
+        cfg={
+            "_resolved": {"market": "us"},
+            "accounts": ["lx"],
+            "account_settings": {
+                "lx": {
+                    "type": "futu",
+                    "futu": {
+                        "account_id": FAKE_FUTU_ACC_ID_LX_PRIMARY,
+                        "host": "127.0.0.1",
+                        "port": 11111,
+                        "trd_env": "REAL",
+                    },
+                }
+            },
+        },
+        account="lx",
+        base_currency="USD",
+    )
+    result = apply_prefilters(
+        symbol="NVDA",
+        sp={},
+        cc={},
+        want_put=False,
+        want_call=True,
+        portfolio_ctx=context,
+    )
+
+    assert context["capacity_authority"]["status"] == "available"
+    assert bool(context["position_snapshot_input"]["errors"]) is (case != "valid_empty")
+    assert context["cash_by_currency"] == {"USD": 2500.0}
+    assert context["cash_balance_reliable"] is True
+    assert context["cash_capacity_by_currency"]["USD"]["capacity_authority_status"] == "available"
+    assert result.want_call is False
+    assert result.call_skip_reason == expected_reason
 
 
 def test_fetch_futu_portfolio_context_rejects_non_numeric_mapped_account_id() -> None:
