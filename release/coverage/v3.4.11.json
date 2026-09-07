@@ -1,0 +1,146 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.4.11",
+  "base": {
+    "tag": "v3.4.10",
+    "commit": "e32462af7e28db075c2b04562bd593f570109fb4"
+  },
+  "reviewed_head": "d115803afea46f7ffa738bfc257ab62dde71b821",
+  "commits": [
+    {
+      "sha": "ca146aab78fd903c5c53f1cb5d3f7ca21ca8e5d5",
+      "subject": "perf(required-data): share chain requests and warm HK opening"
+    },
+    {
+      "sha": "fefb2e490770c68a923f5f51d7d67aaa92e12fdd",
+      "subject": "Merge pull request #250 from liuxie066/codex/hk-chain-sharing"
+    },
+    {
+      "sha": "89baf174ec8b499cf7c31d511c233f4612909df2",
+      "subject": "refactor(trades): harden execution intake and ledger model"
+    },
+    {
+      "sha": "a3f9d7b284091e00b4ff99f387dc7af6a4ac8c74",
+      "subject": "refactor(trades): merge main into intake refactor"
+    },
+    {
+      "sha": "8b7acfe346dbbafc105d1bfa7d50c1acb6151f72",
+      "subject": "refactor(strategy): remove retired experiment platform"
+    },
+    {
+      "sha": "14d2deb404b03e662d418ca2a095c71f321e6912",
+      "subject": "Merge pull request #251 from liuxie066/codex/trade-intake-refactor"
+    },
+    {
+      "sha": "2b5cabe36521890e13fa1521f00f7ec982c8e62f",
+      "subject": "merge(main): resolve dependency graph conflicts"
+    },
+    {
+      "sha": "d115803afea46f7ffa738bfc257ab62dde71b821",
+      "subject": "Merge pull request #252 from liuxie066/codex/remove-experiment-platform"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Reduced overlapping put/call required-data chain requests by partitioning expirations at the shared merger, and reused the existing opening warmer for scheduled HK ticks while preserving fresh formal quotes.",
+      "commits": [
+        "ca146aab78fd903c5c53f1cb5d3f7ca21ca8e5d5"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Hardened OpenD execution intake and ledger persistence around execution identity, idempotent recovery, fee and FX evidence, and strategy attribution.",
+      "commits": [
+        "89baf174ec8b499cf7c31d511c233f4612909df2"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Removed retired Strategy Lab and Shadow Replay code, tests, and experiment-only provider paths; production scanning and Research evidence collection remain.",
+      "commits": [
+        "8b7acfe346dbbafc105d1bfa7d50c1acb6151f72"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "fefb2e490770c68a923f5f51d7d67aaa92e12fdd",
+      "reason": "Merge-only integration commit; the required-data change is classified on its parent implementation commit."
+    },
+    {
+      "commit": "a3f9d7b284091e00b4ff99f387dc7af6a4ac8c74",
+      "reason": "Merge-only integration commit; the required-data and trade-intake changes are classified on their parent implementation commits."
+    },
+    {
+      "commit": "14d2deb404b03e662d418ca2a095c71f321e6912",
+      "reason": "Merge-only integration commit; the trade-intake change is classified on its parent implementation commit."
+    },
+    {
+      "commit": "2b5cabe36521890e13fa1521f00f7ec982c8e62f",
+      "reason": "Merge conflict-resolution commit; the integrated trade-intake and required-data changes are classified on their implementation commits."
+    },
+    {
+      "commit": "d115803afea46f7ffa738bfc257ab62dde71b821",
+      "reason": "Merge-only integration commit; the retired-platform removal is classified on its parent implementation commit."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "ca146aab78fd903c5c53f1cb5d3f7ca21ca8e5d5",
+      "references": [
+        "docs/REQUIRED_DATA_STORAGE_DESIGN.md",
+        "https://github.com/liuxie066/options-monitor/pull/250"
+      ]
+    },
+    {
+      "commit": "fefb2e490770c68a923f5f51d7d67aaa92e12fdd",
+      "references": [
+        "docs/REQUIRED_DATA_STORAGE_DESIGN.md",
+        "https://github.com/liuxie066/options-monitor/pull/250"
+      ]
+    },
+    {
+      "commit": "89baf174ec8b499cf7c31d511c233f4612909df2",
+      "references": [
+        "docs/LEDGER_ARCHITECTURE.md",
+        "https://github.com/liuxie066/options-monitor/pull/251"
+      ]
+    },
+    {
+      "commit": "a3f9d7b284091e00b4ff99f387dc7af6a4ac8c74",
+      "references": [
+        "docs/LEDGER_ARCHITECTURE.md",
+        "https://github.com/liuxie066/options-monitor/pull/251"
+      ]
+    },
+    {
+      "commit": "8b7acfe346dbbafc105d1bfa7d50c1acb6151f72",
+      "references": [
+        "docs/ARCHITECTURE.md",
+        "https://github.com/liuxie066/options-monitor/pull/252"
+      ]
+    },
+    {
+      "commit": "14d2deb404b03e662d418ca2a095c71f321e6912",
+      "references": [
+        "docs/LEDGER_ARCHITECTURE.md",
+        "https://github.com/liuxie066/options-monitor/pull/251"
+      ]
+    },
+    {
+      "commit": "2b5cabe36521890e13fa1521f00f7ec982c8e62f",
+      "references": [
+        "docs/LEDGER_ARCHITECTURE.md",
+        "https://github.com/liuxie066/options-monitor/pull/251"
+      ]
+    },
+    {
+      "commit": "d115803afea46f7ffa738bfc257ab62dde71b821",
+      "references": [
+        "docs/ARCHITECTURE.md",
+        "https://github.com/liuxie066/options-monitor/pull/252"
+      ]
+    }
+  ]
+}
