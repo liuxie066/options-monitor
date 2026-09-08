@@ -81,12 +81,6 @@ class OpenDOptionSnapshot:
             "account_fingerprint": self.account_fingerprint,
             "environment": self.environment,
             "market": self.market,
-            **({
-                "scope": self.snapshot_input.get("scope"),
-                "completeness": self.snapshot_input.get("completeness"),
-                "quality": self.snapshot_input.get("quality"),
-                "source_as_of_utc": self.snapshot_input.get("source_as_of_utc"),
-            } if self.snapshot_input else {}),
         }
 
 
