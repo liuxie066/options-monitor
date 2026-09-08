@@ -117,6 +117,35 @@ def _snapshot(*, qty: int = 1, trading_days: list[date] | None = None) -> OpenDO
     )
 
 
+def test_public_source_snapshot_allowlists_internal_position_input() -> None:
+    snapshot = replace(
+        _snapshot(),
+        snapshot_input={
+            "scope": {"markets": ["US"], "asset_types": ["option"]},
+            "completeness": "complete",
+            "quality": {"status": "ready"},
+            "source_as_of_utc": "2026-07-13T09:59:00Z",
+            "internal_sentinel": "must-not-cross-public-boundary",
+        },
+    )
+
+    public = snapshot.public_source_snapshot()
+
+    assert set(public) == {
+        "provider",
+        "snapshot_id",
+        "observed_at_utc",
+        "complete",
+        "refresh_cache",
+        "account_fingerprint",
+        "environment",
+        "market",
+    }
+    assert snapshot.snapshot_input["internal_sentinel"] == (
+        "must-not-cross-public-boundary"
+    )
+
+
 def test_position_convergence_matches_exact_identity_and_quantity() -> None:
     now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
     dataset, state = build_position_dataset(

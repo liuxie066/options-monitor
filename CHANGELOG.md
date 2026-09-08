@@ -1,9 +1,13 @@
 # Changelog
 
 ## Unreleased
-
 ### Improvements
 - Hardened cross-asset trade intake and lifecycle accounting for exact execution identity, assigned-stock settlement, shared capacity evidence, Combo/Wheel relationships, and fail-closed decision briefs.
+
+## 3.4.12 - 2026-09-08
+
+### Bug Fixes
+- Kept public OpenD quality source snapshots limited to the stable schema, preventing internal fields from leaking into quality evidence (PR #254).
 
 ## 3.4.11 - 2026-09-08
 
