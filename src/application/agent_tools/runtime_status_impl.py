@@ -9,6 +9,7 @@ from typing import Any, Callable, cast
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.channels.status import build_channel_status
 from src.application.environment_status import build_effective_env_with_status
+from src.application.wheel.runtime_readiness import build_wheel_activation_readiness
 from src.application.ledger.api import ledger_store_payload
 from src.application.release_target import compare_versions
 from src.application.runtime_config_freshness import (
@@ -2351,6 +2352,12 @@ def private_runtime_status_tool(
 
     pointer_path = shared_state_dir / "last_run_dir.txt"
     desired_market = _desired_runtime_market(payload, cfg, config_path=config_path)
+    wheel_activation_readiness = build_wheel_activation_readiness(
+        config=cfg,
+        market=desired_market,
+        accounts=accounts,
+        sqlite_path=ledger_store.get("sqlite_path"),
+    )
     requested_run, latest_run_selection = _requested_run_dir_from_payload(payload, base=base, runs_root=runs_root)
     latest_run_payload: dict[str, Any] | None = None
     if latest_run_selection.get("requested"):
@@ -2533,6 +2540,7 @@ def private_runtime_status_tool(
             "runs_root": _relative_path(runs_root, base=base),
         },
         "ledger_store": ledger_store,
+        "wheel_activation_readiness": wheel_activation_readiness,
         "shared": {
             "last_run": shared_last_run,
             "last_run_dir": _path_pointer_file_info(pointer_path, base=base),
@@ -2602,6 +2610,11 @@ def private_runtime_status_tool(
     data["summary"]["ledger_sqlite_path"] = ledger_store.get("sqlite_path")
     data["summary"]["ledger_trade_event_count"] = ledger_store.get("trade_event_count")
     data["summary"]["ledger_position_lot_count"] = ledger_store.get("position_lot_count")
+    data["summary"]["wheel_activation_monitoring_gate"] = wheel_activation_readiness.get("monitoring_gate")
+    data["summary"]["wheel_activation_reason_code"] = wheel_activation_readiness.get("reason_code")
+    data["summary"]["wheel_activation_enabled_account_count"] = wheel_activation_readiness.get(
+        "enabled_account_count"
+    )
     projection_verify_json = projection_verify.get("json") if isinstance(projection_verify.get("json"), dict) else {}
     data["summary"]["projection_verify_ok"] = projection_verify_json.get("ok") if projection_verify_json else None
     data["summary"]["projection_verify_mode"] = projection_verify_json.get("mode_used") if projection_verify_json else None
@@ -2706,6 +2719,9 @@ def _status_safe_runtime_payload(data: dict[str, Any]) -> dict[str, Any]:
             "ledger_fail_closed",
             "ledger_trade_event_count",
             "ledger_position_lot_count",
+            "wheel_activation_monitoring_gate",
+            "wheel_activation_reason_code",
+            "wheel_activation_enabled_account_count",
             "projection_verify_ok",
             "projection_verify_mode",
             "service_upgrade_status",
@@ -2793,6 +2809,9 @@ def _status_safe_runtime_payload(data: dict[str, Any]) -> dict[str, Any]:
                 "sqlite_path_source",
             },
         ),
+        "wheel_activation_readiness": _status_safe_wheel_activation_readiness(
+            data.get("wheel_activation_readiness")
+        ),
         "shared": _status_safe_shared(data.get("shared")),
         "trade_intake": _status_safe_trade_intake(data.get("trade_intake")),
         "option_positions_context": {
@@ -2847,6 +2866,65 @@ def _status_safe_runtime_payload(data: dict[str, Any]) -> dict[str, Any]:
 def _pick(value: Any, fields: set[str]) -> dict[str, Any]:
     source = _dict(value)
     return {key: source.get(key) for key in fields if source.get(key) is not None}
+
+
+def _status_safe_wheel_activation_readiness(value: Any) -> dict[str, Any]:
+    source = _dict(value)
+    identity_fields = {
+        "market",
+        "account",
+        "generation",
+        "activated_at_ms",
+        "deactivated_at_ms",
+        "policy_hash",
+    }
+
+    def identity(raw: Any) -> dict[str, Any] | None:
+        item = _dict(raw)
+        if not item:
+            return None
+        return {key: item.get(key) for key in identity_fields}
+
+    accounts: dict[str, dict[str, Any]] = {}
+    for raw_account, raw_value in _dict(source.get("accounts")).items():
+        account = str(raw_account).strip().lower()
+        item = _dict(raw_value)
+        if not account or not item:
+            continue
+        account_result = {
+            key: item.get(key)
+            for key in {
+                *identity_fields,
+                "ready",
+                "enabled_for_new_lifecycle",
+                "monitoring_gate",
+                "reason_code",
+                "identity_source",
+            }
+        }
+        account_result["descriptor"] = identity(item.get("descriptor"))
+        account_result["durable_window"] = identity(item.get("durable_window"))
+        accounts[account] = account_result
+    out = {
+        **_pick(
+            source,
+            {
+                "schema_version",
+                "market",
+                "monitoring_gate",
+                "ready",
+                "reason_code",
+                "storage_status",
+                "account_count",
+                "enabled_account_count",
+            },
+        ),
+        "reason_codes": _string_list(source.get("reason_codes")),
+        "accounts": accounts,
+    }
+    out["market"] = source.get("market")
+    out["reason_code"] = source.get("reason_code")
+    return out
 
 
 def _string_list(value: Any) -> list[str]:

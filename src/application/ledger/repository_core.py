@@ -13,14 +13,384 @@ from .repository_schema import (
     _ensure_notification_delivery_batches_v1,
     _ensure_notification_outbox_v2,
     _ensure_position_projection_schema,
+    _json_object,
     connect_private_sqlite,
     contextmanager,
     exclusive_private_file_lock,
     initialize_ledger_connection,
+    normalize_wheel_event,
     private_path,
     secure_sqlite_artifacts,
     sqlite3,
 )
+
+
+_WHEEL_EVENT_TYPES_V2 = (
+    "wheel_started",
+    "wheel_manual_ended",
+    "wheel_called_away",
+    "wheel_call_intent_created",
+    "wheel_call_intent_cancelled",
+    "wheel_call_intent_consumed",
+    "wheel_call_linkage_rejected",
+    "wheel_event_voided",
+    "wheel_branch_created",
+    "wheel_branch_decided",
+    "wheel_put_intent_created",
+    "wheel_put_intent_cancelled",
+    "wheel_put_intent_consumed",
+    "wheel_put_linkage_rejected",
+)
+
+
+def _create_wheel_events_v2_table(conn: sqlite3.Connection, table: str) -> None:
+    event_types = ",\n                    ".join(
+        f"'{event_type}'" for event_type in _WHEEL_EVENT_TYPES_V2
+    )
+    conn.execute(
+        f"""
+        CREATE TABLE {table} (
+          event_id TEXT PRIMARY KEY,
+          event_schema_version TEXT NOT NULL CHECK(
+            event_schema_version IN ('wheel_event.v1', 'wheel_event.v2')
+          ),
+          account TEXT NOT NULL CHECK(
+            typeof(account) = 'text'
+            AND account != ''
+            AND account = lower(account)
+          ),
+          wheel_branch_id TEXT NOT NULL CHECK(wheel_branch_id != ''),
+          stock_lot_id TEXT CHECK(stock_lot_id IS NULL OR stock_lot_id != ''),
+          event_type TEXT NOT NULL CHECK(event_type IN (
+            {event_types}
+          )),
+          occurred_at_ms INTEGER NOT NULL CHECK(occurred_at_ms > 0),
+          recorded_at_ms INTEGER NOT NULL CHECK(recorded_at_ms > 0),
+          intent_id TEXT,
+          source_trade_event_id TEXT,
+          payload_json TEXT NOT NULL CHECK(
+            json_valid(payload_json)
+            AND json_type(payload_json) = 'object'
+          ),
+          payload_hash TEXT NOT NULL CHECK(
+            length(payload_hash) = 64
+            AND payload_hash NOT GLOB '*[^0-9a-f]*'
+          ),
+          FOREIGN KEY(source_trade_event_id) REFERENCES trade_events(event_id)
+        )
+        """
+    )
+
+
+def _create_wheel_events_v2_guards(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_wheel_events_account_branch
+        ON wheel_events(account, wheel_branch_id, occurred_at_ms, event_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_wheel_events_account_lot
+        ON wheel_events(account, stock_lot_id, occurred_at_ms, event_id)
+        WHERE stock_lot_id IS NOT NULL
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_wheel_events_append_only_update
+        BEFORE UPDATE ON wheel_events
+        BEGIN
+          SELECT RAISE(ABORT, 'wheel_events is append-only');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_wheel_events_append_only_delete
+        BEFORE DELETE ON wheel_events
+        BEGIN
+          SELECT RAISE(ABORT, 'wheel_events is append-only');
+        END
+        """
+    )
+
+
+def _wheel_events_schema_is_v2(conn: sqlite3.Connection) -> bool:
+    columns = {
+        str(row["name"]): row
+        for row in conn.execute("PRAGMA table_info(wheel_events)").fetchall()
+    }
+    if "event_schema_version" not in columns or "wheel_branch_id" not in columns:
+        return False
+    if int(columns["wheel_branch_id"]["notnull"] or 0) != 1:
+        return False
+    if int(columns["stock_lot_id"]["notnull"] or 0) != 0:
+        return False
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'wheel_events'"
+    ).fetchone()
+    sql = str(row["sql"] or "") if row is not None else ""
+    required_tokens = ("wheel_event.v1", "wheel_event.v2", *_WHEEL_EVENT_TYPES_V2)
+    return all(token in sql for token in required_tokens)
+
+
+def _normalized_wheel_row(
+    row: sqlite3.Row,
+    *,
+    columns: set[str],
+) -> dict[str, Any]:
+    stock_lot_id = row["stock_lot_id"]
+    event_schema_version = (
+        str(row["event_schema_version"] or "").strip()
+        if "event_schema_version" in columns
+        else "wheel_event.v1"
+    )
+    wheel_branch_id = (
+        str(row["wheel_branch_id"] or "").strip()
+        if "wheel_branch_id" in columns
+        else str(stock_lot_id or "").strip()
+    )
+    stored = {
+        "event_id": row["event_id"],
+        "event_schema_version": event_schema_version,
+        "account": row["account"],
+        "wheel_branch_id": wheel_branch_id,
+        "stock_lot_id": stock_lot_id,
+        "event_type": row["event_type"],
+        "occurred_at_ms": row["occurred_at_ms"],
+        "recorded_at_ms": row["recorded_at_ms"],
+        "intent_id": row["intent_id"],
+        "source_trade_event_id": row["source_trade_event_id"],
+        "payload": _json_object(row["payload_json"]),
+        "payload_hash": row["payload_hash"],
+    }
+    normalized = normalize_wheel_event(stored)
+    preserved_fields = (
+        "event_id",
+        "event_schema_version",
+        "account",
+        "wheel_branch_id",
+        "stock_lot_id",
+        "event_type",
+        "occurred_at_ms",
+        "recorded_at_ms",
+        "intent_id",
+        "source_trade_event_id",
+        "payload",
+        "payload_hash",
+    )
+    if any(normalized.get(field) != stored[field] for field in preserved_fields):
+        raise RuntimeError(
+            f"wheel event migration validation failed for event_id={stored['event_id']}"
+        )
+    return normalized
+
+
+def _ensure_wheel_events_v2(conn: sqlite3.Connection) -> None:
+    table = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'wheel_events'"
+    ).fetchone()
+    if table is None:
+        _create_wheel_events_v2_table(conn, "wheel_events")
+        _create_wheel_events_v2_guards(conn)
+        return
+    if _wheel_events_schema_is_v2(conn):
+        _create_wheel_events_v2_guards(conn)
+        return
+
+    columns = {
+        str(row["name"])
+        for row in conn.execute("PRAGMA table_info(wheel_events)").fetchall()
+    }
+    rows = conn.execute("SELECT * FROM wheel_events ORDER BY event_id ASC").fetchall()
+    normalized_rows = [_normalized_wheel_row(row, columns=columns) for row in rows]
+    replacement = "wheel_events_v2_migration"
+    conn.execute(f"DROP TABLE IF EXISTS {replacement}")
+    _create_wheel_events_v2_table(conn, replacement)
+    for source_row, normalized in zip(rows, normalized_rows, strict=True):
+        conn.execute(
+            f"""
+            INSERT INTO {replacement} (
+              event_id, event_schema_version, account, wheel_branch_id,
+              stock_lot_id, event_type, occurred_at_ms, recorded_at_ms,
+              intent_id, source_trade_event_id, payload_json, payload_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                normalized["event_id"],
+                normalized["event_schema_version"],
+                normalized["account"],
+                normalized["wheel_branch_id"],
+                normalized["stock_lot_id"],
+                normalized["event_type"],
+                normalized["occurred_at_ms"],
+                normalized["recorded_at_ms"],
+                normalized["intent_id"],
+                normalized["source_trade_event_id"],
+                source_row["payload_json"],
+                normalized["payload_hash"],
+            ),
+        )
+    migrated_rows = conn.execute(
+        f"SELECT * FROM {replacement} ORDER BY event_id ASC"
+    ).fetchall()
+    if len(migrated_rows) != len(rows):
+        raise RuntimeError("wheel event migration row count mismatch")
+    for source_row, migrated_row in zip(rows, migrated_rows, strict=True):
+        source_event = _normalized_wheel_row(source_row, columns=columns)
+        migrated_event = _normalized_wheel_row(
+            migrated_row,
+            columns=set(migrated_row.keys()),
+        )
+        if source_event != migrated_event:
+            raise RuntimeError(
+                f"wheel event migration readback mismatch for event_id={source_event['event_id']}"
+            )
+    if conn.execute(f"PRAGMA foreign_key_check({replacement})").fetchall():
+        raise RuntimeError("wheel event migration foreign key check failed")
+    conn.execute("DROP TABLE wheel_events")
+    conn.execute(f"ALTER TABLE {replacement} RENAME TO wheel_events")
+    _create_wheel_events_v2_guards(conn)
+
+
+def _ensure_wheel_activation_windows(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS wheel_activation_windows (
+          market TEXT NOT NULL CHECK(market IN ('us', 'hk')),
+          account TEXT NOT NULL CHECK(
+            typeof(account) = 'text'
+            AND account != ''
+            AND account = lower(account)
+          ),
+          generation INTEGER NOT NULL CHECK(generation > 0),
+          activated_at_ms INTEGER NOT NULL CHECK(activated_at_ms > 0),
+          deactivated_at_ms INTEGER CHECK(
+            deactivated_at_ms IS NULL OR deactivated_at_ms > activated_at_ms
+          ),
+          policy_hash TEXT NOT NULL CHECK(
+            length(policy_hash) = 64
+            AND policy_hash NOT GLOB '*[^0-9a-f]*'
+          ),
+          activation_request_id TEXT NOT NULL CHECK(activation_request_id != ''),
+          activation_request_hash TEXT NOT NULL CHECK(
+            length(activation_request_hash) = 64
+            AND activation_request_hash NOT GLOB '*[^0-9a-f]*'
+          ),
+          deactivation_request_id TEXT,
+          deactivation_request_hash TEXT CHECK(
+            deactivation_request_hash IS NULL OR (
+              length(deactivation_request_hash) = 64
+              AND deactivation_request_hash NOT GLOB '*[^0-9a-f]*'
+            )
+          ),
+          PRIMARY KEY(market, account, generation),
+          CHECK(
+            (deactivated_at_ms IS NULL AND deactivation_request_id IS NULL AND deactivation_request_hash IS NULL)
+            OR
+            (deactivated_at_ms IS NOT NULL AND deactivation_request_id != '' AND deactivation_request_hash IS NOT NULL)
+          )
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_wheel_activation_windows_open
+        ON wheel_activation_windows(market, account)
+        WHERE deactivated_at_ms IS NULL
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_wheel_activation_request
+        ON wheel_activation_windows(market, account, activation_request_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_wheel_deactivation_request
+        ON wheel_activation_windows(market, account, deactivation_request_id)
+        WHERE deactivation_request_id IS NOT NULL
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_wheel_activation_windows_insert_guard
+        BEFORE INSERT ON wheel_activation_windows
+        BEGIN
+          SELECT CASE WHEN NEW.generation != COALESCE((
+            SELECT MAX(generation) + 1
+            FROM wheel_activation_windows
+            WHERE market = NEW.market AND account = NEW.account
+          ), 1) THEN RAISE(ABORT, 'wheel activation generation must increase by one') END;
+          SELECT CASE WHEN EXISTS (
+            SELECT 1
+            FROM wheel_activation_windows
+            WHERE market = NEW.market
+              AND account = NEW.account
+              AND (
+                deactivated_at_ms IS NULL
+                OR NEW.activated_at_ms <= activated_at_ms
+                OR NEW.activated_at_ms < deactivated_at_ms
+              )
+          ) THEN RAISE(ABORT, 'wheel activation windows must not overlap') END;
+          SELECT CASE WHEN EXISTS (
+            SELECT 1
+            FROM wheel_activation_windows
+            WHERE market = NEW.market
+              AND account = NEW.account
+              AND deactivation_request_id = NEW.activation_request_id
+          ) THEN RAISE(ABORT, 'wheel activation request identity must be unique') END;
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_wheel_activation_windows_update_guard
+        BEFORE UPDATE ON wheel_activation_windows
+        WHEN NOT (
+          OLD.deactivated_at_ms IS NULL
+          AND NEW.deactivated_at_ms IS NOT NULL
+          AND NEW.deactivated_at_ms > OLD.activated_at_ms
+          AND OLD.market IS NEW.market
+          AND OLD.account IS NEW.account
+          AND OLD.generation IS NEW.generation
+          AND OLD.activated_at_ms IS NEW.activated_at_ms
+          AND OLD.policy_hash IS NEW.policy_hash
+          AND OLD.activation_request_id IS NEW.activation_request_id
+          AND OLD.activation_request_hash IS NEW.activation_request_hash
+          AND OLD.deactivation_request_id IS NULL
+          AND NEW.deactivation_request_id IS NOT NULL
+          AND NEW.deactivation_request_id != ''
+          AND NEW.deactivation_request_id != OLD.activation_request_id
+          AND NOT EXISTS (
+            SELECT 1
+            FROM wheel_activation_windows AS existing
+            WHERE existing.market = OLD.market
+              AND existing.account = OLD.account
+              AND (
+                existing.activation_request_id = NEW.deactivation_request_id
+                OR existing.deactivation_request_id = NEW.deactivation_request_id
+              )
+          )
+          AND OLD.deactivation_request_hash IS NULL
+          AND NEW.deactivation_request_hash IS NOT NULL
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'wheel activation window boundaries are immutable');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_wheel_activation_windows_delete_guard
+        BEFORE DELETE ON wheel_activation_windows
+        BEGIN
+          SELECT RAISE(ABORT, 'wheel activation windows are append-only');
+        END
+        """
+    )
 
 
 @contextmanager
@@ -116,7 +486,7 @@ class RepositoryCoreMixin:
         return row is not None
 
     def _init_db(self) -> None:
-        with self._writer_connection() as conn:
+        with self._writer_connection(begin_immediate=True) as conn:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS trade_events (
@@ -184,66 +554,8 @@ class RepositoryCoreMixin:
                     conn, index_name=index_name, table=table,
                     create_sql=_execution_identity_index_sql(table),
                 )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS wheel_events (
-                  event_id TEXT PRIMARY KEY,
-                  account TEXT NOT NULL CHECK(
-                    typeof(account) = 'text'
-                    AND account != ''
-                    AND account = lower(account)
-                  ),
-                  stock_lot_id TEXT NOT NULL CHECK(stock_lot_id != ''),
-                  event_type TEXT NOT NULL CHECK(event_type IN (
-                    'wheel_started',
-                    'wheel_manual_ended',
-                    'wheel_called_away',
-                    'wheel_call_intent_created',
-                    'wheel_call_intent_cancelled',
-                    'wheel_call_intent_consumed',
-                    'wheel_call_linkage_rejected',
-                    'wheel_event_voided'
-                  )),
-                  occurred_at_ms INTEGER NOT NULL CHECK(occurred_at_ms > 0),
-                  recorded_at_ms INTEGER NOT NULL CHECK(recorded_at_ms > 0),
-                  intent_id TEXT,
-                  source_trade_event_id TEXT,
-                  payload_json TEXT NOT NULL CHECK(
-                    json_valid(payload_json)
-                    AND json_type(payload_json) = 'object'
-                  ),
-                  payload_hash TEXT NOT NULL CHECK(
-                    length(payload_hash) = 64
-                    AND payload_hash NOT GLOB '*[^0-9a-f]*'
-                  ),
-                  FOREIGN KEY(source_trade_event_id) REFERENCES trade_events(event_id)
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_wheel_events_account_lot
-                ON wheel_events(account, stock_lot_id, occurred_at_ms, event_id)
-                """
-            )
-            conn.execute(
-                """
-                CREATE TRIGGER IF NOT EXISTS trg_wheel_events_append_only_update
-                BEFORE UPDATE ON wheel_events
-                BEGIN
-                  SELECT RAISE(ABORT, 'wheel_events is append-only');
-                END
-                """
-            )
-            conn.execute(
-                """
-                CREATE TRIGGER IF NOT EXISTS trg_wheel_events_append_only_delete
-                BEFORE DELETE ON wheel_events
-                BEGIN
-                  SELECT RAISE(ABORT, 'wheel_events is append-only');
-                END
-                """
-            )
+            _ensure_wheel_events_v2(conn)
+            _ensure_wheel_activation_windows(conn)
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_assigned_stock_events_trade_time

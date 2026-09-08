@@ -17,6 +17,7 @@ from src.application.candidate_evidence_history import (
 )
 from src.application.candidate_snapshot_manifest import (
     CANDIDATE_SNAPSHOT_MANIFEST_FILE,
+    CANDIDATE_SNAPSHOT_MANIFEST_V3_FILE,
     publish_candidate_snapshot_manifest,
 )
 from src.application.combo_yield_candidate_snapshot import (
@@ -180,6 +181,32 @@ def test_modern_snapshot_without_manifest_is_missing_not_legacy(tmp_path: Path) 
 
     assert evidence.classification["status"] == UNSUPPORTED_SNAPSHOT_MISSING
     assert evidence.classification["reason_code"] == "candidate_snapshot_manifest_missing"
+
+
+def test_wheel_v2_snapshot_without_manifest_is_missing(tmp_path: Path) -> None:
+    account_dir = _account_dir(tmp_path)
+    (account_dir / "state" / "wheel_candidate_snapshot.v2.json").write_text(
+        json.dumps({"schema_version": "wheel_candidate_snapshot.v2"}),
+        encoding="utf-8",
+    )
+
+    evidence = _classify(tmp_path)
+
+    assert evidence.classification["status"] == UNSUPPORTED_SNAPSHOT_MISSING
+    assert evidence.classification["reason_code"] == "candidate_snapshot_manifest_missing"
+
+
+def test_present_invalid_manifest_v3_takes_schema_precedence(tmp_path: Path) -> None:
+    account_dir = _account_dir(tmp_path)
+    (account_dir / "state" / CANDIDATE_SNAPSHOT_MANIFEST_V3_FILE).write_text(
+        "{}",
+        encoding="utf-8",
+    )
+
+    evidence = _classify(tmp_path)
+
+    assert evidence.classification["status"] == UNSUPPORTED_SNAPSHOT_SCHEMA
+    assert evidence.classification["reason_code"] == "candidate_snapshot_manifest_invalid"
 
 
 def test_valid_v1_snapshot_and_immutable_config_are_limited(tmp_path: Path) -> None:

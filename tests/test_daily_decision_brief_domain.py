@@ -253,6 +253,13 @@ def test_wheel_candidate_identity_is_scoped_to_stock_lot() -> None:
             symbol="NVDA",
             strategy_family="wheel",
         )
+    assert build_daily_brief_candidate_identity(
+        account="lx",
+        market="US",
+        symbol="NVDA",
+        strategy_family="wheel",
+        wheel_branch_id="put-branch-1",
+    ) == "candidate:v1:lx:US:NVDA:wheel:put-branch-1"
 
     action = _action()
     action.update(
@@ -268,6 +275,37 @@ def test_wheel_candidate_identity_is_scoped_to_stock_lot() -> None:
     )["candidate_index"][0]
     assert candidate["identity"] == "candidate:v1:lx:US:NVDA:wheel:stock-lot-1"
     assert candidate["representative"]["position_lot_id"] == "stock-lot-1"
+
+    from domain.domain.wheel import deterministic_wheel_branch_id
+
+    put_branch_id = deterministic_wheel_branch_id("lx", "assignment-1", "put")
+    assert ":" not in put_branch_id
+    assert build_daily_brief_candidate_identity(
+        account="lx",
+        market="US",
+        symbol="NVDA",
+        strategy_family="wheel",
+        wheel_branch_id=put_branch_id,
+    ).endswith(f":{put_branch_id}")
+
+
+def test_legacy_wheel_call_branch_alias_preserves_action_identity() -> None:
+    from domain.domain.daily_decision_brief import build_daily_brief_action_id
+
+    legacy = _action()
+    legacy.update(
+        {
+            "strategy_family": "wheel",
+            "option_type": "call",
+            "contract_symbol": "NVDA260821C00110000",
+            "position_lot_id": "stock-lot-1",
+        }
+    )
+    aliased = {**legacy, "wheel_branch_id": "stock-lot-1"}
+    put = {**legacy, "wheel_branch_id": "wheel-put-1"}
+
+    assert build_daily_brief_action_id(aliased) == build_daily_brief_action_id(legacy)
+    assert build_daily_brief_action_id(put) != build_daily_brief_action_id(legacy)
 
 
 def test_action_identity_normalizes_case_and_strike_representation() -> None:

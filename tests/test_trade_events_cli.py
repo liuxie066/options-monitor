@@ -78,6 +78,28 @@ def _repo_with_assignment(
         wheel_start_enabled=wheel_start_enabled,
     )
     assignment_event_id = str(result["result"]["event_id"])
+    if wheel_start_enabled:
+        from domain.domain.wheel import wheel_started_event_from_assignment
+
+        assignment = next(
+            row
+            for row in repo.list_trade_events()
+            if row["event_id"] == assignment_event_id
+        )
+        source_put_lot = next(
+            row
+            for row in repo.list_position_lots()
+            if row["record_id"] == put_lot_id
+        )
+        with repo._writer_connection(begin_immediate=True) as conn:  # noqa: SLF001 - explicit legacy Wheel history fixture
+            repo.append_wheel_event_once(
+                wheel_started_event_from_assignment(
+                    assignment,
+                    source_put_lot,
+                    recorded_at_ms=2_000,
+                ),
+                conn=conn,
+            )
     return repo, assignment_event_id, f"assigned-stock-{assignment_event_id}"
 
 
@@ -1391,6 +1413,7 @@ def test_assignment_void_rejects_ended_wheel_then_allows_legally_voided_wheel_hi
         expected_batch_generation_hash=batch["batch_generation_hash"],
         request_id="end-wheel-before-intervention",
         actor="test",
+        market="us",
         apply_changes=True,
         as_of_ms=3_000,
     )

@@ -380,17 +380,51 @@ def test_wheel_call_fetch_uses_spot_floor_unbounded_max_and_rv(monkeypatch, tmp_
     assert plan.merged_specs[0].include_realized_volatility is True
 
 
-def test_wheel_prefetch_demand_is_added_only_for_ready_active_batch() -> None:
+def test_wheel_put_fetch_uses_spot_cap_and_rv(monkeypatch, tmp_path: Path) -> None:
+    import src.application.required_data_planning as mod
+
+    monkeypatch.setattr(
+        mod,
+        "list_option_expirations",
+        lambda *args, **kwargs: ["2026-05-29", "2026-06-12", "2026-06-26"],
+    )
+    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: 100.0)
+
+    plan = mod.build_required_data_fetch_plan(
+        base=tmp_path,
+        required_data_dir=tmp_path,
+        symbol="NVDA",
+        limit_expirations=0,
+        want_put=False,
+        want_call=False,
+        wheel_put_cfg={
+            "enabled": True,
+            "min_dte": 30,
+            "max_dte": 45,
+            "requires_realized_volatility": True,
+        },
+        fetch_host="127.0.0.1",
+        fetch_port=11111,
+    )
+
+    assert len(plan.side_plans) == 1
+    assert plan.side_plans[0].option_type == "put"
+    assert plan.side_plans[0].min_dte == 30
+    assert plan.side_plans[0].max_dte == 45
+    assert plan.side_plans[0].strike_window.max_strike == 100.0
+    assert plan.require_realized_volatility is True
+
+
+def test_wheel_prefetch_demand_is_added_only_for_enabled_ready_branches() -> None:
     from src.application.required_data_prefetch_planning import (
         merge_wheel_requirements_into_prefetch_config,
     )
 
     config = {
         "wheel": {
-            "enabled": True,
             "accounts": ["lx"],
-            "min_dte": 30,
-            "max_dte": 45,
+            "call": {"min_dte": 30, "max_dte": 45},
+            "put": {"min_dte": 7, "max_dte": 21},
         },
         "symbols": [
             {
@@ -406,19 +440,31 @@ def test_wheel_prefetch_demand_is_added_only_for_ready_active_batch() -> None:
         candidate_config={**config, "symbols": []},
         account_configs={"lx": config},
         wheel_read_models={
-            "lx": {
-                "batches": [
+                "lx": {
+                "wheel_branches": [
                     {
                         "symbol": "NVDA",
+                        "direction": "call",
                         "lifecycle_status": "active",
                         "integrity_status": "trusted",
                         "phase": "ready",
+                        "monitoring_gate": "enabled",
+                    },
+                    {
+                        "symbol": "NVDA",
+                        "direction": "put",
+                        "lifecycle_status": "active",
+                        "integrity_status": "trusted",
+                        "phase": "ready",
+                        "monitoring_gate": "enabled",
                     },
                     {
                         "symbol": "AAPL",
-                        "lifecycle_status": "ended",
+                        "direction": "put",
+                        "lifecycle_status": "active",
                         "integrity_status": "trusted",
-                        "phase": "ended",
+                        "phase": "ready",
+                        "monitoring_gate": "disabled",
                     },
                 ]
             }
@@ -430,6 +476,12 @@ def test_wheel_prefetch_demand_is_added_only_for_ready_active_batch() -> None:
         "enabled": True,
         "min_dte": 30,
         "max_dte": 45,
+        "requires_realized_volatility": True,
+    }
+    assert merged["symbols"][0]["_wheel_put"] == {
+        "enabled": True,
+        "min_dte": 7,
+        "max_dte": 21,
         "requires_realized_volatility": True,
     }
 

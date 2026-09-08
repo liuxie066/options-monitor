@@ -204,6 +204,9 @@ from src.application.ledger.position_projection_runtime import (
     position_projection_runtime_telemetry,
     run_position_projection_in_transaction,
 )
+from src.application.ledger.publisher import (
+    project_stored_trade_events_to_position_lots as project_position_lots_from_trade_facts,
+)
 from src.application.ledger.decision_snapshot import (
     CURRENT_DECISION_POSITION_FIELDS,
     POSITION_FACT_SNAPSHOT_CONTRACT,
@@ -411,6 +414,7 @@ __all__ = [
     "preview_trade_event_repair",
     "preview_trade_event_void",
     "project_trade_event_log",
+    "project_position_lots_from_trade_facts",
     "project_assigned_stock_lifecycle_from_rows",
     "resolve_position_data_config_path",
     "resolve_position_ledger_sqlite_path",

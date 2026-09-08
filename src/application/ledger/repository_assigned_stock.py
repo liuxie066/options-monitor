@@ -14,6 +14,58 @@ from .repository_schema import (
     sqlite3,
 )
 
+
+def _wheel_activation_scope(market: str, account: str) -> tuple[str, str]:
+    market_value = str(market or "").strip().lower()
+    account_value = str(account or "").strip()
+    if market_value not in {"us", "hk"}:
+        raise ValueError("wheel activation market must be us or hk")
+    if not account_value or account_value != account_value.lower():
+        raise ValueError("wheel activation account must be lowercase")
+    return market_value, account_value
+
+
+def _wheel_activation_hash(value: str, field: str) -> str:
+    digest = str(value or "").strip()
+    if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+        raise ValueError(f"{field} must be a lowercase sha256")
+    return digest
+
+
+def _wheel_activation_request_id(value: str) -> str:
+    request_id = str(value or "").strip()
+    if not request_id:
+        raise ValueError("wheel activation request_id is required")
+    return request_id
+
+
+def _wheel_activation_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "market": str(row["market"]),
+        "account": str(row["account"]),
+        "generation": int(row["generation"]),
+        "activated_at_ms": int(row["activated_at_ms"]),
+        "deactivated_at_ms": (
+            int(row["deactivated_at_ms"])
+            if row["deactivated_at_ms"] is not None
+            else None
+        ),
+        "policy_hash": str(row["policy_hash"]),
+        "activation_request_id": str(row["activation_request_id"]),
+        "activation_request_hash": str(row["activation_request_hash"]),
+        "deactivation_request_id": (
+            str(row["deactivation_request_id"])
+            if row["deactivation_request_id"] is not None
+            else None
+        ),
+        "deactivation_request_hash": (
+            str(row["deactivation_request_hash"])
+            if row["deactivation_request_hash"] is not None
+            else None
+        ),
+    }
+
+
 class AssignedStockRepositoryMixin:
     def compare_and_swap_assigned_stock_order_identity_json(
         self,
@@ -147,11 +199,25 @@ class AssignedStockRepositoryMixin:
             raise ValueError("wheel event append requires an active transaction")
         payload = normalize_wheel_event(event)
         existing = conn.execute(
-            "SELECT payload_hash FROM wheel_events WHERE event_id = ?",
+            """
+            SELECT event_schema_version, wheel_branch_id, payload_hash
+            FROM wheel_events
+            WHERE event_id = ?
+            """,
             (payload["event_id"],),
         ).fetchone()
         if existing is not None:
-            if str(existing["payload_hash"] or "") != payload["payload_hash"]:
+            existing_identity = (
+                str(existing["event_schema_version"] or ""),
+                str(existing["wheel_branch_id"] or ""),
+                str(existing["payload_hash"] or ""),
+            )
+            payload_identity = (
+                payload["event_schema_version"],
+                payload["wheel_branch_id"],
+                payload["payload_hash"],
+            )
+            if existing_identity != payload_identity:
                 raise ValueError(
                     f"wheel event conflict for event_id={payload['event_id']}"
                 )
@@ -159,14 +225,16 @@ class AssignedStockRepositoryMixin:
         conn.execute(
             """
             INSERT INTO wheel_events (
-              event_id, account, stock_lot_id, event_type,
-              occurred_at_ms, recorded_at_ms, intent_id,
-              source_trade_event_id, payload_json, payload_hash
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              event_id, event_schema_version, account, wheel_branch_id,
+              stock_lot_id, event_type, occurred_at_ms, recorded_at_ms,
+              intent_id, source_trade_event_id, payload_json, payload_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 payload["event_id"],
+                payload["event_schema_version"],
                 payload["account"],
+                payload["wheel_branch_id"],
                 payload["stock_lot_id"],
                 payload["event_type"],
                 payload["occurred_at_ms"],
@@ -207,7 +275,9 @@ class AssignedStockRepositoryMixin:
             normalize_wheel_event(
                 {
                     "event_id": row["event_id"],
+                    "event_schema_version": row["event_schema_version"],
                     "account": row["account"],
+                    "wheel_branch_id": row["wheel_branch_id"],
                     "stock_lot_id": row["stock_lot_id"],
                     "event_type": row["event_type"],
                     "occurred_at_ms": row["occurred_at_ms"],
@@ -220,3 +290,290 @@ class AssignedStockRepositoryMixin:
             )
             for row in rows
         ]
+
+    def list_wheel_activation_windows(
+        self,
+        *,
+        market: str,
+        account: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        market_value, account_value = _wheel_activation_scope(market, account)
+        with self._optional_conn(conn) as active_conn:
+            rows = active_conn.execute(
+                """
+                SELECT *
+                FROM wheel_activation_windows
+                WHERE market = ? AND account = ?
+                ORDER BY generation ASC
+                """,
+                (market_value, account_value),
+            ).fetchall()
+        return [_wheel_activation_row(row) for row in rows]
+
+    def get_current_wheel_activation_window(
+        self,
+        *,
+        market: str,
+        account: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any] | None:
+        market_value, account_value = _wheel_activation_scope(market, account)
+        with self._optional_conn(conn) as active_conn:
+            rows = active_conn.execute(
+                """
+                SELECT *
+                FROM wheel_activation_windows
+                WHERE market = ? AND account = ? AND deactivated_at_ms IS NULL
+                ORDER BY generation DESC
+                """,
+                (market_value, account_value),
+            ).fetchall()
+        if len(rows) > 1:
+            raise RuntimeError("wheel activation open-window uniqueness violated")
+        return _wheel_activation_row(rows[0]) if rows else None
+
+    def get_wheel_activation_window_for_event(
+        self,
+        *,
+        market: str,
+        account: str,
+        occurred_at_ms: int,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any] | None:
+        market_value, account_value = _wheel_activation_scope(market, account)
+        try:
+            event_time_ms = int(occurred_at_ms)
+        except (TypeError, ValueError):
+            raise ValueError("wheel activation occurred_at_ms must be positive") from None
+        if event_time_ms <= 0:
+            raise ValueError("wheel activation occurred_at_ms must be positive")
+        with self._optional_conn(conn) as active_conn:
+            rows = active_conn.execute(
+                """
+                SELECT *
+                FROM wheel_activation_windows
+                WHERE market = ?
+                  AND account = ?
+                  AND activated_at_ms <= ?
+                  AND (deactivated_at_ms IS NULL OR ? < deactivated_at_ms)
+                ORDER BY generation ASC
+                """,
+                (market_value, account_value, event_time_ms, event_time_ms),
+            ).fetchall()
+        if len(rows) > 1:
+            raise RuntimeError("wheel activation historical-window uniqueness violated")
+        return _wheel_activation_row(rows[0]) if rows else None
+
+    def _wheel_activation_request_replay(
+        self,
+        *,
+        market: str,
+        account: str,
+        action: str,
+        request_id: str,
+        request_hash: str,
+        policy_hash: str,
+        conn: sqlite3.Connection,
+    ) -> dict[str, Any] | None:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM wheel_activation_windows
+            WHERE market = ?
+              AND account = ?
+              AND (activation_request_id = ? OR deactivation_request_id = ?)
+            ORDER BY generation ASC
+            """,
+            (market, account, request_id, request_id),
+        ).fetchall()
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise RuntimeError("wheel activation request identity is not unique")
+        row = rows[0]
+        stored_action = (
+            "activate" if row["activation_request_id"] == request_id else "deactivate"
+        )
+        stored_hash = (
+            str(row["activation_request_hash"])
+            if stored_action == "activate"
+            else str(row["deactivation_request_hash"])
+        )
+        if (
+            stored_action != action
+            or stored_hash != request_hash
+            or str(row["policy_hash"]) != policy_hash
+        ):
+            raise ValueError(f"wheel activation request conflict for request_id={request_id}")
+        return {
+            "action": action,
+            "write_applied": False,
+            "idempotent": True,
+            "window": _wheel_activation_row(row),
+        }
+
+    def open_wheel_activation_window(
+        self,
+        *,
+        market: str,
+        account: str,
+        expected_current_generation: int,
+        policy_hash: str,
+        request_id: str,
+        request_hash: str,
+        conn: sqlite3.Connection,
+    ) -> dict[str, Any]:
+        if conn is None or not conn.in_transaction:
+            raise ValueError("wheel activation requires an active transaction")
+        market_value, account_value = _wheel_activation_scope(market, account)
+        policy_hash_value = _wheel_activation_hash(policy_hash, "policy_hash")
+        request_id_value = _wheel_activation_request_id(request_id)
+        request_hash_value = _wheel_activation_hash(request_hash, "request_hash")
+        replay = self._wheel_activation_request_replay(
+            market=market_value,
+            account=account_value,
+            action="activate",
+            request_id=request_id_value,
+            request_hash=request_hash_value,
+            policy_hash=policy_hash_value,
+            conn=conn,
+        )
+        if replay is not None:
+            return replay
+        latest = conn.execute(
+            """
+            SELECT *
+            FROM wheel_activation_windows
+            WHERE market = ? AND account = ?
+            ORDER BY generation DESC
+            LIMIT 1
+            """,
+            (market_value, account_value),
+        ).fetchone()
+        current_generation = int(latest["generation"]) if latest is not None else 0
+        if int(expected_current_generation) != current_generation:
+            raise ValueError("wheel activation generation conflict")
+        if latest is not None and latest["deactivated_at_ms"] is None:
+            raise ValueError("wheel activation window is already open")
+        activated_at_ms = max(
+            int(now_ms()),
+            (int(latest["activated_at_ms"]) + 1) if latest is not None else 1,
+            int(latest["deactivated_at_ms"] or 0) if latest is not None else 0,
+        )
+        generation = current_generation + 1
+        conn.execute(
+            """
+            INSERT INTO wheel_activation_windows (
+              market, account, generation, activated_at_ms, deactivated_at_ms,
+              policy_hash, activation_request_id, activation_request_hash,
+              deactivation_request_id, deactivation_request_hash
+            ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, NULL, NULL)
+            """,
+            (
+                market_value,
+                account_value,
+                generation,
+                activated_at_ms,
+                policy_hash_value,
+                request_id_value,
+                request_hash_value,
+            ),
+        )
+        row = conn.execute(
+            """
+            SELECT * FROM wheel_activation_windows
+            WHERE market = ? AND account = ? AND generation = ?
+            """,
+            (market_value, account_value, generation),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("wheel activation write readback failed")
+        return {
+            "action": "activate",
+            "write_applied": True,
+            "idempotent": False,
+            "window": _wheel_activation_row(row),
+        }
+
+    def close_wheel_activation_window(
+        self,
+        *,
+        market: str,
+        account: str,
+        expected_current_generation: int,
+        policy_hash: str,
+        request_id: str,
+        request_hash: str,
+        conn: sqlite3.Connection,
+    ) -> dict[str, Any]:
+        if conn is None or not conn.in_transaction:
+            raise ValueError("wheel deactivation requires an active transaction")
+        market_value, account_value = _wheel_activation_scope(market, account)
+        policy_hash_value = _wheel_activation_hash(policy_hash, "policy_hash")
+        request_id_value = _wheel_activation_request_id(request_id)
+        request_hash_value = _wheel_activation_hash(request_hash, "request_hash")
+        replay = self._wheel_activation_request_replay(
+            market=market_value,
+            account=account_value,
+            action="deactivate",
+            request_id=request_id_value,
+            request_hash=request_hash_value,
+            policy_hash=policy_hash_value,
+            conn=conn,
+        )
+        if replay is not None:
+            return replay
+        row = conn.execute(
+            """
+            SELECT *
+            FROM wheel_activation_windows
+            WHERE market = ? AND account = ? AND deactivated_at_ms IS NULL
+            """,
+            (market_value, account_value),
+        ).fetchone()
+        if row is None:
+            raise ValueError("wheel activation window is not open")
+        generation = int(row["generation"])
+        if int(expected_current_generation) != generation:
+            raise ValueError("wheel activation generation conflict")
+        if str(row["policy_hash"]) != policy_hash_value:
+            raise ValueError("wheel activation policy hash conflict")
+        deactivated_at_ms = max(int(now_ms()), int(row["activated_at_ms"]) + 1)
+        updated = conn.execute(
+            """
+            UPDATE wheel_activation_windows
+            SET deactivated_at_ms = ?,
+                deactivation_request_id = ?,
+                deactivation_request_hash = ?
+            WHERE market = ?
+              AND account = ?
+              AND generation = ?
+              AND deactivated_at_ms IS NULL
+            """,
+            (
+                deactivated_at_ms,
+                request_id_value,
+                request_hash_value,
+                market_value,
+                account_value,
+                generation,
+            ),
+        )
+        if int(updated.rowcount or 0) != 1:
+            raise ValueError("wheel activation close compare-and-swap failed")
+        readback = conn.execute(
+            """
+            SELECT * FROM wheel_activation_windows
+            WHERE market = ? AND account = ? AND generation = ?
+            """,
+            (market_value, account_value, generation),
+        ).fetchone()
+        if readback is None:
+            raise RuntimeError("wheel deactivation write readback failed")
+        return {
+            "action": "deactivate",
+            "write_applied": True,
+            "idempotent": False,
+            "window": _wheel_activation_row(readback),
+        }

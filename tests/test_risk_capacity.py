@@ -3,6 +3,7 @@ from __future__ import annotations
 from domain.domain.risk_capacity import (
     allocate_opening_share_capacity,
     allocate_portfolio_capacity_shadow,
+    allocate_wheel_put_cash_capacity,
     compute_sell_call_share_capacity,
     compute_sell_put_cash_capacity,
     compute_sell_put_effective_cash,
@@ -548,3 +549,123 @@ def test_short_put_cash_secured_zero_open_contracts_release_explicit_cash() -> N
         contracts_open=0,
         cash_secured_amount=40_000,
     ) == 0.0
+
+
+def test_wheel_put_cash_capacity_reserves_ordinary_and_intents_before_wheel() -> None:
+    result = allocate_wheel_put_cash_capacity(
+        cash_capacity_fact={
+            "account": "lx",
+            "status": "available",
+            "cash_authority": {"status": "available", "logical_account": "lx"},
+            "cash_authority_hash": "authority-1",
+            "cash_by_currency": {"USD": 30_000},
+            "cash_secured_by_currency": {},
+            "fx_snapshot": {"rates": {}},
+        },
+        ordinary_put_claims=[
+            {
+                "claim_id": "ordinary",
+                "account": "lx",
+                "currency": "USD",
+                "strike": 100,
+                "multiplier": 100,
+                "requested_contracts": 1,
+            }
+        ],
+        active_wheel_put_intents=[
+            {
+                "intent_id": "intent-1",
+                "account": "lx",
+                "currency": "USD",
+                "cash_reservation_amount": 5_000,
+            }
+        ],
+        wheel_put_claims=[
+            {
+                "claim_id": "wheel-b",
+                "wheel_branch_id": "b",
+                "direction": "put",
+                "account": "lx",
+                "currency": "USD",
+                "strike": 120,
+                "multiplier": 100,
+                "requested_contracts": 1,
+            },
+            {
+                "claim_id": "wheel-a",
+                "wheel_branch_id": "a",
+                "direction": "put",
+                "account": "lx",
+                "currency": "USD",
+                "strike": 100,
+                "multiplier": 100,
+                "requested_contracts": 1,
+            },
+        ],
+        convert_currency=lambda amount, _source, _target: amount,
+    )
+    allocations = {row["wheel_branch_id"]: row for row in result["allocations"]}
+
+    assert allocations["a"]["granted_contracts"] == 1
+    assert allocations["a"]["capacity_before"] == 15_000
+    assert allocations["a"]["capacity_after"] == 5_000
+    assert allocations["b"]["granted_contracts"] == 0
+    assert allocations["b"]["capacity_before"] == 5_000
+    assert result["capacity_identity_hash"]
+    assert result["allocation_input_hash"]
+
+
+def test_wheel_put_capacity_identity_changes_with_prior_claims_not_current_order() -> None:
+    fact = {
+        "account": "lx",
+        "status": "available",
+        "cash_authority": {"status": "available", "logical_account": "lx"},
+        "cash_authority_hash": "authority-1",
+        "cash_by_currency": {"USD": 30_000},
+        "cash_secured_by_currency": {},
+        "fx_snapshot": {"rates": {}},
+    }
+    claim_a = {
+        "claim_id": "wheel-a",
+        "wheel_branch_id": "a",
+        "direction": "put",
+        "account": "lx",
+        "currency": "USD",
+        "strike": 100,
+        "multiplier": 100,
+        "requested_contracts": 1,
+    }
+    claim_b = {**claim_a, "claim_id": "wheel-b", "wheel_branch_id": "b"}
+    first = allocate_wheel_put_cash_capacity(
+        cash_capacity_fact=fact,
+        ordinary_put_claims=[],
+        active_wheel_put_intents=[],
+        wheel_put_claims=[claim_a, claim_b],
+        convert_currency=lambda amount, _source, _target: amount,
+    )
+    reordered = allocate_wheel_put_cash_capacity(
+        cash_capacity_fact=fact,
+        ordinary_put_claims=[],
+        active_wheel_put_intents=[],
+        wheel_put_claims=[claim_b, claim_a],
+        convert_currency=lambda amount, _source, _target: amount,
+    )
+    with_prior = allocate_wheel_put_cash_capacity(
+        cash_capacity_fact=fact,
+        ordinary_put_claims=[
+            {
+                "claim_id": "ordinary",
+                "account": "lx",
+                "currency": "USD",
+                "strike": 50,
+                "multiplier": 100,
+                "requested_contracts": 1,
+            }
+        ],
+        active_wheel_put_intents=[],
+        wheel_put_claims=[claim_a, claim_b],
+        convert_currency=lambda amount, _source, _target: amount,
+    )
+
+    assert first["capacity_identity_hash"] == reordered["capacity_identity_hash"]
+    assert first["capacity_identity_hash"] != with_prior["capacity_identity_hash"]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.ledger import position_lots_fingerprint
 from domain.domain.lifecycle_allocation import validate_stock_settlement_allocation_group
 from domain.domain.trade_execution import execution_economic_content, normalize_execution_input
@@ -1367,7 +1368,7 @@ def persist_trade_event_objects_atomically(
             if stored_settlement_source != incoming_settlement_source:
                 raise ValueError("stored stock settlement allocation source conflicts")
         created_flags = runtime.created_flags
-        wheel_companions = append_wheel_trade_companions(
+        wheel_companions, wheel_companion_review_reasons = append_wheel_trade_companions(
             sqlite_repo,
             conn=conn,
             events=storage_events,
@@ -1509,6 +1510,15 @@ def persist_trade_event_objects_atomically(
                     **(
                         {"wheel_event_id": wheel_companions[event.event_id]}
                         if event.event_id in wheel_companions
+                        else {}
+                    ),
+                    **(
+                        {
+                            "wheel_manual_review_reason": (
+                                wheel_companion_review_reasons[event.event_id]
+                            )
+                        }
+                        if event.event_id in wheel_companion_review_reasons
                         else {}
                     ),
                     **(
@@ -1884,6 +1894,22 @@ def _trade_event_from_normalized_deal(deal: Any) -> TradeEvent:
     multiplier_source = str(getattr(deal, "multiplier_source", "") or "").strip()
     if multiplier_source:
         raw_payload.setdefault("multiplier_source", multiplier_source)
+        diagnostics = getattr(deal, "normalization_diagnostics", {}) or {}
+        multiplier_diagnostics = diagnostics.get("multiplier_resolution")
+        if isinstance(multiplier_diagnostics, Mapping):
+            multiplier_evidence = multiplier_diagnostics.get(
+                "multiplier_evidence"
+            )
+            if isinstance(multiplier_evidence, Mapping):
+                raw_payload.setdefault(
+                    "multiplier_evidence",
+                    dict(multiplier_evidence),
+                )
+            evidence_hash = str(
+                multiplier_diagnostics.get("multiplier_evidence_hash") or ""
+            ).strip()
+            if evidence_hash:
+                raw_payload.setdefault("multiplier_evidence_hash", evidence_hash)
     event_time_ms = _required_broker_trade_time_ms(deal)
     contract_key = ContractKey.from_values(
         broker=getattr(deal, "broker", None) or "富途",

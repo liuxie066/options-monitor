@@ -951,20 +951,6 @@ def _wheel_batch_views(
         for item in brief.get("wheel_batches") or []
         if isinstance(item, Mapping)
     ]
-    if delivery_kind == "candidate_alert":
-        changed_lots = {
-            str(action.get("position_lot_id") or "").strip()
-            for change in diff.get("changes") or []
-            if isinstance(change, Mapping)
-            and isinstance((action := change.get("action")), Mapping)
-            and _lower(action.get("strategy_family")) == "wheel"
-            and str(action.get("position_lot_id") or "").strip()
-        }
-        rows = [
-            row
-            for row in rows
-            if str(row.get("position_lot_id") or "").strip() in changed_lots
-        ]
     symbol_counts: dict[str, int] = {}
     for row in rows:
         symbol = _upper(row.get("symbol"))
@@ -973,22 +959,42 @@ def _wheel_batch_views(
     out: list[dict[str, Any]] = []
     for row in rows:
         symbol = _upper(row.get("symbol")) or "未知标的"
-        lot_id = str(row.get("position_lot_id") or "").strip()
-        suffix = f" · 批次 {lot_id[-8:]}" if symbol_counts.get(symbol, 0) > 1 else ""
+        branch_id = str(
+            row.get("wheel_branch_id") or row.get("position_lot_id") or ""
+        ).strip()
+        suffix = (
+            f" · 分支 {branch_id[-8:]}" if symbol_counts.get(symbol, 0) > 1 else ""
+        )
+        direction = _lower(row.get("direction") or "call")
         shares = max(0, int(row.get("shares_remaining") or 0))
         contracts = max(0, int(row.get("recommended_contracts") or 0))
-        details = [f"剩余股份：{shares} 股"]
+        details = (
+            [f"剩余股份：{shares} 股"]
+            if direction == "call"
+            else [f"剩余轮转：{max(0, int(row.get('remaining_contracts') or 0))} 张"]
+        )
+        if direction == "put" and _number(row.get("principal_anchor")) is not None:
+            details.append(
+                "本金锚："
+                + _money(_number(row.get("principal_anchor")), market=market)
+            )
         if contracts > 0:
             expiration = str(row.get("expiration") or "").strip()
             strike = _number(row.get("strike"))
             contract = _human_contract(
                 expiration=expiration,
                 strike=strike,
-                option_type="call",
+                option_type=direction,
                 market=market,
             )
             details.append(f"建议：卖出 {contracts} 张 {contract}")
-            premium = _number(row.get("candidate_call_net_premium"))
+            premium = _number(
+                row.get(
+                    "candidate_put_net_premium"
+                    if direction == "put"
+                    else "candidate_call_net_premium"
+                )
+            )
             if premium is not None:
                 details.append(f"本轮预计净权利金：{_money(premium, market=market)}")
             lifecycle_pnl = _number(
@@ -1002,13 +1008,23 @@ def _wheel_batch_views(
                     else "本轮行权后预计累计净收益"
                 )
                 details.append(f"{label}：{_money(lifecycle_pnl, market=market)}")
+            remainder = _number(row.get("replenishment_cash_remainder"))
+            if direction == "put" and remainder is not None:
+                details.append(
+                    f"预计补仓后剩余现金：{_money(remainder, market=market)}"
+                )
         else:
             details.append(
                 "状态：" + _wheel_reason_text(
                     row.get("reason_code") or row.get("status")
                 )
             )
-        out.append({"title": f"{symbol} · Wheel{suffix}", "details": details})
+        out.append(
+            {
+                "title": f"{symbol} · Wheel {direction.title()}{suffix}",
+                "details": details,
+            }
+        )
     return out
 
 
@@ -1018,6 +1034,16 @@ def _wheel_reason_text(value: Any) -> str:
         "wheel_disabled": "策略已关闭，现有生命周期继续监控",
         "wheel_call_open": "已有 Wheel Call，等待后续状态",
         "wheel_call_pending": "已有 Call intent，等待成交或取消",
+        "wheel_put_open": "已有 Wheel Put，等待后续状态",
+        "wheel_put_pending": "已有 Put intent，等待成交或取消",
+        "pending_decision": "等待确认是否启动下一阶段监控",
+        "option_open": "已有 Wheel 期权，等待后续状态",
+        "intent_pending": "已有意图，等待手工成交或取消",
+        "residual_capacity": "仍有剩余容量，等待下一轮评估",
+        "linkage_unresolved": "成交归属待人工确认",
+        "converted": "本阶段已转换，等待下一分支决定",
+        "manual_ended": "本分支已人工结束",
+        "cash_capacity_insufficient": "可用现金不足",
         "share_capacity_insufficient": "可覆盖股份不足",
         "share_capacity_oversubscribed": "Short Call 覆盖超过持股，高风险",
         "no_candidate": "当前没有通过门槛的 Call",
@@ -2152,8 +2178,22 @@ def _candidate_alert_brief(
         representative = item.get("representative")
         if family in candidates and isinstance(representative, Mapping):
             candidates[family].append(representative)
+    wheel_branch_ids = {
+        str(representative.get("wheel_branch_id") or representative.get("position_lot_id") or "").strip()
+        for item in shown
+        if _lower(item.get("strategy_family")) == "wheel"
+        and isinstance((representative := item.get("representative")), Mapping)
+        and str(representative.get("wheel_branch_id") or representative.get("position_lot_id") or "").strip()
+    }
     filtered = dict(brief)
     filtered["candidates"] = candidates
+    filtered["wheel_batches"] = [
+        dict(row)
+        for row in brief.get("wheel_batches") or []
+        if isinstance(row, Mapping)
+        and str(row.get("wheel_branch_id") or row.get("position_lot_id") or "").strip()
+        in wheel_branch_ids
+    ]
     filtered["positions"] = []
     return filtered, max(0, len(selected) - len(shown))
 

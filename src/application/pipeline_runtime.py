@@ -315,11 +315,13 @@ def main(argv: list[str] | None = None) -> int:
                     opend_fetch_config=opend_kwargs,
                 )
                 if refreshed.ok and refreshed.multiplier:
-                    cache[sym] = {
-                        "multiplier": int(refreshed.multiplier),
-                        "as_of_utc": multiplier_cache.utc_now(),
-                        "source": "opend",
-                    }
+                    multiplier_cache.store_multiplier(
+                        cache,
+                        sym,
+                        int(refreshed.multiplier),
+                        source="opend",
+                        source_receipt_sha256=refreshed.source_receipt_sha256,
+                    )
             multiplier_cache.save_cache(cache_path, cache)
         except Exception:
             pass

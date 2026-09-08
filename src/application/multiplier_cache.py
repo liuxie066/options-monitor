@@ -32,6 +32,7 @@ except Exception:  # pragma: no cover - non-Unix fallback
     fcntl = None  # type: ignore[assignment]
 
 from domain.domain.symbol_identity import canonical_symbol_aliases, resolve_underlier_alias
+from domain.domain.decision_state_fingerprint import canonical_sha256
 from src.application.opend_fetch_config import filter_opend_fetch_kwargs
 from src.application.write_contract import attach_write_contract
 from src.application.runtime_paths import resolve_runtime_root
@@ -151,6 +152,7 @@ class RefreshResult:
     ok: bool
     multiplier: int | None = None
     error: str | None = None
+    source_receipt_sha256: str | None = None
 
 
 def get_cached_multiplier_source(cache: dict[str, Any], symbol: str) -> str | None:
@@ -223,6 +225,22 @@ def resolve_multiplier_with_source_and_diagnostics(
     cached = get_cached_multiplier(cache, sym)
     if cached:
         source = get_cached_multiplier_source(cache, sym) or "cache"
+        cache_entry = next(
+            (
+                cache.get(alias)
+                for alias in _symbol_aliases(sym)
+                if isinstance(cache.get(alias), dict)
+                and _positive_int(cache.get(alias, {}).get("multiplier"))
+                == int(cached)
+            ),
+            {},
+        )
+        evidence = cache_entry.get("multiplier_evidence")
+        evidence_hash = cache_entry.get("multiplier_evidence_hash")
+        if isinstance(evidence, dict):
+            diagnostics["multiplier_evidence"] = dict(evidence)
+        if evidence_hash not in (None, ""):
+            diagnostics["multiplier_evidence_hash"] = str(evidence_hash)
         diagnostics["selected_source"] = source
         diagnostics["attempted_sources"].append({"source": "cache", "status": "resolved", "value": int(cached)})
         return int(cached), source, diagnostics
@@ -238,8 +256,27 @@ def resolve_multiplier_with_source_and_diagnostics(
             opend_fetch_config=opend_fetch_config,
         )
         if refreshed.ok and refreshed.multiplier and int(refreshed.multiplier) > 0:
-            update = store_multiplier({}, sym, int(refreshed.multiplier), source="opend")
+            update = store_multiplier(
+                {},
+                sym,
+                int(refreshed.multiplier),
+                source="opend",
+                source_receipt_sha256=getattr(
+                    refreshed,
+                    "source_receipt_sha256",
+                    None,
+                ),
+            )
             merge_cache_updates(cache_path, update)
+            entry = update[sym]
+            if isinstance(entry.get("multiplier_evidence"), dict):
+                diagnostics["multiplier_evidence"] = dict(
+                    entry["multiplier_evidence"]
+                )
+            if entry.get("multiplier_evidence_hash"):
+                diagnostics["multiplier_evidence_hash"] = str(
+                    entry["multiplier_evidence_hash"]
+                )
             diagnostics["selected_source"] = "opend"
             diagnostics["attempted_sources"].append({"source": "opend", "status": "resolved", "value": int(refreshed.multiplier)})
             return int(refreshed.multiplier), "opend", diagnostics
@@ -306,17 +343,44 @@ def refresh_via_opend(
                 continue
         if not m:
             return RefreshResult(symbol=sym, ok=False, multiplier=None, error="multiplier_not_found")
-        return RefreshResult(symbol=sym, ok=True, multiplier=int(m))
+        return RefreshResult(
+            symbol=sym,
+            ok=True,
+            multiplier=int(m),
+            source_receipt_sha256=canonical_sha256(payload),
+        )
     except Exception as e:
         return RefreshResult(symbol=sym, ok=False, multiplier=None, error=f"{type(e).__name__}: {e}")
 
 
-def store_multiplier(cache: dict[str, Any], symbol: str, multiplier: int, *, source: str = "opend") -> dict[str, Any]:
-    cache[normalize_symbol(symbol)] = {
+def store_multiplier(
+    cache: dict[str, Any],
+    symbol: str,
+    multiplier: int,
+    *,
+    source: str = "opend",
+    source_receipt_sha256: str | None = None,
+) -> dict[str, Any]:
+    canonical_symbol = normalize_symbol(symbol)
+    entry = {
         "multiplier": int(multiplier),
         "as_of_utc": utc_now(),
         "source": str(source),
     }
+    receipt_hash = str(source_receipt_sha256 or "").strip().lower()
+    if len(receipt_hash) == 64 and all(
+        value in "0123456789abcdef" for value in receipt_hash
+    ):
+        evidence = {
+            "schema_version": "contract_multiplier_evidence.v1",
+            "source": str(source).strip().lower(),
+            "canonical_symbol": canonical_symbol,
+            "multiplier": int(multiplier),
+            "source_receipt_sha256": receipt_hash,
+        }
+        entry["multiplier_evidence"] = evidence
+        entry["multiplier_evidence_hash"] = canonical_sha256(evidence)
+    cache[canonical_symbol] = entry
     return cache
 
 
@@ -467,7 +531,13 @@ def cmd_refresh(cache_path: Path, symbols: list[str], *, host: str, port: int, l
         r = refresh_via_opend(repo_base=Path(__file__).resolve().parents[2], symbol=sym, host=host, port=port, limit_expirations=limit_expirations)
         results.append(r)
         if r.ok and r.multiplier:
-            store_multiplier(cache, sym, int(r.multiplier), source="opend")
+            store_multiplier(
+                cache,
+                sym,
+                int(r.multiplier),
+                source="opend",
+                source_receipt_sha256=r.source_receipt_sha256,
+            )
             updated += 1
 
     if updated:
