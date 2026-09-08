@@ -518,6 +518,7 @@ def _build_single_prefetch_fetch_plan(
     sell_put_cfg = _as_dict(symbol_cfg.get("sell_put"))
     sell_call_cfg = _as_dict(symbol_cfg.get("sell_call"))
     wheel_call_cfg = _as_dict(symbol_cfg.get("_wheel_call"))
+    wheel_put_cfg = _as_dict(symbol_cfg.get("_wheel_put"))
     combo_yield_cfg = resolve_combo_yield_cfg(symbol_cfg)
     yield_policy = derive_combo_yield_policy(combo_yield_cfg)
     want_put = bool(sell_put_cfg.get("enabled", False))
@@ -542,6 +543,7 @@ def _build_single_prefetch_fetch_plan(
         sell_put_cfg=sell_put_cfg,
         sell_call_cfg=sell_call_cfg,
         wheel_call_cfg=wheel_call_cfg,
+        wheel_put_cfg=wheel_put_cfg,
         combo_yield_cfg=combo_yield_cfg,
         position_requirements=position_requirements,
         symbol_cfg=symbol_cfg,

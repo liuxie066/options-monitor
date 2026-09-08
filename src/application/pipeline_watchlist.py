@@ -72,11 +72,13 @@ from src.application.prepared_option_positions_context import (
 )
 from src.application.wheel.candidate_snapshot import seal_wheel_candidate_snapshot
 from src.application.wheel.capacity import (
+    build_shared_cash_capacity_fact,
     build_shared_coverage_facts,
     finalize_wheel_capacity,
+    finalize_wheel_put_capacity,
 )
 from src.application.wheel.config import resolve_wheel_config
-from src.application.wheel.scanning import run_wheel_call_scan
+from src.application.wheel.scanning import run_wheel_call_scan, run_wheel_put_scan
 
 LIQUIDITY_COMMON_FIELDS = (
     'min_open_interest',
@@ -187,6 +189,11 @@ def _normalize_candidate_capture_status(
     return {
         "symbol": symbol,
         "strategy_mode": mode,
+        "direction": (
+            str(raw.get("direction") or "").strip().lower()
+            if owner == "wheel"
+            else ""
+        ),
         "status": status,
         "reason": str(raw.get("reason") or "").strip(),
         "quote_snapshot_id": (
@@ -227,6 +234,7 @@ def _index_owner_statuses(
             {
                 "symbol": normalize_symbol_read(item.get("symbol")),
                 "strategy_mode": str(item.get("strategy_mode") or "").strip().lower(),
+                "direction": str(item.get("direction") or "").strip().lower(),
                 "status": str(item.get("status") or "").strip().lower(),
                 "reason": str(
                     item.get("reason_code") or item.get("reason") or ""
@@ -244,7 +252,11 @@ def _index_owner_statuses(
         )
     for owner in statuses_by_owner:
         statuses_by_owner[owner].sort(
-            key=lambda item: (str(item["symbol"]), str(item["strategy_mode"]))
+            key=lambda item: (
+                str(item["symbol"]),
+                str(item["strategy_mode"]),
+                str(item["direction"]),
+            )
         )
     return statuses_by_owner
 
@@ -255,23 +267,33 @@ def _validate_captured_statuses(
     statuses_by_owner: dict[str, list[dict[str, Any]]],
 ) -> None:
     expected = {
-        (owner, str(item["symbol"]), str(item["strategy_mode"])): item
+        (
+            owner,
+            str(item["symbol"]),
+            str(item["strategy_mode"]),
+            str(item.get("direction") or ""),
+        ): item
         for owner, rows in statuses_by_owner.items()
         for item in rows
     }
-    seen: set[tuple[str, str, str]] = set()
+    seen: set[tuple[str, str, str, str]] = set()
     for raw in captured:
         item = _normalize_candidate_capture_status(raw)
-        key = (str(item["owner"]), str(item["symbol"]), str(item["strategy_mode"]))
+        key = (
+            str(item["owner"]),
+            str(item["symbol"]),
+            str(item["strategy_mode"]),
+            str(item.get("direction") or ""),
+        )
         if key not in expected:
             raise ValueError(
                 f"unexpected {_capture_scope_error_label(str(item['owner']))} scan scope: "
-                f"{item['symbol']}:{item['strategy_mode']}"
+                f"{item['symbol']}:{item['strategy_mode']}:{item.get('direction') or '-'}"
             )
         if key in seen:
             raise ValueError(
                 f"duplicate {_capture_scope_error_label(str(item['owner']))} scan scope: "
-                f"{item['symbol']}:{item['strategy_mode']}"
+                f"{item['symbol']}:{item['strategy_mode']}:{item.get('direction') or '-'}"
             )
         seen.add(key)
         bound = expected[key]
@@ -296,7 +318,8 @@ def _validate_captured_statuses(
         raise ValueError(
             "completed candidate capture status is missing: "
             + ", ".join(
-                f"{owner}:{symbol}:{mode}" for owner, symbol, mode in missing
+                f"{owner}:{symbol}:{mode}:{direction or '-'}"
+                for owner, symbol, mode, direction in missing
             )
         )
 
@@ -364,7 +387,7 @@ def _yield_snapshot_status(
 def _partition_combo_evidence(
     rows: list[dict[str, Any]],
     *,
-    expected_scopes_by_owner: dict[str, set[tuple[str, str]]],
+    expected_scopes_by_owner: dict[str, set[tuple[str, str, str]]],
     statuses_by_owner: dict[str, list[dict[str, Any]]],
 ) -> dict[str, list[dict[str, Any]]]:
     out: dict[str, list[dict[str, Any]]] = {"sp_lc": [], "cc_lp": []}
@@ -381,7 +404,7 @@ def _partition_combo_evidence(
         symbol = normalize_symbol_read(item.get("symbol"))
         if not symbol:
             raise ValueError("combo yield evidence symbol is missing")
-        if (symbol, "combo_yield") not in expected_scopes_by_owner[variant]:
+        if (symbol, "combo_yield", "") not in expected_scopes_by_owner[variant]:
             raise ValueError(
                 f"unexpected {_capture_scope_error_label(variant)} evidence scope: {symbol}:combo_yield"
             )
@@ -1064,27 +1087,44 @@ def run_watchlist_pipeline_default(
                 if isinstance(batch, Mapping)
                 and normalize_symbol_read(batch.get("symbol")) in wheel_symbol_filter
             ],
+            "wheel_branches": [
+                dict(branch)
+                for branch in wheel_read_model.get("wheel_branches") or []
+                if isinstance(branch, Mapping)
+                and normalize_symbol_read(branch.get("symbol")) in wheel_symbol_filter
+            ],
         }
+    wheel_branches: list[Any] = []
+    if isinstance(wheel_read_model, Mapping):
+        wheel_branches = list(wheel_read_model.get("wheel_branches") or [])
+        if not wheel_branches:
+            wheel_branches = list(wheel_read_model.get("batches") or [])
     if (
         not experience
-        and
-        isinstance(wheel_read_model, Mapping)
-        and list(wheel_read_model.get("batches") or [])
+        and isinstance(wheel_read_model, Mapping)
+        and wheel_branches
         and required_data_snapshot_batch is not None
     ):
-        active_batches = [
-            dict(batch)
-            for batch in wheel_read_model.get("batches") or []
-            if isinstance(batch, Mapping)
-            and str(batch.get("lifecycle_status") or "") == "active"
-        ]
+        branches_by_direction = {
+            direction: [
+                dict(branch)
+                for branch in wheel_branches
+                if isinstance(branch, Mapping)
+                and str(branch.get("direction") or "call").strip().lower()
+                == direction
+            ]
+            for direction in ("call", "put")
+        }
 
-        def _unavailable_wheel_capture(reason_code: str) -> dict[str, Any]:
+        def _unavailable_wheel_capture(
+            direction: str,
+            reason_code: str,
+            *,
+            status: str = "unavailable",
+        ) -> dict[str, Any]:
+            branches = branches_by_direction[direction]
             symbols = sorted(
-                {
-                    str(batch.get("symbol") or "").strip().upper()
-                    for batch in active_batches
-                }
+                {str(branch.get("symbol") or "").strip().upper() for branch in branches}
             )
             return {
                 "allocations": [],
@@ -1093,10 +1133,11 @@ def run_watchlist_pipeline_default(
                         "scope": "strategy",
                         "account": account,
                         "symbol": symbol,
+                        "direction": direction,
                         "strategy_family": "wheel",
                         "strategy_mode": "wheel",
                         "candidate_owner": "wheel",
-                        "status": "unavailable",
+                        "status": status,
                         "reason_code": reason_code,
                         "candidate_count": 0,
                     }
@@ -1105,94 +1146,206 @@ def run_watchlist_pipeline_default(
                 "batches": [
                     {
                         "account": account,
-                        "symbol": str(batch.get("symbol") or "").strip().upper(),
-                        "stock_lot_id": batch.get("stock_lot_id"),
-                        "batch_generation_hash": batch.get("batch_generation_hash"),
-                        "projection_hash": batch.get("projection_hash"),
-                        "shares_remaining": int(batch.get("shares_remaining") or 0),
-                        "phase": batch.get("phase"),
-                        "candidate_status": "unavailable",
+                        "symbol": str(branch.get("symbol") or "").strip().upper(),
+                        "wheel_branch_id": branch.get("wheel_branch_id")
+                        or branch.get("stock_lot_id"),
+                        "direction": direction,
+                        "stock_lot_id": branch.get("stock_lot_id"),
+                        "branch_generation_hash": branch.get("branch_generation_hash")
+                        or branch.get("batch_generation_hash"),
+                        "batch_generation_hash": branch.get("batch_generation_hash")
+                        or branch.get("branch_generation_hash"),
+                        "projection_hash": branch.get("projection_hash"),
+                        "shares_remaining": int(branch.get("shares_remaining") or 0),
+                        "remaining_contracts": int(
+                            branch.get("remaining_contracts") or 0
+                        ),
+                        "principal_anchor": branch.get("principal_anchor"),
+                        "currency": branch.get("currency"),
+                        "phase": branch.get("phase"),
+                        "candidate_status": status,
                         "reason_code": reason_code,
                         "raw_candidates": [],
                         "allocation": None,
                         "granted_contracts": 0,
                         "final_candidate": None,
                     }
-                    for batch in active_batches
+                    for branch in branches
                 ],
             }
 
-        try:
-            coverage_facts = build_shared_coverage_facts(
-                account=account,
-                portfolio_context=portfolio_snapshot,
-                option_context=option_snapshot,
-                wheel_read_model=wheel_read_model,
-            )
-        except Exception:
-            wheel_capture = _unavailable_wheel_capture(
-                "wheel_coverage_facts_unavailable"
-            )
-        else:
-            wheel_scan_failed = False
-            try:
-                wheel_policy = resolve_wheel_config(cfg, account)
-                usd_per_cny, cny_per_hkd = exchange_rate_scalars_from_option_context(
-                    option_snapshot
-                )
-                wheel_scan = run_wheel_call_scan(
-                    wheel_read_model,
-                    wheel_policy,
-                    required_data_snapshot_batch,
-                    {},
+        def _wheel_scan_placeholder(
+            direction: str,
+            reason_code: str,
+            *,
+            status: str,
+        ) -> dict[str, Any]:
+            return {
+                "capacity_claims": [],
+                "raw_candidates": {},
+                "scope_results": [
                     {
-                        "exchange_rate_converter": build_converter(
-                            usd_per_cny_exchange_rate=usd_per_cny,
-                            cny_per_hkd_exchange_rate=cny_per_hkd,
-                        )
-                    },
-                    decision_time_ms=int(captured_at.timestamp() * 1000),
-                )
-            except Exception:
-                wheel_scan_failed = True
-                wheel_scan = {
-                    "capacity_claims": [],
-                    "raw_candidates": {},
-                    "scope_results": [
-                        {
-                            "account": account,
-                            "symbol": str(batch.get("symbol") or "").strip().upper(),
-                            "stock_lot_id": batch.get("stock_lot_id"),
-                            "status": "failed",
-                            "reason_code": "wheel_scan_failed",
-                            "candidate_count": 0,
-                        }
-                        for batch in active_batches
-                    ],
-                }
-            try:
-                wheel_capture = finalize_wheel_capacity(
-                    account=account,
-                    wheel_read_model=wheel_read_model,
-                    wheel_scan=wheel_scan,
-                    opening_call_candidates=captured_final_candidates["call"],
-                    coverage_facts=coverage_facts,
-                )
-            except Exception:
-                wheel_capture = _unavailable_wheel_capture(
-                    "wheel_capacity_finalize_failed"
+                        "account": account,
+                        "symbol": str(branch.get("symbol") or "").strip().upper(),
+                        "direction": direction,
+                        "wheel_branch_id": branch.get("wheel_branch_id")
+                        or branch.get("stock_lot_id"),
+                        "stock_lot_id": branch.get("stock_lot_id"),
+                        "status": status,
+                        "reason_code": reason_code,
+                        "candidate_count": 0,
+                    }
+                    for branch in branches_by_direction[direction]
+                ],
+            }
+
+        fee_context: dict[str, Any] = {}
+        exchange_rate_converter: Any = None
+        try:
+            usd_per_cny, cny_per_hkd = exchange_rate_scalars_from_option_context(
+                option_snapshot
+            )
+            exchange_rate_converter = build_converter(
+                usd_per_cny_exchange_rate=usd_per_cny,
+                cny_per_hkd_exchange_rate=cny_per_hkd,
+            )
+            fee_context = {"exchange_rate_converter": exchange_rate_converter}
+            wheel_policy = resolve_wheel_config(cfg, account)
+        except Exception:
+            wheel_policy = None
+
+        coverage_facts: list[dict[str, Any]] = []
+        call_capture = _unavailable_wheel_capture("call", "wheel_not_applicable")
+        if branches_by_direction["call"]:
+            if wheel_policy is None:
+                call_capture = _unavailable_wheel_capture(
+                    "call", "wheel_scan_prerequisite_unavailable"
                 )
             else:
-                if wheel_scan_failed:
-                    wheel_capture["scope_results"] = [
-                        {
-                            **dict(scope),
-                            "status": "failed",
-                            "reason_code": "wheel_scan_failed",
-                            "candidate_count": 0,
-                        }
-                        for scope in wheel_capture["scope_results"]
-                    ]
+                try:
+                    coverage_facts = build_shared_coverage_facts(
+                        account=account,
+                        portfolio_context=portfolio_snapshot,
+                        option_context=option_snapshot,
+                        wheel_read_model=wheel_read_model,
+                    )
+                except Exception:
+                    call_capture = _unavailable_wheel_capture(
+                        "call", "wheel_coverage_facts_unavailable"
+                    )
+                else:
+                    try:
+                        call_scan = run_wheel_call_scan(
+                            wheel_read_model,
+                            wheel_policy,
+                            required_data_snapshot_batch,
+                            {},
+                            fee_context,
+                            decision_time_ms=int(captured_at.timestamp() * 1000),
+                        )
+                    except Exception:
+                        call_scan = _wheel_scan_placeholder(
+                            "call", "wheel_scan_failed", status="failed"
+                        )
+                    try:
+                        call_capture = finalize_wheel_capacity(
+                            account=account,
+                            wheel_read_model=wheel_read_model,
+                            wheel_scan=call_scan,
+                            opening_call_candidates=captured_final_candidates["call"],
+                            coverage_facts=coverage_facts,
+                        )
+                    except Exception:
+                        call_capture = _unavailable_wheel_capture(
+                            "call", "wheel_capacity_finalize_failed", status="failed"
+                        )
+
+        cash_capacity_fact: dict[str, Any] = {}
+        put_capture = _unavailable_wheel_capture("put", "wheel_not_applicable")
+        if branches_by_direction["put"]:
+            if wheel_policy is None or exchange_rate_converter is None:
+                put_capture = _unavailable_wheel_capture(
+                    "put", "wheel_scan_prerequisite_unavailable"
+                )
+            else:
+                try:
+                    cash_capacity_fact = build_shared_cash_capacity_fact(
+                        account=account,
+                        portfolio_context=portfolio_snapshot,
+                        option_context=option_snapshot,
+                        wheel_read_model=wheel_read_model,
+                        fx_snapshot=(
+                            option_snapshot.get("exchange_rates")
+                            if isinstance(option_snapshot.get("exchange_rates"), Mapping)
+                            else {}
+                        ),
+                    )
+                    if cash_capacity_fact.get("status") != "available":
+                        raise ValueError("Wheel Put cash capacity is unavailable")
+                except Exception:
+                    put_capture = _unavailable_wheel_capture(
+                        "put", "wheel_cash_capacity_unavailable"
+                    )
+                else:
+                    try:
+                        put_scan = run_wheel_put_scan(
+                            wheel_read_model,
+                            wheel_policy,
+                            required_data_snapshot_batch,
+                            fee_context,
+                            decision_time_ms=int(captured_at.timestamp() * 1000),
+                        )
+                    except Exception:
+                        put_scan = _wheel_scan_placeholder(
+                            "put", "wheel_scan_failed", status="failed"
+                        )
+                    try:
+                        put_capture = finalize_wheel_put_capacity(
+                            account=account,
+                            wheel_read_model=wheel_read_model,
+                            wheel_scan=put_scan,
+                            opening_put_candidates=captured_final_candidates["put"],
+                            cash_capacity_fact=cash_capacity_fact,
+                            exchange_rate_converter=exchange_rate_converter,
+                        )
+                    except Exception:
+                        put_capture = _unavailable_wheel_capture(
+                            "put", "wheel_capacity_finalize_failed", status="failed"
+                        )
+
+        wheel_capture = {
+            "coverage_facts": coverage_facts,
+            "cash_capacity_fact": cash_capacity_fact,
+            "share_allocations": call_capture["allocations"],
+            "cash_allocations": put_capture["allocations"],
+            "allocations": [
+                *call_capture["allocations"],
+                *put_capture["allocations"],
+            ],
+            "scope_results": sorted(
+                [
+                    *call_capture["scope_results"],
+                    *put_capture["scope_results"],
+                ],
+                key=lambda row: (
+                    str(row.get("symbol") or ""),
+                    str(row.get("direction") or ""),
+                ),
+            ),
+            "batches": sorted(
+                [*call_capture["batches"], *put_capture["batches"]],
+                key=lambda row: (
+                    str(row.get("wheel_branch_id") or ""),
+                    str(row.get("direction") or ""),
+                ),
+            ),
+            "allocation_hash": canonical_sha256(
+                {
+                    "call": call_capture.get("allocation_hash"),
+                    "put": put_capture.get("allocation_hash"),
+                }
+            ),
+        }
         wheel_expected: list[dict[str, str]] = []
         for scope in wheel_capture["scope_results"]:
             status = str(scope["status"])
@@ -1205,6 +1358,7 @@ def run_watchlist_pipeline_default(
                 market=market,
                 symbol=str(scope["symbol"]),
                 strategy_family="wheel",
+                direction=str(scope["direction"]),
                 status=status,
                 candidate_count=(int(scope["candidate_count"]) if status == "completed" else None),
                 reason=(reason or None),
@@ -1213,6 +1367,7 @@ def run_watchlist_pipeline_default(
                 {
                     "symbol": scope["symbol"],
                     "strategy_mode": "wheel",
+                    "direction": scope["direction"],
                     "status": status,
                     "reason": reason,
                 }
@@ -1222,6 +1377,7 @@ def run_watchlist_pipeline_default(
                     "market": market,
                     "symbol": str(scope["symbol"]),
                     "strategy_family": "wheel",
+                    "direction": str(scope["direction"]),
                     "strategy_mode": "wheel",
                     "candidate_owner": "wheel",
                     "account_config_sha256": str(account_config_sha256 or ""),
@@ -1237,6 +1393,7 @@ def run_watchlist_pipeline_default(
                     "strategy_mode",
                     "candidate_owner",
                     "account_config_sha256",
+                    "direction",
                 )
             }
             for item in status_index["items"]
@@ -1248,7 +1405,7 @@ def run_watchlist_pipeline_default(
             account_config_sha256=str(account_config_sha256 or ""),
             expected=existing_expected + wheel_expected,
         )
-    expected_scopes_by_owner: dict[str, set[tuple[str, str]]] = {
+    expected_scopes_by_owner: dict[str, set[tuple[str, str, str]]] = {
         "opening": set(),
         "sp_lc": set(),
         "cc_lp": set(),
@@ -1257,7 +1414,11 @@ def run_watchlist_pipeline_default(
     for item in status_index["items"]:
         owner = str(item["candidate_owner"])
         expected_scopes_by_owner[owner].add(
-            (str(item["symbol"]), str(item["strategy_mode"]))
+            (
+                str(item["symbol"]),
+                str(item["strategy_mode"]),
+                str(item.get("direction") or ""),
+            )
         )
 
     statuses_by_owner = _index_owner_statuses(status_index)

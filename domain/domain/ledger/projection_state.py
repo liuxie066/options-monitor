@@ -181,8 +181,15 @@ def _resumable_open_event(event: TradeEvent) -> TradeEvent:
             if compact_snapshot:
                 resumable_payload["strategy_snapshot"] = compact_snapshot
     else:
+        snapshot = raw_payload.get("strategy_snapshot")
+        snapshot = snapshot if isinstance(snapshot, dict) else {}
         for key in _ECONOMIC_STRATEGY_KEYS:
-            text = str(getattr(strategy_metadata.metadata, key) or "").strip()
+            value = getattr(strategy_metadata.metadata, key, None)
+            if key == "source_wheel_branch_id" and value in (None, ""):
+                value = raw_payload.get(key)
+                if value in (None, ""):
+                    value = snapshot.get(key)
+            text = str(value or "").strip()
             if text:
                 resumable_payload[key] = text
     return TradeEvent(

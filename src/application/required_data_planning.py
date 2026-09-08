@@ -1122,6 +1122,7 @@ def build_required_data_fetch_plan(
     sell_put_cfg: dict | None = None,
     sell_call_cfg: dict | None = None,
     wheel_call_cfg: dict | None = None,
+    wheel_put_cfg: dict | None = None,
     combo_yield_cfg: dict | None = None,
     position_requirements: list[dict[str, Any]] | None = None,
     symbol_cfg: dict[str, Any] | None = None,
@@ -1171,6 +1172,7 @@ def build_required_data_fetch_plan(
     sell_put_cfg = dict(sell_put_cfg or {})
     sell_call_cfg = dict(sell_call_cfg or {})
     wheel_call_cfg = dict(wheel_call_cfg or {})
+    wheel_put_cfg = dict(wheel_put_cfg or {})
     resolved_combo_yield_cfg = dict(combo_yield_cfg or {})
     sell_put_semantics = strategy_semantics_for_side_config(family=SELL_PUT_FAMILY, side_cfg=sell_put_cfg)
     sell_call_semantics = strategy_semantics_for_side_config(family=SELL_CALL_FAMILY, side_cfg=sell_call_cfg)
@@ -1408,6 +1410,21 @@ def build_required_data_fetch_plan(
                 unbounded_max=True,
             )
         )
+    if bool(wheel_put_cfg.get("enabled", False)):
+        try:
+            side_plans.append(
+                _resolve_put_side_plan(
+                    symbol=symbol,
+                    sell_put_cfg=wheel_put_cfg,
+                    limit_expirations=limit_expirations,
+                    available_expirations=available_expirations,
+                    trading_date=trading_date,
+                    spot_reference=spot_reference,
+                    source_prefix="wheel.put",
+                )
+            )
+        except RuntimeError as exc:
+            spot_observation_error = str(exc)
     if combo_yield_enabled:
         side_plans.append(
             _resolve_combo_yield_call_plan(
@@ -1453,6 +1470,7 @@ def build_required_data_fetch_plan(
             for item in ready_position_requirements
         )
         or bool(wheel_call_cfg.get("requires_realized_volatility", False))
+        or bool(wheel_put_cfg.get("requires_realized_volatility", False))
     )
     return RequiredDataFetchPlanBundle(
         symbol=symbol,

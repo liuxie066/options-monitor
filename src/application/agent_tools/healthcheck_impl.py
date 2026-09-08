@@ -10,7 +10,9 @@ from src.application.agent_tool_config import repo_base
 from src.application.assistant.audit import default_audit_db_path
 from src.application.channels.status import build_channel_status
 from src.application.environment_status import build_effective_env_with_status
+from src.application.wheel.runtime_readiness import build_wheel_activation_readiness
 from src.application.ledger.api import ledger_store_payload
+from src.application.runtime_config_freshness import infer_runtime_config_market
 from src.application.secret_resolver import (
     resolve_feishu_bot_config,
     resolve_feishu_holdings_config,
@@ -244,6 +246,7 @@ def run_healthcheck_tool(
     checks.append(channel_health_check)
     warnings.extend(channel_health_warnings)
 
+    ledger_store: dict[str, Any] = {}
     option_positions_bootstrap_status = None
     option_positions_bootstrap_message = None
     if data_config_path.exists() or not data_config_ref:
@@ -310,6 +313,42 @@ def run_healthcheck_tool(
                 "value": {"status": option_positions_bootstrap_status},
             }
         )
+
+    wheel_activation_readiness = build_wheel_activation_readiness(
+        config=cfg,
+        market=infer_runtime_config_market(
+            config_key=payload.get("config_key"),
+            config_path=config_path,
+            config=cfg,
+        ),
+        accounts=accounts,
+        sqlite_path=ledger_store.get("sqlite_path"),
+    )
+    wheel_monitoring_gate = str(
+        wheel_activation_readiness.get("monitoring_gate") or "disabled"
+    )
+    wheel_account_count = int(wheel_activation_readiness.get("account_count") or 0)
+    checks.append(
+        {
+            "name": "wheel_activation_readiness",
+            "status": (
+                "ok"
+                if wheel_monitoring_gate == "enabled" or wheel_account_count == 0
+                else "error"
+                if wheel_monitoring_gate == "config_mismatch"
+                else "warn"
+            ),
+            "message": (
+                "Wheel monitoring is enabled"
+                if wheel_monitoring_gate == "enabled"
+                else "Wheel monitoring is not configured"
+                if wheel_account_count == 0
+                else "Wheel monitoring is fail-closed: "
+                f"{wheel_activation_readiness.get('reason_code')}"
+            ),
+            "value": wheel_activation_readiness,
+        }
+    )
 
     mapping_errors: list[str] = []
     mapping_preview: dict[str, dict[str, Any]] = {}
@@ -782,6 +821,7 @@ def run_healthcheck_tool(
             "account_paths": account_paths,
             "channel_health": channel_health,
             "channel_status": channel_status,
+            "wheel_activation_readiness": wheel_activation_readiness,
             "checks": checks,
             "tools": tools,
             "side_lanes": {
@@ -797,6 +837,15 @@ def run_healthcheck_tool(
                 "critical_count": len(critical),
                 "warning_count": len(warnings) + len(
                     [item for item in checks if item["status"] == "warn" and not bool(item.get("summary_excluded"))]
+                ),
+                "wheel_activation_monitoring_gate": wheel_activation_readiness.get(
+                    "monitoring_gate"
+                ),
+                "wheel_activation_reason_code": wheel_activation_readiness.get(
+                    "reason_code"
+                ),
+                "wheel_activation_enabled_account_count": wheel_activation_readiness.get(
+                    "enabled_account_count"
                 ),
             },
         },

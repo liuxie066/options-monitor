@@ -12,6 +12,11 @@ from src.application.wheel import (
     finalize_wheel_capacity,
     run_wheel_call_scan,
 )
+from src.application.wheel.capacity import (
+    finalize_wheel_put_capacity,
+    revalidate_selected_wheel_put_candidate,
+)
+from src.application.wheel.scanning import run_wheel_put_scan
 from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
 
@@ -29,6 +34,7 @@ def _read_model() -> dict:
                 "lifecycle_status": "active",
                 "integrity_status": "trusted",
                 "phase": "ready",
+                "monitoring_gate": "enabled",
                 "shares_remaining": 100,
                 "batch_generation_hash": "a" * 64,
                 "projection_hash": "b" * 64,
@@ -63,7 +69,10 @@ def _policy() -> dict:
         "enabled_for_new_lifecycle": True,
         "min_dte": 30,
         "max_dte": 45,
-        "min_delta": 0.30,
+        "min_abs_delta": 0.25,
+        "max_abs_delta": 0.35,
+        "min_open_interest": 0,
+        "min_volume": 0,
         "min_annualized_net_premium_return": 0.10,
         "min_net_premium_cny": 50,
         "max_spread_ratio": 0.40,
@@ -391,9 +400,11 @@ def test_rejected_wheel_grant_recomputes_pool_without_regranting_later_claims(
 
 
 def test_wheel_scan_disabled_keeps_batch_status_without_candidate_demand() -> None:
+    model = _read_model()
+    model["batches"][0]["monitoring_gate"] = "disabled"
     result = run_wheel_call_scan(
-        _read_model(),
-        {**_policy(), "enabled_for_new_lifecycle": False},
+        model,
+        _policy(),
         {"frames": {}},
         {},
         {},
@@ -563,3 +574,239 @@ def test_partial_capacity_grant_recomputes_final_candidate_economics() -> None:
     assert final["candidate_covered_shares"] == 100
     assert final["estimated_stock_exit_fees"] == 10
     assert final["candidate_call_net_premium"] * 2 == raw["candidate_call_net_premium"]
+
+
+def test_wheel_put_scan_and_account_cash_grant_are_direction_aware() -> None:
+    model = {
+        "account": "lx",
+        "wheel_branches": [
+            {
+                "account": "lx",
+                "symbol": "NVDA",
+                "wheel_branch_id": branch_id,
+                "direction": "put",
+                "lifecycle_status": "active",
+                "integrity_status": "trusted",
+                "phase": "ready",
+                "monitoring_gate": "enabled",
+                "remaining_contracts": 1,
+                "multiplier": 100,
+                "principal_anchor": 10_010,
+                "realized_put_net_pnl_in_current_stage": 0,
+                "currency": "USD",
+                "branch_generation_hash": generation * 64,
+                "projection_hash": projection * 64,
+            }
+            for branch_id, generation, projection in (
+                ("branch-a", "a", "c"),
+                ("branch-b", "b", "d"),
+            )
+        ],
+    }
+    row = phase2_opening_row(
+        {
+            "symbol": "NVDA",
+            "option_type": "put",
+            "expiration": "2026-05-06",
+            "dte": 35,
+            "contract_symbol": "NVDA-PUT-99",
+            "multiplier": 100,
+            "currency": "USD",
+            "strike": 99,
+            "spot": 100,
+            "bid": 2.0,
+            "ask": 2.2,
+            "last_price": 2.1,
+            "mid": 2.1,
+            "open_interest": 500,
+            "volume": 50,
+            "implied_volatility": 0.30,
+            "term_matched_rv": 0.20,
+            "delta": -0.30,
+        }
+    )
+    converter = CurrencyConverter(
+        ExchangeRates(usd_per_cny=0.14, cny_per_hkd=0.92)
+    )
+    scan = run_wheel_put_scan(
+        model,
+        _policy(),
+        {"frames": {"NVDA": pd.DataFrame([row])}},
+        {
+            "exchange_rate_converter": converter,
+            "stock_assignment_fee_fact_fn": lambda _branch, _candidate, _shares: {
+                "basis": "estimated",
+                "amount": 10,
+            },
+        },
+        decision_time_ms=int(AS_OF.timestamp() * 1000),
+    )
+    captured = finalize_wheel_put_capacity(
+        account="lx",
+        wheel_read_model=model,
+        wheel_scan=scan,
+        opening_put_candidates=[],
+        cash_capacity_fact={
+            "account": "lx",
+            "status": "available",
+            "cash_authority": {"status": "available", "logical_account": "lx"},
+            "cash_authority_hash": "authority-1",
+            "cash_by_currency": {"USD": 15_000},
+            "cash_secured_by_currency": {},
+            "wheel_intent_reservations": [],
+            "fx_snapshot": {"rates": {}},
+        },
+        exchange_rate_converter=converter,
+    )
+
+    allocations = {
+        row["wheel_branch_id"]: row for row in captured["allocations"]
+    }
+    batches = {row["wheel_branch_id"]: row for row in captured["batches"]}
+    assert len(scan["capacity_claims"]) == 2
+    assert allocations["branch-a"]["granted_contracts"] == 1
+    assert allocations["branch-b"]["granted_contracts"] == 0
+    assert batches["branch-a"]["final_candidate"]["direction"] == "put"
+    assert batches["branch-a"]["final_candidate"]["cash_reservation_amount"] == 9_900
+    assert batches["branch-b"]["final_candidate"] is None
+    assert [(row["symbol"], row["direction"]) for row in captured["scope_results"]] == [
+        ("NVDA", "put")
+    ]
+
+
+def test_wheel_pending_put_branch_remains_visible_without_required_data() -> None:
+    model = {
+        "account": "lx",
+        "wheel_branches": [
+            {
+                "account": "lx",
+                "symbol": "NVDA",
+                "wheel_branch_id": "pending-put",
+                "direction": "put",
+                "lifecycle_status": "pending_decision",
+                "integrity_status": "trusted",
+                "phase": "pending_decision",
+                "monitoring_gate": "enabled",
+                "remaining_contracts": 1,
+                "branch_generation_hash": "a" * 64,
+                "projection_hash": "b" * 64,
+            }
+        ],
+    }
+
+    scan = run_wheel_put_scan(
+        model,
+        _policy(),
+        {"frames": {}},
+        {},
+        decision_time_ms=int(AS_OF.timestamp() * 1000),
+    )
+
+    assert scan["capacity_claims"] == []
+    assert scan["scope_results"][0]["status"] == "not_applicable"
+    assert scan["scope_results"][0]["reason_code"] == "wheel_pending_decision"
+
+
+def test_wheel_put_revalidation_consumes_frozen_fx_rate_facts() -> None:
+    allocation = revalidate_selected_wheel_put_candidate(
+        cash_capacity_fact={
+            "account": "lx",
+            "status": "available",
+            "cash_authority": {"status": "available", "logical_account": "lx"},
+            "cash_authority_hash": "authority-1",
+            "cash_by_currency": {"CNY": 70_000},
+            "cash_secured_by_currency": {},
+            "wheel_intent_reservations": [],
+            "fx_snapshot": {
+                "fx_rate_facts": [
+                    {
+                        "fact_id": "fx-usd-cny",
+                        "base_currency": "USD",
+                        "quote_currency": "CNY",
+                        "rate": 7,
+                        "effective_at_ms": 1_000,
+                        "observed_at_ms": 1_001,
+                        "revision": 1,
+                    }
+                ]
+            },
+        },
+        final_candidate={
+            "claim_id": "wheel:put:branch-a",
+            "wheel_branch_id": "branch-a",
+            "symbol": "NVDA",
+            "currency": "USD",
+            "strike": 100,
+            "multiplier": 100,
+            "granted_contracts": 1,
+        },
+    )
+
+    assert allocation["allocation_status"] == "allocated"
+    assert allocation["cash_reservation_amount"] == 10_000
+
+
+def test_wheel_finalizers_preserve_homogeneous_scan_failure_reason() -> None:
+    call_result = finalize_wheel_capacity(
+        account="lx",
+        wheel_read_model=_read_model(),
+        wheel_scan={
+            "scope_results": [
+                {
+                    "symbol": "NVDA",
+                    "stock_lot_id": "stock-1",
+                    "status": "failed",
+                    "reason_code": "wheel_scan_failed",
+                }
+            ],
+            "raw_candidates": {},
+            "capacity_claims": [],
+        },
+        opening_call_candidates=[],
+        coverage_facts=[],
+    )
+    put_result = finalize_wheel_put_capacity(
+        account="lx",
+        wheel_read_model={
+            "account": "lx",
+            "wheel_branches": [
+                {
+                    "account": "lx",
+                    "symbol": "NVDA",
+                    "wheel_branch_id": "put-1",
+                    "direction": "put",
+                    "branch_generation_hash": "a" * 64,
+                    "projection_hash": "b" * 64,
+                }
+            ],
+        },
+        wheel_scan={
+            "scope_results": [
+                {
+                    "symbol": "NVDA",
+                    "wheel_branch_id": "put-1",
+                    "status": "failed",
+                    "reason_code": "wheel_scan_failed",
+                }
+            ],
+            "raw_candidates": {},
+            "capacity_claims": [],
+        },
+        opening_put_candidates=[],
+        cash_capacity_fact={
+            "account": "lx",
+            "status": "available",
+            "cash_authority": {"status": "available", "logical_account": "lx"},
+            "cash_authority_hash": "authority-1",
+            "cash_by_currency": {"USD": 15_000},
+            "cash_secured_by_currency": {},
+            "wheel_intent_reservations": [],
+            "fx_snapshot": {"rates": {}},
+        },
+        exchange_rate_converter=CurrencyConverter(
+            ExchangeRates(usd_per_cny=0.14, cny_per_hkd=0.92)
+        ),
+    )
+
+    assert call_result["scope_results"][0]["reason_code"] == "wheel_scan_failed"
+    assert put_result["scope_results"][0]["reason_code"] == "wheel_scan_failed"

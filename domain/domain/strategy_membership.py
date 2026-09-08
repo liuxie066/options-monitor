@@ -20,6 +20,7 @@ class StrategyMetadata:
     leg_role: str = ""
     strategy_group_id: str | None = None
     source_stock_lot_id: str | None = None
+    source_wheel_branch_id: str | None = None
     expiry_structure: str | None = None
 
 
@@ -37,6 +38,7 @@ class OptionStrategyMembership:
     leg_role: str | None = None
     strategy_group_id: str | None = None
     source_stock_lot_id: str | None = None
+    source_wheel_branch_id: str | None = None
     issues: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
@@ -47,6 +49,7 @@ class OptionStrategyMembership:
             "leg_role": self.leg_role,
             "strategy_group_id": self.strategy_group_id,
             "source_stock_lot_id": self.source_stock_lot_id,
+            "source_wheel_branch_id": self.source_wheel_branch_id,
             "issues": list(self.issues),
         }
 
@@ -66,6 +69,7 @@ def resolve_strategy_metadata(
         "leg_role": _lower,
         "strategy_group_id": _text,
         "source_stock_lot_id": _text,
+        "source_wheel_branch_id": _text,
         "expiry_structure": _lower,
     }
     for key, normalize in normalizers.items():
@@ -86,6 +90,7 @@ def resolve_strategy_metadata(
             leg_role=values["leg_role"],
             strategy_group_id=values["strategy_group_id"] or None,
             source_stock_lot_id=values["source_stock_lot_id"] or None,
+            source_wheel_branch_id=values["source_wheel_branch_id"] or None,
             expiry_structure=expiry_structure,
         ),
         issues=tuple(issues),
@@ -118,6 +123,9 @@ def resolve_option_strategy_membership(
             leg_role=metadata.leg_role or None,
             strategy_group_id=(metadata.strategy_group_id if keep_relationship else None),
             source_stock_lot_id=(metadata.source_stock_lot_id if keep_relationship else None),
+            source_wheel_branch_id=(
+                metadata.source_wheel_branch_id if keep_relationship else None
+            ),
             issues=issues,
         )
 
@@ -143,8 +151,29 @@ def resolve_option_strategy_membership(
             return result(combo, keep_relationship=True, issues=())
         return result(issues=("strategy_attribution_conflict",))
 
-    if strategy == "wheel" or role == "wheel_call" or metadata.source_stock_lot_id:
-        if strategy == "wheel" and role == "wheel_call" and metadata.source_stock_lot_id and leg_type == "sell_call":
+    if (
+        strategy == "wheel"
+        or role in {"wheel_call", "wheel_put"}
+        or metadata.source_wheel_branch_id
+    ):
+        valid_wheel = (
+            strategy == "wheel"
+            and metadata.source_wheel_branch_id
+            and (
+                role == "wheel_call"
+                and metadata.source_stock_lot_id
+                and leg_type == "sell_call"
+                or role == "wheel_put" and leg_type == "sell_put"
+            )
+        )
+        legacy_wheel_call = (
+            strategy == "wheel"
+            and role == "wheel_call"
+            and metadata.source_stock_lot_id
+            and not metadata.source_wheel_branch_id
+            and leg_type == "sell_call"
+        )
+        if valid_wheel or legacy_wheel_call:
             return result("wheel", keep_relationship=True, issues=())
         return result(issues=("strategy_attribution_conflict",))
 
@@ -155,7 +184,10 @@ def resolve_option_strategy_membership(
     if expected_leg and leg_type != expected_leg:
         return result(issues=("strategy_attribution_conflict",))
 
-    return result(issues=())
+    return result(
+        keep_relationship=bool(metadata.source_stock_lot_id),
+        issues=(),
+    )
 
 
 def resolve_expiry_structure(

@@ -1114,7 +1114,13 @@ def _load_wheel_snapshot_family(
 
     batch_views: list[dict[str, Any]] = []
     candidates: list[dict[str, Any]] = []
-    for source_row, raw in enumerate(snapshot.get("batches") or [], start=1):
+    snapshot_rows = (
+        snapshot.get("wheel_branches")
+        or snapshot.get("branches")
+        or snapshot.get("batches")
+        or []
+    )
+    for source_row, raw in enumerate(snapshot_rows, start=1):
         batch = _json_safe(dict(raw))
         symbol = canonical_symbol(batch.get("symbol"))
         if not symbol or symbol_market(symbol) != market:
@@ -1122,10 +1128,18 @@ def _load_wheel_snapshot_family(
         final = batch.get("final_candidate")
         final = dict(final) if isinstance(final, Mapping) else None
         stock_lot_id = _text(batch.get("stock_lot_id"))
+        branch_id = _text(batch.get("wheel_branch_id")) or stock_lot_id
+        direction = _text(batch.get("direction") or "call").lower()
         view = {
             "position_lot_id": stock_lot_id,
+            "wheel_branch_id": branch_id,
+            "direction": direction,
             "symbol": symbol,
             "shares_remaining": int(batch.get("shares_remaining") or 0),
+            "remaining_contracts": int(batch.get("remaining_contracts") or 0),
+            "principal_anchor": batch.get("principal_anchor"),
+            "currency": _text(batch.get("currency")).upper(),
+            "lifecycle_status": _text(batch.get("lifecycle_status")),
             "status": _text(batch.get("phase") or batch.get("candidate_status")),
             "reason_code": _text(batch.get("reason_code")) or None,
             "recommended_contracts": int(batch.get("granted_contracts") or 0),
@@ -1136,6 +1150,12 @@ def _load_wheel_snapshot_family(
             "strike": (final or {}).get("strike"),
             "candidate_call_net_premium": (final or {}).get(
                 "candidate_call_net_premium"
+            ),
+            "candidate_put_net_premium": (final or {}).get(
+                "candidate_put_net_premium"
+            ),
+            "replenishment_cash_remainder": (final or {}).get(
+                "replenishment_cash_remainder"
             ),
             "projected_lifecycle_net_pnl_if_called": (final or {}).get(
                 "projected_lifecycle_net_pnl_if_called"
@@ -1153,19 +1173,29 @@ def _load_wheel_snapshot_family(
                 "symbol": symbol,
                 "position_lot_id": stock_lot_id,
                 "stock_lot_id": stock_lot_id,
+                "wheel_branch_id": branch_id,
+                "direction": direction,
                 "expiration": _text(
                     final.get("expiration") or final.get("expiration_ymd")
                 ),
                 "granted_contracts": int(batch.get("granted_contracts") or 0),
                 "candidate_snapshot_hash": snapshot.get("snapshot_hash"),
-                "_source_path": "state/wheel_candidate_snapshot.json",
+                "_source_path": (
+                    "state/wheel_candidate_snapshot.v2.json"
+                    if snapshot.get("schema_version") == "wheel_candidate_snapshot.v2"
+                    else "state/wheel_candidate_snapshot.json"
+                ),
                 "_source_row": source_row,
             }
         )
     source_artifacts.append(
         {
             "kind": "wheel_candidate_snapshot",
-            "path": "state/wheel_candidate_snapshot.json",
+            "path": (
+                "state/wheel_candidate_snapshot.v2.json"
+                if snapshot.get("schema_version") == "wheel_candidate_snapshot.v2"
+                else "state/wheel_candidate_snapshot.json"
+            ),
             "row_count": len(batch_views),
             "opening_status": snapshot.get("opening_status"),
             "content_sha256": snapshot.get("content_sha256"),
@@ -1627,6 +1657,7 @@ def _build_candidate_index(
                     symbol=row.get("symbol"),
                     strategy_family=family,
                     position_lot_id=row.get("position_lot_id"),
+                    wheel_branch_id=row.get("wheel_branch_id"),
                 )
             except ValueError:
                 data_gaps.append(_row_gap(row, family, "candidate_identity_invalid"))
@@ -1681,7 +1712,11 @@ def _candidate_contract_is_complete(row: Mapping[str, Any], *, family: str) -> b
             _text(row.get("contract_symbol") or row.get("code")),
             _text(row.get("expiration") or row.get("expiration_ymd")),
             _number(row.get("strike")),
-            _text(row.get("position_lot_id")) if family == "wheel" else True,
+            (
+                _text(row.get("wheel_branch_id") or row.get("position_lot_id"))
+                if family == "wheel"
+                else True
+            ),
         )
     )
 
@@ -1790,13 +1825,14 @@ def _covered_call_capacity(row: Mapping[str, Any]) -> dict[str, Any] | None:
 
 def _wheel_capacity(row: Mapping[str, Any]) -> dict[str, Any]:
     contracts = max(0, int(row.get("granted_contracts") or 0))
+    direction = _text(row.get("direction") or "call").lower()
     return {
         "contracts_available": contracts,
         "accepted": contracts >= 1,
         "reason": (
-            "share_capacity_supported"
+            f"{'cash' if direction == 'put' else 'share'}_capacity_supported"
             if contracts >= 1
-            else "share_capacity_insufficient"
+            else f"{'cash' if direction == 'put' else 'share'}_capacity_insufficient"
         ),
         "contract_symbol": _text(
             row.get("contract_symbol") or row.get("code")
@@ -1845,7 +1881,13 @@ def _candidate_action(
         )
         return action
 
-    option_type = "put" if family == "sell_put" else "call"
+    option_type = (
+        _text(row.get("direction")).lower()
+        if family == "wheel"
+        else "put"
+        if family == "sell_put"
+        else "call"
+    )
     contracts = int((capacity or {}).get("contracts_available") or 0)
     return {
         "priority": _priority_from_row(row, default="P1"),
@@ -1860,10 +1902,11 @@ def _candidate_action(
         "strike": row.get("strike"),
         "contract_symbol": _text(row.get("contract_symbol") or row.get("code")).upper(),
         "position_lot_id": _text(row.get("position_lot_id")),
+        "wheel_branch_id": _text(row.get("wheel_branch_id")),
         "title": (
             "CSP 候选"
             if family == "sell_put"
-            else "Wheel 候选"
+            else f"Wheel {option_type.title()} 候选"
             if family == "wheel"
             else "CC 候选"
         ),
@@ -1922,9 +1965,16 @@ def _candidate_view(
         "candidate_id": _text(row.get("candidate_id")),
         "rank": rank,
         "symbol": _text(row.get("symbol")).upper(),
-        "option_type": "put" if family == "sell_put" else "call",
+        "option_type": (
+            _text(row.get("direction")).lower()
+            if family == "wheel"
+            else "put"
+            if family == "sell_put"
+            else "call"
+        ),
         "contract_symbol": _text(row.get("contract_symbol") or row.get("code")).upper(),
         "position_lot_id": _text(row.get("position_lot_id")),
+        "wheel_branch_id": _text(row.get("wheel_branch_id")),
         "expiration": _text(row.get("expiration") or row.get("expiration_ymd")),
         "strike": _number(row.get("strike")),
         "priority": _priority_from_row(row, default="P1"),
@@ -2064,6 +2114,10 @@ def _candidate_metrics(row: Mapping[str, Any], *, rank: int) -> dict[str, Any]:
         "call_cost_to_put_credit",
         "combo_spread_ratio",
         "candidate_call_net_premium",
+        "candidate_put_net_premium",
+        "allocated_prior_stock_sale_net_proceeds",
+        "projected_assignment_total",
+        "replenishment_cash_remainder",
         "projected_lifecycle_net_pnl_if_called",
         "projected_lifecycle_return_if_called",
         "projected_lifecycle_pnl_scope",
@@ -2113,7 +2167,9 @@ def _dedupe_rows(rows: list[dict[str, Any]], *, family: str) -> list[dict[str, A
                 _text(row.get("call_contract_symbol")).upper(),
             )
         elif family == "wheel":
-            identity = (_text(row.get("position_lot_id")),)
+            identity = (
+                _text(row.get("wheel_branch_id") or row.get("position_lot_id")),
+            )
         else:
             identity = (
                 _text(row.get("symbol")).upper(),

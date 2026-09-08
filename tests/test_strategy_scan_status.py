@@ -7,10 +7,15 @@ import pytest
 
 from src.application.strategy_scan_status import (
     STRATEGY_SCAN_STATUS_INDEX_V2_FILE,
+    STRATEGY_SCAN_STATUS_INDEX_V4_FILE,
+    STRATEGY_SCAN_STATUS_INDEX_V4_SCHEMA,
+    STRATEGY_SCAN_STATUS_V2_SCHEMA,
     StrategyScanStatusError,
     load_strategy_scan_status_index_v2,
+    load_strategy_scan_status_index_v4,
     publish_strategy_scan_status,
     publish_strategy_scan_status_index_v2,
+    publish_strategy_scan_status_index_v4,
     validate_strategy_scan_status_index_v2,
 )
 from src.application.source_receipts import sha256_bytes
@@ -93,6 +98,94 @@ def test_v2_index_rejects_owner_mode_mismatch(
             account="lx",
             account_config_sha256="a" * 64,
             expected=_v2_expected(owner=owner, mode=mode),
+        )
+
+
+def test_wheel_direction_statuses_publish_a_v4_index(tmp_path: Path) -> None:
+    report_dir = tmp_path / "reports-wheel"
+    report_dir.mkdir()
+    expected = []
+    for direction in ("call", "put"):
+        status = publish_strategy_scan_status(
+            report_dir=report_dir,
+            run_id="run-wheel",
+            account="lx",
+            market="US",
+            symbol="NVDA",
+            strategy_family="wheel",
+            direction=direction,
+            status="completed",
+            candidate_count=0,
+        )
+        assert status["schema_version"] == STRATEGY_SCAN_STATUS_V2_SCHEMA
+        assert Path(status["status_path"]).name == (
+            f"nvda_wheel_{direction}_scan_status.v2.json"
+        )
+        expected.append(
+            {
+                "market": "US",
+                "symbol": "NVDA",
+                "strategy_family": "wheel",
+                "direction": direction,
+                "strategy_mode": "wheel",
+                "candidate_owner": "wheel",
+                "account_config_sha256": "a" * 64,
+            }
+        )
+
+    index = publish_strategy_scan_status_index_v4(
+        report_dir=report_dir,
+        run_id="run-wheel",
+        account="lx",
+        account_config_sha256="a" * 64,
+        expected=expected,
+    )
+
+    assert index["schema_version"] == STRATEGY_SCAN_STATUS_INDEX_V4_SCHEMA
+    assert {row["direction"] for row in index["items"]} == {"call", "put"}
+    assert all(row["source_status_sha256"] for row in index["items"])
+    loaded = load_strategy_scan_status_index_v4(
+        report_dir / STRATEGY_SCAN_STATUS_INDEX_V4_FILE,
+        expected_run_id="run-wheel",
+        expected_account="lx",
+        expected_account_config_sha256="a" * 64,
+    )
+    assert loaded == {key: value for key, value in index.items() if key != "index_path"}
+
+
+def test_v4_index_rejects_mixed_wheel_identity(tmp_path: Path) -> None:
+    report_dir = tmp_path / "reports-wheel-mixed"
+    report_dir.mkdir()
+    publish_strategy_scan_status(
+        report_dir=report_dir,
+        run_id="run-wheel",
+        account="lx",
+        market="US",
+        symbol="NVDA",
+        strategy_family="wheel",
+        direction="put",
+        status="completed",
+        candidate_count=0,
+    )
+
+    with pytest.raises(StrategyScanStatusError, match="requires direction"):
+        publish_strategy_scan_status_index_v2(
+            report_dir=report_dir,
+            run_id="run-wheel",
+            account="lx",
+            account_config_sha256="a" * 64,
+            expected=[
+                {
+                    "market": "US",
+                    "symbol": symbol,
+                    "strategy_family": "wheel",
+                    **({"direction": "put"} if symbol == "NVDA" else {}),
+                    "strategy_mode": "wheel",
+                    "candidate_owner": "wheel",
+                    "account_config_sha256": "a" * 64,
+                }
+                for symbol in ("NVDA", "AAPL")
+            ],
         )
 
 

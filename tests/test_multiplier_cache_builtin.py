@@ -6,6 +6,8 @@ from pathlib import Path
 from types import ModuleType
 
 from src.application.multiplier_cache import (
+    RefreshResult,
+    cmd_refresh,
     get_cached_multiplier,
     load_cache,
     merge_cache_updates,
@@ -110,7 +112,16 @@ def test_resolve_multiplier_ignores_retired_config_fallback(tmp_path: Path) -> N
 def test_resolve_multiplier_refreshes_opend_and_writes_cache(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         "src.application.multiplier_cache.refresh_via_opend",
-        lambda **_kwargs: type("Result", (), {"ok": True, "multiplier": 1000, "error": None})(),
+        lambda **_kwargs: type(
+            "Result",
+            (),
+            {
+                "ok": True,
+                "multiplier": 1000,
+                "error": None,
+                "source_receipt_sha256": "a" * 64,
+            },
+        )(),
     )
 
     value, source, diagnostics = resolve_multiplier_with_source_and_diagnostics(
@@ -125,6 +136,34 @@ def test_resolve_multiplier_refreshes_opend_and_writes_cache(monkeypatch, tmp_pa
     cache = load_cache(tmp_path / "output_shared" / "state" / "multiplier_cache.json")
     assert cache["9992.HK"]["multiplier"] == 1000
     assert cache["9992.HK"]["source"] == "opend"
+    assert diagnostics["multiplier_evidence_hash"]
+    assert cache["9992.HK"]["multiplier_evidence"]["source_receipt_sha256"] == "a" * 64
+
+
+def test_cmd_refresh_persists_opend_receipt(monkeypatch, tmp_path: Path) -> None:
+    cache_path = tmp_path / "multiplier_cache.json"
+    monkeypatch.setattr(
+        "src.application.multiplier_cache.refresh_via_opend",
+        lambda **_kwargs: RefreshResult(
+            symbol="0700.HK",
+            ok=True,
+            multiplier=500,
+            source_receipt_sha256="b" * 64,
+        ),
+    )
+
+    cmd_refresh(
+        cache_path,
+        ["0700.HK"],
+        host="127.0.0.1",
+        port=11111,
+        limit_expirations=1,
+        force=True,
+    )
+
+    assert load_cache(cache_path)["0700.HK"]["multiplier_evidence"][
+        "source_receipt_sha256"
+    ] == "b" * 64
 
 
 def test_merge_cache_updates_preserves_existing_entries(tmp_path: Path) -> None:
@@ -209,6 +248,7 @@ def test_refresh_via_opend_forwards_opend_fetch_config(monkeypatch, tmp_path: Pa
     )
 
     assert result.ok is True
+    assert len(str(result.source_receipt_sha256)) == 64
     assert captured["symbol"] == "0700.HK"
     assert captured["base_dir"] == tmp_path
     assert captured["max_wait_sec"] == 11

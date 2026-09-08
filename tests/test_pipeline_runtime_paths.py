@@ -16,6 +16,7 @@ def test_scan_pipeline_uses_runtime_root_and_loaded_config_for_refresh(monkeypat
     config_path = tmp_path / "config.us.json"
     config_path.write_text("{}", encoding="utf-8")
     captured: dict[str, object] = {}
+    saved_cache: dict[str, object] = {}
     events: list[str] = []
     cfg = {
         "symbols": [
@@ -52,11 +53,20 @@ def test_scan_pipeline_uses_runtime_root_and_loaded_config_for_refresh(monkeypat
     monkeypatch.setattr(pipeline_runtime, "load_runtime_pipeline_config", _fake_load_config)
     monkeypatch.setattr(pipeline_runtime, "opend_fetch_kwargs", _opend_kwargs)
     monkeypatch.setattr(multiplier_cache, "load_cache", lambda _path: {})
-    monkeypatch.setattr(multiplier_cache, "save_cache", lambda *_args: None)
+    monkeypatch.setattr(
+        multiplier_cache,
+        "save_cache",
+        lambda _path, cache: saved_cache.update(cache),
+    )
     monkeypatch.setattr(
         multiplier_cache,
         "refresh_via_opend",
-        lambda **_kwargs: events.append("refresh") or SimpleNamespace(ok=False, multiplier=None),
+        lambda **_kwargs: events.append("refresh")
+        or SimpleNamespace(
+            ok=True,
+            multiplier=100,
+            source_receipt_sha256="a" * 64,
+        ),
     )
     monkeypatch.setattr(pipeline_watchlist, "run_watchlist_pipeline_default", _fake_run_watchlist_pipeline_default)
 
@@ -78,6 +88,7 @@ def test_scan_pipeline_uses_runtime_root_and_loaded_config_for_refresh(monkeypat
     assert captured["report_dir"] == (runtime_root / "output_shared" / "reports").resolve()
     assert captured["state_dir"] == (runtime_root / "output_shared" / "state").resolve()
     assert captured["required_data_dir"] == (runtime_root / "output_shared" / "required_data").resolve()
+    assert saved_cache["MSFT"]["multiplier_evidence"]["source_receipt_sha256"] == "a" * 64
 
 
 def test_stage_only_notification_always_builds_compact_compatibility_bundle(monkeypatch, tmp_path: Path) -> None:

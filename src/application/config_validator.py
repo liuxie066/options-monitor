@@ -40,6 +40,14 @@ from src.application.combo_yield_config import (
     COMBO_YIELD_STRUCTURE_MODES,
     COMBO_YIELD_VARIANTS,
 )
+from src.application.wheel.config import (
+    WHEEL_ACTIVATION_DESCRIPTOR_FIELDS,
+    WHEEL_LEGACY_POLICY_FIELDS,
+    WHEEL_POLICY_FIELDS,
+    build_wheel_policy_hash,
+    normalize_wheel_activation_descriptor,
+    resolve_wheel_policy,
+)
 
 LIQUIDITY_ALLOWED_GLOBAL_FIELDS = (
     'min_open_interest',
@@ -64,14 +72,11 @@ LEGACY_SELL_PUT_OTM_FIELDS = ('min_otm_pct',)
 WHEEL_ALLOWED_FIELDS = {
     'enabled',
     'accounts',
-    'min_dte',
-    'max_dte',
     'min_delta',
-    'min_annualized_net_premium_return',
-    'min_net_premium_cny',
-    'max_spread_ratio',
-    'min_iv_rv_ratio',
-    'min_iv_minus_rv',
+    'call',
+    'put',
+    'activation_by_account',
+    *WHEEL_LEGACY_POLICY_FIELDS,
 }
 COMBO_YIELD_REMOVED_TARGET_FIELDS = (
     'target_price',
@@ -306,14 +311,88 @@ def validate_non_negative_integer(value, path: str):
         die(f'{path} must be >= 0')
 
 
+def _validate_wheel_policy_side(raw: dict, path: str) -> None:
+    _reject_unknown_keys(raw, set(WHEEL_POLICY_FIELDS), path)
+    for key in ('min_dte', 'max_dte'):
+        validate_positive_integer(raw.get(key), f'{path}.{key}')
+    if int(raw['min_dte']) > int(raw['max_dte']):
+        die(f'{path}.min_dte must be <= {path}.max_dte')
+    for key in (
+        'min_abs_delta',
+        'max_abs_delta',
+        'min_annualized_net_premium_return',
+        'max_spread_ratio',
+    ):
+        value = _finite_number(raw.get(key), f'{path}.{key}')
+        if value <= 0 or value > 1:
+            die(f'{path}.{key} must be within (0, 1]')
+    if float(raw['min_abs_delta']) > float(raw['max_abs_delta']):
+        die(f'{path}.min_abs_delta must be <= {path}.max_abs_delta')
+    validate_positive_number(raw.get('min_net_premium_cny'), f'{path}.min_net_premium_cny')
+    for key in ('min_open_interest', 'min_volume', 'min_iv_rv_ratio', 'min_iv_minus_rv'):
+        if _finite_number(raw.get(key), f'{path}.{key}') < 0:
+            die(f'{path}.{key} must be >= 0')
+
+
+def _validate_wheel_activation_by_account(
+    raw: object,
+    *,
+    path: str,
+    market_accounts: list[str],
+    wheel_config: dict,
+) -> None:
+    if raw is None:
+        return
+    if not isinstance(raw, dict):
+        die(f'{path} must be an object')
+    normalized_accounts: set[str] = set()
+    for raw_account, descriptor in raw.items():
+        try:
+            account = normalize_account_label(raw_account)
+        except ValueError as exc:
+            die(f'{path}.{raw_account} is not a valid account label: {exc}')
+        if account in normalized_accounts:
+            die(f'{path} contains duplicate account labels after normalization')
+        normalized_accounts.add(account)
+        if account not in market_accounts:
+            die(f'{path}.{account} is outside the current market accounts')
+        descriptor_path = f'{path}.{account}'
+        if not isinstance(descriptor, dict):
+            die(f'{descriptor_path} must be an object')
+        _reject_unknown_keys(
+            descriptor,
+            set(WHEEL_ACTIVATION_DESCRIPTOR_FIELDS),
+            descriptor_path,
+        )
+        missing = sorted(set(WHEEL_ACTIVATION_DESCRIPTOR_FIELDS) - set(descriptor))
+        if missing:
+            die(f'{descriptor_path} is missing required fields: {", ".join(missing)}')
+        validate_positive_integer(descriptor.get('generation'), f'{descriptor_path}.generation')
+        validate_positive_integer(descriptor.get('activated_at_ms'), f'{descriptor_path}.activated_at_ms')
+        deactivated_at_ms = descriptor.get('deactivated_at_ms')
+        if deactivated_at_ms is not None:
+            validate_positive_integer(deactivated_at_ms, f'{descriptor_path}.deactivated_at_ms')
+            if int(deactivated_at_ms) <= int(descriptor['activated_at_ms']):
+                die(f'{descriptor_path}.deactivated_at_ms must be > {descriptor_path}.activated_at_ms')
+        try:
+            normalize_wheel_activation_descriptor(descriptor)
+        except ValueError as exc:
+            die(f'{descriptor_path}: {exc}')
+        build_wheel_policy_hash(
+            {'wheel': wheel_config},
+            market='us',
+            account=account,
+        )
+
+
 def _validate_wheel_config(raw, path: str, market_accounts: list[str]) -> None:
     if not isinstance(raw, dict):
         die(f'{path} must be an object')
     _reject_unknown_keys(raw, WHEEL_ALLOWED_FIELDS, path)
-    enabled = raw.get('enabled')
+    enabled = raw.get('enabled', False)
     if not isinstance(enabled, bool):
         die(f'{path}.enabled must be a boolean')
-    accounts = raw.get('accounts')
+    accounts = raw.get('accounts', [])
     if not isinstance(accounts, list):
         die(f'{path}.accounts must be a list')
     normalized = [str(value or '').strip().lower() for value in accounts]
@@ -326,18 +405,21 @@ def _validate_wheel_config(raw, path: str, market_accounts: list[str]) -> None:
         die(f'{path}.accounts contains accounts outside the current market: {", ".join(unknown)}')
     if enabled and not normalized:
         die(f'{path}.accounts must not be empty when enabled')
-    for key in ('min_dte', 'max_dte'):
-        validate_positive_integer(raw.get(key), f'{path}.{key}')
-    if int(raw['min_dte']) > int(raw['max_dte']):
-        die(f'{path}.min_dte must be <= {path}.max_dte')
-    for key in ('min_delta', 'min_annualized_net_premium_return', 'max_spread_ratio'):
-        value = _finite_number(raw.get(key), f'{path}.{key}')
+    if 'min_delta' in raw:
+        value = _finite_number(raw.get('min_delta'), f'{path}.min_delta')
         if value <= 0 or value > 1:
-            die(f'{path}.{key} must be within (0, 1]')
-    validate_positive_number(raw.get('min_net_premium_cny'), f'{path}.min_net_premium_cny')
-    for key in ('min_iv_rv_ratio', 'min_iv_minus_rv'):
-        if _finite_number(raw.get(key), f'{path}.{key}') < 0:
-            die(f'{path}.{key} must be >= 0')
+            die(f'{path}.min_delta must be within (0, 1]')
+    for side, resolved in resolve_wheel_policy(raw).items():
+        supplied = raw.get(side)
+        if supplied is not None and not isinstance(supplied, dict):
+            die(f'{path}.{side} must be an object')
+        _validate_wheel_policy_side(resolved, f'{path}.{side}')
+    _validate_wheel_activation_by_account(
+        raw.get('activation_by_account'),
+        path=f'{path}.activation_by_account',
+        market_accounts=market_accounts,
+        wheel_config=raw,
+    )
 
 
 def _validate_optional_non_negative_number(cfg: dict, key: str, path: str):

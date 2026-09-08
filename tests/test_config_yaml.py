@@ -139,14 +139,18 @@ def test_yaml_market_wheel_config_is_independent_and_account_scoped(tmp_path: Pa
             "      wheel:\n"
             "        enabled: true\n"
             "        accounts: [lx]\n"
-            "        min_dte: 30\n"
-            "        max_dte: 45\n"
-            "        min_delta: 0.30\n"
-            "        min_annualized_net_premium_return: 0.10\n"
-            "        min_net_premium_cny: 50\n"
-            "        max_spread_ratio: 0.40\n"
-            "        min_iv_rv_ratio: 1.10\n"
-            "        min_iv_minus_rv: 0.05\n",
+            "        min_delta: 0.99\n"
+            "        call:\n"
+            "          dte: [30, 45]\n"
+            "          min_abs_delta: 0.26\n"
+            "        put:\n"
+            "          min_dte: 14\n"
+            "          max_dte: 35\n"
+            "        activation_by_account:\n"
+            "          lx:\n"
+            "            generation: 2\n"
+            "            activated_at_ms: 1700000000000\n"
+            "            deactivated_at_ms: null\n",
             1,
         ),
     )
@@ -159,6 +163,18 @@ def test_yaml_market_wheel_config_is_independent_and_account_scoped(tmp_path: Pa
 
     assert config["wheel"]["enabled"] is True
     assert config["wheel"]["accounts"] == ["lx"]
+    assert config["wheel"]["call"]["min_dte"] == 30
+    assert config["wheel"]["call"]["max_dte"] == 45
+    assert config["wheel"]["call"]["min_abs_delta"] == 0.26
+    assert config["wheel"]["call"]["max_abs_delta"] == 0.35
+    assert config["wheel"]["put"]["min_dte"] == 14
+    assert config["wheel"]["put"]["max_dte"] == 35
+    assert config["wheel"]["put"]["min_abs_delta"] == 0.25
+    assert config["wheel"]["activation_by_account"]["lx"] == {
+        "generation": 2,
+        "activated_at_ms": 1_700_000_000_000,
+        "deactivated_at_ms": None,
+    }
     assert config["symbols"][0]["sell_call"]["enabled"] is False
 
 

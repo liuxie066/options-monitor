@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+import src.application.wheel as wheel_application
 from src.application.agent_tools.operations_impl import (
     normalize_option_positions_read_input,
     option_positions_read_tool,
@@ -27,6 +28,7 @@ from src.application.positions.assigned_stock_quotes import refresh_assigned_sto
 from src.application.agent_tool_config import repo_base
 from src.application.ledger.api import open_position_ledger_from_data_config as resolve_option_positions_repo
 from src.application.agent_tools.runtime_helpers import resolve_public_data_config_path
+from src.application.cash_conversion import load_cash_fx_payload
 from src.application.performance.service import build_option_period_performance
 from src.application.wheel import (
     build_wheel_read_model,
@@ -38,7 +40,17 @@ from src.application.wheel import (
     reject_wheel_call_linkage,
     resolve_wheel_config,
 )
-from src.application.wheel.capacity import load_shared_coverage_fact
+from src.application.wheel.capacity import (
+    load_shared_cash_capacity_fact,
+    load_shared_coverage_fact,
+)
+from src.application.wheel.config import build_wheel_policy_hash
+from src.application.wheel.workflows import (
+    cancel_wheel_intent,
+    confirm_wheel_linkage,
+    create_wheel_intent,
+    reject_wheel_linkage,
+)
 
 
 _OPTION_PERFORMANCE_OUTPUT_CONTRACT: dict[str, Any] = {
@@ -192,7 +204,7 @@ _OPTION_POSITIONS_ASSIGNED_STOCK_OUTPUT_CONTRACT: dict[str, Any] = {
     "coverage": "primary_rows",
     "freshness": "source_declared",
     "pagination": {"mode": "none"},
-    "schema_version": "option_positions_read.assigned_stock_output.v2",
+    "schema_version": "option_positions_read.output.v3",
     "source_label": "OM 本地 SQLite assigned_stock_events + trade_events",
     "primary_rows": "rows",
     "row_count_field": "row_count",
@@ -255,10 +267,46 @@ _OPTION_POSITIONS_ASSIGNED_STOCK_OUTPUT_CONTRACT: dict[str, Any] = {
         "rows[].wheel.active_call_lot_ids",
         "rows[].wheel.active_intent_ids",
         "rows[].wheel.candidate",
+        "wheel_branches[].account",
+        "wheel_branches[].symbol",
+        "wheel_branches[].wheel_branch_id",
+        "wheel_branches[].parent_branch_id",
+        "wheel_branches[].direction",
+        "wheel_branches[].stock_lot_id",
+        "wheel_branches[].source_assignment_event_id",
+        "wheel_branches[].lifecycle_status",
+        "wheel_branches[].phase",
+        "wheel_branches[].monitoring_gate",
+        "wheel_branches[].integrity_status",
+        "wheel_branches[].reason_codes",
+        "wheel_branches[].initial_contracts",
+        "wheel_branches[].converted_contracts",
+        "wheel_branches[].remaining_contracts",
+        "wheel_branches[].multiplier",
+        "wheel_branches[].principal_anchor",
+        "wheel_branches[].currency",
+        "wheel_branches[].activation_window",
+        "wheel_branches[].start_event_id",
+        "wheel_branches[].terminal_event_id",
+        "wheel_branches[].active_option_lot_ids",
+        "wheel_branches[].active_intent_ids",
+        "wheel_branches[].active_intent_reserved_contracts",
+        "wheel_branches[].branch_generation_hash",
+        "wheel_branches[].projection_hash",
+        "wheel_branches[].legacy_call_adapter",
+        "wheel_branches[].candidate",
         "assigned_stock_review_rows[].status",
         "quote_refresh.route_source",
     ],
-    "model_preview_fields": ["scope", "coverage", "freshness", "rows", "quote_refresh", "warnings"],
+    "model_preview_fields": [
+        "scope",
+        "coverage",
+        "freshness",
+        "rows",
+        "wheel_branches",
+        "quote_refresh",
+        "warnings",
+    ],
 }
 
 
@@ -379,8 +427,9 @@ def _wheel_now_ms(payload: Mapping[str, Any]) -> int:
 
 def _wheel_runtime(payload: dict[str, Any]) -> tuple[Path, dict[str, Any], Any, dict[str, Any]]:
     config_path, cfg = load_runtime_config(
-        config_key=payload.get("config_key"),
+        config_key=payload.get("config_key") or payload.get("market"),
         config_path=payload.get("config_path"),
+        expected_market=payload.get("market"),
     )
     portfolio = cfg.get("portfolio")
     portfolio = portfolio if isinstance(portfolio, dict) else {}
@@ -432,6 +481,44 @@ def _wheel_batch(model: Mapping[str, Any], stock_lot_id: Any) -> dict[str, Any]:
     return matches[0]
 
 
+def _wheel_branch(
+    model: Mapping[str, Any],
+    *,
+    wheel_branch_id: Any,
+    stock_lot_id: Any,
+) -> dict[str, Any]:
+    branch_id = str(wheel_branch_id or "").strip()
+    lot_id = str(stock_lot_id or "").strip()
+    if bool(branch_id) == bool(lot_id):
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message="Exactly one of wheel_branch_id or stock_lot_id is required",
+        )
+    matches = [
+        dict(item)
+        for item in model.get("wheel_branches") or []
+        if isinstance(item, Mapping)
+        and (
+            (
+                branch_id
+                and str(item.get("wheel_branch_id") or "").strip() == branch_id
+            )
+            or (
+                lot_id
+                and item.get("direction") == "call"
+                and str(item.get("stock_lot_id") or "").strip() == lot_id
+            )
+        )
+    ]
+    if len(matches) != 1:
+        identity = branch_id or lot_id
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message=f"Wheel branch must resolve uniquely: {identity}",
+        )
+    return matches[0]
+
+
 def _wheel_coverage(
     repo: Any,
     cfg: dict[str, Any],
@@ -449,6 +536,25 @@ def _wheel_coverage(
         broker=str(batch.get("broker") or portfolio.get("broker") or "富途"),
         as_of_ms=instant,
         source_identity=str(payload.get("request_id") or ""),
+    )
+
+
+def _wheel_cash_capacity(
+    repo: Any,
+    cfg: dict[str, Any],
+    payload: Mapping[str, Any],
+    branch: Mapping[str, Any],
+    instant: int,
+) -> dict[str, Any]:
+    portfolio = cfg.get("portfolio")
+    portfolio = portfolio if isinstance(portfolio, dict) else {}
+    return load_shared_cash_capacity_fact(
+        repo,
+        config=cfg,
+        account=str(payload.get("account") or ""),
+        broker=str(branch.get("broker") or portfolio.get("broker") or "富途"),
+        as_of_ms=instant,
+        fx_snapshot=load_cash_fx_payload(repo, persist=False) or {},
     )
 
 
@@ -481,6 +587,7 @@ def _wheel_end_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str],
         result = end_wheel_lifecycle(
             repo,
             **_wheel_common(payload, instant=_wheel_now_ms(payload)),
+            market=str(payload.get("config_key") or ""),
         )
         return result, [], meta
 
@@ -501,6 +608,7 @@ def _wheel_call_intent_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], li
                     payload.get("broker_order_inactive_confirmed", False)
                 ),
                 reason=str(payload.get("reason") or ""),
+                market=str(payload.get("config_key") or ""),
             )
             return result, [], meta
         snapshot_base = Path(str(payload.get("runtime_root") or config_path.parent)).resolve()
@@ -509,8 +617,18 @@ def _wheel_call_intent_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], li
             run_id=str(payload.get("run_id") or ""),
             account=str(payload.get("account") or ""),
         )
-        model = build_wheel_read_model(repo, str(payload.get("account") or ""), instant)
+        model = build_wheel_read_model(
+            repo,
+            str(payload.get("account") or ""),
+            instant,
+            market=str(payload.get("config_key") or ""),
+        )
         batch = _wheel_batch(model, payload.get("stock_lot_id"))
+        resolved = resolve_wheel_config(
+            cfg,
+            str(payload.get("account") or ""),
+            market=str(payload.get("config_key") or ""),
+        )
         result = create_wheel_call_intent(
             repo,
             **common,
@@ -520,9 +638,10 @@ def _wheel_call_intent_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], li
             expires_at_ms=int(payload.get("expires_at_ms") or 0),
             broker_order_id=str(payload.get("broker_order_id") or "").strip() or None,
             coverage_fact=_wheel_coverage(repo, cfg, payload, batch, instant),
-            new_intent_enabled=resolve_wheel_config(
-                cfg, str(payload.get("account") or "")
-            )["enabled_for_new_lifecycle"],
+            new_intent_enabled=resolved["enabled_for_new_lifecycle"],
+            market=str(resolved.get("market") or ""),
+            activation_descriptor=resolved.get("activation_descriptor"),
+            policy_sha256=str(resolved.get("policy_sha256") or ""),
         )
         return result, [], meta
 
@@ -540,20 +659,245 @@ def _wheel_call_linkage_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], l
             "linkage_candidate_id": str(payload.get("linkage_candidate_id") or ""),
             "expected_input_hash": str(payload.get("expected_input_hash") or ""),
         }
+        model = build_wheel_read_model(
+            repo,
+            str(payload.get("account") or ""),
+            instant,
+            market=str(payload.get("config_key") or ""),
+        )
+        batch = _wheel_batch(model, payload.get("stock_lot_id"))
         if payload["action"] == "reject":
             result = reject_wheel_call_linkage(
                 repo,
                 **args,
                 reason=str(payload.get("reason") or ""),
+                market=str(payload.get("config_key") or ""),
             )
             return result, [], meta
-        model = build_wheel_read_model(repo, str(payload.get("account") or ""), instant)
-        batch = _wheel_batch(model, payload.get("stock_lot_id"))
         result = confirm_wheel_call_linkage(
             repo,
             **args,
             coverage_fact=_wheel_coverage(repo, cfg, payload, batch, instant),
+            market=str(payload.get("config_key") or ""),
         )
+        return result, [], meta
+
+    return _wheel_result(_run)
+
+
+def _neutral_wheel_context(
+    repo: Any,
+    payload: Mapping[str, Any],
+    *,
+    instant: int,
+) -> tuple[dict[str, Any], str, dict[str, Any]]:
+    account = str(payload.get("account") or "")
+    direction = str(payload.get("direction") or "").strip().lower()
+    branch = _wheel_branch(
+        build_wheel_read_model(
+            repo,
+            account,
+            instant,
+            market=str(payload.get("config_key") or ""),
+        ),
+        wheel_branch_id=payload.get("wheel_branch_id"),
+        stock_lot_id=payload.get("stock_lot_id"),
+    )
+    if branch.get("direction") != direction:
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message="Wheel branch direction mismatch",
+        )
+    common = {
+        "account": account,
+        "wheel_branch_id": branch["wheel_branch_id"],
+        "direction": direction,
+        "expected_branch_generation_hash": str(
+            payload.get("expected_branch_generation_hash") or ""
+        ),
+        "request_id": str(payload.get("request_id") or ""),
+        "actor": str(payload.get("actor") or ""),
+        "market": str(payload.get("config_key") or ""),
+        "apply_changes": bool(payload.get("apply", False)),
+        "as_of_ms": instant,
+    }
+    return branch, direction, common
+
+
+def _wheel_intent_tool(
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    def _run() -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+        config_path, cfg, repo, meta = _wheel_runtime(payload)
+        instant = _wheel_now_ms(payload)
+        branch, direction, common = _neutral_wheel_context(
+            repo,
+            payload,
+            instant=instant,
+        )
+        capacity_fact = (
+            _wheel_coverage(repo, cfg, payload, branch, instant)
+            if direction == "call"
+            else _wheel_cash_capacity(repo, cfg, payload, branch, instant)
+        )
+        if payload["action"] == "cancel":
+            result = cancel_wheel_intent(
+                repo,
+                **common,
+                intent_id=str(payload.get("intent_id") or ""),
+                broker_order_inactive_confirmed=bool(
+                    payload.get("broker_order_inactive_confirmed", False)
+                ),
+                reason=str(payload.get("reason") or ""),
+                capacity_fact=capacity_fact,
+            )
+            return result, [], meta
+        snapshot_base = Path(
+            str(payload.get("runtime_root") or config_path.parent)
+        ).resolve()
+        snapshot = load_wheel_candidate_snapshot(
+            base=snapshot_base,
+            run_id=str(payload.get("run_id") or ""),
+            account=str(payload.get("account") or ""),
+        )
+        resolved = resolve_wheel_config(
+            cfg,
+            str(payload.get("account") or ""),
+            market=str(payload.get("config_key") or ""),
+        )
+        result = create_wheel_intent(
+            repo,
+            **common,
+            candidate_snapshot=snapshot,
+            final_candidate_id=str(payload.get("final_candidate_id") or ""),
+            expected_snapshot_hash=str(payload.get("expected_snapshot_hash") or ""),
+            expires_at_ms=int(payload.get("expires_at_ms") or 0),
+            broker_order_id=str(payload.get("broker_order_id") or "").strip() or None,
+            capacity_fact=capacity_fact,
+            new_intent_enabled=resolved["enabled_for_new_lifecycle"],
+            activation_descriptor=resolved.get("activation_descriptor"),
+            policy_sha256=str(resolved.get("policy_sha256") or ""),
+        )
+        return result, [], meta
+
+    return _wheel_result(_run)
+
+
+def _wheel_linkage_tool(
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    def _run() -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+        _config_path, cfg, repo, meta = _wheel_runtime(payload)
+        instant = _wheel_now_ms(payload)
+        branch, direction, common = _neutral_wheel_context(
+            repo,
+            payload,
+            instant=instant,
+        )
+        args = {
+            **common,
+            "option_record_id": str(payload.get("option_record_id") or ""),
+            "linkage_candidate_id": str(payload.get("linkage_candidate_id") or ""),
+            "expected_input_hash": str(payload.get("expected_input_hash") or ""),
+        }
+        if payload["action"] == "reject":
+            result = reject_wheel_linkage(
+                repo,
+                **args,
+                reason=str(payload.get("reason") or ""),
+            )
+            return result, [], meta
+        capacity_fact = (
+            _wheel_coverage(repo, cfg, payload, branch, instant)
+            if direction == "call"
+            else _wheel_cash_capacity(repo, cfg, payload, branch, instant)
+        )
+        result = confirm_wheel_linkage(
+            repo,
+            **args,
+            capacity_fact=capacity_fact,
+        )
+        return result, [], meta
+
+    return _wheel_result(_run)
+
+
+def _wheel_branch_decision_tool(
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    def _run() -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+        _config_path, cfg, repo, meta = _wheel_runtime(payload)
+        instant = _wheel_now_ms(payload)
+        account = str(payload.get("account") or "")
+        branch = _wheel_branch(
+            build_wheel_read_model(
+                repo,
+                account,
+                instant,
+                market=str(payload.get("config_key") or ""),
+            ),
+            wheel_branch_id=payload.get("wheel_branch_id"),
+            stock_lot_id=payload.get("stock_lot_id"),
+        )
+        action = str(payload.get("action") or "")
+        args: dict[str, Any] = {
+            "account": account,
+            "wheel_branch_id": branch["wheel_branch_id"],
+            "decision": action,
+            "expected_branch_generation_hash": str(
+                payload.get("expected_branch_generation_hash") or ""
+            ),
+            "request_id": str(payload.get("request_id") or ""),
+            "actor": str(payload.get("actor") or ""),
+            "market": str(payload.get("config_key") or ""),
+            "apply_changes": bool(payload.get("apply", False)),
+            "as_of_ms": instant,
+        }
+        if action == "start":
+            resolved = resolve_wheel_config(
+                cfg,
+                account,
+                market=str(payload.get("config_key") or "") or None,
+            )
+            args.update(
+                market=resolved.get("market"),
+                activation_descriptor=resolved.get("activation_descriptor"),
+                policy_sha256=resolved.get("policy_sha256"),
+            )
+        result = wheel_application.decide_wheel_branch(repo, **args)
+        return result, [], meta
+
+    return _wheel_result(_run)
+
+
+def _wheel_activation_tool(
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    def _run() -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+        _config_path, cfg, repo, meta = _wheel_runtime(payload)
+        action = str(payload.get("action") or "")
+        market = str(payload.get("market") or "")
+        account = str(payload.get("account") or "")
+        args: dict[str, Any] = {
+            "action": action,
+            "market": market,
+            "account": account,
+        }
+        if action != "status":
+            args.update(
+                expected_current_generation=int(
+                    payload.get("expected_current_generation") or 0
+                ),
+                request_id=str(payload.get("request_id") or ""),
+                actor=str(payload.get("actor") or ""),
+                policy_sha256=build_wheel_policy_hash(
+                    cfg,
+                    market=market,
+                    account=account,
+                ),
+                apply_changes=bool(payload.get("apply", False)),
+            )
+        result = wheel_application.change_wheel_activation(repo, **args)
         return result, [], meta
 
     return _wheel_result(_run)
@@ -883,6 +1227,7 @@ _WHEEL_WRITE_OUTPUT: dict[str, Any] = {
         "intent_id",
         "call_record_id",
         "request_id",
+        "market",
         "status",
         "lifecycle_status_before",
         "lifecycle_status_after",
@@ -894,9 +1239,115 @@ _WHEEL_WRITE_OUTPUT: dict[str, Any] = {
     "freshness_fields": ["batch_generation_hash"],
 }
 
+_WHEEL_NEUTRAL_INPUT: dict[str, Any] = {
+    "config_key": {
+        "type": "string",
+        "enum": ["us", "hk"],
+        "required": True,
+        "description": "Market runtime config",
+    },
+    "config_path": "optional explicit runtime config path",
+    "data_config": "optional explicit portfolio data config path",
+    "runtime_root": "optional explicit runtime root",
+    "account": {"type": "string", "minLength": 1, "required": True},
+    "direction": {
+        "type": "string",
+        "enum": ["call", "put"],
+        "required": True,
+    },
+    "wheel_branch_id": "canonical Wheel branch id; mutually exclusive with stock_lot_id",
+    "stock_lot_id": "legacy Call-only alias; mutually exclusive with wheel_branch_id",
+    "expected_branch_generation_hash": {
+        "type": "string",
+        "minLength": 1,
+        "required": True,
+    },
+    "request_id": {"type": "string", "minLength": 1, "required": True},
+    "actor": {"type": "string", "minLength": 1, "required": True},
+    "as_of_ms": {"type": "integer", "minimum": 1},
+    "apply": {"type": "boolean", "description": "default false previews only"},
+    "confirm": {"type": "boolean", "description": "required true with apply=true"},
+}
+
+_WHEEL_NEUTRAL_WRITE_OUTPUT: dict[str, Any] = {
+    "source_label": "OM 本地 SQLite Wheel ledger",
+    "fact_fields": [
+        "wheel_branch_id",
+        "direction",
+        "option_record_id",
+        "event_id",
+        "intent_id",
+        "request_id",
+        "market",
+        "status",
+        "dry_run",
+        "write_applied",
+        "audit_id",
+    ],
+    "missing_data_fields": [],
+    "freshness_fields": ["expected_branch_generation_hash"],
+}
+
+_WHEEL_BRANCH_INPUT: dict[str, Any] = {
+    "config_key": {
+        "type": "string",
+        "enum": ["us", "hk"],
+        "required": True,
+        "description": "Market runtime config",
+    },
+    "config_path": "optional explicit runtime config path",
+    "data_config": "optional explicit portfolio data config path",
+    "runtime_root": "optional explicit runtime root",
+    "account": {"type": "string", "minLength": 1, "required": True},
+    "action": {
+        "type": "string",
+        "enum": ["start", "end"],
+        "required": True,
+    },
+    "wheel_branch_id": "canonical Wheel branch id; mutually exclusive with stock_lot_id",
+    "stock_lot_id": "legacy Call branch alias; mutually exclusive with wheel_branch_id",
+    "expected_branch_generation_hash": {
+        "type": "string",
+        "minLength": 1,
+        "required": True,
+    },
+    "request_id": {"type": "string", "minLength": 1, "required": True},
+    "actor": {"type": "string", "minLength": 1, "required": True},
+    "as_of_ms": {"type": "integer", "minimum": 1},
+    "apply": {"type": "boolean", "description": "default false previews only"},
+    "confirm": {"type": "boolean", "description": "required true with apply=true"},
+}
+
+_WHEEL_ACTIVATION_INPUT: dict[str, Any] = {
+    "config_key": {"type": "string", "enum": ["us", "hk"]},
+    "config_path": "optional explicit runtime config path",
+    "data_config": "optional explicit portfolio data config path",
+    "runtime_root": "optional explicit runtime root",
+    "market": {
+        "type": "string",
+        "enum": ["us", "hk"],
+        "required": True,
+    },
+    "account": {"type": "string", "minLength": 1, "required": True},
+    "action": {
+        "type": "string",
+        "enum": ["status", "enable", "disable"],
+        "required": True,
+    },
+    "expected_current_generation": {"type": "integer", "minimum": 0},
+    "request_id": "required for enable or disable",
+    "actor": "required for enable or disable",
+    "apply": {"type": "boolean", "description": "default false previews only"},
+    "confirm": {"type": "boolean", "description": "required true with apply=true"},
+}
+
 
 def _wheel_write_requested(payload: dict[str, Any]) -> bool:
     return bool(payload.get("apply", False))
+
+
+def _wheel_activation_write_requested(payload: dict[str, Any]) -> bool:
+    return payload.get("action") != "status" and bool(payload.get("apply", False))
 
 
 def _require_wheel_fields(payload: Mapping[str, Any], *fields: str) -> None:
@@ -945,6 +1396,73 @@ def _validate_wheel_linkage(payload: dict[str, Any]) -> None:
     if payload.get("action") == "reject":
         required.append("reason")
     _require_wheel_fields(payload, *required)
+
+
+def _validate_neutral_wheel_identity(payload: Mapping[str, Any]) -> None:
+    branch_id = str(payload.get("wheel_branch_id") or "").strip()
+    lot_id = str(payload.get("stock_lot_id") or "").strip()
+    if bool(branch_id) == bool(lot_id):
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message="Exactly one of wheel_branch_id or stock_lot_id is required",
+        )
+    if lot_id and payload.get("direction") != "call":
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message="stock_lot_id is a legacy Call-only alias",
+        )
+
+
+def _validate_neutral_wheel_intent(payload: dict[str, Any]) -> None:
+    _validate_neutral_wheel_identity(payload)
+    _validate_wheel_intent(payload)
+
+
+def _validate_neutral_wheel_linkage(payload: dict[str, Any]) -> None:
+    _validate_neutral_wheel_identity(payload)
+    required = ["option_record_id", "linkage_candidate_id", "expected_input_hash"]
+    if payload.get("action") == "reject":
+        required.append("reason")
+    _require_wheel_fields(payload, *required)
+
+
+def _validate_wheel_branch_decision(payload: dict[str, Any]) -> None:
+    _require_wheel_fields(
+        payload,
+        "expected_branch_generation_hash",
+        "request_id",
+        "actor",
+    )
+    branch_id = str(payload.get("wheel_branch_id") or "").strip()
+    lot_id = str(payload.get("stock_lot_id") or "").strip()
+    if bool(branch_id) == bool(lot_id):
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message="Exactly one of wheel_branch_id or stock_lot_id is required",
+        )
+
+
+def _validate_wheel_activation(payload: dict[str, Any]) -> None:
+    config_key = str(payload.get("config_key") or "").strip().lower()
+    market = str(payload.get("market") or "").strip().lower()
+    if config_key and config_key != market:
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message="Wheel activation config_key must match market",
+        )
+    if payload.get("action") == "status":
+        if bool(payload.get("apply", False)):
+            raise AgentToolError(
+                code="INPUT_ERROR",
+                message="Wheel activation status does not accept apply=true",
+            )
+        return
+    _require_wheel_fields(
+        payload,
+        "expected_current_generation",
+        "request_id",
+        "actor",
+    )
 
 
 WHEEL_END_TOOL = build_agent_tool(
@@ -1030,20 +1548,180 @@ WHEEL_CALL_LINKAGE_TOOL = build_agent_tool(
     allow_additional_input=False,
 )
 
+WHEEL_INTENT_TOOL = build_agent_tool(
+    name="wheel_intent",
+    description=(
+        "Preview or create/cancel one exact local Wheel Call or Put intent. "
+        "Does not place or cancel broker orders."
+    ),
+    requires=("runtime_config", "sqlite_data_config", "broker_holdings_read"),
+    capabilities=("wheel", "local_write"),
+    side_effects=("appends_wheel_event",),
+    input_schema={
+        **_WHEEL_NEUTRAL_INPUT,
+        "action": {
+            "type": "string",
+            "enum": ["create", "cancel"],
+            "required": True,
+        },
+        "run_id": "create-only candidate run id",
+        "final_candidate_id": "create-only final Wheel candidate id",
+        "expected_snapshot_hash": "create-only candidate snapshot hash",
+        "expires_at_ms": {"type": "integer", "minimum": 1},
+        "broker_order_id": "create-only optional broker order id",
+        "intent_id": "cancel-only intent id",
+        "broker_order_inactive_confirmed": {"type": "boolean"},
+        "reason": "cancel-only reason",
+    },
+    handler=_wheel_intent_tool,
+    read_only=False,
+    risk_level="local_write",
+    requires_confirm=True,
+    requires_env=("OM_AGENT_ENABLE_WRITE_TOOLS=true for apply=true",),
+    safe_default_input={"apply": False},
+    write_request_predicate=_wheel_write_requested,
+    input_validator=_validate_neutral_wheel_intent,
+    output_contract={"schema_version": "wheel_intent.output.v1", **_WHEEL_NEUTRAL_WRITE_OUTPUT},
+    allow_additional_input=False,
+)
+
+WHEEL_LINKAGE_TOOL = build_agent_tool(
+    name="wheel_linkage",
+    description=(
+        "Preview or confirm/reject one exact Short Call or Put Wheel attribution. "
+        "Does not place or close broker orders."
+    ),
+    requires=("runtime_config", "sqlite_data_config", "broker_holdings_read"),
+    capabilities=("wheel", "local_write"),
+    side_effects=("appends_trade_or_wheel_event",),
+    input_schema={
+        **_WHEEL_NEUTRAL_INPUT,
+        "action": {
+            "type": "string",
+            "enum": ["confirm", "reject"],
+            "required": True,
+        },
+        "option_record_id": {"type": "string", "minLength": 1},
+        "linkage_candidate_id": {"type": "string", "minLength": 1},
+        "expected_input_hash": {"type": "string", "minLength": 1},
+        "reason": "reject-only reason",
+    },
+    handler=_wheel_linkage_tool,
+    read_only=False,
+    risk_level="local_write",
+    requires_confirm=True,
+    requires_env=("OM_AGENT_ENABLE_WRITE_TOOLS=true for apply=true",),
+    safe_default_input={"apply": False},
+    write_request_predicate=_wheel_write_requested,
+    input_validator=_validate_neutral_wheel_linkage,
+    output_contract={"schema_version": "wheel_linkage.output.v1", **_WHEEL_NEUTRAL_WRITE_OUTPUT},
+    allow_additional_input=False,
+)
+
+WHEEL_BRANCH_DECISION_TOOL = build_agent_tool(
+    name="wheel_branch_decision",
+    description="Preview or start/end one exact local Wheel branch. Does not place or close broker orders.",
+    requires=("runtime_config", "sqlite_data_config"),
+    capabilities=("wheel", "local_write"),
+    side_effects=("appends_wheel_event",),
+    input_schema=_WHEEL_BRANCH_INPUT,
+    handler=_wheel_branch_decision_tool,
+    read_only=False,
+    risk_level="local_write",
+    requires_confirm=True,
+    requires_env=("OM_AGENT_ENABLE_WRITE_TOOLS=true for apply=true",),
+    safe_default_input={"apply": False},
+    write_request_predicate=_wheel_write_requested,
+    input_validator=_validate_wheel_branch_decision,
+    output_contract={
+        "schema_version": "wheel_branch_decision.output.v1",
+        "source_label": "OM 本地 SQLite Wheel ledger",
+        "fact_fields": [
+            "wheel_branch_id",
+            "event_id",
+            "request_id",
+            "market",
+            "expected_branch_generation_hash",
+            "lifecycle_status_after",
+            "status",
+            "dry_run",
+            "write_applied",
+            "audit_id",
+        ],
+        "missing_data_fields": [],
+        "freshness_fields": ["expected_branch_generation_hash"],
+    },
+    allow_additional_input=False,
+)
+
+WHEEL_ACTIVATION_TOOL = build_agent_tool(
+    name="wheel_activation",
+    description="Read, preview, enable, or disable one local market/account Wheel activation window.",
+    requires=("runtime_config", "sqlite_data_config"),
+    capabilities=("wheel", "local_write"),
+    side_effects=("writes_wheel_activation_window",),
+    input_schema=_WHEEL_ACTIVATION_INPUT,
+    handler=_wheel_activation_tool,
+    read_only=False,
+    risk_level="local_write",
+    requires_confirm=True,
+    requires_env=("OM_AGENT_ENABLE_WRITE_TOOLS=true for apply=true",),
+    safe_default_input={"apply": False},
+    write_request_predicate=_wheel_activation_write_requested,
+    input_validator=_validate_wheel_activation,
+    output_contract={
+        "schema_version": "wheel_activation.output.v1",
+        "source_label": "OM 本地 SQLite Wheel activation windows",
+        "fact_fields": [
+            "action",
+            "market",
+            "account",
+            "status",
+            "current_window",
+            "latest_window",
+            "expected_config_descriptor",
+            "request_id",
+            "actor",
+            "request_hash",
+            "idempotent",
+            "dry_run",
+            "write_applied",
+            "audit_id",
+        ],
+        "missing_data_fields": [],
+        "freshness_fields": [
+            "expected_config_descriptor.generation",
+            "expected_config_descriptor.policy_sha256",
+            "current_window.generation",
+            "current_window.policy_sha256",
+            "latest_window.generation",
+        ],
+    },
+    allow_additional_input=False,
+)
+
 TOOLS: tuple[AgentTool, ...] = (
     OPTION_PERFORMANCE_REPORT_TOOL,
     OPTION_POSITIONS_READ_TOOL,
     WHEEL_END_TOOL,
     WHEEL_CALL_INTENT_TOOL,
     WHEEL_CALL_LINKAGE_TOOL,
+    WHEEL_INTENT_TOOL,
+    WHEEL_LINKAGE_TOOL,
+    WHEEL_BRANCH_DECISION_TOOL,
+    WHEEL_ACTIVATION_TOOL,
 )
 
 
 __all__ = [
     "OPTION_PERFORMANCE_REPORT_TOOL",
     "OPTION_POSITIONS_READ_TOOL",
+    "WHEEL_ACTIVATION_TOOL",
+    "WHEEL_BRANCH_DECISION_TOOL",
     "WHEEL_CALL_INTENT_TOOL",
     "WHEEL_CALL_LINKAGE_TOOL",
     "WHEEL_END_TOOL",
+    "WHEEL_INTENT_TOOL",
+    "WHEEL_LINKAGE_TOOL",
     "TOOLS",
 ]

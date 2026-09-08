@@ -8,10 +8,14 @@ import pytest
 
 from src.application.candidate_snapshot_manifest import (
     CANDIDATE_SNAPSHOT_MANIFEST_FILE,
+    CANDIDATE_SNAPSHOT_MANIFEST_V3_FILE,
+    CANDIDATE_SNAPSHOT_MANIFEST_V3_SCHEMA,
     CandidateSnapshotManifestError,
     load_candidate_snapshot_bundle,
+    load_candidate_snapshot_bundle_v3,
     load_latest_candidate_snapshot_bundle,
     publish_candidate_snapshot_manifest,
+    publish_candidate_snapshot_manifest_v3,
 )
 from src.application.combo_yield_candidate_snapshot import (
     COMBO_YIELD_CANDIDATE_SNAPSHOT_FILE,
@@ -22,9 +26,11 @@ from src.application.cc_lp_candidate_snapshot import (
 )
 from src.application.strategy_scan_status import (
     STRATEGY_SCAN_STATUS_INDEX_V2_FILE,
+    STRATEGY_SCAN_STATUS_INDEX_V4_SCHEMA,
     publish_strategy_scan_status,
     publish_strategy_scan_status_index_v2,
 )
+from src.application.wheel.candidate_snapshot import seal_wheel_candidate_snapshot
 
 
 CONFIG_HASH = "a" * 64
@@ -559,3 +565,222 @@ def test_manifest_is_write_once_and_adopts_exact_retry(tmp_path: Path) -> None:
             strategy_policy_sha256=POLICY_HASH,
             sealed_at="2026-08-12T01:00:02Z",
         )
+
+
+def _publish_wheel_v4_statuses(account_dir: Path) -> None:
+    expected = []
+    for direction in ("call", "put"):
+        publish_strategy_scan_status(
+            report_dir=account_dir,
+            run_id="run-1",
+            account="lx",
+            market="US",
+            symbol="NVDA",
+            strategy_family="wheel",
+            direction=direction,
+            status="completed",
+            candidate_count=0,
+        )
+        expected.append(
+            {
+                "market": "US",
+                "symbol": "NVDA",
+                "strategy_family": "wheel",
+                "direction": direction,
+                "strategy_mode": "wheel",
+                "candidate_owner": "wheel",
+                "account_config_sha256": CONFIG_HASH,
+            }
+        )
+    publish_strategy_scan_status_index_v2(
+        report_dir=account_dir,
+        run_id="run-1",
+        account="lx",
+        account_config_sha256=CONFIG_HASH,
+        expected=expected,
+    )
+
+
+def _wheel_v2_snapshot() -> dict:
+    return {
+        "schema_version": "wheel_candidate_snapshot.v2",
+        "run_id": "run-1",
+        "account": "lx",
+        "market": "us",
+        "candidate_owner": "wheel",
+        "account_config_sha256": CONFIG_HASH,
+        "strategy_policy_sha256": POLICY_HASH,
+        "content_sha256": "c" * 64,
+        "opening_status": "no_candidate",
+        "scope_results": [
+            {
+                "scope": "strategy",
+                "symbol": "NVDA",
+                "direction": direction,
+                "strategy_mode": "wheel",
+                "candidate_owner": "wheel",
+                "status": "completed",
+                "reason_code": None,
+                "candidate_count": 0,
+                "quote_snapshot_id": None,
+                "quote_receipt_relpath": None,
+            }
+            for direction in ("call", "put")
+        ],
+        "batches": [],
+    }
+
+
+def test_wheel_v4_index_publishes_and_loads_manifest_v3(
+    tmp_path: Path,
+) -> None:
+    account_dir = _account_dir(tmp_path)
+    _publish_wheel_v4_statuses(account_dir)
+    seal_wheel_candidate_snapshot(
+        base=tmp_path,
+        run_id="run-1",
+        account="lx",
+        market="us",
+        account_config_sha256=CONFIG_HASH,
+        strategy_policy_sha256=POLICY_HASH,
+        dependencies=_dependencies(),
+        scope_results=[
+            {
+                "symbol": "NVDA",
+                "direction": direction,
+                "status": "completed",
+                "candidate_count": 0,
+            }
+            for direction in ("call", "put")
+        ],
+        batches=[],
+    )
+
+    manifest = publish_candidate_snapshot_manifest_v3(
+        base=tmp_path,
+        run_id="run-1",
+        account="lx",
+        strategy_policy_sha256=POLICY_HASH,
+        sealed_at="2026-08-12T01:00:01Z",
+    )
+
+    assert manifest["schema_version"] == CANDIDATE_SNAPSHOT_MANIFEST_V3_SCHEMA
+    assert manifest["status_index"]["schema_version"] == (
+        STRATEGY_SCAN_STATUS_INDEX_V4_SCHEMA
+    )
+    assert {row["direction"] for row in manifest["expected_scopes"]} == {
+        "call",
+        "put",
+    }
+    assert (account_dir / "state" / CANDIDATE_SNAPSHOT_MANIFEST_V3_FILE).is_file()
+    loaded = load_candidate_snapshot_bundle_v3(
+        base=tmp_path,
+        run_id="run-1",
+        account="lx",
+    )
+    assert loaded["manifest"] == manifest
+
+    (account_dir / "nvda_wheel_put_scan_status.v2.json").write_text(
+        "{}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(CandidateSnapshotManifestError, match="status hash mismatch"):
+        load_candidate_snapshot_bundle(base=tmp_path, run_id="run-1", account="lx")
+
+
+def test_manifest_v3_rejects_legacy_wheel_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account_dir = _account_dir(tmp_path)
+    _publish_wheel_v4_statuses(account_dir)
+    snapshot = _wheel_v2_snapshot()
+    state_dir = account_dir / "state"
+    (state_dir / "wheel_candidate_snapshot.v2.json").write_text(
+        json.dumps(snapshot),
+        encoding="utf-8",
+    )
+    (state_dir / "wheel_candidate_snapshot.json").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "src.application.candidate_snapshot_manifest._load_owner_snapshot",
+        lambda **_kwargs: snapshot,
+    )
+
+    with pytest.raises(CandidateSnapshotManifestError, match="artifact_version_mismatch"):
+        publish_candidate_snapshot_manifest(
+            base=tmp_path,
+            run_id="run-1",
+            account="lx",
+            strategy_policy_sha256=POLICY_HASH,
+        )
+
+
+def test_legacy_wheel_bundle_adapts_to_call_and_rejects_v2_mix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account_dir = _account_dir(tmp_path)
+    publish_strategy_scan_status(
+        report_dir=account_dir,
+        run_id="run-1",
+        account="lx",
+        market="US",
+        symbol="NVDA",
+        strategy_family="wheel",
+        status="completed",
+        candidate_count=0,
+    )
+    publish_strategy_scan_status_index_v2(
+        report_dir=account_dir,
+        run_id="run-1",
+        account="lx",
+        account_config_sha256=CONFIG_HASH,
+        expected=[
+            {
+                "market": "US",
+                "symbol": "NVDA",
+                "strategy_family": "wheel",
+                "strategy_mode": "wheel",
+                "candidate_owner": "wheel",
+                "account_config_sha256": CONFIG_HASH,
+            }
+        ],
+    )
+    snapshot = {
+        **_wheel_v2_snapshot(),
+        "schema_version": "wheel_candidate_snapshot.v1",
+        "scope_results": [
+            {
+                key: value
+                for key, value in _wheel_v2_snapshot()["scope_results"][0].items()
+                if key != "direction"
+            }
+        ],
+    }
+    state_dir = account_dir / "state"
+    (state_dir / "wheel_candidate_snapshot.json").write_text(
+        json.dumps(snapshot),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "src.application.candidate_snapshot_manifest._load_owner_snapshot",
+        lambda **_kwargs: snapshot,
+    )
+    publish_candidate_snapshot_manifest(
+        base=tmp_path,
+        run_id="run-1",
+        account="lx",
+        strategy_policy_sha256=POLICY_HASH,
+    )
+
+    bundle = load_candidate_snapshot_bundle(base=tmp_path, run_id="run-1", account="lx")
+    assert bundle["status_index"]["items"][0]["direction"] == "call"
+    assert bundle["manifest"]["expected_scopes"][0]["direction"] == "call"
+    assert bundle["owners"]["wheel"]["scope_results"][0]["direction"] == "call"
+
+    (state_dir / "wheel_candidate_snapshot.v2.json").write_text(
+        "{}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(CandidateSnapshotManifestError, match="artifact_version_mismatch"):
+        load_candidate_snapshot_bundle(base=tmp_path, run_id="run-1", account="lx")
