@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from domain.domain.ledger import position_lots_fingerprint
+from domain.domain.lifecycle_allocation import validate_stock_settlement_allocation_group
 from domain.domain.trade_execution import execution_economic_content, normalize_execution_input
 from .event_codec import trade_event_application_payload, valid_void_target_event_id
 
@@ -1254,6 +1255,27 @@ def persist_trade_event_objects_atomically(
             event_ids,
             conn=conn,
         )
+        settlement_events = [
+            event
+            for event in storage_events
+            if event.event_type in {"assignment", "exercise"}
+            and isinstance((event.raw_payload or {}).get("stock_settlement"), dict)
+            and bool((event.raw_payload or {}).get("stock_settlement"))
+        ]
+        if settlement_events and len(settlement_events) == len(storage_events):
+            incoming_settlement_source = validate_stock_settlement_allocation_group(
+                settlement_events
+            )
+            existing_settlement_source = validate_stock_settlement_allocation_group(
+                [
+                    TradeEvent.from_dict(existing_by_id[event.event_id])
+                    if event.event_id in existing_by_id
+                    else event
+                    for event in settlement_events
+                ]
+            )
+            if existing_settlement_source != incoming_settlement_source:
+                raise ValueError("stock settlement allocation replay source conflicts")
         wheel_intent_events: dict[str, dict[str, Any]] = {}
         wheel_linkage_status: dict[str, str] = {}
         if wheel_intent_coverage_fact is not None:
@@ -1330,6 +1352,20 @@ def persist_trade_event_objects_atomically(
                 force_full=bool(case_update or allocation_rows),
             ),
         )
+        if settlement_events and len(settlement_events) == len(storage_events):
+            stored_by_id = _trade_events_by_id(
+                sqlite_repo,
+                [event.event_id for event in settlement_events],
+                conn=conn,
+            )
+            stored_settlement_source = validate_stock_settlement_allocation_group(
+                [
+                    TradeEvent.from_dict(stored_by_id[event.event_id])
+                    for event in settlement_events
+                ]
+            )
+            if stored_settlement_source != incoming_settlement_source:
+                raise ValueError("stored stock settlement allocation source conflicts")
         created_flags = runtime.created_flags
         wheel_companions = append_wheel_trade_companions(
             sqlite_repo,
@@ -1524,6 +1560,7 @@ def persist_trade_event_with_wheel_intent(
 def _enrich_execution_order_identity(
     repo: Any, rows: list[dict[str, Any]], execution: dict[str, Any], *, conn: Any,
     assigned_stock: bool = False,
+    finalize_decision_projection: bool = True,
 ) -> list[dict[str, Any]]:
     order_id = execution.get("external_order_id")
     namespace = execution.get("external_order_namespace")
@@ -1577,7 +1614,11 @@ def _enrich_execution_order_identity(
     if not plans:
         return rows
     before_fingerprint = position_lots_fingerprint(repo.list_position_lots(conn=conn))
-    fence = capture_trade_event_decision_projection_fence(repo, conn=conn)
+    fence = (
+        capture_trade_event_decision_projection_fence(repo, conn=conn)
+        if finalize_decision_projection
+        else None
+    )
     cas = (repo.compare_and_swap_assigned_stock_order_identity_json if assigned_stock
            else repo.compare_and_swap_trade_event_order_identity_json)
     for event_id, before_json, after_json in plans:

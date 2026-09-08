@@ -17,6 +17,10 @@ from domain.domain.ledger.position_fields import (
     effective_multiplier,
     strategy_metadata_fields_from_payload,
 )
+from domain.domain.lifecycle_allocation import (
+    allocate_stock_settlement,
+    validate_stock_settlement_allocation_group,
+)
 from domain.domain.trade_contract_identity import normalize_trade_side
 from src.application.ledger.external_event_key import broker_deal_completion_payload
 from src.application.ledger.interventions import (
@@ -804,6 +808,7 @@ def _manual_lifecycle_request_replay(
             != intent_hash
         ):
             raise ValueError(f"manual request conflict for request_id={request_id}")
+    stock_settlement_source = validate_stock_settlement_allocation_group(matches)
     matches.sort(
         key=lambda item: (
             int(item.get("trade_time_ms") or 0),
@@ -847,11 +852,7 @@ def _manual_lifecycle_request_replay(
         "event_type": event_type,
         "manual_request_id": request_id,
         "manual_request_intent_hash": intent_hash,
-        "stock_settlement": dict(
-            first_payload.get("stock_settlement")
-            if isinstance(first_payload.get("stock_settlement"), dict)
-            else {}
-        ),
+        "stock_settlement": stock_settlement_source,
         "close_target_resolution": dict(resolution) if isinstance(resolution, dict) else {},
         "operations": operations,
         "result": operations[0]["result"],
@@ -991,6 +992,19 @@ def preview_manual_assignment(
         stock_qty=int(stock_qty),
         stock_price=float(stock_price),
     )
+    settlements_by_lot = allocate_stock_settlement(
+        stock_settlement,
+        (
+            {
+                "target_lot_id": match.record_id,
+                "contracts_allocated": match.contracts_to_close,
+                "multiplier": effective_multiplier(
+                    _current_record_fields(repo, record_id=match.record_id)
+                ),
+            }
+            for match in resolution.matches
+        ),
+    )
     operations: list[dict[str, Any]] = []
     for match in resolution.matches:
         fields = _current_record_fields(repo, record_id=match.record_id)
@@ -1011,7 +1025,10 @@ def preview_manual_assignment(
                 matched_by=match.matched_by,
                 ledger_preflight=ledger_preflight,
                 close_target_resolution=resolution.to_dict(),
-                details={"stock_settlement": stock_settlement},
+                details={
+                    "stock_settlement": settlements_by_lot[match.record_id],
+                    "stock_settlement_source": stock_settlement,
+                },
             ).to_payload()
         )
     request_id_value = str(request_id or "").strip()
@@ -1217,6 +1234,19 @@ def preview_manual_exercise(
         stock_qty=int(stock_qty),
         stock_price=float(stock_price),
     )
+    settlements_by_lot = allocate_stock_settlement(
+        stock_settlement,
+        (
+            {
+                "target_lot_id": match.record_id,
+                "contracts_allocated": match.contracts_to_close,
+                "multiplier": effective_multiplier(
+                    _current_record_fields(repo, record_id=match.record_id)
+                ),
+            }
+            for match in resolution.matches
+        ),
+    )
     operations: list[dict[str, Any]] = []
     for match in resolution.matches:
         fields = _current_record_fields(repo, record_id=match.record_id)
@@ -1237,7 +1267,10 @@ def preview_manual_exercise(
                 matched_by=match.matched_by,
                 ledger_preflight=ledger_preflight,
                 close_target_resolution=resolution.to_dict(),
-                details={"stock_settlement": stock_settlement},
+                details={
+                    "stock_settlement": settlements_by_lot[match.record_id],
+                    "stock_settlement_source": stock_settlement,
+                },
             ).to_payload()
         )
     request_id_value = str(request_id or "").strip()
@@ -2098,13 +2131,23 @@ def record_lifecycle_allocation(
 def record_assigned_stock_event(
     repo: Any,
     *,
-    sale_event: dict[str, Any],
-    assigned_stock_after: dict[str, Any],
+    sale_event: dict[str, Any] | None = None,
+    assigned_stock_after: dict[str, Any] | None = None,
+    account: str | None = None,
+    target_stock_lot_id: str | None = None,
+    trade_time_ms: int | None = None,
+    prepare_sale: Any = None,
+    identity_execution: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return record_assigned_stock_event_atomically(
         repo,
         sale_event=sale_event,
         assigned_stock_after=assigned_stock_after,
+        account=account,
+        target_stock_lot_id=target_stock_lot_id,
+        trade_time_ms=trade_time_ms,
+        prepare_sale=prepare_sale,
+        identity_execution=identity_execution,
     )
 
 

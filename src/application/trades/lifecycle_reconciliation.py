@@ -11,6 +11,7 @@ from domain.domain.ledger.position_fields import (
 from domain.domain.lifecycle_allocation import (
     AllocationPlan,
     TERMINAL_TYPES,
+    allocate_stock_settlement,
     plan_evidence_allocation,
     resolve_allocations,
 )
@@ -888,12 +889,33 @@ def reconcile_lifecycle_evidence(
                 terminal_type=terminal_type,
                 apply_changes=apply_changes,
             )
+        stored_events = {
+            str(item.get("event_id") or ""): TradeEvent.from_dict(item)
+            for item in repo.list_trade_events()
+            if isinstance(item, dict)
+            and str(item.get("event_id") or "")
+            in {
+                str(allocation.get("canonical_terminal_event_id") or "")
+                for allocation in evidence_allocations
+            }
+        }
+        replay_settlements = _allocated_stock_settlements(
+            lot_fields_by_id,
+            lifecycle_case=lifecycle_case,
+            evidence=normalized,
+            allocations=evidence_allocations,
+        )
         replay_events = [
+            stored_events.get(str(allocation.get("canonical_terminal_event_id") or ""))
+            or
             _terminal_event(
                 lot_fields_by_id,
                 lifecycle_case=lifecycle_case,
                 evidence=normalized,
                 allocation=allocation,
+                stock_settlement=replay_settlements.get(
+                    str(allocation.get("target_lot_id") or "")
+                ),
             )
             for allocation in evidence_allocations
         ]
@@ -1005,12 +1027,21 @@ def reconcile_lifecycle_evidence(
             attempt_evidence=attempt_evidence,
             attempt_audit=attempt_audit,
         )
+    allocated_settlements = _allocated_stock_settlements(
+        lot_fields_by_id,
+        lifecycle_case=lifecycle_case,
+        evidence=normalized,
+        allocations=plan.allocations,
+    )
     event_rows = [
         _terminal_event(
             lot_fields_by_id,
             lifecycle_case=lifecycle_case,
             evidence=normalized,
             allocation=allocation,
+            stock_settlement=allocated_settlements.get(
+                str(allocation.get("target_lot_id") or "")
+            ),
         )
         for allocation in plan.allocations
     ]
@@ -1468,6 +1499,7 @@ def _terminal_event(
     lifecycle_case: dict[str, Any],
     evidence: dict[str, Any],
     allocation: dict[str, Any],
+    stock_settlement: dict[str, Any] | None = None,
 ) -> TradeEvent:
     lot_id = str(allocation.get("target_lot_id") or "")
     terminal_type = str(allocation.get("terminal_type") or "").strip().lower()
@@ -1535,9 +1567,53 @@ def _terminal_event(
             "contracts": contracts,
             "source_type": str(evidence.get("source_type") or ""),
             "source_event_id": str(evidence.get("source_event_id") or ""),
-            "stock_settlement": dict(evidence.get("stock_settlement") or {}),
+            "stock_settlement": dict(
+                stock_settlement
+                if stock_settlement is not None
+                else evidence.get("stock_settlement") or {}
+            ),
+            **(
+                {
+                    "stock_settlement_source": dict(
+                        evidence.get("stock_settlement") or {}
+                    )
+                }
+                if stock_settlement is not None
+                else {}
+            ),
             **strategy_metadata_fields_from_payload(fields),
         },
+    )
+
+
+def _allocated_stock_settlements(
+    lot_fields_by_id: dict[str, dict[str, Any]],
+    *,
+    lifecycle_case: dict[str, Any],
+    evidence: dict[str, Any],
+    allocations: Iterable[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    terminal_type = str(
+        evidence.get("terminal_type") or evidence.get("evidence_type") or ""
+    ).strip().lower()
+    source = evidence.get("stock_settlement")
+    rows = [dict(item) for item in allocations]
+    if terminal_type not in {"assignment", "exercise"} or not isinstance(source, dict):
+        return {}
+    return allocate_stock_settlement(
+        source,
+        (
+            {
+                "target_lot_id": str(item.get("target_lot_id") or ""),
+                "contracts_allocated": item.get("contracts_allocated"),
+                "multiplier": lifecycle_case.get("multiplier")
+                or lot_fields_by_id.get(str(item.get("target_lot_id") or ""), {}).get(
+                    "multiplier"
+                )
+                or 100,
+            }
+            for item in rows
+        ),
     )
 
 

@@ -161,6 +161,340 @@ def test_manual_assigned_stock_sale_freezes_formula_estimate(tmp_path: Path) -> 
     assert _assigned_stock_lifecycle(repo, stock_lot_id)["assigned_stock_realized_pnl"] == 497.4739
 
 
+def test_assigned_stock_sale_projects_before_and_after_from_one_transaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.application.ledger.writer_lifecycle_evidence as sale_writer
+
+    repo, stock_lot_id = _repo_with_assigned_stock(tmp_path)
+    projections: list[int] = []
+    transaction_connections: list[object] = []
+    original_project = sale_writer.project_assigned_stock_lifecycle_from_rows
+    original_read = repo.read_lifecycle_account_rows
+
+    def project(rows, **kwargs):
+        projections.append(len(rows.get("account_assigned_stock_events") or []))
+        return original_project(rows, **kwargs)
+
+    def read_rows(*, account, conn=None):
+        assert conn is not None
+        transaction_connections.append(conn)
+        return original_read(account=account, conn=conn)
+
+    monkeypatch.setattr(sale_writer, "project_assigned_stock_lifecycle_from_rows", project)
+    monkeypatch.setattr(repo, "read_lifecycle_account_rows", read_rows)
+
+    execute_manual_assigned_stock_sale(
+        repo,
+        target_stock_lot_id=stock_lot_id,
+        shares=40,
+        price=105,
+        trade_time_ms=3_000,
+        dry_run=False,
+    )
+
+    assert projections == [0, 1]
+    assert len(transaction_connections) == 1
+
+
+def _seed_current_assigned_stock_projection(repo, *, as_of_ms: int) -> None:
+    from src.application.ledger import api
+
+    full = build_assigned_stock_view(repo, account="lx", as_of_ms=as_of_ms)
+    compact = api.compact_assigned_stock_view(
+        full,
+        account="lx",
+        current_position_lots=repo.list_position_lots(),
+        as_of_ms=as_of_ms,
+    )
+    with repo._connect() as conn:  # noqa: SLF001 - current projection fixture seed
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO current_decision_input_generations (
+              account, generation, case_generation, evidence_generation,
+              allocation_generation, source_consumption_generation,
+              timing_generation, combo_identity_generation,
+              assigned_stock_generation, updated_at_ms
+            ) VALUES ('lx', 0, 0, 0, 0, 0, 0, 0, 0, ?)
+            """,
+            (as_of_ms,),
+        )
+    payload = api.build_current_decision_projection(
+        repo,
+        account="lx",
+        updated_at_ms=as_of_ms,
+        assigned_stock_after=compact,
+        all_quality_case_facts=[],
+    )
+    repo.upsert_current_decision_projection(
+        api.current_decision_projection_row(payload)
+    )
+
+
+def _prepare_sale_projection_state(repo, state: str) -> None:
+    if state == "absent":
+        return
+    _seed_current_assigned_stock_projection(repo, as_of_ms=2_000)
+    if state == "dirty":
+        with repo._connect() as conn:  # noqa: SLF001 - dirty projection fixture
+            conn.execute(
+                """
+                UPDATE current_decision_input_generations
+                SET assigned_stock_generation = assigned_stock_generation + 1
+                WHERE account = 'lx'
+                """
+            )
+
+
+@pytest.mark.parametrize(
+    ("projection_state", "expected_status"),
+    [
+        ("clean", "published"),
+        ("absent", "not_initialized"),
+        ("dirty", "preexisting_dirty"),
+    ],
+)
+def test_backdated_sale_publishes_final_state_without_rebuilding_deferred_projection(
+    tmp_path: Path,
+    projection_state: str,
+    expected_status: str,
+) -> None:
+    from src.application.ledger import api
+
+    repo, stock_lot_id = _repo_with_assigned_stock(tmp_path)
+    _prepare_sale_projection_state(repo, projection_state)
+    later = execute_manual_assigned_stock_sale(
+        repo,
+        target_stock_lot_id=stock_lot_id,
+        shares=40,
+        price=105,
+        trade_time_ms=4_000,
+        source_deal_id="later-sale",
+        dry_run=False,
+    )
+    projection_before_backfill = repo.read_current_decision_storage_state("lx")[
+        "projection"
+    ]
+    earlier = execute_manual_assigned_stock_sale(
+        repo,
+        target_stock_lot_id=stock_lot_id,
+        shares=30,
+        price=105,
+        trade_time_ms=3_000,
+        source_deal_id="earlier-sale",
+        dry_run=False,
+    )
+
+    assert later["result"]["decision_projection"]["statuses"] == {
+        "lx": expected_status
+    }
+    assert earlier["result"]["decision_projection"]["statuses"] == {
+        "lx": expected_status
+    }
+    assert earlier["stock_lot_after"]["shares_remaining"] == 70
+    assert len(repo.list_assigned_stock_events()) == 2
+    full = build_assigned_stock_view(repo, account="lx", as_of_ms=5_000)
+    assert full["assigned_stock_lots"][0]["shares_remaining"] == 30
+    assert len(full["assigned_stock_sale_rows"]) == 2
+    if projection_state == "clean":
+        current = api.read_current_decision_projection(
+            repo,
+            account="lx",
+            now_ms=5_000,
+        )
+        assert current["status"] == "trusted"
+        assert current["payload"]["assigned_stock"]["lots"][0][
+            "shares_remaining"
+        ] == 30
+        assert current["payload"]["assigned_stock"]["lots"][0][
+            "sale_fact_count"
+        ] == 2
+    else:
+        assert (
+            repo.read_current_decision_storage_state("lx")["projection"]
+            == projection_before_backfill
+        )
+
+
+@pytest.mark.parametrize("projection_state", ["clean", "absent", "dirty"])
+def test_backdated_sale_cannot_invalidate_existing_later_sale(
+    tmp_path: Path,
+    projection_state: str,
+) -> None:
+    repo, stock_lot_id = _repo_with_assigned_stock(tmp_path)
+    _prepare_sale_projection_state(repo, projection_state)
+    execute_manual_assigned_stock_sale(
+        repo,
+        target_stock_lot_id=stock_lot_id,
+        shares=80,
+        price=105,
+        trade_time_ms=4_000,
+        source_deal_id="later-sale",
+        dry_run=False,
+    )
+    events_before = repo.list_assigned_stock_events()
+    storage_before = repo.read_current_decision_storage_state("lx")
+
+    with pytest.raises(ValueError, match="invalidates_subsequent_sale"):
+        execute_manual_assigned_stock_sale(
+            repo,
+            target_stock_lot_id=stock_lot_id,
+            shares=80,
+            price=105,
+            trade_time_ms=3_000,
+            source_deal_id="earlier-sale",
+            dry_run=False,
+        )
+
+    assert repo.list_assigned_stock_events() == events_before
+    assert repo.read_current_decision_storage_state("lx") == storage_before
+
+
+@pytest.mark.parametrize("projection_state", ["clean", "absent", "dirty"])
+def test_backdated_sale_cannot_invalidate_existing_later_call_coverage(
+    tmp_path: Path,
+    projection_state: str,
+) -> None:
+    repo, stock_lot_id = _repo_with_assigned_stock(tmp_path)
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="NVDA",
+            option_type="call",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=110,
+            multiplier=80,
+            expiration_ymd="2026-06-19",
+            premium_per_share=2,
+            opened_at_ms=4_000,
+            strategy_snapshot={"source_stock_lot_id": stock_lot_id},
+        ),
+    )
+    before = build_assigned_stock_view(repo, account="lx", as_of_ms=5_000)
+    assert sum(row["shares"] for row in before["covered_call_allocations"]) == 80
+    _prepare_sale_projection_state(repo, projection_state)
+    events_before = repo.list_assigned_stock_events()
+    storage_before = repo.read_current_decision_storage_state("lx")
+
+    with pytest.raises(ValueError, match="invalidates_subsequent_covered_call"):
+        execute_manual_assigned_stock_sale(
+            repo,
+            target_stock_lot_id=stock_lot_id,
+            shares=40,
+            price=105,
+            trade_time_ms=3_000,
+            source_deal_id="earlier-sale",
+            dry_run=False,
+        )
+
+    assert repo.list_assigned_stock_events() == events_before
+    assert repo.read_current_decision_storage_state("lx") == storage_before
+    after = build_assigned_stock_view(repo, account="lx", as_of_ms=5_000)
+    assert after["covered_call_allocations"] == before["covered_call_allocations"]
+
+
+@pytest.mark.parametrize(
+    ("stock_shares", "covered_shares", "sale_shares", "allowed"),
+    [
+        (100, [80], 80, False),
+        (100, [20], 80, True),
+        (300, [100, 100], 150, False),
+    ],
+)
+def test_manual_assigned_stock_sale_preserves_aggregate_covered_call_capacity(
+    tmp_path: Path,
+    stock_shares: int,
+    covered_shares: list[int],
+    sale_shares: int,
+    allowed: bool,
+) -> None:
+    repo = ledger_repository.SQLiteOptionPositionsRepository(
+        tmp_path / "option_positions.sqlite3"
+    )
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="NVDA",
+            option_type="put",
+            side="short",
+            contracts=stock_shares // 100,
+            currency="USD",
+            strike=100,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            premium_per_share=2,
+            opened_at_ms=1_000,
+        ),
+    )
+    put_lot = repo.list_position_lots()[0]
+    record_manual_assignment(
+        repo,
+        record_id=put_lot["record_id"],
+        contracts_to_close=stock_shares // 100,
+        stock_side="buy",
+        stock_qty=stock_shares,
+        stock_price=100,
+        as_of_ms=2_000,
+    )
+    stock_lot_id = build_assigned_stock_view(
+        repo,
+        account="lx",
+        as_of_ms=2_000,
+    )["assigned_stock_lots"][0]["stock_lot_id"]
+    for index, shares in enumerate(covered_shares):
+        ledger_manual_trades.persist_manual_open_event(
+            repo,
+            OpenPositionCommand(
+                broker="富途",
+                account="lx",
+                symbol="NVDA",
+                option_type="call",
+                side="short",
+                contracts=1,
+                currency="USD",
+                strike=110 + index,
+                multiplier=shares,
+                expiration_ymd="2026-06-19",
+                premium_per_share=2,
+                opened_at_ms=3_000 + index,
+                strategy_snapshot={"source_stock_lot_id": stock_lot_id},
+            ),
+        )
+
+    if allowed:
+        result = execute_manual_assigned_stock_sale(
+            repo,
+            target_stock_lot_id=stock_lot_id,
+            shares=sale_shares,
+            price=105,
+            trade_time_ms=5_000,
+            dry_run=False,
+        )
+        assert result["result"]["created"] is True
+        assert _assigned_stock_lifecycle(repo, stock_lot_id)["shares_remaining"] == (
+            stock_shares - sale_shares
+        )
+    else:
+        with pytest.raises(ValueError, match="covered_call_capacity_conflict"):
+            execute_manual_assigned_stock_sale(
+                repo,
+                target_stock_lot_id=stock_lot_id,
+                shares=sale_shares,
+                price=105,
+                trade_time_ms=5_000,
+                dry_run=False,
+            )
+        assert repo.list_assigned_stock_events() == []
+        assert _assigned_stock_lifecycle(repo, stock_lot_id)["shares_remaining"] == stock_shares
+
+
 def test_resolve_trade_does_not_reopen_closed_assigned_stock_lot_after_stock_buy(tmp_path: Path) -> None:
     repo, stock_lot_id = _repo_with_assigned_stock(tmp_path)
 
@@ -190,17 +524,29 @@ def test_resolve_trade_does_not_reopen_closed_assigned_stock_lot_after_stock_buy
     assert lifecycle["assigned_stock_realized_pnl"] == 497.4739
 
 
-def test_resolve_trade_broker_assigned_stock_sale_duplicate_is_idempotent(tmp_path: Path) -> None:
+def test_resolve_trade_broker_assigned_stock_sale_duplicate_is_idempotent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     repo, _stock_lot_id = _repo_with_assigned_stock(tmp_path)
 
     first = resolve_trade_deal(_stock_sale_deal(), repo=repo, state={}, apply_changes=True)
+    with sqlite3.connect(f"file:{repo.db_path}?mode=ro", uri=True) as conn:
+        before = tuple(conn.iterdump())
+    monkeypatch.setattr(
+        "src.application.positions.workflows.invalidate_option_positions_context_cache_for_repo",
+        lambda *_args, **_kwargs: pytest.fail("duplicate invalidated positions cache"),
+    )
     duplicate = resolve_trade_deal(_stock_sale_deal(), repo=repo, state={}, apply_changes=True)
 
     assert first.status == "applied"
     assert duplicate.status == "applied"
     assert duplicate.operations[0].to_payload()["result"]["created"] is False
+    assert duplicate.operations[0].to_payload()["result"]["decision_projection"]["projection_dml_count"] == 0
     assert duplicate.diagnostics["assigned_stock_sale"]["idempotent_duplicate"] is True
     assert len(repo.list_assigned_stock_events()) == 1
+    with sqlite3.connect(f"file:{repo.db_path}?mode=ro", uri=True) as conn:
+        assert tuple(conn.iterdump()) == before
 
 
 def test_resolve_trade_keeps_unmatched_stock_sale_as_non_option(tmp_path: Path) -> None:
@@ -329,11 +675,15 @@ def test_intake_rejects_second_physical_account_after_durable_stock_sale(tmp_pat
     first = _standard_stock_sale_deal(contracts=50)
     assert process(first, True)["status"] == "applied"
     events, lots = repo.list_assigned_stock_events(), repo.list_position_lots()
+    with sqlite3.connect(f"file:{repo.db_path}?mode=ro", uri=True) as conn:
+        ledger_before = tuple(conn.iterdump())
     second = _standard_stock_sale_deal(contracts=50, futu_account_id="REAL_2", deal_id="stock-sale-2")
     rejected = process(second, apply_changes)
     assert (rejected["status"], rejected["reason"]) == ("unresolved", "execution_admission_failed")
     assert "unsupported:multiple_physical_accounts_in_projection" in rejected["diagnostics"]["errors"]
     assert repo.list_assigned_stock_events() == events and repo.list_position_lots() == lots
+    with sqlite3.connect(f"file:{repo.db_path}?mode=ro", uri=True) as conn:
+        assert tuple(conn.iterdump()) == ledger_before
     assert events[0]["futu_account_id"] == "REAL_1"
     assert events[0]["execution_input"]["broker_account_ref"]["external_account_id"] == "REAL_1"
     assert _assigned_stock_lifecycle(repo, stock_lot_id)["shares_remaining"] == 50
@@ -451,3 +801,165 @@ def test_late_stock_order_enrichment_preserves_sale_and_recovers_fee_target(tmp_
     assert any(item[-1] == "late-stock-order" for item in targets)
     assert resolve_trade_deal(enriched, repo=repo, state={}, apply_changes=True).status == "applied"
     assert repo.list_assigned_stock_events() == after
+
+
+def test_late_stock_order_enrichment_publishes_final_state_after_newer_sale(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.application.ledger import api
+    import src.application.ledger.writer_lifecycle_evidence as sale_writer
+
+    repo, stock_lot_id = _repo_with_assigned_stock(tmp_path)
+    deal = _standard_stock_sale_deal(contracts=40, order_id=None)
+    assert resolve_trade_deal(
+        deal,
+        repo=repo,
+        state={},
+        apply_changes=True,
+    ).status == "applied"
+    api.refresh_position_lot_projection(repo)
+    _seed_current_assigned_stock_projection(repo, as_of_ms=3_000)
+    execute_manual_assigned_stock_sale(
+        repo,
+        target_stock_lot_id=stock_lot_id,
+        shares=20,
+        price=105,
+        trade_time_ms=4_000,
+        source_deal_id="newer-sale",
+        dry_run=False,
+    )
+    enriched = replace(
+        deal,
+        order_id="late-stock-order",
+        execution_input={
+            **deal.execution_input,
+            "external_order_id": "late-stock-order",
+            "external_order_namespace": "futu.order",
+            "evidence_refs": ["source:history:stock-order"],
+        },
+    )
+    finalizer_calls = 0
+    original_finalizer = sale_writer.finalize_current_decision_projection
+
+    def finalize(*args, **kwargs):
+        nonlocal finalizer_calls
+        finalizer_calls += 1
+        return original_finalizer(*args, **kwargs)
+
+    monkeypatch.setattr(
+        sale_writer,
+        "finalize_current_decision_projection",
+        finalize,
+    )
+
+    replay = resolve_trade_deal(
+        enriched,
+        repo=repo,
+        state={},
+        apply_changes=True,
+    )
+
+    assert replay.status == "applied"
+    assert finalizer_calls == 1
+    assert len(repo.list_assigned_stock_events()) == 2
+    full = build_assigned_stock_view(repo, account="lx", as_of_ms=5_000)
+    current = api.read_current_decision_projection(
+        repo,
+        account="lx",
+        now_ms=5_000,
+    )
+    assert full["assigned_stock_lots"][0]["shares_remaining"] == 40
+    assert current["status"] == "trusted"
+    assert current["payload"]["assigned_stock"]["lots"][0][
+        "shares_remaining"
+    ] == 40
+    original_sale = next(
+        row
+        for row in repo.list_assigned_stock_events()
+        if row.get("source_deal_id") == deal.deal_id
+    )
+    assert original_sale["order_id"] == "late-stock-order"
+
+
+def test_late_stock_order_enrichment_rolls_back_cas_when_finalizer_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.application.positions.workflows import execute_broker_assigned_stock_sale
+
+    repo, _ = _repo_with_assigned_stock(tmp_path)
+    deal = _standard_stock_sale_deal(order_id=None)
+    assert resolve_trade_deal(deal, repo=repo, state={}, apply_changes=True).status == "applied"
+    enriched = replace(
+        deal,
+        order_id="late-stock-order",
+        execution_input={
+            **deal.execution_input,
+            "external_order_id": "late-stock-order",
+            "external_order_namespace": "futu.order",
+            "evidence_refs": ["source:history:stock-order"],
+        },
+    )
+    with sqlite3.connect(f"file:{repo.db_path}?mode=ro", uri=True) as conn:
+        before = tuple(conn.iterdump())
+    monkeypatch.setattr(
+        "src.application.ledger.writer_lifecycle_evidence.finalize_current_decision_projection",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("projection failed after CAS")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="projection failed after CAS"):
+        execute_broker_assigned_stock_sale(repo, enriched, dry_run=False)
+
+    with sqlite3.connect(f"file:{repo.db_path}?mode=ro", uri=True) as conn:
+        assert tuple(conn.iterdump()) == before
+
+
+def test_late_stock_order_conflict_leaves_ledger_unchanged(tmp_path: Path) -> None:
+    from src.application.ledger.api import record_assigned_stock_event
+
+    repo, _ = _repo_with_assigned_stock(tmp_path)
+    deal = _standard_stock_sale_deal(order_id=None)
+    assert resolve_trade_deal(deal, repo=repo, state={}, apply_changes=True).status == "applied"
+    enriched = replace(
+        deal,
+        order_id="late-stock-order",
+        execution_input={
+            **deal.execution_input,
+            "external_order_id": "late-stock-order",
+            "external_order_namespace": "futu.order",
+        },
+    )
+    assert resolve_trade_deal(enriched, repo=repo, state={}, apply_changes=True).status == "applied"
+    conflicting = replace(
+        enriched,
+        order_id="different-stock-order",
+        execution_input={
+            **enriched.execution_input,
+            "external_order_id": "different-stock-order",
+        },
+    )
+    with sqlite3.connect(f"file:{repo.db_path}?mode=ro", uri=True) as conn:
+        before = tuple(conn.iterdump())
+
+    rejected = resolve_trade_deal(
+        conflicting,
+        repo=repo,
+        state={},
+        apply_changes=True,
+    )
+
+    assert rejected.status == "unresolved"
+    with sqlite3.connect(f"file:{repo.db_path}?mode=ro", uri=True) as conn:
+        assert tuple(conn.iterdump()) == before
+    stored = repo.list_assigned_stock_events()[0]
+    for direct_input in (
+        {"sale_event": {**stored, "order_id": "different-stock-order"}},
+        {"sale_event": stored, "identity_execution": conflicting.execution_input},
+    ):
+        with pytest.raises(ValueError, match="conflict"):
+            record_assigned_stock_event(repo, **direct_input)
+        with sqlite3.connect(f"file:{repo.db_path}?mode=ro", uri=True) as conn:
+            assert tuple(conn.iterdump()) == before

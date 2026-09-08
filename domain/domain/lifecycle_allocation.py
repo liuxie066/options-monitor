@@ -6,6 +6,8 @@ from decimal import Decimal, InvalidOperation
 from itertools import product
 from typing import Any, Iterable
 
+from domain.domain.money import quantize_money
+
 
 TERMINAL_TYPES = frozenset({"close", "assignment", "exercise", "expire_close"})
 
@@ -33,6 +35,192 @@ class AllocationPlan:
     status: str
     allocations: tuple[dict[str, Any], ...] = ()
     reason_codes: tuple[str, ...] = ()
+
+
+def _decimal_value(value: Any, *, field: str, nonnegative: bool = False) -> Decimal:
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be a finite number")
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError(f"{field} must be a finite number") from exc
+    if not parsed.is_finite() or (nonnegative and parsed < 0):
+        raise ValueError(f"{field} must be a finite nonnegative number")
+    return parsed
+
+
+def _allocated_money(total: Any, shares: list[int], *, field: str) -> list[float]:
+    amount = quantize_money(_decimal_value(total, field=field, nonnegative=True))
+    total_shares = sum(shares)
+    allocated: list[Decimal] = []
+    running = Decimal("0")
+    for share_count in shares[:-1]:
+        remaining = quantize_money(amount - running)
+        value = min(
+            quantize_money(amount * Decimal(share_count) / Decimal(total_shares)),
+            remaining,
+        )
+        allocated.append(value)
+        running += value
+    allocated.append(quantize_money(amount - running))
+    if any(value < 0 for value in allocated) or sum(allocated, Decimal("0")) != amount:
+        raise ValueError(f"{field} allocation does not conserve its source total")
+    return [float(value) for value in allocated]
+
+
+def allocate_stock_settlement(
+    stock_settlement_source: dict[str, Any],
+    targets: Iterable[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Allocate one immutable stock-settlement source across target lots."""
+    if not isinstance(stock_settlement_source, dict) or not stock_settlement_source:
+        raise ValueError("stock_settlement_source must be a non-empty object")
+    source = dict(stock_settlement_source)
+    source_shares = _positive_contracts(source.get("shares"), field="stock settlement shares")
+    normalized: list[tuple[str, int]] = []
+    seen: set[str] = set()
+    for raw_target in targets:
+        target = dict(raw_target or {})
+        lot_id = str(target.get("target_lot_id") or "").strip()
+        if not lot_id or lot_id in seen:
+            raise ValueError("stock settlement target lot ids must be non-empty and unique")
+        seen.add(lot_id)
+        contracts = _positive_contracts(
+            target.get("contracts_allocated"), field=f"contracts allocated for {lot_id}"
+        )
+        multiplier = _decimal_value(
+            target.get("multiplier"), field=f"multiplier for {lot_id}", nonnegative=True
+        )
+        shares = Decimal(contracts) * multiplier
+        if shares <= 0 or shares != int(shares):
+            raise ValueError(f"allocated shares for {lot_id} must be a positive integer")
+        normalized.append((lot_id, int(shares)))
+    normalized.sort(key=lambda item: item[0])
+    if not normalized or sum(shares for _lot_id, shares in normalized) != source_shares:
+        raise ValueError("allocated stock shares do not equal stock_settlement_source shares")
+
+    share_counts = [shares for _lot_id, shares in normalized]
+    fee_allocations = {
+        field: _allocated_money(source[field], share_counts, field=f"stock settlement {field}")
+        for field in ("fees", "fee")
+        if field in source and source[field] not in (None, "")
+    }
+    provenance = source.get("fee_provenance")
+    provenance_amounts: list[float] | None = None
+    if isinstance(provenance, dict) and provenance.get("amount") not in (None, ""):
+        provenance_amounts = _allocated_money(
+            provenance["amount"], share_counts, field="stock settlement fee_provenance.amount"
+        )
+
+    result: dict[str, dict[str, Any]] = {}
+    for index, (lot_id, shares) in enumerate(normalized):
+        settlement = dict(source)
+        settlement["shares"] = shares
+        if "expected_shares" in settlement:
+            settlement["expected_shares"] = shares
+        if "stock_qty" in settlement:
+            settlement["stock_qty"] = shares
+        for field, values in fee_allocations.items():
+            settlement[field] = values[index]
+        if isinstance(provenance, dict):
+            settlement["fee_provenance"] = dict(provenance)
+            if provenance_amounts is not None:
+                settlement["fee_provenance"]["amount"] = provenance_amounts[index]
+        result[lot_id] = settlement
+    return result
+
+
+def _event_group_fields(event: Any) -> tuple[str, str, int, Any, dict[str, Any]]:
+    if isinstance(event, dict):
+        raw = event.get("raw_payload")
+        payload = dict(raw) if isinstance(raw, dict) else {}
+        return (
+            str(event.get("event_id") or "").strip(),
+            str(event.get("event_type") or "").strip().lower(),
+            int(event.get("contracts") or 0),
+            event.get("multiplier"),
+            payload,
+        )
+    return (
+        str(getattr(event, "event_id", "") or "").strip(),
+        str(getattr(event, "event_type", "") or "").strip().lower(),
+        int(getattr(event, "contracts", 0) or 0),
+        getattr(event, "multiplier", None),
+        dict(getattr(event, "raw_payload", {}) or {}),
+    )
+
+
+def validate_stock_settlement_allocation_group(events: Iterable[Any]) -> dict[str, Any]:
+    """Validate one manual, legacy, or v2 terminal-event settlement group."""
+    rows = [_event_group_fields(event) for event in events]
+    if not rows:
+        raise ValueError("stock settlement allocation group is empty")
+    event_types = {row[1] for row in rows}
+    if len(event_types) != 1 or not event_types <= {"assignment", "exercise"}:
+        raise ValueError("stock settlement allocation group event type is invalid")
+
+    def context(row: tuple[str, str, int, Any, dict[str, Any]]) -> tuple[Any, ...]:
+        event_id, event_type, _contracts, _multiplier, payload = row
+        request_id = str(payload.get("manual_request_id") or "").strip()
+        if request_id:
+            return (
+                "manual",
+                request_id,
+                str(payload.get("manual_request_intent_hash") or "").strip(),
+                event_type,
+            )
+        case_id = str(payload.get("case_id") or "").strip()
+        evidence_id = str(payload.get("evidence_id") or "").strip()
+        if case_id and evidence_id:
+            return ("v2", case_id, evidence_id, event_type)
+        evidence_ids = payload.get("evidence_ids")
+        if case_id:
+            return (
+                "legacy",
+                case_id,
+                tuple(str(item) for item in evidence_ids or []),
+                event_type,
+            )
+        return ("single", event_id, event_type)
+
+    contexts = {context(row) for row in rows}
+    if len(contexts) != 1 or (len(rows) > 1 and next(iter(contexts))[0] == "single"):
+        raise ValueError("stock settlement allocation group context conflicts")
+    if next(iter(contexts))[0] == "manual" and not next(iter(contexts))[2]:
+        raise ValueError("manual stock settlement allocation group intent hash is required")
+
+    has_sources = [isinstance(row[4].get("stock_settlement_source"), dict) for row in rows]
+    if any(has_sources) and not all(has_sources):
+        raise ValueError("stock settlement allocation group mixes old and new representations")
+    settlements = [
+        dict(row[4].get("stock_settlement") or {})
+        if isinstance(row[4].get("stock_settlement"), dict)
+        else {}
+        for row in rows
+    ]
+    targets = [
+        {
+            "target_lot_id": str(row[4].get("target_lot_id") or "").strip(),
+            "contracts_allocated": row[2],
+            "multiplier": row[3],
+        }
+        for row in rows
+    ]
+    if not all(has_sources):
+        if not settlements or any(value != settlements[0] for value in settlements[1:]):
+            raise ValueError("legacy stock settlement allocation group conflicts")
+        allocate_stock_settlement(settlements[0], targets)
+        return dict(settlements[0])
+
+    sources = [dict(row[4]["stock_settlement_source"]) for row in rows]
+    if not sources[0] or any(value != sources[0] for value in sources[1:]):
+        raise ValueError("stock settlement allocation group source conflicts")
+    expected = allocate_stock_settlement(sources[0], targets)
+    for row, settlement in zip(rows, settlements, strict=True):
+        lot_id = str(row[4].get("target_lot_id") or "").strip()
+        if settlement != expected.get(lot_id):
+            raise ValueError("stock settlement per-lot allocation conflicts with source")
+    return dict(sources[0])
 
 
 def _positive_contracts(value: Any, *, field: str) -> int:
@@ -281,8 +469,10 @@ __all__ = [
     "AllocationResolution",
     "TERMINAL_TYPES",
     "allocation_id_for",
+    "allocate_stock_settlement",
     "normalize_target_manifest",
     "plan_evidence_allocation",
     "resolve_allocations",
     "terminal_event_id_for",
+    "validate_stock_settlement_allocation_group",
 ]

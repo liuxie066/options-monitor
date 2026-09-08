@@ -269,6 +269,7 @@ def _current_decision_projection_oracle(
         ),
         account=account_value,
         current_position_lots=list(current_inputs.get("lots") or []),
+        as_of_ms=instant,
     )
     quality = build_lifecycle_quality_fact(
         account=account_value,

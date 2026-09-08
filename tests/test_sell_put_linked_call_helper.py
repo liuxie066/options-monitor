@@ -1,10 +1,25 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
 import pytest
+
+
+def _with_opening_evidence(frame: pd.DataFrame, *, mode: str) -> pd.DataFrame:
+    out = frame.copy()
+    out["option_type"] = mode
+    out["opening_contract_status"] = "ready"
+    out["underlier_observation_status"] = "ready"
+    out["snapshot_received_at_utc"] = datetime.now(timezone.utc).isoformat()
+    out["option_standard_type"] = "STANDARD"
+    out["stock_owner"] = out["symbol"]
+    out["price_tick"] = 0.01
+    out["chain_multiplier"] = out["multiplier"]
+    out["snapshot_multiplier"] = out["multiplier"]
+    return out
 
 
 def test_combo_yield_defaults_match_system_template() -> None:
@@ -62,7 +77,7 @@ def test_combo_yield_pair_engine_uses_hk_liquidity_defaults(tmp_path: Path) -> N
 
     parsed = tmp_path / "parsed"
     parsed.mkdir(parents=True)
-    pd.DataFrame(
+    calls = _with_opening_evidence(pd.DataFrame(
         [
             {
                 "symbol": "0700.HK",
@@ -83,8 +98,8 @@ def test_combo_yield_pair_engine_uses_hk_liquidity_defaults(tmp_path: Path) -> N
                 "multiplier": 100,
             }
         ]
-    ).to_csv(parsed / "0700.HK_required_data.csv", index=False)
-    puts = pd.DataFrame(
+    ), mode="call")
+    puts = _with_opening_evidence(pd.DataFrame(
         [
             {
                 "symbol": "0700.HK",
@@ -104,6 +119,10 @@ def test_combo_yield_pair_engine_uses_hk_liquidity_defaults(tmp_path: Path) -> N
                 "delta": -0.20,
             }
         ]
+    ), mode="put")
+    pd.concat([puts, calls], ignore_index=True).to_csv(
+        parsed / "0700.HK_required_data.csv",
+        index=False,
     )
     cfg = resolve_combo_yield_cfg({"combo_yield": {"enabled": True}})
 
@@ -135,11 +154,18 @@ def _write_single_call(
     ask: float = 0.25,
     implied_volatility: float = 0.80,
     delta: float = 0.20,
+    snapshot_received_at_utc: str | None = None,
 ) -> None:
     parsed = input_root / "parsed"
     parsed.mkdir(parents=True, exist_ok=True)
+    receipt = snapshot_received_at_utc or datetime.now(timezone.utc).isoformat()
+    put_source = _single_put_df(
+        dte=dte,
+        snapshot_received_at_utc=receipt,
+    ).iloc[0].to_dict()
     pd.DataFrame(
         [
+            put_source,
             {
                 "symbol": "NVDA",
                 "option_type": "call",
@@ -157,6 +183,14 @@ def _write_single_call(
                 "currency": "USD",
                 "delta": delta,
                 "multiplier": 100,
+                "opening_contract_status": "ready",
+                "underlier_observation_status": "ready",
+                "snapshot_received_at_utc": receipt,
+                "option_standard_type": "STANDARD",
+                "stock_owner": "NVDA",
+                "price_tick": 0.01,
+                "chain_multiplier": 100,
+                "snapshot_multiplier": 100,
             }
         ]
     ).to_csv(parsed / "NVDA_required_data.csv", index=False)
@@ -186,6 +220,15 @@ def _single_put_df(
         "volume": 80,
         "implied_volatility": implied_volatility,
         "delta": -0.25,
+        "option_type": "put",
+        "opening_contract_status": "ready",
+        "underlier_observation_status": "ready",
+        "snapshot_received_at_utc": datetime.now(timezone.utc).isoformat(),
+        "option_standard_type": "STANDARD",
+        "stock_owner": "NVDA",
+        "price_tick": 0.01,
+        "chain_multiplier": 100,
+        "snapshot_multiplier": 100,
     }
     row.update(overrides)
     return pd.DataFrame([row])
@@ -267,7 +310,7 @@ def test_combo_yield_selects_best_call_and_builds_rank_shadow(tmp_path: Path) ->
 
     parsed = tmp_path / "parsed"
     parsed.mkdir(parents=True)
-    pd.DataFrame(
+    calls = _with_opening_evidence(pd.DataFrame(
         [
             {
                 "symbol": "NVDA",
@@ -308,9 +351,9 @@ def test_combo_yield_selects_best_call_and_builds_rank_shadow(tmp_path: Path) ->
                 "multiplier": 100,
             },
         ]
-    ).to_csv(parsed / "NVDA_required_data.csv", index=False)
+    ), mode="call")
 
-    df = pd.DataFrame(
+    df = _with_opening_evidence(pd.DataFrame(
         [
             {
                 "symbol": "NVDA",
@@ -330,6 +373,10 @@ def test_combo_yield_selects_best_call_and_builds_rank_shadow(tmp_path: Path) ->
                 "delta": -0.25,
             }
         ]
+    ), mode="put")
+    pd.concat([df, calls], ignore_index=True).to_csv(
+        parsed / "NVDA_required_data.csv",
+        index=False,
     )
 
     pairs = find_sell_put_combo_yield_pairs(
@@ -377,7 +424,7 @@ def test_combo_yield_does_not_require_iv_for_funding_decision(tmp_path: Path) ->
 
     parsed = tmp_path / "parsed"
     parsed.mkdir(parents=True)
-    pd.DataFrame(
+    calls = _with_opening_evidence(pd.DataFrame(
         [
             {
                 "symbol": "NVDA",
@@ -397,9 +444,9 @@ def test_combo_yield_does_not_require_iv_for_funding_decision(tmp_path: Path) ->
                 "multiplier": 100,
             }
         ]
-    ).to_csv(parsed / "NVDA_required_data.csv", index=False)
+    ), mode="call")
 
-    df = pd.DataFrame(
+    df = _with_opening_evidence(pd.DataFrame(
         [
             {
                 "symbol": "NVDA",
@@ -418,6 +465,10 @@ def test_combo_yield_does_not_require_iv_for_funding_decision(tmp_path: Path) ->
                 "delta": -0.25,
             }
         ]
+    ), mode="put")
+    pd.concat([df, calls], ignore_index=True).to_csv(
+        parsed / "NVDA_required_data.csv",
+        index=False,
     )
 
     pairs = find_sell_put_combo_yield_pairs(
@@ -446,7 +497,7 @@ def test_combo_yield_rejects_unfunded_call_by_default(tmp_path: Path) -> None:
 
     parsed = tmp_path / "parsed"
     parsed.mkdir(parents=True)
-    pd.DataFrame(
+    calls = _with_opening_evidence(pd.DataFrame(
         [
             {
                 "symbol": "NVDA",
@@ -467,9 +518,9 @@ def test_combo_yield_rejects_unfunded_call_by_default(tmp_path: Path) -> None:
                 "multiplier": 100,
             }
         ]
-    ).to_csv(parsed / "NVDA_required_data.csv", index=False)
+    ), mode="call")
 
-    df = pd.DataFrame(
+    df = _with_opening_evidence(pd.DataFrame(
         [
             {
                 "symbol": "NVDA",
@@ -489,6 +540,10 @@ def test_combo_yield_rejects_unfunded_call_by_default(tmp_path: Path) -> None:
                 "delta": -0.25,
             }
         ]
+    ), mode="put")
+    pd.concat([df, calls], ignore_index=True).to_csv(
+        parsed / "NVDA_required_data.csv",
+        index=False,
     )
 
     pairs = find_sell_put_combo_yield_pairs(
@@ -511,7 +566,7 @@ def test_combo_yield_accepts_premium_funded_call_with_clear_upside(tmp_path: Pat
 
     parsed = tmp_path / "parsed"
     parsed.mkdir(parents=True)
-    pd.DataFrame(
+    calls = _with_opening_evidence(pd.DataFrame(
         [
             {
                 "symbol": "NVDA",
@@ -532,9 +587,9 @@ def test_combo_yield_accepts_premium_funded_call_with_clear_upside(tmp_path: Pat
                 "multiplier": 100,
             }
         ]
-    ).to_csv(parsed / "NVDA_required_data.csv", index=False)
+    ), mode="call")
 
-    df = pd.DataFrame(
+    df = _with_opening_evidence(pd.DataFrame(
         [
             {
                 "symbol": "NVDA",
@@ -554,6 +609,10 @@ def test_combo_yield_accepts_premium_funded_call_with_clear_upside(tmp_path: Pat
                 "delta": -0.25,
             }
         ]
+    ), mode="put")
+    pd.concat([df, calls], ignore_index=True).to_csv(
+        parsed / "NVDA_required_data.csv",
+        index=False,
     )
 
     pairs = find_sell_put_combo_yield_pairs(
@@ -1063,7 +1122,7 @@ def test_combo_yield_rejects_crossed_call_quote(tmp_path: Path) -> None:
     assert pairs.empty
     assert pairs.attrs["reject_counts"] == {
         "call_expiration_unavailable": 1,
-        "call_leg_invalid": 1,
+        "option_ask_below_bid": 1,
     }
 
 
@@ -1074,7 +1133,7 @@ def test_combo_yield_required_data_read_error_is_not_an_empty_universe(tmp_path:
     parsed.mkdir(parents=True)
     (parsed / "NVDA_required_data.csv").write_bytes(b"\xff")
 
-    with pytest.raises(RuntimeError, match="failed to read Combo Yield required-data calls"):
+    with pytest.raises(RuntimeError, match="failed to read Combo Yield required-data"):
         find_sell_put_combo_yield_pairs(
             df_candidates=_single_put_df(dte=44),
             symbol="NVDA",
@@ -1082,6 +1141,59 @@ def test_combo_yield_required_data_read_error_is_not_an_empty_universe(tmp_path:
             combo_yield_cfg={"enabled": True},
             sell_put_cfg={"enabled": True, "min_dte": 20, "max_dte": 60},
         )
+
+
+def test_combo_yield_pair_metrics_only_catches_recognized_input_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from domain.domain.engine import CandidateCalculationError
+    from src.application import sell_put_call_helper as helper
+
+    _write_single_call(
+        tmp_path,
+        dte=44,
+        snapshot_received_at_utc="2026-05-06T13:59:00Z",
+    )
+    kwargs = {
+        "df_candidates": _single_put_df(
+            dte=44,
+            snapshot_received_at_utc="2026-05-06T13:59:00Z",
+        ),
+        "symbol": "NVDA",
+        "input_root": tmp_path,
+        "combo_yield_cfg": {"enabled": True},
+        "sell_put_cfg": {"enabled": True, "min_dte": 20, "max_dte": 60},
+        "now_utc": datetime(2026, 5, 6, 14, 0, tzinfo=timezone.utc),
+    }
+
+    monkeypatch.setattr(
+        helper,
+        "_build_pair_row",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            CandidateCalculationError(
+                "evidence_unavailable",
+                "expected evidence gap",
+            )
+        ),
+    )
+    unavailable = helper.find_sell_put_combo_yield_pairs(**kwargs)
+    diagnostics = helper.get_combo_yield_pair_diagnostics(unavailable)
+    diagnostic = diagnostics.loc[
+        diagnostics["diagnostic_stage"] == "pair_metrics"
+    ].iloc[0]
+    assert diagnostic["reject_reasons"] == "evidence_unavailable"
+    assert diagnostic["evidence_status"] == "unavailable"
+
+    monkeypatch.setattr(
+        helper,
+        "_build_pair_row",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            ValueError("unexpected pair calculation failure")
+        ),
+    )
+    with pytest.raises(ValueError, match="unexpected pair calculation failure"):
+        helper.find_sell_put_combo_yield_pairs(**kwargs)
 
 
 def test_combo_yield_rank_uses_retention_then_delta_not_premium_score() -> None:

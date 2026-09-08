@@ -1661,6 +1661,16 @@ def test_poll_stock_settlement_uses_canonical_lifecycle_writer(
         if item.get("evidence_id") == observation["observation_id"]
     )
     assert pair["evidence_type"] == "assignment"
+    assignment_event = next(
+        item
+        for item in repo.list_trade_events()
+        if item.get("event_type") == "assignment"
+    )
+    assert assignment_event["raw_payload"]["stock_settlement_source"] == pair[
+        "stock_settlement"
+    ]
+    assert assignment_event["raw_payload"]["stock_settlement"]["shares"] == 100
+    assert assignment_event["raw_payload"]["stock_settlement_source"]["shares"] == 100
     assert set(pair["source_evidence_ids"]) == {
         "anchor-1",
         observation["stock_settlement_candidates"][0]["evidence_id"],

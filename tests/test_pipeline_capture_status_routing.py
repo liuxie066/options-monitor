@@ -375,6 +375,360 @@ def _run_default_capture(
     )
 
 
+def _run_wheel_scan_failure_capture(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    reserved_by_symbol: dict[str, int],
+    coverage_facts_fail: bool = False,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], list[str]]:
+    from src.application import pipeline_watchlist as mod
+    from src.application.strategy_scan_status import (
+        load_strategy_scan_status_index_v2,
+        publish_strategy_scan_status,
+        publish_strategy_scan_status_index_v2,
+    )
+    from src.application.wheel.candidate_snapshot import (
+        load_wheel_candidate_snapshot,
+    )
+
+    required_manifest = tmp_path / "required_data_manifest.json"
+    portfolio_manifest = tmp_path / "prepared_portfolio_context.json"
+    ledger_manifest = tmp_path / "prepared_option_positions_context.json"
+    report_dir = tmp_path / "output_runs" / RUN_ID / "accounts" / "lx"
+    report_dir.mkdir(parents=True)
+    for path in (required_manifest, portfolio_manifest, ledger_manifest):
+        path.write_text("{}\n", encoding="utf-8")
+
+    symbols = sorted(reserved_by_symbol)
+    portfolio_context = {
+        "capacity_authority": {
+            "status": "available",
+            "logical_account": "lx",
+            "futu_account_id": "10001",
+            "trd_env": "REAL",
+            "market": "US",
+            "source": "opend",
+        },
+        "stocks_by_symbol": {
+            symbol: {
+                "symbol": symbol,
+                "shares": 100,
+                "can_sell_qty": 100,
+            }
+            for symbol in symbols
+        },
+        "exchange_rates": {},
+    }
+    option_context = {
+        "locked_shares_status": "available",
+        "locked_shares_by_symbol": {},
+        "locked_shares_unavailable_by_symbol": {},
+        "exchange_rates": {},
+        "wheel_read_model": {
+            "batches": [
+                {
+                    "account": "lx",
+                    "symbol": symbol,
+                    "stock_lot_id": f"stock-{symbol}",
+                    "lifecycle_status": "active",
+                    "batch_generation_hash": f"{index:x}" * 64,
+                    "projection_hash": f"{index + 8:x}" * 64,
+                    "shares_remaining": 100,
+                    "active_intent_reserved_shares": reserved_by_symbol[symbol],
+                    "phase": "ready",
+                }
+                for index, symbol in enumerate(symbols, start=1)
+            ]
+        },
+    }
+
+    def _fake_pipeline(**kwargs: Any) -> list[dict[str, Any]]:
+        from domain.domain.engine import evaluate_opening_candidate_policy
+
+        expected: list[dict[str, str]] = []
+        for symbol in symbols:
+            publish_strategy_scan_status(
+                report_dir=report_dir,
+                run_id=RUN_ID,
+                account="lx",
+                market="US",
+                symbol=symbol,
+                strategy_family="covered_call",
+                status="completed",
+                candidate_count=1,
+                snapshot_id="quote-r16",
+                receipt_relpath="quotes/quote-r16/receipt.json",
+            )
+            kwargs["candidate_capture_status_sink_fn"](
+                {
+                    "symbol": symbol,
+                    "strategy_mode": "call",
+                    "status": "completed",
+                    "reason": None,
+                    "quote_snapshot_id": "quote-r16",
+                    "quote_receipt_relpath": "quotes/quote-r16/receipt.json",
+                }
+            )
+            expected.append(
+                {
+                    "market": "US",
+                    "symbol": symbol,
+                    "strategy_family": "covered_call",
+                    "strategy_mode": "call",
+                    "candidate_owner": "opening",
+                    "account_config_sha256": ACCOUNT_CONFIG_SHA256,
+                }
+            )
+        publish_strategy_scan_status_index_v2(
+            report_dir=report_dir,
+            run_id=RUN_ID,
+            account="lx",
+            account_config_sha256=ACCOUNT_CONFIG_SHA256,
+            expected=expected,
+        )
+        candidates = [
+            {
+                    "symbol": symbol,
+                    "contract_symbol": f"{symbol}_CALL",
+                    "expiration": "2026-10-16",
+                    "option_type": "call",
+                    "strike": 110.0,
+                    "spot": 100.0,
+                    "dte": 38,
+                    "bid": 2.9,
+                    "ask": 3.1,
+                    "mid": 3.0,
+                    "multiplier": 100,
+                    "max_new_contracts": 1,
+                    "annualized_net_premium_return": 0.20,
+                    "net_income": 295.0,
+                    "net_income_cny": 2_124.0,
+                    "spread_ratio": 0.0667,
+                    "iv_rv_ratio": 1.4,
+                    "iv_minus_rv": 0.12,
+                    "earnings_evidence_status": "ready",
+                    "earnings_reason_code": None,
+                    "earnings_policy_version": "earnings_near_expiry.v1",
+                    "earnings_window_days": 6,
+                    "earnings_market_date": "2026-09-08",
+                    "earnings_hard_window_start": "2026-10-10",
+                    "earnings_hard_window_end": "2026-10-16",
+                    "earnings_hard_coverage_status": "complete",
+                    "earnings_soft_coverage_status": "complete",
+                    "earnings_has_event": False,
+                    "earnings_blocking_has_event": False,
+                    "earnings_events": [],
+                    "earnings_blocking_events": [],
+                    "earnings_nonblocking_events": [],
+                }
+            for symbol in symbols
+        ]
+        kwargs["opening_final_candidates_sink_fn"]("call", candidates)
+        kwargs["opening_candidate_decisions_sink_fn"](
+            "call",
+            [
+                {
+                    "normalized_input": candidate,
+                    "opening_decision": evaluate_opening_candidate_policy(
+                        candidate,
+                        mode="call",
+                    ),
+                }
+                for candidate in candidates
+            ],
+        )
+        kwargs["opening_runtime_context_sink_fn"](
+            portfolio_context,
+            option_context,
+        )
+        return []
+
+    scan_calls: list[str] = []
+
+    def _failed_scan(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        scan_calls.append("called")
+        raise RuntimeError("Wheel scan failed for R16 test")
+
+    monkeypatch.setattr(mod, "run_watchlist_pipeline", _fake_pipeline)
+    monkeypatch.setattr(
+        mod,
+        "resolve_frozen_required_data_csv_bytes_batch",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr(mod, "resolve_wheel_config", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(mod, "run_wheel_call_scan", _failed_scan)
+    if coverage_facts_fail:
+        monkeypatch.setattr(
+            mod,
+            "build_shared_coverage_facts",
+            lambda **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("coverage facts unavailable for R16 test")
+            ),
+        )
+
+    mod.run_watchlist_pipeline_default(
+        py="python3",
+        base=tmp_path,
+        cfg={"portfolio": {"account": "lx"}, "symbols": []},
+        report_dir=report_dir,
+        state_dir=tmp_path / "state",
+        shared_state_dir=tmp_path / "shared_state",
+        required_data_dir=tmp_path / "required_data",
+        is_scheduled=True,
+        top_n=3,
+        symbol_timeout_sec=10,
+        portfolio_timeout_sec=10,
+        want_scan=True,
+        no_context=False,
+        symbols_arg=None,
+        log=lambda _message: None,
+        want_fn=lambda name: name == "scan",
+        source_account_run_id=RUN_ID,
+        required_data_snapshot_manifest=required_manifest,
+        prepared_portfolio_context_manifest=portfolio_manifest,
+        prepared_option_positions_context_manifest=ledger_manifest,
+        account_config_sha256=ACCOUNT_CONFIG_SHA256,
+    )
+    wheel_snapshot = load_wheel_candidate_snapshot(
+        base=tmp_path,
+        run_id=RUN_ID,
+        account="lx",
+    )
+    status_index = load_strategy_scan_status_index_v2(
+            report_dir / "strategy_scan_status_index.v2.json",
+            expected_run_id=RUN_ID,
+            expected_account="lx",
+            expected_account_config_sha256=ACCOUNT_CONFIG_SHA256,
+    )
+    from datetime import datetime, timezone
+
+    from src.application.daily_decision_brief_service import (
+        assemble_daily_decision_brief,
+    )
+    from src.application.multi_tick.misc import AccountResult
+
+    brief = assemble_daily_decision_brief(
+        base=tmp_path,
+        run_id=RUN_ID,
+        account="lx",
+        market="US",
+        scheduler_decision={"in_run_window": True},
+        account_result=AccountResult("lx", True, True, "ok", ""),
+        pipeline_succeeded=True,
+        config={
+            "schedule": {
+                "timezone": "America/New_York",
+                "run_window": {
+                    "start": "09:30",
+                    "end": "16:00",
+                    "breaks": [],
+                },
+            }
+        },
+        now_utc=datetime(2026, 9, 8, 14, 0, tzinfo=timezone.utc),
+    )
+    return wheel_snapshot, status_index, brief, scan_calls
+
+
+def test_wheel_scan_failure_preserves_reserved_facts_for_ordinary_cc_by_symbol(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    wheel, status_index, brief, scan_calls = _run_wheel_scan_failure_capture(
+        monkeypatch,
+        tmp_path,
+        reserved_by_symbol={"MSFT": 0, "NVDA": 100},
+    )
+
+    allocations = {
+        row["symbol"]: row for row in wheel["capacity_allocations"]
+    }
+    assert scan_calls == ["called"]
+    assert len(wheel["capacity_allocations"]) == 2
+    assert wheel["opening_status"] == "data_unavailable"
+    assert allocations["NVDA"]["granted_contracts"] == 0
+    assert allocations["NVDA"]["allocation_reason"] == "share_capacity_insufficient"
+    assert allocations["MSFT"]["granted_contracts"] == 1
+    assert allocations["MSFT"]["allocation_reason"] == "share_capacity_supported"
+    assert {
+        (row["symbol"], row["status"], row["reason_code"])
+        for row in wheel["scope_results"]
+    } == {
+        ("MSFT", "failed", "wheel_scan_failed"),
+        ("NVDA", "failed", "wheel_scan_failed"),
+    }
+    assert all(
+        row["candidate_status"] == "failed"
+        and row["raw_candidates"] == []
+        and row["allocation"] is None
+        for row in wheel["batches"]
+    )
+    assert {
+        (row["symbol"], row["status"], row["reason"])
+        for row in status_index["items"]
+        if row["strategy_family"] == "wheel"
+    } == {
+        ("MSFT", "failed", "wheel_scan_failed"),
+        ("NVDA", "failed", "wheel_scan_failed"),
+    }
+    covered_call_actions = {
+        row["symbol"]
+        for row in brief["actions"]
+        if row.get("strategy_family") == "covered_call"
+    }
+    assert covered_call_actions == {"MSFT"}
+    covered_call_candidates = {
+        row["symbol"]: row for row in brief["candidates"]["covered_call"]
+    }
+    assert covered_call_candidates["NVDA"]["capacity"]["contracts_available"] == 0
+    assert covered_call_candidates["MSFT"]["capacity"]["contracts_available"] == 1
+
+
+def test_wheel_coverage_fact_failure_seals_unavailable_without_running_scan(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    wheel, status_index, brief, scan_calls = _run_wheel_scan_failure_capture(
+        monkeypatch,
+        tmp_path,
+        reserved_by_symbol={"NVDA": 100},
+        coverage_facts_fail=True,
+    )
+
+    assert scan_calls == []
+    assert wheel["capacity_allocations"] == []
+    assert wheel["opening_status"] == "data_unavailable"
+    assert wheel["scope_results"] == [
+        {
+            "scope": "strategy",
+            "symbol": "NVDA",
+            "strategy_mode": "wheel",
+            "candidate_owner": "wheel",
+            "status": "unavailable",
+            "reason_code": "wheel_coverage_facts_unavailable",
+            "candidate_count": 0,
+            "quote_snapshot_id": None,
+            "quote_receipt_relpath": None,
+        }
+    ]
+    assert [
+        (row["status"], row["reason"])
+        for row in status_index["items"]
+        if row["strategy_family"] == "wheel"
+    ] == [("unavailable", "wheel_coverage_facts_unavailable")]
+    assert not any(
+        row.get("strategy_family") == "covered_call"
+        for row in brief["actions"]
+    )
+    assert any(
+        row.get("strategy_family") == "covered_call"
+        and row.get("symbol") == "NVDA"
+        and row.get("reason") == "share_capacity_unavailable"
+        for row in brief["data_gaps"]
+    )
+
+
 def _run_full_symbol_capture(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -449,6 +803,51 @@ def _run_full_symbol_capture(
         "exchange_rates": {},
     }
 
+    def _combo_required_rows() -> list[dict[str, Any]]:
+        common = {
+            "symbol": symbol,
+            "expiration": "2026-10-16",
+            "dte": 38,
+            "spot": 110.0,
+            "currency": "USD",
+            "multiplier": 100,
+            "opening_contract_status": "ready",
+            "opening_contract_reason_codes": [],
+            "underlier_observation_status": "ready",
+            "snapshot_received_at_utc": "2026-09-08T13:59:00Z",
+            "option_standard_type": "STANDARD",
+            "stock_owner": symbol,
+            "price_tick": 0.01,
+            "chain_multiplier": 100,
+            "snapshot_multiplier": 100,
+            "open_interest": 500,
+            "volume": 50,
+        }
+        return [
+            {
+                **common,
+                "option_type": "put",
+                "contract_symbol": f"{symbol}261016P00100000",
+                "strike": 100.0,
+                "bid": 2.0,
+                "ask": 2.1,
+                "mid": 2.05,
+                "delta": -0.2,
+                "implied_volatility": 0.4,
+            },
+            {
+                **common,
+                "option_type": "call",
+                "contract_symbol": f"{symbol}261016C00120000",
+                "strike": 120.0,
+                "bid": 0.4,
+                "ask": 0.5,
+                "mid": 0.45,
+                "delta": 0.15,
+                "implied_volatility": 0.4,
+            },
+        ]
+
     def _build_context(**_kwargs: Any) -> tuple[dict, dict, float, float]:
         observed["context_builds"] = int(observed["context_builds"]) + 1
         return portfolio_ctx, option_ctx, 7.0, 0.92
@@ -503,7 +902,68 @@ def _run_full_symbol_capture(
         combo_calls.append(variant)
         if variant == "cc_lp":
             assert kwargs["stock"] == portfolio_ctx["stocks_by_symbol"][symbol]
-        if scenario == "failure":
+        if scenario == "combo_metrics_failure":
+            from datetime import datetime, timezone
+
+            import pandas as pd
+
+            from domain.domain.candidate_defaults import (
+                CandidateLiquidityDefaults,
+                CandidateWindowDefaults,
+            )
+            from src.application.candidate_models import CandidateContractInput
+            from src.application.combo_yield_config import derive_combo_yield_policy
+            from src.application.combo_yield_steps import (
+                run_combo_yield_scan_and_summarize,
+            )
+
+            source_rows = _combo_required_rows()
+            put_payload = CandidateContractInput.from_row(
+                source_rows[0],
+                mode="put",
+            ).to_gate_payload()
+            put_payload.update(
+                {
+                    "annualized_net_return_on_cash_basis": 0.18,
+                    "period_net_return_on_cash_basis": 0.02,
+                }
+            )
+
+            def _admit_puts(**admit_kwargs: Any) -> pd.DataFrame:
+                return admit_kwargs["df_labeled"].copy()
+
+            _result, summary = run_combo_yield_scan_and_summarize(
+                sym=symbol,
+                symbol=symbol,
+                symbol_lower=symbol.lower(),
+                symbol_cfg=kwargs["symbol_cfg"],
+                combo_yield_cfg={"enabled": True},
+                yield_sp={"enabled": True, "strategy": "insurance_underwriting"},
+                combo_yield_policy=derive_combo_yield_policy({"enabled": True}),
+                required_data_dir=kwargs["required_data_dir"],
+                report_dir=kwargs["report_dir"],
+                yield_window=CandidateWindowDefaults(min_dte=7, max_dte=60),
+                liquidity=CandidateLiquidityDefaults(),
+                exchange_rate_converter=kwargs["exchange_rate_converter"],
+                portfolio_ctx=kwargs["portfolio_ctx"],
+                top_n=kwargs["top_n"],
+                is_scheduled=kwargs["is_scheduled"],
+                run_put_scan_fn=lambda **_scan_kwargs: pd.DataFrame([put_payload]),
+                cash_filter_put_candidates_fn=None,
+                underwriting_filter_put_candidates_fn=_admit_puts,
+                combo_evidence_sink_fn=kwargs.get("combo_evidence_sink_fn"),
+                required_data_frame=kwargs.get("required_data_frame"),
+                now_utc_fn=lambda: datetime(
+                    2026,
+                    9,
+                    8,
+                    14,
+                    0,
+                    tzinfo=timezone.utc,
+                ),
+            )
+            return summary or {}
+        if scenario in {"failure", "combo_failure"}:
             raise RuntimeError("combo scan failed for test")
 
         pair_rows: list[dict[str, Any]] = []
@@ -605,11 +1065,16 @@ def _run_full_symbol_capture(
     class _RequiredDataBatch:
         def resolve(self, resolved_symbol: str) -> tuple[dict[str, Any], bytes]:
             evidence = _ensure_required_data(symbol=resolved_symbol)
-            csv_bytes = (
-                b"symbol,option_type\n"
-                if scenario == "success_empty"
-                else f"symbol,option_type\n{resolved_symbol},put\n".encode()
-            )
+            if scenario == "combo_metrics_failure":
+                import pandas as pd
+
+                csv_bytes = pd.DataFrame(_combo_required_rows()).to_csv(index=False).encode()
+            else:
+                csv_bytes = (
+                    b"symbol,option_type\n"
+                    if scenario == "success_empty"
+                    else f"symbol,option_type\n{resolved_symbol},put\n".encode()
+                )
             return evidence, csv_bytes
 
     monkeypatch.setattr(
@@ -834,6 +1299,95 @@ def test_candidate_csv_retirement_account_run_matrix(
         }
     else:
         assert not trace_path.exists()
+
+
+def test_unknown_combo_failure_is_sealed_and_visible_to_daily_brief(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from datetime import datetime, timezone
+
+    from src.application.combo_yield_candidate_snapshot import (
+        load_combo_yield_candidate_snapshot,
+    )
+    from src.application.daily_decision_brief_service import (
+        assemble_daily_decision_brief,
+    )
+    from src.application.multi_tick.misc import AccountResult
+    from src.application import sell_put_call_helper
+    from src.application.strategy_scan_status import (
+        STRATEGY_SCAN_STATUS_INDEX_V2_FILE,
+        load_strategy_scan_status_index_v2,
+    )
+
+    pair_metrics_calls: list[str] = []
+
+    def _fail_pair_metrics(**_kwargs: Any) -> dict[str, Any]:
+        pair_metrics_calls.append("called")
+        raise RuntimeError("unexpected pair metrics failure")
+
+    monkeypatch.setattr(sell_put_call_helper, "_build_pair_row", _fail_pair_metrics)
+    _run_full_symbol_capture(
+        monkeypatch,
+        tmp_path,
+        market="US",
+        symbol="NVDA",
+        variant="sp_lc",
+        opening_mode="put",
+        scenario="combo_metrics_failure",
+    )
+    assert pair_metrics_calls == ["called"]
+    account_dir = tmp_path / "output_runs" / RUN_ID / "accounts" / "lx"
+    status_index = load_strategy_scan_status_index_v2(
+        account_dir / STRATEGY_SCAN_STATUS_INDEX_V2_FILE,
+        expected_run_id=RUN_ID,
+        expected_account="lx",
+        expected_account_config_sha256=ACCOUNT_CONFIG_SHA256,
+    )
+    combo_status = next(
+        row
+        for row in status_index["items"]
+        if row["strategy_family"] == "combo_yield"
+    )
+    assert combo_status["status"] == "failed"
+    assert combo_status["reason"] == "combo_yield_scan_failed"
+    combo_snapshot = load_combo_yield_candidate_snapshot(
+        base=tmp_path,
+        run_id=RUN_ID,
+        account="lx",
+    )
+    assert combo_snapshot["opening_status"] == "data_unavailable"
+
+    brief = assemble_daily_decision_brief(
+        base=tmp_path,
+        run_id=RUN_ID,
+        account="lx",
+        market="US",
+        scheduler_decision={"in_run_window": True},
+        account_result=AccountResult("lx", True, True, "ok", ""),
+        pipeline_succeeded=True,
+        config={
+            "schedule": {
+                "timezone": "America/New_York",
+                "run_window": {
+                    "start": "09:30",
+                    "end": "16:00",
+                    "breaks": [],
+                },
+            }
+        },
+        now_utc=datetime(2026, 9, 8, 14, 0, tzinfo=timezone.utc),
+    )
+    assert brief["candidates"]["combo_yield"] == []
+    assert not any(
+        row.get("strategy_family") == "combo_yield"
+        for row in brief["actions"]
+    )
+    assert any(
+        row.get("strategy_family") == "combo_yield"
+        and row.get("reason") == "combo_yield_scan_failed"
+        for row in brief["data_gaps"]
+    )
 
 
 def test_default_pipeline_routes_opening_and_legacy_sp_lc_capture_separately(

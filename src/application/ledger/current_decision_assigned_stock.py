@@ -47,7 +47,9 @@ def compact_assigned_stock_view(
     *,
     account: str,
     current_position_lots: Sequence[Mapping[str, Any]],
+    as_of_ms: int,
 ) -> dict[str, Any]:
+    instant = _integer(as_of_ms, field="assigned stock as_of_ms", minimum=1)
     account_value = str(account or "").strip().lower()
     if not account_value:
         raise CurrentDecisionProjectionError("assigned stock account is required")
@@ -140,6 +142,8 @@ def compact_assigned_stock_view(
         if (
             str(row.get("account") or "").strip().lower() != account_value
             or open_event_id not in active_open_event_ids
+            or int(row.get("start_at_ms") or 0) > instant
+            or (row.get("end_at_ms") is not None and instant >= int(row["end_at_ms"]))
         ):
             continue
         allocations.append(
@@ -807,11 +811,11 @@ def update_assigned_stock_fact(
                     "assigned-stock sale after-view mismatch"
                 )
             lots_by_id[stock_lot_id] = next_lot
-        if any(
-            row["stock_lot_id"] == stock_lot_id
-            and int(row["shares"]) > remaining
+        if sum(
+            int(row["shares"])
             for row in item["covered_call_allocations"]
-        ):
+            if row["stock_lot_id"] == stock_lot_id
+        ) > remaining:
             raise CurrentDecisionProjectionError(
                 "assigned-stock sale conflicts with covered-call allocation"
             )

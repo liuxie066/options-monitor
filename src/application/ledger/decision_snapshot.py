@@ -587,6 +587,7 @@ def _build_current_decision_shadow(
             ),
             account=account,
             current_position_lots=list(snapshot.get("account_position_lots") or []),
+            as_of_ms=now_ms,
         )
         legacy_lifecycle, models_by_case = lifecycle_views_by_lot(
             arbitrate_lifecycle_case_facts(

@@ -41,11 +41,7 @@ def build_combo_candidate_occurrence(
     account_value = str(account or "").strip().lower()
     market_value = str(market or "").strip().upper()
     run_value = str(run_id or "").strip()
-    pair_id = str(
-        source.get("candidate_pair_id")
-        or source.get("strategy_group_id")
-        or ""
-    ).strip()
+    pair_id = str(source.get("candidate_pair_id") or "").strip()
     structure_mode = str(source.get("structure_mode") or "").strip().lower()
     currency = str(source.get("currency") or "").strip().upper()
     multiplier = _decimal_text(source.get("multiplier"))
@@ -240,10 +236,14 @@ def _valid_occurrence_row(
     content_hash = str(row.get("candidate_row_content_hash") or "").strip()
     if len(occurrence_id) != 64 or len(content_hash) != 64:
         return False
+    identity_row = row
+    if not str(row.get("candidate_pair_id") or "").strip():
+        # Read-only validation of the saved pre-pair occurrence algorithm.
+        identity_row = {**row, "candidate_pair_id": row.get("strategy_group_id")}
     try:
         expected = canonical_sha256(
             _occurrence_identity_payload(
-                row,
+                identity_row,
                 account=account,
                 market=market,
                 run_id=run_id,
@@ -264,11 +264,7 @@ def _occurrence_identity_payload(
     account_value = str(account or "").strip().lower()
     market_value = str(market or "").strip().upper()
     run_value = str(run_id or "").strip()
-    pair_id = str(
-        row.get("candidate_pair_id")
-        or row.get("strategy_group_id")
-        or ""
-    ).strip()
+    pair_id = str(row.get("candidate_pair_id") or "").strip()
     structure_mode = str(row.get("structure_mode") or "").strip().lower()
     currency = str(row.get("currency") or "").strip().upper()
     multiplier = _decimal_text(row.get("multiplier"))

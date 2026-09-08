@@ -11,6 +11,7 @@ from domain.domain.engine import (
     evaluate_opening_candidate_policy,
     explain_candidate_rank,
     rank_candidate_rows,
+    validate_opening_contract_evidence,
 )
 
 
@@ -104,7 +105,81 @@ def test_candidate_calculation_never_defaults_multiplier_or_legacy_rv() -> None:
     with pytest.raises(CandidateCalculationError) as _caught:
         calculate_opening_candidate_metrics(row, mode="put")
     exc = _caught.value
-    assert exc.reason == "multiplier_missing_or_invalid"
+    assert exc.reason == "evidence_unavailable"
+
+
+def test_opening_contract_evidence_returns_only_validated_contract_values() -> None:
+    decision_now = datetime(2026, 8, 6, 15, 0, 0, tzinfo=timezone.utc)
+
+    evidence = validate_opening_contract_evidence(
+        _opening_row(snapshot_received_at_utc="2026-08-06T14:59:00+00:00"),
+        mode="put",
+        now_utc=decision_now,
+    )
+
+    assert evidence == {
+        "bid": 1.0,
+        "ask": 1.01,
+        "price_tick": 0.05,
+        "multiplier": 100,
+        "dte": 43,
+        "strike": 100.0,
+        "spot": 110.0,
+    }
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    [
+        "opening_contract_status",
+        "underlier_observation_status",
+        "snapshot_received_at_utc",
+        "option_type",
+        "option_standard_type",
+        "stock_owner",
+        "multiplier",
+        "chain_multiplier",
+        "snapshot_multiplier",
+    ],
+)
+def test_missing_opening_contract_identity_is_evidence_unavailable(
+    missing_field: str,
+) -> None:
+    row = _opening_row()
+    row.pop(missing_field)
+
+    with pytest.raises(CandidateCalculationError) as exc_info:
+        validate_opening_contract_evidence(row, mode="put")
+
+    assert exc_info.value.reason == "evidence_unavailable"
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected_reason"),
+    [
+        (
+            {
+                "opening_contract_status": "ineligible",
+                "opening_contract_reason_codes": ["option_suspended"],
+            },
+            "contract_ineligible",
+        ),
+        ({"option_standard_type": "NON_STANDARD"}, "option_non_standard"),
+        ({"option_type": "call"}, "option_type_mismatch"),
+        ({"snapshot_multiplier": 50}, "option_multiplier_conflict"),
+    ],
+)
+def test_explicit_opening_contract_conflicts_remain_deterministic_rejects(
+    overrides: dict,
+    expected_reason: str,
+) -> None:
+    with pytest.raises(CandidateCalculationError) as exc_info:
+        validate_opening_contract_evidence(
+            _opening_row(**overrides),
+            mode="put",
+        )
+
+    assert exc_info.value.reason == expected_reason
 
 
 def test_candidate_calculation_rejects_unavailable_term_matched_rv() -> None:
@@ -323,6 +398,18 @@ def test_snapshot_missing_receipt_fails_closed_at_decision_moment() -> None:
     row.pop("snapshot_received_at_utc", None)
     with pytest.raises(CandidateCalculationError) as exc_info:
         calculate_opening_candidate_metrics(row, mode="put")
+
+    assert exc_info.value.reason == "evidence_unavailable"
+
+
+def test_snapshot_future_receipt_fails_closed_at_decision_moment() -> None:
+    decision_now = datetime(2026, 8, 6, 15, 0, 0, tzinfo=timezone.utc)
+    with pytest.raises(CandidateCalculationError) as exc_info:
+        calculate_opening_candidate_metrics(
+            _opening_row(snapshot_received_at_utc="2026-08-06T15:00:01+00:00"),
+            mode="put",
+            now_utc=decision_now,
+        )
 
     assert exc_info.value.reason == "evidence_unavailable"
 

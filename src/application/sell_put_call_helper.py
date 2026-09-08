@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from datetime import datetime, timezone
 import math
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,7 @@ import pandas as pd
 from pandas.errors import EmptyDataError
 
 from domain.domain.engine import (
+    CandidateCalculationError,
     ComboYieldFundingDecision,
     ComboYieldLeg,
     compute_combo_yield_funding_decision,
@@ -20,6 +22,7 @@ from domain.domain.engine import (
     rank_combo_yield_rows,
     rank_combo_yield_shadow_rows,
     select_best_combo_yield_per_symbol,
+    validate_opening_contract_evidence,
     validate_combo_yield_pair,
 )
 from domain.domain.candidate_defaults import (
@@ -56,6 +59,18 @@ def _safe_int(value: Any) -> int | None:
     return int(out) if out is not None else None
 
 
+def _safe_text(value: Any) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    text = str(value).strip()
+    return "" if text.lower() in {"<na>", "nan", "nat", "none"} else text
+
+
 def _merged_dict(*items: dict[str, Any] | None) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for item in items:
@@ -76,21 +91,30 @@ def _spread_values(contract: CandidateContractInput) -> tuple[float | None, floa
     return spread, spread / mid
 
 
-def _call_leg_from_required_data(row: pd.Series) -> ComboYieldLeg | None:
+def _call_leg_from_required_data(
+    row: dict[str, Any],
+    *,
+    evidence: dict[str, Any] | None = None,
+) -> ComboYieldLeg | None:
     contract = CandidateContractInput.from_row(row, mode="call")
-    dte = contract.dte
-    strike = contract.strike
-    spot = contract.spot
-    bid = contract.bid
-    ask = contract.ask
+    canonical = evidence or {}
+    symbol = _safe_text(row.get("symbol")).upper()
+    expiration = _safe_text(row.get("expiration"))
+    contract_symbol = _safe_text(row.get("contract_symbol"))
+    currency = contract.currency if _safe_text(row.get("currency")) else ""
+    dte = canonical.get("dte", contract.dte)
+    strike = canonical.get("strike", contract.strike)
+    spot = canonical.get("spot", contract.spot)
+    bid = canonical.get("bid", contract.bid)
+    ask = canonical.get("ask", contract.ask)
     mid = contract.mid
-    multiplier = contract.multiplier
+    multiplier = canonical.get("multiplier", contract.multiplier)
     if (
         contract.option_type != "call"
-        or not contract.symbol
-        or not contract.expiration
-        or not contract.contract_symbol
-        or not contract.currency
+        or not symbol
+        or not expiration
+        or not contract_symbol
+        or not currency
         or None in (dte, strike, spot, bid, ask, mid, multiplier)
     ):
         return None
@@ -109,11 +133,11 @@ def _call_leg_from_required_data(row: pd.Series) -> ComboYieldLeg | None:
         return None
     spread, spread_ratio = _spread_values(contract)
     return ComboYieldLeg(
-        symbol=contract.symbol,
+        symbol=symbol,
         option_type="call",
-        expiration=contract.expiration,
-        contract_symbol=contract.contract_symbol,
-        currency=contract.currency,
+        expiration=expiration,
+        contract_symbol=contract_symbol,
+        currency=currency,
         dte=int(dte),
         strike=float(strike),
         spot=float(spot),
@@ -130,11 +154,13 @@ def _call_leg_from_required_data(row: pd.Series) -> ComboYieldLeg | None:
     )
 
 
-def _put_leg_from_sell_put_row(row: pd.Series) -> ComboYieldLeg | None:
-    contract_symbol = str(row.get("contract_symbol") or "").strip()
-    expiration = str(row.get("expiration") or "").strip()
-    currency = str(row.get("currency") or row.get("option_ccy") or "").strip().upper()
-    symbol = str(row.get("symbol") or "").strip().upper()
+def _put_leg_from_sell_put_row(row: dict[str, Any]) -> ComboYieldLeg | None:
+    contract_symbol = _safe_text(row.get("contract_symbol"))
+    expiration = _safe_text(row.get("expiration"))
+    currency = (
+        _safe_text(row.get("currency")) or _safe_text(row.get("option_ccy"))
+    ).upper()
+    symbol = _safe_text(row.get("symbol")).upper()
     dte = _safe_int(row.get("dte"))
     strike = _safe_float(row.get("strike"))
     spot = _safe_float(row.get("spot"))
@@ -170,6 +196,22 @@ def _put_leg_from_sell_put_row(row: pd.Series) -> ComboYieldLeg | None:
         spread=spread,
         spread_ratio=spread_ratio,
     )
+
+
+def _canonical_evidence_diagnostic(exc: CandidateCalculationError) -> dict[str, Any]:
+    deterministic_reasons = {
+        "contract_ineligible",
+        "option_non_standard",
+        "option_type_mismatch",
+        "option_multiplier_conflict",
+    }
+    return {
+        "evidence_status": (
+            "rejected" if exc.reason in deterministic_reasons else "unavailable"
+        ),
+        "evidence_reason": exc.reason,
+        "evidence_message": exc.message,
+    }
 
 
 def _passes_range(value: float, min_value: float | None, max_value: float | None) -> bool:
@@ -507,7 +549,7 @@ def _put_leg_passes_assignment_bounds(put_leg: ComboYieldLeg, sell_put_cfg: dict
     return put_leg.strike <= effective_max_strike
 
 
-def _load_required_data_calls(
+def _load_required_data(
     *,
     input_root: Path,
     symbol: str,
@@ -522,13 +564,8 @@ def _load_required_data_calls(
         except EmptyDataError:
             return pd.DataFrame()
         except Exception as exc:
-            raise RuntimeError(f"failed to read Combo Yield required-data calls: {path}") from exc
-    if df.empty:
-        return pd.DataFrame()
-    if "option_type" not in df.columns:
-        raise RuntimeError(f"Combo Yield required-data is missing option_type: {path}")
-    mask = df["option_type"].astype(str).str.strip().str.lower() == "call"
-    return df.loc[mask].copy()
+            raise RuntimeError(f"failed to read Combo Yield required-data: {path}") from exc
+    return df
 
 
 _PAIR_DIAGNOSTIC_COLUMNS = (
@@ -636,21 +673,140 @@ def get_combo_yield_pair_diagnostics(pairs_df: pd.DataFrame) -> pd.DataFrame:
     return _pair_diagnostics_df([])
 
 
+def _put_source_matches(candidate: dict[str, Any], source: dict[str, Any]) -> bool:
+    candidate_strike = _safe_float(candidate.get("strike"))
+    source_strike = _safe_float(source.get("strike"))
+    return bool(
+        _safe_text(candidate.get("option_type")).lower() == "put"
+        and _safe_text(source.get("option_type")).lower() == "put"
+        and _safe_text(candidate.get("symbol")).upper()
+        == _safe_text(source.get("symbol")).upper()
+        and _safe_text(candidate.get("contract_symbol"))
+        == _safe_text(source.get("contract_symbol"))
+        and _safe_text(candidate.get("expiration"))
+        == _safe_text(source.get("expiration"))
+        and candidate_strike is not None
+        and source_strike is not None
+        and candidate_strike == source_strike
+    )
+
+
+def _validate_put_sources(
+    *,
+    candidates: pd.DataFrame,
+    required_data: pd.DataFrame,
+    now_utc: datetime,
+    diagnostics: list[dict[str, Any]],
+    reject_counts: Counter[str],
+) -> list[tuple[dict[str, Any], ComboYieldLeg]]:
+    required_rows = required_data.to_dict("records")
+    validated: list[tuple[dict[str, Any], ComboYieldLeg]] = []
+    for candidate in candidates.to_dict("records"):
+        identity_complete = bool(
+            _safe_text(candidate.get("option_type")).lower() == "put"
+            and _safe_text(candidate.get("symbol"))
+            and _safe_text(candidate.get("contract_symbol"))
+            and _safe_text(candidate.get("expiration"))
+            and _safe_float(candidate.get("strike")) is not None
+        )
+        matches = (
+            [row for row in required_rows if _put_source_matches(candidate, row)]
+            if identity_complete
+            else []
+        )
+        if len(matches) != 1:
+            evidence_reason = (
+                "combo_put_source_identity_unavailable"
+                if not identity_complete
+                else (
+                    "combo_put_source_missing"
+                    if not matches
+                    else "combo_put_source_duplicate"
+                )
+            )
+            reject_counts["evidence_unavailable"] += 1
+            diagnostics.append(
+                _diagnostic_row(
+                    scope="put",
+                    stage="put_evidence",
+                    accepted=False,
+                    reject_reasons=("evidence_unavailable",),
+                    candidate={
+                        **candidate,
+                        "evidence_status": "unavailable",
+                        "evidence_reason": evidence_reason,
+                        "put_contract_symbol": candidate.get("contract_symbol"),
+                        "put_strike": candidate.get("strike"),
+                    },
+                )
+            )
+            continue
+        raw_put = dict(matches[0])
+        try:
+            validate_opening_contract_evidence(
+                raw_put,
+                mode="put",
+                now_utc=now_utc,
+            )
+        except CandidateCalculationError as exc:
+            reject_counts[exc.reason] += 1
+            diagnostics.append(
+                _diagnostic_row(
+                    scope="put",
+                    stage="put_evidence",
+                    accepted=False,
+                    reject_reasons=(exc.reason,),
+                    candidate={
+                        **candidate,
+                        **_canonical_evidence_diagnostic(exc),
+                        "put_contract_symbol": candidate.get("contract_symbol"),
+                        "put_strike": candidate.get("strike"),
+                    },
+                )
+            )
+            continue
+        put_leg = _put_leg_from_sell_put_row(raw_put)
+        if put_leg is None:
+            reject_counts["evidence_unavailable"] += 1
+            diagnostics.append(
+                _diagnostic_row(
+                    scope="put",
+                    stage="put_evidence",
+                    accepted=False,
+                    reject_reasons=("evidence_unavailable",),
+                    candidate={
+                        **candidate,
+                        "evidence_status": "unavailable",
+                        "evidence_reason": "combo_put_identity_unavailable",
+                        "put_contract_symbol": candidate.get("contract_symbol"),
+                        "put_strike": candidate.get("strike"),
+                    },
+                )
+            )
+            continue
+        validated.append((candidate, put_leg))
+    return validated
+
+
 def _load_combo_yield_call_legs_by_expiration(
     *,
-    input_root: Path,
-    symbol: str,
+    required_data: pd.DataFrame,
     call_cfg: dict[str, Any],
     call_window: Any,
     liquidity: Any,
     diagnostics: list[dict[str, Any]],
-    required_data_frame: pd.DataFrame | None = None,
+    eligible_expirations: set[str],
+    now_utc: datetime | None,
 ) -> tuple[dict[str, list[ComboYieldLeg]], Counter[str]]:
-    raw_calls = _load_required_data_calls(
-        input_root=input_root,
-        symbol=symbol,
-        required_data_frame=required_data_frame,
-    )
+    raw_calls = required_data.copy()
+    if not raw_calls.empty and "option_type" in raw_calls.columns:
+        option_types = raw_calls["option_type"].fillna("").astype(str).str.strip().str.lower()
+        raw_calls = raw_calls.loc[~option_types.eq("put")].copy()
+    if not raw_calls.empty and "expiration" in raw_calls.columns:
+        expirations = raw_calls["expiration"].fillna("").astype(str).str.strip()
+        raw_calls = raw_calls.loc[
+            expirations.isin(eligible_expirations) | expirations.eq("")
+        ].copy()
     call_legs_by_expiration: dict[str, list[ComboYieldLeg]] = {}
     reject_counts: Counter[str] = Counter()
     if raw_calls.empty:
@@ -661,7 +817,6 @@ def _load_combo_yield_call_legs_by_expiration(
                 stage="call_filter",
                 accepted=False,
                 reject_reasons=("call_universe_empty",),
-                candidate={"symbol": symbol},
             )
         )
         return call_legs_by_expiration, reject_counts
@@ -679,16 +834,43 @@ def _load_combo_yield_call_legs_by_expiration(
         "policy_call_max_spread_ratio": liquidity.max_spread_ratio,
     }
     for raw in raw_calls.to_dict("records"):
-        leg = _call_leg_from_required_data(raw)
-        if leg is None:
-            reject_counts["call_leg_invalid"] += 1
+        evidence: dict[str, Any] | None = None
+        try:
+            evidence = validate_opening_contract_evidence(
+                raw,
+                mode="call",
+                now_utc=now_utc,
+            )
+        except CandidateCalculationError as exc:
+            reject_counts[exc.reason] += 1
             diagnostics.append(
                 _diagnostic_row(
                     scope="call",
-                    stage="call_filter",
+                    stage="call_evidence",
                     accepted=False,
-                    reject_reasons=("call_leg_invalid",),
-                    candidate=diagnostic_policy,
+                    reject_reasons=(exc.reason,),
+                    candidate={
+                        **diagnostic_policy,
+                        **_canonical_evidence_diagnostic(exc),
+                    },
+                    raw_call=raw,
+                )
+            )
+            continue
+        leg = _call_leg_from_required_data(raw, evidence=evidence)
+        if leg is None:
+            reject_counts["evidence_unavailable"] += 1
+            diagnostics.append(
+                _diagnostic_row(
+                    scope="call",
+                    stage="call_evidence",
+                    accepted=False,
+                    reject_reasons=("evidence_unavailable",),
+                    candidate={
+                        **diagnostic_policy,
+                        "evidence_status": "unavailable",
+                        "evidence_reason": "combo_call_identity_unavailable",
+                    },
                     raw_call=raw,
                 )
             )
@@ -776,7 +958,7 @@ def _candidate_pair_reject_reasons(
 
 def _build_combo_yield_pair_rows(
     *,
-    df: pd.DataFrame,
+    validated_puts: list[tuple[dict[str, Any], ComboYieldLeg]],
     call_legs_by_expiration: dict[str, list[ComboYieldLeg]],
     put_window: Any,
     sell_put_cfg: dict[str, Any] | None,
@@ -794,26 +976,7 @@ def _build_combo_yield_pair_rows(
         "policy_min_net_credit_annualized": _safe_float(cfg.get("min_net_credit_annualized")),
         "policy_max_combo_spread_ratio": _safe_float(cfg.get("max_combo_spread_ratio")),
     }
-    for raw in df.to_dict("records"):
-        put_leg = _put_leg_from_sell_put_row(raw)
-        if put_leg is None:
-            reject_counts["put_leg_invalid"] += 1
-            diagnostics.append(
-                _diagnostic_row(
-                    scope="put",
-                    stage="put_filter",
-                    accepted=False,
-                    reject_reasons=("put_leg_invalid",),
-                    candidate={
-                        "symbol": raw.get("symbol"),
-                        "expiration": raw.get("expiration"),
-                        "dte": raw.get("dte"),
-                        "put_contract_symbol": raw.get("contract_symbol"),
-                        "put_strike": raw.get("strike"),
-                    },
-                )
-            )
-            continue
+    for raw, put_leg in validated_puts:
         if not _passes_range(put_leg.dte, int(put_window.min_dte), int(put_window.max_dte)):
             reject_counts["put_dte_out_of_range"] += 1
             diagnostics.append(
@@ -878,17 +1041,35 @@ def _build_combo_yield_pair_rows(
                     enhancement_cfg=cfg,
                     sell_put_cfg=sell_put_cfg,
                 )
-            except Exception:
-                reject_counts["pair_metrics_error"] += 1
+            except CandidateCalculationError as exc:
+                reject_reason = exc.reason
+                diagnostic_evidence = _canonical_evidence_diagnostic(exc)
+            except ValueError as exc:
+                expected_reason = {
+                    "currency must resolve to USD or HKD": "pair_currency_unsupported",
+                    "cash_required must be > 0": "pair_cash_required_invalid",
+                }.get(str(exc))
+                if expected_reason is None:
+                    raise
+                reject_reason = expected_reason
+                diagnostic_evidence = {"evidence_status": "rejected"}
+            else:
+                reject_reason = ""
+                diagnostic_evidence = {}
+            if reject_reason:
+                reject_counts[reject_reason] += 1
                 diagnostics.append(
                     _diagnostic_row(
                         scope="pair",
                         stage="pair_metrics",
                         accepted=False,
-                        reject_reasons=("pair_metrics_error",),
+                        reject_reasons=(reject_reason,),
                         put_leg=put_leg,
                         call_leg=call_leg,
-                        candidate=diagnostic_policy,
+                        candidate={
+                            **diagnostic_policy,
+                            **diagnostic_evidence,
+                        },
                     )
                 )
                 continue
@@ -936,8 +1117,10 @@ def find_sell_put_combo_yield_pairs(
     sell_put_cfg: dict[str, Any] | None = None,
     global_combo_yield_liquidity: dict[str, Any] | None = None,
     required_data_frame: pd.DataFrame | None = None,
+    now_utc: datetime | None = None,
 ) -> pd.DataFrame:
     df = df_candidates.copy()
+    decision_now_utc = now_utc or datetime.now(timezone.utc)
     policy = derive_combo_yield_policy(
         combo_yield_cfg,
         market=symbol_market(symbol),
@@ -962,18 +1145,38 @@ def find_sell_put_combo_yield_pairs(
     min_net_credit_retention = _safe_float(cfg.get("min_net_credit_retention"))
     min_combo_notional_floor = 1.0
 
-    call_legs_by_expiration, reject_counts = _load_combo_yield_call_legs_by_expiration(
+    required_data = _load_required_data(
         input_root=Path(input_root),
         symbol=symbol,
-        call_cfg=call_cfg,
-        call_window=call_window,
-        liquidity=liquidity,
-        diagnostics=diagnostics,
         required_data_frame=required_data_frame,
     )
+    reject_counts: Counter[str] = Counter()
+    validated_puts = _validate_put_sources(
+        candidates=df,
+        required_data=required_data,
+        now_utc=decision_now_utc,
+        diagnostics=diagnostics,
+        reject_counts=reject_counts,
+    )
+    call_legs_by_expiration: dict[str, list[ComboYieldLeg]] = {}
+    if validated_puts:
+        call_legs_by_expiration, call_reject_counts = (
+            _load_combo_yield_call_legs_by_expiration(
+                required_data=required_data,
+                call_cfg=call_cfg,
+                call_window=call_window,
+                liquidity=liquidity,
+                diagnostics=diagnostics,
+                eligible_expirations={
+                    put_leg.expiration for _candidate, put_leg in validated_puts
+                },
+                now_utc=decision_now_utc,
+            )
+        )
+        reject_counts.update(call_reject_counts)
 
     pair_rows = _build_combo_yield_pair_rows(
-        df=df,
+        validated_puts=validated_puts,
         call_legs_by_expiration=call_legs_by_expiration,
         put_window=put_window,
         sell_put_cfg=sell_put_cfg,

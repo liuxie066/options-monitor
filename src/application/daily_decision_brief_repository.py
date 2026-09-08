@@ -15,6 +15,7 @@ from domain.domain.daily_decision_brief import (
     daily_brief_compatible_digests,
     daily_brief_digest,
     normalize_daily_decision_brief,
+    normalize_persisted_daily_decision_brief,
     reconcile_daily_decision_brief_evidence,
 )
 from domain.domain.combo_candidate_evidence import (
@@ -108,11 +109,12 @@ def persist_daily_decision_brief_success(
             previous is not None
             and previous.get("market_trading_date") == market_date
         ):
-            candidate = reconcile_daily_decision_brief_evidence(
+            normalized = reconcile_daily_decision_brief_evidence(
                 previous,
                 candidate,
             )
-        normalized = normalize_daily_decision_brief(candidate)
+        else:
+            normalized = normalize_daily_decision_brief(candidate)
         if normalized.get("status") not in {"ready", "degraded"}:
             raise ValueError("only ready or degraded daily briefs may advance successful current")
         if normalized.get("actionability") == "blocked":
@@ -1298,7 +1300,7 @@ def _normalize_persisted_brief(raw: Any, *, path: Path, account: str, market: st
     if not isinstance(raw, Mapping):
         raise DailyDecisionBriefStateError(f"daily brief state is not an object: {path}")
     try:
-        brief = normalize_daily_decision_brief(raw)
+        brief = normalize_persisted_daily_decision_brief(raw)
     except (TypeError, ValueError) as exc:
         raise DailyDecisionBriefStateError(f"daily brief state is incompatible: {path}: {exc}") from exc
     if brief["account"] != account or brief["market"] != market:

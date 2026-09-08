@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime, timezone
+import hashlib
+import json
 import os
 import subprocess
 import sys
@@ -46,6 +48,109 @@ def _action(
         },
         **({"event_risk": event_risk} if event_risk is not None else {}),
     }
+
+
+def _combo_action(
+    *,
+    symbol: str = "NVDA",
+    pair_id: str | None = "pair-nvda-100-110",
+    put_contract: str = "NVDA260821P00100000",
+    call_contract: str = "NVDA260821C00110000",
+    strategy_group_id: str = "",
+    state: str = "active",
+) -> dict:
+    action = {
+        "priority": "P1",
+        "state": state,
+        "action_type": "open_combo_yield",
+        "strategy_family": "combo_yield",
+        "account": "lx",
+        "symbol": symbol,
+        "option_type": "",
+        "side": "",
+        "expiration": "2026-08-21",
+        "strike": 100,
+        "contract_symbol": put_contract,
+        "strategy_group_id": strategy_group_id,
+        "leg_role": "pair",
+        "metrics": {
+            "put_contract_symbol": put_contract,
+            "call_contract_symbol": call_contract,
+            "capacity": {"contracts_available": 1},
+        },
+    }
+    if pair_id is not None:
+        action["candidate_pair_id"] = pair_id
+    return action
+
+
+def _legacy_combo_action_id(action: dict) -> str:
+    identity = {
+        "action_type": str(action.get("action_type") or "").strip().lower(),
+        "strategy_family": str(action.get("strategy_family") or "").strip().lower(),
+        "account": str(action.get("account") or "").strip().lower(),
+        "symbol": str(action.get("symbol") or "").strip().upper(),
+        "option_type": str(action.get("option_type") or "").strip().lower(),
+        "side": str(action.get("side") or "").strip().lower(),
+        "expiration": str(action.get("expiration") or "").strip(),
+        "strike": str(action.get("strike") or "").strip(),
+        "contract_symbol": str(action.get("contract_symbol") or "").strip().upper(),
+        "position_lot_id": str(action.get("position_lot_id") or "").strip(),
+        "strategy_group_id": str(action.get("strategy_group_id") or "").strip(),
+        "leg_role": str(action.get("leg_role") or "").strip().lower(),
+    }
+    digest = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return "action-" + digest[:24]
+
+
+def _combo_candidate_item(
+    *,
+    symbol: str = "NVDA",
+    pair_id: str | None = "pair-nvda-100-110",
+    put_contract: str = "NVDA260821P00100000",
+    call_contract: str = "NVDA260821C00110000",
+    strategy_group_id: str = "",
+) -> dict:
+    representative = {
+        "symbol": symbol,
+        "strategy_family": "combo_yield",
+        "structure_mode": "same_expiry_pair",
+        "put_contract_symbol": put_contract,
+        "call_contract_symbol": call_contract,
+        "put_expiration": "2026-08-21",
+        "call_expiration": "2026-08-21",
+        "put_strike": 100,
+        "call_strike": 110,
+        "currency": "USD",
+        "multiplier": 100,
+        "strategy_group_id": strategy_group_id,
+        "capacity": {"contracts_available": 1},
+    }
+    if pair_id is not None:
+        representative["candidate_pair_id"] = pair_id
+    return {
+        "identity": f"candidate:v1:lx:US:{symbol}:combo_yield",
+        "symbol": symbol,
+        "strategy_family": "combo_yield",
+        "representative": representative,
+        "contract_count": 1,
+    }
+
+
+def _combo_brief(
+    *,
+    revision: int,
+    actions: list[dict],
+    candidate_items: list[dict] | None = None,
+    data_gaps: list[dict] | None = None,
+) -> dict:
+    brief = _brief(revision=revision, actions=actions)
+    brief["candidate_index"] = list(candidate_items or [])
+    brief["candidates"] = {"combo_yield": []}
+    brief["data_gaps"] = list(data_gaps or [])
+    return brief
 
 
 def _event_risk(state: str, *, date: str | None = None, chain: str = "event-chain-futu") -> dict:
@@ -175,6 +280,132 @@ def test_action_identity_normalizes_case_and_strike_representation() -> None:
     assert build_daily_brief_action_id(first) == build_daily_brief_action_id(second)
 
 
+def test_combo_action_identity_adds_only_pair_and_preserves_ordinary_frozen_ids() -> None:
+    from domain.domain.daily_decision_brief import build_daily_brief_action_id
+
+    first = _combo_action()
+    second = _combo_action(pair_id="pair-nvda-100-111", call_contract="NVDA260821C00111000")
+    noisy = deepcopy(first)
+    noisy["metrics"].update({"rank": 9, "mid": 2.75})
+    noisy["run_id"] = "another-run"
+
+    assert build_daily_brief_action_id(first) != build_daily_brief_action_id(second)
+    assert build_daily_brief_action_id(first) == build_daily_brief_action_id(noisy)
+    with pytest.raises(ValueError, match="candidate_pair_id"):
+        build_daily_brief_action_id(_combo_action(pair_id=None))
+
+    ordinary = {
+        "csp": _action(),
+        "covered_call": {
+            **_action(),
+            "strategy_family": "covered_call",
+            "option_type": "call",
+            "strike": 110,
+            "contract_symbol": "NVDA260821C00110000",
+        },
+        "close": {
+            **_action(priority="P0", action_type="close_position"),
+            "position_lot_id": "lot-baseline-put-1",
+        },
+    }
+    assert {
+        name: build_daily_brief_action_id(action)
+        for name, action in ordinary.items()
+    } == {
+        "csp": "action-549581c47d9d4b532d021d4e",
+        "covered_call": "action-49fe4dec6252b50a32f3f628",
+        "close": "action-a8d565d8ea34ecbc4107248c",
+    }
+
+
+def test_strict_and_persisted_combo_action_id_validation_are_separate() -> None:
+    from domain.domain.daily_decision_brief import (
+        build_daily_brief_action_id,
+        normalize_daily_decision_brief,
+        normalize_persisted_daily_decision_brief,
+    )
+
+    current_action = _combo_action(strategy_group_id="real-group-1")
+    current_action["action_id"] = build_daily_brief_action_id(current_action)
+    current = _combo_brief(
+        revision=0,
+        actions=[current_action],
+        candidate_items=[_combo_candidate_item(strategy_group_id="real-group-1")],
+    )
+    assert normalize_daily_decision_brief(current)["actions"][0]["action_id"] == current_action["action_id"]
+
+    legacy_action = _combo_action(pair_id=None, strategy_group_id="pair-nvda-100-110")
+    legacy_action["action_id"] = _legacy_combo_action_id(legacy_action)
+    legacy = _combo_brief(
+        revision=0,
+        actions=[legacy_action],
+        candidate_items=[
+            _combo_candidate_item(
+                pair_id="pair-nvda-100-110",
+                strategy_group_id="pair-nvda-100-110",
+            )
+        ],
+    )
+    with pytest.raises(ValueError, match="candidate_pair_id"):
+        normalize_daily_decision_brief(legacy)
+    persisted = normalize_persisted_daily_decision_brief(legacy)
+    assert persisted["actions"][0]["action_id"] == legacy_action["action_id"]
+    assert "candidate_pair_id" not in persisted["actions"][0]
+
+    tampered = deepcopy(legacy)
+    tampered["actions"][0]["contract_symbol"] = "NVDA260821P00101000"
+    with pytest.raises(ValueError, match="supported algorithm"):
+        normalize_persisted_daily_decision_brief(tampered)
+
+
+def test_persisted_combo_representative_accepts_old_group_shape_read_only() -> None:
+    from domain.domain.daily_decision_brief import (
+        normalize_daily_decision_brief,
+        normalize_persisted_daily_decision_brief,
+    )
+
+    legacy_action = _combo_action(pair_id=None, strategy_group_id="old-group")
+    legacy_action["action_id"] = _legacy_combo_action_id(legacy_action)
+    legacy = _combo_brief(
+        revision=0,
+        actions=[legacy_action],
+        candidate_items=[_combo_candidate_item(pair_id=None, strategy_group_id="old-group")],
+    )
+    normalized = normalize_persisted_daily_decision_brief(legacy)
+    representative = normalized["candidate_index"][0]["representative"]
+    assert representative["strategy_group_id"] == "old-group"
+    assert "candidate_pair_id" not in representative
+    with pytest.raises(ValueError, match="candidate_pair_id"):
+        normalize_daily_decision_brief(legacy)
+
+
+@pytest.mark.parametrize("raw_pair", [None, "  pair-nvda-100-110  "])
+def test_persisted_legacy_combo_preserves_raw_pair_representation_for_digest(
+    raw_pair: str | None,
+) -> None:
+    from domain.domain.daily_decision_brief import (
+        daily_brief_compatible_digests,
+        normalize_persisted_daily_decision_brief,
+    )
+
+    action = _combo_action(pair_id=None, strategy_group_id="pair-nvda-100-110")
+    action["candidate_pair_id"] = raw_pair
+    action["action_id"] = _legacy_combo_action_id(action)
+    raw = _combo_brief(
+        revision=0,
+        actions=[action],
+        candidate_items=[
+            _combo_candidate_item(strategy_group_id="pair-nvda-100-110")
+        ],
+    )
+
+    compatible_before = daily_brief_compatible_digests(raw)
+    normalized = normalize_persisted_daily_decision_brief(raw)
+
+    assert normalized["actions"][0]["candidate_pair_id"] == raw_pair
+    assert daily_brief_compatible_digests(normalized) == compatible_before
+
+
 def test_normalize_brief_builds_stable_ids_and_rejects_invalid_contracts() -> None:
     from domain.domain.daily_decision_brief import normalize_daily_decision_brief
 
@@ -243,6 +474,148 @@ def test_candidate_evidence_hold_lifecycle_preserves_identity_without_false_inva
         item["change_type"]
         for item in diff_daily_decision_briefs(held_again, absent)["changes"]
     ] == ["candidate_invalidated"]
+
+
+def test_legacy_combo_hold_aligns_to_current_pair_and_recovers_with_real_ids() -> None:
+    from domain.domain.daily_decision_brief import (
+        build_daily_brief_action_id,
+        diff_daily_decision_briefs,
+        normalize_persisted_daily_decision_brief,
+    )
+
+    legacy = _combo_action(pair_id=None, strategy_group_id="pair-nvda-100-110", state="observe")
+    legacy.update(
+        {
+            "action_id": _legacy_combo_action_id(legacy),
+            "evidence_state": "unavailable",
+            "evidence_gap_key": "US:NVDA:combo_yield:snapshot_unavailable",
+            "evidence_reason": "snapshot_unavailable",
+        }
+    )
+    current = _combo_action()
+    current["action_id"] = build_daily_brief_action_id(current)
+    previous_brief = _combo_brief(
+        revision=0,
+        actions=[legacy],
+        candidate_items=[_combo_candidate_item(strategy_group_id="pair-nvda-100-110")],
+    )
+    current_brief = _combo_brief(
+        revision=1,
+        actions=[current],
+        candidate_items=[_combo_candidate_item()],
+    )
+
+    normalized_previous = normalize_persisted_daily_decision_brief(previous_brief)
+    changes = diff_daily_decision_briefs(normalized_previous, current_brief)["changes"]
+    assert [item["change_type"] for item in changes] == ["candidate_evidence_recovered"]
+    assert changes[0]["before_action_id"] == legacy["action_id"]
+    assert changes[0]["after_action_id"] == current["action_id"]
+    assert changes[0]["action"]["action_id"] == current["action_id"]
+
+
+def test_reconcile_combo_alignment_holds_only_the_still_missing_pair() -> None:
+    from domain.domain.daily_decision_brief import (
+        build_daily_brief_action_id,
+        reconcile_daily_decision_brief_evidence,
+    )
+
+    nvda_legacy = _combo_action(pair_id=None, strategy_group_id="fake-group-nvda")
+    nvda_legacy["action_id"] = _legacy_combo_action_id(nvda_legacy)
+    amd_legacy = _combo_action(
+        symbol="AMD",
+        pair_id=None,
+        put_contract="AMD260821P00100000",
+        call_contract="AMD260821C00110000",
+        strategy_group_id="fake-group-amd",
+    )
+    amd_legacy["action_id"] = _legacy_combo_action_id(amd_legacy)
+    previous = _combo_brief(
+        revision=0,
+        actions=[nvda_legacy, amd_legacy],
+        candidate_items=[
+            _combo_candidate_item(strategy_group_id="fake-group-nvda"),
+            _combo_candidate_item(
+                symbol="AMD",
+                pair_id="pair-amd-100-110",
+                put_contract="AMD260821P00100000",
+                call_contract="AMD260821C00110000",
+                strategy_group_id="fake-group-amd",
+            ),
+        ],
+    )
+    nvda_current = _combo_action(strategy_group_id="real-trade-group")
+    nvda_current["action_id"] = build_daily_brief_action_id(nvda_current)
+    current = _combo_brief(
+        revision=1,
+        actions=[nvda_current],
+        candidate_items=[_combo_candidate_item(strategy_group_id="real-trade-group")],
+        data_gaps=[
+            {
+                "market": "US",
+                "symbol": "AMD",
+                "strategy_family": "combo_yield",
+                "reason": "snapshot_unavailable",
+            },
+            {
+                "market": "US",
+                "symbol": "NVDA",
+                "strategy_family": "combo_yield",
+                "reason": "other_pair_partial_gap",
+            },
+        ],
+    )
+
+    reconciled = reconcile_daily_decision_brief_evidence(previous, current)
+
+    assert [item["symbol"] for item in reconciled["actions"]] == ["NVDA", "AMD"]
+    held = reconciled["actions"][1]
+    assert held["action_id"] == amd_legacy["action_id"]
+    assert held["state"] == "observe"
+    assert held["evidence_reason"] == "snapshot_unavailable"
+    assert held["strategy_group_id"] == "fake-group-amd"
+
+
+@pytest.mark.parametrize("conflict", ["pair_binding", "missing_legs", "ambiguous"])
+def test_combo_cross_algorithm_alignment_never_guesses(conflict: str) -> None:
+    from domain.domain.daily_decision_brief import (
+        build_daily_brief_action_id,
+        diff_daily_decision_briefs,
+    )
+
+    legacy = _combo_action(pair_id=None, strategy_group_id="legacy-group")
+    legacy["action_id"] = _legacy_combo_action_id(legacy)
+    previous_actions = [legacy]
+    current = _combo_action()
+    current["action_id"] = build_daily_brief_action_id(current)
+    current_items = [_combo_candidate_item()]
+    if conflict == "pair_binding":
+        current["candidate_pair_id"] = "pair-conflicting"
+        current["action_id"] = build_daily_brief_action_id(current)
+        current_items = [_combo_candidate_item(pair_id="pair-conflicting")]
+    elif conflict == "missing_legs":
+        legacy["metrics"].pop("call_contract_symbol")
+        legacy["action_id"] = _legacy_combo_action_id(legacy)
+    else:
+        duplicate = deepcopy(legacy)
+        duplicate["strategy_group_id"] = "another-legacy-group"
+        duplicate["action_id"] = _legacy_combo_action_id(duplicate)
+        previous_actions.append(duplicate)
+
+    previous = _combo_brief(
+        revision=0,
+        actions=previous_actions,
+        candidate_items=[_combo_candidate_item(strategy_group_id="legacy-group")],
+    )
+    current_brief = _combo_brief(
+        revision=1,
+        actions=[current],
+        candidate_items=current_items,
+    )
+    change_types = {
+        item["change_type"]
+        for item in diff_daily_decision_briefs(previous, current_brief)["changes"]
+    }
+    assert change_types == {"candidate_added", "candidate_invalidated"}
 
 
 

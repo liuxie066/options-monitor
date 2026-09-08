@@ -6,7 +6,7 @@ import json
 import sqlite3
 import unicodedata
 import uuid
-from typing import Any
+from typing import Any, Mapping
 
 from domain.domain.ledger import ContractKey, TradeEvent, fee_fact_for_event, position_lots_fingerprint
 from domain.domain.ledger.fees import FeeBasis
@@ -16,6 +16,7 @@ from domain.domain.ledger.position_fields import (
     normalize_option_type,
     normalize_side,
     now_ms,
+    strategy_metadata_fields_from_payload,
 )
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.trade_contract_identity import (
@@ -24,9 +25,14 @@ from domain.domain.trade_contract_identity import (
     normalize_position_effect,
     normalize_trade_side,
 )
+from domain.domain.wheel import effective_wheel_events
+from src.application.ledger.assigned_stock_projection import (
+    project_assigned_stock_lifecycle_from_rows,
+)
 from src.application.ledger.event_codec import stored_trade_event_to_ledger_event, valid_void_target_event_id
 from src.application.ledger.current_decision_projection import (
     capture_trade_event_decision_projection_fence,
+    defer_current_decision_projection,
     finalize_current_decision_projection,
 )
 from src.application.ledger.position_projection_runtime import (
@@ -38,7 +44,6 @@ from src.application.ledger.repository import (
 )
 from src.application.ledger.results import LedgerWriteResult, TradeEventInterventionPreview
 from src.application.ledger.writer import (
-    persist_trade_event_object,
     projection_diagnostics_summary,
 )
 from src.infrastructure.feishu_bitable import safe_float
@@ -53,21 +58,6 @@ _OPEND_TRADE_TIME_PROVENANCE_SCHEMA = "opend_trade_time_correction.v1"
 
 def _canonical_trade_symbol(value: Any) -> str:
     return canonical_contract_symbol(value)
-
-
-def _get_trade_event_dict(repo: Any, *, event_id: str) -> dict[str, Any]:
-    sqlite_repo = require_option_positions_event_write_repo(repo)
-    target = next(
-        (
-            item
-            for item in sqlite_repo.list_trade_events()
-            if str(item.get("event_id") or "").strip() == str(event_id or "").strip()
-        ),
-        None,
-    )
-    if target is None:
-        raise ValueError(f"trade event not found: {event_id}")
-    return dict(target)
 
 
 def _event_payload(event: dict[str, Any]) -> dict[str, Any]:
@@ -293,7 +283,207 @@ def _repair_downstream_dependencies(events: list[dict[str, Any]], target: dict[s
     return out
 
 
-def _assert_trade_event_can_be_manually_voided(events: list[dict[str, Any]], target: dict[str, Any]) -> None:
+def _dependency_cutoff_ms(rows: Mapping[str, Any], target: Mapping[str, Any]) -> int:
+    values = [int(safe_float(target.get("trade_time_ms")) or 0)]
+    for key, time_fields in (
+        ("trade_events", ("trade_time_ms", "event_time_ms")),
+        ("account_assigned_stock_events", ("trade_time_ms", "event_time_ms")),
+        ("account_wheel_events", ("occurred_at_ms", "recorded_at_ms")),
+    ):
+        for row in rows.get(key) or []:
+            if not isinstance(row, Mapping):
+                continue
+            values.extend(int(safe_float(row.get(field)) or 0) for field in time_fields)
+    return max(1, *values)
+
+
+def _explicit_stock_lot_id(event: Mapping[str, Any]) -> str:
+    payload = event.get("raw_payload")
+    payload = payload if isinstance(payload, Mapping) else {}
+    strategy_metadata = strategy_metadata_fields_from_payload(
+        dict(payload),
+        include_legacy=True,
+    )
+    for source in (event, payload, strategy_metadata):
+        for key in ("stock_lot_id", "target_stock_lot_id", "source_stock_lot_id"):
+            value = str(source.get(key) or "").strip()
+            if value:
+                return value
+    return ""
+
+
+def _stock_dependencies(
+    rows: Mapping[str, Any],
+    target: Mapping[str, Any],
+) -> list[dict[str, str]]:
+    target_event_id = str(target.get("event_id") or "").strip()
+    if str(target.get("event_type") or "").strip().lower() not in {"assignment", "exercise"}:
+        return []
+    account = normalize_account(target.get("account"))
+    report = project_assigned_stock_lifecycle_from_rows(
+        rows,
+        account=account,
+        as_of_ms=_dependency_cutoff_ms(rows, target),
+    )
+    lot_ids = {
+        str(row.get("stock_lot_id") or "").strip()
+        for row in report.get("_all_assigned_stock_lots") or []
+        if isinstance(row, Mapping)
+        and str(row.get("source_assignment_event_id") or "").strip() == target_event_id
+        and str(row.get("stock_lot_id") or "").strip()
+    }
+    if not lot_ids:
+        return []
+
+    dependencies: set[tuple[str, str, str, str]] = set()
+    effective_sale_ids: set[str] = set()
+    for row in report.get("assigned_stock_sale_rows") or []:
+        if not isinstance(row, Mapping):
+            continue
+        lot_id = str(row.get("stock_lot_id") or "").strip()
+        event_id = str(row.get("stock_event_id") or row.get("event_id") or "").strip()
+        if lot_id in lot_ids and event_id:
+            effective_sale_ids.add(event_id)
+            dependencies.add(("assigned_stock_sale", event_id, lot_id, "effective"))
+
+    effective_call_ids: set[str] = set()
+    for row in report.get("covered_call_allocations") or []:
+        if not isinstance(row, Mapping):
+            continue
+        lot_id = str(row.get("stock_lot_id") or "").strip()
+        event_id = str(row.get("open_event_id") or "").strip()
+        if lot_id in lot_ids and event_id:
+            effective_call_ids.add(event_id)
+            dependencies.add(("covered_call", event_id, lot_id, "effective"))
+
+    for row in rows.get("account_assigned_stock_events") or []:
+        if not isinstance(row, Mapping):
+            continue
+        lot_id = _explicit_stock_lot_id(row)
+        event_id = str(row.get("stock_event_id") or row.get("event_id") or "").strip()
+        if lot_id in lot_ids and event_id and event_id not in effective_sale_ids:
+            dependencies.add(("assigned_stock_sale", event_id, lot_id, "unresolved"))
+
+    trade_events = [
+        dict(row)
+        for row in rows.get("trade_events") or []
+        if isinstance(row, Mapping)
+        and normalize_account(row.get("account")) == account
+    ]
+    voided_ids = {
+        target_id
+        for row in trade_events
+        for target_id in [valid_void_target_event_id(row)]
+        if target_id
+    }
+    for row in trade_events:
+        event_id = str(row.get("event_id") or "").strip()
+        if (
+            not event_id
+            or event_id == target_event_id
+            or event_id in voided_ids
+            or valid_void_target_event_id(row) is not None
+        ):
+            continue
+        lot_id = _explicit_stock_lot_id(row)
+        if lot_id not in lot_ids or event_id in effective_sale_ids or event_id in effective_call_ids:
+            continue
+        kind = (
+            "covered_call"
+            if normalize_position_effect(row.get("position_effect")) == "open"
+            and normalize_option_type(row.get("option_type")) == "call"
+            and _event_position_side(row) == "short"
+            else "assigned_stock_sale"
+            if str(row.get("event_type") or "").strip().lower() in {"assignment", "exercise"}
+            else "stock_lot_reference"
+        )
+        dependencies.add((kind, event_id, lot_id, "unresolved"))
+
+    wheel_rows = [
+        dict(row)
+        for row in rows.get("account_wheel_events") or []
+        if isinstance(row, Mapping)
+    ]
+    effective_wheel, invalid_wheel = effective_wheel_events(wheel_rows)
+    for lot_id in lot_ids:
+        group = (account, lot_id)
+        if invalid_wheel.get(group):
+            event_ids = sorted(
+                {
+                    str(row.get("event_id") or "").strip()
+                    for row in wheel_rows
+                    if normalize_account(row.get("account")) == account
+                    and str(row.get("stock_lot_id") or "").strip() == lot_id
+                    and str(row.get("event_id") or "").strip()
+                }
+            ) or [f"wheel-unresolved:{lot_id}"]
+            dependencies.update(
+                ("wheel_event", event_id, lot_id, "unresolved")
+                for event_id in event_ids
+            )
+            continue
+        dependencies.update(
+            (
+                "wheel_event",
+                str(row.get("event_id") or "").strip(),
+                lot_id,
+                "effective",
+            )
+            for row in effective_wheel
+            if str(row.get("stock_lot_id") or "").strip() == lot_id
+            and str(row.get("event_type") or "").strip() != "wheel_event_voided"
+            and str(row.get("event_id") or "").strip()
+        )
+
+    return [
+        {"kind": kind, "event_id": event_id, "lot_id": lot_id, "status": status}
+        for kind, event_id, lot_id, status in sorted(dependencies)
+    ]
+
+
+def _intervention_context(
+    sqlite_repo: Any,
+    *,
+    target_event_id: str,
+    conn: sqlite3.Connection | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any], list[dict[str, str]]]:
+    target_id = str(target_event_id or "").strip()
+    stored_events = (
+        sqlite_repo.list_trade_events(conn=conn)
+        if conn is not None
+        else sqlite_repo.list_trade_events()
+    )
+    events = [dict(row) for row in stored_events]
+    target = next(
+        (row for row in events if str(row.get("event_id") or "").strip() == target_id),
+        None,
+    )
+    if target is None:
+        raise ValueError(f"trade event not found: {target_event_id}")
+    if str(target.get("event_type") or "").strip().lower() not in {"assignment", "exercise"}:
+        return events, target, []
+    account = normalize_account(target.get("account"))
+    rows = (
+        sqlite_repo.read_lifecycle_account_rows(account=account, conn=conn)
+        if conn is not None
+        else sqlite_repo.read_lifecycle_account_rows(account=account)
+    )
+    events = [dict(row) for row in rows.get("trade_events") or [] if isinstance(row, Mapping)]
+    target = next(
+        (row for row in events if str(row.get("event_id") or "").strip() == target_id),
+        None,
+    )
+    if target is None:
+        raise ValueError(f"trade event not found: {target_event_id}")
+    return events, target, _stock_dependencies(rows, target)
+
+
+def _assert_trade_event_can_be_manually_voided(
+    events: list[dict[str, Any]],
+    target: dict[str, Any],
+    *,
+    stock_dependencies: list[dict[str, str]] | None = None,
+) -> None:
     target_event_id = str(target.get("event_id") or "").strip()
     if str(target.get("position_effect") or "").strip().lower() == "void":
         raise ValueError(f"cannot void a void event: {target_event_id}")
@@ -302,6 +492,12 @@ def _assert_trade_event_can_be_manually_voided(events: list[dict[str, Any]], tar
         raise ValueError(
             "trade event already voided: "
             f"{target_event_id} via {str(existing_void.get('event_id') or '').strip()}"
+        )
+    if stock_dependencies:
+        raise ValueError(
+            "cannot void or repair an assignment/exercise with downstream stock dependencies: "
+            f"{target_event_id}; dependencies="
+            f"{json.dumps(stock_dependencies, ensure_ascii=False, sort_keys=True)}"
         )
 
 
@@ -312,30 +508,55 @@ def persist_manual_void_event(
     void_reason: str,
     as_of_ms: int | None = None,
 ) -> LedgerWriteResult:
-    sqlite_repo = require_option_positions_event_write_repo(repo)
-    events = sqlite_repo.list_trade_events()
-    target = next(
-        (
-            item
-            for item in events
-            if str(item.get("event_id") or "").strip() == str(target_event_id or "").strip()
-        ),
-        None,
-    )
-    if target is None:
-        raise ValueError(f"trade event not found: {target_event_id}")
-    _assert_trade_event_can_be_manually_voided(events, target)
+    def _run(sqlite_repo: Any, conn: sqlite3.Connection | None) -> dict[str, Any]:
+        if conn is None:
+            raise TypeError("trade event void requires SQLite transaction authority")
+        events, target, stock_dependencies = _intervention_context(
+            sqlite_repo,
+            target_event_id=target_event_id,
+            conn=conn,
+        )
+        _assert_trade_event_can_be_manually_voided(
+            events,
+            target,
+            stock_dependencies=stock_dependencies,
+        )
+        event = _void_trade_event(
+            event_id=f"manual-void-{target_event_id}-{uuid.uuid4().hex}",
+            target=target,
+            target_event_id=target_event_id,
+            reason=void_reason,
+            mode="manual_void",
+            source="om option-positions",
+            as_of_ms=as_of_ms,
+        )
+        decision_fence = capture_trade_event_decision_projection_fence(
+            sqlite_repo,
+            conn=conn,
+        )
+        runtime = run_position_projection_in_transaction(
+            sqlite_repo,
+            (event,),
+            conn=conn,
+            mode="forced_full",
+        )
+        result = {
+            "event_id": event.event_id,
+            "record_id": None,
+            "created": bool(runtime.created_flags[0]),
+            "position_lot_count": int(runtime.position_lot_count),
+            "decision_projection": defer_current_decision_projection(decision_fence),
+        }
+        result.update(projection_diagnostics_summary(runtime.diagnostics))
+        return result
 
-    event = _void_trade_event(
-        event_id=f"manual-void-{target_event_id}-{uuid.uuid4().hex}",
-        target=target,
-        target_event_id=target_event_id,
-        reason=void_reason,
-        mode="manual_void",
-        source="om option-positions",
-        as_of_ms=as_of_ms,
+    return LedgerWriteResult.from_payload(
+        with_sqlite_repo_transaction(
+            repo,
+            _run,
+            require_projection_publication=True,
+        )
     )
-    return persist_trade_event_object(repo, event)
 
 
 def build_manual_void_preview(
@@ -346,18 +567,15 @@ def build_manual_void_preview(
     as_of_ms: int | None = None,
 ) -> TradeEventInterventionPreview:
     sqlite_repo = require_option_positions_event_write_repo(repo)
-    events = sqlite_repo.list_trade_events()
-    target = next(
-        (
-            item
-            for item in events
-            if str(item.get("event_id") or "").strip() == str(target_event_id or "").strip()
-        ),
-        None,
+    events, target, stock_dependencies = _intervention_context(
+        sqlite_repo,
+        target_event_id=target_event_id,
     )
-    if target is None:
-        raise ValueError(f"trade event not found: {target_event_id}")
-    _assert_trade_event_can_be_manually_voided(events, target)
+    _assert_trade_event_can_be_manually_voided(
+        events,
+        target,
+        stock_dependencies=stock_dependencies,
+    )
     digest = hashlib.sha256(
         json.dumps(
             {
@@ -1192,10 +1410,16 @@ def build_manual_repair_preview(
     repair_reason: str,
     as_of_ms: int | None = None,
 ) -> TradeEventInterventionPreview:
-    target = _get_trade_event_dict(repo, event_id=target_event_id)
     sqlite_repo = require_option_positions_event_write_repo(repo)
-    events = sqlite_repo.list_trade_events()
-    _assert_trade_event_can_be_manually_voided(events, target)
+    events, target, stock_dependencies = _intervention_context(
+        sqlite_repo,
+        target_event_id=target_event_id,
+    )
+    _assert_trade_event_can_be_manually_voided(
+        events,
+        target,
+        stock_dependencies=stock_dependencies,
+    )
     downstream_dependencies = _repair_downstream_dependencies(events, target)
     if downstream_dependencies:
         raise ValueError(
@@ -1260,6 +1484,23 @@ def persist_manual_repair_event(
     def _run(sqlite_repo: Any, conn: sqlite3.Connection | None) -> dict[str, Any]:
         if conn is None:
             raise TypeError("trade event repair requires SQLite transaction authority")
+        events, target, stock_dependencies = _intervention_context(
+            sqlite_repo,
+            target_event_id=target_event_id,
+            conn=conn,
+        )
+        _assert_trade_event_can_be_manually_voided(
+            events,
+            target,
+            stock_dependencies=stock_dependencies,
+        )
+        downstream_dependencies = _repair_downstream_dependencies(events, target)
+        if downstream_dependencies:
+            raise ValueError(
+                "cannot repair an open event with downstream close/adjust dependencies: "
+                f"{target_event_id}; void or repair downstream events first; "
+                f"dependencies={json.dumps(downstream_dependencies, ensure_ascii=False, sort_keys=True)}"
+            )
         runtime = run_position_projection_in_transaction(
             sqlite_repo,
             (void_event, repair_event),
