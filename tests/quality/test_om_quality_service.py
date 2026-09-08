@@ -22,22 +22,41 @@ from src.application.quality.opend_position_adapter import OpenDOptionSnapshot
 
 
 class _OpenD:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        complete: bool = True,
+        environment: str = "REAL",
+        error_code: str | None = None,
+        snapshot_input_factory=None,
+        account_fingerprint: str | None = None,
+    ) -> None:
         self.calls: list[tuple[str, str]] = []
+        self.complete = complete
+        self.environment = environment
+        self.error_code = error_code
+        self.snapshot_input_factory = snapshot_input_factory
+        self.account_fingerprint = account_fingerprint
 
     def fetch(self, *, account: str, market: str, **_kwargs) -> OpenDOptionSnapshot:
         self.calls.append((account, market))
         return OpenDOptionSnapshot(
             account=account,
             market=market,
-            environment="REAL",
-            account_fingerprint="sha256:" + ("b" * 64),
+            environment=self.environment,
+            account_fingerprint=self.account_fingerprint or "sha256:" + ("b" * 64),
             observed_at_utc="2026-07-13T10:00:00Z",
             snapshot_id=f"snapshot-{account}",
-            complete=True,
+            complete=self.complete,
             refresh_cache=True,
             rows=[],
             trading_days=[date(2026, 7, 13), date(2026, 7, 14)],
+            error_code=self.error_code,
+            snapshot_input=(
+                self.snapshot_input_factory(account, market)
+                if self.snapshot_input_factory is not None
+                else {}
+            ),
         )
 
 
@@ -69,9 +88,40 @@ def _trusted_empty_current_projection() -> dict:
     }
 
 
+def _enriched_snapshot_input(account: str, market: str, *, complete: bool) -> dict:
+    return {
+        "schema_version": "position_snapshot.v1",
+        "snapshot_id": f"internal-{account}-{market}",
+        "source_id": "futu-opend.positions",
+        "broker_account_ref": {
+            "broker_account_id": "futu:REAL:123456",
+            "broker_id": "futu",
+            "external_account_id": "123456",
+            "environment": "REAL",
+            "account_label": account,
+        },
+        "scope": {
+            "markets": [market.upper()],
+            "asset_types": ["option"],
+            "filtered": False,
+        },
+        "observed_at_utc": "2026-07-13T10:00:00Z",
+        "source_as_of_utc": "2026-07-13T09:59:00Z",
+        "completeness": "complete" if complete else "partial",
+        "quality": {"status": "ready" if complete else "unknown"},
+        "rows": [],
+        "evidence_refs": [],
+        "source_evidence": [],
+        "errors": [],
+        "internal_sentinel": "must-not-cross-public-boundary",
+    }
+
+
+@pytest.mark.parametrize("complete", [True, False], ids=["complete", "incomplete"])
 def test_service_publishes_schema_valid_artifact_without_business_writes(
     monkeypatch,
     tmp_path: Path,
+    complete: bool,
 ) -> None:
     ledger_path = tmp_path / "option_positions.sqlite3"
     SQLiteOptionPositionsRepository(ledger_path)
@@ -150,7 +200,17 @@ def test_service_publishes_schema_valid_artifact_without_business_writes(
     service = OMQualityService(
         artifact_repository=artifact,
         control_repository=QualityControlStateRepository(tmp_path / "control.v1.json"),
-        opend_adapter=_OpenD(),
+        opend_adapter=_OpenD(
+            complete=complete,
+            environment="REAL" if complete else "UNKNOWN",
+            error_code=None if complete else "OPEND_TEST_INCOMPLETE",
+            snapshot_input_factory=lambda account, market: _enriched_snapshot_input(
+                account, market, complete=complete
+            ),
+            account_fingerprint=(
+                "sha256:8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92"
+            ),
+        ),
         runtime_status_fn=lambda *_args: {"ok": True, "data": runtime},
         now_fn=lambda: now,
         instance_id="test-instance",
@@ -158,6 +218,35 @@ def test_service_publishes_schema_valid_artifact_without_business_writes(
     payload = service.refresh(config_keys=["us"])
     assert artifact.read() == payload
     assert payload["producer"]["service"] == "options-monitor"
+    position_snapshots = [
+        snapshot
+        for dataset in payload["datasets"]
+        for snapshot in dataset.get("source_snapshots") or []
+    ]
+    assert position_snapshots
+    assert all(
+        set(snapshot)
+        == {
+            "provider",
+            "snapshot_id",
+            "observed_at_utc",
+            "complete",
+            "refresh_cache",
+            "account_fingerprint",
+            "environment",
+            "market",
+        }
+        for snapshot in position_snapshots
+    )
+    assert all(
+        "internal_sentinel" not in snapshot for snapshot in position_snapshots
+    )
+    position_dataset = next(
+        dataset
+        for dataset in payload["datasets"]
+        if dataset["dataset_id"] == "om.option_positions"
+    )
+    assert position_dataset["status"] == ("trusted" if complete else "unavailable")
     check_ids = {
         check["check_id"]
         for dataset in payload["datasets"]
