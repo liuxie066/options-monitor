@@ -2,8 +2,12 @@
 
 ## Unreleased
 
+## 3.4.11 - 2026-09-08
+
 ### Improvements
 - Reduced overlapping put/call required-data chain requests by partitioning expirations at the shared merger, and reused the existing opening warmer for scheduled HK ticks while preserving fresh formal quotes.
+- Hardened OpenD execution intake and ledger persistence around execution identity, idempotent recovery, fee and FX evidence, and strategy attribution.
+- Removed retired Strategy Lab and Shadow Replay code, tests, and experiment-only provider paths; production scanning and Research evidence collection remain.
 
 ## 3.4.10 - 2026-09-05
 
