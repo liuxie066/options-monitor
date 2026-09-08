@@ -664,6 +664,9 @@ def _validate_evidence_kind(existing: list[Any], incoming: list[Any]) -> None:
                 raise ValueError("superseding evidence must preserve exact identity")
         by_id[fact_id] = item
         by_source[item.source_identity] = item
+
+    # New edges only reference validated earlier facts; validate the merged graph once.
+    if incoming:
         _validate_correction_graph(by_id)
 
 
