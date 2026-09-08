@@ -1635,6 +1635,7 @@ def _run_listener_source_loop(
     )
     if apply_changes:
         inbox_path = resolve_execution_inbox_path(repo, inbox_path)
+    source = {**source, "inbox_path": inbox_path}
     backfill_checkpoint_path = source.get(
         "backfill_checkpoint_path"
     ) or Path(state_path).with_name("trade_intake_backfill_checkpoint.json")
