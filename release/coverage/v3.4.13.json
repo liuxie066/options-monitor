@@ -1,0 +1,62 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.4.13",
+  "base": {
+    "tag": "v3.4.12",
+    "commit": "76bfcd640727238aea5c13da6a95a024e8afc724"
+  },
+  "reviewed_head": "7223f4cf955f9d4cd3e94e5d240cb9b3947d4a46",
+  "commits": [
+    {
+      "sha": "d85d17a0e1e78c16101e5f456d987a58d5ef3cf1",
+      "subject": "refactor(ledger): harden cross-asset lifecycle accounting"
+    },
+    {
+      "sha": "2f402f46ec912946cec69fe57e2ac2c5af5ef138",
+      "subject": "merge(main): sync latest main into domain refactor"
+    },
+    {
+      "sha": "7223f4cf955f9d4cd3e94e5d240cb9b3947d4a46",
+      "subject": "Merge pull request #256 from liuxie066/codex/domain-minimal-refactor"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Hardened cross-asset trade intake and lifecycle accounting for exact execution identity, assigned-stock settlement, shared capacity evidence, Combo/Wheel relationships, and fail-closed decision briefs.",
+      "commits": [
+        "d85d17a0e1e78c16101e5f456d987a58d5ef3cf1"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "2f402f46ec912946cec69fe57e2ac2c5af5ef138",
+      "reason": "Merge commit that synchronized the already reviewed development branch with main; its constituent user-visible change is covered by the release note for d85d17a0."
+    },
+    {
+      "commit": "7223f4cf955f9d4cd3e94e5d240cb9b3947d4a46",
+      "reason": "Merge commit that integrated PR #256 into main; the user-visible change is covered by the release note for d85d17a0."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "d85d17a0e1e78c16101e5f456d987a58d5ef3cf1",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/256"
+      ]
+    },
+    {
+      "commit": "2f402f46ec912946cec69fe57e2ac2c5af5ef138",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/256"
+      ]
+    },
+    {
+      "commit": "7223f4cf955f9d4cd3e94e5d240cb9b3947d4a46",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/256"
+      ]
+    }
+  ]
+}

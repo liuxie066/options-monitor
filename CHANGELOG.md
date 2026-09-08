@@ -1,6 +1,9 @@
 # Changelog
 
 ## Unreleased
+
+## 3.4.13 - 2026-09-08
+
 ### Improvements
 - Hardened cross-asset trade intake and lifecycle accounting for exact execution identity, assigned-stock settlement, shared capacity evidence, Combo/Wheel relationships, and fail-closed decision briefs.
 
