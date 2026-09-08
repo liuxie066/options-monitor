@@ -104,3 +104,81 @@ systemd renderer 默认不改变现有部署。生产准备时显式加入：
 - `options-monitor-quality-day-end-hk.timer`：香港 `16:30`。
 
 renderer 只生成文件和安装命令，不会自行写 `/etc`、启用 timer 或启动服务。
+
+## Public source snapshot contract
+
+`datasets[*].source_snapshots[*]` is the public
+`investment.quality_status.v1` boundary. `OpenDOptionSnapshot.public_source_snapshot()`
+must be an explicit allowlist projection. The repaired producer must emit exactly
+these eight fields: `provider`, `snapshot_id`, `observed_at_utc`, `complete`,
+`refresh_cache`, `account_fingerprint`, `environment`, and `market`. The current
+`origin/main` implementation still spreads four internal fields into this object;
+that is the defect being removed.
+`source_currency` and `payload_sha256` are permitted by the vendored schema but
+are not emitted by this producer today.
+
+OpenD position-input fields such as `scope`, `completeness`, `quality`, and
+`source_as_of_utc` remain in the internal `snapshot_input` used by position
+checks. They must never be deleted or cleared merely to make publication pass,
+and they are never copied into a public source snapshot. The current
+`sourceSnapshot` schema has no source-level `extensions` slot; dataset-level
+extensions must not be used as an undocumented escape hatch. Any future
+producer-specific field requires an upstream contract decision owned by
+`investment-quality`, not a local schema edit or a new schema version.
+
+The relevant call chain is:
+
+```text
+OMQualityService._refresh
+  -> OpenDOptionPositionAdapter.fetch
+  -> build_opend_runtime_check / build_position_dataset
+  -> public_source_snapshot (position dataset path)
+  -> validate_payload
+  -> artifact_repository.write_atomic
+```
+
+Normal refreshes, `source_ok=false` incomplete/error results, and explicit
+integrity refreshes all use the same public projection. The repair therefore has
+one code owner and does not change OpenD queries, position comparison, quality
+decisions, artifact paths, or production write semantics.
+
+`status.v1.json` and `control_state.v1.json` are each written atomically but are
+not one cross-file transaction. Control state is persisted before payload
+validation; when validation fails, the previous status artifact remains and the
+control state may already contain the new probe metadata. This existing split is
+documented residual risk for the quality-service maintainer's next
+`quality-refresh` reliability work unit, not part of this minimal contract
+repair. Carried-forward snapshots are likewise not sanitized in this change;
+the quality artifact owner must address that in a separate data-integrity work
+unit only if an existing artifact is shown to contain undeclared source fields.
+
+Validation must include an adapter key-set regression and quality-service tests
+with enriched `snapshot_input` for both complete and incomplete/error paths, plus
+the normal release preflight and the explicit `tests/quality/*` suite. A deployed
+oneshot refresh is successful only when its exit result is success and the
+published status artifact validates and can be read back; HTTP health, timer
+activity, or process presence alone is insufficient. Publishing and remote
+upgrade remain separate authorization gates. An upstream contract extension is
+not part of this producer-side repair.
+
+## Hotfix scope and implementation slices
+
+目标是让带有内部 `snapshot_input` 的 OpenD 结果重新能够通过现有
+`investment.quality_status.v1` 校验并发布，同时保持质量判断和生产扫描行为不变。
+验收信号是：公共 source snapshot 的键集合严格等于上述八个字段；完整和不完整/错误
+结果都能完成服务级 schema 校验；quality-refresh oneshot 以成功结果退出并能读回
+有效 status artifact。
+
+实现只分两个行为切片：
+
+1. 在 `OpenDOptionSnapshot.public_source_snapshot()` 保留显式八字段 allowlist，
+   不修改或清空 `snapshot_input`，也不改变 `fetch`、position checks 或 artifact writer。
+2. 在 adapter 和 quality service 的公共边界补回归：用带内部哨兵字段的完整、
+   不完整/错误 snapshot 验证精确键集合和 schema 通过；保留旧的八字段 snapshot
+   仍可通过。测试必须走 `build_position_dataset`/service 真实发布路径，而不是只测
+   一个未被调用的 helper。
+
+以下不属于本 hotfix：修改 vendored schema、增加 source-level `extensions` 或新版本、
+改变 OpenD 查询或消费者、重写跨文件事务、清洗历史 carry-forward artifact、修改
+发布工作流。发布前只读校验现有 status artifact；若发现历史 artifact 已含未声明字段，
+保留原始事实并另开数据修复工作，不在本 hotfix 中覆盖它。
