@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
+import hashlib
 import json
 from pathlib import Path
 
@@ -508,17 +509,24 @@ def _frozen_workspace(
     tmp_path: Path,
     *,
     quote_strike: float = 100,
+    position_fields: dict[str, object] | None = None,
+    ledger_wheel: bool = False,
 ) -> tuple[dict, Path, Path, Path, Path]:
+    from domain.domain.option_position_lots import OpenPositionCommand
+
+    from src.application.ledger import api as ledger_api
     from src.application.close_advice_required_data import (
         PLAN_FILE_NAME,
         build_close_advice_required_data_plan,
         publish_close_advice_required_data_plan,
     )
-    from src.application.ledger.api import position_lot_risk_view
+    from src.application.ledger.repository import SQLiteOptionPositionsRepository
     from src.application.opend_symbol_outputs import (
         publish_required_data_quote_snapshot,
         save_outputs,
     )
+    from src.application.positions.assigned_stock_view import build_assigned_stock_view
+    from src.application.positions.context_builder import build_context
     from src.application.required_data_plan_identity import (
         build_required_data_expected_fetch_contract,
         required_data_plan_id,
@@ -538,7 +546,75 @@ def _frozen_workspace(
     account_state.mkdir(parents=True)
     output_dir = run_dir / "accounts" / "lx"
     config = _config(account="lx")
-    record = _position(account="lx", lot_id="lot-lx")
+    if ledger_wheel:
+        repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+        ledger_api.record_manual_position_open(
+            repo,
+            OpenPositionCommand(
+                broker="富途",
+                account="lx",
+                symbol="NVDA",
+                option_type="put",
+                side="short",
+                contracts=2,
+                currency="USD",
+                strike=100,
+                multiplier=100,
+                expiration_ymd="2026-08-21",
+                premium_per_share=2,
+                opened_at_ms=1_000,
+            ),
+        )
+        put_id = repo.list_position_lots()[0]["record_id"]
+        ledger_api.record_manual_assignment(
+            repo,
+            record_id=put_id,
+            contracts_to_close=2,
+            stock_side="buy",
+            stock_qty=200,
+            stock_price=100,
+            as_of_ms=2_000,
+        )
+        stock_id = build_assigned_stock_view(
+            repo,
+            account="lx",
+            as_of_ms=2_000,
+        )["assigned_stock_lots"][0]["stock_lot_id"]
+        ledger_api.record_manual_position_open(
+            repo,
+            OpenPositionCommand(
+                broker="富途",
+                account="lx",
+                symbol="NVDA",
+                option_type="call",
+                side="short",
+                contracts=2,
+                currency="USD",
+                strike=110,
+                multiplier=100,
+                expiration_ymd="2026-07-29",
+                premium_per_share=2,
+                opened_at_ms=3_000,
+                strategy_snapshot={
+                    "strategy": "wheel",
+                    "leg_role": "wheel_call",
+                    "source_stock_lot_id": stock_id,
+                },
+            ),
+        )
+        position_records = repo.list_position_lots()
+        assigned = build_assigned_stock_view(
+            repo,
+            account="lx",
+            as_of_ms=3_000,
+        )
+        assert [
+            row["shares"] for row in assigned["covered_call_allocations"]
+        ] == [200]
+    else:
+        record = _position(account="lx", lot_id="lot-lx")
+        record["fields"].update(position_fields or {})
+        position_records = [record]
     plan = build_close_advice_required_data_plan(
         run_id=run_id,
         run_started_at_utc=datetime(
@@ -553,7 +629,7 @@ def _frozen_workspace(
         account_configs={"lx": config},
         base_config=config,
         markets_to_run=["US"],
-        position_records_by_account={"lx": [record]},
+        position_records_by_account={"lx": position_records},
     )
     plan_path = state_dir / PLAN_FILE_NAME
     publish_close_advice_required_data_plan(
@@ -777,19 +853,15 @@ def _frozen_workspace(
         },
         close_advice_required_data_plan_path=plan_path,
     )
-    position = position_lot_risk_view(
-        record,
-        as_of_date=date(2026, 7, 29),
-    ).as_open_position_min(as_of_date=date(2026, 7, 29))
+    context = build_context(
+        position_records,
+        broker="富途",
+        account="lx",
+        observed_at=datetime(2026, 7, 29, 14, tzinfo=timezone.utc),
+    )
     context_path = account_state / "option_positions_context.json"
     context_path.write_text(
-        json.dumps(
-            {
-                "context_status": "available",
-                "filters": {"broker": "富途", "account": "lx"},
-                "open_positions_min": [position],
-            }
-        ),
+        json.dumps(context),
         encoding="utf-8",
     )
     return config, context_path, required_root, output_dir, manifest_path
@@ -807,7 +879,14 @@ def test_frozen_close_advice_reads_only_sealed_snapshot(
         required_root,
         output_dir,
         manifest_path,
-    ) = _frozen_workspace(tmp_path)
+    ) = _frozen_workspace(
+        tmp_path,
+        position_fields={
+            "strategy": "combo_yield",
+            "strategy_group_id": "combo-group-1",
+            "leg_role": "funding_put",
+        },
+    )
     monkeypatch.setattr(
         runner,
         "_ensure_required_data_coverage_for_positions",
@@ -888,7 +967,8 @@ def test_frozen_close_advice_reads_only_sealed_snapshot(
     assert result["business_date"] == "2026-07-29"
     assert result["report_manifest"]["status"] == "success"
     assert result["close_advice_required_data_plan_sha256"]
-    row = pd.read_csv(output_dir / "close_advice.csv").iloc[0].to_dict()
+    csv_path = output_dir / "close_advice.csv"
+    row = pd.read_csv(csv_path).iloc[0].to_dict()
     assert row["quote_mode"] == "frozen_snapshot"
     assert row["required_data_snapshot_plan_id"]
     assert row["required_data_snapshot_manifest_sha256"]
@@ -900,10 +980,88 @@ def test_frozen_close_advice_reads_only_sealed_snapshot(
     assert row["required_data_payload_sha256"]
     assert row["required_data_source_observed_at"]
     assert row["required_data_expires_at"]
+    assert row["strategy_group_id"] == "combo-group-1"
+    assert row["leg_role"] == "funding_put"
+    assert pd.isna(row["source_stock_lot_id"])
+    assert result["report_manifest"]["csv_sha256"] == hashlib.sha256(
+        csv_path.read_bytes()
+    ).hexdigest()
+    assert "strategy_group_id" not in result["report_manifest"]
+    assert "leg_role" not in result["report_manifest"]
+    assert "source_stock_lot_id" not in result["report_manifest"]
     assert {
         path: (path.read_bytes(), path.stat().st_mtime_ns)
         for path in before
     } == before
+
+
+def test_frozen_lifecycle_close_advice_preserves_wheel_stock_relationship(
+    tmp_path: Path,
+) -> None:
+    from src.application.close_advice_runner import run_close_advice
+    from src.application.daily_decision_brief_service import (
+        assemble_daily_decision_brief,
+    )
+
+    (
+        config,
+        context_path,
+        required_root,
+        output_dir,
+        manifest_path,
+    ) = _frozen_workspace(
+        tmp_path,
+        ledger_wheel=True,
+    )
+
+    result = run_close_advice(
+        config=config,
+        context_path=context_path,
+        required_data_root=required_root,
+        output_dir=output_dir,
+        base_dir=tmp_path,
+        markets_to_run=["US"],
+        required_data_snapshot_manifest=manifest_path,
+        required_data_snapshot_run_id="run-1",
+        close_advice_required_data_plan=(
+            manifest_path.parent / "close_advice_required_data_plan.json"
+        ),
+        account="lx",
+    )
+
+    csv_path = output_dir / "close_advice.csv"
+    row = pd.read_csv(csv_path).iloc[0]
+    context = json.loads(context_path.read_text(encoding="utf-8"))
+    context_row = context["open_positions_min"][0]
+    assert result["snapshot_authority"] == "valid"
+    assert result["quote_mode"] == "frozen_snapshot"
+    assert row["recommendation_state"] == "not_evaluable"
+    assert row["position_lifecycle_state"] == "expiry_day"
+    assert pd.isna(row["strategy_group_id"])
+    assert row["leg_role"] == "wheel_call"
+    assert row["source_stock_lot_id"] == context_row["source_stock_lot_id"]
+    assert row["strategy_family"] == "covered_call"
+    assert result["report_manifest"]["csv_sha256"] == hashlib.sha256(
+        csv_path.read_bytes()
+    ).hexdigest()
+
+    brief = assemble_daily_decision_brief(
+        base=tmp_path,
+        run_id="run-1",
+        account="lx",
+        market="US",
+        scheduler_decision={"in_run_window": True},
+        account_result={"ran_scan": True, "reason": "ok"},
+        pipeline_succeeded=True,
+        config=config,
+        now_utc=datetime(2026, 7, 29, 14, tzinfo=timezone.utc),
+    )
+    assert len(brief["positions"]) == 1
+    assert brief["positions"][0]["position_lot_id"] == row["position_lot_id"]
+    assert (
+        brief["positions"][0]["source_stock_lot_id"]
+        == row["source_stock_lot_id"]
+    )
 
 
 def test_bound_plan_snapshot_returns_the_exact_validated_generation(

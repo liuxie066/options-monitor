@@ -557,14 +557,6 @@ def _attribute_covered_calls(
         open_unrealized = safe_float(call.get("unrealized_pnl_gross")) if remaining > 0 else 0.0
         economics_complete = remaining == 0 or open_unrealized is not None
         gross_pnl = _round_money(realized_gross + float(open_unrealized or 0.0))
-        closed_times = [int(row.get("closed_at") or 0) for row in realized_rows if int(row.get("closed_at") or 0) > 0]
-        reservation_end = (
-            max(closed_times)
-            if remaining == 0 and closed_times
-            else as_of_ms + 1
-        )
-        if reservation_end <= opened_at:
-            reservation_end = max(as_of_ms, opened_at + 1)
         fee_facts = [_option_fee_fact(open_event, component="covered_call_open_option_fee")]
         for row in realized_rows:
             close_event = event_by_id.get(str(row.get("event_id") or ""))
@@ -631,19 +623,55 @@ def _attribute_covered_calls(
             )
             continue
 
-        available: list[tuple[dict[str, Any], int]] = []
-        for lot in candidates:
-            lot_id = str(lot.get("stock_lot_id") or "")
-            shares = _minimum_available_shares(
+        closed_contracts_by_time: dict[int, int] = {}
+        for row in realized_rows:
+            closed_at = int(row.get("closed_at") or 0)
+            closed_contracts_by_time[closed_at] = (
+                closed_contracts_by_time.get(closed_at, 0) + int(row.get("contracts_closed") or 0)
+            )
+        if (
+            remaining < 0
+            or remaining + sum(closed_contracts_by_time.values()) != contracts
+            or any(
+                closed_at < opened_at or closed_at > as_of_ms or quantity <= 0
+                for closed_at, quantity in closed_contracts_by_time.items()
+            )
+        ):
+            review_rows.append(
+                _assigned_stock_review_row(
+                    status="covered_call_unallocated",
+                    event_id=open_id,
+                    account=key[0],
+                    broker=key[1],
+                    symbol=key[2],
+                    message="covered call close quantities or times do not match its opening",
+                    details={"contracts": contracts, "remaining": remaining},
+                )
+            )
+            continue
+        intervals = [
+            (closed_at, quantity * multiplier)
+            for closed_at, quantity in sorted(closed_contracts_by_time.items())
+            if closed_at > opened_at
+        ]
+        if remaining > 0:
+            intervals.append((as_of_ms + 1, remaining * multiplier))
+        lot = candidates[0]
+        lot_id = str(lot.get("stock_lot_id") or "")
+        staged_reservations = {lot_id: list(reservations.get(lot_id, []))}
+        capacity_sufficient = True
+        for reservation_end, allocated in intervals:
+            if _minimum_available_shares(
                 lot,
-                reservations,
+                staged_reservations,
                 stock_lot_id=lot_id,
                 start_ms=opened_at,
                 end_ms=reservation_end,
-            )
-            if shares > 0:
-                available.append((lot, shares))
-        if sum(shares for _lot, shares in available) < required_shares:
+            ) < allocated:
+                capacity_sufficient = False
+                break
+            staged_reservations[lot_id].append((opened_at, reservation_end, allocated))
+        if not capacity_sufficient:
             review_rows.append(
                 _assigned_stock_review_row(
                     status="covered_call_unallocated",
@@ -657,43 +685,36 @@ def _attribute_covered_calls(
             )
             continue
 
-        remaining_shares = required_shares
-        for lot, shares in available:
-            if remaining_shares <= 0:
-                break
-            allocated = min(shares, remaining_shares)
-            ratio = allocated / required_shares
-            lot["_covered_call_pnl"] = _round_money(float(lot.get("_covered_call_pnl") or 0.0) + gross_pnl * ratio)
-            lot["_covered_call_realized_pnl"] = _round_money(
-                float(lot.get("_covered_call_realized_pnl") or 0.0) + realized_gross * ratio
-            )
-            lot["_covered_call_unrealized_pnl"] = _round_money(
-                float(lot.get("_covered_call_unrealized_pnl") or 0.0) + float(open_unrealized or 0.0) * ratio
-            )
-            lot["_covered_call_fee_facts"].extend(_scale_fee_fact(fact, ratio) for fact in fee_facts)
-            lot["_covered_call_statuses"].add("explicit")
-            lot["_covered_call_complete"] = bool(lot.get("_covered_call_complete")) and economics_complete
-            evidence_fact_id = str(call.get("valuation_evidence_fact_id") or "").strip()
-            if evidence_fact_id:
-                lot["_covered_call_evidence_fact_ids"].add(evidence_fact_id)
-            lot_id = str(lot.get("stock_lot_id") or "")
-            reservations.setdefault(lot_id, []).append((opened_at, reservation_end, allocated))
-            allocation_rows.append(
-                {
-                    "open_event_id": open_id,
-                    "stock_lot_id": lot_id,
-                    "account": key[0],
-                    "broker": key[1],
-                    "symbol": key[2],
-                    "currency": str(lot.get("currency") or ""),
-                    "shares": allocated,
-                    "start_at_ms": opened_at,
-                    "end_at_ms": reservation_end,
-                    "allocation_status": "explicit",
-                    "linkage_basis": linkage_basis,
-                }
-            )
-            remaining_shares -= allocated
+        reservations[lot_id] = staged_reservations[lot_id]
+        lot["_covered_call_pnl"] = _round_money(float(lot.get("_covered_call_pnl") or 0.0) + gross_pnl)
+        lot["_covered_call_realized_pnl"] = _round_money(
+            float(lot.get("_covered_call_realized_pnl") or 0.0) + realized_gross
+        )
+        lot["_covered_call_unrealized_pnl"] = _round_money(
+            float(lot.get("_covered_call_unrealized_pnl") or 0.0) + float(open_unrealized or 0.0)
+        )
+        lot["_covered_call_fee_facts"].extend(fee_facts)
+        lot["_covered_call_statuses"].add("explicit")
+        lot["_covered_call_complete"] = bool(lot.get("_covered_call_complete")) and economics_complete
+        evidence_fact_id = str(call.get("valuation_evidence_fact_id") or "").strip()
+        if evidence_fact_id:
+            lot["_covered_call_evidence_fact_ids"].add(evidence_fact_id)
+        allocation_rows.extend(
+            {
+                "open_event_id": open_id,
+                "stock_lot_id": lot_id,
+                "account": key[0],
+                "broker": key[1],
+                "symbol": key[2],
+                "currency": str(lot.get("currency") or ""),
+                "shares": allocated,
+                "start_at_ms": opened_at,
+                "end_at_ms": reservation_end,
+                "allocation_status": "explicit",
+                "linkage_basis": linkage_basis,
+            }
+            for reservation_end, allocated in intervals
+        )
 
         if remaining > 0 and open_unrealized is None:
             review_rows.append(

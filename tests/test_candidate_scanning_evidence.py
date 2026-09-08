@@ -1,17 +1,24 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pandas as pd
 import pytest
 
+from conftest import phase2_opening_row
 from domain.domain.engine.candidate_engine import (
     REJECT_RISK_EARNINGS_UNAVAILABLE,
 )
 from src.application.candidate_scanning import (
+    CandidateScanConfig,
+    CandidateScanDependencies,
     _load_required_data_rows,
     evidence_summary_from_decisions,
+    run_candidate_scan,
 )
 from src.application.sell_call_steps import _evidence_scan_status as call_status
 from src.application.sell_put_steps import _evidence_scan_status as put_status
+from src.application.scan_sell_put import run_sell_put_scan
 
 
 def _decision(*, accepted: bool = False, reasons: tuple[str, ...] = ()) -> dict:
@@ -157,3 +164,163 @@ def test_supplied_required_data_frame_avoids_legacy_csv_read(
     assert result.to_dict("records") == [
         {"symbol": "NVDA", "option_type": "put"}
     ]
+
+
+def test_sell_put_scan_classifies_missing_canonical_status_as_unavailable(
+    tmp_path,
+) -> None:
+    row = phase2_opening_row(
+        {
+            "symbol": "NVDA",
+            "option_type": "put",
+            "expiration": "2026-09-18",
+            "contract_symbol": "US.NVDA260918P00100000",
+            "currency": "USD",
+            "dte": 43,
+            "strike": 100.0,
+            "spot": 110.0,
+            "bid": 1.0,
+            "ask": 1.01,
+            "multiplier": 100,
+            "implied_volatility": 0.30,
+        }
+    )
+    row.pop("opening_contract_status")
+    decisions: list[dict] = []
+
+    result = run_sell_put_scan(
+        symbols=["NVDA"],
+        input_root=tmp_path,
+        min_annualized_net_return=0.10,
+        quote_freshness_now_utc=datetime(
+            2026,
+            4,
+            1,
+            15,
+            0,
+            tzinfo=timezone.utc,
+        ),
+        calculation_decision_sink_fn=decisions.extend,
+        required_data_frames={"NVDA": pd.DataFrame([row])},
+    )
+
+    assert result.empty
+    assert len(decisions) == 1
+    reject = decisions[0]["opening_decision"]["rejects"][0]
+    assert reject["reason"] == "evidence_unavailable"
+    assert reject["metric_value"]["reason_code"] == "evidence_unavailable"
+
+
+@pytest.mark.parametrize(
+    ("overrides", "specific_reason"),
+    [
+        ({"option_standard_type": "NON_STANDARD"}, "option_non_standard"),
+        ({"snapshot_multiplier": 50}, "option_multiplier_conflict"),
+    ],
+)
+def test_sell_put_scan_classifies_explicit_contract_conflicts_as_ineligible(
+    tmp_path,
+    overrides: dict,
+    specific_reason: str,
+) -> None:
+    row = phase2_opening_row(
+        {
+            "symbol": "NVDA",
+            "option_type": "put",
+            "expiration": "2026-09-18",
+            "contract_symbol": "US.NVDA260918P00100000",
+            "currency": "USD",
+            "dte": 43,
+            "strike": 100.0,
+            "spot": 110.0,
+            "bid": 1.0,
+            "ask": 1.01,
+            "multiplier": 100,
+            "implied_volatility": 0.30,
+            **overrides,
+        }
+    )
+    decisions: list[dict] = []
+
+    result = run_sell_put_scan(
+        symbols=["NVDA"],
+        input_root=tmp_path,
+        min_annualized_net_return=0.10,
+        quote_freshness_now_utc=datetime(
+            2026,
+            4,
+            1,
+            15,
+            0,
+            tzinfo=timezone.utc,
+        ),
+        calculation_decision_sink_fn=decisions.extend,
+        required_data_frames={"NVDA": pd.DataFrame([row])},
+    )
+
+    assert result.empty
+    assert len(decisions) == 1
+    reject = decisions[0]["opening_decision"]["rejects"][0]
+    assert reject["reason"] == "contract_ineligible"
+    assert reject["metric_value"]["reason_code"] == specific_reason
+
+
+@pytest.mark.parametrize(
+    "specific_reason",
+    [
+        "option_non_standard",
+        "option_type_mismatch",
+        "option_multiplier_conflict",
+    ],
+)
+def test_candidate_scan_classifies_only_explicit_contract_evidence_conflicts(
+    tmp_path,
+    specific_reason: str,
+) -> None:
+    row = phase2_opening_row(
+        {
+            "symbol": "NVDA",
+            "option_type": "put",
+            "expiration": "2026-09-18",
+            "contract_symbol": "US.NVDA260918P00100000",
+            "currency": "USD",
+            "dte": 43,
+            "strike": 100.0,
+            "spot": 110.0,
+            "bid": 1.0,
+            "ask": 1.01,
+            "multiplier": 100,
+        }
+    )
+    decisions: list[dict] = []
+
+    result = run_candidate_scan(
+        config=CandidateScanConfig(
+            mode="put",
+            symbols=["NVDA"],
+            input_root=tmp_path,
+            min_dte=1,
+            max_dte=90,
+            min_strike=None,
+            max_strike=None,
+            min_open_interest=None,
+            min_volume=None,
+            max_spread_ratio=None,
+            min_annualized_net_return=None,
+            min_net_income=0.0,
+            required_data_frames={"NVDA": pd.DataFrame([row])},
+        ),
+        deps=CandidateScanDependencies(
+            compute_metrics_fn=lambda _contract: None,
+            build_row_fn=lambda *_args: None,
+            metric_reject_reason_fn=lambda _contract: {
+                "rule": specific_reason,
+            },
+        ),
+        calculation_decision_sink_fn=decisions.extend,
+    )
+
+    assert result.empty
+    reject = decisions[0]["opening_decision"]["rejects"][0]
+    assert reject["reason"] == "contract_ineligible"
+    assert reject["metric_value"]["reason_code"] == specific_reason

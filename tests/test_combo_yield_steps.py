@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import pytest
@@ -24,6 +25,7 @@ from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 def _candidate(**overrides) -> dict:
     row = {
         "symbol": "NVDA",
+        "option_type": "put",
         "expiration": "2026-08-21",
         "dte": 35,
         "contract_symbol": "NVDA260821P00100000",
@@ -39,9 +41,63 @@ def _candidate(**overrides) -> dict:
         "delta": -0.2,
         "event_flag": False,
         "event_source_status": "ok",
+        "opening_contract_status": "ready",
+        "underlier_observation_status": "ready",
+        "snapshot_received_at_utc": "2026-07-17T13:59:00Z",
+        "option_standard_type": "STANDARD",
+        "stock_owner": "NVDA",
+        "price_tick": 0.01,
+        "chain_multiplier": 100,
+        "snapshot_multiplier": 100,
     }
     row.update(overrides)
     return row
+
+
+def _call_candidate(**overrides) -> dict:
+    row = {
+        "symbol": "NVDA",
+        "option_type": "call",
+        "expiration": "2026-08-21",
+        "dte": 35,
+        "contract_symbol": "NVDA260821C00120000",
+        "multiplier": 100,
+        "currency": "USD",
+        "strike": 120.0,
+        "spot": 110.0,
+        "bid": 0.4,
+        "ask": 0.5,
+        "mid": 0.45,
+        "open_interest": 500,
+        "volume": 50,
+        "delta": 0.15,
+        "implied_volatility": 0.40,
+        "opening_contract_status": "ready",
+        "underlier_observation_status": "ready",
+        "snapshot_received_at_utc": "2026-07-17T13:59:00Z",
+        "option_standard_type": "STANDARD",
+        "stock_owner": "NVDA",
+        "price_tick": 0.01,
+        "chain_multiplier": 100,
+        "snapshot_multiplier": 100,
+    }
+    row.update(overrides)
+    return row
+
+
+def _write_combo_calls(
+    base: Path,
+    rows: list[dict],
+    *,
+    put_rows: list[dict] | None = None,
+) -> None:
+    parsed = base / "required_data" / "parsed"
+    parsed.mkdir(parents=True, exist_ok=True)
+    resolved_put_rows = [_candidate()] if put_rows is None else put_rows
+    pd.DataFrame([*resolved_put_rows, *rows]).to_csv(
+        parsed / "NVDA_required_data.csv",
+        index=False,
+    )
 
 
 def _earnings_evidence(*, event_date: str) -> dict:
@@ -122,6 +178,14 @@ def _run(
     select_pairs_fn=None,
     account_run_scope: bool = False,
     demo_capacity: bool = False,
+    decision_now_utc: datetime = datetime(
+        2026,
+        7,
+        17,
+        14,
+        0,
+        tzinfo=timezone.utc,
+    ),
 ):
     report_dir = (
         tmp_path / "output_runs" / "run-1" / "accounts" / "lx"
@@ -183,6 +247,7 @@ def _run(
             else {}
         ),
         demo_capacity=demo_capacity,
+        now_utc_fn=lambda: decision_now_utc,
     )
     trace = [
         json.loads(line)
@@ -629,9 +694,8 @@ def test_combo_yield_writes_pair_rejection_aggregates_to_trace(tmp_path: Path) -
 def test_combo_yield_writes_real_diagnostics_when_call_prefilter_removes_all_pairs(tmp_path: Path) -> None:
     from src.application.sell_put_call_helper import find_sell_put_combo_yield_pairs
 
-    parsed = tmp_path / "required_data" / "parsed"
-    parsed.mkdir(parents=True)
-    pd.DataFrame(
+    _write_combo_calls(
+        tmp_path,
         [
             {
                 "symbol": "NVDA",
@@ -650,9 +714,17 @@ def test_combo_yield_writes_real_diagnostics_when_call_prefilter_removes_all_pai
                 "currency": "USD",
                 "delta": 0.30,
                 "multiplier": 100,
+                "opening_contract_status": "ready",
+                "underlier_observation_status": "ready",
+                "snapshot_received_at_utc": "2026-07-17T13:59:00Z",
+                "option_standard_type": "STANDARD",
+                "stock_owner": "NVDA",
+                "price_tick": 0.01,
+                "chain_multiplier": 100,
+                "snapshot_multiplier": 100,
             }
-        ]
-    ).to_csv(parsed / "NVDA_required_data.csv", index=False)
+        ],
+    )
 
     evidence: list[dict] = []
     _run(
@@ -668,6 +740,264 @@ def test_combo_yield_writes_real_diagnostics_when_call_prefilter_removes_all_pai
     assert call_reject["reject_reasons"] == "call_delta_above_max"
     assert float(call_reject["policy_call_max_delta"]) == 0.20
     assert int(diagnostics["accepted"].sum()) == 0
+
+
+def test_combo_yield_uses_one_pair_admission_time_for_both_legs_and_occurrence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from src.application import sell_put_call_helper as helper
+
+    decision_now = datetime(2026, 7, 17, 14, 0, tzinfo=timezone.utc)
+    _write_combo_calls(tmp_path, [_call_candidate()])
+    observed: list[tuple[str, datetime]] = []
+    original = helper.validate_opening_contract_evidence
+
+    def _capture(raw, *, mode, now_utc=None, **kwargs):
+        observed.append((mode, now_utc))
+        return original(raw, mode=mode, now_utc=now_utc, **kwargs)
+
+    monkeypatch.setattr(helper, "validate_opening_contract_evidence", _capture)
+    evidence: list[dict] = []
+    _rows, _trace, _scan, summary = _run(
+        tmp_path,
+        candidates=[
+            _candidate(
+                annualized_net_return_on_cash_basis=0.18,
+                funding_put_eligible=True,
+            )
+        ],
+        find_pairs_fn=helper.find_sell_put_combo_yield_pairs,
+        combo_evidence_sink_fn=evidence.append,
+        account_run_scope=True,
+        decision_now_utc=decision_now,
+    )
+
+    assert observed == [("put", decision_now), ("call", decision_now)]
+    assert summary["candidate_count"] == 1
+    assert summary["_strategy_status"] == "completed"
+    assert summary["_strategy_reason"] is None
+    occurrence_time = evidence[0]["ranked_pairs"][0][
+        "candidate_occurrence_generated_at_utc"
+    ]
+    assert datetime.fromisoformat(occurrence_time) == decision_now
+
+
+def test_combo_yield_call_evidence_controls_full_pair_scope_status(
+    tmp_path: Path,
+) -> None:
+    from src.application.sell_put_call_helper import find_sell_put_combo_yield_pairs
+
+    common_put = _candidate(
+        annualized_net_return_on_cash_basis=0.18,
+        funding_put_eligible=True,
+    )
+    stale = _call_candidate(
+        contract_symbol="NVDA260821C00125000",
+        strike=125.0,
+        snapshot_received_at_utc="2026-07-17T13:50:00Z",
+    )
+    _write_combo_calls(tmp_path / "unavailable", [stale, dict(stale)])
+    _rows, _trace, _scan, unavailable = _run(
+        tmp_path / "unavailable",
+        candidates=[common_put],
+        find_pairs_fn=find_sell_put_combo_yield_pairs,
+    )
+    assert unavailable["candidate_count"] == 0
+    assert unavailable["_strategy_status"] == "unavailable"
+    assert unavailable["_strategy_reason"] == "data_unavailable"
+    assert unavailable["_evidence_summary"]["pair_evidence_unavailable_count"] == 1
+
+    _write_combo_calls(
+        tmp_path / "partial",
+        [_call_candidate(), stale],
+    )
+    _rows, _trace, _scan, partial = _run(
+        tmp_path / "partial",
+        candidates=[common_put],
+        find_pairs_fn=find_sell_put_combo_yield_pairs,
+    )
+    assert partial["candidate_count"] == 1
+    assert partial["_strategy_status"] == "completed"
+    assert partial["_strategy_reason"] == "partial_data"
+    assert partial["_evidence_summary"]["pair_evaluable_count"] == 1
+
+    _write_combo_calls(
+        tmp_path / "rejected",
+        [_call_candidate(option_standard_type="NON_STANDARD")],
+    )
+    _rows, _trace, _scan, rejected = _run(
+        tmp_path / "rejected",
+        candidates=[common_put],
+        find_pairs_fn=find_sell_put_combo_yield_pairs,
+    )
+    assert rejected["candidate_count"] == 0
+    assert rejected["_strategy_status"] == "completed"
+    assert rejected["_strategy_reason"] == "no_candidate"
+    assert rejected["_evidence_summary"]["pair_evidence_unavailable_count"] == 0
+
+    stale_put = {
+        **common_put,
+        "snapshot_received_at_utc": "2026-07-17T13:50:00Z",
+    }
+    _write_combo_calls(
+        tmp_path / "put_unavailable",
+        [_call_candidate()],
+        put_rows=[stale_put],
+    )
+    _rows, _trace, _scan, put_unavailable = _run(
+        tmp_path / "put_unavailable",
+        candidates=[common_put],
+        find_pairs_fn=find_sell_put_combo_yield_pairs,
+    )
+    assert put_unavailable["candidate_count"] == 0
+    assert put_unavailable["_strategy_status"] == "unavailable"
+    assert put_unavailable["_strategy_reason"] == "data_unavailable"
+    assert (
+        put_unavailable["_evidence_summary"]["pair_evidence_unavailable_count"]
+        == 1
+    )
+
+
+def test_combo_yield_ignores_unrelated_call_gap_without_eligible_put(
+    tmp_path: Path,
+) -> None:
+    from src.application.sell_put_call_helper import find_sell_put_combo_yield_pairs
+
+    _write_combo_calls(
+        tmp_path,
+        [
+            _call_candidate(
+                snapshot_received_at_utc="2026-07-17T13:50:00Z",
+            )
+        ],
+    )
+    _rows, _trace, _scan, summary = _run(
+        tmp_path,
+        candidates=[],
+        find_pairs_fn=find_sell_put_combo_yield_pairs,
+    )
+
+    assert summary["candidate_count"] == 0
+    assert summary["_strategy_status"] == "completed"
+    assert summary["_strategy_reason"] == "no_candidate"
+    assert "pair_evidence_unavailable_count" not in summary["_evidence_summary"]
+
+
+@pytest.mark.parametrize(
+    ("call_case", "expected_status", "expected_reason", "expected_unavailable"),
+    [
+        ("missing_expiration", "unavailable", "data_unavailable", 1),
+        ("missing_option_type", "unavailable", "data_unavailable", 1),
+        ("different_expiration", "completed", "no_candidate", 0),
+        ("empty_provider_universe", "completed", "no_candidate", 0),
+    ],
+)
+def test_combo_yield_call_scope_distinguishes_identity_gap_from_clean_absence(
+    tmp_path: Path,
+    call_case: str,
+    expected_status: str,
+    expected_reason: str,
+    expected_unavailable: int,
+) -> None:
+    from src.application.sell_put_call_helper import find_sell_put_combo_yield_pairs
+
+    call = _call_candidate()
+    if call_case == "missing_expiration":
+        call["expiration"] = None
+    elif call_case == "missing_option_type":
+        call.pop("option_type")
+    elif call_case == "different_expiration":
+        call["expiration"] = "2026-09-18"
+    calls = [] if call_case == "empty_provider_universe" else [call]
+    _write_combo_calls(tmp_path, calls)
+
+    _rows, _trace, _scan, summary = _run(
+        tmp_path,
+        candidates=[
+            _candidate(
+                annualized_net_return_on_cash_basis=0.18,
+                funding_put_eligible=True,
+            )
+        ],
+        find_pairs_fn=find_sell_put_combo_yield_pairs,
+    )
+
+    assert summary["candidate_count"] == 0
+    assert summary["_strategy_status"] == expected_status
+    assert summary["_strategy_reason"] == expected_reason
+    assert (
+        summary["_evidence_summary"]["pair_evidence_unavailable_count"]
+        == expected_unavailable
+    )
+
+
+def test_combo_yield_requires_one_exact_raw_put_before_call_admission(
+    tmp_path: Path,
+) -> None:
+    from src.application.sell_put_call_helper import find_sell_put_combo_yield_pairs
+
+    candidate = _candidate(
+        annualized_net_return_on_cash_basis=0.18,
+        funding_put_eligible=True,
+    )
+    cases = (
+        ("missing", [], "combo_put_source_missing"),
+        ("duplicate", [_candidate(), _candidate()], "combo_put_source_duplicate"),
+    )
+    for label, put_rows, expected_reason in cases:
+        base = tmp_path / label
+        _write_combo_calls(base, [_call_candidate()], put_rows=put_rows)
+        evidence: list[dict[str, Any]] = []
+        _rows, _trace, _scan, summary = _run(
+            base,
+            candidates=[candidate],
+            find_pairs_fn=find_sell_put_combo_yield_pairs,
+            combo_evidence_sink_fn=evidence.append,
+        )
+
+        assert summary["_strategy_status"] == "unavailable"
+        assert summary["_strategy_reason"] == "data_unavailable"
+        diagnostics = evidence[0]["pair_evaluations"]
+        assert len(diagnostics) == 1
+        assert diagnostics[0]["diagnostic_scope"] == "put"
+        assert diagnostics[0]["evidence_reason"] == expected_reason
+
+
+def test_combo_yield_rejected_put_does_not_admit_related_call_gap(
+    tmp_path: Path,
+) -> None:
+    from src.application.sell_put_call_helper import find_sell_put_combo_yield_pairs
+
+    _write_combo_calls(
+        tmp_path,
+        [
+            _call_candidate(
+                snapshot_received_at_utc="2026-07-17T13:50:00Z",
+            )
+        ],
+        put_rows=[_candidate(option_standard_type="NON_STANDARD")],
+    )
+    evidence: list[dict[str, Any]] = []
+    _rows, _trace, _scan, summary = _run(
+        tmp_path,
+        candidates=[
+            _candidate(
+                annualized_net_return_on_cash_basis=0.18,
+                funding_put_eligible=True,
+            )
+        ],
+        find_pairs_fn=find_sell_put_combo_yield_pairs,
+        combo_evidence_sink_fn=evidence.append,
+    )
+
+    assert summary["_strategy_status"] == "completed"
+    assert summary["_strategy_reason"] == "no_candidate"
+    diagnostics = evidence[0]["pair_evaluations"]
+    assert len(diagnostics) == 1
+    assert diagnostics[0]["diagnostic_scope"] == "put"
+    assert diagnostics[0]["evidence_reason"] == "option_non_standard"
+    assert diagnostics[0]["evidence_status"] == "rejected"
 
 
 def test_combo_yield_uses_standalone_sell_put_return_floor_and_annotations(tmp_path: Path) -> None:

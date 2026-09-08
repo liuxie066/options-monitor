@@ -733,6 +733,32 @@ position-projection migration 的 `_write_connection()` 持有同一 `<db>.write
 `--request-id`。相同 request ID 与相同 intent 返回原结果；同一 ID 绑定不同 intent
 会 fail closed。确认前检查响应中的目标 SQLite、account、lot/event identity、数量和写入合同。
 
+指派股票出售在同一 SQLite 写事务中读取账户经济事实，按成交时点投影出售前后状态，
+验证剩余股数及同一股票批次的全部 CC 覆盖。回溯写入还须保留后来已有效的出售和覆盖，
+不能因补录而使它们失效；当前投影使用包含后续已存事实的结果，不用成交时点的历史视图覆盖。
+订单身份补证不改变经济数量和覆盖。已有当前投影可更新；
+缺失或待重建的投影不会因出售校验而自动迁移。没有新增证据的重复成交不产生新的
+经济事件或业务缓存失效；晚到订单身份只补存明确一致的证据，与最终校验一起提交或回滚。
+
+撤销或修复 assignment / exercise 前，必须在写事务内重新检查其股票批次的下游依赖。
+有效出售、CC 覆盖及 Wheel 事件，包括已经平仓或结束的历史依赖，均阻止撤销源事实；
+无法解析但明确引用该股票批次的记录也阻止写入。预览通过不能替代提交时的检查。
+
+共享持股容量按扫描批次封存：allocation、候选最终数量、按实际分配顺序计算的余额及其
+hash 必须一致。Daily Brief 根据已校验的账户、市场和标的范围消费该批记录；需要共享容量
+却缺少唯一可信 allocation 时，保留证据缺口，不以原始持股字段补算推荐数量。
+
+批次的 `strategy_group_id`、`leg_role`、`source_stock_lot_id` 经最小持仓上下文传到 Close Advice
+和 Brief；正常及生命周期不可评估结果保留相同关系。字段缺失保持未知，不能从候选或报告
+推导真实关系。报告 manifest 绑定完整 CSV 字节哈希，不另存一份成员关系。
+
+新的 Combo opening action 以 `candidate_pair_id` 区分两腿，观察批次、报价和排序不参与稳定
+action 身份；普通 CSP、CC、Wheel 和平仓 action 保持原身份合同。历史 Brief 按保存的 action ID
+验证对应算法与摘要，保留原始字节和 ID，读取兼容不能使新输入中的旧 ID 或错误 ID 获得写入许可。
+证据暂缺时，只能从同账户、市场、交易日内已校验的持久版本延续原 action，并更新既有缺证状态。
+新旧 Combo 身份的只读对齐要求完整两腿一致且一对一；缺腿、pair 冲突或歧义不推断等价，
+真实分组不作为猜测两腿的依据。恢复读取、交付证据与 exposure 共用相同的源版本及摘要校验。
+
 ## 批量 adjustment 投影成本
 
 ### 目标、边界与成功信号
@@ -1075,6 +1101,15 @@ Agent 通过 `option_positions_read action=events` 分页读取 canonical `trade
 - `external_holdings` 账户缺少 broker lifecycle evidence 时默认要求人工复核。
 
 到期维护由独立 `auto-close-expired` 服务/定时入口负责，不是普通 `account_run` 或扫描 pipeline 的隐式步骤。
+
+一次交割涉及多个期权批次时，`stock_settlement_source` 保留源总量，
+`stock_settlement` 保存各目标批次的分配。股数按分配合约数与乘数确定；已保存费用按
+稳定批次顺序分摊并处理尾差，分配总额等于源总额，实际、估算及缺失费用的含义不变。
+新记录按整组验证来源、数量与金额；旧记录的重复源总量只读恢复，不能逐行相加或与新表示混用。
+
+CC 覆盖按实际平仓数量记录半开时间区间，平仓时点释放对应股数。历史区间与收益归因
+分别计算，同一开仓的收益和费用只计一次。当前投影只保留同一截止时点有效的覆盖区间，
+完整重建与增量更新使用相同的剩余数量和关联身份。
 
 ## Projection 验证与恢复
 

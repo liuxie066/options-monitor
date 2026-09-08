@@ -97,3 +97,45 @@ def test_wheel_candidate_snapshot_rejects_final_candidate_not_from_raw_top(tmp_p
             scope_results=[{"symbol": "NVDA", "status": "completed", "candidate_count": 1}],
             batches=[batch],
         )
+
+
+def test_wheel_candidate_snapshot_rejects_positive_grant_without_final_candidate(
+    tmp_path: Path,
+) -> None:
+    batch = _batch(final=False)
+    batch["granted_contracts"] = 1
+
+    with pytest.raises(WheelCandidateSnapshotError, match="grant requires final candidate"):
+        seal_wheel_candidate_snapshot(
+            base=tmp_path,
+            run_id="run-1",
+            account="lx",
+            market="us",
+            account_config_sha256="a" * 64,
+            strategy_policy_sha256="b" * 64,
+            dependencies=_dependencies(),
+            scope_results=[{"symbol": "NVDA", "status": "completed", "candidate_count": 1}],
+            batches=[batch],
+        )
+
+
+def test_wheel_candidate_snapshot_accepts_rejected_candidate_with_zero_grant(
+    tmp_path: Path,
+) -> None:
+    batch = _batch(final=False)
+    batch["reason_code"] = "wheel_capacity_grant_candidate_rejected"
+
+    payload = seal_wheel_candidate_snapshot(
+        base=tmp_path,
+        run_id="run-1",
+        account="lx",
+        market="us",
+        account_config_sha256="a" * 64,
+        strategy_policy_sha256="b" * 64,
+        dependencies=_dependencies(),
+        scope_results=[{"symbol": "NVDA", "status": "completed", "candidate_count": 1}],
+        batches=[batch],
+    )
+
+    assert payload["batches"][0]["granted_contracts"] == 0
+    assert payload["batches"][0]["final_candidate"] is None

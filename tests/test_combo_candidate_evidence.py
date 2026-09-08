@@ -130,6 +130,51 @@ def test_occurrence_hash_is_stable_for_column_order_and_non_finite_values() -> N
     assert first["candidate_occurrence_id"] == second["candidate_occurrence_id"]
     assert first["candidate_row_content_hash"] == second["candidate_row_content_hash"]
 
+    later_run = build_combo_candidate_occurrence(
+        first_row,
+        account="lx",
+        market="US",
+        run_id="run-2",
+        generated_at_utc=GENERATED_AT,
+    )
+    assert later_run["candidate_occurrence_id"] != first["candidate_occurrence_id"]
+
+
+def test_occurrence_requires_pair_without_using_real_strategy_group() -> None:
+    row = _candidate_row(candidate_pair_id=None, strategy_group_id="confirmed-group")
+    with pytest.raises(ValueError, match="identity is incomplete"):
+        build_combo_candidate_occurrence(
+            row,
+            account="lx",
+            market="US",
+            run_id="run-1",
+            generated_at_utc=GENERATED_AT,
+        )
+
+
+def test_saved_group_only_occurrence_retains_read_only_exposure() -> None:
+    row = _candidate_row()
+    brief = _brief(row)
+    row["strategy_group_id"] = row.pop("candidate_pair_id")
+    brief["candidate_index"][0]["representative"].pop("candidate_pair_id")
+    # Frozen from the 54571e7 public occurrence builder before the identity change.
+    row.update(
+        candidate_occurrence_schema="combo_candidate_occurrence.v1",
+        candidate_occurrence_id="7ff2e4f175e722682dc5bc7d89423994bd71b0a02c07a03dec12da97f1d7fdeb",
+        candidate_occurrence_generated_at_utc=GENERATED_AT.isoformat(),
+        candidate_occurrence_data_as_of_utc=GENERATED_AT.isoformat(),
+        candidate_row_content_hash="36547cd6a4254b4702c3168cb401b67d44c795212288103abfe3699d444cf8e4",
+    )
+    before = dict(row)
+
+    exposures = derive_combo_candidate_exposures(brief)
+
+    assert len(exposures) == 1
+    assert exposures[0]["candidate_occurrence_id"] == row["candidate_occurrence_id"]
+    assert row == before
+    row["strategy_group_id"] = "tampered-group"
+    assert derive_combo_candidate_exposures(brief) == []
+
 
 def test_exposure_requires_one_rendered_live_occurrence() -> None:
     row = _candidate_row()

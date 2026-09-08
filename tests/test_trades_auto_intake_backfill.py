@@ -243,6 +243,127 @@ def test_run_history_backfill_processes_missing_deal_through_pipeline(tmp_path: 
     assert envelope["adapter_version"] == "om.trade-intake.history.v1"
 
 
+def test_push_lookup_persists_only_exact_deal_economics_once(tmp_path, monkeypatch) -> None:
+    class FakeGateway:
+        def get_deal_list(self, **kwargs):
+            assert kwargs == {"acc_id": 123}
+            return [
+                {
+                    "deal_id": "other-fill",
+                    "order_id": "shared-order",
+                    "acc_id": "123",
+                    "qty": "9",
+                    "price": "99",
+                    "create_time": "2026-09-07 09:00:00",
+                },
+                {
+                    "deal_id": "target-fill",
+                    "order_id": "shared-order",
+                    "acc_id": "123",
+                    "qty": "2",
+                    "price": "2.50",
+                    "create_time": "2026-09-07 10:30:01",
+                },
+            ]
+
+        def get_order_list(self, **kwargs):
+            pytest.fail("complete exact deal must not trigger an order lookup")
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        "src.application.trades.futu_detail_lookup.build_ready_futu_broker_gateway",
+        lambda **kwargs: FakeGateway(),
+    )
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    payload = {
+        "futu_account_id": "123",
+        "deal_id": "target-fill",
+        "order_id": "shared-order",
+        "code": "US.NVDA260918P00100000",
+        "trd_side": "SELL_SHORT",
+        "contract_multiplier": "100",
+    }
+    kwargs = {
+        "repo": repo,
+        "state_path": tmp_path / "state.json",
+        "audit_path": tmp_path / "audit.jsonl",
+        "account_mapping": {"123": "lx"},
+        "futu_account_ids": ["123"],
+        "apply_changes": True,
+        "host": "127.0.0.1",
+        "port": 11111,
+        "config": {},
+        "config_path": tmp_path / "config.json",
+        "runtime_root": tmp_path,
+        "source": "push",
+    }
+
+    first = _process_payload(payload, **kwargs)
+    replay = _process_payload(payload, **kwargs)
+
+    assert (first["status"], first["action"], first["reason"]) == ("applied", "open", "applied_open")
+    assert replay["reason"] == "duplicate"
+    events = repo.list_trade_events()
+    assert len(events) == 1
+    assert events[0]["contracts"] == 2
+    assert events[0]["price"] == 2.5
+    assert events[0]["event_time_ms"] == int(datetime(2026, 9, 7, 2, 30, 1, tzinfo=timezone.utc).timestamp() * 1000)
+
+
+def test_push_lookup_account_mismatch_keeps_missing_economics_in_review(tmp_path, monkeypatch) -> None:
+    class FakeGateway:
+        def get_deal_list(self, **kwargs):
+            return [{
+                "deal_id": "target-fill",
+                "order_id": "shared-order",
+                "acc_id": "456",
+                "qty": "9",
+                "price": "99",
+                "create_time": "2026-09-07 09:00:00",
+            }]
+
+        def get_order_list(self, **kwargs):
+            return []
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        "src.application.trades.futu_detail_lookup.build_ready_futu_broker_gateway",
+        lambda **kwargs: FakeGateway(),
+    )
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    result = _process_payload(
+        {
+            "futu_account_id": "123",
+            "deal_id": "target-fill",
+            "order_id": "shared-order",
+            "code": "US.NVDA260918P00100000",
+            "trd_side": "SELL_SHORT",
+            "contract_multiplier": "100",
+        },
+        repo=repo,
+        state_path=tmp_path / "state.json",
+        audit_path=tmp_path / "audit.jsonl",
+        account_mapping={"123": "lx"},
+        futu_account_ids=["123", "456"],
+        apply_changes=True,
+        host="127.0.0.1",
+        port=11111,
+        config={},
+        config_path=tmp_path / "config.json",
+        runtime_root=tmp_path,
+        source="push",
+    )
+
+    assert result["status"] == "unresolved"
+    assert result["reason"] == "missing_required_fields:contracts,price,trade_time_ms"
+    assert result["diagnostics"]["missing_fields"] == ["contracts", "price", "trade_time_ms"]
+    assert repo.list_trade_events() == []
+
+
 def _standard_stock_execution(execution_id="stock-1"):
     payload = _standard_execution()
     payload["instrument_ref"] = {"asset_type": "stock", "market": "US", "symbol": "NVDA", "currency": "USD"}

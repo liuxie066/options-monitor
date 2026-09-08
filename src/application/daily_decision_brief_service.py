@@ -295,6 +295,15 @@ def assemble_daily_decision_brief(
         call_rows,
         snapshot=bundle_owners.get("wheel") if wheel_applicable else None,
         account=account_norm,
+        required_symbols={
+            canonical_symbol(item.get("symbol"))
+            for item in strategy_status_index.get("items") or []
+            if isinstance(item, Mapping)
+            and item.get("account") == account_norm
+            and item.get("market") == market_norm
+            and item.get("candidate_owner") == "wheel"
+            and item.get("status") != "not_applicable"
+        },
     )
     close_rows, close_available = _load_close_advice(
         path=run_account_dir / "close_advice.csv",
@@ -1170,11 +1179,10 @@ def _apply_shared_covered_call_allocations(
     *,
     snapshot: Mapping[str, Any] | None,
     account: str,
+    required_symbols: set[str],
 ) -> list[dict[str, Any]]:
-    if not isinstance(snapshot, Mapping):
-        return rows
-    grants: dict[str, list[int]] = {}
-    for allocation in snapshot.get("capacity_allocations") or []:
+    grants: dict[str, list[Mapping[str, Any]]] = {}
+    for allocation in (snapshot or {}).get("capacity_allocations") or []:
         if not isinstance(allocation, Mapping):
             continue
         if str(allocation.get("strategy_family") or "") != "covered_call":
@@ -1183,18 +1191,18 @@ def _apply_shared_covered_call_allocations(
             continue
         symbol = canonical_symbol(allocation.get("symbol"))
         if symbol:
-            grants.setdefault(symbol, []).append(
-                max(0, int(allocation.get("granted_contracts") or 0))
-            )
+            grants.setdefault(symbol, []).append(allocation)
     out: list[dict[str, Any]] = []
     for row in rows:
         symbol = canonical_symbol(row.get("symbol"))
-        if symbol in grants and len(grants[symbol]) == 1:
+        if symbol in required_symbols:
+            matches = grants.get(symbol, [])
             out.append(
                 {
                     **row,
-                    "call_covered_contracts_available": grants[symbol][0],
-                    "shared_coverage_allocation": "wheel_candidate_snapshot",
+                    "shared_coverage_allocation": (
+                        dict(matches[0]) if len(matches) == 1 else None
+                    ),
                 }
             )
         else:
@@ -1659,7 +1667,7 @@ def _candidate_contract_is_complete(row: Mapping[str, Any], *, family: str) -> b
     if family == "combo_yield":
         return all(
             (
-                _text(row.get("strategy_group_id") or row.get("candidate_pair_id")),
+                _text(row.get("candidate_pair_id")),
                 _text(row.get("put_contract_symbol")),
                 _text(row.get("call_contract_symbol")),
                 _text(row.get("put_expiration") or row.get("expiration")),
@@ -1704,6 +1712,57 @@ def _sell_put_capacity(row: Mapping[str, Any]) -> dict[str, Any] | None:
 
 
 def _covered_call_capacity(row: Mapping[str, Any]) -> dict[str, Any] | None:
+    if "shared_coverage_allocation" in row:
+        allocation = row["shared_coverage_allocation"]
+        if not isinstance(allocation, Mapping):
+            return None
+        quantities = {
+            key: _number(allocation.get(key))
+            for key in (
+                "granted_contracts", "granted_shares", "multiplier",
+                "capacity_before", "capacity_after",
+            )
+        }
+        if any(
+            value is None or value < 0 or not value.is_integer()
+            for value in quantities.values()
+        ):
+            return None
+        contracts = int(quantities["granted_contracts"])
+        multiplier = int(quantities["multiplier"])
+        reason = allocation.get("allocation_reason")
+        if (
+            multiplier <= 0
+            or multiplier != _number(row.get("multiplier"))
+            or quantities["granted_shares"] != contracts * multiplier
+            or quantities["capacity_before"] - quantities["capacity_after"]
+            != quantities["granted_shares"]
+            or (
+                contracts > 0
+                and (
+                    allocation.get("allocation_status") != "allocated"
+                    or reason not in {
+                        "share_capacity_supported", "share_capacity_partially_supported"
+                    }
+                )
+            )
+            or (
+                contracts == 0
+                and (
+                    allocation.get("allocation_status") != "blocked"
+                    or reason != "share_capacity_insufficient"
+                )
+            )
+        ):
+            return None
+        return {
+            "contracts_available": contracts,
+            "shares_available_for_cover": int(quantities["capacity_before"]),
+            "multiplier": multiplier,
+            "accepted": contracts >= 1,
+            "reason": reason,
+            "contract_symbol": _text(row.get("contract_symbol") or row.get("code")).upper(),
+        }
     explicit = _number(row.get("call_covered_contracts_available"))
     result = compute_sell_call_share_capacity(
         shares_total=row.get("shares_total") if row.get("shares_total") is not None else row.get("shares"),
@@ -1755,7 +1814,6 @@ def _candidate_action(
     event_risk: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if family == "combo_yield":
-        group_id = _text(row.get("strategy_group_id") or row.get("candidate_pair_id"))
         action = {
             "priority": _priority_from_row(row, default="P1"),
             "state": "active",
@@ -1768,7 +1826,8 @@ def _candidate_action(
             "expiration": _text(row.get("put_expiration") or row.get("expiration")),
             "strike": row.get("put_strike"),
             "contract_symbol": _text(row.get("put_contract_symbol")).upper(),
-            "strategy_group_id": group_id,
+            "candidate_pair_id": _text(row.get("candidate_pair_id")),
+            "strategy_group_id": _text(row.get("strategy_group_id")),
             "leg_role": "pair",
             "title": "Combo Yield 候选",
             "reason": _text(row.get("reason") or "已通过现有组合收益筛选"),
@@ -1833,8 +1892,8 @@ def _candidate_view(
         return {
             "rank": rank,
             "symbol": _text(row.get("symbol")).upper(),
-            "strategy_group_id": _text(row.get("strategy_group_id") or row.get("candidate_pair_id")),
-            "candidate_pair_id": _text(row.get("candidate_pair_id") or row.get("strategy_group_id")),
+            "strategy_group_id": _text(row.get("strategy_group_id")),
+            "candidate_pair_id": _text(row.get("candidate_pair_id")),
             "structure_mode": _text(row.get("structure_mode")).lower(),
             "put_contract_symbol": _text(row.get("put_contract_symbol")).upper(),
             "call_contract_symbol": _text(row.get("call_contract_symbol")).upper(),
@@ -1892,6 +1951,7 @@ def _close_action(row: Mapping[str, Any], *, account: str) -> dict[str, Any]:
         "position_lot_id": _text(row.get("position_lot_id")),
         "strategy_group_id": _text(row.get("strategy_group_id")),
         "leg_role": _text(row.get("leg_role")).lower(),
+        "source_stock_lot_id": _text(row.get("source_stock_lot_id")),
         "title": "严格平仓提醒",
         "reason": _text(row.get("reason")),
         "recommendation_state": _text(
@@ -1927,6 +1987,7 @@ def _position_view(
         "position_lot_id",
         "strategy_group_id",
         "leg_role",
+        "source_stock_lot_id",
         "symbol",
         "option_type",
         "expiration",
@@ -2047,7 +2108,7 @@ def _dedupe_rows(rows: list[dict[str, Any]], *, family: str) -> list[dict[str, A
     for row in rows:
         if family == "combo_yield":
             identity = (
-                _text(row.get("strategy_group_id") or row.get("candidate_pair_id")),
+                _text(row.get("candidate_pair_id")),
                 _text(row.get("put_contract_symbol")).upper(),
                 _text(row.get("call_contract_symbol")).upper(),
             )

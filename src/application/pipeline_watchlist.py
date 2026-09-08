@@ -1072,45 +1072,21 @@ def run_watchlist_pipeline_default(
         and list(wheel_read_model.get("batches") or [])
         and required_data_snapshot_batch is not None
     ):
-        try:
-            wheel_policy = resolve_wheel_config(cfg, account)
-            coverage_facts = build_shared_coverage_facts(
-                account=account,
-                portfolio_context=portfolio_snapshot,
-                option_context=option_snapshot,
-                wheel_read_model=wheel_read_model,
-            )
-            usd_per_cny, cny_per_hkd = exchange_rate_scalars_from_option_context(
-                option_snapshot
-            )
-            wheel_scan = run_wheel_call_scan(
-                wheel_read_model,
-                wheel_policy,
-                required_data_snapshot_batch,
-                {},
+        active_batches = [
+            dict(batch)
+            for batch in wheel_read_model.get("batches") or []
+            if isinstance(batch, Mapping)
+            and str(batch.get("lifecycle_status") or "") == "active"
+        ]
+
+        def _unavailable_wheel_capture(reason_code: str) -> dict[str, Any]:
+            symbols = sorted(
                 {
-                    "exchange_rate_converter": build_converter(
-                        usd_per_cny_exchange_rate=usd_per_cny,
-                        cny_per_hkd_exchange_rate=cny_per_hkd,
-                    )
-                },
-                decision_time_ms=int(captured_at.timestamp() * 1000),
+                    str(batch.get("symbol") or "").strip().upper()
+                    for batch in active_batches
+                }
             )
-            wheel_capture = finalize_wheel_capacity(
-                account=account,
-                wheel_read_model=wheel_read_model,
-                wheel_scan=wheel_scan,
-                opening_call_candidates=captured_final_candidates["call"],
-                coverage_facts=coverage_facts,
-            )
-        except Exception:
-            active_batches = [
-                dict(batch)
-                for batch in wheel_read_model.get("batches") or []
-                if isinstance(batch, Mapping)
-                and str(batch.get("lifecycle_status") or "") == "active"
-            ]
-            wheel_capture = {
+            return {
                 "allocations": [],
                 "scope_results": [
                     {
@@ -1120,16 +1096,11 @@ def run_watchlist_pipeline_default(
                         "strategy_family": "wheel",
                         "strategy_mode": "wheel",
                         "candidate_owner": "wheel",
-                        "status": "failed",
-                        "reason_code": "wheel_scan_failed",
+                        "status": "unavailable",
+                        "reason_code": reason_code,
                         "candidate_count": 0,
                     }
-                    for symbol in sorted(
-                        {
-                            str(batch.get("symbol") or "").strip().upper()
-                            for batch in active_batches
-                        }
-                    )
+                    for symbol in symbols
                 ],
                 "batches": [
                     {
@@ -1140,8 +1111,8 @@ def run_watchlist_pipeline_default(
                         "projection_hash": batch.get("projection_hash"),
                         "shares_remaining": int(batch.get("shares_remaining") or 0),
                         "phase": batch.get("phase"),
-                        "candidate_status": "failed",
-                        "reason_code": "wheel_scan_failed",
+                        "candidate_status": "unavailable",
+                        "reason_code": reason_code,
                         "raw_candidates": [],
                         "allocation": None,
                         "granted_contracts": 0,
@@ -1150,6 +1121,78 @@ def run_watchlist_pipeline_default(
                     for batch in active_batches
                 ],
             }
+
+        try:
+            coverage_facts = build_shared_coverage_facts(
+                account=account,
+                portfolio_context=portfolio_snapshot,
+                option_context=option_snapshot,
+                wheel_read_model=wheel_read_model,
+            )
+        except Exception:
+            wheel_capture = _unavailable_wheel_capture(
+                "wheel_coverage_facts_unavailable"
+            )
+        else:
+            wheel_scan_failed = False
+            try:
+                wheel_policy = resolve_wheel_config(cfg, account)
+                usd_per_cny, cny_per_hkd = exchange_rate_scalars_from_option_context(
+                    option_snapshot
+                )
+                wheel_scan = run_wheel_call_scan(
+                    wheel_read_model,
+                    wheel_policy,
+                    required_data_snapshot_batch,
+                    {},
+                    {
+                        "exchange_rate_converter": build_converter(
+                            usd_per_cny_exchange_rate=usd_per_cny,
+                            cny_per_hkd_exchange_rate=cny_per_hkd,
+                        )
+                    },
+                    decision_time_ms=int(captured_at.timestamp() * 1000),
+                )
+            except Exception:
+                wheel_scan_failed = True
+                wheel_scan = {
+                    "capacity_claims": [],
+                    "raw_candidates": {},
+                    "scope_results": [
+                        {
+                            "account": account,
+                            "symbol": str(batch.get("symbol") or "").strip().upper(),
+                            "stock_lot_id": batch.get("stock_lot_id"),
+                            "status": "failed",
+                            "reason_code": "wheel_scan_failed",
+                            "candidate_count": 0,
+                        }
+                        for batch in active_batches
+                    ],
+                }
+            try:
+                wheel_capture = finalize_wheel_capacity(
+                    account=account,
+                    wheel_read_model=wheel_read_model,
+                    wheel_scan=wheel_scan,
+                    opening_call_candidates=captured_final_candidates["call"],
+                    coverage_facts=coverage_facts,
+                )
+            except Exception:
+                wheel_capture = _unavailable_wheel_capture(
+                    "wheel_capacity_finalize_failed"
+                )
+            else:
+                if wheel_scan_failed:
+                    wheel_capture["scope_results"] = [
+                        {
+                            **dict(scope),
+                            "status": "failed",
+                            "reason_code": "wheel_scan_failed",
+                            "candidate_count": 0,
+                        }
+                        for scope in wheel_capture["scope_results"]
+                    ]
         wheel_expected: list[dict[str, str]] = []
         for scope in wheel_capture["scope_results"]:
             status = str(scope["status"])

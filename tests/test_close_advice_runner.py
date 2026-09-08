@@ -31,6 +31,10 @@ def _position(
     option_type: str = "put",
     side: str = "short",
     strike: float = 100.0,
+    expiration: str = EXPIRATION,
+    strategy_group_id: str | None = None,
+    leg_role: str | None = None,
+    source_stock_lot_id: str | None = None,
 ) -> dict:
     return {
         "record_id": lot_id,
@@ -45,7 +49,10 @@ def _position(
         "strike": strike,
         "multiplier": 100,
         "premium": 2.0,
-        "expiration": EXPIRATION,
+        "expiration": expiration,
+        "strategy_group_id": strategy_group_id,
+        "leg_role": leg_role,
+        "source_stock_lot_id": source_stock_lot_id,
         "opened_at": OPENED_AT_MS,
     }
 
@@ -316,7 +323,12 @@ def test_strict_close_row_is_the_only_notified_state(
     _freeze_business_date(monkeypatch)
     result, output_dir = _run(
         tmp_path,
-        positions=[_position()],
+        positions=[
+            _position(
+                strategy_group_id="combo-group-1",
+                leg_role="funding_put",
+            )
+        ],
         quotes=[_quote()],
     )
 
@@ -328,9 +340,41 @@ def test_strict_close_row_is_the_only_notified_state(
     assert row["net_capture_ratio"] >= 0.90
     assert row["close_cost_ratio"] <= 0.001
     assert row["remaining_term_ratio"] >= 0.50
+    assert row["strategy_group_id"] == "combo-group-1"
+    assert row["leg_role"] == "funding_put"
+    assert pd.isna(row["source_stock_lot_id"])
+    assert row["strategy_family"] == "sell_put"
     assert "NVDA Put 2026-06-15" in (
         output_dir / "close_advice.txt"
     ).read_text(encoding="utf-8")
+
+
+def test_lifecycle_not_evaluable_row_preserves_wheel_stock_relationship(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _freeze_business_date(monkeypatch)
+    result, output_dir = _run(
+        tmp_path,
+        positions=[
+            _position(
+                option_type="call",
+                expiration=BUSINESS_DATE.isoformat(),
+                leg_role="wheel_call",
+                source_stock_lot_id="stock-lot-1",
+            )
+        ],
+        quotes=[],
+    )
+
+    row = pd.read_csv(output_dir / "close_advice.csv").iloc[0]
+    assert result["rows"] == 1
+    assert row["recommendation_state"] == "not_evaluable"
+    assert row["position_lifecycle_state"] == "expiry_day"
+    assert pd.isna(row["strategy_group_id"])
+    assert row["leg_role"] == "wheel_call"
+    assert row["source_stock_lot_id"] == "stock-lot-1"
+    assert row["strategy_family"] == "covered_call"
 
 
 @pytest.mark.parametrize(

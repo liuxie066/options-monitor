@@ -3,7 +3,10 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
-from domain.domain.risk_capacity import allocate_opening_share_capacity
+from domain.domain.risk_capacity import (
+    allocate_opening_share_capacity,
+    withdraw_opening_share_capacity_grants,
+)
 from src.application.futu_portfolio_context import fetch_futu_portfolio_context
 from src.application.positions.context_builder import build_context
 from src.application.wheel.read_model import build_wheel_read_model_from_rows
@@ -148,6 +151,46 @@ def build_shared_coverage_facts(
     return facts
 
 
+def _final_wheel_candidate(
+    *,
+    account: str,
+    batch: Mapping[str, Any],
+    internal_candidates: list[dict[str, Any]],
+    allocation: Mapping[str, Any] | None,
+    coverage_facts: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    granted = int((allocation or {}).get("granted_contracts") or 0)
+    if not internal_candidates or granted <= 0:
+        return None
+    top = internal_candidates[0]
+    grant_evaluations = top.get("_grant_evaluations")
+    if isinstance(grant_evaluations, Mapping):
+        exact = grant_evaluations.get(str(granted))
+    else:
+        exact = top if int(top.get("contracts") or 0) == granted else None
+    if not isinstance(exact, Mapping) or exact.get("accepted") is not True:
+        return None
+    return {
+        **{key: value for key, value in top.items() if key != "_grant_evaluations"},
+        **dict(exact),
+        "account": account,
+        "stock_lot_id": str(batch.get("stock_lot_id") or ""),
+        "final_candidate_id": top["candidate_id"],
+        "requested_contracts": int((allocation or {}).get("requested_contracts") or 0),
+        "granted_contracts": granted,
+        "granted_shares": int((allocation or {}).get("granted_shares") or 0),
+        "capacity_identity_hash": next(
+            (
+                row["capacity_identity_hash"]
+                for row in coverage_facts
+                if row.get("account") == account
+                and row.get("symbol") == batch.get("symbol")
+            ),
+            None,
+        ),
+    }
+
+
 def finalize_wheel_capacity(
     *,
     account: str,
@@ -200,6 +243,31 @@ def finalize_wheel_capacity(
     }
     raw_by_batch = wheel_scan.get("raw_candidates")
     raw_by_batch = raw_by_batch if isinstance(raw_by_batch, Mapping) else {}
+    rejected_claim_ids: set[str] = set()
+    for stock_lot_id, batch in batches_by_id.items():
+        allocation = by_claim.get(f"wheel:{stock_lot_id}")
+        internal_candidates = [
+            dict(item)
+            for item in raw_by_batch.get(stock_lot_id) or []
+            if isinstance(item, Mapping)
+        ]
+        if (
+            int((allocation or {}).get("granted_contracts") or 0) > 0
+            and _final_wheel_candidate(
+                account=account,
+                batch=batch,
+                internal_candidates=internal_candidates,
+                allocation=allocation,
+                coverage_facts=coverage_facts,
+            )
+            is None
+        ):
+            rejected_claim_ids.add(f"wheel:{stock_lot_id}")
+    allocations = withdraw_opening_share_capacity_grants(
+        allocations,
+        rejected_claim_ids,
+    )
+    by_claim = {str(row.get("claim_id") or ""): row for row in allocations}
     snapshot_batches: list[dict[str, Any]] = []
     for scope in wheel_scan.get("scope_results") or []:
         if not isinstance(scope, Mapping):
@@ -228,45 +296,13 @@ def finalize_wheel_capacity(
             ),
             {},
         )
-        final = None
-        if internal_candidates and granted > 0:
-            top = internal_candidates[0]
-            grant_evaluations = top.get("_grant_evaluations")
-            grant_evaluations = (
-                grant_evaluations if isinstance(grant_evaluations, Mapping) else None
-            )
-            exact = (
-                grant_evaluations.get(str(granted))
-                if grant_evaluations is not None
-                else top
-            )
-            exact = exact if isinstance(exact, Mapping) else None
-        else:
-            top = exact = None
-        if top is not None and exact is not None and bool(exact.get("accepted", True)):
-            final = {
-                **{key: value for key, value in top.items() if key != "_grant_evaluations"},
-                **dict(exact),
-                "account": account,
-                "stock_lot_id": stock_lot_id,
-                "final_candidate_id": top["candidate_id"],
-                "requested_contracts": int(
-                    (allocation or {}).get("requested_contracts") or 0
-                ),
-                "granted_contracts": granted,
-                "granted_shares": int(
-                    (allocation or {}).get("granted_shares") or 0
-                ),
-                "capacity_identity_hash": next(
-                    (
-                        row["capacity_identity_hash"]
-                        for row in coverage_facts
-                        if row.get("account") == account
-                        and row.get("symbol") == batch.get("symbol")
-                    ),
-                    None,
-                ),
-            }
+        final = _final_wheel_candidate(
+            account=account,
+            batch=batch,
+            internal_candidates=internal_candidates,
+            allocation=allocation,
+            coverage_facts=coverage_facts,
+        )
         snapshot_batches.append(
             {
                 "account": account,
