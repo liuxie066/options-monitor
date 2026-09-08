@@ -11,6 +11,7 @@ MARKET_DATE = "2026-07-21"
 TARGET_1000 = "2026-07-21T10:00:00-04:00"
 IDENTITY_NVDA = "candidate:v1:lx:US:NVDA:sell_put"
 IDENTITY_AMD = "candidate:v1:lx:US:AMD:sell_put"
+LEGACY_COMBO_DIGEST = "ed465e99ea01d9997906cb18d118e7f0d18750bda01ee6ba42d8927ec38a4463"
 
 
 def _action(*, symbol: str = "NVDA", priority: str = "P1", contracts: int = 1) -> dict:
@@ -97,6 +98,97 @@ def _prepare_fixed(tmp_path: Path, persisted: dict, *, message: str = "# lx Â· ç
         render_context={"projection": "fixed_report"},
         prepared_at_utc="2026-07-21T14:00:02+00:00",
     )
+
+
+def _legacy_combo_brief(*, run_id: str = "run-1") -> dict:
+    from datetime import datetime, timezone
+
+    from domain.domain.combo_candidate_evidence import build_combo_candidate_occurrence
+
+    row = {
+        "symbol": "NVDA",
+        "candidate_pair_id": "pair-nvda-100-110",
+        "structure_mode": "same_expiry_pair",
+        "put_expiration": "2026-08-21",
+        "put_strike": 100,
+        "put_contract_symbol": "NVDA260821P00100000",
+        "call_expiration": "2026-08-21",
+        "call_strike": 110,
+        "call_contract_symbol": "NVDA260821C00110000",
+        "currency": "USD",
+        "multiplier": 100,
+    }
+    row.update(
+        build_combo_candidate_occurrence(
+            row,
+            account="lx",
+            market="US",
+            run_id=run_id,
+            generated_at_utc=datetime(2026, 7, 21, 14, 0, tzinfo=timezone.utc),
+        )
+    )
+    action = {
+        "action_id": "action-6f70388725ffbc618358812c",
+        "priority": "P1",
+        "state": "active",
+        "action_type": "open_combo_yield",
+        "strategy_family": "combo_yield",
+        "account": "lx",
+        "symbol": "NVDA",
+        "option_type": "",
+        "side": "",
+        "expiration": "2026-08-21",
+        "strike": 100,
+        "contract_symbol": "NVDA260821P00100000",
+        "strategy_group_id": "pair-nvda-100-110",
+        "leg_role": "pair",
+        "metrics": {
+            "put_contract_symbol": "NVDA260821P00100000",
+            "call_contract_symbol": "NVDA260821C00110000",
+            "capacity": {"contracts_available": 1},
+        },
+    }
+    source = _brief(run_id=run_id, actions=[action])
+    source["revision"] = 0
+    source["candidates"]["combo_yield"] = [row]
+    source["candidate_index"] = [
+        {
+            "identity": "candidate:v1:lx:US:NVDA:combo_yield",
+            "symbol": "NVDA",
+            "strategy_family": "combo_yield",
+            "representative": {
+                **row,
+                "strategy_group_id": "pair-nvda-100-110",
+                "capacity": {"contracts_available": 1},
+            },
+            "contract_count": 1,
+        }
+    ]
+    return source
+
+
+def _install_legacy_combo_revision(tmp_path: Path) -> tuple[dict, str, dict]:
+    from domain.domain.daily_decision_brief import (
+        daily_brief_digest,
+        normalize_persisted_daily_decision_brief,
+    )
+
+    seeded = _persist(tmp_path, run_id="run-1", actions=[_action()])
+    legacy = normalize_persisted_daily_decision_brief(_legacy_combo_brief())
+    digest = daily_brief_digest(legacy)
+    assert digest == LEGACY_COMBO_DIGEST
+    for key in ("revision", "current", "run_brief"):
+        seeded["paths"][key].write_text(
+            json.dumps(legacy, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    shared = json.loads(seeded["paths"]["shared_index"].read_text(encoding="utf-8"))
+    shared["items"]["US/lx"]["brief_digest"] = digest
+    seeded["paths"]["shared_index"].write_text(
+        json.dumps(shared, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return legacy, digest, seeded
 
 
 def test_success_persistence_advances_only_reliable_current_and_returns_identity_delta(tmp_path: Path) -> None:
@@ -1236,3 +1328,269 @@ def test_confirmed_candidate_delivery_rolls_to_later_candidate_batch(tmp_path: P
     )["state"]["days"][MARKET_DATE]
     assert set(day["alerted_candidates"]) == {IDENTITY_NVDA, IDENTITY_AMD}
     assert day["pending_candidates"] == {}
+
+
+def test_legacy_combo_revision_remains_source_for_recovery_delivery_and_exposure(
+    tmp_path: Path,
+) -> None:
+    from domain.domain.combo_candidate_evidence import (
+        combo_exposure_render_context,
+        derive_combo_candidate_exposures,
+    )
+    from src.application.daily_decision_brief_repository import (
+        confirm_daily_decision_brief_delivery_v2,
+        prepare_daily_decision_brief_delivery,
+        read_combo_candidate_exposures,
+        read_daily_decision_brief,
+        read_daily_decision_brief_fixed_recovery,
+        read_latest_daily_decision_brief,
+        read_retryable_daily_decision_brief_delivery,
+        record_daily_decision_brief_candidates,
+        record_daily_decision_brief_fixed_recovery,
+    )
+    from src.application.notification_delivery_adapter import (
+        build_notification_transport_key,
+    )
+
+    legacy, digest, _seeded = _install_legacy_combo_revision(tmp_path)
+    identity = "candidate:v1:lx:US:NVDA:combo_yield"
+    assert read_latest_daily_decision_brief(
+        base=tmp_path,
+        account="lx",
+        market="US",
+    )["brief"]["actions"][0]["action_id"] == "action-6f70388725ffbc618358812c"
+    assert read_daily_decision_brief(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+        revision=0,
+    )["brief_digest"] == digest
+
+    record_daily_decision_brief_fixed_recovery(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+        scheduled_target_market=TARGET_1000,
+        revision=0,
+        brief_digest=digest,
+        candidate_identities=[identity],
+        recorded_at_utc="2026-07-21T14:00:01+00:00",
+    )
+    recovery = read_daily_decision_brief_fixed_recovery(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+    )
+    assert recovery["reason"] == "recovery_pending"
+    assert recovery["brief"]["actions"][0]["action_id"] == "action-6f70388725ffbc618358812c"
+
+    record_daily_decision_brief_candidates(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+        revision=0,
+        brief_digest=digest,
+        candidate_identities=[identity],
+        observed_at_utc="2026-07-21T14:00:02+00:00",
+    )
+    exposures = derive_combo_candidate_exposures(
+        legacy,
+        candidate_identities=[identity],
+    )
+    envelope = prepare_daily_decision_brief_delivery(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+        run_id="run-1",
+        delivery_kind="candidate_alert",
+        source_kind="successful_brief",
+        revision=0,
+        source_digest=digest,
+        candidate_identities=[identity],
+        rendered_message="# synthetic legacy Combo candidate",
+        render_context={
+            **combo_exposure_render_context(exposures),
+            "rendered_combo_candidate_identities": [identity],
+        },
+        prepared_at_utc="2026-07-21T14:00:03+00:00",
+    )["envelope"]
+    retry = read_retryable_daily_decision_brief_delivery(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+    )
+    assert retry["reason"] == "pending_candidates"
+    assert retry["envelope"] == envelope
+    confirm_daily_decision_brief_delivery_v2(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+        delivery_key=envelope["delivery_key"],
+        source_digest=envelope["source_digest"],
+        message_sha256=envelope["message_sha256"],
+        transport_idempotency_key=build_notification_transport_key(envelope["delivery_key"]),
+        confirmed_at_utc="2026-07-21T14:00:04+00:00",
+    )
+    replayed = read_combo_candidate_exposures(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+    )
+    assert replayed["reason"] == "ok"
+    assert len(replayed["exposures"]) == 1
+    assert replayed["exposures"][0]["delivery_confirmed"] is True
+
+
+def test_legacy_combo_hold_survives_two_revisions_then_recovers_to_current_id(
+    tmp_path: Path,
+) -> None:
+    from domain.domain.daily_decision_brief import (
+        daily_brief_digest,
+        diff_daily_decision_briefs,
+    )
+    from src.application.daily_decision_brief_repository import (
+        persist_daily_decision_brief_success,
+        read_daily_decision_brief,
+        read_latest_daily_decision_brief,
+    )
+
+    _legacy, _digest, _seeded = _install_legacy_combo_revision(tmp_path)
+    degraded = _brief(run_id="run-2")
+    degraded["status"] = "degraded"
+    degraded["data_gaps"] = [
+        {
+            "market": "US",
+            "symbol": "NVDA",
+            "strategy_family": "combo_yield",
+            "reason": "snapshot_unavailable",
+        }
+    ]
+    first_hold = persist_daily_decision_brief_success(base=tmp_path, brief=degraded)
+    second_hold = persist_daily_decision_brief_success(
+        base=tmp_path,
+        brief={**degraded, "run_id": "run-3"},
+    )
+    for persisted in (first_hold, second_hold):
+        action = persisted["brief"]["actions"][0]
+        assert action["action_id"] == "action-6f70388725ffbc618358812c"
+        assert action["state"] == "observe"
+    held_readback = read_daily_decision_brief(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+        revision=2,
+    )
+    assert held_readback["available"] is True
+    assert held_readback["brief_digest"] == daily_brief_digest(second_hold["brief"])
+    assert read_latest_daily_decision_brief(
+        base=tmp_path,
+        account="lx",
+        market="US",
+    )["brief"]["actions"][0]["action_id"] == "action-6f70388725ffbc618358812c"
+
+    healthy = _legacy_combo_brief(run_id="run-4")
+    healthy["actions"][0].pop("action_id")
+    healthy["actions"][0]["candidate_pair_id"] = "pair-nvda-100-110"
+    healthy["actions"][0]["strategy_group_id"] = ""
+    healthy["candidate_index"][0]["representative"]["strategy_group_id"] = ""
+    recovered = persist_daily_decision_brief_success(base=tmp_path, brief=healthy)
+    changes = diff_daily_decision_briefs(
+        recovered["previous_successful_brief"],
+        recovered["brief"],
+    )["changes"]
+    assert [item["change_type"] for item in changes] == ["candidate_evidence_recovered"]
+    assert changes[0]["before_action_id"] == "action-6f70388725ffbc618358812c"
+    assert changes[0]["after_action_id"] == recovered["brief"]["actions"][0]["action_id"]
+
+
+def test_legacy_combo_id_cannot_be_submitted_without_a_persisted_previous_source(
+    tmp_path: Path,
+) -> None:
+    from src.application.daily_decision_brief_repository import (
+        persist_daily_decision_brief_success,
+    )
+
+    source = _legacy_combo_brief()
+    source["legacy_action_ids"] = ["action-6f70388725ffbc618358812c"]
+    with pytest.raises(ValueError, match="candidate_pair_id"):
+        persist_daily_decision_brief_success(base=tmp_path, brief=source)
+    assert not (tmp_path / "output_accounts/lx/state/daily_decision_brief.US.current.json").exists()
+
+
+@pytest.mark.parametrize("tamper", ["action_id", "stable_field"])
+def test_public_revision_read_rejects_tampered_legacy_combo_action(
+    tmp_path: Path,
+    tamper: str,
+) -> None:
+    from src.application.daily_decision_brief_repository import read_daily_decision_brief
+
+    _legacy, _digest, seeded = _install_legacy_combo_revision(tmp_path)
+    raw = json.loads(seeded["paths"]["revision"].read_text(encoding="utf-8"))
+    if tamper == "action_id":
+        raw["actions"][0]["action_id"] = "action-000000000000000000000000"
+    else:
+        raw["actions"][0]["contract_symbol"] = "NVDA260821P00101000"
+    seeded["paths"]["revision"].write_text(json.dumps(raw), encoding="utf-8")
+
+    inspected = read_daily_decision_brief(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+        revision=0,
+    )
+    assert inspected["available"] is False
+    assert inspected["reason"] == "state_invalid"
+
+
+def test_legacy_combo_pair_or_digest_tamper_cannot_authorize_fixed_recovery(
+    tmp_path: Path,
+) -> None:
+    from src.application.daily_decision_brief_repository import (
+        DailyDecisionBriefStateError,
+        read_daily_decision_brief_fixed_recovery,
+        record_daily_decision_brief_fixed_recovery,
+    )
+
+    _legacy, digest, seeded = _install_legacy_combo_revision(tmp_path)
+    identity = "candidate:v1:lx:US:NVDA:combo_yield"
+    with pytest.raises(DailyDecisionBriefStateError, match="source digest mismatch"):
+        record_daily_decision_brief_fixed_recovery(
+            base=tmp_path,
+            account="lx",
+            market="US",
+            market_trading_date=MARKET_DATE,
+            scheduled_target_market=TARGET_1000,
+            revision=0,
+            brief_digest="0" * 64,
+            candidate_identities=[identity],
+        )
+    record_daily_decision_brief_fixed_recovery(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+        scheduled_target_market=TARGET_1000,
+        revision=0,
+        brief_digest=digest,
+        candidate_identities=[identity],
+    )
+    raw = json.loads(seeded["paths"]["revision"].read_text(encoding="utf-8"))
+    raw["candidate_index"][0]["representative"]["candidate_pair_id"] = "pair-tampered"
+    seeded["paths"]["revision"].write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(DailyDecisionBriefStateError, match="source digest mismatch"):
+        read_daily_decision_brief_fixed_recovery(
+            base=tmp_path,
+            account="lx",
+            market="US",
+            market_trading_date=MARKET_DATE,
+        )

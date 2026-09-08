@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 from src.infrastructure.futu_gateway import build_ready_futu_broker_gateway
-from domain.domain.trade_account_identity import extract_primary_account_id
+from domain.domain.trade_account_identity import extract_primary_account_id, extract_visible_account_fields
 from domain.domain.symbol_identity import resolve_symbol_identity
 
 
@@ -27,16 +27,22 @@ def _norm_str(value: Any) -> str:
     return str(value or "").strip()
 
 
-def _matches_identifier(row: dict[str, Any], *, order_id: str, deal_id: str) -> bool:
-    if order_id:
-        row_order = _norm_str(row.get("order_id") or row.get("orderID"))
-        if row_order and row_order == order_id:
-            return True
-    if deal_id:
-        row_deal = _norm_str(row.get("deal_id") or row.get("dealID") or row.get("id"))
-        if row_deal and row_deal == deal_id:
-            return True
-    return False
+def _matches_order(row: dict[str, Any], *, order_id: str) -> bool:
+    return bool(order_id and _norm_str(row.get("order_id") or row.get("orderID")) == order_id)
+
+
+def _matches_deal(row: dict[str, Any], *, deal_id: str, order_id: str) -> bool:
+    if not deal_id or _norm_str(row.get("deal_id") or row.get("dealID") or row.get("id")) != deal_id:
+        return False
+    row_order = _norm_str(row.get("order_id") or row.get("orderID"))
+    return not order_id or not row_order or row_order == order_id
+
+
+def _matches_account(row: dict[str, Any], *, account_id: str, require_row_evidence: bool) -> bool:
+    row_accounts = set(extract_visible_account_fields(row).values())
+    if row_accounts:
+        return row_accounts == {account_id}
+    return not require_row_evidence
 
 
 def _extract_account_id(row: dict[str, Any], *, fallback_acc_id: str) -> str:
@@ -87,6 +93,34 @@ _DISPLAY_NAME_KEYS = {
     "name",
     "underlying",
 }
+
+_ORDER_IDENTITY_KEYS = frozenset(
+    {
+        *_SYMBOL_CANDIDATE_KEYS,
+        "order_id",
+        "orderID",
+        "market",
+        "asset_type",
+        "security_type",
+        "stock_type",
+        "sec_type",
+        "option_type",
+        "put_call",
+        "call_or_put",
+        "strike",
+        "strike_price",
+        "multiplier",
+        "contract_multiplier",
+        "lot_size",
+        "expiration",
+        "expiration_ymd",
+        "expiry",
+        "expiry_date",
+        "currency",
+        "currency_code",
+        "ccy",
+    }
+)
 
 
 def _symbol_candidate_rank(key: str, source_kind: str) -> int:
@@ -171,11 +205,14 @@ def _merge_lookup_row(
     row: dict[str, Any],
     *,
     fallback_acc_id: str,
+    allowed_keys: frozenset[str] | None = None,
     diagnostics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     enriched = dict(src)
     enriched["futu_account_id"] = _extract_account_id(row, fallback_acc_id=fallback_acc_id)
     for key, value in row.items():
+        if allowed_keys is not None and key not in allowed_keys:
+            continue
         if key in enriched and enriched.get(key) not in (None, ""):
             continue
         if value in (None, ""):
@@ -198,13 +235,15 @@ def enrich_trade_push_payload_with_account_id(
 ) -> TradePushAccountLookupResult:
     src = dict(payload) if isinstance(payload, dict) else {}
     existing_account_id = extract_primary_account_id(src) or ""
-    candidate_ids: list[str] = []
-    for raw_id in (existing_account_id, *futu_account_ids):
+    configured_ids: list[str] = []
+    for raw_id in futu_account_ids:
         acc_id = str(raw_id or "").strip()
-        if acc_id and acc_id not in candidate_ids:
-            candidate_ids.append(acc_id)
+        if acc_id and acc_id not in configured_ids:
+            configured_ids.append(acc_id)
+    candidate_ids = [existing_account_id] if existing_account_id in configured_ids else ([] if existing_account_id else configured_ids)
     diagnostics: dict[str, Any] = {
         "existing_account_id": existing_account_id or None,
+        "configured_account_ids": configured_ids,
         "candidate_account_ids": candidate_ids,
         "order_id": None,
         "deal_id": None,
@@ -221,6 +260,10 @@ def enrich_trade_push_payload_with_account_id(
         fallback_payload["futu_account_id"] = existing_account_id
     if not order_id and not deal_id:
         diagnostics["matched_via"] = "payload" if existing_account_id else "missing_identifiers"
+        return TradePushAccountLookupResult(payload=fallback_payload, diagnostics=diagnostics)
+
+    if existing_account_id and existing_account_id not in configured_ids:
+        diagnostics["matched_via"] = "unconfigured_payload_account"
         return TradePushAccountLookupResult(payload=fallback_payload, diagnostics=diagnostics)
 
     numeric_candidates = [value for value in candidate_ids if _numeric_account_id(value) is not None]
@@ -248,7 +291,7 @@ def enrich_trade_push_payload_with_account_id(
             diagnostics=diagnostics,
         )
     try:
-        candidate_ids = diagnostics["candidate_account_ids"]
+        deal_matches: list[tuple[str, dict[str, Any]]] = []
         for acc_id in candidate_ids:
             numeric_acc_id = _numeric_account_id(str(acc_id))
             if numeric_acc_id is None:
@@ -256,17 +299,6 @@ def enrich_trade_push_payload_with_account_id(
                     {"method": "account_scoped_lookup", "acc_id": acc_id, "skipped": "non_numeric_account_id"}
                 )
                 continue
-            if order_id:
-                query_kwargs = {"acc_id": numeric_acc_id, "order_id": order_id}
-                rows, error = _query_rows(gateway, "get_order_list", **query_kwargs)
-                diagnostics["tried_queries"].append({"method": "get_order_list", **query_kwargs, "rows": len(rows)})
-                if error:
-                    diagnostics["query_errors"].append({"method": "get_order_list", **query_kwargs, "error": error})
-                for row in rows:
-                    if _matches_identifier(row, order_id=order_id, deal_id=deal_id):
-                        enriched = _merge_lookup_row(src, row, fallback_acc_id=acc_id, diagnostics=diagnostics)
-                        diagnostics["matched_via"] = "order_lookup_by_acc_id"
-                        return TradePushAccountLookupResult(payload=enriched, diagnostics=diagnostics)
             if deal_id:
                 query_kwargs = {"acc_id": numeric_acc_id}
                 rows, error = _query_rows(gateway, "get_deal_list", **query_kwargs)
@@ -282,43 +314,61 @@ def enrich_trade_push_payload_with_account_id(
                 if error:
                     diagnostics["query_errors"].append({"method": "get_deal_list", **query_kwargs, "error": error})
                 for row in rows:
-                    if _matches_identifier(row, order_id=order_id, deal_id=deal_id):
-                        enriched = _merge_lookup_row(src, row, fallback_acc_id=acc_id, diagnostics=diagnostics)
-                        diagnostics["matched_via"] = "deal_lookup_by_acc_id"
-                        return TradePushAccountLookupResult(payload=enriched, diagnostics=diagnostics)
+                    if _matches_deal(row, deal_id=deal_id, order_id=order_id) and _matches_account(
+                        row,
+                        account_id=acc_id,
+                        require_row_evidence=not existing_account_id,
+                    ):
+                        deal_matches.append((acc_id, row))
+        if len(deal_matches) > 1:
+            diagnostics["matched_via"] = "ambiguous_deal_lookup"
+            return TradePushAccountLookupResult(payload=fallback_payload, diagnostics=diagnostics)
+        if deal_matches:
+            acc_id, row = deal_matches[0]
+            enriched = _merge_lookup_row(src, row, fallback_acc_id=acc_id, diagnostics=diagnostics)
+            if not order_id or _resolve_unified_symbol(enriched, {})[0]:
+                diagnostics["matched_via"] = "deal_lookup_by_acc_id"
+                return TradePushAccountLookupResult(payload=enriched, diagnostics=diagnostics)
+            order_candidate_ids = [acc_id]
+        else:
+            enriched = fallback_payload
+            order_candidate_ids = candidate_ids
+
+        order_matches: list[tuple[str, dict[str, Any]]] = []
         if order_id:
-            query_kwargs = {"order_id": order_id}
-            rows, error = _query_rows(gateway, "get_order_list", **query_kwargs)
-            diagnostics["tried_queries"].append({"method": "get_order_list", **query_kwargs, "rows": len(rows)})
-            if error:
-                diagnostics["query_errors"].append({"method": "get_order_list", **query_kwargs, "error": error})
-            for row in rows:
-                if _matches_identifier(row, order_id=order_id, deal_id=deal_id):
-                    resolved_acc_id = _extract_account_id(row, fallback_acc_id="")
-                    if resolved_acc_id:
-                        enriched = _merge_lookup_row(src, row, fallback_acc_id=resolved_acc_id, diagnostics=diagnostics)
-                        diagnostics["matched_via"] = "order_lookup_without_acc_id"
-                        return TradePushAccountLookupResult(payload=enriched, diagnostics=diagnostics)
-        if deal_id:
-            query_kwargs: dict[str, Any] = {}
-            rows, error = _query_rows(gateway, "get_deal_list", **query_kwargs)
-            diagnostics["tried_queries"].append(
-                {
-                    "method": "get_deal_list",
-                    "filter_deal_id": deal_id,
-                    "filter_order_id": order_id or None,
-                    "rows": len(rows),
-                }
+            for acc_id in order_candidate_ids:
+                numeric_acc_id = _numeric_account_id(acc_id)
+                if numeric_acc_id is None:
+                    continue
+                query_kwargs = {"acc_id": numeric_acc_id, "order_id": order_id}
+                rows, error = _query_rows(gateway, "get_order_list", **query_kwargs)
+                diagnostics["tried_queries"].append({"method": "get_order_list", **query_kwargs, "rows": len(rows)})
+                if error:
+                    diagnostics["query_errors"].append({"method": "get_order_list", **query_kwargs, "error": error})
+                for row in rows:
+                    if _matches_order(row, order_id=order_id) and _matches_account(
+                        row,
+                        account_id=acc_id,
+                        require_row_evidence=not existing_account_id,
+                    ):
+                        order_matches.append((acc_id, row))
+        if len(order_matches) > 1:
+            diagnostics["matched_via"] = "ambiguous_order_lookup"
+            return TradePushAccountLookupResult(payload=fallback_payload, diagnostics=diagnostics)
+        if order_matches:
+            acc_id, row = order_matches[0]
+            enriched = _merge_lookup_row(
+                enriched,
+                row,
+                fallback_acc_id=acc_id,
+                allowed_keys=_ORDER_IDENTITY_KEYS,
+                diagnostics=diagnostics,
             )
-            if error:
-                diagnostics["query_errors"].append({"method": "get_deal_list", **query_kwargs, "error": error})
-            for row in rows:
-                if _matches_identifier(row, order_id=order_id, deal_id=deal_id):
-                    resolved_acc_id = _extract_account_id(row, fallback_acc_id="")
-                    if resolved_acc_id:
-                        enriched = _merge_lookup_row(src, row, fallback_acc_id=resolved_acc_id, diagnostics=diagnostics)
-                        diagnostics["matched_via"] = "deal_lookup_without_acc_id"
-                        return TradePushAccountLookupResult(payload=enriched, diagnostics=diagnostics)
+            diagnostics["matched_via"] = "deal_lookup_by_acc_id" if deal_matches else "order_lookup_by_acc_id"
+            return TradePushAccountLookupResult(payload=enriched, diagnostics=diagnostics)
+        if deal_matches:
+            diagnostics["matched_via"] = "deal_lookup_by_acc_id"
+            return TradePushAccountLookupResult(payload=enriched, diagnostics=diagnostics)
     finally:
         gateway.close()
     diagnostics["matched_via"] = "payload" if existing_account_id else "not_found"

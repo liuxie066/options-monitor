@@ -96,18 +96,19 @@ def test_sell_put_scan_emits_calculation_reject_without_csv_authority(tmp_path: 
     assert len(captured) == 1
     decision = captured[0]["opening_decision"]
     assert decision["accepted"] is False
-    assert decision["rejects"][0]["reason"] == "input_invalid"
-    assert decision["rejects"][0]["metric_value"]["reason_code"] == (
-        "option_multiplier_conflict"
+    assert decision["rejects"][0]["reason"] == "contract_ineligible"
+    assert (
+        decision["rejects"][0]["metric_value"]["reason_code"]
+        == "option_multiplier_conflict"
     )
-
     from src.application.candidate_scanning import evidence_summary_from_decisions
 
     evidence = evidence_summary_from_decisions(
         decisions=captured,
         accepted_count=0,
     )
-    assert evidence["eligibility_unresolved_count"] == 1
+    assert evidence["eligibility_unresolved_count"] == 0
+    assert evidence["contract_ineligible_count"] == 1
     assert evidence["policy_rejected_count"] == 0
 
 

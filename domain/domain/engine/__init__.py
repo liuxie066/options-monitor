@@ -49,6 +49,7 @@ from .candidate_engine import (
     normalize_strategy_mode,
     rank_candidate_rows,
     select_best_candidate_per_symbol,
+    validate_opening_contract_evidence,
     validate_candidate_decision_payload,
 )
 from .cc_lp import (
@@ -128,6 +129,7 @@ __all__ = [
     'normalize_strategy_mode',
     'rank_candidate_rows',
     'select_best_candidate_per_symbol',
+    'validate_opening_contract_evidence',
     'validate_candidate_decision_payload',
     'ComboYieldFundingDecision',
     'ComboYieldLeg',

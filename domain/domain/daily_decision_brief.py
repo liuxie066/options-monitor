@@ -75,6 +75,10 @@ _STABLE_ACTION_ID_FIELDS = (
     "leg_role",
 )
 
+_EVIDENCE_HOLD_MUTABLE_FIELDS = frozenset(
+    {"state", "evidence_state", "evidence_gap_key", "evidence_reason"}
+)
+
 
 def build_daily_brief_id(*, market: Any, market_trading_date: Any, account: Any) -> str:
     identity = {
@@ -152,6 +156,23 @@ def decide_daily_brief_notification(
 
 
 def build_daily_brief_action_id(action: Mapping[str, Any]) -> str:
+    identity = _legacy_action_identity(action)
+    if identity["action_type"] == "open_combo_yield":
+        candidate_pair_id = str(action.get("candidate_pair_id") or "").strip()
+        if not candidate_pair_id:
+            raise ValueError("candidate_pair_id is required for Combo action identity")
+        identity["candidate_pair_id"] = candidate_pair_id
+    return "action-" + _digest(identity)[:24]
+
+
+def _build_legacy_combo_action_id(action: Mapping[str, Any]) -> str:
+    identity = _legacy_action_identity(action)
+    if identity["action_type"] != "open_combo_yield":
+        raise ValueError("legacy Combo action identity requires open_combo_yield")
+    return "action-" + _digest(identity)[:24]
+
+
+def _legacy_action_identity(action: Mapping[str, Any]) -> dict[str, str]:
     identity = {
         field: _normalize_action_identity_value(field, action.get(field))
         for field in _STABLE_ACTION_ID_FIELDS
@@ -160,10 +181,37 @@ def build_daily_brief_action_id(action: Mapping[str, Any]) -> str:
         raise ValueError("action_type is required for daily brief action identity")
     if not identity["account"]:
         raise ValueError("account is required for daily brief action identity")
-    return "action-" + _digest(identity)[:24]
+    return identity
+
+
+def _validate_legacy_hold_action_source(
+    action: Mapping[str, Any],
+    source: Mapping[str, Any],
+) -> None:
+    action_fixed = {
+        key: value
+        for key, value in dict(action).items()
+        if key not in _EVIDENCE_HOLD_MUTABLE_FIELDS
+    }
+    source_fixed = {
+        key: value
+        for key, value in dict(source).items()
+        if key not in _EVIDENCE_HOLD_MUTABLE_FIELDS
+    }
+    if _json_safe(action_fixed) != _json_safe(source_fixed):
+        raise ValueError("evidence hold action differs from its persisted source")
 
 
 def normalize_daily_brief_action(action: Mapping[str, Any]) -> dict[str, Any]:
+    return _normalize_daily_brief_action(action, persisted=False)
+
+
+def _normalize_daily_brief_action(
+    action: Mapping[str, Any],
+    *,
+    persisted: bool,
+    legacy_hold_source: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     src = dict(action or {})
     priority = str(src.get("priority") or "P2").strip().upper()
     if priority not in ACTION_PRIORITIES:
@@ -187,13 +235,76 @@ def normalize_daily_brief_action(action: Mapping[str, Any]) -> dict[str, Any]:
     out["position_lot_id"] = str(src.get("position_lot_id") or "").strip()
     out["strategy_group_id"] = str(src.get("strategy_group_id") or "").strip()
     out["leg_role"] = _lower(src.get("leg_role"))
+    if out["action_type"] == "open_combo_yield":
+        candidate_pair_id = str(src.get("candidate_pair_id") or "").strip()
+        if candidate_pair_id or "candidate_pair_id" in src:
+            out["candidate_pair_id"] = candidate_pair_id
+        else:
+            out.pop("candidate_pair_id", None)
     if out["action_type"] in {"open_candidate", "open_combo_yield"}:
         out["event_risk"] = normalize_candidate_event_risk(src.get("event_risk"))
-    out["action_id"] = build_daily_brief_action_id(out)
+
+    supplied_id = str(src.get("action_id") or "").strip()
+    if legacy_hold_source is not None:
+        _validate_legacy_hold_action_source(src, legacy_hold_source)
+        persisted = True
+    if not persisted or not supplied_id:
+        expected_id = build_daily_brief_action_id(out)
+        if (
+            out["action_type"] == "open_combo_yield"
+            and supplied_id
+            and supplied_id != expected_id
+        ):
+            raise ValueError(
+                f"daily brief action_id mismatch: {supplied_id!r} != {expected_id!r}"
+            )
+        out["action_id"] = expected_id
+        return out
+
+    if out["action_type"] == "open_combo_yield":
+        current_id = (
+            build_daily_brief_action_id(out)
+            if str(out.get("candidate_pair_id") or "").strip()
+            else None
+        )
+        legacy_id = _build_legacy_combo_action_id(out)
+        if supplied_id == current_id:
+            pass
+        elif supplied_id == legacy_id:
+            if "candidate_pair_id" in src:
+                out["candidate_pair_id"] = src["candidate_pair_id"]
+            else:
+                out.pop("candidate_pair_id", None)
+        else:
+            raise ValueError("persisted Combo action_id does not match a supported algorithm")
+    else:
+        expected_id = "action-" + _digest(_legacy_action_identity(out))[:24]
+        if supplied_id != expected_id:
+            raise ValueError(
+                f"persisted daily brief action_id mismatch: {supplied_id!r} != {expected_id!r}"
+            )
+    out["action_id"] = supplied_id
     return out
 
 
 def normalize_daily_decision_brief(payload: Mapping[str, Any]) -> dict[str, Any]:
+    return _normalize_daily_decision_brief(payload, persisted=False)
+
+
+def normalize_persisted_daily_decision_brief(
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate stored action identities while preserving their saved IDs."""
+
+    return _normalize_daily_decision_brief(payload, persisted=True)
+
+
+def _normalize_daily_decision_brief(
+    payload: Mapping[str, Any],
+    *,
+    persisted: bool,
+    legacy_hold_actions: Mapping[str, Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
     src = dict(payload or {})
     schema_version = str(src.get("schema_version") or DAILY_DECISION_BRIEF_SCHEMA_VERSION).strip()
     if schema_version != DAILY_DECISION_BRIEF_SCHEMA_VERSION:
@@ -207,10 +318,21 @@ def normalize_daily_decision_brief(payload: Mapping[str, Any]) -> dict[str, Any]
     if actionability not in ACTIONABILITIES:
         raise ValueError(f"unsupported daily brief actionability: {actionability}")
 
-    normalized_actions = [
-        normalize_daily_brief_action(item)
-        for item in _mapping_list(src.get("actions"), field="actions")
-    ]
+    normalized_actions = []
+    for item in _mapping_list(src.get("actions"), field="actions"):
+        supplied_id = str(item.get("action_id") or "").strip()
+        hold_source = (
+            legacy_hold_actions.get(supplied_id)
+            if supplied_id and legacy_hold_actions is not None
+            else None
+        )
+        normalized_actions.append(
+            _normalize_daily_brief_action(
+                item,
+                persisted=persisted,
+                legacy_hold_source=hold_source,
+            )
+        )
     action_ids: set[str] = set()
     for action in normalized_actions:
         action_id = str(action["action_id"])
@@ -253,6 +375,7 @@ def normalize_daily_decision_brief(payload: Mapping[str, Any]) -> dict[str, Any]
                 market=market,
                 actionability=actionability,
                 actions=normalized_actions,
+                persisted=persisted,
             ),
             "rejections": _mapping(src.get("rejections"), field="rejections"),
             "events": _mapping_list(src.get("events"), field="events"),
@@ -273,7 +396,7 @@ def reconcile_daily_decision_brief_evidence(
 ) -> dict[str, Any]:
     """Carry candidate identity across a run with typed family-level data gaps."""
 
-    prev = normalize_daily_decision_brief(previous)
+    prev = normalize_persisted_daily_decision_brief(previous)
     cur = normalize_daily_decision_brief(current)
     _ensure_same_brief_identity(prev, cur)
     gaps = {
@@ -291,12 +414,19 @@ def reconcile_daily_decision_brief_evidence(
         for action in cur.get("actions") or []
         if isinstance(action, Mapping)
     }
+    aligned_current_to_previous = _align_combo_action_ids(prev, cur)
+    aligned_previous_ids = set(aligned_current_to_previous.values())
     additions: list[dict[str, Any]] = []
+    legacy_hold_actions: dict[str, dict[str, Any]] = {}
     for prior in prev.get("actions") or []:
         if not isinstance(prior, Mapping) or not _is_opening_candidate_action(prior):
             continue
         action_id = str(prior.get("action_id") or "")
-        if not action_id or action_id in current_actions:
+        if (
+            not action_id
+            or action_id in current_actions
+            or action_id in aligned_previous_ids
+        ):
             continue
         active_candidate = (
             prior.get("state") == "active"
@@ -330,11 +460,180 @@ def reconcile_daily_decision_brief_evidence(
             }
         )
         additions.append(held)
+        legacy_hold_actions[action_id] = dict(prior)
     if not additions:
         return cur
     candidate = dict(cur)
     candidate["actions"] = [*cur["actions"], *additions]
-    return normalize_daily_decision_brief(candidate)
+    return _normalize_daily_decision_brief(
+        candidate,
+        persisted=False,
+        legacy_hold_actions=legacy_hold_actions,
+    )
+
+
+def _combo_action_generation(action: Mapping[str, Any]) -> str | None:
+    if _lower(action.get("action_type")) != "open_combo_yield":
+        return None
+    saved_id = str(action.get("action_id") or "").strip()
+    if not saved_id:
+        return None
+    pair_id = str(action.get("candidate_pair_id") or "").strip()
+    if pair_id and saved_id == build_daily_brief_action_id(action):
+        return "current"
+    if saved_id == _build_legacy_combo_action_id(action):
+        return "legacy"
+    return None
+
+
+def _combo_action_legs(action: Mapping[str, Any]) -> tuple[str, str] | None:
+    top_put = _upper(action.get("put_contract_symbol"))
+    top_call = _upper(action.get("call_contract_symbol"))
+    metrics = action.get("metrics")
+    metric_put = _upper(metrics.get("put_contract_symbol")) if isinstance(metrics, Mapping) else ""
+    metric_call = _upper(metrics.get("call_contract_symbol")) if isinstance(metrics, Mapping) else ""
+    if bool(top_put) != bool(top_call) or bool(metric_put) != bool(metric_call):
+        return None
+    if top_put and metric_put and (top_put, top_call) != (metric_put, metric_call):
+        return None
+    legs = (top_put, top_call) if top_put else (metric_put, metric_call)
+    return legs if all(legs) else None
+
+
+def _combo_candidate_pair_claims(
+    brief: Mapping[str, Any],
+    *,
+    symbol: str,
+    legs: tuple[str, str],
+    action_pair_id: str,
+) -> tuple[frozenset[str], bool]:
+    pair_bindings: dict[str, set[tuple[str, str, str]]] = {}
+    for item in brief.get("candidate_index") or []:
+        if not isinstance(item, Mapping) or _lower(item.get("strategy_family")) != "combo_yield":
+            continue
+        representative = item.get("representative")
+        if not isinstance(representative, Mapping):
+            continue
+        pair_id = str(representative.get("candidate_pair_id") or "").strip()
+        if not pair_id:
+            continue
+        rep_symbol = _upper(representative.get("symbol") or item.get("symbol"))
+        rep_legs = (
+            _upper(representative.get("put_contract_symbol")),
+            _upper(representative.get("call_contract_symbol")),
+        )
+        pair_bindings.setdefault(pair_id, set()).add(
+            (rep_symbol, rep_legs[0], rep_legs[1])
+        )
+    target = (symbol, legs[0], legs[1])
+    claims = {
+        pair_id
+        for pair_id, bindings in pair_bindings.items()
+        if target in bindings
+    }
+    relevant = set(claims)
+    if action_pair_id:
+        relevant.add(action_pair_id)
+    valid = len(claims) <= 1 and all(
+        pair_bindings.get(pair_id, {target}) == {target}
+        for pair_id in relevant
+    )
+    return frozenset(claims), valid
+
+
+def _combo_alignment_evidence(
+    brief: Mapping[str, Any],
+    action: Mapping[str, Any],
+) -> tuple[tuple[str, str, str, str, str], str, frozenset[str]] | None:
+    generation = _combo_action_generation(action)
+    legs = _combo_action_legs(action)
+    account = _lower(action.get("account"))
+    market = _upper(brief.get("market"))
+    symbol = _upper(action.get("symbol"))
+    if (
+        generation is None
+        or legs is None
+        or not account
+        or account != _lower(brief.get("account"))
+        or not market
+        or not symbol
+    ):
+        return None
+    pair_id = str(action.get("candidate_pair_id") or "").strip()
+    if generation == "current" and not pair_id:
+        return None
+    claims, valid = _combo_candidate_pair_claims(
+        brief,
+        symbol=symbol,
+        legs=legs,
+        action_pair_id=pair_id,
+    )
+    if not valid:
+        return None
+    combined_claims = set(claims)
+    if pair_id:
+        combined_claims.add(pair_id)
+    if len(combined_claims) > 1:
+        return None
+    return (
+        (account, market, symbol, legs[0], legs[1]),
+        generation,
+        frozenset(combined_claims),
+    )
+
+
+def _align_combo_action_ids(
+    previous: Mapping[str, Any],
+    current: Mapping[str, Any],
+) -> dict[str, str]:
+    previous_actions = {
+        str(item.get("action_id") or ""): item
+        for item in previous.get("actions") or []
+        if isinstance(item, Mapping) and str(item.get("action_id") or "")
+    }
+    current_actions = {
+        str(item.get("action_id") or ""): item
+        for item in current.get("actions") or []
+        if isinstance(item, Mapping) and str(item.get("action_id") or "")
+    }
+    exact_ids = set(previous_actions) & set(current_actions)
+    previous_by_key: dict[
+        tuple[str, str, str, str, str],
+        list[tuple[str, str, frozenset[str]]],
+    ] = {}
+    current_by_key: dict[
+        tuple[str, str, str, str, str],
+        list[tuple[str, str, frozenset[str]]],
+    ] = {}
+    for action_id, action in previous_actions.items():
+        if action_id in exact_ids:
+            continue
+        evidence = _combo_alignment_evidence(previous, action)
+        if evidence is not None:
+            key, generation, claims = evidence
+            previous_by_key.setdefault(key, []).append((action_id, generation, claims))
+    for action_id, action in current_actions.items():
+        if action_id in exact_ids:
+            continue
+        evidence = _combo_alignment_evidence(current, action)
+        if evidence is not None:
+            key, generation, claims = evidence
+            current_by_key.setdefault(key, []).append((action_id, generation, claims))
+
+    aligned: dict[str, str] = {}
+    for key in sorted(set(previous_by_key) & set(current_by_key)):
+        prior_rows = previous_by_key[key]
+        current_rows = current_by_key[key]
+        if len(prior_rows) != 1 or len(current_rows) != 1:
+            continue
+        prior_id, prior_generation, prior_claims = prior_rows[0]
+        current_id, current_generation, current_claims = current_rows[0]
+        if {prior_generation, current_generation} != {"legacy", "current"}:
+            continue
+        if len(set(prior_claims) | set(current_claims)) > 1:
+            continue
+        aligned[current_id] = prior_id
+    return aligned
 
 
 def _normalize_daily_brief_funds(value: Any) -> dict[str, Any]:
@@ -398,13 +697,28 @@ def _normalize_candidate_index(
     market: str,
     actionability: str,
     actions: list[dict[str, Any]],
+    persisted: bool,
 ) -> list[dict[str, Any]]:
     if actionability != "live_actionable":
         if value not in (None, []):
             raise ValueError("candidate_index is only valid for live_actionable briefs")
         return []
     if value is None:
-        return _derive_candidate_index_from_actions(actions, account=account, market=market)
+        derived = _derive_candidate_index_from_actions(
+            actions,
+            account=account,
+            market=market,
+        )
+        if not persisted:
+            for item in derived:
+                if item["strategy_family"] != "combo_yield":
+                    continue
+                _validate_candidate_representative(
+                    item["representative"],
+                    family=str(item["strategy_family"]),
+                    persisted=False,
+                )
+        return derived
     items = _mapping_list(value, field="candidate_index")
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -436,7 +750,11 @@ def _normalize_candidate_index(
             symbol=symbol,
             strategy_family=family_norm,
         )
-        _validate_candidate_representative(representative_view, family=family_norm)
+        _validate_candidate_representative(
+            representative_view,
+            family=family_norm,
+            persisted=persisted,
+        )
         out.append(
             {
                 "identity": identity,
@@ -453,6 +771,7 @@ def _validate_candidate_representative(
     representative: Mapping[str, Any],
     *,
     family: str,
+    persisted: bool,
 ) -> None:
     capacity = representative.get("capacity")
     contracts = capacity.get("contracts_available") if isinstance(capacity, Mapping) else None
@@ -460,7 +779,6 @@ def _validate_candidate_representative(
         raise ValueError("candidate representative capacity must be at least one contract")
     if family == "combo_yield":
         required = (
-            "strategy_group_id",
             "put_contract_symbol",
             "call_contract_symbol",
             "put_expiration",
@@ -472,6 +790,12 @@ def _validate_candidate_representative(
         required = ("contract_symbol", "expiration", "strike")
     if any(representative.get(field) in (None, "") for field in required):
         raise ValueError("candidate representative contract fields are incomplete")
+    if family == "combo_yield" and not str(
+        representative.get("candidate_pair_id")
+        or (representative.get("strategy_group_id") if persisted else "")
+        or ""
+    ).strip():
+        raise ValueError("candidate representative pair identity is incomplete")
 
 
 def _derive_candidate_index_from_actions(
@@ -587,8 +911,8 @@ def diff_daily_decision_briefs(
     previous: Mapping[str, Any],
     current: Mapping[str, Any],
 ) -> dict[str, Any]:
-    prev = normalize_daily_decision_brief(previous)
-    cur = normalize_daily_decision_brief(current)
+    prev = normalize_persisted_daily_decision_brief(previous)
+    cur = normalize_persisted_daily_decision_brief(current)
     _ensure_same_brief_identity(prev, cur)
 
     changes: list[dict[str, Any]] = []
@@ -612,9 +936,14 @@ def diff_daily_decision_briefs(
 
     prev_actions = {str(item["action_id"]): item for item in prev["actions"]}
     cur_actions = {str(item["action_id"]): item for item in cur["actions"]}
+    aligned_current_to_previous = _align_combo_action_ids(prev, cur)
+    aligned_previous_ids = set(aligned_current_to_previous.values())
 
     for action_id, action in sorted(cur_actions.items()):
         prior = prev_actions.get(action_id)
+        if prior is None:
+            prior = prev_actions.get(aligned_current_to_previous.get(action_id, ""))
+        action_id_transition = _action_id_transition(prior, action)
         opening_candidate = _is_opening_candidate_action(action)
         if prior is None:
             if action["priority"] in {"P0", "P1"} and action["state"] == "active":
@@ -626,6 +955,7 @@ def diff_daily_decision_briefs(
                         priority=action["priority"],
                         material=True,
                         action=_action_change_view(action),
+                        **action_id_transition,
                     )
                 )
             continue
@@ -654,6 +984,7 @@ def diff_daily_decision_briefs(
                         priority=action["priority"],
                         material=True,
                         action=_action_change_view(action),
+                        **action_id_transition,
                     )
                 )
             elif prior_was_active_high_priority and current_evidence_unavailable:
@@ -663,6 +994,7 @@ def diff_daily_decision_briefs(
                         priority=prior["priority"],
                         material=True,
                         action=_action_change_view(action),
+                        **action_id_transition,
                     )
                 )
             elif prior_evidence_unavailable and current_evidence_unavailable:
@@ -674,6 +1006,7 @@ def diff_daily_decision_briefs(
                         priority=action["priority"],
                         material=True,
                         action=_action_change_view(action),
+                        **action_id_transition,
                     )
                 )
             elif prior_was_active_high_priority and not current_is_active_high_priority:
@@ -686,6 +1019,7 @@ def diff_daily_decision_briefs(
                             before=prior["priority"],
                             after=action["priority"],
                             action=_action_change_view(action),
+                            **action_id_transition,
                         )
                     )
                 else:
@@ -697,6 +1031,7 @@ def diff_daily_decision_briefs(
                             before=prior["state"],
                             after=action["state"],
                             action=_action_change_view(action),
+                            **action_id_transition,
                         )
                     )
             elif prior_was_active_high_priority and current_is_active_high_priority:
@@ -709,6 +1044,7 @@ def diff_daily_decision_briefs(
                             before=prior["priority"],
                             after=action["priority"],
                             action=_action_change_view(action),
+                            **action_id_transition,
                         )
                     )
                 elif priority_rank[action["priority"]] > priority_rank[prior["priority"]]:
@@ -720,6 +1056,7 @@ def diff_daily_decision_briefs(
                             before=prior["priority"],
                             after=action["priority"],
                             action=_action_change_view(action),
+                            **action_id_transition,
                         )
                     )
                 else:
@@ -738,6 +1075,7 @@ def diff_daily_decision_briefs(
                                 before=before_capacity,
                                 after=after_capacity,
                                 action=_action_change_view(action),
+                                **action_id_transition,
                             )
                         )
             if prior_was_active_high_priority or current_is_active_high_priority:
@@ -754,6 +1092,7 @@ def diff_daily_decision_briefs(
                             action=_action_change_view(action),
                             before_event_risk=transition["before_event_risk"],
                             after_event_risk=transition["after_event_risk"],
+                            **action_id_transition,
                         )
                     )
             continue
@@ -814,7 +1153,7 @@ def diff_daily_decision_briefs(
             )
 
     for action_id, action in sorted(prev_actions.items()):
-        if action_id in cur_actions:
+        if action_id in cur_actions or action_id in aligned_previous_ids:
             continue
         evidence_hold = (
             action["priority"] in {"P0", "P1"}
@@ -868,7 +1207,7 @@ def daily_brief_compatible_digests(brief: Mapping[str, Any]) -> tuple[str, ...]:
     """
 
     source = dict(brief or {})
-    normalized = normalize_daily_decision_brief(brief)
+    normalized = normalize_persisted_daily_decision_brief(brief)
     payload = {
         key: value
         for key, value in normalized.items()
@@ -937,12 +1276,26 @@ def _action_change_view(action: Mapping[str, Any]) -> dict[str, Any]:
             "contract_symbol",
             "position_lot_id",
             "strategy_group_id",
+            "candidate_pair_id",
             "leg_role",
             "title",
             "reason",
         )
         if action.get(key) not in (None, "")
     }
+
+
+def _action_id_transition(
+    previous: Mapping[str, Any] | None,
+    current: Mapping[str, Any],
+) -> dict[str, str]:
+    if previous is None:
+        return {}
+    before_id = str(previous.get("action_id") or "").strip()
+    after_id = str(current.get("action_id") or "").strip()
+    if not before_id or not after_id or before_id == after_id:
+        return {}
+    return {"before_action_id": before_id, "after_action_id": after_id}
 
 
 def _change(change_type: str, *, priority: str, material: bool, **fields: Any) -> dict[str, Any]:
@@ -972,6 +1325,7 @@ def _canonical_change(change: Mapping[str, Any]) -> dict[str, Any]:
                 "contract_symbol",
                 "position_lot_id",
                 "strategy_group_id",
+                "candidate_pair_id",
                 "leg_role",
             )
             if action.get(key) not in (None, "")
@@ -1117,5 +1471,6 @@ __all__ = [
     "effective_daily_brief_actionability",
     "normalize_daily_brief_action",
     "normalize_daily_decision_brief",
+    "normalize_persisted_daily_decision_brief",
     "reconcile_daily_decision_brief_evidence",
 ]

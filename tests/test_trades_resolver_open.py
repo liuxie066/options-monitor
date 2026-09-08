@@ -356,10 +356,13 @@ def test_resolve_trade_open_rejects_duplicate_deal_id() -> None:
     assert result.reason == "duplicate_deal_id"
 
 
-def test_resolve_trade_skips_non_option_deal() -> None:
+def test_resolve_trade_skips_non_option_deal(tmp_path: Path) -> None:
+    repo = ledger_repository.SQLiteOptionPositionsRepository(
+        tmp_path / "option_positions.sqlite3"
+    )
     result = resolve_trade_deal(
         _deal(symbol="TIGR", option_type=None, strike=None, expiration_ymd=None, multiplier=None),
-        repo=FakeRepo(),
+        repo=repo,
         state={},
         apply_changes=True,
     )
@@ -368,6 +371,9 @@ def test_resolve_trade_skips_non_option_deal() -> None:
     assert result.action is None
     assert result.reason == "not_option_deal"
     assert result.operations == []
+    assert repo.list_trade_events() == []
+    assert repo.list_assigned_stock_events() == []
+    assert repo.list_position_lots() == []
 
 
 def test_resolve_trade_skips_non_option_deal_before_account_mapping() -> None:

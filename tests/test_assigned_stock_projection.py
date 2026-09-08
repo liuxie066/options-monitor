@@ -4,6 +4,8 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from domain.domain.assigned_stock import (
     _option_fee_fact,
     _stock_fee_fact,
@@ -59,6 +61,7 @@ def _base_projection(
     extra_option_lots: list[dict[str, Any]] | None = None,
     extra_allocations: list[dict[str, Any]] | None = None,
     assignment_payload: dict[str, Any] | None = None,
+    stock_contracts: int = 1,
 ) -> dict[str, Any]:
     opened_at = _ms("2026-04-03T10:00:00")
     assigned_at = _ms("2026-05-01T10:00:00")
@@ -88,13 +91,15 @@ def _base_projection(
             "fee_provenance": {"basis": "actual", "source": "test"},
             "stock_settlement": {
                 "side": "buy",
-                "shares": 100,
+                "shares": 100 * stock_contracts,
                 "price": 100,
                 "fees": 0,
                 "fee_provenance": {"basis": "actual", "source": "test"},
             },
         },
     )
+    open_put["contracts"] = stock_contracts
+    assignment["contracts"] = stock_contracts
     open_put["currency"] = assignment_currency
     assignment["currency"] = assignment_currency
     trade_events = [open_put, assignment, *(extra_events or [])]
@@ -109,7 +114,7 @@ def _base_projection(
             "option_type": "put",
             "position_side": "short",
             "currency": assignment_currency,
-            "contracts": 1,
+            "contracts": stock_contracts,
             "remaining": 0,
             "price": 2.5,
             "multiplier": 100,
@@ -124,9 +129,9 @@ def _base_projection(
             "open_event_id": "open-put",
             "source_record_id": "lot-put",
             "close_type": "assignment",
-            "contracts_closed": 1,
-            "realized_pnl_gross": 250,
-            "realized_pnl_net": 250,
+            "contracts_closed": stock_contracts,
+            "realized_pnl_gross": 250 * stock_contracts,
+            "realized_pnl_net": 250 * stock_contracts,
             "closed_at": assigned_at,
         },
         *(extra_allocations or []),
@@ -501,3 +506,99 @@ def test_hk_expired_worthless_option_leg_requires_persisted_fee_evidence() -> No
     assert fact["basis"] == "missing"
     assert fact["amount"] == 0.0
     assert fact["reason"] == "canonical_option_fee_evidence_unavailable"
+
+
+@pytest.mark.parametrize("reuse", [False, True], ids=["sell-released-shares", "reuse-for-call"])
+@pytest.mark.parametrize("delay_ms", [0, 1], ids=["same-instant", "later"])
+def test_partial_call_close_releases_only_closed_coverage(reuse: bool, delay_ms: int) -> None:
+    opened_at = _ms("2026-05-05T10:00:00")
+    closed_at = _ms("2026-05-20T10:00:00")
+    cutoff = _ms("2026-06-30T16:00:00")
+    stock_lot_id = "assigned-stock-assign-put"
+    call = _event(
+        "call-a", option_type="call", side="sell", position_effect="open",
+        at="2026-05-05T10:00:00", price=2, strike=110,
+        raw_payload={"stock_lot_id": stock_lot_id, "fee_provenance": {"basis": "actual", "source": "test"}},
+    )
+    call.update(contracts=2, fees=2)
+    close = _event(
+        "close-a", option_type="call", side="buy", position_effect="close",
+        at="2026-05-20T10:00:00", price=1, strike=110,
+    )
+    close["fees"] = 1
+    lot = {
+        "record_id": "lot-call-a", "open_event_id": "call-a", "opened_at": opened_at,
+        "account": "lx", "broker": "富途", "symbol": "NVDA", "option_type": "call",
+        "position_side": "short", "currency": "USD", "contracts": 2, "remaining": 1,
+        "price": 2, "multiplier": 100, "strike": 110, "expiration_ymd": "2026-08-21",
+        "unrealized_pnl_gross": 25,
+    }
+    events, lots, sales = [call, close], [lot], []
+    if reuse:
+        next_call = dict(call, event_id="call-b", trade_time_ms=closed_at + delay_ms, contracts=1, fees=1)
+        events.append(next_call)
+        lots.append(dict(lot, record_id="lot-call-b", open_event_id="call-b",
+                         opened_at=closed_at + delay_ms, contracts=1, unrealized_pnl_gross=5))
+    else:
+        sales.append({
+            "event_type": "sale", "stock_event_id": "sale-released", "target_stock_lot_id": stock_lot_id,
+            "account": "lx", "broker": "富途", "symbol": "NVDA", "currency": "USD",
+            "side": "sell", "shares": 100, "price": 105, "fees": 0,
+            "fee_provenance": {"basis": "actual", "source": "test"}, "trade_time_ms": closed_at + delay_ms,
+        })
+    for event in events:
+        event.update(
+            event_time_ms=event["trade_time_ms"], source="test",
+            contract_key={
+                "broker": "富途", "account": "lx", "underlying_symbol": "NVDA",
+                "option_type": "call", "position_side": "short", "strike": 110,
+                "expiration_ymd": "2026-08-21",
+            },
+        )
+    report = _base_projection(
+        stock_contracts=2, extra_events=events, extra_option_lots=lots, assigned_stock_events=sales,
+        extra_allocations=[{
+            "event_id": "close-a", "open_event_id": "call-a", "source_record_id": "lot-call-a",
+            "close_type": "BUY_BACK", "contracts_closed": 1, "realized_pnl_gross": 100,
+            "realized_pnl_net": 99, "closed_at": closed_at,
+        }],
+    )
+    assert not any(row["status"] == "covered_call_unallocated" for row in report["assigned_stock_review_rows"])
+    allocations = report["covered_call_allocations"]
+    assert [(row["shares"], row["end_at_ms"]) for row in allocations if row["open_event_id"] == "call-a"] == [
+        (100, closed_at), (100, cutoff + 1),
+    ]
+    assert sum(row["shares"] for row in allocations if row["start_at_ms"] <= cutoff < row["end_at_ms"]) == (200 if reuse else 100)
+    stock = report["assigned_stock_lots"][0]
+    assert stock["shares_remaining"] == (200 if reuse else 100)
+    assert stock["covered_call_pnl"] == (130 if reuse else 125)
+    assert stock["covered_call_realized_pnl"] == 100
+    assert stock["fees_used"] == (4 if reuse else 3)
+
+
+def test_failed_partial_call_allocation_does_not_publish_earlier_interval() -> None:
+    call = _event(
+        "call-a", option_type="call", side="sell", position_effect="open",
+        at="2026-05-05T10:00:00", price=2, strike=110,
+        raw_payload={"stock_lot_id": "assigned-stock-assign-put", "fee_provenance": {"basis": "actual", "source": "test"}},
+    )
+    call["contracts"] = 2
+    lot = {
+        "record_id": "lot-a", "open_event_id": "call-a", "opened_at": call["trade_time_ms"],
+        "account": "lx", "broker": "富途", "symbol": "NVDA", "option_type": "call",
+        "position_side": "short", "currency": "USD", "contracts": 2, "remaining": 1,
+        "price": 2, "multiplier": 100, "strike": 110, "unrealized_pnl_gross": 50,
+    }
+    next_call = dict(call, event_id="call-b", contracts=1, trade_time_ms=call["trade_time_ms"] + 1)
+    next_lot = dict(lot, record_id="lot-b", open_event_id="call-b", contracts=1, opened_at=next_call["trade_time_ms"])
+    report = _base_projection(
+        extra_events=[call, next_call], extra_option_lots=[lot, next_lot],
+        extra_allocations=[{
+            "event_id": "close-a", "open_event_id": "call-a", "source_record_id": "lot-a",
+            "close_type": "BUY_BACK", "contracts_closed": 1, "closed_at": _ms("2026-05-20T10:00:00"),
+            "realized_pnl_gross": 100, "realized_pnl_net": 100,
+        }],
+    )
+    assert {row["open_event_id"] for row in report["covered_call_allocations"]} == {"call-b"}
+    assert report["assigned_stock_lots"][0]["covered_call_pnl"] == 50
+    assert [row["event_id"] for row in report["assigned_stock_review_rows"] if row["status"] == "covered_call_unallocated"] == ["call-a"]

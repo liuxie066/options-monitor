@@ -150,6 +150,9 @@ class RiskPositionView:
             "strategy": _text_or_none(self.fields.get("strategy")),
             "leg_role": _text_or_none(self.fields.get("leg_role")),
             "strategy_group_id": _text_or_none(self.fields.get("strategy_group_id")),
+            "source_stock_lot_id": _text_or_none(
+                self.fields.get("source_stock_lot_id")
+            ),
             "yield_enhancement_mode": _text_or_none(self.fields.get("yield_enhancement_mode")),
             "strategy_snapshot": (
                 dict(self.fields["strategy_snapshot"])

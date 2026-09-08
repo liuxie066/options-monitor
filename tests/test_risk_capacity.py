@@ -8,6 +8,7 @@ from domain.domain.risk_capacity import (
     compute_sell_put_effective_cash,
     compute_short_call_locked_shares,
     compute_short_put_cash_secured,
+    withdraw_opening_share_capacity_grants,
 )
 
 
@@ -49,6 +50,81 @@ def test_opening_share_capacity_prioritizes_wheel_and_grants_whole_contracts() -
     assert allocations[0]["allocation_reason"] == "share_capacity_partially_supported"
     assert allocations[1]["granted_contracts"] == 1
     assert allocations[1]["capacity_before"] == 200
+
+
+def test_withdraw_opening_share_capacity_grant_replays_real_order_without_regrant() -> None:
+    allocations = allocate_opening_share_capacity(
+        [
+            {
+                "account": "lx",
+                "symbol": "NVDA",
+                "status": "available",
+                "shares_eligible": 300,
+                "shares_locked": 0,
+                "shares_reserved": 100,
+            }
+        ],
+        [
+            {
+                "claim_id": "covered_call:NVDA",
+                "strategy_family": "covered_call",
+                "account": "lx",
+                "symbol": "NVDA",
+                "requested_contracts": 1,
+                "multiplier": 100,
+            },
+            {
+                "claim_id": "wheel:late",
+                "strategy_family": "wheel",
+                "account": "lx",
+                "symbol": "NVDA",
+                "stock_lot_id": "late",
+                "assignment_at_ms": 2,
+                "requested_contracts": 1,
+                "multiplier": 100,
+            },
+            {
+                "claim_id": "wheel:early",
+                "strategy_family": "wheel",
+                "account": "lx",
+                "symbol": "NVDA",
+                "stock_lot_id": "early",
+                "assignment_at_ms": 1,
+                "requested_contracts": 1,
+                "multiplier": 100,
+            },
+        ],
+    )
+
+    withdrawn = withdraw_opening_share_capacity_grants(
+        allocations,
+        {"wheel:early"},
+    )
+    by_claim = {row["claim_id"]: row for row in withdrawn}
+
+    assert [row["claim_id"] for row in withdrawn] == [
+        "covered_call:NVDA",
+        "wheel:late",
+        "wheel:early",
+    ]
+    assert (
+        by_claim["wheel:early"]["granted_contracts"],
+        by_claim["wheel:early"]["capacity_before"],
+        by_claim["wheel:early"]["capacity_after"],
+    ) == (0, 200, 200)
+    assert (
+        by_claim["wheel:late"]["granted_contracts"],
+        by_claim["wheel:late"]["capacity_before"],
+        by_claim["wheel:late"]["capacity_after"],
+    ) == (1, 200, 100)
+    assert (
+        by_claim["covered_call:NVDA"]["granted_contracts"],
+        by_claim["covered_call:NVDA"]["capacity_before"],
+        by_claim["covered_call:NVDA"]["capacity_after"],
+    ) == (0, 100, 100)
+    assert by_claim["wheel:early"]["allocation_reason"] == (
+        "wheel_capacity_grant_candidate_rejected"
+    )
 
 
 def test_opening_share_capacity_fails_closed_when_existing_coverage_is_excessive() -> None:

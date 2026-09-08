@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from domain.domain.lifecycle_allocation import validate_stock_settlement_allocation_group
+
 from .writer_common import (
     Any,
     LifecycleAttemptAuditEnvelope,
@@ -500,6 +502,25 @@ def apply_lifecycle_allocation_atomically(
             [item.event_id for item in projection_rows],
             conn=conn,
         )
+        settlement_rows = [
+            event
+            for event in event_rows
+            if event.event_type in {"assignment", "exercise"}
+        ]
+        if settlement_rows:
+            incoming_settlement_source = validate_stock_settlement_allocation_group(
+                settlement_rows
+            )
+            existing_settlement_source = validate_stock_settlement_allocation_group(
+                [
+                    _canonical_storage_event(existing_by_id[event.event_id])
+                    if event.event_id in existing_by_id
+                    else event
+                    for event in settlement_rows
+                ]
+            )
+            if existing_settlement_source != incoming_settlement_source:
+                raise ValueError("lifecycle stock settlement replay source conflicts")
         observed_at_ms = utc_now_ms()
         projection_rows = _prepare_fee_evidence_for_storage(
             projection_rows,
@@ -523,6 +544,20 @@ def apply_lifecycle_allocation_atomically(
             conn=conn,
             mode="forced_full",
         )
+        if settlement_rows:
+            stored_by_id = _trade_events_by_id(
+                sqlite_repo,
+                [event.event_id for event in settlement_rows],
+                conn=conn,
+            )
+            stored_settlement_source = validate_stock_settlement_allocation_group(
+                [
+                    _canonical_storage_event(stored_by_id[event.event_id])
+                    for event in settlement_rows
+                ]
+            )
+            if stored_settlement_source != incoming_settlement_source:
+                raise ValueError("stored lifecycle stock settlement source conflicts")
         correction_count = len(correction_void_rows)
         correction_void_created = list(runtime.created_flags[:correction_count])
         terminal_event_created = list(runtime.created_flags[correction_count:])

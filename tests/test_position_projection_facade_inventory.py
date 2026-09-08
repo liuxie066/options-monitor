@@ -132,6 +132,11 @@ def test_projection_runtime_facade_modes_are_fully_inventoried() -> None:
             ): 1,
             (
                 "src/application/ledger/interventions.py",
+                "persist_manual_void_event>_run",
+                "'forced_full'",
+            ): 1,
+            (
+                "src/application/ledger/interventions.py",
                 "persist_manual_repair_event>_run",
                 "'forced_full'",
             ): 1,

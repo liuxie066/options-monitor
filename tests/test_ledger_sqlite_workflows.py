@@ -2347,12 +2347,141 @@ def test_lifecycle_close_rejects_resolution_quantity_mismatch_before_write(tmp_p
     assert [item for item in repo.list_trade_events() if item.get("event_type") == "expire_close"] == []
 
 
-def test_multi_lot_lifecycle_close_rolls_back_all_events_on_second_write_failure(
+def test_stock_settlement_allocator_conserves_fees_and_provenance_per_evidence() -> None:
+    from domain.domain.lifecycle_allocation import (
+        allocate_stock_settlement,
+        validate_stock_settlement_allocation_group,
+    )
+
+    source = {
+        "side": "buy",
+        "shares": 300,
+        "price": 100.0,
+        "fees": 0.0,
+        "fee_provenance": {
+            "basis": "estimated",
+            "amount": 0.7,
+            "source": "frozen_schedule",
+            "reason": "actual_fee_unavailable",
+        },
+    }
+    allocated = allocate_stock_settlement(
+        source,
+        [
+            {"target_lot_id": "lot-b", "contracts_allocated": 1, "multiplier": 100},
+            {"target_lot_id": "lot-a", "contracts_allocated": 2, "multiplier": 100},
+        ],
+    )
+
+    assert allocated["lot-a"]["shares"] == 200
+    assert allocated["lot-b"]["shares"] == 100
+    assert sum(Decimal(str(item["fees"])) for item in allocated.values()) == Decimal("0")
+    assert sum(
+        Decimal(str(item["fee_provenance"]["amount"]))
+        for item in allocated.values()
+    ) == Decimal("0.7")
+    assert {
+        (item["fee_provenance"]["basis"], item["fee_provenance"]["source"], item["fee_provenance"]["reason"])
+        for item in allocated.values()
+    } == {("estimated", "frozen_schedule", "actual_fee_unavailable")}
+    assert source["fees"] == 0.0
+    assert source["fee_provenance"]["amount"] == 0.7
+
+    actual_source = {
+        **source,
+        "fees": 1.0,
+        "fee_provenance": {
+            "basis": "actual",
+            "amount": 1.0,
+            "source": "broker",
+            "reason": "broker_reported",
+        },
+    }
+    actual_allocated = allocate_stock_settlement(
+        actual_source,
+        [
+            {"target_lot_id": "lot-b", "contracts_allocated": 1, "multiplier": 100},
+            {"target_lot_id": "lot-a", "contracts_allocated": 2, "multiplier": 100},
+        ],
+    )
+    assert sum(Decimal(str(item["fees"])) for item in actual_allocated.values()) == Decimal("1.0")
+    assert sum(
+        Decimal(str(item["fee_provenance"]["amount"]))
+        for item in actual_allocated.values()
+    ) == Decimal("1.0")
+
+    dust = allocate_stock_settlement(
+        {"side": "buy", "shares": 400, "price": 100.0, "fees": "0.000002"},
+        [
+            {"target_lot_id": f"lot-{index}", "contracts_allocated": 1, "multiplier": 100}
+            for index in range(4)
+        ],
+    )
+    dust_fees = [Decimal(str(item["fees"])) for item in dust.values()]
+    assert dust_fees == [Decimal("0.000001"), Decimal("0.000001"), Decimal("0"), Decimal("0")]
+    assert all(amount >= 0 for amount in dust_fees)
+    assert sum(dust_fees) == Decimal("0.000002")
+
+    def terminal_event(evidence_id: str, lot_id: str, contracts: int) -> TradeEvent:
+        return TradeEvent(
+            event_id=f"terminal-{evidence_id}-{lot_id}",
+            event_type="assignment",
+            event_time_ms=2000,
+            contract_key=ContractKey.from_values(
+                broker="富途",
+                account="lx",
+                underlying_symbol="NVDA",
+                option_type="put",
+                position_side="short",
+                strike=100,
+                expiration_ymd="2026-06-19",
+            ),
+            contracts=contracts,
+            price=0,
+            currency="USD",
+            source="test",
+            multiplier=100,
+            target_lot_id=lot_id,
+            raw_payload={
+                "target_lot_id": lot_id,
+                "case_id": "case-1",
+                "evidence_id": evidence_id,
+                "stock_settlement_source": source,
+                "stock_settlement": allocated[lot_id],
+            },
+        )
+
+    first_evidence = [terminal_event("evidence-1", "lot-a", 2), terminal_event("evidence-1", "lot-b", 1)]
+    assert validate_stock_settlement_allocation_group(first_evidence) == source
+    second_evidence = [terminal_event("evidence-2", "lot-a", 2), terminal_event("evidence-2", "lot-b", 1)]
+    assert validate_stock_settlement_allocation_group(second_evidence) == source
+    with pytest.raises(ValueError, match="context conflicts"):
+        validate_stock_settlement_allocation_group([first_evidence[0], second_evidence[1]])
+    old = TradeEvent.from_dict(first_evidence[0].to_dict())
+    old.raw_payload.pop("stock_settlement_source")
+    with pytest.raises(ValueError, match="mixes old and new"):
+        validate_stock_settlement_allocation_group([old, first_evidence[1]])
+    old_group = [TradeEvent.from_dict(item.to_dict()) for item in first_evidence]
+    for item in old_group:
+        item.raw_payload.pop("stock_settlement_source")
+        item.raw_payload["stock_settlement"] = source
+    assert validate_stock_settlement_allocation_group(old_group) == source
+    for item in old_group:
+        item.raw_payload["stock_settlement"] = {**source, "shares": 400}
+    with pytest.raises(ValueError, match="allocated stock shares"):
+        validate_stock_settlement_allocation_group(old_group)
+    for item in old_group:
+        item.raw_payload["stock_settlement"] = {}
+    with pytest.raises(ValueError, match="non-empty"):
+        validate_stock_settlement_allocation_group(old_group)
+
+
+def test_multi_lot_assignment_rolls_back_all_settlement_events_on_second_write_failure(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     from domain.domain.option_position_lots import OpenPositionCommand
-    from src.application.ledger.lifecycle import persist_expire_close_events
+    from src.application.ledger.lifecycle import persist_assignment_events
     from src.application.ledger.lot_resolver import (
         LotCloseSelector,
         resolve_fifo_close_targets,
@@ -2398,7 +2527,7 @@ def test_multi_lot_lifecycle_close_rolls_back_all_events_on_second_write_failure
 
     def _fail_second_close(event, *, conn=None):
         nonlocal close_write_count
-        if str(getattr(event, "event_type", "")) == "expire_close":
+        if str(getattr(event, "event_type", "")) == "assignment":
             close_write_count += 1
             if close_write_count == 2:
                 raise RuntimeError("injected lifecycle split failure")
@@ -2407,18 +2536,31 @@ def test_multi_lot_lifecycle_close_rolls_back_all_events_on_second_write_failure
     monkeypatch.setattr(repo, "upsert_trade_event", _fail_second_close)
 
     with pytest.raises(RuntimeError, match="injected lifecycle split failure"):
-        persist_expire_close_events(
+        persist_assignment_events(
             repo,
             close_target_resolution=resolution,
             contracts_to_close=2,
             event_time_ms=2000,
             case_id="case-atomic",
+            evidence_ids=["evidence-atomic"],
+            stock_settlement={
+                "side": "buy",
+                "shares": 200,
+                "price": 100.0,
+                "fees": 1.0,
+                "fee_provenance": {
+                    "basis": "actual",
+                    "amount": 1.0,
+                    "source": "broker",
+                    "reason": "broker_reported",
+                },
+            },
         )
 
     assert [
         item
         for item in repo.list_trade_events()
-        if item.get("event_type") == "expire_close"
+        if item.get("event_type") == "assignment"
     ] == []
     assert [
         item["fields"]["contracts_open"]
@@ -3692,6 +3834,103 @@ def test_manual_assignment_request_retry_returns_original_result_after_lot_close
     assert repair.repair_event["event_type"] == "assignment"
     with pytest.raises(ValueError, match="manual request conflict"):
         record_manual_assignment(repo, **(kwargs | {"stock_qty": 200}))
+
+
+@pytest.mark.parametrize(
+    ("terminal_type", "option_type", "position_side", "stock_side"),
+    [
+        ("assignment", "put", "short", "buy"),
+        ("exercise", "call", "long", "buy"),
+    ],
+)
+def test_manual_multi_lot_terminal_persists_conserved_settlement_and_replays_source(
+    tmp_path: Path,
+    terminal_type: str,
+    option_type: str,
+    position_side: str,
+    stock_side: str,
+) -> None:
+    from domain.domain.option_position_lots import OpenPositionCommand
+    from src.application.ledger.commands import (
+        preview_manual_assignment,
+        preview_manual_exercise,
+        record_manual_assignment,
+        record_manual_exercise,
+    )
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    for opened_at_ms in (1000, 1100):
+        ledger_manual_trades.persist_manual_open_event(
+            repo,
+            OpenPositionCommand(
+                broker="富途",
+                account="lx",
+                symbol="TIGR",
+                option_type=option_type,
+                side=position_side,
+                contracts=1,
+                currency="USD",
+                strike=6.0,
+                multiplier=100,
+                expiration_ymd="2026-08-21",
+                premium_per_share=0.2,
+                opened_at_ms=opened_at_ms,
+            ),
+        )
+    kwargs = {
+        "record_id": None,
+        "broker": "富途",
+        "account": "lx",
+        "symbol": "TIGR",
+        "option_type": option_type,
+        "position_side": position_side,
+        "strike": 6.0,
+        "expiration_ymd": "2026-08-21",
+        "contracts_to_close": 2,
+        "stock_side": stock_side,
+        "stock_qty": 200,
+        "stock_price": 6.0,
+        "as_of_ms": 2000,
+        "request_id": f"manual-{terminal_type}-multi-lot",
+    }
+
+    preview_fn = (
+        preview_manual_assignment if terminal_type == "assignment" else preview_manual_exercise
+    )
+    record_fn = record_manual_assignment if terminal_type == "assignment" else record_manual_exercise
+    preview = preview_fn(repo, **kwargs)
+    assert preview["stock_settlement"]["shares"] == 200
+    assert {
+        operation["stock_settlement"]["shares"]
+        for operation in preview["operations"]
+    } == {100}
+    assert {
+        operation["stock_settlement_source"]["shares"]
+        for operation in preview["operations"]
+    } == {200}
+
+    first = record_fn(repo, **kwargs)
+    event_ids = {
+        row["event_id"]
+        for row in repo.list_trade_events()
+        if row.get("event_type") == terminal_type
+    }
+    replay = record_fn(repo, **kwargs)
+    events = [
+        row for row in repo.list_trade_events() if row.get("event_type") == terminal_type
+    ]
+
+    assert first["stock_settlement"]["shares"] == 200
+    assert replay["stock_settlement"]["shares"] == 200
+    assert replay["idempotent_duplicate"] is True
+    assert len(events) == 2
+    assert {row["event_id"] for row in events} == event_ids
+    assert sum(int(row["raw_payload"]["stock_settlement"]["shares"]) for row in events) == 200
+    assert {row["raw_payload"]["stock_settlement"]["shares"] for row in events} == {100}
+    assert {
+        row["raw_payload"]["stock_settlement_source"]["shares"] for row in events
+    } == {200}
+    assert len(repo.list_trade_events()) == 4
 
 
 def test_trade_event_repair_recovers_assignment_type_from_lifecycle_payload() -> None:

@@ -476,6 +476,20 @@ def compute_short_put_cash_secured(
     return max(0.0, float(cash_secured))
 
 
+def _opening_share_capacity_order(rows: list[dict[str, Any]]) -> list[int]:
+    return sorted(
+        range(len(rows)),
+        key=lambda index: (
+            0
+            if str(rows[index].get("strategy_family") or "").lower() == "wheel"
+            else 1,
+            _to_float(rows[index].get("assignment_at_ms")) or 0.0,
+            str(rows[index].get("stock_lot_id") or ""),
+            index,
+        ),
+    )
+
+
 def allocate_opening_share_capacity(
     coverage_facts: list[dict[str, Any]],
     claims: list[dict[str, Any]],
@@ -509,7 +523,6 @@ def allocate_opening_share_capacity(
         claim_id = str(row.get("claim_id") or "").strip()
         multiplier = _positive_exact_int(row.get("multiplier"))
         requested = _positive_exact_int(row.get("requested_contracts"))
-        assignment_at = _to_float(row.get("assignment_at_ms")) or 0.0
         if not account or not symbol or not claim_id or not multiplier or not requested:
             invalid_indexes.add(index)
         claim_indexes.setdefault(claim_id, []).append(index)
@@ -519,7 +532,6 @@ def allocate_opening_share_capacity(
                 "key": (account, symbol),
                 "multiplier": multiplier,
                 "requested": requested,
-                "assignment_at": assignment_at,
             }
         )
     for claim_id, indexes in claim_indexes.items():
@@ -531,20 +543,12 @@ def allocate_opening_share_capacity(
         if all(prepared[index]["key"])
     }
 
-    indexed = list(enumerate(prepared))
-    indexed.sort(
-        key=lambda item: (
-            0
-            if str(item[1]["row"].get("strategy_family") or "").lower() == "wheel"
-            else 1,
-            item[1]["assignment_at"],
-            str(item[1]["row"].get("stock_lot_id") or ""),
-            item[0],
-        )
-    )
     remaining: dict[tuple[str, str], int] = {}
     out_by_index: dict[int, dict[str, Any]] = {}
-    for index, prepared_claim in indexed:
+    for index in _opening_share_capacity_order(
+        [dict(item["row"]) for item in prepared]
+    ):
+        prepared_claim = prepared[index]
         row = dict(prepared_claim["row"])
         key = prepared_claim["key"]
         fact = facts.get(key)
@@ -611,6 +615,54 @@ def allocate_opening_share_capacity(
         )
         out_by_index[index] = result
     return [out_by_index[index] for index in range(len(claims))]
+
+
+def withdraw_opening_share_capacity_grants(
+    allocations: list[dict[str, Any]],
+    rejected_claim_ids: set[str],
+) -> list[dict[str, Any]]:
+    """Withdraw rejected grants without reallocating their released capacity."""
+    rows = [dict(item) for item in allocations]
+    rejected = {str(item or "").strip() for item in rejected_claim_ids if str(item or "").strip()}
+    affected_pools = {
+        (
+            str(row.get("account") or "").strip().lower(),
+            str(row.get("symbol") or "").strip().upper(),
+        )
+        for row in rows
+        if str(row.get("claim_id") or "").strip() in rejected
+        and int(row.get("granted_contracts") or 0) > 0
+    }
+    remaining: dict[tuple[str, str], int] = {}
+    for index in _opening_share_capacity_order(rows):
+        row = rows[index]
+        pool = (
+            str(row.get("account") or "").strip().lower(),
+            str(row.get("symbol") or "").strip().upper(),
+        )
+        if pool not in affected_pools or row.get("capacity_before") is None:
+            continue
+        before = remaining.setdefault(pool, int(row["capacity_before"]))
+        claim_id = str(row.get("claim_id") or "").strip()
+        granted = 0 if claim_id in rejected else int(row.get("granted_contracts") or 0)
+        multiplier = int(row.get("multiplier") or 0)
+        granted_shares = granted * multiplier
+        after = before - granted_shares
+        if min(before, granted, multiplier, granted_shares, after) < 0:
+            raise ValueError("opening share capacity withdrawal is invalid")
+        row.update(
+            granted_contracts=granted,
+            granted_shares=granted_shares,
+            capacity_before=before,
+            capacity_after=after,
+        )
+        if claim_id in rejected:
+            row.update(
+                allocation_status="blocked",
+                allocation_reason="wheel_capacity_grant_candidate_rejected",
+            )
+        remaining[pool] = after
+    return rows
 
 
 def allocate_portfolio_capacity_shadow(ranked_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
