@@ -1600,7 +1600,12 @@ def test_listener_core_owns_one_durable_attempt(tmp_path, monkeypatch, failure):
     monkeypatch.setattr(auto_intake, "OpenDTradePushListener", Listener)
     monkeypatch.setattr(auto_intake, "OpenDHistoryDealClient", History)
     monkeypatch.setattr(auto_intake, "append_lifecycle_attempt_checkpoint_seal", lambda *_, **__: None)
-    monkeypatch.setattr(auto_intake, "reconcile_due_lifecycle_cases_for_source", lambda *_, **__: {})
+    reconciled_sources = []
+    monkeypatch.setattr(
+        auto_intake,
+        "reconcile_due_lifecycle_cases_for_source",
+        lambda *_, **kwargs: (reconciled_sources.append(kwargs["source"]) or {}),
+    )
     monkeypatch.setattr(auto_intake, "enrich_trade_push_payload_with_account_id", lambda raw, **_: raw)
     monkeypatch.setattr("src.application.trades.normalizer.resolve_multiplier_with_source_and_diagnostics",
                         lambda **_: (None, None, {}))
@@ -1617,7 +1622,12 @@ def test_listener_core_owns_one_durable_attempt(tmp_path, monkeypatch, failure):
         runtime_root_source="test", intake_cfg={"mode": "apply", "enabled": True}, apply_changes=True,
         receipt_callback=lambda _: {}, process_lock=threading.RLock(), stop_event=stop,
     ) == 0
-    rows = list_retryable_trade_payloads(resolve_execution_inbox_path(repo, source["inbox_path"]), retry_delay_sec=0)
+    authoritative = resolve_execution_inbox_path(repo, source["inbox_path"])
+    assert reconciled_sources and reconciled_sources[0]["inbox_path"] == authoritative
+    status = json.loads(Path(source["status_path"]).read_text(encoding="utf-8"))
+    assert status["inbox_path"] == str(authoritative)
+    assert status["inbox"]["path"] == str(authoritative)
+    rows = list_retryable_trade_payloads(authoritative, retry_delay_sec=0)
     assert len(rows) == 1
     assert rows[0]["attempt_count"] == 1
     evidence = read_trade_source_evidence(
