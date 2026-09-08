@@ -1,0 +1,44 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.4.12",
+  "base": {
+    "tag": "v3.4.11",
+    "commit": "54571e7fe95526b40d6d3dc0ccb9cd20522da7ee"
+  },
+  "reviewed_head": "e8f305d00571bf4c918e4ba71b1c294f8b730801",
+  "commits": [
+    {
+      "sha": "a5453bbcfd57a788ea413c20e27ac93cecc13d21",
+      "subject": "fix(quality): keep public OpenD source snapshots schema-compatible"
+    },
+    {
+      "sha": "e8f305d00571bf4c918e4ba71b1c294f8b730801",
+      "subject": "Merge pull request #254 from liuxie066/codex/quality-source-snapshot-hotfix"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Kept public OpenD quality source snapshots limited to the stable schema, preventing internal fields from leaking into quality evidence (PR #254).",
+      "commits": [
+        "a5453bbcfd57a788ea413c20e27ac93cecc13d21",
+        "e8f305d00571bf4c918e4ba71b1c294f8b730801"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "a5453bbcfd57a788ea413c20e27ac93cecc13d21",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/254"
+      ]
+    },
+    {
+      "commit": "e8f305d00571bf4c918e4ba71b1c294f8b730801",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/254"
+      ]
+    }
+  ]
+}
