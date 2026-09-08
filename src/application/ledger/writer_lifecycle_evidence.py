@@ -1,8 +1,20 @@
 from __future__ import annotations
 
+from collections import Counter
+
 from src.application.cash_conversion import (
     attach_assigned_stock_sale_cash_conversions,
     load_cash_fx_payload,
+)
+from src.application.ledger.assigned_stock_projection import (
+    project_assigned_stock_lifecycle_from_rows,
+)
+from src.application.ledger.current_decision_assigned_stock import (
+    compact_assigned_stock_view,
+)
+from src.application.ledger.external_event_key import execution_identity_from_input
+from src.application.ledger.writer_trade_events import (
+    _enrich_execution_order_identity,
 )
 
 from .writer_common import (
@@ -68,108 +80,434 @@ from .writer_lifecycle_support import (
     _validate_existing_zero_price_evidence,
 )
 
+
+def _assigned_stock_final_cutoff_ms(
+    rows: dict[str, Any],
+    *,
+    trade_time_ms: int,
+) -> int:
+    cutoff = int(trade_time_ms)
+    for key in ("trade_events", "account_assigned_stock_events"):
+        for row in rows.get(key) or []:
+            if not isinstance(row, dict):
+                continue
+            for field in ("event_time_ms", "trade_time_ms"):
+                try:
+                    cutoff = max(cutoff, int(row.get(field) or 0))
+                except (TypeError, ValueError):
+                    continue
+    return cutoff
+
+
+def _assigned_stock_sale_ids(
+    report: dict[str, Any],
+    *,
+    stock_lot_id: str,
+) -> set[str]:
+    return {
+        str(row.get("stock_event_id") or row.get("event_id") or "").strip()
+        for row in report.get("assigned_stock_sale_rows") or []
+        if isinstance(row, dict)
+        and str(row.get("stock_lot_id") or "").strip() == stock_lot_id
+        and str(row.get("stock_event_id") or row.get("event_id") or "").strip()
+    }
+
+
+def _assigned_stock_coverage_intervals(
+    report: dict[str, Any],
+    *,
+    stock_lot_id: str,
+) -> Counter[tuple[Any, ...]]:
+    return Counter(
+        (
+            str(row.get("open_event_id") or "").strip(),
+            str(row.get("stock_lot_id") or "").strip(),
+            int(row.get("shares") or 0),
+            int(row.get("start_at_ms") or 0),
+            int(row.get("end_at_ms") or 0),
+            str(row.get("allocation_status") or "").strip(),
+            str(row.get("linkage_basis") or "").strip(),
+        )
+        for row in report.get("covered_call_allocations") or []
+        if isinstance(row, dict)
+        and str(row.get("stock_lot_id") or "").strip() == stock_lot_id
+    )
+
+
+def _require_preserved_assigned_stock_facts(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    *,
+    stock_lot_id: str,
+    stock_event_id: str,
+) -> None:
+    before_sales = _assigned_stock_sale_ids(before, stock_lot_id=stock_lot_id)
+    after_sales = _assigned_stock_sale_ids(after, stock_lot_id=stock_lot_id)
+    if not before_sales.issubset(after_sales):
+        raise ValueError(
+            "assigned stock sale validation failed: invalidates_subsequent_sale"
+        )
+    if stock_event_id not in after_sales:
+        raise ValueError(
+            "assigned stock sale validation failed: manual_review_required"
+        )
+
+    before_coverage = _assigned_stock_coverage_intervals(
+        before,
+        stock_lot_id=stock_lot_id,
+    )
+    after_coverage = _assigned_stock_coverage_intervals(
+        after,
+        stock_lot_id=stock_lot_id,
+    )
+    if not before_coverage <= after_coverage:
+        raise ValueError(
+            "assigned stock sale validation failed: "
+            "invalidates_subsequent_covered_call"
+        )
+
 def record_assigned_stock_event_atomically(
     repo: Any,
     *,
-    sale_event: dict[str, Any],
-    assigned_stock_after: dict[str, Any],
+    sale_event: dict[str, Any] | None = None,
+    assigned_stock_after: dict[str, Any] | None = None,
+    account: str | None = None,
+    target_stock_lot_id: str | None = None,
+    trade_time_ms: int | None = None,
+    prepare_sale: Any = None,
+    identity_execution: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Persist one validated sale event and its compact current after-view."""
+    """Validate and persist one assigned-stock sale in one SQLite transaction."""
 
-    event = dict(sale_event or {})
-    after = validate_assigned_stock_fact(assigned_stock_after)
-    account = str(event.get("account") or "").strip().lower()
-    if not account or account != after["account"]:
-        raise ValueError("assigned stock event account mismatch")
+    event_seed = dict(sale_event or {})
+    account_hint = str(account or event_seed.get("account") or "").strip().lower()
+    stock_lot_hint = str(
+        target_stock_lot_id
+        or event_seed.get("target_stock_lot_id")
+        or event_seed.get("stock_lot_id")
+        or ""
+    ).strip()
+    trade_time_hint = int(trade_time_ms or event_seed.get("trade_time_ms") or 0)
+    supplied_after = (
+        validate_assigned_stock_fact(assigned_stock_after)
+        if assigned_stock_after is not None
+        else None
+    )
+    if prepare_sale is None and not event_seed:
+        raise ValueError("assigned stock sale event is required")
+    if trade_time_hint <= 0:
+        raise ValueError("assigned stock sale requires trade_time_ms > 0")
 
     def _run(sqlite_repo: Any, conn: Any | None) -> dict[str, Any]:
         if conn is None:
             raise TypeError(
                 "assigned stock event requires SQLite transaction authority"
             )
-        fence = capture_current_decision_projection_fence(
-            sqlite_repo,
-            accounts=(account,),
-            conn=conn,
-        )
-        begin = fence.accounts[0]
-        prior = (
-            read_current_assigned_stock_fact(
-                sqlite_repo,
-                account=account,
+        selected_account = account_hint
+        execution_id = execution_identity_from_input(identity_execution or {})
+        if execution_id:
+            matching_events = [
+                row
+                for row in sqlite_repo.list_assigned_stock_events(conn=conn)
+                if execution_identity_from_input(row.get("execution_input"))
+                == execution_id
+            ]
+            if len(matching_events) == 1:
+                selected_account = str(
+                    matching_events[0].get("account") or ""
+                ).strip().lower()
+        before_rows: dict[str, Any] | None = None
+        before_report: dict[str, Any] | None = None
+        if selected_account:
+            before_rows = sqlite_repo.read_lifecycle_account_rows(
+                account=selected_account,
                 conn=conn,
             )
-            if begin.projection_present and begin.clean_at_start
-            else None
+            before_report = project_assigned_stock_lifecycle_from_rows(
+                before_rows,
+                account=selected_account,
+                as_of_ms=trade_time_hint,
+            )
+        else:
+            if not stock_lot_hint:
+                raise ValueError("assigned stock sale account or target lot is required")
+            source_event_hint = (
+                stock_lot_hint.removeprefix("assigned-stock-")
+                if stock_lot_hint.startswith("assigned-stock-")
+                else ""
+            )
+            candidate_accounts = {
+                str(row[0]).strip().lower()
+                for row in conn.execute(
+                    """
+                    SELECT account
+                    FROM assigned_stock_events
+                    WHERE json_extract(event_json, '$.target_stock_lot_id') = ?
+                    UNION
+                    SELECT account
+                    FROM trade_events
+                    WHERE event_id = ?
+                    """,
+                    (stock_lot_hint, source_event_hint),
+                ).fetchall()
+                if str(row[0] or "").strip()
+            }
+            if len(candidate_accounts) != 1:
+                raise ValueError(f"assigned stock lot not found: {stock_lot_hint}")
+            selected_account = next(iter(candidate_accounts))
+            before_rows = sqlite_repo.read_lifecycle_account_rows(
+                account=selected_account,
+                conn=conn,
+            )
+            before_report = project_assigned_stock_lifecycle_from_rows(
+                before_rows,
+                account=selected_account,
+                as_of_ms=trade_time_hint,
+            )
+        assert before_rows is not None and before_report is not None
+
+        prepared = (
+            prepare_sale(before_report, list(before_rows["account_assigned_stock_events"]))
+            if prepare_sale is not None
+            else {"sale_event": event_seed}
         )
-        stock_event_id = str(event.get("stock_event_id") or event.get("event_id") or "").strip()
-        existing = next((
-            row for row in sqlite_repo.list_assigned_stock_events(conn=conn)
-            if str(row.get("stock_event_id") or row.get("event_id") or "") == stock_event_id
-        ), None)
-        storage_event = dict(event)
-        if existing is not None:
-            if "cash_conversions" in existing:
-                storage_event["cash_conversions"] = existing["cash_conversions"]
-            else:
-                storage_event.pop("cash_conversions", None)
-        elif event.get("price") is not None and event.get("currency"):
+        if not isinstance(prepared, dict) or not isinstance(
+            prepared.get("sale_event"), dict
+        ):
+            raise ValueError("assigned stock sale preparation is invalid")
+        event = dict(prepared["sale_event"])
+        event_account = str(event.get("account") or "").strip().lower()
+        if event_account != selected_account:
+            raise ValueError("assigned stock event account mismatch")
+        event_time = int(event.get("trade_time_ms") or 0)
+        if event_time != trade_time_hint:
+            raise ValueError("assigned stock event trade time mismatch")
+        stock_lot_id = str(
+            event.get("target_stock_lot_id") or event.get("stock_lot_id") or ""
+        ).strip()
+        if stock_lot_hint and stock_lot_id != stock_lot_hint:
+            raise ValueError("assigned stock event target lot mismatch")
+        before_lot = next(
+            (
+                dict(row)
+                for row in before_report.get("_all_assigned_stock_lots") or []
+                if isinstance(row, dict)
+                and str(row.get("stock_lot_id") or "") == stock_lot_id
+            ),
+            None,
+        )
+        if before_lot is None:
+            raise ValueError(f"assigned stock lot not found: {stock_lot_id}")
+        source_event_id = str(
+            before_lot.get("source_assignment_event_id") or ""
+        ).strip()
+        if not source_event_id or not any(
+            str(row.get("event_id") or "") == source_event_id
+            for row in before_rows.get("trade_events") or []
+            if isinstance(row, dict)
+        ):
+            raise ValueError("assigned stock sale source event is missing")
+
+        stock_event_id = str(
+            event.get("stock_event_id") or event.get("event_id") or ""
+        ).strip()
+        if not stock_event_id:
+            raise ValueError("assigned stock sale event id is required")
+        existing = next(
+            (
+                dict(row)
+                for row in before_rows["account_assigned_stock_events"]
+                if str(row.get("stock_event_id") or row.get("event_id") or "")
+                == stock_event_id
+            ),
+            None,
+        )
+        stable_fields = (
+            "target_stock_lot_id", "account", "broker", "symbol", "side",
+            "shares", "price", "fees", "currency", "trade_time_ms",
+            "source_deal_id", "futu_account_id", "source",
+        )
+        if existing is not None and any(
+            existing.get(key) != event.get(key) for key in stable_fields
+        ):
+            raise ValueError(
+                f"assigned stock sale conflict for stock_event_id={stock_event_id}"
+            )
+        if (
+            existing is not None and existing.get("order_id") and event.get("order_id")
+            and existing["order_id"] != event["order_id"]
+        ):
+            raise ValueError("assigned stock sale conflict: order_id")
+
+        storage_event = dict(existing or event)
+        execution = dict(identity_execution or event.get("execution_input") or {})
+        stored_execution = (
+            existing.get("execution_input")
+            if isinstance(existing, dict)
+            and isinstance(existing.get("execution_input"), dict)
+            else {}
+        )
+        needs_identity_enrichment = bool(
+            existing is not None
+            and execution.get("external_order_id")
+            and execution.get("external_order_namespace")
+            and not all(
+                (
+                    existing.get("order_id"),
+                    stored_execution.get("external_order_id"),
+                    stored_execution.get("external_order_namespace"),
+                )
+            )
+        )
+        identity_enriched = False
+        created = existing is None
+        if created and event.get("price") is not None and event.get("currency"):
             storage_event = attach_assigned_stock_sale_cash_conversions(
                 storage_event,
                 fx_payload=load_cash_fx_payload(sqlite_repo, conn=conn),
                 observed_at_ms=utc_now_ms(),
             )
-        created = sqlite_repo.upsert_assigned_stock_event(storage_event, conn=conn)
-        if prior is not None:
-            stock_lot_id = str(
-                event.get("target_stock_lot_id")
-                or event.get("stock_lot_id")
-                or ""
-            ).strip()
-            lot_after = next(
+
+        shares = int(storage_event.get("shares") or 0)
+        if created and (
+            shares <= 0 or shares > int(before_lot.get("shares_remaining") or 0)
+        ):
+            raise ValueError("assigned stock sale has insufficient shares remaining")
+        remaining_after = int(before_lot.get("shares_remaining") or 0) - (
+            shares if created else 0
+        )
+        covered_shares = sum(
+            int(row.get("shares") or 0)
+            for row in before_report.get("covered_call_allocations") or []
+            if isinstance(row, dict)
+            and str(row.get("stock_lot_id") or "") == stock_lot_id
+            and int(row.get("start_at_ms") or 0) <= trade_time_hint
+            and (
+                row.get("end_at_ms") is None
+                or trade_time_hint < int(row["end_at_ms"])
+            )
+        )
+        if covered_shares > remaining_after:
+            raise ValueError(
+                "assigned stock sale validation failed: covered_call_capacity_conflict"
+            )
+
+        after_rows = dict(before_rows)
+        after_rows["account_assigned_stock_events"] = [
+            *before_rows["account_assigned_stock_events"],
+            *([storage_event] if created else []),
+        ]
+        after_report = project_assigned_stock_lifecycle_from_rows(
+            after_rows,
+            account=selected_account,
+            as_of_ms=trade_time_hint,
+        )
+        if created and not any(
+            str(row.get("stock_event_id") or "") == stock_event_id
+            for row in after_report.get("assigned_stock_sale_rows") or []
+            if isinstance(row, dict)
+        ):
+            review = next(
                 (
                     row
-                    for row in after["lots"]
-                    if row["stock_lot_id"] == stock_lot_id
+                    for row in after_report.get("assigned_stock_review_rows") or []
+                    if isinstance(row, dict)
+                    and str(row.get("stock_event_id") or "") == stock_event_id
                 ),
-                None,
+                {},
             )
-            expected = (
-                update_assigned_stock_fact(
-                    prior,
-                    transition={
-                        "kind": "assigned_stock_sale",
-                        "stock_event_id": str(
-                            event.get("stock_event_id")
-                            or event.get("event_id")
-                            or ""
-                        ).strip(),
-                        "stock_lot_id": stock_lot_id,
-                        "shares": event.get("shares"),
-                        "trade_time_ms": event.get("trade_time_ms"),
-                        "lot_after": lot_after,
-                    },
-                    current_position_lots=(),
+            raise ValueError(
+                "assigned stock sale validation failed: "
+                + str(review.get("status") or "manual_review_required")
+            )
+        final_cutoff_ms = _assigned_stock_final_cutoff_ms(
+            before_rows,
+            trade_time_ms=trade_time_hint,
+        )
+        final_report = after_report
+        if final_cutoff_ms > trade_time_hint and (
+            created or needs_identity_enrichment
+        ):
+            if created:
+                before_final_report = project_assigned_stock_lifecycle_from_rows(
+                    before_rows,
+                    account=selected_account,
+                    as_of_ms=final_cutoff_ms,
                 )
-                if created
-                else prior
+            final_report = project_assigned_stock_lifecycle_from_rows(
+                after_rows,
+                account=selected_account,
+                as_of_ms=final_cutoff_ms,
             )
-            if expected != after:
-                raise ValueError("assigned stock compact after-view mismatch")
+            if created:
+                _require_preserved_assigned_stock_facts(
+                    before_final_report,
+                    final_report,
+                    stock_lot_id=stock_lot_id,
+                    stock_event_id=stock_event_id,
+                )
+        prepared["stock_lot_after"] = next(
+            (
+                dict(row)
+                for row in after_report.get("_all_assigned_stock_lots") or []
+                if isinstance(row, dict)
+                and str(row.get("stock_lot_id") or "") == stock_lot_id
+            ),
+            None,
+        )
+        prepared["review_rows"] = [
+            dict(row)
+            for row in after_report.get("assigned_stock_review_rows") or []
+            if isinstance(row, dict)
+            and str(row.get("stock_event_id") or "") == stock_event_id
+        ]
+        after = compact_assigned_stock_view(
+            final_report,
+            account=selected_account,
+            current_position_lots=list(before_rows.get("account_position_lots") or []),
+            as_of_ms=final_cutoff_ms,
+        )
+        if created and supplied_after is not None and supplied_after != after:
+            raise ValueError("assigned stock compact after-view mismatch")
+
+        fence = capture_current_decision_projection_fence(
+            sqlite_repo,
+            accounts=(selected_account,),
+            conn=conn,
+        )
+        if created:
+            if not sqlite_repo.upsert_assigned_stock_event(storage_event, conn=conn):
+                raise ValueError(
+                    f"assigned stock sale conflict for stock_event_id={stock_event_id}"
+                )
+        elif execution.get("external_order_id") and execution.get("external_order_namespace"):
+            storage_event = _enrich_execution_order_identity(
+                sqlite_repo,
+                [existing],
+                execution,
+                conn=conn,
+                assigned_stock=True,
+                finalize_decision_projection=False,
+            )[0]
+            identity_enriched = storage_event != existing
         decision_projection = finalize_current_decision_projection(
             sqlite_repo,
             fence=fence,
             updated_at_ms=int(utc_now_ms()),
             conn=conn,
-            assigned_stock_after_by_account={account: after},
+            assigned_stock_after_by_account=(
+                {selected_account: after}
+                if created or identity_enriched
+                else None
+            ),
         )
         return {
-            "stock_event_id": str(
-                event.get("stock_event_id") or event.get("event_id") or ""
-            ).strip(),
+            "stock_event_id": stock_event_id,
             "created": bool(created),
             "sale_event": storage_event,
             "decision_projection": decision_projection,
+            "identity_enriched": identity_enriched,
+            "prepared_payload": prepared,
         }
 
     return with_sqlite_repo_transaction(repo, _run)

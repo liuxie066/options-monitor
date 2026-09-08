@@ -94,6 +94,7 @@ def test_build_context_preserves_record_id_without_position_id() -> None:
     assert ctx["open_positions_min"][0]["premium"] == 1.23
     assert ctx["open_positions_min"][0]["expiration_ymd"] is None
     assert ctx["open_positions_min"][0]["days_to_expiration"] is None
+    assert ctx["open_positions_min"][0]["source_stock_lot_id"] is None
     validate_option_positions_context_account(
         ctx,
         account="lx",
@@ -164,6 +165,62 @@ def test_build_context_preserves_strategy_metadata_for_close_advice() -> None:
         position=row,
         config={"symbols": [{"symbol": "9992.HK", "sell_put": {"strategy": "return_first"}}]},
     ).strategy_profile == "short_vol"
+
+
+@pytest.mark.parametrize(
+    ("relationship_fields", "expected"),
+    [
+        (
+            {
+                "option_type": "put",
+                "strategy": "combo_yield",
+                "strategy_group_id": "combo-group-1",
+                "leg_role": "funding_put",
+            },
+            ("combo-group-1", "funding_put", None),
+        ),
+        (
+            {
+                "option_type": "call",
+                "strategy": "wheel",
+                "leg_role": "wheel_call",
+                "source_stock_lot_id": "stock-lot-1",
+            },
+            (None, "wheel_call", "stock-lot-1"),
+        ),
+    ],
+)
+def test_build_context_preserves_canonical_strategy_relationships(
+    relationship_fields: dict[str, str],
+    expected: tuple[str | None, str, str | None],
+) -> None:
+    ctx = build_context(
+        [
+            {
+                "record_id": "option-lot-1",
+                "fields": {
+                    "broker": "富途",
+                    "account": "lx",
+                    "symbol": "NVDA",
+                    "status": "open",
+                    "side": "short",
+                    "contracts": 1,
+                    "contracts_open": 1,
+                    "currency": "USD",
+                    **relationship_fields,
+                },
+            }
+        ],
+        broker="富途",
+        account="lx",
+    )
+
+    row = ctx["open_positions_min"][0]
+    assert (
+        row["strategy_group_id"],
+        row["leg_role"],
+        row["source_stock_lot_id"],
+    ) == expected
 
 
 def test_build_context_reads_premium_from_note_fallback() -> None:

@@ -53,6 +53,9 @@ from src.application.ledger.current_decision_projection import (
     verify_current_decision_projection_migration,
     write_lifecycle_case_decision_fact,
 )
+from src.application.ledger.assigned_stock_projection import (
+    project_assigned_stock_lifecycle_from_rows,
+)
 from src.application.ledger.decision_snapshot import (
     CURRENT_DECISION_LIFECYCLE_FIELDS,
     CURRENT_DECISION_POSITION_FIELDS,
@@ -1374,6 +1377,7 @@ def test_legacy_oracle_matches_all_incremental_settlement_transitions(
         report,
         account="lx",
         current_position_lots=current_lots,
+        as_of_ms=5_000,
     ) == incremental
 
 
@@ -1488,6 +1492,7 @@ def test_assigned_oracle_does_not_restore_mode_absent_from_bound_source_lot() ->
         report,
         account="lx",
         current_position_lots=[_final_option_lot(transition)],
+        as_of_ms=5_000,
     ) == incremental
 
 
@@ -1656,6 +1661,7 @@ def test_hkd_settlement_fee_and_embedded_time_match_legacy_oracle() -> None:
         report,
         account="lx",
         current_position_lots=[current_lot],
+        as_of_ms=5_000,
     ) == incremental
 
 
@@ -2778,10 +2784,15 @@ def test_incremental_owner_fact_surfaces_match_the_frozen_matrix() -> None:
             "record_lifecycle_timing_policy",
             "policy",
         ),
+        writer.record_assigned_stock_event_atomically: (
+            "read_lifecycle_account_rows",
+            "project_assigned_stock_lifecycle_from_rows",
+            "prepare_sale",
+            "finalize_current_decision_projection",
+        ),
         workflows._execute_assigned_stock_sale: (  # noqa: SLF001 - owner inventory
             "before_report",
-            "after_report",
-            "sale_event",
+            "_prepare_sale",
             "record_assigned_stock_event",
         ),
     }
@@ -2794,7 +2805,7 @@ def test_incremental_owner_fact_surfaces_match_the_frozen_matrix() -> None:
     assert "_effective_void_target_ids" not in batch_source
     assigned_sale_source = inspect.getsource(workflows._execute_assigned_stock_sale)  # noqa: SLF001
     assert "list_position_lot_snapshots" not in assigned_sale_source
-    assert "read_current_position_projection" in assigned_sale_source
+    assert "read_current_position_projection" not in assigned_sale_source
 
 
 def test_lifecycle_allocation_delta_uses_only_prior_fact_and_created_rows() -> None:
@@ -2990,12 +3001,65 @@ def test_assigned_stock_sale_owner_publishes_partial_full_and_rolls_back(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    repo = _repo(tmp_path)
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    writer.persist_trade_event_object(
+        repo,
+        _event("option-open", lot_id="lot-source"),
+    )
     transition = _buy_transition()
-    assigned = update_assigned_stock_fact(
-        empty_assigned_stock_fact("lx"),
-        transition=transition,
-        current_position_lots=[_final_option_lot(transition)],
+    writer.persist_trade_event_object(
+        repo,
+        TradeEvent(
+            event_id="terminal-a",
+            event_type="assignment",
+            event_time_ms=2_000,
+            contract_key=ContractKey.from_values(
+                broker="futu",
+                account="lx",
+                underlying_symbol="NVDA",
+                option_type="put",
+                position_side="short",
+                strike=100,
+                expiration_ymd="2026-06-19",
+            ),
+            contracts=1,
+            price=0,
+            currency="USD",
+            source="test",
+            multiplier=100,
+            target_lot_id="lot-source",
+            raw_payload={
+                "stock_settlement": {
+                    "side": "buy",
+                    "shares": 100,
+                    "price": 100,
+                    "fees": 1,
+                    "event_time_ms": 2_000,
+                    "fee_provenance": {"basis": "actual", "source": "test"},
+                }
+            },
+        ),
+    )
+    with repo._connect() as conn:  # noqa: SLF001 - pre-migration fixture seed
+        conn.execute(
+            """
+            INSERT INTO current_decision_input_generations (
+              account, generation, case_generation, evidence_generation,
+              allocation_generation, source_consumption_generation,
+              timing_generation, combo_identity_generation,
+              assigned_stock_generation, updated_at_ms
+            ) VALUES ('lx', 0, 0, 0, 0, 0, 0, 0, 0, 1)
+            """
+        )
+    assigned = compact_assigned_stock_view(
+        project_assigned_stock_lifecycle_from_rows(
+            repo.read_lifecycle_account_rows(account="lx"),
+            account="lx",
+            as_of_ms=2_000,
+        ),
+        account="lx",
+        current_position_lots=repo.list_position_lots(),
+        as_of_ms=2_000,
     )
     payload = build_current_decision_projection(
         repo,
@@ -3024,8 +3088,15 @@ def test_assigned_stock_sale_owner_publishes_partial_full_and_rolls_back(
         "event_type": "sale",
         "target_stock_lot_id": lot["stock_lot_id"],
         "account": "lx",
+        "broker": "futu",
+        "symbol": "NVDA",
+        "side": "sell",
         "shares": 40,
+        "price": 105,
+        "fees": 0,
+        "currency": "USD",
         "trade_time_ms": 3_000,
+        "source": "test",
     }
     first = writer.record_assigned_stock_event_atomically(
         repo,
@@ -3097,10 +3168,8 @@ def test_assigned_stock_sale_owner_publishes_partial_full_and_rolls_back(
         current_position_lots=[],
     )
     sale_b = {
+        **sale_a,
         "stock_event_id": "sale-owner-b",
-        "event_type": "sale",
-        "target_stock_lot_id": partial_lot["stock_lot_id"],
-        "account": "lx",
         "shares": 60,
         "trade_time_ms": 4_000,
     }

@@ -217,7 +217,7 @@ def classify_pending_earnings_events(
     }
 
 
-def _opening_not_ready_reason(status: str, reason_codes: set[str]) -> str:
+def _opening_not_ready_reason(status: str) -> str:
     """Classify a non-ready opening contract into the three reject families.
 
     ``ineligible`` means the contract identity or state is provably not
@@ -228,11 +228,7 @@ def _opening_not_ready_reason(status: str, reason_codes: set[str]) -> str:
 
     if status == "ineligible":
         return REJECT_CONTRACT_INELIGIBLE
-    if status == "data_unavailable":
-        return REJECT_EVIDENCE_UNAVAILABLE
-    if status == "market_closed":
-        return REJECT_EVIDENCE_UNAVAILABLE
-    return REJECT_EVIDENCE_UNAVAILABLE if reason_codes else REJECT_CONTRACT_INELIGIBLE
+    return REJECT_EVIDENCE_UNAVAILABLE
 
 
 def _parse_decision_time(value: Any) -> datetime | None:
@@ -349,6 +345,164 @@ def _tick_ceiling(value: float, tick: float) -> float:
     return float(units * tick_decimal)
 
 
+def validate_opening_contract_evidence(
+    raw: dict[str, Any] | Any,
+    *,
+    mode: StrategyMode | str,
+    now_utc: Any = None,
+    max_snapshot_age_seconds: int = 300,
+) -> dict[str, Any]:
+    """Validate canonical opening-contract identity and quote evidence."""
+
+    mode_norm = normalize_strategy_mode(mode)
+    if not isinstance(raw, dict):
+        raise CandidateCalculationError(
+            "candidate_input_invalid",
+            "candidate input must be an object",
+            metric_value=type(raw).__name__,
+            threshold="object",
+        )
+    opening_status = _first_text(raw, "opening_contract_status").lower()
+    if opening_status != "ready":
+        reason_codes = raw.get("opening_contract_reason_codes")
+        raise CandidateCalculationError(
+            _opening_not_ready_reason(opening_status),
+            "normalized OpenD opening contract is not ready",
+            metric_value={
+                "status": opening_status or None,
+                "reason_codes": reason_codes,
+            },
+            threshold="ready",
+        )
+    underlier_status = _first_text(raw, "underlier_observation_status").lower()
+    if not underlier_status:
+        raise CandidateCalculationError(
+            REJECT_EVIDENCE_UNAVAILABLE,
+            "normalized OpenD underlier observation status is missing",
+            metric_value={
+                "status": None,
+                "reason_code": raw.get("underlier_observation_reason_code"),
+            },
+            threshold="ready",
+        )
+    if underlier_status != "ready":
+        raise CandidateCalculationError(
+            "opening_underlier_not_ready",
+            "normalized OpenD underlier observation is not ready",
+            metric_value={
+                "status": underlier_status,
+                "reason_code": raw.get("underlier_observation_reason_code"),
+            },
+            threshold="ready",
+        )
+
+    # The 300-second acquisition-freshness window is owned by the decision
+    # moment, not the fetch moment: re-evaluate it here against the real
+    # decision clock instead of trusting the fetch-time ``ready`` snapshot.
+    snapshot_received = _parse_decision_time(raw.get("snapshot_received_at_utc"))
+    if snapshot_received is None:
+        raise CandidateCalculationError(
+            REJECT_EVIDENCE_UNAVAILABLE,
+            "OpenD option snapshot receipt timestamp is missing or invalid",
+            metric_value={"snapshot_received_at_utc": raw.get("snapshot_received_at_utc")},
+            threshold="present UTC receipt",
+        )
+    decision_now = _decision_now(now_utc)
+    snapshot_age = (decision_now - snapshot_received).total_seconds()
+    if snapshot_age < 0:
+        raise CandidateCalculationError(
+            REJECT_EVIDENCE_UNAVAILABLE,
+            "OpenD option snapshot receipt is in the future",
+            metric_value={"snapshot_age_seconds": snapshot_age},
+            threshold=">= 0",
+        )
+    if snapshot_age > int(max_snapshot_age_seconds):
+        raise CandidateCalculationError(
+            REJECT_EVIDENCE_UNAVAILABLE,
+            "OpenD option snapshot is stale relative to the decision moment",
+            metric_value={"snapshot_age_seconds": snapshot_age},
+            threshold=int(max_snapshot_age_seconds),
+        )
+
+    option_type = _first_text(raw, "option_type").lower()
+    if not option_type:
+        raise CandidateCalculationError(
+            REJECT_EVIDENCE_UNAVAILABLE,
+            "OpenD option type evidence is missing",
+            threshold=mode_norm,
+        )
+    if option_type != mode_norm:
+        raise CandidateCalculationError(
+            "option_type_mismatch",
+            "option type does not match strategy mode",
+            metric_value=option_type,
+            threshold=mode_norm,
+        )
+    standard_type = _first_text(raw, "option_standard_type").upper()
+    if not standard_type:
+        raise CandidateCalculationError(
+            REJECT_EVIDENCE_UNAVAILABLE,
+            "OpenD option standard type evidence is missing",
+            threshold="STANDARD",
+        )
+    if standard_type != "STANDARD":
+        raise CandidateCalculationError(
+            "option_non_standard",
+            "only OpenD STANDARD option contracts are eligible",
+            metric_value=raw.get("option_standard_type"),
+            threshold="STANDARD",
+        )
+    if not _first_text(raw, "stock_owner"):
+        raise CandidateCalculationError(
+            REJECT_EVIDENCE_UNAVAILABLE,
+            "OpenD stock_owner binding is required",
+            threshold="non-empty",
+        )
+
+    bid = _required_positive_float(raw, "bid")
+    ask = _required_positive_float(raw, "ask")
+    if ask < bid:
+        raise CandidateCalculationError(
+            "option_ask_below_bid",
+            "ask must be greater than or equal to bid",
+            metric_value={"bid": bid, "ask": ask},
+            threshold="ask >= bid",
+        )
+    price_tick = _required_positive_float(raw, "price_tick")
+    for field in ("multiplier", "chain_multiplier", "snapshot_multiplier"):
+        if _is_missing(raw.get(field)):
+            raise CandidateCalculationError(
+                REJECT_EVIDENCE_UNAVAILABLE,
+                f"OpenD {field} binding is missing",
+                metric_value={field: raw.get(field)},
+                threshold="positive integer",
+            )
+    multiplier = _required_positive_int(raw, "multiplier")
+    chain_multiplier = _required_positive_int(raw, "chain_multiplier")
+    snapshot_multiplier = _required_positive_int(raw, "snapshot_multiplier")
+    if len({multiplier, chain_multiplier, snapshot_multiplier}) != 1:
+        raise CandidateCalculationError(
+            "option_multiplier_conflict",
+            "chain and snapshot multiplier bindings disagree",
+            metric_value={
+                "multiplier": multiplier,
+                "chain_multiplier": chain_multiplier,
+                "snapshot_multiplier": snapshot_multiplier,
+            },
+            threshold="all equal",
+        )
+
+    return {
+        "bid": bid,
+        "ask": ask,
+        "price_tick": price_tick,
+        "multiplier": multiplier,
+        "dte": _required_positive_int(raw, "dte"),
+        "strike": _required_positive_float(raw, "strike"),
+        "spot": _required_positive_float(raw, "spot"),
+    }
+
+
 def calculate_opening_candidate_metrics(
     raw: dict[str, Any] | Any,
     *,
@@ -367,120 +521,19 @@ def calculate_opening_candidate_metrics(
     """
 
     mode_norm = normalize_strategy_mode(mode)
-    if not isinstance(raw, dict):
-        raise CandidateCalculationError(
-            "candidate_input_invalid",
-            "candidate input must be an object",
-            metric_value=type(raw).__name__,
-            threshold="object",
-        )
-    opening_status = str(raw.get("opening_contract_status") or "").strip().lower()
-    if opening_status != "ready":
-        reason_codes = raw.get("opening_contract_reason_codes")
-        code_set = (
-            {str(item) for item in reason_codes if item}
-            if isinstance(reason_codes, (list, tuple, set))
-            else set()
-        )
-        raise CandidateCalculationError(
-            _opening_not_ready_reason(opening_status, code_set),
-            "normalized OpenD opening contract is not ready",
-            metric_value={
-                "status": opening_status or None,
-                "reason_codes": reason_codes,
-            },
-            threshold="ready",
-        )
-    underlier_status = str(raw.get("underlier_observation_status") or "").strip().lower()
-    if underlier_status != "ready":
-        raise CandidateCalculationError(
-            "opening_underlier_not_ready",
-            "normalized OpenD underlier observation is not ready",
-            metric_value={
-                "status": underlier_status or None,
-                "reason_code": raw.get("underlier_observation_reason_code"),
-            },
-            threshold="ready",
-        )
-
-    # The 300-second acquisition-freshness window is owned by the decision
-    # moment, not the fetch moment: re-evaluate it here against the real
-    # decision clock instead of trusting the fetch-time ``ready`` snapshot.
-    snapshot_received = _parse_decision_time(raw.get("snapshot_received_at_utc"))
-    if snapshot_received is None:
-        raise CandidateCalculationError(
-            "evidence_unavailable",
-            "OpenD option snapshot receipt timestamp is missing or invalid",
-            metric_value={"snapshot_received_at_utc": raw.get("snapshot_received_at_utc")},
-            threshold="present UTC receipt",
-        )
-    decision_now = _decision_now(now_utc)
-    snapshot_age = (decision_now - snapshot_received).total_seconds()
-    if snapshot_age < 0:
-        raise CandidateCalculationError(
-            "evidence_unavailable",
-            "OpenD option snapshot receipt is in the future",
-            metric_value={"snapshot_age_seconds": snapshot_age},
-            threshold=">= 0",
-        )
-    if snapshot_age > int(max_snapshot_age_seconds):
-        raise CandidateCalculationError(
-            "evidence_unavailable",
-            "OpenD option snapshot is stale relative to the decision moment",
-            metric_value={"snapshot_age_seconds": snapshot_age},
-            threshold=int(max_snapshot_age_seconds),
-        )
-
-    option_type = str(raw.get("option_type") or "").strip().lower()
-    if option_type != mode_norm:
-        raise CandidateCalculationError(
-            "option_type_mismatch",
-            "option type does not match strategy mode",
-            metric_value=option_type or None,
-            threshold=mode_norm,
-        )
-    if str(raw.get("option_standard_type") or "").strip().upper() != "STANDARD":
-        raise CandidateCalculationError(
-            "option_non_standard",
-            "only OpenD STANDARD option contracts are eligible",
-            metric_value=raw.get("option_standard_type"),
-            threshold="STANDARD",
-        )
-    if not str(raw.get("stock_owner") or "").strip():
-        raise CandidateCalculationError(
-            "option_stock_owner_missing",
-            "OpenD stock_owner binding is required",
-            threshold="non-empty",
-        )
-
-    bid = _required_positive_float(raw, "bid")
-    ask = _required_positive_float(raw, "ask")
-    if ask < bid:
-        raise CandidateCalculationError(
-            "option_ask_below_bid",
-            "ask must be greater than or equal to bid",
-            metric_value={"bid": bid, "ask": ask},
-            threshold="ask >= bid",
-        )
-    price_tick = _required_positive_float(raw, "price_tick")
-    multiplier = _required_positive_int(raw, "multiplier")
-    chain_multiplier = _required_positive_int(raw, "chain_multiplier")
-    snapshot_multiplier = _required_positive_int(raw, "snapshot_multiplier")
-    if len({multiplier, chain_multiplier, snapshot_multiplier}) != 1:
-        raise CandidateCalculationError(
-            "option_multiplier_conflict",
-            "chain and snapshot multiplier bindings disagree",
-            metric_value={
-                "multiplier": multiplier,
-                "chain_multiplier": chain_multiplier,
-                "snapshot_multiplier": snapshot_multiplier,
-            },
-            threshold="all equal",
-        )
-
-    dte = _required_positive_int(raw, "dte")
-    strike = _required_positive_float(raw, "strike")
-    spot = _required_positive_float(raw, "spot")
+    evidence = validate_opening_contract_evidence(
+        raw,
+        mode=mode_norm,
+        now_utc=now_utc,
+        max_snapshot_age_seconds=max_snapshot_age_seconds,
+    )
+    bid = evidence["bid"]
+    ask = evidence["ask"]
+    price_tick = evidence["price_tick"]
+    multiplier = evidence["multiplier"]
+    dte = evidence["dte"]
+    strike = evidence["strike"]
+    spot = evidence["spot"]
     implied_volatility = _required_positive_float(raw, "implied_volatility")
     rv_status = str(raw.get("term_matched_rv_status") or "").strip().lower()
     if rv_status != "ok":

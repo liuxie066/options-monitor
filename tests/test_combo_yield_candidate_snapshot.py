@@ -101,7 +101,13 @@ def _funding_put_decision() -> dict:
     }
 
 
-def _seal(tmp_path: Path, *, pairs: bool = True, status: str = "completed") -> dict:
+def _seal(
+    tmp_path: Path,
+    *,
+    pairs: bool = True,
+    status: str = "completed",
+    pair_overrides: dict | None = None,
+) -> dict:
     return seal_combo_yield_candidate_snapshot(
         base=tmp_path,
         run_id="run-1",
@@ -117,9 +123,9 @@ def _seal(tmp_path: Path, *, pairs: bool = True, status: str = "completed") -> d
             )
         ],
         funding_put_decisions=[],
-        pair_evaluations=[_pair_evaluation()] if pairs else [],
-        rank_records=[_rank_record()] if pairs else [],
-        ranked_pairs=[_pair()] if pairs else [],
+        pair_evaluations=[{**_pair_evaluation(), **(pair_overrides or {})}] if pairs else [],
+        rank_records=[{**_rank_record(), **(pair_overrides or {})}] if pairs else [],
+        ranked_pairs=[_pair(**(pair_overrides or {}))] if pairs else [],
     )
 
 
@@ -146,6 +152,27 @@ def test_combo_yield_snapshot_empty_result_seals_no_candidate(tmp_path: Path) ->
 
     assert payload["opening_status"] == "no_candidate"
     assert payload["ranked_pairs"] == []
+
+
+def test_combo_snapshot_derives_pair_from_legs_and_preserves_real_group(tmp_path: Path) -> None:
+    _seal(
+        tmp_path,
+        pair_overrides={"candidate_pair_id": None, "strategy_group_id": "confirmed-group"},
+    )
+    loaded = load_combo_yield_candidate_snapshot(base=tmp_path, run_id="run-1", account="lx")
+    pair = loaded["ranked_pairs"][0]
+    assert pair["candidate_pair_id"] == "combo_yield:NVDA:NVDA_P100:NVDA_C125"
+    assert pair["strategy_group_id"] == "confirmed-group"
+
+    with pytest.raises(ComboYieldCandidateSnapshotError, match="pair identity is missing"):
+        _seal(
+            tmp_path / "incomplete",
+            pair_overrides={
+                "candidate_pair_id": None,
+                "strategy_group_id": "confirmed-group",
+                "call_contract_symbol": None,
+            },
+        )
 
 
 def test_combo_yield_snapshot_derives_data_unavailable_from_scope(tmp_path: Path) -> None:

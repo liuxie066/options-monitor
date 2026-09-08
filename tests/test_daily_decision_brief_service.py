@@ -425,7 +425,6 @@ def _materialize_combo_snapshot_fixture(base: Path, *, market: str) -> None:
             if row_market != market.upper():
                 continue
             scope_symbols.add(symbol)
-            row.setdefault("candidate_pair_id", row.get("strategy_group_id") or "")
             pairs.append(row)
     ranked_pairs = select_best_combo_yield_per_symbol(pairs)
     rank_records = [
@@ -558,6 +557,7 @@ def _materialize_candidate_bundle_fixture(base: Path) -> None:
         "opening": account_dir / "state" / "opening_candidate_snapshot.json",
         "sp_lc": account_dir / "state" / "combo_yield_candidate_snapshot.json",
         "cc_lp": account_dir / "state" / "cc_lp_candidate_snapshot.json",
+        "wheel": account_dir / "state" / "wheel_candidate_snapshot.json",
     }
     snapshots: dict[str, dict[str, Any]] = {}
     for owner, path in snapshot_paths.items():
@@ -589,6 +589,7 @@ def _materialize_candidate_bundle_fixture(base: Path) -> None:
                 "put": "sell_put",
                 "call": "covered_call",
                 "combo_yield": "combo_yield",
+                "wheel": "wheel",
             }[mode]
             status = str(scope.get("status") or "").lower()
             reason = str(scope.get("reason_code") or "").strip() or None
@@ -1045,6 +1046,78 @@ def test_assembler_uses_structured_candidates_ranking_and_capacity(tmp_path: Pat
     assert all("fake" not in item.get("reason", "") for item in brief["actions"])
 
 
+@pytest.mark.parametrize(
+    "allocation_case", ["reserved", "free", "missing", "duplicate", "unavailable", "malformed", "foreign_account"]
+)
+def test_brief_consumes_shared_capacity_without_raw_holdings_fallback(
+    tmp_path: Path, allocation_case: str,
+) -> None:
+    from domain.domain.risk_capacity import allocate_opening_share_capacity
+    from src.application.wheel.candidate_snapshot import seal_wheel_candidate_snapshot
+
+    account_dir = _account_dir(tmp_path)
+    for symbol in ("NVDA", "MSFT", "AAPL"):
+        pd.DataFrame([_call_row(symbol=symbol, contract=f"{symbol}_CALL")]).to_csv(
+            account_dir / f"{symbol.lower()}_sell_call_candidates.csv", index=False,
+        )
+    allocations = allocate_opening_share_capacity(
+        [{
+            "account": "lx", "symbol": "NVDA", "status": "available",
+            "shares_eligible": 100, "shares_locked": 0,
+            "shares_reserved": 100 if allocation_case == "reserved" else 0,
+        }],
+        [{
+            "claim_id": "cc-nvda", "account": "lx", "symbol": "NVDA",
+            "strategy_family": "covered_call", "multiplier": 100,
+            "requested_contracts": 1,
+        }],
+    )
+    if allocation_case == "missing":
+        allocations = []
+    elif allocation_case == "duplicate":
+        allocations += [dict(allocations[0])]
+    elif allocation_case == "unavailable":
+        allocations[0].update(
+            granted_contracts=0, granted_shares=0, capacity_before=None,
+            capacity_after=None, allocation_status="blocked",
+            allocation_reason="share_capacity_fact_unavailable",
+        )
+    elif allocation_case == "malformed":
+        allocations[0]["granted_contracts"] = 1.5
+    elif allocation_case == "foreign_account":
+        allocations[0]["account"] = "sy"
+    seal_wheel_candidate_snapshot(
+        base=tmp_path, run_id="run-1", account="lx", market="US",
+        account_config_sha256="f" * 64, strategy_policy_sha256="1" * 64,
+        dependencies=_fixture_dependencies(), batches=[],
+        scope_results=[
+            {"symbol": "NVDA", "status": "failed", "reason_code": "wheel_scan_failed"},
+            {"symbol": "AAPL", "status": "not_applicable", "reason_code": "wheel_not_applicable"},
+        ],
+        capacity_allocations=allocations, sealed_at="2026-07-17T13:59:59Z",
+    )
+
+    brief = _assemble(tmp_path)
+
+    actions = {item["symbol"] for item in brief["actions"] if item["strategy_family"] == "covered_call"}
+    assert actions == ({"NVDA", "MSFT", "AAPL"} if allocation_case == "free" else {"MSFT", "AAPL"})
+    candidates = {item["symbol"]: item for item in brief["candidates"]["covered_call"]}
+    capacity = candidates["NVDA"]["capacity"]
+    if allocation_case in {"reserved", "free"}:
+        expected = int(allocation_case == "free")
+        assert capacity["contracts_available"] == expected
+        assert capacity["shares_available_for_cover"] == expected * 100
+        assert capacity["reason"] == ("share_capacity_supported" if expected else "share_capacity_insufficient")
+    else:
+        assert capacity == {}
+    assert any(
+        gap.get("reason") == "share_capacity_unavailable" and gap.get("symbol") == "NVDA"
+        for gap in brief["data_gaps"]
+    ) == (allocation_case not in {"reserved", "free"})
+    assert candidates["MSFT"]["capacity"]["contracts_available"] == 2
+    assert candidates["AAPL"]["capacity"]["contracts_available"] == 2
+
+
 def test_assembler_projects_multicurrency_funds_from_run_scoped_context(tmp_path: Path) -> None:
     account_dir = _account_dir(tmp_path)
     pd.DataFrame(columns=_put_row().keys()).to_csv(
@@ -1440,7 +1513,18 @@ def test_candidate_priority_does_not_change_sealed_candidate_order(tmp_path: Pat
     assert priorities["NVDA_STRONG"] == "P0"
 
 
-def test_close_advice_preserves_lot_group_and_leg_identity(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("option_type", "group_id", "leg_role", "stock_lot_id", "family"),
+    [
+        ("put", "group-1", "funding_put", "", "sell_put"),
+        ("call", "", "wheel_call", "stock-1", "covered_call"),
+        ("put", "", "", "", "sell_put"),
+    ],
+)
+def test_close_advice_preserves_lot_group_and_leg_identity(
+    tmp_path: Path, option_type: str, group_id: str, leg_role: str,
+    stock_lot_id: str, family: str,
+) -> None:
     account_dir = _account_dir(tmp_path)
     pd.DataFrame(columns=_put_row().keys()).to_csv(account_dir / "nvda_sell_put_candidates_labeled.csv", index=False)
     _write_close_report(
@@ -1449,10 +1533,12 @@ def test_close_advice_preserves_lot_group_and_leg_identity(tmp_path: Path) -> No
             {
                 "account": "lx",
                 "position_lot_id": "lot-put",
-                "strategy_group_id": "group-1",
-                "leg_role": "funding_put",
+                "strategy_group_id": group_id,
+                "leg_role": leg_role,
+                "source_stock_lot_id": stock_lot_id,
+                "strategy_family": family,
                 "symbol": "NVDA",
-                "option_type": "put",
+                "option_type": option_type,
                 "expiration": "2026-08-21",
                 "strike": 100,
                 "reason": "收益已锁定",
@@ -1478,10 +1564,13 @@ def test_close_advice_preserves_lot_group_and_leg_identity(tmp_path: Path) -> No
 
     assert action["priority"] == "P2"
     assert action["position_lot_id"] == "lot-put"
-    assert action["strategy_group_id"] == "group-1"
-    assert action["leg_role"] == "funding_put"
+    assert action["strategy_group_id"] == group_id
+    assert action["leg_role"] == leg_role
+    assert action["source_stock_lot_id"] == stock_lot_id
+    assert action["strategy_family"] == family
     assert action["recommendation_state"] == "close"
     assert brief["positions"][0]["position_lot_id"] == "lot-put"
+    assert brief["positions"][0]["source_stock_lot_id"] == (stock_lot_id or None)
     assert brief["positions"][0]["metrics"] == {
         "ask": 0.54,
         "remaining_term_ratio": 0.60,
@@ -1827,10 +1916,11 @@ def test_combo_yield_selects_one_pair_per_symbol_and_ranks_before_truncation(tmp
     brief = _assemble(tmp_path)
     combos = brief["candidates"]["combo_yield"]
 
-    assert [item["strategy_group_id"] for item in combos] == [
+    assert [item["candidate_pair_id"] for item in combos] == [
         "combo_yield:AAPL:AAPL_P180:AAPL_C220",
         "combo_yield:NVDA:NVDA_P100:NVDA_C125",
     ]
+    assert all(item["strategy_group_id"] == "" for item in combos)
     assert combos[0]["put_leg_role"] == "funding_put"
     assert combos[0]["call_leg_role"] == "participation_call"
     assert combos[0]["put_sell_reference"] == 4.25
@@ -1843,10 +1933,11 @@ def test_combo_yield_selects_one_pair_per_symbol_and_ranks_before_truncation(tmp
     assert combo_index["AAPL"]["put_sell_reference"] == 4.25
     assert combo_index["AAPL"]["call_buy_reference"] == 0.55
     combo_actions = [item for item in brief["actions"] if item["strategy_family"] == "combo_yield"]
-    assert [item["strategy_group_id"] for item in combo_actions] == [
+    assert [item["candidate_pair_id"] for item in combo_actions] == [
         "combo_yield:AAPL:AAPL_P180:AAPL_C220",
         "combo_yield:NVDA:NVDA_P100:NVDA_C125",
     ]
+    assert all(item["strategy_group_id"] == "" for item in combo_actions)
 
 
 def test_combo_snapshot_partial_status_warns_without_csv_authority(
@@ -1902,13 +1993,20 @@ def test_combo_snapshot_data_unavailable_is_not_clean_no_candidate(
     assert combo_source["opening_status"] == "data_unavailable"
 
 
-def test_combo_yield_event_projection_relates_to_shared_expiration(tmp_path: Path) -> None:
+@pytest.mark.parametrize("group_id", ["", "confirmed-combo-group"])
+def test_combo_yield_event_projection_relates_to_shared_expiration(
+    tmp_path: Path, group_id: str,
+) -> None:
+    from domain.domain.daily_decision_brief import daily_brief_digest
+    from src.application.daily_decision_brief_renderer import render_full_brief
+
     account_dir = _account_dir(tmp_path)
     pd.DataFrame(
         [
             {
                 "symbol": "NVDA",
-                    "candidate_pair_id": "combo_yield:NVDA:NVDA_P100:NVDA_C125",
+                "candidate_pair_id": "combo_yield:NVDA:NVDA_P100:NVDA_C125",
+                "strategy_group_id": group_id,
                 "put_contract_symbol": "NVDA_P100",
                 "call_contract_symbol": "NVDA_C125",
                 "put_expiration": "2026-08-21",
@@ -1916,6 +2014,8 @@ def test_combo_yield_event_projection_relates_to_shared_expiration(tmp_path: Pat
                 "put_strike": 100,
                 "call_strike": 125,
                 "annualized_net_credit_yield": 0.20,
+                "cash_required_usd": 10_000,
+                "cash_free_usd": 20_000,
                 **_earnings_evidence(event_date="2026-08-14"),
                 "earnings_snapshot_hash": "e" * 64,
             }
@@ -1926,6 +2026,15 @@ def test_combo_yield_event_projection_relates_to_shared_expiration(tmp_path: Pat
     candidate = brief["candidates"]["combo_yield"][0]
     action = next(item for item in brief["actions"] if item["action_type"] == "open_combo_yield")
 
+    representative = next(
+        item["representative"] for item in brief["candidate_index"]
+        if item["strategy_family"] == "combo_yield"
+    )
+    for item in (candidate, representative, action):
+        assert item["candidate_pair_id"] == "combo_yield:NVDA:NVDA_P100:NVDA_C125"
+        assert item["strategy_group_id"] == group_id
+    assert len(daily_brief_digest(brief)) == 64
+    assert "NVDA" in render_full_brief(brief)
     assert action["event_risk"] == candidate["event_risk"]
     assert candidate["event_risk"]["user_state"] == "confirmed_event"
     assert candidate["event_risk"]["reason_code"] == "confirmed_distant_earnings_event"

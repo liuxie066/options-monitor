@@ -22,6 +22,13 @@ from src.application.candidate_models import CandidateBaseValues, CandidateContr
 from src.application.earnings_calendar import annotate_candidates_with_earnings_evidence
 
 _DEFINITIVE_CALCULATION_REASONS = frozenset({"net_premium_non_positive"})
+_DEFINITIVE_CONTRACT_EVIDENCE_REASONS = frozenset(
+    {
+        "option_multiplier_conflict",
+        "option_non_standard",
+        "option_type_mismatch",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -125,6 +132,12 @@ def _calculation_decision_record(
         reject_reason = REJECT_CONTRACT_INELIGIBLE
     elif opening_status in {"data_unavailable", "market_closed"}:
         reject_reason = REJECT_EVIDENCE_UNAVAILABLE
+    elif specific_reason == REJECT_EVIDENCE_UNAVAILABLE:
+        reject_reason = REJECT_EVIDENCE_UNAVAILABLE
+    elif specific_reason == REJECT_CONTRACT_INELIGIBLE:
+        reject_reason = REJECT_CONTRACT_INELIGIBLE
+    elif specific_reason in _DEFINITIVE_CONTRACT_EVIDENCE_REASONS:
+        reject_reason = REJECT_CONTRACT_INELIGIBLE
     elif opening_status != "ready":
         reject_reason = REJECT_INPUT_INVALID
     elif specific_reason in _DEFINITIVE_CALCULATION_REASONS:

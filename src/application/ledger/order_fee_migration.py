@@ -1139,6 +1139,7 @@ def _assigned_after_by_account(
                 if str((item.get("fields") or {}).get("account") or "").strip().lower()
                 == account
             ],
+            as_of_ms=as_of_ms,
         )
     return result
 

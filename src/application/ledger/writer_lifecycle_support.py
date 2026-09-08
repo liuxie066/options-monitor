@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from domain.domain.lifecycle_allocation import validate_stock_settlement_allocation_group
+
 from .writer_common import (
     Any,
     ComboMembershipResolution,
@@ -679,6 +681,26 @@ def _require_duplicate_settlement_allocation_state(
         raise SettlementAdmissionStateIncoherent(
             "duplicate settlement terminal allocation type is incoherent"
         )
+    if terminal_type in {"assignment", "exercise"}:
+        event_ids = {
+            str(item.get("canonical_terminal_event_id") or "").strip()
+            for item in evidence_allocations
+        }
+        terminal_events = [
+            item
+            for item in sqlite_repo.list_trade_events(conn=conn)
+            if str(item.get("event_id") or "").strip() in event_ids
+        ]
+        if len(terminal_events) != len(event_ids):
+            raise SettlementAdmissionStateIncoherent(
+                "duplicate settlement terminal events are missing"
+            )
+        try:
+            validate_stock_settlement_allocation_group(terminal_events)
+        except ValueError as exc:
+            raise SettlementAdmissionStateIncoherent(
+                "duplicate settlement stock allocation is incoherent"
+            ) from exc
     return state
 
 def _require_duplicate_settlement_issue_state(
@@ -915,6 +937,11 @@ def _validate_lifecycle_event_allocation_plan(
         raise ValueError("lifecycle evidence contracts are invalid") from exc
     if evidence_contracts <= 0:
         raise ValueError("lifecycle evidence contracts must be positive")
+    terminal_type = str(
+        evidence.get("terminal_type") or evidence.get("evidence_type") or ""
+    ).strip().lower()
+    if terminal_type in {"assignment", "exercise"}:
+        validate_stock_settlement_allocation_group(terminal_events)
     events_by_id = {event.event_id: event for event in terminal_events}
     if len(events_by_id) != len(terminal_events):
         raise ValueError("lifecycle terminal event ids must be unique")

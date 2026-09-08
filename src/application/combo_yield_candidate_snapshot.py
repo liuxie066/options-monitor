@@ -133,7 +133,7 @@ def _canonical_json_bytes(payload: Mapping[str, Any]) -> bytes:
 
 
 def _pair_id(raw: Mapping[str, Any], *, required: bool) -> str | None:
-    pair_id = str(raw.get("candidate_pair_id") or raw.get("strategy_group_id") or "").strip()
+    pair_id = str(raw.get("candidate_pair_id") or "").strip()
     if not pair_id:
         symbol = str(raw.get("symbol") or "").strip().upper()
         put_contract = str(raw.get("put_contract_symbol") or "").strip()

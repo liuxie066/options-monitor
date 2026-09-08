@@ -38,6 +38,83 @@ def _repo_with_open_event(tmp_path: Path):
     event_id = repo.list_trade_events()[0]["event_id"]
     return repo, event_id
 
+
+def _repo_with_assignment(
+    tmp_path: Path,
+    *,
+    wheel_start_enabled: bool = False,
+):
+    from domain.domain.option_position_lots import OpenPositionCommand
+    from src.application.ledger.commands import record_manual_assignment
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="NVDA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=100.0,
+            multiplier=100,
+            expiration_ymd="2026-08-21",
+            premium_per_share=2.5,
+            opened_at_ms=1_000,
+        ),
+    )
+    put_lot_id = str(repo.list_position_lots()[0]["record_id"])
+    result = record_manual_assignment(
+        repo,
+        record_id=put_lot_id,
+        contracts_to_close=1,
+        stock_side="buy",
+        stock_qty=100,
+        stock_price=100.0,
+        as_of_ms=2_000,
+        request_id="assignment-for-intervention-test",
+        wheel_start_enabled=wheel_start_enabled,
+    )
+    assignment_event_id = str(result["result"]["event_id"])
+    return repo, assignment_event_id, f"assigned-stock-{assignment_event_id}"
+
+
+def _durable_ledger_state(repo) -> dict:
+    return deepcopy(
+        {
+            "trade_events": repo.list_trade_events(),
+            "assigned_stock_events": repo.list_assigned_stock_events(),
+            "wheel_events": repo.list_wheel_events(account="lx"),
+            "position_lots": repo.list_position_lots(),
+            "projection_source": repo.read_position_projection_source_state(),
+        }
+    )
+
+
+def _append_assigned_stock_sale(
+    repo,
+    *,
+    stock_lot_id: str,
+    source_deal_id: str,
+) -> dict:
+    from src.application.positions.workflows import execute_manual_assigned_stock_sale
+
+    preview = execute_manual_assigned_stock_sale(
+        repo,
+        target_stock_lot_id=stock_lot_id,
+        shares=100,
+        price=105.0,
+        trade_time_ms=3_000,
+        source_deal_id=source_deal_id,
+        dry_run=True,
+    )
+    event = dict(preview["sale_event"])
+    with repo._writer_connection(begin_immediate=True) as conn:  # noqa: SLF001 - canonical race fixture
+        assert repo.upsert_assigned_stock_event(event, conn=conn) is True
+    return event
+
 def _attach_opend_time_evidence(
     repo,
     *,
@@ -1025,6 +1102,368 @@ def test_trade_events_void_dry_run_includes_projection_preview(monkeypatch, tmp_
     assert out["projection_preview"]["position_lot_count"] == 0
     assert len(repo.list_trade_events()) == 1
     assert len(repo.list_position_lots()) == 1
+
+
+def test_assignment_void_apply_rechecks_sale_created_after_preflight(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    import src.application.ledger.commands as ledger_commands
+    import src.interfaces.cli.trade_events as cli
+
+    repo, assignment_event_id, stock_lot_id = _repo_with_assignment(tmp_path)
+    monkeypatch.setattr(
+        cli,
+        "resolve_option_positions_repo",
+        lambda **_kwargs: (tmp_path / "data.json", repo),
+    )
+    original_persist = ledger_commands.persist_manual_void_event
+
+    def _persist_after_sale(*args, **kwargs):
+        _append_assigned_stock_sale(
+            repo,
+            stock_lot_id=stock_lot_id,
+            source_deal_id="sale-created-after-void-preflight",
+        )
+        state_after_sale = _durable_ledger_state(repo)
+        with pytest.raises(ValueError, match="downstream stock dependencies"):
+            original_persist(*args, **kwargs)
+        assert _durable_ledger_state(repo) == state_after_sale
+        raise ValueError("apply race rejected after dependency re-read")
+
+    monkeypatch.setattr(ledger_commands, "persist_manual_void_event", _persist_after_sale)
+
+    assert cli.main(["void", assignment_event_id, "--confirm", "--format", "json"]) == 2
+
+    assert "apply race rejected after dependency re-read" in capsys.readouterr().out
+    assert len(repo.list_trade_events()) == 2
+    assert len(repo.list_assigned_stock_events()) == 1
+    assert repo.list_position_lots()[0]["fields"]["contracts_open"] == 0
+
+
+def test_assignment_repair_apply_rechecks_sale_created_after_preview(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    import src.application.ledger.interventions as interventions
+    import src.interfaces.cli.trade_events as cli
+
+    repo, assignment_event_id, stock_lot_id = _repo_with_assignment(tmp_path)
+    monkeypatch.setattr(
+        cli,
+        "resolve_option_positions_repo",
+        lambda **_kwargs: (tmp_path / "data.json", repo),
+    )
+    original_transaction = interventions.with_sqlite_repo_transaction
+
+    def _transaction_after_sale(repo_arg, fn, **kwargs):
+        _append_assigned_stock_sale(
+            repo,
+            stock_lot_id=stock_lot_id,
+            source_deal_id="sale-created-after-repair-preview",
+        )
+        state_after_sale = _durable_ledger_state(repo)
+        with pytest.raises(ValueError, match="downstream stock dependencies"):
+            original_transaction(repo_arg, fn, **kwargs)
+        assert _durable_ledger_state(repo) == state_after_sale
+        raise ValueError("repair apply race rejected after dependency re-read")
+
+    monkeypatch.setattr(
+        interventions,
+        "with_sqlite_repo_transaction",
+        _transaction_after_sale,
+    )
+
+    assert cli.main(["repair", assignment_event_id, "--price", "99", "--confirm"]) == 2
+
+    assert "repair apply race rejected after dependency re-read" in capsys.readouterr().out
+    assert len(repo.list_trade_events()) == 2
+    assert len(repo.list_assigned_stock_events()) == 1
+
+
+def test_assignment_void_and_repair_reject_historical_sale_with_stable_dependency(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    import src.interfaces.cli.trade_events as cli
+
+    repo, assignment_event_id, stock_lot_id = _repo_with_assignment(tmp_path)
+    sale = _append_assigned_stock_sale(
+        repo,
+        stock_lot_id=stock_lot_id,
+        source_deal_id="historical-stock-sale",
+    )
+    sale_event_id = str(sale["stock_event_id"])
+    before = _durable_ledger_state(repo)
+    monkeypatch.setattr(
+        cli,
+        "resolve_option_positions_repo",
+        lambda **_kwargs: (tmp_path / "data.json", repo),
+    )
+
+    assert cli.main(["void", assignment_event_id, "--dry-run", "--format", "json"]) == 2
+    void_error = capsys.readouterr().out
+    assert json.dumps(
+        [
+            {
+                "event_id": sale_event_id,
+                "kind": "assigned_stock_sale",
+                "lot_id": stock_lot_id,
+                "status": "effective",
+            }
+        ],
+        ensure_ascii=False,
+        sort_keys=True,
+    ) in void_error
+    assert _durable_ledger_state(repo) == before
+
+    assert cli.main(["repair", assignment_event_id, "--strike", "101", "--confirm"]) == 2
+    assert "downstream stock dependencies" in capsys.readouterr().out
+    assert _durable_ledger_state(repo) == before
+
+
+def test_assignment_void_rejects_closed_covered_call_once_then_allows_legally_voided_call(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    import src.interfaces.cli.trade_events as cli
+    from domain.domain.ledger import ContractKey, TradeEvent
+    from src.application.ledger.writer import persist_trade_event_objects_atomically
+
+    repo, assignment_event_id, stock_lot_id = _repo_with_assignment(tmp_path)
+    call_event_id = "historical-covered-call-open"
+    persist_trade_event_objects_atomically(
+        repo,
+        [
+            TradeEvent(
+                event_id=call_event_id,
+                event_type="open",
+                event_time_ms=3_000,
+                contract_key=ContractKey.from_values(
+                    broker="富途",
+                    account="lx",
+                    underlying_symbol="NVDA",
+                    option_type="call",
+                    position_side="short",
+                    strike=110,
+                    expiration_ymd="2026-08-21",
+                ),
+                contracts=1,
+                price=2.0,
+                currency="USD",
+                source="test",
+                multiplier=100,
+                lot_id="historical-covered-call-lot",
+                raw_payload={"source_stock_lot_id": stock_lot_id},
+            )
+        ],
+    )
+    call_lot = next(
+        row for row in repo.list_position_lots() if row["record_id"] == "historical-covered-call-lot"
+    )
+    close_result = ledger_manual_trades.persist_manual_close_event(
+        repo,
+        record_id=call_lot["record_id"],
+        fields=call_lot["fields"],
+        contracts_to_close=1,
+        close_price=0.5,
+        close_reason="manual_buy_to_close",
+        as_of_ms=4_000,
+    )
+    close_event_id = str(close_result.event_id)
+    before = _durable_ledger_state(repo)
+    monkeypatch.setattr(
+        cli,
+        "resolve_option_positions_repo",
+        lambda **_kwargs: (tmp_path / "data.json", repo),
+    )
+
+    assert cli.main(["void", assignment_event_id, "--dry-run"]) == 2
+    error = capsys.readouterr().out
+    assert error.count(call_event_id) == 1
+    assert '"kind": "covered_call"' in error
+    assert '"status": "effective"' in error
+    assert _durable_ledger_state(repo) == before
+
+    _append_canonical_void_event(
+        repo,
+        target_event_id=close_event_id,
+        event_id="void-historical-covered-call-close",
+        event_time_ms=5_000,
+    )
+    _append_canonical_void_event(
+        repo,
+        target_event_id=call_event_id,
+        event_id="void-historical-covered-call-open",
+        event_time_ms=6_000,
+    )
+    assert cli.main(["void", assignment_event_id, "--dry-run", "--format", "json"]) == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert preview["ledger_preflight"]["status"] == "ok"
+
+
+def test_assignment_void_rejects_unresolved_explicit_stock_lot_reference(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    import src.interfaces.cli.trade_events as cli
+    from domain.domain.ledger import ContractKey, TradeEvent
+    from src.application.ledger.writer import persist_trade_event_objects_atomically
+
+    repo, assignment_event_id, stock_lot_id = _repo_with_assignment(tmp_path)
+    call_event_id = "unresolved-covered-call-open"
+    persist_trade_event_objects_atomically(
+        repo,
+        [
+            TradeEvent(
+                event_id=call_event_id,
+                event_type="open",
+                event_time_ms=3_000,
+                contract_key=ContractKey.from_values(
+                    broker="富途",
+                    account="lx",
+                    underlying_symbol="NVDA",
+                    option_type="call",
+                    position_side="short",
+                    strike=110,
+                    expiration_ymd="2026-08-21",
+                ),
+                contracts=2,
+                price=2.0,
+                currency="USD",
+                source="test",
+                multiplier=100,
+                lot_id="unresolved-covered-call-lot",
+                raw_payload={
+                    "strategy_snapshot": {"source_stock_lot_id": stock_lot_id}
+                },
+            )
+        ],
+    )
+    before = _durable_ledger_state(repo)
+    monkeypatch.setattr(
+        cli,
+        "resolve_option_positions_repo",
+        lambda **_kwargs: (tmp_path / "data.json", repo),
+    )
+
+    assert cli.main(["void", assignment_event_id, "--dry-run"]) == 2
+
+    error = capsys.readouterr().out
+    assert json.dumps(
+        [
+            {
+                "event_id": call_event_id,
+                "kind": "covered_call",
+                "lot_id": stock_lot_id,
+                "status": "unresolved",
+            }
+        ],
+        ensure_ascii=False,
+        sort_keys=True,
+    ) in error
+    assert _durable_ledger_state(repo) == before
+
+
+def test_assignment_void_rejects_ended_wheel_then_allows_legally_voided_wheel_history(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    import src.interfaces.cli.trade_events as cli
+    from domain.domain.wheel import build_wheel_event
+    from src.application.wheel import build_wheel_read_model, end_wheel_lifecycle
+
+    repo, assignment_event_id, stock_lot_id = _repo_with_assignment(
+        tmp_path,
+        wheel_start_enabled=True,
+    )
+    batch = build_wheel_read_model(repo, "lx", 3_000)["batches"][0]
+    ended = end_wheel_lifecycle(
+        repo,
+        account="lx",
+        stock_lot_id=stock_lot_id,
+        expected_batch_generation_hash=batch["batch_generation_hash"],
+        request_id="end-wheel-before-intervention",
+        actor="test",
+        apply_changes=True,
+        as_of_ms=3_000,
+    )
+    end_event_id = str(ended["event_id"])
+    wheel_events = repo.list_wheel_events(account="lx")
+    start_event_id = next(
+        str(row["event_id"])
+        for row in wheel_events
+        if row["event_type"] == "wheel_started"
+    )
+    before = _durable_ledger_state(repo)
+    monkeypatch.setattr(
+        cli,
+        "resolve_option_positions_repo",
+        lambda **_kwargs: (tmp_path / "data.json", repo),
+    )
+
+    assert cli.main(["void", assignment_event_id, "--dry-run"]) == 2
+    error = capsys.readouterr().out
+    assert start_event_id in error
+    assert end_event_id in error
+    assert '"kind": "wheel_event"' in error
+    assert _durable_ledger_state(repo) == before
+
+    for index, target_wheel_event_id in enumerate((start_event_id, end_event_id), start=1):
+        event = build_wheel_event(
+            event_id=f"void-wheel-history-{index}",
+            account="lx",
+            stock_lot_id=stock_lot_id,
+            event_type="wheel_event_voided",
+            occurred_at_ms=4_000 + index,
+            recorded_at_ms=4_000 + index,
+            payload={"target_wheel_event_id": target_wheel_event_id},
+        )
+        with repo._writer_connection(begin_immediate=True) as conn:  # noqa: SLF001 - legal void fixture
+            assert repo.append_wheel_event_once(event, conn=conn) is True
+    assert cli.main(["void", assignment_event_id, "--dry-run", "--format", "json"]) == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert preview["ledger_preflight"]["status"] == "ok"
+
+
+def test_assignment_void_apply_preserves_ordinary_no_dependency_path(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    import src.interfaces.cli.trade_events as cli
+
+    repo, assignment_event_id, _stock_lot_id = _repo_with_assignment(tmp_path)
+    monkeypatch.setattr(
+        cli,
+        "resolve_option_positions_repo",
+        lambda **_kwargs: (tmp_path / "data.json", repo),
+    )
+
+    assert cli.main(["void", assignment_event_id, "--dry-run", "--format", "json"]) == 0
+    capsys.readouterr()
+    assert cli.main(["void", assignment_event_id, "--confirm", "--format", "json"]) == 0
+
+    applied = json.loads(capsys.readouterr().out)
+    assert applied["write_applied"] is True
+    assert applied["created"] is True
+    assert len(repo.list_trade_events()) == 3
+    assert repo.list_assigned_stock_events() == []
+    lots = repo.list_position_lots()
+    assert [row["record_id"] for row in lots] == [
+        next(
+            row["raw_payload"]["record_id"]
+            for row in repo.list_trade_events()
+            if row["event_type"] == "assignment"
+        )
+    ]
+    assert lots[0]["fields"]["contracts_open"] == 1
 
 
 def test_trade_events_rejects_apply_and_dry_run_together(monkeypatch, tmp_path: Path) -> None:

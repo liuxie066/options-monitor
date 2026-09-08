@@ -78,6 +78,9 @@ from src.infrastructure.opend_retcodes import classify_opend_error
 OUTPUT_COLUMNS = [
     "account",
     "position_lot_id",
+    "strategy_group_id",
+    "leg_role",
+    "source_stock_lot_id",
     "quote_mode",
     "required_data_snapshot_plan_id",
     "required_data_snapshot_manifest_sha256",
@@ -1083,6 +1086,7 @@ def _evaluate_position_close_advice(
         {
             "broker": normalize_broker(pos.get("broker")),
             "position_side": str(pos.get("side") or "").strip().lower(),
+            **_position_relationship_fields(pos),
             "strategy_family": (
                 "sell_put" if inp.option_type == "put" else "covered_call"
             ),
@@ -1145,6 +1149,7 @@ def _lifecycle_not_evaluable_row(
         {
             "broker": normalize_broker(pos.get("broker")),
             "position_side": str(pos.get("side") or "").strip().lower(),
+            **_position_relationship_fields(pos),
             "strategy_family": (
                 "sell_put" if inp.option_type == "put" else "covered_call"
             ),
@@ -1152,6 +1157,13 @@ def _lifecycle_not_evaluable_row(
         }
     )
     return row
+
+
+def _position_relationship_fields(pos: dict[str, Any]) -> dict[str, str | None]:
+    return {
+        field: str(pos.get(field) or "").strip() or None
+        for field in ("strategy_group_id", "leg_role", "source_stock_lot_id")
+    }
 
 
 def _with_extra_flags(row: dict[str, Any], flags: list[str]) -> dict[str, Any]:

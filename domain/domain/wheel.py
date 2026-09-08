@@ -961,7 +961,7 @@ def _intent_state(
     return active, reasons, summaries
 
 
-def _effective_wheel_events(
+def effective_wheel_events(
     wheel_events: Sequence[Mapping[str, Any]],
     *,
     as_of_ms: int | None = None,
@@ -1036,7 +1036,7 @@ def project_wheel_call_intents(
     account_value = _required_text(account, "account").lower()
     stock_lot_value = _required_text(stock_lot_id, "stock_lot_id")
     instant = _positive_int(as_of_ms, "as_of_ms")
-    events, _invalid = _effective_wheel_events(
+    events, _invalid = effective_wheel_events(
         [
             event
             for event in wheel_events
@@ -1058,7 +1058,7 @@ def project_wheel_call_linkage_candidates(
     unlinked_short_call_lots: Sequence[Mapping[str, Any]],
     rejected_linkages: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
-    effective_linkages, _invalid = _effective_wheel_events(rejected_linkages)
+    effective_linkages, _invalid = effective_wheel_events(rejected_linkages)
     rejected = {
         (
             str((event.get("payload") or {}).get("call_open_event_id") or "").strip(),
@@ -1180,7 +1180,7 @@ def project_wheel_lifecycles(
     """Rebuild Wheel batches from immutable facts; never guesses a missing link."""
 
     instant = _positive_int(as_of_ms, "as_of_ms")
-    effective_events, invalid_by_group = _effective_wheel_events(
+    effective_events, invalid_by_group = effective_wheel_events(
         wheel_events,
         as_of_ms=instant,
     )
@@ -1498,6 +1498,7 @@ __all__ = [
     "WHEEL_PROJECTION_SCHEMA",
     "build_wheel_call_rank_key",
     "build_wheel_event",
+    "effective_wheel_events",
     "evaluate_wheel_call_candidate",
     "normalize_wheel_event",
     "plan_wheel_call_intent_cancel",

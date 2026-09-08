@@ -64,7 +64,7 @@ def test_enrich_trade_push_payload_uses_existing_account_id_for_symbol_lookup(mo
         },
         host="127.0.0.1",
         port=11111,
-        futu_account_ids=["888"],
+        futu_account_ids=["777", "888"],
     )
 
     assert out.payload["futu_account_id"] == "777"
@@ -150,14 +150,16 @@ def test_enrich_trade_push_payload_filters_deals_locally_for_sdk_without_deal_id
     assert out.diagnostics["tried_queries"][-1]["filter_deal_id"] == "deal-2"
 
 
-def test_enrich_trade_push_payload_falls_back_to_lookup_without_acc_id(monkeypatch) -> None:
+def test_enrich_trade_push_payload_does_not_query_outside_configured_accounts(monkeypatch) -> None:
+    calls: list[dict] = []
+
     class FakeGateway:
         def get_order_list(self, **kwargs):
-            if "acc_id" in kwargs:
-                return []
-            return [{"order_id": "order-3", "acc_id": "777", "stock_name": "泡泡玛特", "code": "HK.POP260528P150000"}]
+            calls.append(dict(kwargs))
+            return []
 
         def get_deal_list(self, **kwargs):
+            calls.append(dict(kwargs))
             return []
 
         def close(self):
@@ -171,10 +173,162 @@ def test_enrich_trade_push_payload_falls_back_to_lookup_without_acc_id(monkeypat
         futu_account_ids=["111"],
     )
 
-    assert out.payload["futu_account_id"] == "777"
-    assert out.payload["stock_name"] == "泡泡玛特"
-    assert out.payload["code"] == "HK.POP260528P150000"
-    assert out.diagnostics["matched_via"] == "order_lookup_without_acc_id"
+    assert "futu_account_id" not in out.payload
+    assert calls == [{"acc_id": 111}, {"acc_id": 111, "order_id": "order-3"}]
+    assert out.diagnostics["matched_via"] == "not_found"
+
+
+def test_order_lookup_only_adds_identity_and_other_deal_on_order_does_not_match(monkeypatch) -> None:
+    class FakeGateway:
+        def get_deal_list(self, **kwargs):
+            return [{
+                "deal_id": "other-deal",
+                "order_id": "shared-order",
+                "acc_id": "123",
+                "qty": "9",
+                "price": "99",
+                "create_time": "2026-09-07 11:22:33",
+            }]
+
+        def get_order_list(self, **kwargs):
+            return [{
+                "order_id": "shared-order",
+                "acc_id": "123",
+                "owner_stock_code": "US.NVDA",
+                "qty": "10",
+                "quantity": "10",
+                "contracts": "10",
+                "price": "88",
+                "execution_price": "88",
+                "dealt_price": "88",
+                "dealt_qty": "8",
+                "dealt_avg_price": "87",
+                "create_time": "2026-09-07 09:00:00",
+                "updated_time": "2026-09-07 12:00:00",
+            }]
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("src.application.trades.futu_detail_lookup.build_ready_futu_broker_gateway", lambda **kwargs: FakeGateway())
+    out = enrich_trade_push_payload_with_account_id(
+        {"futu_account_id": "123", "order_id": "shared-order", "deal_id": "target-deal"},
+        host="127.0.0.1",
+        port=11111,
+        futu_account_ids=["123"],
+    )
+
+    assert out.payload["symbol"] == "NVDA"
+    assert out.payload["futu_account_id"] == "123"
+    assert out.diagnostics["matched_via"] == "order_lookup_by_acc_id"
+    for key in (
+        "qty", "quantity", "contracts", "price", "execution_price", "dealt_price",
+        "dealt_qty", "dealt_avg_price", "create_time", "updated_time",
+    ):
+        assert key not in out.payload
+
+
+def test_deal_lookup_requires_payload_account_match_and_preserves_complete_raw_fill(monkeypatch) -> None:
+    class FakeGateway:
+        def get_deal_list(self, **kwargs):
+            return [{
+                "deal_id": "deal-1",
+                "order_id": "order-1",
+                "acc_id": "456",
+                "qty": "9",
+                "price": "99",
+                "create_time": "2026-09-07 11:22:33",
+            }]
+
+        def get_order_list(self, **kwargs):
+            return []
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("src.application.trades.futu_detail_lookup.build_ready_futu_broker_gateway", lambda **kwargs: FakeGateway())
+    payload = {
+        "futu_account_id": "123",
+        "deal_id": "deal-1",
+        "order_id": "order-1",
+        "qty": "2",
+        "price": "2.50",
+        "create_time": "2026-09-07 10:30:00",
+    }
+    out = enrich_trade_push_payload_with_account_id(
+        payload,
+        host="127.0.0.1",
+        port=11111,
+        futu_account_ids=["123", "456"],
+    )
+
+    assert out.payload == payload
+    assert out.diagnostics["matched_via"] == "payload"
+
+
+def test_deal_lookup_without_payload_account_requires_unique_row_account_evidence(monkeypatch) -> None:
+    class FakeGateway:
+        def get_deal_list(self, **kwargs):
+            return [{"deal_id": "deal-1", "qty": "1", "price": "2.50"}]
+
+        def get_order_list(self, **kwargs):
+            return []
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("src.application.trades.futu_detail_lookup.build_ready_futu_broker_gateway", lambda **kwargs: FakeGateway())
+    out = enrich_trade_push_payload_with_account_id(
+        {"deal_id": "deal-1"},
+        host="127.0.0.1",
+        port=11111,
+        futu_account_ids=["123"],
+    )
+
+    assert out.payload == {"deal_id": "deal-1"}
+    assert out.diagnostics["matched_via"] == "not_found"
+
+
+def test_payload_account_outside_configured_admission_is_not_queried(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "src.application.trades.futu_detail_lookup.build_ready_futu_broker_gateway",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("unconfigured account must not reach OpenD")),
+    )
+    payload = {"futu_account_id": "999", "deal_id": "deal-1"}
+
+    out = enrich_trade_push_payload_with_account_id(
+        payload,
+        host="127.0.0.1",
+        port=11111,
+        futu_account_ids=["123"],
+    )
+
+    assert out.payload == payload
+    assert out.diagnostics["matched_via"] == "unconfigured_payload_account"
+
+
+def test_deal_lookup_without_payload_account_rejects_multiple_configured_matches(monkeypatch) -> None:
+    class FakeGateway:
+        def get_deal_list(self, **kwargs):
+            acc_id = str(kwargs["acc_id"])
+            return [{"deal_id": "same-deal", "acc_id": acc_id, "qty": "1", "price": "2.50"}]
+
+        def get_order_list(self, **kwargs):
+            return []
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("src.application.trades.futu_detail_lookup.build_ready_futu_broker_gateway", lambda **kwargs: FakeGateway())
+    out = enrich_trade_push_payload_with_account_id(
+        {"deal_id": "same-deal"},
+        host="127.0.0.1",
+        port=11111,
+        futu_account_ids=["123", "456"],
+    )
+
+    assert out.payload == {"deal_id": "same-deal"}
+    assert out.diagnostics["matched_via"] == "ambiguous_deal_lookup"
 
 
 def test_enrich_trade_push_payload_unifies_symbol_from_futu_underlying_code(monkeypatch) -> None:

@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 from conftest import phase2_opening_row
+from domain.domain.decision_state_fingerprint import canonical_sha256
 from src.application.wheel import (
     build_shared_coverage_facts,
     finalize_wheel_capacity,
@@ -226,6 +227,8 @@ def test_shared_coverage_and_finalization_prioritize_wheel_over_ordinary_cc() ->
                         "candidate_id": "wheel-candidate",
                         "symbol": "NVDA",
                         "multiplier": 100,
+                        "contracts": 1,
+                        "accepted": True,
                     }
                 ]
             },
@@ -253,6 +256,138 @@ def test_shared_coverage_and_finalization_prioritize_wheel_over_ordinary_cc() ->
     assert ordinary_allocation["granted_contracts"] == 0
     assert captured["scope_results"][0]["candidate_count"] == 1
     assert captured["scope_results"][0]["reason_code"] == "partial_data"
+
+
+@pytest.mark.parametrize(
+    "early_evaluations",
+    [
+        {},
+        {"1": {"accepted": False, "contracts": 1, "multiplier": 100}},
+    ],
+)
+def test_rejected_wheel_grant_recomputes_pool_without_regranting_later_claims(
+    early_evaluations: dict,
+) -> None:
+    model = {
+        "account": "lx",
+        "batches": [
+            {
+                "account": "lx",
+                "symbol": "NVDA",
+                "stock_lot_id": lot_id,
+                "lifecycle_status": "active",
+                "active_intent_reserved_shares": reserved,
+                "assignment_at_ms": assignment_at,
+                "batch_generation_hash": char * 64,
+                "projection_hash": char.upper() * 64,
+            }
+            for lot_id, assignment_at, reserved, char in (
+                ("early", 1, 100, "a"),
+                ("late", 2, 0, "b"),
+            )
+        ],
+    }
+    wheel_scan = {
+        "scope_results": [
+            {
+                "symbol": "NVDA",
+                "stock_lot_id": lot_id,
+                "status": "completed",
+                "reason_code": "candidates_found",
+            }
+            for lot_id in ("late", "early")
+        ],
+        "raw_candidates": {
+            "early": [
+                {
+                    "candidate_id": "candidate-early",
+                    "symbol": "NVDA",
+                    "contracts": 1,
+                    "multiplier": 100,
+                    "accepted": True,
+                    "_grant_evaluations": early_evaluations,
+                }
+            ],
+            "late": [
+                {
+                    "candidate_id": "candidate-late",
+                    "symbol": "NVDA",
+                    "contracts": 1,
+                    "multiplier": 100,
+                    "accepted": True,
+                    "_grant_evaluations": {
+                        "1": {"accepted": True, "contracts": 1, "multiplier": 100}
+                    },
+                }
+            ],
+        },
+        "capacity_claims": [
+            {
+                "claim_id": f"wheel:{lot_id}",
+                "strategy_family": "wheel",
+                "account": "lx",
+                "symbol": "NVDA",
+                "stock_lot_id": lot_id,
+                "assignment_at_ms": assignment_at,
+                "requested_contracts": 1,
+                "multiplier": 100,
+            }
+            for lot_id, assignment_at in (("late", 2), ("early", 1))
+        ],
+    }
+
+    captured = finalize_wheel_capacity(
+        account="lx",
+        wheel_read_model=model,
+        wheel_scan=wheel_scan,
+        opening_call_candidates=[
+            {
+                "symbol": "NVDA",
+                "contract_symbol": "NVDA-CC",
+                "multiplier": 100,
+                "max_new_contracts": 1,
+            }
+        ],
+        coverage_facts=[
+            {
+                "account": "lx",
+                "symbol": "NVDA",
+                "status": "available",
+                "shares_eligible": 300,
+                "shares_locked": 0,
+                "shares_reserved": 100,
+                "capacity_identity_hash": "capacity-1",
+            }
+        ],
+    )
+    allocations = {row["claim_id"]: row for row in captured["allocations"]}
+    batches = {row["stock_lot_id"]: row for row in captured["batches"]}
+
+    assert (
+        allocations["wheel:early"]["granted_contracts"],
+        allocations["wheel:early"]["capacity_before"],
+        allocations["wheel:early"]["capacity_after"],
+    ) == (0, 200, 200)
+    assert allocations["wheel:early"]["allocation_reason"] == (
+        "wheel_capacity_grant_candidate_rejected"
+    )
+    assert (
+        allocations["wheel:late"]["granted_contracts"],
+        allocations["wheel:late"]["capacity_before"],
+        allocations["wheel:late"]["capacity_after"],
+    ) == (1, 200, 100)
+    assert (
+        allocations["covered_call:NVDA"]["granted_contracts"],
+        allocations["covered_call:NVDA"]["capacity_before"],
+        allocations["covered_call:NVDA"]["capacity_after"],
+    ) == (0, 100, 100)
+    assert batches["early"]["granted_contracts"] == 0
+    assert batches["early"]["final_candidate"] is None
+    assert batches["early"]["allocation"] == allocations["wheel:early"]
+    assert batches["early"]["reason_code"] == "wheel_capacity_grant_candidate_rejected"
+    assert batches["late"]["granted_contracts"] == 1
+    assert batches["late"]["final_candidate"]["candidate_id"] == "candidate-late"
+    assert captured["allocation_hash"] == canonical_sha256(captured["allocations"])
 
 
 def test_wheel_scan_disabled_keeps_batch_status_without_candidate_demand() -> None:

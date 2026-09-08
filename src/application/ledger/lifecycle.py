@@ -6,7 +6,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from domain.domain.ledger import ContractKey, TradeEvent
-from domain.domain.lifecycle_allocation import allocation_id_for, terminal_event_id_for
+from domain.domain.lifecycle_allocation import (
+    allocate_stock_settlement,
+    allocation_id_for,
+    terminal_event_id_for,
+)
 from domain.domain.ledger.position_fields import (
     EXPIRE_AUTO_CLOSE,
     effective_contracts_open,
@@ -187,6 +191,22 @@ def _persist_lifecycle_close_events(
     prepared: list[tuple[Any, int, Any, TradeEvent]] = []
     as_of_ms = int(event_time_ms) if event_time_ms is not None else None
     evidence_tuple = tuple(str(item) for item in (evidence_ids or []) if str(item or "").strip())
+    settlement_source = dict(stock_settlement or {})
+    settlements_by_lot: dict[str, dict[str, Any]] = {}
+    if normalized_event_type in {"assignment", "exercise"} and settlement_source:
+        settlements_by_lot = allocate_stock_settlement(
+            settlement_source,
+            (
+                {
+                    "target_lot_id": str(match.record_id),
+                    "contracts_allocated": int(match.contracts_to_close),
+                    "multiplier": effective_multiplier(dict(match.candidate.raw_fields))
+                    if match.candidate is not None
+                    else None,
+                }
+                for match in close_target_resolution.matches
+            ),
+        )
     for match in close_target_resolution.matches:
         record_id = str(match.record_id or "").strip()
         contracts = int(match.contracts_to_close or 0)
@@ -238,7 +258,8 @@ def _persist_lifecycle_close_events(
             case_id=case_id,
             evidence_ids=evidence_tuple,
             close_target_resolution=close_target_resolution.to_dict(),
-            stock_settlement=dict(stock_settlement or {}),
+            stock_settlement=settlements_by_lot.get(record_id, settlement_source),
+            stock_settlement_source=settlement_source if settlements_by_lot else None,
             close_reason=close_reason,
             event_id=event_id,
             evidence_id=allocation_evidence_id,
@@ -311,7 +332,12 @@ def _persist_lifecycle_close_events(
             details={
                 "case_id": case_id,
                 "evidence_ids": list(evidence_tuple),
-                "stock_settlement": dict(stock_settlement or {}),
+                "stock_settlement": dict(
+                    settlements_by_lot.get(record_id, settlement_source)
+                ),
+                "stock_settlement_source": dict(settlement_source)
+                if settlements_by_lot
+                else None,
             },
         )
         writes.append(
@@ -412,6 +438,7 @@ def _lifecycle_close_event(
     evidence_ids: tuple[str, ...],
     close_target_resolution: dict[str, Any],
     stock_settlement: dict[str, Any],
+    stock_settlement_source: dict[str, Any] | None,
     close_reason: str | None = None,
     event_id: str | None = None,
     evidence_id: str | None = None,
@@ -463,6 +490,11 @@ def _lifecycle_close_event(
                 str(manual_request_intent_hash or "").strip() or None
             ),
             "stock_settlement": dict(stock_settlement),
+            **(
+                {"stock_settlement_source": dict(stock_settlement_source)}
+                if stock_settlement_source is not None
+                else {}
+            ),
             "close_target_resolution": dict(close_target_resolution),
             "contracts_open_before": effective_contracts_open(fields),
             **strategy_payload,

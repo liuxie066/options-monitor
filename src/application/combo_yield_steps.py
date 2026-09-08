@@ -139,6 +139,62 @@ def _empty_result() -> ComboYieldResult:
     return ComboYieldResult(recommended_pairs=pd.DataFrame())
 
 
+def _combo_evidence_scan_status(
+    *,
+    funding_evidence: dict[str, Any],
+    pair_diagnostics: pd.DataFrame,
+    eligible_put_count: int,
+    candidate_count: int,
+) -> tuple[dict[str, Any], str, str | None]:
+    evidence = dict(funding_evidence)
+    if eligible_put_count <= 0:
+        status, reason = project_evidence_scan_status(
+            evidence=evidence,
+            candidate_count=candidate_count,
+        )
+        return evidence, status, reason
+
+    unresolved_facts: set[tuple[str, str, str, str]] = set()
+    evaluable_pairs: set[tuple[str, str]] = set()
+    for raw in pair_diagnostics.to_dict("records"):
+        row = dict(raw)
+        scope = str(row.get("diagnostic_scope") or "").strip().lower()
+        put_contract = str(row.get("put_contract_symbol") or "").strip()
+        call_contract = str(row.get("call_contract_symbol") or "").strip()
+        evidence_status = str(row.get("evidence_status") or "").strip().lower()
+        if evidence_status == "unavailable":
+            unresolved_facts.add(
+                (
+                    scope,
+                    put_contract,
+                    call_contract,
+                    str(row.get("evidence_reason") or "").strip(),
+                )
+            )
+        elif scope == "pair" and put_contract and call_contract:
+            evaluable_pairs.add((put_contract, call_contract))
+
+    pair_unresolved_count = len(unresolved_facts)
+    pair_evaluable_count = len(evaluable_pairs)
+    evidence.update(
+        {
+            "pair_evidence_unavailable_count": pair_unresolved_count,
+            "pair_evaluable_count": pair_evaluable_count,
+        }
+    )
+    has_unresolved = bool(
+        int(evidence.get("eligibility_unresolved_count") or 0)
+        or pair_unresolved_count
+    )
+    if candidate_count > 0:
+        return evidence, "completed", "partial_data" if has_unresolved else None
+    if has_unresolved:
+        if pair_evaluable_count > 0:
+            return evidence, "completed", "partial_data"
+        return evidence, "unavailable", "data_unavailable"
+    return evidence, "completed", "no_candidate"
+
+
 def run_combo_yield_scan_and_summarize(
     *,
     sym: str,
@@ -249,6 +305,7 @@ def run_combo_yield_scan_and_summarize(
             decision_sink_fn=funding_put_decisions.extend,
         )
 
+    decision_now_utc = now_utc_fn()
     raw_yield_pairs_df = find_pairs_fn(
         df_candidates=df_yield_put_candidates_for_pairs,
         symbol=symbol,
@@ -257,6 +314,7 @@ def run_combo_yield_scan_and_summarize(
         sell_put_cfg=yield_sp,
         global_combo_yield_liquidity=(symbol_cfg.get("_global_combo_yield_liquidity") or {}),
         required_data_frame=required_data_frame,
+        now_utc=decision_now_utc,
     )
     pair_diagnostics = get_combo_yield_pair_diagnostics(raw_yield_pairs_df)
     pair_diagnostics["run_id"] = scope.get("run_id")
@@ -271,7 +329,7 @@ def run_combo_yield_scan_and_summarize(
             account=occurrence_account,
             market=symbol_market(symbol),
             run_id=occurrence_run_id,
-            generated_at_utc=now_utc_fn(),
+            generated_at_utc=decision_now_utc,
         )
     rank_shadow = build_combo_yield_rank_shadow(raw_yield_pairs_df)
 
@@ -371,12 +429,14 @@ def run_combo_yield_scan_and_summarize(
             output_path=(report_dir / f"{symbol_lower}_combo_yield_alerts.txt").resolve(),
         )
 
-    evidence = evidence_summary_from_decisions(
+    funding_evidence = evidence_summary_from_decisions(
         decisions=funding_put_decisions,
         accepted_count=len(df_yield_put_candidates_for_pairs),
     )
-    strategy_status, strategy_reason = project_evidence_scan_status(
-        evidence=evidence,
+    evidence, strategy_status, strategy_reason = _combo_evidence_scan_status(
+        funding_evidence=funding_evidence,
+        pair_diagnostics=pair_diagnostics,
+        eligible_put_count=len(df_yield_put_candidates_for_pairs),
         candidate_count=len(final_result.recommended_pairs),
     )
     summary = summarize_combo_yield(
