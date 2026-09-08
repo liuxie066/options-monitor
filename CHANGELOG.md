@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 3.4.12 - 2026-09-08
+
+### Bug Fixes
+- Kept public OpenD quality source snapshots limited to the stable schema, preventing internal fields from leaking into quality evidence (PR #254).
+
 ## 3.4.11 - 2026-09-08
 
 ### Improvements
