@@ -398,7 +398,7 @@ DAILY_DECISION_BRIEF_READ_TOOL = build_agent_tool(
         {"input": {"account": "lx", "market": "US", "date": "2026-07-19", "revision": 0}},
     ),
     output_contract=_OUTPUT_CONTRACT,
-    copilot_input_fields=("account", "market", "date", "revision"),
+    bot_input_fields=("account", "market", "date", "revision"),
 )
 
 TOOLS: tuple[AgentTool, ...] = (DAILY_DECISION_BRIEF_READ_TOOL,)

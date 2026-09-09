@@ -401,7 +401,7 @@ RUNTIME_RUNS_TOOL = build_agent_tool(
         {"input": {"run_id": "20260515T182459Z-474761"}},
     ),
     output_contract=_RUNTIME_RUNS_OUTPUT_CONTRACT,
-    copilot_input_fields=("limit", "run_id", "scanned_only"),
+    bot_input_fields=("limit", "run_id", "scanned_only"),
 )
 
 RUNTIME_LOGS_TOOL = build_agent_tool(
@@ -431,7 +431,7 @@ RUNTIME_LOGS_TOOL = build_agent_tool(
         {"input": {"kind": "service", "lines": 50}},
     ),
     output_contract=_RUNTIME_LOGS_OUTPUT_CONTRACT,
-    copilot_input_fields=("run_id", "kind", "lines"),
+    bot_input_fields=("run_id", "kind", "lines"),
 )
 
 TOOLS: tuple[AgentTool, ...] = (

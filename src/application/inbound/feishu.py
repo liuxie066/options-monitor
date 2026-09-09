@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from typing import Any, Callable, cast
 
 from src.application.agent_tool_contracts import AgentToolError, build_response
@@ -62,7 +63,10 @@ def handle_feishu_payload(
     allowed_senders: str | None = None,
     assistant_settings: Any | None = None,
     assistant_config_path: str | None = None,
+    bot_reply_options: dict[str, Any] | None = None,
+    received_monotonic: float | None = None,
 ) -> dict[str, Any]:
+    received_monotonic = time.monotonic() if received_monotonic is None else received_monotonic
     event_type = _extract_event_type(payload)
     if event_type and event_type != "im.message.receive_v1":
         return build_response(
@@ -81,6 +85,8 @@ def handle_feishu_payload(
         config_path=config_path,
         audit_db=audit_db,
         assistant_config_path=assistant_config_path,
+        received_monotonic=received_monotonic,
+        bot_reply_options=bot_reply_options,
     )
     kwargs: dict[str, Any] = {"allowed_senders": allowed_senders}
     if execute_tool_fn is not None:
@@ -131,7 +137,7 @@ def _assistant_settings(
             enabled=configured.enabled,
             context_window_messages=configured.context_window_messages,
             default_market_scope=configured.default_market_scope,
-            copilot=configured.copilot,
+            bot=configured.bot,
             llm=configured.llm,
         )
 
@@ -145,7 +151,10 @@ def feishu_payload_to_inbound_request(
     config_path: str | None = None,
     audit_db: str | None = None,
     assistant_config_path: str | None = None,
+    bot_reply_options: dict[str, Any] | None = None,
+    received_monotonic: float | None = None,
 ) -> AssistantRequest:
+    received_monotonic = time.monotonic() if received_monotonic is None else received_monotonic
     event = _dict(payload.get("event"))
     message = _dict(event.get("message"))
     sender = _dict(event.get("sender"))
@@ -181,6 +190,8 @@ def feishu_payload_to_inbound_request(
 
     return AssistantRequest(
         text=text,
+        reply_context=dict(bot_reply_options or {}),
+        received_monotonic=received_monotonic,
         sender_id=sender_id,
         channel="feishu",
         message_id=message_id,

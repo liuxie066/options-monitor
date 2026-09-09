@@ -130,7 +130,7 @@ def _starter_yaml_payload(
         "assistant": {
             "enabled": True,
             "context_window_messages": 8,
-            "copilot": {
+            "bot": {
                 "enabled": True,
                 "toolsets": {
                     "portfolio": False,

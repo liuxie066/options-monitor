@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -37,8 +38,9 @@ def build_command_id(*, channel: str, sender_id: str, message_id: str | None, te
 
 
 class InboundAuditStore:
-    def __init__(self, path: str | Path | None = None) -> None:
+    def __init__(self, path: str | Path | None = None, *, deadline_monotonic: float | None = None) -> None:
         self.path = private_path(path) if path else default_audit_db_path()
+        self.deadline_monotonic = deadline_monotonic
 
     def find_by_message(self, *, channel: str, message_id: str | None, command_id: str | None = None) -> dict[str, Any] | None:
         normalized_message_id = str(message_id or "").strip()
@@ -230,7 +232,7 @@ class InboundAuditStore:
             )
 
     def _connect(self) -> sqlite3.Connection:
-        conn = connect_inbound_sqlite(self.path)
+        conn = connect_inbound_sqlite(self.path, deadline_monotonic=self.deadline_monotonic)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -280,9 +282,10 @@ class InboundAuditStore:
             raise inbound_sqlite_error(self.path, exc) from exc
 
 
-def connect_inbound_sqlite(path: Path) -> sqlite3.Connection:
+def connect_inbound_sqlite(path: Path, *, deadline_monotonic: float | None = None) -> sqlite3.Connection:
     try:
-        return connect_private_sqlite(path)
+        timeout = 5.0 if deadline_monotonic is None else max(0.0, min(5.0, deadline_monotonic - time.monotonic()))
+        return connect_private_sqlite(path, timeout=timeout)
     except (OSError, sqlite3.Error) as exc:
         raise inbound_sqlite_error(path, exc) from exc
 

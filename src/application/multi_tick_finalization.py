@@ -91,9 +91,16 @@ def finalize_no_account_notification(
             exc=exc,
             extra={"reason": reason, **({"error_code": error_code} if error_code else {})},
         )
+    run_markets = {
+        str(market).strip().upper()
+        for field in ("markets_to_run", "scheduler_markets")
+        for market in (tick_metrics.get(field) or [])
+    }
     for result in results:
         account = str(result.account)
         payload = account_payloads.get(account, {})
+        if len(run_markets) == 1 and run_markets <= {"US", "HK"}:
+            payload["market"] = next(iter(run_markets))
         try:
             state_repo.write_account_last_run(base, result.account, payload)
             state_repo.write_run_account_last_run(base, run_id, result.account, payload)

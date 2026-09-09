@@ -903,10 +903,10 @@ def _wheel_activation_tool(
     return _wheel_result(_run)
 
 
-_OPTION_PERFORMANCE_COPILOT_ALL_SCOPE_MARKERS = frozenset({"all", ":all", "__omit__"})
+_OPTION_PERFORMANCE_BOT_ALL_SCOPE_MARKERS = frozenset({"all", ":all", "__omit__"})
 
 
-def _normalize_option_performance_copilot_input(payload: Mapping[str, Any]) -> dict[str, Any]:
+def _normalize_option_performance_bot_input(payload: Mapping[str, Any]) -> dict[str, Any]:
     normalized = dict(payload)
     for name in ("account", "broker"):
         value = normalized.get(name)
@@ -915,7 +915,7 @@ def _normalize_option_performance_copilot_input(payload: Mapping[str, Any]) -> d
         stripped = value.strip()
         if not stripped:
             raise ValueError(f"{name} must be non-empty when provided")
-        if stripped.lower() in _OPTION_PERFORMANCE_COPILOT_ALL_SCOPE_MARKERS:
+        if stripped.lower() in _OPTION_PERFORMANCE_BOT_ALL_SCOPE_MARKERS:
             normalized.pop(name)
     as_of_date = normalized.get("as_of_date")
     if "as_of_date" in normalized and isinstance(as_of_date, str) and not as_of_date.strip():
@@ -973,7 +973,7 @@ OPTION_PERFORMANCE_REPORT_TOOL = build_agent_tool(
         {"input": {"period": "mtd", "include_rows": True}},
     ),
     output_contract=_OPTION_PERFORMANCE_OUTPUT_CONTRACT,
-    copilot_input_fields=(
+    bot_input_fields=(
         "config_key",
         "account",
         "broker",
@@ -982,7 +982,7 @@ OPTION_PERFORMANCE_REPORT_TOOL = build_agent_tool(
         "month",
         "year",
     ),
-    copilot_input_schema={
+    bot_input_schema={
         "type": "object",
         "properties": {
             "config_key": {"type": "string", "enum": ["us", "hk"]},
@@ -1016,7 +1016,7 @@ OPTION_PERFORMANCE_REPORT_TOOL = build_agent_tool(
         },
         "additionalProperties": False,
     },
-    copilot_input_normalizer=_normalize_option_performance_copilot_input,
+    bot_input_normalizer=_normalize_option_performance_bot_input,
 )
 
 OPTION_POSITIONS_READ_TOOL = build_agent_tool(
@@ -1113,13 +1113,13 @@ OPTION_POSITIONS_READ_TOOL = build_agent_tool(
         "pagination": {"mode": "none"},
     },
     output_contract_resolver=_option_positions_output_contract,
-    copilot_input_fields=(
+    bot_input_fields=(
         "config_key", "action", "broker", "account", "status", "query", "limit",
         "exp_within_days", "expiration_month", "expiration_exact", "expiration_before",
         "expiration_after", "record_id", "symbol", "option_type", "side", "strike",
         "exp", "stock_lot_id", "refresh_quotes", "as_of_ms", "cursor", "include_total", "position_effect",
     ),
-    copilot_input_schema={
+    bot_input_schema={
         "type": "object",
         "properties": {
             "config_key": {"type": "string", "enum": ["us", "hk"], "description": "Market config"},
@@ -1191,7 +1191,7 @@ OPTION_POSITIONS_READ_TOOL = build_agent_tool(
         "additionalProperties": False,
     },
     input_validator=_validate_option_positions_input,
-    copilot_input_normalizer=normalize_option_positions_read_input,
+    bot_input_normalizer=normalize_option_positions_read_input,
 )
 
 

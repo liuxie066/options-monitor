@@ -191,10 +191,10 @@ YAML authoring 使用 `covered_call`；生成的 runtime、CSV 或 trace 可能�
 模型 API key 只 provision 到固定逻辑凭据；YAML 选择 provider/model 即可。旧 `api_key_env`
 仅在显式 `OM_SECRET_BACKEND=env` 的迁移模式下作为兼容名称使用。
 
-Feishu long-connection、WeChat ClawBot 和本地 Assistant 共享 Control/Copilot 安全边界，但渠道 credential、sender allowlist 和 provider readiness 分别验证。详见：
+Feishu long-connection、WeChat ClawBot 和本地 Assistant 共享 Control/Bot 安全边界，但渠道 credential、sender allowlist 和 provider readiness 分别验证。详见：
 
 - [Inbound Control](docs/INBOUND_CONTROL.md)
-- [OM Copilot v2](docs/OM_COPILOT_V2_DESIGN.md)
+- [Bot v2](docs/BOT_DESIGN.md)
 - [Linux / Mac Deployment](docs/DEPLOY_LINUX_MAC.md)
 
 ## 通知

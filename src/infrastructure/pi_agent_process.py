@@ -229,7 +229,7 @@ def _validate_control_request(value: Any) -> None:
     if not isinstance(value["arguments"], dict):
         raise ValueError("control_request arguments must be an object")
     if (
-        value["source"] != "copilot_control_preview"
+        value["source"] != "bot_control_preview"
         or isinstance(value["confidence"], bool)
         or value["confidence"] != 1.0
     ):
@@ -244,7 +244,7 @@ def _tool_result_payload(
 ) -> dict[str, Any]:
     observation = (
         callback_result.get("observation")
-        if tool_name in {_CONTROL_PREVIEW_TOOL, "tool_directory", "submit_answer"}
+        if tool_name in {_CONTROL_PREVIEW_TOOL, "tool_directory", "submit_answer", "bot_memory"}
         else callback_result
     )
     payload = {
@@ -252,7 +252,11 @@ def _tool_result_payload(
         "tool_name": tool_name,
         "observation": observation,
     }
-    if tool_name not in {_CONTROL_PREVIEW_TOOL, "tool_directory", "submit_answer"}:
+    if tool_name not in {_CONTROL_PREVIEW_TOOL, "tool_directory", "submit_answer", "bot_memory"}:
+        return payload
+    if tool_name == "bot_memory":
+        if set(callback_result) != {"observation"}:
+            raise ValueError("memory callback result is invalid")
         return payload
     if tool_name == "tool_directory":
         if set(callback_result) not in ({"observation"}, {"observation", "tool_activation"}):
@@ -317,6 +321,7 @@ def _validate_start_payload(payload: Any) -> None:
 
     allowed_keys = {
         "execution_environment",
+        "remaining_budget_ms",
         "session_id",
         "system_prompt",
         "runtime_context",
@@ -334,8 +339,11 @@ def _validate_start_payload(payload: Any) -> None:
     if set(payload) != allowed_keys:
         raise ValueError("start payload has unknown or missing top-level fields")
 
+    remaining = payload["remaining_budget_ms"]
+    if not _is_pos_int(remaining) or remaining > 180_000:
+        raise ValueError("remaining_budget_ms must be a positive integer <= 180000")
     execution_environment = payload["execution_environment"]
-    if execution_environment not in {"local", "eval", "channel"}:
+    if execution_environment not in {"local", "eval", "channel", "memory_consolidation"}:
         raise ValueError("execution_environment is not allowed")
     session_id = payload["session_id"]
     if session_id is not None and (
@@ -415,10 +423,10 @@ def _validate_start_payload(payload: Any) -> None:
         raise ValueError("catalog is not the exact snapshot projection")
     tools_by_name = {str(item["name"]): item for item in payload["tools"]}
     tool_names = set(tools_by_name)
-    internal_names = {"tool_directory", "submit_answer", "request_control_preview"}
+    internal_names = {"tool_directory", "submit_answer", "request_control_preview", "bot_memory"}
     if set(catalog_names) & internal_names:
         raise ValueError("catalog cannot contain internal tools")
-    if "submit_answer" not in tool_names:
+    if execution_environment != "memory_consolidation" and "submit_answer" not in tool_names:
         raise ValueError("submit_answer must be resident")
     if payload["tool_loading_mode"] == "directory":
         if not catalog_names:
@@ -447,6 +455,14 @@ def _validate_start_payload(payload: Any) -> None:
     expected_catalog_hash = "sha256:" + hashlib.sha256(material_json.encode("utf-8")).hexdigest()
     if payload["catalog_hash"] != expected_catalog_hash:
         raise ValueError("catalog_hash does not match frozen catalog material")
+    if execution_environment == "memory_consolidation" and (
+        payload["session_id"] is not None or payload["tools"] or payload["tool_catalog"]
+        or payload["catalog_snapshot"] or payload["runtime_context"] or payload["recovered_observations"]
+        or payload["debug"] is not None or payload["tool_loading_mode"] != "eager"
+        or remaining > 30_000 or not isinstance(payload["limits"], dict)
+        or payload["limits"].get("timeout_seconds", 181) > 30
+    ):
+        raise ValueError("memory consolidation must be isolated, tool-free, and bounded to 30 seconds")
     recovered = payload["recovered_observations"]
     if not isinstance(recovered, list) or any(
         not isinstance(observation, dict) for observation in recovered
@@ -578,7 +594,8 @@ def _child_env(environ: Mapping[str, str] | None) -> dict[str, str]:
 
 
 def _runtime_command(
-    runtime_entry: Path | None, environ: Mapping[str, str] | None
+    runtime_entry: Path | None, environ: Mapping[str, str] | None,
+    *, deadline_monotonic: float | None = None,
 ) -> tuple[list[str], Path]:
     source = os.environ if environ is None else environ
     node = shutil.which("node", path=source.get("PATH"))
@@ -589,7 +606,7 @@ def _runtime_command(
             [node, "--version"],
             capture_output=True,
             text=True,
-            timeout=2,
+            timeout=min(2, max(0.001, deadline_monotonic - time.monotonic())) if deadline_monotonic is not None else 2,
         ).stdout.strip()
     except (OSError, subprocess.TimeoutExpired):
         raise LookupError("node version probe failed")
@@ -675,6 +692,10 @@ def _validate_envelope(
     if not isinstance(obj["payload"], dict):
         raise ValueError("payload is not an object")
     return type_
+
+
+class _PiDeadlineExceeded(Exception):
+    pass
 
 
 def _stop_child(process: subprocess.Popen[bytes]) -> None:
@@ -879,6 +900,7 @@ def run_pi_agent(
     request_id: str,
     run_id: str,
     timeout_seconds: int,
+    deadline_monotonic: float | None = None,
     on_event: Callable[[dict[str, Any]], None] | None = None,
     on_tool_call: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     on_proposed: Callable[
@@ -906,19 +928,23 @@ def run_pi_agent(
         str(item["name"]) for item in start_payload["tool_catalog"]
     )
 
-    if start_payload["limits"]["timeout_seconds"] != timeout_seconds:
+    if timeout_seconds > start_payload["limits"]["timeout_seconds"]:
         return _safe_failure(
-            "CONFIG_ERROR", "config", "timeout mismatch with limits", False
+            "CONFIG_ERROR", "config", "timeout exceeds scene limits", False
         )
-    if (
-        start_payload["model"]["timeout_seconds"]
-        > start_payload["limits"]["timeout_seconds"]
+    now = time.monotonic()
+    if deadline_monotonic is not None and (
+        isinstance(deadline_monotonic, bool) or not isinstance(deadline_monotonic, (int, float))
+        or not math.isfinite(deadline_monotonic)
     ):
-        return _safe_failure(
-            "CONFIG_ERROR", "config", "model timeout exceeds scene timeout", False
-        )
-
-    deadline = time.monotonic() + timeout_seconds
+        return _safe_failure("CONFIG_ERROR", "config", "invalid monotonic deadline", False)
+    deadline = min(
+        now + min(timeout_seconds, 180),
+        now + start_payload["remaining_budget_ms"] / 1000,
+        deadline_monotonic if deadline_monotonic is not None else float("inf"),
+    )
+    if deadline - time.monotonic() < 0.001:
+        return _safe_failure("PI_PROCESS_TIMEOUT", "deadline", "budget exhausted before spawn", True)
 
     if is_cancelled is not None:
         try:
@@ -928,17 +954,20 @@ def run_pi_agent(
             return _safe_failure("INTERNAL_ERROR", "runtime", "cancellation check failed", False)
 
     try:
-        command, entry = _runtime_command(runtime_entry, environ)
+        command, entry = _runtime_command(runtime_entry, environ, deadline_monotonic=deadline)
     except LookupError as exc:
+        if time.monotonic() >= deadline:
+            return _safe_failure("PI_PROCESS_TIMEOUT", "deadline", "budget exhausted probing runtime", True)
         return _safe_failure("PI_RUNTIME_UNAVAILABLE", "spawn", str(exc), False)
 
     identity = {"request_id": request_id, "run_id": run_id}
     try:
-        start_line = _encode_envelope("run.start", start_payload, identity, 1)
+        _encode_envelope("run.start", start_payload, identity, 1)
     except ValueError as exc:
         return _safe_failure("CONFIG_ERROR", "config", str(exc), False)
-
     child_env = _child_env(environ)
+    if deadline - time.monotonic() < 0.001:
+        return _safe_failure("PI_PROCESS_TIMEOUT", "deadline", "budget exhausted before spawn", True)
     try:
         process = subprocess.Popen(
             command,
@@ -951,6 +980,23 @@ def run_pi_agent(
         )
     except OSError as exc:
         return _safe_failure("PI_RUNTIME_UNAVAILABLE", "spawn", "failed to spawn child", False)
+
+    os.set_blocking(process.stdin.fileno(), False)
+
+    def write_line(line: bytes) -> None:
+        # Node startup or a paused reader must not extend the Host deadline.
+        offset = 0
+        with selectors.DefaultSelector() as writer:
+            writer.register(process.stdin, selectors.EVENT_WRITE)
+            while offset < len(line):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise _PiDeadlineExceeded()
+                if writer.select(min(remaining, 0.1)):
+                    try:
+                        offset += os.write(process.stdin.fileno(), line[offset:])
+                    except BlockingIOError:
+                        continue
 
     os.set_blocking(process.stdout.fileno(), False)
     os.set_blocking(process.stderr.fileno(), False)
@@ -979,8 +1025,12 @@ def run_pi_agent(
     pending_tool: dict[str, str] | None = None
 
     try:
-        process.stdin.write(start_line)
-        process.stdin.flush()
+        remaining_budget_ms = math.floor((deadline - time.monotonic()) * 1000)
+        if remaining_budget_ms < 1:
+            _stop_child(process)
+            return _safe_failure("PI_PROCESS_TIMEOUT", "deadline", "budget exhausted during spawn", True)
+        start_line = _encode_envelope("run.start", {**start_payload, "remaining_budget_ms": remaining_budget_ms}, identity, 1)
+        write_line(start_line)
 
         while True:
             if is_cancelled is not None and not cancel_sent and not decision_written and not saw_terminal:
@@ -990,8 +1040,7 @@ def run_pi_agent(
                             "run.cancel", {"reason": "host_cancel_requested"}, identity, py_seq
                         )
                         py_seq += 1
-                        process.stdin.write(cancel_line)
-                        process.stdin.flush()
+                        write_line(cancel_line)
                         cancel_sent = True
                         cancel_deadline = time.monotonic() + 2
                 except (OSError, ValueError):
@@ -1008,8 +1057,7 @@ def run_pi_agent(
                         cancel_line = _encode_envelope(
                             "run.cancel", {"reason": "deadline"}, identity, py_seq
                         )
-                        process.stdin.write(cancel_line)
-                        process.stdin.flush()
+                        write_line(cancel_line)
                         cancel_sent = True
                     except (OSError, ValueError):
                         pass
@@ -1192,11 +1240,17 @@ def run_pi_agent(
                                 if on_proposed is None:
                                     _stop_child(process)
                                     return _safe_failure("INTERNAL_ERROR", "runtime", "missing proposal callback", False)
+                                if time.monotonic() >= deadline:
+                                    _stop_child(process)
+                                    return _safe_failure("PI_PROCESS_TIMEOUT", "deadline", "budget exhausted before admission", True)
                                 try:
                                     decision = on_proposed(payload)
                                 except Exception:
                                     _stop_child(process)
                                     return _safe_failure("INTERNAL_ERROR", "runtime", "proposal callback failed", False)
+                                if time.monotonic() >= deadline:
+                                    _stop_child(process)
+                                    return _safe_failure("PI_PROCESS_TIMEOUT", "deadline", "budget exhausted during admission", True)
                                 if decision not in {"commit", "discard", "cancel"}:
                                     _stop_child(process)
                                     return _safe_failure("INTERNAL_ERROR", "runtime", "invalid proposal decision", False)
@@ -1207,8 +1261,7 @@ def run_pi_agent(
                                         type_map[decision], payload_map[decision], identity, py_seq
                                     )
                                     py_seq += 1
-                                    process.stdin.write(line_out)
-                                    process.stdin.flush()
+                                    write_line(line_out)
                                 except ValueError:
                                     _stop_child(process)
                                     return _safe_failure(
@@ -1319,8 +1372,7 @@ def run_pi_agent(
                             "tool.result", result_payload, identity, py_seq
                         )
                     py_seq += 1
-                    process.stdin.write(line_out)
-                    process.stdin.flush()
+                    write_line(line_out)
                     if callback_cancelled:
                         cancel_sent = True
                         cancel_deadline = time.monotonic() + 2
@@ -1357,6 +1409,14 @@ def run_pi_agent(
         if final_error is not None:
             return {"ok": False, "error": final_error}
         return _safe_failure("PROTOCOL_ERROR", "protocol", "missing terminal", False)
+    except _PiDeadlineExceeded:
+        try:
+            process.kill()
+        except OSError:
+            pass
+        return _safe_failure("PI_PROCESS_TIMEOUT", "deadline", "budget exhausted writing to runtime", True)
+    except OSError:
+        return _safe_failure("PI_PROCESS_EXITED", "process", "child closed stdin", True)
     finally:
         try:
             if process.stdin and not process.stdin.closed:

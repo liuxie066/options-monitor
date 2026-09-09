@@ -787,7 +787,7 @@ def _assistant_runtime_summary(
             "path": mask_path(path),
             "loaded": bool(cfg),
             "enabled": bool(settings.enabled),
-            "copilot": settings.copilot.public_payload(),
+            "bot": settings.bot.public_payload(),
             "context_window_messages": int(settings.context_window_messages),
             "default_market_scope": settings.default_market_scope,
         },
@@ -2638,21 +2638,21 @@ def private_runtime_status_tool(
     assistant_audit_summary = assistant_runtime.get("audit") if isinstance(assistant_runtime.get("audit"), dict) else {}
     assistant_latest = assistant_audit_summary.get("latest") if isinstance(assistant_audit_summary.get("latest"), dict) else {}
     data["summary"]["assistant_enabled"] = bool(assistant_config_summary.get("enabled"))
-    assistant_copilot = (
-        assistant_config_summary.get("copilot")
-        if isinstance(assistant_config_summary.get("copilot"), dict)
+    assistant_bot = (
+        assistant_config_summary.get("bot")
+        if isinstance(assistant_config_summary.get("bot"), dict)
         else {}
     )
-    data["summary"]["assistant_copilot_enabled"] = bool(assistant_copilot.get("enabled"))
-    assistant_copilot_toolsets = (
-        assistant_copilot.get("toolsets")
-        if isinstance(assistant_copilot.get("toolsets"), dict)
+    data["summary"]["assistant_bot_enabled"] = bool(assistant_bot.get("enabled"))
+    assistant_bot_toolsets = (
+        assistant_bot.get("toolsets")
+        if isinstance(assistant_bot.get("toolsets"), dict)
         else {}
     )
-    data["summary"]["assistant_copilot_portfolio_enabled"] = bool(
+    data["summary"]["assistant_bot_portfolio_enabled"] = bool(
         assistant_config_summary.get("enabled")
-        and assistant_copilot.get("enabled")
-        and assistant_copilot_toolsets.get("portfolio")
+        and assistant_bot.get("enabled")
+        and assistant_bot_toolsets.get("portfolio")
     )
     data["summary"]["assistant_llm_enabled"] = bool(assistant_llm_summary.get("enabled"))
     data["summary"]["assistant_llm_provider"] = assistant_llm_summary.get("provider")
@@ -2732,8 +2732,8 @@ def _status_safe_runtime_payload(data: dict[str, Any]) -> dict[str, Any]:
             "service_upgrade_reason",
             "service_drift_status",
             "assistant_enabled",
-            "assistant_copilot_enabled",
-            "assistant_copilot_portfolio_enabled",
+            "assistant_bot_enabled",
+            "assistant_bot_portfolio_enabled",
             "assistant_llm_enabled",
             "assistant_llm_provider",
             "assistant_latest_route",
@@ -3192,9 +3192,9 @@ def _status_safe_assistant_runtime(value: Any) -> dict[str, Any]:
         "error_code": str(source.get("error") or "").split(":", 1)[0] or None,
         "config": {
             **_pick(config, {"loaded", "enabled", "context_window_messages", "default_market_scope"}),
-            "copilot": {
-                **_pick(config.get("copilot"), {"enabled"}),
-                "toolsets": _pick(_dict(config.get("copilot")).get("toolsets"), {"portfolio"}),
+            "bot": {
+                **_pick(config.get("bot"), {"enabled"}),
+                "toolsets": _pick(_dict(config.get("bot")).get("toolsets"), {"portfolio"}),
             },
         },
         "llm": _pick(
@@ -3250,3 +3250,30 @@ __all__ = [
     "private_runtime_status_tool",
     "runtime_status_tool",
 ]
+
+
+def query_run_receipts(*, base: Path, accounts: list[str], query: dict[str, Any]) -> list[dict[str, Any]]:
+    """Read retained account run facts, never confuse scheduler status with delivery."""
+    from domain.storage.repositories.run_repo import list_retained_run_ids, get_run_account_state_dir
+    from src.application.receipt_query import read_receipt_json, receipt_event, receipt_matches
+    run_id = query.get("run_id")
+    run_ids, more = ([run_id], False) if run_id else list_retained_run_ids(base)
+    if more:
+        raise ValueError("run_query_needs_narrowing")
+    rows = []
+    for run_id in run_ids:
+        for account in accounts:
+            path = get_run_account_state_dir(base, run_id, account) / "last_run.json"
+            if not path.is_file():
+                continue
+            payload = read_receipt_json(path)
+            if payload.get("account") and str(payload["account"]).lower() != account:
+                raise ValueError("run_account_unlinkable")
+            event = receipt_event(source="scheduled_run", event_id=run_id + ":" + account,
+                account=account, market=payload.get("market"), kind="scheduled",
+                occurred=payload.get("last_run_utc") or payload.get("finished_at_utc") or payload.get("as_of_utc") or payload.get("timestamp") or payload.get("run_at"),
+                revision=payload.get("updated_at_utc"), business_result=payload,
+                run_id=run_id, diagnostic_code=payload.get("reason") or payload.get("status"))
+            if receipt_matches(event, query):
+                rows.append(event)
+    return rows

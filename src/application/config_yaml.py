@@ -967,7 +967,7 @@ def _assistant_config_from_runtime_defaults(cfg: dict[str, Any]) -> dict[str, An
     return {
         "enabled": True,
         "context_window_messages": 8,
-        "copilot": {
+        "bot": {
             "enabled": False,
             "toolsets": {
                 "portfolio": False,

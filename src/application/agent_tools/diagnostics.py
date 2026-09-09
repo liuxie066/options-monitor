@@ -371,7 +371,7 @@ HEALTHCHECK_TOOL = build_agent_tool(
     safe_default_input={},
     examples=({"input": {"config_key": "us"}},),
     output_contract=_HEALTHCHECK_OUTPUT_CONTRACT,
-    copilot_input_fields=("config_key", "accounts", "timeout_sec", "include_service_status"),
+    bot_input_fields=("config_key", "accounts", "timeout_sec", "include_service_status"),
 )
 
 RUNTIME_STATUS_TOOL = build_agent_tool(
@@ -422,7 +422,7 @@ RUNTIME_STATUS_TOOL = build_agent_tool(
     safe_default_input={},
     examples=({"input": {"config_key": "us", "max_notification_chars": 2000}},),
     output_contract=_RUNTIME_STATUS_OUTPUT_CONTRACT,
-    copilot_input_fields=(
+    bot_input_fields=(
         "config_key", "accounts", "run_id", "max_notification_chars", "max_run_age_minutes", "include_service_status"
     ),
 )
@@ -465,7 +465,7 @@ OPERATION_TIMELINE_TOOL = build_agent_tool(
         },
     ),
     output_contract=_OPERATION_TIMELINE_OUTPUT_CONTRACT,
-    copilot_input_fields=(
+    bot_input_fields=(
         "operation_id", "operation_types", "statuses", "limit"
     ),
 )

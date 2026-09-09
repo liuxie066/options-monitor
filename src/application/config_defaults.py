@@ -132,7 +132,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "assistant": {
             "enabled": True,
             "context_window_messages": 8,
-            "copilot": {
+            "bot": {
                 "enabled": False,
                 "tool_loading_mode": "eager",
                 "toolsets": {

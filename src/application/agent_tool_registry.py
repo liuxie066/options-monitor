@@ -18,6 +18,7 @@ from src.application.agent_tools import (
     portfolio,
     quality,
     runtime,
+    receipts,
 )
 from src.application.agent_tools.base import AgentTool
 from src.application.agent_tools.permissions import write_tools_enabled_from_env as _write_tools_enabled_from_env
@@ -37,6 +38,7 @@ AGENT_TOOL_MODULES: tuple[ModuleType, ...] = (
     close_advice,
     notifications,
     notification_perception,
+    receipts,
 )
 
 
@@ -80,7 +82,7 @@ def tool_names() -> tuple[str, ...]:
 
 
 def toolset_for_definition(definition: AgentTool) -> str:
-    """Return the canonical module grouping used by the Copilot catalog."""
+    """Return the canonical module grouping used by the Bot catalog."""
     for module in AGENT_TOOL_MODULES:
         if definition in _module_tools(module):
             return module.__name__.rsplit(".", 1)[-1]
@@ -101,12 +103,12 @@ def build_compact_catalog(tool_names_value: tuple[str, ...] | list[str] | None =
         contract = definition.output_contract
         if (
             not contract
-            or definition.copilot_evidence_type() == "mixed" and "evidence_type" not in contract
+            or definition.bot_evidence_type() == "mixed" and "evidence_type" not in contract
             or not isinstance(contract.get("bounded_projection"), str)
             or not isinstance(contract.get("coverage"), str)
             or not isinstance(contract.get("freshness"), str)
             or not isinstance(contract.get("pagination"), dict)
-            or contract["pagination"].get("mode") not in {"none"}
+            or contract["pagination"].get("mode") not in {"none", "keyset"}
         ):
             raise ValueError(f"output contract metadata is missing: {name}")
         entries.append({
@@ -114,7 +116,7 @@ def build_compact_catalog(tool_names_value: tuple[str, ...] | list[str] | None =
             "toolset": toolset_for_definition(definition),
             "purpose": purpose,
             "access": "read",
-            "evidence_type": definition.copilot_evidence_type(),
+            "evidence_type": definition.bot_evidence_type(),
         })
     entries.sort(key=lambda item: item["name"])
     return entries

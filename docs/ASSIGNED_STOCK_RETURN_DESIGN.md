@@ -187,7 +187,7 @@ Broker stock sell intake 仅在 deal 能唯一匹配开放 assigned-stock lot �
 | canonical ledger boundary | `src/application/ledger/api.py` |
 | public Tool Gateway | `src/application/agent_tools/positions.py` |
 
-OM Copilot 只能基于 registry 投影的 pure-read tool observations 表达事实，不能自行
+Bot 只能基于 registry 投影的 pure-read tool observations 表达事实，不能自行
 合成 spot、sale、费用、金额或股数。显式命令和待确认写操作仍走 deterministic
 Control / CLI 边界。
 

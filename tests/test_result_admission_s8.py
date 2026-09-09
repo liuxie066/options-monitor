@@ -4,7 +4,7 @@ import hashlib
 
 import pytest
 
-from src.application.copilot.result_admission import admit_submit_answer
+from src.application.bot.result_admission import admit_submit_answer
 
 
 def _evidence(

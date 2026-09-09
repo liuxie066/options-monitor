@@ -660,6 +660,7 @@ def read_daily_decision_brief_delivery_state(
     base: Path,
     account: str,
     market: str,
+    bounded: bool = False,
 ) -> dict[str, Any]:
     """Read and validate only v2 delivery state without writing anything."""
 
@@ -667,7 +668,11 @@ def read_daily_decision_brief_delivery_state(
     account_norm = _normalize_account(account)
     market_norm = _normalize_market(market)
     path = _delivery_path(base_path, account_norm, market_norm)
-    raw = _read_json_strict(path)
+    if bounded:
+        from src.application.receipt_query import read_receipt_json
+        raw = read_receipt_json(path)
+    else:
+        raw = _read_json_strict(path)
     if raw is _MISSING:
         return {"available": False, "reason": "not_found", "state": None, "path": path}
     try:
@@ -2357,3 +2362,40 @@ __all__ = [
     "record_daily_decision_brief_fixed_recovery",
     "validate_daily_decision_brief_delivery_identity",
 ]
+
+
+def query_daily_brief_receipts(*, base: Path, account: str, market: str, query: dict[str, Any]) -> list[dict[str, Any]]:
+    """Query retained delivery envelopes, including fixed failures, independently of run plans."""
+    from src.application.receipt_query import read_receipt_json, receipt_event, receipt_matches
+    path = _delivery_path(Path(base).resolve(), _normalize_account(account), _normalize_market(market))
+    result = read_daily_decision_brief_delivery_state(base=base, account=account, market=market, bounded=True)
+    if not result.get("available"):
+        raise ValueError("daily_brief_" + str(result.get("reason")))
+    selected_key = None
+    if query.get("run_id"):
+        run_id = _normalize_run_id(query["run_id"])
+        plan = read_receipt_json(paths.run_account_state_dir(base, run_id, account) / f"daily_decision_brief_delivery_plan.{market}.json")
+        if plan.get("account") != account or plan.get("market") != market or plan.get("run_id") != run_id:
+            raise ValueError("daily_brief_run_scope_mismatch")
+        selected_key = (plan.get("envelope") or {}).get("delivery_key")
+        if not selected_key:
+            raise ValueError("daily_brief_run_plan_invalid")
+    rows = []
+    for day in result["state"]["days"].values():
+        envelopes = list((day.get("fixed_reports") or {}).values()) + list(day.get("candidate_delivery_history") or [])
+        if day.get("candidate_delivery"):
+            envelopes.append(day["candidate_delivery"])
+        for item in envelopes:
+            if selected_key and item["delivery_key"] != selected_key:
+                continue
+            event = receipt_event(source="daily_brief", event_id=item["delivery_key"], account=account, market=market,
+                kind="monitor" if item["delivery_kind"] == "candidate_alert" else "scheduled",
+                occurred=item.get("first_prepared_at_utc"), recorded=item.get("last_attempt_at_utc"),
+                revision=item.get("revision"), body=item["rendered_message"], delivery=item.get("status"),
+                business_result={"delivery_kind": item["delivery_kind"], "source_kind": item["source_kind"],
+                                 "source_reference": item.get("source_reference")},
+                run_id=query.get("run_id") if selected_key else (item.get("render_context") or {}).get("run_id"),
+                diagnostic_code="scan_failure" if item["delivery_kind"] == "fixed_failure" else None)
+            if receipt_matches(event, query):
+                rows.append(event)
+    return rows

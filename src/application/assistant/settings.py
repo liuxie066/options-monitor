@@ -13,12 +13,12 @@ DEFAULT_LLM_TIMEOUT_SECONDS = 90
 DEFAULT_LLM_MAX_OUTPUT_TOKENS = 2048
 DEFAULT_CONTEXT_WINDOW_MESSAGES = 8
 DEFAULT_MARKET_SCOPE = ""
-CONFIGURABLE_COPILOT_TOOLSETS = frozenset({"portfolio"})
-COPILOT_TOOL_LOADING_MODES = frozenset({"eager", "directory"})
+CONFIGURABLE_BOT_TOOLSETS = frozenset({"portfolio"})
+BOT_TOOL_LOADING_MODES = frozenset({"eager", "directory"})
 
 
 @dataclass(frozen=True)
-class CopilotSettings:
+class BotSettings:
     enabled: bool = False
     toolsets: frozenset[str] = frozenset()
     tool_loading_mode: str = "eager"
@@ -28,7 +28,7 @@ class CopilotSettings:
             "enabled": bool(self.enabled),
             "toolsets": {
                 name: name in self.toolsets
-                for name in sorted(CONFIGURABLE_COPILOT_TOOLSETS)
+                for name in sorted(CONFIGURABLE_BOT_TOOLSETS)
             },
             "tool_loading_mode": self.tool_loading_mode,
         }
@@ -65,7 +65,7 @@ class AssistantSettings:
     enabled: bool | None = None
     context_window_messages: int = DEFAULT_CONTEXT_WINDOW_MESSAGES
     default_market_scope: str = DEFAULT_MARKET_SCOPE
-    copilot: CopilotSettings = CopilotSettings()
+    bot: BotSettings = BotSettings()
     llm: AssistantLlmSettings = AssistantLlmSettings()
 
     def __post_init__(self) -> None:
@@ -74,17 +74,19 @@ class AssistantSettings:
     @classmethod
     def from_runtime_config(cls, cfg: dict[str, Any]) -> "AssistantSettings":
         assistant_cfg = _dict(cfg.get("assistant"))
+        if "copilot" in assistant_cfg:
+            raise ValueError("assistant.copilot is retired; run ./om bot migrate --dry-run")
         enabled = _assistant_enabled(assistant_cfg)
-        copilot_cfg = _dict(assistant_cfg.get("copilot"))
-        copilot_toolsets = _dict(copilot_cfg.get("toolsets"))
-        configured_copilot = CopilotSettings(
-            enabled=_bool(copilot_cfg.get("enabled"), default=False),
+        bot_cfg = _dict(assistant_cfg.get("bot"))
+        bot_toolsets = _dict(bot_cfg.get("toolsets"))
+        configured_bot = BotSettings(
+            enabled=_bool(bot_cfg.get("enabled"), default=False),
             toolsets=frozenset(
                 name
-                for name in CONFIGURABLE_COPILOT_TOOLSETS
-                if _bool(copilot_toolsets.get(name), default=False)
+                for name in CONFIGURABLE_BOT_TOOLSETS
+                if _bool(bot_toolsets.get(name), default=False)
             ),
-            tool_loading_mode=_tool_loading_mode(copilot_cfg.get("tool_loading_mode")),
+            tool_loading_mode=_tool_loading_mode(bot_cfg.get("tool_loading_mode")),
         )
         llm_cfg = _dict(assistant_cfg.get("llm"))
         return cls(
@@ -96,8 +98,8 @@ class AssistantSettings:
                 maximum=20,
             ),
             default_market_scope=_market_scope(assistant_cfg.get("default_market_scope")),
-            copilot=configured_copilot,
-            llm=_llm_settings(llm_cfg, enabled=bool(enabled and configured_copilot.enabled)),
+            bot=configured_bot,
+            llm=_llm_settings(llm_cfg, enabled=bool(enabled and configured_bot.enabled)),
         )
 
     def public_payload(self) -> dict[str, Any]:
@@ -105,15 +107,15 @@ class AssistantSettings:
             "enabled": bool(self.enabled),
             "context_window_messages": int(self.context_window_messages),
             "default_market_scope": self.default_market_scope,
-            "copilot": self.copilot.public_payload(),
+            "bot": self.bot.public_payload(),
             "llm": self.llm.public_payload(),
         }
 
     @property
-    def enabled_copilot_toolsets(self) -> frozenset[str]:
-        if not self.enabled or not self.copilot.enabled:
+    def enabled_bot_toolsets(self) -> frozenset[str]:
+        if not self.enabled or not self.bot.enabled:
             return frozenset()
-        return self.copilot.toolsets
+        return self.bot.toolsets
 
 
 def _bool(value: Any, *, default: bool) -> bool:
@@ -139,7 +141,7 @@ def _market_scope(value: Any) -> str:
 
 def _tool_loading_mode(value: Any) -> str:
     mode = str(value or "eager").strip().lower()
-    return mode if mode in COPILOT_TOOL_LOADING_MODES else "eager"
+    return mode if mode in BOT_TOOL_LOADING_MODES else "eager"
 
 
 def _llm_settings(llm_cfg: dict[str, Any], *, enabled: bool) -> AssistantLlmSettings:

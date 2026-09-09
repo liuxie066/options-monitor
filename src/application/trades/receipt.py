@@ -15,13 +15,41 @@ from src.application.notification_delivery_adapter import (
 from src.application.notification_shells import render_receipt
 from src.application.trades.deal_identity import broker_deal_key
 from src.application.trades.inbox import TradePayloadClaimLost
-from src.application.trades.lifecycle_outbox import (
-    BATCH_RENDERER_VERSION,
-    build_notification_batch_route,
-)
+from src.application.ledger.api import canonical_payload_hash
 
 
+BATCH_RENDERER_VERSION = "trade_lifecycle_batch.v1"
 MAX_LIFECYCLE_BATCH_DISPLAY_ITEMS = 12
+
+
+def build_notification_batch_route(
+    *,
+    provider: str,
+    channel: str,
+    target: str,
+) -> dict[str, str]:
+    provider_value = str(provider or "").strip().lower()
+    channel_value = str(channel or "").strip().lower()
+    target_value = str(target or "").strip()
+    if not provider_value or not channel_value or not target_value:
+        raise ValueError("notification batch route is incomplete")
+    target_fingerprint = canonical_payload_hash(
+        {"target": target_value}
+    )
+    route_fingerprint = canonical_payload_hash(
+        {
+            "provider": provider_value,
+            "channel": channel_value,
+            "target_fingerprint": target_fingerprint,
+        }
+    )
+    return {
+        "provider": provider_value,
+        "channel": channel_value,
+        "target": target_value,
+        "target_fingerprint": target_fingerprint,
+        "route_fingerprint": route_fingerprint,
+    }
 
 
 def send_trade_intake_receipt(
@@ -612,7 +640,7 @@ def send_trade_lifecycle_outbox_payload(
     else:
         resolved_send_fn = send_fn
         resolved_normalize_fn = normalize_fn
-    message = (
+    message = payload.get("_frozen_message") or (
         build_trade_lifecycle_notification_batch_message(payload)
         if is_batch
         else build_trade_lifecycle_notification_message(payload)

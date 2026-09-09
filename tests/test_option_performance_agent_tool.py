@@ -7,7 +7,7 @@ import pytest
 
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.agent_tools import positions
-from src.application.copilot import tools as copilot_tools
+from src.application.bot import tools as bot_tools
 from src.application.performance.service import OptionPerformanceReadError
 
 
@@ -307,7 +307,7 @@ def test_option_performance_observation_exposes_cny_conversion_gap() -> None:
         "missing": ["cash_conversion_missing"],
     }
 
-    observation = copilot_tools.compact_observation(
+    observation = bot_tools.compact_observation(
         "option_performance_report",
         {"ok": True, "data": report},
         {"period": "mtd", "as_of_date": "2026-09-02"},
@@ -336,7 +336,7 @@ def test_option_performance_tool_schema_exposes_only_the_frozen_inputs() -> None
         "include_rows",
     }
     assert tool.input_schema["period"]["enum"] == ["mtd", "ytd", "month", "year"]
-    assert set(tool.copilot_input_fields) == {
+    assert set(tool.bot_input_fields) == {
         "config_key",
         "account",
         "broker",
@@ -346,7 +346,7 @@ def test_option_performance_tool_schema_exposes_only_the_frozen_inputs() -> None
         "year",
     }
 
-    payload, error = copilot_tools.build_tool_payload(
+    payload, error = bot_tools.build_tool_payload(
         "option_performance_report",
         {"period": "month", "month": "2026-08", "include_rows": True},
     )

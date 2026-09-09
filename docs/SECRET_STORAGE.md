@@ -48,7 +48,7 @@ Facebook 等后续集成遵循同一规则：App ID 是普通配置；App Secret
 非交互 stdin、命令参数和管道输入都会被拒绝。
 
 `option_positions_read action=events` 不注册或配置独立游标密钥。运行时适配层使用
-HMAC-SHA256 和固定域 `options-monitor/copilot/trade-event-cursor/v1`，从
+HMAC-SHA256 和固定域 `options-monitor/bot/trade-event-cursor/v1`，从
 `inbound.operation_hmac_key` 派生只用于交易事件游标的子密钥；主密钥和子密钥都不会进入
 Node、模型、日志或游标内容。缺少 inbound 密钥时分页明确失败。轮换 inbound 密钥会让尚未
 过期的旧游标立即失效，用户需要重新发起查询。已退役的
@@ -77,7 +77,7 @@ root 授权运行，例如先确认目标，再执行 `sudo ./om secrets set <lo
 默认 `--secret-credential-delivery load-credential-encrypted`，为各消费 unit 生成
 `LoadCredentialEncrypted=` 绑定。每个 drop-in 只包含该 unit 固定注册表中需要的
 credential ID。它不会创建、读取或修改 `/etc/credstore.encrypted` 中的文件，也不会安装 drop-in。
-启用 Copilot 时，cursor credential 只绑定给实际运行 Copilot 的 inbound service；升级 unit
+启用 Bot 时，cursor credential 只绑定给实际运行 Bot 的 inbound service；升级 unit
 不会读取该密钥。
 两种安全交付 drop-in 都会用 `UnsetEnvironment=` 从进程环境中移除固定注册表里的旧 secret env 名；
 普通 env-file 仍可保留非秘密配置。

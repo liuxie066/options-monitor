@@ -90,15 +90,15 @@ def normalize_model_profile_name(name: str, *, path: str = "model profile name")
 def resolve_authoring_assistant_config(assistant_cfg: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     assistant = deepcopy(assistant_cfg if isinstance(assistant_cfg, dict) else {})
     warnings: list[str] = []
-    copilot = assistant.get("copilot")
-    if isinstance(copilot, dict):
-        retired_keys = sorted(key for key in ("channel_scenes", "human_review") if key in copilot)
+    bot = assistant.get("bot")
+    if isinstance(bot, dict):
+        retired_keys = sorted(key for key in ("channel_scenes", "human_review") if key in bot)
         if retired_keys:
-            assistant["copilot"] = {key: value for key, value in copilot.items() if key not in retired_keys}
-            warnings.append(f"retired assistant.copilot keys omitted: {', '.join(retired_keys)}")
+            assistant["bot"] = {key: value for key, value in bot.items() if key not in retired_keys}
+            warnings.append(f"retired assistant.bot keys omitted: {', '.join(retired_keys)}")
     models_raw = assistant.pop("models", None)
     active_model_raw = assistant.pop("active_model", None)
-    copilot_enabled = _assistant_copilot_enabled(assistant)
+    bot_enabled = _assistant_bot_enabled(assistant)
 
     if models_raw is None and active_model_raw is None:
         return assistant, {
@@ -111,17 +111,17 @@ def resolve_authoring_assistant_config(assistant_cfg: dict[str, Any]) -> tuple[d
     profiles = parse_model_profiles(models_raw)
     active_model = str(active_model_raw or "").strip()
     if not active_model:
-        if copilot_enabled:
+        if bot_enabled:
             raise AgentToolError(
                 code="CONFIG_ERROR",
-                message="assistant.active_model is required when assistant.models is configured and assistant.copilot.enabled is true",
+                message="assistant.active_model is required when assistant.models is configured and assistant.bot.enabled is true",
             )
         return assistant, {
             "model_profiles_enabled": True,
             "active_model": None,
             "resolved_profile": None,
             "profile_count": len(profiles),
-            "warnings": ["assistant.models configured without active_model; assistant Copilot is disabled so assistant.llm is unchanged"],
+            "warnings": ["assistant.models configured without active_model; assistant Bot is disabled so assistant.llm is unchanged"],
         }
 
     active_model = normalize_model_profile_name(active_model, path="assistant.active_model")
@@ -144,11 +144,11 @@ def resolve_authoring_assistant_config(assistant_cfg: dict[str, Any]) -> tuple[d
     }
 
 
-def _assistant_copilot_enabled(assistant: dict[str, Any]) -> bool:
+def _assistant_bot_enabled(assistant: dict[str, Any]) -> bool:
     if isinstance(assistant.get("enabled"), bool) and assistant.get("enabled") is False:
         return False
-    copilot = assistant.get("copilot")
-    return bool(isinstance(copilot, dict) and copilot.get("enabled") is True)
+    bot = assistant.get("bot")
+    return bool(isinstance(bot, dict) and bot.get("enabled") is True)
 
 
 def parse_model_profiles(raw_models: Any) -> dict[str, LlmModelProfile]:

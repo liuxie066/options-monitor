@@ -33,7 +33,7 @@ from src.application.channels.reply_decision import (
     permission_denied_message as _permission_denied_message,
     permission_denied_should_stay_silent as _permission_denied_should_stay_silent,
 )
-from src.application.copilot.host_store import CopilotHostStore
+from src.application.bot.host_store import BotHostStore
 from src.application.inbound.feishu import prepare_feishu_ack_target
 from src.application.secret_resolver import (
     DEFAULT_FEISHU_BOT_APP_ID_ENV,
@@ -81,7 +81,7 @@ class FeishuWsSettings:
     ack_reaction: str = ""
     queue_size: int = DEFAULT_FEISHU_WS_QUEUE_SIZE
     assistant_enabled: bool = True
-    assistant_copilot_enabled: bool = False
+    assistant_bot_enabled: bool = False
     assistant_context_window_messages: int = DEFAULT_CONTEXT_WINDOW_MESSAGES
     assistant_default_market_scope: str = ""
     assistant_llm: AssistantLlmSettings = field(default_factory=AssistantLlmSettings)
@@ -130,7 +130,7 @@ class FeishuWsSettings:
             "ack_reaction": self.ack_reaction,
             "queue_size": int(self.queue_size),
             "assistant_enabled": bool(self.assistant_enabled),
-            "assistant_copilot_enabled": bool(self.assistant_copilot_enabled),
+            "assistant_bot_enabled": bool(self.assistant_bot_enabled),
             "assistant_context_window_messages": int(self.assistant_context_window_messages),
             "assistant_default_market_scope": self.assistant_default_market_scope,
             "assistant_llm": self.assistant_llm.public_payload(),
@@ -194,7 +194,7 @@ def build_feishu_ws_settings(
             default=DEFAULT_FEISHU_WS_QUEUE_SIZE,
         ),
         assistant_enabled=bool(assistant_settings.enabled),
-        assistant_copilot_enabled=bool(assistant_settings.copilot.enabled),
+        assistant_bot_enabled=bool(assistant_settings.bot.enabled),
         assistant_context_window_messages=assistant_settings.context_window_messages,
         assistant_default_market_scope=assistant_settings.default_market_scope,
         assistant_llm=assistant_settings.llm,
@@ -240,15 +240,22 @@ def handle_feishu_ws_event(
     channel_service: ChannelService | None = None,
     execute_tool_fn: ExecuteToolFn | None = None,
     react_in_handler: bool = True,
+    received_monotonic: float | None = None,
 ) -> dict[str, Any]:
     event_ref = _event_ref(payload)
     handler_started = time.monotonic()
+    received_monotonic = handler_started if received_monotonic is None else received_monotonic
+    expired = handler_started >= received_monotonic + 180
 
     stage_started = time.monotonic()
-    outbox_retry = _retry_pending_feishu_reply(settings=settings, reply_fn=reply_fn)
+    outbox_retry = ({"attempted": False, "reason": "budget_exhausted"} if expired else
+                    _retry_pending_feishu_reply(settings=settings, reply_fn=reply_fn))
     outbox_retry_ms = _duration_ms(stage_started, time.monotonic())
 
-    inbound_kwargs: dict[str, Any] = {"allowed_senders": settings.allowed_senders}
+    inbound_kwargs: dict[str, Any] = {"allowed_senders": settings.allowed_senders,
+                                      "received_monotonic": received_monotonic}
+    inbound_kwargs['bot_reply_options'] = {'bot_reply_enabled': settings.reply_enabled,
+        'reply_in_thread': settings.reply_in_thread, 'max_reply_chars': settings.max_reply_chars}
     if execute_tool_fn is not None:
         inbound_kwargs["execute_tool_fn"] = execute_tool_fn
     service = channel_service or build_feishu_inbound_channel_service()
@@ -270,7 +277,7 @@ def handle_feishu_ws_event(
         inbound=inbound,
         settings=settings,
         reaction_fn=reaction_fn,
-        send_reaction=react_in_handler,
+        send_reaction=react_in_handler and not expired,
     )
     reaction_ms = _duration_ms(reaction_started, time.monotonic())
 
@@ -517,6 +524,7 @@ class _FeishuWsWorker:
                     reaction_fn=self._reaction_fn,
                     execute_tool_fn=self._execute_tool_fn,
                     react_in_handler=False,
+                    received_monotonic=job.received_monotonic,
                 )
                 if not bool(result.get("ok", False)):
                     status = "failed"
@@ -741,16 +749,18 @@ def _maybe_reply(
         max_chars=settings.max_reply_chars,
         render_route=_inbound_render_route(decision.inbound_result),
     )
-    outbox: CopilotHostStore | None = None
+    outbox: BotHostStore | None = None
     delivery_key: str | None = None
-    if str(settings.audit_db or "").strip() and command_id:
-        outbox = CopilotHostStore(str(settings.audit_db))
+    if command_id:
+        outbox = BotHostStore(InboundAuditStore(settings.audit_db).path)
         delivery_key = f"feishu:{command_id}"
         record = outbox.enqueue_reply(
             delivery_key=delivery_key,
             channel="feishu",
             payload=envelope,
         )
+        if record.get("payload_json") and record.get("run_id"):
+            envelope = json.loads(record["payload_json"])
         if str(record.get("status") or "") == "delivered":
             return {
                 "attempted": False,
@@ -848,9 +858,7 @@ def _maybe_reply(
 
 
 def _retry_pending_feishu_reply(*, settings: FeishuWsSettings, reply_fn: ReplyFn) -> dict[str, Any]:
-    if not str(settings.audit_db or "").strip():
-        return {"attempted": False, "reason": "outbox_disabled"}
-    store = CopilotHostStore(str(settings.audit_db))
+    store = BotHostStore(InboundAuditStore(settings.audit_db).path)
     record = store.claim_reply(channel="feishu")
     if record is None:
         return {"attempted": False, "reason": "outbox_empty"}

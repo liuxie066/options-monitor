@@ -12,8 +12,9 @@ from src.infrastructure.private_storage import private_path
 
 
 class InboundOperationStore:
-    def __init__(self, path: str | Path | None = None) -> None:
+    def __init__(self, path: str | Path | None = None, *, deadline_monotonic: float | None = None) -> None:
         self.path = private_path(path) if path else default_audit_db_path()
+        self.deadline_monotonic = deadline_monotonic
 
     def save_preview(
         self,
@@ -646,7 +647,7 @@ class InboundOperationStore:
             )
 
     def _connect(self) -> sqlite3.Connection:
-        conn = connect_inbound_sqlite(self.path)
+        conn = connect_inbound_sqlite(self.path, deadline_monotonic=self.deadline_monotonic)
         conn.row_factory = sqlite3.Row
         return conn
 

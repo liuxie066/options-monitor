@@ -12,13 +12,13 @@ from src.application.channels.feishu_reply_renderer import (
 )
 
 
-def test_copilot_reply_uses_card_markdown_even_for_plain_sentence() -> None:
+def test_bot_reply_uses_card_markdown_even_for_plain_sentence() -> None:
     envelope = render_feishu_conversation_reply(
         message_id="msg_1",
         text="结论：系统运行正常。",
         reply_in_thread=True,
         max_chars=3500,
-        render_route="copilot",
+        render_route="bot",
     )
 
     assert envelope["schema_version"] == FEISHU_REPLY_ENVELOPE_SCHEMA_VERSION
