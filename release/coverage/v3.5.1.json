@@ -1,0 +1,119 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.5.1",
+  "base": {
+    "tag": "v3.5.0",
+    "commit": "9eb1ed7bdaffb839e7e77a5699840afc1eed2134"
+  },
+  "reviewed_head": "e9ff4e3ba7c1054da52ac02546eefdb81728ca2a",
+  "commits": [
+    {
+      "sha": "40243377d59dfb7805bd0ffaf2d2f7c1a2f22353",
+      "subject": "fix(trades): recover intake results and delivery receipts"
+    },
+    {
+      "sha": "32debda2af51580a548e30bfee7115fc9bc6fbd3",
+      "subject": "fix(trades): preserve late order association recovery"
+    },
+    {
+      "sha": "16ee6e830a3a9b89232feb70c02d4bdee6d4bdd9",
+      "subject": "Merge pull request #262 from liuxie066/codex/fix-trade-receipt-recovery"
+    },
+    {
+      "sha": "3e496cf63d6a6ba3e1cdec901e4916d379a22c9a",
+      "subject": "feat(bot): add receipt context and durable memory with bounded runtime"
+    },
+    {
+      "sha": "8a23ba3e705159a3381ff78e6f06f511d465d29f",
+      "subject": "fix(bot): tolerate short SQLite writer contention within deadlines"
+    },
+    {
+      "sha": "e9ff4e3ba7c1054da52ac02546eefdb81728ca2a",
+      "subject": "Merge pull request #263 from liuxie066/codex/bot-v1"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "Upgraded Copilot to Bot with receipt-aware context, bounded execution, and durable conversation memory.",
+      "commits": [
+        "40243377d59dfb7805bd0ffaf2d2f7c1a2f22353"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Preserved verified account and environment evidence from OpenD trade push headers so valid fills can be recorded on first delivery without guessing account identity.",
+      "commits": [
+        "8a23ba3e705159a3381ff78e6f06f511d465d29f"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Preserved active SQLite transaction locks while securing database and sidecar file permissions.",
+      "commits": [
+        "32debda2af51580a548e30bfee7115fc9bc6fbd3"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Added bounded trade-intake and notification recovery with actionable failure receipts and distinct recovery-success receipts, while preventing duplicate economic effects and blind resends after ambiguous delivery.",
+      "commits": [
+        "3e496cf63d6a6ba3e1cdec901e4916d379a22c9a"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "16ee6e830a3a9b89232feb70c02d4bdee6d4bdd9",
+      "reason": "Merge commit; the underlying trade receipt changes are covered by the mapped release notes."
+    },
+    {
+      "commit": "e9ff4e3ba7c1054da52ac02546eefdb81728ca2a",
+      "reason": "Merge commit; the underlying Bot changes are covered by the mapped release note."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "40243377d59dfb7805bd0ffaf2d2f7c1a2f22353",
+      "references": [
+        "docs/FUTU_TRADE_HOLDINGS_SYNC.md#trade-intake-recovery",
+        "https://github.com/liuxie066/options-monitor/pull/262"
+      ]
+    },
+    {
+      "commit": "32debda2af51580a548e30bfee7115fc9bc6fbd3",
+      "references": [
+        "docs/FUTU_TRADE_HOLDINGS_SYNC.md#trade-intake-recovery",
+        "https://github.com/liuxie066/options-monitor/pull/262"
+      ]
+    },
+    {
+      "commit": "16ee6e830a3a9b89232feb70c02d4bdee6d4bdd9",
+      "references": [
+        "docs/FUTU_TRADE_HOLDINGS_SYNC.md#trade-intake-recovery",
+        "https://github.com/liuxie066/options-monitor/pull/262"
+      ]
+    },
+    {
+      "commit": "3e496cf63d6a6ba3e1cdec901e4916d379a22c9a",
+      "references": [
+        "docs/BOT_PRD.md#4-f2-回执内容与数据合同",
+        "https://github.com/liuxie066/options-monitor/pull/263"
+      ]
+    },
+    {
+      "commit": "8a23ba3e705159a3381ff78e6f06f511d465d29f",
+      "references": [
+        "docs/BOT_PRD.md#5-f3-容量与完成语义",
+        "https://github.com/liuxie066/options-monitor/pull/263"
+      ]
+    },
+    {
+      "commit": "e9ff4e3ba7c1054da52ac02546eefdb81728ca2a",
+      "references": [
+        "docs/BOT_PRD.md#1-目标范围与成功信号",
+        "https://github.com/liuxie066/options-monitor/pull/263"
+      ]
+    }
+  ]
+}
