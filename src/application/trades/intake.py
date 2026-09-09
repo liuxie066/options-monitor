@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import sqlite3
 from typing import Any, Callable, Mapping, Protocol, cast
 
 from domain.domain.trade_execution import normalize_execution_input
@@ -27,7 +28,7 @@ TRADE_INTAKE_SOURCE_CONTEXT_SCHEMA = "trade_intake_source.v1"
 def _payload_deal_id(payload: dict[str, Any] | None) -> str | None:
     if not isinstance(payload, dict):
         return None
-    for key in ("deal_id", "dealID", "id"):
+    for key in ("deal_id", "dealID", "id", "external_execution_id"):
         raw = payload.get(key)
         value = str(raw or "").strip()
         if value:
@@ -96,6 +97,19 @@ def _exception_result_dict(
         position_effect = str(getattr(deal, "position_effect", "") or "").strip().lower()
         if position_effect in {"open", "close"}:
             action = position_effect
+    sqlite_code = getattr(exc, "sqlite_errorcode", None)
+    primary_code = (sqlite_code & 0xff) if isinstance(sqlite_code, int) else None
+    transient = isinstance(exc, sqlite3.OperationalError) and (
+        primary_code in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED, sqlite3.SQLITE_PROTOCOL}
+        or (primary_code is None and str(exc).lower() in {
+            "database is locked", "database table is locked", "locking protocol",
+        })
+    )
+    category = ("sqlite_transient" if transient else "storage_permission" if isinstance(exc, PermissionError)
+                or primary_code in {sqlite3.SQLITE_PERM, sqlite3.SQLITE_READONLY, sqlite3.SQLITE_AUTH}
+                else "storage_full" if primary_code == sqlite3.SQLITE_FULL
+                else "storage_schema" if isinstance(exc, sqlite3.Error)
+                else "invalid_input" if stage == "normalize" else "processing_error")
     return {
         "status": "failed",
         "action": action,
@@ -107,7 +121,9 @@ def _exception_result_dict(
             "exception_stage": str(stage),
             "exception_type": type(exc).__name__,
             "exception_message": str(exc),
-            "retryable": bool(retryable),
+            "retryable": bool(retryable and transient),
+            "failure_category": category,
+            "sqlite_errorcode": sqlite_code,
         },
     }
 
@@ -366,7 +382,7 @@ def _finalize_trade_payload_result(
                 "payload": payload,
                 "effective_payload": effective_payload,
                 "deal": deal,
-                "result": dict(result_dict),
+                "result": result_dict,
                 "state": state,
                 "apply_changes": apply_changes,
                 "state_path": state_path,
@@ -540,6 +556,8 @@ def process_trade_payload(
             stage="normalize",
             retryable=True,
         )
+        if before_receipt_fn is not None:
+            result_dict = before_receipt_fn(result_dict) or result_dict
         append_trade_intake_audit_fn(
             audit_path,
             build_trade_intake_audit_event("failed", source=source, payload=effective_payload, result=result_dict),
@@ -594,7 +612,6 @@ def process_trade_payload(
         )
         if portfolio_refresh_intent is not None:
             result_dict["portfolio_refresh_intent"] = portfolio_refresh_intent
-        append_trade_intake_audit_fn(audit_path, build_trade_intake_audit_event("resolved", source=source, deal=deal, result=result_dict))
     except TradePayloadClaimLost:
         raise
     except Exception as exc:
@@ -607,65 +624,45 @@ def process_trade_payload(
         )
         if portfolio_refresh_intent is not None:
             result_dict["portfolio_refresh_intent"] = portfolio_refresh_intent
-        append_trade_intake_audit_fn(
-            audit_path,
-            build_trade_intake_audit_event("failed", source=source, deal=deal, result=result_dict),
-        )
-        if apply_changes:
-            state = _record_failed_deal_state(
-                state=state,
-                state_path=state_path,
-                result_dict=result_dict,
-                write_trade_intake_state_fn=write_trade_intake_state_fn,
-                upsert_deal_state_fn=upsert_deal_state_fn,
-                deal_key=broker_deal_key(deal),
-            )
-        return _finalize_trade_payload_result(
-            result_dict=result_dict,
-            state=state,
-            state_path=state_path,
-            audit_path=audit_path,
-            payload=payload,
-            effective_payload=effective_payload,
-            deal=deal,
-            apply_changes=apply_changes,
-            write_trade_intake_state_fn=write_trade_intake_state_fn,
-            append_trade_intake_audit_fn=append_trade_intake_audit_fn,
-            on_result_fn=on_result_fn,
-            source=source,
-        )
 
     if before_receipt_fn is not None:
         enriched_result = before_receipt_fn(result_dict)
         if isinstance(enriched_result, dict):
             result_dict = enriched_result
 
+    append_trade_intake_audit_fn(
+        audit_path,
+        build_trade_intake_audit_event(
+            "failed" if result_dict.get("status") == "failed" else "resolved",
+            source=source, deal=deal, result=result_dict,
+        ),
+    )
     deal_key = broker_deal_key(deal)
     economic_payload_hash = lifecycle_deal_economic_hash(deal)
     if apply_changes and deal_key:
-        if result.status == "applied" or _is_terminal_ledger_result(result_dict):
-            reconciled_terminal = result.status != "applied"
+        if result_dict.get("status") == "applied" or _is_terminal_ledger_result(result_dict):
+            reconciled_terminal = result_dict.get("status") != "applied"
             state = upsert_deal_state_fn(
                 state,
                 bucket="processed_deal_ids",
                 deal_id=deal_key,
                 payload={
                     "status": "reconciled" if reconciled_terminal else "applied",
-                    "action": result.action,
-                    "account": result.account,
+                    "action": result_dict.get("action"),
+                    "account": result_dict.get("account"),
                     "source_deal_id": deal.deal_id,
                     "futu_account_id": deal.futu_account_id,
                     "broker_deal_key": deal_key,
                     "economic_payload_hash": economic_payload_hash,
-                    "applied_record_ids": [op.record_id for op in result.operations if op.record_id],
-                    "reason": result.reason,
+                    "applied_record_ids": [op["record_id"] for op in result_dict.get("operations", []) if op.get("record_id")],
+                    "reason": result_dict.get("reason"),
                     "diagnostics": (
                         {
                             "reconciled_from": "terminal_ledger_result",
                             **dict(result_dict.get("diagnostics") or {}),
                         }
                         if reconciled_terminal
-                        else {}
+                        else dict(result_dict.get("diagnostics") or {})
                     ),
                 },
             )
@@ -676,7 +673,7 @@ def process_trade_payload(
                     "phase": "ledger_persisted",
                     "source": source,
                     "deal_id": deal.deal_id,
-                    "account": result.account,
+                    "account": result_dict.get("account"),
                     "event_id": deal_key,
                 },
             )
@@ -687,8 +684,8 @@ def process_trade_payload(
                 deal_id=deal_key,
                 payload={
                     "status": "skipped",
-                    "action": result.action,
-                    "account": result.account,
+                    "action": result_dict.get("action"),
+                    "account": result_dict.get("account"),
                     "source_deal_id": deal.deal_id,
                     "futu_account_id": deal.futu_account_id,
                     "broker_deal_key": deal_key,
@@ -699,7 +696,7 @@ def process_trade_payload(
                 },
             )
             write_trade_intake_state_fn(state_path, state)
-        elif result.status == "unresolved":
+        elif result_dict.get("status") == "unresolved":
             try:
                 prior = dict((state.get("unresolved_deal_ids") or {}).get(deal_key) or {})
             except Exception:
@@ -708,14 +705,14 @@ def process_trade_payload(
             retryable = bool(diagnostics.get("retryable"))
             payload = {
                 "status": "unresolved",
-                "action": result.action,
-                "account": result.account,
+                "action": result_dict.get("action"),
+                "account": result_dict.get("account"),
                 "source_deal_id": deal.deal_id,
                 "futu_account_id": deal.futu_account_id,
                 "broker_deal_key": deal_key,
                 "economic_payload_hash": economic_payload_hash,
                 "applied_record_ids": [],
-                "reason": result.reason,
+                "reason": result_dict.get("reason"),
                 "retryable": retryable,
                 "attempt_count": int(prior.get("attempt_count") or 0) + 1,
                 "diagnostics": diagnostics,
@@ -730,18 +727,18 @@ def process_trade_payload(
                 payload=payload,
             )
             write_trade_intake_state_fn(state_path, state)
-        elif result.status == "failed":
+        elif result_dict.get("status") == "failed":
             prior_receipt = _prior_receipt(state, deal_key)
             payload = {
                 "status": "failed",
-                "action": result.action,
-                "account": result.account,
+                "action": result_dict.get("action"),
+                "account": result_dict.get("account"),
                 "source_deal_id": deal.deal_id,
                 "futu_account_id": deal.futu_account_id,
                 "broker_deal_key": deal_key,
                 "economic_payload_hash": economic_payload_hash,
                 "applied_record_ids": [],
-                "reason": result.reason,
+                "reason": result_dict.get("reason"),
                 "diagnostics": dict(result_dict.get("diagnostics") or {}),
             }
             if prior_receipt:

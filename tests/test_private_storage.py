@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import stat
 from pathlib import Path
 import threading
@@ -314,21 +315,34 @@ def test_exclusive_private_file_lock_releases_after_body_exception(tmp_path: Pat
         assert _mode(lock_path) == 0o600
 
 
-def test_sqlite_artifact_helper_tolerates_sidecar_disappearing_before_open(
+@pytest.mark.parametrize("stage", ["stat", "chmod", "readback"])
+def test_sqlite_artifact_helper_tolerates_sidecar_disappearing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    stage: str,
 ) -> None:
     database = ensure_private_file(tmp_path / "private" / "inbox.sqlite3")
     journal = Path(f"{database}-journal")
     journal.write_bytes(b"transient")
-    real_open = os.open
+    real_lstat = Path.lstat
+    real_chmod = os.chmod
+    stats = 0
 
-    def open_after_journal_disappears(path: str | os.PathLike[str], flags: int) -> int:
-        if Path(path) == journal:
+    def stat_after_journal_disappears(path: Path):
+        nonlocal stats
+        if path == journal:
+            stats += 1
+        if path == journal and (stage == "stat" or (stage == "readback" and stats == 2)):
             journal.unlink()
-        return real_open(path, flags)
+        return real_lstat(path)
 
-    monkeypatch.setattr(private_storage.os, "open", open_after_journal_disappears)
+    def chmod_after_journal_disappears(path, mode, **kwargs):
+        if path == journal and stage == "chmod":
+            journal.unlink()
+        return real_chmod(path, mode, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", stat_after_journal_disappears)
+    monkeypatch.setattr(private_storage.os, "chmod", chmod_after_journal_disappears)
 
     secure_sqlite_artifacts(database)
 
@@ -336,7 +350,7 @@ def test_sqlite_artifact_helper_tolerates_sidecar_disappearing_before_open(
     assert not journal.exists()
 
 
-@pytest.mark.parametrize("artifact_kind", ["symlink", "directory"])
+@pytest.mark.parametrize("artifact_kind", ["symlink", "directory", "fifo"])
 def test_sqlite_artifact_helper_rejects_unsafe_sidecar(tmp_path: Path, artifact_kind: str) -> None:
     database = ensure_private_file(tmp_path / "private" / "inbox.sqlite3")
     journal = Path(f"{database}-journal")
@@ -345,8 +359,11 @@ def test_sqlite_artifact_helper_rejects_unsafe_sidecar(tmp_path: Path, artifact_
         outside.write_text("unchanged", encoding="utf-8")
         journal.symlink_to(outside)
         expected = "must not be a symlink"
-    else:
+    elif artifact_kind == "directory":
         journal.mkdir()
+        expected = "is not a regular file"
+    else:
+        os.mkfifo(journal)
         expected = "is not a regular file"
 
     with pytest.raises(OSError, match=expected):
@@ -397,3 +414,213 @@ def test_trade_inbox_ignores_permissive_umask(tmp_path: Path) -> None:
         assert _mode(database) == 0o600
     finally:
         os.umask(previous_umask)
+
+
+@pytest.mark.parametrize("artifact_kind", ["symlink", "directory", "fifo"])
+def test_sqlite_factory_rejects_unsafe_database(tmp_path: Path, artifact_kind: str) -> None:
+    database = tmp_path / "private" / "database.sqlite3"
+    database.parent.mkdir()
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"unchanged")
+    outside.chmod(0o644)
+    if artifact_kind == "symlink":
+        database.symlink_to(outside)
+    elif artifact_kind == "directory":
+        database.mkdir()
+    else:
+        os.mkfifo(database)
+    with pytest.raises(OSError, match="symlink|regular file"):
+        connect_private_sqlite(database)
+    assert outside.read_bytes() == b"unchanged"
+    assert _mode(outside) == 0o644
+
+
+@pytest.mark.parametrize("helper", [connect_private_sqlite, secure_sqlite_artifacts])
+def test_sqlite_helpers_reject_symlink_parent(tmp_path: Path, helper) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o755)
+    (outside / "database.sqlite3").touch(mode=0o644)
+    link = tmp_path / "link"
+    link.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(OSError, match="symlink"):
+        helper(link / "database.sqlite3")
+    assert _mode(outside) == 0o755
+    assert _mode(outside / "database.sqlite3") == 0o644
+
+
+def test_sqlite_helpers_do_not_open_existing_artifacts(tmp_path: Path, monkeypatch) -> None:
+    database = ensure_private_file(tmp_path / "private" / "database.sqlite3")
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        artifact = Path(f"{database}{suffix}")
+        artifact.touch()
+        artifact.chmod(0o666)
+
+    def unexpected_open(*args, **kwargs):
+        raise AssertionError("permission maintenance must not open existing artifacts")
+
+    monkeypatch.setattr(private_storage.os, "open", unexpected_open)
+    with connect_private_sqlite(database) as connection:
+        secure_sqlite_artifacts(database)
+        assert connection.execute("SELECT 1").fetchone() == (1,)
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        artifact = Path(f"{database}{suffix}")
+        if artifact.exists():
+            assert _mode(artifact) == 0o600
+
+
+@pytest.mark.parametrize("replacement", ["symlink", "regular", "directory"])
+def test_sqlite_metadata_rejects_path_replacement(tmp_path: Path, monkeypatch, replacement: str) -> None:
+    database = ensure_private_file(tmp_path / "private" / "database.sqlite3")
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"unchanged")
+    outside.chmod(0o644)
+    real_chmod = os.chmod
+
+    def replace_before_chmod(path, mode, **kwargs):
+        if path == database:
+            path.rename(path.with_suffix(".old"))
+            if replacement == "symlink":
+                path.symlink_to(outside)
+            elif replacement == "directory":
+                path.mkdir()
+            else:
+                path.touch()
+        assert kwargs == {"follow_symlinks": False}
+        return real_chmod(path, mode, **kwargs)
+
+    monkeypatch.setattr(private_storage.os, "chmod", replace_before_chmod)
+    with pytest.raises((OSError, NotImplementedError), match="changed|not implemented|not supported"):
+        secure_sqlite_artifacts(database)
+    assert outside.read_bytes() == b"unchanged"
+    assert _mode(outside) == 0o644
+
+
+@pytest.mark.parametrize("error", [PermissionError("denied"), NotImplementedError("no no-follow support")])
+def test_sqlite_metadata_errors_are_not_silenced(tmp_path: Path, monkeypatch, error) -> None:
+    database = ensure_private_file(tmp_path / "private" / "database.sqlite3")
+    journal = Path(f"{database}-journal")
+    journal.touch()
+    real_chmod = os.chmod
+
+    def failed_chmod(path, mode, **kwargs):
+        if path == journal:
+            raise error
+        return real_chmod(path, mode, **kwargs)
+
+    monkeypatch.setattr(private_storage.os, "chmod", failed_chmod)
+    with pytest.raises(type(error), match=str(error)):
+        secure_sqlite_artifacts(database)
+
+
+def test_sqlite_creation_publishes_closed_inode_and_preserves_competing_database(tmp_path: Path, monkeypatch) -> None:
+    database = tmp_path / "private" / "database.sqlite3"
+    real_mkstemp = private_storage.tempfile.mkstemp
+    real_link = os.link
+    descriptor = None
+    competitor = None
+
+    def tracked_mkstemp(**kwargs):
+        nonlocal descriptor
+        descriptor, name = real_mkstemp(**kwargs)
+        return descriptor, name
+
+    def competing_link(source, target, **kwargs):
+        nonlocal competitor
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+        assert _mode(Path(source)) == 0o600
+        assert not target.exists()
+        with pytest.raises(sqlite3.OperationalError):
+            sqlite3.connect(f"{target.as_uri()}?mode=ro", uri=True)
+        # A competing writer publishes its own DB while this creator is preparing.
+        competitor = sqlite3.connect(target)
+        competitor.execute("CREATE TABLE winner (value TEXT)")
+        competitor.execute("INSERT INTO winner VALUES ('preserved')")
+        competitor.commit()
+        with sqlite3.connect(f"{target.as_uri()}?mode=ro", uri=True) as reader:
+            assert reader.execute("SELECT value FROM winner").fetchone() == ("preserved",)
+        return real_link(source, target, **kwargs)
+
+    monkeypatch.setattr(private_storage.tempfile, "mkstemp", tracked_mkstemp)
+    monkeypatch.setattr(private_storage.os, "link", competing_link)
+    try:
+        connection = connect_private_sqlite(database)
+        try:
+            assert connection.execute("SELECT value FROM winner").fetchone() == ("preserved",)
+        finally:
+            connection.close()
+    finally:
+        if competitor is not None:
+            competitor.close()
+    assert not list(database.parent.glob(".*.tmp"))
+    assert _mode(database) == 0o600
+
+
+@pytest.mark.parametrize("stage", ["fchmod", "link"])
+def test_sqlite_creation_failure_cleans_temporary_inode(tmp_path: Path, monkeypatch, stage: str) -> None:
+    database = tmp_path / "private" / "database.sqlite3"
+    real_mkstemp = private_storage.tempfile.mkstemp
+    descriptor = None
+
+    def tracked_mkstemp(**kwargs):
+        nonlocal descriptor
+        descriptor, name = real_mkstemp(**kwargs)
+        return descriptor, name
+
+    def fail(*args, **kwargs):
+        raise PermissionError("creation failed")
+
+    monkeypatch.setattr(private_storage.tempfile, "mkstemp", tracked_mkstemp)
+    monkeypatch.setattr(private_storage.os, stage, fail)
+    with pytest.raises(PermissionError, match="creation failed"):
+        connect_private_sqlite(database)
+    with pytest.raises(OSError):
+        os.fstat(descriptor)
+    assert not database.exists()
+    assert not list(database.parent.glob(".*.tmp"))
+
+
+def test_sqlite_directory_replacement_does_not_chmod_symlink_destination(tmp_path: Path, monkeypatch) -> None:
+    database = ensure_private_file(tmp_path / "private" / "database.sqlite3")
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o755)
+    real_chmod = os.chmod
+
+    def replace_before_chmod(path, mode, **kwargs):
+        if path == database.parent:
+            path.rename(tmp_path / "old-private")
+            path.symlink_to(outside, target_is_directory=True)
+        assert kwargs == {"follow_symlinks": False}
+        return real_chmod(path, mode, **kwargs)
+
+    monkeypatch.setattr(private_storage.os, "chmod", replace_before_chmod)
+    with pytest.raises((OSError, NotImplementedError), match="changed|not implemented|not supported"):
+        secure_sqlite_artifacts(database)
+    assert _mode(outside) == 0o755
+
+
+def test_sqlite_concurrent_creators_use_one_published_inode(tmp_path: Path, monkeypatch) -> None:
+    database = tmp_path / "private" / "database.sqlite3"
+    barrier = threading.Barrier(4)
+    real_link = os.link
+    published = []
+
+    def synchronized_link(source, target, **kwargs):
+        barrier.wait(timeout=5)
+        real_link(source, target, **kwargs)
+        published.append(target.stat().st_ino)
+
+    def connect():
+        connection = connect_private_sqlite(database)
+        try:
+            assert connection.execute("SELECT 1").fetchone() == (1,)
+            return database.stat().st_ino
+        finally:
+            connection.close()
+
+    monkeypatch.setattr(private_storage.os, "link", synchronized_link)
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = list(executor.map(lambda _: connect(), range(4)))
+    assert len(published) == 1
+    assert results == published * 4
+    assert not list(database.parent.glob(".*.tmp"))

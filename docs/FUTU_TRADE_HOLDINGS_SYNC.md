@@ -239,34 +239,277 @@ provider 失败不回滚成交或改变 settled Inbox、同一订单并发重试
 
 ## Push 来源身份
 
-Futu deal push 通过 OM 主动连接的 OpenD TCP 端口进入，不是独立 webhook。
-每个 push 必须在写入 durable inbox 之前绑定可信的 source 配置，并记录：
+Futu deal push 经 OM 主动连接的 OpenD TCP 端口进入。transport 保留响应头与成交行的
+来源证据，source binder 校验允许的物理账户、环境与内部账户映射。PID 只用于诊断，
+不进入业务幂等键。缺少真实物理身份、环境不符或来源冲突不得凭单账户配置猜测归属。
 
-```text
-source_id
-account
-futu_account_id
-opend_process=FutuOpenD
-opend_host
-opend_port
-received_at_utc
-deal_id
-```
+当前 canonical execution identity 由 `domain/domain/trade_execution.py` 拥有，应用经
+`src/application/ledger/api.py` 和 `src/application/trades/deal_identity.py` 复用，键为
+`execution:v1:<hash>`。`futu:<account>:<physical_account_id>:<deal_id>` 保留为兼容或
+外部事件键，不替代 canonical identity。`trade_account_identity.py` 只负责账户字段提取。
 
-`source_id + opend_host + opend_port` 是稳定的逻辑进程身份；操作系统 PID
-会在 OpenD 重启后变化，只用于实时诊断，不进入业务幂等键。若 push payload
-缺少账户 ID，只允许从绑定到单一 Futu 账户的 source 补齐；若 payload 身份
-与 source 配置冲突，必须在入箱前拒绝并写
-`push_source_identity_rejected` 审计，不能退化为裸 `deal_id`。
+推送头字段保留、错误门修复与 push/history 收敛要求见下节；不得通过放松来源校验修复
+SDK 转换丢字段。无身份记录只保留证据，关联必须经既有证据导入机制证明。
 
-Push 与 history backfill 随后统一使用账户级 broker deal key：
+## 成交录入与回执恢复
 
-```text
-futu:<account>:<futu_account_id>:<deal_id>
-```
+### 目标与边界
 
-因此无论 push 或 backfill 谁先到，后到者都只能命中同一业务成交，不能因
-传输顺序生成第二条 inbox 记录。
+普通成交尽量在首次推送时完成录入并发送成功回执。首次失败时说明具体原因、是否自动重试及
+用户下一步；重试录入成功后发送独立的成功回执。交易已成交、OM 已记录、通知已送达是三个
+不同事实，不以其中一个推断另一个。由 trade-intake 与 private-storage owners 负责。
+
+验收要求：可信推送无需等待 history 才获得账户身份；SQLite 权限维护不释放活动事务的锁；
+重复推送、回补、崩溃恢复均只产生一次经济效果；失败、恢复、重试耗尽都可解释；通知恢复不
+重放成交。外部发送结果不明时不能保证恰好一次，不允许用盲目重发制造这一保证。
+
+范围限于推送身份传递、共享 SQLite 文件权限维护，以及普通 intake 回执与现有重试循环的
+衔接。不改变策略、费用计算或 lifecycle outbox 的业务归属，不引入通用消息平台或历史全量
+扫描。本设计不授权生产重放、账本补录、真实回执补发、配置变更、发布或升级。
+
+### 已修复缺陷与约束
+
+- 修复前推送入口调用 SDK `TradeDealHandlerBase.on_recv_rsp` 后只转发 DataFrame 行。SDK 的列清单
+  不包含物理账户 ID；原始响应 `s2c.header` 则携带交易环境和账户标识。下游先设置
+  `missing:push_physical_account`，导致应用层已有 source 身份绑定被跳过。
+- history 可以提供完整身份并重新进入录入。现有 canonical identity owner 负责命名空间、
+  账户映射与 broker execution 幂等，不能以配置账户标签或裸 deal ID 替代。
+- 修复前 `secure_sqlite_artifacts` 打开并关闭数据库与 sidecar 文件以执行 `fchmod`。
+  Linux 上额外的 `close` 会释放本进程在同一文件上的 POSIX 锁；已用临时 SQLite WAL 数据库
+  和另一进程的锁探针复现。`ensure_private_file` 对已存在数据库的 open/close 也必须覆盖。
+  这是已证实的共享存储缺陷；缺少故障 SQL 堆栈，不能断言它是个别 `locking protocol`
+  异常的唯一原因。
+- 修复前普通回执在 Inbox 中保存一次 `receipt_json`；只要已有回执，后续业务结果就被
+  `durable_receipt_*` 拦截。失败通知送达因此会阻止后来成功通知。
+- 修复前 retry 列表默认按 60 秒筛选、以 `attempt_count < 20` 过滤；claim 本身不检查到期
+  时间、不递增计数，计数实际在结算时增加。因此崩溃重领没有统一预算保证，现有 claim 将计数与到期检查收敛在同一事务。通知失败、provider 接受但未确认、业务耗尽不能都表示为“未记录”。
+- lifecycle outbox 已有独立投递所有权；有可读回 outbox 的 lifecycle 结果不得转为普通直发。
+
+### 方案与责任边界
+
+沿用现有入口、Inbox、ledger facade 与重试循环，只修复它们之间的契约。
+
+| Owner | 责任 |
+|---|---|
+| `src/infrastructure/futu_trade_push.py` | 在 SDK 行转换丢字段前保留可信响应头身份；验证行与头的冲突 |
+| `domain/domain/trade_execution.py` 经 ledger facade/deal_identity；现有 source binder | 复用执行身份生成；binder 校验 source 与映射，transport 不生成平行主键 |
+| `src/infrastructure/private_storage.py` | 所有 SQLite caller 共用的私有权限、文件类型与锁保护 |
+| `src/application/trades/intake.py` | 返回真实持久化结果、结构化失败分类与可重试性 |
+| `src/application/trades/inbox.py` | 持久化业务 claim、实际重试政策和有版本的回执记录，使用事务与 CAS |
+| `src/application/trades/receipt.py` 与 `receipt_compensation.py` | 共用 Inbox 发送资格；保留人工补偿的预览与确认边界 |
+| `src/application/trades/auto_intake.py` | 复用当前循环协调业务重试和仅通知恢复，保持账户/source 隔离 |
+
+不以延长 timeout 或对全部 `OperationalError` 盲目重试掩盖锁问题；不让历史回补承担本可从
+推送头获得的身份；不清空旧 `receipt_json` 来补发成功；不新建并行的交易状态库或通用队列。
+
+### 推送身份与首次录入
+
+数据流为原始 SDK 响应头与成交行 → transport 保留来源证据 → source/account identity 验证
+→ canonical execution key → durable Inbox → 现有录入 facade。响应头中的账户 ID 只有通过
+当前 source、交易环境、订阅/可见账户与映射校验后才可作为物理身份。
+
+行与头同时有身份时必须一致；缺少、格式不合法、环境不匹配或多账户歧义继续拒绝录入并
+保留可诊断证据，不能清除真实错误来绕过校验。配置只约束允许的账户，不凭配置推断成交
+属于谁。移除或收紧 source binder 中无证据的单账户推断分支；单账户 source 但无响应头/
+可验证行身份也必须拒绝。直接注入 listener 的测试/兼容入口仍经过同一身份验证。
+
+同一有效成交的 push 与 backfill 必须收敛到现有 canonical key。已有身份缺失行不按裸
+`deal_id` 强制合并；只有现有证据导入机制可证明等价时才关联，未证明的继续保留待复核。
+无法证明账户归属的入口错误只进入既有本地 audit/status，不借单账户通知 route 猜测
+归属；已有可信账户的规范化/录入错误才可产生该账户的失败回执。这是来源安全下的明确
+限制，不承诺所有缺身份推送都能即时发出账户回执。
+
+### SQLite 权限与锁
+
+连接建立前仅在目标不存在时创建私有空文件；发现已有文件不额外 open/close。
+新建复用 `tempfile.mkstemp` 在同一私有目录创建唯一临时 inode，设置 0600 并先关闭 fd，
+然后以不覆盖目标的 `os.link` 原子发布到数据库路径，最后删除临时名称。目标已存在则
+丢弃自己的临时文件并验证已有目标，禁止 replace 已有数据库。发布前没有可由普通 DB
+读写入口连接的目标 inode；发布后权限维护不再打开它，从而避免“创建者关闭 fd 释放
+并发连接锁”的窗口。临时文件清理使用 finally，失败不能留下非私有目标。
+
+全部 SQLite 创建入口经共享 helper，不对数据库调用通用 `ensure_private_file`。
+不要求只读 `mode=ro` 入口执行 chmod、创建或获得业务锁；它们可能在发布后立即连接，
+仍不会被 helper 的额外 close 破坏锁。初始化采用私有临时文件而非扩大连接锁覆盖范围，
+以保留只读边界；验证中加入发布前后并发只读连接与创建竞争。
+数据库与 journal/WAL/SHM 的权限维护使用不打开文件内容的 metadata 操作，并明确禁止
+跟随符号链接。优先使用标准库提供的 no-follow 操作；不支持的平台应明确失败，不能
+回退到跟随 symlink 的 chmod。检查路径类型、父目录私有性和操作后的状态，保留既有
+0600 文件、0700 目录及特殊文件拒绝契约；sidecar 正常消失可容忍，权限异常不可吞掉。
+
+全面核对共享 helper 的调用者，包括同进程多连接、初始化、事务内调用及关闭后的维护。
+新文件初始化也不得对另一个活动连接的同名 inode 执行危险 open/close。连接建立后若
+权限维护失败必须关闭新连接。检查与 chmod 之间的路径替换风险纳入安全测试；采用受控
+私有目录与 no-follow 元数据操作，不引入会再次释放 SQLite 锁的文件描述符校验。
+
+不新增连接准备锁；现有 ledger writer lock 和 SQLite transaction 继续负责业务事务串行性。metadata no-follow 调用必须通过实际 Linux 锁探针验证，不能仅凭 API 名称
+假定其实现没有额外 open/close。信任已配置 runtime 根及既有祖先目录；直接父目录须为受控私有目录，
+对直接父目录和数据库文件执行 no-follow 类型、inode 与权限复核；
+不把同 UID 恶意进程修改其自身私有目录宣称为已隔离的安全边界。
+只对已明确分类且确认可安全重试的临时故障沿用 durable 重试；本轮不增加进程内 sleep
+或第二套快速重试政策。首发成功率主要通过修复身份与锁缺陷提升。
+
+### 普通成交回执与恢复
+
+以现有 Inbox 为唯一持久化 owner。扩展 `receipt_json` 为显式版本的记录，按语义保存
+`pending_retry`、`recorded`、`manual_required`、`verification_pending` 回执，而不是每次异常建立新通知。
+这些是普通回执的结果版本，不是新的交易生命周期状态。JSON envelope 包含 schema_version、
+current_result_key 与按语义键索引的 receipts；`verification_pending` 专指经济状态待核对，
+与投递 unknown 分离。键由 Inbox identity 与结果语义构成，不随
+传输来源、重试次数或无经济变化的关联补充变化。同一语义只冻结一份内容，发送尝试用独立
+attempt ID；保留各结果的 route/message、送达证据、次数、下次可尝试时间与停止原因。
+
+普通即时发送、重复入口和通知恢复都先走 Inbox 的同一结果/attempt claim。state.json
+只保留兼容投影，不得以旧 delivery_confirmed/unknown 否决新结果、复活旧结果或绕过
+预算。没有 Inbox 的旧兼容路径保留原有抑制规则，不能用其状态猜测迁移后的发送资格。
+
+所有正常、normalize 失败、resolve 失败及已知辅助异常出口统一先收敛经济事实，再以
+claim/payload CAS 写入结果、重试决定和回执意图，最后进行外部发送。禁止异常分支绕过
+该持久化步骤，禁止发送回调失败把已记录业务改回 pending。ledger 与 Inbox 的提交窗口
+由 canonical readback 恢复；无法可靠读回时只进入待核对，不再执行经济写入。
+恢复的账本读回与 Inbox 结果更新共用现有 ledger writer lock，等待仍在提交的过期 claim。
+沿用 compensation → ledger → Inbox 的加锁顺序，外部发送前释放锁，不能把未提交快照中的缺失当成最终未记录。
+Inbox 不可写时不发送无法持久化防重的通知；记录现有日志/status，存储恢复后继续协调。
+
+成功回执的内容截止于收敛时已知的 ledger 及 before-receipt 结果（如 combo）；不等待后续
+lifecycle timing、费用或 PM 刷新完成。这些后续结果继续由各自现有 status/audit 呈现，
+不会追改冻结消息或新增辅助工作流通知。发送完成只更新投递记录与兼容投影。
+
+| 业务事实 | 用户回执 | 后续动作 |
+|---|---|---|
+| 首次持久化并读回成功 | ✅ 已记录 | 一次成功回执 |
+| 未持久化、可安全重试且未耗尽 | ⚠️ 暂未记录；原因；至少 60 秒后自动重试 | 同一失败阶段不重复刷屏；恢复后独立成功回执 |
+| 不可自动重试或达到上限 | ❌ 暂未记录；原因；不会继续自动重试；处理建议 | 一次需处理回执；等待经授权的复核/修复 |
+| 持久化成功，回执截止前已知辅助步骤失败 | ✅ 已记录；注明当时已知的未完成步骤 | 后续辅助任务由原有状态入口呈现，不重复写交易 |
+| 未获得可靠持久化结论 | ⚠️ 记录状态待核对 | 先按 canonical key 读回；不能猜测成功或再次执行经济效果 |
+
+业务重试政策集中在 Inbox claim 边界：首次可立即认领；以后所有处理入口均在同一 CAS
+中检查 due time、lease、attempt_count 与可重试结论。成功 claim 原子消费一次现有计数，
+最多 20 次；settle 不再递增。正常失败从结算时间起至少 60 秒后到期；claim 中断须先等
+租约到期，不能以直接 processor 调用跳过期限。存储恢复读回与通知协调不消费业务预算。
+旧计数按已结算次数保留，不虚构此前崩溃次数；迁移后每次新 claim 都按新政策消费。
+
+第 20 次 claim 后崩溃也先执行无经济写入的 readback：确认已记录则恢复成功结果；明确
+未记录则耗尽；读回不可用则“记录状态待核对”，不可写成“未记录”。人工 resume 保留
+既有显式 operator 门与审计，重新开启预算不代表授权重发已确认或 unknown 的相同回执。
+
+intake 分类稳定原因码；仅确认可安全恢复的暂态 SQLite busy/locked/protocol 等错误可
+自动重试，权限、磁盘空间、schema、身份冲突等须给出对应处理建议，不能只凭异常类型。
+已提交或提交状态不明的异常先读回，禁止绕过唯一事件/lot 约束。渲染读取持久化的
+attempt/remaining/retryable、到期下限和调度条件，不自行计数或承诺精确执行时间。
+用户看到可执行的原因和动作，原始异常/堆栈只进诊断，不泄漏路径或凭据。
+
+`pending_retry` → `recorded` 或 `manual_required` 是不同可发送结果。重复的失败与重复
+成功都不能新增经济效果或重复已确认回执。成功必须来自 ledger facade 的持久化与读回
+证据；历史已处理但无新失败的成交继续保持历史抑制，不能因升级批量补发旧成交成功消息。
+
+提交边界不明或最后一次 claim 中断且 ledger 暂不可读时，冻结 `verification_pending`：
+“记录状态待核对；暂不重复录入；系统将继续核对”。每轮到期协调仅经 ledger 只读 facade
+按 canonical key 核验事件/lot，不调用可能补关联的 resolver；本地读取可每 60 秒再次到期，
+每批有上限，不消费经济或发送预算，也不重复发已确认的待核对通知。读取仍失败则保留
+该结果；确认已记录则推进到 recorded；确认未记录且有预算则 pending_retry；确认未记录
+且无预算/不可重试则 manual_required。每次推进按同一 supersession/CAS 规则废止旧未发
+消息，允许最终明确结果独立发送；未知不能当有效零结果。核对与真实投递各自 unknown
+字段不得混用。
+
+保留当前 `begin/finish` attempt fence，扩展到结果版本、payload version/hash、账户及
+冻结 route/message。claim 和 finish 必须核对当前 attempt ID 与版本；过期 worker 的
+完成回调不能覆盖新结果。旧结果已在发送中时，不能宣称撤销该外部发送；新成功内容应
+清楚说明为恢复结果，不能因为旧失败的已发送标记而跳过。结果推进时，原子撤销被替代
+失败或待核对结果未来的发送资格；尚未发送、无 route 或明确未接受的旧结果只保留审计，不能在
+成功或需处理结果之后再发送。claim 再核对 current_result_key。已经开始的旧 attempt
+允许按自身 ID 完成记录，但不能修改当前结果或恢复自身重试资格。
+
+投递状态沿用现有 `sent`、`failed`、`unknown` 语义：只有 delivery confirmation 才为
+sent；明确未接受为 failed，允许在既有循环中按持久化节奏仅重试通知；accepted/unconfirmed、
+超时或发送中崩溃为 unknown，禁止自动重发同一结果，状态诊断说明需核对投递。没有可用
+通知路由时保留待发送与原因，不伪造已送达。新业务成功属于新结果，不被旧失败通知的
+unknown 阻止；若同一成功通知 unknown 则继续防止重复发送。
+
+通知恢复独立于业务 pending 查询，从相同 Inbox 选择有新结果或明确未接受的待发送回执；
+已处理成交不重新进入 pipeline。用当前账户/source enabled、receipt enabled、route 与
+身份校验约束选择；保留 notify_applied、notify_failed、notify_unresolved 等现有子开关：
+recorded 属 applied，暂态/耗尽失败属 failed，身份明确的待复核属 unresolved；
+verification_pending 沿用产生该结果的原通知类别并持久化，不借恢复绕过用户抑制。
+停用时不发送，恢复启用后才继续。每个发送阶段必须有持久化意图，
+业务结果提交后、意图冻结前崩溃，可由 Inbox 结果与 ledger readback 恢复，不依赖新 push。
+source 拥有同一个到期协调函数，在正常循环、启动前与 reconnect 等待片段中调用。
+transport 的 `start` 复用已有 SDK 初始化线程，在当前 `queue.get(timeout=0.1)` 等待点
+提供可选 on_wait 回调；只暴露等待机会，不包含业务查询或发送逻辑。source 注入到期函数，
+因此初始化长时间未完成也能恢复通知；回调每次先检查 stop/due，实际工作受批量与发送
+超时约束，异常只进 status，不逃逸中断 SDK 等待。取消后不开始新的通知尝试。
+
+同步 health 查询须有 SDK 连接等待与请求超时：transport 使用现有
+`set_sync_query_connect_timeout` 设置有限连接等待，并沿用 SDK 请求超时；不能只依靠
+_queue 轮询超时。恢复最早到期为 60 秒，实际还受本轮有界 I/O 延迟影响，不承诺精确周期。
+测试初始化线程保持未完成、首轮通知明确失败、时钟到期后再次发送及 stop，不能只用
+立即抛错的 listener stub。沿用现有线程与协调，不新建常驻服务或通用 supervisor。
+
+达到上限时，即使下一轮业务查询已排除该行，也必须由现有循环的状态协调产生最后的需
+处理意图。通知重试使用独立计数，不能消耗或复活业务 retry budget；同样有上限和终止
+原因，以免永久刷接口。沿用 60 秒/20 次默认政策，不增加配置键或服务；通知 attempt
+认领时原子消费其独立预算，未知发送不续发，无路由只是等待条件、不消费发送次数。
+路由首次有效时冻结，重试前验证当前账户与 route 仍匹配；路由变更则停下待核对，不能
+把冻结消息自动发往另一个目标。通知预算耗尽/unknown 由现有 intake status 的 Inbox
+摘要展示结果、原因、最后 attempt 和处理建议；只读核对后另行授权补发，不自动发送
+一张“发送失败”的通知来递归通知失败。
+
+人工 `receipt_compensation` 必须先检查该成交是否由新版 Inbox 管理：是则 fail closed，
+返回 Inbox 当前投递状态和恢复策略，禁止通过独立补偿 JSON 再次发送。旧补偿仍保留其
+preview/hash/confirm 门。接管旧无路由记录前，在现有 compensation lock 内核对同一
+account/canonical deal 的补偿证据并完成 Inbox 接管；旧补偿 apply 在同一锁内重新检查
+Inbox 归属，避免先预览后并发发送。已有 send_started/unknown 视为歧义，confirmed 视为
+已送达；多成交合并补偿的任一成员都不能再次自动发送。缺失/无法归属的证据 fail closed。
+通知网络调用不持该迁移锁；新记录认领后由 Inbox 独立 CAS 防重。
+
+旧单回执读取必须兼容：sent/unknown 保留其原状态；只有保存了明确失败业务结果且当前
+已持久化成功，才建立恢复成功的新结果。无法证明旧回执对应何种结果时 fail closed 并
+显示诊断，禁止猜测补发。旧失败 sent/unknown 只约束其旧语义，不能挡住有证据的新成功。
+已有历史成功和空旧 receipt 不因升级批量补发；仅 live、可证明为本流程尚待完成的回执
+进入恢复，保留 delivery_purpose 与 receipt_recovery_allowed 的历史保护。
+
+扩展现有 `trade_inbox_writer_version()` 与 SQLite writer triggers：迁移在单一事务中
+检查版本并替换旧 guard，新写入要求新 writer version；先安装 guard 再写新格式。
+旧连接、旧二进制及不兼容降级必须在写入前失败，不得覆盖新版 JSON。新 reader 兼容旧
+单回执；损坏/未知版本 fail closed。测试旧连接在迁移前已打开、迁移并发和降级写入，
+不通过新增部署锁或文档提醒代替持久化兼容门。
+
+### 实现切片与验证
+
+1. **可信推送首次录入**：以真实 SDK 形状的响应头进入公开 listener，验证转换、source
+   绑定、入箱与同一成交的 history 收敛；覆盖缺头、多账户、账户/环境冲突，不伪造默认账户。
+2. **权限维护保持事务锁**：临时目录中复现 Linux SQLite WAL 写锁；独立进程在 helper
+   前后都应无法取得锁，事务提交正确。覆盖同进程第二连接、权限修复、新建竞态、symlink、
+   特殊文件、sidecar 消失和异常连接释放；macOS 通过不能替代 Linux 锁验收。
+3. **失败到恢复的完整回执**：用真实 Inbox/ledger 与 fake sender 经过 auto-intake facade，
+   验证首次成功、失败到成功、不可重试、耗尽、仅通知重试、无路由、unknown、进程重启、
+   旧回执兼容、旧 worker 迟到、账户停用和 lifecycle outbox 交接。内部顺序为统一结果与
+   原子预算 → 版本回执/兼容 guard → 外层通知恢复及补偿互斥，整体交付前不启用半成品发送。
+   覆盖失败待发→成功后旧失败失效，失败已送达→耗尽仍发新结果；claim 后/最后一次
+   claim 后崩溃、直接未到期认领、异常出口发送前后崩溃；OpenD 持续失败时仍恢复；
+   补偿先完成或并发自动恢复、无 route 后恢复、route 变更、旧 writer 及两存储状态冲突；
+   第20次 claim 崩溃→ledger 暂不可读→最终已记录/明确未记录，待核对通知失败/送达后
+   最终结果仍正确发送，且核对阶段经济写入次数为零；初始化一直未完成时再次到期发送
+   和取消可达；子开关抑制沿原类别生效。
+   断言唯一事件/lot，
+   冻结内容、发送次数及持久化确认；不以函数返回成功替代投递事实。
+
+验证以现有 `test_trades_push_listener.py`、`test_private_storage.py`、
+`test_trade_receipt_recovery.py`、`test_trade_receipt_claim_fence.py`、
+`test_trade_receipt_concurrency.py`、`test_trades_inbox.py` 与 auto-intake 对应测试为基础，
+按入口补最小回归，不复制实现做镜像测试。执行相关 import/依赖边界、文案与敏感信息 guardrails，
+测试/import 变化时重新生成 `docs/DEPENDENCY_GRAPH.md`。
+
+待落实的风险由对应 owner 处理：transport 需核对运行 SDK header 契约；private-storage
+需证明无符号链接跟随和 Linux 锁保持；Inbox 需验证旧格式迁移、compensation 证据归属与混合 writer 保护；
+status 的只读诊断不得把 unknown 提示成可直接安全重发。任何需要生产动作的验证先使用临时数据和 fake provider，
+真实补发与部署另行取得授权。
+
+业务到期时间由 Inbox 的 `next_attempt_at_ms` 保存，避免新推送补充关联信息时更新
+`updated_at_ms` 而推迟或绕过重试窗口。既有非零次数按原更新时间迁移到期时间；只有真实
+claim/settle 才推进业务重试到期时间，核对已确认缺失不会继续推迟录入。无法核对的结果
+每 60 秒再次只读核对，显式操作员恢复才重置预算。迁移和 writer-version guard 在同一
+事务内完成，调用方复用该事务，不再嵌套 `BEGIN`。
 
 ## 审计
 

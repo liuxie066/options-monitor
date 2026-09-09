@@ -71,6 +71,8 @@ def test_auth_required_stops_without_retry_and_writes_blocked_status(tmp_path: P
 
 def test_retryable_disconnect_recovers_and_resets_to_floor(tmp_path: Path, monkeypatch) -> None:
     waits: list[float] = []
+    clock = [0.0]
+    monkeypatch.setattr(auto_intake.time, "monotonic", lambda: clock[0])
 
     class _Stop:
         stopped = False
@@ -83,7 +85,8 @@ def test_retryable_disconnect_recovers_and_resets_to_floor(tmp_path: Path, monke
 
         def wait(self, seconds):
             waits.append(seconds)
-            if len(waits) >= 2:
+            clock[0] += seconds
+            if seconds == 0:
                 self.stopped = True
             return self.stopped
 
@@ -107,11 +110,13 @@ def test_retryable_disconnect_recovers_and_resets_to_floor(tmp_path: Path, monke
 
     assert rc == 0
     assert _Listener.starts == 2
-    assert waits == [5, 0]  # Reconnect backoff, then wakeable polling cancellation check.
+    assert waits == [1] * 5 + [0]
 
 
 def test_retry_backoff_is_capped_at_sixty_seconds(tmp_path: Path, monkeypatch) -> None:
     waits: list[float] = []
+    clock = [0.0]
+    monkeypatch.setattr(auto_intake.time, "monotonic", lambda: clock[0])
 
     class _Stop:
         stopped = False
@@ -124,7 +129,8 @@ def test_retry_backoff_is_capped_at_sixty_seconds(tmp_path: Path, monkeypatch) -
 
         def wait(self, seconds):
             waits.append(seconds)
-            if len(waits) >= 2:
+            clock[0] += seconds
+            if clock[0] >= 100:
                 self.stopped = True
             return self.stopped
 
@@ -144,7 +150,9 @@ def test_retry_backoff_is_capped_at_sixty_seconds(tmp_path: Path, monkeypatch) -
     rc = _run(tmp_path, monkeypatch, _Listener, reconnect_sec=40, stop_event=_Stop())
 
     assert rc == 0
-    assert waits == [40, 60]
+    assert waits == [1] * 100
+    status = json.loads((tmp_path / "status.json").read_text())
+    assert status["restart_count"] == 2
 
 
 def test_multi_source_auth_stops_sibling_and_propagates_exit_code() -> None:

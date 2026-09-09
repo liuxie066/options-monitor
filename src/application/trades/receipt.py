@@ -46,7 +46,7 @@ def send_trade_intake_receipt(
     decision = decide_trade_intake_receipt(
         receipt_config=cfg,
         apply_changes=apply_changes,
-        state=state,
+        state={} if inbox_path is not None and inbox_id else state,
         deal_id=(
             str(broker_deal_key(deal) or "").strip()
             or _deal_id(deal, result, payload)
@@ -93,12 +93,15 @@ def send_trade_intake_receipt(
             attempt = begin_trade_receipt_attempt(
                 inbox_path, inbox_id=inbox_id, message=message,
                 route={key: route.get(key) for key in ("provider", "channel", "target")},
-                claim=inbox_claim,
+                claim=inbox_claim, result_key=result.get("receipt_result_key"),
             )
             if not attempt["claimed"]:
                 return {"enabled": True, "status": "skipped",
                         "reason": f"durable_receipt_{attempt['status']}",
                         "delivery_confirmed": attempt["status"] == "sent", "message_id": None}
+        if attempt is not None:
+            message = attempt["message"]
+            provider, channel, target = (attempt["route"][key] for key in ("provider", "channel", "target"))
         send_result = resolved_send_fn(
             base=base,
             channel=str(channel),
@@ -672,6 +675,8 @@ def decide_trade_intake_receipt(
 
     status = str(result.get("status") or "").strip().lower()
     reason = str(result.get("reason") or "").strip().lower()
+    if result.get("receipt_kind") == "verification_pending":
+        status = str((result.get("diagnostics") or {}).get("notification_category") or status)
     if status == "applied":
         return {"should_send": bool(cfg.get("notify_applied", True)), "reason": "applied"}
     if status == "unresolved":
@@ -728,7 +733,14 @@ def build_trade_intake_receipt_message(
     diagnostics_raw = result.get("diagnostics")
     diagnostics = cast(dict[str, Any], diagnostics_raw) if isinstance(diagnostics_raw, dict) else {}
     needs_lot_confirmation = status == "unresolved" and reason == "ambiguous_assigned_stock_sale"
-    if status == "failed" and reason == "projection_verification_failed":
+    kind = result.get("receipt_kind")
+    if kind == "verification_pending":
+        status_text = "⚠️ 记录状态待核对"
+    elif kind == "pending_retry":
+        status_text = "⚠️ 暂未记录"
+    elif kind == "recorded":
+        status_text = "✅ 已记录"
+    elif status == "failed" and reason == "projection_verification_failed":
         status_text = "❌ 写入异常"
     elif needs_lot_confirmation:
         status_text = "⚠️ 待确认"
@@ -779,13 +791,43 @@ def build_trade_intake_receipt_message(
                 f" · 预期 {first_check.get('expected_contracts_open_after')}",
             )
         )
-    if ledger_store:
+    if ledger_store and not kind:
         fields.append(("账本", ledger_store.get("sqlite_path") or "-"))
-    if _matching_auto_combo_adoption(result):
+    if (result.get("combo_reconciliation") or {}).get("ok") is False:
+        fields.append(("组合", "组合核对未完成；请检查组合核对服务。"))
+    elif _matching_auto_combo_adoption(result):
         fields.append(("组合", "✅ 已自动归入 Combo Yield（Funding Put + Participation Call）"))
     elif _combo_yield_relation_pending(diagnostics):
         fields.append(("组合", "关系待确认；未提供 pair_intent_id，当前按单腿记录，未自动归入 Combo Yield 组。"))
-    fields.append(("诊断", reason))
+    if kind:
+        cause = {
+            "sqlite_transient": "数据库短暂争用，本次记录未完成",
+            "storage_permission": "数据库写入权限不足",
+            "storage_full": "数据库存储空间不足",
+            "storage_schema": "数据库结构或存储异常",
+            "invalid_input": "成交信息不完整或不符合记录要求",
+            "processing_error": "成交处理异常，需要检查记录服务",
+        }.get(diagnostics.get("failure_category"), {
+            "interrupted_before_recording": "处理进程中断；已核对本次尚未记录",
+        }.get(reason, reason))
+        policy = result.get("retry_policy") or {}
+        if kind == "recorded":
+            cause = "自动恢复后已确认记录成功" if diagnostics.get("recovered_from_ledger") or int(policy.get("attempt_count", 0)) > 1 else "已确认记录成功"
+            fields.append(("处理", "无需重复录入"))
+        elif kind == "verification_pending":
+            cause = "暂时无法确认账本记录状态"
+            fields.append(("重试", "每 60 秒自动核对；核对前不会重复录入"))
+            fields.append(("处理", "无需重复提交；持续未恢复时请检查记录服务"))
+        elif kind == "pending_retry" and policy.get("retryable"):
+            fields.append(("重试", f"最早 60 秒后自动重试，剩余 {policy['remaining']} 次；恢复后发送成功回执"))
+            fields.append(("处理", "无需重复提交"))
+        else:
+            exhausted = int(policy.get("attempt_count", 0)) >= int(policy.get("max_attempts", 20))
+            fields.append(("重试", f"记录尝试已达 {policy['max_attempts']} 次，不会自动重试" if exhausted else "不会自动重试"))
+            fields.append(("处理", "请检查上述原因，修复后由操作员恢复处理"))
+        fields.append(("诊断", cause))
+    else:
+        fields.append(("诊断", reason))
     sections: list[tuple[str, list[str]]] = []
     if needs_lot_confirmation:
         candidate_lines = _assigned_stock_candidate_lines(diagnostics)

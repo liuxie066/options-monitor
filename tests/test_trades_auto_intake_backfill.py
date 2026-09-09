@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1246,6 +1247,8 @@ def test_pm_intent_survives_stock_state_crash_and_is_claimed_once(tmp_path, monk
     with pytest.raises(Crash):
         _process_stock(tmp_path, repo, payload)
     inbox = resolve_execution_inbox_path(repo, tmp_path / "legacy.sqlite3")
+    after_lease = auto_intake.time.time() + 121
+    monkeypatch.setattr(auto_intake.time, "time", lambda: after_lease)
     pending = list_retryable_trade_payloads(inbox, retry_delay_sec=0)[0]
     saved = read_trade_payload(inbox, inbox_id=pending["inbox_id"])
     intent = saved["result"]["portfolio_refresh_intent"]
@@ -1276,6 +1279,8 @@ def test_backfill_disabled_preserves_pending_refresh_for_enabled_replay(tmp_path
         _process_stock(tmp_path, repo, payload)
     monkeypatch.setattr(auto_intake, "update_trade_intake_state_entries", original)
     path = resolve_execution_inbox_path(repo, tmp_path / "unused.sqlite3")
+    after_lease = auto_intake.time.time() + 121
+    monkeypatch.setattr(auto_intake.time, "time", lambda: after_lease)
     pending = list_retryable_trade_payloads(path, retry_delay_sec=0)[0]
     intent = json.loads(read_trade_payload(path, inbox_id=pending["inbox_id"])["portfolio_refresh_intent_json"])
     resume_trade_payload(path, inbox_id=pending["inbox_id"], operator="offline-test", repo=repo)
@@ -1321,15 +1326,24 @@ def test_backfill_counts_one_attempt_per_real_core_attempt(tmp_path, monkeypatch
         monkeypatch.setattr(auto_intake, "save_trade_payload_result",
                             lambda *_, **__: (_ for _ in ()).throw(OSError("result storage unavailable")))
     inbox = resolve_execution_inbox_path(repo, tmp_path / "legacy.sqlite3")
+    key = broker_deal_key_from_payload(payload, account_mapping={"123": "lx"})
+    inbox_id = hashlib.sha256(key.encode()).hexdigest()
+    clock = [auto_intake.time.time()]
+    monkeypatch.setattr(auto_intake.time, "time", lambda: clock[0])
     for expected_attempts in (1, 2):
         result = _run_standard_backfill(tmp_path, repo, payload)
         rows = list_retryable_trade_payloads(inbox, retry_delay_sec=0)
-        assert len(rows) == 1
-        assert rows[0]["attempt_count"] == expected_attempts
         if failure == "unresolved":
+            assert len(rows) == 1
+            assert rows[0]["attempt_count"] == expected_attempts
             assert result["last_result"]["reason"] == "missing_required_fields:multiplier"
         else:
-            assert "result storage unavailable" in rows[0]["last_error"]
+            assert rows == []
+            saved = read_trade_payload(inbox, inbox_id=inbox_id)
+            assert saved["attempt_count"] == 1
+            assert saved["result"]["receipt_kind"] == "verification_pending"
+            assert "result storage unavailable" in saved["last_error"]
+        clock[0] += 61
     assert repo.list_trade_events() == []
 
 

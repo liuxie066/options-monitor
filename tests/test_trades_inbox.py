@@ -9,6 +9,7 @@ from src.application.trades.auto_intake import (
 )
 
 from src.application.trades.inbox import (
+    claim_trade_payload,
     claim_trade_payload_refresh_intent,
     enqueue_trade_payload,
     list_retryable_trade_payloads,
@@ -73,10 +74,13 @@ def test_trade_inbox_is_idempotent_and_retries_callback_exception(
     assert first_id == second_id
     assert trade_inbox_summary(path)["pending_count"] == 1
 
+    claim = claim_trade_payload(path, inbox_id=first_id)
     mark_trade_payload_retryable(
         path,
         inbox_id=first_id,
         error="RuntimeError: callback failed",
+        result={"status": "failed", "reason": "sqlite_busy", "diagnostics": {"retryable": True}},
+        claim=claim,
     )
     retry = list_retryable_trade_payloads(path, retry_delay_sec=0)
     assert len(retry) == 1
@@ -104,7 +108,7 @@ def test_trade_inbox_is_idempotent_and_retries_callback_exception(
     summary = trade_inbox_summary(path)
     assert summary["pending_count"] == 0
     assert summary["handled_count"] == 1
-    assert summary["max_attempt_count"] == 2
+    assert summary["max_attempt_count"] == 1
 
 
 def test_trade_inbox_migrates_old_evidence_without_guessing_adapter_version(
@@ -120,7 +124,7 @@ def test_trade_inbox_migrates_old_evidence_without_guessing_adapter_version(
         adapter_version="om.trade-intake.push.v1",
     )
     with sqlite3.connect(path) as conn:
-        conn.create_function("trade_inbox_writer_version", 0, lambda: 1)
+        conn.create_function("trade_inbox_writer_version", 0, lambda: 2)
         conn.execute(
             "UPDATE trade_inbox_evidence SET evidence_id = NULL, evidence_json = NULL"
         )
@@ -272,7 +276,7 @@ def test_trade_inbox_summary_cache_is_revision_gated(
         result={"status": "applied", "reason": "seed"},
     )
     with sqlite3.connect(path) as conn:
-        conn.create_function("trade_inbox_writer_version", 0, lambda: 1)
+        conn.create_function("trade_inbox_writer_version", 0, lambda: 2)
         conn.executemany(
             """
             INSERT INTO trade_inbox (
@@ -353,7 +357,7 @@ def test_trade_inbox_summary_cache_is_revision_gated(
     _cached_trade_inbox_summary(path, cache=cache)
     assert summary_reads == 3
     with sqlite3.connect(path) as conn:
-        conn.create_function("trade_inbox_writer_version", 0, lambda: 1)
+        conn.create_function("trade_inbox_writer_version", 0, lambda: 2)
         conn.execute(
             "DELETE FROM trade_inbox WHERE inbox_id = ?",
             (first_id,),
