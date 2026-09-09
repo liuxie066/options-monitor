@@ -14,11 +14,16 @@ from src.application.source_receipts import sha256_bytes
 from src.infrastructure.io_utils import atomic_write_json
 
 
-STRATEGY_SCAN_STATUS_SCHEMA = "strategy_scan_status.v1"
+STRATEGY_SCAN_STATUS_V1_SCHEMA = "strategy_scan_status.v1"
+STRATEGY_SCAN_STATUS_V2_SCHEMA = "strategy_scan_status.v2"
+STRATEGY_SCAN_STATUS_SCHEMA = STRATEGY_SCAN_STATUS_V1_SCHEMA
 STRATEGY_SCAN_STATUS_INDEX_V2_SCHEMA = "strategy_scan_status_index.v2"
 STRATEGY_SCAN_STATUS_INDEX_V2_FILE = "strategy_scan_status_index.v2.json"
 STRATEGY_SCAN_STATUS_INDEX_V3_SCHEMA = "strategy_scan_status_index.v3"
 STRATEGY_SCAN_STATUS_INDEX_V3_FILE = "strategy_scan_status_index.v3.json"
+STRATEGY_SCAN_STATUS_INDEX_V4_SCHEMA = "strategy_scan_status_index.v4"
+STRATEGY_SCAN_STATUS_INDEX_V4_FILE = "strategy_scan_status_index.v4.json"
+_WHEEL_DIRECTIONS = frozenset({"call", "put"})
 _TERMINAL = frozenset({"completed", "unavailable", "failed", "not_applicable"})
 _COMPLETED_REASONS = frozenset({"no_candidate", "partial_data", "market_closed"})
 
@@ -32,9 +37,18 @@ def strategy_status_path(
     report_dir: Path,
     symbol: str,
     strategy_family: str,
+    direction: str | None = None,
 ) -> Path:
     symbol_key = str(symbol or "").strip().lower()
     family = str(strategy_family or "").strip().lower()
+    direction_value = str(direction or "").strip().lower()
+    if direction_value:
+        if family != "wheel" or direction_value not in _WHEEL_DIRECTIONS:
+            raise StrategyScanStatusError("strategy scan status direction is invalid")
+        return (
+            Path(report_dir)
+            / f"{symbol_key}_{family}_{direction_value}_scan_status.v2.json"
+        ).resolve()
     return (Path(report_dir) / f"{symbol_key}_{family}_scan_status.json").resolve()
 
 
@@ -53,6 +67,7 @@ def publish_strategy_scan_status(
     receipt_relpath: str | None = None,
     source_outcome: str | None = None,
     reason_code: str | None = None,
+    direction: str | None = None,
 ) -> dict[str, Any]:
     status_norm = str(status or "").strip().lower()
     if status_norm not in _TERMINAL:
@@ -77,16 +92,22 @@ def publish_strategy_scan_status(
             )
 
     root = Path(report_dir).resolve()
+    family = _required(strategy_family, "strategy_family").lower()
+    direction_value = str(direction or "").strip().lower()
+    if direction_value and (family != "wheel" or direction_value not in _WHEEL_DIRECTIONS):
+        raise StrategyScanStatusError("strategy scan status direction is invalid")
+    status_schema = (
+        STRATEGY_SCAN_STATUS_V2_SCHEMA
+        if family == "wheel" and direction_value
+        else STRATEGY_SCAN_STATUS_V1_SCHEMA
+    )
     payload: dict[str, Any] = {
-        "schema_version": STRATEGY_SCAN_STATUS_SCHEMA,
+        "schema_version": status_schema,
         "run_id": _required(run_id, "run_id"),
         "account": _required(account, "account").lower(),
         "market": _required(market, "market").upper(),
         "symbol": _required(symbol, "symbol").upper(),
-        "strategy_family": _required(
-            strategy_family,
-            "strategy_family",
-        ).lower(),
+        "strategy_family": family,
         "status": status_norm,
         "published_at_utc": datetime.now(timezone.utc).isoformat(),
     }
@@ -104,10 +125,14 @@ def publish_strategy_scan_status(
     if source_outcome_norm:
         payload["source_outcome"] = source_outcome_norm
         payload["reason_code"] = reason_code_norm
+    if status_schema == STRATEGY_SCAN_STATUS_V2_SCHEMA:
+        payload["direction"] = direction_value
+        payload["content_sha256"] = sha256_bytes(_canonical_index_content(payload))
     path = strategy_status_path(
         report_dir=root,
         symbol=symbol,
         strategy_family=strategy_family,
+        direction=direction_value or None,
     )
     atomic_write_json(path, payload)
     return {**payload, "status_path": str(path)}
@@ -129,19 +154,36 @@ def publish_strategy_scan_status_index_v2(
     account_norm = _required(account, "account").lower()
     config_hash = _sha256(account_config_sha256, "account_config_sha256")
     expected_rows = [dict(item) for item in expected]
+    wheel_v2 = any(
+        str(item.get("strategy_family") or "").strip().lower() == "wheel"
+        and str(item.get("direction") or "").strip()
+        for item in expected_rows
+    )
+    if wheel_v2 and experience_fields:
+        raise StrategyScanStatusError(
+            "Wheel v2 status index cannot use experience fields"
+        )
     items: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str | None]] = set()
     for raw in sorted(
         expected_rows,
         key=lambda item: (
             str(item.get("market") or ""),
             str(item.get("symbol") or ""),
             str(item.get("strategy_family") or ""),
+            str(item.get("direction") or ""),
         ),
     ):
         market = _required(raw.get("market"), "market").upper()
         symbol = _required(raw.get("symbol"), "symbol").upper()
         family = _required(raw.get("strategy_family"), "strategy_family").lower()
+        direction = str(raw.get("direction") or "").strip().lower() or None
+        if family == "wheel" and direction is not None and direction not in _WHEEL_DIRECTIONS:
+            raise StrategyScanStatusError("Wheel strategy scope direction is invalid")
+        if family != "wheel" and direction is not None:
+            raise StrategyScanStatusError("non-Wheel strategy scope cannot have direction")
+        if wheel_v2 and family == "wheel" and direction is None:
+            raise StrategyScanStatusError("Wheel v4 strategy scope requires direction")
         mode = _required(raw.get("strategy_mode"), "strategy_mode").lower()
         owner = _required(raw.get("candidate_owner"), "candidate_owner").lower()
         expected_owner, expected_mode = _family_owner_mode(family, owner=owner)
@@ -155,7 +197,7 @@ def publish_strategy_scan_status_index_v2(
         )
         if item_config_hash != config_hash:
             raise StrategyScanStatusError("strategy scope account config hash mismatch")
-        key = (symbol, family)
+        key = (symbol, family, direction if family == "wheel" else None)
         if key in seen:
             raise StrategyScanStatusError("strategy status scope is duplicated")
         seen.add(key)
@@ -163,6 +205,7 @@ def publish_strategy_scan_status_index_v2(
             report_dir=root,
             symbol=symbol,
             strategy_family=family,
+            direction=direction,
         )
         status = _validate_status_core(
             path=status_path,
@@ -171,16 +214,22 @@ def publish_strategy_scan_status_index_v2(
             market=market,
             symbol=symbol,
             strategy_family=family,
+            direction=direction,
         )
-        items.append(
-            {
+        row = {
                 **status,
                 "strategy_mode": mode,
                 "candidate_owner": owner,
                 "account_config_sha256": config_hash,
                 "source_status_path": status_path.relative_to(root).as_posix(),
             }
-        )
+        if wheel_v2:
+            row["source_status_sha256"] = sha256_bytes(status_path.read_bytes())
+            if status.get("source_status_content_sha256"):
+                row["source_status_content_sha256"] = status[
+                    "source_status_content_sha256"
+                ]
+        items.append(row)
     counts = {
         status: sum(1 for item in items if item.get("status") == status)
         for status in ("completed", "unavailable", "failed", "not_applicable")
@@ -188,7 +237,9 @@ def publish_strategy_scan_status_index_v2(
     experience = dict(experience_fields or {})
     payload: dict[str, Any] = {
         "schema_version": (
-            STRATEGY_SCAN_STATUS_INDEX_V3_SCHEMA
+            STRATEGY_SCAN_STATUS_INDEX_V4_SCHEMA
+            if wheel_v2
+            else STRATEGY_SCAN_STATUS_INDEX_V3_SCHEMA
             if experience
             else STRATEGY_SCAN_STATUS_INDEX_V2_SCHEMA
         ),
@@ -205,13 +256,27 @@ def publish_strategy_scan_status_index_v2(
     path = (
         root
         / (
-            STRATEGY_SCAN_STATUS_INDEX_V3_FILE
+            STRATEGY_SCAN_STATUS_INDEX_V4_FILE
+            if wheel_v2
+            else STRATEGY_SCAN_STATUS_INDEX_V3_FILE
             if experience
             else STRATEGY_SCAN_STATUS_INDEX_V2_FILE
         )
     ).resolve()
     atomic_write_json(path, payload)
-    if experience:
+    if wheel_v2:
+        for superseded in (
+            STRATEGY_SCAN_STATUS_INDEX_V2_FILE,
+            STRATEGY_SCAN_STATUS_INDEX_V3_FILE,
+        ):
+            (root / superseded).unlink(missing_ok=True)
+        validate_strategy_scan_status_index_v4(
+            payload,
+            expected_run_id=run_id_norm,
+            expected_account=account_norm,
+            expected_account_config_sha256=config_hash,
+        )
+    elif experience:
         validate_strategy_scan_status_index_v3(
             payload,
             expected_run_id=run_id_norm,
@@ -226,6 +291,33 @@ def publish_strategy_scan_status_index_v2(
             expected_account_config_sha256=config_hash,
         )
     return {**payload, "index_path": str(path)}
+
+
+def publish_strategy_scan_status_index_v4(
+    *,
+    report_dir: Path,
+    run_id: str,
+    account: str,
+    account_config_sha256: str,
+    expected: Iterable[Mapping[str, str]],
+) -> dict[str, Any]:
+    expected_rows = [dict(item) for item in expected]
+    if not any(
+        str(item.get("strategy_family") or "").strip().lower() == "wheel"
+        and str(item.get("direction") or "").strip().lower() in _WHEEL_DIRECTIONS
+        for item in expected_rows
+    ):
+        raise StrategyScanStatusError("strategy status v4 index requires Wheel directions")
+    payload = publish_strategy_scan_status_index_v2(
+        report_dir=report_dir,
+        run_id=run_id,
+        account=account,
+        account_config_sha256=account_config_sha256,
+        expected=expected_rows,
+    )
+    if payload.get("schema_version") != STRATEGY_SCAN_STATUS_INDEX_V4_SCHEMA:
+        raise StrategyScanStatusError("strategy status v4 index requires Wheel directions")
+    return payload
 
 
 def load_strategy_scan_status_index_v2(
@@ -270,6 +362,31 @@ def load_strategy_scan_status_index_v3(
     if not isinstance(payload, dict):
         raise StrategyScanStatusError("strategy status v3 index is invalid")
     validate_strategy_scan_status_index_v3(
+        payload,
+        expected_run_id=expected_run_id,
+        expected_account=expected_account,
+        expected_account_config_sha256=expected_account_config_sha256,
+    )
+    return payload
+
+
+def load_strategy_scan_status_index_v4(
+    path: Path,
+    *,
+    expected_run_id: str | None = None,
+    expected_account: str | None = None,
+    expected_account_config_sha256: str | None = None,
+) -> dict[str, Any]:
+    target = Path(path)
+    if not target.is_file() or target.is_symlink():
+        raise StrategyScanStatusError("strategy status v4 index is unavailable")
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise StrategyScanStatusError("strategy status v4 index is unreadable") from exc
+    if not isinstance(payload, dict):
+        raise StrategyScanStatusError("strategy status v4 index is invalid")
+    validate_strategy_scan_status_index_v4(
         payload,
         expected_run_id=expected_run_id,
         expected_account=expected_account,
@@ -356,6 +473,8 @@ def validate_strategy_scan_status_index_v2(
         row = dict(raw)
         if "artifacts" in row:
             raise StrategyScanStatusError("strategy status v2 item references compatibility artifacts")
+        if "direction" in row:
+            raise StrategyScanStatusError("strategy status v2 item has v4 identity")
         if row.get("run_id") != run_id or str(row.get("account") or "").lower() != account:
             raise StrategyScanStatusError("strategy status v2 item identity mismatch")
         if _sha256(row.get("account_config_sha256"), "scope account_config_sha256") != config_hash:
@@ -404,6 +523,117 @@ def validate_strategy_scan_status_index_v2(
         raise StrategyScanStatusError("strategy status v2 counts mismatch")
 
 
+def validate_strategy_scan_status_index_v4(
+    payload: Mapping[str, Any],
+    *,
+    expected_run_id: str | None = None,
+    expected_account: str | None = None,
+    expected_account_config_sha256: str | None = None,
+) -> None:
+    item = dict(payload or {})
+    if item.get("schema_version") != STRATEGY_SCAN_STATUS_INDEX_V4_SCHEMA:
+        raise StrategyScanStatusError("strategy status v4 index schema mismatch")
+    run_id = _required(item.get("run_id"), "run_id")
+    account = _required(item.get("account"), "account").lower()
+    config_hash = _sha256(item.get("account_config_sha256"), "account_config_sha256")
+    if expected_run_id is not None and run_id != expected_run_id:
+        raise StrategyScanStatusError("strategy status v4 index run mismatch")
+    if expected_account is not None and account != expected_account.lower():
+        raise StrategyScanStatusError("strategy status v4 index account mismatch")
+    if expected_account_config_sha256 is not None and config_hash != _sha256(
+        expected_account_config_sha256,
+        "expected account_config_sha256",
+    ):
+        raise StrategyScanStatusError("strategy status v4 index config mismatch")
+    content_hash = _sha256(item.get("content_sha256"), "content_sha256")
+    content = {key: value for key, value in item.items() if key != "content_sha256"}
+    if sha256_bytes(_canonical_index_content(content)) != content_hash:
+        raise StrategyScanStatusError("strategy status v4 index content hash mismatch")
+    rows = item.get("items")
+    if not isinstance(rows, list) or any(not isinstance(row, Mapping) for row in rows):
+        raise StrategyScanStatusError("strategy status v4 index items are invalid")
+    if int(item.get("expected_count", -1)) != len(rows):
+        raise StrategyScanStatusError("strategy status v4 index count mismatch")
+    seen: set[tuple[str, str, str | None]] = set()
+    for raw in rows:
+        row = dict(raw)
+        if "artifacts" in row:
+            raise StrategyScanStatusError(
+                "strategy status v4 item references compatibility artifacts"
+            )
+        if row.get("run_id") != run_id or str(row.get("account") or "").lower() != account:
+            raise StrategyScanStatusError("strategy status v4 item identity mismatch")
+        if _sha256(
+            row.get("account_config_sha256"),
+            "scope account_config_sha256",
+        ) != config_hash:
+            raise StrategyScanStatusError("strategy status v4 item config mismatch")
+        symbol = _required(row.get("symbol"), "symbol").upper()
+        family = _required(row.get("strategy_family"), "strategy_family").lower()
+        owner = _required(row.get("candidate_owner"), "candidate_owner").lower()
+        mode = _required(row.get("strategy_mode"), "strategy_mode").lower()
+        expected_owner, expected_mode = _family_owner_mode(family, owner=owner)
+        if owner != expected_owner or mode != expected_mode:
+            raise StrategyScanStatusError("strategy status v4 item owner/mode mismatch")
+        direction = str(row.get("direction") or "").strip().lower() or None
+        if family == "wheel":
+            if direction not in _WHEEL_DIRECTIONS:
+                raise StrategyScanStatusError("Wheel v4 strategy scope requires direction")
+            expected_source_schema = STRATEGY_SCAN_STATUS_V2_SCHEMA
+            expected_source_name = f"{symbol.lower()}_wheel_{direction}_scan_status.v2.json"
+            _sha256(
+                row.get("source_status_content_sha256"),
+                "source_status_content_sha256",
+            )
+        else:
+            if direction is not None:
+                raise StrategyScanStatusError("non-Wheel v4 strategy scope has direction")
+            expected_source_schema = STRATEGY_SCAN_STATUS_V1_SCHEMA
+            expected_source_name = f"{symbol.lower()}_{family}_scan_status.json"
+            if "source_status_content_sha256" in row:
+                raise StrategyScanStatusError(
+                    "legacy strategy status cannot claim a content hash"
+                )
+        if row.get("source_status_schema") != expected_source_schema:
+            raise StrategyScanStatusError("strategy status v4 source schema mismatch")
+        source_path = Path(_required(row.get("source_status_path"), "source_status_path"))
+        if (
+            source_path.is_absolute()
+            or source_path.parts != (expected_source_name,)
+            or source_path.suffix != ".json"
+        ):
+            raise StrategyScanStatusError("strategy status v4 source path mismatch")
+        _sha256(row.get("source_status_sha256"), "source_status_sha256")
+        if row.get("status") not in _TERMINAL:
+            raise StrategyScanStatusError("strategy status v4 item is not terminal")
+        if row.get("status") == "completed":
+            candidate_count = row.get("candidate_count")
+            if (
+                not isinstance(candidate_count, int)
+                or isinstance(candidate_count, bool)
+                or candidate_count < 0
+            ):
+                raise StrategyScanStatusError(
+                    "completed v4 status requires a non-negative integer candidate_count"
+                )
+        elif not str(row.get("reason") or "").strip():
+            raise StrategyScanStatusError("non-completed v4 status requires reason")
+        snapshot_id = str(row.get("snapshot_id") or "").strip()
+        receipt_relpath = str(row.get("receipt_relpath") or "").strip()
+        if bool(snapshot_id) != bool(receipt_relpath):
+            raise StrategyScanStatusError("strategy status v4 quote binding is incomplete")
+        key = (symbol, family, direction if family == "wheel" else None)
+        if key in seen:
+            raise StrategyScanStatusError("strategy status v4 scope is duplicated")
+        seen.add(key)
+    expected_counts = {
+        status: sum(1 for row in rows if row.get("status") == status)
+        for status in ("completed", "unavailable", "failed", "not_applicable")
+    }
+    if item.get("counts") != expected_counts:
+        raise StrategyScanStatusError("strategy status v4 counts mismatch")
+
+
 def _canonical_index_content(payload: Mapping[str, Any]) -> bytes:
     return json.dumps(
         dict(payload),
@@ -434,6 +664,7 @@ def _validate_status_core(
     market: str,
     symbol: str,
     strategy_family: str,
+    direction: str | None = None,
 ) -> dict[str, Any]:
     """Validate terminal status facts without opening compatibility artifact bytes."""
 
@@ -441,8 +672,14 @@ def _validate_status_core(
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise StrategyScanStatusError("strategy status is unreadable") from exc
+    direction_value = str(direction or "").strip().lower() or None
+    expected_schema = (
+        STRATEGY_SCAN_STATUS_V2_SCHEMA
+        if strategy_family.lower() == "wheel" and direction_value
+        else STRATEGY_SCAN_STATUS_V1_SCHEMA
+    )
     expected = {
-        "schema_version": STRATEGY_SCAN_STATUS_SCHEMA,
+        "schema_version": expected_schema,
         "run_id": run_id,
         "account": account.lower(),
         "market": market.upper(),
@@ -451,6 +688,15 @@ def _validate_status_core(
     }
     if not isinstance(payload, dict) or any(payload.get(key) != value for key, value in expected.items()):
         raise StrategyScanStatusError("strategy status identity mismatch")
+    if expected_schema == STRATEGY_SCAN_STATUS_V2_SCHEMA:
+        if payload.get("direction") != direction_value:
+            raise StrategyScanStatusError("strategy status direction mismatch")
+        content_hash = _sha256(payload.get("content_sha256"), "content_sha256")
+        content = {key: value for key, value in payload.items() if key != "content_sha256"}
+        if sha256_bytes(_canonical_index_content(content)) != content_hash:
+            raise StrategyScanStatusError("strategy status content hash mismatch")
+    elif "direction" in payload or "content_sha256" in payload:
+        raise StrategyScanStatusError("legacy strategy status has v2 fields")
     status = str(payload.get("status") or "")
     if status not in _TERMINAL:
         raise StrategyScanStatusError("strategy status is not terminal")
@@ -493,6 +739,7 @@ def _validate_status_core(
             "market",
             "symbol",
             "strategy_family",
+            "direction",
             "status",
             "candidate_count",
             "reason",
@@ -500,9 +747,12 @@ def _validate_status_core(
             "receipt_relpath",
             "source_outcome",
             "reason_code",
+            "content_sha256",
         }
     }
     out["source_status_schema"] = out.pop("schema_version")
+    if "content_sha256" in out:
+        out["source_status_content_sha256"] = out.pop("content_sha256")
     return out
 
 
@@ -525,13 +775,20 @@ __all__ = [
     "STRATEGY_SCAN_STATUS_INDEX_V2_SCHEMA",
     "STRATEGY_SCAN_STATUS_INDEX_V3_FILE",
     "STRATEGY_SCAN_STATUS_INDEX_V3_SCHEMA",
+    "STRATEGY_SCAN_STATUS_INDEX_V4_FILE",
+    "STRATEGY_SCAN_STATUS_INDEX_V4_SCHEMA",
     "STRATEGY_SCAN_STATUS_SCHEMA",
+    "STRATEGY_SCAN_STATUS_V1_SCHEMA",
+    "STRATEGY_SCAN_STATUS_V2_SCHEMA",
     "StrategyScanStatusError",
     "load_strategy_scan_status_index_v2",
     "load_strategy_scan_status_index_v3",
+    "load_strategy_scan_status_index_v4",
     "publish_strategy_scan_status",
     "publish_strategy_scan_status_index_v2",
+    "publish_strategy_scan_status_index_v4",
     "strategy_status_path",
     "validate_strategy_scan_status_index_v2",
     "validate_strategy_scan_status_index_v3",
+    "validate_strategy_scan_status_index_v4",
 ]

@@ -680,3 +680,32 @@ def test_archive_prune_remote_rechecks_current_local_copy(tmp_path: Path) -> Non
     assert data["deletion_guard"]["mutated_or_missing_archive_run_ids"] == ["run-1"]
     assert data["deletion_guard"]["unverified_delete_run_ids"] == ["run-1"]
     assert len(calls) == 2
+
+
+def test_critical_files_include_bidirectional_wheel_artifacts(tmp_path: Path) -> None:
+    from src.application.research.archive import _critical_files
+
+    run_dir = tmp_path / "run-wheel"
+    account_dir = run_dir / "accounts" / "lx"
+    state_dir = account_dir / "state"
+    state_dir.mkdir(parents=True)
+    for path in (
+        state_dir / "candidate_snapshot_manifest.v3.json",
+        state_dir / "wheel_candidate_snapshot.v2.json",
+        account_dir / "strategy_scan_status_index.v4.json",
+        account_dir / "nvda_wheel_put_scan_status.v2.json",
+    ):
+        path.write_text("{}\n", encoding="utf-8")
+
+    critical = _critical_files(run_dir)
+
+    assert critical["candidate_manifest_files"] == [
+        "accounts/lx/state/candidate_snapshot_manifest.v3.json"
+    ]
+    assert critical["candidate_snapshot_files"] == [
+        "accounts/lx/state/wheel_candidate_snapshot.v2.json"
+    ]
+    assert critical["candidate_status_files"] == [
+        "accounts/lx/nvda_wheel_put_scan_status.v2.json",
+        "accounts/lx/strategy_scan_status_index.v4.json",
+    ]

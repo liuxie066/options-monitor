@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### New Features
+- Added bidirectional Wheel monitoring, recommendation, and result tracking for Call and Put rotations, with explicit human transition confirmation, manual broker trading, market/account isolation, and receipt-bound multiplier evidence.
+
 ## 3.4.13 - 2026-09-08
 
 ### Improvements

@@ -296,7 +296,7 @@ def merge_wheel_requirements_into_prefetch_config(
     wheel_read_models: dict[str, dict[str, Any]],
     allowed_symbols: set[str] | None = None,
 ) -> dict[str, Any]:
-    """Add active Wheel Call demand to the shared Required Data plan."""
+    """Add enabled active Wheel branch demand to the shared Required Data plan."""
 
     items = [
         deepcopy(item)
@@ -312,23 +312,34 @@ def merge_wheel_requirements_into_prefetch_config(
         if allowed_symbols is not None
         else None
     )
-    demands: dict[tuple[str, tuple[str, str, int]], dict[str, Any]] = {}
+    demands: dict[tuple[str, tuple[str, str, int], str], dict[str, Any]] = {}
     for account in sorted(account_configs):
         config = account_configs[account]
         policy = resolve_wheel_config(config, account)
-        if not policy["enabled_for_new_lifecycle"]:
+        if account not in policy["accounts"]:
             continue
         model = wheel_read_models.get(account) or {}
-        for batch in model.get("batches") or []:
-            if not isinstance(batch, dict) or any(
+        branches = model.get("wheel_branches") or model.get("batches") or []
+        for branch in branches:
+            if not isinstance(branch, dict) or any(
                 (
-                    batch.get("lifecycle_status") != "active",
-                    batch.get("integrity_status") != "trusted",
-                    batch.get("phase") != "ready",
+                    branch.get("lifecycle_status") != "active",
+                    branch.get("integrity_status") != "trusted",
+                    branch.get("phase") != "ready",
+                    str(
+                        branch.get("monitoring_gate")
+                        or model.get("monitoring_gate")
+                        or "disabled"
+                    ).strip().lower()
+                    != "enabled",
                 )
             ):
                 continue
-            symbol = _symbol_key(str(batch.get("symbol") or ""))
+            direction = str(branch.get("direction") or "call").strip().lower()
+            if direction not in {"call", "put"}:
+                continue
+            direction_policy = policy[direction]
+            symbol = _symbol_key(str(branch.get("symbol") or ""))
             binding, error = resolve_position_fetch_binding(
                 symbol=symbol,
                 account_config=config,
@@ -346,19 +357,25 @@ def merge_wheel_requirements_into_prefetch_config(
                 _physical_host(binding["host"]),
                 int(binding["port"]),
             )
-            key = (symbol, route)
+            key = (symbol, route, direction)
             current = demands.setdefault(
                 key,
                 {
                     "enabled": True,
-                    "min_dte": int(policy["min_dte"]),
-                    "max_dte": int(policy["max_dte"]),
+                    "min_dte": int(direction_policy["min_dte"]),
+                    "max_dte": int(direction_policy["max_dte"]),
                     "requires_realized_volatility": True,
                 },
             )
-            current["min_dte"] = min(int(current["min_dte"]), int(policy["min_dte"]))
-            current["max_dte"] = max(int(current["max_dte"]), int(policy["max_dte"]))
-    for (symbol, route), demand in sorted(demands.items()):
+            current["min_dte"] = min(
+                int(current["min_dte"]),
+                int(direction_policy["min_dte"]),
+            )
+            current["max_dte"] = max(
+                int(current["max_dte"]),
+                int(direction_policy["max_dte"]),
+            )
+    for (symbol, route, direction), demand in sorted(demands.items()):
         item = by_route.get((symbol, route))
         if item is None:
             item = {
@@ -370,7 +387,7 @@ def merge_wheel_requirements_into_prefetch_config(
             }
             items.append(item)
             by_route[(symbol, route)] = item
-        item["_wheel_call"] = demand
+        item[f"_wheel_{direction}"] = demand
     items.sort(key=_stable_symbol_config_key)
     out = deepcopy(candidate_config)
     set_watchlist_config(out, items)
@@ -477,6 +494,7 @@ def _has_any_market_demand(symbol_cfg: dict[str, Any]) -> bool:
         _has_non_account_market_demand(symbol_cfg)
         or _as_dict(symbol_cfg.get("sell_call")).get("enabled", False)
         or _as_dict(symbol_cfg.get("_wheel_call")).get("enabled", False)
+        or _as_dict(symbol_cfg.get("_wheel_put")).get("enabled", False)
     )
 
 

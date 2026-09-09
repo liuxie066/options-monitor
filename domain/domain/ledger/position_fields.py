@@ -40,6 +40,7 @@ POSITION_LOT_STRATEGY_PATCH_FIELDS = (
     "leg_role",
     "strategy_group_id",
     "source_stock_lot_id",
+    "source_wheel_branch_id",
     "strategy_snapshot",
 )
 LEGACY_POSITION_LOT_PATCH_FIELDS = ("yield_enhancement_mode",)
@@ -400,6 +401,7 @@ class PositionLotPatch:
     leg_role: _PatchValue = _UNSET
     strategy_group_id: _PatchValue = _UNSET
     source_stock_lot_id: _PatchValue = _UNSET
+    source_wheel_branch_id: _PatchValue = _UNSET
     strategy_snapshot: _PatchValue = _UNSET
     yield_enhancement_mode: _PatchValue = _UNSET
 
@@ -457,6 +459,7 @@ def decode_position_lot_patch(payload: Any) -> PositionLotPatch:
         leg_role=payload.get("leg_role", _UNSET),
         strategy_group_id=payload.get("strategy_group_id", _UNSET),
         source_stock_lot_id=payload.get("source_stock_lot_id", _UNSET),
+        source_wheel_branch_id=payload.get("source_wheel_branch_id", _UNSET),
         strategy_snapshot=payload.get("strategy_snapshot", _UNSET),
         yield_enhancement_mode=payload.get("yield_enhancement_mode", _UNSET),
     )
@@ -680,6 +683,7 @@ def build_open_adjustment_patch_contract(
     leg_role: str | None = None,
     strategy_group_id: str | None = None,
     source_stock_lot_id: str | None = None,
+    source_wheel_branch_id: str | None = None,
     strategy_snapshot: dict[str, Any] | None = None,
     as_of_ms: int | None = None,
 ) -> PositionLotPatch:
@@ -698,6 +702,7 @@ def build_open_adjustment_patch_contract(
             leg_role,
             strategy_group_id,
             source_stock_lot_id,
+            source_wheel_branch_id,
             strategy_snapshot,
         )
     ):
@@ -750,6 +755,10 @@ def build_open_adjustment_patch_contract(
     patch_source_stock_lot_id = _optional_patch_text(
         source_stock_lot_id,
         "source_stock_lot_id",
+    )
+    patch_source_wheel_branch_id = _optional_patch_text(
+        source_wheel_branch_id,
+        "source_wheel_branch_id",
     )
     patch_strategy_snapshot = _optional_patch_object(strategy_snapshot, "strategy_snapshot")
 
@@ -823,6 +832,7 @@ def build_open_adjustment_patch_contract(
         leg_role=patch_leg_role,
         strategy_group_id=patch_strategy_group_id,
         source_stock_lot_id=patch_source_stock_lot_id,
+        source_wheel_branch_id=patch_source_wheel_branch_id,
         strategy_snapshot=patch_strategy_snapshot,
     )
 
@@ -840,6 +850,7 @@ def build_open_adjustment_patch(
     leg_role: str | None = None,
     strategy_group_id: str | None = None,
     source_stock_lot_id: str | None = None,
+    source_wheel_branch_id: str | None = None,
     strategy_snapshot: dict[str, Any] | None = None,
     as_of_ms: int | None = None,
 ) -> dict[str, Any]:
@@ -855,6 +866,7 @@ def build_open_adjustment_patch(
         leg_role=leg_role,
         strategy_group_id=strategy_group_id,
         source_stock_lot_id=source_stock_lot_id,
+        source_wheel_branch_id=source_wheel_branch_id,
         strategy_snapshot=strategy_snapshot,
         as_of_ms=as_of_ms,
     ).to_dict()

@@ -1663,8 +1663,7 @@ def test_option_positions_read_lists_events_history_and_inspect(monkeypatch, tmp
     assert assigned_stock_row["assigned_stock_unrealized_pnl"] == -200.0
     assert assigned_stock_row["option_premium_attribution"] == 250.0
     assert assigned_stock_row["assignment_lifecycle_pnl"] == 50.0
-    assert assigned_stock_row["wheel"]["stock_lot_id"] == stock_lot_id
-    assert assigned_stock_row["wheel"]["lifecycle_status"] == "active"
+    assert assigned_stock_row["wheel"] is None
 
     list_wrapped_action = run_tool(
         "option_positions_read",

@@ -268,6 +268,10 @@ def test_agent_registry_manifest_and_tool_objects_stay_in_sync() -> None:
         "candidate_filter_explain",
         "option_performance_report",
         "option_positions_read",
+        "wheel_activation",
+        "wheel_branch_decision",
+        "wheel_intent",
+        "wheel_linkage",
         "close_advice_read",
         "preview_notification",
         "runtime_status",
@@ -338,7 +342,7 @@ def test_agent_tool_output_contracts_advertise_model_visible_data_shape() -> Non
     }
 
     assigned_stock_contract = positions.resolve_output_contract({"action": "assigned-stock"})
-    assert assigned_stock_contract["schema_version"] == "option_positions_read.assigned_stock_output.v2"
+    assert assigned_stock_contract["schema_version"] == "option_positions_read.output.v3"
     assert "rows[].assignment_lifecycle_pnl" in assigned_stock_contract["fact_fields"]
     assert "rows[].lifecycle_pnl_net" in assigned_stock_contract["fact_fields"]
     assert "rows[].capital_days" in assigned_stock_contract["fact_fields"]
@@ -348,8 +352,56 @@ def test_agent_tool_output_contracts_advertise_model_visible_data_shape() -> Non
     assert "rows[].fee_missing_components" in assigned_stock_contract["missing_data_fields"]
     assert "rows[].quote_status" in assigned_stock_contract["freshness_fields"]
     assert "quote_refresh.missing_symbols" in assigned_stock_contract["missing_data_fields"]
+    assert "wheel_branches" in assigned_stock_contract["model_preview_fields"]
+    assert "wheel_branches[].wheel_branch_id" in assigned_stock_contract["fact_fields"]
+    assert "wheel_branches[].parent_branch_id" in assigned_stock_contract["fact_fields"]
+    assert "wheel_branches[].direction" in assigned_stock_contract["fact_fields"]
+    assert "wheel_branches[].source_assignment_event_id" in assigned_stock_contract["fact_fields"]
+    assert "wheel_branches[].branch_generation_hash" in assigned_stock_contract["fact_fields"]
     list_wrapped_assigned_stock_contract = positions.resolve_output_contract({"action": ["assigned-stock"]})
     assert list_wrapped_assigned_stock_contract == assigned_stock_contract
+
+    branch_decision = get_tool_definition("wheel_branch_decision")
+    assert branch_decision is not None
+    assert branch_decision.safe_default_input == {"apply": False}
+    assert branch_decision.output_contract["schema_version"] == (
+        "wheel_branch_decision.output.v1"
+    )
+    assert "wheel_branch_id" in branch_decision.output_contract["fact_fields"]
+    assert "market" in branch_decision.output_contract["fact_fields"]
+    assert "stock_lot_id" in branch_decision.input_schema
+    assert "wheel_branch_id" in branch_decision.input_schema
+
+    activation = get_tool_definition("wheel_activation")
+    assert activation is not None
+    assert activation.safe_default_input == {"apply": False}
+    assert activation.output_contract["schema_version"] == "wheel_activation.output.v1"
+    assert activation.input_schema["action"]["enum"] == ["status", "enable", "disable"]
+    assert "broker_holdings_read" not in activation.requires
+    assert "expected_config_descriptor" in activation.output_contract["fact_fields"]
+    assert "window" not in activation.output_contract["fact_fields"]
+
+    healthcheck = get_tool_definition("healthcheck")
+    runtime_status = get_tool_definition("runtime_status")
+    assert "wheel_activation_readiness.monitoring_gate" in healthcheck.output_contract["fact_fields"]
+    assert "wheel_activation_readiness.monitoring_gate" in runtime_status.output_contract["fact_fields"]
+    assert "wheel_activation_readiness" in runtime_status.output_contract["model_preview_fields"]
+
+    wheel_intent = get_tool_definition("wheel_intent")
+    assert wheel_intent is not None
+    assert wheel_intent.safe_default_input == {"apply": False}
+    assert wheel_intent.input_schema["direction"]["enum"] == ["call", "put"]
+    assert "wheel_branch_id" in wheel_intent.input_schema
+    assert "stock_lot_id" in wheel_intent.input_schema
+    assert wheel_intent.output_contract["schema_version"] == "wheel_intent.output.v1"
+    assert "market" in wheel_intent.output_contract["fact_fields"]
+
+    wheel_linkage = get_tool_definition("wheel_linkage")
+    assert wheel_linkage is not None
+    assert wheel_linkage.safe_default_input == {"apply": False}
+    assert "option_record_id" in wheel_linkage.input_schema
+    assert wheel_linkage.output_contract["schema_version"] == "wheel_linkage.output.v1"
+    assert "market" in wheel_linkage.output_contract["fact_fields"]
 
 
     close_advice = get_tool_definition("close_advice_read")

@@ -12,6 +12,7 @@ from typing import Any, Mapping
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from src.application.candidate_snapshot_manifest import (
     CANDIDATE_SNAPSHOT_MANIFEST_FILE,
+    CANDIDATE_SNAPSHOT_MANIFEST_V3_FILE,
     CandidateSnapshotManifestError,
     load_candidate_snapshot_bundle,
 )
@@ -35,7 +36,10 @@ from src.application.opening_candidate_snapshot import (
     OpeningCandidateSnapshotError,
     load_opening_candidate_snapshot,
 )
-from src.application.strategy_scan_status import STRATEGY_SCAN_STATUS_INDEX_V2_FILE
+from src.application.strategy_scan_status import (
+    STRATEGY_SCAN_STATUS_INDEX_V2_FILE,
+    STRATEGY_SCAN_STATUS_INDEX_V4_FILE,
+)
 from src.application.tick_run_workspace import (
     ACCOUNT_RUN_CONFIG_NAME,
     AccountRunConfigError,
@@ -75,11 +79,15 @@ _OWNER_FILES = {
     "opening": OPENING_CANDIDATE_SNAPSHOT_FILE,
     "sp_lc": COMBO_YIELD_CANDIDATE_SNAPSHOT_FILE,
     "cc_lp": CC_LP_CANDIDATE_SNAPSHOT_FILE,
+    "wheel_v1": "wheel_candidate_snapshot.json",
+    "wheel_v2": "wheel_candidate_snapshot.v2.json",
 }
 _MODERN_OWNER_SCHEMAS = {
     "opening": OPENING_CANDIDATE_SNAPSHOT_SCHEMA,
     "sp_lc": COMBO_YIELD_CANDIDATE_SNAPSHOT_SCHEMA,
     "cc_lp": CC_LP_CANDIDATE_SNAPSHOT_SCHEMA,
+    "wheel_v1": "wheel_candidate_snapshot.v1",
+    "wheel_v2": "wheel_candidate_snapshot.v2",
 }
 _LEGACY_OWNER_SCHEMAS = {
     "opening": OPENING_CANDIDATE_SNAPSHOT_SCHEMA,
@@ -151,10 +159,16 @@ def load_account_candidate_evidence(
         "legacy_candidate_files": legacy_csv_names,
     }
 
-    manifest_path = state_dir / CANDIDATE_SNAPSHOT_MANIFEST_FILE
+    manifest_paths = (
+        state_dir / CANDIDATE_SNAPSHOT_MANIFEST_FILE,
+        state_dir / CANDIDATE_SNAPSHOT_MANIFEST_V3_FILE,
+    )
+    formal_manifests_present = [
+        path for path in manifest_paths if path.exists() or path.is_symlink()
+    ]
     experience_manifest_path = state_dir / EXPERIENCE_CANDIDATE_MANIFEST_FILE
     if experience_manifest_path.exists() or experience_manifest_path.is_symlink():
-        if manifest_path.exists() or manifest_path.is_symlink():
+        if formal_manifests_present:
             return _result(
                 account_dir=account_dir,
                 common=common,
@@ -184,7 +198,7 @@ def load_account_candidate_evidence(
             status_index=dict(bundle["status_index"]),
             manifest=dict(bundle["manifest"]),
         )
-    if manifest_path.exists() or manifest_path.is_symlink():
+    if formal_manifests_present:
         try:
             bundle = load_candidate_snapshot_bundle(
                 base=authority_base,
@@ -217,7 +231,13 @@ def load_account_candidate_evidence(
         )
 
     owner_payloads, owner_read_errors = _read_owner_payloads(state_dir)
-    if (account_dir / STRATEGY_SCAN_STATUS_INDEX_V2_FILE).exists() or any(
+    if any(
+        (account_dir / filename).exists()
+        for filename in (
+            STRATEGY_SCAN_STATUS_INDEX_V2_FILE,
+            STRATEGY_SCAN_STATUS_INDEX_V4_FILE,
+        )
+    ) or any(
         payload.get("schema_version") in set(_MODERN_OWNER_SCHEMAS.values()) - {OPENING_CANDIDATE_SNAPSHOT_SCHEMA}
         for payload in owner_payloads.values()
     ):
@@ -721,12 +741,17 @@ def _has_other_scan_evidence(account_dir: Path) -> bool:
         "candidate_filter_trace.jsonl",
         _LEGACY_INDEX_FILE,
         STRATEGY_SCAN_STATUS_INDEX_V2_FILE,
+        STRATEGY_SCAN_STATUS_INDEX_V4_FILE,
     }
     for path in account_dir.rglob("*"):
         if not path.is_file() or path.is_symlink():
             continue
         name = path.name.lower()
-        if name in evidence_names or name.endswith("_scan_status.json"):
+        if (
+            name in evidence_names
+            or name.endswith("_scan_status.json")
+            or name.endswith("_scan_status.v2.json")
+        ):
             return True
     return False
 

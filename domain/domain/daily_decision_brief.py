@@ -34,6 +34,7 @@ _CANDIDATE_REPRESENTATIVE_FIELDS = (
     "strike",
     "strategy_group_id",
     "position_lot_id",
+    "wheel_branch_id",
     "candidate_pair_id",
     "structure_mode",
     "put_contract_symbol",
@@ -98,6 +99,7 @@ def build_daily_brief_candidate_identity(
     symbol: Any,
     strategy_family: Any,
     position_lot_id: Any = None,
+    wheel_branch_id: Any = None,
 ) -> str:
     account_norm = _lower(account)
     market_norm = _upper(market)
@@ -116,10 +118,12 @@ def build_daily_brief_candidate_identity(
     identity = f"candidate:v1:{account_norm}:{market_norm}:{symbol_norm}:{family_norm}"
     if family_norm != "wheel":
         return identity
-    lot_id = str(position_lot_id or "").strip()
-    if not lot_id or ":" in lot_id:
-        raise ValueError("valid position_lot_id is required for Wheel candidate identity")
-    return f"{identity}:{lot_id}"
+    branch_id = str(wheel_branch_id or position_lot_id or "").strip()
+    if not branch_id or ":" in branch_id:
+        raise ValueError(
+            "valid wheel_branch_id or position_lot_id is required for Wheel candidate identity"
+        )
+    return f"{identity}:{branch_id}"
 
 
 def decide_daily_brief_notification(
@@ -181,6 +185,14 @@ def _legacy_action_identity(action: Mapping[str, Any]) -> dict[str, str]:
         raise ValueError("action_type is required for daily brief action identity")
     if not identity["account"]:
         raise ValueError("account is required for daily brief action identity")
+    wheel_branch_id = str(action.get("wheel_branch_id") or "").strip()
+    position_lot_id = str(action.get("position_lot_id") or "").strip()
+    if (
+        identity["strategy_family"] == "wheel"
+        and wheel_branch_id
+        and wheel_branch_id != position_lot_id
+    ):
+        identity["wheel_branch_id"] = wheel_branch_id
     return identity
 
 
@@ -233,6 +245,11 @@ def _normalize_daily_brief_action(
     out["strike"] = _canonical_number(src.get("strike"))
     out["contract_symbol"] = _upper(src.get("contract_symbol"))
     out["position_lot_id"] = str(src.get("position_lot_id") or "").strip()
+    wheel_branch_id = str(src.get("wheel_branch_id") or "").strip()
+    if out["strategy_family"] == "wheel" and wheel_branch_id:
+        out["wheel_branch_id"] = wheel_branch_id
+    else:
+        out.pop("wheel_branch_id", None)
     out["strategy_group_id"] = str(src.get("strategy_group_id") or "").strip()
     out["leg_role"] = _lower(src.get("leg_role"))
     if out["action_type"] == "open_combo_yield":
@@ -732,6 +749,7 @@ def _normalize_candidate_index(
             symbol=symbol,
             strategy_family=family,
             position_lot_id=representative.get("position_lot_id"),
+            wheel_branch_id=representative.get("wheel_branch_id"),
         )
         supplied_identity = str(item.get("identity") or "").strip()
         if supplied_identity and supplied_identity != identity:
@@ -821,6 +839,7 @@ def _derive_candidate_index_from_actions(
                 symbol=action.get("symbol"),
                 strategy_family=action.get("strategy_family"),
                 position_lot_id=action.get("position_lot_id"),
+                wheel_branch_id=action.get("wheel_branch_id"),
             )
         except ValueError:
             continue
@@ -856,7 +875,10 @@ def _candidate_representative_view(
         field: _json_safe(value.get(field))
         for field in _CANDIDATE_REPRESENTATIVE_FIELDS
         if value.get(field) is not None
-        and (field != "position_lot_id" or strategy_family == "wheel")
+        and (
+            field not in {"position_lot_id", "wheel_branch_id"}
+            or strategy_family == "wheel"
+        )
     }
     if "capacity" not in out:
         metrics = out.get("metrics")
@@ -1275,6 +1297,7 @@ def _action_change_view(action: Mapping[str, Any]) -> dict[str, Any]:
             "strike",
             "contract_symbol",
             "position_lot_id",
+            "wheel_branch_id",
             "strategy_group_id",
             "candidate_pair_id",
             "leg_role",
@@ -1324,6 +1347,7 @@ def _canonical_change(change: Mapping[str, Any]) -> dict[str, Any]:
                 "strike",
                 "contract_symbol",
                 "position_lot_id",
+                "wheel_branch_id",
                 "strategy_group_id",
                 "candidate_pair_id",
                 "leg_role",
