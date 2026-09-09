@@ -2,8 +2,16 @@
 
 ## Unreleased
 
+## 3.5.0 - 2026-09-09
+
 ### New Features
 - Added bidirectional Wheel monitoring, recommendation, and result tracking for Call and Put rotations, with explicit human transition confirmation, manual broker trading, market/account isolation, and receipt-bound multiplier evidence.
+
+### Improvements
+- Reduced bulk performance-evidence import cost by validating correction graphs once per batch while preserving per-fact validation and transaction behavior.
+
+### Bug Fixes
+- Kept trade-intake status and lifecycle reconciliation on the resolved canonical inbox after startup, preventing restarts from recreating and reading legacy per-account SQLite shells.
 
 ## 3.4.13 - 2026-09-08
 
