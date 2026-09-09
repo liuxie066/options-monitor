@@ -8,7 +8,7 @@ import pytest
 
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.assistant.diagnostics import check_assistant_llm
-from src.application.copilot.model_config import model_api_key_configured
+from src.application.bot.model_config import model_api_key_configured
 
 
 def _assistant_config(
@@ -23,7 +23,7 @@ def _assistant_config(
             "enabled": True,
             "context_window_messages": 8,
             "default_market_scope": "us",
-            "copilot": {
+            "bot": {
                 "enabled": enabled,
                 "toolsets": {"portfolio": portfolio_enabled},
             },
@@ -38,7 +38,7 @@ def _write_config(tmp_path: Path, cfg: dict[str, Any]) -> Path:
     return path
 
 
-def test_llm_check_allows_disabled_copilot_without_api_key(tmp_path: Path) -> None:
+def test_llm_check_allows_disabled_bot_without_api_key(tmp_path: Path) -> None:
     cfg_path = _write_config(tmp_path, _assistant_config())
 
     out = check_assistant_llm(
@@ -49,7 +49,7 @@ def test_llm_check_allows_disabled_copilot_without_api_key(tmp_path: Path) -> No
 
     assert out["summary"]["ok"] is True
     assert out["summary"]["status"] == "disabled"
-    assert out["summary"]["assistant_copilot_portfolio_enabled"] is False
+    assert out["summary"]["assistant_bot_portfolio_enabled"] is False
     assert out["llm"]["enabled"] is False
     assert "runtime_status" in out["capabilities"]["pure_read_tools"]
     assert "portfolio_query" in out["capabilities"]["pure_read_tools"]
@@ -81,7 +81,7 @@ def test_llm_check_reports_effective_portfolio_toolset(tmp_path: Path) -> None:
         include_local_env_file=False,
     )
 
-    assert out["summary"]["assistant_copilot_portfolio_enabled"] is True
+    assert out["summary"]["assistant_bot_portfolio_enabled"] is True
 
 
 def test_ollama_model_config_does_not_require_api_key() -> None:
@@ -356,6 +356,6 @@ def test_llm_check_live_probe_skips_removed_provider_planner(tmp_path: Path) -> 
     live_probe = checks["live_probe"]
     assert live_probe["status"] == "skipped"
     assert live_probe["message"] == (
-        "provider diagnostics are configuration-only; use Copilot execution for an end-to-end model probe"
+        "provider diagnostics are configuration-only; use Bot execution for an end-to-end model probe"
     )
-    assert live_probe["value"] == {"live_requested": True, "probe_count": 0, "copilot_runtime": True}
+    assert live_probe["value"] == {"live_requested": True, "probe_count": 0, "bot_runtime": True}

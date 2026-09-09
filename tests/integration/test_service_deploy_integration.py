@@ -148,7 +148,7 @@ def test_deepseek_credential_is_bound_only_to_selected_assistant_service(
         "markets: {}\n"
         "assistant:\n"
         "  enabled: true\n"
-        "  copilot:\n"
+        "  bot:\n"
         "    enabled: true\n"
         "  active_model: deepseek-default\n"
         "  models:\n"
@@ -1347,7 +1347,7 @@ def test_service_drift_removes_legacy_cursor_binding_without_resuming_paused_tim
         "    symbols: [0700.HK]\n"
         "assistant:\n"
         "  enabled: true\n"
-        "  copilot:\n"
+        "  bot:\n"
         "    enabled: true\n"
         "  active_model: deepseek-default\n"
         "  models:\n"
@@ -1381,7 +1381,7 @@ def test_service_drift_removes_legacy_cursor_binding_without_resuming_paused_tim
     )
     for service_name in inbound_services:
         old_profile["secret_credentials"]["service_credentials"][service_name].append(
-            "copilot.cursor_hmac_key"
+            "bot.cursor_hmac_key"
         )
     (runtime / "service.profile.json").write_text(
         json.dumps(old_profile, ensure_ascii=False, indent=2) + "\n",
@@ -1470,7 +1470,7 @@ def test_service_drift_removes_legacy_cursor_binding_without_resuming_paused_tim
         (runtime / "service.profile.json").read_text(encoding="utf-8")
     )
     assert all(
-        "copilot.cursor_hmac_key"
+        "bot.cursor_hmac_key"
         not in refreshed_profile["secret_credentials"]["service_credentials"][name]
         for name in inbound_services
     )

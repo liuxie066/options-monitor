@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import time
+from dataclasses import replace
+
 import json
 from datetime import date
 from typing import Any, Callable
@@ -17,8 +20,8 @@ from src.application.assistant.operation_store import InboundOperationStore
 from src.application.assistant.permission_response import parse_permission_response
 from src.application.assistant.policy import enforce_sender_allowed
 from src.application.assistant.renderer import render_inbound_text
-from src.application.copilot.channel_facade import run_channel_request
-from src.application.copilot.contracts import AppResult
+from src.application.bot.channel_facade import run_channel_request
+from src.application.bot.contracts import AppResult
 from src.application.tool_execution import execute_tool
 
 
@@ -44,14 +47,24 @@ def handle_assistant_request(
     now_fn: Callable[[], date] | None = None,
     parse_command_fn: ParseCommandFn | None = None,
 ) -> dict[str, Any]:
+    if request.received_monotonic is None:
+        request = replace(request, received_monotonic=time.monotonic())
     normalized_request = _normalize_request(request)
-    store = audit_store or InboundAuditStore(normalized_request.audit_db)
+    store = audit_store or InboundAuditStore(normalized_request.audit_db, deadline_monotonic=normalized_request.received_monotonic + 180)
     command_id = build_command_id(
         channel=normalized_request.channel,
         sender_id=normalized_request.sender_id,
         message_id=normalized_request.message_id,
         text=normalized_request.text,
     )
+
+    # Expired deliveries still authenticate before replaying a prior response.
+    if time.monotonic() >= normalized_request.received_monotonic + 180:
+        try:
+            enforce_sender_allowed(channel=normalized_request.channel,
+                                   sender_id=normalized_request.sender_id, allowed_senders=allowed_senders)
+        except AgentToolError as err:
+            return _error_response(command_id=command_id, request=normalized_request, err=err, audit_db=store.path)
 
     try:
         existing = store.find_by_message(
@@ -95,16 +108,19 @@ def handle_assistant_request(
             sender_id=normalized_request.sender_id,
             allowed_senders=allowed_senders,
         )
+        _check_request_deadline(normalized_request)
         command = _parse_command(
             normalized_request,
             store=store,
             now_fn=now_fn,
             parse_command_fn=parse_command_fn,
         )
+        _check_request_deadline(normalized_request)
         if command is None:
-            copilot_result = _run_copilot(normalized_request, command_id=command_id, audit_db=store.path)
-            if copilot_result.control_request:
-                command = _control_command_from_copilot(copilot_result.control_request)
+            bot_result = _run_bot(normalized_request, command_id=command_id, audit_db=store.path)
+            if bot_result.control_request:
+                _check_request_deadline(normalized_request)
+                command = _control_command_from_bot(bot_result.control_request)
                 control = execute_explicit_control(
                     command,
                     request=normalized_request,
@@ -120,17 +136,17 @@ def handle_assistant_request(
                     audit_db=store.path,
                 )
                 data = response.get("data") if isinstance(response.get("data"), dict) else {}
-                data["copilot"] = _copilot_result_payload(copilot_result)
+                data["bot"] = _bot_result_payload(bot_result)
                 response["data"] = data
                 decision = _decision_for_control(control)
             else:
-                response = _copilot_response(
+                response = _bot_response(
                     normalized_request,
                     command_id=command_id,
                     audit_db=store.path,
-                    result=copilot_result,
+                    result=bot_result,
                 )
-                decision = "copilot"
+                decision = "bot"
             return _record_and_return(
                 store=store,
                 request=normalized_request,
@@ -172,6 +188,12 @@ def handle_assistant_request(
         response=response,
         error_code=error_code,
     )
+
+
+def _check_request_deadline(request: AssistantRequest) -> None:
+    if request.received_monotonic is not None and time.monotonic() >= request.received_monotonic + 180:
+        raise AgentToolError(code="BUDGET_EXHAUSTED",
+                             message="请求等待或准备已超过总时间预算，本次未完成。请重新发起请求。")
 
 
 def _parse_command(
@@ -218,14 +240,39 @@ def _configured_accounts_for_command(request: AssistantRequest) -> list[str] | N
         return None
 
 
-def _run_copilot(request: AssistantRequest, *, command_id: str, audit_db: Any) -> AppResult:
-    pending = InboundOperationStore(audit_db).list_pending_operations(
+def _bot_reply_builder(request: AssistantRequest, command_id: str):
+    context = request.reply_context or {}
+    if context.get('bot_reply_enabled') is not True:
+        return None
+    if request.channel == 'feishu' and request.message_id:
+        from src.application.channels.feishu_reply_renderer import render_feishu_conversation_reply
+        def build(result: AppResult) -> dict[str, Any]:
+            return {'delivery_key': f'feishu:{command_id}', 'channel': 'feishu', 'payload': render_feishu_conversation_reply(
+                message_id=request.message_id, text=result.user_response, reply_in_thread=bool(context.get('reply_in_thread')),
+                max_chars=int(context.get('max_reply_chars') or 0), render_route='bot')}
+        return build
+    if request.channel == 'wechat' and context.get('to_user_id') and context.get('context_token'):
+        from src.application.channels.reply_decision import trim_reply
+        def build(result: AppResult) -> dict[str, Any]:
+            return {'delivery_key': f'wechat:{command_id}', 'channel': 'wechat', 'payload': {
+                'to_user_id': context['to_user_id'], 'context_token': context['context_token'],
+                'group_id': context.get('group_id'), 'text': trim_reply(result.user_response, max_chars=int(context.get('max_reply_chars') or 0))}}
+        return build
+    return None
+
+
+def _run_bot(request: AssistantRequest, *, command_id: str, audit_db: Any) -> AppResult:
+    deadline = (request.received_monotonic if request.received_monotonic is not None else time.monotonic()) + 180
+    pending = InboundOperationStore(audit_db, deadline_monotonic=deadline).list_pending_operations(
         channel=request.channel,
         sender_id=request.sender_id,
         conversation_id=request.conversation_id,
     )
     return run_channel_request(
         user_message=request.text,
+        received_monotonic=request.received_monotonic,
+        authenticated_sender_id=request.sender_id,
+        reply_builder=_bot_reply_builder(request, command_id),
         config_key=request.config_key,
         config_path=request.config_path,
         request_id=command_id,
@@ -243,49 +290,49 @@ def _run_copilot(request: AssistantRequest, *, command_id: str, audit_db: Any) -
     )
 
 
-def _copilot_response(
+def _bot_response(
     request: AssistantRequest,
     *,
     command_id: str,
     audit_db: Any,
     result: AppResult | None = None,
 ) -> dict[str, Any]:
-    result = result or _run_copilot(request, command_id=command_id, audit_db=audit_db)
+    result = result or _run_bot(request, command_id=command_id, audit_db=audit_db)
     return build_response(
-        tool_name="copilot.chat",
+        tool_name="bot.chat",
         ok=bool(result.ok),
         data={
             "command_id": command_id,
             "request": request.public_payload(),
-            "decision": {"allowed": True, "reason": "copilot_freeform"},
+            "decision": {"allowed": True, "reason": "bot_freeform"},
             "response_text": result.user_response,
-            "copilot": _copilot_result_payload(result),
+            "bot": _bot_result_payload(result),
         },
         meta={"audit_db": mask_path(audit_db)},
     )
 
 
-def _control_command_from_copilot(value: dict[str, Any]) -> ControlCommand:
+def _control_command_from_bot(value: dict[str, Any]) -> ControlCommand:
     intent_name = str(value.get("intent_name") or "").strip()
     arguments = value.get("arguments")
     if not intent_name or not isinstance(arguments, dict):
-        raise AgentToolError(code="INVALID_ACTION", message="Copilot control preview request is invalid")
+        raise AgentToolError(code="INVALID_ACTION", message="Bot control preview request is invalid")
     allowed = {str(item["intent_name"]): item for item in preview_operation_capabilities()}
     spec = allowed.get(intent_name)
     if spec is None:
-        raise AgentToolError(code="INVALID_ACTION", message="Copilot requested a non-preview control capability")
+        raise AgentToolError(code="INVALID_ACTION", message="Bot requested a non-preview control capability")
     unknown = sorted(str(key) for key in arguments if str(key) not in set(spec.get("arguments") or ()))
     if unknown:
-        raise AgentToolError(code="INVALID_ACTION", message="Copilot control preview contains unsupported arguments")
+        raise AgentToolError(code="INVALID_ACTION", message="Bot control preview contains unsupported arguments")
     return ControlCommand(
         intent_name=intent_name,
         arguments=dict(arguments),
-        source="copilot_control_preview",
+        source="bot_control_preview",
         confidence=1.0,
     )
 
 
-def _copilot_result_payload(result: AppResult) -> dict[str, Any]:
+def _bot_result_payload(result: AppResult) -> dict[str, Any]:
     return {
         "status": result.status,
         "request_id": result.request_id,
@@ -460,6 +507,7 @@ def _normalize_request(request: AssistantRequest) -> AssistantRequest:
         audit_db=str(request.audit_db).strip() if request.audit_db is not None and str(request.audit_db).strip() else None,
         assistant_config_path=str(request.assistant_config_path).strip() if request.assistant_config_path is not None and str(request.assistant_config_path).strip() else None,
         reply_context=dict(request.reply_context) if isinstance(request.reply_context, dict) else None,
+        received_monotonic=request.received_monotonic,
     )
 
 

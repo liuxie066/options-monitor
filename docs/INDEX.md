@@ -62,14 +62,14 @@
 - [OM Runtime and Data Quality](quality-monitoring/README.md)：OM 本地检查实现与操作入口；跨系统正式设计由 `investment-quality` 维护。
 - [Dependency Graph](DEPENDENCY_GRAPH.md)：由生成脚本维护的 Python import graph。
 
-## Tool Gateway、Copilot 与消息入口
+## Tool Gateway、Bot 与消息入口
 
 - [Agent Getting Started](AGENT_GETTING_STARTED.md)：最短 Tool Gateway 接入。
 - [Agent Integration](AGENT_INTEGRATION.md)：JSON envelope、manifest 和权限合同。
 - [Tool Reference](TOOL_REFERENCE.md)：公开工具分类、风险 metadata 和常用示例。
-- [OM Capability Surfaces](OM_AGENT_CAPABILITY_MAP.md)：Tool Gateway、Control、Copilot 的能力边界。
+- [OM Capability Surfaces](OM_AGENT_CAPABILITY_MAP.md)：Tool Gateway、Control、Bot 的能力边界。
 - [Inbound Control](INBOUND_CONTROL.md)：确定性 Control、pending operation 和 channel 安全。
-- [OM Copilot v2 / Scene v5](OM_COPILOT_V2_DESIGN.md)：当前产品/Scene 合同；底层模型工具循环已经切换到 Pi Agent Core。
+- [Bot v2 / Scene v5](BOT_DESIGN.md)：当前产品/Scene 合同；底层模型工具循环已经切换到 Pi Agent Core。
 - [Pi Agent Core Integration](PI_AGENT_CORE_INTEGRATION.md)：已发布 Pi Agent Core runtime、会话、工具准入和回滚边界。
 - [Agent Handbook](AGENT_WIKI.md)：本地 agent 的任务 playbook、模块地图和验证矩阵。
 - [Session Summary](SESSION_SUMMARY.md)：仅在显式 handoff 时使用的模板。

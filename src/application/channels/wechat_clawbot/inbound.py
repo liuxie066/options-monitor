@@ -48,7 +48,7 @@ from src.application.channels.wechat_clawbot.message import (
 from src.application.channels.wechat_clawbot.state import DEFAULT_WECHAT_CLAWBOT_LABEL, resolve_wechat_clawbot_state_dir
 from src.application.channels.wechat_clawbot.state_store import WechatClawbotStateStore
 from src.application.conversation_scope import wechat_window_conversation_id
-from src.application.copilot.host_store import CopilotHostStore
+from src.application.bot.host_store import BotHostStore
 from src.infrastructure.io_utils import utc_now
 from src.application.payload_helpers import as_dict as _dict
 from src.application.payload_helpers import first_text as _first_text
@@ -221,7 +221,10 @@ def handle_wechat_clawbot_message(
     allowed_senders: str | None = None,
     assistant_settings: Any | None = None,
     assistant_config_path: str | None = None,
+    bot_reply_options: dict[str, Any] | None = None,
+    received_monotonic: float | None = None,
 ) -> dict[str, Any]:
+    received_monotonic = time.monotonic() if received_monotonic is None else received_monotonic
     text = message_text(payload)
     if not text:
         return build_response(
@@ -240,6 +243,8 @@ def handle_wechat_clawbot_message(
             config_path=config_path,
             audit_db=audit_db,
             assistant_config_path=assistant_config_path,
+            received_monotonic=received_monotonic,
+            bot_reply_options=bot_reply_options,
         )
     except AgentToolError as exc:
         return build_response(
@@ -282,7 +287,10 @@ def wechat_clawbot_message_to_assistant_request(
     config_path: str | None = None,
     audit_db: str | None = None,
     assistant_config_path: str | None = None,
+    bot_reply_options: dict[str, Any] | None = None,
+    received_monotonic: float | None = None,
 ) -> AssistantRequest:
+    received_monotonic = time.monotonic() if received_monotonic is None else received_monotonic
     sender_id = message_user_id(payload)
     if not sender_id:
         raise AgentToolError(code="INPUT_ERROR", message="failed to extract WeChat ClawBot sender id")
@@ -296,6 +304,7 @@ def wechat_clawbot_message_to_assistant_request(
     resolved_label = str(label or DEFAULT_WECHAT_CLAWBOT_LABEL)
     store = _state_store(base=base_path, label=resolved_label, state_dir=state_dir)
     reply_context = {
+        **(bot_reply_options or {}),
         "provider": WECHAT_CLAWBOT_NOTIFICATION_PROVIDER,
         "base": str(base_path),
         "label": resolved_label,
@@ -306,6 +315,7 @@ def wechat_clawbot_message_to_assistant_request(
     }
     return AssistantRequest(
         text=text,
+        received_monotonic=received_monotonic,
         sender_id=sender_id,
         channel="wechat",
         message_id=message_id(payload) or None,
@@ -350,6 +360,7 @@ def poll_wechat_clawbot_once(
     client = client_factory(bot_token=bot_token, base_url=base_url, timeout=timeout_sec)
     outbox_retry = _retry_pending_wechat_reply(audit_db=audit_db, client=client)
     response = client.get_updates(get_updates_buf=cursor_before)
+    received_monotonic = time.monotonic()
     cursor_after = extract_first_string(response, ("get_updates_buf", "getUpdatesBuf"))
     messages = extract_messages(response)
     service = channel_service or build_wechat_clawbot_inbound_channel_service()
@@ -372,10 +383,14 @@ def poll_wechat_clawbot_once(
             "audit_db": audit_db,
             "assistant_config_path": assistant_config_path,
             "allowed_senders": allowed_senders,
+            "received_monotonic": received_monotonic,
         }
+        inbound_kwargs["bot_reply_options"] = {"bot_reply_enabled": reply_enabled, "max_reply_chars": max_reply_chars}
         if execute_tool_fn is not None:
             inbound_kwargs["execute_tool_fn"] = execute_tool_fn
-        typing_status = _maybe_start_typing(message=message, client=client, allowed_senders=allowed_senders)
+        expired = time.monotonic() >= received_monotonic + 180
+        typing_status = ({"attempted": False, "ok": True, "reason": "budget_exhausted"} if expired else
+                         _maybe_start_typing(message=message, client=client, allowed_senders=allowed_senders))
         binding_refresh: dict[str, Any] = {"attempted": False, "updated_count": 0, "reason": "not_started"}
         try:
             inbound = service.handle_inbound(WECHAT_CLAWBOT_NOTIFICATION_PROVIDER, message, **inbound_kwargs)
@@ -910,12 +925,13 @@ def _maybe_reply(
     )
     if outbox_state is not None:
         return outbox_state
+    frozen = outbox.reply_payload(delivery_key) if outbox is not None and delivery_key else {}
     try:
         api_response = client.send_text_message(
-            to_user_id=to_user_id,
-            context_token=context_token,
-            text=decision.text,
-            group_id=message_group_id(message) or None,
+            to_user_id=frozen.get("to_user_id", to_user_id),
+            context_token=frozen.get("context_token", context_token),
+            text=frozen.get("text", decision.text),
+            group_id=frozen.get("group_id", message_group_id(message) or None),
             client_id=_outbox_client_id(delivery_key),
         )
     except Exception as exc:
@@ -951,14 +967,12 @@ def _prepare_reply_outbox(
     command_id: str | None,
     message: dict[str, Any],
     text: str,
-) -> tuple[CopilotHostStore | None, str | None, dict[str, Any] | None]:
-    if not str(audit_db or "").strip():
-        return None, None, None
+) -> tuple[BotHostStore | None, str | None, dict[str, Any] | None]:
     key_source = str(command_id or message_id(message) or "").strip()
     if not key_source:
         return None, None, None
     delivery_key = f"wechat:{key_source}"
-    store = CopilotHostStore(str(audit_db))
+    store = BotHostStore(InboundAuditStore(audit_db).path)
     record = store.enqueue_reply(
         delivery_key=delivery_key,
         channel="wechat",
@@ -993,9 +1007,7 @@ def _retry_pending_wechat_reply(
     audit_db: str | None,
     client: WechatClawbotClient,
 ) -> dict[str, Any]:
-    if not str(audit_db or "").strip():
-        return {"attempted": False, "reason": "outbox_disabled"}
-    store = CopilotHostStore(str(audit_db))
+    store = BotHostStore(InboundAuditStore(audit_db).path)
     record = store.claim_reply(channel="wechat")
     if record is None:
         return {"attempted": False, "reason": "outbox_empty"}
@@ -1097,7 +1109,7 @@ def _assistant_settings(*, assistant_config_path: str | None = None) -> Any:
             enabled=configured.enabled,
             context_window_messages=configured.context_window_messages,
             default_market_scope=configured.default_market_scope,
-            copilot=configured.copilot,
+            bot=configured.bot,
             llm=configured.llm,
         )
     return AssistantSettings()

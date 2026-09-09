@@ -44,7 +44,7 @@ from src.interfaces.cli.config_ops import (
     set_yaml_symbol_config,
     validate_yaml_runtime_config,
 )
-from src.interfaces.cli.copilot_ops import add_copilot_commands, handle_copilot_command
+from src.interfaces.cli.bot_ops import add_bot_commands, handle_bot_command
 from src.interfaces.cli.daily_brief_ops import add_daily_brief_commands, handle_daily_brief_command
 from src.interfaces.cli.operator_ops import (
     add_operator_commands,
@@ -124,7 +124,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     add_assistant_commands(sub.add_parser("assistant", help="inspect optional conversational assistant runtime"))
 
-    add_copilot_commands(sub)
+    add_bot_commands(sub)
 
     add_inbound_commands(sub)
     add_runtime_observability_commands(sub)
@@ -188,7 +188,7 @@ def _bootstrap_runtime_env_from_args(args: argparse.Namespace) -> None:
         return
     if not getattr(args, "env_file", None):
         return
-    if args.command not in {"healthcheck", "doctor", "status", "inbound", "assistant", "copilot"}:
+    if args.command not in {"healthcheck", "doctor", "status", "inbound", "assistant", "bot"}:
         return
     bootstrap_process_env(
         repo_root=repo_base(),
@@ -248,8 +248,8 @@ def main(argv: list[str] | None = None) -> int:
                 handle_assistant_turn_fn=handle_assistant_turn,
             )
 
-        if args.command == "copilot":
-            return _print(handle_copilot_command(args))
+        if args.command == "bot":
+            return _print(handle_bot_command(args))
 
         if args.command == "inbound":
             return handle_inbound_command(

@@ -10,7 +10,7 @@ from src.application.assistant.audit import InboundAuditStore, inbound_sqlite_er
 from src.application.assistant.operation_lifecycle import build_action_lifecycle
 from src.application.assistant.operation_store import InboundOperationStore
 from src.application.assistant.renderer import render_pending_operations
-from src.application.assistant.turn_result import copilot_events_from_response_data, copilot_trace_from_response_data
+from src.application.assistant.turn_result import bot_events_from_response_data, bot_trace_from_response_data
 from src.application.payload_helpers import as_dict as _dict
 from src.application.payload_helpers import first_text as _first_text
 
@@ -266,15 +266,15 @@ def format_recent_audit(rows: list[dict[str, Any]], *, filters: dict[str, Any]) 
         error_code = str(row.get("error_code") or "").strip()
         if error_code:
             lines.append(f"  error: {error_code}")
-        copilot = row.get("copilot") if isinstance(row.get("copilot"), dict) else {}
-        if copilot:
-            parts = [f"{key}={value}" for key, value in copilot.items() if value]
+        bot = row.get("bot") if isinstance(row.get("bot"), dict) else {}
+        if bot:
+            parts = [f"{key}={value}" for key, value in bot.items() if value]
             if parts:
-                lines.append("  copilot: " + " ".join(parts))
-        copilot_events = row.get("copilot_events") if isinstance(row.get("copilot_events"), dict) else {}
-        failures = copilot_events.get("failure_reasons") if isinstance(copilot_events.get("failure_reasons"), list) else []
+                lines.append("  bot: " + " ".join(parts))
+        bot_events = row.get("bot_events") if isinstance(row.get("bot_events"), dict) else {}
+        failures = bot_events.get("failure_reasons") if isinstance(bot_events.get("failure_reasons"), list) else []
         if failures:
-            lines.append("  copilot_events: failures=" + ",".join(str(item) for item in failures if str(item).strip()))
+            lines.append("  bot_events: failures=" + ",".join(str(item) for item in failures if str(item).strip()))
         duplicate_count = int(row.get("duplicate_count") or 0)
         if duplicate_count:
             lines.append(f"  duplicates: {duplicate_count}")
@@ -308,12 +308,12 @@ def _audit_row_summary(row: dict[str, Any]) -> dict[str, Any]:
         "last_duplicate_sender_id": row.get("last_duplicate_sender_id"),
         "last_duplicate_decision": row.get("last_duplicate_decision"),
     }
-    copilot = copilot_trace_from_response_data(data)
-    if copilot:
-        summary["copilot"] = copilot
-    copilot_events = copilot_events_from_response_data(data)
-    if copilot_events:
-        summary["copilot_events"] = copilot_events
+    bot = bot_trace_from_response_data(data)
+    if bot:
+        summary["bot"] = bot
+    bot_events = bot_events_from_response_data(data)
+    if bot_events:
+        summary["bot_events"] = bot_events
     return summary
 
 

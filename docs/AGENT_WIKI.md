@@ -32,8 +32,8 @@ Entrypoint rule:
 - Use `./om assistant handle` for local or remote messages. This is the
   Inbound Assistant surface.
 - Explicit commands and pending-operation replies use deterministic Control.
-  Every other message enters the single read-only `om_chat` Copilot Scene when
-  `assistant.copilot.enabled` is true. There is no business router, per-Scene
+  Every other message enters the single read-only `om_chat` Bot Scene when
+  `assistant.bot.enabled` is true. There is no business router, per-Scene
   channel allowlist, planner fallback, or write-capable model path.
 
 For the canonical entry and layer boundaries, see
@@ -84,7 +84,7 @@ For explicit Control operation diagnosis, read the durable operation timeline:
 ./om-agent run --tool operation_timeline --input-json '{"limit":10}'
 ```
 
-Copilot sessions, runs, and model/tool events are owned by the Copilot Host
+Bot sessions, runs, and model/tool events are owned by the Bot Host
 store. Control audit rows must not be repackaged as synthetic Agent plans or
 evidence sessions.
 

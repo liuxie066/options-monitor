@@ -63,7 +63,7 @@ unset PYTHONPATH PYTHONHOME \
 )
 
 response="$(
-  OM_PYTHON="$PYTHON_BIN" "$ROOT/om" copilot eval \
+  OM_PYTHON="$PYTHON_BIN" "$ROOT/om" bot eval \
     --fixture current_option_exposure_model_ready \
     --model-turn-json '[{"tool_calls":[{"name":"submit_answer","arguments":{"mode":"conceptual","status":"complete","answer_markdown":"Pi runtime ready.","claims":[]}}]}]'
 )"

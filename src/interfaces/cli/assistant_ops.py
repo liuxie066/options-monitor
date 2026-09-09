@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import argparse
 import json
 import sys
@@ -61,7 +63,7 @@ def _assistant_settings_for_cli(
             enabled=configured.enabled if force_enabled is None else bool(force_enabled),
             context_window_messages=configured.context_window_messages,
             default_market_scope=configured.default_market_scope,
-            copilot=configured.copilot,
+            bot=configured.bot,
             llm=configured.llm,
         )
     return AssistantSettings(enabled=True if force_enabled is None else bool(force_enabled))
@@ -265,7 +267,7 @@ def _check_assistant_model_profile(
         "assistant": {
             "enabled": True,
             "context_window_messages": 8,
-            "copilot": {"enabled": True},
+            "bot": {"enabled": True},
             "llm": profile.llm_config(),
         }
     }
@@ -429,6 +431,7 @@ def handle_assistant_command(
         return _print(build_response(tool_name=tool_name, ok=True, data=data))
 
     if args.assistant_command == "handle":
+        received_monotonic = time.monotonic()
         assistant_settings = _assistant_settings_for_cli(
             config_key=args.config_key,
             config_path=args.config_path,
@@ -437,6 +440,7 @@ def handle_assistant_command(
         )
         request = AssistantRequest(
             text=args.text,
+            received_monotonic=received_monotonic,
             sender_id=args.sender_id,
             channel=args.channel,
             message_id=args.message_id,

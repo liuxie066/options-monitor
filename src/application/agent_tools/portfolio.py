@@ -471,7 +471,7 @@ PORTFOLIO_QUERY_TOOL = build_agent_tool(
         ],
     },
     output_contract_resolver=_portfolio_query_output_contract,
-    copilot_input_fields=(
+    bot_input_fields=(
         "view",
         "account",
         "accounts",
@@ -547,7 +547,7 @@ def _bridge_tool(
             ],
             "missing_data_fields": ["accounts[].status", evidence_field, "combined.status"],
         },
-        copilot_input_fields=("period", "as_of_month", "accounts"),
+        bot_input_fields=("period", "as_of_month", "accounts"),
     )
 
 
@@ -651,7 +651,7 @@ PORTFOLIO_ASSIGNMENT_SCENARIO_TOOL = build_agent_tool(
             "Long options are excluded and are neither valued nor retained in this report.",
         ],
     },
-    copilot_input_fields=("accounts",),
+    bot_input_fields=("accounts",),
 )
 
 TOOLS: tuple[AgentTool, ...] = (

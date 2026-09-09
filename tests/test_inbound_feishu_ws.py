@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import pytest
 import logging
 import sqlite3
 import threading
@@ -9,9 +10,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+
+@pytest.fixture(autouse=True)
+def isolated_default_audit_path(tmp_path, monkeypatch):
+    monkeypatch.setattr("src.application.assistant.audit.default_audit_db_path", lambda: tmp_path / "default-audit.sqlite3")
+
 from src.application.agent_tool_contracts import build_response
 from src.application.assistant.audit import InboundAuditStore
-from src.application.copilot.contracts import AppResult
+from src.application.bot.contracts import AppResult
 import src.application.inbound.feishu_ws as feishu_ws
 from src.application.inbound.feishu import prepare_feishu_ack_target
 from src.application.inbound.feishu_ws import (
@@ -185,7 +191,7 @@ def test_feishu_ws_delegates_to_inbound_and_replies(tmp_path: Path) -> None:
 
 
 def test_feishu_ws_failed_business_response_remains_retryable(tmp_path: Path) -> None:
-    from src.application.copilot.host_store import CopilotHostStore
+    from src.application.bot.host_store import BotHostStore
 
     class FakeChannelService:
         def handle_inbound(self, channel: str, payload: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
@@ -221,13 +227,13 @@ def test_feishu_ws_failed_business_response_remains_retryable(tmp_path: Path) ->
 
     assert out["ok"] is False
     assert out["data"]["reply"]["reason"] == "reply_failed"
-    record = CopilotHostStore(database).list_replies()[0]
+    record = BotHostStore(database).list_replies()[0]
     assert record["status"] == "retryable_failed"
     assert record["attempt_count"] == 1
 
 
 def test_feishu_ws_markdown_table_reply_persists_final_card_envelope(tmp_path: Path) -> None:
-    from src.application.copilot.host_store import CopilotHostStore
+    from src.application.bot.host_store import BotHostStore
 
     markdown = (
         "拆解如下：\n\n"
@@ -250,7 +256,7 @@ def test_feishu_ws_markdown_table_reply_persists_final_card_envelope(tmp_path: P
                     "inbound_result": {
                         "ok": True,
                         "command_id": "cmd_table",
-                        "render_route": "copilot",
+                        "render_route": "bot",
                         "response_text": markdown,
                     },
                 },
@@ -276,14 +282,14 @@ def test_feishu_ws_markdown_table_reply_persists_final_card_envelope(tmp_path: P
     assert replies[0]["content"]["body"]["elements"][0]["content"] == markdown
     assert replies[0]["uuid"] == "feishu:cmd_table"
     assert out["data"]["reply"]["render"]["markdown_table_detected"] is True
-    record = CopilotHostStore(database).list_replies()[0]
+    record = BotHostStore(database).list_replies()[0]
     assert record["status"] == "delivered"
     assert record["payload_json"] == "{}"
     assert markdown not in str(record)
 
 
 def test_feishu_ws_card_permanent_failure_uses_stable_text_fallback(tmp_path: Path) -> None:
-    from src.application.copilot.host_store import CopilotHostStore
+    from src.application.bot.host_store import BotHostStore
 
     markdown = "| 项目 | CNY |\n|---|---:|\n| 权利金 | ¥1,000 |"
     calls: list[dict[str, Any]] = []
@@ -301,7 +307,7 @@ def test_feishu_ws_card_permanent_failure_uses_stable_text_fallback(tmp_path: Pa
                     "inbound_result": {
                         "ok": True,
                         "command_id": "cmd_fallback",
-                        "render_route": "copilot",
+                        "render_route": "bot",
                         "response_text": markdown,
                     },
                 },
@@ -337,11 +343,11 @@ def test_feishu_ws_card_permanent_failure_uses_stable_text_fallback(tmp_path: Pa
     assert calls[1]["uuid"] == "feishu:cmd_fallback:fallback"
     assert calls[1]["text"] == "项目：权利金\nCNY：¥1,000"
     assert out["data"]["reply"]["render"]["fallback_used"] is True
-    assert CopilotHostStore(database).list_replies()[0]["status"] == "delivered"
+    assert BotHostStore(database).list_replies()[0]["status"] == "delivered"
 
 
 def test_feishu_ws_ambiguous_card_response_retries_original_without_fallback(tmp_path: Path) -> None:
-    from src.application.copilot.host_store import CopilotHostStore
+    from src.application.bot.host_store import BotHostStore
 
     calls: list[dict[str, Any]] = []
 
@@ -359,7 +365,7 @@ def test_feishu_ws_ambiguous_card_response_retries_original_without_fallback(tmp
                     "inbound_result": {
                         "ok": True,
                         "command_id": "cmd_ambiguous",
-                        "render_route": "copilot",
+                        "render_route": "bot",
                         "response_text": markdown,
                     },
                 },
@@ -390,23 +396,25 @@ def test_feishu_ws_ambiguous_card_response_retries_original_without_fallback(tmp
     assert len(calls) == 1
     assert calls[0]["msg_type"] == "interactive"
     assert calls[0]["uuid"] == "feishu:cmd_ambiguous"
-    record = CopilotHostStore(database).list_replies()[0]
+    record = BotHostStore(database).list_replies()[0]
     assert record["status"] == "retryable_failed"
     assert record["attempt_count"] == 1
 
 
-def test_pending_feishu_reply_retries_stored_card_and_legacy_text(tmp_path: Path) -> None:
+@pytest.mark.parametrize("explicit_db", [True, False])
+def test_pending_feishu_reply_retries_stored_card_and_legacy_text(tmp_path: Path, explicit_db: bool) -> None:
     from src.application.channels.feishu_reply_renderer import render_feishu_conversation_reply
-    from src.application.copilot.host_store import CopilotHostStore
+    from src.application.bot.host_store import BotHostStore
 
-    database = tmp_path / "audit.sqlite3"
-    store = CopilotHostStore(database)
+    database = tmp_path / ("audit.sqlite3" if explicit_db else "default-audit.sqlite3")
+    audit_argument = str(database) if explicit_db else None
+    store = BotHostStore(database)
     envelope = render_feishu_conversation_reply(
         message_id="msg_card",
         text="| 项目 | CNY |\n|---|---:|\n| 权利金 | ¥1,000 |",
         reply_in_thread=True,
         max_chars=3500,
-        render_route="copilot",
+        render_route="bot",
     )
     store.enqueue_reply(delivery_key="feishu:card", channel="feishu", payload=envelope)
     card_calls: list[dict[str, Any]] = []
@@ -415,7 +423,7 @@ def test_pending_feishu_reply_retries_stored_card_and_legacy_text(tmp_path: Path
         settings=FeishuWsSettings(
             app_id="app_1",
             app_secret="secret_1",
-            audit_db=str(database),
+            audit_db=audit_argument,
         ),
         reply_fn=lambda **kwargs: card_calls.append(dict(kwargs)) or {"code": 0},
     )
@@ -434,7 +442,7 @@ def test_pending_feishu_reply_retries_stored_card_and_legacy_text(tmp_path: Path
         settings=FeishuWsSettings(
             app_id="app_1",
             app_secret="secret_1",
-            audit_db=str(database),
+            audit_db=audit_argument,
         ),
         reply_fn=lambda **kwargs: legacy_calls.append(dict(kwargs)) or {"code": 0},
     )
@@ -497,13 +505,13 @@ def test_feishu_ws_routes_inbound_through_channel_service() -> None:
     assert inbound_calls[0]["kwargs"]["config_key"] == "us"
     assert inbound_calls[0]["kwargs"]["allowed_senders"] == "feishu:ou_1"
     assert replies[0]["text"] == "channel service reply"
-    assert replies[0]["uuid"] == "cmd_1"
+    assert replies[0]["uuid"] == "feishu:cmd_1"
 
 
 def test_feishu_ws_can_route_through_assistant(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
     assistant_config_path = tmp_path / "config.assistant.json"
-    assistant_config_path.write_text(json.dumps({"assistant": {"enabled": True, "copilot": {"enabled": False}}}), encoding="utf-8")
+    assistant_config_path.write_text(json.dumps({"assistant": {"enabled": True, "bot": {"enabled": False}}}), encoding="utf-8")
 
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         calls.append((tool_name, payload))
@@ -531,7 +539,7 @@ def test_feishu_ws_can_route_through_assistant(tmp_path: Path) -> None:
     assert inbound_result["route"] == "deterministic_control"
 
 
-def test_feishu_ws_routes_free_form_cashflow_question_to_copilot(monkeypatch: Any, tmp_path: Path) -> None:
+def test_feishu_ws_routes_free_form_cashflow_question_to_bot(monkeypatch: Any, tmp_path: Path) -> None:
     replies: list[dict[str, Any]] = []
     calls: list[tuple[str, dict[str, Any]]] = []
     assistant_config_path = tmp_path / "config.assistant.json"
@@ -540,7 +548,7 @@ def test_feishu_ws_routes_free_form_cashflow_question_to_copilot(monkeypatch: An
             {
                 "assistant": {
                     "enabled": True,
-                    "copilot": {"enabled": True},
+                    "bot": {"enabled": True},
                     "llm": {
                         "provider": "openai",
                         "model": "gpt-5.2",
@@ -557,10 +565,10 @@ def test_feishu_ws_routes_free_form_cashflow_question_to_copilot(monkeypatch: An
         calls.append((tool_name, payload))
         return build_response(tool_name=tool_name, ok=True, data={"unexpected": True})
 
-    copilot_calls: list[dict[str, Any]] = []
+    bot_calls: list[dict[str, Any]] = []
 
     def _run_channel_request(**kwargs: Any) -> AppResult:
-        copilot_calls.append(dict(kwargs))
+        bot_calls.append(dict(kwargs))
         return AppResult(status="completed", user_response="结论：6月净现金流来自已实现收益和权利金。")
 
     monkeypatch.setattr("src.application.assistant.inbound_service.run_channel_request", _run_channel_request)
@@ -586,15 +594,15 @@ def test_feishu_ws_routes_free_form_cashflow_question_to_copilot(monkeypatch: An
     inbound_result = out["data"]["inbound"]
     assert out["ok"] is True
     assert calls == []
-    assert copilot_calls[0]["user_message"] == "分析 lx 6月的净现金流明细"
+    assert bot_calls[0]["user_message"] == "分析 lx 6月的净现金流明细"
     assert replies
     assert replies[0]["msg_type"] == "interactive"
     assert replies[0]["content"]["body"]["elements"][0]["content"].startswith("结论：")
-    assert inbound_result["decision_reason"] == "copilot_freeform"
-    assert inbound_result["route"] == "copilot"
+    assert inbound_result["decision_reason"] == "bot_freeform"
+    assert inbound_result["route"] == "bot"
 
 
-def test_feishu_ws_free_form_copilot_does_not_read_legacy_audit_context(
+def test_feishu_ws_free_form_bot_does_not_read_legacy_audit_context(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
@@ -604,7 +612,7 @@ def test_feishu_ws_free_form_copilot_does_not_read_legacy_audit_context(
         json.dumps(
             {
                 "assistant": {
-                    "copilot": {"enabled": True},
+                    "bot": {"enabled": True},
                     "llm": {
                         "provider": "openai",
                         "model": "gpt-5.2",
@@ -661,7 +669,7 @@ def test_feishu_ws_free_form_copilot_does_not_read_legacy_audit_context(
     assert replies
     assert replies[0]["msg_type"] == "interactive"
     assert replies[0]["content"]["body"]["elements"][0]["content"] == "结论：系统运行正常。"
-    assert inbound_result["route"] == "copilot"
+    assert inbound_result["route"] == "bot"
 
 
 def test_feishu_ws_reaction_failure_does_not_fail_inbound_or_reply(tmp_path: Path) -> None:
@@ -850,7 +858,7 @@ def test_feishu_ws_settings_reads_behavior_from_assistant_config(tmp_path: Path)
                     }
                 },
                     "assistant": {
-                        "copilot": {"enabled": True},
+                        "bot": {"enabled": True},
                         "context_window_messages": 9,
                     "default_market_scope": "us",
                     "llm": {
@@ -890,7 +898,7 @@ def test_feishu_ws_settings_reads_behavior_from_assistant_config(tmp_path: Path)
     assert settings.ack_reaction == "SMILE"
     assert settings.queue_size == 5
     assert settings.assistant_enabled is True
-    assert settings.assistant_copilot_enabled is True
+    assert settings.assistant_bot_enabled is True
     assert settings.assistant_context_window_messages == 9
     assert settings.assistant_llm.enabled is True
     assert settings.assistant_llm.provider == "openai"
@@ -934,7 +942,7 @@ def test_feishu_ws_settings_enables_command_runtime_by_default(tmp_path: Path) -
     )
 
     assert settings.assistant_enabled is True
-    assert settings.assistant_copilot_enabled is False
+    assert settings.assistant_bot_enabled is False
     assert settings.assistant_llm.enabled is False
 
 
@@ -1603,3 +1611,55 @@ def test_feishu_ws_client_converts_sdk_event_model() -> None:
     assert payload["header"]["event_type"] == "im.message.receive_v1"
     assert payload["event"]["sender"]["sender_id"]["open_id"] == "ou_1"
     assert payload["event"]["message"]["content"] == '{"text":"状态"}'
+
+
+@pytest.mark.parametrize('explicit_db', [False, True])
+@pytest.mark.parametrize('access', ['allowed', 'unauthorized', 'disabled'])
+@pytest.mark.parametrize('text', ['调查账户问题', '/income sy ytd'])
+def test_queued_feishu_budget_terminal_reply_is_authorized_and_idempotent(tmp_path, monkeypatch, explicit_db, access, text):
+    from src.application.assistant.audit import InboundAuditStore
+    from src.application.bot.host_store import BotHostStore
+    def forbidden(*args, **kwargs):
+        raise AssertionError('expired request must not prepare, model, execute, retry or react')
+    monkeypatch.setattr(feishu_ws, '_retry_pending_feishu_reply', forbidden)
+    monkeypatch.setattr('src.application.assistant.inbound_service._parse_command', forbidden)
+    monkeypatch.setattr('src.application.assistant.inbound_service._run_bot', forbidden)
+    replies = []
+    def reply(**kwargs):
+        replies.append(kwargs)
+        return {'code': 0, 'data': {'message_id': 'terminal-reply'}}
+    settings = FeishuWsSettings(app_id='test', app_secret='test',
+        audit_db=str(tmp_path / 'explicit.sqlite3') if explicit_db else None,
+        allowed_senders='feishu:ou_1' if access != 'unauthorized' else 'feishu:other',
+        reply_enabled=access != 'disabled')
+    payload = _message_payload(text=text)
+    results = [handle_feishu_ws_event(payload, settings=settings, reply_fn=reply,
+               reaction_fn=forbidden, execute_tool_fn=forbidden,
+               received_monotonic=time.monotonic() - 181) for _ in range(2)]
+    assert all(result['ok'] is False for result in results)
+    assert results[0]['error']['code'] == ('PERMISSION_DENIED' if access == 'unauthorized' else 'BUDGET_EXHAUSTED')
+    if access == 'allowed':
+        assert len(replies) == 1
+        assert '本次未完成' in json.dumps(replies, ensure_ascii=False)
+        assert '请重新发起请求' in json.dumps(replies, ensure_ascii=False)
+        assert results[1]['data']['reply']['reason'] == 'idempotent_replay'
+        host = BotHostStore(InboundAuditStore(settings.audit_db).path)
+        with host._connect() as conn:
+            assert conn.execute('SELECT count(*) FROM bot_runs').fetchone()[0] == 0
+            assert conn.execute('SELECT status,run_id FROM bot_reply_outbox').fetchone() == ('delivered', None)
+    else:
+        assert replies == []
+        assert results[0]['data']['reply']['reason'] == ('permission_denied' if access == 'unauthorized' else 'reply_disabled')
+
+
+def test_feishu_trusted_received_timestamp_is_internal_and_survives_normalization():
+    from src.application.inbound.feishu import feishu_payload_to_inbound_request
+    from src.application.assistant.inbound_service import _normalize_request
+    from src.application.assistant.runtime import _request_with_default_market_scope
+    from src.application.assistant.settings import AssistantSettings
+    payload = _message_payload()
+    payload["received_monotonic"] = 999999999999
+    request = feishu_payload_to_inbound_request(payload, received_monotonic=123.25)
+    normalized = _request_with_default_market_scope(_normalize_request(request), AssistantSettings(default_market_scope="us"))
+    assert normalized.received_monotonic == 123.25
+    assert "received_monotonic" not in normalized.public_payload()

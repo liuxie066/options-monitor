@@ -145,7 +145,7 @@ NOTIFICATION_PERCEPTION_READ_TOOL = build_agent_tool(
         {"input": {"run_id": "20260515T182459Z-474761"}},
     ),
     output_contract=_OUTPUT_CONTRACT,
-    copilot_input_fields=(
+    bot_input_fields=(
         "run_id",
         "event_kind",
         "limit",

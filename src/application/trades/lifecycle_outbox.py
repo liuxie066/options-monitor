@@ -9,6 +9,10 @@ from src.application.ledger.api import (
     with_sqlite_repo_transaction,
 )
 from src.application.cash_conversion import utc_now_ms
+from src.application.trades.receipt import (
+    BATCH_RENDERER_VERSION,
+    build_notification_batch_route,
+)
 
 
 OUTBOX_STATUSES = frozenset(
@@ -31,7 +35,6 @@ QUIET_WINDOW_MS = 10 * 1000
 MAX_BATCH_WAIT_MS = 60 * 1000
 TARGET_SEND_INTERVAL_MS = 60 * 1000
 BATCH_RETRY_BACKOFF_MS = (60 * 1000, 5 * 60 * 1000)
-BATCH_RENDERER_VERSION = "trade_lifecycle_batch.v1"
 
 
 def enqueue_notification_intent(
@@ -177,18 +180,23 @@ def mark_notification_send_started(
     claim_id: str,
     now_ms: int,
 ) -> dict[str, Any]:
+    current = repo.get_trade_lifecycle_notification(outbox_id)
+    if not isinstance(current, dict):
+        raise ValueError("notification outbox row not found")
+    frozen = _frozen_receipt(current, batch=False)
     changed = repo.compare_and_set_trade_lifecycle_notification(
         outbox_id=outbox_id,
         expected_status="claimed",
         new_status="send_started",
         expected_claim_id=claim_id,
-        fields={"send_started_at_ms": int(now_ms)},
+        fields={"send_started_at_ms": int(now_ms), "provider_receipt_json": frozen},
     )
     if not changed:
         raise ValueError("notification claim lost before send_started")
     row = repo.get_trade_lifecycle_notification(outbox_id)
     if not isinstance(row, dict):
         raise RuntimeError("notification outbox readback failed")
+    row["payload"] = {**row["payload"], "_frozen_message": frozen["rendered_message"]}
     return row
 
 
@@ -223,7 +231,7 @@ def complete_notification_attempt(
         "provider_message_id": (
             str(provider_message_id or "").strip() or None
         ),
-        "provider_receipt_json": dict(provider_receipt or {}),
+        "provider_receipt_json": _preserve_frozen_receipt(row, provider_receipt),
         "next_attempt_at_ms": next_attempt_at_ms,
         "last_error": str(error or "").strip() or None,
         "confirmed_at_ms": (
@@ -310,9 +318,7 @@ def reconcile_unknown_notification(
             "broker_ref": reference,
             "note": explanation,
             "resolved_at_ms": resolved_at_ms,
-            "original_provider_receipt": current.get(
-                "provider_receipt"
-            ),
+            "original_provider_receipt": {key: value for key, value in (current.get("provider_receipt") or {}).items() if key not in {"rendered_message", "message_sha256"}},
         }
         if normalized_action in {"confirmed", "unknown"}:
             new_status = normalized_action
@@ -327,7 +333,7 @@ def reconcile_unknown_notification(
                             if new_status == "confirmed"
                             else None
                         ),
-                        "provider_receipt_json": manual_receipt,
+                        "provider_receipt_json": _preserve_frozen_receipt(current, manual_receipt),
                     },
                     conn=conn,
                 )
@@ -400,36 +406,6 @@ def reconcile_unknown_notification(
         }
 
     return with_sqlite_repo_transaction(repo, _run)
-
-
-def build_notification_batch_route(
-    *,
-    provider: str,
-    channel: str,
-    target: str,
-) -> dict[str, str]:
-    provider_value = str(provider or "").strip().lower()
-    channel_value = str(channel or "").strip().lower()
-    target_value = str(target or "").strip()
-    if not provider_value or not channel_value or not target_value:
-        raise ValueError("notification batch route is incomplete")
-    target_fingerprint = canonical_payload_hash(
-        {"target": target_value}
-    )
-    route_fingerprint = canonical_payload_hash(
-        {
-            "provider": provider_value,
-            "channel": channel_value,
-            "target_fingerprint": target_fingerprint,
-        }
-    )
-    return {
-        "provider": provider_value,
-        "channel": channel_value,
-        "target": target_value,
-        "target_fingerprint": target_fingerprint,
-        "route_fingerprint": route_fingerprint,
-    }
 
 
 def _normalized_accounts(values: Iterable[str] | None) -> set[str] | None:
@@ -885,6 +861,7 @@ def mark_notification_batch_send_started(
         )
         if not isinstance(current, dict):
             raise ValueError("notification delivery batch not found")
+        frozen = _frozen_receipt(current, batch=True)
         attempts = int(current.get("attempt_count") or 0) + 1
         if attempts > MAX_ATTEMPTS:
             raise ValueError(
@@ -899,6 +876,7 @@ def mark_notification_batch_send_started(
                 fields={
                     "send_started_at_ms": int(now_ms),
                     "attempt_count": attempts,
+                    "provider_receipt_json": frozen,
                 },
                 conn=conn,
             )
@@ -915,6 +893,7 @@ def mark_notification_batch_send_started(
             raise RuntimeError(
                 "notification delivery batch readback failed"
             )
+        row["payload"] = {**row["payload"], "_frozen_message": frozen["rendered_message"]}
         return row
 
     return with_sqlite_repo_transaction(repo, _run)
@@ -980,7 +959,7 @@ def complete_notification_batch_attempt(
             "provider_message_id": (
                 str(provider_message_id or "").strip() or None
             ),
-            "provider_receipt_json": dict(provider_receipt or {}),
+            "provider_receipt_json": _preserve_frozen_receipt(batch, provider_receipt),
             "next_attempt_at_ms": next_attempt_at_ms,
             "last_error": error_value,
             "confirmed_at_ms": (
@@ -1191,9 +1170,7 @@ def reconcile_notification_batch(
             "broker_ref": reference,
             "note": explanation,
             "resolved_at_ms": resolved_at_ms,
-            "original_provider_receipt": current.get(
-                "provider_receipt"
-            ),
+            "original_provider_receipt": {key: value for key, value in (current.get("provider_receipt") or {}).items() if key not in {"rendered_message", "message_sha256"}},
         }
         if normalized_action in {"confirmed", "unknown"}:
             changed = (
@@ -1207,7 +1184,7 @@ def reconcile_notification_batch(
                             if normalized_action == "confirmed"
                             else None
                         ),
-                        "provider_receipt_json": manual_receipt,
+                        "provider_receipt_json": _preserve_frozen_receipt(current, manual_receipt),
                     },
                     conn=conn,
                 )
@@ -1347,3 +1324,21 @@ __all__ = [
     "recover_stale_notification_batches",
     "recover_stale_notifications",
 ]
+
+
+def _preserve_frozen_receipt(row: dict[str, Any], provider: dict[str, Any] | None) -> dict[str, Any]:
+    previous = row.get("provider_receipt") or {}
+    return {**dict(provider or {}), **{key: previous[key] for key in ("rendered_message", "message_sha256") if key in previous}}
+
+
+def _frozen_receipt(row: dict[str, Any], *, batch: bool) -> dict[str, Any]:
+    import hashlib
+    from src.application.trades.receipt import build_trade_lifecycle_notification_batch_message, build_trade_lifecycle_notification_message
+    previous = _preserve_frozen_receipt(row, row.get("provider_receipt"))
+    if previous.get("rendered_message") is not None:
+        if hashlib.sha256(previous["rendered_message"].encode()).hexdigest() != previous.get("message_sha256"):
+            raise ValueError("lifecycle frozen receipt digest mismatch")
+        return previous
+    renderer = build_trade_lifecycle_notification_batch_message if batch else build_trade_lifecycle_notification_message
+    message = renderer(row["payload"])
+    return {**previous, "rendered_message": message, "message_sha256": hashlib.sha256(message.encode()).hexdigest()}

@@ -685,6 +685,7 @@ def apply_lifecycle_allocation_atomically(
                 "resolution_revision": resolution_revision,
                 "state_fingerprint": state_fingerprint,
                 "account": lifecycle_case.get("account"),
+                "market": lifecycle_case.get("market"),
                 "symbol": lifecycle_case.get("symbol"),
                 "option_type": lifecycle_case.get("option_type"),
                 "position_side": lifecycle_case.get("position_side"),

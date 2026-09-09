@@ -187,20 +187,20 @@ def test_assistant_config_rejects_business_runtime_shape() -> None:
                 "accounts": ["lx"],
                 "portfolio": {"broker": "富途"},
                 "symbols": [{"symbol": "NVDA"}],
-                "assistant": {"enabled": True, "copilot": {"enabled": True}},
+                "assistant": {"enabled": True, "bot": {"enabled": True}},
             }
         )
 
     assert "use config.assistant.json, not config.<market>.json" in str(exc.value)
 
 
-def test_copilot_runtime_does_not_import_old_assistant_or_shell_tool_gateway() -> None:
-    copilot_root = ROOT / "src" / "application" / "copilot"
-    assert copilot_root.exists()
+def test_bot_runtime_does_not_import_old_assistant_or_shell_tool_gateway() -> None:
+    bot_root = ROOT / "src" / "application" / "bot"
+    assert bot_root.exists()
 
     import_offenders: list[str] = []
     shell_offenders: list[str] = []
-    for path in sorted(copilot_root.rglob("*.py")):
+    for path in sorted(bot_root.rglob("*.py")):
         text = path.read_text(encoding="utf-8")
         tree = ast.parse(text)
         for node in ast.walk(tree):
@@ -219,7 +219,7 @@ def test_copilot_runtime_does_not_import_old_assistant_or_shell_tool_gateway() -
     assert shell_offenders == []
 
 
-def test_public_tool_gateway_does_not_import_or_expose_copilot_runtime() -> None:
+def test_public_tool_gateway_does_not_import_or_expose_bot_runtime() -> None:
     import json
 
     checked_python_files = [
@@ -233,14 +233,14 @@ def test_public_tool_gateway_does_not_import_or_expose_copilot_runtime() -> None
     for path in checked_python_files:
         imports = _imported_modules(path)
         for module in imports:
-            if module.startswith("src.application.copilot"):
+            if module.startswith("src.application.bot"):
                 import_offenders.append(f"{path.relative_to(ROOT)}:{module}")
         text = path.read_text(encoding="utf-8")
-        if "src.application.copilot" in text or "CopilotRequest" in text or "ExecutionContract" in text:
+        if "src.application.bot" in text or "BotRequest" in text or "ExecutionContract" in text:
             reference_offenders.append(str(path.relative_to(ROOT)))
 
     om_agent_text = (ROOT / "om-agent").read_text(encoding="utf-8")
-    assert "copilot" not in om_agent_text.lower()
+    assert "bot" not in om_agent_text.lower()
     assert import_offenders == []
     assert reference_offenders == []
 
@@ -249,8 +249,8 @@ def test_public_tool_gateway_does_not_import_or_expose_copilot_runtime() -> None
     manifest = build_tool_manifest()
     manifest_text = json.dumps(manifest, ensure_ascii=False)
     for forbidden in (
-        "copilot",
-        "Copilot",
+        "bot",
+        "Bot",
         "SceneManifest",
         "ExecutionContract",
         "SceneDefinition",
@@ -270,35 +270,35 @@ def test_public_tool_gateway_does_not_import_or_expose_copilot_runtime() -> None
     ]
 
 
-def test_copilot_cli_entry_wires_service_to_host_without_agent_internals() -> None:
-    cli_text = (ROOT / "src" / "interfaces" / "cli" / "copilot_ops.py").read_text(encoding="utf-8")
+def test_bot_cli_entry_wires_service_to_host_without_agent_internals() -> None:
+    cli_text = (ROOT / "src" / "interfaces" / "cli" / "bot_ops.py").read_text(encoding="utf-8")
     tree = ast.parse(cli_text)
     forbidden_modules: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             module = node.module or ""
             if module in {
-                "src.application.copilot.agent",
-                "src.application.copilot.engine",
-                "src.application.copilot.model_client",
-                "src.application.copilot.model_decider",
-                "src.application.copilot.result_projection",
-                "src.application.copilot.scene",
-                "src.application.copilot.tools",
+                "src.application.bot.agent",
+                "src.application.bot.engine",
+                "src.application.bot.model_client",
+                "src.application.bot.model_decider",
+                "src.application.bot.result_projection",
+                "src.application.bot.scene",
+                "src.application.bot.tools",
             }:
                 forbidden_modules.append(module)
 
     assert forbidden_modules == []
-    assert "from src.application.copilot.local_harness import run_local_request" in cli_text
-    assert "from src.application.copilot.service import prepare_contract" not in cli_text
-    assert "from src.application.copilot.host import run_contract" not in cli_text
-    assert "CopilotRequest(" in cli_text
+    assert "from src.application.bot.local_harness import run_local_request" in cli_text
+    assert "from src.application.bot.service import prepare_contract" not in cli_text
+    assert "from src.application.bot.host import run_contract" not in cli_text
+    assert "BotRequest(" in cli_text
     assert "ExecutionContract" not in cli_text
     assert "return run_local_request(" in cli_text
     assert "model_turn_json=model_turn_json" in cli_text
-    assert "model_config_json" not in cli_text.split("CopilotRequest(", 1)[1].split(")", 1)[0]
-    assert "assistant_config_path" not in cli_text.split("CopilotRequest(", 1)[1].split(")", 1)[0]
-    assert "model_turn_json" not in cli_text.split("CopilotRequest(", 1)[1].split(")", 1)[0]
+    assert "model_config_json" not in cli_text.split("BotRequest(", 1)[1].split(")", 1)[0]
+    assert "assistant_config_path" not in cli_text.split("BotRequest(", 1)[1].split(")", 1)[0]
+    assert "model_turn_json" not in cli_text.split("BotRequest(", 1)[1].split(")", 1)[0]
     assert "use_default_assistant_config" not in cli_text
     assert "build_action_model" not in cli_text
     assert "ModelActionDecider" not in cli_text
@@ -310,20 +310,20 @@ def test_copilot_cli_entry_wires_service_to_host_without_agent_internals() -> No
     assert 'default="分析 2026-06 的期权操作有没有不合理，需要优化的地方"' not in cli_text
 
 
-def test_copilot_local_harness_is_phase1_composition_only() -> None:
-    harness_path = ROOT / "src" / "application" / "copilot" / "local_harness.py"
+def test_bot_local_harness_is_phase1_composition_only() -> None:
+    harness_path = ROOT / "src" / "application" / "bot" / "local_harness.py"
     harness_text = harness_path.read_text(encoding="utf-8")
     imports = set(_imported_modules(harness_path))
 
-    assert "src.application.copilot.service" in imports
-    assert "src.application.copilot.host" in imports
-    assert "src.application.copilot.model_config" in imports
-    assert "src.application.copilot.model_client" not in imports
-    assert "src.application.copilot.conversation_memory" not in imports
-    assert "src.application.copilot.model_decider" not in imports
-    assert "src.application.copilot.scene" not in imports
-    assert "src.application.copilot.tools" not in imports
-    assert "src.application.copilot.engine" not in imports
+    assert "src.application.bot.service" in imports
+    assert "src.application.bot.host" in imports
+    assert "src.application.bot.model_config" in imports
+    assert "src.application.bot.model_client" not in imports
+    assert "src.application.bot.conversation_memory" not in imports
+    assert "src.application.bot.model_decider" not in imports
+    assert "src.application.bot.scene" not in imports
+    assert "src.application.bot.tools" not in imports
+    assert "src.application.bot.engine" not in imports
     assert "src.application.agent_tool_registry" not in imports
     assert "src.application.tool_execution" not in imports
     assert "monthly_option_review" not in harness_text
@@ -334,18 +334,18 @@ def test_copilot_local_harness_is_phase1_composition_only() -> None:
     assert "def _resolve_pi_model(" in harness_text
 
 
-def test_copilot_has_no_retired_python_agent_runtime() -> None:
-    copilot_root = ROOT / "src" / "application" / "copilot"
+def test_bot_has_no_retired_python_agent_runtime() -> None:
+    bot_root = ROOT / "src" / "application" / "bot"
     retired_modules = {
-        "src.application.copilot.agent",
-        "src.application.copilot.conversation_memory",
-        "src.application.copilot.engine",
-        "src.application.copilot.model_client",
+        "src.application.bot.agent",
+        "src.application.bot.conversation_memory",
+        "src.application.bot.engine",
+        "src.application.bot.model_client",
     }
-    assert not any((copilot_root / f"{name.rsplit('.', 1)[-1]}.py").exists() for name in retired_modules)
+    assert not any((bot_root / f"{name.rsplit('.', 1)[-1]}.py").exists() for name in retired_modules)
 
     offenders: list[str] = []
-    for path in sorted(copilot_root.glob("*.py")):
+    for path in sorted(bot_root.glob("*.py")):
         relative = str(path.relative_to(ROOT))
         for module in _imported_modules(path):
             if module in retired_modules:
@@ -359,76 +359,76 @@ def test_copilot_has_no_retired_python_agent_runtime() -> None:
     assert offenders == []
 
 
-def test_copilot_internal_layers_do_not_reverse_dayu_dependencies() -> None:
-    copilot_root = ROOT / "src" / "application" / "copilot"
+def test_bot_internal_layers_do_not_reverse_dayu_dependencies() -> None:
+    bot_root = ROOT / "src" / "application" / "bot"
     forbidden_by_file = {
         "agent.py": {
-            "src.application.copilot.host",
-            "src.application.copilot.service",
-            "src.application.copilot.engine",
-            "src.application.copilot.tools",
-            "src.application.copilot.scene",
-            "src.application.copilot.result_projection",
-            "src.application.copilot.result_admission",
-            "src.application.copilot.event_store",
+            "src.application.bot.host",
+            "src.application.bot.service",
+            "src.application.bot.engine",
+            "src.application.bot.tools",
+            "src.application.bot.scene",
+            "src.application.bot.result_projection",
+            "src.application.bot.result_admission",
+            "src.application.bot.event_store",
             "src.application.agent_tool_registry",
             "src.application.tool_execution",
         },
         "engine.py": {
-            "src.application.copilot.host",
-            "src.application.copilot.service",
-            "src.application.copilot.scene",
-            "src.application.copilot.tools",
-            "src.application.copilot.model_decider",
+            "src.application.bot.host",
+            "src.application.bot.service",
+            "src.application.bot.scene",
+            "src.application.bot.tools",
+            "src.application.bot.model_decider",
             "src.application.agent_tool_registry",
             "src.application.tool_execution",
         },
         "model_decider.py": {
-            "src.application.copilot.host",
-            "src.application.copilot.service",
-            "src.application.copilot.scene",
-            "src.application.copilot.tools",
-            "src.application.copilot.engine",
+            "src.application.bot.host",
+            "src.application.bot.service",
+            "src.application.bot.scene",
+            "src.application.bot.tools",
+            "src.application.bot.engine",
             "src.application.agent_tool_registry",
             "src.application.tool_execution",
         },
         "model_client.py": {
-            "src.application.copilot.host",
-            "src.application.copilot.service",
-            "src.application.copilot.scene",
-            "src.application.copilot.tools",
-            "src.application.copilot.engine",
+            "src.application.bot.host",
+            "src.application.bot.service",
+            "src.application.bot.scene",
+            "src.application.bot.tools",
+            "src.application.bot.engine",
             "src.application.agent_tool_registry",
             "src.application.tool_execution",
             "src.application.assistant",
         },
         "result_projection.py": {
-            "src.application.copilot.host",
-            "src.application.copilot.service",
-            "src.application.copilot.scene",
-            "src.application.copilot.tools",
-            "src.application.copilot.engine",
-            "src.application.copilot.agent",
+            "src.application.bot.host",
+            "src.application.bot.service",
+            "src.application.bot.scene",
+            "src.application.bot.tools",
+            "src.application.bot.engine",
+            "src.application.bot.agent",
             "src.application.agent_tool_registry",
             "src.application.tool_execution",
         },
         "result_admission.py": {
-            "src.application.copilot.host",
-            "src.application.copilot.service",
-            "src.application.copilot.scene",
-            "src.application.copilot.tools",
-            "src.application.copilot.engine",
-            "src.application.copilot.agent",
+            "src.application.bot.host",
+            "src.application.bot.service",
+            "src.application.bot.scene",
+            "src.application.bot.tools",
+            "src.application.bot.engine",
+            "src.application.bot.agent",
             "src.application.agent_tool_registry",
             "src.application.tool_execution",
         },
         "event_store.py": {
-            "src.application.copilot.host",
-            "src.application.copilot.service",
-            "src.application.copilot.scene",
-            "src.application.copilot.tools",
-            "src.application.copilot.engine",
-            "src.application.copilot.agent",
+            "src.application.bot.host",
+            "src.application.bot.service",
+            "src.application.bot.scene",
+            "src.application.bot.tools",
+            "src.application.bot.engine",
+            "src.application.bot.agent",
             "src.application.agent_tool_registry",
             "src.application.tool_execution",
         },
@@ -436,7 +436,7 @@ def test_copilot_internal_layers_do_not_reverse_dayu_dependencies() -> None:
 
     offenders: list[str] = []
     for filename, forbidden_modules in forbidden_by_file.items():
-        path = copilot_root / filename
+        path = bot_root / filename
         if not path.exists():
             continue
         imports = _imported_modules_with_from_names(path)
@@ -448,8 +448,8 @@ def test_copilot_internal_layers_do_not_reverse_dayu_dependencies() -> None:
     assert offenders == []
 
 
-def test_copilot_keeps_generic_answer_quality_model_turn_fixtures() -> None:
-    fixture_root = ROOT / "tests" / "fixtures" / "copilot"
+def test_bot_keeps_generic_answer_quality_model_turn_fixtures() -> None:
+    fixture_root = ROOT / "tests" / "fixtures" / "bot"
 
     for name in (
         "opening_candidate_snapshot_diagnostics_model_turns.json",
@@ -471,7 +471,7 @@ def test_tool_contracts_do_not_carry_planner_routing_metadata() -> None:
     assert "description" not in binding_fields
     assert "input_schema" not in binding_fields
     assert "output_contract" not in binding_fields
-    for field_name in ("planner_notes", "planner_semantics", "planner_semantics_resolver", "copilot_notes"):
+    for field_name in ("planner_notes", "planner_semantics", "planner_semantics_resolver", "bot_notes"):
         assert field_name not in binding_fields
         assert field_name not in tool_fields
 

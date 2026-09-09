@@ -20,7 +20,7 @@
 |---|---|---|
 | `./om` | 人工操作者 | 配置、扫描、账本、研究、服务和运维 workflow |
 | `./om-agent` | 外部 agent、脚本、结构化集成 | JSON manifest 与单工具 JSON envelope |
-| `./om assistant` / `./om copilot` | 消息入口与 OM Copilot | Control / Copilot，不属于 Tool Gateway |
+| `./om assistant` / `./om bot` | 消息入口与 Bot | Control / Bot，不属于 Tool Gateway |
 
 `om-agent` 不维护对话状态，不负责多步规划，也不是自动交易 Agent。
 
@@ -249,7 +249,7 @@ root 来源及每个 JSONL 文件的 `ok`、`missing`、`valid_empty`、`partial
   尚未过期的 cursor 失效。
 - `snapshot_exhausted=true` 表示当前冻结集合已读完。过期后重新查询会建立新集合，因此可能
   与旧查询已经返回的记录重叠。
-- 首次查询即 `snapshot_exhausted=true` 时，返回结果覆盖当前完整查询，Copilot 会明确说明
+- 首次查询即 `snapshot_exhausted=true` 时，返回结果覆盖当前完整查询，Bot 会明确说明
   已全部返回且没有更多记录；`has_more=true` 时则明确说明仍有下一页。继续页即使读到末尾，
   单页证据仍只覆盖该页，不能单独声称覆盖完整查询。
 - 请求超过单页 20 条时不得静默截断；应说明单页上限并使用分页。cursor 过期后不得自动续读，
@@ -359,16 +359,16 @@ Tool Gateway 的写门禁针对“实际请求产品/配置写入”的非只读
 
 自动化调用前应检查 manifest 的 `side_effects`，并为允许的输出目录设置明确 runtime root。未知工具名会返回结构化错误，不要 fallback 到任意 shell 或内部 Python 模块。
 
-## 与 Copilot / Control 的关系
+## 与 Bot / Control 的关系
 
 Tool Gateway 与消息入口是不同能力面：
 
 - Tool Gateway：外部调用方选择一个公开工具；
-- Copilot：Host 投影允许的只读工具，回答自由问题；
+- Bot：Host 投影允许的只读工具，回答自由问题；
 - Control：显式命令、pending operation、人工确认和审计。
 
-Copilot 不能因为 Tool Gateway 注册了某个写工具就直接写入。详细边界见：
+Bot 不能因为 Tool Gateway 注册了某个写工具就直接写入。详细边界见：
 
 - [OM Capability Surfaces](OM_AGENT_CAPABILITY_MAP.md)
 - [Inbound Control](INBOUND_CONTROL.md)
-- [OM Copilot v2 Design](OM_COPILOT_V2_DESIGN.md)
+- [Bot v2 Design](BOT_DESIGN.md)

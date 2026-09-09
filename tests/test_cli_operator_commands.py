@@ -292,7 +292,7 @@ markets:
     symbols: [NVDA]
 assistant:
   enabled: true
-  copilot:
+  bot:
     enabled: true
   active_model: openai-default
   models:
@@ -338,7 +338,7 @@ markets:
     symbols: [NVDA]
 assistant:
   enabled: true
-  copilot:
+  bot:
     enabled: true
   active_model: openai-default
   models:
@@ -382,7 +382,7 @@ markets:
     symbols: [NVDA]
 assistant:
   enabled: true
-  copilot:
+  bot:
     enabled: false
 """,
         encoding="utf-8",
@@ -444,7 +444,7 @@ def test_assistant_model_current_text_displays_authoring_and_runtime_context(
         """\
 assistant:
   enabled: true
-  copilot:
+  bot:
     enabled: true
   active_model: openai-default
   models:
@@ -462,7 +462,7 @@ assistant:
             {
                 "assistant": {
                     "enabled": True,
-                    "copilot": {"enabled": True},
+                    "bot": {"enabled": True},
                     "llm": {
                         "provider": "openai",
                         "model": "gpt-5.2",
@@ -510,7 +510,7 @@ markets:
     symbols: [NVDA]
 assistant:
   enabled: true
-  copilot:
+  bot:
     enabled: true
   active_model: openai-default
   models:

@@ -65,13 +65,13 @@ The refactor is complete only when all of the following are true:
 10. A fully executed aggregate report declares `coverage.status=complete` and
     `complete_for=full_query` independently of metric-level `quality.status`; partial fee, lifecycle,
     or capital evidence remains partial and is never promoted to a complete metric.
-11. Copilot may admit a supported partial answer when the report covers the full requested scope and
+11. Bot may admit a supported partial answer when the report covers the full requested scope and
     the answer preserves the report's missing-data and freshness limits.
 
 ## Current Facts and Constraints
 
 The option-only report, canonical ledger projection, metric reducer, facade cutover, natural-period
-windows, and fail-closed Copilot admission are implemented. Current behavior adds three narrow
+windows, and fail-closed Bot admission are implemented. Current behavior adds three narrow
 contracts without reopening those completed boundaries:
 
 - `PeriodRequest` and every public facade accept `mtd|ytd|month|year` with exactly one matching
@@ -100,7 +100,7 @@ SQLite trade_events
   -> domain.domain.performance: contract-share facts and all metric reductions
   -> src.application.performance: request/scope orchestration only
   -> option_performance_report
-  -> CLI / Tool Gateway / Control / Copilot / Feishu renderers
+  -> CLI / Tool Gateway / Control / Bot / Feishu renderers
 ```
 
 Ownership boundaries:
@@ -624,9 +624,9 @@ The report remains read-only. Supported public inputs are `config_key`, optional
 `start_date`, `end_date`, `range`, and `refresh_quotes` remain unsupported and are rejected as invalid.
 `/income` accepts account plus MTD, YTD, an exact natural month, an exact natural year, or `上月`.
 `include_rows` remains available to direct Tool Gateway and CLI callers but is absent from the
-Copilot-visible schema and fixed to `false`; Copilot evidence is the canonical aggregate only.
+Bot-visible schema and fixed to `false`; Bot evidence is the canonical aggregate only.
 
-For Copilot only, the current-message selector fence attests a closed grammar before any ledger read:
+For Bot only, the current-message selector fence attests a closed grammar before any ledger read:
 
 - explicit month: `YYYY-MM` or `YYYY年M月`;
 - relative month: `上月`;
@@ -656,7 +656,7 @@ The one shared option-performance public adapter owns error translation and reus
 - raw exception text, paths, event payloads, and partial business results are not exposed in the error
   details.
 
-Tool Gateway, CLI, Control, Copilot, and `/income` preserve that error code instead of wrapping it as
+Tool Gateway, CLI, Control, Bot, and `/income` preserve that error code instead of wrapping it as
 `INTERNAL_ERROR`, `TOOL_EXCEPTION`, or a successful unavailable metric. Their presentation text may
 differ, but a failed framework envelope has `ok=false`, empty business `data`, and no report payload.
 
@@ -697,12 +697,12 @@ rows[]                         # exact weighted-row contract; only when include_
 `freshness_status` is `current` only when the selected period ends at the frozen request instant. A
 completed natural period or past MTD/YTD cutoff, including T-1, is `historical`. Public adapters
 receive the same frozen `report_now_ms`; equal inputs and equal `report_now_ms` produce equal metric
-facts across Agent, CLI, Control, Copilot, and Feishu. Presentation wording may differ.
+facts across Agent, CLI, Control, Bot, and Feishu. Presentation wording may differ.
 
-## Evidence Envelope and Copilot Admission
+## Evidence Envelope and Bot Admission
 
 The existing canonical `src.application.performance.service._serialize_report()` owns the top-level
-`coverage` and `freshness` declarations consumed unchanged by the public materializer and Copilot
+`coverage` and `freshness` declarations consumed unchanged by the public materializer and Bot
 evidence projection. No facade, generic projection, or Host reconstructs either declaration from
 metric contents.
 
@@ -711,9 +711,9 @@ were fully queried with no pagination or projection omission. It does not mean e
 observed. Missing fee, terminal, or occupied-capital evidence remains represented by the metric bundle
 and root `quality`; a complete query may therefore produce a partial report.
 
-Copilot never requests `rows[]`. This keeps the source-declared complete scope equal to the
-model-visible aggregate projection. A future row-detail Copilot contract would require its own
-bounded collection coverage and is outside this aggregate Copilot contract.
+Bot never requests `rows[]`. This keeps the source-declared complete scope equal to the
+model-visible aggregate projection. A future row-detail Bot contract would require its own
+bounded collection coverage and is outside this aggregate Bot contract.
 
 `freshness.status=current` requires a current partial period and an ISO `as_of` at the frozen report
 instant. Completed natural periods and past MTD/YTD cutoffs are `historical` with an ISO `as_of` at the
@@ -783,7 +783,7 @@ groups. An unfiltered aggregate includes every relevant scoped degradation.
 All in-repository consumers must switch atomically to the new canonical fields. No consumer may derive
 deleted PnL or stock cash, or derive a CNY amount other than the canonical root `cny_total`.
 
-- The option-performance renderer, Control `/income`, Copilot projection, and Tool contract use the
+- The option-performance renderer, Control `/income`, Bot projection, and Tool contract use the
   canonical fields without recalculation.
 - `portfolio_pnl_bridge` cannot use this report after `pnl.period_total_net` is removed. Its public
   route may remain, but option PnL must be explicitly unavailable until a separate authoritative PnL
@@ -807,8 +807,8 @@ configuration.
 
 1. **Canonical natural periods and facade propagation.** The existing period owner validates `month`
    and `year` without accepting `range`. Shared materializer, Tool Gateway, CLI, `/income`, Control,
-   tool bindings, and Copilot propagate only `period`, `as_of_date`, `month`, and `year`.
-   Copilot omits `include_rows`; direct facades retain it.
+   tool bindings, and Bot propagate only `period`, `as_of_date`, `month`, and `year`.
+   Bot omits `include_rows`; direct facades retain it.
 2. **Evidence at the canonical serializer.** `_serialize_report()` emits complete aggregate
    `coverage` and period `freshness`; public materialization passes them unchanged and
    `compact_observation()` does not synthesize replacements.
@@ -831,13 +831,13 @@ Focused deterministic checks cover this contract:
 - `test_option_performance_agent_tool.py`: schema/normalizer propagation; canonical envelope for
   complete, partial-quality, and proven-empty aggregates; past MTD and past natural month/year produce
   historical ISO freshness; current MTD/month/year produce current freshness at the frozen instant;
-  Copilot rejects `include_rows` while direct tool execution still accepts it.
+  Bot rejects `include_rows` while direct tool execution still accepts it.
 - One end-to-end report -> `compact_observation()` -> `admit_submit_answer()` test proves historical
   claims are admitted for past periods while current claims are rejected; current claims are admitted
   for current periods; partial-quality evidence admits an honestly partial answer but rejects a
   complete answer; missing or malformed coverage/freshness stays fail-closed; a proven-empty aggregate
   never invents a zero metric.
-- Copilot Host tests prove exact explicit/bare/relative month and explicit-year attestation, rejection
+- Bot Host tests prove exact explicit/bare/relative month and explicit-year attestation, rejection
   of wrong, future, multiple, or conflicting selectors before a ledger read, and reuse of the frozen
   `operating_date`. Contract/scene tests prove
   `reference_year` and `operating_date` derive from one
@@ -845,7 +845,7 @@ Focused deterministic checks cover this contract:
   immediately before local midnight, advances wall time past midnight before execution, and proves the
   report still uses the frozen instant. A second test
   proves the ContextVar resets after success and failure so direct or concurrent requests cannot
-  inherit it. Copilot Host and `/income` parser tests prove a January `上月` becomes the same canonical
+  inherit it. Bot Host and `/income` parser tests prove a January `上月` becomes the same canonical
   previous-December month. An expiration date outside the report phrase never authorizes a period,
   and a second period phrase is rejected. Prompt/catalog tests prove natural periods are selectable
   without restoring range. Existing runtime-context prompt-budget checks remain at or below baseline.
@@ -876,7 +876,7 @@ for the same money facts and make external callers diverge.
 ### Translate natural periods into hidden MTD/YTD cutoffs in the Host
 
 Rejected because the canonical period owner already validates calendar windows. Rewriting a natural
-month or year in the Copilot Host would duplicate business semantics, weaken facade consistency, and
+month or year in the Bot Host would duplicate business semantics, weaken facade consistency, and
 conflict with the current-message cutoff authority rule.
 
 ### Relax answer admission for option performance

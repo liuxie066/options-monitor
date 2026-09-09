@@ -50,17 +50,17 @@ jobs:
           npm ci --omit=dev --ignore-scripts --prefix agent-runtime
           bash scripts/pi_runtime_smoke.sh --root "${{ github.workspace }}" --python "${{ github.workspace }}/.venv/bin/python"
 
-      - name: Pi runtime and Copilot release gate
+      - name: Pi runtime and Bot release gate
         if: ${{ inputs.run_regression_gates }}
         run: |
           ./.venv/bin/python -m pytest tests/test_pi_agent_process.py
           ./.venv/bin/python -m pytest \
-            tests/test_copilot_phase1.py \
-            tests/test_copilot_conversation_memory.py \
-            tests/test_copilot_p1_eval.py \
+            tests/test_bot_phase1.py \
+            tests/test_bot_conversation_memory.py \
+            tests/test_bot_p1_eval.py \
             tests/test_install_script.py \
             tests/test_release_test_plan.py \
-            tests/copilot_eval/test_answer_quality.py
+            tests/bot_eval/test_answer_quality.py
 
       - name: Validate release metadata
         run: |

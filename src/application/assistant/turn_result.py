@@ -30,12 +30,12 @@ def assistant_turn_result_from_response(
     data = response.get("data") if isinstance(response.get("data"), dict) else {}
     meta = response.get("meta") if isinstance(response.get("meta"), dict) else {}
     trace = {"route": route}
-    copilot_trace = copilot_trace_from_response_data(data)
-    if copilot_trace:
-        trace["copilot"] = copilot_trace
-    copilot_events = copilot_events_from_response_data(data)
-    if copilot_events:
-        trace["copilot_events"] = copilot_events
+    bot_trace = bot_trace_from_response_data(data)
+    if bot_trace:
+        trace["bot"] = bot_trace
+    bot_events = bot_events_from_response_data(data)
+    if bot_events:
+        trace["bot_events"] = bot_events
     return AssistantTurnResult(
         response_text=str(data.get("response_text") or ""),
         render_route=_turn_render_route(response=response, route=route, data=data),
@@ -52,25 +52,25 @@ def assistant_turn_result_from_response(
     )
 
 
-def copilot_trace_from_response_data(data: dict[str, Any]) -> dict[str, Any]:
+def bot_trace_from_response_data(data: dict[str, Any]) -> dict[str, Any]:
     result_data = _control_result_data(data)
-    copilot = result_data.get("copilot") if isinstance(result_data.get("copilot"), dict) else {}
-    if not copilot:
+    bot = result_data.get("bot") if isinstance(result_data.get("bot"), dict) else {}
+    if not bot:
         return {}
-    decision_trace = copilot.get("decision_trace") if isinstance(copilot.get("decision_trace"), dict) else {}
+    decision_trace = bot.get("decision_trace") if isinstance(bot.get("decision_trace"), dict) else {}
     trace = {
-        "status": _text(copilot.get("status")),
+        "status": _text(bot.get("status")),
         "scene": _text(decision_trace.get("selected_scene")),
-        "run_id": _text(copilot.get("run_id")),
-        "contract_id": _text(copilot.get("contract_id")),
+        "run_id": _text(bot.get("run_id")),
+        "contract_id": _text(bot.get("contract_id")),
         "channel_gate": _text(decision_trace.get("channel_gate")),
     }
     return {key: value for key, value in trace.items() if value}
 
 
-def copilot_events_from_response_data(data: dict[str, Any]) -> dict[str, Any]:
+def bot_events_from_response_data(data: dict[str, Any]) -> dict[str, Any]:
     result_data = _control_result_data(data)
-    summary = result_data.get("copilot_events") if isinstance(result_data.get("copilot_events"), dict) else {}
+    summary = result_data.get("bot_events") if isinstance(result_data.get("bot_events"), dict) else {}
     if not summary:
         return {}
     event_count = _int(summary.get("event_count"))

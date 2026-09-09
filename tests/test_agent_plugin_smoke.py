@@ -1271,10 +1271,10 @@ def test_scheduler_status_reads_decision_without_writing_state(tmp_path: Path) -
     assert out["meta"]["state_path"] == ".../scheduler_state.json"
     assert not state_path.exists()
 
-    from src.application.copilot import tools as copilot_tools
-    from src.application.copilot.result_admission import admit_submit_answer
+    from src.application.bot import tools as bot_tools
+    from src.application.bot.result_admission import admit_submit_answer
 
-    observation = copilot_tools.compact_observation(
+    observation = bot_tools.compact_observation(
         "scheduler_status",
         out,
         {"config_path": str(cfg_path), "account": "user1"},
@@ -1313,8 +1313,8 @@ def test_trade_event_cursor_key_uses_fixed_domain_derivation() -> None:
 
     derived = _derive_trade_event_cursor_key("test-inbound-key")
     assert derived == (
-        "335828dbfea78ace5d7f1d0f04b8e195"
-        "6e459c6f8e4c43085015a7b32b301c03"
+        "f8a57b73413c36f43c5af70050dff538"
+        "edcffd19cd50e9e8842ea3e827ae8c6b"
     )
     assert derived != "test-inbound-key"
 
@@ -1565,9 +1565,9 @@ def test_option_positions_read_lists_events_history_and_inspect(monkeypatch, tmp
     assert listed["data"]["freshness"]["status"] == "fresh"
     assert listed["data"]["freshness"]["kind"] == "ledger_snapshot"
     assert "+00:00" in listed["data"]["freshness"]["as_of"]
-    from src.application.copilot import tools as copilot_tools
+    from src.application.bot import tools as bot_tools
 
-    listed_observation = copilot_tools.compact_observation(
+    listed_observation = bot_tools.compact_observation(
         "option_positions_read",
         listed,
         {"config_path": str(cfg_path), "action": "list", "account": "user1"},
@@ -1594,7 +1594,7 @@ def test_option_positions_read_lists_events_history_and_inspect(monkeypatch, tmp
     assert events["data"]["coverage"]["omitted_count"] == 0
     assert events["data"]["coverage"]["complete_for"] == "full_query"
     assert events["data"]["coverage"]["as_of"] == events["data"]["as_of"]
-    event_observation = copilot_tools.compact_observation(
+    event_observation = bot_tools.compact_observation(
         "option_positions_read",
         events,
         {"config_path": str(cfg_path), "include_total": True},
@@ -2625,7 +2625,7 @@ def test_runtime_status_reports_assistant_llm_and_latest_agent_route(monkeypatch
         json.dumps(
             {
                 "assistant": {
-                    "copilot": {
+                    "bot": {
                         "enabled": True,
                         "toolsets": {"portfolio": True},
                     },
@@ -2675,8 +2675,8 @@ def test_runtime_status_reports_assistant_llm_and_latest_agent_route(monkeypatch
     data, _warnings, _meta = _call_runtime_status_for_upgrade(tmp_path, fixture["cfg_path"], fixture["cfg"])
 
     assert data["assistant_runtime"]["config"]["enabled"] is True
-    assert data["assistant_runtime"]["config"]["copilot"]["enabled"] is True
-    assert data["assistant_runtime"]["config"]["copilot"]["toolsets"]["portfolio"] is True
+    assert data["assistant_runtime"]["config"]["bot"]["enabled"] is True
+    assert data["assistant_runtime"]["config"]["bot"]["toolsets"]["portfolio"] is True
     assert data["assistant_runtime"]["llm"]["enabled"] is True
     assert data["assistant_runtime"]["llm"]["provider"] == "deepseek"
     assert data["assistant_runtime"]["llm"]["endpoint_url"] == "https://api.deepseek.com/chat/completions"
@@ -2684,7 +2684,7 @@ def test_runtime_status_reports_assistant_llm_and_latest_agent_route(monkeypatch
     assert data["assistant_runtime"]["audit"]["latest"]["route"] == "agent_loop"
     assert data["assistant_runtime"]["audit"]["latest"]["llm_reason"] == "accepted"
     assert data["summary"]["assistant_enabled"] is True
-    assert data["summary"]["assistant_copilot_portfolio_enabled"] is True
+    assert data["summary"]["assistant_bot_portfolio_enabled"] is True
     assert data["summary"]["assistant_latest_route"] == "agent_loop"
 
 
@@ -3961,9 +3961,9 @@ def test_close_advice_read_filters_existing_run_report(tmp_path: Path) -> None:
     assert out["data"]["freshness"]["status"] == "historical"
     assert out["data"]["freshness"]["kind"] == "report_snapshot"
     assert "+00:00" in out["data"]["freshness"]["as_of"]
-    from src.application.copilot import tools as copilot_tools
+    from src.application.bot import tools as bot_tools
 
-    close_observation = copilot_tools.compact_observation(
+    close_observation = bot_tools.compact_observation(
         "close_advice_read",
         out,
         {
@@ -5481,10 +5481,10 @@ def test_symbol_config_read_resolves_alias_and_reports_missing_field(tmp_path: P
     assert "+00:00" in out["data"]["freshness"]["as_of"]
     assert out["meta"]["config_path"].endswith("config.hk.json")
 
-    from src.application.copilot import tools as copilot_tools
-    from src.application.copilot.result_admission import admit_submit_answer
+    from src.application.bot import tools as bot_tools
+    from src.application.bot.result_admission import admit_submit_answer
 
-    observation = copilot_tools.compact_observation(
+    observation = bot_tools.compact_observation(
         "symbol_config_read",
         out,
         {"config_path": str(cfg_path), "symbol": "泡泡玛特", "strategy": "csp", "field": "max_strike"},

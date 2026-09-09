@@ -12,9 +12,9 @@ FAKE_FUTU_ACC_ID_LX = "123456789012345678"
 
 
 def _cash_observation(result: dict) -> dict:
-    from src.application.copilot import tools as copilot_tools
+    from src.application.bot import tools as bot_tools
 
-    return copilot_tools.compact_observation(
+    return bot_tools.compact_observation(
         "query_cash_headroom",
         {"ok": True, "data": result},
         {"config_key": "us", "account": "lx"},
@@ -22,7 +22,7 @@ def _cash_observation(result: dict) -> dict:
 
 
 def _admit_current_cash_fact(observation: dict, text: str) -> dict:
-    from src.application.copilot.result_admission import admit_submit_answer
+    from src.application.bot.result_admission import admit_submit_answer
 
     return admit_submit_answer(
         {
@@ -202,9 +202,9 @@ def test_query_sell_put_cash_can_run_without_writing_cache(tmp_path: Path) -> No
         "as_of": portfolio_observed_at,
         "kind": "source_snapshot",
     }
-    from src.application.copilot import tools as copilot_tools
+    from src.application.bot import tools as bot_tools
 
-    observation = copilot_tools.compact_observation(
+    observation = bot_tools.compact_observation(
         "query_cash_headroom",
         {"ok": True, "data": result},
         {"config_key": "us", "account": "lx"},

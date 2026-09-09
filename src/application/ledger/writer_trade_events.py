@@ -1147,6 +1147,7 @@ def _normal_close_notification_intent(
         "resolution_revision": 1,
         "broker_deal_key": broker_deal_key,
         "account": account,
+        "market": ((raw.get("execution_input") or {}).get("instrument_ref") or {}).get("market"),
         "futu_account_id": futu_account_id,
         "symbol": first.contract_key.underlying_symbol,
         "option_type": first.contract_key.option_type,

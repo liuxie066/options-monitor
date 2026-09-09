@@ -25,8 +25,8 @@ from src.infrastructure.pi_agent_process import (  # noqa: E402
     run_pi_agent,
 )
 from src.infrastructure import pi_agent_process as pi_process  # noqa: E402
-from src.application.copilot.model_config import PiModelSettings  # noqa: E402
-from src.application.copilot.result_admission import admit_submit_answer  # noqa: E402
+from src.application.bot.model_config import PiModelSettings  # noqa: E402
+from src.application.bot.result_admission import admit_submit_answer  # noqa: E402
 
 
 CONTINUATION_PROMPT_FOR_TEST = (
@@ -198,6 +198,8 @@ def _loopback_server(responses: list[dict]):
             if delay:
                 time.sleep(delay)
             body = response.get("body", b"")
+            if callable(body):
+                body = body(payload)
             if isinstance(body, str):
                 body = body.encode()
             try:
@@ -264,6 +266,7 @@ def _provider_env(*, keyed: bool = True, database: Path | None = None) -> dict[s
 def _start_payload(**overrides):
     base = {
         "execution_environment": "eval",
+        "remaining_budget_ms": 60_000,
         "session_id": None,
         "system_prompt": "sys",
         "runtime_context": [],
@@ -316,7 +319,7 @@ def _start_payload(**overrides):
         }
         for tool in catalog_tools
         if isinstance(tool, dict) and tool.get("name") not in {
-            "submit_answer", "tool_directory", "request_control_preview"
+            "submit_answer", "tool_directory", "request_control_preview", "bot_memory"
         }
     ]
     base["tool_catalog"] = catalog
@@ -334,7 +337,7 @@ def _start_payload(**overrides):
         }
         for tool in catalog_tools
         if isinstance(tool, dict) and tool.get("name") not in {
-            "submit_answer", "tool_directory", "request_control_preview"
+            "submit_answer", "tool_directory", "request_control_preview", "bot_memory"
         }
     ]
     if "catalog_snapshot" in overrides:
@@ -858,7 +861,7 @@ def test_s8_frozen_catalog_material_tamper_is_fail_closed():
 
 
 def test_s8_submit_answer_closed_schema_is_not_a_plain_final_contract():
-    from src.application.copilot.host import _submit_answer_description
+    from src.application.bot.host import _submit_answer_description
 
     description = _submit_answer_description()
     schema = description["input_schema"]
@@ -5508,7 +5511,7 @@ def test_control_preview_terminates_and_commits_only_the_pi_turn(tmp_path):
     control_request = {
         "intent_name": "upgrade_now",
         "arguments": {"target_version": "1.2.400"},
-        "source": "copilot_control_preview",
+        "source": "bot_control_preview",
         "confidence": 1.0,
     }
     calls: list[dict] = []
@@ -5699,7 +5702,7 @@ def test_control_preview_repair_can_commit_a_valid_request(tmp_path, repair_kind
     control_request = {
         "intent_name": "upgrade_now",
         "arguments": {"target_version": "1.2.400"},
-        "source": "copilot_control_preview",
+        "source": "bot_control_preview",
         "confidence": 1.0,
     }
 
@@ -5779,7 +5782,7 @@ def test_malformed_control_bridge_result_fails_closed(tmp_path):
 
 
 def test_s6_channel_cutover_has_no_legacy_conversation_side_channel():
-    channel = (REPO / "src/application/copilot/channel_facade.py").read_text(encoding="utf-8")
+    channel = (REPO / "src/application/bot/channel_facade.py").read_text(encoding="utf-8")
     inbound = (REPO / "src/application/assistant/inbound_service.py").read_text(encoding="utf-8")
 
     for source in (channel, inbound):
@@ -5794,17 +5797,336 @@ def test_s6_channel_cutover_has_no_legacy_conversation_side_channel():
 
 
 def test_s5_application_call_path_uses_pi_without_legacy_fallback():
-    host = (REPO / "src/application/copilot/host.py").read_text(encoding="utf-8")
-    harness = (REPO / "src/application/copilot/local_harness.py").read_text(encoding="utf-8")
+    host = (REPO / "src/application/bot/host.py").read_text(encoding="utf-8")
+    harness = (REPO / "src/application/bot/local_harness.py").read_text(encoding="utf-8")
 
     assert "run_pi_agent(" in host
     assert "PiModelSettings" in host
     assert "def _resolve_pi_model(" in harness
     assert "PiModelSettings" in harness
     for source in (host, harness):
-        assert "copilot.engine" not in source
-        assert "copilot.model_client" not in source
-        assert "copilot.conversation_memory" not in source
+        assert "bot.engine" not in source
+        assert "bot.model_client" not in source
+        assert "bot.conversation_memory" not in source
         assert "_resolve_model_runner" not in source
         assert "model_runner" not in source
         assert "run_engine(" not in source
+
+
+@pytest.mark.parametrize("value", [None, True, 0, -1, 0.5, "100", 180001, float("inf"), float("nan")])
+def test_remaining_budget_is_strict_in_both_protocol_ends(value):
+    payload = _start_payload(remaining_budget_ms=value)
+    result = run_pi_agent(payload, request_id="req_budget", run_id="run_budget", timeout_seconds=60)
+    assert result["error"]["code"] == "CONFIG_ERROR"
+    assert _node_start_rejection(payload)[0] == 2
+
+
+def test_remaining_budget_missing_is_rejected_in_both_protocol_ends():
+    payload = _start_payload()
+    del payload["remaining_budget_ms"]
+    result = run_pi_agent(payload, request_id="req_budget", run_id="run_budget", timeout_seconds=60)
+    assert result["error"]["code"] == "CONFIG_ERROR"
+    assert _node_start_rejection(payload)[0] == 2
+
+
+def test_expired_deadline_never_probes_or_spawns_runtime(monkeypatch):
+    monkeypatch.setattr(pi_process, "_runtime_command", lambda *_a, **_k: pytest.fail("expired request spawned"))
+    result = run_pi_agent(_start_payload(), request_id="req_budget", run_id="run_budget",
+                          timeout_seconds=60, deadline_monotonic=time.monotonic() - 0.001)
+    assert result["error"]["code"] == "PI_PROCESS_TIMEOUT"
+
+
+def test_subsecond_deadline_includes_runtime_startup():
+    started = time.monotonic()
+    result = run_pi_agent(_start_payload(debug={"fixture_response": "late", "delay_ms": 2000}),
+                          request_id="req_budget", run_id="run_budget", timeout_seconds=60,
+                          deadline_monotonic=started + 0.4, on_proposed=lambda _p: pytest.fail("late proposal"))
+    assert result["ok"] is False
+    assert result["error"]["code"] in {"PI_PROCESS_TIMEOUT", "BUDGET_EXHAUSTED"}
+    assert time.monotonic() - started < 1
+
+
+def test_scene_timeout_is_a_ceiling_not_a_restarted_bridge_budget():
+    result = run_pi_agent(_start_payload(), request_id="req_budget", run_id="run_budget",
+                          timeout_seconds=2, on_proposed=lambda _p: "commit")
+    assert result["ok"] is True
+
+
+def test_unchanged_failed_business_call_is_not_executed_again():
+    payload = _tool_payload([_tool_turn("failed_1"), _tool_turn("failed_2"), {"text": "gap remains"}])
+    calls = []
+    result = run_pi_agent(payload, request_id="req_repeat", run_id="run_repeat", timeout_seconds=60,
+        on_tool_call=lambda call: calls.append(call) or {"ok": False, "error": {"code": "INPUT_ERROR", "message": "fix args"}},
+        on_proposed=lambda _p: "commit")
+    assert result["ok"] is True
+    assert len(calls) == 1
+
+
+def test_memory_consolidation_is_tool_free_and_uses_existing_provider():
+    with _loopback_server([{"body": _chat_response(text='{"candidates":[]}')}]) as (base_url, requests):
+        payload = _provider_payload("deepseek", base_url, execution_environment="memory_consolidation", remaining_budget_ms=30000)
+        payload["tools"] = []
+        result = run_pi_agent(payload, request_id="req_memory", run_id="run_memory", timeout_seconds=6,
+                              environ=_provider_env(), on_proposed=lambda _p: "commit")
+    assert result["ok"] is True
+    assert json.loads(result["result"]["text"]) == {"candidates": []}
+    assert not requests[0]["payload"].get("tools")
+    payload["tools"] = [_SUBMIT_TOOL]
+    assert run_pi_agent(payload, request_id="req_memory", run_id="run_memory", timeout_seconds=6)["error"]["code"] == "CONFIG_ERROR"
+    assert _node_start_rejection(payload)[0] == 2
+
+
+def test_tool_limit_preserves_one_submit_answer_and_blocks_extra_business_calls():
+    payload = _tool_payload([_tool_turn(), _tool_turn("answer", tool_name="submit_answer", arguments=_submit_arguments("finished"))])
+    payload["limits"]["max_tool_calls"] = 1
+    calls = []
+    def tool(call):
+        calls.append(call["tool_name"])
+        return _approved_provider_tool_result(call)
+    result = run_pi_agent(payload, request_id="req_finish", run_id="run_finish", timeout_seconds=60,
+                          on_tool_call=tool, on_proposed=lambda _p: "commit")
+    assert result["ok"] is True, result
+    assert calls == ["runtime_status", "submit_answer"]
+
+
+def test_runtime_compaction_preserves_current_complete_evidence_turn(tmp_path):
+    database = tmp_path / "runtime_compaction.sqlite3"
+    session_id = derive_pi_session_id("feishu", "runtime_compaction", "chat", "key:us")
+    assert _run_session(database, session_id,
+        _start_payload(session_id=session_id, user_message="old question", debug={"fixture_response": "a" * 20000, "delay_ms": 0}),
+        run_id="seed_runtime_compaction")["ok"]
+    assert _run_session(database, session_id,
+        _start_payload(session_id=session_id, user_message="second old question", debug={"fixture_response": "brief prior answer", "delay_ms": 0}),
+        run_id="seed_runtime_tail")["ok"]
+    events = []
+    with _loopback_server([
+        {"body": _chat_response(tool_call=True, usage=(5500, 2))},
+        {"body": _chat_response(text="historical summary")},
+        {"body": _chat_response(tool_name="submit_answer", tool_arguments=_submit_arguments("finished"), call_id="answer")},
+    ]) as (base_url, requests):
+        payload = _provider_payload("deepseek", base_url, session_id=session_id, tools=[_READ_TOOL], user_message="current exact question")
+        payload["model"].update(context_window_tokens=12000, max_output_tokens=512)
+        def tool(call):
+            if call["tool_name"] == "runtime_status":
+                return {"ok": True, "observation_id": "current_evidence", "text": "b" * 11000}
+            return _approved_provider_tool_result(call)
+        result = run_pi_agent(payload, request_id="req_compact", run_id="run_compact", timeout_seconds=6,
+                              on_event=events.append, on_tool_call=tool, on_proposed=lambda _p: "commit",
+                              environ=_provider_env(database=database))
+    assert result["ok"] is True, result
+    assert len(requests) == 3
+    final_input = json.dumps(requests[-1]["payload"]["messages"])
+    assert "current exact question" in final_input and "current_evidence" in final_input
+    assert "b" * 11000 in final_input
+    assert any(event["event_type"] == "context_compaction_committed" for event in events)
+
+
+def test_blocked_start_pipe_cannot_extend_the_deadline(tmp_path):
+    entry = _write_fake(tmp_path, "setInterval(() => {}, 1000);\n")
+    started = time.monotonic()
+    result = run_pi_agent(_start_payload(user_message="x" * 200000), request_id="req_pipe", run_id="run_pipe",
+                          timeout_seconds=60, deadline_monotonic=started + 0.4, runtime_entry=entry)
+    assert result["error"]["code"] == "PI_PROCESS_TIMEOUT"
+    assert time.monotonic() - started < 1
+
+
+@pytest.mark.parametrize("loading_mode", ["eager", "directory"])
+@pytest.mark.parametrize("memory_ok", [True, False])
+def test_private_memory_survives_real_provider_activation_and_returns_one_receipt(loading_mode, memory_ok):
+    from src.application.bot.memory import memory_tool_description
+
+    memory_tool = memory_tool_description()
+    payload = _provider_payload("deepseek", "http://127.0.0.1", tool_loading_mode=loading_mode,
+        tools=[memory_tool, _READ_TOOL] if loading_mode == "eager" else [memory_tool],
+        catalog_tools=[_READ_TOOL])
+    payload["limits"]["max_tool_calls"] = 1 if loading_mode == "eager" else 2
+    assert {row["name"] for row in payload["tool_catalog"]} == {"runtime_status"}
+    responses = []
+    if loading_mode == "directory":
+        responses.append({"body": _chat_response(tool_name="tool_directory", call_id="directory",
+            tool_arguments={"catalog_hash": payload["catalog_hash"], "tool_names": ["runtime_status"]})})
+    responses.extend([
+        {"body": _chat_response(tool_name="bot_memory", tool_arguments={"action": "list"}, call_id="memory")},
+        {"body": _chat_response(tool_name="submit_answer", tool_arguments=_submit_arguments("memory result"), call_id="answer")},
+    ])
+    observation = ({"ok": True, "tool_name": "bot_memory", "ref": "memory_receipt",
+                    "value": {"acknowledgement": "当前保存的记忆：简短回答"}} if memory_ok else
+                   {"ok": False, "tool_name": "bot_memory", "error": {"code": "MEMORY_UNAVAILABLE", "message": "unconfirmed"}})
+    calls = []
+    def callback(call):
+        calls.append(call["tool_name"])
+        if call["tool_name"] == "tool_directory":
+            return _tool_activation(payload, [_READ_TOOL])
+        if call["tool_name"] == "bot_memory":
+            return {"observation": observation}
+        return _approved_provider_tool_result(call)
+    with _loopback_server(responses) as (base_url, requests):
+        payload["model"]["base_url"] = base_url
+        result = run_pi_agent(payload, request_id="req_private_memory", run_id="run_private_memory", timeout_seconds=6,
+                              environ=_provider_env(), on_tool_call=callback, on_proposed=lambda _p: "commit")
+    assert result["ok"] is True, result
+    assert calls == (["tool_directory"] if loading_mode == "directory" else []) + ["bot_memory", "submit_answer"]
+    memory_request = requests[-2]["payload"]
+    assert "bot_memory" in {tool["function"]["name"] for tool in memory_request["tools"]}
+    received = next(row for row in requests[-1]["payload"]["messages"] if row.get("tool_call_id") == "memory")
+    assert json.loads(received["content"]) == observation
+    assert {tool["function"]["name"] for tool in requests[-1]["payload"]["tools"]} == {"submit_answer"}
+
+
+def test_private_memory_cannot_be_activated_as_a_business_catalog_tool():
+    payload = _start_payload(tools=[_READ_TOOL])
+    for key in ("tool_catalog", "catalog_snapshot"):
+        payload[key][0]["name"] = "bot_memory"
+    material = {"authorized_names": ["bot_memory"], "catalog": payload["tool_catalog"], "snapshot": payload["catalog_snapshot"]}
+    payload["catalog_hash"] = "sha256:" + hashlib.sha256(json.dumps(material, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()).hexdigest()
+    result = run_pi_agent(payload, request_id="req_private_catalog", run_id="run_private_catalog", timeout_seconds=6)
+    assert result["error"]["code"] == "CONFIG_ERROR"
+    assert _node_start_rejection(payload)[0] == 2
+
+
+def test_real_host_memory_commit_readback_fault_retries_same_key_once(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from src.application.bot.host import run_contract
+    from src.application.bot.memory import BotMemoryStore
+    from tests.test_bot_memory_host import channel
+    from tests.bot_pi_test_support import _TEST_MODEL
+
+    contract, store, session = channel(tmp_path, monkeypatch)
+    original_readback = BotMemoryStore.readback
+    reads = []
+    def fault_once(self, **kwargs):
+        receipt = original_readback(self, **kwargs)
+        reads.append(dict(receipt))
+        if len(reads) == 1:
+            raise sqlite3.OperationalError("injected post-commit readback fault")
+        return receipt
+    monkeypatch.setattr(BotMemoryStore, "readback", fault_once)
+    arguments = {"action": "remember", "kind": "preference", "content": "我喜欢简短回答",
+                 "source_quote": "记住：我喜欢简短回答", "expected_epoch": 0, "expected_revision": 0,
+                 "idempotency_key": "same-key"}
+    received = []
+    def answer(payload):
+        results = [json.loads(row["content"]) for row in payload["messages"] if row.get("role") == "tool" and row["content"].startswith("{")]
+        received.extend(results)
+        saved = next((row for row in reversed(results) if row.get("ok") and row.get("ref")), None)
+        arguments = ({"mode": "evidence", "status": "complete", "answer_markdown": "已记住。",
+            "claims": [{"text": "已记住。", "kind": "current_fact", "required_scope": "point", "observation_ids": [saved["ref"]]}]}
+            if saved else _submit_arguments("记忆操作未确认，请重试同一幂等键或重新查询。"))
+        return _chat_response(tool_name="submit_answer", tool_arguments=arguments, call_id="answer")
+    with _loopback_server([
+        {"body": _chat_response(tool_name="bot_memory", tool_arguments=arguments, call_id="write")},
+        {"body": _chat_response(tool_name="bot_memory", tool_arguments=arguments, call_id="readback")},
+        {"body": answer},
+    ]) as (base_url, requests):
+        model = replace(_TEST_MODEL, base_url=base_url, context_window_tokens=100000, timeout_seconds=3)
+        result = run_contract(contract, host_store=store, session_key=session, model_settings=model,
+                              process_environ=_provider_env(database=tmp_path / "pi.sqlite3"))
+    assert len(reads) == 2, (result.error, received)
+    assert reads[0] == reads[1]
+    assert result.status == "answered" and result.user_response.startswith("已记住。"), result
+    assert received[0]["ok"] is False and received[1]["ok"] is True
+    assert len(requests) == 3
+    with store._connect() as conn:
+        assert conn.execute("SELECT count(*) FROM bot_memory WHERE kind='preference'").fetchone()[0] == 1
+        assert conn.execute("SELECT revision FROM bot_memory WHERE kind='preference'").fetchone()[0] == 1
+        events = json.loads(conn.execute("SELECT events_json FROM bot_runs WHERE run_id=?", (result.run_id,)).fetchone()[0])
+    assert sum(event["type"] == "memory_operation_receipt" for event in events) == 1
+
+
+def test_directory_plain_answer_repair_counts_new_loop_resident_schemas(tmp_path):
+    business = {**_READ_TOOL, "description": "details " + "x" * 13000}
+    payload = _provider_payload("deepseek", "http://127.0.0.1",
+        tool_loading_mode="directory", catalog_tools=[business])
+    payload["model"].update(context_window_tokens=12000, max_output_tokens=512)
+    calls = []
+    with _loopback_server([
+        {"body": _chat_response(tool_name="tool_directory", tool_arguments={
+            "catalog_hash": payload["catalog_hash"], "tool_names": ["runtime_status"],
+        }, call_id="directory")},
+        {"body": _chat_response(text="plain answer requiring evidence submission", usage=(5000, 2))},
+        {"body": _chat_response(tool_name="submit_answer",
+            tool_arguments=_submit_arguments("finished"), call_id="answer")},
+    ]) as (base_url, requests):
+        payload["model"]["base_url"] = base_url
+        def tool(call):
+            calls.append(call["tool_name"])
+            if call["tool_name"] == "tool_directory":
+                return _tool_activation(payload, [business])
+            return _approved_provider_tool_result(call)
+        result = run_pi_agent(payload, request_id="req_directory_repair", run_id="run_directory_repair",
+            timeout_seconds=6, environ=_provider_env(database=tmp_path / "pi.sqlite3"),
+            on_tool_call=tool, on_proposed=lambda _p: "discard")
+    assert result["ok"] is True, result
+    assert result["result"]["text"] == "finished"
+    assert calls == ["tool_directory", "submit_answer"]
+    assert len(requests) == 3
+    transmitted_tools = [
+        {tool["function"]["name"] for tool in request["payload"]["tools"]}
+        for request in requests
+    ]
+    resident = {"tool_directory", "submit_answer"}
+    assert transmitted_tools == [resident, resident | {"runtime_status"}, resident]
+
+
+def test_directory_schema_growth_compacts_history_before_provider_gate(tmp_path):
+    database = tmp_path / "directory_capacity.sqlite3"
+    session_id = derive_pi_session_id("feishu", "directory_capacity", "chat", "key:us")
+    assert _run_session(database, session_id,
+        _start_payload(session_id=session_id, user_message="old question", debug={"fixture_response": "a" * 20000, "delay_ms": 0}),
+        run_id="seed_directory_capacity")["ok"]
+    assert _run_session(database, session_id,
+        _start_payload(session_id=session_id, user_message="recent question", debug={"fixture_response": "b" * 4000, "delay_ms": 0}),
+        run_id="seed_directory_recent")["ok"]
+    business = {**_READ_TOOL, "description": "details " + "x" * 12000}
+    payload = _provider_payload("deepseek", "http://127.0.0.1", session_id=session_id,
+        tool_loading_mode="directory", catalog_tools=[business], user_message="current question")
+    payload["model"].update(context_window_tokens=12000, max_output_tokens=512)
+    events = []
+    with _loopback_server([
+        {"body": _chat_response(tool_name="tool_directory", tool_arguments={"catalog_hash": payload["catalog_hash"], "tool_names": ["runtime_status"]}, call_id="directory", usage=(5500, 2))},
+        {"body": _chat_response(text="compacted historical answers")},
+        {"body": _chat_response(tool_name="submit_answer", tool_arguments=_submit_arguments("finished"), call_id="answer")},
+    ]) as (base_url, requests):
+        payload["model"]["base_url"] = base_url
+        def tool(call):
+            if call["tool_name"] == "tool_directory":
+                return _tool_activation(payload, [business])
+            return _approved_provider_tool_result(call)
+        result = run_pi_agent(payload, request_id="req_directory_capacity", run_id="run_directory_capacity", timeout_seconds=6,
+            environ=_provider_env(database=database), on_tool_call=tool, on_event=events.append, on_proposed=lambda _p: "commit")
+    assert result["ok"] is True, (result, [e for e in events if e["event_type"] in {"context_budget_checked", "context_compaction_committed"}], len(requests))
+    assert len(requests) == 3
+    assert any(event["event_type"] == "context_compaction_committed" for event in events)
+    assert not any(event["event_type"] == "context_budget_checked" and event["data"]["decision"] == "blocked_75" for event in events)
+    assert "current question" in json.dumps(requests[-1]["payload"]["messages"])
+    assert "runtime_status" in {tool["function"]["name"] for tool in requests[-1]["payload"]["tools"]}
+
+
+@pytest.mark.parametrize("action,error_code,max_tools,max_failures,expected_calls", [
+    ("remember", "MEMORY_UNAVAILABLE", 12, 4, 2),
+    ("remember", "MEMORY_UNAVAILABLE", 1, 4, 1),
+    ("remember", "MEMORY_UNAVAILABLE", 12, 1, 1),
+    ("remember", "INPUT_ERROR", 12, 4, 1),
+    ("list", "MEMORY_UNAVAILABLE", 12, 4, 1),
+])
+def test_memory_recovery_is_one_write_retry_with_shared_budgets(action, error_code, max_tools, max_failures, expected_calls):
+    from src.application.bot.memory import memory_tool_description
+
+    arguments = {"action": action, "idempotency_key": "same-key"}
+    payload = _start_payload(tools=[memory_tool_description()], debug={"fixture_turns": [
+        _tool_turn("attempt1", tool_name="bot_memory", arguments=arguments),
+        _tool_turn("attempt2", tool_name="bot_memory", arguments=arguments),
+        _tool_turn("attempt3", tool_name="bot_memory", arguments=arguments),
+        _tool_turn("answer", tool_name="submit_answer", arguments=_submit_arguments("unconfirmed")),
+    ], "delay_ms": 0})
+    payload["limits"].update(max_tool_calls=max_tools, max_consecutive_failed_tool_batches=max_failures)
+    calls = []
+    def tool(call):
+        if call["tool_name"] == "bot_memory":
+            calls.append(call)
+            return {"observation": {"ok": False, "error": {"code": error_code, "message": "unconfirmed"}}}
+        return _approved_provider_tool_result(call)
+    run_pi_agent(payload, request_id="req_retry_bound", run_id="run_retry_bound", timeout_seconds=60,
+                 on_tool_call=tool, on_proposed=lambda _p: "commit")
+    assert len(calls) == expected_calls
+    assert all(call["arguments"] == arguments for call in calls)

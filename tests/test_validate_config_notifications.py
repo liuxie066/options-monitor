@@ -131,7 +131,7 @@ def test_validate_config_rejects_invalid_assistant_llm_config() -> None:
     with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
     exc = _caught.value
-    assert "assistant.llm.enabled is retired; use assistant.copilot.enabled" in str(exc)
+    assert "assistant.llm.enabled is retired; use assistant.bot.enabled" in str(exc)
 
     cfg = _base_cfg()
     cfg["assistant"] = {"llm": {"provider": ["openai"]}}
@@ -142,40 +142,40 @@ def test_validate_config_rejects_invalid_assistant_llm_config() -> None:
     assert "assistant.llm.provider must be a string" in str(exc)
 
 
-def test_validate_config_accepts_known_boolean_copilot_toolsets() -> None:
+def test_validate_config_accepts_known_boolean_bot_toolsets() -> None:
     import src.application.config_validator as mod
 
     for enabled in (True, False):
         cfg = _base_cfg()
         cfg["assistant"] = {
             "enabled": True,
-            "copilot": {"enabled": True, "toolsets": {"portfolio": enabled}},
+            "bot": {"enabled": True, "toolsets": {"portfolio": enabled}},
         }
         mod.validate_config(cfg)
 
 
-def test_validate_config_rejects_invalid_copilot_toolsets() -> None:
+def test_validate_config_rejects_invalid_bot_toolsets() -> None:
     import src.application.config_validator as mod
 
     cases = (
-        ({"portfolio": "yes"}, "assistant.copilot.toolsets.portfolio must be a boolean"),
-        ({"portfolio": None}, "assistant.copilot.toolsets.portfolio must be a boolean"),
-        ({"unknown": True}, "assistant.copilot.toolsets contains unsupported keys: unknown"),
+        ({"portfolio": "yes"}, "assistant.bot.toolsets.portfolio must be a boolean"),
+        ({"portfolio": None}, "assistant.bot.toolsets.portfolio must be a boolean"),
+        ({"unknown": True}, "assistant.bot.toolsets contains unsupported keys: unknown"),
     )
     for toolsets, expected in cases:
         cfg = _base_cfg()
-        cfg["assistant"] = {"copilot": {"enabled": True, "toolsets": toolsets}}
+        cfg["assistant"] = {"bot": {"enabled": True, "toolsets": toolsets}}
         with pytest.raises(SystemExit) as _caught:
             mod.validate_config(cfg)
         exc = _caught.value
         assert expected in str(exc)
 
     cfg = _base_cfg()
-    cfg["assistant"] = {"copilot": {"enabled": True, "toolsets": ["portfolio"]}}
+    cfg["assistant"] = {"bot": {"enabled": True, "toolsets": ["portfolio"]}}
     with pytest.raises(SystemExit) as _caught:
         mod.validate_config(cfg)
     exc = _caught.value
-    assert "assistant.copilot.toolsets must be an object" in str(exc)
+    assert "assistant.bot.toolsets must be an object" in str(exc)
 
     cfg = _base_cfg()
     cfg["assistant"] = {"llm": {"base_url": ["https://llm.example/v1"]}}
@@ -242,7 +242,7 @@ def test_validate_config_rejects_invalid_copilot_toolsets() -> None:
     assert "assistant.llm.provider must be one of: openai, deepseek, kimi" in str(exc)
 
 
-def test_validate_config_rejects_legacy_assistant_modes_and_accepts_copilot_config() -> None:
+def test_validate_config_rejects_legacy_assistant_modes_and_accepts_bot_config() -> None:
     import src.application.config_validator as mod
 
     cfg = _base_cfg()
@@ -288,7 +288,7 @@ def test_validate_config_rejects_legacy_assistant_modes_and_accepts_copilot_conf
     cfg = _base_cfg()
     cfg["assistant"] = {
         "enabled": True,
-        "copilot": {"enabled": True},
+        "bot": {"enabled": True},
         "llm": {
             "provider": "openai",
             "base_url": "https://llm.example/v1",
@@ -304,7 +304,7 @@ def test_validate_config_rejects_legacy_assistant_modes_and_accepts_copilot_conf
     cfg = _base_cfg()
     cfg["assistant"] = {
         "enabled": True,
-        "copilot": {"enabled": True},
+        "bot": {"enabled": True},
         "llm": {
             "provider": "deepseek",
             "base_url": "https://api.deepseek.com",
@@ -328,7 +328,7 @@ def test_validate_config_rejects_legacy_assistant_modes_and_accepts_copilot_conf
         (4096, "must exceed max_output_tokens by more than 2000"),
     ],
 )
-def test_validate_active_copilot_context_window(context_window_tokens, message) -> None:
+def test_validate_active_bot_context_window(context_window_tokens, message) -> None:
     import src.application.config_validator as mod
 
     llm = {
@@ -341,7 +341,7 @@ def test_validate_active_copilot_context_window(context_window_tokens, message) 
     cfg = _base_cfg()
     cfg["assistant"] = {
         "enabled": True,
-        "copilot": {"enabled": True},
+        "bot": {"enabled": True},
         "llm": llm,
     }
 

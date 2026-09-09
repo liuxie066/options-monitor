@@ -8,17 +8,17 @@ from tests.candidate_evidence_helpers import seal_opening_candidate_fixture
 
 
 def test_candidate_rank_runtime_root_is_operator_only_input() -> None:
-    from src.application.copilot.tools import tool_descriptions
+    from src.application.bot.tools import tool_descriptions
     from src.application.tool_execution import build_tool_manifest
 
     manifest = build_tool_manifest()
     operator_tool = next(
         item for item in manifest["tools"] if item["name"] == "candidate_rank_explain"
     )
-    copilot_tool = tool_descriptions(("candidate_rank_explain",))[0]
+    bot_tool = tool_descriptions(("candidate_rank_explain",))[0]
 
     assert "runtime_root" in operator_tool["input_json_schema"]["properties"]
-    assert "runtime_root" not in copilot_tool["input_schema"]["properties"]
+    assert "runtime_root" not in bot_tool["input_schema"]["properties"]
 
 
 def test_runtime_artifact_tools_default_to_om_runtime_root(

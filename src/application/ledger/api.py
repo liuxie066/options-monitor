@@ -247,6 +247,9 @@ from src.application.ledger.lifecycle_attempt_audit import (
     validate_lifecycle_attempt_run_seal,
     verify_lifecycle_attempt_run_seal,
 )
+from src.application.ledger.receipt_queries import query_lifecycle_receipts
+from src.application.ledger.trade_event_pagination import encode_cursor as encode_evidence_cursor, decode_cursor as decode_evidence_cursor
+
 from src.application.ledger.notification_outbox import (
     build_notification_intent,
     canonical_payload_hash,
@@ -276,6 +279,7 @@ from src.application.ledger.lifecycle_settlement_semantics import (
 )
 
 __all__ = [
+    "query_lifecycle_receipts", "encode_evidence_cursor", "decode_evidence_cursor",
     "MAX_TRADE_EVENT_PAGE_ROWS",
     "CURRENT_ASSIGNED_STOCK_SCHEMA",
     "CURRENT_COMBO_GROUP_FACT_SCHEMA",
