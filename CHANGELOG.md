@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Bug Fixes
+- Preserved verified account and environment evidence from OpenD trade push headers so valid fills can be recorded on first delivery without guessing account identity.
+- Preserved active SQLite transaction locks while securing database and sidecar file permissions.
+- Added bounded trade-intake and notification recovery with actionable failure receipts and distinct recovery-success receipts, while preventing duplicate economic effects and blind resends after ambiguous delivery.
+
 ## 3.5.0 - 2026-09-09
 
 ### New Features

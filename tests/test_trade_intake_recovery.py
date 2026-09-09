@@ -250,7 +250,7 @@ def test_transient_processing_exception_recovers_unchanged_once(
     monkeypatch.setattr(
         auto_intake,
         owner,
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("offline transient failure")),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(sqlite3.OperationalError("database is locked")),
     )
 
     first = _process(repo, tmp_path, "initial", payload, source="push")
@@ -344,6 +344,8 @@ def test_inferred_open_recovers_after_commit_with_one_receipt(tmp_path: Path, mo
     assert events[0]["raw_payload"]["execution_input"]["position_effect"] is None
     assert calls == [] and not (tmp_path / "initial/state.json").exists()
     path = resolve_execution_inbox_path(repo, tmp_path / "unused.sqlite3")
+    after_lease = time.time() + 121
+    monkeypatch.setattr("src.application.trades.inbox.time.time", lambda: after_lease)
     pending = list_retryable_trade_payloads(path, retry_delay_sec=0)[0]
     stored = read_trade_payload(path, inbox_id=pending["inbox_id"], read_only=True)
     assert stored["result"] is None and stored["receipt"] is None
@@ -431,9 +433,10 @@ def test_saved_result_keeps_pm_intent_atomic_and_claimable_once(tmp_path: Path) 
     claim = claim_trade_payload(inbox, inbox_id=inbox_id, repo=repo)
     intent = {"account": "lx", "request_id": "stock-refresh:atomic"}
     result = {"status": "skipped", "reason": "not_option", "portfolio_refresh_intent": intent}
-    save_trade_payload_result(inbox, claim=claim, result=result)
+    enriched_result = save_trade_payload_result(inbox, claim=claim, result=result)
     current = read_trade_payload(inbox, inbox_id=inbox_id, read_only=True)
-    assert current["result"] == result
+    assert current["result"] == enriched_result
+    assert enriched_result["portfolio_refresh_intent"] == result["portfolio_refresh_intent"]
     assert json.loads(current["portfolio_refresh_intent_json"]) == intent
     assert current["portfolio_refresh_attempted_at_ms"] is None
 
@@ -499,6 +502,8 @@ def test_new_known_associations_fence_old_claim_and_survive_original_payload_ret
     assert results == []
     assert len(failures) == 1
     assert repo.list_trade_events() == []
+    after_due = time.time() + 61
+    monkeypatch.setattr("src.application.trades.inbox.time.time", lambda: after_due)
     retry = _process(repo, tmp_path, "retry", initial, source="backfill")
     assert retry["status"] == "unresolved"
     assert repo.list_trade_events() == []
@@ -582,7 +587,7 @@ def test_claim_takeover_and_exhaustion_require_safe_explicit_recovery(tmp_path: 
     monkeypatch.setattr("src.application.trades.inbox.time.time", lambda: now[0])
     old_claim = claim_trade_payload(inbox, inbox_id=inbox_id, repo=repo, lease_ms=1)
     assert old_claim is not None
-    now[0] += 1
+    now[0] += 61
     current_claim = claim_trade_payload(inbox, inbox_id=inbox_id, repo=repo)
     assert current_claim is not None
     assert current_claim["claim_id"] != old_claim["claim_id"]
@@ -595,13 +600,17 @@ def test_claim_takeover_and_exhaustion_require_safe_explicit_recovery(tmp_path: 
     assert pending["claim_id"] == current_claim["claim_id"]
     assert pending["result"] is None
 
-    for attempt in range(20):
+    # The interrupted first claim already consumed one of the twenty attempts.
+    for attempt in range(19):
         if attempt:
+            now[0] += 61
             current_claim = claim_trade_payload(inbox, inbox_id=inbox_id, repo=repo)
         assert current_claim is not None
-        mark_trade_payload_retryable(inbox, inbox_id=inbox_id, error="offline failure", claim=current_claim)
+        mark_trade_payload_retryable(inbox, inbox_id=inbox_id, error="offline failure", claim=current_claim,
+                                     result={"status": "failed", "diagnostics": {"retryable": True}})
     exhausted = read_trade_payload(inbox, inbox_id=inbox_id, read_only=True)
-    assert exhausted["status"] == "pending"
+    assert exhausted["status"] == "handled"
+    assert exhausted["result"]["receipt_kind"] == "manual_required"
     assert exhausted["attempt_count"] == 20
     assert claim_trade_payload(inbox, inbox_id=inbox_id, repo=repo) is None
     assert list_retryable_trade_payloads(inbox, retry_delay_sec=0) == []
@@ -671,7 +680,7 @@ def test_conflict_after_economic_commit_preserves_original_event_across_entries(
 
 
 @pytest.mark.parametrize("phase,exit_code", [("before_commit", 81), ("after_commit", 82)])
-def test_process_crash_recovers_expired_claim_from_another_entry(tmp_path: Path, phase: str, exit_code: int) -> None:
+def test_process_crash_recovers_expired_claim_from_another_entry(tmp_path: Path, monkeypatch, phase: str, exit_code: int) -> None:
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     ctx = multiprocessing.get_context("spawn")
     ready, release, results = ctx.Event(), ctx.Event(), ctx.Queue()
@@ -683,12 +692,13 @@ def test_process_crash_recovers_expired_claim_from_another_entry(tmp_path: Path,
         original = repo.list_trade_events()
         assert len(original) == int(phase == "after_commit")
         authoritative = resolve_execution_inbox_path(repo, tmp_path / "unused.sqlite3")
+        after_due = time.time() + 121
+        monkeypatch.setattr("src.application.trades.inbox.time.time", lambda: after_due)
         pending = list_retryable_trade_payloads(authoritative, account_ids=["123"], retry_delay_sec=0)
         assert len(pending) == 1
         interrupted = read_trade_payload(authoritative, inbox_id=pending[0]["inbox_id"])
         assert interrupted["result"] is None
         assert interrupted["claim_id"] is not None
-        time.sleep(0.01)  # Worker uses a real 1 ms lease; no manual resume or state repair.
         replay = _process(repo, tmp_path, "manual", _execution(), source="manual")
         final = repo.list_trade_events()
         assert len(final) == 1
@@ -701,3 +711,51 @@ def test_process_crash_recovers_expired_claim_from_another_entry(tmp_path: Path,
         assert saved["claim_id"] is None
     finally:
         _stop(process, release)
+
+
+@pytest.mark.parametrize("failure", ["postcommit", "combo"])
+def test_converged_recorded_receipt_projects_success_and_known_auxiliary_failure(tmp_path, monkeypatch, failure):
+    from src.application.agent_tools.runtime_status_impl import _trade_intake_summary
+    from src.application.trades import auto_intake, receipt
+    from src.application.trades.state import load_trade_intake_state
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    calls = []
+    def sender(**kwargs):
+        calls.append(kwargs)
+        return {"ok": True, "delivery_confirmed": True, "message_id": "offline-message"}
+    monkeypatch.setattr(auto_intake, "send_trade_intake_receipt", partial(
+        receipt.send_trade_intake_receipt, send_fn=sender, normalize_fn=lambda send_result: send_result))
+    callback = auto_intake._build_receipt_callback(
+        base=tmp_path, repo=repo, receipt_config={"enabled": True},
+        cfg={"notifications": {"provider": "wechat_clawbot", "target": "wechat:offline-test"}})
+    resolver = auto_intake.resolve_trade_deal
+    def commit_then_raise(*args, **kwargs):
+        resolver(*args, **kwargs)
+        raise sqlite3.OperationalError("locking protocol")
+    def failed_combo():
+        raise RuntimeError("private diagnostic /secret/path")
+    if failure == "postcommit":
+        monkeypatch.setattr(auto_intake, "resolve_trade_deal", commit_then_raise)
+    result = _process(repo, tmp_path, "initial", _execution(), source="push", on_result_fn=callback,
+        before_receipt_fn=lambda current: auto_intake._attach_combo_reconciliation_after_open(
+            current, apply_changes=True, mode="active" if failure == "combo" else "off", reconcile_fn=failed_combo))
+    state = load_trade_intake_state(tmp_path / "initial/state.json")
+    key = broker_deal_key_from_payload(_execution(), account_mapping={"123": "lx"})
+    assert result["status"] == "applied" and result["receipt_kind"] == "recorded"
+    assert state["processed_deal_ids"][key]["status"] == "applied"
+    assert not state["failed_deal_ids"] and not state["unresolved_deal_ids"]
+    assert _trade_intake_summary(state, {})["pending_count"] == 0
+    audit = [json.loads(line) for line in (tmp_path / "initial/audit.jsonl").read_text().splitlines()]
+    assert not [item for item in audit if item["phase"] == "failed"]
+    assert len(repo.list_trade_events()) == len(repo.list_position_lots()) == len(calls) == 1
+    message = calls[0]["message"]
+    assert "✅ 已记录" in message and "无需重复录入" in message
+    if failure == "combo":
+        assert result["combo_reconciliation"]["status"] == "failed"
+        assert "组合核对未完成" in message and "请检查组合核对服务" in message
+        assert "private diagnostic" not in message and "/secret/path" not in message
+    else:
+        assert state["processed_deal_ids"][key]["diagnostics"]["recovered_from_ledger"]
+    stored = read_trade_payload(resolve_execution_inbox_path(repo, tmp_path / "unused"), inbox_id=result["inbox_id"])
+    assert stored["receipt"]["message"] == message and stored["receipt"]["status"] == "sent"

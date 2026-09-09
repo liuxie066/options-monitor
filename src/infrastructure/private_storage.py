@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import errno
 import fcntl
 import os
 import sqlite3
@@ -205,7 +204,26 @@ def open_private_text(path: str | Path, *, encoding: str = "utf-8") -> Iterator[
 
 
 def connect_private_sqlite(path: str | Path, **kwargs: Any) -> sqlite3.Connection:
-    target = ensure_private_file(path)
+    target = private_path(path)
+    target.parent.mkdir(parents=True, exist_ok=True, mode=PRIVATE_DIRECTORY_MODE)
+    _secure_sqlite_directory(target.parent)
+    try:
+        target.lstat()
+    except FileNotFoundError:
+        descriptor, temp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
+        try:
+            try:
+                os.fchmod(descriptor, PRIVATE_FILE_MODE)
+            finally:
+                os.close(descriptor)
+            # Close before publication: another SQLite connection may immediately lock this inode.
+            try:
+                os.link(temp_name, target, follow_symlinks=False)
+            except FileExistsError:
+                pass
+        finally:
+            os.unlink(temp_name)
+    _secure_sqlite_file(target)
     connection = sqlite3.connect(str(target), **kwargs)
     try:
         secure_sqlite_artifacts(target)
@@ -218,32 +236,46 @@ def connect_private_sqlite(path: str | Path, **kwargs: Any) -> sqlite3.Connectio
     return connection
 
 
+def _secure_sqlite_directory(path: Path) -> None:
+    before = path.lstat()
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISDIR(before.st_mode):
+        raise OSError(f"sensitive SQLite directory must be a directory, not a symlink: {path.name}")
+    os.chmod(path, PRIVATE_DIRECTORY_MODE, follow_symlinks=False)
+    after = path.lstat()
+    if (
+        not stat.S_ISDIR(after.st_mode)
+        or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+        or stat.S_IMODE(after.st_mode) != PRIVATE_DIRECTORY_MODE
+    ):
+        raise OSError(f"sensitive SQLite directory changed during permission maintenance: {path.name}")
+
+
+def _secure_sqlite_file(path: Path) -> None:
+    before = path.lstat()
+    if stat.S_ISLNK(before.st_mode):
+        raise OSError(f"sensitive SQLite artifact must not be a symlink: {path.name}")
+    if not stat.S_ISREG(before.st_mode):
+        raise OSError(f"sensitive SQLite artifact is not a regular file: {path.name}")
+    # Opening and closing an existing inode releases this process's POSIX SQLite locks.
+    os.chmod(path, PRIVATE_FILE_MODE, follow_symlinks=False)
+    after = path.lstat()
+    if (
+        not stat.S_ISREG(after.st_mode)
+        or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+        or stat.S_IMODE(after.st_mode) != PRIVATE_FILE_MODE
+    ):
+        raise OSError(f"sensitive SQLite artifact changed during permission maintenance: {path.name}")
+
+
 def secure_sqlite_artifacts(path: str | Path) -> None:
     target = private_path(path)
+    _secure_sqlite_directory(target.parent)
     for candidate in (target, *(Path(f"{target}{suffix}") for suffix in _SQLITE_SIDECAR_SUFFIXES)):
-        flags = (
-            os.O_RDONLY
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_NONBLOCK", 0)
-        )
         try:
-            descriptor = os.open(candidate, flags)
+            _secure_sqlite_file(candidate)
         except FileNotFoundError:
             if candidate == target:
                 raise OSError(f"sensitive SQLite artifact is missing: {candidate.name}") from None
-            continue
-        except OSError as exc:
-            if exc.errno == errno.ELOOP:
-                raise OSError(f"sensitive SQLite artifact must not be a symlink: {candidate.name}") from exc
-            raise
-        try:
-            file_stat = os.fstat(descriptor)
-            if not stat.S_ISREG(file_stat.st_mode):
-                raise OSError(f"sensitive SQLite artifact is not a regular file: {candidate.name}")
-            os.fchmod(descriptor, PRIVATE_FILE_MODE)
-        finally:
-            os.close(descriptor)
 
 
 __all__ = [

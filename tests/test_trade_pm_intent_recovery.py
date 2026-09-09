@@ -1,6 +1,7 @@
 import json
 import multiprocessing
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -184,6 +185,8 @@ def test_pending_retry_while_pm_disabled_preserves_intent_for_enabled_restart(tm
         _core(tmp_path, _stock())
     monkeypatch.setattr(auto_intake, "update_trade_intake_state_entries", original)
     path = _inbox(tmp_path)
+    after_lease = time.time() + 121
+    monkeypatch.setattr("src.application.trades.inbox.time.time", lambda: after_lease)
     pending = list_retryable_trade_payloads(path, retry_delay_sec=0)[0]
     saved = read_trade_payload(path, inbox_id=pending["inbox_id"])
     original_intent = json.loads(saved["portfolio_refresh_intent_json"])
@@ -272,3 +275,35 @@ def test_saved_inbox_public_preview_uses_authority_and_legacy_guard(tmp_path, mo
         assert result == 0
         assert json.loads(output)["inbox_id"] == stored["inbox_id"]
     assert ledger.read_bytes() == before
+
+
+@pytest.mark.parametrize("kind", ["pending_retry", "verification_pending"])
+def test_resumed_unclaimed_work_keeps_processing_and_verification_owners(tmp_path, monkeypatch, kind):
+    from src.application.trades.deal_identity import broker_deal_key_from_payload
+    from src.application.trades.inbox import (
+        begin_trade_receipt_attempt, claim_trade_payload, finish_trade_receipt_attempt,
+        list_trade_receipt_recovery_rows, mark_trade_payload_retryable, resume_trade_payload,
+    )
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    path = _inbox(tmp_path)
+    payload = _stock()
+    key = broker_deal_key_from_payload(payload, account_mapping={"123": "lx"})
+    inbox_id = enqueue_trade_payload(path, payload=payload, source="push", broker_deal_key=key, repo=repo)
+    claim = claim_trade_payload(path, inbox_id=inbox_id, repo=repo)
+    mark_trade_payload_retryable(path, inbox_id=inbox_id, claim=claim, error="offline interrupted processing",
+        result={"status": "failed", "receipt_kind": kind,
+                "diagnostics": {"retryable": kind == "pending_retry", "verification_pending": kind == "verification_pending"}})
+    attempt = begin_trade_receipt_attempt(path, inbox_id=inbox_id, result_key=kind,
+        route={"provider": "wechat_clawbot", "channel": "wechat_clawbot", "target": "wechat:offline-test"}, message="offline notice")
+    assert attempt["claimed"]
+    finish_trade_receipt_attempt(path, inbox_id=inbox_id, attempt_id=attempt["attempt_id"], result={"delivery_confirmed": True})
+    assert resume_trade_payload(path, inbox_id=inbox_id, operator="offline-test", repo=repo)
+    row = read_trade_payload(path, inbox_id=inbox_id)
+    assert row["attempt_count"] == 0 and row["result"]["receipt_kind"] == kind
+    assert row["receipt"]["status"] == "sent"
+    after_due = time.time() + 61
+    monkeypatch.setattr("src.application.trades.inbox.time.time", lambda: after_due)
+    recovery = list_trade_receipt_recovery_rows(path, account_ids=["123"])
+    assert [item["inbox_id"] for item in recovery] == ([inbox_id] if kind == "verification_pending" else [])
+    assert bool(claim_trade_payload(path, inbox_id=inbox_id, repo=repo)) is (kind == "pending_retry")
