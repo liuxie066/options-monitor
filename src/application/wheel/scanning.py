@@ -20,7 +20,9 @@ from domain.domain.engine import (
 )
 from domain.domain.wheel import (
     build_wheel_call_rank_key,
+    build_wheel_put_rank_key,
     evaluate_wheel_call_candidate,
+    evaluate_wheel_put_candidate,
 )
 from src.application.candidate_models import CandidateBaseValues, CandidateContractInput
 from src.application.candidate_scanning import (
@@ -118,11 +120,13 @@ def _frames_from_snapshot(
 
 def _candidate_universe(
     *,
+    direction: str,
     symbols: list[str],
     frames: Mapping[str, pd.DataFrame],
     input_root: Path,
     exchange_rate_converter: Any,
     decision_time_ms: int,
+    policy: Mapping[str, Any],
 ) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
     decisions: list[dict[str, Any]] = []
 
@@ -130,7 +134,7 @@ def _candidate_universe(
         try:
             return calculate_opening_candidate_metrics(
                 contract.to_gate_payload(),
-                mode="call",
+                mode=direction,
                 avg_cost=None,
                 now_utc=datetime.fromtimestamp(
                     decision_time_ms / 1000,
@@ -168,15 +172,15 @@ def _candidate_universe(
     return (
         run_candidate_scan(
             config=CandidateScanConfig(
-                mode="call",
+                mode=direction,
                 symbols=symbols,
                 input_root=input_root,
-                min_dte=0,
-                max_dte=0,
+                min_dte=int(policy["min_dte"]),
+                max_dte=int(policy["max_dte"]),
                 min_strike=None,
                 max_strike=None,
-                min_open_interest=None,
-                min_volume=None,
+                min_open_interest=float(policy["min_open_interest"]),
+                min_volume=float(policy["min_volume"]),
                 max_spread_ratio=None,
                 min_annualized_net_return=None,
                 min_net_income=0,
@@ -229,6 +233,83 @@ def _exit_fee_fact(
     }
 
 
+def _assignment_fee_fact(
+    *,
+    branch: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    shares: int,
+    fee_context: Any,
+) -> dict[str, Any]:
+    custom = (
+        fee_context.get("stock_assignment_fee_fact_fn")
+        if isinstance(fee_context, Mapping)
+        else None
+    )
+    if callable(custom):
+        return dict(custom(branch, candidate, shares))
+    currency = str(branch.get("currency") or candidate.get("currency") or "").strip().upper()
+    try:
+        amount = calc_futu_stock_fee(
+            currency,
+            float(candidate.get("strike")),
+            shares=shares,
+            is_sell=False,
+        )
+    except (TypeError, ValueError):
+        return {
+            "component": "wheel_projected_stock_assignment_fee",
+            "basis": "missing",
+            "amount": 0.0,
+            "reason": "projected_stock_assignment_fee_unavailable",
+        }
+    return {
+        "component": "wheel_projected_stock_assignment_fee",
+        "basis": "estimated",
+        "amount": amount,
+        "currency": currency,
+        "source": FUTU_HK_FEE_SCHEDULE_URL if currency == "HKD" else FUTU_US_FEE_SCHEDULE_URL,
+        "reason": "projected_stock_assignment_fee_formula",
+    }
+
+
+def _direction_policy(wheel_config: Mapping[str, Any], direction: str) -> dict[str, Any]:
+    nested = wheel_config.get(direction)
+    if isinstance(nested, Mapping):
+        return dict(nested)
+    return dict(wheel_config)
+
+
+def _branch_gate_reason(branch: Mapping[str, Any]) -> str | None:
+    gate = str(branch.get("monitoring_gate") or "disabled").strip().lower()
+    if gate == "enabled":
+        return None
+    if gate == "config_mismatch":
+        return "wheel_config_mismatch"
+    return "wheel_disabled"
+
+
+def _common_policy_decision(
+    candidate: Mapping[str, Any],
+    *,
+    direction: str,
+    policy: Mapping[str, Any],
+) -> dict[str, Any]:
+    return evaluate_opening_candidate_policy(
+        dict(candidate),
+        mode=direction,
+        min_dte=int(policy["min_dte"]),
+        max_dte=int(policy["max_dte"]),
+        min_annualized_return=float(policy["min_annualized_net_premium_return"]),
+        min_net_premium_cny=float(policy["min_net_premium_cny"]),
+        min_iv_rv_ratio=float(policy["min_iv_rv_ratio"]),
+        min_iv_minus_rv=float(policy["min_iv_minus_rv"]),
+        max_spread_ratio=float(policy["max_spread_ratio"]),
+        require_earnings_evidence=False,
+        reject_known_earnings=False,
+        apply_default_call_strike_cap=False,
+    )
+
+
 def run_wheel_call_scan(
     wheel_read_model: Mapping[str, Any],
     wheel_config: Mapping[str, Any],
@@ -241,10 +322,16 @@ def run_wheel_call_scan(
     """Build Wheel Call candidates from one already-frozen required-data batch."""
 
     account = str(wheel_read_model.get("account") or "").strip().lower()
-    batches = [dict(row) for row in wheel_read_model.get("batches") or [] if isinstance(row, Mapping)]
+    branch_rows = wheel_read_model.get("wheel_branches") or wheel_read_model.get("batches") or []
+    batches = [
+        dict(row)
+        for row in branch_rows
+        if isinstance(row, Mapping)
+        and str(row.get("direction") or "call").strip().lower() == "call"
+    ]
     if not batches:
         return {"account": account, "scope_results": [], "raw_candidates": {}, "capacity_claims": []}
-    enabled = bool(wheel_config.get("enabled_for_new_lifecycle"))
+    policy = _direction_policy(wheel_config, "call")
     stocks = _stock_rows(wheel_read_model)
     scan_batches = [
         row
@@ -252,17 +339,19 @@ def run_wheel_call_scan(
         if row.get("lifecycle_status") == "active"
         and row.get("integrity_status") == "trusted"
         and row.get("phase") == "ready"
-        and enabled
+        and _branch_gate_reason(row) is None
     ]
     symbols = sorted({str(row.get("symbol") or "").strip().upper() for row in scan_batches})
     frames, unavailable_symbols = _frames_from_snapshot(required_data_snapshot, symbols)
     converter = fee_context.get("exchange_rate_converter") if isinstance(fee_context, Mapping) else fee_context
     universe, calculation_decisions = _candidate_universe(
+        direction="call",
         symbols=symbols,
         frames=frames,
         input_root=Path("."),
         exchange_rate_converter=converter,
         decision_time_ms=int(decision_time_ms),
+        policy=policy,
     ) if symbols else (pd.DataFrame(), [])
     universe_by_symbol = {
         symbol: [dict(row) for row in universe.loc[universe["symbol"] == symbol].to_dict("records")]
@@ -278,19 +367,10 @@ def run_wheel_call_scan(
     }
     for symbol, candidates in universe_by_symbol.items():
         for candidate in candidates:
-            decision = evaluate_opening_candidate_policy(
+            decision = _common_policy_decision(
                 candidate,
-                mode="call",
-                min_dte=int(wheel_config["min_dte"]),
-                max_dte=int(wheel_config["max_dte"]),
-                min_annualized_return=float(wheel_config["min_annualized_net_premium_return"]),
-                min_net_premium_cny=float(wheel_config["min_net_premium_cny"]),
-                min_iv_rv_ratio=float(wheel_config["min_iv_rv_ratio"]),
-                min_iv_minus_rv=float(wheel_config["min_iv_minus_rv"]),
-                max_spread_ratio=float(wheel_config["max_spread_ratio"]),
-                require_earnings_evidence=False,
-                reject_known_earnings=False,
-                apply_default_call_strike_cap=False,
+                direction="call",
+                policy=policy,
             )
             decisions_by_symbol[symbol].append(decision)
             if decision["accepted"]:
@@ -300,26 +380,42 @@ def run_wheel_call_scan(
     claims: list[dict[str, Any]] = []
     for raw_batch in batches:
         stock_lot_id = str(raw_batch.get("stock_lot_id") or "")
+        wheel_branch_id = str(raw_batch.get("wheel_branch_id") or stock_lot_id)
         symbol = str(raw_batch.get("symbol") or "").strip().upper()
         base_scope = {
             "scope": "strategy",
             "account": account,
             "symbol": symbol,
+            "direction": "call",
+            "wheel_branch_id": wheel_branch_id,
             "stock_lot_id": stock_lot_id,
             "strategy_family": "wheel",
             "strategy_mode": "wheel",
             "candidate_owner": "wheel",
             "batch_generation_hash": raw_batch.get("batch_generation_hash"),
+            "branch_generation_hash": raw_batch.get("branch_generation_hash")
+            or raw_batch.get("batch_generation_hash"),
             "projection_hash": raw_batch.get("projection_hash"),
             "candidate_count": 0,
         }
+        if raw_batch.get("lifecycle_status") == "pending_decision":
+            raw_by_batch[stock_lot_id] = []
+            scopes.append(
+                {
+                    **base_scope,
+                    "status": "not_applicable",
+                    "reason_code": "wheel_pending_decision",
+                }
+            )
+            continue
         if raw_batch.get("lifecycle_status") != "active":
             continue
         if raw_batch.get("integrity_status") != "trusted":
             scopes.append({**base_scope, "status": "failed", "reason_code": "wheel_integrity_conflict"})
             continue
-        if not enabled:
-            scopes.append({**base_scope, "status": "not_applicable", "reason_code": "wheel_disabled"})
+        gate_reason = _branch_gate_reason(raw_batch)
+        if gate_reason is not None:
+            scopes.append({**base_scope, "status": "not_applicable", "reason_code": gate_reason})
             continue
         if raw_batch.get("phase") != "ready":
             scopes.append({**base_scope, "status": "not_applicable", "reason_code": f"wheel_{raw_batch.get('phase') or 'not_ready'}"})
@@ -352,7 +448,7 @@ def run_wheel_call_scan(
                 grant_evaluations[str(grant)] = evaluate_wheel_call_candidate(
                     batch,
                     candidate,
-                    wheel_config,
+                    policy,
                     fee,
                     grant,
                 )
@@ -363,8 +459,14 @@ def run_wheel_call_scan(
             if not item.get("accepted"):
                 continue
             item["stock_lot_id"] = stock_lot_id
+            item["wheel_branch_id"] = wheel_branch_id
+            item["direction"] = "call"
             item["candidate_id"] = "wheel:" + canonical_sha256(
-                {"stock_lot_id": stock_lot_id, "contract_symbol": item.get("contract_symbol")}
+                {
+                    "wheel_branch_id": wheel_branch_id,
+                    "direction": "call",
+                    "contract_symbol": item.get("contract_symbol"),
+                }
             )[:24]
             item["rank_key"] = build_wheel_call_rank_key(item)
             item["_grant_evaluations"] = grant_evaluations
@@ -383,10 +485,12 @@ def run_wheel_call_scan(
             top = evaluated[0]
             claims.append(
                 {
-                    "claim_id": f"wheel:{stock_lot_id}",
+                    "claim_id": f"wheel:call:{wheel_branch_id}",
                     "strategy_family": "wheel",
+                    "direction": "call",
                     "account": account,
                     "symbol": symbol,
+                    "wheel_branch_id": wheel_branch_id,
                     "stock_lot_id": stock_lot_id,
                     "candidate_id": top["candidate_id"],
                     "requested_contracts": int(top["contracts"]),
@@ -426,4 +530,282 @@ def run_wheel_call_scan(
     }
 
 
-__all__ = ["run_wheel_call_scan"]
+def run_wheel_put_scan(
+    wheel_read_model: Mapping[str, Any],
+    wheel_config: Mapping[str, Any],
+    required_data_snapshot: FrozenRequiredDataBatch | Mapping[str, Any],
+    fee_context: Any,
+    *,
+    decision_time_ms: int,
+) -> dict[str, Any]:
+    """Build Wheel Put candidates without assigning account cash per branch."""
+
+    account = str(wheel_read_model.get("account") or "").strip().lower()
+    branches = [
+        dict(row)
+        for row in wheel_read_model.get("wheel_branches") or []
+        if isinstance(row, Mapping)
+        and str(row.get("direction") or "").strip().lower() == "put"
+    ]
+    if not branches:
+        return {
+            "account": account,
+            "scope_results": [],
+            "raw_candidates": {},
+            "capacity_claims": [],
+        }
+    policy = _direction_policy(wheel_config, "put")
+    scan_branches = [
+        row
+        for row in branches
+        if row.get("lifecycle_status") == "active"
+        and row.get("integrity_status") == "trusted"
+        and row.get("phase") == "ready"
+        and _branch_gate_reason(row) is None
+    ]
+    symbols = sorted(
+        {str(row.get("symbol") or "").strip().upper() for row in scan_branches}
+    )
+    frames, unavailable_symbols = _frames_from_snapshot(
+        required_data_snapshot,
+        symbols,
+    )
+    converter = (
+        fee_context.get("exchange_rate_converter")
+        if isinstance(fee_context, Mapping)
+        else fee_context
+    )
+    universe, calculation_decisions = (
+        _candidate_universe(
+            direction="put",
+            symbols=symbols,
+            frames=frames,
+            input_root=Path("."),
+            exchange_rate_converter=converter,
+            decision_time_ms=int(decision_time_ms),
+            policy=policy,
+        )
+        if symbols
+        else (pd.DataFrame(), [])
+    )
+    universe_by_symbol = (
+        {
+            symbol: [
+                dict(row)
+                for row in universe.loc[universe["symbol"] == symbol].to_dict(
+                    "records"
+                )
+            ]
+            for symbol in symbols
+        }
+        if not universe.empty
+        else {symbol: [] for symbol in symbols}
+    )
+    decisions_by_symbol: dict[str, list[dict[str, Any]]] = {
+        symbol: [] for symbol in symbols
+    }
+    for decision in calculation_decisions:
+        symbol = _decision_symbol(decision)
+        if symbol in decisions_by_symbol:
+            decisions_by_symbol[symbol].append(decision)
+    common_candidates_by_symbol: dict[str, list[dict[str, Any]]] = {
+        symbol: [] for symbol in symbols
+    }
+    for symbol, candidates in universe_by_symbol.items():
+        for candidate in candidates:
+            decision = _common_policy_decision(
+                candidate,
+                direction="put",
+                policy=policy,
+            )
+            decisions_by_symbol[symbol].append(decision)
+            if decision["accepted"]:
+                common_candidates_by_symbol[symbol].append(candidate)
+
+    scopes: list[dict[str, Any]] = []
+    raw_by_branch: dict[str, list[dict[str, Any]]] = {}
+    claims: list[dict[str, Any]] = []
+    for branch in branches:
+        branch_id = str(branch.get("wheel_branch_id") or "").strip()
+        symbol = str(branch.get("symbol") or "").strip().upper()
+        base_scope = {
+            "scope": "strategy",
+            "account": account,
+            "symbol": symbol,
+            "direction": "put",
+            "wheel_branch_id": branch_id,
+            "strategy_family": "wheel",
+            "strategy_mode": "wheel",
+            "candidate_owner": "wheel",
+            "branch_generation_hash": branch.get("branch_generation_hash"),
+            "projection_hash": branch.get("projection_hash"),
+            "candidate_count": 0,
+        }
+        if branch.get("lifecycle_status") == "pending_decision":
+            raw_by_branch[branch_id] = []
+            scopes.append(
+                {
+                    **base_scope,
+                    "status": "not_applicable",
+                    "reason_code": "wheel_pending_decision",
+                }
+            )
+            continue
+        if branch.get("lifecycle_status") != "active":
+            continue
+        if branch.get("integrity_status") != "trusted":
+            scopes.append(
+                {
+                    **base_scope,
+                    "status": "failed",
+                    "reason_code": "wheel_integrity_conflict",
+                }
+            )
+            continue
+        gate_reason = _branch_gate_reason(branch)
+        if gate_reason is not None:
+            scopes.append(
+                {
+                    **base_scope,
+                    "status": "not_applicable",
+                    "reason_code": gate_reason,
+                }
+            )
+            continue
+        if branch.get("phase") != "ready":
+            scopes.append(
+                {
+                    **base_scope,
+                    "status": "not_applicable",
+                    "reason_code": f"wheel_{branch.get('phase') or 'not_ready'}",
+                }
+            )
+            continue
+        if symbol in unavailable_symbols:
+            scopes.append(
+                {
+                    **base_scope,
+                    "status": "unavailable",
+                    "reason_code": unavailable_symbols[symbol],
+                }
+            )
+            continue
+        try:
+            requested_contracts = int(branch.get("remaining_contracts") or 0)
+        except (TypeError, ValueError):
+            requested_contracts = 0
+        evaluated: list[dict[str, Any]] = []
+        data_unavailable = requested_contracts <= 0
+        for candidate in common_candidates_by_symbol.get(symbol, []):
+            try:
+                multiplier = int(float(candidate.get("multiplier") or 0))
+            except (TypeError, ValueError):
+                multiplier = 0
+            grant_evaluations: dict[str, dict[str, Any]] = {}
+            for grant in range(1, requested_contracts + 1):
+                fee = _assignment_fee_fact(
+                    branch=branch,
+                    candidate=candidate,
+                    shares=grant * max(multiplier, 0),
+                    fee_context=fee_context,
+                )
+                grant_evaluations[str(grant)] = evaluate_wheel_put_candidate(
+                    branch,
+                    candidate,
+                    policy,
+                    fee,
+                    grant,
+                )
+            item = grant_evaluations.get(str(requested_contracts), {})
+            if item.get("wheel_candidate_status") == "data_unavailable":
+                data_unavailable = True
+                continue
+            if not item.get("accepted"):
+                continue
+            item.update(
+                {
+                    "wheel_branch_id": branch_id,
+                    "direction": "put",
+                    "branch_generation_hash": branch.get(
+                        "branch_generation_hash"
+                    ),
+                }
+            )
+            item["candidate_id"] = "wheel:" + canonical_sha256(
+                {
+                    "wheel_branch_id": branch_id,
+                    "direction": "put",
+                    "contract_symbol": item.get("contract_symbol"),
+                }
+            )[:24]
+            item["rank_key"] = build_wheel_put_rank_key(item)
+            item["_grant_evaluations"] = grant_evaluations
+            evaluated.append(item)
+        evaluated.sort(
+            key=lambda row: tuple(
+                (row.get("rank_key") or {}).get("sort_tuple") or ()
+            )
+        )
+        raw_by_branch[branch_id] = evaluated
+        evidence = evidence_summary_from_decisions(
+            decisions=decisions_by_symbol.get(symbol, []),
+            accepted_count=len(common_candidates_by_symbol.get(symbol, [])),
+        )
+        evidence_status, evidence_reason = project_evidence_scan_status(
+            evidence=evidence,
+            candidate_count=len(evaluated),
+        )
+        if evaluated:
+            top = evaluated[0]
+            claims.append(
+                {
+                    "claim_id": f"wheel:put:{branch_id}",
+                    "strategy_family": "wheel",
+                    "direction": "put",
+                    "account": account,
+                    "symbol": symbol,
+                    "wheel_branch_id": branch_id,
+                    "branch_generation_hash": branch.get(
+                        "branch_generation_hash"
+                    ),
+                    "candidate_id": top["candidate_id"],
+                    "requested_contracts": int(top["contracts"]),
+                    "multiplier": int(top["multiplier"]),
+                    "strike": float(top["strike"]),
+                    "currency": str(top.get("currency") or "").strip().upper(),
+                }
+            )
+            scopes.append(
+                {
+                    **base_scope,
+                    "status": "completed",
+                    "reason_code": (
+                        "partial_data"
+                        if data_unavailable or evidence_reason == "partial_data"
+                        else "candidates_found"
+                    ),
+                    "candidate_count": len(evaluated),
+                }
+            )
+        else:
+            scopes.append(
+                {
+                    **base_scope,
+                    "status": "unavailable" if data_unavailable else evidence_status,
+                    "reason_code": (
+                        "wheel_candidate_data_unavailable"
+                        if data_unavailable
+                        else evidence_reason or "no_candidate"
+                    ),
+                }
+            )
+    return {
+        "account": account,
+        "scope_results": scopes,
+        "raw_candidates": raw_by_branch,
+        "capacity_claims": claims,
+        "calculation_decisions": calculation_decisions,
+    }
+
+
+__all__ = ["run_wheel_call_scan", "run_wheel_put_scan"]

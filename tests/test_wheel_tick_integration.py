@@ -4,14 +4,16 @@ import json
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
+from domain.domain.ledger import ContractKey, TradeEvent
 from domain.domain.option_position_lots import OpenPositionCommand
-from src.application.ledger.commands import record_manual_assignment
 from src.application.ledger.manual_trades import persist_manual_open_event
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
+from src.application.ledger.writer import persist_trade_event_objects_atomically
 from src.application.prepared_option_positions_context import (
     load_prepared_option_positions_context,
     prepare_option_positions_contexts,
@@ -20,6 +22,7 @@ from src.application.required_data_prefetch_planning import (
     merge_wheel_requirements_into_prefetch_config,
 )
 from src.application.tick_run_workspace import publish_account_run_config
+from src.application.wheel.config import build_wheel_policy_hash
 
 
 def test_wheel_disabled_without_scope_preserves_candidate_config() -> None:
@@ -52,6 +55,31 @@ def test_prepared_context_uses_generation_fence_for_active_wheel(
     data_config.write_text("{}\n", encoding="utf-8")
     config_path = tmp_path / "config.us.json"
     config_path.write_text("{}\n", encoding="utf-8")
+    config = {
+        "portfolio": {
+            "account": "acct_a",
+            "broker": "富途",
+            "data_config": str(data_config),
+        },
+        "wheel": {
+            "accounts": ["acct_a"],
+            "activation_by_account": {
+                "acct_a": {
+                    "generation": 1,
+                    "activated_at_ms": 500,
+                    "deactivated_at_ms": None,
+                }
+            },
+        },
+        "symbols": [
+            {
+                "symbol": "NVDA",
+                "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111},
+                "sell_put": {"enabled": False},
+                "sell_call": {"enabled": False},
+            }
+        ],
+    }
     repo = SQLiteOptionPositionsRepository(
         tmp_path / "output_shared" / "state" / "option_positions.sqlite3"
     )
@@ -70,36 +98,63 @@ def test_prepared_context_uses_generation_fence_for_active_wheel(
             expiration_ymd="2099-08-21",
             premium_per_share=2,
             opened_at_ms=1_000,
+            request_id="wheel-tick-manual-open",
         ),
     )
     put_lot_id = str(repo.list_position_lots()[0]["record_id"])
-    record_manual_assignment(
+    with patch(
+        "src.application.ledger.repository_assigned_stock.now_ms",
+        return_value=500,
+    ), repo._writer_connection(begin_immediate=True) as conn:
+        repo.open_wheel_activation_window(
+            market="us",
+            account="acct_a",
+            expected_current_generation=0,
+            policy_hash=build_wheel_policy_hash(
+                config,
+                market="us",
+                account="acct_a",
+            ),
+            request_id="activate-wheel",
+            request_hash="a" * 64,
+            conn=conn,
+        )
+    persist_trade_event_objects_atomically(
         repo,
-        record_id=put_lot_id,
-        contracts_to_close=1,
-        stock_side="buy",
-        stock_qty=100,
-        stock_price=100,
-        as_of_ms=2_000,
-        request_id="assignment-1",
-        wheel_start_enabled=True,
-    )
-    config = {
-        "portfolio": {
-            "account": "acct_a",
-            "broker": "富途",
-            "data_config": str(data_config),
-        },
-        "wheel": {"enabled": True, "accounts": ["acct_a"]},
-        "symbols": [
-            {
-                "symbol": "NVDA",
-                "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111},
-                "sell_put": {"enabled": False},
-                "sell_call": {"enabled": False},
-            }
+        [
+            TradeEvent(
+                event_id="assignment-1",
+                event_type="assignment",
+                event_time_ms=2_000,
+                contract_key=ContractKey.from_values(
+                    broker="富途",
+                    account="acct_a",
+                    underlying_symbol="NVDA",
+                    option_type="put",
+                    position_side="short",
+                    strike=100,
+                    expiration_ymd="2099-08-21",
+                ),
+                contracts=1,
+                price=0,
+                currency="USD",
+                source="test",
+                multiplier=100,
+                target_lot_id=put_lot_id,
+                raw_payload={
+                    "target_lot_id": put_lot_id,
+                    "stock_settlement": {
+                        "side": "buy",
+                        "shares": 100,
+                        "price": 100,
+                        "fees": 0,
+                        "currency": "USD",
+                        "fee_provenance": {"basis": "actual", "source": "test"},
+                    },
+                },
+            )
         ],
-    }
+    )
     run_id = "wheel-tick-integration"
     authority = publish_account_run_config(
         base=tmp_path,
@@ -128,7 +183,9 @@ def test_prepared_context_uses_generation_fence_for_active_wheel(
 
     assert batch.ledger_read_count == 2
     wheel_model = batch.wheel_read_models_by_account["acct_a"]
+    assert wheel_model["market"] == "US"
     assert wheel_model["batches"][0]["lifecycle_status"] == "active"
+    assert wheel_model["monitoring_gate"] == "enabled"
     context = load_prepared_option_positions_context(
         manifest_path=Path(batch.manifests["acct_a"]["manifest_path"]),
         expected_base=tmp_path,
@@ -175,7 +232,7 @@ def test_wheel_required_data_preserves_existing_strategy_config_matrix(
     combo_enabled: bool,
 ) -> None:
     config = {
-        "wheel": {"enabled": True, "accounts": ["acct_a"]},
+        "wheel": {"accounts": ["acct_a"]},
         "symbols": [
             {
                 "symbol": "NVDA",
@@ -202,6 +259,7 @@ def test_wheel_required_data_preserves_existing_strategy_config_matrix(
                         "lifecycle_status": "active",
                         "integrity_status": "trusted",
                         "phase": "ready",
+                        "monitoring_gate": "enabled",
                     }
                 ]
             }

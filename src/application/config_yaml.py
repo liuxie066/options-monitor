@@ -46,6 +46,12 @@ from src.application.runtime_paths import resolve_runtime_root
 from src.application.portfolio_management import (
     normalize_portfolio_management_config,
 )
+from src.application.wheel.config import (
+    WHEEL_ACTIVATION_DESCRIPTOR_FIELDS,
+    WHEEL_LEGACY_POLICY_FIELDS,
+    WHEEL_POLICY_FIELDS,
+    materialize_wheel_config,
+)
 
 
 RESOLVED_KEY = "_resolved"
@@ -92,15 +98,13 @@ COMBO_YIELD_AUTHORING_FIELDS = {
 WHEEL_AUTHORING_FIELDS = {
     "enabled",
     "accounts",
-    "min_dte",
-    "max_dte",
     "min_delta",
-    "min_annualized_net_premium_return",
-    "min_net_premium_cny",
-    "max_spread_ratio",
-    "min_iv_rv_ratio",
-    "min_iv_minus_rv",
+    "call",
+    "put",
+    "activation_by_account",
+    *WHEEL_LEGACY_POLICY_FIELDS,
 }
+WHEEL_SIDE_AUTHORING_FIELDS = {*WHEEL_POLICY_FIELDS, "dte"}
 
 
 def default_yaml_config_path(*, repo_root: Path) -> Path:
@@ -368,6 +372,59 @@ def _normalize_combo_yield(raw: Any, *, path: str) -> dict[str, Any]:
     return out
 
 
+def _normalize_wheel_activation_by_account(raw: Any, *, path: str) -> dict[str, Any]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise AgentToolError(code="CONFIG_ERROR", message=f"{path} must be an object")
+    out: dict[str, Any] = {}
+    for raw_account, raw_descriptor in raw.items():
+        account = _normalize_account_label(raw_account, path=f"{path}.<account>")
+        if account in out:
+            raise AgentToolError(
+                code="CONFIG_ERROR",
+                message=f"{path} contains duplicate account after normalization: {account}",
+            )
+        if not isinstance(raw_descriptor, dict):
+            raise AgentToolError(
+                code="CONFIG_ERROR",
+                message=f"{path}.{account} must be an object",
+            )
+        _reject_unknown_authoring_keys(
+            raw_descriptor,
+            allowed=set(WHEEL_ACTIVATION_DESCRIPTOR_FIELDS),
+            path=f"{path}.{account}",
+        )
+        out[account] = deepcopy(raw_descriptor)
+    return out
+
+
+def _normalize_wheel(raw: Any, *, path: str) -> dict[str, Any]:
+    out = _normalize_strategy(
+        raw,
+        path=path,
+        allow_ranges=False,
+        allowed_keys=WHEEL_AUTHORING_FIELDS,
+    )
+    for side in ("call", "put"):
+        if side in out:
+            out[side] = _normalize_strategy(
+                out[side],
+                path=f"{path}.{side}",
+                allow_ranges=True,
+                allowed_keys=WHEEL_SIDE_AUTHORING_FIELDS,
+            )
+    if "activation_by_account" in out:
+        out["activation_by_account"] = _normalize_wheel_activation_by_account(
+            out["activation_by_account"],
+            path=f"{path}.activation_by_account",
+        )
+    try:
+        return materialize_wheel_config(out)
+    except ValueError as exc:
+        raise AgentToolError(code="CONFIG_ERROR", message=f"{path}: {exc}") from exc
+
+
 def _canonical_strategy_authoring_key(raw_key: Any) -> str:
     key = str(raw_key or "").strip()
     if key == COVERED_CALL_AUTHORING_KEY:
@@ -460,12 +517,7 @@ def _normalize_features(raw: Any, *, path: str) -> dict[str, Any]:
                     code="CONFIG_ERROR",
                     message=f"{path}.wheel is only supported under markets.<market>.features",
                 )
-            out["wheel"] = _normalize_strategy(
-                raw_value,
-                path=f"{path}.wheel",
-                allow_ranges=False,
-                allowed_keys=WHEEL_AUTHORING_FIELDS,
-            )
+            out["wheel"] = _normalize_wheel(raw_value, path=f"{path}.wheel")
             continue
         if key == "close_advice":
             close_advice = _normalize_strategy(raw_value, path=f"{path}.close_advice", allow_ranges=False)

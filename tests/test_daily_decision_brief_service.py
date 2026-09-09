@@ -115,6 +115,58 @@ def test_brief_omits_retired_ai_decision_advice_section(tmp_path: Path) -> None:
     assert "ai_decision_advice_evidence_index" not in brief
 
 
+def test_wheel_v2_snapshot_maps_put_branch_identity(monkeypatch) -> None:
+    from src.application import daily_decision_brief_service as service
+
+    monkeypatch.setattr(
+        service,
+        "validate_wheel_candidate_snapshot",
+        lambda *_args, **_kwargs: None,
+    )
+    artifacts: list[dict[str, Any]] = []
+    gaps: list[dict[str, Any]] = []
+    batches, candidates, available = service._load_wheel_snapshot_family(
+        run_id="run-1",
+        account="lx",
+        market="US",
+        source_artifacts=artifacts,
+        data_gaps=gaps,
+        snapshot={
+            "schema_version": "wheel_candidate_snapshot.v2",
+            "snapshot_hash": "a" * 64,
+            "content_sha256": "b" * 64,
+            "batches": [
+                {
+                    "wheel_branch_id": "put-branch-1",
+                    "direction": "put",
+                    "symbol": "NVDA",
+                    "remaining_contracts": 1,
+                    "principal_anchor": 10_500,
+                    "currency": "USD",
+                    "phase": "ready",
+                    "granted_contracts": 1,
+                    "final_candidate": {
+                        "candidate_id": "put-1",
+                        "expiration": "2026-08-21",
+                        "strike": 100,
+                        "candidate_put_net_premium": 185,
+                        "replenishment_cash_remainder": 684,
+                    },
+                }
+            ],
+        },
+    )
+
+    assert available is True
+    assert gaps == []
+    assert batches[0]["wheel_branch_id"] == "put-branch-1"
+    assert batches[0]["direction"] == "put"
+    assert candidates[0]["position_lot_id"] == ""
+    assert candidates[0]["wheel_branch_id"] == "put-branch-1"
+    assert candidates[0]["_source_path"] == "state/wheel_candidate_snapshot.v2.json"
+    assert artifacts[0]["path"] == "state/wheel_candidate_snapshot.v2.json"
+
+
 def test_brief_uses_explicit_candidate_snapshot(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -539,6 +591,7 @@ def _seal_combo_status_snapshot(
 def _materialize_candidate_bundle_fixture(base: Path) -> None:
     from src.application.candidate_snapshot_manifest import (
         CANDIDATE_SNAPSHOT_MANIFEST_FILE,
+        CANDIDATE_SNAPSHOT_MANIFEST_V3_FILE,
         publish_candidate_snapshot_manifest,
     )
     from src.application.strategy_scan_status import (
@@ -550,14 +603,24 @@ def _materialize_candidate_bundle_fixture(base: Path) -> None:
     account_dir = base / "output_runs" / "run-1" / "accounts" / "lx"
     if not account_dir.is_dir():
         return
-    manifest_path = account_dir / "state" / CANDIDATE_SNAPSHOT_MANIFEST_FILE
-    if manifest_path.is_file():
+    if any(
+        (account_dir / "state" / filename).is_file()
+        for filename in (
+            CANDIDATE_SNAPSHOT_MANIFEST_FILE,
+            CANDIDATE_SNAPSHOT_MANIFEST_V3_FILE,
+        )
+    ):
         return
+    wheel_v2_path = account_dir / "state" / "wheel_candidate_snapshot.v2.json"
     snapshot_paths = {
         "opening": account_dir / "state" / "opening_candidate_snapshot.json",
         "sp_lc": account_dir / "state" / "combo_yield_candidate_snapshot.json",
         "cc_lp": account_dir / "state" / "cc_lp_candidate_snapshot.json",
-        "wheel": account_dir / "state" / "wheel_candidate_snapshot.json",
+        "wheel": (
+            wheel_v2_path
+            if wheel_v2_path.is_file()
+            else account_dir / "state" / "wheel_candidate_snapshot.json"
+        ),
     }
     snapshots: dict[str, dict[str, Any]] = {}
     for owner, path in snapshot_paths.items():
@@ -566,7 +629,7 @@ def _materialize_candidate_bundle_fixture(base: Path) -> None:
 
     expected: list[dict[str, str]] = []
     for owner, snapshot in snapshots.items():
-        counts: dict[tuple[str, str], int] = {}
+        counts: dict[tuple[str, str, str], int] = {}
         selected = (
             snapshot.get("ranked_candidates")
             if owner == "opening"
@@ -578,8 +641,21 @@ def _materialize_candidate_bundle_fixture(base: Path) -> None:
             key = (
                 str(facts.get("symbol") or row.get("symbol") or "").upper(),
                 str(row.get("strategy_mode") or "combo_yield").lower(),
+                "",
             )
             counts[key] = counts.get(key, 0) + 1
+        if owner == "wheel":
+            for batch in snapshot.get("batches") or []:
+                if not isinstance(batch, dict):
+                    continue
+                key = (
+                    str(batch.get("symbol") or "").upper(),
+                    "wheel",
+                    str(batch.get("direction") or "").lower(),
+                )
+                counts[key] = counts.get(key, 0) + len(
+                    batch.get("raw_candidates") or []
+                )
         for scope in snapshot.get("scope_results") or []:
             if not isinstance(scope, dict) or scope.get("scope") != "strategy":
                 continue
@@ -593,10 +669,12 @@ def _materialize_candidate_bundle_fixture(base: Path) -> None:
             }[mode]
             status = str(scope.get("status") or "").lower()
             reason = str(scope.get("reason_code") or "").strip() or None
+            direction = str(scope.get("direction") or "").lower()
             status_path = strategy_status_path(
                 report_dir=account_dir,
                 symbol=symbol,
                 strategy_family=family,
+                direction=direction or None,
             )
             keep_existing = False
             try:
@@ -611,7 +689,7 @@ def _materialize_candidate_bundle_fixture(base: Path) -> None:
                     and (
                         status != "completed"
                         or int(existing.get("candidate_count", -1))
-                        == counts.get((symbol, mode), 0)
+                        == counts.get((symbol, mode, direction), 0)
                     )
                 )
             except (OSError, json.JSONDecodeError, TypeError, ValueError):
@@ -626,7 +704,7 @@ def _materialize_candidate_bundle_fixture(base: Path) -> None:
                     strategy_family=family,
                     status=status,
                     candidate_count=(
-                        counts.get((symbol, mode), 0)
+                        counts.get((symbol, mode, direction), 0)
                         if status == "completed"
                         else None
                     ),
@@ -637,6 +715,7 @@ def _materialize_candidate_bundle_fixture(base: Path) -> None:
                     ),
                     snapshot_id=scope.get("quote_snapshot_id"),
                     receipt_relpath=scope.get("quote_receipt_relpath"),
+                    direction=direction or None,
                 )
             expected.append(
                 {
@@ -646,6 +725,7 @@ def _materialize_candidate_bundle_fixture(base: Path) -> None:
                     "strategy_mode": mode,
                     "candidate_owner": owner,
                     "account_config_sha256": "f" * 64,
+                    **({"direction": direction} if direction else {}),
                 }
             )
     publish_strategy_scan_status_index_v2(
@@ -1089,11 +1169,11 @@ def test_brief_consumes_shared_capacity_without_raw_holdings_fallback(
     seal_wheel_candidate_snapshot(
         base=tmp_path, run_id="run-1", account="lx", market="US",
         account_config_sha256="f" * 64, strategy_policy_sha256="1" * 64,
-        dependencies=_fixture_dependencies(), batches=[],
-        scope_results=[
-            {"symbol": "NVDA", "status": "failed", "reason_code": "wheel_scan_failed"},
-            {"symbol": "AAPL", "status": "not_applicable", "reason_code": "wheel_not_applicable"},
-        ],
+            dependencies=_fixture_dependencies(), batches=[],
+            scope_results=[
+                {"symbol": "NVDA", "direction": "call", "status": "failed", "reason_code": "wheel_scan_failed"},
+                {"symbol": "AAPL", "direction": "call", "status": "not_applicable", "reason_code": "wheel_not_applicable"},
+            ],
         capacity_allocations=allocations, sealed_at="2026-07-17T13:59:59Z",
     )
 

@@ -261,10 +261,102 @@ def test_fixed_report_renders_wheel_after_combo_yield() -> None:
     message = render_fixed_report(brief, context=_scheduled_context())
 
     assert message.index("## 组合增强") < message.index("## Wheel")
-    assert "NVDA｜Wheel" in message
+    assert "NVDA｜Wheel Call" in message
     assert "剩余股份｜100 股" in message
     assert "建议｜卖出 1 张 08-21 $110 Call" in message
     assert "最终全部叫走后预计总收益｜$1,320.00" in message
+
+
+def test_fixed_report_renders_wheel_put_branch() -> None:
+    from src.application.daily_decision_brief_renderer import render_fixed_report
+
+    brief = _brief()
+    brief["wheel_batches"] = [
+        {
+            "wheel_branch_id": "wheel-put-1",
+            "direction": "put",
+            "symbol": "NVDA",
+            "remaining_contracts": 1,
+            "principal_anchor": 10_500,
+            "status": "ready",
+            "recommended_contracts": 1,
+            "expiration": "2026-08-21",
+            "strike": 100,
+            "candidate_put_net_premium": 185,
+            "replenishment_cash_remainder": 684,
+        }
+    ]
+
+    message = render_fixed_report(brief, context=_scheduled_context())
+
+    assert "NVDA｜Wheel Put" in message
+    assert "剩余轮转｜1 张" in message
+    assert "本金锚｜$10,500.00" in message
+    assert "建议｜卖出 1 张 08-21 $100 Put" in message
+    assert "预计补仓后剩余现金｜$684.00" in message
+
+
+def test_candidate_alert_renders_only_selected_wheel_branch() -> None:
+    from domain.domain.daily_decision_brief import build_daily_brief_candidate_identity
+    from src.application.daily_decision_brief_renderer import (
+        render_candidate_alert,
+        render_candidate_alert_card_markdown,
+    )
+
+    brief = _brief()
+    brief["wheel_batches"] = [
+        {
+            "wheel_branch_id": "stock-call-1",
+            "position_lot_id": "stock-call-1",
+            "direction": "call",
+            "symbol": "NVDA",
+            "shares_remaining": 100,
+            "status": "ready",
+            "recommended_contracts": 1,
+            "expiration": "2026-08-21",
+            "strike": 110,
+        },
+        {
+            "wheel_branch_id": "wheel-put-1",
+            "direction": "put",
+            "symbol": "NVDA",
+            "remaining_contracts": 1,
+            "status": "ready",
+            "recommended_contracts": 1,
+            "expiration": "2026-08-21",
+            "strike": 100,
+        },
+    ]
+    identity = build_daily_brief_candidate_identity(
+        account="lx",
+        market="US",
+        symbol="NVDA",
+        strategy_family="wheel",
+        wheel_branch_id="wheel-put-1",
+    )
+    brief["candidate_index"] = [
+        {
+            "identity": identity,
+            "symbol": "NVDA",
+            "strategy_family": "wheel",
+            "representative": {
+                "wheel_branch_id": "wheel-put-1",
+                "direction": "put",
+            },
+            "contract_count": 1,
+        }
+    ]
+
+    for message in (
+        render_candidate_alert(brief, [identity], context=_scheduled_context()),
+        render_candidate_alert_card_markdown(
+            brief,
+            [identity],
+            context=_scheduled_context(),
+        ),
+    ):
+        assert "NVDA｜Wheel Put" in message
+        assert "NVDA｜Wheel Call" not in message
 
 
 def test_success_empty_warning_is_embedded_without_failure_wording() -> None:

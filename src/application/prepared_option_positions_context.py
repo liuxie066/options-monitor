@@ -31,6 +31,7 @@ from src.application.ledger.api import (
     validate_position_fact_snapshot_contract,
 )
 from src.application.source_receipts import sha256_bytes
+from src.application.runtime_config_freshness import infer_runtime_config_market
 from src.application.cash_conversion import cash_fx_observation_facts
 from src.application.positions.context_builder import (
     build_shared_context,
@@ -45,6 +46,10 @@ from src.application.tick_run_workspace import (
     write_account_run_state_bytes_once_safely,
 )
 from src.application.payload_helpers import required_text
+from src.application.wheel.config import (
+    evaluate_wheel_activation_readiness,
+    resolve_wheel_activation_descriptor,
+)
 from src.application.wheel.read_model import build_wheel_read_model_from_rows
 from functools import partial
 
@@ -710,10 +715,29 @@ def prepare_option_positions_contexts(
                     prepared_authority["fx_error_type"] = fx_error_type
                 context = dict(context)
                 try:
+                    market = infer_runtime_config_market(
+                        config_path=config_path,
+                        config=configs[account],
+                    )
+                    descriptor = resolve_wheel_activation_descriptor(
+                        configs[account], market=market, account=account
+                    )
+                    durable_window = repos_by_ledger_path[
+                        ledger_path
+                    ].get_current_wheel_activation_window(
+                        market=market,
+                        account=account,
+                    )
+                    monitoring_readiness = evaluate_wheel_activation_readiness(
+                        descriptor,
+                        durable_window,
+                    )
                     wheel_model = build_wheel_read_model_from_rows(
                         rows_by_account[account],
                         account=account,
                         as_of_ms=lifecycle_now_ms,
+                        monitoring_readiness=monitoring_readiness,
+                        market=market,
                     )
                 except Exception as exc:
                     unavailable[account] = (

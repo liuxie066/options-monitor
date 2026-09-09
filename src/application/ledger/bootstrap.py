@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.ledger import ContractKey, TradeEvent
 from domain.domain.ledger.position_fields import (
     effective_expiration_ymd,
@@ -131,12 +132,39 @@ def _bootstrap_trade_event(item: dict[str, Any], *, source_name: str) -> Any | N
     raw_multiplier = safe_float(fields.get("multiplier"))
     expiration_ymd = str(fields.get("expiration_ymd") or exp_ms_to_ymd(fields.get("expiration")) or "").strip() or None
     event_id = _stable_bootstrap_event_id(source_name, record_id, raw_fields)
+    multiplier_evidence = None
+    if (
+        raw_multiplier is not None
+        and raw_multiplier > 0
+        and raw_multiplier == int(raw_multiplier)
+    ):
+        source_receipt_sha256 = canonical_sha256(
+            {
+                "source": source_name,
+                "lot_record_id": record_id,
+                "fields": raw_fields,
+            }
+        )
+        multiplier_evidence = {
+            "schema_version": "contract_multiplier_evidence.v1",
+            "source": "bootstrap_snapshot",
+            "canonical_symbol": _canonical_trade_symbol(fields.get("symbol")),
+            "multiplier": int(raw_multiplier),
+            "source_receipt_id": event_id,
+            "source_receipt_sha256": source_receipt_sha256,
+        }
     raw_payload = {
         "source_type": "bootstrap_snapshot",
         "lot_record_id": record_id,
         "fields": raw_fields,
         "source": source_name,
         "multiplier_source": "bootstrap_snapshot" if raw_multiplier is not None else None,
+        "multiplier_evidence": multiplier_evidence,
+        "multiplier_evidence_hash": (
+            canonical_sha256(multiplier_evidence)
+            if multiplier_evidence is not None
+            else None
+        ),
     }
     try:
         contract_key = ContractKey.from_values(

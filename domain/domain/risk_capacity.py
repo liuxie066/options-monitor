@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
 
@@ -663,6 +663,205 @@ def withdraw_opening_share_capacity_grants(
             )
         remaining[pool] = after
     return rows
+
+
+def _cash_claim_reservation(
+    raw: Mapping[str, Any],
+) -> tuple[str, float] | None:
+    currency = str(
+        raw.get("currency")
+        or raw.get("cash_reservation_currency")
+        or raw.get("cash_native_currency")
+        or ""
+    ).strip().upper()
+    if currency == "RMB":
+        currency = "CNY"
+    amount = _to_float(
+        raw.get("cash_reservation_amount")
+        or raw.get("reserved_cash_amount")
+    )
+    if amount is None:
+        strike = _to_float(raw.get("strike"))
+        multiplier = _to_float(raw.get("multiplier"))
+        contracts = _to_float(
+            raw.get("requested_contracts")
+            or raw.get("granted_contracts")
+            or raw.get("contracts")
+            or 1
+        )
+        if None not in {strike, multiplier, contracts}:
+            amount = float(strike) * float(multiplier) * float(contracts)
+    if not currency or amount is None or amount <= 0:
+        return None
+    return currency, amount
+
+
+def allocate_wheel_put_cash_capacity(
+    *,
+    cash_capacity_fact: Mapping[str, Any],
+    ordinary_put_claims: Sequence[Mapping[str, Any]],
+    active_wheel_put_intents: Sequence[Mapping[str, Any]],
+    wheel_put_claims: Sequence[Mapping[str, Any]],
+    convert_currency: Callable[[float, str, str], float | None],
+) -> dict[str, Any]:
+    """Grant Wheel Put claims from one account pool after immutable prior claims."""
+
+    fact = dict(cash_capacity_fact or {})
+    account = str(fact.get("account") or "").strip().lower()
+    authority = fact.get("cash_authority")
+    authority = dict(authority) if isinstance(authority, Mapping) else {}
+    cash = _normalized_currency_amounts(fact.get("cash_by_currency"))
+    existing_secured = _normalized_currency_amounts(
+        fact.get("cash_secured_by_currency") or {}
+    )
+    fx_snapshot = fact.get("fx_snapshot")
+    fact_available = (
+        bool(account)
+        and str(fact.get("status") or "").strip().lower() == "available"
+        and str(authority.get("status") or "").strip().lower() == "available"
+        and bool(str(fact.get("cash_authority_hash") or "").strip())
+        and cash is not None
+        and bool(cash)
+        and existing_secured is not None
+        and isinstance(fx_snapshot, Mapping)
+    )
+    ordinary_rows = [dict(item) for item in ordinary_put_claims]
+    intent_rows = [dict(item) for item in active_wheel_put_intents]
+    wheel_rows = [dict(item) for item in wheel_put_claims]
+    ordinary_identity_rows = sorted(ordinary_rows, key=canonical_sha256)
+    intent_identity_rows = sorted(intent_rows, key=canonical_sha256)
+    wheel_identity_rows = sorted(wheel_rows, key=canonical_sha256)
+    capacity_identity_hash = canonical_sha256(
+        {
+            "schema_version": "wheel_put_cash_capacity.v1",
+            "account": account,
+            "cash_authority": authority,
+            "cash_authority_hash": fact.get("cash_authority_hash"),
+            "cash_by_currency": cash,
+            "cash_secured_by_currency": existing_secured,
+            "ordinary_put_claims": ordinary_identity_rows,
+            "active_wheel_put_intents": intent_identity_rows,
+            "fx_snapshot": dict(fx_snapshot) if isinstance(fx_snapshot, Mapping) else None,
+        }
+    )
+    allocation_input_hash = canonical_sha256(
+        {
+            "capacity_identity_hash": capacity_identity_hash,
+            "wheel_put_claims": wheel_identity_rows,
+        }
+    )
+    secured = dict(existing_secured or {})
+    prior_invalid = False
+    for row in [*ordinary_rows, *intent_rows]:
+        reservation = _cash_claim_reservation(row)
+        if (
+            reservation is None
+            or str(row.get("account") or account).strip().lower() != account
+        ):
+            prior_invalid = True
+            continue
+        currency, amount = reservation
+        secured[currency] = secured.get(currency, 0.0) + amount
+
+    claim_indexes: dict[str, list[int]] = {}
+    for index, row in enumerate(wheel_rows):
+        claim_indexes.setdefault(str(row.get("claim_id") or "").strip(), []).append(
+            index
+        )
+    duplicate_indexes = {
+        index
+        for claim_id, indexes in claim_indexes.items()
+        if not claim_id or len(indexes) != 1
+        for index in indexes
+    }
+    allocations_by_index: dict[int, dict[str, Any]] = {}
+    order = sorted(
+        range(len(wheel_rows)),
+        key=lambda index: (
+            _to_float(wheel_rows[index].get("assignment_at_ms")) or 0.0,
+            str(wheel_rows[index].get("wheel_branch_id") or ""),
+            str(wheel_rows[index].get("claim_id") or ""),
+            index,
+        ),
+    )
+    for index in order:
+        row = wheel_rows[index]
+        reservation = _cash_claim_reservation(
+            {**row, "requested_contracts": 1}
+        )
+        try:
+            requested = _to_nonnegative_int(row.get("requested_contracts"))
+        except (TypeError, ValueError):
+            requested = 0
+        result = {
+            **row,
+            "capacity_identity_hash": capacity_identity_hash,
+            "allocation_input_hash": allocation_input_hash,
+            "requested_contracts": requested,
+            "granted_contracts": 0,
+            "cash_reservation_amount": 0.0,
+            "cash_reservation_currency": reservation[0] if reservation else None,
+            "capacity_before": None,
+            "capacity_after": None,
+            "allocation_status": "blocked",
+            "allocation_reason": "cash_capacity_fact_unavailable",
+        }
+        if index in duplicate_indexes or reservation is None or requested <= 0:
+            result["allocation_reason"] = "cash_capacity_claim_invalid"
+        elif str(row.get("account") or "").strip().lower() != account:
+            result["allocation_reason"] = "cash_capacity_claim_account_mismatch"
+        elif not fact_available:
+            pass
+        elif prior_invalid:
+            result["allocation_reason"] = "prior_cash_claim_invalid"
+        else:
+            currency, unit_required = reservation
+            effective = compute_sell_put_effective_cash(
+                cash_by_currency=cash,
+                cash_secured_by_currency=secured,
+                native_currency=currency,
+                convert_currency=convert_currency,
+                cash_required_native=unit_required,
+                fx_status=str(fact.get("fx_status") or ""),
+            )
+            if not effective.available or effective.cash_free is None:
+                result["allocation_reason"] = effective.reason
+            else:
+                capacity = compute_sell_put_cash_capacity(
+                    cash_required_native=unit_required,
+                    cash_free_effective_native=effective.cash_free,
+                    cash_native_currency=currency,
+                )
+                granted = min(requested, capacity.max_new_contracts)
+                reserved_amount = unit_required * granted
+                before = float(effective.cash_free)
+                after = max(0.0, before - reserved_amount)
+                if granted:
+                    secured[currency] = secured.get(currency, 0.0) + reserved_amount
+                result.update(
+                    granted_contracts=granted,
+                    cash_reservation_amount=round(reserved_amount, 6),
+                    capacity_before=round(before, 6),
+                    capacity_after=round(after, 6),
+                    allocation_status="allocated" if granted else "blocked",
+                    allocation_reason=(
+                        "cash_capacity_supported"
+                        if granted == requested
+                        else "cash_capacity_partially_supported"
+                        if granted
+                        else "effective_native_cash_insufficient"
+                    ),
+                )
+        allocations_by_index[index] = result
+    allocations = [allocations_by_index[index] for index in range(len(wheel_rows))]
+    return {
+        "account": account,
+        "status": "available" if fact_available and not prior_invalid else "unavailable",
+        "capacity_identity_hash": capacity_identity_hash,
+        "allocation_input_hash": allocation_input_hash,
+        "allocations": allocations,
+        "cash_secured_after_by_currency": dict(sorted(secured.items())),
+    }
 
 
 def allocate_portfolio_capacity_shadow(ranked_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

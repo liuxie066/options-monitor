@@ -561,10 +561,10 @@ def apply_lifecycle_allocation_atomically(
         correction_count = len(correction_void_rows)
         correction_void_created = list(runtime.created_flags[:correction_count])
         terminal_event_created = list(runtime.created_flags[correction_count:])
-        wheel_companions = append_wheel_trade_companions(
+        wheel_companions, wheel_companion_review_reasons = append_wheel_trade_companions(
             sqlite_repo,
             conn=conn,
-            events=event_rows,
+            events=projection_rows[correction_count:],
             created_flags=terminal_event_created,
             context=wheel_context,
             recorded_at_ms=utc_now_ms(),
@@ -827,6 +827,9 @@ def apply_lifecycle_allocation_atomically(
             "terminal_event_ids": [item.event_id for item in event_rows],
             "terminal_events_created": terminal_event_created,
             "wheel_event_ids_by_trade_event": wheel_companions,
+            "wheel_manual_review_reasons_by_trade_event": (
+                wheel_companion_review_reasons
+            ),
             "correction_void_event_ids": [
                 item.event_id for item in correction_void_rows
             ],

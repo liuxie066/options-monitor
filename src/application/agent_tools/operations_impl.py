@@ -582,21 +582,39 @@ def _assigned_stock_action(
                             status=status,
                         )
                     ]
+    try:
+        wheel_accounts = resolve_configured_accounts(
+            cfg,
+            [account] if account else None,
+        )
+    except ValueError as exc:
+        raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
+
     wheel_batches: dict[tuple[str, str], dict[str, Any]] = {}
-    for account_value in sorted(
-        {
-            str(row.get("account") or "").strip().lower()
-            for row in selected_report_rows
-            if str(row.get("account") or "").strip()
-        }
-    ):
-        model = build_wheel_read_model(repo, account_value, read_as_of_ms)
+    wheel_branches: list[dict[str, Any]] = []
+    for account_value in wheel_accounts:
+        model = build_wheel_read_model(
+            repo,
+            account_value,
+            read_as_of_ms,
+            market=str(payload.get("config_key") or ""),
+        )
         wheel_batches.update(
             {
                 (account_value, str(batch.get("stock_lot_id") or "").strip()): dict(batch)
                 for batch in model.get("batches") or []
                 if isinstance(batch, dict) and str(batch.get("stock_lot_id") or "").strip()
             }
+        )
+        wheel_branches.extend(
+            dict(branch)
+            for branch in model.get("wheel_branches") or []
+            if isinstance(branch, dict)
+            and (not symbol or str(branch.get("symbol") or "").strip().upper() == symbol)
+            and (
+                not stock_lot_id
+                or str(branch.get("stock_lot_id") or "").strip() == stock_lot_id
+            )
         )
     rows = []
     for item in selected_report_rows:
@@ -619,9 +637,11 @@ def _assigned_stock_action(
         stock_lot_id=stock_lot_id,
     )
     return {
+        "schema_version": "option_positions_read.output.v3",
         "action": "assigned-stock",
         "rows": rows,
         "row_count": len(rows),
+        "wheel_branches": wheel_branches,
         "assigned_stock_lots": rows,
         "assigned_stock_sale_rows": sale_rows,
         "assigned_stock_review_rows": review_rows,

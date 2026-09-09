@@ -1,13 +1,14 @@
 # 轮转策略（Wheel）PRD
 
-- **状态**：已实现；默认关闭，按账户显式启用
+- **状态**：双向 Wheel 已在源码实现并通过本地验证；尚未提交、发布或生产启用
 - **中文名**：轮转策略
 - **英文名**：Wheel
 - **内部标识**：`wheel`
-- **文档性质**：当前产品、安全与 owner 合同
+- **文档性质**：当前产品、安全与 owner 合同；第 13 节为双向实现合同
 
-当前实现位于 `domain/domain/wheel.py`、`src/application/wheel/` 和 `src/interfaces/cli/wheel.py`。
-本文不保存已完成的实施步骤；运行行为以当前源码、配置验证器和测试为准。
+当前实现位于 `domain/domain/wheel.py`、`src/application/wheel/`、相关 ledger/tick owner 和
+`src/interfaces/cli/wheel.py`。第 1～12 节保留单向 Call 合同和兼容语义，第 13 节补充双向扩展；
+运行行为以当前源码、配置验证器和测试为准。源码实现不表示已提交、发布或生产启用。
 
 ## 1. 背景
 
@@ -524,3 +525,483 @@ scheduler 和通知通道。不得新增平行排序器、账本、投影表、b
 14. focused workflow、projection、scan、capacity、tick、Daily Brief、CLI、Agent、config 和
     compatibility 测试覆盖 replay、CAS、rollback、部分/全部指派、事实不可用、账户隔离和
     Wheel-disabled 行为，且不写生产数据、不调用 broker mutation。
+
+## 13. 双向 Wheel 实现合同
+
+本节的产品输入和验收唯一真源是 `codex/om-wheel-prd.md`，包括 S1～S5、A01～A16 和第 8 节
+批准依据。本节确定当前实现边界、owner、数据流和迁移方式，不修改该产品合同。实现完成不授权
+commit、push、merge、发布、部署、运行时配置修改、生产数据写入或 broker 操作。
+
+### 13.1 目标、成功信号与非目标
+
+目标是在保留普通 CSP 指派自动进入 Wheel CC 的同时，补齐普通 CC 指派自动进入 Wheel CSP，
+并让 Wheel 内部任一方向的真实指派只对实际转换部分生成待确认分支。用户选择“启动轮转”后仅
+开始下一方向监控；用户选择“结束轮转”后该分支永久结束。推荐、意图、归属和结果跟踪继续由
+OM 完成，实际下单继续由用户完成。
+
+成功信号：
+
+1. 四种入口和转换严格符合 `codex/om-wheel-prd.md` §3.1；普通策略入口自动启动，Wheel 内部
+   指派必须等待用户决定。
+2. 部分指派按实际数量拆出独立分支，原分支未转换余量继续原方向，不复制本金、收益或容量。
+3. Wheel CC 和 Wheel CSP 均执行 `0.25 <= abs(delta) <= 0.35`，本金底线无交集时等待，不放宽。
+4. CSP 的历史卖出净收入只决定价格预算；当前可用现金仍由既有物理账户容量决定。
+5. 唯一有效意图才自动归属；无匹配、多匹配、事实缺失或冲突均不猜测，真实仓位仍计入占用。
+6. 启用前普通指派不补建；重复事件、重复决定和终态重放不重复启动或复活分支。
+7. A01～A16 均有可执行的 facade 或端到端测试，不以内部 helper 测试代替可观察结果。
+
+非目标保持不变：不自动交易、撤单、滚动或行权；不新增独立页面、通知通道、监听进程、scheduler、
+行情缓存、平行账本或通用策略评分器；不修改普通 CSP/CC 行为；不跨标的轮转；不回填历史普通 CC；
+不支持已结束分支重新启动；不借机重构全部 ledger 或候选系统。
+
+### 13.2 当前事实和约束
+
+本设计的源码基线是本地跟踪 `origin/main@343a5d1f720e15fc05b168cd8d363788cbd137b3`，不是生产
+核实。当前事实为：
+
+- `wheel_events` 是 append-only SQLite 事件表，事件身份强制依赖非空 `stock_lot_id`，事件类型
+  CHECK 只允许当前单向 Call 生命周期、Call intent、Call linkage 和 void 事件。
+- 当前投影按 `(account, stock_lot_id)` 分组，只能同时表达一个 Call 阶段。Wheel Call 部分指派
+  只减少剩余股票；全部叫走才追加 `wheel_called_away`，已卖部分不会形成 CSP 分支。
+- 当前 `wheel_trade_companions` 已在 trade writer 同一事务中追加 Wheel 事件并校验投影，具有
+  event ID 与 payload hash 幂等基础；新设计继续使用该原子边界。
+- 当前扫描、候选快照、Daily Brief 和公开写入口只理解 Wheel Call；配置是单层 `wheel` policy，
+  Delta 只有 `min_delta=0.30`，没有绝对值上限。
+- 已有 Call coverage、普通 CSP 现金容量、assignment stock settlement cash facts、实际费用和
+  assigned-stock 成本投影可复用，但当前没有 Wheel Put intent 现金预留或多分支现金 grant。
+- 当前只保存运行时 enabled 布尔值，没有可用于迟到事件判断的账户级持久化启用时间。
+
+`config.yaml` 仍是人工配置真源，runtime JSON 仍由构建链生成。实现不得直接修改现有生产配置；
+双向 Wheel 的实际启用时间和值由后续独立授权的配置迁移提供。
+
+### 13.3 选定方案：单一分支事件流
+
+继续使用一个 `wheel_events` owner，不新增 `wheel_csp_events`、第二套 projection 或业务监听器。
+将 Wheel 的持久身份从“必须拥有股票的批次”演进为“可处于 Call 或 Put 方向的分支”：
+
+- 新增稳定的 `wheel_branch_id`。有真实股票 backing 的 Call 分支继续令
+  `wheel_branch_id=stock_lot_id`；Put 分支使用 `(account, source_assignment_event_id,
+  target_direction)` 确定性生成的非股票 ID。
+- `parent_branch_id` 放在新事件的 hash-bound payload 中记录部分转换和轮转血缘；在出现真实查询需求前
+  不新增专用列或索引。一个 assignment event 只能为一个明确来源分支创建一个对应 child，不能跨多个
+  分支自动拆分。
+- `stock_lot_id` 改为可选资源引用：Call 分支引用真实 assigned-stock lot；Put 分支允许没有股票 lot。
+- 事件行新增持久化 `event_schema_version`。旧 `wheel_event.v1` 行使用
+  `wheel_branch_id=stock_lot_id`，仍按原字段集合重算旧 hash，新增列不得进入 v1 hash；`wheel_event.v2`
+  的 hash 必须覆盖 `wheel_branch_id`、可选 `stock_lot_id` 及包含 `parent_branch_id`、`direction` 的
+  normalized payload。读取按版本分派并拒绝 v2 篡改。
+- 迁移必须证明新 normalize/hash 分派对每个 v1 事件重算后得到原 hash；仅比较迁移前后存储值不算验证。
+  原 event ID、payload、payload hash 和时间保持不变，旧 `called_away` / `manual_ended` 只作历史终态
+  解释，不回建 CSP child。
+- 新普通 CSP 或普通 CC assignment 创建 active child；新 Wheel 内部 assignment 创建
+  `pending_decision` child。用户决定只追加一次含 expected generation hash 的 CAS 事件：`start`
+  转为 active，`end` 转为不可逆 `manual_ended`。
+- 父分支按实际 assignment 数量减少可继续监控的数量；还有整张容量时继续原阶段，不足一张时
+  显示 residual；完全转换后派生为 `converted`，不再生成原方向推荐。
+
+最小新增生命周期事件为 `wheel_branch_created`、`wheel_branch_decided`；保留现有
+`wheel_started`、`wheel_called_away`、`wheel_manual_ended`、`wheel_call_intent_created`、
+`wheel_call_intent_cancelled`、`wheel_call_intent_consumed`、`wheel_call_linkage_rejected` 和
+`wheel_event_voided`。Put 只增加对称的 `wheel_put_intent_created`、`wheel_put_intent_cancelled`、
+`wheel_put_intent_consumed`、`wheel_put_linkage_rejected`，共享现有幂等、CAS 和原子校验，不泛化改写
+历史 Call 事件。
+
+SQLite 迁移必须在单一事务内重建 `wheel_events` 的列、事件类型 CHECK、索引和 append-only triggers，
+迁移前后校验行数、event ID、payload hash、外键和 normalized payload 完全一致。任何不一致回滚整个
+迁移；不得原地猜测或修补冲突行。事务回滚只在 schema commit 前成立；一旦写入首个 v2 事件，旧 v1
+binary/schema 不再是安全回退目标，因为它无法读取新事件类型且 append-only 事实不可删除。此后只能
+回退到 v2-compatible package 或前向修复，并以“写入 v2 -> compatible rollback -> 全量 readback”演练
+证明恢复路径。
+
+### 13.4 数量、经济事实和分摊
+
+`trade_events -> position_lots -> assignment settlement -> assigned-stock / cash facts` 继续是成交、
+数量、multiplier、价格和实际费用的权威链。Wheel 事件只保存分支身份、来源事实引用、决定、转换数量
+和稳定排序字段，不保存可重算金额，不建立第二份经济账。
+
+每个 child 使用 assignment 的实际 contracts、multiplier 和 stock settlement shares。它们必须满足
+`shares == contracts * multiplier`；缺失、非整数或与来源 lot 不一致时不自动创建 child。单笔 fill
+不跨 Wheel 分支分配；若来源不能唯一确定，进入待人工归属并继续占用物理股票或现金。multiplier 必须
+来自 source event、source lot 或明确的 contract evidence；实际 shares/contracts 只可互相佐证，不能
+在 multiplier 缺失时默认补成 `100`。
+
+自动 child 必须同时取得 multiplier 数值、`multiplier_source` 和可审计 evidence ID/hash。可信来源仅为：
+broker/OpenD payload receipt、带 source receipt/hash 的 multiplier cache 或 bootstrap snapshot、或用户在
+confirmed manual trade payload 中显式提供的 contract multiplier；source lot 只有在自己保留上述 provenance
+时才能转交。dataclass/legacy fallback、`us_standard_default`、无 receipt 的 runtime seed，或单纯“数值是
+100 且 shares 相等”均不构成证据。多个权威来源数值冲突时 fail closed 为 `multiplier_conflict`；缺证据时
+为 `multiplier_unproven`。branch event 的 hash-bound payload 同时绑定数值、source 和 evidence hash，两个
+writer 与 manual path 必须得到同一判定。
+
+child 当前方向的本金锚只来自本次 assignment 的真实 stock settlement cash 与 actual fees：Call child
+使用本次 assigned-stock 实际接货成本，Put child 使用本次实际股票卖出净收入。不得按父分支比例继承
+或推导 child 的当前方向本金锚。
+
+只有父分支既有的历史已实现 PnL 和尚未转换展示余额按实际转换数量分摊。Wheel event 仅持久化 source
+fact IDs、转换数量、authoritative `occurred_at_ms/event_id` 和 lineage，不持久化可因迟到事实改变的
+per-child 金额，也不复制 canonical cash/PnL。
+
+读模型对同一完整 source fact set 按稳定 `(occurred_at_ms, event_id)` 顺序，以 Decimal 精度计算每个
+child 的未量化比例金额；仅在公开读面或 sealed snapshot 输出边界按 currency quantum 分配，稳定顺序
+中的最后一个 child 吸收量化余数。这样同一事实集合无论正序、逆序或跨事务到达，均得到相同 child
+allocation、parent remainder 和 snapshot hash；迟到事实会生成新的 projection/generation hash，旧 CAS
+自然失效，但不改写历史 Wheel event。父分支转换数量为零时不得带走金额；全部转换后不得在零数量父
+分支保留非零余额。例如 3 张对应 USD 100.00 的历史 PnL，无论三个一张 assignment 以何种 ingestion
+顺序到达，均按其 authoritative stable order 让同一个最终 child 取得余数。
+
+Wheel CC 的下一方向 child 使用本次真实股票卖出 gross cash 与实际 stock settlement fee 得到卖出
+净收入。普通 CC 不要求先存在 assigned-stock lot 或 raw `strategy` 字段；必须复用
+`domain/domain/strategy_membership.py` 的唯一 canonical membership，以 short Call 合同事实且无
+Wheel/Combo/relationship conflict 判定普通 CC。实际卖出交割完整时，才可直接以 assignment cash facts
+建立 CSP 分支。若普通 CC 的股票交割
+与 active Wheel stock lot 重叠或指向它，只更新真实物理容量并暴露 manual-review conflict，不自动再建
+CSP child。
+
+Wheel Put 被指派后，新的 Call child 使用 assigned-stock 投影形成的真实接货成本。Put/Call 权利金
+保持独立现金事实，只进入阶段已实现收益和排序，不摊低 Call 成本或提高 Put 本金上限。
+
+### 13.5 状态、归属与写入
+
+方向中立读模型输出 `wheel_branch_id`、`parent_branch_id`、`direction=call|put`、来源 assignment、
+初始/剩余数量、本金锚、收益分摊、`lifecycle_status`、运行 `phase`、完整性和 generation hash。
+新状态只表达必要业务事实：
+
+```text
+pending_decision --start--> active --assignment--> converted 或 active(剩余数量)
+pending_decision --end----> manual_ended
+```
+
+`start` 只启动监控，不创建 intent、不预留成交、不下单。`manual_ended` 和 `converted` 不可逆；
+重复决定幂等，冲突决定拒绝。未回应的 pending branch 不进入 required-data 或候选扫描。
+
+output v3 的 direction-neutral `phase` 对 Call/Put 使用同一枚举。terminal lifecycle 先输出
+`converted|manual_ended`，pending lifecycle 输出 `pending_decision`；active branch 再按以下优先级派生：
+
+```text
+conflict > linkage_unresolved > option_open > intent_pending
+         > residual_capacity > data_unavailable > ready
+```
+
+`conflict` 由 integrity/source void 等事实触发；terminal branch 不再扫描。active branch 只有 `ready` 才进入
+候选生成。有效 intent 使该 branch 进入 `intent_pending`；唯一成交关联原子
+消费 intent 并进入 `option_open`，因此不会重复推荐或重复占用。intent cancel/expire 且无成交后释放 intent
+claim 并按当前事实重算 phase。Short Call/Put 买入平仓或到期未指派后，canonical lot/cash facts 先记录实际
+净收益并释放对应股票/现金 claim，branch 再回到 `ready`、`residual_capacity` 或 `data_unavailable`。
+partial assignment 对实际转换量创建 pending child；父分支若仍有 open option 则保持 `option_open`，否则按
+剩余容量重算。full assignment 使父分支 `converted`。无法唯一关联的真实仓位进入
+`linkage_unresolved`，继续计入物理容量但不生成候选。
+
+顶层 `wheel_branches[].phase` 使用上述中性值；legacy `rows[].wheel` adapter 继续输出既有
+`call_open`、`call_pending`、`residual_stock` 等字段，不用 v2 phase 反向改写 v1 历史合同。
+
+期权 lot 使用 `strategy=wheel`、方向对应的 `leg_role=wheel_call|wheel_put` 和中性
+`source_wheel_branch_id`。Call 同时保留 `source_stock_lot_id` 以证明股票覆盖来源。唯一匹配的有效
+intent 才允许 trade writer 原子写入归属并消费 intent；没有或存在多个匹配时不猜，仓位保持真实、
+占用进入共享容量，并在读模型中暴露 linkage unresolved。
+
+已有 open Wheel Call lot 的兼容 adapter 只在 `strategy=wheel`、`leg_role=wheel_call`、没有冲突
+`strategy_group_id` 且 `source_stock_lot_id` 在账户内唯一时映射到同 ID branch；新 lot 必须显式保存
+`source_wheel_branch_id`，不得用标的、时间或方向模糊匹配。CLI/Agent 的 `--stock-lot-id` 仅作为旧 Call
+branch 的兼容别名；它与 `wheel_branch_id` 互斥，解析结果必须唯一且进入 hash-bound input。
+
+继续使用现有 `option_positions_read` 作为 Agent 读取入口，不新增独立 read tool。其 additive
+`option_positions_read.output.v3` 在保留 legacy Call 的 `rows[].wheel` 兼容信息之外，新增顶层
+`wheel_branches`，使没有 assigned-stock lot 的 Put/pending branch 也可见。Daily Brief、候选和人工
+命令一律以 `wheel_branch_id` 作为生命周期身份。pending branch 的 generation hash 覆盖 branch、
+source assignment、数量分配、parent facts 和当前决定，并在同一读面暴露；候选 linkage input hash 的
+完整来源也必须可读，不能只返回不可解释的 hash。
+
+CLI 在现有 `./om wheel` 下增加 branch start，并扩展 end、intent 和 linkage 接受
+`wheel_branch_id`。所有写入默认 preview；broker read 可用于 preview 事实核对，但不得产生外部 mutation。
+apply 时要求 confirm、request ID、actor、expected generation/input hash，并在同一 SQLite 事务内重读
+与校验；任何 Wheel 操作都不获得 broker mutation 权限。
+
+### 13.6 策略、配置和容量
+
+Wheel policy 演进为市场级独立 `wheel.call` 和 `wheel.put` 子配置。两侧分别保存 DTE、收益、流动性、
+IV/RV 和 `min_abs_delta` / `max_abs_delta`；初始 Delta 均为 `0.25` / `0.35`。解析优先级固定为：嵌套 v2
+显式值覆盖 Wheel 自有 defaults；legacy 平铺字段只迁移 Call 的公共字段，已废弃的 `min_delta` 不得覆盖
+新的绝对 Delta 区间。Put 初始 defaults 在代码中从 canonical CSP defaults 复制一次，此后不得在运行时
+联动普通 CSP；现有 Call 从下一次有效扫描起同样强制使用 `0.25 <= abs(delta) <= 0.35`。配置构建、
+resolved policy 和真实 scan 必须由同一组测试串联验证。
+
+自动 child 的唯一启停真源是 SQLite 中最小的 market/account-scoped `wheel_activation_windows`，每行
+保存 `market`、`account`、单调递增 `generation`、`activated_at_ms`、可空 `deactivated_at_ms` 和 policy
+hash；每个 `(market, account)` 至多一个 open window，窗口不可删除、不可重叠，US/HK 同名账户完全隔离。
+唯一允许的历史更新是同一事务将 open row 的
+`deactivated_at_ms` 从 NULL 设置一次；其他字段和已关闭边界均不可修改。时间使用 UTC epoch
+milliseconds，并与 authoritative event `occurred_at_ms` 使用同一规范化时间域；active window 两端采用
+`activated_at_ms <= occurred_at_ms < deactivated_at_ms`，open window 只有 inclusive 下界。
+
+`config.yaml` 仍是人工 authoring source，但 boolean/current timestamp 不能替代启停历史。additive schema
+保留每个 market runtime config 的现有 `wheel.accounts: [lx, ...]` 列表，并新增
+`wheel.activation_by_account.<account> = {generation, activated_at_ms, deactivated_at_ms}`；resolver 将当前
+market 与 descriptor 组合成期望 `(market, account)` window。旧配置缺少该 block 时只允许既有 branch
+读、投影和终态处理，当前扫描/start/new intent 保持关闭；ordinary assignment 是否建立 branch 仍只按
+durable historical window 的 event time 判断，不能由当前 config 补猜。
+
+受控的 `./om wheel activation --market <us|hk> --account <account>` operator workflow 以 preview、confirm、
+expected current generation、request ID、事务 readback 和 receipt 开启/关闭 window；它只写本地 Wheel
+policy state，不交易、不补建 branch。请求、receipt、policy hash、branch payload 和 writer transaction
+均绑定同一 `(market, account)`，writer 还必须从 source symbol/contract 复核 market。
+
+静态 config build/validator 保持纯函数，只验证 descriptor shape、market/account、generation、timestamp
+顺序和 policy hash 可重算性，不读取 SQLite。现有 runtime status/healthcheck readiness owner 比较 resolved
+descriptor 与 durable current window，并给出 `missing_window`、`descriptor_mismatch`、`closed_window` 等
+明确 reason。该 current readiness 只 gate 当前监控动作，不覆盖历史 event-time eligibility；writer 不得
+因观察到配置变化而隐式创建、关闭或改写 window。
+
+安全 rollout 的前提是 v2-compatible binary、readiness 和双 writer gate 已部署，旧 v1 writer 已停止并
+完成进程/版本核验；否则不得创建 window。首次启用/重启用由 operator 在成功 SQLite transaction 中
+分配不可由 caller 指定或回填的 `activated_at_ms`，readback/receipt 再产出 exact descriptor。随后安装该
+market config；在 descriptor 缺失或不匹配期间，current scan/start/new intent 始终 fail closed。禁用由
+operator 在 transaction 中一次写入 `deactivated_at_ms`，立即关闭 current actions，readback 再产出 closed
+descriptor 供安装。任一步崩溃或双进程 config skew 都保持 current actions 关闭，重试靠 request ID/
+readback 幂等恢复。re-enable 必须显式创建更大 generation 和更晚
+`activated_at_ms`；复用旧 generation/timestamp、删除旧 window 或改写边界一律拒绝。该生产 state/config
+迁移属于后续独立授权，不由当前设计或实现测试触发。
+
+两个真实 writer owner `src/application/ledger/writer_trade_events.py`、
+`src/application/ledger/writer_lifecycle_allocation.py` 及其共享 companion hook 都接收同一份 immutable
+market/account window history，并在各自 SQLite 事务内重读。普通 CSP/CC assignment 只按
+`(market, account, occurred_at_ms)` 在全部 immutable historical windows 中唯一命中 generation：命中一行
+即使该 row 后来已关闭或当前已是更高 generation，也创建 active bootstrap child；零行表示启用前或
+closed-window gap，永久不补建；多行是 schema conflict。来源 timestamp 缺失时 fail closed，禁止用入库、
+部署、首次启动或当前时间补猜。branch 的 hash-bound payload 记录实际命中的 generation、window bounds
+和 policy hash，因此迟到入库、逆序 writer 和 replay 对同一事实得到同一结果。
+
+既有 Wheel branch 的真实 assignment 不属于普通自动入口：无论 current window 是否 open，都必须在同一
+事务记录 parent conversion，并只为实际转换量创建 `pending_decision` child；它不自动开始监控。current
+window/descriptor action matrix 固定为：
+
+| 动作 | 是否要求 current open window 与 descriptor 精确匹配 |
+|---|---|
+| 普通 CSP/CC assignment bootstrap | 否；只按 historical event-time window |
+| 既有 Wheel assignment 的 parent conversion + pending child | 否 |
+| projection/read、物理容量、open lot close/expire/assignment、source void/reconciliation | 否 |
+| linkage confirm/reject、existing intent consume/cancel/expire、branch end | 否 |
+| pending branch start、required-data/candidate scan、新 intent create | 是 |
+
+公开读面额外输出 `monitoring_gate=enabled|disabled|config_mismatch`。新候选 required-data planning 只服务
+enabled 的 active non-conflict branch，并可把可恢复的 market-data unavailable 更新为完整事实；candidate
+generation 仅在 `lifecycle_status=active`、`phase=ready` 且 `monitoring_gate=enabled` 时运行。
+disabled/config mismatch 时继续展示 branch、pending 决定、真实仓位和终态，但不拉取该 branch 的新候选
+required-data、不推荐、不创建新 intent；pending `end` 仍允许，`start` 明确拒绝。生产配置迁移和实际启用
+必须另获授权。
+
+扫描继续使用同一 required-data plan、冻结行情和 Candidate Engine。Call 保留当前本金底线及生命周期
+净收益排序，只将 Delta 改为绝对区间。Put 复用 canonical Put 的公共 opening policy、费用和现金事实，
+在 Wheel domain 层只增加：
+
+```text
+strike * assignment_shares + estimated_assignment_fees
+  <= allocated_prior_stock_sale_net_proceeds
+
+strike <= live_spot
+
+replenishment_cash_remainder
+  = allocated_prior_stock_sale_net_proceeds
+  - projected_assignment_total
+  + realized_put_net_pnl_in_current_stage
+  + candidate_put_net_premium
+```
+
+硬约束通过后按 `replenishment_cash_remainder` 降序，再复用 Put 侧既有稳定次级排序。Delta、现价、
+multiplier、费用、币种或本金锚缺失时返回 `data_unavailable`；硬条件完整但无合约通过时返回
+`no_candidate`。
+
+`domain/domain/risk_capacity.py` 是唯一生产 Put 现金 allocator。它消费同一冻结事实集：物理账户 cash
+authority、`cash_by_currency`、已有 cash-secured positions、active Wheel Put intents、当前 ordinary CSP
+最终推荐 claims、当前 Wheel Put claims 和冻结 FX。为保持 A14 和普通 CSP 既有行为，ordinary CSP 最终
+推荐及其 output 完全不变，并作为 immutable prior claims 先占用；allocator 只从剩余容量稳定 grant
+Wheel Put，不在本任务修复 ordinary CSP recommendation 之间已有的非加和行为。
+
+pool 是 account-wide；跨币种 claim 复用现有 currency conversion contract，FX 缺失 fail closed。
+capacity snapshot hash 必须覆盖 account authority、cash、cash-secured positions、ordinary claims、
+Wheel intents 和 FX。容量 claim 按既有 CSP 口径 `strike * multiplier * contracts`；estimated assignment
+fees 只属于 Wheel price-budget 硬约束，不重复计入 cash-secured reservation。intent create/consume/
+cancel 都在事务内重读全部 reservation，并校验 capacity hash、currency 和 amount。历史股票卖出净收入
+只决定 Wheel Put 价格预算，绝不加入物理现金。
+
+当前 Tick 对多个 Put 分支使用该单一现金池做稳定 grant，不能让每个候选各自重复显示全部现金。Call
+继续使用现有账户+标的股票覆盖池。候选推荐本身只在冻结快照内分配展示额度，不形成持久 broker 或
+ledger 预留；只有显式 intent 才持久预留相应股票或现金。
+
+新双向 run 只产一份 sealed `wheel_candidate_snapshot.v2.json`，schema 为
+`wheel_candidate_snapshot.v2`。其 `scope_results` 数据 scope 以 `(symbol, direction)` 唯一，branch
+batch/claim 以 `(wheel_branch_id, direction)` 唯一，并绑定 projection、policy、required-data、capacity
+allocation、authority/cash/FX hash 和 intent input hash。
+
+同一身份贯穿 upstream producer：新 Wheel status 使用 `strategy_scan_status.v2`，文件名
+`<symbol>_wheel_<direction>_scan_status.v2.json`；新 index 使用
+`strategy_scan_status_index.v4.json`/`strategy_scan_status_index.v4`；新 live manifest 使用
+`candidate_snapshot_manifest.v3.json`/`candidate_snapshot_manifest.v3`。四者的 status path、index key、
+expected rows、manifest owner/schema projection 和 Daily Brief linkage 均使用
+`(symbol, strategy_family=wheel, direction)`。非 Wheel family 不升级其 per-scope identity；现有 experience
+`candidate_snapshot_manifest.v2` 保持原合同，不被本次复用或改写。
+
+新 Wheel writer 只产上述新版本；新 manifest v3/index v4 继续接纳非 Wheel family 的既有 status/snapshot
+schema，只对 Wheel owner 要求 status v2/snapshot v2。新 reader dual-read：合法 legacy live bundle
+`wheel_candidate_snapshot.v1` + `strategy_scan_status.v1` + index v2/v3 + manifest v1 适配为
+`direction=call` 和 legacy branch identity；新 bundle 必须符合 manifest v3 声明的 per-owner version
+matrix。Wheel v1 artifact 出现在新 manifest，或 Wheel v2 artifact 出现在 legacy manifest，均以明确
+`artifact_version_mismatch` fail closed；旧 binary 不要求读取新双向 artifacts。strict manifest、
+archive、candidate evidence history、Agent candidate explain 和 Daily Brief loader 同步更新 owner schema/
+filename matrix 与 content hash 校验，不能覆盖旧 sealed file。一侧 failure/data unavailable 只污染该
+direction scope。Daily Brief 在现有 Wheel 区块区分 Call、Put、pending decision、合法等待和
+data unavailable，不新增 scheduler 或通知通道。
+
+### 13.7 Owner 和端到端数据流
+
+| 责任 | 设计 owner |
+|---|---|
+| 分支事件、状态、经济分摊、Call/Put 策略和排序 | `domain/domain/wheel.py` |
+| 普通 CC/CSP canonical membership 与冲突识别 | `domain/domain/strategy_membership.py` |
+| 事件表/activation windows 迁移、append、读取和原子 trade companion | `src/application/ledger/repository_core.py`、`src/application/ledger/repository_assigned_stock.py`、`src/application/ledger/wheel_trade_companions.py` |
+| 两条 trade writer 的账户启用 policy 与事务重校验 | `src/application/ledger/writer_trade_events.py`、`src/application/ledger/writer_lifecycle_allocation.py`、共享 companion hook |
+| 一致性投影与公开读模型 | `src/application/wheel/read_model.py` |
+| branch 决定、activation、intent、linkage 和 CAS | `src/application/wheel/workflows.py` |
+| 两侧配置构建与验证 | `src/application/wheel/config.py`、`src/application/config_yaml.py`、`src/application/config_validator.py` |
+| activation descriptor/window readiness | `src/application/agent_tools/runtime_status_impl.py`、`src/application/healthcheck.py` |
+| 两侧扫描、快照和股票/现金 grant | `src/application/wheel/scanning.py`、`src/application/wheel/candidate_snapshot.py`、`src/application/wheel/capacity.py`；唯一 Put 现金 allocator 为 `domain/domain/risk_capacity.py` |
+| 现有 tick、direction-aware status、required-data、manifest 和 Daily Brief 集成 | `src/application/pipeline_watchlist.py`、`src/application/strategy_scan_status.py`、`src/application/required_data_prefetch_planning.py`、`src/application/candidate_snapshot_manifest.py`、`src/application/daily_decision_brief_service.py`、`src/application/daily_decision_brief_renderer.py` |
+| sealed artifact legacy/new dual-read | `src/application/candidate_evidence_history.py`、`src/application/research/archive.py`、`src/application/agent_tools/candidate.py`、`src/application/agent_tools/candidate_filter_impl.py`、`src/application/agent_tools/candidate_rank_impl.py` |
+| 人工与 Agent facade | `src/interfaces/cli/wheel.py`、`src/application/agent_tools/positions.py` |
+
+权威数据流：
+
+```text
+broker/manual confirmed trade
+-> trade writer transaction
+-> trade event + position/assigned-stock/cash facts
+-> Wheel companion event
+-> one Wheel branch projection
+-> existing required-data plan and frozen quotes
+-> direction-specific policy + shared physical capacity grant
+-> one sealed Wheel snapshot
+-> option_positions_read / CLI / Daily Brief
+```
+
+意图链：
+
+```text
+sealed candidate -> preview/confirmed local intent -> user trades at broker
+-> confirmed fill -> unique intent match and revalidation
+-> atomic lot attribution + intent consumption -> projection/readback
+```
+
+### 13.8 失败和恢复语义
+
+- assignment、交割方向、实际数量、multiplier、费用、币种、来源 lot 或 parent branch 不完整时，
+  不自动创建 child；保留 trade 事实并返回人工核对原因。
+- 普通 CC 仅在 canonical strategy membership 将来源 short Call 判为 `cc`、没有 Wheel/Combo/
+  relationship conflict 且股票卖出 settlement 完整时自动入口；raw `strategy` 缺失不单独阻断，存在冲突
+  metadata 则 fail closed。与 active Wheel stock lot 重叠时进入明确 conflict/manual review，不能创建
+  重复 Put child。
+- 一个 fill 同时可能属于多个 branch 时不分摊、不选择最近时间或同标的候选；实际 Call/Put 仍进入
+  股票或现金占用，直到人工确认或明确拒绝。
+- pending branch 未决定时不扫描；start/end 输入过期、generation 变化或与既有决定冲突时不写入。
+- 历史卖出预算成立但当前现金不足时不得给可执行 Put 推荐；当前现金充足但本金锚不成立时同样等待。
+- 关闭 durable activation window 后，停止 current scan/start/new intent，但继续记录既有 Wheel branch 的
+  internal assignment、pending child、close/expire、void、reconciliation 和真实物理占用。普通入口只按
+  source event 是否命中 historical window 判定：启用前/gap 永不补建，历史 active interval 内的迟到事实
+  仍确定性建立 branch，但在 current gate disabled 时不扫描。“关闭后不启动新 lifecycle”按 source
+  event time 解释；关闭后才入库的 pre-close fact 是完成已获准区间的事实，不是 post-disable 新入口。
+- source assignment 后续被 void 时，branch 进入显式 conflict，相关金额投影停止为 data unavailable 并走
+  受控 repair；不得静默删除 child、自动重分摊、篡改 append-only facts 或自动复活父分支。
+- schema commit 前，SQLite 迁移、trade event 和 Wheel companion 任一步失败都回滚同一事务；重试使用
+  确定性 ID 和 versioned payload hash 得到一个结果。首个 v2 事件写入后的恢复只允许 v2-compatible
+  rollback/readback 或前向修复。
+- Wheel projection、scan 或 snapshot 失败只影响对应 Wheel scope；共享容量事实不可信时停止受影响的
+  新 Call/Put 推荐，不删除其他策略结果。
+- legacy projection 明确保留 `wheel_called_away -> called_away`、`wheel_manual_ended -> manual_ended`；
+  v2 全量转换使用 `converted`，且 legacy 终态不合成 CSP child。
+
+### 13.9 实现组成
+
+1. **双向持久生命周期与 facade**：包含 versioned event/schema migration 的全部事件类型与 CHECK、
+   durable activation windows/operator workflow、market/account historical eligibility 与 current action gate、
+   双 writer 事务传播、branch projection、
+   普通双入口、Wheel 内部 pending/start/end、部分数量与经济分摊、公开
+   `wheel_branches` read v3、CLI/Agent preview-confirm-CAS、两个 writer hooks、legacy open Call adapter 和
+   v2-compatible rollback；A03/A04 可从公开 facade 完整验证，不只停在内部事件层。
+2. **Wheel Put 推荐与共享容量**：包含 v2 Call/Put scanning config/policy、绝对 Delta 区间、Put 本金/排序、唯一现金
+   allocator、现金 intent 预留、当轮 grant、direction-aware strategy status producer/index、strict manifest
+   contract 和 sealed snapshot v2；由 A07～A08、A13～A16 验证。
+3. **Tick 与 operator 闭环**：接入 required-data、status/manifest runtime、tick 和 Daily Brief，覆盖四种转换、
+   歧义归属、rollback 和 Wheel-disabled 端到端回归。
+
+各组成保持普通 CSP/CC 候选与账本行为不变，并通过各自的 facade 级测试。
+三个组成共同构成一次产品交付，任何单项都不得独立 release 或生产启用；全部验证且另获 release/
+activation 授权前，v2 automatic writer policy 必须保持 disabled。
+
+### 13.10 验证计划
+
+实现时先运行最小拥有者测试：
+
+```bash
+./.venv/bin/python -m pytest \
+  tests/test_wheel_strategy.py \
+  tests/test_wheel_scanning.py \
+  tests/test_wheel_workflows.py \
+  tests/test_wheel_tick_integration.py \
+  tests/test_wheel_candidate_snapshot.py \
+  tests/test_wheel_cli.py \
+  tests/test_wheel_agent_tools.py \
+  tests/test_config_yaml.py \
+  tests/test_candidate_engine_contract.py
+```
+
+再覆盖相邻真实链路：
+
+```bash
+./.venv/bin/python -m pytest \
+  tests/test_ledger_projection.py \
+  tests/test_ledger_sqlite_workflows.py \
+  tests/test_trades_lifecycle_runtime.py \
+  tests/test_trades_auto_intake_audit.py \
+  tests/test_risk_capacity.py \
+  tests/test_strategy_scan_status.py \
+  tests/test_candidate_snapshot_manifest.py \
+  tests/test_candidate_evidence_history.py \
+  tests/test_runtime_status_cli.py \
+  tests/test_research_archive.py \
+  tests/test_required_data_fetch_planning.py \
+  tests/test_daily_decision_brief_domain.py \
+  tests/test_daily_decision_brief_renderer.py
+```
+
+新增测试必须覆盖 A01～A16，尤其包括：v1 replay 与重算 hash 完全相同、v2 append/tamper rejection、
+一次 migration 的全部事件 CHECK、v2 写入后 compatible rollback/readback；durable activation window 首次
+启用、inclusive 边界、disable gap、迟到事实、re-enable generation、防旧 timestamp 复用、同账户 US/HK
+隔离；config validate/build 无 DB、descriptor/window 每个 rollout 中间态的 readiness reason、崩溃恢复、
+重复 request 和双进程 config skew；禁止 caller backdate、transaction-assigned activation timestamp、apply
+后 config 安装前发生的 ordinary event、active-window event 在 close/re-enable 后迟到入库、gap event 和
+两 writer 逆序/replay 均绑定唯一 historical generation；disabled 前后 internal partial/full assignment 均
+保留 pending child，start/scan/new intent 拒绝，end/linkage/consume/cancel/close/expire/void 继续；两个 writer
+的 policy parity 与事务 rollback；legacy open Call lot 与 output v3 顶层 Put/pending branch；
+pending generation/linkage input hash 来源；0.25/0.35 端点与缺失 Delta；显式非 100 multiplier 与禁止
+default 100；`100 + evidence`、`100 无 provenance`、非 100 authoritative、source conflict 和 manual path；
+broker-origin short Call 缺 raw strategy、显式普通 CC、Wheel/Combo/conflict membership 与
+Wheel stock overlap；同一 assignment fact set 按正序、逆序、分事务和 retry 到达时逐 child allocation、
+parent remainder、projection/hash 完全相同；唯一 cash allocator 对 ordinary CSP prior claims、FX 缺失、
+Wheel intents 和历史预算非现金的处理；Call/Put 对称 phase 的 intent/open/close/expire/partial/full/
+unresolved 转移与容量释放；同一账户/标的 Call+Put 在 status 路径/index、snapshot、manifest、Daily Brief
+中无覆盖，一侧 failure/data unavailable 不污染另一侧；legacy sealed bundle dual-read 为 Call、新 bundle
+seal/readback、old/new mixed bundle 精确拒绝、content tamper、experience manifest v2 不变、compatible
+rollback；迟到启用前事件、source void、终态重放、Wheel-disabled 和普通策略输出不变。完成 focused
+checks 后再按实际改动范围运行 repository analyze、完整测试和文档/敏感产物 guardrail。
+
+### 13.11 残余风险和发布前核实
+
+- 当前测试尚未证明所有 broker partial assignment 都会形成可唯一归属、稳定 event ID 的单 branch
+  trade event。实现必须从真实 writer contract 证明；若一个事件跨 branch，保持 fail closed。
+- 现有运行环境是否已启用 Wheel、真实启用时间和需要迁移的配置值尚未核实。该信息只影响后续配置
+  与部署计划，不允许通过当前时间或历史最早事件推断。
+- 旧 `wheel_events` 的真实数据量、SQLite 版本和迁移时长需在发布前用只读副本验证；本设计不授权
+  读取或修改生产数据库。
+- Put 现金 grant 必须证明与现有 CSP 占用使用同一物理 cash authority；若当前 owner 只能返回候选级
+  上限而不能做多 branch 分配，应只在 `domain/domain/risk_capacity.py` 补最小共享分配函数，不建立
+  第二个现金模型。
+- 实际 fees 或 cash conversion 不完整时可能让部分历史事实只能停在 data unavailable；不得用估算值
+  覆盖已发生但缺失的真实成交费用。

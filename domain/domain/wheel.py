@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from decimal import Decimal
 import math
 from typing import Any, Mapping, Sequence
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.engine.candidate_engine import build_candidate_rank_key
+from domain.domain.ledger import TradeEvent, project_trade_events
+from domain.domain.symbol_identity import symbol_market
 from domain.domain.trade_execution import futu_order_namespace_issue
 
 
-WHEEL_EVENT_TYPES = frozenset(
+WHEEL_EVENT_TYPES_V1 = frozenset(
     {
         "wheel_started",
         "wheel_manual_ended",
@@ -21,8 +24,20 @@ WHEEL_EVENT_TYPES = frozenset(
         "wheel_event_voided",
     }
 )
-WHEEL_EVENT_SCHEMA = "wheel_event.v1"
-WHEEL_PROJECTION_SCHEMA = "wheel_projection.v1"
+WHEEL_EVENT_TYPES = WHEEL_EVENT_TYPES_V1 | frozenset(
+    {
+        "wheel_branch_created",
+        "wheel_branch_decided",
+        "wheel_put_intent_created",
+        "wheel_put_intent_cancelled",
+        "wheel_put_intent_consumed",
+        "wheel_put_linkage_rejected",
+    }
+)
+WHEEL_EVENT_SCHEMA_V1 = "wheel_event.v1"
+WHEEL_EVENT_SCHEMA_V2 = "wheel_event.v2"
+WHEEL_EVENT_SCHEMA = WHEEL_EVENT_SCHEMA_V2
+WHEEL_PROJECTION_SCHEMA = "wheel_projection.v2"
 
 
 def _finite_float(value: Any) -> float | None:
@@ -33,6 +48,35 @@ def _finite_float(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if math.isfinite(number) else None
+
+
+def _wheel_market(value: Mapping[str, Any] | str) -> str:
+    symbol = value.get("symbol") if isinstance(value, Mapping) else value
+    market = str(symbol_market(symbol) or "").strip().lower()
+    declared = (
+        str(value.get("market") or "").strip().lower()
+        if isinstance(value, Mapping)
+        else ""
+    )
+    if market not in {"us", "hk"} or declared not in {"", market}:
+        raise ValueError("Wheel symbol market is invalid")
+    return market
+
+
+def _wheel_abs_delta_bounds(
+    wheel_policy: Mapping[str, Any],
+) -> tuple[float | None, float | None]:
+    minimum = _finite_float(wheel_policy.get("min_abs_delta", 0.25))
+    maximum = _finite_float(wheel_policy.get("max_abs_delta", 0.35))
+    if (
+        minimum is None
+        or maximum is None
+        or minimum < 0
+        or maximum > 1
+        or minimum > maximum
+    ):
+        return None, None
+    return minimum, maximum
 
 
 def evaluate_wheel_call_candidate(
@@ -66,7 +110,7 @@ def evaluate_wheel_call_candidate(
     realized_stock = _finite_float(batch.get("realized_prior_stock_sale_net_pnl"))
     fee_amount = _finite_float(stock_exit_fee_fact.get("amount"))
     fee_basis = str(stock_exit_fee_fact.get("basis") or "").strip().lower()
-    min_delta = _finite_float(wheel_policy.get("min_delta"))
+    min_abs_delta, max_abs_delta = _wheel_abs_delta_bounds(wheel_policy)
     for field, value in (
         ("multiplier_unavailable", multiplier),
         ("delta_unavailable", delta),
@@ -79,7 +123,8 @@ def evaluate_wheel_call_candidate(
         ("realized_prior_call_net_pnl_unavailable", realized_calls),
         ("realized_prior_stock_sale_net_pnl_unavailable", realized_stock),
         ("stock_exit_fee_unavailable", fee_amount),
-        ("wheel_min_delta_unavailable", min_delta),
+        ("wheel_abs_delta_bounds_unavailable", min_abs_delta),
+        ("wheel_abs_delta_bounds_unavailable", max_abs_delta),
     ):
         if value is None:
             unavailable.append(field)
@@ -104,15 +149,19 @@ def evaluate_wheel_call_candidate(
     assert realized_calls is not None
     assert realized_stock is not None
     assert fee_amount is not None
-    assert min_delta is not None
+    assert min_abs_delta is not None
+    assert max_abs_delta is not None
     multiplier_int = int(multiplier)
     if multiplier_int <= 0 or multiplier != multiplier_int:
         unavailable.append("multiplier_unavailable")
     covered_shares = contract_count * multiplier_int
     if covered_shares <= 0 or covered_shares > int(shares_remaining):
         reasons.append("wheel_batch_capacity_insufficient")
-    if delta < min_delta:
-        reasons.append("wheel_call_delta_below_min")
+    absolute_delta = abs(delta)
+    if absolute_delta < min_abs_delta:
+        reasons.append("wheel_call_abs_delta_below_min")
+    if absolute_delta > max_abs_delta:
+        reasons.append("wheel_call_abs_delta_above_max")
     if strike < spot:
         reasons.append("wheel_call_strike_below_spot")
     if shares_remaining <= 0 or remaining_basis < 0 or spot <= 0:
@@ -166,6 +215,165 @@ def evaluate_wheel_call_candidate(
     return result
 
 
+def evaluate_wheel_put_candidate(
+    branch: Mapping[str, Any],
+    normalized_candidate: Mapping[str, Any],
+    wheel_policy: Mapping[str, Any],
+    stock_assignment_fee_fact: Mapping[str, Any],
+    contracts: int,
+) -> dict[str, Any]:
+    """Apply only Wheel Put replenishment economics after common Put policy."""
+
+    result = dict(normalized_candidate)
+    reasons: list[str] = []
+    unavailable: list[str] = []
+    try:
+        contract_count = _positive_int(contracts, "contracts")
+    except ValueError:
+        contract_count = 0
+        unavailable.append("contracts_unavailable")
+    multiplier = _finite_float(result.get("multiplier"))
+    delta = _finite_float(result.get("delta"))
+    strike = _finite_float(result.get("strike"))
+    spot = _finite_float(result.get("spot"))
+    net_premium_per_contract = _finite_float(
+        result.get("net_premium", result.get("net_income"))
+    )
+    principal_anchor_total = _finite_float(
+        branch.get(
+            "allocated_prior_stock_sale_net_proceeds",
+            branch.get("principal_anchor"),
+        )
+    )
+    remaining_contracts = _finite_float(branch.get("remaining_contracts"))
+    branch_multiplier = _finite_float(branch.get("multiplier"))
+    realized_put = _finite_float(
+        branch.get("realized_put_net_pnl_in_current_stage")
+    )
+    fee_amount = _finite_float(stock_assignment_fee_fact.get("amount"))
+    fee_basis = str(stock_assignment_fee_fact.get("basis") or "").strip().lower()
+    candidate_currency = str(result.get("currency") or "").strip().upper()
+    branch_currency = str(branch.get("currency") or "").strip().upper()
+    min_abs_delta, max_abs_delta = _wheel_abs_delta_bounds(wheel_policy)
+    for field, value in (
+        ("multiplier_unavailable", multiplier),
+        ("delta_unavailable", delta),
+        ("strike_unavailable", strike),
+        ("spot_unavailable", spot),
+        ("candidate_net_premium_unavailable", net_premium_per_contract),
+        ("principal_anchor_unavailable", principal_anchor_total),
+        ("remaining_contracts_unavailable", remaining_contracts),
+        ("branch_multiplier_unavailable", branch_multiplier),
+        ("realized_put_net_pnl_unavailable", realized_put),
+        ("stock_assignment_fee_unavailable", fee_amount),
+        ("wheel_abs_delta_bounds_unavailable", min_abs_delta),
+        ("wheel_abs_delta_bounds_unavailable", max_abs_delta),
+    ):
+        if value is None:
+            unavailable.append(field)
+    if fee_basis not in {"actual", "estimated"}:
+        unavailable.append("stock_assignment_fee_unavailable")
+    if not candidate_currency or not branch_currency:
+        unavailable.append("currency_unavailable")
+    elif candidate_currency != branch_currency:
+        unavailable.append("currency_mismatch")
+    if unavailable:
+        return {
+            **result,
+            "accepted": False,
+            "wheel_candidate_status": "data_unavailable",
+            "reason_codes": sorted(set(unavailable)),
+        }
+
+    assert multiplier is not None
+    assert delta is not None
+    assert strike is not None
+    assert spot is not None
+    assert net_premium_per_contract is not None
+    assert principal_anchor_total is not None
+    assert remaining_contracts is not None
+    assert branch_multiplier is not None
+    assert realized_put is not None
+    assert fee_amount is not None
+    assert min_abs_delta is not None
+    assert max_abs_delta is not None
+    multiplier_int = int(multiplier)
+    if (
+        multiplier_int <= 0
+        or multiplier != multiplier_int
+        or branch_multiplier != multiplier
+    ):
+        unavailable.append("multiplier_unavailable")
+    remaining_contracts_int = int(remaining_contracts)
+    if (
+        remaining_contracts_int <= 0
+        or remaining_contracts != remaining_contracts_int
+        or contract_count > remaining_contracts_int
+    ):
+        unavailable.append("remaining_contracts_unavailable")
+    if strike <= 0 or spot <= 0 or principal_anchor_total < 0 or fee_amount < 0:
+        unavailable.append("wheel_put_economics_invalid")
+    assignment_shares = contract_count * multiplier_int
+    if assignment_shares <= 0:
+        unavailable.append("contracts_unavailable")
+    if unavailable:
+        return {
+            **result,
+            "accepted": False,
+            "wheel_candidate_status": "data_unavailable",
+            "reason_codes": sorted(set(unavailable)),
+        }
+
+    absolute_delta = abs(delta)
+    if absolute_delta < min_abs_delta:
+        reasons.append("wheel_put_abs_delta_below_min")
+    if absolute_delta > max_abs_delta:
+        reasons.append("wheel_put_abs_delta_above_max")
+    if strike > spot:
+        reasons.append("wheel_put_strike_above_spot")
+    allocated_principal_anchor = (
+        principal_anchor_total * contract_count / remaining_contracts_int
+    )
+    projected_assignment_total = strike * assignment_shares + fee_amount
+    if projected_assignment_total > allocated_principal_anchor:
+        reasons.append("wheel_put_principal_anchor_exceeded")
+    candidate_premium = net_premium_per_contract * contract_count
+    replenishment_cash_remainder = (
+        allocated_principal_anchor
+        - projected_assignment_total
+        + realized_put
+        + candidate_premium
+    )
+    result.update(
+        {
+            "accepted": not reasons,
+            "wheel_candidate_status": "accepted" if not reasons else "rejected",
+            "reason_codes": sorted(set(reasons)),
+            "contracts": contract_count,
+            "candidate_assignment_shares": assignment_shares,
+            "allocated_prior_stock_sale_net_proceeds": round(
+                allocated_principal_anchor,
+                6,
+            ),
+            "estimated_stock_assignment_fees": round(fee_amount, 6),
+            "stock_assignment_fee_basis": fee_basis,
+            "projected_assignment_total": round(projected_assignment_total, 6),
+            "realized_put_net_pnl_in_current_stage": round(realized_put, 6),
+            "candidate_put_net_premium": round(candidate_premium, 6),
+            "replenishment_cash_remainder": round(
+                replenishment_cash_remainder,
+                6,
+            ),
+            "cash_reservation_amount": round(
+                strike * multiplier_int * contract_count,
+                6,
+            ),
+            "cash_reservation_currency": candidate_currency,
+        }
+    )
+    return result
+
+
 def build_wheel_call_rank_key(evaluated_candidate: Mapping[str, Any]) -> dict[str, Any]:
     lifecycle_pnl = _finite_float(
         evaluated_candidate.get("projected_lifecycle_net_pnl_if_called")
@@ -178,6 +386,20 @@ def build_wheel_call_rank_key(evaluated_candidate: Mapping[str, Any]) -> dict[st
             lifecycle_pnl is None,
             -float(lifecycle_pnl or 0.0),
             *tuple(call_key["sort_tuple"]),
+        ),
+    }
+
+
+def build_wheel_put_rank_key(evaluated_candidate: Mapping[str, Any]) -> dict[str, Any]:
+    remainder = _finite_float(evaluated_candidate.get("replenishment_cash_remainder"))
+    put_key = build_candidate_rank_key(dict(evaluated_candidate), mode="put")
+    return {
+        "replenishment_cash_remainder": remainder,
+        "sell_put_rank_key": put_key,
+        "sort_tuple": (
+            remainder is None,
+            -float(remainder or 0.0),
+            *tuple(put_key["sort_tuple"]),
         ),
     }
 
@@ -205,9 +427,13 @@ def wheel_event_payload_hash(event: Mapping[str, Any]) -> str:
     payload = event.get("payload")
     if not isinstance(payload, Mapping):
         raise ValueError("wheel event payload must be an object")
-    return canonical_sha256(
-        {
-            "schema_version": WHEEL_EVENT_SCHEMA,
+    schema_version = str(
+        event.get("event_schema_version") or WHEEL_EVENT_SCHEMA_V1
+    ).strip()
+    if schema_version not in {WHEEL_EVENT_SCHEMA_V1, WHEEL_EVENT_SCHEMA_V2}:
+        raise ValueError(f"unsupported wheel event schema: {schema_version}")
+    canonical = {
+            "schema_version": schema_version,
             "account": str(event.get("account") or "").strip().lower(),
             "stock_lot_id": str(event.get("stock_lot_id") or "").strip(),
             "event_type": str(event.get("event_type") or "").strip().lower(),
@@ -218,7 +444,14 @@ def wheel_event_payload_hash(event: Mapping[str, Any]) -> str:
             ),
             "payload": dict(payload),
         }
-    )
+    if schema_version == WHEEL_EVENT_SCHEMA_V2:
+        canonical["wheel_branch_id"] = str(
+            event.get("wheel_branch_id") or ""
+        ).strip()
+        canonical["stock_lot_id"] = (
+            str(event.get("stock_lot_id") or "").strip() or None
+        )
+    return canonical_sha256(canonical)
 
 
 def normalize_wheel_event(event: Mapping[str, Any]) -> dict[str, Any]:
@@ -228,9 +461,30 @@ def normalize_wheel_event(event: Mapping[str, Any]) -> dict[str, Any]:
     account = _required_text(event.get("account"), "account")
     if account != account.lower():
         raise ValueError("wheel event account must be lowercase")
-    stock_lot_id = _required_text(event.get("stock_lot_id"), "stock_lot_id")
+    event_schema_version = str(
+        event.get("event_schema_version") or WHEEL_EVENT_SCHEMA_V1
+    ).strip()
+    if event_schema_version not in {WHEEL_EVENT_SCHEMA_V1, WHEEL_EVENT_SCHEMA_V2}:
+        raise ValueError(
+            f"unsupported wheel event schema: {event_schema_version}"
+        )
+    stock_lot_id = str(event.get("stock_lot_id") or "").strip() or None
+    if event_schema_version == WHEEL_EVENT_SCHEMA_V1 and stock_lot_id is None:
+        raise ValueError("wheel event requires stock_lot_id")
+    wheel_branch_id = str(event.get("wheel_branch_id") or "").strip()
+    if event_schema_version == WHEEL_EVENT_SCHEMA_V1:
+        if wheel_branch_id and wheel_branch_id != stock_lot_id:
+            raise ValueError("wheel_event.v1 branch must equal stock_lot_id")
+        wheel_branch_id = str(stock_lot_id)
+    else:
+        wheel_branch_id = _required_text(wheel_branch_id, "wheel_branch_id")
     event_type = _required_text(event.get("event_type"), "event_type").lower()
-    if event_type not in WHEEL_EVENT_TYPES:
+    allowed_types = (
+        WHEEL_EVENT_TYPES_V1
+        if event_schema_version == WHEEL_EVENT_SCHEMA_V1
+        else WHEEL_EVENT_TYPES
+    )
+    if event_type not in allowed_types:
         raise ValueError(f"unsupported wheel event type: {event_type}")
     occurred_at_ms = _positive_int(event.get("occurred_at_ms"), "occurred_at_ms")
     recorded_at_ms = _positive_int(event.get("recorded_at_ms"), "recorded_at_ms")
@@ -241,13 +495,26 @@ def normalize_wheel_event(event: Mapping[str, Any]) -> dict[str, Any]:
     source_trade_event_id = (
         str(event.get("source_trade_event_id") or "").strip() or None
     )
-    if event_type.startswith("wheel_call_intent_") and not intent_id:
+    if (
+        event_type.startswith("wheel_call_intent_")
+        or event_type.startswith("wheel_put_intent_")
+    ) and not intent_id:
         raise ValueError(f"{event_type} requires intent_id")
+    if event_type == "wheel_branch_created":
+        direction = str(payload.get("direction") or "").strip().lower()
+        if direction not in {"call", "put"}:
+            raise ValueError("wheel_branch_created requires direction=call|put")
+    if event_type == "wheel_branch_decided":
+        decision = str(payload.get("decision") or "").strip().lower()
+        if decision not in {"start", "end"}:
+            raise ValueError("wheel_branch_decided requires decision=start|end")
     if event_type == "wheel_event_voided":
         _required_text(payload.get("target_wheel_event_id"), "target_wheel_event_id")
     normalized = {
         "event_id": event_id,
+        "event_schema_version": event_schema_version,
         "account": account,
+        "wheel_branch_id": wheel_branch_id,
         "stock_lot_id": stock_lot_id,
         "event_type": event_type,
         "occurred_at_ms": occurred_at_ms,
@@ -268,7 +535,9 @@ def build_wheel_event(
     *,
     event_id: str,
     account: str,
-    stock_lot_id: str,
+    stock_lot_id: str | None,
+    wheel_branch_id: str | None = None,
+    event_schema_version: str = WHEEL_EVENT_SCHEMA_V2,
     event_type: str,
     occurred_at_ms: int,
     recorded_at_ms: int,
@@ -279,7 +548,9 @@ def build_wheel_event(
     return normalize_wheel_event(
         {
             "event_id": event_id,
+            "event_schema_version": event_schema_version,
             "account": account,
+            "wheel_branch_id": wheel_branch_id or stock_lot_id,
             "stock_lot_id": stock_lot_id,
             "event_type": event_type,
             "occurred_at_ms": occurred_at_ms,
@@ -288,6 +559,173 @@ def build_wheel_event(
             "source_trade_event_id": source_trade_event_id,
             "payload": dict(payload),
         }
+    )
+
+
+def deterministic_wheel_branch_id(
+    account: str,
+    source_assignment_event_id: str,
+    direction: str,
+) -> str:
+    account_value = _required_text(account, "account").lower()
+    source_event_id = _required_text(
+        source_assignment_event_id,
+        "source_assignment_event_id",
+    )
+    direction_value = _required_text(direction, "direction").lower()
+    if direction_value not in {"call", "put"}:
+        raise ValueError("Wheel branch direction must be call or put")
+    digest = canonical_sha256(
+        {
+            "schema_version": "wheel_branch_identity.v1",
+            "account": account_value,
+            "source_assignment_event_id": source_event_id,
+            "direction": direction_value,
+        }
+    )[:32]
+    return f"wheel-{direction_value}-{digest}"
+
+
+def build_wheel_branch_created_event(
+    *,
+    account: str,
+    source_assignment_event_id: str,
+    direction: str,
+    occurred_at_ms: int,
+    recorded_at_ms: int,
+    symbol: str,
+    contracts: int,
+    multiplier: int | None,
+    multiplier_source: str,
+    multiplier_evidence_hash: str,
+    currency: str | None,
+    principal_anchor: str | None,
+    principal_anchor_reason: str | None = None,
+    principal_anchor_fact_ids: Sequence[str] = (),
+    stock_lot_id: str | None = None,
+    parent_branch_id: str | None = None,
+    lifecycle_status: str = "active",
+    activation_window: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    direction_value = _required_text(direction, "direction").lower()
+    if direction_value not in {"call", "put"}:
+        raise ValueError("Wheel branch direction must be call or put")
+    status = _required_text(lifecycle_status, "lifecycle_status").lower()
+    if status not in {"active", "pending_decision"}:
+        raise ValueError("Wheel branch lifecycle_status must be active or pending_decision")
+    account_value = _required_text(account, "account").lower()
+    source_event_id = _required_text(
+        source_assignment_event_id,
+        "source_assignment_event_id",
+    )
+    stock_lot_value = str(stock_lot_id or "").strip() or None
+    if direction_value == "call" and stock_lot_value is None:
+        raise ValueError("Wheel Call branch requires stock_lot_id")
+    branch_id = (
+        stock_lot_value
+        if direction_value == "call"
+        else deterministic_wheel_branch_id(
+            account_value,
+            source_event_id,
+            direction_value,
+        )
+    )
+    symbol_value = _required_text(symbol, "symbol").upper()
+    payload = {
+        "schema_version": "wheel_branch_created.v1",
+        "market": _wheel_market(symbol_value),
+        "direction": direction_value,
+        "parent_branch_id": str(parent_branch_id or "").strip() or None,
+        "source_assignment_event_id": source_event_id,
+        "symbol": symbol_value,
+        "contracts": _positive_int(contracts, "contracts"),
+        "multiplier": (
+            _positive_int(multiplier, "multiplier") if multiplier is not None else None
+        ),
+        "multiplier_source": _required_text(
+            multiplier_source,
+            "multiplier_source",
+        ),
+        "multiplier_evidence_hash": _required_text(
+            multiplier_evidence_hash,
+            "multiplier_evidence_hash",
+        ),
+        "currency": str(currency or "").strip().upper() or None,
+        "principal_anchor": (
+            str(principal_anchor).strip() if principal_anchor is not None else None
+        ),
+        "principal_anchor_reason": (
+            str(principal_anchor_reason or "").strip() or None
+        ),
+        "principal_anchor_fact_ids": sorted(
+            {str(value).strip() for value in principal_anchor_fact_ids if str(value).strip()}
+        ),
+        "initial_lifecycle_status": status,
+        "activation_window": dict(activation_window or {}) or None,
+    }
+    return build_wheel_event(
+        event_id=f"wheel-branch-created:{source_event_id}:{direction_value}",
+        event_schema_version=WHEEL_EVENT_SCHEMA_V2,
+        account=account_value,
+        wheel_branch_id=branch_id,
+        stock_lot_id=stock_lot_value,
+        event_type="wheel_branch_created",
+        occurred_at_ms=occurred_at_ms,
+        recorded_at_ms=recorded_at_ms,
+        source_trade_event_id=source_event_id,
+        payload=payload,
+    )
+
+
+def plan_wheel_branch_decision(
+    branch: Mapping[str, Any],
+    decision: str,
+    request_id: str,
+    actor: str,
+    expected_generation_hash: str,
+    *,
+    occurred_at_ms: int,
+    recorded_at_ms: int,
+) -> dict[str, Any]:
+    decision_value = _required_text(decision, "decision").lower()
+    if decision_value not in {"start", "end"}:
+        raise ValueError("Wheel branch decision must be start or end")
+    if branch.get("lifecycle_status") != "pending_decision":
+        raise ValueError("Wheel branch is not pending a decision")
+    expected = _required_text(
+        expected_generation_hash,
+        "expected_generation_hash",
+    )
+    if expected != str(branch.get("branch_generation_hash") or ""):
+        raise ValueError("Wheel branch generation changed")
+    account = _required_text(branch.get("account"), "account").lower()
+    branch_id = _required_text(branch.get("wheel_branch_id"), "wheel_branch_id")
+    request = _required_text(request_id, "request_id")
+    digest = canonical_sha256(
+        {
+            "schema_version": "wheel_branch_decision_request.v1",
+            "account": account,
+            "wheel_branch_id": branch_id,
+            "request_id": request,
+        }
+    )[:24]
+    return build_wheel_event(
+        event_id=f"wheel-branch-decided:{digest}",
+        event_schema_version=WHEEL_EVENT_SCHEMA_V2,
+        account=account,
+        wheel_branch_id=branch_id,
+        stock_lot_id=str(branch.get("stock_lot_id") or "").strip() or None,
+        event_type="wheel_branch_decided",
+        occurred_at_ms=occurred_at_ms,
+        recorded_at_ms=recorded_at_ms,
+        payload={
+            "schema_version": "wheel_branch_decided.v1",
+            "market": _wheel_market(branch),
+            "decision": decision_value,
+            "request_id": request,
+            "actor": _required_text(actor, "actor"),
+            "expected_generation_hash": expected,
+        },
     )
 
 
@@ -374,6 +812,7 @@ def wheel_started_event_from_assignment(
     stock_lot_id = f"assigned-stock-{event_id}"
     return build_wheel_event(
         event_id=f"wheel-started:{event_id}",
+        event_schema_version=WHEEL_EVENT_SCHEMA_V1,
         account=account,
         stock_lot_id=stock_lot_id,
         event_type="wheel_started",
@@ -450,6 +889,7 @@ def wheel_called_away_event_from_call_assignment(
     )
     return build_wheel_event(
         event_id=f"wheel-called-away:{source_event_id}:{stock_lot_id}",
+        event_schema_version=WHEEL_EVENT_SCHEMA_V1,
         account=account,
         stock_lot_id=stock_lot_id,
         event_type="wheel_called_away",
@@ -494,6 +934,11 @@ def plan_wheel_manual_end(
     )[:24]
     return build_wheel_event(
         event_id=f"wheel-manual-ended:{event_digest}",
+        event_schema_version=(
+            WHEEL_EVENT_SCHEMA_V1
+            if wheel_batch.get("legacy_call_adapter")
+            else WHEEL_EVENT_SCHEMA_V2
+        ),
         account=account_value,
         stock_lot_id=stock_lot_id,
         event_type="wheel_manual_ended",
@@ -501,6 +946,7 @@ def plan_wheel_manual_end(
         recorded_at_ms=recorded_at_ms,
         payload={
             "schema_version": "wheel_manual_ended.v1",
+            "market": _wheel_market(wheel_batch),
             "request_id": request,
             "actor": actor_value,
             "batch_generation_hash": str(
@@ -534,6 +980,111 @@ def _coverage_capacity(
         raise ValueError("Wheel Call available shares are invalid") from None
     if shares_available < contracts * multiplier:
         raise ValueError("Wheel Call coverage is insufficient")
+
+
+def build_wheel_intent_capacity_binding(
+    branch: Mapping[str, Any],
+    final_candidate: Mapping[str, Any],
+    capacity_fact: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate the immutable capacity facts bound into a new Wheel intent."""
+
+    direction = str(branch.get("direction") or "call").strip().lower()
+    if direction not in {"call", "put"}:
+        raise ValueError("Wheel intent direction must be call or put")
+    account = _required_text(branch.get("account"), "account").lower()
+    symbol = _required_text(branch.get("symbol"), "symbol").upper()
+    branch_id = _required_text(
+        branch.get("wheel_branch_id") or branch.get("stock_lot_id"),
+        "wheel_branch_id",
+    )
+    generation_hash = _required_text(
+        branch.get("branch_generation_hash") or branch.get("batch_generation_hash"),
+        "branch_generation_hash",
+    )
+    contracts = _positive_int(
+        final_candidate.get("granted_contracts"),
+        "granted_contracts",
+    )
+    multiplier = _positive_int(final_candidate.get("multiplier"), "multiplier")
+    candidate_branch_id = str(
+        final_candidate.get("wheel_branch_id")
+        or final_candidate.get("stock_lot_id")
+        or ""
+    ).strip()
+    if candidate_branch_id != branch_id:
+        raise ValueError("Wheel candidate branch mismatch")
+    if str(final_candidate.get("account") or account).strip().lower() != account:
+        raise ValueError("Wheel candidate account mismatch")
+    if str(final_candidate.get("symbol") or "").strip().upper() != symbol:
+        raise ValueError("Wheel candidate symbol mismatch")
+    candidate_generation = str(
+        final_candidate.get("branch_generation_hash")
+        or final_candidate.get("batch_generation_hash")
+        or ""
+    ).strip()
+    if candidate_generation and candidate_generation != generation_hash:
+        raise ValueError("Wheel candidate branch generation mismatch")
+    capacity_identity_hash = _required_text(
+        capacity_fact.get("capacity_identity_hash"),
+        "capacity_identity_hash",
+    )
+    candidate_capacity_hash = str(
+        final_candidate.get("capacity_identity_hash") or ""
+    ).strip()
+    if candidate_capacity_hash != capacity_identity_hash:
+        raise ValueError("Wheel candidate capacity identity mismatch")
+
+    if direction == "call":
+        _coverage_capacity(
+            capacity_fact,
+            account=account,
+            symbol=symbol,
+            contracts=contracts,
+            multiplier=multiplier,
+        )
+        return {
+            "direction": direction,
+            "wheel_branch_id": branch_id,
+            "branch_generation_hash": generation_hash,
+            "capacity_identity_hash": capacity_identity_hash,
+            "reserved_amount": contracts * multiplier,
+            "reservation_unit": "shares",
+            "currency": None,
+        }
+
+    if str(capacity_fact.get("account") or "").strip().lower() != account:
+        raise ValueError("Wheel Put cash capacity account mismatch")
+    if str(capacity_fact.get("allocation_status") or "").strip().lower() != "allocated":
+        raise ValueError("Wheel Put cash capacity is unavailable")
+    if int(capacity_fact.get("granted_contracts") or 0) < contracts:
+        raise ValueError("Wheel Put cash capacity is insufficient")
+    strike = _finite_float(final_candidate.get("strike"))
+    if strike is None or strike <= 0:
+        raise ValueError("Wheel Put candidate strike must be positive")
+    currency = _required_text(
+        final_candidate.get("cash_reservation_currency")
+        or final_candidate.get("currency"),
+        "cash_reservation_currency",
+    ).upper()
+    reserved_amount = round(strike * multiplier * contracts, 6)
+    fact_currency = str(
+        capacity_fact.get("cash_reservation_currency")
+        or capacity_fact.get("currency")
+        or ""
+    ).strip().upper()
+    fact_amount = _finite_float(capacity_fact.get("cash_reservation_amount"))
+    if fact_currency != currency or fact_amount != reserved_amount:
+        raise ValueError("Wheel Put cash reservation binding mismatch")
+    return {
+        "direction": direction,
+        "wheel_branch_id": branch_id,
+        "branch_generation_hash": generation_hash,
+        "capacity_identity_hash": capacity_identity_hash,
+        "reserved_amount": reserved_amount,
+        "reservation_unit": "cash",
+        "currency": currency,
+    }
 
 
 def plan_wheel_call_intent_create(
@@ -603,6 +1154,11 @@ def plan_wheel_call_intent_create(
     intent_id = f"wheel-call-intent:{digest}"
     return build_wheel_event(
         event_id=f"wheel-call-intent-created:{digest}",
+        event_schema_version=(
+            WHEEL_EVENT_SCHEMA_V1
+            if batch.get("legacy_call_adapter")
+            else WHEEL_EVENT_SCHEMA_V2
+        ),
         account=account,
         stock_lot_id=stock_lot_id,
         event_type="wheel_call_intent_created",
@@ -611,6 +1167,7 @@ def plan_wheel_call_intent_create(
         intent_id=intent_id,
         payload={
             "schema_version": "wheel_call_intent_created.v1",
+            "market": _wheel_market(batch),
             "request_id": request,
             "actor": actor_value,
             "final_candidate_id": candidate_id,
@@ -624,6 +1181,95 @@ def plan_wheel_call_intent_create(
             "expiration_ymd": expiration_ymd,
             "contracts": contracts,
             "multiplier": multiplier,
+            "expires_at_ms": expiry,
+            "broker_order_id": str(broker_order_id or "").strip() or None,
+        },
+    )
+
+
+def plan_wheel_put_intent_create(
+    branch: Mapping[str, Any],
+    final_candidate: Mapping[str, Any],
+    cash_capacity_fact: Mapping[str, Any],
+    expires_at_ms: int,
+    request_id: str,
+    actor: str,
+    *,
+    occurred_at_ms: int,
+    recorded_at_ms: int,
+    broker_order_id: str | None = None,
+) -> dict[str, Any]:
+    if str(branch.get("direction") or "").strip().lower() != "put":
+        raise ValueError("Wheel Put intent requires a Put branch")
+    if branch.get("lifecycle_status") != "active":
+        raise ValueError("Wheel branch is not active")
+    if branch.get("integrity_status") != "trusted":
+        raise ValueError("Wheel branch integrity is not trusted")
+    if branch.get("active_option_lot_ids") or branch.get("active_intent_ids"):
+        raise ValueError("Wheel branch already has an active Put or intent")
+    if branch.get("phase") != "ready":
+        raise ValueError("Wheel branch is not ready for a Put intent")
+    account = _required_text(branch.get("account"), "account").lower()
+    symbol = _required_text(branch.get("symbol"), "symbol").upper()
+    branch_id = _required_text(branch.get("wheel_branch_id"), "wheel_branch_id")
+    candidate_id = _required_text(
+        final_candidate.get("final_candidate_id")
+        or final_candidate.get("candidate_id"),
+        "final_candidate_id",
+    )
+    contracts = _positive_int(
+        final_candidate.get("granted_contracts"),
+        "granted_contracts",
+    )
+    multiplier = _positive_int(final_candidate.get("multiplier"), "multiplier")
+    strike = _finite_float(final_candidate.get("strike"))
+    if strike is None or strike <= 0:
+        raise ValueError("Wheel Put candidate strike must be positive")
+    expiration_ymd = _required_text(
+        final_candidate.get("expiration_ymd") or final_candidate.get("expiration"),
+        "expiration_ymd",
+    )
+    binding = build_wheel_intent_capacity_binding(
+        branch,
+        final_candidate,
+        cash_capacity_fact,
+    )
+    now = _positive_int(occurred_at_ms, "occurred_at_ms")
+    expiry = _positive_int(expires_at_ms, "expires_at_ms")
+    if expiry <= now:
+        raise ValueError("Wheel Put intent expiry must be in the future")
+    request = _required_text(request_id, "request_id")
+    actor_value = _required_text(actor, "actor")
+    digest = canonical_sha256(
+        {"account": account, "wheel_branch_id": branch_id, "request_id": request}
+    )[:24]
+    intent_id = f"wheel-put-intent:{digest}"
+    return build_wheel_event(
+        event_id=f"wheel-put-intent-created:{digest}",
+        event_schema_version=WHEEL_EVENT_SCHEMA_V2,
+        account=account,
+        wheel_branch_id=branch_id,
+        stock_lot_id=str(branch.get("stock_lot_id") or "").strip() or None,
+        event_type="wheel_put_intent_created",
+        occurred_at_ms=now,
+        recorded_at_ms=recorded_at_ms,
+        intent_id=intent_id,
+        payload={
+            "schema_version": "wheel_put_intent_created.v1",
+            "market": _wheel_market(branch),
+            "request_id": request,
+            "actor": actor_value,
+            "final_candidate_id": candidate_id,
+            "snapshot_hash": str(final_candidate.get("snapshot_hash") or "").strip(),
+            "branch_generation_hash": binding["branch_generation_hash"],
+            "capacity_identity_hash": binding["capacity_identity_hash"],
+            "symbol": symbol,
+            "strike": strike,
+            "expiration_ymd": expiration_ymd,
+            "contracts": contracts,
+            "multiplier": multiplier,
+            "cash_reservation_amount": binding["reserved_amount"],
+            "cash_reservation_currency": binding["currency"],
             "expires_at_ms": expiry,
             "broker_order_id": str(broker_order_id or "").strip() or None,
         },
@@ -661,6 +1307,11 @@ def plan_wheel_call_intent_cancel(
     )[:24]
     return build_wheel_event(
         event_id=f"wheel-call-intent-cancelled:{digest}",
+        event_schema_version=(
+            WHEEL_EVENT_SCHEMA_V1
+            if batch.get("legacy_call_adapter")
+            else WHEEL_EVENT_SCHEMA_V2
+        ),
         account=account,
         stock_lot_id=stock_lot_id,
         event_type="wheel_call_intent_cancelled",
@@ -669,6 +1320,7 @@ def plan_wheel_call_intent_cancel(
         intent_id=intent_id,
         payload={
             "schema_version": "wheel_call_intent_cancelled.v1",
+            "market": _wheel_market(batch),
             "request_id": request,
             "actor": _required_text(actor, "actor"),
             "reason": _required_text(reason, "reason"),
@@ -738,6 +1390,11 @@ def plan_wheel_call_intent_consume(
     intent_id = _required_text(intent.get("intent_id"), "intent_id")
     return build_wheel_event(
         event_id=f"wheel-call-intent-consumed:{intent_id}:{event_id}",
+        event_schema_version=(
+            WHEEL_EVENT_SCHEMA_V1
+            if batch.get("legacy_call_adapter")
+            else WHEEL_EVENT_SCHEMA_V2
+        ),
         account=str(batch.get("account") or ""),
         stock_lot_id=str(batch.get("stock_lot_id") or ""),
         event_type="wheel_call_intent_consumed",
@@ -747,6 +1404,7 @@ def plan_wheel_call_intent_consume(
         source_trade_event_id=event_id,
         payload={
             "schema_version": "wheel_call_intent_consumed.v1",
+            "market": _wheel_market(batch),
             "contracts": contracts,
             "multiplier": multiplier,
             "call_lot_id": str(event.get("lot_id") or f"lot_{event_id}"),
@@ -754,6 +1412,190 @@ def plan_wheel_call_intent_consume(
     )
 
 
+def _validate_put_intent_reservation(
+    intent_payload: Mapping[str, Any],
+    cash_capacity_fact: Mapping[str, Any],
+    *,
+    account: str,
+) -> None:
+    if str(cash_capacity_fact.get("account") or "").strip().lower() != account:
+        raise ValueError("Wheel Put cash capacity account mismatch")
+    expected_hash = _required_text(
+        intent_payload.get("capacity_identity_hash"),
+        "intent capacity_identity_hash",
+    )
+    if str(cash_capacity_fact.get("capacity_identity_hash") or "").strip() != expected_hash:
+        raise ValueError("Wheel Put cash capacity identity changed")
+    expected_currency = _required_text(
+        intent_payload.get("cash_reservation_currency"),
+        "intent cash_reservation_currency",
+    ).upper()
+    fact_currency = _required_text(
+        cash_capacity_fact.get("cash_reservation_currency"),
+        "cash_reservation_currency",
+    ).upper()
+    expected_amount = _finite_float(intent_payload.get("cash_reservation_amount"))
+    fact_amount = _finite_float(cash_capacity_fact.get("cash_reservation_amount"))
+    if (
+        expected_currency != fact_currency
+        or expected_amount is None
+        or fact_amount is None
+        or round(expected_amount, 6) != round(fact_amount, 6)
+    ):
+        raise ValueError("Wheel Put cash reservation changed")
+
+
+def plan_wheel_put_intent_cancel(
+    branch: Mapping[str, Any],
+    intent: Mapping[str, Any],
+    cash_capacity_fact: Mapping[str, Any],
+    request_id: str,
+    actor: str,
+    broker_order_inactive_confirmed: bool,
+    reason: str,
+    *,
+    occurred_at_ms: int,
+    recorded_at_ms: int,
+) -> dict[str, Any] | None:
+    if branch.get("lifecycle_status") != "active" or branch.get("integrity_status") != "trusted":
+        raise ValueError("Wheel branch is not an active trusted lifecycle")
+    if str(branch.get("direction") or "").strip().lower() != "put":
+        raise ValueError("Wheel Put intent requires a Put branch")
+    if not broker_order_inactive_confirmed:
+        raise ValueError("broker_order_inactive_confirmed=true is required")
+    if str(intent.get("status") or "") != "active":
+        return None
+    payload = intent.get("payload")
+    payload = payload if isinstance(payload, Mapping) else intent
+    account = _required_text(branch.get("account"), "account").lower()
+    _validate_put_intent_reservation(
+        payload,
+        cash_capacity_fact,
+        account=account,
+    )
+    branch_id = _required_text(branch.get("wheel_branch_id"), "wheel_branch_id")
+    intent_id = _required_text(intent.get("intent_id"), "intent_id")
+    request = _required_text(request_id, "request_id")
+    digest = canonical_sha256(
+        {
+            "account": account,
+            "wheel_branch_id": branch_id,
+            "intent_id": intent_id,
+            "request_id": request,
+        }
+    )[:24]
+    return build_wheel_event(
+        event_id=f"wheel-put-intent-cancelled:{digest}",
+        event_schema_version=WHEEL_EVENT_SCHEMA_V2,
+        account=account,
+        wheel_branch_id=branch_id,
+        stock_lot_id=str(branch.get("stock_lot_id") or "").strip() or None,
+        event_type="wheel_put_intent_cancelled",
+        occurred_at_ms=occurred_at_ms,
+        recorded_at_ms=recorded_at_ms,
+        intent_id=intent_id,
+        payload={
+            "schema_version": "wheel_put_intent_cancelled.v1",
+            "market": _wheel_market(branch),
+            "request_id": request,
+            "actor": _required_text(actor, "actor"),
+            "reason": _required_text(reason, "reason"),
+            "broker_order_inactive_confirmed": True,
+            "remaining_contracts": int(intent.get("remaining_contracts") or 0),
+            "branch_generation_hash": str(
+                branch.get("branch_generation_hash") or ""
+            ),
+            "capacity_identity_hash": payload.get("capacity_identity_hash"),
+            "cash_reservation_amount": payload.get("cash_reservation_amount"),
+            "cash_reservation_currency": payload.get("cash_reservation_currency"),
+        },
+    )
+
+
+def plan_wheel_put_intent_consume(
+    branch: Mapping[str, Any],
+    intent: Mapping[str, Any],
+    fill: Any,
+    cash_capacity_fact: Mapping[str, Any],
+    *,
+    recorded_at_ms: int,
+) -> dict[str, Any]:
+    if branch.get("lifecycle_status") != "active" or branch.get("integrity_status") != "trusted":
+        raise ValueError("Wheel branch is not an active trusted lifecycle")
+    if str(branch.get("direction") or "").strip().lower() != "put":
+        raise ValueError("Wheel Put intent requires a Put branch")
+    if str(intent.get("status") or "") != "active":
+        raise ValueError("Wheel Put intent is not active")
+    event = _trade_event_fact(fill)
+    if (
+        _event_type(event) != "open"
+        or _trade_option_type(event) != "put"
+        or _trade_position_side(event) != "short"
+    ):
+        raise ValueError("Wheel Put intent can only consume a Short Put open")
+    payload = intent.get("payload")
+    payload = payload if isinstance(payload, Mapping) else intent
+    account = _required_text(branch.get("account"), "account").lower()
+    _validate_put_intent_reservation(
+        payload,
+        cash_capacity_fact,
+        account=account,
+    )
+    event_id = _required_text(event.get("event_id"), "source_trade_event_id")
+    contracts = _positive_int(event.get("contracts"), "fill contracts")
+    multiplier = _positive_int(event.get("multiplier"), "fill multiplier")
+    occurred_at_ms = _positive_int(event.get("event_time_ms"), "fill occurred_at_ms")
+    if contracts > int(intent.get("remaining_contracts") or 0):
+        raise ValueError("Wheel Put fill exceeds intent remainder")
+    if not (
+        int(intent.get("created_at_ms") or 0)
+        <= occurred_at_ms
+        <= int(intent.get("expires_at_ms") or 0)
+    ):
+        raise ValueError("Wheel Put fill is outside the intent window")
+    if (
+        _trade_account(event) != account
+        or _trade_symbol(event) != str(branch.get("symbol") or "")
+        or float(event.get("strike") or 0) != float(payload.get("strike") or 0)
+        or str(event.get("expiration_ymd") or "")
+        != str(payload.get("expiration_ymd") or "")
+        or multiplier != int(payload.get("multiplier") or 0)
+    ):
+        raise ValueError("Wheel Put fill does not match the intent contract")
+    bound_order = str(payload.get("broker_order_id") or "").strip()
+    fill_payload = event.get("raw_payload") or {}
+    if bound_order and (
+        str(fill_payload.get("order_id") or "").strip() != bound_order
+        or futu_order_namespace_issue(fill_payload) is not None
+    ):
+        raise ValueError("Wheel Put fill does not match the bound order")
+    intent_id = _required_text(intent.get("intent_id"), "intent_id")
+    branch_id = _required_text(branch.get("wheel_branch_id"), "wheel_branch_id")
+    return build_wheel_event(
+        event_id=f"wheel-put-intent-consumed:{intent_id}:{event_id}",
+        event_schema_version=WHEEL_EVENT_SCHEMA_V2,
+        account=account,
+        wheel_branch_id=branch_id,
+        stock_lot_id=str(branch.get("stock_lot_id") or "").strip() or None,
+        event_type="wheel_put_intent_consumed",
+        occurred_at_ms=occurred_at_ms,
+        recorded_at_ms=recorded_at_ms,
+        intent_id=intent_id,
+        source_trade_event_id=event_id,
+        payload={
+            "schema_version": "wheel_put_intent_consumed.v1",
+            "market": _wheel_market(branch),
+            "contracts": contracts,
+            "multiplier": multiplier,
+            "put_lot_id": str(event.get("lot_id") or f"lot_{event_id}"),
+            "capacity_identity_hash": payload.get("capacity_identity_hash"),
+            "cash_reservation_amount": round(
+                float(payload.get("strike") or 0) * multiplier * contracts,
+                6,
+            ),
+            "cash_reservation_currency": payload.get("cash_reservation_currency"),
+        },
+    )
 def _lot_fields(row: Mapping[str, Any]) -> dict[str, Any]:
     fields = row.get("fields")
     return dict(fields) if isinstance(fields, Mapping) else dict(row)
@@ -870,12 +1712,17 @@ def _intent_state(
     *,
     as_of_ms: int,
     known_trade_event_ids: set[str],
+    direction: str = "call",
 ) -> tuple[list[str], list[str], list[dict[str, Any]]]:
+    direction_value = _required_text(direction, "direction").lower()
+    if direction_value not in {"call", "put"}:
+        raise ValueError("Wheel intent direction must be call or put")
+    prefix = f"wheel_{direction_value}_intent_"
     by_intent: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     reasons: list[str] = []
     for event in events:
         event_type = str(event.get("event_type") or "")
-        if not event_type.startswith("wheel_call_intent_"):
+        if not event_type.startswith(prefix):
             continue
         intent_id = str(event.get("intent_id") or "").strip()
         if not intent_id:
@@ -886,9 +1733,9 @@ def _intent_state(
     summaries: list[dict[str, Any]] = []
     for intent_id in sorted(by_intent):
         intent_events = by_intent[intent_id]
-        created = [item for item in intent_events if item["event_type"] == "wheel_call_intent_created"]
-        cancelled = [item for item in intent_events if item["event_type"] == "wheel_call_intent_cancelled"]
-        consumed = [item for item in intent_events if item["event_type"] == "wheel_call_intent_consumed"]
+        created = [item for item in intent_events if item["event_type"] == f"{prefix}created"]
+        cancelled = [item for item in intent_events if item["event_type"] == f"{prefix}cancelled"]
+        consumed = [item for item in intent_events if item["event_type"] == f"{prefix}consumed"]
         if len(created) != 1:
             reasons.append("intent_creation_conflict")
             summaries.append({"intent_id": intent_id, "status": "conflict"})
@@ -971,7 +1818,11 @@ def effective_wheel_events(
     for raw in wheel_events:
         group = (
             str(raw.get("account") or "").strip().lower(),
-            str(raw.get("stock_lot_id") or "").strip(),
+            str(
+                raw.get("wheel_branch_id")
+                or raw.get("stock_lot_id")
+                or ""
+            ).strip(),
         )
         try:
             event = normalize_wheel_event(raw)
@@ -983,10 +1834,10 @@ def effective_wheel_events(
             continue
         previous = events_by_id.get(event["event_id"])
         if previous is not None and previous["payload_hash"] != event["payload_hash"]:
-            invalid_by_group[(event["account"], event["stock_lot_id"])].add(
+            invalid_by_group[(event["account"], event["wheel_branch_id"])].add(
                 "wheel_event_id_conflict"
             )
-            invalid_by_group[(previous["account"], previous["stock_lot_id"])].add(
+            invalid_by_group[(previous["account"], previous["wheel_branch_id"])].add(
                 "wheel_event_id_conflict"
             )
             continue
@@ -998,13 +1849,13 @@ def effective_wheel_events(
     for event in events_by_id.values():
         if event["event_type"] != "wheel_event_voided":
             continue
-        group = (event["account"], event["stock_lot_id"])
+        group = (event["account"], event["wheel_branch_id"])
         target_id = str(event["payload"].get("target_wheel_event_id") or "").strip()
         target = events_by_id.get(target_id)
         if (
             target is None
             or target["event_type"] == "wheel_event_voided"
-            or (target["account"], target["stock_lot_id"]) != group
+            or (target["account"], target["wheel_branch_id"]) != group
         ):
             invalid_by_group[group].add("wheel_void_target_invalid")
             continue
@@ -1025,6 +1876,44 @@ def effective_wheel_events(
     )
 
 
+def project_wheel_intents(
+    wheel_events: Sequence[Mapping[str, Any]],
+    *,
+    account: str,
+    wheel_branch_id: str,
+    direction: str,
+    as_of_ms: int,
+    known_trade_event_ids: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    account_value = _required_text(account, "account").lower()
+    branch_id = _required_text(wheel_branch_id, "wheel_branch_id")
+    direction_value = _required_text(direction, "direction").lower()
+    if direction_value not in {"call", "put"}:
+        raise ValueError("Wheel intent direction must be call or put")
+    instant = _positive_int(as_of_ms, "as_of_ms")
+    events, _invalid = effective_wheel_events(
+        [
+            event
+            for event in wheel_events
+            if str(event.get("account") or "").strip().lower() == account_value
+            and str(
+                event.get("wheel_branch_id")
+                or event.get("stock_lot_id")
+                or ""
+            ).strip()
+            == branch_id
+        ],
+        as_of_ms=instant,
+    )
+    _active, _reasons, summaries = _intent_state(
+        events,
+        as_of_ms=instant,
+        known_trade_event_ids=set(known_trade_event_ids or ()),
+        direction=direction_value,
+    )
+    return summaries
+
+
 def project_wheel_call_intents(
     wheel_events: Sequence[Mapping[str, Any]],
     *,
@@ -1041,7 +1930,12 @@ def project_wheel_call_intents(
             event
             for event in wheel_events
             if str(event.get("account") or "").strip().lower() == account_value
-            and str(event.get("stock_lot_id") or "").strip() == stock_lot_value
+            and str(
+                event.get("wheel_branch_id")
+                or event.get("stock_lot_id")
+                or ""
+            ).strip()
+            == stock_lot_value
         ],
         as_of_ms=instant,
     )
@@ -1170,6 +2064,177 @@ def project_wheel_call_linkage_candidates(
     )
 
 
+def project_wheel_linkage_candidates(
+    wheel_branches: Sequence[Mapping[str, Any]],
+    unlinked_short_option_lots: Sequence[Mapping[str, Any]],
+    rejected_linkages: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return deterministic Call and Put linkage choices without guessing."""
+
+    call_branches = [
+        {
+            **row,
+            "batch_generation_hash": row.get("batch_generation_hash")
+            or row.get("branch_generation_hash"),
+        }
+        for row in wheel_branches
+        if str(row.get("direction") or "call").strip().lower() == "call"
+    ]
+    call_branch_by_stock_lot = {
+        str(row.get("stock_lot_id") or ""): row for row in call_branches
+    }
+    call_candidates = [
+        {
+            **item,
+            "direction": "call",
+            "wheel_branch_id": str(
+                call_branch_by_stock_lot[item["stock_lot_id"]].get(
+                    "wheel_branch_id"
+                )
+                or item["stock_lot_id"]
+            ),
+            "option_record_id": item["call_record_id"],
+            "option_open_event_id": item["call_open_event_id"],
+            "branch_generation_hash": item.get("batch_generation_hash"),
+        }
+        for item in project_wheel_call_linkage_candidates(
+            call_branches,
+            unlinked_short_option_lots,
+            rejected_linkages,
+        )
+    ]
+    effective_linkages, _invalid = effective_wheel_events(rejected_linkages)
+    rejected = {
+        (
+            str(
+                (event.get("payload") or {}).get("option_open_event_id")
+                or (event.get("payload") or {}).get("put_open_event_id")
+                or ""
+            ).strip(),
+            str(event.get("wheel_branch_id") or "").strip(),
+        )
+        for event in effective_linkages
+        if str(event.get("event_type") or "").strip()
+        == "wheel_put_linkage_rejected"
+    }
+    put_candidates: list[dict[str, Any]] = []
+    for row in unlinked_short_option_lots:
+        fields = _lot_fields(row)
+        if (
+            str(fields.get("option_type") or "").strip().lower() != "put"
+            or str(
+                fields.get("side") or fields.get("position_side") or ""
+            ).strip().lower()
+            != "short"
+            or _contracts_open(fields) <= 0
+            or any(
+                str(fields.get(key) or "").strip()
+                for key in (
+                    "strategy",
+                    "leg_role",
+                    "strategy_group_id",
+                    "source_wheel_branch_id",
+                )
+            )
+        ):
+            continue
+        record_id = _required_text(row.get("record_id"), "option_record_id")
+        open_event_id = _required_text(
+            fields.get("source_event_id"),
+            "option_open_event_id",
+        )
+        account = str(fields.get("account") or "").strip().lower()
+        symbol = str(fields.get("symbol") or "").strip().upper()
+        for branch in wheel_branches:
+            branch_id = str(branch.get("wheel_branch_id") or "").strip()
+            if (
+                str(branch.get("direction") or "").strip().lower() != "put"
+                or branch.get("lifecycle_status") != "active"
+                or branch.get("integrity_status") != "trusted"
+                or branch.get("active_option_lot_ids")
+                or str(branch.get("account") or "").strip().lower() != account
+                or str(branch.get("symbol") or "").strip().upper() != symbol
+                or (open_event_id, branch_id) in rejected
+            ):
+                continue
+            try:
+                contracts = _contracts_open(fields)
+                multiplier = int(float(fields.get("multiplier") or 0))
+                remaining = int(branch.get("remaining_contracts") or 0)
+                branch_multiplier = int(branch.get("multiplier") or 0)
+            except (TypeError, ValueError):
+                continue
+            if (
+                contracts <= 0
+                or contracts > remaining
+                or multiplier <= 0
+                or multiplier != branch_multiplier
+            ):
+                continue
+            digest = canonical_sha256(
+                {
+                    "direction": "put",
+                    "option_open_event_id": open_event_id,
+                    "wheel_branch_id": branch_id,
+                }
+            )[:24]
+            generation_hash = str(branch.get("branch_generation_hash") or "")
+            put_candidates.append(
+                {
+                    "linkage_candidate_id": f"wheel-put-linkage:{digest}",
+                    "input_snapshot_hash": canonical_sha256(
+                        {
+                            "option_record_id": record_id,
+                            "option": {
+                                key: fields.get(key)
+                                for key in (
+                                    "account",
+                                    "symbol",
+                                    "option_type",
+                                    "side",
+                                    "contracts_open",
+                                    "strike",
+                                    "expiration_ymd",
+                                    "expiration",
+                                    "multiplier",
+                                    "source_event_id",
+                                )
+                            },
+                            "wheel_branch_id": branch_id,
+                            "branch_generation_hash": generation_hash,
+                        }
+                    ),
+                    "account": account,
+                    "symbol": symbol,
+                    "direction": "put",
+                    "option_record_id": record_id,
+                    "option_open_event_id": open_event_id,
+                    "wheel_branch_id": branch_id,
+                    "contracts": contracts,
+                    "multiplier": multiplier,
+                    "cash_reservation_amount": float(
+                        fields.get("strike") or 0
+                    )
+                    * multiplier
+                    * contracts,
+                    "cash_reservation_currency": str(
+                        fields.get("currency") or branch.get("currency") or ""
+                    ).strip().upper(),
+                    "branch_generation_hash": generation_hash,
+                }
+            )
+    return sorted(
+        [*call_candidates, *put_candidates],
+        key=lambda item: (
+            str(item.get("account") or ""),
+            str(item.get("symbol") or ""),
+            str(item.get("direction") or ""),
+            str(item.get("option_record_id") or ""),
+            str(item.get("wheel_branch_id") or ""),
+        ),
+    )
+
+
 def project_wheel_lifecycles(
     wheel_events: Sequence[Mapping[str, Any]],
     trade_events: Sequence[Mapping[str, Any]],
@@ -1186,6 +2251,8 @@ def project_wheel_lifecycles(
     )
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for event in effective_events:
+        if event["event_schema_version"] != WHEEL_EVENT_SCHEMA_V1:
+            continue
         grouped[(event["account"], event["stock_lot_id"])].append(event)
 
     active_trade_events = _active_trade_events(trade_events)
@@ -1457,9 +2524,13 @@ def project_wheel_lifecycles(
             "assigned_stock": _stable_stock_fact(stock_row),
         }
         batch_generation_hash = canonical_sha256(generation_payload)
+        symbol = str(
+            (stock_row or {}).get("symbol") or _trade_symbol(start_trade or {})
+        ).strip().upper()
         result = {
             "account": account,
-            "symbol": str((stock_row or {}).get("symbol") or _trade_symbol(start_trade or {})),
+            "market": str(symbol_market(symbol) or "").strip().lower() or None,
+            "symbol": symbol,
             "stock_lot_id": stock_lot_id,
             "lifecycle_status": lifecycle_status,
             "phase": phase,
@@ -1492,22 +2563,481 @@ def project_wheel_lifecycles(
     return results
 
 
+def project_wheel_branches(
+    wheel_events: Sequence[Mapping[str, Any]],
+    trade_events: Sequence[Mapping[str, Any]],
+    position_lots: Sequence[Mapping[str, Any]],
+    assigned_stock_projection: Mapping[str, Any],
+    as_of_ms: int,
+    *,
+    monitoring_gate: str = "disabled",
+) -> list[dict[str, Any]]:
+    """Project v2 branches while adapting legacy Call batches unchanged."""
+
+    instant = _positive_int(as_of_ms, "as_of_ms")
+    gate = str(monitoring_gate or "disabled").strip().lower()
+    if gate not in {"enabled", "disabled", "config_mismatch"}:
+        raise ValueError("invalid Wheel monitoring gate")
+    legacy_batches = project_wheel_lifecycles(
+        wheel_events,
+        trade_events,
+        position_lots,
+        assigned_stock_projection,
+        instant,
+    )
+    branches: list[dict[str, Any]] = []
+    for batch in legacy_batches:
+        phase = {
+            "call_open": "option_open",
+            "call_pending": "intent_pending",
+            "residual_stock": "residual_capacity",
+        }.get(batch.get("phase"), batch.get("phase"))
+        lifecycle_status = (
+            "converted"
+            if batch.get("lifecycle_status") == "called_away"
+            else batch.get("lifecycle_status")
+        )
+        branches.append(
+            {
+                **batch,
+                "wheel_branch_id": batch["stock_lot_id"],
+                "parent_branch_id": None,
+                "direction": "call",
+                "lifecycle_status": lifecycle_status,
+                "phase": phase,
+                "monitoring_gate": gate,
+                "branch_generation_hash": batch["batch_generation_hash"],
+                "legacy_call_adapter": True,
+            }
+        )
+
+    effective_events, invalid_by_group = effective_wheel_events(
+        wheel_events,
+        as_of_ms=instant,
+    )
+    v2_events = [
+        event
+        for event in effective_events
+        if event["event_schema_version"] == WHEEL_EVENT_SCHEMA_V2
+    ]
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for event in v2_events:
+        grouped[(event["account"], event["wheel_branch_id"])].append(event)
+    created_events = [
+        event for event in v2_events if event["event_type"] == "wheel_branch_created"
+    ]
+    children_by_parent: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for event in created_events:
+        parent = str(event["payload"].get("parent_branch_id") or "").strip()
+        if parent:
+            children_by_parent[parent].append(event)
+
+    active_trade_events = _active_trade_events(trade_events)
+    trade_ids = {
+        str(item.get("event_id") or "").strip()
+        for item in active_trade_events
+        if str(item.get("event_id") or "").strip()
+    }
+    allocations_by_lot: dict[str, list[Any]] = defaultdict(list)
+    allocation_projection_available = True
+    try:
+        economic_projection = project_trade_events(
+            [TradeEvent.from_dict(dict(item)) for item in trade_events]
+        )
+    except (TypeError, ValueError, OverflowError):
+        allocation_projection_available = False
+    else:
+        for allocation in economic_projection.allocations:
+            allocations_by_lot[allocation.target_lot_id].append(allocation)
+    stock_rows = assigned_stock_projection.get("_all_assigned_stock_lots")
+    if not isinstance(stock_rows, Sequence):
+        stock_rows = assigned_stock_projection.get("assigned_stock_lots") or []
+    stock_by_id = {
+        str(item.get("stock_lot_id") or "").strip(): item
+        for item in stock_rows
+        if isinstance(item, Mapping) and str(item.get("stock_lot_id") or "").strip()
+    }
+    lots = [
+        (str(item.get("record_id") or "").strip(), _lot_fields(item))
+        for item in position_lots
+        if isinstance(item, Mapping)
+    ]
+    known_legacy_ids = {
+        str(item.get("wheel_branch_id") or "") for item in branches
+    }
+    for group in sorted(grouped):
+        account, branch_id = group
+        if branch_id in known_legacy_ids:
+            continue
+        events = sorted(
+            grouped[group],
+            key=lambda item: (int(item["occurred_at_ms"]), str(item["event_id"])),
+        )
+        creations = [
+            item for item in events if item["event_type"] == "wheel_branch_created"
+        ]
+        if not creations:
+            continue
+        reasons = set(invalid_by_group.get(group, set()))
+        if len(creations) != 1:
+            reasons.add("wheel_branch_creation_conflict")
+        created = creations[0]
+        payload = created["payload"]
+        direction = str(payload.get("direction") or "").strip().lower()
+        if direction not in {"call", "put"}:
+            reasons.add("wheel_branch_direction_invalid")
+        symbol = str(payload.get("symbol") or "").strip().upper()
+        try:
+            market = _wheel_market(symbol)
+        except ValueError:
+            market = ""
+            reasons.add("wheel_branch_market_invalid")
+        if str(payload.get("market") or "").strip().lower() not in {"", market}:
+            reasons.add("wheel_branch_market_mismatch")
+        if any(
+            str((item.get("payload") or {}).get("market") or "").strip().lower()
+            not in {"", market}
+            for item in events
+        ):
+            reasons.add("wheel_event_market_mismatch")
+        source_assignment_event_id = str(
+            payload.get("source_assignment_event_id")
+            or created.get("source_trade_event_id")
+            or ""
+        ).strip()
+        if not source_assignment_event_id or source_assignment_event_id not in trade_ids:
+            reasons.add("wheel_branch_source_invalid")
+        try:
+            initial_contracts = _positive_int(payload.get("contracts"), "contracts")
+        except ValueError:
+            initial_contracts = 0
+            reasons.add("wheel_branch_quantity_invalid")
+        try:
+            multiplier = (
+                _positive_int(payload.get("multiplier"), "multiplier")
+                if payload.get("multiplier") is not None
+                else 0
+            )
+        except ValueError:
+            multiplier = 0
+            reasons.add("wheel_branch_quantity_invalid")
+        multiplier_source = str(payload.get("multiplier_source") or "").strip()
+        if not multiplier_source or not str(
+            payload.get("multiplier_evidence_hash") or ""
+        ).strip():
+            reasons.add("multiplier_unproven")
+        elif multiplier_source == "unproven":
+            reasons.add("multiplier_unproven")
+        elif multiplier_source == "conflict":
+            reasons.add("multiplier_conflict")
+        if payload.get("principal_anchor") in (None, ""):
+            reasons.add(
+                str(payload.get("principal_anchor_reason") or "principal_anchor_unavailable")
+            )
+        if not str(payload.get("currency") or "").strip():
+            reasons.add("assignment_currency_unavailable")
+        child_events = children_by_parent.get(branch_id, [])
+        converted_contracts = 0
+        for child in child_events:
+            try:
+                converted_contracts += _positive_int(
+                    child["payload"].get("contracts"),
+                    "contracts",
+                )
+            except ValueError:
+                reasons.add("wheel_child_quantity_invalid")
+            child_source = str(
+                child["payload"].get("source_assignment_event_id")
+                or child.get("source_trade_event_id")
+                or ""
+            ).strip()
+            if not child_source or child_source not in trade_ids:
+                reasons.add("wheel_child_source_conflict")
+        remaining_contracts = initial_contracts - converted_contracts
+        if remaining_contracts < 0:
+            reasons.add("wheel_branch_conversion_conflict")
+
+        decisions = [
+            item for item in events if item["event_type"] == "wheel_branch_decided"
+        ]
+        manual_ends = [
+            item for item in events if item["event_type"] == "wheel_manual_ended"
+        ]
+        decision_values = {
+            str(item["payload"].get("decision") or "").strip().lower()
+            for item in decisions
+        }
+        if len(decisions) > 1 or len(decision_values) > 1 or (
+            decisions and manual_ends
+        ) or len(manual_ends) > 1:
+            reasons.add("wheel_branch_decision_conflict")
+        initial_status = str(
+            payload.get("initial_lifecycle_status") or "active"
+        ).strip().lower()
+        lifecycle_status = initial_status
+        terminal_event_id = None
+        if manual_ends:
+            lifecycle_status = "manual_ended"
+            terminal_event_id = manual_ends[0]["event_id"]
+        elif decisions:
+            decision = next(iter(decision_values), "")
+            terminal_event_id = decisions[0]["event_id"] if decision == "end" else None
+            if initial_status != "pending_decision":
+                reasons.add("wheel_branch_decision_conflict")
+            elif decision == "start":
+                lifecycle_status = "active"
+            elif decision == "end":
+                lifecycle_status = "manual_ended"
+        if lifecycle_status == "active" and initial_contracts > 0 and remaining_contracts == 0:
+            lifecycle_status = "converted"
+
+        linked_lots = [
+            (record_id, fields)
+            for record_id, fields in lots
+            if str(fields.get("account") or "").strip().lower() == account
+            and str(fields.get("source_wheel_branch_id") or "").strip() == branch_id
+        ]
+        realized_put_net_pnl: float | None = None
+        if direction == "put":
+            realized_net = Decimal(0)
+            realized_net_available = allocation_projection_available
+            for record_id, fields in linked_lots:
+                try:
+                    closed_contracts = int(fields.get("contracts_closed") or 0)
+                except (TypeError, ValueError):
+                    realized_net_available = False
+                    break
+                allocations = allocations_by_lot.get(record_id, [])
+                if closed_contracts < 0 or sum(item.contracts for item in allocations) != closed_contracts:
+                    realized_net_available = False
+                    break
+                if any(item.realized_pnl_net is None for item in allocations):
+                    realized_net_available = False
+                    break
+                realized_net += sum(
+                    (item.realized_pnl_net for item in allocations),
+                    Decimal(0),
+                )
+            if realized_net_available:
+                realized_put_net_pnl = float(realized_net)
+            else:
+                reasons.add("realized_put_net_pnl_unavailable")
+        active_lot_ids = sorted(
+            record_id
+            for record_id, fields in linked_lots
+            if _contracts_open(fields) > 0
+        )
+        expected_role = f"wheel_{direction}"
+        for _record_id, fields in linked_lots:
+            if (
+                str(fields.get("strategy") or "").strip().lower() != "wheel"
+                or str(fields.get("leg_role") or "").strip().lower() != expected_role
+                or str(fields.get("strategy_group_id") or "").strip()
+            ):
+                reasons.add("wheel_option_linkage_conflict")
+        active_intent_ids, intent_reasons, intent_summaries = _intent_state(
+            events,
+            as_of_ms=instant,
+            known_trade_event_ids=trade_ids,
+            direction=direction if direction in {"call", "put"} else "call",
+        )
+        reasons.update(intent_reasons)
+        active_intent_reservations: list[dict[str, Any]] = []
+        if direction == "put":
+            for summary in intent_summaries:
+                if summary.get("status") != "active":
+                    continue
+                intent_payload = summary.get("payload")
+                intent_payload = (
+                    intent_payload if isinstance(intent_payload, Mapping) else {}
+                )
+                strike = _finite_float(intent_payload.get("strike"))
+                intent_multiplier = _finite_float(intent_payload.get("multiplier"))
+                currency = str(
+                    intent_payload.get("cash_reservation_currency") or ""
+                ).strip().upper()
+                capacity_hash = str(
+                    intent_payload.get("capacity_identity_hash") or ""
+                ).strip()
+                remaining = int(summary.get("remaining_contracts") or 0)
+                if (
+                    strike is None
+                    or strike <= 0
+                    or intent_multiplier is None
+                    or intent_multiplier <= 0
+                    or not intent_multiplier.is_integer()
+                    or remaining <= 0
+                    or not currency
+                    or not capacity_hash
+                ):
+                    reasons.add("intent_cash_reservation_invalid")
+                    continue
+                active_intent_reservations.append(
+                    {
+                        "account": account,
+                        "wheel_branch_id": branch_id,
+                        "intent_id": summary["intent_id"],
+                        "branch_generation_hash": intent_payload.get(
+                            "branch_generation_hash"
+                        ),
+                        "capacity_identity_hash": capacity_hash,
+                        "currency": currency,
+                        "cash_reservation_amount": round(
+                            strike * int(intent_multiplier) * remaining,
+                            6,
+                        ),
+                        "remaining_contracts": remaining,
+                    }
+                )
+        stock_lot_id = str(created.get("stock_lot_id") or "").strip() or None
+        stock_row = stock_by_id.get(stock_lot_id or "")
+        if direction == "call" and stock_row is None:
+            reasons.add("assigned_stock_lot_unavailable")
+
+        conflict = any(
+            reason.endswith("conflict")
+            or reason.endswith("_invalid")
+            or reason == "invalid_wheel_event"
+            for reason in reasons
+        )
+        integrity_status = "conflict" if conflict else "trusted"
+        if lifecycle_status in {"converted", "manual_ended"}:
+            phase = lifecycle_status
+        elif lifecycle_status == "pending_decision":
+            phase = "pending_decision"
+        elif conflict:
+            phase = "conflict"
+        elif active_lot_ids:
+            phase = "option_open"
+        elif active_intent_ids:
+            phase = "intent_pending"
+        elif remaining_contracts <= 0 or (
+            direction == "call"
+            and stock_row is not None
+            and int(stock_row.get("shares_remaining") or 0) < multiplier
+        ):
+            phase = "residual_capacity"
+        elif reasons:
+            phase = "data_unavailable"
+        else:
+            phase = "ready"
+
+        generation_payload = {
+            "schema_version": WHEEL_PROJECTION_SCHEMA,
+            "account": account,
+            "wheel_branch_id": branch_id,
+            "events": events,
+            "children": sorted(
+                (
+                    {
+                        "event_id": item["event_id"],
+                        "payload_hash": item["payload_hash"],
+                    }
+                    for item in child_events
+                ),
+                key=lambda item: item["event_id"],
+            ),
+            "position_lots": [
+                {"record_id": record_id, "fields": fields}
+                for record_id, fields in linked_lots
+            ],
+            "assigned_stock": _stable_stock_fact(stock_row),
+            "realized_put_net_pnl_in_current_stage": realized_put_net_pnl,
+        }
+        branch_generation_hash = canonical_sha256(generation_payload)
+        branch = {
+            "account": account,
+            "market": market or None,
+            "symbol": symbol,
+            "wheel_branch_id": branch_id,
+            "parent_branch_id": str(payload.get("parent_branch_id") or "").strip() or None,
+            "direction": direction,
+            "stock_lot_id": stock_lot_id,
+            "source_assignment_event_id": source_assignment_event_id,
+            "lifecycle_status": lifecycle_status,
+            "phase": phase,
+            "monitoring_gate": gate,
+            "integrity_status": integrity_status,
+            "reason_codes": sorted(reasons),
+            "initial_contracts": initial_contracts,
+            "converted_contracts": converted_contracts,
+            "remaining_contracts": max(0, remaining_contracts),
+            "multiplier": multiplier or None,
+            "shares_opened": (
+                int(stock_row.get("shares_opened") or 0) if stock_row is not None else None
+            ),
+            "shares_remaining": (
+                int(stock_row.get("shares_remaining") or 0)
+                if stock_row is not None
+                else None
+            ),
+            "principal_anchor": payload.get("principal_anchor"),
+            "realized_put_net_pnl_in_current_stage": realized_put_net_pnl,
+            "currency": payload.get("currency"),
+            "activation_window": payload.get("activation_window"),
+            "start_event_id": created["event_id"],
+            "terminal_event_id": terminal_event_id,
+            "active_option_lot_ids": active_lot_ids,
+            "active_intent_ids": active_intent_ids,
+            "active_intent_reserved_contracts": sum(
+                int(item.get("remaining_contracts") or 0)
+                for item in intent_summaries
+                if item.get("status") == "active"
+            ),
+            "active_intent_reservations": active_intent_reservations,
+            "branch_generation_hash": branch_generation_hash,
+            "legacy_call_adapter": False,
+            "candidate": None,
+        }
+        branch["projection_hash"] = canonical_sha256(
+            {
+                "schema_version": WHEEL_PROJECTION_SCHEMA,
+                "branch_generation_hash": branch_generation_hash,
+                "as_of_ms": instant,
+                "derived": branch,
+            }
+        )
+        branches.append(branch)
+    return sorted(
+        branches,
+        key=lambda item: (
+            str(item.get("account") or ""),
+            str(item.get("wheel_branch_id") or ""),
+        ),
+    )
+
+
 __all__ = [
     "WHEEL_EVENT_SCHEMA",
+    "WHEEL_EVENT_SCHEMA_V1",
+    "WHEEL_EVENT_SCHEMA_V2",
     "WHEEL_EVENT_TYPES",
+    "WHEEL_EVENT_TYPES_V1",
     "WHEEL_PROJECTION_SCHEMA",
+    "build_wheel_intent_capacity_binding",
     "build_wheel_call_rank_key",
+    "build_wheel_put_rank_key",
     "build_wheel_event",
+    "build_wheel_branch_created_event",
+    "deterministic_wheel_branch_id",
     "effective_wheel_events",
     "evaluate_wheel_call_candidate",
+    "evaluate_wheel_put_candidate",
     "normalize_wheel_event",
     "plan_wheel_call_intent_cancel",
     "plan_wheel_call_intent_consume",
     "plan_wheel_call_intent_create",
+    "plan_wheel_put_intent_cancel",
+    "plan_wheel_put_intent_consume",
+    "plan_wheel_put_intent_create",
     "plan_wheel_manual_end",
+    "plan_wheel_branch_decision",
     "project_wheel_call_linkage_candidates",
     "project_wheel_call_intents",
+    "project_wheel_intents",
+    "project_wheel_linkage_candidates",
     "project_wheel_lifecycles",
+    "project_wheel_branches",
     "wheel_called_away_event_from_call_assignment",
     "wheel_event_payload_hash",
     "wheel_started_event_from_assignment",

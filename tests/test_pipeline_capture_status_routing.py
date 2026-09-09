@@ -384,7 +384,7 @@ def _run_wheel_scan_failure_capture(
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], list[str]]:
     from src.application import pipeline_watchlist as mod
     from src.application.strategy_scan_status import (
-        load_strategy_scan_status_index_v2,
+        load_strategy_scan_status_index_v4,
         publish_strategy_scan_status,
         publish_strategy_scan_status_index_v2,
     )
@@ -595,11 +595,11 @@ def _run_wheel_scan_failure_capture(
         run_id=RUN_ID,
         account="lx",
     )
-    status_index = load_strategy_scan_status_index_v2(
-            report_dir / "strategy_scan_status_index.v2.json",
-            expected_run_id=RUN_ID,
-            expected_account="lx",
-            expected_account_config_sha256=ACCOUNT_CONFIG_SHA256,
+    status_index = load_strategy_scan_status_index_v4(
+        report_dir / "strategy_scan_status_index.v4.json",
+        expected_run_id=RUN_ID,
+        expected_account="lx",
+        expected_account_config_sha256=ACCOUNT_CONFIG_SHA256,
     )
     from datetime import datetime, timezone
 
@@ -701,9 +701,10 @@ def test_wheel_coverage_fact_failure_seals_unavailable_without_running_scan(
     assert wheel["opening_status"] == "data_unavailable"
     assert wheel["scope_results"] == [
         {
-            "scope": "strategy",
-            "symbol": "NVDA",
-            "strategy_mode": "wheel",
+                "scope": "strategy",
+                "symbol": "NVDA",
+                "direction": "call",
+                "strategy_mode": "wheel",
             "candidate_owner": "wheel",
             "status": "unavailable",
             "reason_code": "wheel_coverage_facts_unavailable",

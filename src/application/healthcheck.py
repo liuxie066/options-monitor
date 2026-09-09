@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from src.application.tool_execution import execute_tool
+from src.application.wheel.runtime_readiness import build_wheel_activation_readiness
 
 
 def run_healthcheck(
@@ -17,6 +17,8 @@ def run_healthcheck(
     env_file: str | None = None,
     include_service_status: bool = False,
 ) -> dict[str, Any]:
+    from src.application.tool_execution import execute_tool
+
     payload: dict[str, Any] = {}
     if config_key:
         payload["config_key"] = str(config_key)
