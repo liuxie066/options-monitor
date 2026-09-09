@@ -92,7 +92,7 @@ CLOSE_ADVICE_READ_TOOL = build_agent_tool(
     safe_default_input={},
     examples=({"input": {"config_key": "us", "query": {"option_type": "put", "side": "short"}}},),
     output_contract=_CLOSE_ADVICE_READ_OUTPUT_CONTRACT,
-    copilot_input_fields=("config_key", "market_scope", "query", "run_id"),
+    bot_input_fields=("config_key", "market_scope", "query", "run_id"),
 )
 
 TOOLS: tuple[AgentTool, ...] = (CLOSE_ADVICE_READ_TOOL,)

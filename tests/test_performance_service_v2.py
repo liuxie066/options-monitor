@@ -14,8 +14,8 @@ from src.application.performance.service import (
     OptionPerformanceReadError,
     build_option_period_performance,
 )
-from src.application.copilot import tools as copilot_tools
-from src.application.copilot.result_admission import admit_submit_answer
+from src.application.bot import tools as bot_tools
+from src.application.bot.result_admission import admit_submit_answer
 
 
 _TZ = ZoneInfo("Asia/Shanghai")
@@ -310,7 +310,7 @@ def test_real_report_evidence_is_admitted_only_for_supported_time_claims() -> No
         config_key="us",
         configured_accounts=("lx",),
     )
-    observation = copilot_tools.compact_observation(
+    observation = bot_tools.compact_observation(
         "option_performance_report",
         {"ok": True, "data": report},
         {"period": "mtd", "as_of_date": "2026-09-02"},
@@ -340,7 +340,7 @@ def test_current_real_report_supports_current_claim_and_empty_is_not_zero_profit
         config_key="us",
         configured_accounts=("lx",),
     )
-    observation = copilot_tools.compact_observation(
+    observation = bot_tools.compact_observation(
         "option_performance_report",
         {"ok": True, "data": report},
         {"period": "month", "month": "2026-09"},
@@ -447,7 +447,7 @@ def test_service_does_not_publish_internal_failed_fact_states(
     assert report["quality"]["missing"] == ["economic_adjust_invalid"]
     assert report["coverage"]["status"] == "complete"
     assert report["coverage"]["complete_for"] == "full_query"
-    observation = copilot_tools.compact_observation(
+    observation = bot_tools.compact_observation(
         "option_performance_report",
         {"ok": True, "data": report},
         {"period": "mtd", "as_of_date": "2026-09-02"},

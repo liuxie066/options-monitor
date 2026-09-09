@@ -80,24 +80,24 @@ for compatibility re-exports and shared helpers such as config/contracts; they
 must not own tool implementations. The legacy
 `src.application.agent_tool_handlers` switchboard has been removed.
 
-`./om copilot ...` is the local/eval entry for the read-only Copilot. Channel
-Copilot is read-first and may request deterministic Control previews. Both are part
+`./om bot ...` is the local/eval entry for the read-only Bot. Channel
+Bot is read-first and may request deterministic Control previews. Both are part
 of the human CLI surface, not the Tool Gateway manifest:
 
 ```text
-./om copilot run|eval
--> src.interfaces.cli.copilot_ops
--> src.application.copilot.local_harness
+./om bot run|eval
+-> src.interfaces.cli.bot_ops
+-> src.application.bot.local_harness
 -> Service prepares an ExecutionContract
 -> Host prepares a SceneManifest, runs the Agent/Engine loop, records events,
    and admits the final AppResult
 ```
 
 The same Service, Host, Scene, Agent, and pure-read tool projection serve local
-and channel questions. Channel adapters call the Copilot channel facade rather
+and channel questions. Channel adapters call the Bot channel facade rather
 than Host or Agent directly. There is one Scene, `om_chat`; no per-question
 Scene selection or channel Scene allowlist exists. Host-backed channel runs
-persist their session, run, and event lifecycle in the Copilot Host store and a
+persist their session, run, and event lifecycle in the Bot Host store and a
 sanitized summary in the inbound audit record.
 
 ## Research
@@ -129,7 +129,7 @@ or live tick scheduling.
 Research execution must not be a startup prerequisite for an ordinary CLI
 command or a production Tick entry point. The package-level collect forwarders
 load their canonical owners only when called; `src.application.research.redaction`
-remains a shared pure sanitizer used by Copilot and support-bundle code.
+remains a shared pure sanitizer used by Bot and support-bundle code.
 
 ## Inbound Flow
 
@@ -143,7 +143,7 @@ Feishu / future channels
 -> sender allowlist / idempotency
 -> explicit command or pending-operation reply?
    -> deterministic Control
-   otherwise -> Copilot Service -> Host -> om_chat Agent
+   otherwise -> Bot Service -> Host -> om_chat Agent
 -> audit / operation persistence
 -> channel reply
 ```
@@ -159,7 +159,7 @@ responses, sender allowlist checks, previews, confirmations, applies, and
 operation receipts are owned by `src.application.assistant`.
 
 Every message that is not explicit Control protocol enters the read-first
-Copilot path. Copilot Service prepares the execution contract, Host owns
+Bot path. Bot Service prepares the execution contract, Host owns
 session/run/event governance and the `om_chat` Scene, and Agent/Engine own the
 generic model/tool loop. The model can use canonical pure-read tools and, on
 channel runs, one generic Control-preview meta-tool. It cannot receive or call
@@ -174,7 +174,7 @@ store, so stale or compacted chat history cannot become operation authority.
 
 There is no business intent router, multi-Scene catalog, planner fallback,
 evidence pipeline, or synthetic Assistant Agent session. Missing model
-configuration or unavailable evidence produces an explicit Copilot failure; it
+configuration or unavailable evidence produces an explicit Bot failure; it
 does not fall back to ordinary chat or deterministic business templates.
 
 Model selection is a startup/configuration concern. `config.yaml` may define multiple
@@ -186,14 +186,14 @@ message.
 Inbound uses one explicit command/permission contract. Slash commands never call
 the model. Bound confirm/cancel phrases such as `确认升级` enter the permission
 path only when they match an existing pending operation in the same
-sender/channel/conversation scope. All other text enters Copilot. Deterministic
+sender/channel/conversation scope. All other text enters Bot. Deterministic
 code must not recover natural-language business intent through unrelated command
 fallback.
 Any preview-write result can only enter an existing pending-operation path.
 Confirm, cancel, apply, notifications, direct config writes, ledger/trade
 writes, and service operations remain outside model authority.
 
-Control emits one `ControlExecution`; Copilot emits one Host-owned `AppResult`.
+Control emits one `ControlExecution`; Bot emits one Host-owned `AppResult`.
 Neither path recreates perception/reasoning/action/observation stages.
 
 ## Runtime Tick Flow

@@ -27,7 +27,7 @@ def _prepare_pi_setup_root(tmp_path: Path, *, context_window_tokens: int = 24_00
             {
                 "assistant": {
                     "enabled": True,
-                    "copilot": {"enabled": True, "toolsets": {}},
+                    "bot": {"enabled": True, "toolsets": {}},
                     "llm": {
                         "provider": "ollama",
                         "base_url": "http://127.0.0.1:11434/v1",
@@ -148,10 +148,10 @@ def test_setup_check_reports_pi_runtime_context_and_session_without_writes(monke
     assert checks["install.node"]["value"]["version"] == "v22.19.0"
     assert checks["install.npm"]["status"] == "ok"
     assert checks["install.pi_packages"]["status"] == "ok"
-    assert checks["copilot.model_context"]["status"] == "ok"
-    assert checks["copilot.model_context"]["value"]["context_window_tokens"] == 24_000
-    assert checks["copilot.pi_session_path"]["status"] == "ok"
-    assert checks["copilot.pi_session_path"]["value"]["pi_session_path"] == str(
+    assert checks["bot.model_context"]["status"] == "ok"
+    assert checks["bot.model_context"]["value"]["context_window_tokens"] == 24_000
+    assert checks["bot.pi_session_path"]["status"] == "ok"
+    assert checks["bot.pi_session_path"]["value"]["pi_session_path"] == str(
         runtime / "output_shared" / "state" / "pi_sessions.sqlite3"
     )
     assert not (runtime / "output_shared" / "state" / "pi_sessions.sqlite3").exists()
@@ -173,8 +173,8 @@ def test_setup_check_rejects_invalid_model_context(monkeypatch, tmp_path: Path) 
     out = run_setup_check(repo_root=root, markets=["us"], include_local_env_file=False)
     checks = {item["name"]: item for item in out["checks"]}
 
-    assert checks["copilot.model_context"]["status"] == "error"
-    assert checks["copilot.model_context"]["value"]["error"] == "invalid_assistant_config"
+    assert checks["bot.model_context"]["status"] == "error"
+    assert checks["bot.model_context"]["value"]["error"] == "invalid_assistant_config"
 
 
 def test_setup_check_reports_missing_or_unwritable_pi_session_parent(monkeypatch, tmp_path: Path) -> None:
@@ -187,7 +187,7 @@ def test_setup_check_reports_missing_or_unwritable_pi_session_parent(monkeypatch
     )
 
     missing = run_setup_check(repo_root=root, markets=["us"], include_local_env_file=False)
-    missing_check = {item["name"]: item for item in missing["checks"]}["copilot.pi_session_path"]
+    missing_check = {item["name"]: item for item in missing["checks"]}["bot.pi_session_path"]
     assert missing_check["status"] == "error"
     assert missing_check["value"]["parent_exists"] is False
     assert not missing_audit.parent.exists()
@@ -201,7 +201,7 @@ def test_setup_check_reports_missing_or_unwritable_pi_session_parent(monkeypatch
         lambda path, mode: False if Path(path) == existing_parent else real_access(path, mode),
     )
     unwritable = run_setup_check(repo_root=root, markets=["us"], include_local_env_file=False)
-    unwritable_check = {item["name"]: item for item in unwritable["checks"]}["copilot.pi_session_path"]
+    unwritable_check = {item["name"]: item for item in unwritable["checks"]}["bot.pi_session_path"]
     assert unwritable_check["status"] == "error"
     assert unwritable_check["value"]["parent_exists"] is True
     assert not (existing_parent / "pi_sessions.sqlite3").exists()
@@ -224,7 +224,7 @@ def test_setup_check_rejects_symlinked_pi_session_parent_without_resolving_or_wr
     )
 
     out = run_setup_check(repo_root=root, markets=["us"], include_local_env_file=False)
-    check = {item["name"]: item for item in out["checks"]}["copilot.pi_session_path"]
+    check = {item["name"]: item for item in out["checks"]}["bot.pi_session_path"]
 
     assert check["status"] == "error"
     assert check["value"]["parent"] == str(lexical_parent)

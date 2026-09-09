@@ -24,8 +24,8 @@ from src.application.inbound.feishu import feishu_payload_to_inbound_request, ha
 from src.application.assistant.policy import PURE_READ_TOOLS, check_sender_allowed, enforce_tool_allowed
 from src.application.assistant.renderer import render_inbound_text
 from src.application.assistant.inbound_service import handle_assistant_request
-from src.application.copilot.contracts import AppResult
-from src.application.copilot.control_handoff import control_preview_tool_description
+from src.application.bot.contracts import AppResult
+from src.application.bot.control_handoff import control_preview_tool_description
 from src.application.assistant.runtime import handle_assistant_turn
 from src.application.assistant.settings import AssistantSettings
 
@@ -80,7 +80,7 @@ def test_control_preview_contract_tells_agent_to_collect_required_trade_fields()
         ),
     ],
 )
-def test_copilot_write_request_hands_off_to_deterministic_control_preview(
+def test_bot_write_request_hands_off_to_deterministic_control_preview(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     text: str,
@@ -100,7 +100,7 @@ def test_copilot_write_request_hands_off_to_deterministic_control_preview(
             control_request={
                 "intent_name": intent_name,
                 "arguments": control_arguments,
-                "source": "copilot_control_preview",
+                "source": "bot_control_preview",
                 "confidence": 1.0,
             },
             ok=True,
@@ -147,18 +147,18 @@ def test_copilot_write_request_hands_off_to_deterministic_control_preview(
 
     assert out["ok"] is True
     assert out["data"]["control"]["requires_confirmation"] is True
-    assert out["data"]["copilot"]["status"] == "control_requested"
+    assert out["data"]["bot"]["status"] == "control_requested"
     assert len(seen) == 1
     assert seen[0].intent_name == intent_name
     assert seen[0].arguments == control_arguments
-    assert seen[0].source == "copilot_control_preview"
+    assert seen[0].source == "bot_control_preview"
     audit = InboundAuditStore(tmp_path / "audit.sqlite3").list_recent(
         conversation_id="wechat:chat_a:ou_1", limit=1
     )[0]
     assert json.loads(audit["control_json"])["result"]["data"]["operation_id"] == "op_test"
 
 
-def test_copilot_receives_current_conversation_pending_context(
+def test_bot_receives_current_conversation_pending_context(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -215,7 +215,7 @@ def test_copilot_receives_current_conversation_pending_context(
     assert captured[1]["config_path"] == str(config_path)
 
 
-def test_copilot_cannot_bypass_control_with_confirm_intent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_bot_cannot_bypass_control_with_confirm_intent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     executed = False
     monkeypatch.setattr(
         inbound_service,
@@ -444,7 +444,7 @@ accounts:
     holdings_account: lx
 assistant:
   enabled: true
-  copilot:
+  bot:
     enabled: true
   active_model: openai-default
   models:
@@ -473,7 +473,7 @@ markets:
             {
                 "assistant": {
                     "enabled": True,
-                    "copilot": {"enabled": True},
+                    "bot": {"enabled": True},
                     "llm": {
                         "provider": "openai",
                         "base_url": "https://api.openai.com/v1",
@@ -4240,9 +4240,11 @@ def test_feishu_payload_adapter_extracts_text_message_and_calls_inbound(tmp_path
             data={"summary": [{"month": "2026-05", "account": "sy", "currency": "HKD"}]},
         )
 
-    request = feishu_payload_to_inbound_request(payload, audit_db=str(tmp_path / "audit.sqlite3"))
+    request = feishu_payload_to_inbound_request(payload, audit_db=str(tmp_path / "audit.sqlite3"), received_monotonic=123.25)
     assert request == AssistantRequest(
         text="/income sy ytd",
+        reply_context={},
+        received_monotonic=123.25,
         sender_id="ou_1",
         channel="feishu",
         message_id="om_1",
@@ -4273,7 +4275,7 @@ def test_feishu_payload_adapter_assistant_reads_assistant_config(monkeypatch: py
     assistant_config_path = tmp_path / "config.assistant.json"
     assistant_config_path.write_text(json.dumps({"assistant": {
         "enabled": True,
-        "copilot": {"enabled": True},
+        "bot": {"enabled": True},
         "context_window_messages": 7,
         "default_market_scope": "us",
         "llm": {
@@ -4321,7 +4323,7 @@ def test_feishu_payload_adapter_assistant_reads_assistant_config(monkeypatch: py
     assert len(seen) == 1
     settings = seen[0]["kwargs"]["settings"]
     assert settings.enabled is True
-    assert settings.copilot.enabled is True
+    assert settings.bot.enabled is True
     assert settings.context_window_messages == 7
     assert settings.llm.enabled is True
     assert settings.llm.provider == "openai"
@@ -4340,7 +4342,7 @@ def test_feishu_payload_adapter_defaults_to_assistant_from_assistant_config(monk
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
     assistant_config_path = tmp_path / "config.assistant.json"
     assistant_config_path.write_text(
-        json.dumps({"assistant": {"enabled": True, "copilot": {"enabled": False}, "context_window_messages": 5, "llm": {}}}, ensure_ascii=False),
+        json.dumps({"assistant": {"enabled": True, "bot": {"enabled": False}, "context_window_messages": 5, "llm": {}}}, ensure_ascii=False),
         encoding="utf-8",
     )
     payload = {
@@ -4376,7 +4378,7 @@ def test_feishu_payload_adapter_defaults_to_assistant_from_assistant_config(monk
     assert len(seen) == 1
     settings = seen[0]["kwargs"]["settings"]
     assert settings.enabled is True
-    assert settings.copilot.enabled is False
+    assert settings.bot.enabled is False
     assert settings.context_window_messages == 5
 
 
@@ -4434,9 +4436,11 @@ def test_assistant_cli_handle_wires_request(monkeypatch, capsys, tmp_path: Path)
 
     assert rc == 0
     assert payload["tool_name"] == "assistant.handle"
+    assert seen[0].received_monotonic is not None
     assert seen == [
         AssistantRequest(
             text="状态",
+            received_monotonic=seen[0].received_monotonic,
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_1",
@@ -4457,7 +4461,7 @@ def test_assistant_cli_handle_loads_settings_from_config(monkeypatch, capsys, tm
     assistant_config_path = tmp_path / "config.assistant.json"
     assistant_config_path.write_text(json.dumps({"assistant": {
         "enabled": True,
-        "copilot": {"enabled": True},
+        "bot": {"enabled": True},
         "context_window_messages": 6,
         "default_market_scope": "us",
         "llm": {
@@ -4510,7 +4514,7 @@ def test_assistant_cli_handle_loads_settings_from_config(monkeypatch, capsys, tm
     assert settings.llm.max_output_tokens == 771
 
 
-def test_assistant_cli_handle_uses_copilot_disabled_config(monkeypatch, capsys, tmp_path: Path) -> None:
+def test_assistant_cli_handle_uses_bot_disabled_config(monkeypatch, capsys, tmp_path: Path) -> None:
     import src.interfaces.cli.main as cli
 
     cfg = _runtime_cfg(str(tmp_path / "portfolio.runtime.json"))
@@ -4518,7 +4522,7 @@ def test_assistant_cli_handle_uses_copilot_disabled_config(monkeypatch, capsys, 
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
     assistant_config_path = tmp_path / "config.assistant.json"
     assistant_config_path.write_text(
-        json.dumps({"assistant": {"enabled": True, "copilot": {"enabled": False}, "context_window_messages": 4, "llm": {}}}, ensure_ascii=False),
+        json.dumps({"assistant": {"enabled": True, "bot": {"enabled": False}, "context_window_messages": 4, "llm": {}}}, ensure_ascii=False),
         encoding="utf-8",
     )
     seen = []
@@ -4550,7 +4554,7 @@ def test_assistant_cli_handle_uses_copilot_disabled_config(monkeypatch, capsys, 
     assert len(seen) == 1
     settings = seen[0]["settings"]
     assert settings.enabled is True
-    assert settings.copilot.enabled is False
+    assert settings.bot.enabled is False
     assert settings.context_window_messages == 4
 
 
@@ -4797,3 +4801,29 @@ def test_inbound_cli_feishu_ws_rejects_secret_override_flags(capsys) -> None:
     exc = _caught.value
     assert int(exc.code or 0) == 2
     _ = capsys.readouterr()
+
+
+def test_inbound_database_lock_waits_use_remaining_budget(tmp_path):
+    import time
+    import sqlite3
+    from src.application.assistant.operation_store import InboundOperationStore
+    path = tmp_path / "bounded_inbound.sqlite3"
+    with InboundAuditStore(path)._connect() as conn:
+        conn.execute("CREATE TABLE budget_probe (value INTEGER)")
+    with sqlite3.connect(path) as blocker:
+        blocker.execute("BEGIN IMMEDIATE")
+        for store_type in (InboundAuditStore, InboundOperationStore):
+            started = time.monotonic()
+            store = store_type(path, deadline_monotonic=started + 0.05)
+            with store._connect() as conn:
+                assert 0 <= conn.execute("PRAGMA busy_timeout").fetchone()[0] <= 50
+                try:
+                    conn.execute("INSERT INTO budget_probe VALUES (1)")
+                except sqlite3.OperationalError as error:
+                    assert "locked" in str(error)
+                else:
+                    raise AssertionError("test lock unexpectedly acquired")
+            assert time.monotonic() - started < 0.25
+        blocker.rollback()
+    with InboundAuditStore(path)._connect() as conn:
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000

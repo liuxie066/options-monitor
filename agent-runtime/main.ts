@@ -82,7 +82,7 @@ const PROVIDER_API_KINDS: Record<string, Api> = {
 };
 const COMPACTION_INSTRUCTIONS = [
   "Preserve the user's investment goals and stable preferences.",
-  "Keep timestamps on historical claims and preserve unresolved questions and Control references.",
+  "Keep confirmed scope, evidence IDs and source timestamps, unresolved goals, and Control references.",
   "Never present remembered financial facts as current facts.",
   "Omit coding and file-operation guidance.",
 ].join(" ");
@@ -197,7 +197,7 @@ function isControlRequest(value: unknown): value is JsonObject {
     exactKeys(value, ["intent_name", "arguments", "source", "confidence"]) &&
     isNonEmptyString(value.intent_name) &&
     isRecord(value.arguments) &&
-    value.source === "copilot_control_preview" &&
+    value.source === "bot_control_preview" &&
     value.confidence === 1;
 }
 
@@ -282,6 +282,7 @@ function parseEnvelope(
 function validateStart(payload: JsonObject): void {
   const keys = [
     "execution_environment",
+    "remaining_budget_ms",
     "session_id",
     "system_prompt",
     "runtime_context",
@@ -297,10 +298,14 @@ function validateStart(payload: JsonObject): void {
     "debug",
   ];
   if (!exactKeys(payload, keys)) throw new Error("start payload keys are not closed");
+  if (!isPositiveInteger(payload.remaining_budget_ms) || (payload.remaining_budget_ms as number) > 180_000) {
+    throw new Error("remaining_budget_ms must be a positive integer <= 180000");
+  }
   if (
     payload.execution_environment !== "local" &&
     payload.execution_environment !== "eval" &&
-    payload.execution_environment !== "channel"
+    payload.execution_environment !== "channel" &&
+    payload.execution_environment !== "memory_consolidation"
   ) {
     throw new Error("execution_environment is not allowed");
   }
@@ -394,7 +399,10 @@ function validateStart(payload: JsonObject): void {
     })) throw new Error("catalog is not the exact snapshot projection");
   }
   const initialNames = new Set((payload.tools as JsonObject[]).map((item) => String(item.name)));
-  const residentNames = new Set(["tool_directory", "submit_answer", CONTROL_PREVIEW_TOOL]);
+  const residentNames = new Set(["tool_directory", "submit_answer", CONTROL_PREVIEW_TOOL, "bot_memory"]);
+  if (catalogNames.some((name) => residentNames.has(name))) {
+    throw new Error("catalog cannot contain internal tools");
+  }
   if (payload.tool_loading_mode === "directory" &&
     (catalogNames.length === 0 ||
       [...initialNames].some((name) => !residentNames.has(name)) ||
@@ -403,7 +411,7 @@ function validateStart(payload: JsonObject): void {
   }
   if (payload.tool_loading_mode === "eager" &&
     (catalogNames.some((name) => !initialNames.has(name)) ||
-      !initialNames.has("submit_answer") || initialNames.has("tool_directory"))) {
+      (payload.execution_environment !== "memory_consolidation" && !initialNames.has("submit_answer")) || initialNames.has("tool_directory"))) {
     throw new Error("eager initial tools are invalid");
   }
   if (!Array.isArray(payload.recovered_observations)) {
@@ -412,6 +420,14 @@ function validateStart(payload: JsonObject): void {
   for (const observation of payload.recovered_observations) {
     if (!isRecord(observation)) throw new Error("recovered observation must be an object");
   }
+
+  if (payload.execution_environment === "memory_consolidation" && (
+    payload.session_id !== null || payload.tools.length !== 0 || payload.tool_catalog.length !== 0 ||
+    payload.catalog_snapshot.length !== 0 || (payload.runtime_context as JsonObject[]).length !== 0 ||
+    payload.recovered_observations.length !== 0 || payload.debug !== null || payload.tool_loading_mode !== "eager" ||
+    (payload.remaining_budget_ms as number) > 30_000 || !isRecord(payload.limits) ||
+    (payload.limits.timeout_seconds as number) > 30
+  )) throw new Error("memory consolidation must be isolated, tool-free, and bounded to 30 seconds");
 
   if (!isRecord(payload.model)) throw new Error("model must be an object");
   const model = payload.model;
@@ -702,7 +718,8 @@ function withOmRequestPolicy(
   const maxAttempts = raw.max_attempts as number;
 
   const requestOptions = <T extends StreamOptions>(options: T | undefined): T => {
-    const remaining = Math.max(1, Math.floor(remainingSceneMs()));
+    const remaining = Math.floor(remainingSceneMs());
+    if (remaining < 1) throw new SafeRunFailure(safeError("BUDGET_EXHAUSTED", "budget", "time deadline exhausted", false));
     const callerTimeout = options?.timeoutMs ?? modelTimeoutMs;
     const callerMaxTokens = options?.maxTokens ?? model.maxTokens;
     const call = metrics.startCall();
@@ -1093,7 +1110,8 @@ function createToolBridge(
     residentTools: tools.filter((tool) =>
       tool.name === "tool_directory" ||
       tool.name === "submit_answer" ||
-      tool.name === CONTROL_PREVIEW_TOOL
+      tool.name === CONTROL_PREVIEW_TOOL ||
+      tool.name === "bot_memory"
     ),
     activateTools(activation) {
       if (!Array.isArray(activation.tools)) throw new Error("tool activation tools are invalid");
@@ -1452,6 +1470,7 @@ async function prepareSessionState(
   signal: AbortSignal,
   runId: string,
   tools: AgentTool[],
+  completeTurnsOnly = false,
 ): Promise<SessionState> {
   const contextWindow = model.contextWindow;
   // S8 policy is expressed against effective input capacity, after reserving
@@ -1513,6 +1532,19 @@ async function prepareSessionState(
     throw new SafeRunFailure(
       safeError("BUDGET_EXHAUSTED", "budget", "provider input has no safe compactable prefix", false)
     );
+  }
+  if (completeTurnsOnly && preparation.value.isSplitTurn) {
+    // The active request lives outside this historical prefix. Move a cut that
+    // lands inside a historical user turn forward to its next user boundary,
+    // so an overflowing assistant/tool group is summarized in full.
+    const nextTurn = preparation.value.retainedTail.findIndex((message) => message.role === "user");
+    const cut = nextTurn < 0 ? preparation.value.retainedTail.length : nextTurn;
+    preparation.value.messagesToSummarize.push(
+      ...preparation.value.turnPrefixMessages, ...preparation.value.retainedTail.slice(0, cut),
+    );
+    preparation.value.turnPrefixMessages = [];
+    preparation.value.retainedTail = preparation.value.retainedTail.slice(cut);
+    preparation.value.isSplitTurn = false;
   }
   const metricsStart = metrics.beginCompaction();
   let result;
@@ -1885,6 +1917,7 @@ function safeModelFailure(
 async function run(): Promise<void> {
   const lines = readJsonLines(process.stdin);
   const first = await lines.next();
+  const receivedAt = performance.now();
   if (first.done) {
     process.stderr.write("diagnostic: missing run.start\n");
     process.exitCode = 2;
@@ -1908,6 +1941,8 @@ async function run(): Promise<void> {
     nodeSeq += 1;
     emit(type, p, identity, nodeSeq);
   };
+  const deadline = receivedAt + (payload.remaining_budget_ms as number);
+  const remainingSceneMs = (): number => deadline - performance.now();
   const sessionId = payload.session_id as string | null;
   let repository: SqliteSessionRepository | null = null;
   let session: Session | null = null;
@@ -1952,10 +1987,12 @@ async function run(): Promise<void> {
       payload.catalog_hash as string,
     );
     const limits = payload.limits as JsonObject;
-    const startedAt = performance.now();
-    const remainingSceneMs = (): number =>
-      (limits.timeout_seconds as number) * 1_000 - (performance.now() - startedAt);
     const runAbort = new AbortController();
+    const deadlineTimer = setTimeout(() => {
+      runAbort.abort();
+      agent?.abort();
+    }, Math.max(0, Math.floor(remainingSceneMs())));
+    deadlineTimer.unref();
     const metrics = new RunMetrics();
     const providerModels = payload.execution_environment === "eval"
       ? createFixtureModels(payload)
@@ -1965,6 +2002,8 @@ async function run(): Promise<void> {
       : providerModels.streamSimple.bind(providerModels);
     let assistantTurns = 0;
     let finalizedToolCalls = 0;
+    const failedCalls = new Map<string, string>();
+    const retriedMemoryWrites = new Set<string>();
     let consecutiveFailedToolBatches = 0;
     let forcedFinalAtTurn: number | null = null;
     let continuationUsed = false;
@@ -2146,6 +2185,10 @@ async function run(): Promise<void> {
       return;
     }
 
+    const historyLength = sessionState.messages.length;
+    let providerHistory = sessionState.messages;
+    // Pi loop context tool updates do not mutate Agent.state.tools.
+    let activeTools = bridge.tools;
     agent = new Agent({
       initialState: {
         systemPrompt,
@@ -2156,8 +2199,51 @@ async function run(): Promise<void> {
       },
       streamFn,
       convertToLlm,
+      transformContext: async (messages) => {
+        const currentTurn = messages.slice(historyLength);
+        const tools = activeTools;
+        const checkpoint = providerHistory.findLast((message) => message.role === "compactionSummary");
+        const providerMessages = [...providerHistory, ...currentTurn].map((message) =>
+          checkpoint && message.role === "assistant" && message.timestamp <= checkpoint.timestamp
+            ? { ...message, usage: emptyUsage() } : message
+        );
+        const before = estimateProviderInputTokens(systemPrompt, "", providerMessages, tools);
+        if (assistantTurns === 0 || before < (model.contextWindow - model.maxTokens) * 0.70) return providerMessages;
+        try {
+          // Current-turn evidence is retained verbatim. Only complete historical
+          // groups go through Pi compaction; the current turn consumes its fixed
+          // budget. The durable conversation suffix remains unchanged.
+          sessionState = await prepareSessionState(
+            session, sessionState, { ...payload, user_message: stableJson(convertToLlm(currentTurn)) },
+            model, providerModels, metrics, systemPrompt, runAbort.signal, identity.runId, tools, true,
+          );
+          providerHistory = sessionState.messages;
+          const result = [...providerHistory, ...currentTurn].map((message) =>
+            message.role === "assistant" ? { ...message, usage: emptyUsage() } : message
+          );
+          emitRun("agent.event", { event_type: "context_compaction_committed", data: {
+            compaction_count: 1, usage_total: metrics.usageTotal(),
+          } });
+          return result;
+        } catch (error) {
+          runtimeFailure = mapSessionFailure(error);
+          runAbort.abort();
+          agent?.abort();
+          return providerMessages;
+        }
+      },
       toolExecution: "sequential",
-      beforeToolCall: async ({ assistantMessage, toolCall }) => {
+      beforeToolCall: async ({ assistantMessage, toolCall, args }) => {
+        if (toolCall.name !== "submit_answer" && (
+          finalizedToolCalls >= (limits.max_tool_calls as number) || forcedFinalAtTurn !== null
+        )) return { block: true, reason: "Tool budget exhausted; call submit_answer alone to finish." };
+        const callKey = stableJson({ name: toolCall.name, arguments: args });
+        const failure = failedCalls.get(callKey);
+        const retryMemoryWrite = failure === "MEMORY_UNAVAILABLE" && toolCall.name === "bot_memory" &&
+          isRecord(args) && ["remember", "correct", "forget"].includes(String(args.action)) &&
+          isNonEmptyString(args.idempotency_key) && !retriedMemoryWrites.has(callKey);
+        if (failure && !retryMemoryWrite) return { block: true, reason: `Unchanged failed call (${failure}); change the arguments or finish with the evidence gap.` };
+
         const calls = assistantMessage.content.filter((item) => item.type === "toolCall");
         const controlCalls = calls.filter((item) => item.name === CONTROL_PREVIEW_TOOL);
         const protocolCalls = calls.filter((item) => item.name === "tool_directory" || item.name === "submit_answer");
@@ -2181,10 +2267,19 @@ async function run(): Promise<void> {
             }),
           };
         }
+        // A committed memory write may lose only its readback. Preserve one
+        // same-key recovery without replenishing any shared execution budget.
+        if (retryMemoryWrite) retriedMemoryWrites.add(callKey);
         return undefined;
       },
-      afterToolCall: async ({ result }) => {
+      afterToolCall: async ({ result, toolCall, args }) => {
         const details = result.details;
+        if (isRecord(details) && isRecord(details.observation) && details.observation.ok === false &&
+          toolCall.name !== "submit_answer" && toolCall.name !== "tool_directory" && toolCall.name !== CONTROL_PREVIEW_TOOL) {
+          const error = details.observation.error;
+          failedCalls.set(stableJson({ name: toolCall.name, arguments: args }),
+            isRecord(error) ? String(error.code || "TOOL_ERROR") : String(error || "TOOL_ERROR"));
+        }
         return isRecord(details) &&
           isRecord(details.observation) &&
           details.observation.ok === false
@@ -2214,7 +2309,7 @@ async function run(): Promise<void> {
           const details = activationResult.details as JsonObject;
           const activation = details.toolActivation as JsonObject;
           try {
-            const activeTools = [
+            activeTools = [
               ...bridge.residentTools,
               ...bridge.activateTools(activation),
             ];
@@ -2235,6 +2330,7 @@ async function run(): Promise<void> {
         }
         const remainingMs = remainingSceneMs();
         const eligibleContinuation =
+          payload.execution_environment !== "memory_consolidation" &&
           !continuationUsed &&
           forcedFinalAtTurn === null &&
           message.stopReason === "length" &&
@@ -2252,7 +2348,8 @@ async function run(): Promise<void> {
             content: [{ type: "text", text: CONTINUATION_PROMPT }],
             timestamp: Date.now(),
           });
-          return { context: { ...context, tools: bridge.residentTools } };
+          activeTools = bridge.residentTools;
+          return { context: { ...context, tools: activeTools } };
         }
         if (forcedFinalAtTurn !== null || toolResults.length === 0) return undefined;
         const exhausted =
@@ -2276,10 +2373,12 @@ async function run(): Promise<void> {
                   : "time_reserve",
           },
         });
-        return { context: { ...context, tools: bridge.residentTools } };
+        activeTools = bridge.residentTools.filter((tool) => tool.name === "submit_answer");
+        return { context: { ...context, tools: activeTools } };
       },
       shouldStopAfterTurn: () =>
-        forcedFinalAtTurn !== null && assistantTurns > forcedFinalAtTurn,
+        (payload.execution_environment === "memory_consolidation" && assistantTurns >= 1) ||
+        (forcedFinalAtTurn !== null && assistantTurns > forcedFinalAtTurn),
     });
 
     agent.subscribe((event) => {
@@ -2328,12 +2427,17 @@ async function run(): Promise<void> {
     let promptFailed = false;
     let promptFailure: unknown = null;
     try {
+      activeTools = agent.state.tools;
       await agent.prompt(payload.user_message as string);
     } catch (error) {
       promptFailed = true;
       promptFailure = error;
     }
 
+    if (remainingSceneMs() < 1) {
+      finishError(safeError("BUDGET_EXHAUSTED", "budget", "time deadline exhausted", false));
+      return;
+    }
     if (inbound.error) {
       finishError(inbound.error);
       return;
@@ -2402,6 +2506,7 @@ async function run(): Promise<void> {
       }
       let repairPromptFailed = false;
       try {
+        activeTools = agent.state.tools;
         await agent.prompt(ANSWER_REPAIR_PROMPT);
         finalMessage = lastAssistant(agent);
         approvedAnswer = bridge.approvedAnswer();
@@ -2530,6 +2635,10 @@ async function run(): Promise<void> {
       finishCancelled(usage);
       return;
     }
+    if (remainingSceneMs() < 1) {
+      finishError(safeError("BUDGET_EXHAUSTED", "budget", "time deadline exhausted before commit", false));
+      return;
+    }
     if (action === "run.commit" && session) {
       try {
         await persistTurn(
@@ -2545,6 +2654,11 @@ async function run(): Promise<void> {
         return;
       }
     }
+    if (remainingSceneMs() < 1) {
+      finishError(safeError("BUDGET_EXHAUSTED", "budget", "time deadline exhausted during commit", false));
+      return;
+    }
+    clearTimeout(deadlineTimer);
     inbound.terminal = true;
     emitRun("run.final", {
       status,

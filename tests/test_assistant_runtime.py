@@ -7,8 +7,8 @@ from src.application.agent_tool_contracts import build_response
 from src.application.assistant.contracts import AssistantRequest
 from src.application.assistant.runtime import handle_assistant_turn
 from src.application.assistant.renderer import render_canonical_tool_result
-from src.application.assistant.settings import AssistantSettings, CopilotSettings
-from src.application.copilot.contracts import AppResult
+from src.application.assistant.settings import AssistantSettings, BotSettings
+from src.application.bot.contracts import AppResult
 
 
 def _request(tmp_path: Path, text: str, *, message_id: str = "m_runtime") -> AssistantRequest:
@@ -25,38 +25,38 @@ def _request(tmp_path: Path, text: str, *, message_id: str = "m_runtime") -> Ass
 
 
 def test_portfolio_toolset_is_disabled_by_default_and_requires_all_gates() -> None:
-    assert AssistantSettings.from_runtime_config({}).enabled_copilot_toolsets == frozenset()
+    assert AssistantSettings.from_runtime_config({}).enabled_bot_toolsets == frozenset()
     assert AssistantSettings.from_runtime_config(
-        {"assistant": {"copilot": {"enabled": True, "toolsets": {"portfolio": True}}}}
-    ).enabled_copilot_toolsets == frozenset({"portfolio"})
+        {"assistant": {"bot": {"enabled": True, "toolsets": {"portfolio": True}}}}
+    ).enabled_bot_toolsets == frozenset({"portfolio"})
     assert AssistantSettings.from_runtime_config(
-        {"assistant": {"enabled": False, "copilot": {"enabled": True, "toolsets": {"portfolio": True}}}}
-    ).enabled_copilot_toolsets == frozenset()
+        {"assistant": {"enabled": False, "bot": {"enabled": True, "toolsets": {"portfolio": True}}}}
+    ).enabled_bot_toolsets == frozenset()
     assert AssistantSettings.from_runtime_config(
-        {"assistant": {"copilot": {"enabled": False, "toolsets": {"portfolio": True}}}}
-    ).enabled_copilot_toolsets == frozenset()
+        {"assistant": {"bot": {"enabled": False, "toolsets": {"portfolio": True}}}}
+    ).enabled_bot_toolsets == frozenset()
 
 
-def test_freeform_turn_goes_directly_to_copilot(monkeypatch, tmp_path: Path) -> None:
+def test_freeform_turn_goes_directly_to_bot(monkeypatch, tmp_path: Path) -> None:
     from src.application.assistant import inbound_service
 
     captured: list[dict[str, Any]] = []
 
-    def fake_copilot(**kwargs: Any) -> AppResult:
+    def fake_bot(**kwargs: Any) -> AppResult:
         captured.append(dict(kwargs))
         return AppResult(status="answered", user_response="7 月收益主要来自权利金。")
 
-    monkeypatch.setattr(inbound_service, "run_channel_request", fake_copilot)
+    monkeypatch.setattr(inbound_service, "run_channel_request", fake_bot)
     result = handle_assistant_turn(
         _request(tmp_path, "7月收益"),
         allowed_senders="u_runtime",
-        settings=AssistantSettings(copilot=CopilotSettings(enabled=True)),
+        settings=AssistantSettings(bot=BotSettings(enabled=True)),
     )
 
     assert result.ok is True
     assert result.response_text == "7 月收益主要来自权利金。"
-    assert result.trace["route"] == "copilot"
-    assert result.meta["assistant"]["route"] == "copilot"
+    assert result.trace["route"] == "bot"
+    assert result.meta["assistant"]["route"] == "bot"
     assert captured[0]["conversation_id"] == "c_runtime"
 
 
@@ -65,15 +65,15 @@ def test_followup_text_is_not_reparsed_as_a_business_intent(monkeypatch, tmp_pat
 
     captured: list[str] = []
 
-    def fake_copilot(**kwargs: Any) -> AppResult:
+    def fake_bot(**kwargs: Any) -> AppResult:
         captured.append(str(kwargs["user_message"]))
         return AppResult(status="answered", user_response="结论是收益集中于两个标的。")
 
-    monkeypatch.setattr(inbound_service, "run_channel_request", fake_copilot)
+    monkeypatch.setattr(inbound_service, "run_channel_request", fake_bot)
     result = handle_assistant_turn(
         _request(tmp_path, "结论呢", message_id="m_followup"),
         allowed_senders="u_runtime",
-        settings=AssistantSettings(copilot=CopilotSettings(enabled=True)),
+        settings=AssistantSettings(bot=BotSettings(enabled=True)),
     )
 
     assert captured == ["结论呢"]
@@ -91,11 +91,11 @@ def test_slash_command_keeps_deterministic_control_path(tmp_path: Path) -> None:
         _request(tmp_path, "/status", message_id="m_status"),
         execute_tool_fn=execute_tool,
         allowed_senders="u_runtime",
-        settings=AssistantSettings(copilot=CopilotSettings(enabled=True)),
+        settings=AssistantSettings(bot=BotSettings(enabled=True)),
     )
 
     assert result.ok is True
-    assert result.trace["route"] != "copilot"
+    assert result.trace["route"] != "bot"
     assert calls
 
 
@@ -104,14 +104,14 @@ def test_duplicate_freeform_message_reuses_audited_response(monkeypatch, tmp_pat
 
     calls = 0
 
-    def fake_copilot(**_kwargs: Any) -> AppResult:
+    def fake_bot(**_kwargs: Any) -> AppResult:
         nonlocal calls
         calls += 1
         return AppResult(status="answered", user_response="第一次回答。")
 
-    monkeypatch.setattr(inbound_service, "run_channel_request", fake_copilot)
+    monkeypatch.setattr(inbound_service, "run_channel_request", fake_bot)
     request = _request(tmp_path, "最近有哪些风险？", message_id="m_duplicate")
-    settings = AssistantSettings(copilot=CopilotSettings(enabled=True))
+    settings = AssistantSettings(bot=BotSettings(enabled=True))
     first = handle_assistant_turn(request, allowed_senders="u_runtime", settings=settings)
     second = handle_assistant_turn(request, allowed_senders="u_runtime", settings=settings)
 

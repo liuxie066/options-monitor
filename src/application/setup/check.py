@@ -14,7 +14,7 @@ from typing import Any, Iterable
 from src.application.agent_tool_config import load_runtime_config
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.platform_profile import PlatformProfile, current_platform_profile
-from src.application.copilot.model_config import PiModelSettings, load_assistant_llm_config
+from src.application.bot.model_config import PiModelSettings, load_assistant_llm_config
 from src.application.runtime_config_readiness import evaluate_runtime_config_readiness
 from src.application.runtime_paths import resolve_runtime_root
 from src.application.settings import build_effective_env, diagnose_effective_settings
@@ -202,7 +202,7 @@ def run_setup_check(
             model_error = "invalid_model_config"
     model_context_ok = model_settings is not None
     add(
-        "copilot.model_context",
+        "bot.model_context",
         "ok" if model_context_ok else "error",
         "active Pi model context is valid" if model_context_ok else "active Pi model context is missing or invalid",
         {
@@ -228,7 +228,7 @@ def run_setup_check(
         and os.access(session_parent, os.W_OK | os.X_OK)
     )
     add(
-        "copilot.pi_session_path",
+        "bot.pi_session_path",
         "ok" if session_parent_ok else "error",
         "Pi Session parent exists and is writable" if session_parent_ok else "Pi Session parent is missing or not writable",
         {

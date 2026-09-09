@@ -58,7 +58,7 @@ markets:
 assistant:
   enabled: true
   context_window_messages: 8
-  copilot:
+  bot:
     enabled: true
     tool_loading_mode: eager
     toolsets:

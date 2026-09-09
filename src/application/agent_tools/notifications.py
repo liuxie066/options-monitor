@@ -70,7 +70,7 @@ PREVIEW_NOTIFICATION_TOOL = build_agent_tool(
         },
     ),
     output_contract=_PREVIEW_NOTIFICATION_OUTPUT_CONTRACT,
-    copilot_input_fields=("alerts_text", "changes_text", "account_label", "render_style"),
+    bot_input_fields=("alerts_text", "changes_text", "account_label", "render_style"),
 )
 
 TOOLS: tuple[AgentTool, ...] = (PREVIEW_NOTIFICATION_TOOL,)

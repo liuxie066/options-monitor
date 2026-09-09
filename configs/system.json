@@ -129,7 +129,7 @@
     "assistant": {
       "enabled": true,
       "context_window_messages": 8,
-      "copilot": {
+      "bot": {
         "enabled": false,
         "tool_loading_mode": "eager",
         "toolsets": {

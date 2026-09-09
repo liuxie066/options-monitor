@@ -20,7 +20,7 @@ from src.application.agent_tool_config import resolve_output_root
 from src.application.symbol_aliases import symbol_aliases_from_config
 
 
-def _normalize_candidate_filter_copilot_input(payload: Mapping[str, Any]) -> dict[str, Any]:
+def _normalize_candidate_filter_bot_input(payload: Mapping[str, Any]) -> dict[str, Any]:
     normalized = dict(payload)
     selector = normalized.get("run_selector")
     if selector is not None:
@@ -178,7 +178,7 @@ CANDIDATE_RANK_EXPLAIN_TOOL = build_agent_tool(
         {"input": {"account": "sy", "run_id": "20260514T100000Z", "mode": "call"}},
     ),
     output_contract=_CANDIDATE_RANK_OUTPUT_CONTRACT,
-    copilot_input_fields=("mode", "top_n", "run_id", "account"),
+    bot_input_fields=("mode", "top_n", "run_id", "account"),
 )
 
 CANDIDATE_FILTER_EXPLAIN_TOOL = build_agent_tool(
@@ -238,7 +238,7 @@ CANDIDATE_FILTER_EXPLAIN_TOOL = build_agent_tool(
         {"input": {"account": "sy", "symbol": "0700.HK", "run_selector": "latest_notification"}},
     ),
     output_contract=_CANDIDATE_FILTER_OUTPUT_CONTRACT,
-    copilot_input_fields=(
+    bot_input_fields=(
         "config_key",
         "symbol",
         "account",
@@ -247,7 +247,7 @@ CANDIDATE_FILTER_EXPLAIN_TOOL = build_agent_tool(
         "run_selector",
         "notification_date",
     ),
-    copilot_input_normalizer=_normalize_candidate_filter_copilot_input,
+    bot_input_normalizer=_normalize_candidate_filter_bot_input,
 )
 
 TOOLS: tuple[AgentTool, ...] = (
