@@ -220,6 +220,8 @@ def enqueue_trade_payload(
                 conn.execute(
                     """UPDATE trade_inbox SET payload_version = payload_version + 1,
                        claim_id = NULL, claim_until_ms = NULL, updated_at_ms = ?,
+                       next_attempt_at_ms = CASE WHEN status = 'handled' THEN 0
+                           ELSE next_attempt_at_ms END,
                        receipt_recovery_allowed = CASE
                            WHEN status = 'handled' AND ? THEN 0
                            ELSE receipt_recovery_allowed END,
