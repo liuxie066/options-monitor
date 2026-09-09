@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 3.5.1 - 2026-09-09
+
+### New Features
+- Upgraded Copilot to Bot with receipt-aware context, bounded execution, and durable conversation memory.
+
 ### Bug Fixes
 - Preserved verified account and environment evidence from OpenD trade push headers so valid fills can be recorded on first delivery without guessing account identity.
 - Preserved active SQLite transaction locks while securing database and sidecar file permissions.
