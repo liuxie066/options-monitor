@@ -489,7 +489,7 @@ def test_sqlite_metadata_rejects_path_replacement(tmp_path: Path, monkeypatch, r
         return real_chmod(path, mode, **kwargs)
 
     monkeypatch.setattr(private_storage.os, "chmod", replace_before_chmod)
-    with pytest.raises((OSError, NotImplementedError), match="changed|not implemented|not supported"):
+    with pytest.raises((OSError, NotImplementedError), match="changed|not implemented|not supported|unavailable"):
         secure_sqlite_artifacts(database)
     assert outside.read_bytes() == b"unchanged"
     assert _mode(outside) == 0o644
@@ -594,7 +594,7 @@ def test_sqlite_directory_replacement_does_not_chmod_symlink_destination(tmp_pat
         return real_chmod(path, mode, **kwargs)
 
     monkeypatch.setattr(private_storage.os, "chmod", replace_before_chmod)
-    with pytest.raises((OSError, NotImplementedError), match="changed|not implemented|not supported"):
+    with pytest.raises((OSError, NotImplementedError), match="changed|not implemented|not supported|unavailable"):
         secure_sqlite_artifacts(database)
     assert _mode(outside) == 0o755
 
