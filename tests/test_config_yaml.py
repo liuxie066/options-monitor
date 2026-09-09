@@ -61,7 +61,7 @@ assistant:
   enabled: true
   context_window_messages: 6
   default_market_scope: us
-  copilot:
+  bot:
     enabled: true
   llm:
     provider: ""
@@ -992,8 +992,8 @@ inbound:
     cfg, _meta = resolve_yaml_assistant_config(repo_root=REPO_ROOT, config_path=config_path)
 
     assert cfg["assistant"]["enabled"] is True
-    assert cfg["assistant"]["copilot"]["enabled"] is False
-    assert cfg["assistant"]["copilot"]["toolsets"]["portfolio"] is False
+    assert cfg["assistant"]["bot"]["enabled"] is False
+    assert cfg["assistant"]["bot"]["toolsets"]["portfolio"] is False
     assert cfg["assistant"]["llm"]["api_key_env"] == "OM_LLM_API_KEY"
     assert cfg["inbound"]["feishu_ws"]["reply_enabled"] is True
     assert cfg["inbound"]["feishu_ws"]["queue_size"] == 100
@@ -1027,7 +1027,7 @@ markets:
                 "defaults": {
                     "assistant": {
                         "enabled": True,
-                        "copilot": {"enabled": True},
+                        "bot": {"enabled": True},
                         "context_window_messages": 3,
                         "default_market_scope": "hk",
                         "llm": {"provider": "openai"},
@@ -1047,7 +1047,7 @@ markets:
     )
 
     assert cfg["assistant"]["enabled"] is True
-    assert cfg["assistant"]["copilot"]["enabled"] is True
+    assert cfg["assistant"]["bot"]["enabled"] is True
     assert cfg["assistant"]["context_window_messages"] == 3
     assert cfg["assistant"]["default_market_scope"] == "hk"
     assert cfg["assistant"]["llm"]["provider"] == "openai"
@@ -1079,7 +1079,7 @@ markets:
     symbols: [FUTU]
 assistant:
   enabled: true
-  copilot:
+  bot:
     enabled: true
   active_model: deepseek-default
   models:
@@ -1119,7 +1119,7 @@ def test_yaml_assistant_model_profile_requires_declared_context_window(tmp_path:
         """\
 assistant:
   enabled: true
-  copilot:
+  bot:
     enabled: true
   active_model: deepseek-default
   models:
@@ -1140,7 +1140,7 @@ def test_yaml_assistant_config_allows_local_ollama_without_api_key(tmp_path: Pat
         """\
 assistant:
   enabled: true
-  copilot:
+  bot:
     enabled: true
   active_model: local
   models:
@@ -1176,7 +1176,7 @@ markets:
     symbols: [FUTU]
 assistant:
   enabled: true
-  copilot:
+  bot:
     enabled: true
   active_model: missing
   models:
@@ -1206,7 +1206,7 @@ markets:
     symbols: [FUTU]
 assistant:
   enabled: true
-  copilot:
+  bot:
     enabled: true
   hooks:
     pre_tool_use: custom
@@ -1217,7 +1217,7 @@ assistant:
         resolve_yaml_assistant_config(repo_root=REPO_ROOT, config_path=config_path)
 
 
-def test_yaml_assistant_config_omits_retired_copilot_keys(tmp_path: Path) -> None:
+def test_yaml_assistant_config_omits_retired_bot_keys(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
         """\
@@ -1231,7 +1231,7 @@ markets:
     symbols: [FUTU]
 assistant:
   enabled: true
-  copilot:
+  bot:
     enabled: true
     channel_scenes: [operations_diagnostics]
     human_review: false
@@ -1240,13 +1240,13 @@ assistant:
 
     cfg, _meta = resolve_yaml_assistant_config(repo_root=REPO_ROOT, config_path=config_path)
 
-    assert cfg["assistant"]["copilot"] == {
+    assert cfg["assistant"]["bot"] == {
         "enabled": True,
         "tool_loading_mode": "eager",
         "toolsets": {"portfolio": False},
     }
     assert cfg[RESOLVED_KEY]["assistant_models"]["warnings"] == [
-        "retired assistant.copilot keys omitted: channel_scenes, human_review"
+        "retired assistant.bot keys omitted: channel_scenes, human_review"
     ]
 
 
@@ -1264,7 +1264,7 @@ markets:
     symbols: [FUTU]
 assistant:
   enabled: true
-  copilot:
+  bot:
     enabled: true
   active_model: unsafe
   models:
@@ -1305,8 +1305,8 @@ def test_config_init_writes_starter_yaml_and_runtime_configs(tmp_path: Path) -> 
     payload = yaml.safe_load(output_path.read_text(encoding="utf-8"))
     assert payload["accounts"]["lx"]["futu_account_id"] == "12345678"
     assert payload["assistant"]["enabled"] is True
-    assert payload["assistant"]["copilot"]["enabled"] is True
-    assert payload["assistant"]["copilot"]["toolsets"]["portfolio"] is False
+    assert payload["assistant"]["bot"]["enabled"] is True
+    assert payload["assistant"]["bot"]["toolsets"]["portfolio"] is False
     assert payload["assistant"]["context_window_messages"] == 8
     assert "default_market_scope" not in payload["assistant"]
     assert payload["assistant"]["active_model"] == "deepseek-default"
@@ -1324,8 +1324,8 @@ def test_config_init_writes_starter_yaml_and_runtime_configs(tmp_path: Path) -> 
     assert hk_cfg[GENERATED_KEY]["market"] == "hk"
     assert us_cfg["runtime"] == hk_cfg["runtime"]
     assert assistant_cfg["assistant"]["enabled"] is True
-    assert assistant_cfg["assistant"]["copilot"]["enabled"] is True
-    assert assistant_cfg["assistant"]["copilot"]["toolsets"]["portfolio"] is False
+    assert assistant_cfg["assistant"]["bot"]["enabled"] is True
+    assert assistant_cfg["assistant"]["bot"]["toolsets"]["portfolio"] is False
     assert assistant_cfg["assistant"]["context_window_messages"] == 8
     assert "default_market_scope" not in assistant_cfg["assistant"]
     assert "active_model" not in assistant_cfg["assistant"]

@@ -5,7 +5,7 @@ WeChat messages. It has two mutually exclusive paths:
 
 ```text
 explicit protocol -> deterministic Control
-all other text    -> read-first Copilot
+all other text    -> read-first Bot
                      -> optional validated Control preview request
 ```
 
@@ -42,18 +42,18 @@ pending operation per contract. Confirm the whole notice with the plain reply
 `/confirm trade <command_id>` as an explicit fallback, or confirm individual
 contracts with `/confirm trade <operation_id>`.
 
-## Copilot Boundary
+## Bot Boundary
 
-Messages that are not explicit Control protocol enter Copilot when both
-`assistant.enabled` and `assistant.copilot.enabled` are true.
+Messages that are not explicit Control protocol enter Bot when both
+`assistant.enabled` and `assistant.bot.enabled` are true.
 Portfolio-management access is a separate fail-closed projection: `portfolio_query`
-is available to Copilot only when `assistant.copilot.toolsets.portfolio` is also
+is available to Bot only when `assistant.bot.toolsets.portfolio` is also
 true. Missing values mean disabled.
 
-Copilot uses:
+Bot uses:
 
 ```text
-Channel UI -> Copilot Service -> Host -> om_chat Agent
+Channel UI -> Bot Service -> Host -> om_chat Agent
                                       -> pure-read tools
                                       -> request_control_preview
                                          -> deterministic Control preview
@@ -66,7 +66,7 @@ receives write, confirm, cancel, or apply tools. Its only state-change surface
 is a generic preview request projected from the Control capability catalog.
 
 After Control returns, the inbound service writes a structured receipt to
-Copilot session history. Before every later channel turn it injects the current conversation's
+Bot session history. Before every later channel turn it injects the current conversation's
 pending-operation summaries from the operation store. The operation store, not
 chat history, remains authoritative for confirmation and cancellation.
 
@@ -76,19 +76,19 @@ Channel adapters render the returned `AssistantTurnResult.response_text`.
 
 - Control replies may include deterministic results, preview requests, or
   permission errors.
-- Copilot replies contain the model's final answer or an explicit runtime/data
+- Bot replies contain the model's final answer or an explicit runtime/data
   failure.
 - Unauthorized-sender behavior remains channel-policy dependent.
 
 Channel adapters must not import command parsers, tool implementations, or
-Copilot internals directly.
+Bot internals directly.
 
 ## Configuration
 
 ```yaml
 assistant:
   enabled: true
-  copilot:
+  bot:
     enabled: true
     toolsets:
       portfolio: false
@@ -96,7 +96,7 @@ assistant:
 ```
 
 Change `portfolio` to `true` to share the portfolio-management pure-read toolset
-with Copilot. This does not start the portfolio-management API service and does
+with Bot. This does not start the portfolio-management API service and does
 not change the external `./om-agent` Tool Gateway contract.
 
 `assistant.models` defines model profiles. Generated
@@ -113,18 +113,18 @@ Planner flags, task profiles, per-business Scene allowlists, and
 ./om-agent run --tool operation_timeline --input-json '{"limit":10}'
 ```
 
-Copilot Host persists real sessions, runs, and model/tool events. Control audit
+Bot Host persists real sessions, runs, and model/tool events. Control audit
 rows must not be repackaged as synthetic Agent plans, evidence bundles, or
 verifier traces.
 
 Durable Host diagnostics are available through:
 
 ```bash
-./om copilot runs --host-db <audit-db>
-./om copilot events --host-db <audit-db> --run-id <run-id>
-./om copilot cancel --host-db <audit-db> --run-id <run-id>
-./om copilot resume --host-db <audit-db> --run-id <run-id> --assistant-config <path>
-./om copilot replies --host-db <audit-db>
+./om bot runs --host-db <audit-db>
+./om bot events --host-db <audit-db> --run-id <run-id>
+./om bot cancel --host-db <audit-db> --run-id <run-id>
+./om bot resume --host-db <audit-db> --run-id <run-id> --assistant-config <path>
+./om bot replies --host-db <audit-db>
 ```
 
 `cancel` above cancels an active analysis run. It is distinct from cancelling a

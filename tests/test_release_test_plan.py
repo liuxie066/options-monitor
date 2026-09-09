@@ -67,7 +67,7 @@ def test_release_test_plan_maps_assistant_changes_to_minimal_runtime_gate() -> N
 
     plan = build_release_test_plan(
         changed_files=[
-            "docs/OM_COPILOT_V2_DESIGN.md",
+            "docs/BOT_DESIGN.md",
             "src/application/assistant/runtime.py",
             "src/application/agent_tool_registry.py",
         ],
@@ -101,22 +101,22 @@ def test_release_test_plan_maps_assistant_changes_to_minimal_runtime_gate() -> N
         "agent-runtime/package.json",
         "agent-runtime/package-lock.json",
         "agent-runtime/main.ts",
-        "scripts/copilot_p1_eval.py",
+        "scripts/bot_p1_eval.py",
         "scripts/install.sh",
         "scripts/release_preflight.sh",
         "scripts/pi_runtime_smoke.sh",
-        "src/application/copilot/host.py",
+        "src/application/bot/host.py",
         "src/application/release_test_plan.py",
         "src/application/service_upgrade.py",
         "src/application/setup/check.py",
         "src/infrastructure/pi_agent_process.py",
         "docs/PI_AGENT_CORE_INTEGRATION.md",
-        "tests/copilot_pi_test_support.py",
+        "tests/bot_pi_test_support.py",
         "tests/test_architecture_guards.py",
         "tests/test_pi_agent_process.py",
-        "tests/test_copilot_p1_eval.py",
-        "tests/test_copilot_phase1.py",
-        "tests/test_copilot_conversation_memory.py",
+        "tests/test_bot_p1_eval.py",
+        "tests/test_bot_phase1.py",
+        "tests/test_bot_conversation_memory.py",
         "tests/test_inbound_control.py",
         "tests/test_setup_check.py",
         "tests/test_cli_operator_commands.py",
@@ -127,7 +127,7 @@ def test_release_test_plan_maps_assistant_changes_to_minimal_runtime_gate() -> N
         "tests/e2e/test_service_deploy_e2e.py",
         "tests/test_release_check.py",
         "tests/test_release_test_plan.py",
-        "tests/copilot_eval/test_answer_quality.py",
+        "tests/bot_eval/test_answer_quality.py",
     ],
 )
 def test_release_test_plan_maps_every_pi_runtime_surface(changed_file: str) -> None:
@@ -138,8 +138,8 @@ def test_release_test_plan_maps_every_pi_runtime_surface(changed_file: str) -> N
     assert "pi_runtime" in {rule["name"] for rule in plan["matched_rules"]}
     assert "npm ci --omit=dev --ignore-scripts --prefix agent-runtime" in plan["commands"]
     assert any("tests/test_pi_agent_process.py" in command for command in plan["commands"])
-    assert any("tests/test_copilot_p1_eval.py" in command for command in plan["commands"])
-    assert any("tests/copilot_eval/test_answer_quality.py" in command for command in plan["commands"])
+    assert any("tests/test_bot_p1_eval.py" in command for command in plan["commands"])
+    assert any("tests/bot_eval/test_answer_quality.py" in command for command in plan["commands"])
 
 
 def test_release_preflight_maps_to_service_and_pi_runtime_gates() -> None:
@@ -151,8 +151,8 @@ def test_release_preflight_maps_to_service_and_pi_runtime_gates() -> None:
     assert {"service_release", "pi_runtime"} <= matched_rules
     assert "npm ci --omit=dev --ignore-scripts --prefix agent-runtime" in plan["commands"]
     assert any("tests/test_pi_agent_process.py" in command for command in plan["commands"])
-    assert any("tests/test_copilot_p1_eval.py" in command for command in plan["commands"])
-    assert any("tests/copilot_eval/test_answer_quality.py" in command for command in plan["commands"])
+    assert any("tests/test_bot_p1_eval.py" in command for command in plan["commands"])
+    assert any("tests/bot_eval/test_answer_quality.py" in command for command in plan["commands"])
     assert any("tests/test_release_test_plan.py" in command for command in plan["commands"])
 
 
@@ -183,11 +183,11 @@ def test_release_test_plan_requires_delta_coverage_for_manifest_change() -> None
     assert {rule["name"] for rule in plan["matched_rules"]} == {"service_release"}
 
 
-def test_release_test_plan_maps_current_copilot_design_doc() -> None:
+def test_release_test_plan_maps_current_bot_design_doc() -> None:
     from src.application.release_test_plan import build_release_test_plan
 
     plan = build_release_test_plan(
-        changed_files=["docs/OM_COPILOT_V2_DESIGN.md"],
+        changed_files=["docs/BOT_DESIGN.md"],
         mode="standard",
     )
 
@@ -326,9 +326,9 @@ def test_release_workflow_pins_and_gates_pi_runtime() -> None:
     workflow = root / ".github" / "workflows" / "_release-reusable.yml"
     required_suites = (
         "tests/test_pi_agent_process.py",
-        "tests/test_copilot_p1_eval.py",
-        "tests/test_copilot_phase1.py",
-        "tests/test_copilot_conversation_memory.py",
+        "tests/test_bot_p1_eval.py",
+        "tests/test_bot_phase1.py",
+        "tests/test_bot_conversation_memory.py",
         "tests/test_inbound_control.py",
         "tests/test_setup_check.py",
         "tests/test_cli_operator_commands.py",
@@ -336,7 +336,7 @@ def test_release_workflow_pins_and_gates_pi_runtime() -> None:
         "tests/*/test_service_deploy_*.py",
         "tests/test_release_check.py",
         "tests/test_release_test_plan.py",
-        "tests/copilot_eval/test_answer_quality.py",
+        "tests/bot_eval/test_answer_quality.py",
     )
 
     text = workflow.read_text(encoding="utf-8")
@@ -483,7 +483,7 @@ def test_release_preflight_full_mode_runs_pytest_once(tmp_path: Path) -> None:
     pytest_commands = [command for command in commands if command.startswith("-m pytest")]
     assert pytest_commands == ["-m pytest"]
     assert commands.count("npm ci --omit=dev --ignore-scripts --prefix agent-runtime") == 1
-    assert any("copilot eval --fixture current_option_exposure_model_ready" in command for command in commands)
+    assert any("bot eval --fixture current_option_exposure_model_ready" in command for command in commands)
 
 
 def test_release_preflight_exports_selected_python_to_nested_entrypoints() -> None:
@@ -501,14 +501,14 @@ def test_release_preflight_non_full_mode_keeps_focused_tests(tmp_path: Path) -> 
     assert pytest_commands == [
         "-m pytest tests/test_pi_agent_process.py",
         (
-            "-m pytest tests/test_copilot_phase1.py tests/test_copilot_conversation_memory.py "
-            "tests/test_copilot_p1_eval.py tests/test_inbound_control.py "
+            "-m pytest tests/test_bot_phase1.py tests/test_bot_conversation_memory.py "
+            "tests/test_bot_p1_eval.py tests/test_inbound_control.py "
             "tests/test_setup_check.py "
             "tests/test_cli_operator_commands.py tests/test_install_script.py "
             "tests/e2e/test_service_deploy_e2e.py "
             "tests/integration/test_service_deploy_integration.py "
             "tests/unit/test_service_deploy_unit.py tests/test_release_check.py "
-            "tests/test_release_test_plan.py tests/copilot_eval/test_answer_quality.py"
+            "tests/test_release_test_plan.py tests/bot_eval/test_answer_quality.py"
         ),
         "-m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py",
         "-m pytest tests/test_research.py tests/test_research_archive.py",
@@ -518,7 +518,7 @@ def test_release_preflight_non_full_mode_keeps_focused_tests(tmp_path: Path) -> 
         ),
     ]
     assert commands.count("npm ci --omit=dev --ignore-scripts --prefix agent-runtime") == 1
-    assert any("copilot eval --fixture current_option_exposure_model_ready" in command for command in commands)
+    assert any("bot eval --fixture current_option_exposure_model_ready" in command for command in commands)
 
 
 def test_release_preflight_focused_mode_is_independent_of_caller_cwd(tmp_path: Path) -> None:

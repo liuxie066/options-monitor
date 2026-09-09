@@ -166,14 +166,14 @@ VALID_FUTU_TRD_ENVS = {'REAL', 'SIMULATE'}
 ASSISTANT_CONFIG_KEYS = {
     'active_model',
     'context_window_messages',
-    'copilot',
+    'bot',
     'default_market_scope',
     'enabled',
     'llm',
     'models',
 }
-COPILOT_TOOLSET_KEYS = {'portfolio'}
-COPILOT_CONFIG_KEYS = {'enabled', 'toolsets', 'tool_loading_mode'}
+BOT_TOOLSET_KEYS = {'portfolio'}
+BOT_CONFIG_KEYS = {'enabled', 'toolsets', 'tool_loading_mode'}
 RETIRED_FEISHU_CALLBACK_KEYS = {
     'encrypt_key',
     'encrypt_key_env',
@@ -532,36 +532,38 @@ def _validate_assistant_config(cfg: dict) -> None:
         assistant = {}
     if not isinstance(assistant, dict):
         die('assistant must be an object')
+    if 'copilot' in assistant:
+        die('assistant.copilot is retired; run ./om bot migrate --dry-run')
     unsupported_assistant_keys = sorted(str(key) for key in assistant.keys() if str(key) not in ASSISTANT_CONFIG_KEYS)
     if unsupported_assistant_keys:
         die('assistant has unsupported keys: ' + ', '.join(unsupported_assistant_keys))
     if 'enabled' in assistant and assistant.get('enabled') is not None and not isinstance(assistant.get('enabled'), bool):
         die('assistant.enabled must be a boolean')
-    copilot = assistant.get('copilot')
-    if copilot is None:
-        copilot = {}
-    if not isinstance(copilot, dict):
-        die('assistant.copilot must be an object')
-    unsupported_copilot = sorted(str(key) for key in copilot if key not in COPILOT_CONFIG_KEYS)
-    if unsupported_copilot:
-        die(f'assistant.copilot contains unsupported keys: {", ".join(unsupported_copilot)}')
-    if 'enabled' in copilot and copilot.get('enabled') is not None and not isinstance(copilot.get('enabled'), bool):
-        die('assistant.copilot.enabled must be a boolean')
-    if 'tool_loading_mode' in copilot:
-        mode = str(copilot.get('tool_loading_mode') or '').strip().lower()
+    bot = assistant.get('bot')
+    if bot is None:
+        bot = {}
+    if not isinstance(bot, dict):
+        die('assistant.bot must be an object')
+    unsupported_bot = sorted(str(key) for key in bot if key not in BOT_CONFIG_KEYS)
+    if unsupported_bot:
+        die(f'assistant.bot contains unsupported keys: {", ".join(unsupported_bot)}')
+    if 'enabled' in bot and bot.get('enabled') is not None and not isinstance(bot.get('enabled'), bool):
+        die('assistant.bot.enabled must be a boolean')
+    if 'tool_loading_mode' in bot:
+        mode = str(bot.get('tool_loading_mode') or '').strip().lower()
         if mode not in {'eager', 'directory'}:
-            die('assistant.copilot.tool_loading_mode must be one of: eager, directory')
-    toolsets = copilot.get('toolsets')
+            die('assistant.bot.tool_loading_mode must be one of: eager, directory')
+    toolsets = bot.get('toolsets')
     if toolsets is None:
         toolsets = {}
     if not isinstance(toolsets, dict):
-        die('assistant.copilot.toolsets must be an object')
-    unsupported_toolsets = sorted(str(key) for key in toolsets if key not in COPILOT_TOOLSET_KEYS)
+        die('assistant.bot.toolsets must be an object')
+    unsupported_toolsets = sorted(str(key) for key in toolsets if key not in BOT_TOOLSET_KEYS)
     if unsupported_toolsets:
-        die(f'assistant.copilot.toolsets contains unsupported keys: {", ".join(unsupported_toolsets)}')
+        die(f'assistant.bot.toolsets contains unsupported keys: {", ".join(unsupported_toolsets)}')
     for name, value in toolsets.items():
         if not isinstance(value, bool):
-            die(f'assistant.copilot.toolsets.{name} must be a boolean')
+            die(f'assistant.bot.toolsets.{name} must be a boolean')
     if 'context_window_messages' in assistant and assistant.get('context_window_messages') is not None:
         validate_non_negative_integer(assistant.get('context_window_messages'), 'assistant.context_window_messages')
         if int(assistant.get('context_window_messages')) > 20:
@@ -575,17 +577,17 @@ def _validate_assistant_config(cfg: dict) -> None:
     if not isinstance(llm, dict):
         die('assistant.llm must be an object')
     if 'enabled' in llm:
-        die('assistant.llm.enabled is retired; use assistant.copilot.enabled')
+        die('assistant.llm.enabled is retired; use assistant.bot.enabled')
     _validate_llm_config(
         llm,
         path='assistant.llm',
         enabled=bool(
             assistant.get('enabled') is not False
-            and copilot.get('enabled') is True
+            and bot.get('enabled') is True
             and str(llm.get('provider') or '').strip()
             and str(llm.get('model') or '').strip()
         ),
-        required_reason='assistant Copilot uses LLM',
+        required_reason='assistant Bot uses LLM',
     )
 
     if 'agent' in cfg:

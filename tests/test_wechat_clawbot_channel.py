@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import json
+import pytest
 import stat
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+
+
+@pytest.fixture(autouse=True)
+def isolated_default_audit_path(tmp_path, monkeypatch):
+    monkeypatch.setattr("src.application.assistant.audit.default_audit_db_path", lambda: tmp_path / "default-audit.sqlite3")
 
 
 def test_wechat_clawbot_response_parsers_preserve_precedence_and_traversal() -> None:
@@ -364,6 +370,7 @@ def test_wechat_clawbot_message_adapter_builds_assistant_request(tmp_path: Path)
             "item_list": [{"type": 1, "text_item": {"text": "状态"}}],
         },
         config_key="us",
+        received_monotonic=123.25,
         audit_db=str(tmp_path / "audit.sqlite3"),
     )
 
@@ -374,6 +381,7 @@ def test_wechat_clawbot_message_adapter_builds_assistant_request(tmp_path: Path)
         message_id="msg_1",
         conversation_id="wechat:group_1",
         config_key="us",
+        received_monotonic=123.25,
         audit_db=str(tmp_path / "audit.sqlite3"),
         reply_context={
             "provider": "wechat_clawbot",
@@ -699,15 +707,17 @@ def test_wechat_clawbot_poll_once_persists_failed_reply_receipt(tmp_path: Path) 
     assert "api_response" not in receipt
 
 
-def test_wechat_reply_outbox_retries_with_stable_client_id(tmp_path: Path) -> None:
+@pytest.mark.parametrize("explicit_db", [True, False])
+def test_wechat_reply_outbox_retries_with_stable_client_id(tmp_path: Path, explicit_db: bool) -> None:
     from src.application.channels.wechat_clawbot.inbound import (
         _outbox_client_id,
         _prepare_reply_outbox,
         _retry_pending_wechat_reply,
     )
-    from src.application.copilot.host_store import CopilotHostStore
+    from src.application.bot.host_store import BotHostStore
 
-    database = tmp_path / "audit.sqlite3"
+    database = tmp_path / ("audit.sqlite3" if explicit_db else "default-audit.sqlite3")
+    audit_argument = str(database) if explicit_db else None
     message = {
         "from_user_id": "user_1",
         "group_id": "group_1",
@@ -715,7 +725,7 @@ def test_wechat_reply_outbox_retries_with_stable_client_id(tmp_path: Path) -> No
         "message_id": "msg_1",
     }
     store, delivery_key, state = _prepare_reply_outbox(
-        audit_db=str(database),
+        audit_db=audit_argument,
         command_id="cmd_1",
         message=message,
         text="结论：运行正常。",
@@ -726,7 +736,7 @@ def test_wechat_reply_outbox_retries_with_stable_client_id(tmp_path: Path) -> No
     assert store.mark_reply_failed(delivery_key, error="temporary", retryable=True, retry_after_seconds=0)
     with store._connect() as conn:
         conn.execute(
-            "UPDATE copilot_reply_outbox SET next_attempt_at = '2000-01-01T00:00:00+00:00' WHERE delivery_key = ?",
+            "UPDATE bot_reply_outbox SET next_attempt_at = '2000-01-01T00:00:00+00:00' WHERE delivery_key = ?",
             (delivery_key,),
         )
 
@@ -737,8 +747,8 @@ def test_wechat_reply_outbox_retries_with_stable_client_id(tmp_path: Path) -> No
             sends.append(dict(kwargs))
             return {"ret": 0, "data": {"message_id": "reply_1"}}
 
-    first_retry = _retry_pending_wechat_reply(audit_db=str(database), client=FakeClient())
-    second_retry = _retry_pending_wechat_reply(audit_db=str(database), client=FakeClient())
+    first_retry = _retry_pending_wechat_reply(audit_db=audit_argument, client=FakeClient())
+    second_retry = _retry_pending_wechat_reply(audit_db=audit_argument, client=FakeClient())
 
     assert first_retry["ok"] is True
     assert first_retry["delivery_key"] == delivery_key
@@ -752,7 +762,7 @@ def test_wechat_reply_outbox_retries_with_stable_client_id(tmp_path: Path) -> No
             "client_id": _outbox_client_id(delivery_key),
         }
     ]
-    record = CopilotHostStore(database).list_replies()[0]
+    record = BotHostStore(database).list_replies()[0]
     assert record["status"] == "delivered"
     assert record["attempt_count"] == 2
 
@@ -1773,3 +1783,56 @@ def test_channel_status_checks_secret_metadata_without_reading_value(tmp_path: P
     assert health["credentials_configured"] is True
     assert health["allowed_senders_configured"] is True
     assert health["available"] is True
+
+
+@pytest.mark.parametrize('explicit_db', [False, True])
+@pytest.mark.parametrize('access', ['allowed', 'unauthorized', 'disabled'])
+@pytest.mark.parametrize('text', ['调查账户问题', '/income sy ytd'])
+def test_expired_wechat_batch_terminal_reply_uses_existing_outbox(tmp_path, monkeypatch, explicit_db, access, text):
+    import time
+    import src.application.channels.wechat_clawbot.inbound as inbound
+    from src.application.assistant.audit import InboundAuditStore
+    from src.application.bot.host_store import BotHostStore
+    state_dir = tmp_path / 'wechat-state'
+    state_dir.mkdir()
+    (state_dir / 'state.json').write_text(json.dumps({'bot_token': 'fixture'}))
+    received = time.monotonic() - 181
+    # Receipt time precedes processing by one exhausted batch budget.
+    clock_values = iter([received, time.monotonic(), time.monotonic()])
+    monkeypatch.setattr(inbound, 'time', SimpleNamespace(monotonic=lambda: next(clock_values)))
+    def forbidden(*args, **kwargs):
+        raise AssertionError('expired message must not parse, prepare, execute or invoke a model')
+    monkeypatch.setattr('src.application.assistant.inbound_service._parse_command', forbidden)
+    monkeypatch.setattr('src.application.assistant.inbound_service._run_bot', forbidden)
+    replies = []
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+        def get_updates(self, **kwargs):
+            message = {'from_user_id': 'user_1', 'context_token': 'ctx_1', 'message_id': 'expired',
+                       'item_list': [{'type': 1, 'text_item': {'text': text}}]}
+            return {'ret': 0, 'get_updates_buf': 'after', 'msgs': [message, dict(message)]}
+        def get_config(self, **kwargs):
+            return forbidden()
+        def send_text_message(self, **kwargs):
+            replies.append(kwargs)
+            return {'ret': 0, 'message_id': 'terminal'}
+    audit_db = str(tmp_path / 'explicit.sqlite3') if explicit_db else None
+    out = inbound.poll_wechat_clawbot_once(base=tmp_path, state_dir=str(state_dir), audit_db=audit_db,
+        assistant_config_path=str(_write_minimal_assistant_config(tmp_path)),
+        allowed_senders='wechat:user_1' if access != 'unauthorized' else 'wechat:other',
+        reply_enabled=access != 'disabled', execute_tool_fn=forbidden, client_factory=Client)
+    results = out['data']['results']
+    assert out['ok'] is False and out['data']['processed_count'] == 2
+    assert all(item['inbound']['error_code'] == ('PERMISSION_DENIED' if access == 'unauthorized' else 'BUDGET_EXHAUSTED') for item in results)
+    assert json.loads((state_dir / 'state.json').read_text())['get_updates_buf'] == 'after'
+    if access == 'allowed':
+        assert len(replies) == 1 and '本次未完成' in replies[0]['text'] and '请重新发起请求' in replies[0]['text']
+        assert results[1]['reply']['reason'] == 'idempotent_replay'
+        host = BotHostStore(InboundAuditStore(audit_db).path)
+        with host._connect() as conn:
+            assert conn.execute('SELECT count(*) FROM bot_runs').fetchone()[0] == 0
+            assert conn.execute('SELECT status,run_id FROM bot_reply_outbox').fetchone() == ('delivered', None)
+    else:
+        assert replies == []
+        assert results[0]['reply']['reason'] == ('permission_denied' if access == 'unauthorized' else 'reply_disabled')

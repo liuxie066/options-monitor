@@ -28,7 +28,7 @@ from src.application.runtime_config_freshness import infer_runtime_config_market
 from src.application.wheel.read_model import build_wheel_read_model
 
 
-_TRADE_EVENT_CURSOR_KEY_DOMAIN = b"options-monitor/copilot/trade-event-cursor/v1"
+_TRADE_EVENT_CURSOR_KEY_DOMAIN = b"options-monitor/bot/trade-event-cursor/v1"
 
 
 def _derive_trade_event_cursor_key(master_key: str) -> str:

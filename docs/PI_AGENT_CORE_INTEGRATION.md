@@ -19,7 +19,7 @@ is part of the current runtime contract. Runtime enablement still depends on the
 deployed version and configured provider.
 
 This document is the implementation authority for OM's Pi Agent Core runtime.
-[OM_COPILOT_V2_DESIGN.md](OM_COPILOT_V2_DESIGN.md) continues to own the product
+[BOT_DESIGN.md](BOT_DESIGN.md) continues to own the product
 and Scene v5 contract; it no longer describes a separate legacy model/tool
 runtime.
 
@@ -49,7 +49,7 @@ branches. All non-Control text still enters the single `om_chat` Scene.
 ### 1.2 Product entrypoints
 
 - `./om assistant handle` is the product entry for local and remote messages.
-- `./om copilot run` and `./om copilot eval` remain diagnostic and evaluation
+- `./om bot run` and `./om bot eval` remain diagnostic and evaluation
   surfaces. They are not a second product assistant.
 - No TUI or Web UI is included in this integration.
 
@@ -57,7 +57,7 @@ branches. All non-Control text still enters the single `om_chat` Scene.
 
 The integration succeeds when:
 
-- Pi `Agent` is the only generic model/tool loop used by free-form Copilot;
+- Pi `Agent` is the only generic model/tool loop used by free-form Bot;
 - Pi Session owns new conversational transcripts and context compaction;
 - OM still owns sender and account scope, canonical tools, financial truth,
   Control, result admission, run governance, audit, and reply delivery;
@@ -115,7 +115,7 @@ OM Assistant Inbound
 identity, account scope, message idempotency, explicit Control
         |
         v
-OM Copilot Service + Host
+Bot Service + Host
 contract, Scene, leases, run record, cancellation, audit, admission, outbox
         |
         | om-pi-ipc.v1 over JSONL stdio
@@ -125,7 +125,7 @@ Pi Agent + selected model + Pi Session/context
         |
         | tool.call / tool.result
         v
-existing Python Copilot tool adapter
+existing Python Bot tool adapter
 canonical OM tool registry, execution, redaction, compact observation
 ```
 
@@ -230,6 +230,7 @@ below; the top-level fields and limit keys are complete.
 ```json
 {
   "execution_environment": "local",
+  "remaining_budget_ms": 179500,
   "session_id": null,
   "system_prompt": "compiled static om_chat prompt",
   "runtime_context": [
@@ -286,7 +287,7 @@ below; the top-level fields and limit keys are complete.
     "max_iterations": 16,
     "max_tool_calls": 12,
     "max_consecutive_failed_tool_batches": 2,
-    "final_answer_reserve_seconds": 20
+    "final_answer_reserve_seconds": 45
   },
   "recovered_observations": [],
   "debug": null
@@ -295,7 +296,11 @@ below; the top-level fields and limit keys are complete.
 
 Validation rules:
 
-- `execution_environment` is `local`, `eval`, or `channel`;
+- `execution_environment` is `local`, `eval`, `channel`, or the internal
+  `memory_consolidation` mode;
+- `remaining_budget_ms` is a required finite positive integer no larger than
+  180000; booleans, fractional values, missing values, and numeric strings fail
+  validation on both ends;
 - `session_id` is `null` for a transient run or an OM-derived identifier;
 - `system_prompt` and `user_message` are non-empty strings;
 - `runtime_context` accepts only `{role: "system", content: string}` and is
@@ -316,6 +321,23 @@ Validation rules:
   of `fixture_response` or `fixture_turns`; optional history, persistence-delay,
   and compaction fixtures remain deterministic and network-free.
 
+The trusted ingress captures `received_monotonic`; queueing, preparation, locks,
+Node startup, provider calls, compaction, and final admission share its 180-second
+deadline. Python passes a floored remaining millisecond budget, shortens it again
+before writing `run.start`, and bounds every pipe write and generation wait by
+the original deadline. Node starts a local `performance.now()` deadline upon
+receiving the request. Provider timeout is the smaller of the configured timeout
+and the remaining milliseconds, including subsecond budgets. The Scene timeout
+is a ceiling; it need not equal a shortened bridge timeout.
+
+`memory_consolidation` reuses this runtime for one model turn and returns the
+candidate JSON as ordinary proposed text for the trusted worker to validate.
+Its deadline is at most 30 seconds; `session_id` and `debug` must be null, while
+`tools`, `tool_catalog`, `catalog_snapshot`, `runtime_context`, and
+`recovered_observations` must be empty. It uses `eager` mode and the normal hash
+of the empty catalog, has no business tools or session persistence, and cannot
+continue a truncated response.
+
 #### `tool.result`
 
 ```json
@@ -332,7 +354,7 @@ Validation rules:
 ```
 
 The result must match exactly one outstanding `tool.call`. The observation is
-the output of `copilot.tools.compact_observation()`, not the raw tool response.
+the output of `bot.tools.compact_observation()`, not the raw tool response.
 Duplicate, unknown, or mismatched call IDs are terminal protocol errors.
 
 #### `run.cancel`
@@ -541,7 +563,7 @@ Session storage. Exactly one public data-scope input is accepted:
 - both key and path: fail closed with `CONFIG_ERROR` rather than relying on the
   resolver's path precedence;
 - neither: the existing Assistant runtime must supply its configured default
-  key before Copilot handoff; if it cannot, the channel request fails before
+  key before Bot handoff; if it cannot, the channel request fails before
   lease acquisition and Node spawn.
 
 Canonical aliases and symlinks to the same resolved path produce the same
@@ -562,9 +584,9 @@ without an explicit session key is transient.
 - If a caller supplies a Host database, the Pi database is
   `host_db.with_name("pi_sessions.sqlite3")`.
 - Pi SQLite stores transcript and compaction entries only.
-- `CopilotHostStore` keeps run state, events, cancellation, recovery metadata,
+- `BotHostStore` keeps run state, events, cancellation, recovery metadata,
   lanes, audit, and reply outbox.
-- Existing `copilot_sessions.messages_json`, `turns_json`, and `memory_json`
+- Existing `bot_sessions.messages_json`, `turns_json`, and `memory_json`
   become legacy read-only data after cutover. They are not dual-written or
   imported because the old channel key does not prove sender ownership.
 
@@ -645,7 +667,7 @@ candidate is at or below the 75% hard gate.
 ### 7.1 Tool projection
 
 Python continues to build tool descriptions through
-`src/application/copilot/tools.py`. Only `name`, `description`, and
+`src/application/bot/tools.py`. Only `name`, `description`, and
 `input_schema` cross to Pi. Pi tools are created mechanically from those JSON
 schemas and use `executionMode: "sequential"`.
 
@@ -717,11 +739,11 @@ provider canaries are separate, explicitly authorized acceptance work.
 
 | Responsibility | Canonical owner |
 |---|---|
-| Product facade and Scene contract | `src/application/copilot/service.py`, `src/application/copilot/scene.py`, and `src/application/copilot/om_chat.scene.json` |
-| Host run governance, cancellation, durable admission, audit, and finalization | `src/application/copilot/host.py`, `src/application/copilot/host_store.py`, `src/application/copilot/result_admission.py`, and `src/application/copilot/event_store.py` |
-| Assistant channel identity, idempotency, and deterministic Control handoff | `src/application/copilot/channel_facade.py`, `src/application/assistant/inbound_service.py`, and `src/application/copilot/control_handoff.py` |
-| Canonical tool metadata, projection, execution, and permissions | `src/application/agent_tool_registry.py`, `src/application/agent_tools/`, and `src/application/copilot/tools.py` |
-| Provider and model-profile validation | `src/application/copilot/model_config.py` |
+| Product facade and Scene contract | `src/application/bot/service.py`, `src/application/bot/scene.py`, and `src/application/bot/om_chat.scene.json` |
+| Host run governance, cancellation, durable admission, audit, and finalization | `src/application/bot/host.py`, `src/application/bot/host_store.py`, `src/application/bot/result_admission.py`, and `src/application/bot/event_store.py` |
+| Assistant channel identity, idempotency, and deterministic Control handoff | `src/application/bot/channel_facade.py`, `src/application/assistant/inbound_service.py`, and `src/application/bot/control_handoff.py` |
+| Canonical tool metadata, projection, execution, and permissions | `src/application/agent_tool_registry.py`, `src/application/agent_tools/`, and `src/application/bot/tools.py` |
+| Provider and model-profile validation | `src/application/bot/model_config.py` |
 | Python/Node process boundary | `src/infrastructure/pi_agent_process.py` and `agent-runtime/main.ts` |
 | Runtime dependency lock | `agent-runtime/package.json` and `agent-runtime/package-lock.json` |
 
@@ -997,6 +1019,14 @@ support mixed old/new payload shapes inside one release. Source and fixture
 search must prove that no Scene or process limit still carries an absolute
 context cap.
 
+During a run, historical user turns are compacted only as complete groups; the
+current question and current tool evidence remain verbatim. Provider usage from
+before that compaction is invalidated for the transformed context. If the
+current evidence cannot safely fit, the run fails its capacity gate. Exhausting
+the business-call limit leaves `submit_answer` available for one normal final
+turn; an unchanged failed business call cannot execute again with identical
+validated arguments.
+
 The 70% compact trigger, 75% hard input gate, and 50% post-compact target are
 fixed constants owned by the Node Pi Runtime, not operator settings or
 `run.start` fields. The Runtime records the effective values in structured
@@ -1243,7 +1273,7 @@ audit stores only its hash.
 Cursor signing uses a domain-separated child key derived by the Python tool
 adapter from the existing `inbound.operation_hmac_key`. The derivation is
 HMAC-SHA256 with the fixed byte label
-`options-monitor/copilot/trade-event-cursor/v1`; the resulting child key is
+`options-monitor/bot/trade-event-cursor/v1`; the resulting child key is
 passed to the canonical ledger facade. Neither key enters Node/model context.
 S8 adds no credential, keyring, transparent rotation, or upgrader secret
 workflow. Rotating the inbound master key invalidates outstanding cursors, and
@@ -1592,7 +1622,7 @@ Host callback cancellation -> Python `run.cancel` -> cancelled
 The two answer-repair transitions may occur once each and in either order,
 subject to the same global limits.
 
-At the Copilot Host boundary, `option_performance_report` accepts MTD, YTD,
+At the Bot Host boundary, `option_performance_report` accepts MTD, YTD,
 natural month, and natural year. MTD keeps the strict affirmative cutoff form
 `截至 YYYY-MM-DD 的 M月期权收益率`; the date must be valid, equal the payload
 `as_of_date`, and match the stated month. YTD `as_of_date` is retained only
@@ -1607,7 +1637,7 @@ in `Asia/Shanghai`, and includes those derived values in the existing runtime
 reference context. The raw instant occupies a `host_only_tool_scope` scene slot
 and is never rendered to the model. The same instant is supplied internally to
 option-performance period normalization; it is not a model tool argument or a
-new Node protocol field. The Copilot read-call path sets one
+new Node protocol field. The Bot read-call path sets one
 option-performance-only request `ContextVar` around the existing generic
 `execute_tool()` call for `option_performance_report` and resets its token in
 `finally`. The existing
@@ -1636,7 +1666,7 @@ rewrite a natural period into MTD/YTD, and direct Tool Gateway calls remain
 outside this current-message fence. The canonical period owner rejects selector
 fields that do not belong to the chosen period. `range`, `start_date`,
 `end_date`, quote-refresh, and `include_rows` arguments remain outside the
-Copilot tool schema.
+Bot tool schema.
 
 Attestation requires a valid contract `operating_date` or a valid frozen
 `report_now_ms` from which Host derives the same Asia/Shanghai date. If both are
@@ -1878,11 +1908,11 @@ ambiguous, eager remains available.
 |---|---|
 | `src/application/agent_tool_registry.py` and canonical `TOOLS` definitions | add/validate `catalog_summary`; derive toolset/access; retain the one canonical registry |
 | canonical output contracts | declare evidence type, deterministic projection, coverage, freshness, page/query scope, cursor TTL, and stable order |
-| `src/application/copilot/scene.py` | build the frozen authorized universe and loading mode without interpreting user intent; remove Scene-owned absolute context caps |
-| `src/application/copilot/service.py`, channel/local preparation facades, and `om_chat.scene.json` | freeze one injectable request instant, derive the existing reference year plus Asia/Shanghai operating date, render only the derived reference values, and retain the raw instant in Host-only scope |
-| `src/application/copilot/host.py` | freeze catalog/schema snapshot and request time, serve private activations, attest and narrowly bind option-performance selectors after model tool selection, maintain current-request evidence, preserve final durable admission, and render only terminal-adjacent admission receipt categories |
-| `src/application/copilot/tools.py` | extend `compact_observation()` with deterministic source-declared coverage/freshness projection, retain month/year in request scope, provide the bounded model/effective input audit projection, scope/reset the frozen option-performance clock around the existing executor, and eliminate exhaustive claims from generic previews |
-| `src/application/copilot/result_admission.py` | validate `submit_answer` claims against Host evidence and append non-removable coverage banners; retain existing final result checks |
+| `src/application/bot/scene.py` | build the frozen authorized universe and loading mode without interpreting user intent; remove Scene-owned absolute context caps |
+| `src/application/bot/service.py`, channel/local preparation facades, and `om_chat.scene.json` | freeze one injectable request instant, derive the existing reference year plus Asia/Shanghai operating date, render only the derived reference values, and retain the raw instant in Host-only scope |
+| `src/application/bot/host.py` | freeze catalog/schema snapshot and request time, serve private activations, attest and narrowly bind option-performance selectors after model tool selection, maintain current-request evidence, preserve final durable admission, and render only terminal-adjacent admission receipt categories |
+| `src/application/bot/tools.py` | extend `compact_observation()` with deterministic source-declared coverage/freshness projection, retain month/year in request scope, provide the bounded model/effective input audit projection, scope/reset the frozen option-performance clock around the existing executor, and eliminate exhaustive claims from generic previews |
+| `src/application/bot/result_admission.py` | validate `submit_answer` claims against Host evidence and append non-removable coverage banners; retain existing final result checks |
 | `domain/domain/performance/period.py`, `src/application/performance/service.py`, and the existing option-performance facades | restore canonical month/year windows, propagate only their exact selectors, and serialize the aggregate coverage/freshness envelope once |
 | `src/application/ledger/repository.py`, `queries.py`, and `api.py` | migrate and query the canonical trade-event stream; own `ingest_seq`, normalized market/effect projections, snapshot fencing, keyset SQL, cursor validation/encoding, and the public ledger facade |
 | `src/application/agent_tools/operations_impl.py` and `positions.py` | keep the existing `option_positions_read(action=events)` entry; expose the events-only cursor/count inputs and output contract; call only the public ledger facade and never load all events |
@@ -1908,7 +1938,7 @@ registry is permitted by this design.
 | Cursor secret | an inbound-only runtime fixture pages successfully with the fixed domain derivation; no dedicated cursor credential is registered or bound; a missing inbound key makes `events` fail explicitly; neither master nor child key appears in Node/model/metrics or upgrader state, and an intentional inbound-key change deterministically invalidates old cursors |
 | Evidence scope | observation IDs are globally unique and valid only in the current external request; pre-run committed-prefix compaction cannot grant old IDs current authority; old-page follow-up re-calls the canonical tool |
 | Answer admission | conceptual/evidence modes, every claim kind/scope, mutually exclusive private result fields, one plain-final repair and one submission repair in either order, mixed-batch consumption of every represented class, second same-class safe failure with no commit, shared-budget exhaustion before either repair, canonical retryable rejection only, callback cancellation through Python `run.cancel`, identical terminal arbitration after both prompts, cancel/propose race, exact approved-text/hash comparison, and unchanged fail-closed handling of missing/malformed declarations pass |
-| Option-performance selector scope | the real Copilot Host callback proves a conflicting model proposal is replaced by exact MTD/YTD, explicit/bare/relative month, or explicit-year attestation before normalization; fixed month alone and equal message scope succeed; malformed, future, multiple, fixed-scope-conflicting, and missing-frozen-clock cases reject before any business read; returned evidence exposes the bound scope; direct Tool Gateway behavior remains unchanged |
+| Option-performance selector scope | the real Bot Host callback proves a conflicting model proposal is replaced by exact MTD/YTD, explicit/bare/relative month, or explicit-year attestation before normalization; fixed month alone and equal message scope succeed; malformed, future, multiple, fixed-scope-conflicting, and missing-frozen-clock cases reject before any business read; returned evidence exposes the bound scope; direct Tool Gateway behavior remains unchanged |
 | Admission receipt | each allowlisted terminal-adjacent rejection group renders only its frozen text plus public `run_id`; unknown reasons use the generic receipt; a prior rejection followed by model, tool, schema, budget, or cancellation failure preserves that real outcome and leaks no raw reason or rejected content |
 | Context | 69/70/75 percent boundaries, committed-prefix-only pre-run compact, untouched open suffix, same-model compact, 50 percent as a target rather than an admission gate, explicit proof that a post-compact candidate above 50 percent and at or below 75 percent proceeds, no-prefix failure at the 70 percent trigger, failed/oversized compact rollback, two successful compactions on one Session, and exact pre-provider rejection before every main call pass at 128k and smaller fixtures |
 | Session | internal directory/finalizer groups and repair prompts are absent; canonical assistant answer appears once; business tool groups remain complete |
@@ -1917,7 +1947,7 @@ registry is permitted by this design.
 | Context migration | source and fixture search finds no Scene/process absolute context cap; the closed Python/Node payload uses only `model.context_window_tokens`; a 128k model with a formerly smaller Scene fixture is admitted by the single authority |
 | Prompt budget | static prompt chars/tokens do not exceed baseline; directory-mode fixed plus active-schema tokens are measured against eager baseline |
 | Audit/privacy | required structured metrics exist; bounded `model_input` and effective `tool_input` retain safe period fields, hash SQL/query and unsupported values, and stay within the observation-token ceiling; raw prompts/results/cursors/private schemas/secrets/reasoning are absent |
-| Regression | focused Pi contract tests, Copilot Host/Service tests, agent plugin contract/smoke, full Python suite, locked Node tests, and clean-archive smoke pass |
+| Regression | focused Pi contract tests, Bot Host/Service tests, agent plugin contract/smoke, full Python suite, locked Node tests, and clean-archive smoke pass |
 
 The historical one-character incident is a required regression fixture: a very
 large tool result must become bounded/partial or `needs_narrowing`, the 75%
@@ -1930,7 +1960,7 @@ completion must never become an admitted answer.
   prompt.
 - Keep the single Pi main model responsible for exact tool selection.
 - Keep Host authority deterministic and narrow. Its only business-input
-  attestation is the Copilot-only closed option-performance selector fence in
+  attestation is the Bot-only closed option-performance selector fence in
   13.11: after model tool selection, bind one current-message MTD/YTD cutoff or
   natural month/year into the four period fields, honor trusted fixed month,
   reject malformed, ambiguous, future, or conflicting selectors before the

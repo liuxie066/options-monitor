@@ -3317,3 +3317,68 @@ __all__ = [
     "trade_payload_evidence_ref",
     "upsert_settlement_attempt_state",
 ]
+
+
+def query_trade_receipts(path: str | Path, *, accounts: list[str], query: dict[str, Any]) -> list[dict[str, Any]]:
+    """Read semantic receipt history; never claim, recover, migrate, or send."""
+    from src.application.receipt_query import MAX_SOURCE_ROWS, receipt_event, receipt_matches
+    if not Path(path).is_file():
+        raise FileNotFoundError("trade_inbox_missing")
+    with closing(sqlite3.connect(f"{Path(path).resolve().as_uri()}?mode=ro", uri=True, timeout=1)) as conn:
+        conn.row_factory = sqlite3.Row
+        clauses = ["receipt_json IS NOT NULL"]
+        args: list[Any] = []
+        if query.get("deal_id"):
+            clauses.append("deal_id = ?")
+            args.append(query["deal_id"])
+        if query.get("event_id"):
+            event_id = str(query["event_id"]).removeprefix("trade_inbox:")
+            clauses.append("(json_extract(receipt_json, '$.receipt_id') = ? OR EXISTS (SELECT 1 FROM json_each(receipt_json, '$.receipts') WHERE json_extract(value, '$.receipt_id') = ?))")
+            args.extend((event_id, event_id))
+        from datetime import datetime
+        if query.get("start_time"):
+            clauses.append("updated_at_ms >= ?")
+            args.append(int(datetime.fromisoformat(query["start_time"]).timestamp() * 1000))
+        if query.get("end_time"):
+            clauses.append("received_at_ms <= ?")
+            args.append(int(datetime.fromisoformat(query["end_time"]).timestamp() * 1000))
+        rows = conn.execute("SELECT inbox_id, length(payload_json) + coalesce(length(receipt_json), 0) AS size FROM trade_inbox WHERE " + " AND ".join(clauses) + " ORDER BY received_at_ms DESC, inbox_id DESC LIMIT ?", [*args, MAX_SOURCE_ROWS + 1]).fetchall()
+    if len(rows) > MAX_SOURCE_ROWS:
+        raise ValueError("trade_inbox_query_needs_narrowing")
+    result = []
+    for summary in rows:
+        if summary["size"] > 262144:
+            raise ValueError("trade_receipt_size_limit")
+        row = read_trade_payload(path, inbox_id=summary["inbox_id"], read_only=True)
+        if row is None:
+            raise ValueError("trade_receipt_changed")
+        envelope = row.get("receipt_envelope") or {}
+        entries = envelope.get("receipts", {}) if envelope.get("schema_version") == 2 else {"legacy": envelope}
+        payload = row.get("payload") or {}
+        for result_key, receipt in entries.items():
+            business = receipt.get("business_result") or {}
+            saved = receipt.get("payload") or {}
+            labels = {str(value).strip().lower() for value in (
+                payload.get("internal_account"), payload.get("account"), saved.get("internal_account"),
+                saved.get("account"), business.get("account"), business.get("internal_account")) if value}
+            execution = payload.get("execution") or payload
+            label = (execution.get("broker_account_ref") or {}).get("account_label")
+            if label:
+                labels.add(str(label).strip().lower())
+            if len(labels) != 1:
+                raise ValueError("trade_receipt_account_unlinkable")
+            account = next(iter(labels))
+            if account not in accounts:
+                continue
+            row_event = receipt_event(source="trade_inbox", event_id=receipt.get("receipt_id") or row["inbox_id"] + ":" + result_key,
+                account=account, market=saved.get("market") or payload.get("market") or business.get("market") or (execution.get("instrument_ref") or {}).get("market") or ((saved.get("execution_input") or {}).get("instrument_ref") or {}).get("market"), kind="trade",
+                occurred=receipt.get("created_at_ms") or row["received_at_ms"], recorded=row["updated_at_ms"],
+                revision=receipt.get("payload_version") or row.get("payload_version"), body=receipt.get("message"),
+                business_result=business or None, delivery=receipt.get("status"),
+                deal_id=str(row.get("deal_id") or saved.get("deal_id") or "") or None,
+                symbol=saved.get("symbol") or payload.get("symbol") or business.get("symbol") or (execution.get("instrument_ref") or {}).get("symbol"),
+                run_id=business.get("run_id"), diagnostic_code=business.get("reason"),
+                related={"superseded_by": receipt.get("superseded_by")})
+            if receipt_matches(row_event, query):
+                result.append(row_event)
+    return result

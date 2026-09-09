@@ -10,8 +10,8 @@ import pytest
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.agent_tool_registry import get_tool_definition, pure_read_toolsets
 from src.application.agent_tools import portfolio
-from src.application.copilot import tools as copilot_tools
-from src.application.copilot.result_admission import admit_submit_answer
+from src.application.bot import tools as bot_tools
+from src.application.bot.result_admission import admit_submit_answer
 
 
 @pytest.fixture(autouse=True)
@@ -117,7 +117,7 @@ def test_assignment_scenario_tool_has_accounts_only_contract(monkeypatch) -> Non
     assert definition.is_pure_read() is True
     assert definition.safe_default_input == {}
     assert definition.input_json_schema()["required"] == ["accounts"]
-    assert definition.copilot_input_fields == ("accounts",)
+    assert definition.bot_input_fields == ("accounts",)
 
     data, warnings, meta = definition.call({"accounts": ["lx"]})
 
@@ -199,7 +199,7 @@ def test_portfolio_query_collection_contract_projects_real_rows(monkeypatch) -> 
         },
     )
 
-    observation = copilot_tools.compact_observation(
+    observation = bot_tools.compact_observation(
         "portfolio_query",
         {"ok": True, "data": data, "warnings": warnings},
         {"view": "accounts", "include_default": False},
@@ -234,7 +234,7 @@ def test_portfolio_query_untrusted_freshness_cannot_support_current_fact(monkeyp
             "retrieved_at_utc": "2026-08-22T09:30:00Z",
         },
     )
-    observation = copilot_tools.compact_observation(
+    observation = bot_tools.compact_observation(
         "portfolio_query",
         {"ok": True, "data": data, "warnings": warnings},
         {"view": "accounts", "include_default": False},
@@ -295,7 +295,7 @@ def test_portfolio_query_grouped_holdings_declares_closed_collection_coverage(mo
         },
     )
 
-    observation = copilot_tools.compact_observation(
+    observation = bot_tools.compact_observation(
         "portfolio_query",
         {"ok": True, "data": data, "warnings": warnings},
         {"view": "holdings", "account": "lx", "group_by_market": True},

@@ -50,7 +50,7 @@ def render_feishu_conversation_reply(
         max_bytes=FEISHU_REPLY_CONTENT_BUDGET_BYTES,
     )
     markdown_detected = has_rich_markdown(rendered)
-    use_card = str(render_route or "").strip() == "copilot" or markdown_detected
+    use_card = str(render_route or "").strip() == "bot" or markdown_detected
     if use_card:
         render_mode = "card_markdown_v2"
         fallback_text = flatten_markdown_tables(rendered) or _flatten_non_table_markdown(rendered) or rendered

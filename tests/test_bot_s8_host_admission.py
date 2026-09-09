@@ -1,0 +1,719 @@
+from __future__ import annotations
+
+from src.application.bot import tools as bot_tools
+from src.application.bot.host import run_contract
+from tests.bot_pi_test_support import _TEST_MODEL
+from tests.test_bot_phase1 import _contract
+
+import pytest
+
+
+def _run_answered_host(monkeypatch, prompt: str, tool_flow) -> object:
+    def process(_start, *, on_tool_call, on_proposed, **_kwargs):
+        text = tool_flow(on_tool_call)
+        proposal = {
+            "status": "answered",
+            "text": text,
+            "control_request": None,
+            "termination_reason": "stop",
+            "usage": {},
+        }
+        decision = on_proposed(proposal)
+        return {"ok": True, "result": {**proposal, "committed": decision == "commit"}}
+
+    monkeypatch.setattr("src.application.bot.host.run_pi_agent", process)
+    return run_contract(_contract(prompt), model_settings=_TEST_MODEL)
+
+
+def test_host_registers_successful_read_for_submit_answer(monkeypatch) -> None:
+    monkeypatch.setattr(
+        bot_tools,
+        "call_read_tool",
+        lambda *_args, **_kwargs: {"ok": True, "data": {"summary": {"ok": True}}},
+    )
+    monkeypatch.setattr(
+        bot_tools,
+        "compact_observation",
+        lambda *_args, **_kwargs: {
+            "tool_name": "runtime_status",
+            "ok": True,
+            "status": "complete",
+            "value": {"summary": {"ok": True}},
+            "coverage": {
+                "status": "complete",
+                "complete_for": "point",
+                "scope": {"config_key": "us"},
+            },
+            "freshness": {
+                "status": "current",
+                "as_of": "2026-08-22T09:30:00+08:00",
+            },
+        },
+    )
+
+    def tool_flow(on_tool_call):
+        observation = on_tool_call(
+            {
+                "call_id": "read_1",
+                "tool_name": "runtime_status",
+                "arguments": {"config_key": "us"},
+            }
+        )
+        admitted = on_tool_call(
+            {
+                "call_id": "answer_1",
+                "tool_name": "submit_answer",
+                "arguments": {
+                    "mode": "evidence",
+                    "status": "complete",
+                    "answer_markdown": "结论：当前运行状态正常。",
+                    "claims": [
+                        {
+                            "text": "当前运行状态正常",
+                            "kind": "current_fact",
+                            "observation_ids": [observation["ref"]],
+                            "required_scope": "point",
+                        }
+                    ],
+                },
+            }
+        )
+        assert admitted["observation"] == {"ok": True, "status": "answer_accepted"}
+        return admitted["approved_answer"]["text"]
+
+    result = _run_answered_host(monkeypatch, "检查当前运行状态", tool_flow)
+
+    assert result.ok is True
+    assert result.status == "answered"
+    assert result.user_response.startswith("结论：当前运行状态正常。")
+    assert "> 数据时间：2026-08-22T09:30:00+08:00。" in result.user_response
+
+
+def test_host_reports_rejected_answer_as_admission_failure_not_model_outage(monkeypatch) -> None:
+    monkeypatch.setattr(
+        bot_tools,
+        "call_read_tool",
+        lambda *_args, **_kwargs: {"ok": True, "data": {"rows": [{"symbol": "PDD"}]}},
+    )
+    monkeypatch.setattr(
+        bot_tools,
+        "compact_observation",
+        lambda *_args, **_kwargs: {
+            "tool_name": "option_positions_read",
+            "ok": True,
+            "status": "complete",
+            "value": {"rows": [{"symbol": "PDD"}]},
+            "coverage": {
+                "status": "complete",
+                "complete_for": "requested_page",
+                "scope": {"position_effect": "close", "limit": 5},
+            },
+            "freshness": {
+                "status": "historical",
+                "as_of": "2026-08-23T02:03:07Z",
+            },
+        },
+    )
+
+    def process(_start, *, on_tool_call, **_kwargs):
+        evidence = on_tool_call(
+            {
+                "call_id": "read_recent_closes",
+                "tool_name": "option_positions_read",
+                "arguments": {
+                    "action": "events",
+                    "position_effect": "close",
+                    "limit": 5,
+                },
+            }
+        )
+        rejected = on_tool_call(
+            {
+                "call_id": "answer_rejected",
+                "tool_name": "submit_answer",
+                "arguments": {
+                    "mode": "evidence",
+                    "status": "complete",
+                    "answer_markdown": "最近有 5 条平仓记录。",
+                    "claims": [
+                        {
+                            "text": "最近有 5 条平仓记录",
+                            "kind": "current_fact",
+                            "observation_ids": [evidence["ref"]],
+                            "required_scope": "requested_page",
+                        }
+                    ],
+                },
+            }
+        )
+        assert rejected["observation"]["ok"] is False
+        assert rejected["observation"]["reason"] == "claim_freshness_not_supported"
+        return {
+            "ok": False,
+            "error": {
+                "code": "MODEL_ERROR",
+                "stage": "model",
+                "message": "aborted after answer rejection",
+                "retryable": False,
+            },
+        }
+
+    monkeypatch.setattr("src.application.bot.host.run_pi_agent", process)
+
+    result = run_contract(_contract("查询最近平仓的5条期权交易记录"), model_settings=_TEST_MODEL)
+
+    assert result.ok is False
+    assert result.error == {"code": "ANSWER_ADMISSION_FAILED"}
+    assert result.user_response == (
+        "答案时间与证据时间不一致，未发送未经校验的答案。"
+        f"运行 ID：{result.run_id}"
+    )
+    assert any(event.type == "answer_admission_failed" for event in result.events)
+
+
+@pytest.mark.parametrize(
+    ("observation", "claim", "submit_status", "expected_reason", "receipt"),
+    [
+        (
+            {
+                "status": "complete",
+                "coverage": {"status": "complete", "complete_for": "point"},
+                "freshness": {"status": "current", "as_of": "2026-09-02T09:00:00+08:00"},
+            },
+            {"kind": "current_fact", "required_scope": "full_query"},
+            "complete",
+            "claim_scope_not_covered",
+            "请求的数据覆盖不足，未发送未经校验的答案。",
+        ),
+        (
+            {
+                "status": "partial",
+                "coverage": {"status": "complete", "complete_for": "full_query"},
+                "freshness": {"status": "current", "as_of": "2026-09-02T09:00:00+08:00"},
+            },
+            {"kind": "current_fact", "required_scope": "full_query"},
+            "complete",
+            "answer_status_overstates_evidence",
+            "答案超出已有证据，未发送未经校验的答案。",
+        ),
+        (
+            None,
+            {"kind": "current_fact", "required_scope": "point"},
+            "complete",
+            "observation_outside_request",
+            "引用证据不属于当前请求或权威性不足，未发送未经校验的答案。",
+        ),
+    ],
+)
+def test_host_returns_safe_admission_receipt_categories(
+    monkeypatch,
+    observation: dict | None,
+    claim: dict,
+    submit_status: str,
+    expected_reason: str,
+    receipt: str,
+) -> None:
+    if observation is not None:
+        monkeypatch.setattr(
+            bot_tools,
+            "call_read_tool",
+            lambda *_args, **_kwargs: {"ok": True, "data": {}},
+        )
+        monkeypatch.setattr(
+            bot_tools,
+            "compact_observation",
+            lambda *_args, **_kwargs: {
+                "tool_name": "runtime_status",
+                "ok": True,
+                "value": {},
+                **observation,
+            },
+        )
+
+    def process(_start, *, on_tool_call, **_kwargs):
+        evidence_id = "missing_observation"
+        if observation is not None:
+            evidence_id = on_tool_call(
+                {
+                    "call_id": "read_for_receipt",
+                    "tool_name": "runtime_status",
+                    "arguments": {"config_key": "us"},
+                }
+            )["ref"]
+        rejected = on_tool_call(
+            {
+                "call_id": "rejected_receipt",
+                "tool_name": "submit_answer",
+                "arguments": {
+                    "mode": "evidence",
+                    "status": submit_status,
+                    "answer_markdown": "未经校验的结论",
+                    "claims": [
+                        {
+                            "text": "未经校验的结论",
+                            "observation_ids": [evidence_id],
+                            **claim,
+                        }
+                    ],
+                },
+            }
+        )
+        assert rejected["observation"]["reason"] == expected_reason
+        return {
+            "ok": False,
+            "error": {
+                "code": "MODEL_ERROR",
+                "stage": "model",
+                "message": "aborted after rejection",
+                "retryable": False,
+            },
+        }
+
+    monkeypatch.setattr("src.application.bot.host.run_pi_agent", process)
+    result = run_contract(_contract("检查回执分类"), model_settings=_TEST_MODEL)
+
+    assert result.error == {"code": "ANSWER_ADMISSION_FAILED"}
+    assert result.user_response == f"{receipt}运行 ID：{result.run_id}"
+    assert expected_reason not in result.user_response
+
+
+def test_stale_rejection_does_not_relabel_a_later_model_failure(monkeypatch) -> None:
+    def process(_start, *, on_tool_call, on_event, **_kwargs):
+        rejected = on_tool_call(
+            {
+                "call_id": "stale_rejection",
+                "tool_name": "submit_answer",
+                "arguments": {
+                    "mode": "evidence",
+                    "status": "complete",
+                    "answer_markdown": "无证据结论",
+                    "claims": [
+                        {
+                            "text": "无证据结论",
+                            "kind": "current_fact",
+                            "observation_ids": ["missing"],
+                            "required_scope": "point",
+                        }
+                    ],
+                },
+            }
+        )
+        assert rejected["observation"]["reason"] == "observation_outside_request"
+        on_event({"event_type": "turn_start", "data": {}})
+        return {
+            "ok": False,
+            "error": {
+                "code": "MODEL_ERROR",
+                "stage": "model",
+                "message": "real later model failure",
+                "retryable": False,
+            },
+        }
+
+    monkeypatch.setattr("src.application.bot.host.run_pi_agent", process)
+    result = run_contract(_contract("检查真实错误分类"), model_settings=_TEST_MODEL)
+
+    assert result.error == {"code": "MODEL_ERROR"}
+    assert result.user_response == "Bot 模型暂时不可用。"
+
+
+def test_unknown_admission_reason_uses_generic_safe_receipt(monkeypatch) -> None:
+    def process(_start, *, on_tool_call, **_kwargs):
+        rejected = on_tool_call(
+            {
+                "call_id": "generic_rejection",
+                "tool_name": "submit_answer",
+                "arguments": {
+                    "mode": "conceptual",
+                    "status": "complete",
+                    "answer_markdown": "无效答案",
+                    "claims": [],
+                    "unexpected": True,
+                },
+            }
+        )
+        assert rejected["observation"]["reason"] == "answer_schema_invalid"
+        return {
+            "ok": False,
+            "error": {
+                "code": "MODEL_ERROR",
+                "stage": "model",
+                "message": "aborted after rejection",
+                "retryable": False,
+            },
+        }
+
+    monkeypatch.setattr("src.application.bot.host.run_pi_agent", process)
+    result = run_contract(_contract("检查通用回执"), model_settings=_TEST_MODEL)
+
+    assert result.error == {"code": "ANSWER_ADMISSION_FAILED"}
+    assert result.user_response == (
+        "Bot 已读取数据，但答案未通过证据校验。"
+        f"运行 ID：{result.run_id}"
+    )
+
+
+def test_host_registers_evidence_budget_narrowing_as_diagnostic(monkeypatch) -> None:
+    monkeypatch.setattr(
+        bot_tools,
+        "call_read_tool",
+        lambda *_args, **_kwargs: {"ok": True, "data": {"summary": {"ok": True}}},
+    )
+    monkeypatch.setattr(
+        bot_tools,
+        "compact_observation",
+        lambda *_args, **_kwargs: {
+            "tool_name": "runtime_status",
+            "ok": True,
+            "status": "complete",
+            "value": {"summary": {"ok": True}},
+            "coverage": {"status": "complete", "complete_for": "point"},
+            "freshness": {
+                "status": "current",
+                "as_of": "2026-08-22T09:30:00+08:00",
+            },
+        },
+    )
+    monkeypatch.setattr(bot_tools, "conservative_json_tokens", lambda _value: 20_001)
+
+    def tool_flow(on_tool_call):
+        observation = on_tool_call(
+            {
+                "call_id": "read_large",
+                "tool_name": "runtime_status",
+                "arguments": {"config_key": "us"},
+            }
+        )
+        assert observation["status"] == "needs_narrowing"
+        admitted = on_tool_call(
+            {
+                "call_id": "answer_narrow",
+                "tool_name": "submit_answer",
+                "arguments": {
+                    "mode": "evidence",
+                    "status": "needs_narrowing",
+                    "answer_markdown": "当前结果范围过大。",
+                    "claims": [
+                        {
+                            "text": "当前结果范围过大",
+                            "kind": "judgment",
+                            "observation_ids": [observation["ref"]],
+                            "required_scope": "point",
+                        }
+                    ],
+                },
+            }
+        )
+        assert admitted["observation"] == {"ok": True, "status": "answer_accepted"}
+        return admitted["approved_answer"]["text"]
+
+    result = _run_answered_host(monkeypatch, "检查当前运行状态", tool_flow)
+
+    assert result.ok is True
+    assert "需要缩小范围" in result.user_response
+
+
+def test_host_discards_plain_answer_without_submit_answer(monkeypatch) -> None:
+    def process(_start, *, on_proposed, **_kwargs):
+        proposal = {
+            "status": "answered",
+            "text": "绕过结构化准入的回答",
+            "control_request": None,
+            "termination_reason": "stop",
+            "usage": {},
+        }
+        decision = on_proposed(proposal)
+        return {"ok": True, "result": {**proposal, "committed": decision == "commit"}}
+
+    monkeypatch.setattr("src.application.bot.host.run_pi_agent", process)
+
+    result = run_contract(_contract("解释运行机制"), model_settings=_TEST_MODEL)
+
+    assert result.ok is False
+    assert result.status == "failed"
+    assert result.error == {
+        "code": "RESULT_REJECTED",
+        "reason": "answer_not_approved",
+    }
+
+
+def test_failed_read_is_audited_but_not_registered_as_evidence(monkeypatch) -> None:
+    monkeypatch.setattr(
+        bot_tools,
+        "call_read_tool",
+        lambda *_args, **_kwargs: {
+            "ok": False,
+            "error": {"code": "READ_ERROR", "message": "unavailable"},
+        },
+    )
+
+    def tool_flow(on_tool_call):
+        failed = on_tool_call(
+            {
+                "call_id": "read_failed",
+                "tool_name": "runtime_status",
+                "arguments": {"config_key": "us"},
+            }
+        )
+        rejected = on_tool_call(
+            {
+                "call_id": "answer_failed_read",
+                "tool_name": "submit_answer",
+                "arguments": {
+                    "mode": "evidence",
+                    "status": "complete",
+                    "answer_markdown": "错误地引用失败读取。",
+                    "claims": [
+                        {
+                            "text": "读取成功",
+                            "kind": "current_fact",
+                            "observation_ids": [failed["ref"]],
+                            "required_scope": "point",
+                        }
+                    ],
+                },
+            }
+        )
+        assert rejected["observation"]["reason"] == "observation_outside_request"
+        admitted = on_tool_call(
+            {
+                "call_id": "answer_diagnostic",
+                "tool_name": "submit_answer",
+                "arguments": {
+                    "mode": "conceptual",
+                    "status": "insufficient_evidence",
+                    "answer_markdown": "读取失败，无法形成事实结论。",
+                    "claims": [],
+                },
+            }
+        )
+        return admitted["approved_answer"]["text"]
+
+    result = _run_answered_host(monkeypatch, "检查当前运行状态", tool_flow)
+
+    failed_events = [
+        event
+        for event in result.events
+        if event.type == "tool_result"
+        and event.payload.get("tool_call_id") == "read_failed"
+    ]
+    assert result.ok is True
+    assert len(failed_events) == 1
+    assert failed_events[0].payload["ok"] is False
+
+
+def test_evidence_content_hash_binds_coverage_metadata(monkeypatch) -> None:
+    projection_count = 0
+
+    monkeypatch.setattr(
+        bot_tools,
+        "call_read_tool",
+        lambda *_args, **_kwargs: {"ok": True, "data": {"value": 1}},
+    )
+
+    def compact(*_args, **_kwargs):
+        nonlocal projection_count
+        projection_count += 1
+        return {
+            "tool_name": "runtime_status",
+            "ok": True,
+            "status": "complete",
+            "value": {"value": 1},
+            "coverage": {
+                "status": "complete",
+                "complete_for": "point" if projection_count == 1 else "requested_page",
+            },
+            "freshness": {"status": "not_applicable"},
+        }
+
+    monkeypatch.setattr(bot_tools, "compact_observation", compact)
+
+    def tool_flow(on_tool_call):
+        first = on_tool_call(
+            {
+                "call_id": "hash_1",
+                "tool_name": "runtime_status",
+                "arguments": {"config_key": "us"},
+            }
+        )
+        second = on_tool_call(
+            {
+                "call_id": "hash_2",
+                "tool_name": "runtime_status",
+                "arguments": {"config_key": "us"},
+            }
+        )
+        assert first["value"] == second["value"]
+        assert first["content_hash"] != second["content_hash"]
+        admitted = on_tool_call(
+            {
+                "call_id": "answer_hash",
+                "tool_name": "submit_answer",
+                "arguments": {
+                    "mode": "conceptual",
+                    "status": "complete",
+                    "answer_markdown": "哈希覆盖完整证据包。",
+                    "claims": [],
+                },
+            }
+        )
+        return admitted["approved_answer"]["text"]
+
+    result = _run_answered_host(monkeypatch, "检查证据哈希", tool_flow)
+
+    assert result.ok is True
+
+
+def _near_limit_ascii_blob(factory) -> str:
+    low, high = 0, 30_000
+    best = ""
+    while low <= high:
+        midpoint = (low + high) // 2
+        candidate = "x" * midpoint
+        tokens = bot_tools.conservative_json_tokens(factory(candidate))
+        if tokens <= 3_998:
+            best = candidate
+            low = midpoint + 1
+        else:
+            high = midpoint - 1
+    assert 3_980 <= bot_tools.conservative_json_tokens(factory(best)) <= 3_998
+    return best
+
+
+def test_host_final_success_observation_is_bounded_after_protocol_metadata(monkeypatch) -> None:
+    template = lambda blob: {
+        "tool_name": "runtime_status",
+        "ok": True,
+        "status": "complete",
+        "value": {"blob": blob},
+        "coverage": {"status": "complete", "complete_for": "point"},
+        "freshness": {"status": "not_applicable"},
+    }
+    projected = template(_near_limit_ascii_blob(template))
+    captured = {}
+    monkeypatch.setattr(
+        bot_tools,
+        "call_read_tool",
+        lambda *_args, **_kwargs: {"ok": True, "data": {}},
+    )
+    monkeypatch.setattr(
+        bot_tools,
+        "compact_observation",
+        lambda *_args, **_kwargs: projected,
+    )
+
+    def process(_start, *, on_tool_call, **_kwargs):
+        captured.update(on_tool_call({
+            "call_id": "read_near_limit",
+            "tool_name": "runtime_status",
+            "arguments": {"config_key": "us"},
+        }))
+        return {
+            "ok": False,
+            "error": {
+                "code": "MODEL_ERROR",
+                "stage": "model",
+                "message": "test completed",
+                "retryable": False,
+            },
+        }
+
+    monkeypatch.setattr("src.application.bot.host.run_pi_agent", process)
+    run_contract(_contract("检查最终证据预算"), model_settings=_TEST_MODEL)
+
+    assert captured["status"] == "needs_narrowing"
+    assert "tool_call_id" not in captured
+    assert bot_tools.conservative_json_tokens(captured) <= 4_000
+
+
+def test_host_final_failed_observation_is_bounded_after_ref(monkeypatch) -> None:
+    template = lambda blob: {
+        "tool_name": "runtime_status",
+        "ok": False,
+        "status": "failed",
+        "error": "READ_ERROR",
+        "code": "READ_ERROR",
+        "message": "unavailable",
+        "retryable": False,
+        "details": {"blob": blob},
+    }
+    projected = template(_near_limit_ascii_blob(template))
+    captured = {}
+    monkeypatch.setattr(
+        bot_tools,
+        "call_read_tool",
+        lambda *_args, **_kwargs: {"ok": False, "error": {}},
+    )
+    monkeypatch.setattr(
+        bot_tools,
+        "compact_observation",
+        lambda *_args, **_kwargs: projected,
+    )
+
+    def process(_start, *, on_tool_call, **_kwargs):
+        captured.update(on_tool_call({
+            "call_id": "read_failed_near_limit",
+            "tool_name": "runtime_status",
+            "arguments": {"config_key": "us"},
+        }))
+        return {
+            "ok": False,
+            "error": {
+                "code": "MODEL_ERROR",
+                "stage": "model",
+                "message": "test completed",
+                "retryable": False,
+            },
+        }
+
+    monkeypatch.setattr("src.application.bot.host.run_pi_agent", process)
+    run_contract(_contract("检查失败证据预算"), model_settings=_TEST_MODEL)
+
+    assert captured["status"] == "failed"
+    assert captured["details"] == {"truncated": True}
+    assert "tool_call_id" not in captured
+    assert bot_tools.conservative_json_tokens(captured) <= 4_000
+
+
+def test_host_does_not_copy_provider_call_id_into_model_observation(monkeypatch) -> None:
+    captured = {}
+    monkeypatch.setattr(
+        bot_tools,
+        "call_read_tool",
+        lambda *_args, **_kwargs: {"ok": True, "data": {}},
+    )
+    monkeypatch.setattr(
+        bot_tools,
+        "compact_observation",
+        lambda *_args, **_kwargs: {
+            "tool_name": "runtime_status",
+            "ok": True,
+            "status": "complete",
+            "value": {"healthy": True},
+            "coverage": {"status": "complete", "complete_for": "point"},
+            "freshness": {"status": "not_applicable"},
+        },
+    )
+
+    def process(_start, *, on_tool_call, **_kwargs):
+        captured.update(on_tool_call({
+            "call_id": "c" * 100_000,
+            "tool_name": "runtime_status",
+            "arguments": {"config_key": "us"},
+        }))
+        return {
+            "ok": False,
+            "error": {
+                "code": "MODEL_ERROR",
+                "stage": "model",
+                "message": "test completed",
+                "retryable": False,
+            },
+        }
+
+    monkeypatch.setattr("src.application.bot.host.run_pi_agent", process)
+    run_contract(_contract("检查 call id 边界"), model_settings=_TEST_MODEL)
+
+    assert captured["status"] == "complete"
+    assert "tool_call_id" not in captured
+    assert bot_tools.conservative_json_tokens(captured) <= 4_000

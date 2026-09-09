@@ -23,6 +23,7 @@ class AssistantRequest:
     audit_db: str | None = None
     assistant_config_path: str | None = None
     reply_context: dict[str, Any] | None = None
+    received_monotonic: float | None = None
 
     def public_payload(self) -> dict[str, Any]:
         return {

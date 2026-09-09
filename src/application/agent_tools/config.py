@@ -413,7 +413,7 @@ CONFIG_VALIDATE_TOOL = build_agent_tool(
     safe_default_input={},
     examples=({"input": {"config_key": "us"}},),
     output_contract=_CONFIG_VALIDATE_OUTPUT_CONTRACT,
-    copilot_input_fields=("config_key",),
+    bot_input_fields=("config_key",),
 )
 
 SCHEDULER_STATUS_TOOL = build_agent_tool(
@@ -436,7 +436,7 @@ SCHEDULER_STATUS_TOOL = build_agent_tool(
     safe_default_input={},
     examples=({"input": {"config_key": "us", "account": "lx"}},),
     output_contract=_SCHEDULER_STATUS_OUTPUT_CONTRACT,
-    copilot_input_fields=("config_key", "schedule_key", "account", "force"),
+    bot_input_fields=("config_key", "schedule_key", "account", "force"),
 )
 
 SYMBOL_CONFIG_READ_TOOL = build_agent_tool(
@@ -465,7 +465,7 @@ SYMBOL_CONFIG_READ_TOOL = build_agent_tool(
         {"input": {"config_key": "us", "symbol": "NVDA", "strategy": "cc"}},
     ),
     output_contract=_SYMBOL_CONFIG_OUTPUT_CONTRACT,
-    copilot_input_fields=("config_key", "symbol", "strategy", "field"),
+    bot_input_fields=("config_key", "symbol", "strategy", "field"),
 )
 
 SYMBOL_RESOLVE_TOOL = build_agent_tool(
@@ -493,7 +493,7 @@ SYMBOL_RESOLVE_TOOL = build_agent_tool(
         {"input": {"symbol": "NVDA"}},
     ),
     output_contract=_SYMBOL_RESOLVE_OUTPUT_CONTRACT,
-    copilot_input_fields=("config_key", "symbol"),
+    bot_input_fields=("config_key", "symbol"),
 )
 
 MANAGE_SYMBOLS_TOOL = build_agent_tool(

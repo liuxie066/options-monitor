@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import date
+from dataclasses import replace
+import time
 from typing import Any, Callable
 
 from src.application.assistant.settings import AssistantSettings
@@ -23,6 +25,8 @@ def handle_assistant_turn(
     now_fn: Callable[[], date] | None = None,
     settings: AssistantSettings | None = None,
 ) -> AssistantTurnResult:
+    if request.received_monotonic is None:
+        request = replace(request, received_monotonic=time.monotonic())
     runtime_settings = settings or AssistantSettings()
     if not runtime_settings.enabled:
         return AssistantTurnResult(
@@ -57,7 +61,7 @@ def _run_assistant_turn_response(
 ) -> dict[str, Any]:
     runtime_settings = settings or AssistantSettings()
     request = _request_with_default_market_scope(request, runtime_settings)
-    store = audit_store or InboundAuditStore(request.audit_db)
+    store = audit_store or InboundAuditStore(request.audit_db, deadline_monotonic=(request.received_monotonic if request.received_monotonic is not None else time.monotonic()) + 180)
     response = handle_assistant_request(
         request,
         audit_store=store,
@@ -93,6 +97,7 @@ def _request_with_default_market_scope(request: AssistantRequest, settings: Assi
         audit_db=request.audit_db,
         assistant_config_path=request.assistant_config_path,
         reply_context=dict(request.reply_context) if isinstance(request.reply_context, dict) else None,
+        received_monotonic=request.received_monotonic,
     )
 
 
@@ -117,12 +122,12 @@ def _with_assistant_meta(
     meta = dict(meta_raw) if isinstance(meta_raw, dict) else {}
     assistant_meta = {
         "enabled": bool(settings.enabled),
-        "copilot": settings.copilot.public_payload(),
+        "bot": settings.bot.public_payload(),
         "route": route,
     }
     assistant_meta["decision"] = {
         "route": route,
-        "source": "copilot" if route == "copilot" else "deterministic_control",
+        "source": "bot" if route == "bot" else "deterministic_control",
     }
     meta["assistant"] = assistant_meta
     return {**response, "meta": meta}
@@ -131,6 +136,6 @@ def _with_assistant_meta(
 def _response_route(response: dict[str, Any]) -> str:
     data = response.get("data") if isinstance(response.get("data"), dict) else {}
     decision = data.get("decision") if isinstance(data.get("decision"), dict) else {}
-    if str(decision.get("reason") or "") == "copilot_freeform":
-        return "copilot"
+    if str(decision.get("reason") or "") == "bot_freeform":
+        return "bot"
     return "deterministic_control"

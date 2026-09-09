@@ -154,6 +154,8 @@ def send_auto_close_receipt(
         "command_ok": command_ok,
         "returncode": int(normalized.get("returncode") or (0 if command_ok else 1)),
         "error_code": normalized.get("error_code"),
+        "rendered_message": message,
+        "message_sha256": sha256(message.encode()).hexdigest(),
         "message_len": len(message),
         "send_message": _optional_str(normalized.get("message")),
         "attempt_count": _next_attempt_count(prior_receipt),
@@ -498,6 +500,7 @@ def _receipt_state_entry(*, result: dict[str, Any], receipt: dict[str, Any]) -> 
         "result_summary": {
             "mode": result.get("mode"),
             "account": result.get("account"),
+            "market_filter": result.get("market_filter"),
             "broker": result.get("broker"),
             "as_of_utc": result.get("as_of_utc"),
             "candidates_should_close": result.get("candidates_should_close"),
@@ -591,3 +594,26 @@ def _optional_str(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def query_maintenance_receipts(*, base: Path, account: str, query: dict[str, Any]) -> list[dict[str, Any]]:
+    """Read the original retained state without mkdir or forgiving corrupt JSON."""
+    from domain.storage import paths
+    from src.application.receipt_query import read_receipt_json, receipt_event, receipt_matches
+    state = read_receipt_json(paths.account_state_dir(base, account) / _AUTO_CLOSE_RECEIPT_STATE_NAME)
+    if not isinstance(state.get("receipts"), dict):
+        raise ValueError("maintenance_receipts_invalid")
+    rows = []
+    for key, item in state["receipts"].items():
+        summary, receipt = item.get("result_summary") or {}, item.get("receipt") or {}
+        if summary.get("account") != account:
+            raise ValueError("maintenance_receipt_account_unlinkable")
+        event = receipt_event(source="maintenance", event_id=key, account=account,
+            market=summary.get("market_filter"), kind="monitor",
+            occurred=summary.get("as_of_utc"), recorded=item.get("updated_at_utc"),
+            revision=item.get("updated_at_utc"), body=receipt.get("rendered_message"), business_result=summary,
+            delivery=receipt.get("status"), confirmed=bool(receipt.get("delivery_confirmed")),
+            diagnostic_code=receipt.get("error_code"))
+        if receipt_matches(event, query):
+            rows.append(event)
+    return rows

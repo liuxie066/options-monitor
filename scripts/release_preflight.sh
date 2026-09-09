@@ -166,11 +166,11 @@ fi
 if [[ "${FOCUSED}" -eq 1 && "${FULL}" -eq 0 ]]; then
   run_step "Pi runtime focused tests" \
     "${PYTHON_BIN}" -m pytest tests/test_pi_agent_process.py
-  run_step "Copilot, Control, and operations focused tests" \
+  run_step "Bot, Control, and operations focused tests" \
     "${PYTHON_BIN}" -m pytest \
-      tests/test_copilot_phase1.py \
-      tests/test_copilot_conversation_memory.py \
-      tests/test_copilot_p1_eval.py \
+      tests/test_bot_phase1.py \
+      tests/test_bot_conversation_memory.py \
+      tests/test_bot_p1_eval.py \
       tests/test_inbound_control.py \
       tests/test_setup_check.py \
       tests/test_cli_operator_commands.py \
@@ -180,7 +180,7 @@ if [[ "${FOCUSED}" -eq 1 && "${FULL}" -eq 0 ]]; then
       tests/unit/test_service_deploy_unit.py \
       tests/test_release_check.py \
       tests/test_release_test_plan.py \
-      tests/copilot_eval/test_answer_quality.py
+      tests/bot_eval/test_answer_quality.py
   run_step "agent/plugin focused tests" \
     "${PYTHON_BIN}" -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py
   run_step "research domain focused tests" \

@@ -48,10 +48,10 @@ def check_assistant_llm(
     checks: list[dict[str, Any]] = []
     validation_ok = _append_assistant_config_check(checks, cfg=cfg, settings=runtime_settings)
     checks.append({
-        "name": "assistant_copilot_tool_loading_mode",
+        "name": "assistant_bot_tool_loading_mode",
         "status": "ok",
-        "message": f"assistant Copilot tool loading mode is {runtime_settings.copilot.tool_loading_mode}",
-        "mode": runtime_settings.copilot.tool_loading_mode,
+        "message": f"assistant Bot tool loading mode is {runtime_settings.bot.tool_loading_mode}",
+        "mode": runtime_settings.bot.tool_loading_mode,
     })
     checks.extend(_config_checks(settings, secret_provider=provider))
     live_probe = _live_probe_check(
@@ -83,8 +83,8 @@ def check_assistant_llm(
             "ok": ok,
             "status": status,
             "enabled": bool(settings.enabled),
-            "assistant_copilot_portfolio_enabled": (
-                "portfolio" in runtime_settings.enabled_copilot_toolsets
+            "assistant_bot_portfolio_enabled": (
+                "portfolio" in runtime_settings.enabled_bot_toolsets
             ),
             "live_checked": bool(live),
             "error_count": sum(1 for item in checks if item.get("status") == "error"),
@@ -301,11 +301,11 @@ def _live_probe_check(
     return {
         "name": "live_probe",
         "status": "skipped",
-        "message": "provider diagnostics are configuration-only; use Copilot execution for an end-to-end model probe",
+        "message": "provider diagnostics are configuration-only; use Bot execution for an end-to-end model probe",
         "value": {
             "live_requested": bool(live),
             "probe_count": 0,
-            "copilot_runtime": True,
+            "bot_runtime": True,
         },
     }
 
@@ -314,7 +314,7 @@ def _capability_summary() -> dict[str, Any]:
     tool_names = sorted(pure_read_tool_names())
     toolsets = {name: list(names) for name, names in sorted(pure_read_toolsets().items())}
     return {
-        "schema_version": "om-copilot-tool-summary-v1",
+        "schema_version": "om-bot-tool-summary-v1",
         "pure_read_tool_count": len(tool_names),
         "pure_read_tools": tool_names,
         "toolsets": toolsets,

@@ -378,8 +378,8 @@ def test_invalid_notification_date_rejected() -> None:
     assert out["error"]["code"] == "INPUT_ERROR"
 
 
-def test_copilot_error_stays_in_safe_vocabulary(tmp_path: Path) -> None:
-    from src.application.copilot.contracts import COPILOT_SAFE_ERROR_CODES
+def test_bot_error_stays_in_safe_vocabulary(tmp_path: Path) -> None:
+    from src.application.bot.contracts import BOT_SAFE_ERROR_CODES
 
     _seal_run(tmp_path, "run-only")
     out = _run_tool(
@@ -393,7 +393,7 @@ def test_copilot_error_stays_in_safe_vocabulary(tmp_path: Path) -> None:
     )
 
     assert out["ok"] is False
-    assert out["error"]["code"] in COPILOT_SAFE_ERROR_CODES
+    assert out["error"]["code"] in BOT_SAFE_ERROR_CODES
 
 
 def test_cross_utc_midnight_event_maps_to_local_date(tmp_path: Path) -> None:

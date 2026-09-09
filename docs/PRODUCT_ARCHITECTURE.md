@@ -199,7 +199,7 @@ system defaults
 Feishu / WeChat / Inbound
   -> channel adapter
   -> explicit command or permission response -> deterministic Control
-  -> all other text -> Copilot Service -> Host -> Agent
+  -> all other text -> Bot Service -> Host -> Agent
   -> canonical application tools and use cases
 ```
 

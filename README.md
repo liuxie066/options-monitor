@@ -52,7 +52,7 @@ trade_events -> projection -> position_lots
 | 期权账本与生命周期 | `om option-positions`、`om trade-events` | [Ledger Architecture](docs/LEDGER_ARCHITECTURE.md) |
 | 期权收益与现金 | `om option-performance` | [Option Performance](docs/OPTION_PERFORMANCE_DESIGN.md) |
 | 全部 CSP / CC 指派压力测试 | `om portfolio assignment-scenario` | 本 README 的“指派后资产分布” |
-| 本地 Copilot | `om copilot` | [Agent Integration](docs/AGENT_INTEGRATION.md) |
+| 本地 Bot | `om bot` | [Agent Integration](docs/AGENT_INTEGRATION.md) |
 | 结构化 Tool Gateway | `om-agent spec`、`om-agent run --tool <name> --input-json '<json>'` | [Tool Reference](docs/TOOL_REFERENCE.md) |
 | Research 取证与归档 | `om research` | [Agent Handbook](docs/AGENT_WIKI.md) |
 | 运行诊断、服务与版本升级 | `om status`、`om service`、`om update` | [RUNBOOK.md](RUNBOOK.md) |
@@ -289,7 +289,7 @@ om-agent run --tool portfolio_assignment_scenario \
 - 费用复用统一股票费用计算器；缺少券商、币种或指派费用规则时返回 `partial` 和 `null`，不按 0 处理；
 - 现金不足形成 funding liability，CC 覆盖不足形成 short-stock liability，不会被改写成执行错误。
 
-Copilot 通过同一个 `portfolio_assignment_scenario` 纯读工具调用，不维护第二套触发词或计算逻辑。使用 Copilot 时需在 assistant 配置中显式启用可选的 `portfolio` toolset，并保持 portfolio-management API 仅在同机 loopback 提供服务。
+Bot 通过同一个 `portfolio_assignment_scenario` 纯读工具调用，不维护第二套触发词或计算逻辑。使用 Bot 时需在 assistant 配置中显式启用可选的 `portfolio` toolset，并保持 portfolio-management API 仅在同机 loopback 提供服务。
 
 ### Close Advice
 
