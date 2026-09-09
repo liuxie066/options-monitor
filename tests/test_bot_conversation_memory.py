@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import time
 from argparse import Namespace
 
 
@@ -852,3 +853,60 @@ def _contract(text: str):
     )
     assert not isinstance(prepared, AppResult)
     return prepared
+
+
+def test_cancel_survives_short_schema_writer_contention(tmp_path, monkeypatch) -> None:
+    store = BotHostStore(tmp_path / "bot.sqlite3")
+    store.start_run("contended", contract=_contract("运行状态"), session_key="wechat:chat")
+    reached_write = threading.Event()
+    connect = store._connect
+
+    def traced_connect(**kwargs):
+        conn = connect(**kwargs)
+        conn.set_trace_callback(lambda sql: reached_write.set() if "UPDATE bot_reply_outbox" in sql else None)
+        return conn
+
+    monkeypatch.setattr(store, "_connect", traced_connect)
+    outcome = {}
+
+    def cancel():
+        try:
+            outcome["cancel"] = store.request_cancel("contended")
+        except Exception as exc:
+            outcome["error"] = exc
+
+    with sqlite3.connect(store.path) as blocker:
+        blocker.execute("BEGIN IMMEDIATE")
+        worker = threading.Thread(target=cancel)
+        worker.start()
+        try:
+            assert reached_write.wait(2)
+            time.sleep(0.15)
+        finally:
+            blocker.rollback()
+            worker.join(timeout=2)
+    assert not worker.is_alive()
+    assert outcome == {"cancel": True}
+    assert store.claim_admission_decision("contended", "commit") == "cancel"
+    assert store.run_record("contended")["cancel_requested"] == 1
+
+
+def test_schema_writer_wait_respects_admission_deadline(tmp_path) -> None:
+    store = BotHostStore(tmp_path / "bot.sqlite3")
+    store.start_run("existing", contract=_contract("运行状态"), session_key="wechat:chat")
+    with sqlite3.connect(store.path) as blocker:
+        blocker.execute("BEGIN IMMEDIATE")
+        for acquire in (
+            lambda deadline: store.acquire_lane("foreground", "late", limit=1, ttl_seconds=180, deadline_monotonic=deadline),
+            lambda deadline: store.acquire_session_run("wechat:late", "late", ttl_seconds=180, deadline_monotonic=deadline),
+        ):
+            started = time.monotonic()
+            try:
+                acquire(started + 0.1)
+            except sqlite3.OperationalError as exc:
+                assert "locked" in str(exc)
+            else:
+                raise AssertionError("A held writer must not admit another lease")
+            assert time.monotonic() - started < 0.5
+        assert blocker.execute("SELECT COUNT(*) FROM bot_lane_leases").fetchone()[0] == 0
+        assert blocker.execute("SELECT COUNT(*) FROM bot_session_runs WHERE run_id='late'").fetchone()[0] == 0

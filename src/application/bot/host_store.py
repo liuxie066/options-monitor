@@ -132,7 +132,7 @@ class BotHostStore:
     def acquire_session_run(self, session_key: str, run_id: str, *, ttl_seconds: int, deadline_monotonic: float | None = None) -> bool:
         if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
             return False
-        self._ensure_schema()
+        self._ensure_schema(deadline_monotonic=deadline_monotonic)
         now = datetime.now(timezone.utc)
         expires_at = (now + timedelta(seconds=max(1, ttl_seconds))).isoformat()
         with self._connect(deadline_monotonic=deadline_monotonic) as conn:
@@ -272,7 +272,7 @@ class BotHostStore:
     def finish_run(self, result: AppResult, *, progress_resolution: dict[str, Any] | None = None,
                    reply: dict[str, Any] | None = None, reply_builder: Any = None, progress_scope: Any = None,
                    deadline_monotonic: float | None = None) -> AppResult:
-        self._ensure_schema()
+        self._ensure_schema(deadline_monotonic=deadline_monotonic)
         with self._connect(deadline_monotonic=deadline_monotonic) as conn:
             conn.execute("BEGIN IMMEDIATE")
             conn.row_factory = sqlite3.Row
@@ -670,7 +670,7 @@ class BotHostStore:
     def acquire_lane(self, lane: str, lease_id: str, *, limit: int, ttl_seconds: int, deadline_monotonic: float | None = None) -> bool:
         if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
             return False
-        self._ensure_schema()
+        self._ensure_schema(deadline_monotonic=deadline_monotonic)
         now = datetime.now(timezone.utc)
         expires_at = (now + timedelta(seconds=max(1, int(ttl_seconds)))).isoformat()
         with self._connect(deadline_monotonic=deadline_monotonic) as conn:
@@ -774,14 +774,14 @@ class BotHostStore:
                 'next_step': '重新读取当前证据，继续原问题；旧引用仅作导航。', 'resolved_by': None, 'resolved_at': None}
 
     def _connect(self, *, deadline_monotonic: float | None = None) -> sqlite3.Connection:
-        # Fail promptly under contention; the interaction must not wait ten seconds per DB call.
-        timeout = 0.05 if deadline_monotonic is None else max(0, min(0.05, deadline_monotonic - time.monotonic()))
+        # Allow short competing commits without resetting the interaction deadline.
+        timeout = 1.0 if deadline_monotonic is None else max(0, min(1.0, deadline_monotonic - time.monotonic()))
         return connect_private_sqlite(self.path, timeout=timeout)
 
-    def _ensure_schema(self) -> None:
+    def _ensure_schema(self, *, deadline_monotonic: float | None = None) -> None:
         from src.application.bot.migration import assert_bot_ready
         assert_bot_ready(self.path)
-        with self._connect() as conn:
+        with self._connect(deadline_monotonic=deadline_monotonic) as conn:
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS bot_sessions (
