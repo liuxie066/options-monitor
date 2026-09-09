@@ -1,0 +1,124 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.5.0",
+  "base": {
+    "tag": "v3.4.13",
+    "commit": "c6671dfc23554038d953facaa9424fdee73d2ca8"
+  },
+  "reviewed_head": "43ab17fc54bd99e6708dea6bf8bdb9faaf40b99f",
+  "commits": [
+    {
+      "sha": "9abcc5dd9e2da5738f4f29f53b3bbb81da98ab81",
+      "subject": "perf(evidence): validate correction graph once per batch"
+    },
+    {
+      "sha": "cfb907ab5262f9ce244df3d8317bafa6c99308b4",
+      "subject": "docs(evidence): refresh dependency graph for regression tests"
+    },
+    {
+      "sha": "343a5d1f720e15fc05b168cd8d363788cbd137b3",
+      "subject": "Merge pull request #258 from liuxie066/codex/evidence-validation"
+    },
+    {
+      "sha": "03d5bf63f1c03d7d219e9d7bf2d7678cf2ed3637",
+      "subject": "Fix trade-intake canonical inbox propagation"
+    },
+    {
+      "sha": "82d328492765c17f89dc859a9178bd80a0189026",
+      "subject": "Merge pull request #259 from liuxie066/codex/trade-intake-canonical-source"
+    },
+    {
+      "sha": "2ef7d8e588a8af860a58899bf9b44c91e64cbe6a",
+      "subject": "feat(wheel): add bidirectional rotation lifecycle"
+    },
+    {
+      "sha": "43ab17fc54bd99e6708dea6bf8bdb9faaf40b99f",
+      "subject": "Merge pull request #260 from liuxie066/codex/wheel-bidirectional"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "Added bidirectional Wheel monitoring, recommendation, and result tracking for Call and Put rotations, with explicit human transition confirmation, manual broker trading, market/account isolation, and receipt-bound multiplier evidence.",
+      "commits": [
+        "2ef7d8e588a8af860a58899bf9b44c91e64cbe6a"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Reduced bulk performance-evidence import cost by validating correction graphs once per batch while preserving per-fact validation and transaction behavior.",
+      "commits": [
+        "9abcc5dd9e2da5738f4f29f53b3bbb81da98ab81"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Kept trade-intake status and lifecycle reconciliation on the resolved canonical inbox after startup, preventing restarts from recreating and reading legacy per-account SQLite shells.",
+      "commits": [
+        "03d5bf63f1c03d7d219e9d7bf2d7678cf2ed3637"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "cfb907ab5262f9ce244df3d8317bafa6c99308b4",
+      "reason": "Generated dependency-graph refresh accompanying the performance-evidence regression coverage; the user-visible improvement is covered by 9abcc5dd."
+    },
+    {
+      "commit": "343a5d1f720e15fc05b168cd8d363788cbd137b3",
+      "reason": "Merge commit for PR #258; the user-visible improvement is covered by 9abcc5dd."
+    },
+    {
+      "commit": "82d328492765c17f89dc859a9178bd80a0189026",
+      "reason": "Merge commit for PR #259; the user-visible bug fix is covered by 03d5bf63."
+    },
+    {
+      "commit": "43ab17fc54bd99e6708dea6bf8bdb9faaf40b99f",
+      "reason": "Merge commit for PR #260; the user-visible Wheel feature is covered by 2ef7d8e5."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "9abcc5dd9e2da5738f4f29f53b3bbb81da98ab81",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/258"
+      ]
+    },
+    {
+      "commit": "cfb907ab5262f9ce244df3d8317bafa6c99308b4",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/258"
+      ]
+    },
+    {
+      "commit": "343a5d1f720e15fc05b168cd8d363788cbd137b3",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/258"
+      ]
+    },
+    {
+      "commit": "03d5bf63f1c03d7d219e9d7bf2d7678cf2ed3637",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/259"
+      ]
+    },
+    {
+      "commit": "82d328492765c17f89dc859a9178bd80a0189026",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/259"
+      ]
+    },
+    {
+      "commit": "2ef7d8e588a8af860a58899bf9b44c91e64cbe6a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/260"
+      ]
+    },
+    {
+      "commit": "43ab17fc54bd99e6708dea6bf8bdb9faaf40b99f",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/260"
+      ]
+    }
+  ]
+}
