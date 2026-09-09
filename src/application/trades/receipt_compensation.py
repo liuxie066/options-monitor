@@ -4,7 +4,8 @@ import fcntl
 import hashlib
 import json
 import os
-from contextlib import contextmanager
+import sqlite3
+from contextlib import closing, contextmanager
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -32,6 +33,8 @@ from src.application.trades.deal_identity import (
 from src.application.trades.lifecycle_outbox import (
     build_notification_batch_route,
 )
+from src.application.trades.inbox import read_trade_payload
+from src.application.trades.inbox_authority import resolve_execution_inbox_path
 from src.application.trades.receipt import (
     classify_trade_lifecycle_delivery_result,
 )
@@ -77,6 +80,9 @@ def compensate_trade_intake_receipts(
 
     source = _select_source(sources, account=account)
     if not apply_changes:
+        managed = _inbox_managed_result(source, repo=repo, account=account, deal_ids=deal_ids)
+        if managed is not None:
+            return {**managed, "dry_run": True}
         plan = _build_plan(
             config=config,
             source=source,
@@ -96,6 +102,9 @@ def compensate_trade_intake_receipts(
 
     lock_path = Path(source["state_path"]).parent / "receipt_compensations.lock"
     with _exclusive_lock(lock_path):
+        managed = _inbox_managed_result(source, repo=repo, account=account, deal_ids=deal_ids)
+        if managed is not None:
+            return {**managed, "dry_run": False}
         plan = _build_plan(
             config=config,
             source=source,
@@ -109,6 +118,12 @@ def compensate_trade_intake_receipts(
             plan,
             expected_payload_hash=expected_payload_hash,
         )
+        if not Path(plan["record_path"]).exists():
+            evidence = _legacy_compensation_evidence(source, account=account, deal_ids=plan["deal_ids"])
+            if evidence["blocked"]:
+                return {**_public_plan(plan), "ok": False, "status": "duplicate_suppressed",
+                        "dry_run": False, "write_applied": False,
+                        "suppression_reason": "overlapping_compensation", "compensation_evidence": evidence}
         return _execute_plan(
             base=base,
             plan=plan,
@@ -117,6 +132,82 @@ def compensate_trade_intake_receipts(
             adapter_selector=adapter_selector,
             now_fn=now_fn,
         )
+
+
+def _inbox_managed_result(source: dict[str, Any], *, repo: Any, account: str,
+                          deal_ids: list[str]) -> dict[str, Any] | None:
+    canonical = _canonical_deal_ids(deal_ids, account=account)
+    requested = source.get("inbox_path") or Path(source["state_path"]).with_name("trade_intake_inbox.sqlite3")
+    path = resolve_execution_inbox_path(repo, requested)
+    if not path.exists():
+        return None
+    keys = set(canonical)
+    for event in active_ledger_events(_list_trade_events(repo)):
+        aliases = structured_deal_keys_from_ledger_event(event)
+        if aliases.intersection(canonical):
+            keys.update(aliases)
+    with closing(sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)) as conn:
+        placeholders = ",".join("?" for _ in keys)
+        rows = conn.execute(f"SELECT inbox_id FROM trade_inbox WHERE broker_deal_key IN ({placeholders})",
+                            sorted(keys)).fetchall()
+    managed = []
+    for (inbox_id,) in rows:
+        row = read_trade_payload(path, inbox_id=inbox_id, read_only=True)
+        envelope = row.get("receipt_envelope") if row else None
+        if envelope and envelope.get("schema_version") == 2:
+            managed.append({"inbox_id": inbox_id, "current_result_key": envelope["current_result_key"],
+                            "receipt": row["receipt"], "retry_policy": (row.get("result") or {}).get("retry_policy")})
+    if not managed:
+        return None
+    return {"ok": False, "status": "inbox_managed", "write_applied": False,
+            "account": account, "deal_ids": canonical, "inbox_receipts": managed,
+            "recovery_strategy": "Use Inbox recovery; inspect unknown or exhausted delivery before separately authorized resend."}
+
+
+@contextmanager
+def receipt_compensation_takeover(*, source: dict[str, Any], account: str,
+                                  canonical_deal_id: str) -> Iterator[dict[str, Any]]:
+    """Inspect legacy sends and prepare Inbox ownership under one lock; send after exit."""
+    canonical = _canonical_deal_ids([canonical_deal_id], account=account)
+    if str(source.get("account") or "").strip() != account:
+        raise ValueError("receipt compensation takeover source account mismatch")
+    with _exclusive_lock(Path(source["state_path"]).parent / "receipt_compensations.lock"):
+        yield _legacy_compensation_evidence(source, account=account, deal_ids=canonical)
+
+
+def _legacy_compensation_evidence(source: dict[str, Any], *, account: str,
+                                  deal_ids: list[str]) -> dict[str, Any]:
+    matches = []
+    directory = Path(source["state_path"]).parent / "receipt_compensations"
+    for path in sorted(directory.glob("*.json")):
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(record, dict) or record.get("schema_version") != COMPENSATION_SCHEMA_VERSION:
+                raise ValueError("unsupported compensation schema")
+            record_account = record["account"]
+            members = _canonical_deal_ids(record["deal_ids"], account=record_account)
+            if (record.get("compensation_id") != _compensation_id(account=record_account, deal_ids=members)
+                    or path.stem != record["compensation_id"]):
+                raise ValueError("compensation identity mismatch")
+            member_rows = record["members"]
+            if (not isinstance(member_rows, list)
+                    or any(not isinstance(item, dict) or item.get("account") != record_account for item in member_rows)
+                    or sorted(item.get("canonical_deal_id") for item in member_rows) != members):
+                raise ValueError("compensation members mismatch")
+            if record_account != account or not set(members).intersection(deal_ids):
+                continue
+            # Legacy compensation messages only describe recorded trades.
+            status = str(record.get("status") or "unknown")
+            safe_failure = (status == "explicit_failed" and record.get("explicit_pre_acceptance_failure") is True
+                            and not record.get("delivery_confirmed") and not record.get("message_id"))
+            matches.append({"compensation_id": record["compensation_id"], "status": status,
+                            "deal_ids": members, "blocks_recorded": not safe_failure})
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise ValueError(f"unverifiable receipt compensation evidence: {path.name}") from exc
+    blocked = any(item["blocks_recorded"] for item in matches)
+    status = ("confirmed" if any(item["status"] == "confirmed" for item in matches)
+              else "unknown" if blocked else "clear")
+    return {"blocked": blocked, "status": status, "result_key": "recorded", "records": matches}
 
 
 def _select_source(
@@ -933,4 +1024,5 @@ __all__ = [
     "COMPENSATION_SCHEMA_VERSION",
     "LEGACY_FALSE_OUTBOX_REASON",
     "compensate_trade_intake_receipts",
+    "receipt_compensation_takeover",
 ]

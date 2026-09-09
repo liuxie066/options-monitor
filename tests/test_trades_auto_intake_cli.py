@@ -658,7 +658,7 @@ def test_disabled_settlement_observation_retries_seal_without_gateways(
             self.on_deal = on_deal
 
         def start(self, **_kwargs):
-            self.on_deal({"deal_id": "deal-1"})
+            self.on_deal({"deal_id": "deal-1", "futu_account_id": "REAL_LX"})
 
         def check_health(self):
             return None
@@ -997,7 +997,7 @@ def test_deal_json_source_selection_rejects_account_mapping_conflict() -> None:
         )
 
 
-def test_push_source_binding_supplies_account_identity_before_inbox() -> None:
+def test_push_source_binding_preserves_explicit_account_identity_before_inbox() -> None:
     source = {
         "id": "sy",
         "account": "sy",
@@ -1008,6 +1008,7 @@ def test_push_source_binding_supplies_account_identity_before_inbox() -> None:
     }
     push_payload = {
         "deal_id": "deal-expiry-1",
+        "futu_account_id": "REAL_87654321",
         "code": "HK.TCH260730P440000",
         "price": 0.0,
         "qty": 1.0,
@@ -1049,7 +1050,7 @@ def test_push_and_backfill_build_same_inbox_identity_regardless_of_arrival_order
         "futu_account_ids": ["REAL_87654321"],
     }
     push_payload = auto_intake._bind_push_payload_to_source(
-        {"deal_id": "same-deal", "code": "HK.TCH260730P440000"},
+        {"deal_id": "same-deal", "code": "HK.TCH260730P440000", "futu_account_id": "REAL_87654321"},
         source=source,
         received_at_utc="2026-07-30T11:58:17+00:00",
     )
@@ -1103,10 +1104,11 @@ def test_push_source_binding_rejects_payload_from_another_account() -> None:
         )
 
 
-def test_push_source_binding_rejects_ambiguous_source_without_payload_account() -> None:
+@pytest.mark.parametrize("account_ids", [["REAL_12345678"], ["REAL_12345678", "REAL_87654321"]])
+def test_push_source_binding_rejects_source_without_payload_account(account_ids) -> None:
     import pytest
 
-    with pytest.raises(ValueError, match="requires exactly one futu_account_id"):
+    with pytest.raises(ValueError, match="requires verified futu_account_id"):
         auto_intake._bind_push_payload_to_source(
             {"deal_id": "ambiguous"},
             source={
@@ -1117,7 +1119,7 @@ def test_push_source_binding_rejects_ambiguous_source_without_payload_account() 
                     "REAL_12345678": "lx",
                     "REAL_87654321": "sy",
                 },
-                "futu_account_ids": ["REAL_12345678", "REAL_87654321"],
+                "futu_account_ids": account_ids,
             },
             received_at_utc="2026-07-30T11:58:17+00:00",
         )
@@ -1177,10 +1179,11 @@ def test_listener_binds_push_source_before_enqueue(monkeypatch, tmp_path: Path) 
         def __init__(self, *, on_deal, **_kwargs):
             self.on_deal = on_deal
 
-        def start(self, *, cancel_event):
+        def start(self, *, cancel_event, on_wait=None):
             self.on_deal(
                 {
                     "deal_id": "push-deal-1",
+                    "futu_account_id": "REAL_87654321",
                     "code": "HK.TCH260730P440000",
                 }
             )
@@ -1274,7 +1277,7 @@ def test_listener_retry_preserves_source_without_dry_run_refresh_side_effects(
         def __init__(self, **_kwargs):
             pass
 
-        def start(self, *, cancel_event):
+        def start(self, *, cancel_event, on_wait=None):
             pass
 
         def check_health(self):
@@ -1515,6 +1518,8 @@ def test_execution_file_cli_preview_apply_and_saved_inbox_view(tmp_path, monkeyp
             )
         monkeypatch.setattr(auto_intake, "update_trade_intake_state_entries", original_write)
         inbox = resolve_execution_inbox_path(repo, tmp_path / "unused.sqlite3")
+        after_lease = auto_intake.time.time() + 121
+        monkeypatch.setattr(auto_intake.time, "time", lambda: after_lease)
         pending = list_retryable_trade_payloads(inbox, retry_delay_sec=0)[0]
         saved_args = [*common, "--inbox-id", pending["inbox_id"]]
         assert run(saved_args) == 0
@@ -1571,9 +1576,11 @@ def test_om_trade_intake_public_process_accepts_saved_input_flags(tmp_path, entr
 
 @pytest.mark.parametrize("failure", ["unresolved", "exception"])
 def test_listener_core_owns_one_durable_attempt(tmp_path, monkeypatch, failure):
+    import hashlib
     from src.application.ledger.repository import SQLiteOptionPositionsRepository
     from src.application.trades.inbox import (
         list_retryable_trade_payloads,
+        read_trade_payload,
         read_trade_source_evidence,
         trade_payload_evidence_ref,
     )
@@ -1627,7 +1634,15 @@ def test_listener_core_owns_one_durable_attempt(tmp_path, monkeypatch, failure):
     status = json.loads(Path(source["status_path"]).read_text(encoding="utf-8"))
     assert status["inbox_path"] == str(authoritative)
     assert status["inbox"]["path"] == str(authoritative)
+    after_lease = auto_intake.time.time() + 121
+    monkeypatch.setattr(auto_intake.time, "time", lambda: after_lease)
     rows = list_retryable_trade_payloads(authoritative, retry_delay_sec=0)
+    if failure == "exception":
+        from src.application.trades.deal_identity import broker_deal_key_from_payload
+        assert rows == []
+        key = broker_deal_key_from_payload(payload, account_mapping=source["account_mapping"])
+        rows = [read_trade_payload(authoritative, inbox_id=hashlib.sha256(key.encode()).hexdigest())]
+        assert rows[0]["result"]["receipt_kind"] == "verification_pending"
     assert len(rows) == 1
     assert rows[0]["attempt_count"] == 1
     evidence = read_trade_source_evidence(

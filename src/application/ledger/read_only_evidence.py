@@ -6,7 +6,10 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any
 
-from src.application.ledger.event_codec import trade_event_application_payload
+from src.application.ledger.event_codec import (
+    stored_trade_event_to_ledger_event,
+    trade_event_application_payload,
+)
 from src.application.ledger.sqlite_row_codec import (
     read_current_decision_projection_inputs_from_conn,
 )
@@ -43,6 +46,20 @@ class _ReadOnlyTradeReconciliationEvidenceRepository:
         with closing(self._connect()) as conn:
             rows = self._read_position_lots(conn)
         return rows
+
+    def read_trade_receipt_evidence(self) -> dict[str, list[dict[str, Any]]]:
+        """Read required execution and projection evidence from one read-only snapshot."""
+        with closing(self._connect()) as conn:
+            conn.execute("BEGIN")
+            if not self._tables_exist(conn, "trade_events", "position_lots"):
+                raise sqlite3.DatabaseError("trade receipt evidence requires trade_events and position_lots tables")
+            events = self._read_trade_events(conn, strict=True)
+            for payload in events:
+                event, diagnostics = stored_trade_event_to_ledger_event(payload)
+                if event is None or any(item.severity == "error" for item in diagnostics):
+                    raise ValueError("trade receipt evidence contains an invalid canonical trade event")
+            lots = self._read_position_lots(conn, strict=True)
+            return {"trade_events": events, "position_lots": lots}
 
     def read_current_decision_projection_inputs(
         self,
@@ -83,14 +100,14 @@ class _ReadOnlyTradeReconciliationEvidenceRepository:
         out: list[dict[str, Any]] = []
         for row in rows:
             try:
-                fields = json.loads(str(row["fields_json"]) or "{}")
-            except (TypeError, ValueError):
+                fields = json.loads(row["fields_json"] if strict else str(row["fields_json"]) or "{}")
+            except (TypeError, ValueError) as exc:
                 if strict:
-                    raise
+                    raise ValueError("stored ledger position lot contains invalid JSON") from exc
                 continue
             if not isinstance(fields, dict):
                 if strict:
-                    fields = {}
+                    raise ValueError("stored ledger position lot JSON value must be an object")
                 else:
                     continue
             out.append(
@@ -437,13 +454,15 @@ class _ReadOnlyTradeReconciliationEvidenceRepository:
         out: list[dict[str, Any]] = []
         for row in rows:
             try:
-                payload = json.loads(str(row["event_json"]) or "{}")
-            except (TypeError, ValueError):
+                payload = json.loads(row["event_json"] if strict else str(row["event_json"]) or "{}")
+            except (TypeError, ValueError) as exc:
                 if strict:
-                    raise
+                    raise ValueError("stored ledger trade event contains invalid JSON") from exc
                 continue
             if isinstance(payload, dict):
                 out.append(trade_event_application_payload(payload))
+            elif strict:
+                raise ValueError("stored ledger trade event JSON value must be an object")
         return out
 
     @classmethod

@@ -50,11 +50,18 @@ class OpenDTradePushListener:
         TradeDealHandlerBase: Any = getattr(futu_mod, "TradeDealHandlerBase")
 
         class DealHandler(TradeDealHandlerBase):
-            def __init__(self, callback: Callable[[dict[str, Any]], None]) -> None:
+            def __init__(self, callback: Callable[[dict[str, Any], dict[str, Any] | None], None]) -> None:
                 super().__init__()
                 self._callback = callback
 
             def on_recv_rsp(self, rsp_pb: Any) -> tuple[int, Any]:
+                # The SDK DataFrame drops accID; retain protobuf presence before conversion.
+                header = getattr(getattr(rsp_pb, "s2c", None), "header", None)
+                header_fields = {
+                    key: getattr(header, key)
+                    for key in ("accID", "trdEnv")
+                    if header is not None and header.HasField(key)
+                }
                 ret, data = super().on_recv_rsp(rsp_pb)
                 if ret == 0 and data is not None:
                     rows = data.to_dict("records") if hasattr(data, "to_dict") else []
@@ -62,7 +69,7 @@ class OpenDTradePushListener:
                         for row in rows:
                             if isinstance(row, dict):
                                 try:
-                                    self._callback(row)
+                                    self._callback(row, header_fields if header is not None else None)
                                 except Exception as exc:
                                     print(
                                         f"[WARN] trade push callback failed: {type(exc).__name__}: {exc}",
@@ -88,6 +95,7 @@ class OpenDTradePushListener:
                 last_error = exc
         if ctx is None:
             raise RuntimeError(f"failed to initialize OpenSecTradeContext: {last_error}")
+        ctx.set_sync_query_connect_timeout(2)
         environments: dict[str, str] = {}
         ambiguous_accounts: set[str] = set()
         try:
@@ -104,12 +112,42 @@ class OpenDTradePushListener:
             # Missing account evidence remains unbound; never infer REAL from an account ID.
             pass
 
-        def receive(row: dict[str, Any]) -> None:
+        def receive(row: dict[str, Any], header: dict[str, Any] | None) -> None:
+            payload = dict(row)
+            errors: list[str] = []
             visible = extract_visible_account_fields(row)
             physical_ids = {value for key, value in visible.items() if key != "account"}
+            if any(not value.isascii() or not value.isdecimal() or int(value) <= 0 for value in physical_ids):
+                errors.append("invalid:push_physical_account")
+            if header is not None:
+                payload["_trade_intake_push_header"] = header
+                header_id = header.get("accID")
+                header_env = header.get("trdEnv")
+                if header_id is None:
+                    errors.append("missing:push_header_physical_account")
+                elif type(header_id) is not int or header_id <= 0:
+                    errors.append("invalid:push_header_physical_account")
+                else:
+                    physical_ids.add(str(header_id))
+                    if not visible.get("acc_id"):
+                        payload["acc_id"] = str(header_id)
+                if header_env is None:
+                    errors.append("missing:push_header_environment")
+                else:
+                    environment_name = (
+                        futu_mod.TrdEnv.to_string2(header_env) if type(header_env) is int else ""
+                    )
+                    if environment_name not in {"REAL", "SIMULATE"}:
+                        errors.append("invalid:push_header_environment")
+                    else:
+                        for key in ("environment", "trd_env"):
+                            supplied = str(row.get(key) or "").strip().rsplit(".", 1)[-1].upper()
+                            if supplied and supplied != environment_name:
+                                errors.append(f"conflict:push_{key}")
+                        if not row.get("trd_env"):
+                            payload["trd_env"] = environment_name
             physical = next(iter(physical_ids)) if len(physical_ids) == 1 else ""
             environment = environments.get(physical)
-            errors: list[str] = []
             if not physical_ids:
                 errors.append("missing:push_physical_account")
             elif len(physical_ids) != 1:
@@ -130,10 +168,9 @@ class OpenDTradePushListener:
                 if supplied and supplied != value:
                     errors.append(f"conflict:push_{key}")
             for key in ("environment", "trd_env"):
-                supplied = str(row.get(key) or "").strip().rsplit(".", 1)[-1].upper()
+                supplied = str(payload.get(key) or "").strip().rsplit(".", 1)[-1].upper()
                 if environment and supplied and supplied != environment:
                     errors.append(f"conflict:push_{key}")
-            payload = dict(row)
             if errors:
                 payload["_trade_intake_source_identity_errors"] = sorted(set(errors))
                 payload["_trade_intake_source_account_evidence"] = {
@@ -151,7 +188,10 @@ class OpenDTradePushListener:
             self.on_deal(payload)
         return ctx, DealHandler(receive)
 
-    def start(self, *, cancel_event: threading.Event | None = None) -> None:
+    def start(
+        self, *, cancel_event: threading.Event | None = None,
+        on_wait: Callable[[], None] | None = None,
+    ) -> None:
         results: queue.Queue[tuple[str, Any, Any]] = queue.Queue(maxsize=1)
         auth_required = threading.Event()
         auth_evidence: dict[str, str] = {}
@@ -196,6 +236,8 @@ class OpenDTradePushListener:
                 try:
                     result, value, handler = results.get(timeout=0.1)
                 except queue.Empty:
+                    if on_wait is not None and not (cancel_event is not None and cancel_event.is_set()):
+                        on_wait()
                     continue
                 if result == "error":
                     raise value

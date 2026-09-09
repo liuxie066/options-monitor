@@ -1,5 +1,6 @@
 from dataclasses import replace
 from pathlib import Path
+import sqlite3
 
 import pytest
 
@@ -8,6 +9,8 @@ from src.application.ledger.api import enrich_order_fees, execution_identity_fro
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.trades import auto_intake
 from src.application.trades.auto_intake import _process_payload
+from src.application.trades.inbox import read_trade_payload
+from src.application.trades.inbox_authority import resolve_execution_inbox_path
 from src.application.trades.order_fee_sync import (
     fee_target_from_trusted_payload,
     recover_order_fee_targets,
@@ -41,7 +44,7 @@ def _intake(tmp_path: Path, repo, payload, *, replay=False):
         account_mapping={"123": "lx"}, futu_account_ids=["123"], host="127.0.0.1", port=11111,
         apply_changes=True, allow_external_lookup=False, source="file",
     )
-    assert result["status"] == "applied" or (replay and result["status"] == "skipped")
+    assert result["status"] == "applied" or (replay and result["status"] == "skipped"), result
 
 
 class _Provider:
@@ -244,3 +247,49 @@ def test_late_order_association_recovers_fee_target_after_ledger_commit(tmp_path
     if namespace != "futu.order":
         assert original == after
     assert recover_order_fee_targets(reopened, account="lx")["targets"] == []
+
+
+def test_late_order_association_preserves_pending_economic_retry_deadline(tmp_path, monkeypatch):
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    unknown = _payload("pending-order")
+    unknown.pop("external_order_id")
+    unknown.pop("external_order_namespace")
+    now = [_NOW_MS / 1000]
+    monkeypatch.setattr("src.application.trades.inbox.time.time", lambda: now[0])
+    calls = []
+    resolve = auto_intake.resolve_trade_deal
+
+    def fail_once(*args, **kwargs):
+        calls.append(True)
+        if len(calls) == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return resolve(*args, **kwargs)
+
+    monkeypatch.setattr(auto_intake, "resolve_trade_deal", fail_once)
+
+    def process(payload):
+        return _process_payload(
+            payload, repo=repo, state_path=tmp_path / "state.json", audit_path=tmp_path / "audit.jsonl",
+            account_mapping={"123": "lx"}, futu_account_ids=["123"], host="127.0.0.1", port=11111,
+            apply_changes=True, allow_external_lookup=False, source="file",
+        )
+
+    failed = process(unknown)
+    assert failed["receipt_kind"] == "pending_retry"
+    inbox = resolve_execution_inbox_path(repo, tmp_path / "unused.sqlite3")
+    before = read_trade_payload(inbox, inbox_id=failed["inbox_id"], read_only=True)
+    now[0] += 1
+    waiting = process(_payload("pending-order"))
+    assert waiting["status"] == "unresolved"
+    assert waiting["reason"] == "inbox_pending"
+    after = read_trade_payload(inbox, inbox_id=failed["inbox_id"], read_only=True)
+    assert after["next_attempt_at_ms"] == before["next_attempt_at_ms"]
+    assert after["attempt_count"] == before["attempt_count"] == 1
+    assert calls == [True]
+    assert repo.list_trade_events() == []
+    now[0] += 60
+    recovered = process(unknown)
+    assert recovered["status"] == "applied"
+    assert len(calls) == 2
+    assert len(repo.list_trade_events()) == len(repo.list_position_lots()) == 1
+    assert recover_order_fee_targets(repo, account="lx")["targets"] == [_TARGET]

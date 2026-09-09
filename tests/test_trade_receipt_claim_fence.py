@@ -1,6 +1,7 @@
 from functools import partial
 from pathlib import Path
 import threading
+import time
 
 import pytest
 
@@ -9,6 +10,12 @@ from src.application.trades import auto_intake, inbox, receipt
 from src.application.trades.deal_identity import broker_deal_key_from_payload
 from src.application.trades.inbox_authority import resolve_execution_inbox_path
 from src.application.trades.order_fee_sync import recover_order_fee_targets
+
+
+
+def _advance_retry_clock(monkeypatch, seconds=61):
+    after_due = time.time() + seconds
+    monkeypatch.setattr(inbox.time, "time", lambda: after_due)
 
 
 def _execution():
@@ -128,6 +135,7 @@ def test_normalize_failure_state_write_requires_current_claim(tmp_path, monkeypa
     try:
         assert paused.wait(5)
         if takeover:
+            _advance_retry_clock(monkeypatch)
             known = {**payload, "order_id": "late-order", "external_order_namespace": "futu.order"}
             completed = _process(repo, tmp_path, "shared", known, callback)
             assert completed["status"] == "applied" and completed["receipt"]["delivery_confirmed"] is True
@@ -153,7 +161,9 @@ def test_normalize_failure_state_write_requires_current_claim(tmp_path, monkeypa
         assert failed["reason"] == "exception:OSError"
         assert failed["receipt"]["delivery_confirmed"] is True
         saved = inbox.read_trade_payload(path, inbox_id=results[0]["inbox_id"])
-        assert saved["status"] == "pending" and saved["result"]["status"] == "failed"
+        assert saved["status"] == "handled" and saved["result"]["status"] == "failed"
+        assert saved["result"]["receipt_kind"] == "manual_required"
+        assert saved["result"]["retry_policy"]["retryable"] is False
         assert saved["receipt"]["status"] == "sent"
         assert repo.list_trade_events() == []
         recovered = _process(
@@ -166,8 +176,11 @@ def test_normalize_failure_state_write_requires_current_claim(tmp_path, monkeypa
         )
         assert recovered["status"] == "applied"
         assert len(repo.list_trade_events()) == 1
-        assert len(calls) == 1
-        assert inbox.read_trade_payload(path, inbox_id=results[0]["inbox_id"])["receipt"] == saved["receipt"]
+        assert len(calls) == 2
+        current = inbox.read_trade_payload(path, inbox_id=results[0]["inbox_id"])
+        assert current["receipt"]["receipt_kind"] == "recorded"
+        assert current["receipt"]["status"] == "sent"
+        assert current["receipt_envelope"]["receipts"]["manual_required"]["status"] == "sent"
 
 
 def test_revoked_claim_exits_before_failed_state_or_receipt_and_new_worker_notifies(tmp_path, monkeypatch):
@@ -203,6 +216,7 @@ def test_revoked_claim_exits_before_failed_state_or_receipt_and_new_worker_notif
     assert calls == [] and repo.list_trade_events() == []
     assert not (tmp_path / "old/state.json").exists()
     assert inbox.read_trade_payload(path, inbox_id=inbox_id)["receipt"] is None
+    _advance_retry_clock(monkeypatch)
     recovered = _process(repo, tmp_path, "new", payload, callback)
     assert recovered["status"] == "applied" and recovered["receipt"]["delivery_confirmed"] is True
     assert len(calls) == len(repo.list_trade_events()) == 1
@@ -229,7 +243,8 @@ def test_takeover_between_saved_result_and_receipt_freeze_cannot_send_or_rewrite
         before = inbox.read_trade_payload(path, inbox_id=inbox_id)
         state_path = tmp_path / "old/state.json"
         state_before = state_path.read_bytes()
-        assert before["result"]["status"] == "applied" and before["receipt"] is None
+        assert before["result"]["status"] == "applied" and before["receipt"]["status"] == "pending"
+        assert before["receipt"]["attempt_count"] == 0
         assert inbox.resume_trade_payload(path, inbox_id=inbox_id, operator="test-takeover", repo=repo)
         successor = inbox.claim_trade_payload(path, inbox_id=inbox_id, owner="new-worker", repo=repo)
         assert successor["claim_id"] != before["claim_id"]
@@ -239,8 +254,9 @@ def test_takeover_between_saved_result_and_receipt_freeze_cannot_send_or_rewrite
     assert not worker.is_alive()
     assert len(errors) == 1 and isinstance(errors[0], inbox.TradePayloadClaimLost)
     assert state_path.read_bytes() == state_before
-    assert calls == [] and inbox.read_trade_payload(path, inbox_id=inbox_id)["receipt"] is None
+    assert calls == [] and inbox.read_trade_payload(path, inbox_id=inbox_id)["receipt"] == before["receipt"]
     assert inbox.resume_trade_payload(path, inbox_id=inbox_id, operator="test-process-successor", repo=repo)
+    _advance_retry_clock(monkeypatch)
     recovered = _process(repo, tmp_path, "new", payload, callback)
     assert recovered["receipt"]["delivery_confirmed"] is True
     assert len(calls) == len(repo.list_trade_events()) == 1
@@ -260,6 +276,7 @@ def test_handled_association_enrichment_preserves_existing_receipt_without_new_s
     inbox.enqueue_trade_payload(path, payload=known, source="backfill", broker_deal_key=key, repo=repo)
     pending = inbox.read_trade_payload(path, inbox_id=initial["inbox_id"])
     assert pending["status"] == "pending"
+    _advance_retry_clock(monkeypatch)
     result = _process(repo, tmp_path, "enriched", payload, callback)
     assert result["receipt"]["reason"] == "execution_association_enrichment"
     assert len(calls) == len(repo.list_trade_events()) == 1
@@ -288,6 +305,7 @@ def test_unresolved_execution_new_evidence_recovers_once_across_retry_and_state_
         raise inbox.TradePayloadClaimLost("offline interruption before economic commit")
     monkeypatch.setattr(auto_intake, "resolve_trade_deal", interrupt)
     known = {**unknown, "position_effect": "open"}
+    _advance_retry_clock(monkeypatch)
     with pytest.raises(inbox.TradePayloadClaimLost):
         _process(repo, tmp_path, recovery_entry, known, callback)
     pending = inbox.read_trade_payload(path, inbox_id=first["inbox_id"])
@@ -295,6 +313,7 @@ def test_unresolved_execution_new_evidence_recovers_once_across_retry_and_state_
     assert repo.list_trade_events() == []
     monkeypatch.setattr(auto_intake, "resolve_trade_deal", original_resolve)
     # Restart consumes the original unknown payload and the accepted durable evidence.
+    _advance_retry_clock(monkeypatch, 121)
     recovered = _process(repo, tmp_path, recovery_entry, unknown, callback)
     assert recovered["status"] == "applied" and recovered["action"] == "open"
     assert recovered["receipt"]["delivery_confirmed"] is True
@@ -337,6 +356,7 @@ def test_new_association_after_rolled_back_first_write_keeps_first_receipt_eligi
     assert repo.list_trade_events() == [] and calls == []
     monkeypatch.setattr(repo, "upsert_trade_event", upsert)
     known = {**_execution(), "external_order_id": "late-order", "external_order_namespace": "futu.order"}
+    _advance_retry_clock(monkeypatch)
     recovered = _process(repo, tmp_path, "failed", known, callback)
     assert recovered["status"] == "applied" and recovered["receipt"]["delivery_confirmed"] is True
     _process(repo, tmp_path, "another-source", known, callback)
