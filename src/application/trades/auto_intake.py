@@ -46,7 +46,10 @@ from src.application.trades.order_fee_sync import (
     recover_order_fee_targets,
     sync_order_fees,
 )
-from src.application.trades.deal_identity import broker_deal_key_from_payload
+from src.application.trades.deal_identity import (
+    broker_deal_key_from_payload, completed_ledger_execution_events,
+    structured_deal_keys_from_ledger_event,
+)
 from src.infrastructure.futu_history_deals import OpenDHistoryDealClient
 from src.application.trades.state_reconcile import reconcile_trade_intake_state
 from src.infrastructure.futu_trade_push import (
@@ -77,6 +80,7 @@ from src.application.trades.receipt import (
 from src.application.trades.receipt_compensation import (
     LEGACY_FALSE_OUTBOX_REASON,
     compensate_trade_intake_receipts,
+    receipt_compensation_takeover,
 )
 from src.application.trades.inbox_authority import resolve_execution_inbox_path
 from src.application.trades.inbox import (
@@ -89,6 +93,9 @@ from src.application.trades.inbox import (
     claim_trade_payload_refresh_intent,
     enqueue_trade_payload,
     list_retryable_trade_payloads,
+    list_trade_receipt_recovery_rows,
+    prepare_trade_receipt_result,
+    TradePayloadClaimLost,
     list_unclaimed_trade_payload_refresh_intents,
     mark_trade_payload_retryable,
     mark_trade_payload_review,
@@ -101,6 +108,9 @@ from src.application.opend_fetch_config import opend_fetch_kwargs
 from src.application.futu_quote_routing import resolve_futu_quote_route
 from src.application.ledger.api import (
     open_position_ledger_from_runtime_config,
+    open_trade_reconciliation_evidence_repo,
+    broker_external_event_key,
+    with_sqlite_repo_writer_lock,
     resolve_position_ledger_sqlite_path,
     record_trade_event_with_wheel_intent,
 )
@@ -288,6 +298,128 @@ def _attach_combo_reconciliation_after_open(
     return result
 
 
+def _receipt_deal_snapshot(deal: Any) -> dict[str, Any]:
+    return {key: getattr(deal, key, None) for key in (
+        "deal_id", "internal_account", "futu_account_id", "symbol", "option_type", "side",
+        "position_effect", "contracts", "price", "strike", "multiplier", "expiration_ymd",
+        "currency", "trade_time_ms", "asset_type", "execution_input",
+    )} if deal is not None else {}
+
+
+@contextlib.contextmanager
+def _receipt_preparation_scope(*, source: dict[str, Any], deal: Any, result: dict[str, Any]):
+    key = broker_external_event_key(deal) if deal is not None else ""
+    parts = key.split(":")
+    if len(parts) != 4 or parts[0] != "futu" or not parts[2].isdigit() or not parts[3].isdigit():
+        yield result
+        return
+    with receipt_compensation_takeover(source=source, account=deal.internal_account,
+                                      canonical_deal_id=key) as evidence:
+        yield {**result, "_receipt_legacy_evidence": evidence}
+
+
+def _readback_trade_receipt_result(*, repo: Any, deal: Any,
+                                  result: dict[str, Any]) -> dict[str, Any]:
+    """Resolve uncertain writes from one read-only snapshot, never through the writer."""
+    diagnostics = dict(result.get("diagnostics") or {})
+    try:
+        if deal is None or not getattr(deal, "execution_input", None):
+            raise ValueError("execution identity unavailable for readback")
+        if getattr(deal, "asset_type", None) != "option":
+            raise ValueError("non-option execution requires its existing ledger owner readback")
+        path = getattr(getattr(repo, "primary_repo", repo), "db_path", None)
+        if not isinstance(path, (str, Path)):
+            raise ValueError("ledger readback path unavailable")
+        evidence = open_trade_reconciliation_evidence_repo(path).read_trade_receipt_evidence()
+        events = evidence["trade_events"]
+        complete = completed_ledger_execution_events(events, deal)
+        if complete:
+            if getattr(deal, "position_effect", None) != "open":
+                # Lifecycle closes retain their own durable receipt owner.
+                raise ValueError("lifecycle result requires lifecycle readback")
+            projected = {str(row["fields"].get("source_event_id") or "") for row in evidence["position_lots"]}
+            if not all(str(event["event_id"]) in projected for event in complete):
+                raise ValueError("recorded execution projection unavailable")
+            diagnostics.update(retryable=False, verification_pending=False, recovered_from_ledger=True)
+            return {**result, "status": "applied", "action": "open", "reason": "applied_open",
+                    "account": deal.internal_account, "deal_id": deal.deal_id,
+                    "receipt_kind": "recorded", "diagnostics": diagnostics,
+                    "_receipt_payload": _receipt_deal_snapshot(deal)}
+        keys = {broker_deal_key_from_payload(deal.execution_input, account_mapping=None),
+                broker_external_event_key(deal)} - {""}
+        if any(keys.intersection(structured_deal_keys_from_ledger_event(event)) for event in events):
+            raise ValueError("execution evidence voided or incomplete")
+        if result.get("receipt_kind") == "recorded" or result.get("status") == "applied":
+            raise ValueError("previously recorded execution is absent")
+        diagnostics["verification_pending"] = False
+        # A crashed claim with no result can retry only after absence is established.
+        retryable = bool(diagnostics.get("retryable") or diagnostics.get("verification_retryable") or not result)
+        diagnostics.update(retryable=retryable, readback="absent")
+        return {**result, "status": "failed", "reason": result.get("reason") or "interrupted_before_recording",
+                "account": deal.internal_account, "deal_id": deal.deal_id,
+                "receipt_kind": "pending_retry" if retryable else "manual_required",
+                "diagnostics": diagnostics, "_receipt_payload": _receipt_deal_snapshot(deal)}
+    except Exception as exc:
+        diagnostics.setdefault("notification_category", result.get("status") or "failed")
+        diagnostics["verification_retryable"] = bool(diagnostics.get("verification_retryable") or diagnostics.get("retryable") or not result)
+        diagnostics.update(retryable=False, verification_pending=True,
+                           readback_error=f"{type(exc).__name__}: {exc}")
+        return {**result, "status": result.get("status") if result.get("status") in {"failed", "unresolved"} else "failed",
+                "receipt_kind": "verification_pending", "diagnostics": diagnostics,
+                "_receipt_payload": _receipt_deal_snapshot(deal)}
+
+
+def recover_trade_intake_receipts(*, repo: Any, source: dict[str, Any],
+                                  receipt_callback: Callable[[dict[str, Any]], Any],
+                                  stop_event: threading.Event) -> dict[str, Any]:
+    """Run bounded local readback and notification work independently of OpenD."""
+    path = source["inbox_path"]
+    counts: dict[str, Any] = {"checked": 0, "sent": 0, "errors": []}
+    if not source.get("enabled", True) or not (source.get("receipt") or {}).get("enabled", True):
+        return counts
+    for row in list_trade_receipt_recovery_rows(path, account_ids=source.get("futu_account_ids") or [], limit=100):
+        if stop_event.is_set():
+            break
+        try:
+            result = dict(row.get("result") or {})
+            snapshot = result.get("_receipt_payload") or (row.get("receipt") or {}).get("payload")
+            if snapshot:
+                deal = SimpleNamespace(**snapshot)
+            elif result.get("receipt_kind") == "manual_required" and result.get("account"):
+                deal = SimpleNamespace(internal_account=result["account"], deal_id=result.get("deal_id"))
+            else:
+                deal = normalize_trade_deal(row["payload"], futu_account_mapping=source.get("account_mapping"),
+                                            allow_opend_refresh=False)
+            execution = row["payload"].get("execution_input") or row["payload"]
+            physical = str((execution.get("broker_account_ref") or {}).get("external_account_id")
+                           or extract_primary_account_id(row["payload"]) or "")
+            account = str(getattr(deal, "internal_account", "") or "")
+            if (not account or (source.get("account") and account != source["account"])
+                    or (source.get("account_mapping") or {}).get(physical) != account):
+                continue
+            with _receipt_preparation_scope(source={**source, "account": account}, deal=deal, result=result) as prepared:
+                # Keep compensation -> repository -> Inbox order; an expired lease may still be committing.
+                with with_sqlite_repo_writer_lock(repo):
+                    if row["status"] == "pending":
+                        prepared = {**prepared, **_readback_trade_receipt_result(repo=repo, deal=deal, result=result)}
+                    prepared.setdefault("_receipt_payload", _receipt_deal_snapshot(deal))
+                    result = prepare_trade_receipt_result(path, inbox_id=row["inbox_id"], result=prepared,
+                        expected_payload_version=row["payload_version"], expected_result=row.get("result"))
+            if stop_event.is_set():
+                break
+            sent = receipt_callback({"result": result, "deal": deal, "effective_payload": result["_receipt_payload"],
+                "payload": row["payload"], "state": {}, "state_path": source["state_path"],
+                "audit_path": source.get("audit_path"), "apply_changes": True,
+                "inbox_path": path, "inbox_id": row["inbox_id"], "source": row["source"]})
+            counts["checked"] += 1
+            counts["sent"] += int(bool(isinstance(sent, dict) and sent.get("delivery_confirmed") and sent.get("status") == "sent"))
+        except TradePayloadClaimLost:
+            continue
+        except Exception as exc:
+            counts["errors"].append({"inbox_id": row["inbox_id"], "error": f"{type(exc).__name__}: {exc}"})
+    return counts
+
+
 def _process_payload(
     payload: dict[str, Any],
     *,
@@ -372,8 +504,10 @@ def _process_payload(
         return {"status": "unresolved", "reason": review_reason,
                 "diagnostics": {"errors": input_errors, "retryable": False}}
 
+    normalized_deal = None
     opend_config = opend_fetch_kwargs(config) if isinstance(config, dict) else None
     def normalize_fn(raw: dict[str, Any], *, futu_account_mapping=None):
+        nonlocal normalized_deal
         deal = normalize_trade_deal(
             raw, futu_account_mapping=futu_account_mapping, repo_base=repo_base,
             runtime_root=runtime_root, config_path=config_path, config=config,
@@ -382,6 +516,7 @@ def _process_payload(
         )
         associations = dict((claim or {}).get("associations") or {})
         if not associations:
+            normalized_deal = deal
             return deal
         execution = dict(deal.execution_input or {})
         changes = {}
@@ -398,7 +533,8 @@ def _process_payload(
                 if existing and existing != value:
                     raise ValueError(f"trade claim association conflict: {field}")
                 changes[attribute] = value
-        return replace(deal, execution_input=execution, **changes)
+        normalized_deal = replace(deal, execution_input=execution, **changes)
+        return normalized_deal
 
     def _enrich_payload(raw: dict[str, Any]) -> Any:
         return enrich_trade_push_payload_with_account_id(
@@ -439,10 +575,23 @@ def _process_payload(
             return resolved
 
     def _before_receipt(current: dict[str, Any]) -> dict[str, Any]:
+        if not current.get("account"):
+            execution = payload.get("execution_input") or payload
+            physical = extract_primary_account_id(payload) or (execution.get("broker_account_ref") or {}).get("external_account_id")
+            if str(physical or "") in futu_account_ids and str(physical or "") in account_mapping:
+                current = {**current, "account": account_mapping[str(physical)]}
+        if claim is not None and (current.get("diagnostics") or {}).get("exception_stage") in {"resolve", "post_resolve"}:
+            current = _readback_trade_receipt_result(repo=repo, deal=normalized_deal, result=current)
         if before_receipt_fn is not None:
             current = before_receipt_fn(current) or current
+        if _lifecycle_notification_is_outbox_owned({"deal": normalized_deal, "result": current}):
+            current = {**current, "receipt_notification_owner": "lifecycle_outbox"}
         if claim is not None:
-            save_trade_payload_result(inbox_path, claim=claim, result=current)
+            with _receipt_preparation_scope(source={"state_path": state_path,
+                    "account": getattr(normalized_deal, "internal_account", None)},
+                    deal=normalized_deal, result=current) as prepared:
+                current = save_trade_payload_result(inbox_path, claim=claim, result={
+                    **prepared, "_receipt_payload": _receipt_deal_snapshot(normalized_deal)})
         return current
 
     def _write_state(path: Path, current: dict[str, Any]) -> Path:
@@ -461,6 +610,18 @@ def _process_payload(
             )
 
     def _receipt(context: dict[str, Any]) -> dict[str, Any] | None:
+        if claim is not None:
+            current = context["result"]
+            if not current.get("receipt_kind") and (current.get("diagnostics") or {}).get("exception_stage") in {"resolve", "post_resolve"}:
+                current = _readback_trade_receipt_result(repo=repo, deal=context.get("deal"), result=current)
+            if _lifecycle_notification_is_outbox_owned({**context, "result": current}):
+                current = {**current, "receipt_notification_owner": "lifecycle_outbox"}
+            with _receipt_preparation_scope(source={"state_path": state_path,
+                    "account": getattr(context.get("deal"), "internal_account", None)},
+                    deal=context.get("deal"), result=current) as prepared:
+                enriched = save_trade_payload_result(inbox_path, claim=claim, result={
+                    **prepared, "_receipt_payload": _receipt_deal_snapshot(context.get("deal"))})
+            context["result"].update(enriched)
         if claim is not None and claim.get("association_enrichment"):
             return {"status": "skipped", "reason": "execution_association_enrichment", "delivery_confirmed": False}
         if claim is not None and claim["delivery_purpose"] == "historical":
@@ -497,6 +658,8 @@ def _process_payload(
         retry_failed_deal=retry_failed_deal,
         source=source,
     )
+    except TradePayloadClaimLost:
+        raise
     except Exception as exc:
         if claim is not None:
             mark_trade_payload_retryable(inbox_path, inbox_id=claim["inbox_id"],
@@ -541,12 +704,9 @@ def _bind_push_payload_to_source(
                 f"source_id={source_id or '-'} port={port} "
                 f"payload={futu_account_id} configured={','.join(configured_account_ids)}"
             )
-    elif len(configured_account_ids) == 1:
-        futu_account_id = configured_account_ids[0]
-        out["futu_account_id"] = futu_account_id
     else:
         raise ValueError(
-            "push OpenD source binding requires exactly one futu_account_id when "
+            "push OpenD source binding requires verified futu_account_id when "
             f"the payload omits account identity: source_id={source_id or '-'} "
             f"port={port} configured_count={len(configured_account_ids)}"
         )
@@ -1994,10 +2154,29 @@ def _run_listener_source_loop(
     backfill_cfg = dict(source.get("backfill") or intake_cfg.get("backfill") or {})
     reconnect_floor_sec = max(1, int(source.get("reconnect_sec") or intake_cfg.get("reconnect_sec") or 5))
     reconnect_delay_sec = reconnect_floor_sec
+    last_receipt_recovery_monotonic = None
+
+    def _recover_receipts_if_due() -> None:
+        nonlocal last_receipt_recovery_monotonic
+        now = time.monotonic()
+        if (not apply_changes or stop.is_set() or (last_receipt_recovery_monotonic is not None
+                and now - last_receipt_recovery_monotonic < 60)):
+            return
+        last_receipt_recovery_monotonic = now
+        try:
+            with process_lock:
+                status_state["receipt_recovery"] = recover_trade_intake_receipts(
+                    repo=repo, source=source, receipt_callback=receipt_callback, stop_event=stop)
+        except Exception as exc:
+            status_state["receipt_recovery"] = {"error": f"{type(exc).__name__}: {exc}"}
+        _write_listener_status(status_path, status_state, status=str(status_state.get("status") or "starting"),
+                               stage="receipt_recovery")
+
     while not stop.is_set():
         try:
+            _recover_receipts_if_due()
             _write_listener_status(status_path, status_state, status="starting", stage="listener_start", restart_count=restart_count)
-            listener.start(cancel_event=stop)
+            listener.start(cancel_event=stop, on_wait=_recover_receipts_if_due)
             _log(f"[OK] auto trade intake listener started source={source.get('id')} {host}:{port}")
             if status_state.get("last_error"):
                 status_state["recovered_at"] = utc_now()
@@ -2006,6 +2185,7 @@ def _run_listener_source_loop(
             if bool(backfill_cfg.get("enabled", True)) and not bool(backfill_cfg.get("startup_check", True)) and last_backfill_monotonic is None:
                 last_backfill_monotonic = time.monotonic()
             while not stop.is_set():
+                _recover_receipts_if_due()
                 listener.check_health()
                 reconnect_delay_sec = reconnect_floor_sec
                 now_mono = time.monotonic()
@@ -2360,8 +2540,10 @@ def _run_listener_source_loop(
                 reconnect_delay_sec=reconnect_delay_sec,
             )
             _log(f"[WARN] listener source={source.get('id')} exited: {exc}; retry in {reconnect_delay_sec} sec")
-            if stop.wait(reconnect_delay_sec):
-                break
+            reconnect_until = time.monotonic() + reconnect_delay_sec
+            while not stop.is_set() and time.monotonic() < reconnect_until:
+                _recover_receipts_if_due()
+                stop.wait(min(1, max(0, reconnect_until - time.monotonic())))
             reconnect_delay_sec = min(reconnect_delay_sec * 2, 60)
     listener.close()
     history_client.close()

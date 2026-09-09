@@ -33,6 +33,7 @@ from src.infrastructure.private_storage import connect_private_sqlite
 SETTLEMENT_ATTEMPT_MIN_LEASE_MS = 120_000
 TRADE_EVIDENCE_SET_REF_PREFIX = "trade-inbox-evidence-set:v1:"
 LEGACY_ADAPTER_VERSION = "legacy/unversioned"
+_UNOBSERVED_RECEIPT_RESULT = object()
 TRADE_INTAKE_ADAPTER_VERSIONS = {
     "push": "om.trade-intake.push.v1",
     "backfill": "om.trade-intake.history.v1",
@@ -219,6 +220,8 @@ def enqueue_trade_payload(
                 conn.execute(
                     """UPDATE trade_inbox SET payload_version = payload_version + 1,
                        claim_id = NULL, claim_until_ms = NULL, updated_at_ms = ?,
+                       next_attempt_at_ms = CASE WHEN status = 'handled' THEN 0
+                           ELSE next_attempt_at_ms END,
                        receipt_recovery_allowed = CASE
                            WHEN status = 'handled' AND ? THEN 0
                            ELSE receipt_recovery_allowed END,
@@ -485,10 +488,16 @@ def claim_trade_payload(path: str | Path, *, inbox_id: str, repo: Any = None,
     with with_sqlite_repo_writer_lock(repo), closing(_connect(Path(path))) as conn, conn:
         _ensure_schema(conn)
         changed = conn.execute(
-            """UPDATE trade_inbox SET claim_id = ?, claim_until_ms = ?, claim_owner = ?
+            """UPDATE trade_inbox SET claim_id = ?, claim_until_ms = ?, claim_owner = ?,
+                attempt_count = attempt_count + 1, next_attempt_at_ms = ?
             WHERE inbox_id = ? AND status = 'pending' AND attempt_count < 20
-              AND (claim_id IS NULL OR claim_until_ms <= ?)""",
-            (token, now_ms + max(1, int(lease_ms)), str(owner), inbox_id, now_ms),
+              AND (claim_id IS NULL OR claim_until_ms <= ?)
+              AND next_attempt_at_ms <= ?
+              AND (result_json IS NULL OR json_extract(result_json, '$.receipt_kind') IS NULL
+                   OR json_extract(result_json, '$.receipt_kind') = 'pending_retry'
+                   OR (last_error = 'execution_association_enrichment'
+                       AND json_extract(result_json, '$.receipt_kind') IN ('recorded', 'manual_required')))""",
+            (token, now_ms + max(1, int(lease_ms)), str(owner), now_ms + 60_000, inbox_id, now_ms, now_ms),
         ).rowcount
         if not changed:
             return None
@@ -540,6 +549,28 @@ def trade_payload_commit_scope(path: str | Path, *, claim: Mapping[str, Any], re
         yield
 
 
+def _receipt_envelope(raw: str | None) -> dict[str, Any] | None:
+    value = json.loads(raw) if raw else None
+    if value is not None and not isinstance(value, dict):
+        raise ValueError("invalid trade receipt envelope")
+    if value is not None and "schema_version" in value:
+        if (value["schema_version"] != 2 or not isinstance(value.get("receipts"), dict)
+                or value.get("current_result_key") not in value["receipts"]):
+            raise ValueError("unsupported trade receipt envelope")
+    return value
+
+
+def _trade_payload_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    out = dict(row)
+    out["payload"] = json.loads(out.pop("payload_json"))
+    out["result"] = json.loads(out.pop("result_json", None) or "null")
+    envelope = _receipt_envelope(out.pop("receipt_json", None))
+    out["receipt_envelope"] = envelope
+    out["receipt"] = (envelope["receipts"][envelope["current_result_key"]]
+                      if envelope and envelope.get("schema_version") == 2 else envelope)
+    return out
+
+
 def read_trade_payload(path: str | Path, *, inbox_id: str, read_only: bool = False) -> dict[str, Any] | None:
     if not Path(path).exists():
         return None
@@ -550,75 +581,278 @@ def read_trade_payload(path: str | Path, *, inbox_id: str, read_only: bool = Fal
         if not read_only:
             _ensure_schema(conn)
         row = conn.execute("SELECT * FROM trade_inbox WHERE inbox_id = ?", (inbox_id,)).fetchone()
-    if row is None:
-        return None
-    out = dict(row)
-    out["payload"] = json.loads(out.pop("payload_json"))
-    out["result"] = json.loads(out.pop("result_json", None) or "null")
-    out["receipt"] = json.loads(out.pop("receipt_json", None) or "null")
-    return out
+    return _trade_payload_row(row) if row is not None else None
 
 
-def save_trade_payload_result(path: str | Path, *, claim: Mapping[str, Any], result: dict[str, Any]) -> None:
+def _trade_result_policy(row: Mapping[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    diagnostics = result.get("diagnostics") or {}
+    status = result.get("status")
+    retryable = (status in {"failed", "unresolved"} and bool(diagnostics.get("retryable"))
+                 and not diagnostics.get("broker_evidence_accepted")
+                 and result.get("reason") not in {"waiting_settlement_evidence", "awaiting_out_of_order_pair",
+                                                  "awaiting_settlement_evidence", "lifecycle_conflict_requires_review"})
+    count = int(row["attempt_count"])
+    kind = result.get("receipt_kind")
+    if kind is None:
+        kind = ("verification_pending" if diagnostics.get("verification_pending") else
+                "recorded" if status == "applied" else
+                "pending_retry" if retryable and count < 20 else
+                "manual_required" if status in {"failed", "unresolved"} else None)
+    if kind not in {None, "pending_retry", "recorded", "manual_required", "verification_pending"}:
+        raise ValueError("invalid trade receipt result kind")
+    if kind == "pending_retry" and count >= 20:
+        kind = "manual_required"
+    retryable = bool(retryable and count < 20 and kind == "pending_retry")
+    return {**result, "receipt_kind": kind, "receipt_result_key": kind,
+            "retry_policy": {"attempt_count": count, "max_attempts": 20,
+                             "remaining": max(0, 20 - count), "retryable": retryable,
+                             "retry_delay_sec": 60}}
+
+
+def _prepare_trade_receipt_result(conn: sqlite3.Connection, row: Mapping[str, Any],
+                                   result: dict[str, Any]) -> dict[str, Any]:
+    enriched = _trade_result_policy(row, result)
+    kind = enriched["receipt_kind"]
+    envelope = _receipt_envelope(row["receipt_json"])
+    old_result = json.loads(row["result_json"] or "null") or {}
+    if envelope is not None and envelope.get("schema_version") != 2:
+        # Old delivery evidence can only be assigned semantics from its saved business result.
+        old_kind = _trade_result_policy(row, old_result)["receipt_kind"]
+        old_diagnostics = old_result.get("diagnostics") or {}
+        old_failed = old_result.get("status") == "failed" or (
+            old_result.get("status") == "unresolved" and old_diagnostics.get("retryable")
+            and not old_diagnostics.get("broker_evidence_accepted")
+            and not old_diagnostics.get("verification_pending"))
+        if not old_kind or not old_failed:
+            enriched["receipt_suppression_reason"] = "legacy_receipt_history_unproven"
+            envelope = None
+            kind = None
+        else:
+            envelope = {"schema_version": 2, "current_result_key": old_kind,
+                        "receipts": {old_kind: {**envelope, "result_key": old_kind,
+                                                "receipt_kind": old_kind, "business_result": old_result,
+                                                "attempt_count": int(bool(envelope.get("attempt_id"))),
+                                                "legacy": True}}}
+    elif envelope is None and (not row["receipt_recovery_allowed"] or (
+            row["status"] == "handled" and old_result.get("status") == "applied"
+            and not old_result.get("receipt_kind"))):
+        # New caller claims can process legacy rows, but cannot authorize historical delivery.
+        enriched["receipt_suppression_reason"] = "legacy_receipt_history_unproven"
+        kind = None
+    lifecycle_owned = (result.get("receipt_notification_owner") == "lifecycle_outbox"
+                       or (result.get("diagnostics") or {}).get("notification_authority") == "lifecycle_outbox")
+    if lifecycle_owned:
+        kind = None
+        if envelope and envelope.get("schema_version") == 2:
+            previous = envelope["receipts"][envelope["current_result_key"]]
+            previous.update(superseded_by="lifecycle_outbox", stop_reason="lifecycle_outbox_handoff")
+    if kind is not None and row["delivery_purpose"] == "live":
+        envelope = envelope or {"schema_version": 2, "current_result_key": kind, "receipts": {}}
+        receipts = envelope["receipts"]
+        current = envelope["current_result_key"]
+        if current == "recorded" and kind != "recorded" and not (
+                kind == "verification_pending" and (result.get("diagnostics") or {}).get("verification_pending")):
+            raise TradePayloadClaimLost("recorded trade result cannot regress")
+        if current != kind and current in receipts:
+            receipts[current].update(superseded_by=kind, stop_reason="result_superseded")
+        if kind not in receipts:
+            receipts[kind] = {"result_key": kind, "receipt_kind": kind,
+                              "receipt_id": f"trade-receipt:{row['inbox_id']}" + (f":{kind}" if receipts else ""),
+                              "status": "pending", "attempt_count": 0,
+                              "business_result": enriched,
+                              "payload": enriched.get("_receipt_payload"),
+                              "payload_version": row["payload_version"],
+                              "economic_payload_hash": row["economic_payload_hash"],
+                              "created_at_ms": int(time.time() * 1000)}
+        # Revisited semantics retain their original send evidence and frozen content.
+        receipts[kind].pop("superseded_by", None)
+        if receipts[kind].get("stop_reason") == "result_superseded":
+            receipts[kind].pop("stop_reason")
+        envelope["current_result_key"] = kind
+        legacy_evidence = result.get("_receipt_legacy_evidence") or {}
+        if (kind == "recorded" and legacy_evidence.get("blocked")
+                and receipts[kind].get("status") not in {"sent", "unknown"}):
+            confirmed = legacy_evidence.get("status") == "confirmed"
+            receipts[kind].update(status="sent" if confirmed else "unknown",
+                                  stop_reason="legacy_compensation_owned",
+                                  result={"delivery_confirmed": confirmed,
+                                          "legacy_compensation_evidence": legacy_evidence})
+        receipt_json = json.dumps(envelope, ensure_ascii=False, default=str)
+    else:
+        receipt_json = (json.dumps(envelope, ensure_ascii=False, default=str)
+                        if lifecycle_owned and envelope and envelope.get("schema_version") == 2
+                        else row["receipt_json"])
+    conn.execute("""UPDATE trade_inbox SET result_json = ?, result_status = ?, result_reason = ?,
+                    receipt_json = ? WHERE inbox_id = ?""",
+                 (json.dumps(enriched, ensure_ascii=False, default=str), enriched.get("status"),
+                  enriched.get("reason"), receipt_json, row["inbox_id"]))
+    return enriched
+
+
+def save_trade_payload_result(path: str | Path, *, claim: Mapping[str, Any],
+                              result: dict[str, Any]) -> dict[str, Any]:
     with closing(_connect(Path(path))) as conn, conn:
         _ensure_schema(conn)
-        changed = conn.execute(
-            """UPDATE trade_inbox SET result_json = ? WHERE inbox_id = ? AND status = 'pending'
-               AND claim_id = ? AND payload_version = ?""",
-            (json.dumps(result, ensure_ascii=False, default=str), claim["inbox_id"],
-             claim["claim_id"], claim["payload_version"]),
-        ).rowcount
-        if not changed:
+        row = conn.execute("SELECT * FROM trade_inbox WHERE inbox_id = ?", (claim["inbox_id"],)).fetchone()
+        if (row is None or row["status"] != "pending" or row["claim_id"] != claim["claim_id"]
+                or row["payload_version"] != claim["payload_version"]
+                or row["economic_payload_hash"] != claim["economic_payload_hash"]):
             raise TradePayloadClaimLost("trade result claim lost")
+        enriched = _prepare_trade_receipt_result(conn, row, result)
         intent = result.get("portfolio_refresh_intent")
         if isinstance(intent, Mapping):
             _record_trade_payload_refresh_intent(conn, inbox_id=claim["inbox_id"], intent=intent)
+        return enriched
+
+
+def prepare_trade_receipt_result(path: str | Path, *, inbox_id: str, result: dict[str, Any],
+                                 expected_payload_version: int | None = None,
+                                 expected_result: Any = _UNOBSERVED_RECEIPT_RESULT) -> dict[str, Any]:
+    """Reconcile readback without an economic claim; compare the exact observed result."""
+    if expected_payload_version is None and expected_result is _UNOBSERVED_RECEIPT_RESULT:
+        raise TradePayloadClaimLost("receipt recovery requires observed result or payload version")
+    with closing(_connect(Path(path))) as conn, conn:
+        _ensure_schema(conn)
+        row = conn.execute("SELECT * FROM trade_inbox WHERE inbox_id = ?", (inbox_id,)).fetchone()
+        if (row is None or row["status"] == "conflict"
+                or (row["claim_id"] and int(row["claim_until_ms"] or 0) > int(time.time() * 1000))
+                or (expected_payload_version is not None and row["payload_version"] != expected_payload_version)
+                or (expected_result is not _UNOBSERVED_RECEIPT_RESULT
+                    and json.loads(row["result_json"] or "null") != expected_result)):
+            raise TradePayloadClaimLost("receipt recovery observation changed")
+        enriched = _prepare_trade_receipt_result(conn, row, result)
+        # Readback can settle a crashed claim without consuming another economic attempt.
+        status = "pending" if enriched["receipt_kind"] in {"pending_retry", "verification_pending"} else "handled"
+        next_attempt_at_ms = (int(time.time() * 1000) + 60_000
+                              if enriched["receipt_kind"] == "verification_pending"
+                              else row["next_attempt_at_ms"])
+        conn.execute("""UPDATE trade_inbox SET status = ?, claim_id = NULL, claim_until_ms = NULL,
+                        updated_at_ms = ?, next_attempt_at_ms = ? WHERE inbox_id = ?""",
+                     (status, int(time.time() * 1000), next_attempt_at_ms, inbox_id))
+        return enriched
 
 
 def begin_trade_receipt_attempt(path: str | Path, *, inbox_id: str,
                                 route: dict[str, Any], message: str,
-                                claim: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    """Freeze one ordinary receipt before external I/O; an interrupted attempt stays unknown."""
+                                claim: Mapping[str, Any] | None = None,
+                                result_key: str | None = None) -> dict[str, Any]:
+    """Claim the current semantic result; mark unknown before any external I/O."""
+    now_ms = int(time.time() * 1000)
     with closing(_connect(Path(path))) as conn, conn:
         _ensure_schema(conn)
-        conn.commit()
-        conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute("SELECT * FROM trade_inbox WHERE inbox_id = ?",
-                           (inbox_id,)).fetchone()
+        row = conn.execute("SELECT * FROM trade_inbox WHERE inbox_id = ?", (inbox_id,)).fetchone()
         if claim is not None and (
-            row is None or row["status"] != "pending"
-            or row["claim_id"] != claim.get("claim_id")
+            row is None or row["status"] != "pending" or row["claim_id"] != claim.get("claim_id")
             or row["payload_version"] != claim.get("payload_version")
             or row["economic_payload_hash"] != claim.get("economic_payload_hash")
         ):
             raise TradePayloadClaimLost("trade receipt claim no longer permits delivery")
         if row is None or row["status"] == "conflict" or row["delivery_purpose"] == "historical":
             return {"claimed": False, "status": "suppressed"}
-        if row["receipt_json"]:
-            return {**json.loads(row["receipt_json"]), "claimed": False}
-        frozen = {"receipt_id": f"trade-receipt:{inbox_id}", "status": "unknown",
-                  "route": route, "message": message, "attempt_id": uuid.uuid4().hex,
-                  "attempted_at_ms": int(time.time() * 1000)}
+        if claim is None and row["claim_id"] and int(row["claim_until_ms"] or 0) > now_ms:
+            return {"claimed": False, "status": "pending", "reason": "economic_claim_active"}
+        envelope = _receipt_envelope(row["receipt_json"])
+        if envelope is None:
+            return {"claimed": False, "status": "suppressed", "reason": "durable_receipt_intent_missing"}
+        if envelope.get("schema_version") != 2:
+            return {**envelope, "claimed": False}
+        key = envelope["current_result_key"]
+        frozen = envelope["receipts"][key]
+        if result_key is not None and result_key != key:
+            raise TradePayloadClaimLost("trade receipt result superseded")
+        if frozen.get("status") not in {"pending", "failed"} or frozen.get("stop_reason"):
+            return {**frozen, "claimed": False}
+        if frozen.get("route") is not None and frozen["route"] != route:
+            frozen["stop_reason"] = "route_changed_requires_review"
+        elif int(frozen.get("attempt_count", 0)) >= 20:
+            frozen["stop_reason"] = "notification_attempts_exhausted"
+        elif int(frozen.get("next_attempt_at_ms", 0)) > now_ms:
+            return {**frozen, "claimed": False}
+        elif not route:
+            return {**frozen, "claimed": False, "reason": "route_unavailable"}
+        else:
+            if frozen.get("attempt_id"):
+                frozen.setdefault("attempts", []).append({name: frozen.get(name) for name in
+                    ("attempt_id", "attempted_at_ms", "status", "result")})
+            frozen.update(status="unknown", attempt_id=uuid.uuid4().hex, attempted_at_ms=now_ms,
+                          attempt_count=int(frozen.get("attempt_count", 0)) + 1,
+                          route=frozen.get("route", route), message=frozen.get("message", message))
+            frozen.pop("result", None)
         conn.execute("UPDATE trade_inbox SET receipt_json = ? WHERE inbox_id = ?",
-                     (json.dumps(frozen, ensure_ascii=False), inbox_id))
-        return {**frozen, "claimed": True}
+                     (json.dumps(envelope, ensure_ascii=False), inbox_id))
+        return {**frozen, "claimed": not bool(frozen.get("stop_reason"))}
 
 
 def finish_trade_receipt_attempt(path: str | Path, *, inbox_id: str, attempt_id: str,
                                  result: dict[str, Any]) -> None:
     with closing(_connect(Path(path))) as conn, conn:
         _ensure_schema(conn)
-        conn.commit()
-        conn.execute("BEGIN IMMEDIATE")
         row = conn.execute("SELECT receipt_json FROM trade_inbox WHERE inbox_id = ?", (inbox_id,)).fetchone()
-        frozen = json.loads(row[0] or "{}") if row else {}
-        if frozen.get("attempt_id") != attempt_id:
+        envelope = _receipt_envelope(row[0]) if row else None
+        entries = list(envelope["receipts"].values()) if envelope and envelope.get("schema_version") == 2 else [envelope]
+        attempts = [attempt for entry in entries if entry
+                    for attempt in [entry, *entry.get("attempts", [])]]
+        frozen = next((attempt for attempt in attempts if attempt.get("attempt_id") == attempt_id), None)
+        if frozen is None:
             raise TradePayloadClaimLost("trade receipt attempt changed")
+        # A repeated/contradictory callback cannot reopen confirmed or explicitly rejected attempts.
+        if frozen.get("result") is not None:
+            return
         status = ("sent" if result.get("delivery_confirmed") else
                   "failed" if result.get("explicit_pre_acceptance_failure") else "unknown")
         frozen.update(result=result, status=status)
+        if status == "failed":
+            frozen["next_attempt_at_ms"] = int(time.time() * 1000) + 60_000
+            if int(frozen.get("attempt_count", 0)) >= 20:
+                frozen["stop_reason"] = "notification_attempts_exhausted"
         conn.execute("UPDATE trade_inbox SET receipt_json = ? WHERE inbox_id = ?",
-                     (json.dumps(frozen, ensure_ascii=False), inbox_id))
+                     (json.dumps(envelope, ensure_ascii=False), inbox_id))
+
+
+def list_trade_receipt_recovery_rows(path: str | Path, *, account_ids: Iterable[str],
+                                     limit: int = 100) -> list[dict[str, Any]]:
+    allowed = {str(value).strip() for value in account_ids if str(value).strip()}
+    if not allowed or not Path(path).exists():
+        return []
+    now_ms = int(time.time() * 1000)
+    out = []
+    with closing(_connect(Path(path))) as conn, conn:
+        _ensure_schema(conn)
+        rows = conn.execute("""SELECT * FROM trade_inbox WHERE delivery_purpose = 'live'
+            AND receipt_recovery_allowed = 1 AND source IN ('push', 'backfill')
+            AND status != 'conflict' AND (claim_id IS NULL OR claim_until_ms <= ?)
+            AND (result_json IS NOT NULL OR attempt_count > 0)
+            ORDER BY updated_at_ms, received_at_ms, inbox_id""", (now_ms,))
+        for row in rows:
+            item = _trade_payload_row(row)
+            payload = item["payload"]
+            execution = payload.get("execution_input") or payload
+            ref = execution.get("broker_account_ref") or {}
+            physical = str(ref.get("external_account_id") or extract_primary_account_id(payload) or "").strip()
+            if physical not in allowed:
+                continue
+            receipt = item["receipt"] or {}
+            if (item["status"] == "pending" and item["attempt_count"] == 0
+                    and (item["result"] or {}).get("receipt_kind") != "verification_pending"):
+                # An unclaimed/resumed execution belongs to processing, not receipt readback.
+                continue
+            needs_readback = (item["status"] == "pending" and (item["attempt_count"] > 0
+                              or (item["result"] or {}).get("receipt_kind") == "verification_pending"))
+            if needs_readback and item["next_attempt_at_ms"] > now_ms:
+                continue
+            if not needs_readback and receipt:
+                if receipt.get("status") not in {"pending", "failed"} or receipt.get("stop_reason"):
+                    continue
+                if int(receipt.get("next_attempt_at_ms", 0)) > now_ms:
+                    continue
+            if not receipt and item["status"] == "handled" and item["result"] and item["result"].get("status") == "applied":
+                # Only a saved new-writer semantic result can prove the pre-intent crash window.
+                if not item["result"].get("receipt_kind"):
+                    continue
+            out.append(item)
+            if len(out) >= max(1, int(limit)):
+                break
+    return out
 
 
 def resume_trade_payload(path: str | Path, *, inbox_id: str, operator: str, repo: Any = None) -> bool:
@@ -627,8 +861,13 @@ def resume_trade_payload(path: str | Path, *, inbox_id: str, operator: str, repo
     with with_sqlite_repo_writer_lock(repo), closing(_connect(Path(path))) as conn, conn:
         _ensure_schema(conn)
         changed = conn.execute(
-            """UPDATE trade_inbox SET attempt_count = 0, claim_id = NULL, claim_until_ms = NULL,
-               last_error = ?, updated_at_ms = ? WHERE inbox_id = ? AND status = 'pending'""",
+            """UPDATE trade_inbox SET status = 'pending', attempt_count = 0, next_attempt_at_ms = 0,
+               claim_id = NULL, claim_until_ms = NULL,
+               last_error = ?, updated_at_ms = ?, result_json = CASE WHEN result_json IS NULL THEN NULL
+                   WHEN json_extract(result_json, '$.receipt_kind') = 'verification_pending' THEN result_json
+                   ELSE json_set(result_json, '$.receipt_kind', 'pending_retry', '$.retry_policy.retryable', json('true')) END
+               WHERE inbox_id = ? AND (status = 'pending' OR (status = 'handled'
+                   AND json_extract(result_json, '$.receipt_kind') = 'manual_required'))""",
             (f"resumed_by:{operator}", int(time.time() * 1000), inbox_id),
         ).rowcount
         if changed:
@@ -664,11 +903,16 @@ def list_retryable_trade_payloads(
                 FROM trade_inbox
                 WHERE status = 'pending'
                   AND attempt_count < ?
-                  AND (attempt_count = 0 OR updated_at_ms <= ?)
+                  AND (claim_id IS NULL OR claim_until_ms <= ?)
+                  AND (result_json IS NULL OR json_extract(result_json, '$.receipt_kind') IS NULL
+                       OR json_extract(result_json, '$.receipt_kind') = 'pending_retry'
+                   OR (last_error = 'execution_association_enrichment'
+                       AND json_extract(result_json, '$.receipt_kind') IN ('recorded', 'manual_required')))
+                  AND (attempt_count = 0 OR next_attempt_at_ms - 60000 <= ?)
                 ORDER BY received_at_ms ASC, inbox_id ASC
                 LIMIT ?
                 """,
-                (int(max_attempts), cutoff_ms, row_limit if allowed is None else -1),
+                (int(max_attempts), int(time.time() * 1000), cutoff_ms, row_limit if allowed is None else -1),
             )
             # ponytail: scoped recovery is O(n); add an account index if backlog measurements require it.
             for row in rows:
@@ -703,127 +947,50 @@ def list_retryable_trade_payloads(
     return out
 
 
-def mark_trade_payload_handled(
-    path: str | Path,
-    *,
-    inbox_id: str,
-    result: dict[str, Any] | None,
-    claim: Mapping[str, Any] | None = None,
-) -> None:
-    inbox_path = Path(path)
-    now_ms = int(time.time() * 1000)
-    result_payload = result if isinstance(result, dict) else {}
-    with closing(_connect(inbox_path)) as conn:
-        with conn:
-            _ensure_schema(conn)
-            conn.execute(
-                """
-                UPDATE trade_inbox
-                SET status = 'handled',
-                    attempt_count = attempt_count + 1,
-                    updated_at_ms = ?,
-                    last_error = NULL, claim_id = NULL, claim_until_ms = NULL,
-                    result_json = ?, result_status = ?,
-                    result_reason = ?
-                WHERE inbox_id = ? AND status = 'pending'
-                  AND (claim_id = ? OR (claim_id IS NULL AND ? IS NULL))
-                  AND (? IS NULL OR payload_version = ?)
-                """,
-                (
-                    now_ms,
-                    json.dumps(result_payload, ensure_ascii=False, sort_keys=True),
-                    str(result_payload.get("status") or "").strip() or None,
-                    str(result_payload.get("reason") or "").strip() or None,
-                    str(inbox_id),
-                    (claim or {}).get("claim_id"), (claim or {}).get("claim_id"),
-                    (claim or {}).get("payload_version"), (claim or {}).get("payload_version"),
-                ),
-            )
+def _settle_trade_payload(path: str | Path, *, inbox_id: str, result: dict[str, Any] | None,
+                           claim: Mapping[str, Any] | None, retry: bool, error: str | None = None) -> None:
+    with closing(_connect(Path(path))) as conn, conn:
+        _ensure_schema(conn)
+        row = conn.execute("SELECT * FROM trade_inbox WHERE inbox_id = ?", (inbox_id,)).fetchone()
+        if (row is None or row["status"] != "pending"
+                or row["claim_id"] != (claim or {}).get("claim_id")
+                or (claim is not None and row["payload_version"] != claim.get("payload_version"))):
+            return
+        if result is None:
+            result = json.loads(row["result_json"] or "null")
+            if result is None:
+                result = {"status": "unresolved", "reason": "callback_exception",
+                          "diagnostics": {"verification_pending": True, "retryable": False}}
+        enriched = _prepare_trade_receipt_result(conn, row, result)
+        if enriched["receipt_kind"] == "recorded":
+            retry = False
+        elif enriched["receipt_kind"] == "verification_pending":
+            retry = True
+        elif enriched["receipt_kind"] == "manual_required":
+            retry = False
+        conn.execute("""UPDATE trade_inbox SET status = ?, updated_at_ms = ?, last_error = ?,
+                        claim_id = NULL, claim_until_ms = NULL, next_attempt_at_ms = ? WHERE inbox_id = ?""",
+                     ("pending" if retry else "handled", int(time.time() * 1000), error,
+                      int(time.time() * 1000) + 60_000, inbox_id))
 
 
-def mark_trade_payload_retryable(
-    path: str | Path,
-    *,
-    inbox_id: str,
-    error: str | None,
-    result: dict[str, Any] | None = None,
-    claim: Mapping[str, Any] | None = None,
-) -> None:
-    inbox_path = Path(path)
-    now_ms = int(time.time() * 1000)
-    result_payload = result if isinstance(result, dict) else {}
-    with closing(_connect(inbox_path)) as conn:
-        with conn:
-            _ensure_schema(conn)
-            conn.execute(
-                """
-                UPDATE trade_inbox
-                SET status = 'pending',
-                attempt_count = attempt_count + 1,
-                updated_at_ms = ?,
-                last_error = ?, claim_id = NULL, claim_until_ms = NULL,
-                result_json = ?, result_status = ?,
-                result_reason = ?
-            WHERE inbox_id = ? AND status = 'pending'
-                  AND (claim_id = ? OR (claim_id IS NULL AND ? IS NULL))
-                  AND (? IS NULL OR payload_version = ?)
-            """,
-                (
-                    now_ms,
-                    str(error) if error else None,
-                    json.dumps(result_payload, ensure_ascii=False, sort_keys=True),
-                    str(result_payload.get("status") or "exception"),
-                    str(result_payload.get("reason") or "callback_exception"),
-                    str(inbox_id),
-                    (claim or {}).get("claim_id"), (claim or {}).get("claim_id"),
-                    (claim or {}).get("payload_version"), (claim or {}).get("payload_version"),
-                ),
-            )
+def mark_trade_payload_handled(path: str | Path, *, inbox_id: str,
+                                result: dict[str, Any] | None,
+                                claim: Mapping[str, Any] | None = None) -> None:
+    _settle_trade_payload(path, inbox_id=inbox_id, result=result, claim=claim, retry=False)
 
 
-def settle_trade_payload_result(
-    path: str | Path,
-    *,
-    inbox_id: str,
-    result: dict[str, Any] | None,
-    claim: Mapping[str, Any] | None = None,
-) -> None:
-    result_payload = result if isinstance(result, dict) else {}
-    diagnostics = (
-        result_payload.get("diagnostics")
-        if isinstance(result_payload.get("diagnostics"), dict)
-        else {}
-    )
-    result_status = str(result_payload.get("status") or "").strip().lower()
-    lifecycle_pending_or_review = str(
-        result_payload.get("reason") or ""
-    ).strip().lower() in {
-        "waiting_settlement_evidence",
-        "awaiting_out_of_order_pair",
-        "awaiting_settlement_evidence",
-        "lifecycle_conflict_requires_review",
-    }
-    retryable = (
-        result_status in {"failed", "unresolved"}
-        and bool(diagnostics.get("retryable"))
-        and not bool(diagnostics.get("broker_evidence_accepted"))
-        and not lifecycle_pending_or_review
-    )
-    if retryable:
-        mark_trade_payload_retryable(
-            path,
-            inbox_id=inbox_id,
-            error=None,
-            result=result_payload,
-            claim=claim,
-        )
-        return
-    mark_trade_payload_handled(
-        path,
-        inbox_id=inbox_id,
-        result=result_payload,
-        claim=claim,
-    )
+def mark_trade_payload_retryable(path: str | Path, *, inbox_id: str, error: str | None,
+                                  result: dict[str, Any] | None = None,
+                                  claim: Mapping[str, Any] | None = None) -> None:
+    _settle_trade_payload(path, inbox_id=inbox_id, result=result, claim=claim, retry=True, error=error)
+
+
+def settle_trade_payload_result(path: str | Path, *, inbox_id: str, result: dict[str, Any] | None,
+                                 claim: Mapping[str, Any] | None = None) -> None:
+    diagnostics = (result or {}).get("diagnostics") or {}
+    _settle_trade_payload(path, inbox_id=inbox_id, result=result, claim=claim,
+                          retry=bool(diagnostics.get("retryable")))
 
 
 def record_trade_payload_refresh_intent(
@@ -955,13 +1122,40 @@ def trade_inbox_summary(path: str | Path) -> dict[str, Any]:
             "handled_count": 0,
             "identity_needs_review_count": 0,
             "max_attempt_count": 0,
+            "receipt_status_counts": {},
+            "receipt_kind_counts": {},
+            "receipt_attention": [],
         }
+    receipt_status_counts: dict[str, int] = {}
+    receipt_kind_counts: dict[str, int] = {}
+    receipt_attention = []
     with closing(_connect(inbox_path)) as conn:
         with conn:
             _ensure_schema(conn)
+            for item in conn.execute("SELECT inbox_id, receipt_json FROM trade_inbox WHERE receipt_json IS NOT NULL"):
+                envelope = _receipt_envelope(item["receipt_json"])
+                if not envelope:
+                    continue
+                receipt = (envelope["receipts"][envelope["current_result_key"]]
+                           if envelope.get("schema_version") == 2 else envelope)
+                status = str(receipt.get("status") or "unknown")
+                kind = str(receipt.get("receipt_kind") or "legacy")
+                receipt_status_counts[status] = receipt_status_counts.get(status, 0) + 1
+                receipt_kind_counts[kind] = receipt_kind_counts.get(kind, 0) + 1
+                if len(receipt_attention) < 20 and (status == "unknown" or receipt.get("stop_reason")):
+                    receipt_attention.append({"inbox_id": item["inbox_id"], "receipt_kind": kind,
+                        "status": status, "attempt_count": receipt.get("attempt_count", 0),
+                        "last_attempt_at_ms": receipt.get("attempted_at_ms"),
+                        "reason": receipt.get("stop_reason") or "delivery_requires_verification",
+                        "next_action": "verify_delivery_before_explicit_compensation"})
             eligibility = conn.execute(
-                """SELECT SUM(status = 'pending' AND attempt_count < 20) AS eligible,
-                          SUM(status = 'pending' AND attempt_count >= 20) AS exhausted
+                """SELECT SUM(status = 'pending' AND attempt_count < 20 AND (
+                              result_json IS NULL OR json_extract(result_json, '$.receipt_kind') IS NULL
+                              OR json_extract(result_json, '$.receipt_kind') = 'pending_retry'
+                              OR (last_error = 'execution_association_enrichment'
+                                  AND json_extract(result_json, '$.receipt_kind') IN ('recorded', 'manual_required')))) AS eligible,
+                          SUM(attempt_count >= 20 AND (status = 'pending'
+                              OR json_extract(result_json, '$.receipt_kind') = 'manual_required')) AS exhausted
                    FROM trade_inbox"""
             ).fetchone()
             rows = conn.execute(
@@ -981,6 +1175,9 @@ def trade_inbox_summary(path: str | Path) -> dict[str, Any]:
             0,
         ),
         "conflict_count": counts.get("conflict", 0),
+        "receipt_status_counts": receipt_status_counts,
+        "receipt_kind_counts": receipt_kind_counts,
+        "receipt_attention": receipt_attention,
         "retryable_count": int(eligibility["eligible"] or 0),
         "exhausted_count": int(eligibility["exhausted"] or 0),
         "max_attempt_count": max(
@@ -1174,7 +1371,6 @@ def claim_settlement_attempt(
     )
     with closing(_connect(inbox_path)) as conn:
         _ensure_schema(conn)
-        conn.execute("BEGIN IMMEDIATE")
         try:
             cursor = conn.execute(
                 """
@@ -1241,7 +1437,6 @@ def reserve_settlement_attempt_invocation(
     inbox_path.parent.mkdir(parents=True, exist_ok=True)
     with closing(_connect(inbox_path)) as conn:
         _ensure_schema(conn)
-        conn.execute("BEGIN IMMEDIATE")
         try:
             cursor = conn.execute(
                 """
@@ -1335,7 +1530,6 @@ def mark_settlement_attempt_provider_started(
     inbox_path = Path(path)
     with closing(_connect(inbox_path)) as conn:
         _ensure_schema(conn)
-        conn.execute("BEGIN IMMEDIATE")
         try:
             cursor = conn.execute(
                 """
@@ -1404,7 +1598,6 @@ def finish_settlement_attempt_provider_invocation(
     inbox_path = Path(path)
     with closing(_connect(inbox_path)) as conn:
         _ensure_schema(conn)
-        conn.execute("BEGIN IMMEDIATE")
         try:
             current = _read_settlement_attempt_row(
                 conn,
@@ -1534,7 +1727,6 @@ def replace_finished_settlement_attempt_provider_invocation(
     inbox_path = Path(path)
     with closing(_connect(inbox_path)) as conn:
         _ensure_schema(conn)
-        conn.execute("BEGIN IMMEDIATE")
         try:
             current = _read_settlement_attempt_row(
                 conn,
@@ -1718,7 +1910,6 @@ def reconcile_settlement_attempt_invocation(
     inbox_path = Path(path)
     with closing(_connect(inbox_path)) as conn:
         _ensure_schema(conn)
-        conn.execute("BEGIN IMMEDIATE")
         try:
             current = _read_settlement_attempt_row(
                 conn,
@@ -1870,7 +2061,6 @@ def claim_settlement_provider_batch(
     inbox_path.parent.mkdir(parents=True, exist_ok=True)
     with closing(_connect(inbox_path)) as conn:
         _ensure_schema(conn)
-        conn.execute("BEGIN IMMEDIATE")
         try:
             cursor = conn.execute(
                 """
@@ -1918,7 +2108,6 @@ def renew_settlement_provider_batch_claim(
     inbox_path = Path(path)
     with closing(_connect(inbox_path)) as conn:
         _ensure_schema(conn)
-        conn.execute("BEGIN IMMEDIATE")
         try:
             cursor = conn.execute(
                 """
@@ -1952,7 +2141,6 @@ def release_settlement_provider_batch_claim(
     inbox_path = Path(path)
     with closing(_connect(inbox_path)) as conn:
         _ensure_schema(conn)
-        conn.execute("BEGIN IMMEDIATE")
         try:
             cursor = conn.execute(
                 """
@@ -1995,7 +2183,6 @@ def renew_settlement_attempt_claim(
     inbox_path = Path(path)
     with closing(_connect(inbox_path)) as conn:
         _ensure_schema(conn)
-        conn.execute("BEGIN IMMEDIATE")
         try:
             cursor = conn.execute(
                 """
@@ -2041,7 +2228,6 @@ def complete_settlement_attempt(
     inbox_path = Path(path)
     with closing(_connect(inbox_path)) as conn:
         _ensure_schema(conn)
-        conn.execute("BEGIN IMMEDIATE")
         try:
             current = _read_settlement_attempt_row(
                 conn,
@@ -2280,7 +2466,7 @@ def require_trade_inbox_store_readable(path: str | Path) -> None:
 def _connect(path: Path) -> sqlite3.Connection:
     conn = connect_private_sqlite(path, timeout=30)
     conn.row_factory = sqlite3.Row
-    conn.create_function("trade_inbox_writer_version", 0, lambda: 1)
+    conn.create_function("trade_inbox_writer_version", 0, lambda: 2)
     return conn
 
 
@@ -2340,6 +2526,8 @@ def _settlement_attempt_scope(
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS trade_inbox (
@@ -2456,7 +2644,11 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         "portfolio_refresh_attempted_at_ms",
         "INTEGER",
     )
+    # Economic retry due time must survive metadata/enrichment updates to updated_at_ms.
+    retry_deadline_missing = "next_attempt_at_ms" not in {
+        row["name"] for row in conn.execute("PRAGMA table_info(trade_inbox)")}
     for column, sql_type in (
+        ("next_attempt_at_ms", "INTEGER NOT NULL DEFAULT 0"),
         ("payload_version", "INTEGER NOT NULL DEFAULT 1"),
         ("claim_id", "TEXT"), ("claim_until_ms", "INTEGER"), ("claim_owner", "TEXT"),
         ("result_json", "TEXT"), ("receipt_json", "TEXT"),
@@ -2476,6 +2668,24 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         ON trade_inbox_evidence(inbox_id)
         WHERE evidence_id IS NULL OR evidence_json IS NULL"""
     )
+    conn.execute("""CREATE TABLE IF NOT EXISTS trade_inbox_recovery (
+        inbox_id TEXT NOT NULL, operator TEXT NOT NULL, resumed_at_ms INTEGER NOT NULL)""")
+    for table in ("trade_inbox", "trade_inbox_evidence", "trade_inbox_recovery"):
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)).fetchone():
+            continue
+        for operation in ("INSERT", "UPDATE", "DELETE"):
+            name = f"{table}_{operation.lower()}_writer_guard"
+            guard = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?", (name,)).fetchone()
+            if guard and "trade_inbox_writer_version() != 2" in guard[0]:
+                continue
+            if guard and "trade_inbox_writer_version() != 1" not in guard[0]:
+                raise ValueError("unsupported trade inbox writer guard")
+            conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+            conn.execute(f"""CREATE TRIGGER {name} BEFORE {operation} ON {table}
+                WHEN trade_inbox_writer_version() != 2
+                BEGIN SELECT RAISE(ABORT, 'trade inbox requires compatible writer'); END""")
+    if retry_deadline_missing:
+        conn.execute("UPDATE trade_inbox SET next_attempt_at_ms = updated_at_ms + 60000 WHERE attempt_count > 0")
     _migrate_trade_source_evidence(conn)
     conn.execute(
         """CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_inbox_evidence_id
@@ -2483,12 +2693,6 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     )
     conn.execute("""CREATE TABLE IF NOT EXISTS trade_inbox_recovery (
         inbox_id TEXT NOT NULL, operator TEXT NOT NULL, resumed_at_ms INTEGER NOT NULL)""")
-    for table in ("trade_inbox", "trade_inbox_evidence", "trade_inbox_recovery"):
-        for operation in ("INSERT", "UPDATE", "DELETE"):
-            conn.execute(f"""CREATE TRIGGER IF NOT EXISTS {table}_{operation.lower()}_writer_guard
-                BEFORE {operation} ON {table}
-                WHEN trade_inbox_writer_version() != 1
-                BEGIN SELECT RAISE(ABORT, 'trade inbox requires compatible writer'); END""")
     existing_attempt_columns = {
         str(row["name"])
         for row in conn.execute(

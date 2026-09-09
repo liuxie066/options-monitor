@@ -35,6 +35,10 @@ def test_trade_push_listener_isolates_callback_exception(monkeypatch) -> None:
         def __init__(self, **_kwargs):
             self.handler = None
 
+        def set_sync_query_connect_timeout(self, timeout):
+            assert timeout == 2
+            self.connect_timeout = timeout
+
         def set_handler(self, handler):
             self.handler = handler
 
@@ -75,6 +79,10 @@ def test_trade_push_listener_health_uses_existing_trade_context(monkeypatch) -> 
         def __init__(self, **_kwargs):
             type(self).instances += 1
 
+        def set_sync_query_connect_timeout(self, timeout):
+            assert timeout == 2
+            self.connect_timeout = timeout
+
         def set_handler(self, _handler):
             return None
 
@@ -110,6 +118,10 @@ def test_trade_push_listener_health_raises_terminal_phone_verification(monkeypat
         def __init__(self, **_kwargs):
             return None
 
+        def set_sync_query_connect_timeout(self, timeout):
+            assert timeout == 2
+            self.connect_timeout = timeout
+
         def set_handler(self, _handler):
             return None
 
@@ -144,6 +156,10 @@ def test_trade_push_listener_health_keeps_disconnect_retryable(monkeypatch) -> N
     class _FakeContext:
         def __init__(self, **_kwargs):
             return None
+
+        def set_sync_query_connect_timeout(self, timeout):
+            assert timeout == 2
+            self.connect_timeout = timeout
 
         def set_handler(self, _handler):
             return None
@@ -282,7 +298,7 @@ def test_listener_raises_typed_unreachable_when_port_closed(monkeypatch) -> None
         listener._build_default_context()
 
 
-def _mock_sdk_rows(monkeypatch, *, rows, accounts, stop=None):
+def _mock_sdk_rows(monkeypatch, *, rows, accounts, stop=None, response=None, handler_base=None):
     class Frame:
         def __init__(self, values):
             self.values = values
@@ -303,11 +319,15 @@ def _mock_sdk_rows(monkeypatch, *, rows, accounts, stop=None):
             self.account_reads += 1
             return (0, Frame(accounts)) if accounts is not None else (-1, "unavailable")
 
+        def set_sync_query_connect_timeout(self, timeout):
+            assert timeout == 2
+            self.connect_timeout = timeout
+
         def set_handler(self, handler):
             self.handler = handler
 
         def start(self):
-            self.handler.on_recv_rsp(None)
+            self.handler.on_recv_rsp(response)
             if stop is not None:
                 stop.set()
 
@@ -315,8 +335,135 @@ def _mock_sdk_rows(monkeypatch, *, rows, accounts, stop=None):
             pass
 
     monkeypatch.setitem(sys.modules, "futu", SimpleNamespace(
-        OpenSecTradeContext=Context, TradeDealHandlerBase=HandlerBase,
+        OpenSecTradeContext=Context, TradeDealHandlerBase=handler_base or HandlerBase,
+        TrdEnv=SimpleNamespace(to_string2=lambda value: {0: "SIMULATE", 1: "REAL"}.get(value, "N/A")),
     ))
+
+
+def _push_response(**fields):
+    return SimpleNamespace(s2c=SimpleNamespace(header=SimpleNamespace(
+        HasField=lambda key: key in fields, **fields,
+    )))
+
+
+@pytest.mark.parametrize("physical,environment", [(123, "REAL"), (456, "SIMULATE")])
+def test_push_header_selects_exact_visible_account_before_conversion(monkeypatch, physical, environment):
+    response = _push_response(accID=physical, trdEnv=1 if environment == "REAL" else 0)
+    row = {"deal_id": "fill-1", "order_id": "order-1", "trd_env": environment}
+    _mock_sdk_rows(monkeypatch, rows=[row], response=response, accounts=[
+        {"acc_id": "123", "trd_env": "REAL"}, {"acc_id": "456", "trd_env": "SIMULATE"},
+    ])
+    seen = []
+    listener = OpenDTradePushListener(host="127.0.0.1", port=11111, on_deal=seen.append)
+    listener.start()
+    assert seen == [{**row, "acc_id": str(physical), "environment": environment,
+                     "broker_account_id": f"futu:{environment}:{physical}",
+                     "external_id_namespace": "futu.deal", "external_order_namespace": "futu.order",
+                     "_trade_intake_push_header": {"accID": physical, "trdEnv": 1 if environment == "REAL" else 0}}]
+
+
+@pytest.mark.parametrize("header,row,accounts,error", [
+    ({"accID": 123, "trdEnv": 1}, {"acc_id": "456"}, [{"acc_id": "123", "trd_env": "REAL"}], "conflict:push_physical_account"),
+    ({"accID": 123, "trdEnv": 1}, {"trd_env": "SIMULATE"}, [{"acc_id": "123", "trd_env": "REAL"}], "conflict:push_trd_env"),
+    ({"accID": 123, "trdEnv": 0}, {}, [{"acc_id": "123", "trd_env": "REAL"}], "conflict:push_trd_env"),
+    ({"accID": 123, "trdEnv": 1}, {}, [], "missing:source_account_environment"),
+    ({"accID": 123, "trdEnv": 1}, {}, None, "missing:source_account_environment"),
+    ({"trdEnv": 1}, {"acc_id": "123"}, [{"acc_id": "123", "trd_env": "REAL"}], "missing:push_header_physical_account"),
+    ({"accID": 123}, {}, [{"acc_id": "123", "trd_env": "REAL"}], "missing:push_header_environment"),
+    ({"accID": 0, "trdEnv": 1}, {}, [], "invalid:push_header_physical_account"),
+    ({"accID": "123", "trdEnv": 1}, {}, [], "invalid:push_header_physical_account"),
+    ({"accID": 123, "trdEnv": 7}, {}, [], "invalid:push_header_environment"),
+    ({"accID": 123, "trdEnv": True}, {}, [], "invalid:push_header_environment"),
+    ({"accID": 123, "trdEnv": 1}, {"acc_id": "123.0"}, [], "invalid:push_physical_account"),
+])
+def test_push_header_rejects_missing_invalid_conflicting_identity(monkeypatch, header, row, accounts, error):
+    row = {"deal_id": "fill-1", **row}
+    _mock_sdk_rows(monkeypatch, rows=[row], accounts=accounts, response=_push_response(**header))
+    seen = []
+    listener = OpenDTradePushListener(host="127.0.0.1", port=11111, on_deal=seen.append)
+    listener.start()
+    assert len(seen) == 1
+    assert {key: seen[0][key] for key in row} == row
+    assert error in seen[0]["_trade_intake_source_identity_errors"]
+    assert seen[0]["_trade_intake_push_header"] == header
+    assert "broker_account_id" not in seen[0]
+
+
+def test_real_sdk_protobuf_header_survives_dataframe_conversion(monkeypatch, tmp_path):
+    import os.path
+
+    # Importing the SDK opens its logger; keep even that I/O in test storage.
+    join = os.path.join
+    monkeypatch.setattr(os.path, "join", lambda *parts: str(tmp_path / "sdk-log")
+                        if parts[-1:] == (".com.futunn.FutuOpenD/Log",) else join(*parts))
+    futu = pytest.importorskip("futu")
+    from futu.common.pb import Trd_UpdateOrderFill_pb2
+
+    response = Trd_UpdateOrderFill_pb2.Response()
+    response.retType = 0
+    response.s2c.header.accID = 123
+    response.s2c.header.trdEnv = 1
+    response.s2c.header.trdMarket = 2
+    deal = response.s2c.orderFill
+    deal.fillID = 321
+    deal.fillIDEx = "321"
+    deal.orderIDEx = "order-1"
+    deal.trdSide = 1
+    deal.code = "NVDA"
+    deal.name = "NVIDIA"
+    deal.qty = 1
+    deal.price = 100
+    deal.createTime = "2026-09-09 10:00:00"
+    deal.secMarket = 2
+    assert response.IsInitialized()
+    ret, frame = futu.TradeDealHandlerBase().on_recv_rsp(response)
+    assert ret == 0
+    assert "acc_id" not in frame.columns
+    _mock_sdk_rows(monkeypatch, rows=None, accounts=[{"acc_id": "123", "trd_env": "REAL"}],
+                   response=response, handler_base=futu.TradeDealHandlerBase)
+    seen = []
+    listener = OpenDTradePushListener(host="127.0.0.1", port=11111, on_deal=seen.append)
+    listener.start()
+    assert len(seen) == 1
+    assert seen[0]["acc_id"] == "123"
+    assert seen[0]["broker_account_id"] == "futu:REAL:123"
+    assert "_trade_intake_source_identity_errors" not in seen[0]
+
+
+def test_start_wait_hook_runs_repeatedly_before_initialization_and_stops(monkeypatch):
+    from src.infrastructure.futu_trade_push import TradeIntakeStartCancelled
+
+    constructed = threading.Event()
+    release_constructor = threading.Event()
+    worker_finished = threading.Event()
+    stop = threading.Event()
+    calls = []
+    listener = OpenDTradePushListener(host="127.0.0.1", port=11111, on_deal=lambda _: None)
+
+    def build():
+        constructed.set()
+        try:
+            assert release_constructor.wait(5)
+            raise RuntimeError("test constructor released")
+        finally:
+            worker_finished.set()
+
+    def on_wait():
+        assert constructed.is_set()
+        assert not release_constructor.is_set()
+        assert not stop.is_set()
+        calls.append(len(calls))
+        if len(calls) == 3:
+            stop.set()
+
+    monkeypatch.setattr(listener, "_build_default_context", build)
+    try:
+        with pytest.raises(TradeIntakeStartCancelled):
+            listener.start(cancel_event=stop, on_wait=on_wait)
+        assert calls == [0, 1, 2]
+    finally:
+        release_constructor.set()
+        assert worker_finished.wait(2)
 
 
 def test_push_binds_only_matching_account_snapshot_and_preserves_order_alias(monkeypatch):

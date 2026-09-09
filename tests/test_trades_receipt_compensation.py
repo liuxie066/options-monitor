@@ -10,6 +10,7 @@ from src.application.trades.receipt_compensation import (
     LEGACY_FALSE_OUTBOX_REASON,
     SKIPPED_NO_ROUTE_REASON,
     compensate_trade_intake_receipts,
+    receipt_compensation_takeover,
 )
 
 
@@ -444,7 +445,7 @@ def _core_compensation_input(tmp_path, monkeypatch, *, namespace="futu.deal", ou
     }
 
 
-def test_real_core_no_route_receipt_compensation_uses_proven_execution_alias_once(tmp_path, monkeypatch):
+def test_real_core_no_route_receipt_compensation_defers_to_inbox_owner(tmp_path, monkeypatch):
     kwargs = _core_compensation_input(tmp_path, monkeypatch)
     state_before = (tmp_path / "state.json").read_bytes()
     state = json.loads(state_before)
@@ -459,19 +460,17 @@ def test_real_core_no_route_receipt_compensation_uses_proven_execution_alias_onc
         return {"command_ok": True, "delivery_confirmed": True, "message_id": "offline-compensation", "returncode": 0}
 
     preview = compensate_trade_intake_receipts(**kwargs, apply_changes=False)
-    assert preview["status"] == "ready"
-    assert not Path(preview["record_path"]).exists()
+    assert preview["status"] == "inbox_managed"
+    assert preview["inbox_receipts"][0]["current_result_key"] == "recorded"
     assert (tmp_path / "state.json").read_bytes() == state_before
-    with pytest.raises(ValueError, match="payload changed after dry-run"):
-        compensate_trade_intake_receipts(**kwargs, apply_changes=True, expected_payload_hash="stale", send_fn=sender)
     result = compensate_trade_intake_receipts(**kwargs, apply_changes=True,
-                                            expected_payload_hash=preview["payload_hash"], send_fn=sender)
-    assert result["status"] == "confirmed"
-    assert json.loads(Path(result["record_path"]).read_text())["message_id"] == "offline-compensation"
+                                            expected_payload_hash="old-preview", send_fn=sender)
+    assert result["status"] == "inbox_managed"
     replay = compensate_trade_intake_receipts(**kwargs, apply_changes=True,
-                                            expected_payload_hash=preview["payload_hash"], send_fn=sender)
-    assert replay["status"] == "duplicate_suppressed"
-    assert len(calls) == 1
+                                            expected_payload_hash="old-preview", send_fn=sender)
+    assert replay["status"] == "inbox_managed"
+    assert calls == []
+    assert not (tmp_path / "receipt_compensations").exists()
     assert (repo.list_trade_events(), repo.list_position_lots()) == economics_before
     assert (tmp_path / "state.json").read_bytes() == state_before
 
@@ -488,6 +487,106 @@ def test_compensation_does_not_guess_execution_alias_or_override_receipt_evidenc
         state = json.loads(path.read_text())
         state["processed_deal_ids"]["futu:lx:123:777"] = next(iter(state["processed_deal_ids"].values()))
         path.write_text(json.dumps(state))
-    with pytest.raises(ValueError, match="missing deal_id|delivery-confirmed|unsent no-route marker|ambiguous identities"):
-        compensate_trade_intake_receipts(**kwargs, apply_changes=False)
+    if case in {"already_sent", "unknown", "ambiguous_alias"}:
+        assert compensate_trade_intake_receipts(**kwargs, apply_changes=False)["status"] == "inbox_managed"
+    else:
+        with pytest.raises(ValueError, match="missing deal_id"):
+            compensate_trade_intake_receipts(**kwargs, apply_changes=False)
     assert not (tmp_path / "receipt_compensations").exists()
+
+
+@pytest.mark.parametrize("status,blocked", [
+    ("send_started", True), ("unknown", True), ("confirmed", True),
+    ("prepared", True), ("explicit_failed", False),
+])
+def test_takeover_checks_every_member_of_legacy_combined_receipt(tmp_path, status, blocked):
+    preview = _run(tmp_path, apply_changes=False)
+    record = {**preview, "status": status, "explicit_pre_acceptance_failure": status == "explicit_failed"}
+    path = Path(preview["record_path"])
+    path.parent.mkdir()
+    path.write_text(json.dumps(record))
+    source = {"state_path": preview["state_path"], "account": ACCOUNT}
+    for deal_id in DEAL_IDS:
+        with receipt_compensation_takeover(source=source, account=ACCOUNT, canonical_deal_id=deal_id) as evidence:
+            assert evidence["blocked"] is blocked
+            assert evidence["result_key"] == "recorded"
+            assert evidence["records"][0]["deal_ids"] == list(DEAL_IDS)
+            assert evidence["status"] == ("confirmed" if status == "confirmed" else "unknown" if blocked else "clear")
+
+
+@pytest.mark.parametrize("broken", [{}, {"schema_version": "unknown"}, "invalid json"])
+def test_takeover_fails_closed_for_unattributable_legacy_evidence(tmp_path, broken):
+    source = {"state_path": tmp_path / "state.json", "account": ACCOUNT}
+    directory = tmp_path / "receipt_compensations"
+    directory.mkdir()
+    (directory / "unproven.json").write_text(broken if isinstance(broken, str) else json.dumps(broken))
+    with pytest.raises(ValueError, match="unverifiable receipt compensation evidence"):
+        with receipt_compensation_takeover(source=source, account=ACCOUNT, canonical_deal_id=DEAL_IDS[0]):
+            pytest.fail("unproven legacy evidence must not grant takeover")
+
+
+def test_manual_apply_blocks_overlap_with_combined_legacy_send(tmp_path):
+    preview = _run(tmp_path, apply_changes=False)
+    path = Path(preview["record_path"])
+    path.parent.mkdir()
+    path.write_text(json.dumps({**preview, "status": "send_started"}))
+    sources, repo = _fixture(tmp_path)
+    kwargs = dict(base=tmp_path, config={}, sources=sources, repo=repo, account=ACCOUNT,
+                  deal_ids=[DEAL_IDS[0]], route_resolver=_route)
+    single = compensate_trade_intake_receipts(**kwargs, apply_changes=False)
+    result = compensate_trade_intake_receipts(
+        **kwargs, apply_changes=True, expected_payload_hash=single["payload_hash"],
+        send_fn=lambda **_: pytest.fail("overlap must never send"),
+    )
+    assert result["status"] == "duplicate_suppressed"
+    assert result["suppression_reason"] == "overlapping_compensation"
+    assert not Path(single["record_path"]).exists()
+
+
+def test_manual_apply_rechecks_inbox_takeover_after_preview_under_shared_lock(tmp_path):
+    import fcntl
+    import threading
+    from src.application.trades.inbox import enqueue_trade_payload, prepare_trade_receipt_result
+    from src.application.ledger.repository import SQLiteOptionPositionsRepository
+    from src.application.trades.deal_identity import broker_deal_key_from_payload
+    from tests.test_trade_receipt_recovery import _payload
+
+    sources, repo = _fixture(tmp_path)
+    source = sources[0]
+    inbox_path = Path(source["state_path"]).with_name("trade_intake_inbox.sqlite3")
+    kwargs = dict(base=tmp_path, config={}, sources=sources, repo=repo, account=ACCOUNT,
+                  deal_ids=list(DEAL_IDS), route_resolver=_route)
+    preview = compensate_trade_intake_receipts(**kwargs, apply_changes=False)
+    payload = _payload(DEAL_IDS[0].rsplit(":", 1)[1])
+    payload["broker_account_ref"].update(external_account_id=FUTU_ACCOUNT_ID,
+                                          broker_account_id=f"futu:REAL:{FUTU_ACCOUNT_ID}")
+    repo.events[0]["raw_payload"]["execution_input"] = payload
+    key = broker_deal_key_from_payload(payload, account_mapping=None)
+    result = []
+    started = threading.Event()
+
+    def apply():
+        started.set()
+        result.append(compensate_trade_intake_receipts(
+            **kwargs, apply_changes=True, expected_payload_hash=preview["payload_hash"],
+            send_fn=lambda **_: pytest.fail("Inbox owns this multi-deal request")))
+
+    with receipt_compensation_takeover(source=source, account=ACCOUNT, canonical_deal_id=DEAL_IDS[0]) as evidence:
+        assert evidence["blocked"] is False
+        with Path(source["state_path"]).with_name("receipt_compensations.lock").open("a+") as second:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(second.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        worker = threading.Thread(target=apply)
+        worker.start()
+        assert started.wait(2)
+        inbox_id = enqueue_trade_payload(inbox_path, payload=payload, source="push", broker_deal_key=key,
+                                        repo=SQLiteOptionPositionsRepository(tmp_path / "empty-ledger.sqlite3"))
+        prepare_trade_receipt_result(inbox_path, inbox_id=inbox_id,
+                                     result={"status": "applied", "reason": "applied_open"},
+                                     expected_payload_version=1)
+        assert not result
+    worker.join(2)
+    assert not worker.is_alive()
+    assert result[0]["status"] == "inbox_managed"
+    assert result[0]["inbox_receipts"][0]["current_result_key"] == "recorded"
+    assert not Path(preview["record_path"]).exists()
