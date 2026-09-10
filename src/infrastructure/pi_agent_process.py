@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import fcntl
 import hashlib
 import json
 import math
@@ -9,12 +10,18 @@ import queue
 import re
 import selectors
 import shutil
+import stat
 import subprocess
 import threading
 import time
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
-from typing import Any, Callable, Literal, Mapping
+from typing import Any, Callable, Iterator, Literal, Mapping
 from urllib.parse import urlsplit
+
+from src.infrastructure.private_storage import (
+    ensure_private_directory, ensure_private_file, private_path, secure_sqlite_artifacts,
+)
 
 PROTOCOL = "om-pi-ipc.v1"
 MAX_LINE_BYTES = 1_048_576
@@ -120,6 +127,45 @@ def derive_pi_local_session_id(authority_scope: str, session_key: str) -> str:
         raise ValueError("local session identity parts must be non-empty and contain no NUL")
     material = "local\0" + authority_scope + "\0" + session_key
     return "om_" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+@contextmanager
+def pi_session_locks(
+    database: str | Path, session_id: str | None = None,
+) -> Iterator[tuple[Path, tuple[int, ...]]]:
+    """Hold independent inherited flock descriptions; None fences offline conversion."""
+    if session_id is not None and not _SESSION_ID_PATTERN.fullmatch(session_id):
+        raise ValueError("invalid session identity")
+    target = private_path(database)
+    ensure_private_directory(target.parent)
+    if target.is_symlink():
+        raise OSError("session database must not be a symlink")
+    if target.exists():
+        if target.stat().st_nlink != 1:
+            raise OSError("session database must not have hard-link aliases")
+        secure_sqlite_artifacts(target)
+    target = target.resolve()
+    paths = [(Path(str(target) + ".om-pi.lock"), fcntl.LOCK_EX if session_id is None else fcntl.LOCK_SH)]
+    if session_id is not None:
+        paths.append((Path(str(target) + "." + session_id + ".lock"), fcntl.LOCK_EX))
+    descriptors: list[int] = []
+    try:
+        for path, operation in paths:
+            ensure_private_file(path)
+            fd = os.open(path, os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW)
+            descriptors.append(fd)
+            identity = os.fstat(fd)
+            named = path.lstat()
+            if (not stat.S_ISREG(identity.st_mode) or identity.st_nlink != 1
+                    or (identity.st_dev, identity.st_ino) != (named.st_dev, named.st_ino)):
+                raise OSError("session lock identity changed")
+            fcntl.flock(fd, operation | fcntl.LOCK_NB)
+        yield target, tuple(descriptors)
+    finally:
+        # LOCK_UN would also unlock a surviving child's inherited description.
+        # Close only: the kernel releases exclusion when the final holder exits.
+        for fd in reversed(descriptors):
+            os.close(fd)
 
 
 def _is_pos_int(value: Any) -> bool:
@@ -630,6 +676,43 @@ def _runtime_command(
     return [node, "--no-warnings", str(entry)], entry
 
 
+def run_pi_migration_bridge(
+    command: str,
+    runtime: Path,
+    arguments: Mapping[str, str | Path],
+    *,
+    timeout: float = 120,
+    maintenance_descriptors: tuple[int, ...] = (),
+) -> dict[str, Any]:
+    """Run the offline Pi converter with the same Node floor as the Agent."""
+    if command not in {"identity", "probe", "export", "import"}:
+        raise ValueError("unsupported Pi migration bridge command")
+    entry = Path(__file__).resolve().parents[2] / "agent-runtime" / "pi_migration.mjs"
+    environment = {"PATH": os.environ.get("PATH", "")}
+    try:
+        argv, _ = _runtime_command(entry, environment)
+        argv.insert(1, "--experimental-import-meta-resolve")
+        argv.extend((command, "--runtime", str(runtime)))
+        for name, argument in arguments.items():
+            argv.extend(("--" + name.replace("_", "-"), str(argument)))
+        completed = subprocess.run(
+            argv, capture_output=True, text=True, timeout=timeout,
+            check=False, env=environment, pass_fds=maintenance_descriptors,
+        )
+    except (LookupError, OSError, subprocess.TimeoutExpired) as exc:
+        raise ValueError("Pi migration Node runtime is unavailable or timed out") from exc
+    if completed.returncode:
+        reason = completed.stderr.strip().splitlines()[-1] if completed.stderr.strip() else "offline bridge failed"
+        raise ValueError(f"Pi migration bridge rejected the store: {reason[:MAX_SAFE_MESSAGE_CHARS]}")
+    try:
+        result = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Pi migration bridge returned invalid output") from exc
+    if not isinstance(result, dict) or result.get("ok") is not True:
+        raise ValueError("Pi migration bridge failed")
+    return result
+
+
 def _encode_envelope(
     type_: str, payload: dict[str, Any], identity: dict[str, str], seq: int
 ) -> bytes:
@@ -725,7 +808,7 @@ def _validate_run_accepted(payload: dict[str, Any], expected_session_id: str | N
         raise ValueError("run.accepted payload shape is invalid")
     if payload["runtime"] != "pi-agent-core":
         raise ValueError("run.accepted runtime is not pi-agent-core")
-    if payload["runtime_version"] != "0.84.2":
+    if payload["runtime_version"] != "0.85.1":
         raise ValueError("run.accepted runtime_version is not pinned")
     if payload["session_id"] != expected_session_id:
         raise ValueError("run.accepted session_id does not match run.start")
@@ -968,6 +1051,25 @@ def run_pi_agent(
     child_env = _child_env(environ)
     if deadline - time.monotonic() < 0.001:
         return _safe_failure("PI_PROCESS_TIMEOUT", "deadline", "budget exhausted before spawn", True)
+    locks = ExitStack()
+    pass_fds: tuple[int, ...] = ()
+    if start_payload["session_id"] is not None:
+        database = child_env.get("OM_PI_SESSION_DB")
+        if not database:
+            return _safe_failure("SESSION_ERROR", "session", "session storage is unavailable", False)
+        try:
+            canonical, pass_fds = locks.enter_context(pi_session_locks(database, start_payload["session_id"]))
+            child_env["OM_PI_SESSION_DB"] = str(canonical)
+            child_env["OM_PI_LOCK_FDS"] = json.dumps(pass_fds)
+        except BlockingIOError:
+            locks.close()
+            return _safe_failure("SESSION_ERROR", "session", "session is temporarily busy", True)
+        except (OSError, ValueError):
+            locks.close()
+            return _safe_failure("SESSION_ERROR", "session", "session storage is unavailable", False)
+    if deadline - time.monotonic() < 0.001:
+        locks.close()
+        return _safe_failure("PI_PROCESS_TIMEOUT", "deadline", "budget exhausted before spawn", True)
     try:
         process = subprocess.Popen(
             command,
@@ -976,12 +1078,12 @@ def run_pi_agent(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=child_env,
+            pass_fds=pass_fds,
             bufsize=0,
         )
-    except OSError as exc:
+    except OSError:
+        locks.close()
         return _safe_failure("PI_RUNTIME_UNAVAILABLE", "spawn", "failed to spawn child", False)
-
-    os.set_blocking(process.stdin.fileno(), False)
 
     def write_line(line: bytes) -> None:
         # Node startup or a paused reader must not extend the Host deadline.
@@ -998,12 +1100,18 @@ def run_pi_agent(
                     except BlockingIOError:
                         continue
 
-    os.set_blocking(process.stdout.fileno(), False)
-    os.set_blocking(process.stderr.fileno(), False)
-
     sel = selectors.DefaultSelector()
-    sel.register(process.stdout, selectors.EVENT_READ)
-    sel.register(process.stderr, selectors.EVENT_READ)
+    try:
+        os.set_blocking(process.stdin.fileno(), False)
+        os.set_blocking(process.stdout.fileno(), False)
+        os.set_blocking(process.stderr.fileno(), False)
+        sel.register(process.stdout, selectors.EVENT_READ)
+        sel.register(process.stderr, selectors.EVENT_READ)
+    except OSError:
+        sel.close()
+        _stop_child(process)
+        locks.close()
+        return _safe_failure("PI_PROCESS_EXITED", "process", "failed to initialize child pipes", True)
 
     node_seq = 1
     py_seq = 2
@@ -1428,3 +1536,4 @@ def run_pi_agent(
         except OSError:
             pass
         _stop_child(process)
+        locks.close()

@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
 from src.application.bot.control_handoff import CONTROL_PREVIEW_TOOL
 from src.application.bot.host import run_contract as _run_contract
 from src.application.bot.model_config import PiModelSettings
+from src.infrastructure.pi_agent_process import derive_pi_local_session_id, run_pi_migration_bridge
+from src.infrastructure.private_storage import atomic_write_private_text, ensure_private_directory
 
 
 _TEST_MODEL = PiModelSettings(
@@ -302,12 +309,106 @@ def run_contract(contract, *, model_runner=None, **kwargs):
         return _run_contract(contract, **kwargs)
 
 
+@dataclass(frozen=True)
+class ActualPiMigrationFixture:
+    database: Path
+    session_id: str
+    source_runtime: Path
+    target_runtime: Path
+
+
+@lru_cache(maxsize=1)
+def actual_pi_runtime_dirs() -> tuple[Path, Path]:
+    target = Path(__file__).resolve().parents[1] / "agent-runtime"
+    configured = os.environ.get("OM_PI_LEGACY_RUNTIME")
+    if configured:
+        source = Path(configured)
+    else:
+        # Keep the real legacy SDK isolated from the shipped runtime dependencies.
+        temporary = tempfile.TemporaryDirectory(prefix="om-pi-legacy-test-")
+        actual_pi_runtime_dirs.temporary = temporary
+        source = Path(temporary.name)
+        packages = (
+            "@earendil-works/pi-agent-core", "@earendil-works/pi-ai",
+            "@earendil-works/pi-session-backend-sqlite-node",
+        )
+        (source / "package.json").write_text(json.dumps({
+            "private": True, "type": "module",
+            "dependencies": {name: "0.84.2" for name in packages},
+        }), encoding="utf-8")
+        subprocess.run(
+            ["npm", "install", "--ignore-scripts", "--no-audit", "--no-fund"],
+            cwd=source, check=True, capture_output=True, text=True, timeout=180,
+        )
+    for runtime, version in ((source, "0.84.2"), (target, "0.85.1")):
+        manifest = json.loads((runtime / "package.json").read_text(encoding="utf-8"))
+        assert set(manifest["dependencies"].values()) == {version}
+        assert (runtime / "package-lock.json").is_file()
+        assert (runtime / "node_modules").is_dir()
+    return source.resolve(), target.resolve()
+
+
+def _migration_usage() -> dict[str, Any]:
+    return {
+        "input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 2,
+        "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0},
+    }
+
+
+def seed_actual_legacy_pi_store(database: Path) -> ActualPiMigrationFixture:
+    source_runtime, target_runtime = actual_pi_runtime_dirs()
+    ensure_private_directory(database.parent)
+    session_id = derive_pi_local_session_id("key:us", "pi-migration-fixture")
+    user = {"role": "user", "content": "old question", "timestamp": 1_700_000_000_010}
+    assistant = {
+        "role": "assistant", "content": [{"type": "text", "text": "old answer"}],
+        "api": "openai-responses", "provider": "openai", "model": "fixture",
+        "usage": _migration_usage(), "stopReason": "stop", "timestamp": 1_700_000_000_020,
+    }
+    retained_user = {"role": "user", "content": "retained question", "timestamp": 1_699_999_999_000}
+    retained_assistant = {**assistant, "content": [{"type": "text", "text": "retained answer"}],
+                          "timestamp": 1_699_999_999_010}
+    entries = [
+        {"id": "old_user", "parentId": None, "timestamp": 1_700_000_000_010,
+         "type": "message", "message": user},
+        {"id": "old_assistant", "parentId": "old_user", "timestamp": 1_700_000_000_020,
+         "type": "message", "message": assistant},
+        {"id": "old_commit", "parentId": "old_assistant", "timestamp": 1_700_000_000_030,
+         "type": "custom", "customType": "om.turn.commit.v1",
+         "data": {"run_id": "old_run", "kind": "turn"}},
+        {"id": "old_compaction", "parentId": "old_commit", "timestamp": 1_700_000_000_040,
+         "type": "compaction", "summary": "old summary",
+         "retainedTail": [retained_user, retained_assistant], "tokensBefore": 100,
+         "usage": _migration_usage(), "fromHook": False},
+        {"id": "old_compaction_commit", "parentId": "old_compaction", "timestamp": 1_700_000_000_050,
+         "type": "custom", "customType": "om.turn.commit.v1",
+         "data": {"run_id": "old_compaction_run", "kind": "compaction"}},
+    ]
+    canonical = {
+        "format": "om-pi-export.v1",
+        "sessions": [{
+            "id": session_id, "createdAt": 1_700_000_000_000, "entries": entries,
+            "excludedTailCount": 0, "contextSha256": "0" * 64, "contentSha256": "0" * 64,
+        }],
+    }
+    export_path = database.with_name(database.name + ".seed.json")
+    atomic_write_private_text(export_path, json.dumps(canonical, sort_keys=True))
+    run_pi_migration_bridge(
+        "import", source_runtime,
+        {"expected-version": "0.84.2", "database": database, "input": export_path},
+    )
+    return ActualPiMigrationFixture(database, session_id, source_runtime, target_runtime)
+
+
 __all__ = [
     "_TEST_MODEL",
     "ModelRequest",
     "ModelRunner",
     "ModelTurn",
     "ToolCall",
+    "ActualPiMigrationFixture",
+    "actual_pi_runtime_dirs",
     "fake_pi_agent",
     "run_contract",
+    "seed_actual_legacy_pi_store",
 ]
