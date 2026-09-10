@@ -6,6 +6,7 @@ from src.application.bot.contracts import AppResult
 from src.application.bot.host import run_contract
 from src.application.bot.host_store import BotHostStore
 from src.application.bot.memory_worker import MemoryWorker
+from src.application.bot.memory_worker import configured_memory_scope
 from src.application.bot.service import prepare_contract
 from src.infrastructure.pi_agent_process import derive_pi_session_id
 from tests.bot_pi_test_support import _TEST_MODEL
@@ -20,6 +21,48 @@ def channel(tmp_path, monkeypatch, text="记住：我喜欢简短回答", *, env
     host = BotHostStore(tmp_path / "host.sqlite3")
     session = derive_pi_session_id("test", "test-user", "test-conversation", "key:us") if environment == "channel" else None
     return contract, host, session
+
+
+def test_configured_memory_scope_accepts_runtime_account_list(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "src.application.agent_tool_config.load_runtime_config",
+        lambda **_: (tmp_path, {"accounts": ["lx", "sy"]}),
+    )
+    contract = prepare_contract(
+        _request("查看记忆", environment="channel"),
+        reference_year=2026,
+        report_now_ms=1788319188212,
+    )
+
+    scope = configured_memory_scope(contract)
+
+    assert scope.allowed_accounts == frozenset({"lx", "sy"})
+
+
+def test_channel_memory_runtime_config_list_is_enabled(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "src.application.agent_tool_config.load_runtime_config",
+        lambda **_: (tmp_path, {"accounts": ["lx", "sy"]}),
+    )
+    monkeypatch.setattr(MemoryWorker, "wake", lambda _: None)
+    contract = prepare_contract(
+        _request("介绍一下自己", environment="channel"),
+        reference_year=2026,
+        report_now_ms=1788319188212,
+    )
+    host = BotHostStore(tmp_path / "host.sqlite3")
+    session = derive_pi_session_id("test", "test-user", "test-conversation", "key:us")
+
+    def ordinary(start, call, _):
+        assert "bot_memory" in {item["name"] for item in start["tools"]}
+        assert "memory and historical progress are unavailable" not in "\n".join(
+            item["content"] for item in start["runtime_context"]
+        )
+        return submit(call, "结论：我是 Bot。")
+
+    result = execute(monkeypatch, contract, host, session, ordinary)
+
+    assert result.status == "answered"
 
 
 def execute(monkeypatch, contract, host, session, flow):

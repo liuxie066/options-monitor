@@ -249,13 +249,18 @@ _WORKERS_LOCK = threading.Lock()
 
 def configured_memory_scope(contract: Any) -> Any:
     """Reuse the canonical config identity gate and its authoritative account names."""
+    from src.application.account_config import accounts_from_config
     from src.application.agent_tool_config import load_runtime_config
 
     scope_from_contract(contract)  # Reject untrusted/local callers before loading configuration.
     _, config = load_runtime_config(config_key=contract.input.get("config_key"),
                                     config_path=contract.input.get("config_path"))
-    accounts = config.get("accounts")
-    if not isinstance(accounts, dict):
+    try:
+        raw_accounts = config.get("accounts")
+        # Older generated snapshots used an account->settings mapping; the
+        # current canonical shape is a validated list of labels.
+        accounts = list(raw_accounts) if isinstance(raw_accounts, dict) else accounts_from_config(config, fallback=())
+    except (TypeError, ValueError):
         raise ValueError("MEMORY_ACCOUNT_CONFIG_INVALID")
     return scope_from_contract(contract, accounts)
 
