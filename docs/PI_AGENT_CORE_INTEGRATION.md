@@ -2017,3 +2017,468 @@ upstream API details may refine field spelling during implementation, but any
 change to authority, budgets, evidence scope, cursor semantics, compaction
 failure behavior, rollout boundaries, or final-answer admission requires a
 design update before code.
+
+## 14. Pi 0.85.1 Compatibility Upgrade (Target Design)
+
+This section specifies the target upgrade from the installed 0.84.2 baseline;
+it does not claim that 0.85.1 is deployed. Existing behavior in sections 1–13
+remains binding except for the versioned Session storage/API adaptation below.
+The implementation baseline is the Bot code at commit
+`77e740c13d4fff1e1bf0d7596bfe6e28b2c118c1` (OM 3.5.1), not an older checkout
+with the retired `src/application/copilot/` layout. Runtime enablement and production
+migration require their own release and operator actions.
+
+### 14.1 Goal, scope, and success signals
+
+Upgrade `pi-agent-core`, `pi-ai`, and `pi-session-backend-sqlite-node` together to
+exactly 0.85.1 and retain the supported Node.js floor of 22.19.0. The goal is a
+working upgrade of the existing Bot, including its durable conversations, rather
+than a dependency-only change that cannot start.
+
+Acceptance signals:
+
+- **A1 — Execution:** the real Python facade starts 0.85.1, validates the exact
+  runtime version, completes deterministic evaluation, and preserves existing
+  provider profiles, tool activation/admission, one bounded length continuation,
+  budgets, usage accounting, and cancellation.
+- **A2 — Continuity:** every supported source session keeps its opaque identity,
+  committed history, complete tool-call/result groups, compaction summaries and
+  retained tails, and current committed branch. Unknown formats fail closed.
+- **A3 — Durable safety:** concurrent same-session runs cannot overwrite each
+  other; cancelling or killing either process cannot release exclusion while a
+  surviving child can still write; only Host-approved turns become durable.
+  Independent sessions retain their existing ability to run concurrently.
+- **A4 — Migration/recovery:** preview is read-only; explicit apply preserves a
+  verified source backup, detects changed inputs, is restartable without duplicate
+  import, and never publishes an unverified database. Rollback preserves turns
+  committed after upgrading, not merely the pre-upgrade snapshot.
+- **A5 — Delivery readiness:** installed and clean-installed dependencies, runtime
+  smoke, Session/provider/Host regressions, and release packaging checks pass.
+  The offline maintenance order is tested before any real deployment.
+
+Non-goals: changing models or strategy; redesigning Host, memory extraction,
+Scene, registry or tool permissions; adopting AgentHarness or a Pi server;
+changing user/sender/config scope; silently resetting sessions; dual-writing
+old and new stores; adding a general migration framework. Source work does not
+itself commit, push, publish, stop services, migrate production data, or deploy.
+
+### 14.2 Verified compatibility facts
+
+The installed npm artifacts, rather than the release notes alone, establish:
+
+| 0.84.2 integration | 0.85.1 target |
+|---|---|
+| `SessionError`, `SqliteSessionRepository`, top-level `buildSessionContext` | These exports are absent; use `SqliteSessionRepo`, public Session/Branch primitives and explicit OM error adaptation |
+| `env`, `sqlite`, `writerLease` repository options | `directory`, `databasePath`, `databaseFactory`; no equivalent writer-lease option |
+| Session `findEntriesOnBranch`, `moveLane`, append helpers | Public Branch reads; `Session.mutate` plus entry/value writes and `branchTip` for atomic persistence |
+| Repository `metadata.schema` guard | OM format marker stored in an OM-namespaced public scalar value; opaque Session IDs are unchanged |
+| `compact(..., signal, ...)` | Context-taking `compact` / `compactWithRequest`; cancellation is carried through the public Context API |
+| `prepareNextTurnWithContext` runs after completed turns | It runs only when another assistant turn has already been selected |
+| SQLite `sessions.cwd`, lane/record/fact tables and `writer_leases` | Different Session columns plus scalar/list/usage storage; no shipped converter for the installed OM schema |
+
+A direct version bump was observed to fail before the IPC handshake at the
+missing `SessionError` export. The old packages were restored after that probe.
+Both versions retain the public `Agent`, message constructors, and compaction
+primitives. The new internal `harness/session/context` implementation exists but
+is not an exported package subpath; production must not import it by filesystem
+path or patch npm package exports.
+
+The Bot Host lease is a separate admission mechanism. Its TTL and optional
+Host-store use do not prove process-lifetime exclusion for every
+`run_pi_agent` caller. The old Pi writer fence cannot simply be deleted because
+an upstream Session mutation barrier exists inside one Node process.
+
+### 14.3 Runtime and persistence adaptation
+
+Keep `om-pi-ipc.v1`, the existing closed envelopes and tool/answer contracts.
+Change the pinned handshake version in Node, Python and owning fixtures
+atomically. Retain `Agent` as the sole model/tool loop.
+
+Use public 0.85.1 Context cancellation and the existing provider request wrapper
+for ordinary and compaction calls. Preserve per-call budget admission, configured
+retry policy, empty-summary rejection and once-only usage accounting, including
+committed compaction followed by a cancelled main call. Do not reopen earlier
+context-budget policy decisions.
+
+Queue an eligible length continuation only in `shouldStopAfterTurn`, before Pi
+polls its continuation queues. Keep the current eligibility checks and single-use
+budget; the enqueue branch returns `false`, never stop=true. No second callback
+or event subscriber queues the same continuation. Use
+`prepareNextTurnWithContext` only to supply the selected next turn's tools and
+context. Its context replaces the whole prior context, so retain the completed
+turn's messages and systemPrompt when changing tools. A final/admitted answer or
+forced-final budget stop cannot enqueue another turn. Tool arguments cut off by
+a length stop are never executed.
+
+Open the explicit canonical `OM_PI_SESSION_DB`, never the new backend's default
+per-session-file layout. Under the locks in section 14.4, inspect the existing
+file with public `createNodeSqliteFactory().openReadOnly()` and its query API
+before constructing a writable Repository. Check integrity and the exact pinned
+schemas, including table/column definitions and storage version, to distinguish
+legacy 0.84.2, target 0.85.1, and incomplete/corrupt/unknown data. This bounded
+format probe is the only reader coupled to the two SQLite schemas; it imports
+no package internals. A few absent tables or an empty Repository catalog never
+prove a database is missing or safe to initialize.
+
+Database format and requested session existence are separate decisions. A missing
+database may be created; a recognized target database may create a missing
+session ID without disturbing other sessions. Read an existing target session's
+OM scalar marker through public `SqliteStorage.getValue` and `value(namespace,key)`
+on the read-only connection before writable `repo.open()`. A valid marker admits
+normal loading. Legacy, mixed, unknown or nonempty unmarked data returns bounded
+`SESSION_ERROR` remediation; ordinary startup performs no version migration and
+never replaces unreadable data with an empty database.
+
+Public `repo.create({id})` commits the session row before OM initialization.
+Initialize the format marker and `branchTip("main") = null` together in one
+`Session.mutate` commit. If interrupted between creation and initialization,
+retry that mutation only when the target session is proven completely empty:
+no entries, scalar/list values, usage rows or branch state. Any durable content
+without the expected marker fails closed. This recovery is scoped to the requested
+session under its lock; it does not recreate or clear the shared database.
+
+Use a data-only `main` Branch. At load, use its public Branch reads to find and
+validate the last `om.turn.commit.v1` marker on the current ancestry; a session-wide
+entry search is not a substitute. Unknown markers or broken ancestry fail closed.
+Rewind the branch tip to that committed point through public mutation primitives
+before exposing history. Uncommitted tails are not model context.
+
+Because the old context-builder export is gone, the integration owns one narrow
+projection of its allowed persisted entry types: message entries after the most
+recent committed compaction; that compaction's public summary message and retained
+tail; and commit markers, which are ignored as context. Preserve existing
+filtering of failed/aborted assistant turns and complete tool groups. Reject
+unsupported entry/custom-message types rather than invent semantics. Use public
+Pi message constructors and compaction primitives; this adapter does not calculate
+new summaries, prune history independently, or implement general harness branches.
+Keep `estimateProviderInputTokens` as the owner of budget estimation: it disregards
+pre-compaction assistant usage on an estimation-only copy by timestamp. Preserve
+those timestamps and persisted usage; do not duplicate that rule in the projector.
+
+Append a validated canonical turn, its commit marker and new branch tip in one
+`Session.mutate` commit. Persist a successful pre-run compaction and its marker
+in a separate atomic commit, retaining the existing checkpoint rule if the user
+turn is later discarded. Do not call queued public Session writers from inside a
+mutation callback. On an ambiguous return after a durable commit, read the marker
+for that run and canonical content before deciding whether retry is safe; an
+existing matching committed run is not appended twice.
+
+### 14.4 Process-lifetime exclusion
+
+At the common Python `run_pi_agent` boundary, use BSD `fcntl.flock` with
+`LOCK_NB`; `lockf` and traditional POSIX record locks do not satisfy the inherited
+ownership contract. Reuse private path/file validation from
+`src/infrastructure/private_storage.py`, then resolve the validated database path
+consistently before deriving lock identities. Keep existing hostile-symlink
+rejection. Valid aliases such as macOS `/tmp` and `/private/tmp` must identify the
+same database lock and the same opaque-session lock. Database lock identity is
+based on this stable canonical pathname, not the inode replaced by migration.
+
+Each run independently opens its lock descriptors; same-process requests for the
+same session must contend too. Do not reuse the existing helper's reentrant
+ownership or explicit-unlock lifetime for child handoff. No npm locking package
+or new lease table is needed. Lock files are private and remain in place;
+unlinking an active lock file is forbidden.
+
+Acquire a shared database maintenance lock (`LOCK_SH`) before the per-session
+exclusive lock (`LOCK_EX`); the offline converter takes the database lock
+exclusively. Both use nonblocking flock. Lock ordering is always database then
+session. Distinct sessions may hold the shared database lock together.
+A busy session returns the existing retryable session error, before provider or
+Session writes; waiting does not consume a new unbounded execution budget.
+
+Both acquired lock descriptors are passed to the Node child via `pass_fds` and
+are held until the child has exited. Normal cleanup terminates/reaps the child
+before explicitly unlocking. If Python is killed, the inherited descriptors keep
+the lock alive in Node; if Node is killed, Python reaps it before releasing its
+copies. A stopped process retains its lock instead of losing ownership at a TTL.
+If termination cannot be proved, no replacement writer may be admitted. The
+private Node entry must reject a persistent run without both expected descriptor
+identities and a valid handoff. Checking open descriptors and their expected file
+identity is an integrity guard, not proof that flock is held; real contention
+tests prove exclusion. Tests exercise direct-entry rejection as well as the facade.
+Transient evaluation creates no Session database or Session locks.
+
+This exclusion is for supported local SQLite filesystems on macOS/Linux. No
+Windows or network-filesystem lock emulation is introduced. Unsupported locking
+fails explicitly. Host admission leases remain unchanged and retain their own
+run-governance role. A hung or paused writer remains busy until it exits. Diagnose
+the owning processes and drain or terminate them through an authorized operator
+action; never steal the lock or unlink its file to admit another writer. No PID
+registry or automatic lock-stealing timeout is added.
+
+### 14.5 Explicit offline conversion and rollback
+
+Add one bounded operator surface under the existing Bot CLI:
+
+```text
+./om bot migrate-pi --pi-db PATH --source-runtime DIR --target-runtime DIR --dry-run
+./om bot migrate-pi --pi-db PATH --source-runtime DIR --target-runtime DIR --apply --writers-stopped
+```
+
+These are proposed commands, not current commands. Runtime directories contain
+the matching package manifest, lockfile and installed packages. Only the exact
+0.84.2 and 0.85.1 formats are accepted. The existing `./om bot migrate` continues
+to own the Copilot-to-Bot name/config migration; Pi conversion neither invokes
+that migration nor edits its receipt, Host database, outbox, configs or memory
+extraction records. No new global package or old/new runtime fallback is installed.
+
+Use the existing Python SQLite `backup()` pattern to create a self-contained,
+WAL-consistent recovery backup, close/checkpoint it and verify integrity and
+logical parity. Seal that backup and record its identity; Pi never opens it.
+Make a disposable export copy from the sealed backup. The source version's public
+Session APIs open only this working copy, because even old public `open()` writes
+leases and can leave WAL state after a crash. Import into a separate private
+staging database through the target version's public APIs. Recheck the sealed
+backup independently after export; an interrupted working copy can be discarded
+and recreated from it without altering the recovery artifact.
+
+One narrow offline Node bridge runs export and import in separate processes,
+separate from normal IPC. Anchor standard module resolution at each explicitly
+selected runtime manifest, resolve only public package exports, then load the
+resolved module URL and verify the actual package paths/versions against that
+runtime's manifest, lockfile and installed-package identity. Changing cwd alone
+does not select an import's version. Reject wrong-version resolution before any
+Session open. No custom loader/import-map framework or copied old implementation
+is required. Export handles supported OM sessions only.
+
+The conversion report includes versions/package-lock hashes, source logical
+fingerprint including committed WAL contents, opaque session IDs, per-session
+committed entry counts and content hashes, retained compactions/tool groups,
+excluded uncommitted tails, sealed-backup/export-copy/target identities, and
+validation results. Disk checks include all three copies and the active source.
+Do not output conversation text, provider keys or raw authority paths in reports.
+All source rows, including unreachable historical branches and incomplete tails,
+remain preserved in the verified immutable backup; only validated committed main
+history becomes active in the target. Unsupported source branches, metadata or
+custom entry semantics block conversion instead of being silently dropped.
+Physical sequence numbers may be reassigned; message timestamps, entry ancestry,
+IDs referenced by payloads and run commit identities must be preserved or mapped
+explicitly and validated. Readback uses the target runtime's real context loader
+and checks equivalence of the canonical model-visible history, not only row counts.
+Old OM pre-run compaction entries map to target `fromHook:false`; reverse mapping
+removes that field only for supported OM-origin entries. Unsupported hook-origin
+content blocks conversion. Preserve message and compaction timestamps and validate
+one and multiple compactions through both real context loaders, including the
+unchanged budget estimator and complete tool groups.
+
+Apply requires a maintenance window: stop/drain every Agent ingress, shared-db
+writer and manual persistent CLI run; retain the activation-state snapshot.
+`--writers-stopped` records this explicit operator assertion. The converter also
+rejects outstanding source writer leases, obtains the exclusive database lock,
+rechecks the source snapshot immediately before publication, and refuses any
+changed input or unresolved live writer. New runtime locks cannot fence old
+0.84.2 processes; their quiescence is a required precondition, not an inferred
+consequence of an expired lease.
+
+Conversion phases and failure behavior:
+
+1. **Preview:** read-only format/identity/integrity/space checks and conversion
+   feasibility. No lock-file, backup, receipt, Session creation or network/model
+   call. A preview is evidence, not authorization.
+2. **Prepared:** after explicit apply and quiescence, create and seal the verified
+   WAL-consistent backup, durably record its identity plus source/target runtime
+   identities in a private conversion receipt, then make the disposable export
+   copy. Record its separate identity; failure here leaves the source and sealed
+   backup unchanged. Interrupted disposable work is never used as a recovery copy.
+3. **Validated:** import all supported sessions into a private same-filesystem
+   staging database, close/checkpoint it, and verify integrity and context/commit
+   equivalence. Failure leaves the active source unchanged. Receipts never mark
+   a target validated before readback succeeds.
+4. **Published:** after rechecking source identity and closing all database
+   connections, replace the canonical file atomically, fsync the directory, and
+   record readback completion. No live WAL/SHM file is copied onto the new store;
+   their ownership and absence after quiescent checkpoint are checked before
+   publication. A crash between replacement and receipt completion is reconciled
+   by exact source/target identity, never by importing again into the target.
+
+Retries reuse a matching prepared/validated target or report already applied.
+A mismatched receipt, backup, schema, source or target is an error, not an
+invitation to overwrite it. A partial staging file is never a candidate for
+activation. Runtime startup refuses an unresolved publication receipt.
+
+Rollback after new turns requires the same stopped-writer conversion in reverse,
+using the current 0.85.1 committed history and the retained 0.84.2 runtime. Verify
+that the previous runtime can resume that converted history before switching the
+application release. A pre-upgrade backup alone is sufficient only when a checked
+fingerprint proves no new committed data would be lost. Unsupported new content
+blocks automatic rollback; keep the current data and report the incompatibility.
+Neither direction deletes snapshots automatically or restores stale data over
+newly committed conversations.
+
+### 14.6 Owners and rollout boundary
+
+| Owner | Bounded responsibility |
+|---|---|
+| `agent-runtime/main.ts` | Public Pi API adaptation, Context/continuation, canonical Session projection and durable commit |
+| `agent-runtime/package.json`, `package-lock.json` | Three exact pins and reproducible dependency graph |
+| `src/infrastructure/pi_agent_process.py` | Exact handshake, process-lifetime locks and descriptor lifecycle |
+| `src/infrastructure/private_storage.py` | Existing private file/path primitives; preserve existing callers |
+| Proposed `src/application/bot/pi_migration.py` and a narrow offline Node bridge | Preview/apply/reconcile conversion and public old/new backend access |
+| `src/interfaces/cli/bot_ops.py` | Explicit migration CLI and bounded operator result |
+| `src/application/service_upgrade.py` | Format/runtime readiness for upgrade, rollback and failed-transition compensation; retain the verified source runtime; no implicit migration |
+| `src/application/service_cleanup.py` | Exclude source runtime directories still required by the Pi conversion receipt from release cleanup |
+| Existing Bot runtime callers | Preserve canonical database and session identity; no duplicated lock or conversion logic |
+| This document and `docs/RELEASE_PROCESS.md` | Runtime contract and operator maintenance order respectively |
+
+The generic upgrade path must not restart an old runtime against a converted
+store or a new runtime against an unconverted store. Before an authorized real
+rollout, prepare and smoke-test the released target without changing activation;
+quiesce writers; convert/verify Session storage; perform the controlled release
+switch; verify current dependencies, config freshness, and live service health;
+then restore the intended ingress activation state. Automatic version switching
+stops with remediation when this offline step is required. The old deployment's
+upgrade command cannot be assumed to know the new gate; the new release's
+preflight and the operator sequence must be used. Failure after storage
+publication follows the reverse-conversion rule before old services resume.
+Enforce that ordering in `_compensate_service_transition` as well as ordinary
+upgrade/rollback entrypoints: an incompatible old runtime must not restart after
+a failed switch, and a failed reverse conversion leaves ingress stopped with
+explicit remediation rather than restoring stale history.
+
+The release/upgrade owner retains the exact 0.84.2 runtime directory and its
+manifest, lockfile and installed-package identity while Pi rollback depends on it.
+Store that dependency in the existing Pi conversion receipt. Readiness verifies
+the directory before migration and rollback; cleanup refuses to remove a runtime
+referenced by a retained conversion dependency, independently of keep-count rules.
+Use the retained release directory rather than a new runtime cache. Releasing that
+dependency requires an explicit operator decision ending this rollback obligation;
+ordinary cleanup never infers that decision. `docs/RELEASE_PROCESS.md` owns this
+maintenance order and operator handoff.
+
+#### First transition from an unmodified 0.84.2 deployment
+
+The first incompatible transition uses the existing installer in a private
+staging prefix. Old automatic upgraders must be disabled and drained before
+they can consume the incompatible release; retain their activation states.
+Do not invoke the old release's confirmed `update apply` for this transition:
+its dry-run does not prepare a target, and its confirmed call prepares and
+switches in one operation. The new gate cannot retrofit an already running old
+upgrader. This maintenance precondition also covers other operators or jobs that
+could switch the production link during conversion.
+
+Use an explicitly published and verified target tag. In the commands below,
+`PI_OLD_RELEASE` is the resolved active old release, `PI_UPGRADE_STAGE` is a fresh
+private directory outside production release/runtime paths, `PI_TARGET_TAG` is
+that exact `v...` tag, `PI_PRODUCTION_LINK` is the production current symlink,
+`PI_RUNTIME_ROOT` is its runtime root, and `PI_SESSION_DB` is an inventoried
+canonical database. These are operator-supplied paths, not new config keys.
+
+1. Prepare the control runtime with the existing old release's installer:
+
+   ```bash
+   bash "$PI_OLD_RELEASE/scripts/install.sh" --version "$PI_TARGET_TAG" \
+     --prefix "$PI_UPGRADE_STAGE" --no-install-cli
+   PI_TARGET_CONTROL="$PI_UPGRADE_STAGE/releases/$PI_TARGET_TAG"
+   ```
+
+   This changes only the private prefix's `current` link, installs the target's
+   locked dependencies and runs its isolated smoke. It does not change the
+   production current/config/services/SQLite or global CLI wrappers. Verify the
+   published target commit and installed package identities before proceeding;
+   preparation failure leaves production on its old runtime/store.
+
+2. Snapshot and stop/drain every Agent ingress and shared-DB writer as required
+   by section 14.5; the old upgrade jobs remain disabled. Run the target CLI
+   **from the target directory** as well as by absolute path, so Python's current
+   directory cannot select old application modules ahead of the target:
+
+   ```bash
+   (cd "$PI_TARGET_CONTROL" && "$PI_TARGET_CONTROL/om" bot migrate-pi \
+     --pi-db "$PI_SESSION_DB" --source-runtime "$PI_OLD_RELEASE/agent-runtime" \
+     --target-runtime "$PI_TARGET_CONTROL/agent-runtime" --dry-run)
+   ```
+
+   After reviewing the preview within the authorized maintenance window, repeat
+   with `--apply --writers-stopped` instead of `--dry-run`, for each inventoried
+   database. The conversion receipt/readback must validate all stores before
+   any production link switch. `migrate-pi` remains the proposed command in 14.5.
+
+3. From the same target control directory, preview the existing update surface
+   with explicit production paths:
+
+   ```bash
+   (cd "$PI_TARGET_CONTROL" && "$PI_TARGET_CONTROL/om" update apply \
+     --repo-root "$PI_PRODUCTION_LINK" --runtime-root "$PI_RUNTIME_ROOT" \
+     --target-version "$PI_TARGET_TAG" --no-restart-services \
+     --preserve-activation-state)
+   ```
+
+   After a successful readiness preview, repeat with `--confirm --yes`. The
+   target controller owns the storage gate and compensation; production runtime
+   preparation must verify the same release/package identity used for migration.
+   Keep ingress stopped through switch and readback. Only after current runtime,
+   converted stores, configs and live service checks agree may the operator
+   restore the recorded activation states and automatic upgrade jobs, whose
+   entrypoints must now resolve to the new production controller.
+
+Before storage publication, failure keeps the old source and production link.
+After publication, failure at any later step requires verified reverse conversion
+from the current data before old writers can resume, even if the link never
+switched. If reverse conversion fails, keep ingress stopped and preserve the
+data/receipts for remediation. Retain both the old runtime and staged controller
+until the transition and any compensation are verified. The operator commands
+are maintained in `docs/RELEASE_PROCESS.md`; the existing upgrade owner consumes
+the receipt's source/target/backup identities for readiness and compensation.
+No new prepare-only command or generic deployment workflow is introduced.
+
+### 14.7 Three independently verifiable behavior slices
+
+1. **New runtime executes existing requests (A1):** adapt imports, exact version
+   handshake, Context/compaction signatures and continuation scheduling. Prove
+   stateless smoke and existing loopback provider, tool/admission, budget and
+   cancellation behavior, including exactly one admitted continuation and complete
+   context after tool changes. Persistent execution is not enabled until slice 2.
+2. **Conversations remain safe and continuous (A2–A4):** implement canonical
+   Session projection/atomic commits, process-lifetime exclusion and offline
+   forward/reverse conversion. Verify old-format fixtures, distinct-account and
+   same-account processes, kill/stop/cancel scenarios, migration fault injection
+   at every publication boundary, retry/no-op, and rollback after new commits.
+   Explicitly cover: legacy/corrupt source unchanged on startup; interrupted empty
+   session initialization; committed WAL in the sealed backup; exporter death
+   leaving that backup unchanged; runtime-version resolution rejection; single
+   and repeated compactions; same-process lock contention; alias-path contention;
+   parent SIGKILL with child paused while a second same-session run remains busy
+   until child exit; and distinct-session success. Test new transaction atomicity
+   with crashes, and ancestry rewind with a deliberately uncommitted-tail fixture.
+3. **Packaged rollout fails safely or succeeds (A5):** integrate format readiness
+   with release/upgrade checks, CLI help and owner documentation. Prove clean
+   install, source-archive smoke and offline switch/rollback scenarios. This
+   slice prepares delivery; it does not publish or operate production. Include
+   compensation after a failed switch and cleanup refusal for the retained source
+   runtime required by rollback. Begin the first-transition fixture with an
+   unmodified 3.5.1/0.84.2 controller: private-prefix preparation leaves production
+   unchanged, old automatic switchers remain quiescent, the target CLI imports
+   target code, all conversion receipts validate before the production link
+   changes, and every post-publication failure reverses current data before old
+   writers resume. This proves the supported recipe; it does not claim the old
+   binary acquires new safety checks.
+
+Validation uses Node 22.19.0 as well as the available local Node version; model
+requests use loopback fixtures, and all databases, receipts and kill tests use
+private temporary storage. Existing failing assertions about lease-table shape
+may change only when equivalent facade-level exclusion/recovery assertions are
+present. Do not weaken behavioral tests to make the version bump pass.
+
+Run `tests/test_pi_agent_process.py`, relevant `tests/test_bot_*` and Bot eval
+suites, the Pi/service rule from `src/application/release_test_plan.py`, the
+runtime smoke script, dependency-graph check, and documentation/sensitive-artifact
+guardrails. Add narrow migration and lock-lifecycle tests to the owning test plan;
+regenerate the dependency graph if imports change. The final validation scope is
+determined from the complete task diff, including new files.
+
+### 14.8 Residual risks and release prerequisites
+
+- **Runtime adapter owner:** prove public-only context projection parity for all
+  OM-persisted entries. An unsupported type must block, not be erased.
+- **Storage adapter owner:** verify inherited-lock behavior on both supported OSes,
+  real cross-process races, crash recovery, and same-filesystem publication.
+- **Migration owner:** prove both official backend import directions can represent
+  the supported OM history, including compaction/commit identities; inability to
+  preserve them is a blocking design finding, not permission to reset history.
+- **Operator/release owner:** inventory actual database paths, retention/disk
+  capacity and all Agent writers during the separately authorized deployment.
+  Do not collect live conversation content into review artifacts.
+- **Release owner:** a Pi adaptation must be released before the remote consumes
+  it. Publication remains separately authorized; the remote-upgrade request is
+  retained and is not evidence that publication or migration has already run.

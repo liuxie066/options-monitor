@@ -124,6 +124,16 @@ def _fake_pi_runtime_prepare(command: list[str]) -> subprocess.CompletedProcess 
     return None
 
 
+def _stub_pi_storage_readiness(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import src.application.service_upgrade as service_upgrade_module
+
+    monkeypatch.setattr(
+        service_upgrade_module,
+        "_pi_storage_readiness",
+        lambda **_kwargs: {"ok": True, "stores": []},
+    )
+
+
 def _fake_release_target_query(
     command: list[str],
     *,
