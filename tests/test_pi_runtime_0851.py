@@ -6,6 +6,7 @@ import os
 import sqlite3
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 
 from src.infrastructure.pi_agent_process import _runtime_command, derive_pi_session_id
@@ -198,12 +199,14 @@ def test_dangling_main_tip_fails_closed_without_rewind(tmp_path):
         run_id="dangling_seed",
     )
     assert seeded["ok"] is True
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection:
         connection.execute(
             "UPDATE scalar_values SET value = ? "
             "WHERE session_id = ? AND namespace = 'pi.branch.tip' AND key = 'main'",
             (json.dumps("missing-entry-id"), session_id),
         )
+        connection.commit()
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     before = database.read_bytes()
 
     rejected = _run_session(
