@@ -21,7 +21,15 @@ from tests.service_deploy_test_support import (
     _fake_release_target_query,
     _legacy_credential_migration_fixture,
     _credential_migration_runner,
+    _stub_pi_storage_readiness,
 )
+
+
+@pytest.fixture(autouse=True)
+def _legacy_service_fixtures_have_ready_pi_storage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_pi_storage_readiness(monkeypatch)
 
 def test_render_systemd_bundle_can_own_feishu_agent_credential_assets(
     tmp_path: Path,

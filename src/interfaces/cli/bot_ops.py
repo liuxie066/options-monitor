@@ -103,6 +103,14 @@ def add_bot_commands(subparsers: Any) -> argparse.ArgumentParser:
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--apply", action="store_true")
     migrate.add_argument("--writers-stopped", action="store_true")
+    migrate_pi = bot_sub.add_parser("migrate-pi", help="inspect or convert the bounded Pi Session store")
+    migrate_pi.add_argument("--pi-db", required=True)
+    migrate_pi.add_argument("--source-runtime", required=True)
+    migrate_pi.add_argument("--target-runtime", required=True)
+    pi_mode = migrate_pi.add_mutually_exclusive_group(required=True)
+    pi_mode.add_argument("--dry-run", action="store_true")
+    pi_mode.add_argument("--apply", action="store_true")
+    migrate_pi.add_argument("--writers-stopped", action="store_true")
     return bot
 
 
@@ -111,6 +119,15 @@ def handle_bot_command(args: argparse.Namespace) -> dict[str, Any]:
     if args.bot_command == "migrate":
         from src.application.bot.migration import migrate_bot
         return migrate_bot(host_db=args.host_db, config_paths=args.config, pi_paths=args.pi_db, apply=args.apply, writers_stopped=args.writers_stopped)
+    if args.bot_command == "migrate-pi":
+        from src.application.bot.pi_migration import migrate_pi
+        return migrate_pi(
+            pi_db=args.pi_db,
+            source_runtime=args.source_runtime,
+            target_runtime=args.target_runtime,
+            apply=args.apply,
+            writers_stopped=args.writers_stopped,
+        )
     if args.bot_command == "run":
         request = BotRequest(
             request_id=new_id("req"),

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import os
 import hashlib
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from functools import cmp_to_key
 import shutil
@@ -10,7 +10,42 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
+from src.application.bot.pi_migration import (
+    pi_migration_receipt_path,
+    read_pi_migration_receipt,
+    retained_pi_runtime_paths,
+)
+from src.application.settings import build_effective_env
 from src.application.version_check import compare_versions
+
+
+_PI_SESSION_STATE_RELATIVE_PATH = Path("output_shared/state")
+
+
+def pi_session_database_paths(
+    *,
+    runtime_root: Path,
+    repo_root: Path,
+    release_dirs: tuple[Path, ...] = (),
+) -> tuple[Path, ...]:
+    effective = build_effective_env(repo_root=repo_root)
+    audit_raw = effective.get("OM_INBOUND_AUDIT_DB").strip()
+    audit_db = (
+        Path(audit_raw).expanduser()
+        if audit_raw
+        else runtime_root
+        / _PI_SESSION_STATE_RELATIVE_PATH
+        / "inbound_control.sqlite3"
+    )
+    if not audit_db.is_absolute():
+        audit_db = repo_root / audit_db
+    active_db = audit_db.absolute().with_name("pi_sessions.sqlite3")
+    candidates = [active_db]
+    for release_dir in release_dirs:
+        candidate = (release_dir / _PI_SESSION_STATE_RELATIVE_PATH / "pi_sessions.sqlite3").absolute()
+        if candidate.exists() or pi_migration_receipt_path(candidate).exists():
+            candidates.append(candidate)
+    return tuple(dict.fromkeys(candidates))
 
 
 def _default_releases_root(repo_root: Path) -> Path:
@@ -75,6 +110,35 @@ def _release_dirs(releases_root: Path) -> list[Path]:
         if path.is_dir() and not path.is_symlink() and (path / "VERSION").is_file()
     ]
     return sorted(dirs, key=cmp_to_key(_compare_release_dirs_desc))
+
+
+def _pi_retained_releases(
+    *,
+    runtime_root: Path,
+    repo_root: Path,
+    releases: list[Path],
+) -> tuple[list[Path], list[dict[str, Any]]]:
+    receipts: list[dict[str, Any]] = []
+    retained_runtimes: list[Path] = []
+    for pi_db in pi_session_database_paths(
+        runtime_root=runtime_root,
+        repo_root=repo_root,
+        release_dirs=tuple(releases),
+    ):
+        receipt = read_pi_migration_receipt(pi_db)
+        if receipt is None:
+            continue
+        receipts.append(receipt)
+        retained_runtimes.extend(path.expanduser().resolve() for path in retained_pi_runtime_paths(receipt))
+    retained = [
+        release.resolve()
+        for release in releases
+        if any(
+            runtime_dir == release.resolve() or runtime_dir.is_relative_to(release.resolve())
+            for runtime_dir in retained_runtimes
+        )
+    ]
+    return retained, receipts
 
 
 def _safe_child(path: Path, *, parent: Path) -> bool:
@@ -375,6 +439,7 @@ def service_cleanup(
     repo_link = Path(repo_root).expanduser()
     releases = Path(releases_root).expanduser().resolve() if releases_root else _default_releases_root(repo_link)
     runtime = Path(runtime_root).expanduser().resolve() if runtime_root else None
+    pi_runtime = runtime or Path("/var/lib/options-monitor")
     keep_count = max(2, int(keep_releases or 2))
     base = {
         "schema_version": 1,
@@ -405,6 +470,24 @@ def service_cleanup(
             "changed": False,
         }
 
+    pi_retained: list[Path] = []
+    pi_receipts: list[dict[str, Any]] = []
+    try:
+        pi_retained, pi_receipts = _pi_retained_releases(
+            runtime_root=pi_runtime,
+            repo_root=repo_link,
+            releases=releases_list,
+        )
+    except Exception as exc:
+        return {
+            **base,
+            "ok": False,
+            "status": "pi_retention_unresolved",
+            "reason": f"Pi migration receipt cannot be validated: {type(exc).__name__}: {exc}",
+            "active_release": str(active_release),
+            "changed": False,
+        }
+
     kept: list[Path] = [active_release]
     for release in releases_list:
         if release.resolve() == active_release:
@@ -412,6 +495,7 @@ def service_cleanup(
         if len(kept) >= keep_count:
             break
         kept.append(release.resolve())
+    kept.extend(path for path in pi_retained if path not in kept)
     kept_set = {path.resolve() for path in kept}
     delete_releases = [path for path in releases_list if path.resolve() not in kept_set]
 
@@ -628,6 +712,7 @@ def service_cleanup(
         "user overlay config",
         "active release",
         "rollback release",
+        "Pi migration retained release runtime",
     ]
     failures = [
         item
@@ -650,6 +735,8 @@ def service_cleanup(
         "changed": changed,
         "active_release": str(active_release),
         "kept_releases": [{"path": str(path), "version": path.name} for path in kept],
+        "pi_retained_releases": [{"path": str(path), "version": path.name} for path in pi_retained],
+        "pi_migration_receipt_phases": [receipt.get("phase") for receipt in pi_receipts],
         "delete_releases": release_items,
         "cache_dirs": cache_items,
         "output_runs_cleanup": output_runs_cleanup,

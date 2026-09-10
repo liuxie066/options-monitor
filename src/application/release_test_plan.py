@@ -103,6 +103,7 @@ TEST_RULES: tuple[TestRule, ...] = (
             "src/application/release_version_recommendation.py",
             "src/application/release_target.py",
             "src/application/version_check.py",
+            "src/application/service_cleanup.py",
             "src/application/service_upgrade.py",
             "src/application/service_deploy.py",
             "src/interfaces/cli/service_ops.py",
@@ -114,6 +115,7 @@ TEST_RULES: tuple[TestRule, ...] = (
             "tests/test_install_script.py",
             "tests/test_release_check.py",
             "tests/test_release_delta_coverage.py",
+            "tests/test_service_pi_readiness.py",
         ),
         reason="service, installer, or release-upgrade files changed",
         commands=(
@@ -122,6 +124,7 @@ TEST_RULES: tuple[TestRule, ...] = (
             "tests/test_release_delta_coverage.py "
             "tests/test_release_version_recommendation.py tests/test_version_check.py "
             "tests/test_install_script.py tests/test_release_test_plan.py",
+            "./.venv/bin/python -m pytest tests/test_service_pi_readiness.py",
         ),
     ),
     TestRule(
@@ -143,6 +146,10 @@ TEST_RULES: tuple[TestRule, ...] = (
             "tests/bot_pi_test_support.py",
             "tests/test_architecture_guards.py",
             "tests/test_pi_agent_process.py",
+            "tests/test_pi_runtime_0851.py",
+            "tests/test_bot_pi_migration.py",
+            "tests/test_pi_session_locks.py",
+            "tests/test_service_pi_readiness.py",
             "tests/test_bot_p1_eval.py",
             "tests/test_bot_*.py",
             "tests/test_inbound_control.py",
@@ -158,7 +165,10 @@ TEST_RULES: tuple[TestRule, ...] = (
         reason="Pi Agent runtime, packaging, or public contract files changed",
         commands=(
             "npm ci --omit=dev --ignore-scripts --prefix agent-runtime",
-            "./.venv/bin/python -m pytest tests/test_pi_agent_process.py",
+            "./.venv/bin/python -m pytest tests/test_pi_agent_process.py "
+            "tests/test_pi_runtime_0851.py",
+            "./.venv/bin/python -m pytest tests/test_bot_pi_migration.py "
+            "tests/test_pi_session_locks.py tests/test_service_pi_readiness.py",
             "./.venv/bin/python -m pytest tests/test_bot_phase1.py "
             "tests/test_bot_conversation_memory.py tests/test_bot_p1_eval.py "
             "tests/test_inbound_control.py "
