@@ -4,11 +4,13 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 from src.application.agent_tool_config import load_runtime_config
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.config_yaml import build_yaml_runtime_config_file
 from src.application.runtime_config_freshness import GENERATED_KEY, check_runtime_config_freshness
+from src.application.runtime_config_readiness import evaluate_runtime_config_readiness, require_runtime_config_readiness
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -202,3 +204,72 @@ markets:
     assert result["ok"] is False
     assert any(item["code"] == "inline_source_changed" for item in result["errors"])
     assert "./om config build" in str(result["rebuild_command"])
+
+
+@pytest.mark.parametrize("market,symbol", [("us", "NVDA"), ("hk", "0700.HK")])
+def test_readiness_accepts_assistant_only_edit_without_writes(
+    tmp_path: Path, market: str, symbol: str,
+) -> None:
+    source = tmp_path / "config.yaml"
+    doc = {
+        "accounts": {"lx": {"type": "futu", "futu_account_id": "12345678"}},
+        "markets": {market: {"accounts": ["lx"], "symbols": [symbol]}},
+        "assistant": {"enabled": True, "context_window_messages": 6},
+    }
+    source.write_text(yaml.safe_dump(doc), encoding="utf-8")
+    runtime = tmp_path / f"config.{market}.json"
+    build_yaml_runtime_config_file(
+        repo_root=REPO_ROOT, market=market, config_path=source, output_config_path=runtime,
+    )
+    doc["assistant"] = {"enabled": False, "context_window_messages": 8}
+    source.write_text(yaml.safe_dump(doc), encoding="utf-8")
+    before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in tmp_path.rglob("*") if p.is_file()}
+
+    path, config = load_runtime_config(config_key=market, config_path=runtime)
+    result = require_runtime_config_readiness(
+        config, repo_root=REPO_ROOT, runtime_config_path=path, explicit_market=market,
+    )
+
+    assert result["ok"] is True
+    assert result["freshness"]["ok"] is True
+    after = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in tmp_path.rglob("*") if p.is_file()}
+    assert after == before
+
+
+def test_readiness_reports_invalid_yaml_source_without_leaking_content(tmp_path: Path) -> None:
+    source = tmp_path / "config.yaml"
+    source.write_text(
+        "accounts:\n  lx:\n    type: futu\n    futu_account_id: '12345678'\n"
+        "markets:\n  us:\n    accounts: [lx]\n    symbols: [NVDA]\n",
+        encoding="utf-8",
+    )
+    runtime = tmp_path / "config.us.json"
+    build_yaml_runtime_config_file(
+        repo_root=REPO_ROOT, market="us", config_path=source, output_config_path=runtime,
+    )
+    source.write_text("markets: [PRIVATE_CONFIG_VALUE\n", encoding="utf-8")
+    config = json.loads(runtime.read_text(encoding="utf-8"))
+
+    result = evaluate_runtime_config_readiness(
+        config, repo_root=REPO_ROOT, runtime_config_path=runtime, explicit_market="us",
+    )
+
+    assert result["ok"] is False
+    assert result["validation"]["ok"] is True
+    assert result["identity"]["ok"] is True
+    assert result["schedule"]["ok"] is True
+    assert result["freshness"]["ok"] is False
+    assert result["errors"]
+    assert all(error["component"] == "freshness" for error in result["errors"])
+    error = result["errors"][0]
+    assert error["code"] != "source_changed"
+    assert error["role"] == "market_user"
+    assert error["path"] == str(source)
+    assert "./om config build" in result["freshness"]["rebuild_command"]
+    assert "PRIVATE_CONFIG_VALUE" not in json.dumps(result)
+    with pytest.raises(AgentToolError) as exc:
+        require_runtime_config_readiness(
+            config, repo_root=REPO_ROOT, runtime_config_path=runtime, explicit_market="us",
+        )
+    assert exc.value.code == "CONFIG_ERROR"
+    assert exc.value.details == result

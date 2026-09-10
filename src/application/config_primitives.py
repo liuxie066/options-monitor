@@ -11,6 +11,8 @@ from src.application.agent_tool_contracts import AgentToolError
 
 
 MARKETS = ("us", "hk")
+GENERATED_KEY = "_generated"
+GENERATED_SCHEMA_VERSION = "1.0"
 
 
 class IndentedYamlDumper(yaml.SafeDumper):
