@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Any
 
 from src.application.bot.contracts import AppResult
+from src.application.bot.task_report import TASK_MARKER, TASK_TOOL, render_task_report
 
 
 _SUBMIT_KEYS = {"mode", "status", "answer_markdown", "claims"}
@@ -26,6 +27,9 @@ _MAX_ANSWER_CHARS = 12_000
 def admit_submit_answer(
     arguments: dict[str, Any],
     evidence_registry: dict[str, dict[str, Any]],
+    *,
+    task_reads: dict | None = None,
+    narrow_tasks: bool = False,
 ) -> dict[str, Any]:
     """Validate the closed S8 final-answer protocol against request evidence."""
 
@@ -44,13 +48,51 @@ def admit_submit_answer(
         or not isinstance(claims, list)
     ):
         return _answer_rejection("answer_schema_invalid", code="INPUT_ERROR")
-    if output_contract_rejection_reason(text) is not None:
+    if not task_reads and output_contract_rejection_reason(text) is not None:
         return _answer_rejection("answer_markdown_invalid", code="INPUT_ERROR")
     if (mode == "conceptual" and claims) or (mode == "evidence" and not claims):
         return _answer_rejection("answer_mode_inconsistent")
 
+    task_ids: set[str] = set()
+    task_claim_seen = False
+    maintenance_text = text.strip()
+    if task_reads:
+        if text.count(TASK_MARKER) != 1 or not text.startswith(TASK_MARKER):
+            return _answer_rejection("task_report_marker_required")
+        maintenance_text = text[len(TASK_MARKER):].strip()
+        report, task_status, task_ids = render_task_report(task_reads, narrowed=narrow_tasks)
+        # Validate references to the visible source even when the channel later
+        # requires a smaller presentation of the same approved task segment.
+        if narrow_tasks:
+            _, _, task_ids = render_task_report(task_reads)
+        if task_status == "needs_narrowing" or status == "complete":
+            status = task_status
+        elif task_status == "insufficient_evidence" and status == "partial":
+            status = task_status
+        text = text.replace(TASK_MARKER, report, 1)
+    elif TASK_MARKER in text:
+        return _answer_rejection("task_report_without_read")
+    if output_contract_rejection_reason(text) is not None:
+        return _answer_rejection("answer_markdown_invalid", code="INPUT_ERROR")
+
     referenced: dict[str, dict[str, Any]] = {}
     for claim in claims:
+        if isinstance(claim, dict) and claim.get("text") == TASK_MARKER:
+            refs = claim.get("observation_ids")
+            if (task_claim_seen or not task_ids or set(claim) != _CLAIM_KEYS
+                or claim.get("kind") != "current_fact" or claim.get("required_scope") != "point"
+                or not isinstance(refs, list) or any(not isinstance(ref, str) for ref in refs)
+                or len(refs) != len(set(refs)) or set(refs) != task_ids):
+                return _answer_rejection("task_report_claim_invalid")
+            for ref in refs:
+                evidence = evidence_registry.get(ref, {})
+                if (evidence.get("authorized_read") is not True or evidence.get("ok") is not True
+                    or evidence.get("tool_name") != TASK_TOOL
+                    or not _freshness_supports("current_fact", evidence.get("freshness"))):
+                    return _answer_rejection("task_report_evidence_invalid")
+                referenced[ref] = evidence
+            task_claim_seen = True
+            continue
         rejection = _validate_claim(
             claim,
             answer_status=str(status),
@@ -59,15 +101,17 @@ def admit_submit_answer(
         )
         if rejection is not None:
             return rejection
+    if task_ids and not task_claim_seen:
+        return _answer_rejection("task_report_claim_required")
 
     memory_evidence = [e for e in referenced.values()
                        if e.get('evidence_kind') in {'memory_operation', 'memory_read'}]
     if memory_evidence and len(memory_evidence) == len(referenced):
         acknowledgements = list(dict.fromkeys(str(e['acknowledgement']) for e in memory_evidence))
-        if text.strip() != "\n".join(acknowledgements):
+        if maintenance_text != "\n".join(acknowledgements):
             return _answer_rejection('memory_receipt_supports_only_maintenance')
-    if text.strip() in {'已记住。', '已更正。', '已删除。'} and not any(
-        e.get('evidence_kind') == 'memory_operation' and e.get('acknowledgement') == text.strip()
+    if maintenance_text in {'已记住。', '已更正。', '已删除。'} and not any(
+        e.get('evidence_kind') == 'memory_operation' and e.get('acknowledgement') == maintenance_text
         for e in memory_evidence
     ):
         return _answer_rejection('memory_operation_receipt_required')
@@ -84,6 +128,8 @@ def admit_submit_answer(
 
     banner = _forced_banner(str(status), referenced)
     approved_text = text + banner
+    if len(approved_text) > _MAX_ANSWER_CHARS and task_reads and not narrow_tasks:
+        return admit_submit_answer(arguments, evidence_registry, task_reads=task_reads, narrow_tasks=True)
     if (
         len(approved_text) > _MAX_ANSWER_CHARS
         or output_contract_rejection_reason(approved_text) is not None
@@ -130,6 +176,8 @@ def _validate_claim(
             return _answer_rejection("observation_outside_request")
         if evidence.get("ok") is not True or evidence.get("authorized_read") is not True:
             return _answer_rejection("observation_not_authoritative")
+        if evidence.get("tool_name") == TASK_TOOL:
+            return _answer_rejection("task_evidence_supports_only_fixed_report")
         if evidence.get('evidence_kind') in {'memory_operation', 'memory_read'} and (
             text != evidence.get('acknowledgement') or kind != 'current_fact' or required_scope != 'point'
         ):

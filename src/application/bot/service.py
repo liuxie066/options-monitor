@@ -48,6 +48,7 @@ def prepare_contract(
             "authenticated_channel",
             "authenticated_sender_id",
             "authenticated_conversation_id",
+            "authority_scope",
         }
         and value not in (None, "")
     }

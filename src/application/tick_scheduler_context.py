@@ -71,6 +71,15 @@ class TickSchedulerOutcome:
     message: str | None = None
 
 
+def select_scheduler_schedule_key(
+    scheduler_markets: list[str],
+    base_cfg: dict[str, Any],
+) -> str:
+    if scheduler_markets == ["HK"] and "schedule_hk" in (base_cfg or {}):
+        return "schedule_hk"
+    return "schedule"
+
+
 def build_tick_scheduler_context(request: TickSchedulerRequest) -> TickSchedulerOutcome:
     now_utc = datetime.now(timezone.utc)
     market_resolution = resolve_market_run(
@@ -96,9 +105,10 @@ def build_tick_scheduler_context(request: TickSchedulerRequest) -> TickScheduler
     )
 
     _ensure_scheduler_state_file(request.base, state_path)
-    scheduler_schedule_key = "schedule"
-    if scheduler_markets == ["HK"] and "schedule_hk" in (request.base_cfg or {}):
-        scheduler_schedule_key = "schedule_hk"
+    scheduler_schedule_key = select_scheduler_schedule_key(
+        scheduler_markets,
+        request.base_cfg,
+    )
 
     if bool(market_resolution.trading_day_blocked):
         reason_global = str(market_resolution.skip_message or "trading_day_guard_skip")
