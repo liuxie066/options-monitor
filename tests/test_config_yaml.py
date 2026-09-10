@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -16,14 +18,21 @@ from src.application.config_yaml import (
     build_yaml_runtime_config_file,
     build_yaml_assistant_config_file,
     explain_yaml_config_key,
+    market_user_config_fingerprint,
     resolve_yaml_assistant_config,
     resolve_yaml_runtime_config,
     runtime_strategy_keys_to_yaml_authoring,
+    yaml_to_market_user_config,
 )
 from src.application.config_yaml_init import init_yaml_config
 from src.application.config_yaml_symbols import mutate_yaml_symbol_config, set_yaml_symbol_config
 from src.application.pipeline_watchlist import resolve_watchlist_item_runtime_config
-from src.application.runtime_config_freshness import GENERATED_KEY
+from src.application.runtime_config_freshness import (
+    GENERATED_KEY,
+    RuntimeConfigFreshnessError,
+    check_runtime_config_freshness,
+    ensure_runtime_config_freshness,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -564,7 +573,7 @@ markets:
     assert defaulted.config["call"] == {"min_delta": 0.05, "max_delta": 0.20}
 
     overridden = policies["FUTU"]
-    assert overridden.explicit_fields == ("enabled", "min_net_credit_retention", "call")
+    assert overridden.explicit_fields == ("call", "enabled", "min_net_credit_retention")
     assert overridden.config["min_net_credit_retention"] == 0.70
     assert overridden.config["call"] == {"min_delta": 0.12, "max_delta": 0.20}
     assert "output_mode" not in overridden.config
@@ -1866,3 +1875,214 @@ def test_config_validate_cli_supports_yaml_source(tmp_path: Path, capsys) -> Non
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
     assert payload["source_format"] == "yaml"
+
+
+def _market_source(config: dict) -> dict:
+    return next(item for item in config[GENERATED_KEY]['sources'] if item['role'] == 'market_user')
+
+
+@pytest.mark.parametrize('market', ['us', 'hk'])
+@pytest.mark.parametrize('change,stale_markets', [
+    ('assistant_model', set()), ('assistant_context', set()), ('assistant_enabled', set()),
+    ('comments', set()), ('us_symbols', {'us'}), ('hk_symbols', {'hk'}),
+    ('us_schedule', {'us'}), ('us_accounts', {'us'}), ('selected_account', {'us', 'hk'}),
+    ('shared_runtime', {'us', 'hk'}),
+])
+def test_yaml_freshness_tracks_market_inputs(tmp_path: Path, market: str, change: str, stale_markets: set[str]) -> None:
+    path = _write_yaml(tmp_path / 'config.yaml', _minimal_yaml())
+    config, _ = resolve_yaml_runtime_config(repo_root=REPO_ROOT, market=market, config_path=path)
+    before = deepcopy(config)
+    doc = yaml.safe_load(_minimal_yaml())
+    if change == 'assistant_model':
+        doc['assistant']['llm']['model'] = 'another-model'
+    elif change == 'assistant_context':
+        doc['assistant']['context_window_messages'] = 20
+    elif change == 'assistant_enabled':
+        doc['assistant']['enabled'] = False
+    elif change == 'us_symbols':
+        doc['markets']['us']['symbols'].append('AAPL')
+    elif change == 'hk_symbols':
+        doc['markets']['hk']['symbols'].append('9988.HK')
+    elif change == 'us_schedule':
+        doc['markets']['us']['schedule'] = {'timeout_sec': 333}
+    elif change == 'us_accounts':
+        doc['markets']['us']['accounts'] = ['lx']
+    elif change == 'selected_account':
+        doc['accounts']['lx']['futu_account_id'] = 'REAL_99999'
+    elif change == 'shared_runtime':
+        doc['runtime'] = {'symbol_timeout_sec': 123}
+    path.write_text('# new comment\n' + yaml.safe_dump(doc, sort_keys=True), encoding='utf-8')
+    source_before = (path.read_bytes(), path.stat().st_mtime_ns)
+    result = check_runtime_config_freshness(config, repo_root=REPO_ROOT, market=market)
+    assert result['ok'] is (market not in stale_markets)
+    if market in stale_markets:
+        assert any(error['code'] == 'source_changed' for error in result['errors'])
+    assert (path.read_bytes(), path.stat().st_mtime_ns) == source_before
+    assert config == before
+
+
+@pytest.mark.parametrize('source_format', ['yaml', 'layered'])
+def test_yaml_legacy_and_other_formats_keep_raw_sha_checks(tmp_path: Path, source_format: str) -> None:
+    path = _write_yaml(tmp_path / 'config.yaml', _minimal_yaml())
+    config, _ = resolve_yaml_runtime_config(repo_root=REPO_ROOT, market='us', config_path=path)
+    if source_format == 'yaml':
+        _market_source(config).pop('effective')
+    config[GENERATED_KEY]['source_format'] = source_format
+    assert check_runtime_config_freshness(config, repo_root=REPO_ROOT, market='us')['ok']
+    path.write_text(_minimal_yaml() + '\n# assistant-only edit\n', encoding='utf-8')
+    result = check_runtime_config_freshness(config, repo_root=REPO_ROOT, market='us')
+    assert not result['ok']
+    assert result['errors'][0]['code'] == 'source_changed'
+
+
+@pytest.mark.parametrize('patch', [
+    {'loaded': False}, {'loaded': None}, {'loaded': 1}, {'inline': True},
+    {'inline': 'false'}, {'enabled': False}, {'optional': True},
+    {'path': ''}, {'path': None}, {'path': ['config.yaml']}, {'path': '\x00'},
+    {'sha256': None}, {'sha256': 'bad'}, {'effective': None}, {'effective': {}},
+    {'effective': []},
+    {'effective': {'kind': 'unknown', 'market': 'us', 'sha256': 'a' * 64}},
+    {'effective': {'kind': 'yaml-market-user-v1', 'market': 'hk', 'sha256': 'a' * 64}},
+    {'effective': {'kind': 'yaml-market-user-v1', 'market': 'us', 'sha256': 'not-a-digest'}},
+])
+def test_yaml_freshness_rejects_invalid_new_source_before_shortcuts(tmp_path: Path, patch: dict) -> None:
+    path = _write_yaml(tmp_path / 'config.yaml', _minimal_yaml())
+    config, _ = resolve_yaml_runtime_config(repo_root=REPO_ROOT, market='us', config_path=path)
+    _market_source(config).update(patch)
+    result = check_runtime_config_freshness(config, repo_root=REPO_ROOT, market='us')
+    assert not result['ok']
+    assert any(error['code'] == 'invalid_source_metadata' for error in result['errors'])
+
+
+@pytest.mark.parametrize('role', ['system', 'market_user'])
+@pytest.mark.parametrize('damage', ['missing', 'duplicate'])
+def test_yaml_freshness_rejects_missing_or_duplicate_required_roles(tmp_path: Path, role: str, damage: str) -> None:
+    path = _write_yaml(tmp_path / 'config.yaml', _minimal_yaml())
+    config, _ = resolve_yaml_runtime_config(repo_root=REPO_ROOT, market='us', config_path=path)
+    sources = config[GENERATED_KEY]['sources']
+    item = next(item for item in sources if item['role'] == role)
+    if damage == 'missing':
+        sources.remove(item)
+    else:
+        sources.append(deepcopy(item))
+    result = check_runtime_config_freshness(config, repo_root=REPO_ROOT, market='us')
+    assert not result['ok']
+    assert any(error['code'] == f'{damage}_source_record' for error in result['errors'])
+
+
+@pytest.mark.parametrize('content', [b'\xff', b'[not: valid', b'- list root', b'markets: {}',
+                                      b'markets:\n\tus: {}', None])
+def test_yaml_freshness_source_failure_is_structured(tmp_path: Path, content: bytes | None) -> None:
+    path = _write_yaml(tmp_path / 'config.yaml', _minimal_yaml())
+    config, _ = resolve_yaml_runtime_config(repo_root=REPO_ROOT, market='us', config_path=path)
+    if content is None:
+        path.unlink()
+    else:
+        path.write_bytes(content)
+        _market_source(config)['sha256'] = hashlib.sha256(content).hexdigest()
+    result = check_runtime_config_freshness(config, repo_root=REPO_ROOT, market='us')
+    assert not result['ok']
+    assert result['errors'][0]['code'] == 'source_check_failed'
+    assert result['errors'][0]['role'] == 'market_user'
+    assert 'rebuild_command' in result
+
+
+def test_yaml_freshness_read_error_is_structured(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = _write_yaml(tmp_path / 'config.yaml', _minimal_yaml())
+    config, _ = resolve_yaml_runtime_config(repo_root=REPO_ROOT, market='us', config_path=path)
+    original_read = Path.read_bytes
+
+    def unreadable(self: Path) -> bytes:
+        if self == path:
+            raise PermissionError('private diagnostic value')
+        return original_read(self)
+
+    monkeypatch.setattr(Path, 'read_bytes', unreadable)
+    result = check_runtime_config_freshness(config, repo_root=REPO_ROOT, market='us')
+    assert not result['ok']
+    assert result['errors'][0]['error_type'] == 'PermissionError'
+    assert 'private diagnostic value' not in json.dumps(result)
+
+
+def test_yaml_invalid_source_envelope_stops_before_io(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = _write_yaml(tmp_path / 'config.yaml', _minimal_yaml())
+    config, _ = resolve_yaml_runtime_config(repo_root=REPO_ROOT, market='us', config_path=path)
+    config[GENERATED_KEY]['sources'].append({'role': 'system', 'loaded': True, 'path': '\x00'})
+    reads = []
+
+    def unexpected_read(self: Path) -> bytes:
+        reads.append(self)
+        raise OSError('must reject the envelope before reading sources')
+
+    monkeypatch.setattr(Path, 'read_bytes', unexpected_read)
+    result = check_runtime_config_freshness(config, repo_root=REPO_ROOT, market='us')
+    assert not result['ok']
+    assert [error['code'] for error in result['errors']] == ['duplicate_source_record']
+    with pytest.raises(RuntimeConfigFreshnessError) as exc:
+        ensure_runtime_config_freshness(config, repo_root=REPO_ROOT, market='us')
+    assert exc.value.result == result
+    assert reads == []
+
+
+@pytest.mark.parametrize('value', [float('nan'), float('inf'), float('-inf')])
+def test_yaml_market_fingerprint_rejects_nonfinite_values_on_build_and_check(tmp_path: Path, value: float) -> None:
+    path = _write_yaml(tmp_path / 'config.yaml', _minimal_yaml())
+    config, _ = resolve_yaml_runtime_config(repo_root=REPO_ROOT, market='us', config_path=path)
+    doc = yaml.safe_load(_minimal_yaml())
+    doc['runtime'] = {'symbol_timeout_sec': value}
+    path.write_text(yaml.safe_dump(doc), encoding='utf-8')
+    with pytest.raises(ValueError):
+        resolve_yaml_runtime_config(repo_root=REPO_ROOT, market='us', config_path=path)
+    assert not check_runtime_config_freshness(config, repo_root=REPO_ROOT, market='us')['ok']
+
+
+def test_yaml_mapping_order_does_not_change_combo_policy_or_fingerprint() -> None:
+    from src.application.combo_yield_config import derive_combo_yield_policy
+
+    doc = yaml.safe_load(_minimal_yaml())
+    combo = {'enabled': True, 'min_net_credit_retention': 0.7, 'call': {'min_delta': 0.12, 'max_delta': 0.18}}
+    doc['markets']['us']['overrides']['FUTU']['combo_yield'] = combo
+    before = yaml_to_market_user_config(doc, market='us')
+    combo['call'] = dict(reversed(list(combo['call'].items())))
+    doc['markets']['us']['overrides']['FUTU']['combo_yield'] = dict(reversed(list(combo.items())))
+    after = yaml_to_market_user_config(doc, market='us')
+    assert market_user_config_fingerprint(before, market='us') == market_user_config_fingerprint(after, market='us')
+    before_policy = derive_combo_yield_policy(before['symbols'][1]['combo_yield'], market='us')
+    after_policy = derive_combo_yield_policy(after['symbols'][1]['combo_yield'], market='us')
+    assert before_policy == after_policy
+    assert before_policy.config['call']['min_delta'] == 0.12
+    assert before_policy.config['min_net_credit_retention'] == 0.7
+    # Symbol lists have real ordering semantics and must not be canonicalized as sets.
+    after['symbols'].reverse()
+    assert market_user_config_fingerprint(before, market='us') != market_user_config_fingerprint(after, market='us')
+
+
+def test_yaml_build_metadata_uses_exact_single_read_even_if_source_changes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source_bytes = ('# preserve CRLF and comment\r\n' + _minimal_yaml().replace('\n', '\r\n')).encode('utf-8')
+    path = tmp_path / 'config.yaml'
+    path.write_bytes(source_bytes)
+    output = tmp_path / 'config.us.json'
+    original_read = Path.read_bytes
+    reads = []
+
+    def read_then_edit(self: Path) -> bytes:
+        content = original_read(self)
+        if self == path:
+            reads.append(content)
+            self.write_bytes(content.replace(b'- NVDA', b'- AAPL'))
+        return content
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, 'read_bytes', read_then_edit)
+        result = build_yaml_runtime_config_file(repo_root=REPO_ROOT, market='us', config_path=path, output_config_path=output)
+    config = json.loads(output.read_text())
+    assert len(reads) == 1
+    expected_sha = hashlib.sha256(source_bytes).hexdigest()
+    assert _market_source(config)['sha256'] == expected_sha
+    assert config[RESOLVED_KEY]['config_yaml_sha256'] == expected_sha
+    assert result['config_yaml_sha256'] == expected_sha
+    assert config['symbols'][0]['symbol'] == 'NVDA'
+    assert _market_source(config)['effective'] == market_user_config_fingerprint(
+        yaml_to_market_user_config(yaml.safe_load(source_bytes), market='us'), market='us',
+    )
+    assert not check_runtime_config_freshness(config, repo_root=REPO_ROOT, market='us')['ok']
