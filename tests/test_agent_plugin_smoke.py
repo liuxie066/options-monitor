@@ -1282,7 +1282,7 @@ def test_scheduler_status_reads_decision_without_writing_state(tmp_path: Path) -
     admitted = admit_submit_answer(
         {
             "mode": "evidence",
-            "status": "complete",
+            "status": "partial",
             "answer_markdown": "当前调度已启用。",
             "claims": [
                 {

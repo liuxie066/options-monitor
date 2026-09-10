@@ -4,7 +4,7 @@ import hashlib
 import json
 import math
 from copy import deepcopy
-from typing import Any
+from typing import Any, Callable
 
 from src.application.agent_tool_registry import get_tool_definition, pure_read_tool_names, pure_read_toolsets
 from src.application.bot.contracts import safe_error_code
@@ -79,6 +79,9 @@ def build_tool_payload(
         value = (fixed_input or {}).get(name)
         if value in (None, ""):
             continue
+        explicit = explicit_payload.get(name)
+        if explicit not in (None, "") and explicit != value:
+            return None, f"tool input conflicts with trusted scope: {name}"
         payload[name] = value.strip() if isinstance(value, str) else value
     return payload, None
 
@@ -89,6 +92,8 @@ def call_read_tool(
     *,
     allowed_tools: tuple[str, ...],
     now_ms: int | None = None,
+    deadline_monotonic: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     if tool_name not in allowed_tools:
         return _tool_error(tool_name, "POLICY_ERROR", "tool is outside the Host allowlist")
@@ -103,6 +108,11 @@ def call_read_tool(
         )
 
         with option_performance_report_now_ms(now_ms):
+            return execute_tool(tool_name, payload)
+    if tool_name == "scheduled_tasks_read":
+        from src.application.agent_tools.scheduled_tasks_impl import scheduled_tasks_query_context
+
+        with scheduled_tasks_query_context(deadline_monotonic=deadline_monotonic, cancelled=cancelled):
             return execute_tool(tool_name, payload)
     return execute_tool(tool_name, payload)
 
@@ -839,6 +849,11 @@ def _field_priorities(output_contract: dict[str, Any]) -> dict[str, list[str]]:
 
 
 def _model_value(data: dict[str, Any], output_contract: dict[str, Any]) -> dict[str, Any]:
+    if output_contract.get("schema_version") == "scheduled_tasks.output.v1":
+        # This owner already returns a safe inventory; the observation token
+        # limit below narrows it as a whole instead of changing its count.
+        return {key: deepcopy(data[key]) for key in
+            ("scope", "tasks", "count", "observed_at", "availability", "reasons") if key in data}
     fields = output_contract.get("model_value_fields")
     if fields:
         return _contract_values(data, fields, preview_max_depth=6)

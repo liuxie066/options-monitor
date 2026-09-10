@@ -26,14 +26,28 @@ def scope_from_contract(contract: Any, allowed_accounts: Any = ()) -> MemoryScop
         raise ValueError("MEMORY_UNAUTHENTICATED")
     channel = str(data.get("authenticated_channel") or "").strip().lower()
     sender = str(data.get("authenticated_sender_id") or "").strip()
-    key, path = data.get("config_key"), data.get("config_path")
-    if not channel or not sender or bool(key) == bool(path):
+    key = str(data.get("config_key") or "").strip().lower()
+    path = str(data.get("config_path") or "").strip()
+    declared_authority = str(data.get("authority_scope") or "").strip()
+    if not channel or not sender or not (key or path):
         raise ValueError("MEMORY_UNAUTHENTICATED")
     if path:
         from src.application.agent_tool_config import resolve_runtime_config_path
-        authority = "path:" + str(resolve_runtime_config_path(config_path=path).resolve(strict=True))
+
+        canonical_path = str(resolve_runtime_config_path(config_path=path).resolve(strict=True))
+        path_authority = "path:" + hashlib.sha256(canonical_path.encode("utf-8")).hexdigest()
     else:
-        authority = "key:" + str(key).lower().strip()
+        canonical_path = ""
+        path_authority = ""
+    key_authority = f"key:{key}" if key else ""
+    if key and path:
+        if declared_authority not in {key_authority, path_authority}:
+            raise ValueError("MEMORY_UNAUTHENTICATED")
+        authority = key_authority if declared_authority == key_authority else "path:" + canonical_path
+    else:
+        authority = key_authority or "path:" + canonical_path
+        if declared_authority and declared_authority not in {key_authority, path_authority}:
+            raise ValueError("MEMORY_UNAUTHENTICATED")
     owner = hashlib.sha256(json.dumps([channel, sender, authority], ensure_ascii=False).encode()).hexdigest()
     return MemoryScope(owner, frozenset(str(a).lower() for a in allowed_accounts))
 

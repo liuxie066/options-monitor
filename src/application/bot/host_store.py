@@ -24,6 +24,7 @@ from src.infrastructure.private_storage import connect_private_sqlite, private_p
 
 REPLY_DELIVERY_LEASE_SECONDS = 300
 REPLY_CAPABILITY_TTL_SECONDS = 24 * 60 * 60
+PROGRESS_RESOLUTION_CONFLICT_NOTICE = '\n原事项的进度已变化，本次回答已保存，但未将原事项标记为完成。'
 
 
 class BotHostStore:
@@ -310,7 +311,7 @@ class BotHostStore:
                                      (json.dumps(previous, ensure_ascii=False), original['run_id']))
                         closed = True
                 if not closed:
-                    result = replace(result, user_response=result.user_response + '\n原事项的进度已变化，本次回答已保存，但未将原事项标记为完成。')
+                    result = replace(result, user_response=result.user_response + PROGRESS_RESOLUTION_CONFLICT_NOTICE)
             response = {'status':result.status, 'ok':result.ok, 'user_response':result.user_response, 'error':result.error}
             events = json.loads(row['events_json'])
             for event in events:

@@ -6,6 +6,7 @@ import plistlib
 import re
 import shlex
 import subprocess
+import time
 from dataclasses import dataclass
 from json import JSONDecodeError
 from pathlib import Path
@@ -37,6 +38,19 @@ from src.application.payload_helpers import first_text as _first_text
 ServiceTarget = Literal["systemd", "launchd"]
 ServiceProvider = Literal["systemd", "launchd", "manual"]
 SecretCredentialDelivery = Literal["load-credential-encrypted", "runtime-files"]
+
+_MARKET_TIMER_RE = re.compile(
+    r"^options-monitor-(?:tick|auto-close|quality-day-end)-(us|hk)\.timer$"
+)
+_SHARED_TIMER_NAMES = frozenset(
+    {
+        "options-monitor-projection-verify.timer",
+        "options-monitor-quality-recheck.timer",
+        "options-monitor-quality-refresh.timer",
+        "options-monitor-runtime-status.timer",
+        "options-monitor-upgrade.timer",
+    }
+)
 
 DEFAULT_MARKETS: tuple[str, ...] = ("us", "hk")
 DEFAULT_ACCOUNTS: tuple[str, ...] = ("lx", "sy")
@@ -2297,6 +2311,11 @@ def service_status_from_profile(
     include_status: bool = False,
     include_enabled: bool = False,
     run_cmd: Callable[..., Any] = subprocess.run,
+    deadline_monotonic: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+    per_probe_timeout_sec: float = 1.0,
+    query_timeout_sec: float = 10.0,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> dict[str, Any]:
     provider = str(profile.get("service_provider") or profile.get("provider") or "manual").strip().lower()
     services_raw = profile.get("services")
@@ -2319,13 +2338,44 @@ def service_status_from_profile(
     }
     if not include_status:
         return out
+    local_deadline = monotonic() + max(0.0, min(float(query_timeout_sec), 10.0))
+    if deadline_monotonic is not None:
+        local_deadline = min(local_deadline, float(deadline_monotonic))
     checked: list[dict[str, Any]] = []
     for service in normalized_services:
         name = str(service.get("name") or "")
-        active = _check_one_service(provider=provider, name=name, run_cmd=run_cmd)
+        stop_reason = _service_probe_stop_reason(
+            deadline_monotonic=local_deadline,
+            cancelled=cancelled,
+            monotonic=monotonic,
+        )
+        active = (
+            {"status": "unknown", "reason": stop_reason}
+            if stop_reason
+            else _check_one_service(
+                provider=provider,
+                name=name,
+                run_cmd=run_cmd,
+                timeout_sec=min(per_probe_timeout_sec, max(0.001, local_deadline - monotonic())),
+            )
+        )
         checked_service = {**service, **active}
         if include_enabled:
-            enabled = _check_one_service_enabled(provider=provider, name=name, run_cmd=run_cmd)
+            stop_reason = _service_probe_stop_reason(
+                deadline_monotonic=local_deadline,
+                cancelled=cancelled,
+                monotonic=monotonic,
+            )
+            enabled = (
+                {"status": "unknown", "reason": stop_reason}
+                if stop_reason
+                else _check_one_service_enabled(
+                    provider=provider,
+                    name=name,
+                    run_cmd=run_cmd,
+                    timeout_sec=min(per_probe_timeout_sec, max(0.001, local_deadline - monotonic())),
+                )
+            )
             checked_service["active"] = active
             checked_service["enabled"] = enabled
         checked.append(checked_service)
@@ -2333,29 +2383,67 @@ def service_status_from_profile(
     return out
 
 
-def _check_one_service(*, provider: str, name: str, run_cmd: Callable[..., Any]) -> dict[str, Any]:
+def _service_probe_stop_reason(
+    *,
+    deadline_monotonic: float,
+    cancelled: Callable[[], bool] | None,
+    monotonic: Callable[[], float],
+) -> str | None:
+    if cancelled is not None:
+        try:
+            if cancelled():
+                return "query_cancelled"
+        except Exception:
+            return "query_cancelled"
+    if monotonic() >= deadline_monotonic:
+        return "query_deadline_exceeded"
+    return None
+
+
+def _check_one_service(
+    *, provider: str, name: str, run_cmd: Callable[..., Any], timeout_sec: float = 1.0
+) -> dict[str, Any]:
     if provider == "systemd":
-        return _run_status_command(["systemctl", "is-active", name], run_cmd=run_cmd)
+        return _run_status_command(
+            ["systemctl", "is-active", name], run_cmd=run_cmd, timeout_sec=timeout_sec
+        )
     if provider == "launchd":
-        return _run_status_command(["launchctl", "print", f"gui/{os.getuid()}/{name}"], run_cmd=run_cmd)
+        return _run_status_command(
+            ["launchctl", "print", f"gui/{os.getuid()}/{name}"],
+            run_cmd=run_cmd,
+            timeout_sec=timeout_sec,
+        )
     return {"status": "skipped", "message": f"service provider does not support command checks: {provider}"}
 
 
-def _check_one_service_enabled(*, provider: str, name: str, run_cmd: Callable[..., Any]) -> dict[str, Any]:
+def _check_one_service_enabled(
+    *, provider: str, name: str, run_cmd: Callable[..., Any], timeout_sec: float = 1.0
+) -> dict[str, Any]:
     if provider == "systemd":
-        return _run_status_command(["systemctl", "is-enabled", name], run_cmd=run_cmd)
+        return _run_status_command(
+            ["systemctl", "is-enabled", name], run_cmd=run_cmd, timeout_sec=timeout_sec
+        )
     if provider == "launchd":
         return {"status": "skipped", "message": "launchd enabled state is managed by installed plist presence"}
     return {"status": "skipped", "message": f"service provider does not support enabled checks: {provider}"}
 
 
-def _run_status_command(command: list[str], *, run_cmd: Callable[..., Any]) -> dict[str, Any]:
+def _run_status_command(
+    command: list[str], *, run_cmd: Callable[..., Any], timeout_sec: float = 1.0
+) -> dict[str, Any]:
     try:
-        proc = run_cmd(command, capture_output=True, text=True, timeout=10, check=False)
+        proc = run_cmd(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=max(0.001, min(float(timeout_sec), 1.0)),
+            check=False,
+        )
     except Exception as exc:
         return {
             "status": "unknown",
             "command": command,
+            "reason": "probe_timeout" if isinstance(exc, subprocess.TimeoutExpired) else "probe_failed",
             "error": f"{type(exc).__name__}: {exc}",
         }
     stdout = str(getattr(proc, "stdout", "") or "").strip()
@@ -2368,6 +2456,174 @@ def _run_status_command(command: list[str], *, run_cmd: Callable[..., Any]) -> d
         "stdout": stdout[:1000],
         "stderr": stderr[:1000],
     }
+
+
+def scheduled_tasks_from_profile(
+    profile: dict[str, Any],
+    *,
+    market: str,
+    authorized_accounts: tuple[str, ...] | list[str] | None = None,
+    deadline_monotonic: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+    run_cmd: Callable[..., Any] = subprocess.run,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> dict[str, Any]:
+    """Return the bounded, safe scheduled-task projection for one market."""
+
+    provider = str(profile.get("service_provider") or profile.get("provider") or "manual").strip().lower()
+    if provider != "systemd":
+        return {
+            "tasks": [],
+            "coverage": "unavailable",
+            "availability": "unavailable",
+            "reasons": ["provider_unsupported"],
+        }
+
+    services_raw = profile.get("services")
+    if not isinstance(services_raw, list):
+        return {
+            "tasks": [],
+            "coverage": "unavailable",
+            "availability": "unavailable",
+            "reasons": ["profile_services_invalid"],
+        }
+    invalid_service_entry = any(
+        not isinstance(item, dict) or not str(item.get("name") or "").strip()
+        for item in services_raw
+    )
+    configured = {
+        str(item.get("name") or "").strip()
+        for item in services_raw
+        if isinstance(item, dict) and str(item.get("name") or "").strip().endswith(".timer")
+    }
+    markets_raw = profile.get("markets")
+    invalid_market_scope = not isinstance(markets_raw, list) or not markets_raw
+    known_profile_markets: set[str] = set()
+    if isinstance(markets_raw, list):
+        for value in markets_raw:
+            if isinstance(value, str) and value in {"us", "hk"}:
+                known_profile_markets.add(value)
+            else:
+                invalid_market_scope = True
+    if not known_profile_markets:
+        invalid_market_scope = True
+    profile_markets = tuple(sorted(known_profile_markets))
+    try:
+        profile_accounts = frozenset(accounts_from_config(profile, fallback=()))
+    except ValueError:
+        profile_accounts = frozenset()
+    authorized_account_set = frozenset(authorized_accounts or ())
+    declared: dict[str, tuple[str, ...]] = {}
+    reasons: list[str] = []
+    if invalid_service_entry:
+        reasons.append("profile_service_entry_invalid")
+    if invalid_market_scope:
+        reasons.append("profile_market_scope_invalid")
+    for name in configured:
+        markets = _scheduled_task_markets(name, profile_markets=profile_markets)
+        if markets:
+            declared[name] = markets
+    if configured - set(declared):
+        reasons.append("task_scope_unknown")
+
+    selected: list[tuple[str, tuple[str, ...]]] = []
+    shared_excluded = False
+    for name, markets in declared.items():
+        if market not in markets:
+            continue
+        if name in _SHARED_TIMER_NAMES and (
+            invalid_market_scope
+            or len(markets) > 1
+            or not profile_accounts
+            or not profile_accounts.issubset(authorized_account_set)
+        ):
+            shared_excluded = True
+            continue
+        selected.append((name, markets))
+    if shared_excluded:
+        reasons.append("shared_scope_excluded")
+
+    status = service_status_from_profile(
+        {"service_provider": provider, "services": [{"name": name} for name, _ in selected]},
+        include_status=True,
+        include_enabled=True,
+        run_cmd=run_cmd,
+        deadline_monotonic=deadline_monotonic,
+        cancelled=cancelled,
+        monotonic=monotonic,
+    )
+    statuses = {
+        str(item.get("name") or ""): item
+        for item in status.get("services") or []
+        if isinstance(item, dict)
+    }
+    tasks: list[dict[str, Any]] = []
+    for name, markets in sorted(selected):
+        raw = statuses.get(name, {})
+        active, active_reason = _systemd_task_state(raw.get("active"), kind="active")
+        enabled, enabled_reason = _systemd_task_state(raw.get("enabled"), kind="enabled")
+        task_reasons = sorted({reason for reason in (active_reason, enabled_reason) if reason})
+        tasks.append(
+            {
+                "id": f"{provider}:{name}",
+                "name": name,
+                "markets": list(markets),
+                "configured": True,
+                "enabled": enabled,
+                "active": active,
+                "availability": "partial" if task_reasons else "available",
+                "reasons": task_reasons,
+            }
+        )
+    task_reasons = sorted({reason for task in tasks for reason in task["reasons"]})
+    reasons = sorted(set(reasons + task_reasons))
+    coverage = (
+        "partial"
+        if any(
+            reason in reasons
+            for reason in (
+                "profile_service_entry_invalid",
+                "profile_market_scope_invalid",
+                "shared_scope_excluded",
+                "task_scope_unknown",
+            )
+        )
+        else "complete"
+    )
+    availability = "partial" if coverage == "partial" or task_reasons else "available"
+    return {"tasks": tasks, "coverage": coverage, "availability": availability, "reasons": reasons}
+
+
+def _scheduled_task_markets(
+    name: str, *, profile_markets: tuple[str, ...]
+) -> tuple[str, ...]:
+    match = _MARKET_TIMER_RE.fullmatch(name)
+    if match:
+        return (match.group(1),)
+    if name in _SHARED_TIMER_NAMES and profile_markets:
+        return profile_markets
+    return ()
+
+
+def _systemd_task_state(raw: Any, *, kind: str) -> tuple[str, str | None]:
+    if not isinstance(raw, dict):
+        return "unknown", f"{kind}_not_queried"
+    reason = str(raw.get("reason") or "").strip()
+    if reason:
+        return "unknown", f"{kind}_{reason}"
+    stdout = str(raw.get("stdout") or "").strip().lower()
+    stderr = str(raw.get("stderr") or "").strip().lower()
+    if kind == "active" and stdout in {"active", "inactive"}:
+        return stdout, None
+    if kind == "enabled" and stdout in {"enabled", "disabled"}:
+        return stdout, None
+    if "permission denied" in stderr or "access denied" in stderr:
+        return "unknown", f"{kind}_permission_denied"
+    combined = f"{stdout} {stderr}"
+    if any(value in combined for value in ("not-found", "not found", "could not be found", "does not exist")):
+        return "unknown", f"{kind}_not_found"
+    known = next((value for value in ("masked", "static", "failed") if stdout == value), None)
+    return "unknown", f"{kind}_{known.replace('-', '_') if known else 'probe_failed'}"
 
 
 __all__ = [
@@ -2383,6 +2639,7 @@ __all__ = [
     "normalize_target",
     "render_service_bundle",
     "service_preflight",
+    "scheduled_tasks_from_profile",
     "service_status_from_profile",
     "write_service_bundle",
 ]

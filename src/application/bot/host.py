@@ -23,10 +23,11 @@ from src.application.bot.control_handoff import (
 )
 from src.application.bot.contracts import AppResult, ExecutionContract, SceneManifest, new_id
 from src.application.bot.event_store import BotEventLog
-from src.application.bot.host_store import BotHostStore
+from src.application.bot.host_store import BotHostStore, PROGRESS_RESOLUTION_CONFLICT_NOTICE
 from src.application.bot.model_config import PiModelSettings
 from src.application.bot.result_admission import admit_result_with_decision, admit_submit_answer
 from src.application.bot.scene import build_scene_manifest, scene_policy_rejection_reason
+from src.application.bot.task_report import TASK_TOOL, task_market, render_task_report
 from src.application.research.redaction import redact_value
 from src.infrastructure.pi_agent_process import (
     derive_pi_local_session_id,
@@ -388,6 +389,13 @@ def _run_contract(
     run_lock = Lock()
     tool_events_open = True
     finalized = False
+    task_reads: dict[str, dict[str, Any]] = {}
+    frozen_replies: dict[str, dict[str, Any]] = {}
+
+    def final_reply_builder(result: AppResult):
+        if frozen_replies and result.status == "answered":
+            return deepcopy(frozen_replies[result.user_response])
+        return reply_builder(result) if reply_builder is not None else None
 
     def record_event(
         event_type: str,
@@ -454,7 +462,7 @@ def _run_contract(
                             pass
                     completed = host_store.finish_run(completed, progress_resolution=progress_resolution,
                         progress_scope=resolution_scope,
-                        reply_builder=reply_builder,
+                        reply_builder=final_reply_builder,
                         deadline_monotonic=deadline)
                 except Exception:
                     completed = replace(completed, status='failed', ok=False, user_response='回答持久化未完成；本次未确认成功，请稍后重试。', error={'code':'PERSISTENCE_FAILED'})
@@ -737,6 +745,15 @@ def _run_contract(
         arguments = dict(call.get("arguments") or {})
         model_input_audit: dict[str, Any] | None = None
         model_input_hash: str | None = None
+        requested_market = task_market(arguments.get("config_key") or manifest.fixed_tool_input.get("config_key"))
+        task_key = requested_market  # The trusted config identity is fixed for this run.
+
+        def retain_task_read(observation: dict[str, Any], diagnostic: str | None = None) -> None:
+            if tool_name == TASK_TOOL:
+                task_reads[task_key] = {"market": requested_market, "observation": (
+                    {"ok": False, "diagnostic": diagnostic or str(observation.get("code") or "read_unavailable")}
+                    if observation.get("ok") is not True else deepcopy(observation)
+                )}
         if tool_name != "submit_answer":
             pending_answer_admission_category = None
 
@@ -900,7 +917,9 @@ def _run_contract(
             nonlocal progress_resolution
             resolution = arguments.get('progress_resolution')
             answer_arguments = {k:v for k,v in arguments.items() if k != 'progress_resolution'}
-            admitted_answer = admit_submit_answer(answer_arguments, evidence_registry)
+            with run_lock:
+                answer_tasks = deepcopy(task_reads) if not memory_write_unconfirmed else {}
+            admitted_answer = admit_submit_answer(answer_arguments, evidence_registry, task_reads=answer_tasks)
             if memory_write_unconfirmed and not (
                 answer_arguments.get('mode') == 'conceptual' and answer_arguments.get('claims') == []
                 and answer_arguments.get('answer_markdown') == '记忆操作未确认，请重试同一幂等键或重新查询。'
@@ -924,6 +943,35 @@ def _run_contract(
                         valid = False
                 if not valid:
                     admitted_answer = {'observation': {'ok': False, 'reason': 'progress_resolution_invalid'}}
+            if admitted_answer.get('observation', {}).get('ok') is True and answer_tasks and reply_builder is not None:
+                def preflight(admitted):
+                    text = admitted['approved_answer']['text']
+                    suffixes = ('', PROGRESS_RESOLUTION_CONFLICT_NOTICE) if resolution is not None else ('',)
+                    return {text + suffix: reply_builder(AppResult(
+                        status='answered', user_response=text + suffix, run_id=run_id,
+                        request_id=contract.request_id, contract_id=contract.contract_id, ok=True,
+                    )) for suffix in suffixes}
+
+                previews = preflight(admitted_answer)
+                if any(reply.get('payload', {}).get('render_meta', {}).get('truncated') for reply in previews.values()):
+                    admitted_answer = admit_submit_answer(answer_arguments, evidence_registry,
+                        task_reads=answer_tasks, narrow_tasks=True)
+                    if admitted_answer.get('observation', {}).get('ok') is True:
+                        previews = preflight(admitted_answer)
+                        narrowed_report = render_task_report(answer_tasks, narrowed=True)[0]
+                        if any(narrowed_report not in reply.get('payload', {}).get('text', '') for reply in previews.values()
+                               if reply.get('channel') == 'feishu'):
+                            from src.application.channels.feishu_reply_renderer import FEISHU_REPLY_TRUNCATION_NOTICE
+                            text = FEISHU_REPLY_TRUNCATION_NOTICE
+                            admitted_answer['approved_answer'].update(status='needs_narrowing', text=text,
+                                text_sha256='sha256:' + hashlib.sha256(text.encode('utf-8')).hexdigest())
+                            previews = preflight(admitted_answer)
+                if admitted_answer.get('observation', {}).get('ok') is True:
+                    frozen_replies.clear()
+                    frozen_replies.update(previews)
+            if resolution is not None and admitted_answer.get('approved_answer', {}).get('status') != 'complete':
+                admitted_answer = {'observation': {'ok': False, 'reason': 'progress_resolution_invalid'}}
+                frozen_replies.clear()
             if admitted_answer.get('observation', {}).get('ok') is True:
                 progress_resolution = resolution
 
@@ -977,6 +1025,8 @@ def _run_contract(
                 **_tool_error(tool_name, code, message),
                 "ref": new_id("obv"),
             }
+            retain_task_read(observation, 'scope_conflict' if message.startswith('tool input conflicts with trusted scope:')
+                else 'input_invalid' if code == 'INPUT_ERROR' else code)
             event_log.record(
                 "tool_result",
                 {
@@ -1086,7 +1136,7 @@ def _run_contract(
                     payload_error or "tool input could not be prepared",
                 )
             if tool_name == 'receipt_read':
-                for name in ('config_key','config_path','authenticated_channel','authenticated_sender_id','authenticated_conversation_id'):
+                for name in ('config_key','config_path','authenticated_channel','authenticated_sender_id','authenticated_conversation_id','authority_scope'):
                     payload.pop(name, None)
                     if contract.input.get(name) not in (None, ''):
                         payload[name] = contract.input[name]
@@ -1110,6 +1160,9 @@ def _run_contract(
             call_kwargs: dict[str, Any] = {
                 "allowed_tools": tuple(manifest.allowed_tools),
             }
+            if tool_name == TASK_TOOL:
+                call_kwargs.update(deadline_monotonic=min(time.monotonic() + 10,
+                    deadline - limits['final_answer_reserve_seconds']), cancelled=cancellation_requested)
             if (
                 tool_name == "option_performance_report"
                 and manifest.fixed_tool_input.get("report_now_ms") is not None
@@ -1171,6 +1224,7 @@ def _run_contract(
                         ),
                         str(failed_observation.get("ref") or "") or None,
                     )
+                    retain_task_read(failed_observation)
             return failed_observation
         with run_lock:
             if not tool_events_open or finalized:
@@ -1245,6 +1299,7 @@ def _run_contract(
                 "content_hash": observation.get("content_hash"),
             }
             active_evidence_tokens += evidence_tokens
+            retain_task_read(observation)
             return observation
 
     def on_tool_call(call: dict[str, Any]) -> dict[str, Any]:
@@ -1635,6 +1690,12 @@ def _submit_answer_description() -> dict[str, Any]:
             "claim kind 必须匹配证据 freshness：current/fresh + as_of 使用 current_fact；"
             "historical + as_of 使用 historical_fact 或 derived_fact；"
             "unknown/stale 只能在不完整答案中使用 judgment。"
+            "调用 scheduled_tasks_read 后，answer_markdown 必须以且仅有一个 [[scheduled_tasks]] 开头；"
+            "任务名称、数量、启停与失败原因由 Host 填入，不得另写任务事实。单纯任务查询正文只填此标记，"
+            "混合问题可在标记后回答其他问题。任务读取有可见成功清单时必须有且仅有一条任务 claim："
+            "text=[[scheduled_tasks]]、kind=current_fact、required_scope=point，引用本次各市场最新成功清单的全部 ID；"
+            "任务 ID 不得用于其他 claim。任务全失败、不可用或 needs_narrowing 时不得引用它们："
+            "没有其他事实则用 conceptual 和 claims=[]，有其他事实只引用其他证据。"
         ),
         "input_schema": {
             "type": "object",
@@ -1701,27 +1762,44 @@ def _effective_model_payload(
 def _pi_session_id(contract: ExecutionContract, session_key: str | None) -> str | None:
     if contract.execution_environment == "eval":
         return None
+    if contract.execution_environment != "channel" and not str(session_key or "").strip():
+        return None
     config_key = str(contract.input.get("config_key") or "").strip().lower()
     config_path = str(contract.input.get("config_path") or "").strip()
-    authority_scope = f"key:{config_key or 'default'}"
+    declared_authority = str(contract.input.get("authority_scope") or "").strip()
+    key_authority = f"key:{config_key}" if config_key else None
+    path_authority = None
+    if config_path:
+        resolved_path = resolve_runtime_config_path(config_path=config_path).resolve(strict=True)
+        if not resolved_path.is_file():
+            raise ValueError("config_path must resolve to a regular file")
+        path_authority = "path:" + hashlib.sha256(
+            str(resolved_path).encode("utf-8")
+        ).hexdigest()
+    if config_key:
+        resolve_runtime_config_path(config_key=config_key)
+    if config_key and config_path:
+        if not declared_authority and contract.execution_environment != "channel":
+            authority_scope = key_authority or ""
+        elif declared_authority not in {key_authority, path_authority}:
+            raise ValueError("normalized config authority is invalid")
+        else:
+            authority_scope = declared_authority
+    elif config_key or config_path:
+        authority_scope = key_authority or path_authority or ""
+        if declared_authority and declared_authority != authority_scope:
+            raise ValueError("config authority does not match the trusted scope")
+    else:
+        if contract.execution_environment == "channel":
+            raise ValueError("channel config identity is incomplete")
+        authority_scope = declared_authority or "key:default"
     if contract.execution_environment != "channel":
-        if not str(session_key or "").strip():
-            return None
         return derive_pi_local_session_id(authority_scope, str(session_key).strip())
     channel = str(contract.input.get("authenticated_channel") or "").strip().lower()
     sender = str(contract.input.get("authenticated_sender_id") or "").strip()
     conversation = str(contract.input.get("authenticated_conversation_id") or "").strip()
-    if not channel or not sender or bool(config_key) == bool(config_path):
+    if not channel or not sender or not authority_scope:
         raise ValueError("channel Session identity is incomplete")
-    if config_path:
-        resolved_path = resolve_runtime_config_path(config_path=config_path).resolve(strict=True)
-        if not resolved_path.is_file():
-            raise ValueError("channel config_path must resolve to a regular file")
-        authority_scope = "path:" + hashlib.sha256(
-            str(resolved_path).encode("utf-8")
-        ).hexdigest()
-    else:
-        resolve_runtime_config_path(config_key=config_key)
     expected = derive_pi_session_id(
         channel,
         sender,

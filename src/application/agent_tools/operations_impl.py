@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -311,52 +312,174 @@ def scheduler_status_tool(
     read_state: Callable[[Path], dict[str, Any]],
     decide: Callable[..., Any],
     repo_base: Callable[[], Path],
+    resolve_runtime_root: Callable[..., Any],
+    validate_schedule_cfg: Callable[[Any, str], None],
+    select_state_filename: Callable[[list[str]], str],
+    select_schedule_key: Callable[[list[str], dict[str, Any]], str],
+    shared_state_path: Callable[[Path, str], Path],
+    parse_state_datetime: Callable[[Any], datetime | None],
     mask_path: Callable[[Any], str],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     base = repo_base()
     config_path, cfg = load_runtime_config(config_key=payload.get("config_key"), config_path=payload.get("config_path"))
-    schedule_key = str(payload.get("schedule_key") or "schedule").strip() or "schedule"
-    schedule_cfg = cfg.get(schedule_key) if isinstance(cfg.get(schedule_key), dict) else {}
-    schedule_enabled = bool((schedule_cfg or {}).get("enabled", True))
-
-    default_state_dir = (base / "output_shared" / "state").resolve()
-    state_dir = _resolve_local_path(payload.get("state_dir"), base=base, default=default_state_dir)
-    default_state = (state_dir / "scheduler_state.json").resolve()
-    state_path = _resolve_local_path(payload.get("state"), base=base, default=default_state)
-
-    try:
-        state_data = read_state(state_path)
-    except Exception as exc:
+    market = infer_runtime_config_market(
+        config_key=payload.get("config_key"),
+        config_path=config_path,
+        config=cfg,
+    )
+    if market not in {"us", "hk"}:
         raise AgentToolError(
             code="CONFIG_ERROR",
-            message="scheduler state is unreadable",
-            details={"state_path": mask_path(state_path), "error": str(exc)},
-        ) from exc
+            message="scheduler market could not be inferred from runtime config",
+        )
+
+    scheduler_markets = [market.upper()]
+    state_filename = select_state_filename(scheduler_markets)
+    if payload.get("state") not in (None, ""):
+        state_path = _resolve_local_path(payload.get("state"), base=base, default=base)
+        state_selection = "explicit_state"
+    elif payload.get("state_dir") not in (None, ""):
+        state_dir = _resolve_local_path(payload.get("state_dir"), base=base, default=base)
+        state_path = (state_dir / state_filename).resolve()
+        state_selection = "explicit_state_dir"
+    else:
+        runtime_root = resolve_runtime_root(repo_root=base).runtime_root
+        state_path = shared_state_path(runtime_root, state_filename)
+        state_selection = "production_default"
+
+    explicit_schedule = payload.get("schedule_key") not in (None, "")
+    schedule_key = (
+        str(payload.get("schedule_key")).strip()
+        if explicit_schedule
+        else select_schedule_key(scheduler_markets, cfg)
+    )
+    if not schedule_key:
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message="schedule_key must not be empty",
+        )
+    raw_schedule_cfg = cfg.get(schedule_key)
+    if explicit_schedule and raw_schedule_cfg is None:
+        schedule_status = "missing"
+        schedule_cfg: dict[str, Any] | None = None
+    elif explicit_schedule and raw_schedule_cfg == {}:
+        schedule_status = "invalid"
+        schedule_cfg = None
+    else:
+        selected_schedule_cfg = {} if raw_schedule_cfg is None else raw_schedule_cfg
+        try:
+            validate_schedule_cfg(selected_schedule_cfg, schedule_key)
+        except SystemExit:
+            schedule_status = "invalid"
+            schedule_cfg = None
+        else:
+            schedule_status = "available"
+            schedule_cfg = selected_schedule_cfg
+    schedule_enabled = (
+        bool(schedule_cfg.get("enabled", True))
+        if schedule_cfg is not None
+        else None
+    )
+
+    state_data, state_status = _read_scheduler_state_snapshot(
+        state_path,
+        read_state=read_state,
+        parse_datetime=parse_state_datetime,
+    )
 
     account = _optional_text(payload.get("account"))
-    decision = decide(
-        schedule_cfg or {},
-        state_data,
-        datetime.now(timezone.utc),
-        account=account,
-        schedule_key=schedule_key,
-        force=bool(payload.get("force", False)),
-    )
-    decision_payload = asdict(decision)
-    decision_payload["should_notify"] = bool(decision_payload.get("is_notify_window_open"))
+    if account is not None:
+        try:
+            account = resolve_configured_accounts(cfg, [account])[0]
+        except ValueError as exc:
+            raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
+    force = bool(payload.get("force", False))
+    now_utc = datetime.now(timezone.utc)
+    decision_mode = "force_simulation" if force else "current_state"
+    decision_payload: dict[str, Any]
+    if schedule_cfg is not None and state_data is not None:
+        try:
+            decision = decide(
+                schedule_cfg,
+                state_data,
+                now_utc,
+                account=account,
+                schedule_key=schedule_key,
+                force=force,
+            )
+        except Exception:
+            try:
+                decide(
+                    schedule_cfg,
+                    {},
+                    now_utc,
+                    account=account,
+                    schedule_key=schedule_key,
+                    force=force,
+                )
+            except Exception:
+                schedule_status = "invalid"
+                schedule_enabled = None
+                reason = "schedule_invalid"
+            else:
+                state_data = None
+                state_status = "corrupt"
+                reason = "state_corrupt"
+            decision_payload = _unknown_scheduler_decision(
+                now_utc=now_utc,
+                schedule_key=schedule_key,
+                reason=reason,
+            )
+        else:
+            decision_payload = asdict(decision)
+            decision_payload["should_notify"] = bool(decision_payload.get("is_notify_window_open"))
+            decision_payload["status"] = "available"
+    else:
+        reason = (
+            f"schedule_{schedule_status}"
+            if schedule_status != "available"
+            else f"state_{state_status}"
+        )
+        decision_payload = _unknown_scheduler_decision(
+            now_utc=now_utc,
+            schedule_key=schedule_key,
+            reason=reason,
+        )
     decision_payload["schedule_enabled"] = schedule_enabled
+    decision_payload["evaluation_mode"] = decision_mode
 
-    last_run_by_account = state_data.get("last_run_utc_by_account")
-    last_processed_target_by_account = state_data.get("last_processed_scan_target_utc_by_account")
-    last_notify_by_account = state_data.get("last_notify_utc_by_account")
+    state = state_data or {}
+    last_run_by_account = state.get("last_run_utc_by_account")
+    last_processed_target_by_account = state.get("last_processed_scan_target_utc_by_account")
+    last_notify_by_account = state.get("last_notify_utc_by_account")
+    account_maps = (last_run_by_account, last_processed_target_by_account, last_notify_by_account)
+    account_record_status = (
+        "not_selected"
+        if account is None
+        else "unknown"
+        if state_data is None
+        else "present"
+        if any(isinstance(item, dict) and account in item for item in account_maps)
+        else "absent"
+    )
     data = {
         "decision": decision_payload,
         "freshness": {
             "status": "current",
             "as_of": decision_payload["now_utc"],
         },
+        "schedule": {
+            "key": schedule_key,
+            "selection": "explicit" if explicit_schedule else "production_default",
+            "status": schedule_status,
+            "enabled": schedule_enabled,
+        },
         "state": {
             "state_path": mask_path(state_path),
+            "selection": state_selection,
+            "status": state_status,
+            "empty": state_data == {} if state_data is not None else None,
+            "account_record_status": account_record_status,
             "last_run_utc_for_account": (
                 last_run_by_account.get(account) if account and isinstance(last_run_by_account, dict) else None
             ),
@@ -365,7 +488,7 @@ def scheduler_status_tool(
                 if account and isinstance(last_processed_target_by_account, dict)
                 else None
             ),
-            "last_notify_utc": state_data.get("last_notify_utc"),
+            "last_notify_utc": state.get("last_notify_utc"),
             "last_notify_utc_for_account": (
                 last_notify_by_account.get(account) if account and isinstance(last_notify_by_account, dict) else None
             ),
@@ -373,10 +496,93 @@ def scheduler_status_tool(
         "filters": {
             "account": account,
             "schedule_key": schedule_key,
-            "force": bool(payload.get("force", False)),
+            "force": force,
+            "market": market,
         },
     }
     return data, [], {"config_path": mask_path(config_path), "state_path": mask_path(state_path)}
+
+
+def _read_scheduler_state_snapshot(
+    state_path: Path,
+    *,
+    read_state: Callable[[Path], dict[str, Any]],
+    parse_datetime: Callable[[Any], datetime | None],
+) -> tuple[dict[str, Any] | None, str]:
+    try:
+        state_stat = state_path.stat()
+        if not state_path.is_file():
+            return None, "unreadable"
+        if state_stat.st_size <= 0:
+            return None, "corrupt"
+        state = read_state(state_path)
+    except FileNotFoundError:
+        return None, "missing"
+    except (OSError, UnicodeError):
+        return None, "unreadable"
+    except json.JSONDecodeError:
+        return None, "corrupt"
+    except Exception:
+        return None, "corrupt"
+    if not isinstance(state, dict):
+        return None, "corrupt"
+    account_map_fields = (
+        "last_run_utc_by_account",
+        "last_scan_utc_by_account",
+        "last_processed_scan_target_utc_by_account",
+        "last_notify_utc_by_account",
+    )
+    for field in account_map_fields:
+        if field not in state:
+            continue
+        raw_map = state[field]
+        if not isinstance(raw_map, dict):
+            return None, "corrupt"
+        for value in raw_map.values():
+            if not isinstance(value, str) or not value.strip():
+                return None, "corrupt"
+            try:
+                parsed = parse_datetime(value)
+            except Exception:
+                return None, "corrupt"
+            if parsed is None or parsed.tzinfo is None:
+                return None, "corrupt"
+    for field in (
+        "last_run_utc",
+        "last_scan_utc",
+        "last_processed_scan_target_utc",
+        "last_notify_utc",
+    ):
+        if field not in state or state[field] is None:
+            continue
+        value = state[field]
+        if not isinstance(value, str) or not value.strip():
+            return None, "corrupt"
+        try:
+            parsed = parse_datetime(value)
+        except Exception:
+            return None, "corrupt"
+        if parsed is None or parsed.tzinfo is None:
+            return None, "corrupt"
+    return state, "available"
+
+
+def _unknown_scheduler_decision(
+    *,
+    now_utc: datetime,
+    schedule_key: str,
+    reason: str,
+) -> dict[str, Any]:
+    return {
+        "status": "unknown",
+        "now_utc": now_utc.isoformat(),
+        "schedule_key": schedule_key,
+        "in_run_window": None,
+        "should_run_scan": None,
+        "is_notify_window_open": None,
+        "should_notify": None,
+        "reason": reason,
+    }
 
 
 def _event_row(event: dict[str, Any], *, normalize_broker: Callable[[Any], str], normalize_account: Callable[[Any], str]) -> dict[str, Any]:

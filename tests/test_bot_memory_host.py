@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import hashlib
+from dataclasses import replace
+
 import pytest
 
 from src.application.bot.contracts import AppResult
 from src.application.bot.host import run_contract
 from src.application.bot.host_store import BotHostStore
+from src.application.bot.memory import scope_from_contract
 from src.application.bot.memory_worker import MemoryWorker
 from src.application.bot.memory_worker import configured_memory_scope
 from src.application.bot.service import prepare_contract
@@ -37,6 +41,57 @@ def test_configured_memory_scope_accepts_runtime_account_list(tmp_path, monkeypa
     scope = configured_memory_scope(contract)
 
     assert scope.allowed_accounts == frozenset({"lx", "sy"})
+
+
+def test_memory_scope_accepts_normalized_key_and_path_without_changing_owner(
+    tmp_path, monkeypatch
+):
+    config_path = tmp_path / "config.us.json"
+    config_path.write_text("{}", encoding="utf-8")
+    contract = prepare_contract(
+        _request("查看记忆", environment="channel"),
+        reference_year=2026,
+        report_now_ms=1788319188212,
+    )
+    assert not isinstance(contract, AppResult)
+    canonical = str(config_path.resolve())
+    path_authority = "path:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    legacy_path = replace(
+        contract,
+        input={**contract.input, "config_key": None, "config_path": canonical},
+    )
+    normalized_path = replace(
+        contract,
+        input={
+            **contract.input,
+            "config_key": "us",
+            "config_path": canonical,
+            "authority_scope": path_authority,
+        },
+    )
+    legacy_key = replace(
+        contract,
+        input={**contract.input, "config_key": "us", "config_path": None},
+    )
+    normalized_key = replace(
+        contract,
+        input={
+            **contract.input,
+            "config_key": "us",
+            "config_path": canonical,
+            "authority_scope": "key:us",
+        },
+    )
+    calls = []
+    monkeypatch.setattr(
+        "src.application.agent_tool_config.load_runtime_config",
+        lambda **kwargs: (calls.append(kwargs) or config_path, {"accounts": ["lx"]}),
+    )
+
+    assert scope_from_contract(normalized_path) == scope_from_contract(legacy_path)
+    assert scope_from_contract(normalized_key) == scope_from_contract(legacy_key)
+    assert configured_memory_scope(normalized_path).allowed_accounts == frozenset({"lx"})
+    assert calls == [{"config_key": "us", "config_path": canonical}]
 
 
 def test_channel_memory_runtime_config_list_is_enabled(tmp_path, monkeypatch):
