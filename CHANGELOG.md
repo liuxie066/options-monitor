@@ -2,8 +2,13 @@
 
 ## Unreleased
 
+## 3.5.2 - 2026-09-10
+
 ### Improvements
 - Adapted Bot to Pi 0.85.1 while preserving committed session history, compaction, cancellation, and explicit commit admission; added controlled bidirectional session migration with recovery receipts and runtime readiness checks before service activation.
+
+### Bug Fixes
+- Fixed Bot memory scope loading for runtime configurations that declare accounts as a list.
 
 ## 3.5.1 - 2026-09-09
 

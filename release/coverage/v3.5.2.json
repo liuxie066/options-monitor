@@ -1,0 +1,95 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.5.2",
+  "base": {
+    "tag": "v3.5.1",
+    "commit": "77e740c13d4fff1e1bf0d7596bfe6e28b2c118c1"
+  },
+  "reviewed_head": "d18563bc7c2dd9f6e559f7003b5201748d2d0e64",
+  "commits": [
+    {
+      "sha": "82dffc12a1926a63cfa3905d8972edb93c4a6464",
+      "subject": "fix(bot): load configured account list for memory (#265)"
+    },
+    {
+      "sha": "73855a547c842c6dd6eba3c7d99435f103a26d21",
+      "subject": "feat(bot): adapt Pi runtime to 0.85.1 with controlled session migration"
+    },
+    {
+      "sha": "766b88cd5ce4429ffe7b8c75a4b24260e83127a6",
+      "subject": "chore(integration): merge main into Pi 0.85.1 adaptation"
+    },
+    {
+      "sha": "574894285fb46b653b844aad7899ce9341e412f3",
+      "subject": "test(pi): synchronize exporter death and checkpoint fixture snapshots"
+    },
+    {
+      "sha": "d18563bc7c2dd9f6e559f7003b5201748d2d0e64",
+      "subject": "Merge pull request #266 from liuxie066/codex/pi-0.85.1"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Adapted Bot to Pi 0.85.1 while preserving committed session history, compaction, cancellation, and explicit commit admission; added controlled bidirectional session migration with recovery receipts and runtime readiness checks before service activation.",
+      "commits": [
+        "73855a547c842c6dd6eba3c7d99435f103a26d21",
+        "766b88cd5ce4429ffe7b8c75a4b24260e83127a6"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Fixed Bot memory scope loading for runtime configurations that declare accounts as a list.",
+      "commits": [
+        "82dffc12a1926a63cfa3905d8972edb93c4a6464"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "574894285fb46b653b844aad7899ce9341e412f3",
+      "reason": "Test-only fixture synchronization; no runtime or user-facing behavior."
+    },
+    {
+      "commit": "d18563bc7c2dd9f6e559f7003b5201748d2d0e64",
+      "reason": "Merge commit; the underlying Pi adaptation is covered by the Improvements release note."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "82dffc12a1926a63cfa3905d8972edb93c4a6464",
+      "references": [
+        "docs/BOT_PRD.md#1-目标范围与成功信号",
+        "https://github.com/liuxie066/options-monitor/pull/265"
+      ]
+    },
+    {
+      "commit": "73855a547c842c6dd6eba3c7d99435f103a26d21",
+      "references": [
+        "docs/PI_AGENT_CORE_INTEGRATION.md",
+        "https://github.com/liuxie066/options-monitor/pull/266"
+      ]
+    },
+    {
+      "commit": "766b88cd5ce4429ffe7b8c75a4b24260e83127a6",
+      "references": [
+        "docs/PI_AGENT_CORE_INTEGRATION.md",
+        "https://github.com/liuxie066/options-monitor/pull/266"
+      ]
+    },
+    {
+      "commit": "574894285fb46b653b844aad7899ce9341e412f3",
+      "references": [
+        "docs/PI_AGENT_CORE_INTEGRATION.md",
+        "https://github.com/liuxie066/options-monitor/pull/266"
+      ]
+    },
+    {
+      "commit": "d18563bc7c2dd9f6e559f7003b5201748d2d0e64",
+      "references": [
+        "docs/PI_AGENT_CORE_INTEGRATION.md",
+        "https://github.com/liuxie066/options-monitor/pull/266"
+      ]
+    }
+  ]
+}
