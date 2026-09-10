@@ -5,7 +5,7 @@
     "tag": "v3.5.1",
     "commit": "77e740c13d4fff1e1bf0d7596bfe6e28b2c118c1"
   },
-  "reviewed_head": "d18563bc7c2dd9f6e559f7003b5201748d2d0e64",
+  "reviewed_head": "ac19219c1f322cfce2265d6261cb7dd6bc724617",
   "commits": [
     {
       "sha": "82dffc12a1926a63cfa3905d8972edb93c4a6464",
@@ -26,6 +26,10 @@
     {
       "sha": "d18563bc7c2dd9f6e559f7003b5201748d2d0e64",
       "subject": "Merge pull request #266 from liuxie066/codex/pi-0.85.1"
+    },
+    {
+      "sha": "ac19219c1f322cfce2265d6261cb7dd6bc724617",
+      "subject": "chore: release 3.5.2 (#267)"
     }
   ],
   "release_notes": [
@@ -53,6 +57,10 @@
     {
       "commit": "d18563bc7c2dd9f6e559f7003b5201748d2d0e64",
       "reason": "Merge commit; the underlying Pi adaptation is covered by the Improvements release note."
+    },
+    {
+      "commit": "ac19219c1f322cfce2265d6261cb7dd6bc724617",
+      "reason": "Release metadata commit; no user-facing behavior beyond publishing the already reviewed 3.5.2 contents."
     }
   ],
   "design_evidence": [
@@ -89,6 +97,13 @@
       "references": [
         "docs/PI_AGENT_CORE_INTEGRATION.md",
         "https://github.com/liuxie066/options-monitor/pull/266"
+      ]
+    },
+    {
+      "commit": "ac19219c1f322cfce2265d6261cb7dd6bc724617",
+      "references": [
+        "docs/PI_AGENT_CORE_INTEGRATION.md",
+        "https://github.com/liuxie066/options-monitor/pull/267"
       ]
     }
   ]
