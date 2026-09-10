@@ -11,6 +11,8 @@ from src.application.config_authoring_transaction import (
     config_source_sha256,
     publish_yaml_config_generation,
 )
+from src.application.config_yaml import resolve_yaml_runtime_config
+from src.application.runtime_config_freshness import GENERATED_KEY, check_runtime_config_freshness
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -150,3 +152,67 @@ def test_config_authoring_compensates_generation_when_source_commit_fails(
     for path, payload in before_bytes.items():
         assert path.read_bytes() == payload
     assert json.loads(us_path.read_text(encoding="utf-8")) == {"old": "us"}
+
+
+def test_config_authoring_retarget_preserves_effective_fingerprint_for_new_document(tmp_path: Path) -> None:
+    source = tmp_path / "config.yaml"
+    _write_yaml(source, _config_doc())
+    before_sha = config_source_sha256(source)
+    changed = _config_doc()
+    changed["markets"]["us"]["symbols"].append("FUTU")
+    changed["markets"]["hk"]["symbols"].append("9988.HK")
+    comparison_source = tmp_path / "expected.yaml"
+    _write_yaml(comparison_source, changed)
+    expected_effective = {}
+    for market in ("us", "hk"):
+        config, _ = resolve_yaml_runtime_config(repo_root=REPO_ROOT, market=market, config_path=comparison_source)
+        expected_effective[market] = next(
+            item["effective"] for item in config[GENERATED_KEY]["sources"] if item["role"] == "market_user"
+        )
+
+    result = publish_yaml_config_generation(
+        repo_root=REPO_ROOT, config_yaml_path=source, config_doc=changed,
+        runtime_root=tmp_path, markets=["us", "hk"], include_assistant=False,
+        apply=True, expected_source_sha256=before_sha,
+    )
+
+    assert result["write_applied"] is True
+    after_sha = config_source_sha256(source)
+    assert before_sha != after_sha
+    assert result["source_revision"] == {"before_sha256": before_sha, "after_sha256": after_sha}
+    for market in ("us", "hk"):
+        runtime = tmp_path / f"config.{market}.json"
+        config = json.loads(runtime.read_text(encoding="utf-8"))
+        record = next(item for item in config[GENERATED_KEY]["sources"] if item["role"] == "market_user")
+        assert record["path"] == str(source)
+        assert record["sha256"] == after_sha
+        assert record["effective"] == expected_effective[market]
+        assert record["effective"]["kind"] == "yaml-market-user-v1"
+        assert record["effective"]["market"] == market
+        assert config["_resolved"]["config_yaml_path"] == str(source)
+        assert config["_resolved"]["config_yaml_sha256"] == after_sha
+        assert check_runtime_config_freshness(
+            config, repo_root=REPO_ROOT, market=market, runtime_config_path=runtime,
+        )["ok"] is True
+
+
+def test_config_authoring_assistant_only_edit_still_invalidates_preview_sha(tmp_path: Path) -> None:
+    source = tmp_path / "config.yaml"
+    original = _config_doc()
+    _write_yaml(source, original)
+    expected_sha = config_source_sha256(source)
+    changed = _config_doc()
+    changed["assistant"] = {"enabled": False}
+    _write_yaml(source, changed)
+    before = source.read_bytes()
+
+    with pytest.raises(AgentToolError) as exc:
+        publish_yaml_config_generation(
+            repo_root=REPO_ROOT, config_yaml_path=source, config_doc=original,
+            runtime_root=tmp_path, markets=["us", "hk"], apply=True,
+            expected_source_sha256=expected_sha,
+        )
+
+    assert exc.value.code == "STALE_PREVIEW"
+    assert source.read_bytes() == before
+    assert list(tmp_path.iterdir()) == [source]

@@ -4,6 +4,10 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
+from src.application.config_yaml import build_yaml_runtime_config_file
+
 
 def _write_json(path: Path, payload: dict) -> Path:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -277,3 +281,52 @@ def test_scan_scheduler_external_adapter_forwards_force_flag(monkeypatch, tmp_pa
     )
 
     assert '--force' in calls[0][0]
+
+
+@pytest.mark.parametrize("market,symbol", [("us", "NVDA"), ("hk", "0700.HK")])
+@pytest.mark.parametrize("invalid_yaml", [False, True], ids=["assistant-only", "invalid-yaml"])
+def test_tick_cron_real_preflight_after_yaml_edit(
+    tmp_path: Path, capsys, market: str, symbol: str, invalid_yaml: bool,
+) -> None:
+    from src.application.tick_cron import run_tick_cron
+
+    source = tmp_path / "config.yaml"
+    original = (
+        "accounts:\n  lx:\n    type: futu\n    futu_account_id: '12345678'\n"
+        f"markets:\n  {market}:\n    accounts: [lx]\n    symbols: [{symbol}]\n"
+    )
+    source.write_text(original, encoding="utf-8")
+    runtime = tmp_path / f"config.{market}.json"
+    build_yaml_runtime_config_file(
+        repo_root=Path(__file__).resolve().parents[1], market=market,
+        config_path=source, output_config_path=runtime,
+    )
+    source.write_text(
+        "markets: [PRIVATE_CONFIG_VALUE\n" if invalid_yaml
+        else original + "assistant:\n  enabled: false\n  context_window_messages: 8\n",
+        encoding="utf-8",
+    )
+    calls = []
+
+    def run_command(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0)
+
+    rc = run_tick_cron(
+        market=market, config_path=str(runtime), lock_path=str(tmp_path / "tick.lock"),
+        run_cmd=run_command, no_send=True, environ={},
+    )
+
+    captured = capsys.readouterr()
+    if invalid_yaml:
+        assert rc == 1
+        assert calls == []
+        assert "[CONFIG_ERROR]" in captured.err
+        assert f"rebuild: ./om config build --source yaml --market {market}" in captured.err
+        assert "Traceback" not in captured.err
+        assert "PRIVATE_CONFIG_VALUE" not in captured.err
+    else:
+        assert rc == 0
+        assert len(calls) == 1
+        assert "--no-send" in calls[0][0]
+        assert captured.err == ""
