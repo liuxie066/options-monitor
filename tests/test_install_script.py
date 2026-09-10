@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -67,11 +68,12 @@ chmod +x "$dest/om" "$dest/om-agent"
 if [[ "${FAKE_MISSING_OM_AGENT:-0}" == "1" ]]; then
   rm -f "$dest/om-agent"
 fi
-cat > "$dest/agent-runtime/package.json" <<'JSON'
-{"dependencies":{"@earendil-works/pi-agent-core":"0.84.2","@earendil-works/pi-ai":"0.84.2","@earendil-works/pi-session-backend-sqlite-node":"0.84.2"}}
+pi_version="${FAKE_PI_PACKAGE_VERSION:-0.84.2}"
+cat > "$dest/agent-runtime/package.json" <<JSON
+{"dependencies":{"@earendil-works/pi-agent-core":"$pi_version","@earendil-works/pi-ai":"$pi_version","@earendil-works/pi-session-backend-sqlite-node":"$pi_version"}}
 JSON
-cat > "$dest/agent-runtime/package-lock.json" <<'JSON'
-{"lockfileVersion":3,"packages":{"":{"dependencies":{"@earendil-works/pi-agent-core":"0.84.2","@earendil-works/pi-ai":"0.84.2","@earendil-works/pi-session-backend-sqlite-node":"0.84.2"}}}}
+cat > "$dest/agent-runtime/package-lock.json" <<JSON
+{"lockfileVersion":3,"packages":{"":{"dependencies":{"@earendil-works/pi-agent-core":"$pi_version","@earendil-works/pi-ai":"$pi_version","@earendil-works/pi-session-backend-sqlite-node":"$pi_version"}}}}
 JSON
 cat > "$dest/scripts/pi_runtime_smoke.sh" <<'SH'
 #!/usr/bin/env bash
@@ -551,6 +553,65 @@ def test_install_script_no_install_cli_skips_wrappers(tmp_path: Path) -> None:
     assert not (tmp_path / "home" / ".local" / "bin" / "om").exists()
     assert "cd " in result.stdout
     assert "./om setup check" in result.stdout
+
+
+def test_first_pi_transition_stages_private_target_without_changing_production(
+    tmp_path: Path,
+) -> None:
+    production = tmp_path / "production"
+    old_release = production / "releases" / "3.5.1"
+    old_runtime = old_release / "agent-runtime"
+    old_runtime.mkdir(parents=True)
+    (old_release / "VERSION").write_text("3.5.1\n", encoding="utf-8")
+    (old_runtime / "package.json").write_text(
+        '{"dependencies":{"@earendil-works/pi-agent-core":"0.84.2"}}\n',
+        encoding="utf-8",
+    )
+    production_link = production / "current"
+    production_link.symlink_to(old_release, target_is_directory=True)
+    production_runtime = tmp_path / "production-runtime"
+    production_runtime.mkdir()
+    runtime_marker = production_runtime / "service.profile.json"
+    runtime_marker.write_text('{"activation":"stopped"}\n', encoding="utf-8")
+    before_link = production_link.resolve()
+    before_runtime = runtime_marker.read_bytes()
+
+    stage = tmp_path / "private-upgrade-control"
+    env = _installer_env(tmp_path)
+    env["FAKE_PI_PACKAGE_VERSION"] = "0.85.1"
+    result = subprocess.run(
+        [
+            "bash",
+            str(ROOT / "scripts" / "install.sh"),
+            "--version",
+            "v9.9.9",
+            "--prefix",
+            str(stage),
+            "--repo-url",
+            "https://example.invalid/options-monitor.git",
+            "--no-install-cli",
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert production_link.resolve() == before_link
+    assert runtime_marker.read_bytes() == before_runtime
+    assert json.loads((old_runtime / "package.json").read_text(encoding="utf-8"))[
+        "dependencies"
+    ]["@earendil-works/pi-agent-core"] == "0.84.2"
+    target_control = stage / "releases" / "v9.9.9"
+    assert (stage / "current").resolve() == target_control.resolve()
+    assert json.loads(
+        (target_control / "agent-runtime" / "package.json").read_text(
+            encoding="utf-8"
+        )
+    )["dependencies"]["@earendil-works/pi-agent-core"] == "0.85.1"
+    assert not (tmp_path / "home" / ".local" / "bin" / "om").exists()
+    assert not (tmp_path / "home" / ".local" / "bin" / "om-agent").exists()
 
 
 def test_install_script_refuses_existing_non_om_wrapper_before_installing(tmp_path: Path) -> None:

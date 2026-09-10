@@ -37,9 +37,9 @@ CONTINUATION_PROMPT_FOR_TEST = (
 
 def test_pi_runtime_dependencies_are_exactly_pinned():
     expected = {
-        "@earendil-works/pi-agent-core": "0.84.2",
-        "@earendil-works/pi-ai": "0.84.2",
-        "@earendil-works/pi-session-backend-sqlite-node": "0.84.2",
+        "@earendil-works/pi-agent-core": "0.85.1",
+        "@earendil-works/pi-ai": "0.85.1",
+        "@earendil-works/pi-session-backend-sqlite-node": "0.85.1",
     }
     package = json.loads((REPO / "agent-runtime/package.json").read_text(encoding="utf-8"))
     lock = json.loads((REPO / "agent-runtime/package-lock.json").read_text(encoding="utf-8"))
@@ -1772,7 +1772,7 @@ def _run_session(
 def _session_entries(database: Path, session_id: str) -> list[dict]:
     with sqlite3.connect(database) as connection:
         rows = connection.execute(
-            "SELECT seq, id, parent_id, type, payload FROM entries "
+            "SELECT seq, id, parent_id, type, custom_type, payload FROM entries "
             "WHERE session_id = ? ORDER BY seq",
             (session_id,),
         ).fetchall()
@@ -1782,9 +1782,10 @@ def _session_entries(database: Path, session_id: str) -> list[dict]:
             "id": entry_id,
             "parent_id": parent_id,
             "type": type_,
+            "custom_type": custom_type,
             "payload": json.loads(payload),
         }
-        for seq, entry_id, parent_id, type_, payload in rows
+        for seq, entry_id, parent_id, type_, custom_type, payload in rows
     ]
 
 
@@ -1855,15 +1856,21 @@ def _write_child_record(process, identity, seq, type_, payload):
 def _start_node_until_proposed(database, payload, run_id):
     command, entry = _runtime_command(None, None)
     identity = {"request_id": f"req_{run_id}", "run_id": run_id}
-    process = subprocess.Popen(
-        command,
-        cwd=entry.parent.parent,
-        env=_session_env(database),
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        bufsize=0,
-    )
+    session_id = payload["session_id"]
+    assert session_id is not None
+    with pi_process.pi_session_locks(database, session_id) as (canonical, lock_fds):
+        environ = _session_env(canonical)
+        environ["OM_PI_LOCK_FDS"] = json.dumps(lock_fds)
+        process = subprocess.Popen(
+            command,
+            cwd=entry.parent.parent,
+            env=environ,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            pass_fds=lock_fds,
+            bufsize=0,
+        )
     _write_child_record(process, identity, 1, "run.start", payload)
     buffer = bytearray()
     next_seq = 2
@@ -1894,25 +1901,6 @@ def _start_node_until_proposed(database, payload, run_id):
         process.kill()
         process.wait(timeout=2)
         raise
-
-
-def _expire_writer_lease(database: Path, session_id: str) -> None:
-    now_ms = int(time.time() * 1000)
-    with sqlite3.connect(database) as connection:
-        row = connection.execute(
-            "SELECT expires_at_ms FROM writer_leases WHERE session_id = ?",
-            (session_id,),
-        ).fetchone()
-        assert row is not None
-        assert row[0] > now_ms
-        updated = connection.execute(
-            "UPDATE writer_leases SET expires_at_ms = ? WHERE session_id = ?",
-            (now_ms - 1, session_id),
-        ).rowcount
-        connection.commit()
-    assert updated == 1
-
-
 def _wait_for_tool_slot(expected: bool, timeout: float = 2.0) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -2044,7 +2032,7 @@ const rec = (type, seq, payload) =>
     seq, payload,
   }) + "\\n");
 rl.once("line", () => {
-  rec("run.accepted", 1, { runtime: "pi-agent-core", runtime_version: "0.84.2", session_id: null });
+  rec("run.accepted", 1, { runtime: "pi-agent-core", runtime_version: "0.85.1", session_id: null });
 """
         + records
         + "\n});\n"
@@ -2069,7 +2057,7 @@ let n = 0;
 rl.on("line", (line) => {{
   n += 1;
   if (n === 1) {{
-    rec("run.accepted", 1, {{ runtime: "pi-agent-core", runtime_version: "0.84.2", session_id: null }});
+    rec("run.accepted", 1, {{ runtime: "pi-agent-core", runtime_version: "0.85.1", session_id: null }});
     scripted.forEach((record, index) => rec(record.type, index + 2, record.payload));
   }} else if (n === 2 && finalPayload !== null) {{
     const committed = JSON.parse(line).type === "run.commit";
@@ -2092,7 +2080,7 @@ let n = 0;
 rl.on("line", (line) => {
   n += 1;
   if (n === 1) {
-    rec("run.accepted", 1, { runtime: "pi-agent-core", runtime_version: "0.84.2", session_id: null });
+    rec("run.accepted", 1, { runtime: "pi-agent-core", runtime_version: "0.85.1", session_id: null });
     rec("agent.event", 2, { event_type: "agent_start", data: {} });
     rec("agent.event", 3, { event_type: "turn_start", data: {} });
     rec("agent.event", 4, { event_type: "model_turn_completed", data: { stop_reason: "stop", attempt_count: 0, model_retry_count: 0, usage: { input: 1, output: 1, totalTokens: 2 }, usage_total: { input: 1, output: 1, totalTokens: 2 } } });
@@ -2187,7 +2175,7 @@ def test_malformed_child_fails_protocol(tmp_path):
 def test_mismatched_run_id_fails_closed(tmp_path):
     entry = _write_fake(
         tmp_path,
-        'process.stdout.write(JSON.stringify({protocol:"om-pi-ipc.v1",type:"run.accepted",request_id:"req_1",run_id:"OTHER",seq:1,payload:{runtime:"pi-agent-core",runtime_version:"0.84.2",session_id:null}})+"\\n");\n',
+        'process.stdout.write(JSON.stringify({protocol:"om-pi-ipc.v1",type:"run.accepted",request_id:"req_1",run_id:"OTHER",seq:1,payload:{runtime:"pi-agent-core",runtime_version:"0.85.1",session_id:null}})+"\\n");\n',
     )
     result = run_pi_agent(
         _start_payload(),
@@ -2237,7 +2225,7 @@ def test_accepted_then_nonzero_exit(tmp_path):
     child = (
         'process.stdout.write(JSON.stringify({protocol:"om-pi-ipc.v1",type:"run.accepted",'
         'request_id:"req_1",run_id:"run_1",seq:1,payload:{runtime:"pi-agent-core",'
-        'runtime_version:"0.84.2",session_id:null}})+"\\n", () => process.exit(2));\n'
+        'runtime_version:"0.85.1",session_id:null}})+"\\n", () => process.exit(2));\n'
     )
     entry = _write_fake(tmp_path, child)
     result = run_pi_agent(
@@ -2619,7 +2607,7 @@ let n = 0;
 rl.on("line", (line) => {
   n += 1;
   if (n === 1) {
-    rec("run.accepted", 1, { runtime: "pi-agent-core", runtime_version: "0.84.2", session_id: null });
+    rec("run.accepted", 1, { runtime: "pi-agent-core", runtime_version: "0.85.1", session_id: null });
     rec("agent.event", 2, { event_type: "agent_start", data: {} });
     rec("agent.event", 3, { event_type: "turn_start", data: {} });
     rec("agent.event", 4, { event_type: "model_turn_completed", data: { stop_reason: "stop", attempt_count: 0, model_retry_count: 0, usage: {}, usage_total: {} } });
@@ -2667,7 +2655,7 @@ const rec = (type, seq, payload) =>
     seq, payload,
   }) + "\\n");
 rl.once("line", () => {
-  rec("run.accepted", 1, { runtime: "pi-agent-core", runtime_version: "0.84.2", session_id: null });
+  rec("run.accepted", 1, { runtime: "pi-agent-core", runtime_version: "0.85.1", session_id: null });
   const proposal = { status: "answered", text: "hello", control_request: null, termination_reason: "stop", usage: {} };
   rec("run.proposed", 2, proposal);
   rec("run.proposed", 3, proposal);
@@ -2996,7 +2984,7 @@ let n = 0;
 rl.on("line", (line) => {
   n += 1;
   if (n === 1) {
-    rec("run.accepted", 1, { runtime: "pi-agent-core", runtime_version: "0.84.2", session_id: null });
+    rec("run.accepted", 1, { runtime: "pi-agent-core", runtime_version: "0.85.1", session_id: null });
     rec("agent.event", 2, { event_type: "agent_start", data: {} });
     rec("agent.event", 3, { event_type: "turn_start", data: {} });
     rec("agent.event", 4, { event_type: "model_turn_completed", data: { stop_reason: "stop", attempt_count: 0, model_retry_count: 0, usage: {}, usage_total: {} } });
@@ -3784,6 +3772,7 @@ def test_transient_eval_run_does_not_create_session_database(tmp_path):
 
     assert result["ok"] is True
     assert database.exists() is False
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_only_admitted_turn_messages_are_persisted(tmp_path):
@@ -3893,60 +3882,103 @@ def _seed_compactable_history(
     }
 
 
-def test_killed_partial_turns_rewind_and_writer_lease_expires(tmp_path):
-    cases = []
-    for appended_messages in range(1, 5):
-        database = tmp_path / f"partial_{appended_messages}.sqlite3"
-        session_id = derive_pi_session_id(
-            "feishu", f"sender-{appended_messages}", "group-1", "key:us"
-        )
-        baseline_question = f"baseline-question-{appended_messages}"
-        baseline_answer = f"baseline-answer-{appended_messages}"
-        assert _run_session(
-            database,
-            session_id,
-            _start_payload(
-                session_id=session_id,
-                user_message=baseline_question,
-                debug={"fixture_response": baseline_answer, "delay_ms": 0},
-            ),
-            run_id=f"baseline_{appended_messages}",
-        )["ok"]
-        baseline = _session_entries(database, session_id)
-        baseline_marker = baseline[-1]["id"]
-        partial_question = f"partial-question-{appended_messages}"
-        partial_answer = f"partial-answer-{appended_messages}"
-        payload = _tool_payload(
-            [_tool_turn(arguments={"index": appended_messages}), {"text": partial_answer}],
-            session_id=session_id,
-            user_message=partial_question,
-        )
-        payload["debug"]["persist_delay_ms"] = 750
-        process, identity, seq = _start_node_until_proposed(
-            database, payload, f"partial_{appended_messages}"
-        )
-        _write_child_record(process, identity, seq, "run.commit", {})
+def test_failed_marker_insert_rolls_back_whole_admitted_turn(tmp_path):
+    database = tmp_path / "atomic_failure.sqlite3"
+    session_id = derive_pi_session_id("feishu", "atomic-failure", "group", "key:us")
+    assert _run_session(database, session_id, _start_payload(session_id=session_id),
+                        run_id="baseline")["ok"]
+    before = _session_entries(database, session_id)
 
-        target = len(baseline) + appended_messages
-        deadline = time.monotonic() + 10
-        while len(_session_entries(database, session_id)) < target:
-            if time.monotonic() >= deadline:
-                process.kill()
-                raise AssertionError(f"append point {appended_messages} was not reached")
-            time.sleep(0.02)
-        process.kill()
-        process.wait(timeout=2)
-        cases.append(
-            (
-                database,
-                session_id,
-                baseline_marker,
-                baseline_question,
-                baseline_answer,
-                partial_question,
-                partial_answer,
-            )
-        )
+    def fail_commit_after_messages(_proposal):
+        with sqlite3.connect(database) as connection:
+            connection.execute("""
+                CREATE TRIGGER fail_turn_marker BEFORE INSERT ON entries
+                WHEN NEW.custom_type = 'om.turn.commit.v1'
+                BEGIN SELECT RAISE(ABORT, 'injected marker failure'); END
+            """)
+        return "commit"
+
+    payload = _start_payload(session_id=session_id, user_message="failed-atomic-turn")
+    failed = run_pi_agent(
+        payload, request_id="atomic", run_id="failed_commit", timeout_seconds=60,
+        on_proposed=fail_commit_after_messages, environ=_session_env(database),
+    )
+    assert failed["ok"] is False
+    assert failed["error"]["code"] == "SESSION_ERROR"
+    assert _session_entries(database, session_id) == before
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TRIGGER fail_turn_marker")
+    recovered = _run_session(database, session_id, payload, run_id="failed_commit")
+    assert recovered["ok"] is True, recovered
+    after = _session_entries(database, session_id)
+    assert after[:len(before)] == before
+    assert after[len(before)]["parent_id"] == before[-1]["id"]
+    assert sum(entry["type"] == "custom" and entry["payload"]["data"]["run_id"] == "failed_commit"
+               for entry in after) == 1
+
+
+def test_killed_turn_commit_is_atomic_and_compaction_checkpoint_survives(tmp_path):
+    database = tmp_path / "atomic_turn.sqlite3"
+    session_id = derive_pi_session_id(
+        "feishu", "atomic-turn", "group-1", "key:us"
+    )
+    baseline_question = "baseline-question"
+    baseline_answer = "baseline-answer"
+    assert _run_session(
+        database,
+        session_id,
+        _start_payload(
+            session_id=session_id,
+            user_message=baseline_question,
+            debug={"fixture_response": baseline_answer, "delay_ms": 0},
+        ),
+        run_id="atomic_baseline",
+    )["ok"]
+    baseline = _session_entries(database, session_id)
+    baseline_marker = baseline[-1]["id"]
+    crash_question = "atomic-crash-question"
+    crash_answer = "atomic-crash-answer"
+    payload = _tool_payload(
+        [_tool_turn(arguments={"index": 1}), {"text": crash_answer}],
+        session_id=session_id,
+        user_message=crash_question,
+    )
+    payload["debug"]["persist_delay_ms"] = 1_500
+    process, identity, seq = _start_node_until_proposed(
+        database, payload, "atomic_crash"
+    )
+    _write_child_record(process, identity, seq, "run.commit", {})
+    time.sleep(0.2)
+
+    assert process.poll() is None
+    assert _session_entries(database, session_id) == baseline
+    process.kill()
+    process.wait(timeout=2)
+    assert _session_entries(database, session_id) == baseline
+
+    recovered_question = "recovery-after-atomic-crash"
+    recovered = _run_session(
+        database,
+        session_id,
+        _start_payload(
+            session_id=session_id,
+            user_message=recovered_question,
+            debug={
+                "fixture_response": "recovered-answer",
+                "delay_ms": 0,
+                "expected_history": [baseline_question, baseline_answer],
+                "forbidden_history": [crash_question, crash_answer],
+            },
+        ),
+        run_id="atomic_recovered",
+    )
+    assert recovered["ok"] is True, recovered
+    recovered_entry = next(
+        entry
+        for entry in _session_entries(database, session_id)
+        if recovered_question in json.dumps(entry["payload"], ensure_ascii=False)
+    )
+    assert recovered_entry["parent_id"] == baseline_marker
 
     compact_database = tmp_path / "compaction_crash.sqlite3"
     compact_session = derive_pi_session_id(
@@ -3956,10 +3988,10 @@ def test_killed_partial_turns_rewind_and_writer_lease_expires(tmp_path):
         compact_database, compact_session, label="compact_crash"
     )
     compact_before = _session_entries(compact_database, compact_session)
-    crash_question = "crashed-after-compaction"
+    compact_crash_question = "crashed-after-compaction"
     crash_payload = _start_payload(
         session_id=compact_session,
-        user_message=crash_question,
+        user_message=compact_crash_question,
         model={
             **_start_payload()["model"],
             "context_window_tokens": 8_000,
@@ -3981,62 +4013,7 @@ def test_killed_partial_turns_rewind_and_writer_lease_expires(tmp_path):
         "compaction",
         "custom",
     ]
-    assert crash_question not in json.dumps(compact_after, ensure_ascii=False)
-    busy = _run_session(
-        compact_database,
-        compact_session,
-        _start_payload(
-            session_id=compact_session,
-            debug={"fixture_response": "busy", "delay_ms": 0},
-        ),
-        run_id="busy_before_ttl",
-    )
-    assert busy == {
-        "ok": False,
-        "error": {
-            "code": "SESSION_ERROR",
-            "stage": "session",
-            "message": "session is temporarily busy",
-            "retryable": True,
-        },
-    }
-
-    for database, session_id, *_ in cases:
-        _expire_writer_lease(database, session_id)
-    _expire_writer_lease(compact_database, compact_session)
-
-    for (
-        database,
-        session_id,
-        baseline_marker,
-        baseline_question,
-        baseline_answer,
-        partial_question,
-        partial_answer,
-    ) in cases:
-        recovered_question = f"recovery-question-{session_id[-4:]}"
-        recovered = _run_session(
-            database,
-            session_id,
-            _start_payload(
-                session_id=session_id,
-                user_message=recovered_question,
-                debug={
-                    "fixture_response": "recovered-answer",
-                    "delay_ms": 0,
-                    "expected_history": [baseline_question, baseline_answer],
-                    "forbidden_history": [partial_question, partial_answer],
-                },
-            ),
-            run_id=f"recovered_{session_id[-4:]}",
-        )
-        assert recovered["ok"] is True, recovered
-        recovered_entry = next(
-            entry
-            for entry in _session_entries(database, session_id)
-            if recovered_question in json.dumps(entry["payload"], ensure_ascii=False)
-        )
-        assert recovered_entry["parent_id"] == baseline_marker
+    assert compact_crash_question not in json.dumps(compact_after, ensure_ascii=False)
 
     compact_recovered = _run_session(
         compact_database,
@@ -4059,7 +4036,7 @@ def test_killed_partial_turns_rewind_and_writer_lease_expires(tmp_path):
                 "forbidden_history": [
                     compact_history["summarized_question"],
                     compact_history["summarized_answer"],
-                    crash_question,
+                    compact_crash_question,
                 ],
             },
         ),
@@ -4210,7 +4187,7 @@ def test_compaction_persists_pi_payload_and_complete_tool_turn(tmp_path):
         "custom",
     }
     assert all(
-        entry["payload"]["customType"] == "om.turn.commit.v1"
+        entry["custom_type"] == "om.turn.commit.v1"
         for entry in _session_entries(database, session_id)
         if entry["type"] == "custom"
     )
@@ -4654,8 +4631,9 @@ def test_session_storage_errors_are_safe(tmp_path):
     )["ok"]
     with sqlite3.connect(metadata_database) as connection:
         connection.execute(
-            "UPDATE sessions SET metadata = ? WHERE id = ?",
-            (json.dumps({"schema": "unknown"}), session_id),
+            "UPDATE scalar_values SET value = ? WHERE session_id = ? "
+            "AND namespace = 'om.pi' AND key = 'session-format'",
+            (json.dumps("unknown"), session_id),
         )
     metadata = _run_session(
         metadata_database,

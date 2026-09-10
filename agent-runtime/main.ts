@@ -2,7 +2,7 @@
 // sequential Host tools over
 // `om-pi-ipc.v1` JSONL stdio.
 //
-// Pinned to @earendil-works/pi-agent-core@0.84.2 and @earendil-works/pi-ai@0.84.2.
+// Pinned to @earendil-works/pi-agent-core@0.85.1 and @earendil-works/pi-ai@0.85.1.
 // The protocol (envelope, start payload, terminal payload) is specified by
 // docs/PI_AGENT_CORE_INTEGRATION.md sections 5, 11, and 12 and mirrored by
 // src/infrastructure/pi_agent_process.py.
@@ -10,19 +10,18 @@
 import process from "node:process";
 import path from "node:path";
 import { createHash } from "node:crypto";
+import { fstatSync, lstatSync } from "node:fs";
 import {
   Agent,
-  SessionError,
-  buildSessionContext,
   compact,
   convertToLlm,
   createCompactionSummaryMessage,
   estimateContextTokens,
   estimateTokens,
   prepareCompaction,
-  uuidv7,
+  TODO_CONTEXT,
+  withAbortSignal,
 } from "@earendil-works/pi-agent-core";
-import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
 import {
   createAssistantMessageEventStream,
   createModels,
@@ -53,20 +52,19 @@ import type {
   Entry,
   Session,
 } from "@earendil-works/pi-agent-core";
+import type { SqliteSessionRepo } from "@earendil-works/pi-session-backend-sqlite-node";
 import {
-  SqliteSessionRepository,
-  createNodeSqliteFactory,
-} from "@earendil-works/pi-session-backend-sqlite-node";
+  appendCommittedCompaction,
+  appendCommittedTurn,
+  loadCommittedContext,
+  openTargetSession,
+} from "./pi_session_adapter.ts";
 
 const PROTOCOL = "om-pi-ipc.v1";
 const MAX_LINE_BYTES = 1_048_576;
 const MAX_SAFE_MESSAGE_CHARS = 240;
 const MAX_FIXTURE_DELAY_MS = 300_000;
 const SESSION_ID_PATTERN = /^om_[0-9a-f]{64}$/;
-const SESSION_SCHEMA = "om-pi-session.v1";
-const TURN_COMMIT_TYPE = "om.turn.commit.v1";
-const WRITER_LEASE_TTL_MS = 30_000;
-const WRITER_HEARTBEAT_MS = 10_000;
 const OLLAMA_LOCAL_API_KEY = "ollama-local";
 const CONTROL_PREVIEW_TOOL = "request_control_preview";
 const CONTINUATION_PROMPT =
@@ -1309,28 +1307,36 @@ function effectiveSystemPrompt(
   return parts.join("\n\n");
 }
 
-function isCommitMarker(entry: Entry): boolean {
-  return entry.type === "custom" &&
-    entry.customType === TURN_COMMIT_TYPE &&
-    isRecord(entry.data) &&
-    exactKeys(entry.data, ["run_id", "kind"]) &&
-    isNonEmptyString(entry.data.run_id) &&
-    (entry.data.kind === "turn" || entry.data.kind === "compaction");
-}
-
-async function loadCommittedState(session: Session): Promise<SessionState> {
-  const reachable = await session.findEntriesOnBranch({ order: "oldestFirst" });
-  let committedLeaf: string | null = null;
-  for (const entry of reachable) {
-    if (isCommitMarker(entry)) committedLeaf = entry.id;
+function validateInheritedLockFds(databasePath: string, sessionId: string): void {
+  let descriptors: unknown;
+  try {
+    descriptors = JSON.parse(process.env.OM_PI_LOCK_FDS ?? "");
+  } catch {
+    throw new Error("persistent session lock handoff is invalid");
   }
-  await session.moveLane("main", committedLeaf);
-  const entries = await session.findEntriesOnBranch({ order: "oldestFirst" });
-  return { entries, messages: buildSessionContext(entries).messages };
+  if (!Array.isArray(descriptors) || descriptors.length !== 2 ||
+      descriptors.some((fd) => !Number.isInteger(fd) || fd < 0) ||
+      descriptors[0] === descriptors[1]) {
+    throw new Error("persistent session lock handoff is invalid");
+  }
+  const lockPaths = [
+    `${databasePath}.om-pi.lock`,
+    `${databasePath}.${sessionId}.lock`,
+  ];
+  for (let index = 0; index < descriptors.length; index += 1) {
+    const descriptor = fstatSync(descriptors[index] as number);
+    const named = lstatSync(lockPaths[index] as string);
+    if (!descriptor.isFile() || !named.isFile() || descriptor.nlink !== 1 ||
+        descriptor.dev !== named.dev || descriptor.ino !== named.ino ||
+        (named.mode & 0o077) !== 0 ||
+        (typeof process.getuid === "function" && named.uid !== process.getuid())) {
+      throw new Error("persistent session lock handoff is invalid");
+    }
+  }
 }
 
 async function openPiSession(sessionId: string): Promise<{
-  repository: SqliteSessionRepository;
+  repository: SqliteSessionRepo;
   session: Session;
   state: SessionState;
 }> {
@@ -1344,55 +1350,23 @@ async function openPiSession(sessionId: string): Promise<{
       safeError("SESSION_ERROR", "session", "session storage is unavailable", false)
     );
   }
-
-  const repositoryRoot = process.cwd();
-  const repository = new SqliteSessionRepository({
-    env: new NodeExecutionEnv({ cwd: repositoryRoot }),
-    sqlite: createNodeSqliteFactory(),
-    databasePath,
-    writerLease: {
-      ttlMs: WRITER_LEASE_TTL_MS,
-      heartbeatIntervalMs: WRITER_HEARTBEAT_MS,
-    },
-  });
   try {
-    const metadata = (await repository.list()).find((candidate) => candidate.id === sessionId);
-    let session: Session;
-    if (metadata) {
-      if (
-        !isRecord(metadata.metadata) ||
-        !exactKeys(metadata.metadata, ["schema"]) ||
-        metadata.metadata.schema !== SESSION_SCHEMA
-      ) {
-        throw new SafeRunFailure(
-          safeError("SESSION_ERROR", "session", "session storage is unavailable", false)
-        );
-      }
-      session = await repository.open(metadata);
-    } else {
-      session = await repository.create({
-        id: sessionId,
-        cwd: repositoryRoot,
-        metadata: { schema: SESSION_SCHEMA },
-      });
-    }
-    return { repository, session, state: await loadCommittedState(session) };
-  } catch (error) {
-    await repository.close().catch(() => {});
-    throw error;
+    validateInheritedLockFds(databasePath, sessionId);
+    return await openTargetSession(databasePath, sessionId);
+  } catch {
+    throw new SafeRunFailure(
+      safeError("SESSION_ERROR", "session", "session storage is unavailable", false)
+    );
   }
 }
 
 function mapSessionFailure(error: unknown): JsonObject {
   if (error instanceof SafeRunFailure) return error.payload;
-  const retryable = error instanceof SessionError &&
-    error.code === "storage" &&
-    error.message.includes("active writer");
   return safeError(
     "SESSION_ERROR",
     "session",
-    retryable ? "session is temporarily busy" : "session storage is unavailable",
-    retryable
+    "session storage is unavailable",
+    false
   );
 }
 
@@ -1554,9 +1528,10 @@ async function prepareSessionState(
       rejectEmptyCompactionCompletions(models),
       model,
       COMPACTION_INSTRUCTIONS,
-      signal,
       "off",
-      { enabled: false, maxRetries: 0, baseDelayMs: 0 }
+      { enabled: false, maxRetries: 0, baseDelayMs: 0 },
+      undefined,
+      withAbortSignal(signal, TODO_CONTEXT)
     );
   } catch (error) {
     metrics.finishCompaction(metricsStart, {});
@@ -1592,13 +1567,9 @@ async function prepareSessionState(
     );
   }
 
-  await session.appendEntry(
-    { type: "compaction", id: uuidv7(), ...result.value },
-    "main"
-  );
-  await session.appendCustomEntry(TURN_COMMIT_TYPE, { run_id: runId, kind: "compaction" });
+  await appendCommittedCompaction(session, result.value, runId, state.entries.at(-1)?.id ?? null);
   metrics.commitCompaction(compactionMetrics);
-  return loadCommittedState(session);
+  return loadCommittedContext(session);
 }
 
 function validatedTurnSuffix(messages: AgentMessage[], startIndex: number): AgentMessage[] {
@@ -1798,11 +1769,8 @@ async function persistTurn(
   runId: string,
   persistDelayMs: number
 ): Promise<void> {
-  for (const message of messages) {
-    await session.appendMessage(JSON.parse(JSON.stringify(message)) as AgentMessage);
-    if (persistDelayMs > 0) await waitAbortOrDelay(undefined, persistDelayMs);
-  }
-  await session.appendCustomEntry(TURN_COMMIT_TYPE, { run_id: runId, kind: "turn" });
+  if (persistDelayMs > 0) await waitAbortOrDelay(undefined, persistDelayMs);
+  await appendCommittedTurn(session, messages, runId);
 }
 
 function normalizeUsage(usage: Record<string, unknown>): JsonObject {
@@ -1944,7 +1912,7 @@ async function run(): Promise<void> {
   const deadline = receivedAt + (payload.remaining_budget_ms as number);
   const remainingSceneMs = (): number => deadline - performance.now();
   const sessionId = payload.session_id as string | null;
-  let repository: SqliteSessionRepository | null = null;
+  let repository: SqliteSessionRepo | null = null;
   let session: Session | null = null;
   let sessionState: SessionState = { entries: [], messages: [] };
   try {
@@ -1963,7 +1931,7 @@ async function run(): Promise<void> {
   try {
     emitRun("run.accepted", {
       runtime: "pi-agent-core",
-      runtime_version: "0.84.2",
+      runtime_version: "0.85.1",
       session_id: sessionId,
     });
     const catalogEntries = payload.tool_catalog as JsonObject[];
@@ -2286,7 +2254,7 @@ async function run(): Promise<void> {
           ? { isError: true }
           : undefined;
       },
-      prepareNextTurnWithContext: ({ context, message, newMessages, toolResults }) => {
+      prepareNextTurnWithContext: ({ context, toolResults }) => {
         if (bridge.takeSubmissionRepairPending()) {
           if (repairBudgetExhausted()) {
             runtimeFailure = safeError(
@@ -2329,25 +2297,7 @@ async function run(): Promise<void> {
           }
         }
         const remainingMs = remainingSceneMs();
-        const eligibleContinuation =
-          payload.execution_environment !== "memory_consolidation" &&
-          !continuationUsed &&
-          forcedFinalAtTurn === null &&
-          message.stopReason === "length" &&
-          extractText(message).trim().length > 0 &&
-          message.content.every((item) => item.type !== "toolCall") &&
-          newMessages.length >= 2 &&
-          newMessages[0].role === "user" &&
-          newMessages[newMessages.length - 1] === message &&
-          assistantTurns < (limits.max_iterations as number) &&
-          remainingMs > (limits.final_answer_reserve_seconds as number) * 1_000;
-        if (eligibleContinuation) {
-          continuationUsed = true;
-          agent?.followUp({
-            role: "user",
-            content: [{ type: "text", text: CONTINUATION_PROMPT }],
-            timestamp: Date.now(),
-          });
+        if (continuationUsed && toolResults.length === 0) {
           activeTools = bridge.residentTools;
           return { context: { ...context, tools: activeTools } };
         }
@@ -2376,9 +2326,31 @@ async function run(): Promise<void> {
         activeTools = bridge.residentTools.filter((tool) => tool.name === "submit_answer");
         return { context: { ...context, tools: activeTools } };
       },
-      shouldStopAfterTurn: () =>
-        (payload.execution_environment === "memory_consolidation" && assistantTurns >= 1) ||
-        (forcedFinalAtTurn !== null && assistantTurns > forcedFinalAtTurn),
+      shouldStopAfterTurn: ({ message, newMessages }) => {
+        if (bridge.approvedAnswer() !== null || bridge.controlRequest() !== null ||
+            (payload.execution_environment === "memory_consolidation" && assistantTurns >= 1) ||
+            (forcedFinalAtTurn !== null && assistantTurns > forcedFinalAtTurn)) return true;
+        const eligibleContinuation =
+          !continuationUsed &&
+          forcedFinalAtTurn === null &&
+          message.stopReason === "length" &&
+          extractText(message).trim().length > 0 &&
+          message.content.every((item) => item.type !== "toolCall") &&
+          newMessages.length >= 2 &&
+          newMessages[0].role === "user" &&
+          newMessages[newMessages.length - 1] === message &&
+          assistantTurns < (limits.max_iterations as number) &&
+          remainingSceneMs() > (limits.final_answer_reserve_seconds as number) * 1000;
+        if (eligibleContinuation) {
+          continuationUsed = true;
+          agent?.followUp({
+            role: "user",
+            content: [{ type: "text", text: CONTINUATION_PROMPT }],
+            timestamp: Date.now(),
+          });
+        }
+        return false;
+      },
     });
 
     agent.subscribe((event) => {
@@ -2671,7 +2643,7 @@ async function run(): Promise<void> {
     process.exitCode = 0;
     return;
   } finally {
-    if (repository) await repository.close().catch(() => {});
+    if (repository) await repository.close(TODO_CONTEXT).catch(() => {});
   }
 }
 
