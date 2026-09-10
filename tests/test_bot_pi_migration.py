@@ -296,6 +296,22 @@ def test_exporter_death_leaves_prepared_backup_and_retry_recovers(tmp_path, monk
     node = shutil.which("node")
     assert node is not None
     bridge_entry = Path(__file__).resolve().parents[1] / "agent-runtime" / "pi_migration.mjs"
+    ready = tmp_path / "exporter-opened"
+    preload = tmp_path / "pause-exporter.mjs"
+    preload.write_text(f'''
+import {{ writeFileSync }} from "node:fs";
+import {{ pathToFileURL }} from "node:url";
+const runtime = process.argv[process.argv.indexOf("--runtime") + 1];
+const sdk = await import(import.meta.resolve("@earendil-works/pi-session-backend-sqlite-node", pathToFileURL(runtime + "/package.json").href));
+const prototype = sdk.SqliteSessionRepository.prototype;
+const original = prototype.open;
+prototype.open = async function (...args) {{
+  const session = await original.apply(this, args);
+  writeFileSync({json.dumps(str(ready))}, String(process.pid));
+  process.kill(process.pid, "SIGSTOP");
+  return session;
+}};
+''')
     exporter_opened_store = False
 
     def kill_real_legacy_export(command, runtime, **arguments):
@@ -303,7 +319,7 @@ def test_exporter_death_leaves_prepared_backup_and_retry_recovers(tmp_path, monk
         if command != "export" or Path(runtime) != fixture.source_runtime:
             return original_bridge(command, runtime, **arguments)
         maintenance_descriptors = arguments.pop("maintenance_descriptors", ())
-        argv = [node, "--experimental-import-meta-resolve", "--no-warnings", str(bridge_entry),
+        argv = [node, "--experimental-import-meta-resolve", "--no-warnings", "--import", str(preload), str(bridge_entry),
                 command, "--runtime", str(runtime)]
         for name, value in arguments.items():
             argv.extend(("--" + name.replace("_", "-"), str(value)))
@@ -316,22 +332,15 @@ def test_exporter_death_leaves_prepared_backup_and_retry_recovers(tmp_path, monk
             pass_fds=maintenance_descriptors,
         )
         deadline = time.monotonic() + 10
-        work = Path(arguments["database"])
-        while process.poll() is None and time.monotonic() < deadline:
-            try:
-                with closing(sqlite3.connect(f"file:{work}?mode=ro", uri=True, timeout=0.01)) as connection:
-                    exporter_opened_store = connection.execute(
-                        "SELECT COUNT(*) FROM writer_leases",
-                    ).fetchone()[0] > 0
-            except sqlite3.Error:
-                pass
-            if exporter_opened_store:
-                break
-            time.sleep(0.001)
-        process.kill()
-        process.communicate(timeout=5)
-        if not exporter_opened_store:
-            raise AssertionError("real legacy exporter exited before its public repository opened")
+        try:
+            while not ready.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            exporter_opened_store = ready.exists()
+        finally:
+            if process.poll() is None:
+                process.kill()
+            stdout, stderr = process.communicate(timeout=5)
+        assert exporter_opened_store, f"legacy exporter did not reach repository open: {stdout}\n{stderr}"
         raise RuntimeError("exporter killed")
 
     monkeypatch.setattr(migration, "_bridge", kill_real_legacy_export)
