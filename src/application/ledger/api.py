@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from src.application.ledger.commands import (
     accept_option_close_evidence,
     adopt_existing_combo_identity,
@@ -258,8 +260,8 @@ from src.application.ledger.notification_outbox import (
     canonical_payload_hash,
 )
 from src.application.ledger.repository import (
+    SQLiteOptionPositionsRepository,
     POSITION_PROJECTION_SCHEMA,
-    open_wheel_activation_repository,
     with_sqlite_repo_transaction,
     with_sqlite_repo_writer_lock,
 )
@@ -281,6 +283,14 @@ from src.application.ledger.lifecycle_settlement_semantics import (
     settlement_evidence_id,
     settlement_observation_semantic,
 )
+
+
+def open_wheel_activation_repository(
+    sqlite_path: str | Path,
+) -> SQLiteOptionPositionsRepository:
+    """Open a repository writer without running portfolio bootstrap work."""
+
+    return SQLiteOptionPositionsRepository(Path(sqlite_path))
 
 __all__ = [
     "query_lifecycle_receipts", "encode_evidence_cursor", "decode_evidence_cursor",
