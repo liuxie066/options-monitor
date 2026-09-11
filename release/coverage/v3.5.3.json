@@ -1,0 +1,313 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.5.3",
+  "base": {
+    "tag": "v3.5.2",
+    "commit": "4ee3b408edeb020483a8906512d438cb131ad0c1"
+  },
+  "reviewed_head": "a7a7439804ee29eabceb99c30c5e16c1ed28678e",
+  "commits": [
+    {
+      "sha": "98953aa6bbfac9058c17a1caa0b20990850d03b6",
+      "subject": "fix(config): scope YAML freshness to effective market input"
+    },
+    {
+      "sha": "83deead069f5d5fb749a4bfd3c4a14b242fccdd4",
+      "subject": "Merge pull request #269 from liuxie066/codex/config-freshness-fix"
+    },
+    {
+      "sha": "7f91b905519dabae1e4c59634c676e0dc6505e9c",
+      "subject": "fix(bot): ground scheduler answers in authorized runtime facts"
+    },
+    {
+      "sha": "3f1f27f2e0ba299c825de22afa7b4bda921f0140",
+      "subject": "chore(merge): sync main into bot scheduler facts"
+    },
+    {
+      "sha": "4d40828c9d477069fe82a462148e961936b2ff5e",
+      "subject": "Merge pull request #270 from liuxie066/codex/bot-scheduler-facts"
+    },
+    {
+      "sha": "684ddeb299abbad80b83e7c416ef7ff50c1afa47",
+      "subject": "fix(bot): preserve candidate provenance and evidence through tool responses"
+    },
+    {
+      "sha": "d0fe19fc76d87ba86bb8de3729bc5eba6ac9c453",
+      "subject": "test(bot): align runtime fixture with report provenance contract"
+    },
+    {
+      "sha": "acb8caedd47e7e39e1b7a1354f6f2c89017207da",
+      "subject": "fix(bot): preserve candidate provenance and answer evidence (#271)"
+    },
+    {
+      "sha": "1e27571e7341eda7d682a9249fa490ae9c933083",
+      "subject": "feat(bot): add task completion and independent read rules"
+    },
+    {
+      "sha": "7cdbb9c0d84ea654a06d947334ad38d7e3db7d69",
+      "subject": "fix(bot): fix guardrails dependency baseline failures"
+    },
+    {
+      "sha": "8da0030d8c237cb77e5599992dbe1118f42a0b4f",
+      "subject": "fix(bot): align prompt rules baseline ref for shallow checkout"
+    },
+    {
+      "sha": "bf1e4a9b3f2c695d1862ca1f2f9b915e006afa1e",
+      "subject": "Merge pull request #272 from liuxie066/codex/bot-prompt-rules"
+    },
+    {
+      "sha": "231ebf9ed65f842563f22d05622dd0375039e1c8",
+      "subject": "fix(wheel): make csp/cc activation single durable operation"
+    },
+    {
+      "sha": "c3bc2fb1e73b1fec193fc3a0dec192b571879252",
+      "subject": "chore(main): merge origin/main"
+    },
+    {
+      "sha": "4653bda614285d59f6590be7bc2c941281884778",
+      "subject": "fix(wheel): refresh dependency graph and keep ledger repository facade thin"
+    },
+    {
+      "sha": "863dc437fc3340821abbc978d4e41b63712545a5",
+      "subject": "fix(wheel): preserve thin ledger facade"
+    },
+    {
+      "sha": "95c5f5c48c55d9b6efb4695903763965841589d6",
+      "subject": "chore(docs): refresh dependency graph"
+    },
+    {
+      "sha": "0d7979043eeaaf90aae3c62d80960f1d8db09a2a",
+      "subject": "fix(wheel): accept cleanly closed activation ledgers"
+    },
+    {
+      "sha": "8a6e4e5d667e03fe58def8c90a7d771b288a2ced",
+      "subject": "test(wheel): cover partial WAL sidecars"
+    },
+    {
+      "sha": "a7a7439804ee29eabceb99c30c5e16c1ed28678e",
+      "subject": "Merge pull request #273 from liuxie066/codex/wheel-activation-single-operation"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Added explicit Bot task completion handling and independent read rules for bounded, auditable operations.",
+      "commits": [
+        "1e27571e7341eda7d682a9249fa490ae9c933083"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Scoped YAML freshness checks to the effective market input, preventing an unrelated market's configuration from making runtime state appear fresh.",
+      "commits": [
+        "98953aa6bbfac9058c17a1caa0b20990850d03b6"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Bound Bot configuration identity to its authorized market and read scheduler history from the production state location, distinguishing missing or invalid data from empty history.",
+      "commits": [
+        "7f91b905519dabae1e4c59634c676e0dc6505e9c"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Added an authorized OM scheduled-task inventory with structured names, counts, and independent enabled/active states; preserved explicit query failures and successful memory receipts in the final response.",
+      "commits": [
+        "7f91b905519dabae1e4c59634c676e0dc6505e9c"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Preserved candidate provenance and answer evidence through Bot tool responses so reports retain their source facts.",
+      "commits": [
+        "684ddeb299abbad80b83e7c416ef7ff50c1afa47",
+        "acb8caedd47e7e39e1b7a1354f6f2c89017207da"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Made CSP/CC activation a single durable operation and kept cleanly closed activation ledgers readable while rejecting partial WAL sidecars.",
+      "commits": [
+        "231ebf9ed65f842563f22d05622dd0375039e1c8",
+        "0d7979043eeaaf90aae3c62d80960f1d8db09a2a"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "83deead069f5d5fb749a4bfd3c4a14b242fccdd4",
+      "reason": "merge commit for the config freshness pull request; no additional product change"
+    },
+    {
+      "commit": "3f1f27f2e0ba299c825de22afa7b4bda921f0140",
+      "reason": "merge synchronization commit; no additional product change"
+    },
+    {
+      "commit": "4d40828c9d477069fe82a462148e961936b2ff5e",
+      "reason": "merge commit for the scheduler facts pull request; no additional product change"
+    },
+    {
+      "commit": "d0fe19fc76d87ba86bb8de3729bc5eba6ac9c453",
+      "reason": "test fixture alignment only; no runtime or user-facing change"
+    },
+    {
+      "commit": "7cdbb9c0d84ea654a06d947334ad38d7e3db7d69",
+      "reason": "guardrail baseline fixture correction only; no runtime or user-facing change"
+    },
+    {
+      "commit": "8da0030d8c237cb77e5599992dbe1118f42a0b4f",
+      "reason": "prompt baseline reference correction only; no runtime or user-facing change"
+    },
+    {
+      "commit": "bf1e4a9b3f2c695d1862ca1f2f9b915e006afa1e",
+      "reason": "merge commit for the prompt rules pull request; no additional product change"
+    },
+    {
+      "commit": "c3bc2fb1e73b1fec193fc3a0dec192b571879252",
+      "reason": "main synchronization commit; no additional product change"
+    },
+    {
+      "commit": "4653bda614285d59f6590be7bc2c941281884778",
+      "reason": "internal ledger facade and generated graph cleanup; no public behavior change"
+    },
+    {
+      "commit": "863dc437fc3340821abbc978d4e41b63712545a5",
+      "reason": "internal ledger facade extraction; no public behavior change"
+    },
+    {
+      "commit": "95c5f5c48c55d9b6efb4695903763965841589d6",
+      "reason": "generated dependency graph refresh only; no runtime or user-facing change"
+    },
+    {
+      "commit": "8a6e4e5d667e03fe58def8c90a7d771b288a2ced",
+      "reason": "regression test coverage only; no runtime or user-facing change"
+    },
+    {
+      "commit": "a7a7439804ee29eabceb99c30c5e16c1ed28678e",
+      "reason": "merge commit for the Wheel activation pull request; no additional product change"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "98953aa6bbfac9058c17a1caa0b20990850d03b6",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/269"
+      ]
+    },
+    {
+      "commit": "83deead069f5d5fb749a4bfd3c4a14b242fccdd4",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/269"
+      ]
+    },
+    {
+      "commit": "7f91b905519dabae1e4c59634c676e0dc6505e9c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/270"
+      ]
+    },
+    {
+      "commit": "3f1f27f2e0ba299c825de22afa7b4bda921f0140",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/270"
+      ]
+    },
+    {
+      "commit": "4d40828c9d477069fe82a462148e961936b2ff5e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/270"
+      ]
+    },
+    {
+      "commit": "684ddeb299abbad80b83e7c416ef7ff50c1afa47",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/271"
+      ]
+    },
+    {
+      "commit": "d0fe19fc76d87ba86bb8de3729bc5eba6ac9c453",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/271"
+      ]
+    },
+    {
+      "commit": "acb8caedd47e7e39e1b7a1354f6f2c89017207da",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/271"
+      ]
+    },
+    {
+      "commit": "1e27571e7341eda7d682a9249fa490ae9c933083",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/272"
+      ]
+    },
+    {
+      "commit": "7cdbb9c0d84ea654a06d947334ad38d7e3db7d69",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/272"
+      ]
+    },
+    {
+      "commit": "8da0030d8c237cb77e5599992dbe1118f42a0b4f",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/272"
+      ]
+    },
+    {
+      "commit": "bf1e4a9b3f2c695d1862ca1f2f9b915e006afa1e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/272"
+      ]
+    },
+    {
+      "commit": "231ebf9ed65f842563f22d05622dd0375039e1c8",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/273"
+      ]
+    },
+    {
+      "commit": "c3bc2fb1e73b1fec193fc3a0dec192b571879252",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/273"
+      ]
+    },
+    {
+      "commit": "4653bda614285d59f6590be7bc2c941281884778",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/273"
+      ]
+    },
+    {
+      "commit": "863dc437fc3340821abbc978d4e41b63712545a5",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/273"
+      ]
+    },
+    {
+      "commit": "95c5f5c48c55d9b6efb4695903763965841589d6",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/273"
+      ]
+    },
+    {
+      "commit": "0d7979043eeaaf90aae3c62d80960f1d8db09a2a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/273"
+      ]
+    },
+    {
+      "commit": "8a6e4e5d667e03fe58def8c90a7d771b288a2ced",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/273"
+      ]
+    },
+    {
+      "commit": "a7a7439804ee29eabceb99c30c5e16c1ed28678e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/273"
+      ]
+    }
+  ]
+}
