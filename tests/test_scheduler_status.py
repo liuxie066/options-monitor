@@ -183,11 +183,8 @@ def test_scheduler_status_labels_explicit_and_force_preview(
         {"config_path": str(config_path), "state_dir": str(state_dir)},
     )
 
-    assert missing["data"]["schedule"]["selection"] == "explicit"
-    assert missing["data"]["schedule"]["status"] == "missing"
-    assert missing["data"]["decision"]["status"] == "unknown"
-    assert invalid["data"]["schedule"]["status"] == "invalid"
-    assert invalid["data"]["decision"]["status"] == "unknown"
+    assert missing["ok"] is False and missing["error"]["code"] == "INPUT_ERROR"
+    assert invalid["ok"] is False and invalid["error"]["code"] == "CONFIG_ERROR"
     assert forced["data"]["schedule"]["selection"] == "explicit"
     assert forced["data"]["decision"]["evaluation_mode"] == "force_simulation"
     assert forced["data"]["decision"]["should_run_scan"] is True
@@ -234,10 +231,14 @@ def test_scheduler_status_unavailable_decision_compacts_as_partial(
     response = execute_tool("scheduler_status", payload)
     observation = compact_observation("scheduler_status", response, payload)
 
-    assert response["ok"] is True
-    assert response["data"]["decision"]["status"] == "unknown"
-    assert observation["status"] == "partial"
-    assert observation["missing_data"]["decision.status"] == "unknown"
+    if unavailable == "invalid_schedule":
+        assert response["ok"] is False and response["error"]["code"] == "CONFIG_ERROR"
+        assert observation["status"] == "failed"
+    else:
+        assert response["ok"] is True
+        assert response["data"]["decision"]["status"] == "unknown"
+        assert observation["status"] == "partial"
+        assert observation["missing_data"]["decision.status"] == "unknown"
 
 
 def test_scheduler_status_rejects_unconfigured_account_before_state_projection(
@@ -298,13 +299,10 @@ def test_scheduler_status_strictly_rejects_non_schedule_or_invalid_schedule(
     response = execute_tool("scheduler_status", payload)
     observation = compact_observation("scheduler_status", response, payload)
 
-    assert response["ok"] is True
-    assert response["data"]["schedule"]["status"] == "invalid"
-    assert response["data"]["schedule"]["enabled"] is None
-    assert response["data"]["decision"]["status"] == "unknown"
-    assert response["data"]["decision"]["reason"] == "schedule_invalid"
-    assert "now_market" not in response["data"]["decision"]
-    assert observation["status"] == "partial"
+    assert response["ok"] is False
+    assert response["error"]["code"] == "CONFIG_ERROR"
+    assert response["error"]["details"]["reason"] == "schedule_invalid"
+    assert observation["status"] == "failed"
 
 
 @pytest.mark.parametrize(
@@ -397,3 +395,42 @@ def test_scheduler_status_accepts_legacy_none_and_config_validator_rejects_strin
     assert response["data"]["decision"]["status"] == "available"
     with pytest.raises(SystemExit, match="schedule.enabled must be a boolean"):
         validate_config({"schedule": {"enabled": "false"}})
+
+
+@pytest.mark.parametrize(("present", "value", "key", "error"), [
+    (False, None, None, "CONFIG_ERROR"),
+    (False, None, "schedule", "INPUT_ERROR"),
+    (True, None, None, "CONFIG_ERROR"),
+    (True, None, "schedule", "CONFIG_ERROR"),
+    (True, {}, "schedule", "CONFIG_ERROR"),
+    (True, {}, "   ", "INPUT_ERROR"),
+    (True, {}, None, None),
+    (True, {}, "", None),
+])
+def test_schedule_presence_and_explicit_empty_mapping_contract(tmp_path, monkeypatch, present, value, key, error):
+    from src.application.agent_tools import config as config_tools
+    from src.application.tool_execution import execute_tool
+    config = _runtime_config(market="us")
+    if present:
+        config["schedule"] = value
+    path = tmp_path / "config.us.json"
+    path.write_text(json.dumps(config))
+    state = tmp_path / "state.json"
+    state.write_text("{}")
+    calls = []
+    real_decide = config_tools.scheduler_decide
+    def decide(*args, **kwargs):
+        calls.append(True)
+        return real_decide(*args, **kwargs)
+    monkeypatch.setattr(config_tools, "scheduler_decide", decide)
+    payload = {"config_path": str(path), "state": str(state)}
+    if key is not None:
+        payload["schedule_key"] = key
+    response = execute_tool("scheduler_status", payload)
+    assert response["ok"] is (error is None)
+    if error:
+        assert response["error"]["code"] == error
+        assert calls == []
+    else:
+        assert calls == [True]
+        assert response["data"]["schedule"]["selection"] == "production_default"

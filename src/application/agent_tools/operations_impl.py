@@ -358,23 +358,29 @@ def scheduler_status_tool(
             code="INPUT_ERROR",
             message="schedule_key must not be empty",
         )
-    raw_schedule_cfg = cfg.get(schedule_key)
-    if explicit_schedule and raw_schedule_cfg is None:
-        schedule_status = "missing"
-        schedule_cfg: dict[str, Any] | None = None
-    elif explicit_schedule and raw_schedule_cfg == {}:
-        schedule_status = "invalid"
-        schedule_cfg = None
-    else:
-        selected_schedule_cfg = {} if raw_schedule_cfg is None else raw_schedule_cfg
-        try:
-            validate_schedule_cfg(selected_schedule_cfg, schedule_key)
-        except SystemExit:
-            schedule_status = "invalid"
-            schedule_cfg = None
-        else:
-            schedule_status = "available"
-            schedule_cfg = selected_schedule_cfg
+    if schedule_key not in cfg:
+        raise AgentToolError(
+            code="INPUT_ERROR" if explicit_schedule else "CONFIG_ERROR",
+            message=f"scheduler schedule key is missing: {schedule_key}",
+            details={"reason": "schedule_missing", "retryable": False,
+                     "hint": "Select an existing schedule key or correct the runtime configuration."},
+        )
+    schedule_cfg = cfg[schedule_key]
+    if not isinstance(schedule_cfg, dict) or (explicit_schedule and not schedule_cfg):
+        raise AgentToolError(
+            code="CONFIG_ERROR", message=f"scheduler schedule is invalid: {schedule_key}",
+            details={"reason": "schedule_invalid", "retryable": False,
+                     "hint": "Correct the selected schedule configuration before querying again."},
+        )
+    try:
+        validate_schedule_cfg(schedule_cfg, schedule_key)
+    except SystemExit as exc:
+        raise AgentToolError(
+            code="CONFIG_ERROR", message=f"scheduler schedule is invalid: {schedule_key}",
+            details={"reason": "schedule_invalid", "retryable": False,
+                     "hint": "Correct the selected schedule configuration before querying again."},
+        ) from exc
+    schedule_status = "available"
     schedule_enabled = (
         bool(schedule_cfg.get("enabled", True))
         if schedule_cfg is not None
