@@ -86,14 +86,11 @@ def read_wheel_activation_windows_read_only(
         return {"windows": [], "source_status": "unreadable"}
     try:
         resolved = path.resolve()
-        with resolved.open("rb") as source:
-            header = source.read(20)
         wal = resolved.with_name(resolved.name + "-wal")
         shm = resolved.with_name(resolved.name + "-shm")
-        wal_mode = header[18:20] == b"\x02\x02"
-        if wal.exists() != shm.exists() or (
-            wal_mode and not (wal.is_file() and shm.is_file())
-        ):
+        # A cleanly closed WAL database checkpoints and removes both sidecars;
+        # that state remains readable.  A partial sidecar pair is unsafe.
+        if wal.exists() != shm.exists():
             return {"windows": [], "source_status": "unreadable"}
         with closing(
             sqlite3.connect(f"{resolved.as_uri()}?mode=ro", uri=True, timeout=1)
