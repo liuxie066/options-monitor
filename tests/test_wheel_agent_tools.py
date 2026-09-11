@@ -4,8 +4,10 @@ import pytest
 
 import src.application.agent_tools.operations_impl as operations_impl
 import src.application.agent_tools.positions as position_tools
+import src.application.config_authoring_transaction as config_transaction
 import src.application.wheel.read_model as wheel_read_model
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.tool_execution import execute_tool
 from domain.domain.ledger.events import TradeEvent
 from domain.domain.ledger.identity import ContractKey
 from domain.domain.ledger.position_fields import (
@@ -13,6 +15,44 @@ from domain.domain.ledger.position_fields import (
     strategy_metadata_fields_from_payload,
 )
 from domain.domain.ledger.projection_state import _resumable_open_event
+from tests.test_wheel_cli import (
+    _activation_environment,
+    _deployment_file_bytes,
+    _malformed_activation_status_environment,
+    _prepare_activation_storage_case,
+)
+
+
+def _activation_payload(
+    action: str,
+    *,
+    runtime: Path,
+    data_config: Path,
+    runtime_root: Path,
+    source_sha: str | None = None,
+    apply: bool = False,
+) -> dict:
+    payload = {
+        "market": "us",
+        "account": "lx",
+        "action": action,
+        "config_path": str(runtime),
+        "data_config": str(data_config),
+        "runtime_root": str(runtime_root),
+    }
+    if action == "status":
+        return payload
+    payload.update(
+        expected_current_generation=0,
+        request_id="agent-enable-1",
+        actor="agent",
+        apply=apply,
+    )
+    if source_sha:
+        payload["expected_source_sha256"] = source_sha
+    if apply:
+        payload["confirm"] = True
+    return payload
 
 
 def test_wheel_end_agent_tool_previews_through_application_workflow(
@@ -304,6 +344,7 @@ def test_wheel_neutral_agent_rejects_put_stock_lot_alias() -> None:
                 "expected_current_generation": 0,
                 "request_id": "request-1",
                 "actor": "agent",
+                "expected_source_sha256": "a" * 64,
                 "apply": True,
             },
         ),
@@ -315,21 +356,15 @@ def test_wheel_agent_apply_requires_confirmation(tool, payload) -> None:
 
 
 def test_wheel_activation_agent_status_and_enable_preview(monkeypatch) -> None:
-    repo = object()
     calls = []
     monkeypatch.setattr(
         position_tools,
         "_wheel_runtime",
-        lambda _payload: (Path("config.us.json"), {}, repo, {"ledger_store": {}}),
-    )
-    monkeypatch.setattr(
-        position_tools,
-        "build_wheel_policy_hash",
-        lambda *_args, **_kwargs: "b" * 64,
+        lambda _payload: pytest.fail("activation must use the shared facade"),
     )
 
-    def _change(active_repo, **kwargs):
-        calls.append((active_repo, kwargs))
+    def _change(**kwargs):
+        calls.append(kwargs)
         return {"dry_run": True, "write_applied": False}
 
     monkeypatch.setattr(
@@ -356,20 +391,36 @@ def test_wheel_activation_agent_status_and_enable_preview(monkeypatch) -> None:
     assert status["dry_run"] is True
     assert enable["dry_run"] is True
     assert calls == [
-        (repo, {"action": "status", "market": "us", "account": "lx"}),
-        (
-            repo,
-            {
-                "action": "enable",
-                "market": "us",
-                "account": "lx",
-                "expected_current_generation": 0,
-                "request_id": "enable-1",
-                "actor": "agent",
-                "policy_sha256": "b" * 64,
-                "apply_changes": False,
-            },
-        ),
+        {
+            "repo_root": position_tools.repo_base(),
+            "action": "status",
+            "market": "us",
+            "account": "lx",
+            "config_path": None,
+            "config_key": "us",
+            "data_config": None,
+            "runtime_root": None,
+            "expected_current_generation": None,
+            "request_id": None,
+            "actor": None,
+            "expected_source_sha256": None,
+            "apply_changes": False,
+        },
+        {
+            "repo_root": position_tools.repo_base(),
+            "action": "enable",
+            "market": "us",
+            "account": "lx",
+            "config_path": None,
+            "config_key": "us",
+            "data_config": None,
+            "runtime_root": None,
+            "expected_current_generation": 0,
+            "request_id": "enable-1",
+            "actor": "agent",
+            "expected_source_sha256": None,
+            "apply_changes": False,
+        },
     ]
     assert position_tools.WHEEL_ACTIVATION_TOOL.is_write_requested(
         {"action": "status", "apply": True}
@@ -377,6 +428,302 @@ def test_wheel_activation_agent_status_and_enable_preview(monkeypatch) -> None:
     assert position_tools.WHEEL_ACTIVATION_TOOL.is_write_requested(
         {"action": "enable", "apply": True}
     ) is True
+
+
+def test_wheel_activation_agent_apply_requires_preview_source_sha() -> None:
+    with pytest.raises(AgentToolError, match="expected_source_sha256"):
+        position_tools.WHEEL_ACTIVATION_TOOL.call(
+            {
+                "market": "us",
+                "account": "lx",
+                "action": "enable",
+                "expected_current_generation": 0,
+                "request_id": "enable-1",
+                "actor": "agent",
+                "apply": True,
+                "confirm": True,
+            }
+        )
+
+
+def test_wheel_activation_agent_manifest_declares_all_writes() -> None:
+    assert position_tools.WHEEL_ACTIVATION_TOOL.side_effects == (
+        "writes_wheel_activation_window",
+        "writes_config_yaml",
+        "publishes_generated_runtime_configs",
+    )
+    assert "expected_source_sha256" in position_tools.WHEEL_ACTIVATION_TOOL.input_schema
+    facts = position_tools.WHEEL_ACTIVATION_TOOL.output_contract["fact_fields"]
+    for field in (
+        "expected_source_sha256",
+        "paths",
+        "window_receipt",
+        "config_audit",
+        "readiness",
+        "source_status",
+        "storage_status",
+        "pending_authoring_journal",
+        "original_request",
+        "recovered_transactions",
+        "failure_phase",
+        "retry_hint",
+    ):
+        assert field in facts
+
+
+def test_wheel_activation_agent_preserves_workflow_error_details(monkeypatch) -> None:
+    error = AgentToolError(
+        code="WHEEL_ACTIVATION_INCOMPLETE",
+        message="runtime readback failed",
+        details={"failure_phase": "readback", "write_applied": True},
+    )
+    monkeypatch.setattr(
+        position_tools.wheel_application,
+        "change_wheel_activation",
+        lambda **_kwargs: (_ for _ in ()).throw(error),
+    )
+
+    with pytest.raises(AgentToolError) as raised:
+        position_tools.WHEEL_ACTIVATION_TOOL.call(
+            {"market": "us", "account": "lx", "action": "status"}
+        )
+
+    assert raised.value is error
+    assert raised.value.details == {
+        "failure_phase": "readback",
+        "write_applied": True,
+    }
+
+
+def test_wheel_activation_agent_public_entry_applies_preview(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _source, runtime, data_config, _sqlite_path = _activation_environment(tmp_path)
+    preview_response = execute_tool(
+        "wheel_activation",
+        _activation_payload(
+            "enable",
+            runtime=runtime,
+            data_config=data_config,
+            runtime_root=tmp_path,
+        )
+    )
+    assert preview_response["ok"] is True
+    preview = preview_response["data"]
+    monkeypatch.setenv("OM_AGENT_ENABLE_WRITE_TOOLS", "true")
+    applied_response = execute_tool(
+        "wheel_activation",
+        _activation_payload(
+            "enable",
+            runtime=runtime,
+            data_config=data_config,
+            runtime_root=tmp_path,
+            source_sha=preview["expected_source_sha256"],
+            apply=True,
+        )
+    )
+    assert applied_response["ok"] is True
+    applied = applied_response["data"]
+
+    assert applied["status"] == "applied"
+    assert applied["ready"] is True
+    assert applied["window_receipt"]["write_applied"] is True
+    assert applied["config_audit"]["write_applied"] is True
+    assert applied["paths"]["config_path"] == str(runtime)
+    assert applied_response["meta"] == {
+        "repo_base": position_tools._mask_path_str(position_tools.repo_base())
+    }
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_status", "storage_status"),
+    [
+        ("missing_database", "unavailable", "missing_database"),
+        ("missing_table", "unavailable", "missing_table"),
+        ("unreadable", "unavailable", "unreadable"),
+        ("available_no_window", "no_window", "available"),
+        ("open", "open", "available"),
+        ("closed", "closed", "available"),
+    ],
+)
+def test_wheel_activation_agent_public_status_distinguishes_storage_and_window_state(
+    case: str,
+    expected_status: str,
+    storage_status: str,
+    tmp_path: Path,
+) -> None:
+    _source, runtime, data_config, sqlite_path = _prepare_activation_storage_case(
+        tmp_path,
+        case,
+    )
+
+    response = execute_tool(
+        "wheel_activation",
+        _activation_payload(
+            "status",
+            runtime=runtime,
+            data_config=data_config,
+            runtime_root=tmp_path,
+        ),
+    )
+
+    assert response["ok"] is True
+    status = response["data"]
+    assert status["status"] == expected_status
+    assert status["storage_status"] == storage_status
+    assert status["source_status"] == "available"
+    assert status["pending_authoring_journal"] is False
+    if case == "missing_database":
+        assert not sqlite_path.exists()
+        assert not sqlite_path.with_name(sqlite_path.name + "-wal").exists()
+        assert not sqlite_path.with_name(sqlite_path.name + "-shm").exists()
+
+
+def test_wheel_activation_agent_status_preserves_known_window_for_malformed_descriptor(
+    tmp_path: Path,
+) -> None:
+    runtime, data_config, _sqlite_path, expected_window = (
+        _malformed_activation_status_environment(tmp_path)
+    )
+    before = _deployment_file_bytes(tmp_path)
+
+    response = execute_tool(
+        "wheel_activation",
+        _activation_payload(
+            "status",
+            runtime=runtime,
+            data_config=data_config,
+            runtime_root=tmp_path,
+        ),
+    )
+
+    assert response["ok"] is True
+    status = response["data"]
+    assert status["current_window"] == expected_window
+    assert status["latest_window"] == expected_window
+    assert status["membership"] is True
+    assert status["ready"] is False
+    assert status["monitoring_gate"] == "config_mismatch"
+    assert status["reason_code"] == "descriptor_mismatch"
+    assert status["pending_authoring_journal"] is True
+    assert _deployment_file_bytes(tmp_path) == before
+
+
+def test_wheel_activation_agent_source_drift_preserves_failure_facts(
+    tmp_path: Path,
+) -> None:
+    source, runtime, data_config, _sqlite_path = _activation_environment(tmp_path)
+    preview, _, _ = position_tools.WHEEL_ACTIVATION_TOOL.call(
+        _activation_payload(
+            "enable",
+            runtime=runtime,
+            data_config=data_config,
+            runtime_root=tmp_path,
+        )
+    )
+    source.write_text(source.read_text(encoding="utf-8") + "\n# changed\n", encoding="utf-8")
+
+    with pytest.raises(AgentToolError) as raised:
+        position_tools.WHEEL_ACTIVATION_TOOL.call(
+            _activation_payload(
+                "enable",
+                runtime=runtime,
+                data_config=data_config,
+                runtime_root=tmp_path,
+                source_sha=preview["expected_source_sha256"],
+                apply=True,
+            )
+        )
+
+    assert raised.value.code == "STALE_PREVIEW"
+    assert raised.value.details["failure_phase"] == "source_validation"
+    assert raised.value.details["window_receipt"] is None
+    assert raised.value.details["write_applied"] is False
+    assert raised.value.details["original_request"]["request_id"] == "agent-enable-1"
+
+
+def test_wheel_activation_agent_status_reports_missing_yaml_without_writes(
+    tmp_path: Path,
+) -> None:
+    source, runtime, data_config, sqlite_path = _activation_environment(tmp_path)
+    source.unlink()
+    before = sqlite_path.read_bytes()
+
+    status, _, _ = position_tools.WHEEL_ACTIVATION_TOOL.call(
+        _activation_payload(
+            "status",
+            runtime=runtime,
+            data_config=data_config,
+            runtime_root=tmp_path,
+        )
+    )
+
+    assert status["source_status"] == "unavailable"
+    assert status["storage_status"] == "available"
+    assert status["write_applied"] is False
+    assert sqlite_path.read_bytes() == before
+
+    with pytest.raises(AgentToolError) as raised:
+        position_tools.WHEEL_ACTIVATION_TOOL.call(
+            _activation_payload(
+                "enable",
+                runtime=runtime,
+                data_config=data_config,
+                runtime_root=tmp_path,
+            )
+        )
+    assert raised.value.details["failure_phase"] == "source_validation"
+    assert raised.value.details["source_status"] == "unavailable"
+    assert raised.value.details["write_applied"] is False
+    assert sqlite_path.read_bytes() == before
+
+
+def test_wheel_activation_agent_config_failure_keeps_committed_window(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _source, runtime, data_config, _sqlite_path = _activation_environment(tmp_path)
+    preview, _, _ = position_tools.WHEEL_ACTIVATION_TOOL.call(
+        _activation_payload(
+            "enable",
+            runtime=runtime,
+            data_config=data_config,
+            runtime_root=tmp_path,
+        )
+    )
+    monkeypatch.setattr(
+        config_transaction,
+        "publish_yaml_config_generation_locked",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AgentToolError(
+                code="CONFIG_WRITE_FAILED",
+                message="injected config interruption",
+                details={"write_applied": False, "targets": []},
+            )
+        ),
+    )
+
+    with pytest.raises(AgentToolError) as raised:
+        position_tools.WHEEL_ACTIVATION_TOOL.call(
+            _activation_payload(
+                "enable",
+                runtime=runtime,
+                data_config=data_config,
+                runtime_root=tmp_path,
+                source_sha=preview["expected_source_sha256"],
+                apply=True,
+            )
+        )
+
+    details = raised.value.details
+    assert raised.value.code == "CONFIG_WRITE_FAILED"
+    assert details["failure_phase"] == "config_publish"
+    assert details["window_receipt"]["write_applied"] is True
+    assert details["window_receipt"]["expected_config_descriptor"]["generation"] == 1
+    assert details["config_audit"] == {"write_applied": False, "targets": []}
+    assert details["write_applied"] is True
+    assert details["readiness"]["reason_code"] == "missing_descriptor"
 
 
 def test_wheel_activation_agent_rejects_market_config_mismatch() -> None:

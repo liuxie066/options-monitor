@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+
 from .repository_schema import (
     Any,
     OptionPositionsEventReadRepo,

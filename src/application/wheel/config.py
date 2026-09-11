@@ -193,6 +193,12 @@ def normalize_wheel_activation_by_account(raw: Any) -> dict[str, dict[str, int |
     return out
 
 
+def normalize_wheel_accounts(raw: Any) -> list[str]:
+    if not isinstance(raw, list):
+        raise ValueError("wheel.accounts must be a list")
+    return [_normalized_account(value) for value in raw]
+
+
 def materialize_wheel_config(raw: Mapping[str, Any] | None) -> dict[str, Any]:
     """Materialize the static v2 config while preserving legacy Call fields."""
 
@@ -200,10 +206,7 @@ def materialize_wheel_config(raw: Mapping[str, Any] | None) -> dict[str, Any]:
     if not isinstance(source, Mapping):
         raise ValueError("wheel must be an object")
     policy = resolve_wheel_policy(source)
-    raw_accounts = source.get("accounts", [])
-    if not isinstance(raw_accounts, list):
-        raise ValueError("wheel.accounts must be a list")
-    accounts = [_normalized_account(value) for value in raw_accounts]
+    accounts = normalize_wheel_accounts(source.get("accounts", []))
     return {
         **dict(source),
         "enabled": source.get("enabled", False),
@@ -355,12 +358,29 @@ def evaluate_wheel_activation_readiness(
         actual = _window_identity(durable_window)
     except (TypeError, ValueError):
         expected = actual = None
-    if expected is None or actual is None or expected != actual:
+    if expected is None or actual is None:
         return {
             "ready": False,
             "enabled_for_new_lifecycle": False,
             "monitoring_gate": "config_mismatch",
             "reason_code": "descriptor_mismatch",
+        }
+    identity_fields = (
+        "market",
+        "account",
+        "generation",
+        "activated_at_ms",
+        "deactivated_at_ms",
+    )
+    boundary_matches = all(expected[key] == actual[key] for key in identity_fields)
+    policy_drift = expected["policy_sha256"] != actual["policy_sha256"]
+    if not boundary_matches:
+        return {
+            "ready": False,
+            "enabled_for_new_lifecycle": False,
+            "monitoring_gate": "config_mismatch",
+            "reason_code": "descriptor_mismatch",
+            "policy_drift": policy_drift,
         }
     if expected["deactivated_at_ms"] is not None:
         return {
@@ -368,6 +388,15 @@ def evaluate_wheel_activation_readiness(
             "enabled_for_new_lifecycle": False,
             "monitoring_gate": "disabled",
             "reason_code": "closed_window",
+            "policy_drift": policy_drift,
+        }
+    if policy_drift:
+        return {
+            "ready": False,
+            "enabled_for_new_lifecycle": False,
+            "monitoring_gate": "config_mismatch",
+            "reason_code": "descriptor_mismatch",
+            "policy_drift": True,
         }
     return {
         "ready": True,

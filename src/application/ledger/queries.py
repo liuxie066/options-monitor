@@ -84,7 +84,7 @@ def resolve_position_ledger_sqlite_path(
 ) -> Path:
     """Resolve the canonical SQLite owner behind a runtime config."""
 
-    from src.application.ledger.store_resolution import resolve_ledger_store
+    from src.application.ledger.store_resolution import resolve_ledger_sqlite_path
 
     resolved_data_config = resolve_position_data_config_path(
         base=base,
@@ -92,11 +92,11 @@ def resolve_position_ledger_sqlite_path(
         data_config=data_config,
         config_path=config_path,
     )
-    return resolve_ledger_store(
+    return resolve_ledger_sqlite_path(
         resolved_data_config,
         runtime_root=runtime_root,
         config_path=config_path,
-    ).sqlite_path.resolve()
+    )
 
 
 def open_position_ledger_from_runtime_config(
