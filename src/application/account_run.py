@@ -309,6 +309,8 @@ def run_one_account(
         }
         if request.experience:
             payload.update(experience_fields(str(request.account_display_name or "")))
+        if "scan_outcome" in acct_metrics:
+            payload["scan_outcome"] = acct_metrics["scan_outcome"]
         _write_acct_run_state("account_metrics.json", payload)
 
     def _prepared_option_integrity_failure(
@@ -409,6 +411,21 @@ def run_one_account(
         acct_metrics["should_notify"] = result_should_notify
         acct_metrics["meaningful"] = bool(scan_gate.get("meaningful"))
         acct_metrics["reason"] = str(scan_gate.get("result_reason") or reason)
+        account_decision = (
+            request.scan_decision_by_account.get(acct)
+            if isinstance(request.scan_decision_by_account, dict)
+            else None
+        )
+        if (
+            not request.experience
+            and isinstance(account_decision, dict)
+            and account_decision.get("source") == "account_scheduler"
+            and account_decision.get("should_run") is False
+            and should_run is False
+            and scan_gate.get("run_pipeline") is False
+            and scan_gate.get("ran_scan") is False
+        ):
+            acct_metrics["scan_outcome"] = "scheduler_skipped"
         _write_account_metrics_state()
         return AccountRunOutcome(
             result=AccountResult(

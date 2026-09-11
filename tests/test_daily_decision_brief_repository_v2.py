@@ -1594,3 +1594,16 @@ def test_legacy_combo_pair_or_digest_tamper_cannot_authorize_fixed_recovery(
             market="US",
             market_trading_date=MARKET_DATE,
         )
+
+
+def test_delivery_source_run_is_derived_from_validated_revision(tmp_path: Path) -> None:
+    from src.application.daily_decision_brief_repository import read_daily_decision_brief_delivery_state
+
+    prepared = _prepare_fixed(tmp_path, _persist(tmp_path, run_id='source-scan'))
+    path = prepared['paths']['delivery']
+    raw = json.loads(path.read_text())
+    raw['days'][MARKET_DATE]['fixed_reports'][TARGET_1000]['source_run_id'] = 'forged-attempt'
+    path.write_text(json.dumps(raw))
+    readback = read_daily_decision_brief_delivery_state(base=tmp_path, account='lx', market='US')
+    envelope = readback['state']['days'][MARKET_DATE]['fixed_reports'][TARGET_1000]
+    assert envelope['source_run_id'] == 'source-scan'

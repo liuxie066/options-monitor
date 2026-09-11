@@ -874,6 +874,50 @@ def test_provider_definite_failure_stays_pending_for_exact_delivery_only_retry(m
     assert mod.run_tick_notification_flow(second.request) == 0
     assert retry_calls[0]["message"] == retry_before["rendered_message"]
     assert retry_calls[0]["idempotency_key"] == calls[0]["idempotency_key"]
+    event = next(item for item in second.request.audit_helper.events
+                 if item["action"] == "notification_delivery_completed")
+    assert event["run_id"] == "delivery-only"
+    reference = event["extra"]["report_refs"][0]
+    assert reference["source_run_id"] == "send-fail"
+    assert reference["account"] == "lx"
+    assert reference["source_digest"] == retry_before["source_digest"]
+    # Exercise the real audit reader and Bot projection, including the wide raw event.
+    from src.application.tool_execution import execute_tool
+    from src.application.bot.tools import compact_observation
+    audit = tmp_path / "output_shared/state/audit_events.jsonl"
+    audit.parent.mkdir(parents=True, exist_ok=True)
+    audit.write_text(json.dumps(event) + "\n")
+    payload = {"runtime_root": str(tmp_path), "event_kind": "notification_delivery_completed", "limit": 1}
+    observation = compact_observation("notification_perception_read", execute_tool("notification_perception_read", payload), payload)
+    assert observation["coverage"]["status"] == "complete"
+    assert observation["freshness"]["status"] == "historical"
+    assert observation["value"]["event_summaries"][0]["report_refs"] == [reference]
+    # The Bot must use that retained source through real tool registration/admission.
+    from src.application.agent_tools import candidate, notification_perception
+    from tests.candidate_evidence_helpers import seal_opening_candidate_fixture
+    from tests.test_bot_s8_host_admission import _run_answered_host
+    seal_opening_candidate_fixture(tmp_path, run_id="send-fail", accepted_rows=[{
+        "symbol": "NVDA", "contract_symbol": "NVDA260821P00100000", "mode": "put",
+    }])
+    monkeypatch.setattr(candidate, "repo_base", lambda: tmp_path)
+    monkeypatch.setattr(notification_perception, "repo_base", lambda: tmp_path)
+    monkeypatch.setattr(candidate, "load_runtime_config", lambda **_: (tmp_path / "config.us.json", {}))
+    def flow(call):
+        report = call({"call_id": "report", "tool_name": "notification_perception_read", "arguments": {
+            "event_kind": "notification_delivery_completed", "limit": 1}})
+        assert report["status"] == "complete", report
+        source = report["value"]["event_summaries"][0]["report_refs"][0]
+        ranked = call({"call_id": "rank", "tool_name": "candidate_rank_explain", "arguments": {
+            "account": source["account"], "run_id": source["source_run_id"], "mode": "put", "top_n": 1}})
+        assert ranked["source"]["run_id"] == "send-fail"
+        assert ranked["value"]["ranked_summary"][0]["contract_symbol"] == "NVDA260821P00100000"
+        answer = call({"call_id": "answer", "tool_name": "submit_answer", "arguments": {
+            "mode": "evidence", "status": "complete", "answer_markdown": "报告引用历史扫描中的 NVDA 排名记录。",
+            "claims": [{"text": "报告引用历史扫描中的 NVDA 排名记录", "kind": "historical_fact",
+                        "required_scope": "requested_page", "observation_ids": [report["ref"], ranked["ref"]]}]}})
+        assert answer["observation"]["ok"] is True, answer
+        return answer["approved_answer"]["text"]
+    assert _run_answered_host(monkeypatch, "为什么报告里 NVDA 排第一", flow).ok is True
 
 
 @pytest.mark.parametrize("retry_status", ("pending", "ambiguous"))
@@ -1217,6 +1261,11 @@ def test_delivery_only_rebuilds_missing_envelope_from_committed_brief(
     assert envelope["status"] == "confirmed"
     assert envelope["revision"] == 0
     assert envelope["source_digest"] == original_digest
+    event = next(item["extra"] for item in retry.request.audit_helper.events
+                 if item["action"] == "notification_delivery_completed")
+    assert event["run_id"] == "delivery-recovery"
+    assert event["report_refs"][0]["source_run_id"] == "render-crash"
+    assert event["report_refs"][0]["revision"] == 0
     assert read_daily_decision_brief_fixed_recovery(
         base=tmp_path,
         account="lx",
@@ -1342,3 +1391,24 @@ def test_multi_market_flow_records_terminal_failure_and_nonzero_exit(monkeypatch
         "ok": False,
         "error_code": "daily_brief_multi_market_delivery_unsupported",
     }]
+
+
+@pytest.mark.parametrize('failure', ['no_send', 'unconfirmed', 'confirmation_error'])
+def test_report_reference_requires_confirmed_delivery(monkeypatch, tmp_path: Path, failure: str) -> None:
+    import src.application.tick_notification_flow as mod
+
+    _patch_assembler(monkeypatch)
+    result = {'ok': True, 'command_ok': True, 'delivery_confirmed': False, 'ambiguous_send': True} if failure == 'unconfirmed' else None
+    _patch_sender(monkeypatch, result=result)
+    if failure == 'confirmation_error':
+        def fail_confirmation(**_kwargs):
+            raise OSError('controlled confirmation failure')
+        monkeypatch.setattr(mod, 'confirm_daily_decision_brief_delivery_v2', fail_confirmation)
+    bundle = _request(tmp_path, run_id='unconfirmed-report', no_send=failure == 'no_send')
+    mod.run_tick_notification_flow(bundle.request)
+    events = [item['extra'] for item in bundle.request.audit_helper.events
+              if item['action'] == 'notification_delivery_completed']
+    assert events or failure == 'no_send'
+    for event in events:
+        assert event['send_summary']['sent_accounts'] == []
+        assert not event.get('report_refs')

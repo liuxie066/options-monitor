@@ -300,3 +300,20 @@ def _row(run_id: str, action: str, conversation_id: str) -> dict:
             "target": "must_not_leak",
         },
     }
+
+
+def test_internal_report_iterator_preserves_scope_and_incomplete_audit(tmp_path: Path) -> None:
+    from src.application.notification_perception_read import iter_notification_perception_events
+
+    audit = tmp_path / 'output_shared/state/audit_events.jsonl'
+    audit.parent.mkdir(parents=True)
+    _append(audit, _row('my-run', 'notification_delivery_completed', 'my-chat'))
+    _append(audit, _row('other-run', 'notification_delivery_completed', 'other-chat'))
+    with audit.open('a') as stream:
+        stream.write('{broken newest row\n')
+    data = iter_notification_perception_events(repo_root=tmp_path, conversation_id='my-chat')
+    assert [row['run_id'] for row in data['events']] == ['my-run']
+    assert data['summary']['status'] == 'partial'
+    assert data['summary']['malformed_count'] == 1
+    audit.write_bytes(b'\xff')
+    assert iter_notification_perception_events(repo_root=tmp_path)['summary']['status'] == 'failed'

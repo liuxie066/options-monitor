@@ -9,6 +9,7 @@ from typing import Any, Callable, TypedDict
 from domain.domain.symbol_identity import canonical_symbol
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.candidate_reject_summary import candidate_rule_label
+from src.application.candidate_snapshot_contract import CandidateSnapshotContractError, sha256_text
 from src.application.candidate_snapshot_manifest import (
     CandidateSnapshotManifestError,
     load_candidate_snapshot_bundle_readonly,
@@ -42,27 +43,15 @@ def _event_local_date(event: Mapping[str, Any], tz: timezone) -> date | None:
     return moment.astimezone(tz).date()
 
 
-def _event_visible_to_account(event: Mapping[str, Any], account: str) -> bool:
-    send_summary = event.get("send_summary")
-    if isinstance(send_summary, Mapping):
-        sent = send_summary.get("sent_accounts")
-        if isinstance(sent, list) and sent:
-            return account in {str(item).strip().lower() for item in sent}
-        failure_count = int(send_summary.get("failure_count") or 0)
-        if isinstance(sent, list) and not sent and failure_count > 0:
-            return False
-    accounts = event.get("accounts")
-    if isinstance(accounts, list):
-        return account in {str(item).strip().lower() for item in accounts}
-    return False
-
-
 def _is_delivered_notification(event: Mapping[str, Any], account: str) -> bool:
-    if str(event.get("event_kind") or "").strip() != _DELIVERED_EVENT_KIND:
-        return False
-    if event.get("no_send") is True:
-        return False
-    return _event_visible_to_account(event, account)
+    summary = event.get("send_summary")
+    sent = summary.get("sent_accounts") if isinstance(summary, Mapping) else None
+    return (
+        event.get("event_kind") == _DELIVERED_EVENT_KIND
+        and event.get("no_send") is False
+        and isinstance(sent, list)
+        and account in {str(item).strip().lower() for item in sent}
+    )
 
 
 class NotificationRunResolution(TypedDict, total=False):
@@ -70,6 +59,8 @@ class NotificationRunResolution(TypedDict, total=False):
     matched_event_created_at_utc: Any
     truncated: bool
     total_count: int
+    reason: str
+    market: str
 
 
 def _resolve_notification_run(
@@ -78,27 +69,49 @@ def _resolve_notification_run(
     account: str,
     notification_date: date,
     tz: timezone,
+    conversation_id: str | None = None,
 ) -> NotificationRunResolution:
     result = iter_notification_perception_events(
         repo_root=base,
         event_kind=_DELIVERED_EVENT_KIND,
+        conversation_id=conversation_id,
     )
     resolution: NotificationRunResolution = {
         "truncated": bool(result.get("truncated")),
         "total_count": int(result.get("total_count") or 0),
     }
+    summary = result.get("summary") or {}
+    if resolution["truncated"]:
+        resolution["reason"] = "audit_window_truncated"
+        return resolution
+    if summary.get("status") not in {"ok", "empty"} or any(
+        summary.get(key) for key in ("malformed_count", "unreadable_count", "missing_count")
+    ):
+        resolution["reason"] = "notification_audit_incomplete"
+        return resolution
     for event in result.get("events") or []:
-        if not isinstance(event, Mapping):
-            continue
-        if not _is_delivered_notification(event, account):
+        if not isinstance(event, Mapping) or not _is_delivered_notification(event, account):
             continue
         if _event_local_date(event, tz) != notification_date:
             continue
-        run_id = str(event.get("run_id") or "").strip()
-        if run_id:
-            resolution["run_id"] = run_id
-            resolution["matched_event_created_at_utc"] = event.get("created_at_utc")
+        raw_refs = event.get("report_refs")
+        refs = [ref for ref in raw_refs if isinstance(ref, Mapping) and ref.get("account") == account] if isinstance(raw_refs, list) else []
+        required = ("market", "market_date", "source_digest", "delivery_key", "source_run_id")
+        if (len(refs) != 1 or not all(isinstance(refs[0].get(key), str) and refs[0][key].strip() for key in required)
+                or type(refs[0].get("revision")) is not int or refs[0]["revision"] < 0
+                or refs[0].get("source_kind") != "successful_brief"):
+            resolution["reason"] = "notification_source_unavailable"
             return resolution
+        try:
+            sha256_text(refs[0]["source_digest"], "source_digest")
+            date.fromisoformat(refs[0]["market_date"])
+        except (CandidateSnapshotContractError, ValueError):
+            resolution["reason"] = "notification_source_unavailable"
+            return resolution
+        resolution["run_id"] = refs[0]["source_run_id"]
+        resolution["market"] = str(refs[0]["market"]).upper()
+        resolution["matched_event_created_at_utc"] = event.get("created_at_utc")
+        return resolution
     return resolution
 
 
@@ -139,6 +152,12 @@ def candidate_filter_explain_tool(
             message=f"unsupported run_selector: {run_selector}",
             hint="Supported selectors: latest, latest_notification.",
         )
+    if str(payload.get("run_id") or "").strip() and run_selector:
+        raise AgentToolError(code="INPUT_ERROR", message="run_id and run_selector are mutually exclusive")
+    authenticated = str(payload.get("authenticated_conversation_id") or "").strip()
+    explicit_conversation = str(payload.get("conversation_id") or "").strip()
+    if authenticated and explicit_conversation and authenticated != explicit_conversation:
+        raise AgentToolError(code="PERMISSION_DENIED", message="notification scope cannot override the authenticated conversation")
     raw_notification_date = str(payload.get("notification_date") or "").strip()
     if raw_notification_date and run_selector != "latest_notification":
         raise AgentToolError(
@@ -177,13 +196,10 @@ def candidate_filter_explain_tool(
                 account=account,
                 notification_date=notification_date,
                 tz=tz,
+                conversation_id=authenticated or explicit_conversation or None,
             )
             if not resolved.get("run_id"):
-                reason = (
-                    "audit_window_truncated"
-                    if resolved.get("truncated")
-                    else "no_notification_run"
-                )
+                reason = resolved.get("reason") or "no_notification_run"
                 raise AgentToolError(
                     code="DEPENDENCY_MISSING",
                     message=(
@@ -195,11 +211,13 @@ def candidate_filter_explain_tool(
                             else ""
                         )
                     ),
+                    hint="Read notification_perception_read for the confirmed report source; unchanged retries cannot restore missing historical evidence.",
                     details={
                         "reason": reason,
                         "account": account,
                         "notification_date": notification_date.isoformat(),
                         "audit_total_count": resolved.get("total_count"),
+                        "retryable": False,
                     },
                 )
             try:
@@ -212,8 +230,10 @@ def candidate_filter_explain_tool(
                 raise AgentToolError(
                     code="DEPENDENCY_MISSING",
                     message=str(exc),
+                    hint="Query an available explicit run; this report source is unavailable and unchanged retries cannot restore it.",
                     details={
                         "reason": "snapshot_unavailable_for_notification_run",
+                        "retryable": False,
                         "account": account,
                         "run_id": resolved["run_id"],
                         "notification_date": notification_date.isoformat(),
@@ -242,17 +262,23 @@ def candidate_filter_explain_tool(
             raise CandidateSnapshotManifestError(
                 "manifest-bound opening candidate snapshot is unavailable"
             )
+        if run_selector == "latest_notification" and snapshot.get("market") != resolved.get("market"):
+            raise CandidateSnapshotManifestError("notification source market does not match candidate snapshot")
     except AgentToolError:
         raise
     except CandidateSnapshotManifestError as exc:
         raise AgentToolError(
             code="DEPENDENCY_MISSING",
             message=str(exc),
-            details={"account": account, "run_id": payload.get("run_id")},
+            hint="Query an available explicit run or read the delivered report source; unchanged retries cannot restore missing historical evidence.",
+            details={"account": account, "run_id": getattr(exc, "run_id", None) or (run_resolution or {}).get("resolved_run_id") or payload.get("run_id"),
+                     "reason": "candidate_snapshot_unavailable", "retryable": False},
         ) from exc
     if run_resolution is not None and run_resolution.get("resolved_run_id") is None:
         run_resolution["resolved_run_id"] = snapshot.get("run_id")
 
+    run_resolution.update(bundle.get("source_selection") or {})
+    manifest = bundle.get("manifest") or {}
     requested_mode = _FUNCTION_MODE.get(function_filter)
     scoped = [
         dict(item)
@@ -298,8 +324,20 @@ def candidate_filter_explain_tool(
     }
     if run_resolution is not None:
         source["run_resolution"] = run_resolution
+    summary = [_model_summary(function, [row for row in scoped if row.get("strategy_mode") == _FUNCTION_MODE[function]])
+               for function in functions]
     return (
         {
+            "summary": summary,
+            "narrowing_hint": (
+                "结果超过证据预算，请指定 function=sell_put 或 sell_call。" if not function_filter
+                else "该筛选摘要仍超过证据预算；此工具没有可进一步缩小该摘要的参数，当前无法完整解释。"
+            ),
+            "summary_count": len(summary),
+            "coverage": {"status": "complete" if scoped else "partial", "complete_for": "point",
+                         "included_count": len(summary), "total_count": len(summary), "omitted_count": 0},
+            "source": {"run_id": snapshot.get("run_id"), "account": account, **run_resolution},
+            "freshness": {"status": "historical", "as_of": manifest.get("sealed_at_utc")},
             "symbol": symbol,
             "raw_symbol": raw_symbol,
             "canonical_symbol": symbol,
@@ -307,6 +345,8 @@ def candidate_filter_explain_tool(
             "scope": {
                 "account": account,
                 "account_semantics": "opening_candidate_snapshot",
+                "run_id": snapshot.get("run_id"), "market": snapshot.get("market"),
+                "symbol": symbol, "function": function_filter or "all",
             },
             "opening_status": snapshot.get("opening_status"),
             "evidence_status": "available",
@@ -445,4 +485,26 @@ def _event(
         "decision_hash": row.get("decision_hash"),
         "normalized_input_hash": row.get("normalized_input_hash"),
         "evidence_path": "state/opening_candidate_snapshot.json",
+    }
+
+
+def _model_summary(function: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    contracts = [row for row in rows if row.get("scope") == "contract"]
+    counts: Counter[str] = Counter()
+    examples: list[dict[str, Any]] = []
+    for row in rows:
+        reasons = sorted({str(reason) for reason in [*(row.get("reason_codes") or []), row.get("reason_code")] if reason})
+        counts.update(reasons)
+        for reason in reasons:
+            event = _event(row, reason, run_id=None, account="")
+            examples.append({key: event[key] for key in ("rule", "contract_symbol", "threshold", "metric_value")})
+    rules = sorted(counts, key=lambda rule: (-counts[rule], rule))
+    examples.sort(key=lambda item: (-counts[item["rule"]], item["rule"], str(item["contract_symbol"] or "")))
+    return {
+        "function": function, "status": _function_status(rows),
+        "accepted_count": sum(row.get("status") == "accepted" for row in contracts),
+        "rejected_count": sum(row.get("status") == "rejected" for row in contracts),
+        "rules": [{"rule": rule, "label": candidate_rule_label(rule), "count": counts[rule]} for rule in rules[:8]],
+        "rules_included_count": min(8, len(rules)), "rules_total_count": len(rules),
+        "examples": examples[:3], "examples_included_count": min(3, len(examples)), "examples_total_count": len(examples),
     }

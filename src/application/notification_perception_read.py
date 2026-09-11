@@ -84,6 +84,7 @@ def read_notification_perception_events(
 def iter_notification_perception_events(
     *,
     repo_root: Path,
+    conversation_id: str | None = None,
     event_kind: str | None = None,
     limit: int | None = None,
 ) -> dict[str, Any]:
@@ -94,30 +95,41 @@ def iter_notification_perception_events(
     that must scan beyond the public preview window. The scan remains bounded:
     ``limit`` defaults to 5000 and may not exceed 5000.
 
-    Returns ``{"events": [...], "total_count": int, "truncated": bool}`` so the
-    caller can distinguish "no matching event" from "the matching event fell
-    outside the bounded scan window".
+    Returns events, total_count, truncated and read_statuses/summary so callers
+    can distinguish no match, a bounded-window gap and damaged audit evidence.
     """
 
     base = repo_root.resolve()
     paths = _audit_paths(base=base, run_id=None, audit_path=None)
     rows: list[dict[str, Any]] = []
+    read_statuses: list[dict[str, Any]] = []
     for path in paths:
-        file_rows, _status = _read_jsonl(path, base=base)
+        file_rows, read_status = _read_jsonl(path, base=base)
         rows.extend(file_rows)
+        read_statuses.append(read_status)
     filtered = [
         row
         for row in rows
         if row.get("event_type") == NOTIFICATION_PERCEPTION_EVENT_TYPE
-        and _matches_event(row, conversation_id=None, event_kind=event_kind)
+        and _matches_event(row, conversation_id=conversation_id, event_kind=event_kind)
     ]
     filtered.sort(key=lambda row: str(row.get("event_at_utc") or row.get("created_at_utc") or ""), reverse=True)
     max_rows = max(0, min(int(limit if limit is not None else 5000), 5000))
     events = [_public_event(row) for row in filtered[:max_rows]]
+    malformed = sum(item["malformed_count"] for item in read_statuses)
+    unreadable = sum(item["status"] == "unreadable" for item in read_statuses)
+    missing = sum(item["status"] == "missing" for item in read_statuses)
     return {
         "events": events,
         "total_count": len(filtered),
         "truncated": len(filtered) > len(events),
+        "read_statuses": read_statuses,
+        "summary": {
+            "status": "failed" if unreadable else "partial" if malformed else "missing" if missing else "ok",
+            "malformed_count": malformed,
+            "unreadable_count": unreadable,
+            "missing_count": missing,
+        },
     }
 
 
@@ -178,7 +190,7 @@ def _read_jsonl(
     out: list[dict[str, Any]] = []
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         return [], {
             "path": display_path,
             "status": "unreadable",

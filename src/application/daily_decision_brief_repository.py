@@ -556,6 +556,7 @@ def prepare_daily_decision_brief_delivery(
         "delivery_kind": kind_norm,
         "source_kind": source_kind_norm,
         "revision": revision_norm,
+        "source_run_id": (str(source_brief.get("run_id") or "").strip() or None) if source_brief else None,
         "source_digest": digest_norm,
         "source_reference": source_reference_norm or None,
         "delivery_key": delivery_key,
@@ -1770,6 +1771,7 @@ def _normalize_delivery_envelope(
         raise DailyDecisionBriefStateError(f"daily brief delivery render context is invalid: {path}")
     source_reference = str(envelope.get("source_reference") or "").strip() or None
 
+    source_run_id: str | None = None
     revision: int | None
     if source_kind == "successful_brief":
         try:
@@ -1786,6 +1788,7 @@ def _normalize_delivery_envelope(
             revision=revision,
             source_digest=source_digest,
         )
+        source_run_id = str(source_brief.get("run_id") or "").strip() or None
         if validated_source_raw is not None:
             validated_source_raw.append(source_raw)
         if not set(candidate_identities).issubset(_candidate_identity_set(source_brief)):
@@ -1839,6 +1842,7 @@ def _normalize_delivery_envelope(
         "delivery_kind": delivery_kind,
         "source_kind": source_kind,
         "revision": revision,
+        "source_run_id": source_run_id,
         "source_digest": source_digest,
         "source_reference": source_reference,
         "delivery_key": delivery_key,

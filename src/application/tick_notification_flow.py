@@ -510,6 +510,20 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
     )
     _run_post_delivery_sidecars_best_effort(request)
 
+    report_refs = []
+    if not request.no_send:
+        for account in sent_accounts:
+            lifecycle = daily_brief_prep.lifecycles_by_account[account]
+            envelope = lifecycle["envelope"]
+            report_refs.append({
+                "account": account,
+                "market": lifecycle["market"],
+                "market_date": lifecycle["market_trading_date"],
+                **{key: envelope.get(key) for key in (
+                    "revision", "source_digest", "delivery_key", "source_kind", "source_run_id",
+                )},
+            })
+
     _audit_notification_perception(
         request,
         build_notification_perception_event(
@@ -528,7 +542,8 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
             quiet_hours=quiet_hours,
             delivery_decision=notify_delivery,
             conversation_scope=perception_scope,
-            sent_accounts=sent_accounts,
+            sent_accounts=[] if request.no_send else sent_accounts,
+            report_refs=report_refs,
             notify_failures=notify_failures,
             send_attempted_count=send_attempted_count,
             send_confirmed_count=send_confirmed_count,

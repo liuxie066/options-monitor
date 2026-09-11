@@ -39,6 +39,7 @@ from src.application.wheel.candidate_snapshot import (
     load_wheel_candidate_snapshot,
 )
 from src.application.source_receipts import sha256_bytes
+from src.application.futu_quote_routing import runtime_config_market
 from src.application.strategy_scan_status import (
     STRATEGY_SCAN_STATUS_INDEX_V2_FILE,
     STRATEGY_SCAN_STATUS_INDEX_V2_SCHEMA,
@@ -53,6 +54,8 @@ from src.application.strategy_scan_status import (
 )
 from src.application.tick_run_workspace import (
     AccountRunConfigError,
+    account_run_config_paths,
+    load_published_account_run_config,
     read_account_run_state_bytes_safely,
     write_account_run_state_bytes_once_safely,
 )
@@ -92,6 +95,9 @@ _FORMAL_MANIFEST_FILES = (
 
 class CandidateSnapshotManifestError(RuntimeError):
     """Raised when an account-run candidate commit cannot be trusted."""
+
+    run_id: str | None = None
+    account: str | None = None
 
 
 def _canonical_json_bytes(payload: Mapping[str, Any]) -> bytes:
@@ -1026,6 +1032,77 @@ def load_candidate_snapshot_bundle_readonly(
     )
 
 
+def _frozen_account_market(
+    *, base: Path, run_id: str, account: str, config_hash: str,
+) -> str:
+    state_path, compatibility_path = account_run_config_paths(
+        base=base, run_id=run_id, account=account,
+    )
+    config = load_published_account_run_config(
+        base=base,
+        run_id=run_id,
+        account=account,
+        state_path=state_path,
+        compatibility_path=compatibility_path,
+        account_config_sha256=config_hash,
+    )
+    market = runtime_config_market(config)
+    if market not in {"US", "HK"}:
+        raise CandidateSnapshotManifestError("frozen account market is unavailable")
+    for metadata_key in ("_generated", "_resolved"):
+        metadata = config.get(metadata_key)
+        if isinstance(metadata, dict) and metadata.get("market") is not None:
+            if str(metadata["market"]).strip().upper() != market:
+                raise CandidateSnapshotManifestError("frozen account market conflicts")
+    if config.get("market") is not None and str(config["market"]).strip().upper() != market:
+        raise CandidateSnapshotManifestError("frozen account market conflicts")
+    return market
+
+
+def _scheduler_skipped_market(*, base: Path, run_id: str, account: str) -> str | None:
+    account_dir = _run_account_dir(base, run_id, account)
+    metrics_path = account_dir / "state" / "account_metrics.json"
+    if not (metrics_path.exists() or metrics_path.is_symlink()):
+        return None
+    metrics = json.loads(read_account_run_state_bytes_safely(
+        base=base, run_id=run_id, account=account, name="account_metrics.json",
+    ))
+    if not isinstance(metrics, dict):
+        raise CandidateSnapshotManifestError("account metrics must be an object")
+    if metrics.get("scan_outcome") != "scheduler_skipped":
+        return None
+    if (
+        metrics.get("run_id") != run_id
+        or metrics.get("account") != account
+        or metrics.get("ran_scan") is not False
+        or metrics.get("ran_pipeline") is not False
+        or metrics.get("scan_mode") == "experience"
+        or metrics.get("pipeline_started_at_utc") is not None
+        or metrics.get("pipeline_ms") is not None
+        or any(metrics.get(key) is not None for key in ("error", "error_code", "typed_reason"))
+        or metrics.get("snapshot_status") not in (None, "complete", "partial")
+    ):
+        raise CandidateSnapshotManifestError("scheduler skip metrics conflict")
+    # A terminal skip cannot coexist with evidence that its pipeline started.
+    for directory in (account_dir, account_dir / "state"):
+        for path in directory.iterdir():
+            name = path.name
+            if (
+                "candidate" in name
+                or "scan_status" in name
+                or name == "symbols_notification.txt"
+            ):
+                raise CandidateSnapshotManifestError("scheduler skip has pipeline output")
+    market = _frozen_account_market(
+        base=base, run_id=run_id, account=account,
+        config_hash=metrics.get("account_config_sha256"),
+    )
+    markets = metrics.get("markets_to_run")
+    if not isinstance(markets, list) or markets != [market]:
+        raise CandidateSnapshotManifestError("scheduler skip market binding mismatch")
+    return market
+
+
 def _load_latest_candidate_snapshot_bundle(
     *,
     base: Path,
@@ -1035,64 +1112,96 @@ def _load_latest_candidate_snapshot_bundle(
     root = Path(base).resolve()
     try:
         account_norm = required_text(account, "account").lower()
-    except CandidateSnapshotContractError as exc:
-        raise CandidateSnapshotManifestError(str(exc)) from exc
-    runs_root_path = root / "output_runs"
-    if runs_root_path.is_symlink():
+        account_run_config_paths(base=root, run_id="identity-check", account=account_norm)
+    except (CandidateSnapshotContractError, AccountRunConfigError) as exc:
+        raise CandidateSnapshotManifestError("candidate account identity is invalid") from exc
+    runs_root = root / "output_runs"
+    if runs_root.is_symlink():
         raise CandidateSnapshotManifestError("output_runs may not be a symlink")
-    runs_root = runs_root_path.resolve()
     pointer = root / "output_shared" / "state" / "last_run_dir.txt"
-    if pointer.is_symlink():
+    if any(path.is_symlink() for path in (pointer, pointer.parent, pointer.parent.parent)):
         raise CandidateSnapshotManifestError("last-run pointer may not be a symlink")
+    pointed = None
     if pointer.exists():
         if not pointer.is_file():
             raise CandidateSnapshotManifestError("last-run pointer is invalid")
         try:
             pointed = Path(pointer.read_text(encoding="utf-8").strip())
-        except OSError as exc:
+        except (OSError, UnicodeError) as exc:
             raise CandidateSnapshotManifestError("last-run pointer is unreadable") from exc
         if not pointed.is_absolute():
-            pointed = (root / pointed).resolve()
-        else:
-            pointed = pointed.resolve()
-        if pointed.parent != runs_root:
-            raise CandidateSnapshotManifestError("last-run pointer is outside output_runs")
-        return loader(
-            base=root,
-            run_id=pointed.name,
-            account=account_norm,
-        )
+            pointed = root / pointed
+        if pointed.is_symlink() or pointed.parent.resolve() != runs_root:
+            raise CandidateSnapshotManifestError("last-run pointer is outside output_runs or unsafe")
+        pointed = pointed.parent.resolve() / pointed.name
 
-    if not runs_root.is_dir() or runs_root.is_symlink():
+    skipped = 0
+    skipped_market = None
+    attempted_run_id = None
+
+    def load_or_skip(run_dir: Path) -> dict[str, Any] | None:
+        nonlocal skipped, skipped_market, attempted_run_id
+        attempted_run_id = run_dir.name
+        try:
+            market = _scheduler_skipped_market(
+                base=root, run_id=run_dir.name, account=account_norm,
+            )
+            if market is not None:
+                if skipped_market is not None and market != skipped_market:
+                    raise CandidateSnapshotManifestError("scheduler skip account market changed")
+                skipped_market = market
+                skipped += 1
+                return None
+            bundle = loader(base=root, run_id=run_dir.name, account=account_norm)
+            if skipped:
+                manifest = bundle["manifest"]
+                market = _frozen_account_market(
+                    base=root, run_id=run_dir.name, account=account_norm,
+                    config_hash=manifest["account_config_sha256"],
+                )
+                if market != skipped_market or any(
+                    scope.get("market") != market
+                    for scope in manifest.get("expected_scopes", [])
+                ):
+                    raise CandidateSnapshotManifestError("candidate account market binding mismatch")
+            return {**bundle, "source_selection": {"skipped_non_scan_runs": skipped}}
+        except (CandidateSnapshotManifestError, AccountRunConfigError, OSError, ValueError) as exc:
+            error = CandidateSnapshotManifestError(str(exc))
+            error.run_id = run_dir.name
+            error.account = account_norm
+            raise error from exc
+
+    if pointed is not None:
+        bundle = load_or_skip(pointed)
+        if bundle is not None:
+            return bundle
+    if not runs_root.is_dir():
         raise CandidateSnapshotManifestError("no output runs are available")
     try:
         candidates = sorted(
-            (
-                item
-                for item in runs_root.iterdir()
-                if item.is_dir() and not item.is_symlink()
-            ),
+            (item for item in runs_root.iterdir() if item.is_dir() and not item.is_symlink()),
             key=lambda item: (item.stat().st_mtime_ns, item.name),
             reverse=True,
         )
-    except OSError as exc:
+        if pointed is not None:
+            candidates = candidates[candidates.index(pointed) + 1:]
+        for run_dir in candidates:
+            account_dir = run_dir / "accounts" / account_norm
+            if account_dir.is_symlink() or account_dir.parent.is_symlink():
+                raise CandidateSnapshotManifestError("latest account run may not be a symlink")
+            if not account_dir.is_dir():
+                continue
+            bundle = load_or_skip(run_dir)
+            if bundle is not None:
+                return bundle
+    except (OSError, ValueError) as exc:
         raise CandidateSnapshotManifestError("output runs are unreadable") from exc
-    for run_dir in candidates:
-        account_dir = run_dir / "accounts" / account_norm
-        if account_dir.is_symlink():
-            raise CandidateSnapshotManifestError("latest account run may not be a symlink")
-        if not account_dir.is_dir():
-            continue
-        # The newest run containing the requested account is authoritative.
-        # Do not skip an incomplete run and silently return stale evidence.
-        return loader(
-            base=root,
-            run_id=run_dir.name,
-            account=account_norm,
-        )
-    raise CandidateSnapshotManifestError(
+    error = CandidateSnapshotManifestError(
         f"no candidate run is available for account {account_norm}"
     )
+    error.run_id = attempted_run_id
+    error.account = account_norm
+    raise error
 
 
 def load_latest_candidate_snapshot_bundle(
