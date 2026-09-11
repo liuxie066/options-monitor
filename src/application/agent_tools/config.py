@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from domain.domain.multi_tick import select_scheduler_state_filename
+from domain.storage.paths import shared_state_path
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.agent_tools.operations_impl import config_validate_tool, scheduler_status_tool
 from src.application.agent_tools.symbols_impl import find_symbol_entry, manage_symbols_tool
@@ -17,7 +19,11 @@ from src.application.account_config import normalize_accounts
 from src.application.scan_scheduler import read_state as read_scheduler_state
 from src.application.agent_tool_config import repo_base
 from src.application.config_sections import resolve_watchlist_config
+from src.application.config_validator import validate_schedule_cfg
 from src.application.scan_scheduler import decide as scheduler_decide
+from src.application.scan_scheduler import maybe_parse_dt as parse_scheduler_datetime
+from src.application.runtime_paths import resolve_runtime_root
+from src.application.tick_scheduler_context import select_scheduler_schedule_key
 from src.application.agent_tools.runtime_helpers import validate_runtime_config
 from src.application.agent_tool_config import write_tools_enabled
 from src.application.config_yaml_symbols import mutate_yaml_symbol_config
@@ -107,22 +113,41 @@ _SYMBOL_RESOLVE_OUTPUT_CONTRACT: dict[str, Any] = {
 }
 
 _SCHEDULER_STATUS_OUTPUT_CONTRACT: dict[str, Any] = {
-    "schema_version": "scheduler_status.output.v1",
+    "schema_version": "scheduler_status.output.v2",
     "evidence_type": "diagnostic", "bounded_projection": "contract_fields", "coverage": "point", "freshness": "source_declared", "pagination": {"mode": "none"},
-    "source_label": "OM scheduler config and local scheduler state",
+    "source_label": "validated OM runtime config and production-selected scheduler state",
     "result_shape": "scalar",
     "fact_fields": [
         "decision.reason",
-        "decision.is_scan_window_open",
+        "decision.status",
+        "decision.in_run_window",
+        "decision.should_run_scan",
         "decision.is_notify_window_open",
         "decision.should_notify",
         "decision.schedule_enabled",
+        "decision.evaluation_mode",
+        "schedule.key",
+        "schedule.selection",
+        "schedule.status",
+        "schedule.enabled",
+        "state.status",
+        "state.empty",
+        "state.selection",
+        "state.account_record_status",
         "state.last_run_utc_for_account",
+        "state.last_processed_scan_target_utc_for_account",
         "state.last_notify_utc",
         "state.last_notify_utc_for_account",
         "filters.account",
         "filters.schedule_key",
         "filters.force",
+        "filters.market",
+    ],
+    "missing_data_fields": [
+        "decision.status",
+        "schedule.status",
+        "state.status",
+        "state.account_record_status",
     ],
     "freshness_fields": [
         "state.last_run_utc_for_account",
@@ -167,6 +192,12 @@ def _scheduler_status_tool(
         read_state=read_scheduler_state,
         decide=scheduler_decide,
         repo_base=repo_base,
+        resolve_runtime_root=resolve_runtime_root,
+        validate_schedule_cfg=validate_schedule_cfg,
+        select_state_filename=select_scheduler_state_filename,
+        select_schedule_key=select_scheduler_schedule_key,
+        shared_state_path=shared_state_path,
+        parse_state_datetime=parse_scheduler_datetime,
         mask_path=lambda value: _mask_path_str(value),
     )
 
@@ -418,16 +449,16 @@ CONFIG_VALIDATE_TOOL = build_agent_tool(
 
 SCHEDULER_STATUS_TOOL = build_agent_tool(
     name="scheduler_status",
-    catalog_summary="读取调度器与任务激活状态。",
-    description="Return scheduler decision and existing scheduler state without marking scan/notify state or running pipelines.",
+    catalog_summary="读取业务调度策略与状态；不枚举系统定时任务。",
+    description="Return the selected business schedule and scheduler state without marking scan/notify state or running pipelines.",
     requires=("runtime_config",),
     capabilities=("scheduler_status", "read_only"),
     input_schema={
         "config_key": "us|hk",
         "config_path": "optional explicit config path",
-        "state_dir": "optional state dir; defaults to output_shared/state",
+        "state_dir": "optional state dir; defaults to the production runtime state dir",
         "state": "optional explicit scheduler state file",
-        "schedule_key": "optional schedule key; defaults to schedule",
+        "schedule_key": "optional explicit schedule key; defaults to the production market selection",
         "account": "optional account label",
         "force": "optional bool to preview force-mode scheduler decision",
     },

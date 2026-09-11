@@ -132,6 +132,64 @@ _RUNTIME_STATUS_OUTPUT_CONTRACT: dict[str, Any] = {
     ],
 }
 
+_SCHEDULED_TASKS_OUTPUT_CONTRACT: dict[str, Any] = {
+    "schema_version": "scheduled_tasks.output.v1",
+    "evidence_type": "collection",
+    "bounded_projection": "contract_fields",
+    "coverage": "source_declared",
+    "freshness": "source_declared",
+    "pagination": {"mode": "none"},
+    "source_label": "OM managed service profile and local service manager",
+    "primary_rows": "tasks",
+    "row_count_field": "count",
+    "fact_fields": [
+        "scope.market",
+        "scope.granularity",
+        "scope.inventory_source",
+        "scope.coverage",
+        "scope.reasons[]",
+        "tasks[].id",
+        "tasks[].name",
+        "tasks[].markets[]",
+        "tasks[].configured",
+        "tasks[].enabled",
+        "tasks[].active",
+        "tasks[].availability",
+        "tasks[].reasons[]",
+        "count",
+        "observed_at",
+        "coverage.status",
+        "coverage.included_count",
+        "coverage.total_count",
+        "freshness.status",
+        "freshness.as_of",
+        "availability",
+        "reasons[]",
+    ],
+    "freshness_fields": ["freshness.status", "freshness.as_of"],
+    "missing_data_fields": [
+        "scope.coverage",
+        "scope.reasons[]",
+        "tasks[].enabled",
+        "tasks[].active",
+        "tasks[].availability",
+        "tasks[].reasons[]",
+        "coverage.status",
+        "availability",
+        "reasons[]",
+    ],
+    "model_preview_fields": [
+        "scope",
+        "tasks",
+        "count",
+        "observed_at",
+        "coverage",
+        "freshness",
+        "availability",
+        "reasons",
+    ],
+}
+
 def _mask_path_str(value: Any) -> str:
     return mask_path(value) or "..."
 
@@ -195,6 +253,14 @@ def _private_runtime_status_tool(
         repo_base=repo_base,
         mask_path=mask_path,
     )
+
+
+def _scheduled_tasks_tool(
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    from src.application.agent_tools.scheduled_tasks_impl import run_scheduled_tasks_tool
+
+    return run_scheduled_tasks_tool(payload)
 
 
 def _operation_timeline_tool(
@@ -427,6 +493,28 @@ RUNTIME_STATUS_TOOL = build_agent_tool(
     ),
 )
 
+SCHEDULED_TASKS_READ_TOOL = build_agent_tool(
+    name="scheduled_tasks_read",
+    catalog_summary="读取当前授权市场的 OM 定时任务清单与启停状态。",
+    description=(
+        "Read the deployment-level OM scheduled-task inventory for the trusted market. "
+        "Configured, enabled, and active are independent facts; account scheduling and next wake time are outside this tool."
+    ),
+    requires=("runtime_config", "service_profile"),
+    capabilities=("scheduled_tasks", "diagnostics", "read_only"),
+    input_schema={
+        "config_key": {"type": "string", "enum": ["us", "hk"], "description": "Market config"},
+        "config_path": {"type": "string", "minLength": 1, "description": "Trusted runtime config path"},
+    },
+    handler=_scheduled_tasks_tool,
+    pure_read=True,
+    allow_additional_input=False,
+    safe_default_input={},
+    examples=({"input": {"config_key": "us"}},),
+    output_contract=_SCHEDULED_TASKS_OUTPUT_CONTRACT,
+    bot_input_fields=("config_key",),
+)
+
 OPERATION_TIMELINE_TOOL = build_agent_tool(
     name="operation_timeline",
     catalog_summary="读取指定运行操作的时间线与阶段结果。",
@@ -473,6 +561,7 @@ OPERATION_TIMELINE_TOOL = build_agent_tool(
 TOOLS: tuple[AgentTool, ...] = (
     HEALTHCHECK_TOOL,
     RUNTIME_STATUS_TOOL,
+    SCHEDULED_TASKS_READ_TOOL,
     OPERATION_TIMELINE_TOOL,
 )
 
@@ -481,5 +570,6 @@ __all__ = [
     "HEALTHCHECK_TOOL",
     "OPERATION_TIMELINE_TOOL",
     "RUNTIME_STATUS_TOOL",
+    "SCHEDULED_TASKS_READ_TOOL",
     "TOOLS",
 ]

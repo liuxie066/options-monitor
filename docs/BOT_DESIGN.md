@@ -290,6 +290,219 @@ S2 在保留旧功能的 S1 上验证；S3 复用 S2 真实回执作为连续调
 - 未选 Hermes/新 runtime：不消除业务回执、Host 治理与数据授权工作；未选向量库：现有有限记忆尚无检索证据要求；未选仅抬预算：已有失败远早于180秒。
 - 产品合同无未决项；source 覆盖与迁移对象以 B4/B5 为实现边界，实际环境中的路径/数量由 dry-run 枚举，不在设计阶段臆测。未知源或历史缺项按 partial/unavailable 呈现；实现不能把未验证的 source 标记完整。必要验收 fixture 以 B8 固定，后续发现的缺口按四项合同裁决。
 
+## 调度查询与任务事实（开发实现，尚未发布）
+
+### T1. 目标与边界
+
+让 Bot 在已授权范围内准确回答 OM 定时任务清单、启停状态和调度状态；能力不足或证据缺失时明确查询边界。
+配置存在不代表授权，部分可见结果不能称为整机任务总数。本节描述开发实现的行为，不代表已发布。
+
+本次只覆盖 OM 管理的任务，不枚举其他应用或整台机器的所有任务；不增加任务执行器、自然语言真伪验证器、
+业务关键词路由、自动修复、模型替换或 Hermes 集成。不改变 sender/account/market 授权，不改生产配置或服务。
+普通问答、Control 的 preview/confirm/idempotency/outbox 和 180 秒总预算保持原合同。
+
+成功信号：
+- 同一可信配置范围从入口、模型可见市场、工具实际路径到 observation 始终一致；冲突不能悄悄改成另一市场。
+- 默认调度状态与生产 tick 使用相同的市场/存储选择规则；未指定账户与不存在运行记录可区分。
+- 清单的名称、数量、启停状态由当前结构化证据生成，显示覆盖范围，不硬编码任务数量。
+- 正常、跨市场冲突、部分失败、状态缺失、能力不支持均通过飞书真实入口回归；失败不变成零结果。
+
+### T2. 当前事实与 owner
+
+源码核查基线为 3.5.2 对应提交 `4ee3b408edeb020483a8906512d438cb131ad0c1`。
+
+| 当前行为 | 根 owner 与拟变更 |
+| --- | --- |
+| channel_facade 对 config_key 和 config_path 分别绑定，路径模式未向模型绑定市场身份 | bot/channel_facade.py 与 agent_tool_config.py：复用配置校验，得到一致可信身份 |
+| build_tool_payload 末尾覆盖固定字段，模型 HK 与固定 US 路径可能同时存在 | bot/tools.py：固定范围与模型过滤条件冲突时拒绝，不静默替换 |
+| scheduler_status 默认以 repo_base 读取通用 scheduler_state.json，生产 tick 先解析 runtime root | runtime_paths.py、agent_tools/operations_impl.py、tick_scheduler_context.py：共用运行根、纯路径/日程选择规则 |
+| tick 的 context builder 同时含目录、状态初始化和 provider 判断 | 只抽取/复用无副作用选择规则；读工具不调用完整 tick builder |
+| service_status_from_profile 已能读取 active 和 enabled，runtime_status 的安全投影只保留数量 | service_deploy.py 保持服务事实 owner；增加窄的安全任务投影 |
+| submit_answer 验证声明的引用、范围、新鲜度，不证明正文含义 | bot/tools.py、result_admission.py、host.py：对任务报告使用结构化呈现约束 |
+| 已有飞书路由测试替换 run_channel_request | tests/test_inbound_feishu_ws.py：保留真实 Bot 链，只替换外部边界 |
+
+不复制生产证据、绝对路径、用户身份或原始提示词到 living docs。事件证据与可重放反例留在工作流 artifact。
+
+### T3. 授权与配置解析
+
+1. 可信 Channel/CLI 输入仍是现有 config_key 或 config_path；使用既有 resolver、runtime identity/freshness 校验，
+   得到规范路径和实际市场。禁止通过猜测同目录文件、service profile 的 markets 或用户文本扩展权限。
+2. 保留原 session authority 标识规则，避免无关会话迁移；内部请求同时携带实际市场与固定路径。
+   实际市场进入已有 config_key fixed_tool_scope，配置路径继续使用已有 config_path host_only_tool_scope；不增加 market slot。
+   账户集合从已授权配置读取，沿用现有 sender policy。Channel 入口要求 key/path 恰有一个；解析后的内部请求可同时携带两者。
+   本地 `om bot run` 保留无 scope 的概念问答；显式绑定时 `--config-key` 与 `--config-path` 互斥并使用同一解析。
+3. 共同 tool payload 边界验证固定身份与模型显式过滤条件；不一致返回作用域冲突，工具不读文件。
+   模型省略市场则绑定可信市场。不能仅删除固定路径来让 HK 查询成功。
+4. 本地 Tool Gateway 的显式配置和状态参数仍属于 operator 能力；Bot 不开放任意路径参数。
+   对 identity mismatch、文件不存在、配置过期、读取失败保留不同原因；只有确实缺少/过期时提供对应构建提示。
+5. 入口首次解析配置失败时保留既有 not_ready 信封，使用安全的细分 reason：config_identity_mismatch、config_missing、
+   config_stale、config_unreadable（拟定值，由入口 owner 定义）；用户消息只说明已知市场与原因，不输出路径/异常原文。
+   身份错误仍用 channel_identity_or_scope_invalid。模型之后请求不同市场属于 scope conflict，不声称该市场文件有错。
+6. 当前单市场入口只能查询该市场；询问其它市场时说明无法在当前授权范围核实，不能推断其它市场未配置。
+
+### T4. 生产调度状态读取
+
+scheduler_status 与生产入口共同使用 runtime_paths.resolve_runtime_root(repo_root=repo_base()) 得到状态运行根，
+再交给 storage_paths 与 domain 的 select_scheduler_state_filename；不能只换文件名而继续读代码目录。
+显式 state > 显式 state_dir 下所选文件名 > runtime root 下默认状态路径；既有相对 operator 路径仍按原 repo_base 解释。
+日程键在 tick scheduler owner 中提取最小纯函数，供 tick 与 scheduler_status 共同调用；HK 且配置存在 schedule_hk 时选它，
+其余保持生产条件。保留现有多市场列表选择语义，不新增状态仓库或改变生产执行条件。
+市场来源为已验证 runtime config，不能由当前是否开市或模型猜测决定状态文件。
+
+- US/HK 默认各读生产选择的市场状态文件，不因目标文件不存在回退通用旧文件。
+- 保留 operator 显式 state/state_dir/schedule_key 和现有 Bot schedule_key/force 只读预览能力；Bot 仍隐藏路径覆盖。
+  输出明确标注默认生产选择、显式日程选择或 force 模拟；模拟决定不能作为当前生产 should_run_scan/should_notify。
+  显式日程不存在或格式无效时返回缺失/无效诊断，不能把空字典按 enabled=true 解释。
+- 不建目录、不创建/修补状态、不调用 OpenD、不执行 tick。读取前区分不存在、不可读、损坏和有效空对象。
+- 当前策略决定的 as_of 是本次求值时刻；历史运行时间是源字段，两者不可相互替代。
+- 未指定 account 时标明账户未选定，不把 null 解释为从未运行；指定账户缺少记录时只说该状态源无记录。
+- schedule.enabled、定时器 enabled/active、should_run_scan、should_notify 分别描述，不能相互推断。
+- 缺失状态时可报告已验证配置中的启用和窗口事实，但依赖状态的决策标为不可确定；不能用空字典计算后宣称完整。
+
+### T5. 受控任务清单
+
+拟新增一个纯读工具 `scheduled_tasks_read`，definition 放在现有 agent_tools/diagnostics.py，复用其已被 Scene 选择的 toolset。
+理由是 scheduler_status 只解释业务策略，runtime_status 是广泛健康摘要；独立窄查询能让模型选中准确能力，
+且避免为列表运行整个健康检查。工具只是既有服务 owner 的适配器，不拥有第二套任务定义或调度逻辑。
+
+输入仅有现有 config_key/config_path；Bot 隐藏 path。不接受 account、命令、任意 profile、服务名模式或搜索路径。
+这是市场/部署层面的清单，不判断某账户是否受任务调度；账户历史仍用 scheduler_status。配置允许账户与实际部署账户不同，
+不能把同市场任务关联到任意配置账户。未知账户适用性不影响已证明的市场任务名称，但不得扩展账户可见范围。
+从已验证 runtime root 读取既有 service.profile.json，并核对其 runtime/config 绑定；profile 只作为部署清单，不授予权限。
+通过现有 service_deploy 生成/命名规则识别任务及其市场范围；不能识别归属的条目排除并标明覆盖不完整。
+市场任务仅在授权市场内可见；共享任务仅在其所需市场/账户范围都获授权时可见。未能证明范围不能当成全局公开任务。
+
+最小输出（拟定字段，在 tool owner 定义唯一 schema）：
+- scope：可见市场、granularity=market_deployment、inventory_source、覆盖是否完整以及限制原因；不提供账户调度结论。
+- tasks：稳定 id（provider + unit 名）、原始任务名称、市场范围、configured、enabled、active。
+- count：实际返回的去重任务条数；不是 enabled 数，也不是整机总数。
+- observed_at、每项可用性/错误原因；失败、缺失、unsupported 独立于 count。
+
+systemd 只取清单中的 timer，关联 service 不重复计数；按稳定 id 去重排序，enabled/active 分开读取。
+现有 service_status_from_profile 的命令结果由服务 owner 归一化；查询返回非零不一律表示 disabled，
+超时/权限失败保持 unknown。输出 configured 表示在部署清单中；不把它解释为 OS 已安装。
+只从 systemd 已知响应映射 enabled/disabled、active/inactive；not-found、masked、static、failed、超时、权限错误各保留
+明确状态或 unknown reason，不用返回码一刀切。不给模型原始 stdout/stderr、命令、路径或凭据。
+
+在服务 owner 的现有串行读取接口增加可选 monotonic deadline 与 cancellation callback，逐次探针前检查；
+单次 timeout 不超过 1 秒且不超过剩余查询预算，单次查询总预算最多 10 秒。到期/取消后不启动下一条探针，
+未查询条目保留 configured 与 unknown。正在执行的 subprocess 最迟在本次 1 秒上限内结束并被回收；不新增线程池。
+Bot 将 Host 剩余工具预算（扣除既有收尾 reserve）与该 10 秒上限取小值传入。使用 call_read_tool 的 Python-only 参数，
+在执行回调所在同一线程内按现有 option_performance_report_now_ms 的 contextvars 模式绑定/重置，只作用于本查询；
+不把 deadline/callback 塞入模型 payload，不改变公共 execute_tool/AgentTool handler schema。Tool Gateway 没有 Host 截止时
+仍采用 10 秒总上限。取消后的回调结束释放既有工具槽；Host 不接纳取消后迟到的事实，不承诺硬杀任意 Python 回调。
+launchd/manual 等不能从现有证据可靠识别任务或启停时，返回 unsupported/unknown；不伪造相同平台语义。
+清单缺失、损坏或不匹配时不能返回成功空清单；有效且覆盖完整的空清单才可说当前范围无任务。
+
+本切片不新增 OS 下一次唤醒探针；scheduler_status 已知的下一业务扫描时间明确标为业务扫描。
+服务 enabled 不证明实际业务成功，扫描时间戳也不证明飞书 delivery_confirmed。
+
+### T6. 结构化呈现与失败语义
+
+沿用 Host 的 observation registry 与有限的确定性正文校验，不引入通用文本推理器。
+Host 在当前 run 的锁内保存 task_reads（内存字典，不建表、不回读旧会话），记录 scheduled_tasks_read 的尝试与结果。
+固定清单段只取该工具的任务事实；scheduler_status 的显式/模拟决定不混入清单段，继续按其带标签的读合同使用。
+键由工具名、可信配置身份、模型原始请求市场（省略时为可信市场）组成，在固定参数绑定/拒绝前捕获；
+不同请求市场不能相互覆盖。记录只有最终有界安全投影或脱敏失败诊断，不包含原始 profile、命令或异常文本。
+成功读才进入业务 evidence_registry；拒绝、读取失败、预算失败仅进入 task_reads。取消后/已提交 run 不再更新。
+
+确定性呈现采用唯一固定标记 `[[scheduled_tasks]]`（拟实施的任务报告占位符），仍使用现有 submit_answer 字段：
+- 没有任务查询时，标记非法，沿用原准入；发生任务查询后，提交正文必须恰有一个标记，不能省略失败诊断。
+- 报告仅含任务结果时，answer_markdown 使用该标记；混合回复以标记开头，其后保留按原合同准入的其它分析。
+  允许无需业务证据的概念解释，不以存在非任务 observation 作为保留条件；有非任务事实 claim 时仍须原业务证据。
+  例如“解释 enabled/active，再列任务”在清单成功或失败时均保留解释。Host 不分类问题意图；
+  标记外文字沿用普通准入，不能凭任务 claim 获得支持。探索性查询不替换整条回复，也不改 Control 的预览/确认/回执。
+- 有成功任务 observation 时，任务 claim 的 text 只能是该标记，kind=current_fact、required_scope=point，
+  observation_ids 必须恰好覆盖当前报告使用的成功任务 observation。失败记录绝不成为 claim 的引用。
+  准入对这种窄 claim 单独校验同 run、authorized_read、固定报告绑定和投影可用性；不能凭它支持标记外自由文本。
+  非任务 claim 继续走现有 _validate_claim，不放宽普通业务范围/新鲜度规则。
+- 纯失败报告使用 conceptual + claims=[]，并单独核对 task_reads 生成的精确报告与失败状态。
+  同时有概念解释仍使用此模式；同时有其它成功业务事实则使用 evidence，仅引用那些成功事实，不引用失败任务记录。
+  成功与失败混合时使用 evidence，引用成功任务 observation；其它成功业务证据可按现有规则引用。
+  有成功任务事实但投影已被收窄为提示时不能引用被移除事实；只呈现固定收窄报告。
+- fixed report 由 Host 从最终模型可见投影生成，列出范围、已核实事实和每个未恢复查询的诊断。
+  已知范围内完整读取且所有所需状态可用才允许 complete；有已知事实同时有缺口为 partial；全失败为 insufficient_evidence；
+  投影因容量缩减为 needs_narrowing。最终状态不能比任务报告更乐观，模型其它证据要求更保守时保留更保守结果。
+
+准入顺序固定：校验标记、任务记录和普通 claims → 展开任务段并决定最终 status/banner → 输出/长度检查
+→ 调用既有纯 reply_builder 作渠道预检 → 必要时按下述容量规则收窄并重检 → 冻结 approved_answer。
+复用 inbound_service._bot_reply_builder 已捕获的 reply_context.max_reply_chars 与既有 renderer，不新增渠道预算 schema。
+预检不发送、不入队；Host 在 submit_answer 返回成功收据前完成它。最终 text/status/text_sha256 返回 Pi，
+Pi result.proposed 与 Host on_proposed 继续核对该最终文本和 hash；失败、取消、Control 仍走原终态路径。
+Host 只在最终文本匹配时把预检得到的同一 payload 交给既有 finish_run/outbox 事务，不在发送阶段重组任务段。
+唯一既有追加路径是 progress_resolution 的事务冲突说明：提交此字段时，预检正文与“正文 + 原 owner 的固定冲突说明”
+两种结果，容量规则同时满足两者；finish_run 按真实事务结果选择对应的已构建载荷，不提前更新进度、不接受任意后缀。
+模型 approved hash 仍绑定准入正文，追加说明只由既有进度 owner 决定；最终 source/payload hash 绑定实际选定的消息。
+approved_answer.text_sha256 是最终准入文本的 hash；render_meta.source_sha256 是 renderer 规范化输入的 hash，
+rendered_sha256 是既有规范化 transport JSON 的 hash。三者按各自输入核对，不要求相等；原有发送/回退语义保持。
+这是 T1 授权的单个工具事实段呈现，作为下文通用 Host/Scene 禁止问法专用 renderer 的窄例外：
+只由实际工具记录触发，不读取问题关键词、不选工具、不计算业务事实，不增加通用报告编排器。
+仅任务回复采用固定段；标记外文字不能以任务 claim 支持，但其全面语义真实性仍不在本次保证内。
+
+沿用现有 Pi failedCalls 抑制，不增加同参失败重试例外或自动重试。报告说明本次未自动重试；用户新请求可重新读取。
+同一 run 如存在允许的再次成功读取，只使用其真实新 observation；旧 event log 的成功不能当作本次恢复证据。
+跨市场失败不会被另一市场成功清除，成功后仍未知的状态保留诊断。
+
+容量边界先于固定报告绑定：复用 compact_observation 的 4,000-token、活动证据 20,000-token 与正文 12,000-char 上限。
+超限后报告与模型可见的最终 narrowing 投影一致，不要求模型复述不可见正文，不增加分页协议。
+飞书预检检查既有 render_meta.truncated 及实际 transport/fallback 内容；任务段位于正文开头，范围与失败摘要先于列表。
+首次预检发生截断时，任务段一次性替换为固定的收窄说明和范围，status 使用 needs_narrowing，重新生成 banner 并预检；
+不循环试探长度、不新增分页。其它分析保留在后方，沿用既有渠道截断提示；不能发送被截成另一结论的任务表。
+若极小预算连收窄段也不能完整展示，以既有不可呈现提示作为最终文本，重建并冻结对应载荷，status 保持 needs_narrowing，
+不声称完整核查。检查最终 outbox 的 transport 和 fallback，不只检查 admission 文本。
+
+| 已知情况 | 可陈述内容 | 不可陈述内容 |
+| --- | --- | --- |
+| 完整的授权清单读取成功 | 当前范围有 N 项，逐项 enabled/active | 整台机器只有 N 项 |
+| US 成功，HK 超出授权或读取失败 | US 已核实；HK 当前无法核实及原因 | HK 未配置/不存在 |
+| 清单存在，某项状态读取失败 | 已配置该任务，状态未知 | 已停用 |
+| 未指定账户或状态没有对应记录 | 未指定账户/该源未找到记录 | 从未运行或从未发送 |
+| provider 不支持/清单不可用 | 当前无法读取该信息，说明已有范围 | 没有任务 |
+| 模型或工具预算耗尽 | 使用既有失败/部分结果路径，保留确定的事实 | 已完整核查 |
+
+同时修正配置错误提示和 Scene 工具描述：scheduler_status 不是清单；配置路径不匹配不代表市场未配置；
+无记录不代表从未发生。提示词不承担权限或事实校验。同步 registry/Scene 投影的工具说明、隐藏输入及真实 schema/prompt 指纹。
+开放式自然语言问答的全面真实性不在本次保证范围。
+
+### T7. 行为切片与验证
+
+| 切片 | 可验收增量 | 验证证据 |
+| --- | --- | --- |
+| 1 查询依据一致 | config_key/path 等价范围；冲突无读取；生产状态默认路径、日程键一致 | Bot payload/渠道 scope 测试；scheduler_status public facade 与生产纯选择规则的对照；文件无写入 |
+| 2 清单准确 | 只列授权 OM 任务，去重计数，状态独立，完整空集与不可用不同 | profile/service adapter 假 provider 测试；跨市场/共享任务隔离；systemd inactive/disabled/timeout，unsupported provider |
+| 3 回复可靠 | 结构化任务报告与失败不被模型改写；真实飞书链路可重放 | 入口到 outbox 捕获的最终回复与持久化审计断言；虚构 HK、漏引用失败、重试恢复反例 |
+
+回归刻意分离 repo root 与临时 runtime root，两边放冲突状态，再加入两市场配置、生产命名状态文件和旧通用空状态文件。
+通过公开 Tool Gateway 和 Bot 默认读取证明命中生产根与文件，不只传显式 state 路径；HK-only schedule_hk 用例对照生产选择。
+入口覆盖 key-only/path-only、both/neither、首次配置 missing/stale/unreadable/mismatch，以及有效 US 范围后模型请求 HK。
+从生产 service bundle 生成测试 profile，覆盖部署账户子集、未知归属、共享任务、重复条目和状态失败，不能用手写第二份任务目录。
+查询预算覆盖总截止、每条命令超时、取消后不启动下一项，以及回调结束后下一条普通工具请求成功。
+替换模型 transport、OS status runner 和最终 reply_fn 发送边界；不能替换 run_channel_request、build_tool_payload、
+真实 read/admission/renderer。模型 gate 使用有效夹具配置与假 key 自然通过，不替换 gate。
+复用 tests/test_pi_agent_process.py 的本地假 HTTP provider 与真实 Node/Pi bridge 验证 failedCalls，不能用 run_pi_agent stub
+声称证明运行时重试/取消行为。普通纯函数测试可以更窄，但最终飞书入口回归保留真实链路。
+模拟模型请求 HK，验证越权在实际读前拒绝，回复不将其写成未配置。
+另一场景使用授权 HK、非空历史记录和 disabled timer，验证账户历史、启停与业务窗口互不混淆。
+对照默认日程、显式其它日程、缺失日程与 force=true，验证模拟标签不冒充生产事实，且不执行 tick。
+最终 outbox 用例包括：全失败、预执行拒绝、US 成功 + HK 拒绝、同参重试被抑制、新请求恢复、超大投影和极小渠道预算。
+保留普通概念问答、financial read、Control preview/confirm/idempotency，以及分析未通知原因时顺带查询任务的混合用例。
+加入“概念解释 + 清单”的成功/失败两例，不提供额外业务 observation，断言概念文字与固定任务段同时保留。
+渲染用例覆盖换行/首尾空白规范化、表格 transport/fallback、字符/字节截断和极小预算；分别重算准入、source、rendered
+hash，断言 Pi 收据、最终 proposal、持久化答案和实际 outbox payload 对应同一冻结结果。
+带 progress_resolution 的任务回答覆盖正常关闭与 CAS 冲突，断言原冲突说明保留、正文不变、正确预检载荷入队；
+准入正文与确定性追加说明分开核对，不把追加说明伪称为模型准入内容。
+每个行为切片只运行相关用例；最终统一运行 Agent contract/smoke、Bot scope/admission、飞书入口与 tick scheduler 回归，
+再运行文案、运行配置追踪、敏感 artifact 和适用依赖边界 guardrails。
+测试不会发送真实飞书消息、调用 broker 或写生产状态；真实在线模型评估和远端升级后验证单独授权。
+
+### T8. 风险与后续边界
+
+部署清单可能落后于 OS 实际安装状态：报告明确“OM 部署清单内”，不宣称完整 OS 盘点；列出已配置但 OS 不存在的任务。
+当前 service profile 主要存服务名称，没有独立 ACL：范围不能证明时输出受限结果，不借本次修复增加授权配置体系。
+固定任务段限制模型改写该段的自由度；其它分析沿用当前问答准入，不因任务查询丢失，不扩大为通用内容验证。
+launchd 精确任务发现、OS 下一唤醒时间、跨市场新授权和通用事实校验由各 owner 在单独需求下处理。
+任务报告仍依赖模型正确选择清单工具；通过工具描述和入口回归约束典型问法，不用关键词路由保证全部表达。
+
 ## Purpose
 
 Bot is the general conversational Agent for options-monitor. It must

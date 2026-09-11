@@ -873,7 +873,7 @@ def _validate_timezone(value, path: str) -> None:
         die(f'{path} must be a valid IANA timezone')
 
 
-def _validate_schedule_cfg(raw, path: str) -> None:
+def validate_schedule_cfg(raw, path: str) -> None:
     if raw is None:
         return
     if not isinstance(raw, dict):
@@ -891,6 +891,8 @@ def _validate_schedule_cfg(raw, path: str) -> None:
         path,
     )
 
+    if 'enabled' in raw and not isinstance(raw.get('enabled'), bool):
+        die(f'{path}.enabled must be a boolean')
     if 'timezone' in raw:
         _validate_timezone(raw.get('timezone'), f'{path}.timezone')
     if 'beijing_timezone' in raw:
@@ -1103,8 +1105,8 @@ def validate_config(cfg: dict):
     _validate_no_inline_secrets_or_retired_callback_cfg(cfg)
     _validate_watchdog_config(cfg.get('watchdog'))
 
-    _validate_schedule_cfg(cfg.get('schedule'), 'schedule')
-    _validate_schedule_cfg(cfg.get('schedule_hk'), 'schedule_hk')
+    validate_schedule_cfg(cfg.get('schedule'), 'schedule')
+    validate_schedule_cfg(cfg.get('schedule_hk'), 'schedule_hk')
 
     portfolio_cfg = cfg.get('portfolio') or {}
     if portfolio_cfg and not isinstance(portfolio_cfg, dict):

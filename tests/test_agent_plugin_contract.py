@@ -15,6 +15,7 @@ def test_diagnostics_module_keeps_current_exports() -> None:
         "HEALTHCHECK_TOOL",
         "OPERATION_TIMELINE_TOOL",
         "RUNTIME_STATUS_TOOL",
+        "SCHEDULED_TASKS_READ_TOOL",
         "TOOLS",
     }
     module = __import__(module_name, fromlist=["*"])
@@ -23,6 +24,16 @@ def test_diagnostics_module_keeps_current_exports() -> None:
 
     assert set(module.__all__) == expected
     assert set(namespace) - {"__builtins__"} == expected
+
+
+def test_scheduled_tasks_tool_has_narrow_read_only_input() -> None:
+    from src.application.agent_tools.diagnostics import SCHEDULED_TASKS_READ_TOOL
+
+    schema = SCHEDULED_TASKS_READ_TOOL.execution_input_json_schema()
+    assert set(schema["properties"]) == {"config_key", "config_path"}
+    assert schema["additionalProperties"] is False
+    assert SCHEDULED_TASKS_READ_TOOL.bot_input_fields == ("config_key",)
+    assert SCHEDULED_TASKS_READ_TOOL.is_pure_read() is True
 
 
 def test_agent_spec_uses_symbols_public_name() -> None:
@@ -47,6 +58,7 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "option_performance_report" in tool_names
     assert "option_positions_read" in tool_names
     assert "runtime_status" in tool_names
+    assert "scheduled_tasks_read" in tool_names
     assert "runtime_runs" in tool_names
     assert "runtime_logs" in tool_names
     assert "notification_perception_read" in tool_names
@@ -462,6 +474,7 @@ def test_pure_read_allowlist_is_derived_from_registry_metadata() -> None:
     assert PURE_READ_TOOLS == expected
     assert pure_read_tool_names() == expected
     assert "runtime_status" in PURE_READ_TOOLS
+    assert "scheduled_tasks_read" in PURE_READ_TOOLS
     assert "version_check" in PURE_READ_TOOLS
     assert "runtime_runs" in PURE_READ_TOOLS
     assert "runtime_logs" in PURE_READ_TOOLS
