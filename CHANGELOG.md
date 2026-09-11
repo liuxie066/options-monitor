@@ -2,9 +2,17 @@
 
 ## Unreleased
 
+## 3.5.3 - 2026-09-11
+
 ### Bug Fixes
+- Scoped YAML freshness checks to the effective market input, preventing an unrelated market's configuration from making runtime state appear fresh.
 - Bound Bot configuration identity to its authorized market and read scheduler history from the production state location, distinguishing missing or invalid data from empty history.
 - Added an authorized OM scheduled-task inventory with structured names, counts, and independent enabled/active states; preserved explicit query failures and successful memory receipts in the final response.
+- Preserved candidate provenance and answer evidence through Bot tool responses so reports retain their source facts.
+- Made CSP/CC activation a single durable operation and kept cleanly closed activation ledgers readable while rejecting partial WAL sidecars.
+
+### Improvements
+- Added explicit Bot task completion handling and independent read rules for bounded, auditable operations.
 
 ## 3.5.2 - 2026-09-10
 
