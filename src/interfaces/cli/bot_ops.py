@@ -9,6 +9,11 @@ from pathlib import Path
 from typing import Any
 
 from src.application.bot.contracts import AppResult, BotRequest, BotScope, new_id, to_payload
+from src.application.bot.channel_facade import (
+    BotConfigScopeError,
+    config_scope_error_message,
+    resolve_trusted_config_scope,
+)
 from src.application.bot.host import session_run_slot
 from src.application.bot.host_store import BotHostStore
 from src.application.bot.local_harness import run_local_request, run_prepared_contract
@@ -21,7 +26,9 @@ def add_bot_commands(subparsers: Any) -> argparse.ArgumentParser:
 
     run = bot_sub.add_parser("run", help="run one local read-only Bot question")
     run.add_argument("--text", required=True)
-    run.add_argument("--config-key", default=None, choices=("us", "hk"))
+    run_scope = run.add_mutually_exclusive_group()
+    run_scope.add_argument("--config-key", default=None, choices=("us", "hk"))
+    run_scope.add_argument("--config-path", default=None)
     run.add_argument("--symbol", default=None)
     run.add_argument("--month", default=None)
     run.add_argument("--include-events", action="store_true")
@@ -129,18 +136,43 @@ def handle_bot_command(args: argparse.Namespace) -> dict[str, Any]:
             writers_stopped=args.writers_stopped,
         )
     if args.bot_command == "run":
+        request_id = new_id("req")
+        config_key = args.config_key
+        config_path = args.config_path
+        authority_scope = None
+        if config_key or config_path:
+            try:
+                config_key, config_path, authority_scope = resolve_trusted_config_scope(
+                    config_key=config_key,
+                    config_path=config_path,
+                )
+            except BotConfigScopeError as exc:
+                return to_payload(
+                    AppResult(
+                        status="not_ready",
+                        ok=False,
+                        error={"code": "CONFIG_ERROR", "reason": exc.reason},
+                        user_response=f"{config_scope_error_message(exc.reason)}；本次没有调用工具。",
+                        request_id=request_id,
+                    ),
+                    include_events=bool(args.include_events),
+                )
         request = BotRequest(
-            request_id=new_id("req"),
+            request_id=request_id,
             source_entry="cli",
             received_monotonic=received_monotonic,
             deadline_monotonic=received_monotonic + 180,
             user_message=args.text,
             explicit_scope=BotScope(
-                config_key=args.config_key,
+                config_key=config_key,
+                config_path=config_path,
                 symbol=args.symbol,
                 month=args.month,
             ),
             execution_environment="local",
+            trusted_tool_scope=(
+                {"authority_scope": authority_scope} if authority_scope else {}
+            ),
         )
         host_store = BotHostStore(args.host_db) if args.host_db else None
         session_key = args.session_key

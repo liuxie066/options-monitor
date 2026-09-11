@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 1001 (`src`: 516, `domain`: 82, `scripts`: 11, `tests`: 392)
-- Internal import edges: 6993 total, 2902 production/script edges excluding tests
+- Python files scanned: 1008 (`src`: 518, `domain`: 82, `scripts`: 11, `tests`: 397)
+- Internal import edges: 7074 total, 2919 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,26 +31,26 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|456| domain
+  application -->|457| domain
   application -->|4| domain_services
   application -->|147| infrastructure
-  application -->|44| storage
+  application -->|45| storage
   domain_services -->|5| domain
   domain_services -->|2| storage
   infrastructure -->|9| application
   infrastructure -->|6| domain
-  interfaces -->|155| application
+  interfaces -->|156| application
   interfaces -->|1| domain
   interfaces -->|4| infrastructure
   scripts -->|42| application
   scripts -->|4| domain
   scripts -->|2| infrastructure
   storage -->|1| domain
-  tests -->|3048| application
+  tests -->|3100| application
   tests -->|468| domain
   tests -->|2| domain_services
   tests -->|245| infrastructure
-  tests -->|227| interfaces
+  tests -->|229| interfaces
   tests -->|21| scripts
   tests -->|20| storage
 ```
@@ -59,10 +59,10 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 456 |
-| interfaces | application | 155 |
+| application | domain | 457 |
+| interfaces | application | 156 |
 | application | infrastructure | 147 |
-| application | storage | 44 |
+| application | storage | 45 |
 | scripts | application | 42 |
 | infrastructure | application | 9 |
 | infrastructure | domain | 6 |
@@ -79,10 +79,10 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 3048 |
+| tests | application | 3100 |
 | tests | domain | 468 |
 | tests | infrastructure | 245 |
-| tests | interfaces | 227 |
+| tests | interfaces | 229 |
 | tests | scripts | 21 |
 | tests | storage | 20 |
 | tests | domain_services | 2 |
@@ -93,13 +93,13 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 
 | from | to | imports |
 |---|---|---|
-| src.application | domain.domain | 214 |
-| src.interfaces | src.application | 122 |
+| src.application | domain.domain | 215 |
+| src.interfaces | src.application | 123 |
 | src.application | src.infrastructure | 102 |
 | src.application.ledger | domain.domain | 80 |
 | src.application.ledger | domain.domain.ledger | 49 |
 | src.application.trades | domain.domain | 35 |
-| src.application | domain.storage | 33 |
+| src.application | domain.storage | 34 |
 | scripts | src.application | 31 |
 | src.application.research | src.application | 29 |
 | src.application | domain.domain.engine | 25 |
@@ -181,12 +181,12 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 |---|---|
 | src.application.agent_tool_contracts | 95 |
 | domain.domain.symbol_identity | 71 |
+| src.application.agent_tool_config | 62 |
 | src.application.ledger.api | 62 |
-| src.application.agent_tool_config | 61 |
 | domain.domain.ledger.position_fields | 48 |
 | src.application.payload_helpers | 48 |
+| src.application.account_config | 45 |
 | src.infrastructure.io_utils | 44 |
-| src.application.account_config | 44 |
 | domain.domain.option_position_identity | 44 |
 | domain.domain.decision_state_fingerprint | 37 |
 | domain.domain.ledger | 25 |
@@ -206,14 +206,14 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.application.multi_account_tick | 28 |
 | src.interfaces.cli.main | 28 |
 | src.interfaces.cli.option_positions | 27 |
+| src.application.agent_tools.config | 26 |
 | src.application.agent_tools.runtime_status_impl | 26 |
 | src.application.ledger.writer_common | 26 |
 | src.application.agent_tools.materialization | 25 |
 | src.application.channels.wechat_clawbot.inbound | 25 |
 | src.application.ledger.queries | 25 |
 | src.application.pipeline_runtime | 25 |
-| src.application.daily_decision_brief_service | 24 |
-| src.application.tick_account_execution | 24 |
+| src.application.agent_tools.diagnostics | 24 |
 
 ## Reading
 

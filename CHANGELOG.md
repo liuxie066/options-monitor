@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Bug Fixes
+- Bound Bot configuration identity to its authorized market and read scheduler history from the production state location, distinguishing missing or invalid data from empty history.
+- Added an authorized OM scheduled-task inventory with structured names, counts, and independent enabled/active states; preserved explicit query failures and successful memory receipts in the final response.
+
 ## 3.5.2 - 2026-09-10
 
 ### Improvements

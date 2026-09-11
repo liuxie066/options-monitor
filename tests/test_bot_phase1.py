@@ -1355,7 +1355,7 @@ def test_explicit_scope_cannot_be_overridden_by_model_tool_arguments(monkeypatch
     turns = iter(
         (
             ModelTurn(tool_calls=(_call("option_performance_report", {"config_key": "hk", "period": "mtd"}),)),
-            ModelTurn(text="结论：已按明确的 us 范围查询。"),
+            ModelTurn(text="当前入口只授权 us，本次 hk 查询未执行。"),
         )
     )
 
@@ -1367,7 +1367,9 @@ def test_explicit_scope_cannot_be_overridden_by_model_tool_arguments(monkeypatch
     result = run_contract(_contract("7月收益"), model_runner=lambda _request: next(turns))
 
     assert result.status == "answered"
-    assert calls[0]["config_key"] == "us"
+    assert calls == []
+    assert any(event.type == "tool_result" and event.payload.get("code") == "INPUT_ERROR"
+        and "trusted scope" in event.payload.get("message", "") for event in result.events)
 
 
 def test_undeclared_contract_input_cannot_override_model_tool_arguments(monkeypatch) -> None:
@@ -2108,30 +2110,67 @@ def test_channel_without_authenticated_session_identity_is_rejected_before_pi_sp
     assert calls == 0
 
 
-def test_host_rebinds_channel_session_to_canonical_path_scope(tmp_path) -> None:
-    config_path = tmp_path / "config.us.json"
-    alias = tmp_path / "config.alias.json"
-    config_path.write_text("{}", encoding="utf-8")
-    alias.symlink_to(config_path)
+def test_channel_authority_cannot_replace_missing_config_identity() -> None:
     prepared = prepare_contract(
         BotRequest(
             request_id=new_id("test_req"),
             source_entry="test",
-            user_message="检查运行状态",
-            explicit_scope=BotScope(config_path=str(alias)),
+            user_message="介绍一下自己",
+            explicit_scope=BotScope(),
             execution_environment="channel",
             trusted_tool_scope={
                 "authenticated_channel": "feishu",
                 "authenticated_sender_id": "ou_1",
                 "authenticated_conversation_id": "group_1",
+                "authority_scope": "key:us",
             },
         ),
         reference_year=2026,
     )
     assert not isinstance(prepared, AppResult)
-    _, _, canonical_scope = channel_facade._resolve_authority_scope(
+    calls = 0
+
+    def model(_request: ModelRequest) -> ModelTurn:
+        nonlocal calls
+        calls += 1
+        return ModelTurn(text="不应执行")
+
+    result = run_contract(
+        prepared,
+        model_runner=model,
+        session_key=derive_pi_session_id(
+            "feishu", "ou_1", "group_1", "key:us"
+        ),
+    )
+
+    assert result.error == {"code": "SCENE_PREPARATION_FAILED"}
+    assert calls == 0
+
+
+def test_host_rebinds_channel_session_to_canonical_path_scope(tmp_path, example_config_path) -> None:
+    config_path = example_config_path
+    alias = tmp_path / "config.alias.json"
+    alias.symlink_to(config_path)
+    config_key, canonical_path, canonical_scope = channel_facade.resolve_trusted_config_scope(
         config_key=None, config_path=str(alias)
     )
+    prepared = prepare_contract(
+        BotRequest(
+            request_id=new_id("test_req"),
+            source_entry="test",
+            user_message="检查运行状态",
+            explicit_scope=BotScope(config_key=config_key, config_path=canonical_path),
+            execution_environment="channel",
+            trusted_tool_scope={
+                "authenticated_channel": "feishu",
+                "authenticated_sender_id": "ou_1",
+                "authenticated_conversation_id": "group_1",
+                "authority_scope": canonical_scope,
+            },
+        ),
+        reference_year=2026,
+    )
+    assert not isinstance(prepared, AppResult)
     canonical_session = derive_pi_session_id(
         "feishu", "ou_1", "group_1", canonical_scope
     )
@@ -2153,30 +2192,29 @@ def test_host_rebinds_channel_session_to_canonical_path_scope(tmp_path) -> None:
     assert calls == 1
 
 
-def test_channel_config_path_is_not_returned_to_the_model(monkeypatch, tmp_path) -> None:
-    config_path = tmp_path / "private" / "config.us.json"
-    config_path.parent.mkdir()
-    config_path.write_text("{}", encoding="utf-8")
+def test_channel_config_path_is_not_returned_to_the_model(monkeypatch, example_config_path) -> None:
+    config_path = example_config_path
     canonical = str(config_path.resolve())
+    config_key, canonical, authority_scope = channel_facade.resolve_trusted_config_scope(
+        config_key=None, config_path=canonical
+    )
     prepared = prepare_contract(
         BotRequest(
             request_id=new_id("test_req"),
             source_entry="test",
             user_message="检查运行状态",
-            explicit_scope=BotScope(config_path=canonical),
+            explicit_scope=BotScope(config_key=config_key, config_path=canonical),
             execution_environment="channel",
             trusted_tool_scope={
                 "authenticated_channel": "feishu",
                 "authenticated_sender_id": "ou_1",
                 "authenticated_conversation_id": "group_1",
+                "authority_scope": authority_scope,
             },
         ),
         reference_year=2026,
     )
     assert not isinstance(prepared, AppResult)
-    _, _, authority_scope = channel_facade._resolve_authority_scope(
-        config_key=None, config_path=canonical
-    )
     requests: list[ModelRequest] = []
 
     def model(request: ModelRequest) -> ModelTurn:
@@ -2208,6 +2246,69 @@ def test_channel_config_path_is_not_returned_to_the_model(monkeypatch, tmp_path)
     assert "tool_input" not in json.loads(tool_message["content"])
     tool_event = next(event for event in result.events if event.type == "tool_result")
     assert tool_event.payload["tool_input"]["config_path"] == ".../config.us.json"
+
+
+def test_receipt_read_receives_normalized_channel_authority(
+    monkeypatch, example_config_path
+) -> None:
+    config_key, canonical, authority_scope = channel_facade.resolve_trusted_config_scope(
+        config_key=None,
+        config_path=str(example_config_path),
+    )
+    prepared = prepare_contract(
+        BotRequest(
+            request_id=new_id("test_req"),
+            source_entry="test",
+            user_message="查询历史回执",
+            explicit_scope=BotScope(config_key=config_key, config_path=canonical),
+            execution_environment="channel",
+            trusted_tool_scope={
+                "authenticated_channel": "feishu",
+                "authenticated_sender_id": "ou_1",
+                "authenticated_conversation_id": "group_1",
+                "authority_scope": authority_scope,
+            },
+        ),
+        reference_year=2026,
+    )
+    assert not isinstance(prepared, AppResult)
+    captured = {}
+
+    def fake_call(name, payload, *, allowed_tools, **_kwargs):
+        captured.update(payload)
+        assert name == "receipt_read"
+        assert "receipt_read" in allowed_tools
+        return {"ok": False, "error": {"code": "NOT_FOUND", "message": "not found"}}
+
+    def fake_pi(_start, *, on_tool_call, **_kwargs):
+        on_tool_call(
+            {
+                "call_id": "receipt_1",
+                "tool_name": "receipt_read",
+                "arguments": {"type": "trade", "deal_id": "7258806397173991645"},
+            }
+        )
+        return {
+            "ok": False,
+            "error": {"code": "MODEL_ERROR", "stage": "model", "message": "fixture complete"},
+        }
+
+    monkeypatch.setattr(bot_tools, "call_read_tool", fake_call)
+    monkeypatch.setattr("src.application.bot.host.run_pi_agent", fake_pi)
+    run_contract(
+        prepared,
+        model_settings=_TEST_MODEL,
+        session_key=derive_pi_session_id(
+            "feishu", "ou_1", "group_1", authority_scope
+        ),
+    )
+
+    assert captured["config_key"] == "us"
+    assert captured["config_path"] == canonical
+    assert captured["authority_scope"] == authority_scope
+    assert captured["authenticated_channel"] == "feishu"
+    assert captured["authenticated_sender_id"] == "ou_1"
+    assert captured["authenticated_conversation_id"] == "group_1"
 
 
 def test_same_tool_can_retry_with_changed_arguments(monkeypatch) -> None:
@@ -2659,7 +2760,7 @@ def test_host_preserves_conversation_context() -> None:
     assert manifest.messages[-3:] == [*context, {"role": "user", "content": "结论呢"}]
 
 
-def test_channel_injects_only_current_authoritative_pending_snapshot(monkeypatch, tmp_path) -> None:
+def test_channel_injects_only_current_authoritative_pending_snapshot(monkeypatch, tmp_path, example_config_path) -> None:
     captured: dict[str, object] = {}
     monkeypatch.setattr(channel_facade, "_channel_model_gate", lambda _path: None)
 
@@ -2668,6 +2769,7 @@ def test_channel_injects_only_current_authoritative_pending_snapshot(monkeypatch
         return AppResult(status="answered", user_response="结论：请明确要修改哪条预览。")
 
     monkeypatch.setattr(channel_facade, "run_prepared_contract", fake_run)
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(example_config_path.parent))
     result = channel_facade.run_channel_request(
         user_message="改成 1.2.400",
         config_key="us",
@@ -2696,7 +2798,7 @@ def test_channel_injects_only_current_authoritative_pending_snapshot(monkeypatch
     assert messages[-1] == {"role": "user", "content": "改成 1.2.400"}
 
 
-def test_channel_injects_empty_pending_snapshot_to_override_stale_history(monkeypatch, tmp_path) -> None:
+def test_channel_injects_empty_pending_snapshot_to_override_stale_history(monkeypatch, tmp_path, example_config_path) -> None:
     captured: dict[str, object] = {}
     monkeypatch.setattr(channel_facade, "_channel_model_gate", lambda _path: None)
 
@@ -2705,6 +2807,7 @@ def test_channel_injects_empty_pending_snapshot_to_override_stale_history(monkey
         return AppResult(status="answered", user_response="结论：当前没有待确认操作。")
 
     monkeypatch.setattr(channel_facade, "run_prepared_contract", fake_run)
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(example_config_path.parent))
     result = channel_facade.run_channel_request(
         user_message="刚才那个还在吗",
         config_key="us",

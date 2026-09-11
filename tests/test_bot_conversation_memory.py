@@ -4,8 +4,9 @@ import json
 import sqlite3
 import threading
 import time
-from argparse import Namespace
+from argparse import ArgumentParser, Namespace
 
+import pytest
 
 from src.application.bot import channel_facade, tools as bot_tools
 from src.application.bot.contracts import AppResult, BotRequest, BotScope, new_id
@@ -17,16 +18,18 @@ from tests.bot_pi_test_support import (
 )
 from src.application.bot.host_store import BotHostStore
 from src.application.bot.service import prepare_contract
-from src.interfaces.cli.bot_ops import _successful_observations, handle_bot_command
+from src.interfaces.cli import bot_ops
+from src.interfaces.cli.bot_ops import _successful_observations, add_bot_commands, handle_bot_command
 from src.infrastructure.pi_agent_process import derive_pi_session_id
 
 
 def test_successful_channel_answer_uses_opaque_pi_session_without_legacy_write(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, example_config_path
 ) -> None:
     database = tmp_path / "bot.sqlite3"
     captured: dict[str, object] = {}
     monkeypatch.setattr(channel_facade, "_channel_model_gate", lambda _path: None)
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(example_config_path.parent))
 
     def fake_run(_prepared, **kwargs):  # type: ignore[no-untyped-def]
         captured.update(kwargs)
@@ -54,21 +57,21 @@ def test_successful_channel_answer_uses_opaque_pi_session_without_legacy_write(
     assert BotHostStore(database).session_turns("feishu:chat_1") == ()
 
 
-def test_channel_path_scope_is_canonical_and_sender_scoped(tmp_path) -> None:
-    first = tmp_path / "config-a.json"
-    second = tmp_path / "config-b.json"
+def test_channel_path_scope_is_canonical_and_sender_scoped(tmp_path, example_config_path) -> None:
+    first = example_config_path
+    second = tmp_path / "other" / "config.us.json"
     alias = tmp_path / "config-alias.json"
-    first.write_text("{}", encoding="utf-8")
-    second.write_text("{}", encoding="utf-8")
+    second.parent.mkdir()
+    second.write_bytes(first.read_bytes())
     alias.symlink_to(first)
 
-    _, canonical, scope = channel_facade._resolve_authority_scope(
+    _, canonical, scope = channel_facade.resolve_trusted_config_scope(
         config_key=None, config_path=str(alias)
     )
-    _, _, same_scope = channel_facade._resolve_authority_scope(
+    _, _, same_scope = channel_facade.resolve_trusted_config_scope(
         config_key=None, config_path=str(first)
     )
-    _, _, other_scope = channel_facade._resolve_authority_scope(
+    _, _, other_scope = channel_facade.resolve_trusted_config_scope(
         config_key=None, config_path=str(second)
     )
 
@@ -101,7 +104,150 @@ def test_channel_path_scope_is_canonical_and_sender_scoped(tmp_path) -> None:
     ) == derive_pi_session_id("feishu", "ou_1", "sender:ou_1", scope)
 
 
-def test_invalid_channel_identity_or_scope_fails_before_model_gate(monkeypatch, tmp_path) -> None:
+def test_channel_key_and_path_resolve_to_the_same_internal_config(
+    monkeypatch, example_config_path
+) -> None:
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(example_config_path.parent))
+
+    key_scope = channel_facade.resolve_trusted_config_scope(
+        config_key="us", config_path=None
+    )
+    path_scope = channel_facade.resolve_trusted_config_scope(
+        config_key=None, config_path=str(example_config_path)
+    )
+
+    assert key_scope[:2] == path_scope[:2] == ("us", str(example_config_path))
+    assert key_scope[2] == "key:us"
+    assert path_scope[2].startswith("path:")
+    assert key_scope[2] != path_scope[2]
+
+
+def test_bot_run_cli_allows_no_config_or_one_explicit_reference() -> None:
+    parser = ArgumentParser()
+    add_bot_commands(parser.add_subparsers(dest="command", required=True))
+
+    parsed = parser.parse_args(
+        ["bot", "run", "--text", "检查运行状态", "--config-key", "us"]
+    )
+    assert parsed.config_key == "us" and parsed.config_path is None
+    no_scope = parser.parse_args(["bot", "run", "--text", "介绍一下自己"])
+    assert no_scope.config_key is None and no_scope.config_path is None
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "bot",
+                "run",
+                "--text",
+                "检查运行状态",
+                "--config-key",
+                "us",
+                "--config-path",
+                "config.us.json",
+            ]
+        )
+
+
+def test_bot_run_cli_passes_normalized_market_and_path(
+    monkeypatch, example_config_path
+) -> None:
+    captured = {}
+
+    def fake_run(request, **_kwargs):
+        captured["request"] = request
+        return AppResult(status="answered", user_response="结论：运行正常。")
+
+    monkeypatch.setattr(bot_ops, "_run_local_request", fake_run)
+    payload = handle_bot_command(
+        Namespace(
+            bot_command="run",
+            text="检查运行状态",
+            config_key=None,
+            config_path=str(example_config_path),
+            symbol=None,
+            month=None,
+            include_events=False,
+            host_db=None,
+            session_key=None,
+            model_config_json=None,
+            assistant_config=None,
+        )
+    )
+
+    request = captured["request"]
+    assert payload["status"] == "answered"
+    assert request.explicit_scope.config_key == "us"
+    assert request.explicit_scope.config_path == str(example_config_path)
+    assert request.trusted_tool_scope["authority_scope"].startswith("path:")
+
+
+def test_bot_run_cli_preserves_conceptual_request_without_config(monkeypatch) -> None:
+    captured = {}
+
+    def fake_run(request, **_kwargs):
+        captured["request"] = request
+        return AppResult(status="answered", user_response="结论：我是 Bot。")
+
+    monkeypatch.setattr(bot_ops, "_run_local_request", fake_run)
+    payload = handle_bot_command(
+        Namespace(
+            bot_command="run",
+            text="介绍一下自己",
+            config_key=None,
+            config_path=None,
+            symbol=None,
+            month=None,
+            include_events=False,
+            host_db=None,
+            session_key=None,
+            model_config_json=None,
+            assistant_config=None,
+        )
+    )
+
+    request = captured["request"]
+    assert payload["status"] == "answered"
+    assert request.explicit_scope.config_key is None
+    assert request.explicit_scope.config_path is None
+    assert request.trusted_tool_scope == {}
+
+
+def test_bot_run_cli_config_failure_is_safe_and_precedes_model(
+    monkeypatch, tmp_path
+) -> None:
+    called = False
+
+    def unexpected_run(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("model path must not run")
+
+    monkeypatch.setattr(bot_ops, "_run_local_request", unexpected_run)
+    missing = tmp_path / "private-runtime-config.json"
+    payload = handle_bot_command(
+        Namespace(
+            bot_command="run",
+            text="检查运行状态",
+            config_key=None,
+            config_path=str(missing),
+            symbol=None,
+            month=None,
+            include_events=False,
+            host_db=None,
+            session_key=None,
+            model_config_json=None,
+            assistant_config=None,
+        )
+    )
+
+    assert payload["status"] == "not_ready"
+    assert payload["error"] == {"code": "CONFIG_ERROR", "reason": "config_missing"}
+    assert str(missing) not in payload["user_response"]
+    assert called is False
+
+
+def test_invalid_channel_identity_or_scope_fails_before_model_gate(
+    monkeypatch, tmp_path, example_config_path
+) -> None:
     invoked = False
     directory = tmp_path / "config-directory"
     directory.mkdir()
@@ -112,14 +258,16 @@ def test_invalid_channel_identity_or_scope_fails_before_model_gate(monkeypatch, 
         return None
 
     monkeypatch.setattr(channel_facade, "_channel_model_gate", unexpected_gate)
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(example_config_path.parent))
     cases = (
-        {"config_key": "us", "sender_id": ""},
-        {"config_key": "us", "config_path": str(tmp_path / "missing.json")},
-        {"config_key": None, "config_path": str(tmp_path / "missing.json")},
-        {"config_key": None, "config_path": str(directory)},
+        ({"config_key": "us", "sender_id": ""}, "channel_identity_or_scope_invalid"),
+        ({"config_key": "us", "config_path": str(example_config_path)}, "channel_identity_or_scope_invalid"),
+        ({"config_key": None, "config_path": None}, "channel_identity_or_scope_invalid"),
+        ({"config_key": None, "config_path": str(tmp_path / "missing.json")}, "config_missing"),
+        ({"config_key": None, "config_path": str(directory)}, "channel_identity_or_scope_invalid"),
     )
 
-    for case in cases:
+    for case, reason in cases:
         request = {
             "user_message": "检查运行状态",
             "channel": "feishu",
@@ -130,15 +278,82 @@ def test_invalid_channel_identity_or_scope_fails_before_model_gate(monkeypatch, 
         result = channel_facade.run_channel_request(**request)
         assert result.error == {
             "code": "CHANNEL_NOT_READY",
-            "reason": "channel_identity_or_scope_invalid",
+            "reason": reason,
         }
     assert invoked is False
 
 
-def test_channel_config_path_stays_out_of_model_visible_context(monkeypatch, tmp_path) -> None:
-    config_path = tmp_path / "private" / "config.us.json"
-    config_path.parent.mkdir()
-    config_path.write_text("{}", encoding="utf-8")
+def test_channel_config_readiness_failures_are_safe_and_precede_model_gate(
+    monkeypatch, tmp_path, example_config_path
+) -> None:
+    unread = tmp_path / "config.unreadable.json"
+    unread.write_text("{", encoding="utf-8")
+    identity = tmp_path / "identity" / "config.us.json"
+    identity.parent.mkdir()
+    identity_payload = json.loads(example_config_path.read_text(encoding="utf-8"))
+    identity_payload["_generated"]["market"] = "hk"
+    identity.write_text(json.dumps(identity_payload), encoding="utf-8")
+    stale = tmp_path / "stale" / "config.us.json"
+    stale.parent.mkdir()
+    stale_payload = json.loads(example_config_path.read_text(encoding="utf-8"))
+    loaded_source = next(
+        item for item in stale_payload["_generated"]["sources"] if item.get("loaded")
+    )
+    loaded_source["sha256"] = "0" * 64
+    stale.write_text(json.dumps(stale_payload), encoding="utf-8")
+    gate_called = False
+
+    def unexpected_gate(_path):
+        nonlocal gate_called
+        gate_called = True
+        return None
+
+    monkeypatch.setattr(channel_facade, "_channel_model_gate", unexpected_gate)
+    cases = (
+        (tmp_path / "missing" / "config.us.json", "config_missing"),
+        (unread, "config_unreadable"),
+        (identity, "config_identity_mismatch"),
+        (stale, "config_stale"),
+    )
+
+    for config_path, reason in cases:
+        result = channel_facade.run_channel_request(
+            user_message="检查运行状态",
+            config_key=None,
+            config_path=str(config_path),
+            channel="feishu",
+            sender_id="ou_1",
+            conversation_id="group_1",
+        )
+        assert result.status == "not_ready"
+        assert result.error == {"code": "CHANNEL_NOT_READY", "reason": reason}
+        assert str(config_path) not in result.user_response
+        assert str(config_path) not in json.dumps(result.error, ensure_ascii=False)
+
+    assert gate_called is False
+
+
+def test_valid_channel_config_still_requires_the_model_gate(example_config_path) -> None:
+    result = channel_facade.run_channel_request(
+        user_message="检查运行状态",
+        config_key=None,
+        config_path=str(example_config_path),
+        channel="feishu",
+        sender_id="ou_1",
+        conversation_id="group_1",
+    )
+
+    assert result.status == "not_ready"
+    assert result.error == {
+        "code": "CHANNEL_NOT_READY",
+        "reason": "channel_model_config_missing",
+    }
+
+
+def test_channel_config_path_stays_out_of_model_visible_context(
+    monkeypatch, tmp_path, example_config_path
+) -> None:
+    config_path = example_config_path
     captured: dict[str, object] = {}
     monkeypatch.setattr(channel_facade, "_channel_model_gate", lambda _path: None)
 
@@ -162,6 +377,7 @@ def test_channel_config_path_stays_out_of_model_visible_context(monkeypatch, tmp
     canonical = str(config_path.resolve())
     assert result.status == "answered"
     assert prepared.input["config_path"] == canonical
+    assert prepared.input["config_key"] == "us"
     assert canonical not in json.dumps(prepared.input["messages"], ensure_ascii=False)
     assert canonical not in str(captured["session_key"])
 
@@ -786,7 +1002,9 @@ def test_lane_limit_and_expired_lease_recovery(tmp_path) -> None:
     assert store.acquire_lane("chat_read", "lease_3", limit=1, ttl_seconds=60)
 
 
-def test_channel_capacity_exhaustion_does_not_invoke_model_runtime(monkeypatch, tmp_path) -> None:
+def test_channel_capacity_exhaustion_does_not_invoke_model_runtime(
+    monkeypatch, tmp_path, example_config_path
+) -> None:
     database = tmp_path / "bot.sqlite3"
     store = BotHostStore(database)
     assert store.acquire_lane("chat_read", "occupied_1", limit=2, ttl_seconds=60)
@@ -800,6 +1018,7 @@ def test_channel_capacity_exhaustion_does_not_invoke_model_runtime(monkeypatch, 
 
     monkeypatch.setattr(channel_facade, "_channel_model_gate", lambda _path: None)
     monkeypatch.setattr(channel_facade, "run_prepared_contract", unexpected_run)
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(example_config_path.parent))
 
     result = channel_facade.run_channel_request(
         user_message="7月收益",
