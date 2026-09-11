@@ -784,3 +784,202 @@ def test_legacy_wheel_bundle_adapts_to_call_and_rejects_v2_mix(
     )
     with pytest.raises(CandidateSnapshotManifestError, match="artifact_version_mismatch"):
         load_candidate_snapshot_bundle(base=tmp_path, run_id="run-1", account="lx")
+
+
+def _write_scheduler_skip(
+    base: Path, monkeypatch, *, run_id: str = "run-2", interruption: str | None = None,
+) -> Path:
+    from types import SimpleNamespace
+    from src.application import account_run
+    from src.application.tick_run_workspace import publish_account_run_config
+
+    config = {"portfolio": {"account": "lx"}, "_generated": {"market": "us"}, "symbols": []}
+    authority = publish_account_run_config(base=base, run_id=run_id, account="lx", config=config)
+    request = account_run.AccountRunRequest(
+        acct="lx", base=base, account_config_authority=authority, vpy=base / "python",
+        markets_to_run=["US"], scheduler_ms=1, scheduler_view=None,
+        notify_decision_by_account={}, should_run_global=True, reason_global="global_due",
+        run_id=run_id, run_dir=base / "output_runs" / run_id,
+        shared_required=base / "required_data", accounts_root=base / "output_runs" / run_id / "accounts",
+        prefetch_done=True,
+        scan_decision_by_account={"lx": {"source": "account_scheduler", "should_run": False, "reason": "not_due"}},
+    )
+    monkeypatch.setattr(account_run, "run_pipeline_script", lambda **_: pytest.fail("skip started pipeline"))
+    writer = account_run.state_repo.write_account_run_state
+
+    def write(*args):
+        payload = args[-1]
+        final = payload.get("scan_outcome") == "scheduler_skipped"
+        if final and interruption in {"before_final", "write_failed"}:
+            if interruption == "write_failed":
+                raise OSError("injected final write failure")
+            raise KeyboardInterrupt("before final publication")
+        result = writer(*args)
+        if (not final and interruption == "after_initial") or (final and interruption == "after_final"):
+            raise KeyboardInterrupt("after publication")
+        return result
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(account_run.state_repo, "write_account_run_state", write)
+        if interruption in {"after_initial", "before_final", "after_final"}:
+            with pytest.raises(KeyboardInterrupt):
+                account_run.run_one_account(
+                    request=request, runlog=SimpleNamespace(safe_event=lambda *a, **k: None),
+                    audit_fn=lambda *a, **k: None, fail_schema_validation=lambda **_: pytest.fail("schema"),
+                )
+        else:
+            outcome = account_run.run_one_account(
+                request=request, runlog=SimpleNamespace(safe_event=lambda *a, **k: None),
+                audit_fn=lambda *a, **k: None, fail_schema_validation=lambda **_: pytest.fail("schema"),
+            )
+            assert outcome.ran_pipeline is False
+    return authority.state_path.parent / "account_metrics.json"
+
+
+def _older_bundle_with_frozen_config(tmp_path, monkeypatch, *, market="us"):
+    from src.application.tick_run_workspace import publish_account_run_config
+
+    authority = publish_account_run_config(
+        base=tmp_path, run_id="run-1", account="lx",
+        config={"portfolio": {"account": "lx"}, "_generated": {"market": market}, "symbols": []},
+    )
+    monkeypatch.setattr(__import__(__name__, fromlist=["CONFIG_HASH"]), "CONFIG_HASH", authority.account_config_sha256)
+    return _seal_combo_bundle(tmp_path)
+
+
+@pytest.mark.parametrize("pointer", [False, True])
+@pytest.mark.parametrize("interruption", [None, "after_initial", "before_final", "write_failed", "after_final"])
+def test_latest_requires_actual_terminal_skip_publication(tmp_path, monkeypatch, pointer, interruption):
+    manifest = _older_bundle_with_frozen_config(tmp_path, monkeypatch)
+    metrics_path = _write_scheduler_skip(tmp_path, monkeypatch, interruption=interruption)
+    previous = tmp_path / "output_runs" / "run-1"
+    latest = tmp_path / "output_runs" / "run-2"
+    newer = previous.stat().st_mtime_ns + 1_000_000_000
+    os.utime(latest, ns=(newer, newer))
+    if pointer:
+        path = tmp_path / "output_shared" / "state" / "last_run_dir.txt"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(latest))
+    published = interruption in {None, "after_final"}
+    assert (json.loads(metrics_path.read_text()).get("scan_outcome") == "scheduler_skipped") is published
+    if published:
+        bundle = load_latest_candidate_snapshot_bundle(base=tmp_path, account="lx")
+        assert bundle["manifest"] == manifest
+        assert bundle["source_selection"] == {"skipped_non_scan_runs": 1}
+    else:
+        with pytest.raises(CandidateSnapshotManifestError, match="manifest is unavailable") as error:
+            load_latest_candidate_snapshot_bundle(base=tmp_path, account="lx")
+        assert error.value.run_id == "run-2"
+    with pytest.raises(CandidateSnapshotManifestError, match="manifest is unavailable"):
+        load_candidate_snapshot_bundle(base=tmp_path, run_id="run-2", account="lx")
+
+
+@pytest.mark.parametrize("change", [
+    {"scan_outcome": None}, {"scan_outcome": "prefetch_failed"},
+    {"ran_scan": 0}, {"ran_pipeline": "false"}, {"ran_scan": True},
+    {"pipeline_started_at_utc": "2026-09-11T00:00:00Z"}, {"pipeline_ms": 0},
+    {"error_code": "CONFIG_ERROR"}, {"snapshot_status": "failed"},
+    {"account_config_sha256": "f" * 64}, {"run_id": "other"}, {"account": "sy"},
+    {"markets_to_run": ["HK"]}, {"markets_to_run": []}, {"scan_mode": "experience"},
+])
+def test_latest_never_skips_unproven_or_conflicting_metrics(tmp_path, monkeypatch, change):
+    _older_bundle_with_frozen_config(tmp_path, monkeypatch)
+    path = _write_scheduler_skip(tmp_path, monkeypatch)
+    metrics = json.loads(path.read_text())
+    path.write_text(json.dumps({**metrics, **change}))
+    with pytest.raises(CandidateSnapshotManifestError) as error:
+        load_latest_candidate_snapshot_bundle(base=tmp_path, account="lx")
+    assert error.value.run_id == "run-2"
+
+
+@pytest.mark.parametrize("artifact", ["corrupt_metrics", "legacy_metrics", "config_corrupt", "config_account", "market_conflict", "market_missing", "candidate_output", "manifest_output", "metrics_symlink", "state_symlink", "accounts_symlink", "pointer_symlink"])
+def test_latest_skip_rejects_corrupt_legacy_unsafe_or_output_evidence(tmp_path, monkeypatch, artifact):
+    from hashlib import sha256
+
+    _older_bundle_with_frozen_config(tmp_path, monkeypatch)
+    metrics_path = _write_scheduler_skip(tmp_path, monkeypatch)
+    if artifact == "corrupt_metrics":
+        metrics_path.write_text("{")
+    elif artifact == "legacy_metrics":
+        metrics_path.write_text('{"ran_scan":false,"ran_pipeline":false}')
+    elif artifact in {"config_corrupt", "config_account", "market_conflict", "market_missing"}:
+        config_path = metrics_path.parent / "config.override.json"
+        config = json.loads(config_path.read_text())
+        if artifact == "config_account":
+            config["portfolio"]["account"] = "sy"
+        elif artifact == "market_conflict":
+            config["_generated"]["market"] = "hk"
+        elif artifact == "market_missing":
+            del config["_generated"]
+        encoded = json.dumps(config).encode()
+        config_path.write_bytes(encoded)
+        if artifact != "config_corrupt":
+            (config_path.parent.parent / "config.override.json").write_bytes(encoded)
+            metrics = json.loads(metrics_path.read_text())
+            metrics["account_config_sha256"] = sha256(encoded).hexdigest()
+            metrics_path.write_text(json.dumps(metrics))
+    elif artifact in {"candidate_output", "manifest_output"}:
+        (metrics_path.parent / ("opening_candidate_snapshot.json" if artifact == "candidate_output" else CANDIDATE_SNAPSHOT_MANIFEST_FILE)).write_text("{}")
+    else:
+        if artifact == "pointer_symlink":
+            pointer = tmp_path / "output_shared" / "state" / "last_run_dir.txt"
+            pointer.parent.mkdir(parents=True, exist_ok=True)
+            target = tmp_path / "pointer.txt"
+            target.write_text(str(tmp_path / "output_runs" / "run-2"))
+            pointer.symlink_to(target)
+        else:
+            path = {"metrics_symlink": metrics_path, "state_symlink": metrics_path.parent, "accounts_symlink": metrics_path.parents[2]}[artifact]
+            moved = path.with_name(path.name + "-moved")
+            path.rename(moved)
+            path.symlink_to(moved)
+    with pytest.raises(CandidateSnapshotManifestError):
+        load_latest_candidate_snapshot_bundle(base=tmp_path, account="lx")
+
+
+@pytest.mark.parametrize("conflict", ["selected_market", "selected_hash", "intervening_failure", "skip_market"])
+def test_skip_chain_preserves_frozen_target_scope_and_stops_at_failed_scan(tmp_path, monkeypatch, conflict):
+    from hashlib import sha256
+
+    _older_bundle_with_frozen_config(tmp_path, monkeypatch, market="hk" if conflict == "selected_market" else "us")
+    metrics_path = _write_scheduler_skip(tmp_path, monkeypatch)
+    if conflict == "selected_hash":
+        state = tmp_path / "output_runs" / "run-1" / "accounts" / "lx" / "state"
+        config_path = state / "config.override.json"
+        config = json.loads(config_path.read_text())
+        config["_generated"]["market"] = "hk"
+        encoded = json.dumps(config).encode()
+        config_path.write_bytes(encoded)
+        (state.parent / config_path.name).write_bytes(encoded)
+    elif conflict == "intervening_failure":
+        broken = tmp_path / "output_runs" / "run-failed" / "accounts" / "lx" / "state"
+        broken.mkdir(parents=True)
+        broken.joinpath("account_metrics.json").write_text('{"ran_scan":false,"ran_pipeline":false,"error_code":"PREFETCH_FAILED"}')
+        old_time = (tmp_path / "output_runs" / "run-1").stat().st_mtime_ns
+        os.utime(broken.parents[2], ns=(old_time + 1_000_000_000, old_time + 1_000_000_000))
+        os.utime(metrics_path.parents[3], ns=(old_time + 2_000_000_000, old_time + 2_000_000_000))
+    elif conflict == "skip_market":
+        path = _write_scheduler_skip(tmp_path, monkeypatch, run_id="run-3")
+        config_path = path.parent / "config.override.json"
+        config = json.loads(config_path.read_text())
+        config["_generated"]["market"] = "hk"
+        encoded = json.dumps(config).encode()
+        config_path.write_bytes(encoded)
+        (path.parent.parent / config_path.name).write_bytes(encoded)
+        metrics = json.loads(path.read_text())
+        metrics.update(account_config_sha256=sha256(encoded).hexdigest(), markets_to_run=["HK"])
+        path.write_text(json.dumps(metrics))
+    with pytest.raises(CandidateSnapshotManifestError):
+        load_latest_candidate_snapshot_bundle(base=tmp_path, account="lx")
+
+
+def test_latest_pointer_skip_does_not_select_run_newer_than_pointer(tmp_path, monkeypatch):
+    manifest = _older_bundle_with_frozen_config(tmp_path, monkeypatch)
+    _write_scheduler_skip(tmp_path, monkeypatch)
+    # The established pointer is authoritative even if a later workspace exists.
+    newer = tmp_path / "output_runs" / "run-3" / "accounts" / "lx"
+    newer.mkdir(parents=True)
+    pointer = tmp_path / "output_shared" / "state" / "last_run_dir.txt"
+    pointer.parent.mkdir(parents=True, exist_ok=True)
+    pointer.write_text("output_runs/run-2")
+    bundle = load_latest_candidate_snapshot_bundle(base=tmp_path, account="lx")
+    assert bundle["manifest"] == manifest

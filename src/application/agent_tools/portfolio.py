@@ -117,7 +117,16 @@ def _validate_input(payload: dict[str, Any]) -> None:
             message=f"portfolio_query endpoint fields are not accepted: {', '.join(supplied_endpoint_fields)}",
         )
     view = str(payload.get("view") or "health").strip()
-    if view in _ACCOUNT_REQUIRED_VIEWS and not str(payload.get("account") or "").strip():
+    account = str(payload.get("account") or "").strip()
+    accounts = [str(item).strip() for item in payload.get("accounts") or [] if str(item).strip()]
+    if account and accounts:
+        raise AgentToolError(code="INPUT_ERROR", message="portfolio_query account and accounts are mutually exclusive")
+    if account and view not in _ACCOUNT_REQUIRED_VIEWS | {"distribution"}:
+        supported = "use accounts for overview" if view == "overview" else "this view accepts neither account nor accounts"
+        raise AgentToolError(code="INPUT_ERROR", message=f"portfolio_query account is not supported for view={view}; {supported}")
+    if accounts and view not in {"overview", "distribution"}:
+        raise AgentToolError(code="INPUT_ERROR", message=f"portfolio_query accounts is not supported for view={view}")
+    if view in _ACCOUNT_REQUIRED_VIEWS and not account:
         raise AgentToolError(code="INPUT_ERROR", message=f"portfolio_query account is required for view={view}")
 
 
@@ -428,12 +437,12 @@ PORTFOLIO_QUERY_TOOL = build_agent_tool(
     capabilities=("portfolio_read", "cross_product_read", "read_only"),
     input_schema={
         "view": "optional health|accounts|overview|holdings|cash|nav|distribution|full_report",
-        "account": "optional portfolio account; required for holdings, cash, nav, and full_report",
+        "account": "required for holdings, cash, nav, full_report; optional for distribution; forbidden for overview, health, accounts; mutually exclusive with accounts",
         "accounts": {
             "type": "array",
             "items": {"type": "string", "minLength": 1},
             "minItems": 1,
-            "description": "Optional portfolio accounts for overview or distribution",
+            "description": "Optional accounts only for overview or distribution; mutually exclusive with account",
         },
         "include_default": "optional bool for accounts",
         "price_timeout": {"type": "integer", "minimum": 1, "maximum": 300},

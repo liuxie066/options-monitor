@@ -28,6 +28,8 @@ def _normalize_candidate_filter_bot_input(payload: Mapping[str, Any]) -> dict[st
         if selector_value not in {"latest", "latest_notification"}:
             raise ValueError("run_selector must be latest or latest_notification")
         normalized["run_selector"] = selector_value
+    if str(normalized.get("run_id") or "").strip() and normalized.get("run_selector"):
+        raise ValueError("run_id and run_selector are mutually exclusive")
     raw_date = normalized.get("notification_date")
     if raw_date is not None:
         date_text = str(raw_date).strip()
@@ -45,12 +47,13 @@ _CANDIDATE_FILTER_OUTPUT_CONTRACT: dict[str, Any] = {
     "schema_version": "candidate_filter_explain.output.v1",
     "evidence_type": "collection",
     "bounded_projection": "contract_fields",
-    "coverage": "primary_rows",
+    "coverage": "source_declared",
     "freshness": "source_declared",
     "pagination": {"mode": "none"},
     "source_label": "OM sealed opening candidate snapshot",
-    "primary_rows": "functions",
-    "row_count_field": "trace_count",
+    "primary_rows": "summary",
+    "row_count_field": "summary_count",
+    "model_value_fields": ["summary", "scope", "source", "freshness"],
     "fact_fields": [
         "symbol",
         "canonical_symbol",
@@ -88,12 +91,13 @@ _CANDIDATE_RANK_OUTPUT_CONTRACT: dict[str, Any] = {
     "schema_version": "candidate_rank_explain.output.v1",
     "evidence_type": "collection",
     "bounded_projection": "contract_fields",
-    "coverage": "primary_rows",
+    "coverage": "source_declared",
     "freshness": "source_declared",
     "pagination": {"mode": "none"},
     "source_label": "OM sealed opening candidate snapshot",
-    "primary_rows": "ranked",
-    "row_count_field": "row_count",
+    "primary_rows": "ranked_summary",
+    "row_count_field": "returned_count",
+    "model_value_fields": ["ranked_summary", "ranking_summary", "scope", "source", "freshness"],
     "fact_fields": [
         "mode",
         "top_n",
@@ -155,14 +159,16 @@ CANDIDATE_RANK_EXPLAIN_TOOL = build_agent_tool(
     name="candidate_rank_explain",
     catalog_summary="解释候选机会的排序依据与证据。",
     description=(
-        "Explain the recorded order in a terminal manifest-bound account opening-candidate snapshot. The tool never re-ranks rows."
+        "Explain the recorded order in a terminal manifest-bound account opening-candidate snapshot. The tool never re-ranks rows. Omitted run_id selects the latest eligible scan; explicit run_id is exact. "
+        "For a delivered report, first read notification_perception_read with event_kind=notification_delivery_completed, "
+        "then pass the unique confirmed report_refs.source_run_id explicitly. Missing report source is an evidence gap."
     ),
     requires=("candidate_snapshot_manifest", "opening_candidate_snapshot"),
     capabilities=("ranking_explain", "read_only"),
     input_schema={
         "mode": "optional put|call|all; defaults to all",
         "top_n": "optional int, max 100; defaults to 10",
-        "run_id": "optional output_runs run id; omitted resolves the latest terminal manifest-bound run",
+        "run_id": "optional exact output_runs run id; omitted selects latest eligible terminal scan, skipping only proven scheduler skips",
         "runtime_root": "optional explicit runtime root; defaults to OM_RUNTIME_ROOT then repo root",
         "account": {
             "type": "string",
@@ -186,7 +192,7 @@ CANDIDATE_FILTER_EXPLAIN_TOOL = build_agent_tool(
     catalog_summary="解释候选机会的筛选结果与排除原因。",
     description=(
         "Explain the recorded opening decision for a symbol from a terminal manifest-bound account snapshot. The tool never re-filters rows. "
-        "With run_selector=latest_notification it resolves the run that produced the most recent notification actually delivered "
+        "Explicit run_id and run_selector are mutually exclusive. With run_selector=latest_notification it resolves the validated source run of the most recent report actually delivered "
         "to the account on notification_date (default: today, runtime host local timezone), so a user can ask why a symbol was "
         "filtered right after a monitoring notification arrives."
     ),
@@ -210,6 +216,8 @@ CANDIDATE_FILTER_EXPLAIN_TOOL = build_agent_tool(
             "required": True,
             "description": "Logical account label bound to the physical OpenD account snapshot",
         },
+        "conversation_id": "optional operator notification conversation scope",
+        "authenticated_conversation_id": "host-injected authenticated notification conversation scope",
         "function": (
             "optional "
             + strategy_key_help(
@@ -219,7 +227,7 @@ CANDIDATE_FILTER_EXPLAIN_TOOL = build_agent_tool(
                 )
             )
         ),
-        "run_id": "optional output_runs run id; omitted resolves the latest terminal manifest-bound run",
+        "run_id": "optional exact output_runs run id; omitted selects latest eligible terminal scan, skipping only proven scheduler skips",
         "run_selector": (
             "optional latest|latest_notification; latest_notification resolves the most recent run whose "
             "notification was actually delivered to the account on notification_date"

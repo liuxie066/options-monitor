@@ -13,12 +13,12 @@ from src.application.runtime_paths import resolve_runtime_root
 _OUTPUT_CONTRACT: dict[str, Any] = {
     "evidence_type": "collection",
     "bounded_projection": "contract_fields",
-    "coverage": "primary_rows",
+    "coverage": "source_declared",
     "freshness": "source_declared",
     "pagination": {"mode": "none"},
     "schema_version": "notification_perception_read.output.v1",
     "source_label": "OM tick audit assistant_perception events",
-    "primary_rows": "events",
+    "primary_rows": "event_summaries",
     "fact_fields": [
         "summary.total_count",
         "summary.returned_count",
@@ -36,7 +36,10 @@ _OUTPUT_CONTRACT: dict[str, Any] = {
         "coverage.total_count",
         "coverage.returned_count",
     ],
-    "freshness_fields": ["freshness.kind", "freshness.latest_event_at_utc"],
+    "freshness_fields": ["freshness.status", "freshness.as_of"],
+    "model_value_fields": [
+        "scope", "summary.status", "coverage", "freshness", "event_summaries",
+    ],
     "model_preview_fields": [
         "scope",
         "coverage",
@@ -71,6 +74,13 @@ def _notification_perception_read_tool(
     )
     summary = data.get("summary") if isinstance(data.get("summary"), dict) else {}
     events = data.get("events") if isinstance(data.get("events"), list) else []
+    data["event_summaries"] = [
+        {key: event[key] for key in (
+            "run_id", "created_at_utc", "event_kind", "no_send", "threshold_met",
+            "delivery", "send_summary", "report_refs",
+        ) if key in event}
+        for event in events
+    ]
     data["source"] = {"label": "OM tick audit notification perception events", "kind": "audit_snapshot"}
     data["runtime_root"] = {
         "path": mask_path(runtime_resolution.runtime_root),
@@ -82,13 +92,20 @@ def _notification_perception_read_tool(
         "event_kind": summary.get("event_kind"),
     }
     data["coverage"] = {
+        "status": "complete" if summary.get("status") in {"ok", "valid_empty"} else "partial",
+        "complete_for": "requested_page",
+        "included_count": len(events),
         "total_count": summary.get("total_count", 0),
+        "omitted_count": max(0, summary.get("total_count", 0) - len(events)),
+        "has_more": summary.get("total_count", 0) > len(events),
         "returned_count": summary.get("returned_count", 0),
         "limit": summary.get("limit"),
         "malformed_count": summary.get("malformed_count", 0),
         "unreadable_count": summary.get("unreadable_count", 0),
     }
     data["freshness"] = {
+        "status": "historical",
+        "as_of": events[0].get("created_at_utc") if events and isinstance(events[0], dict) else None,
         "kind": "audit_snapshot",
         "latest_event_at_utc": events[0].get("created_at_utc") if events and isinstance(events[0], dict) else None,
     }
@@ -121,7 +138,10 @@ NOTIFICATION_PERCEPTION_READ_TOOL = build_agent_tool(
     catalog_summary="读取通知感知与确认状态。",
     description=(
         "Read notification decision and delivery evidence from tick audit artifacts. Use to explain whether a "
-        "notification threshold was met, skipped, attempted, or confirmed; this tool never sends a notification."
+        "notification threshold was met, skipped, attempted, or confirmed. For report candidate explanations, "
+        "select notification_delivery_completed and use the matching confirmed account's report_refs.source_run_id "
+        "as candidate_rank_explain/candidate_filter_explain run_id; event run_id is only the send attempt. "
+        "Missing/ambiguous references or partial audit evidence cannot bind a report. This tool never sends a notification."
     ),
     requires=("runtime_artifacts",),
     capabilities=("notification_perception", "audit_tail", "read_only", "runtime_artifacts"),
