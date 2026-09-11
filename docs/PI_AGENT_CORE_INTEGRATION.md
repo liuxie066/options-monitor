@@ -2482,3 +2482,408 @@ determined from the complete task diff, including new files.
 - **Release owner:** a Pi adaptation must be released before the remote consumes
   it. Publication remains separately authorized; the remote-upgrade request is
   retained and is not evidence that publication or migration has already run.
+
+## 15. Candidate Tool Evidence Repair (Target Design)
+
+This section specifies the bounded repair of candidate explanations and the
+confirmed input/receipt defects. It is a target contract, not a claim that the
+deployed runtime already satisfies it. Sections 7 and 13 retain ownership of
+the tool bridge and evidence admission. Section 14 is independent runtime
+upgrade work and is outside this repair.
+
+### 15.1 Goal, boundary, and success signals
+
+The goal is to answer recorded filter/rank questions when authoritative evidence
+exists, and otherwise explain the missing dependency, retry conditions, and
+available next query. This target is limited to the success signals below;
+workflow approval and review records do not become runtime dependencies.
+
+Success signals:
+
+- **C1 — Source identity:** explicit runs remain exact; report follow-ups use
+  their delivered-report source. Default queries skip only proven non-scan
+  runs. Failed, incomplete, ambiguous, or unreadable scan evidence blocks
+  implicit fallback. Successful evidence exposes account, resolved run and time.
+- **C2 — Usable evidence:** filter reasons, recorded thresholds/values, and rank
+  drivers survive tool projection and support historical answer admission.
+  A mixed accepted/rejected symbol is not represented as wholly filtered out.
+- **C3 — Honest failure:** inapplicable/conflicting portfolio account arguments
+  and unknown scheduler keys return explicit errors. Read failures and answer
+  submission failures are distinct in durable progress and the final receipt.
+- **C4 — Connected validation:** controlled persisted snapshots exercise real
+  tool execution, Bot projection, request-local registration, answer admission,
+  and failure receipts, including negative cases.
+
+Non-goals: changing screening/ranking policies, live rescanning, refreshing
+quotes, new tools or a new tool framework, global context-budget increases,
+weaker evidence admission, wholesale migration of all tool contracts, or new
+retry workers. There is no ledger, broker, notification, production-config,
+release, or deployment operation in this repair.
+
+### 15.2 Current facts and constraints
+
+The inspected 3.5.2 sources contain both candidate tools. The latest-bundle
+loader follows the global last-run pointer even when the selected account did
+not scan. Without the pointer it selects the newest account run. Existing tests
+deliberately reject fallback past an incomplete candidate run; this protection
+must remain.
+
+Both candidate contracts declare source-provided freshness but omit fields that
+the Host can normalize. Source metadata, including run identity, is partly held
+outside `data` and is therefore absent from the model observation. Generic depth
+clipping can discard the complete model value even for one ranked result.
+`fact_fields` prioritizes preview fields; `model_value_fields` selects the
+actual model projection. Those mechanisms are not interchangeable.
+
+Filter summaries already aggregate reasons and retain up to 20 trace events;
+the events are examples, not an exhaustive contract list. Ranking repeats rows
+inside groups and a flat list. The repair must distinguish summary coverage,
+example coverage, and ranked-page coverage instead of deriving all three from
+the raw trace count.
+
+`portfolio_query` currently ignores singular `account` for overview and prefers
+`accounts` over a simultaneous `account` for distribution. In the inspected
+3.5.2 tag, `scheduler_status` passes an empty mapping to its decision function
+for a missing key. The later scheduler-facts implementation on main already
+selects the production market schedule and returns unknown decisions for
+explicit missing/invalid keys, but still reports tool success for those invalid
+inputs. Preserve its production selection and state diagnostics while applying
+the explicit error contract below. Progress
+currently counts any failed non-memory tool result as a failed read, including
+`submit_answer`.
+
+### 15.3 Run selection and source provenance
+
+Preserve the three existing selection meanings: explicit `run_id`, latest
+delivered notification, and default/latest scan. Reject mutually exclusive
+selectors rather than silently choosing one. `notification_date` applies only
+to notification selection. Reuse the delivered-notification resolver and its
+account/date and audit-window checks; submission or rendering success does not
+prove delivery.
+
+For ranking a report, obtain its source through the existing report/notification
+read path and pass that run explicitly to `candidate_rank_explain`. Do not add a
+second notification resolver or new rank selector in this slice. A report
+without a unique authoritative run produces an evidence gap; it never silently
+becomes a latest-scan question. Tool descriptions must explain this route and
+the difference between omitted and explicit run selection.
+
+The concrete route is `notification_perception_read` with completed-event
+selection, then explicit-run candidate explanation. Its owner projects compact
+events with confirmed accounts and `report_refs`, avoiding wide-event clipping.
+The same existing notification resolver consumes those references for filter
+queries with `latest_notification`. A reference contains account, market,
+market date, revision, source digest, delivery key, source kind and
+`source_run_id`. Event `run_id` remains the delivery-attempt run and is never
+substituted for `source_run_id`.
+
+Populate these references only for accounts returned by
+`_confirm_daily_brief_execution`, with `no_send=false` and an actual send
+decision. Reuse `daily_brief_prep.lifecycles_by_account` and its exact retained
+envelope, including delivery-only/rebuilt retries. The repository's existing
+`_normalize_delivery_envelope` source-validation branch already reads and
+validates the successful Brief revision/digest; retain its `source_brief.run_id`
+as derived `source_run_id` in the normalized envelope instead of performing
+another lookup or trusting render-context/preparation run IDs. Derive the value
+from the source on every normalization; an input-supplied value is not trusted.
+This does not alter the message, delivery key, source digest or confirmation
+policy. Failure reports with no successful Brief keep an explicit unavailable
+candidate source rather than borrowing another run.
+
+The existing perception builder preserves an empty `sent_accounts` list. The
+resolver requires affirmative membership in that list and excludes no-send
+events; it never substitutes planned `accounts`. New report references bind to
+the successful account, envelope revision and validated source. Legacy events
+without sufficient source or delivery proof remain evidence gaps, even if their
+attempt run has a valid candidate snapshot. Preserve existing authenticated
+conversation filtering; reports outside that scope are not fetched by dropping
+the filter. Ambiguous/missing context is a clarification or evidence gap.
+
+Only the notification read projection is additionally repaired for this route;
+the broad `daily_decision_brief_read` contract migration remains out of scope.
+Use bounded `model_value_fields` for the event identity, timestamp, delivery
+flags, confirmed accounts and report references. Declare historical event time
+through the existing freshness envelope; event time proves delivery observation,
+not candidate quote freshness. Candidate facts still require their own sealed
+snapshot evidence. Large event pages may narrow by existing run/event/limit
+selectors; a single normal event must remain usable.
+
+The shared latest-candidate reader may continue to an older run only when the
+requested account's authoritative run metadata proves a completed, ordinary
+scheduler skip with no candidate pipeline attempt. Boolean `ran_scan=false`
+and `ran_pipeline=false` alone are insufficient: configuration and prefetch
+failures also produce those values. The current writer does not preserve the
+needed positive fact, so add exactly one terminal value to the existing account
+metrics: `scan_outcome="scheduler_skipped"`. In `account_run.py`, set it only at
+the actual no-pipeline return after the scan gate, for a non-experience account
+whose existing account decision has `source="account_scheduler"`, strictly
+false `should_run`, and whose effective decision and gate both prevent pipeline
+execution. Do not mark no-symbol-only, fallback/global-only, scheduler-error,
+configuration-error or prefetch-barrier exits. The existing request already
+carries the account decision; no new caller protocol is needed.
+
+The existing atomic `account_metrics.json` writer preserves the marker only in
+that final account-scan write. Initial metrics never have it. Publication is the
+linearization point for this account's scan path: interruption before it leaves
+no proof; interruption after it cannot start that account pipeline because only
+the return remains. It does not assert that the entire tick or notification
+finished. A failed write leaves no skip authorization. No new file/table/state
+machine or legacy backfill is introduced.
+
+The reader requires this marker plus strict false scan flags, no conflicting
+pipeline-start/output or failure evidence, and matching run/account identity in
+the canonical run-account metrics. Validate the existing frozen account config
+hash with the existing run-workspace authority reader and require a nonempty
+market binding consistent with that frozen config. Never substitute current
+runtime config for historical binding. Across skipped records and the selected
+candidate bundle, require compatible account/market scope; mismatch blocks
+lookup. Preserve the established pointer/run ordering and filesystem safety
+checks. Unknown/error/barrier/legacy outcomes stop lookup; localized reason text,
+missing files, directory mtime alone or absence of errors never prove a skip.
+The global early no-scan return currently creates no run workspace; leave that
+behavior unchanged rather than manufacture new candidate-history entries.
+
+An explicit run or report-bound run is never skipped. Preserve account/market
+binding, path and symlink checks, manifest integrity checks, supported snapshot
+versions, and read-only behavior. All callers of the shared latest reader must
+be examined before changing its selection semantics.
+
+Return bounded provenance in `data`, using existing scope/source/freshness
+surfaces: selected run, account, selection basis, and authoritative source time.
+Default lookup discloses that non-scan runs were skipped without copying an
+unbounded run history. Error details name the attempted run/account and missing
+dependency; hints identify an available explicit-run or report query. An error
+must not prescribe unchanged retries for immutable missing historical data.
+
+### 15.4 Candidate projection, coverage, and freshness
+
+Candidate tool owners produce the semantic summary. Configure their existing
+`model_value_fields` to select that summary, scope and provenance; do not expose
+duplicate ranked collections or incidental hashes/paths to the model. Preserve
+recorded business values without re-filtering or re-ranking.
+
+For filters, retain per-strategy status, accepted/rejected counts and rule
+aggregates across the requested symbol scope. Include a bounded set of compact
+example records, each keeping its own rule, contract identity, threshold and
+observed value together; never flatten independent arrays into assumed pairs.
+Omitted raw events do not invalidate a complete aggregate, but examples must be
+labelled as examples with honest counts. Missing recorded thresholds remain
+missing. Use an additive owner-produced `data.summary` selected by
+`model_value_fields`; keep the existing raw functions/events response compatible.
+The summary contains requested symbol/strategy, per-strategy accepted/rejected
+counts, rule aggregates, and compact example tuples. Project at most eight
+reason aggregates and three examples per strategy, using deterministic count
+then rule/contract ordering; expose included/total counts for both bounded sets.
+Whole-scope accepted/rejected counts are computed before this display bound.
+The bounds are display limits, not a second screening policy.
+
+The filter observation uses owner-declared `complete_for=point`: it answers the
+selected symbol's recorded summary, not a full contract collection. If the
+summary is available, declare complete point coverage; if no matching scope was
+observed, retain indeterminate/partial evidence rather than inventing a rejected
+symbol. Counts in the top-level coverage envelope count summary objects, never
+`trace_count`. Example included/total counts live within the summary and do not
+create another Host coverage envelope. A historical point claim about recorded
+counts/reasons can pass; an exhaustive `required_scope=full_query` claim must
+fail. Example labels guide model semantics; the verifier still makes no guarantee
+for arbitrary prose. Do not add field-level claim permissions.
+
+For ranks, retain strategy identity, recorded rank, symbol/contract and recorded
+drivers in one model collection. `top_n` applies to each selected strategy as in
+the existing tool; preserve this meaning for `mode=all`. Declare actual returned
+row count and available total separately. A full top-N page does not prove full
+collection coverage. A one-row result must not be discarded because a redundant
+copy is nested more deeply elsewhere in the raw result. Select a single compact
+model collection with strategy mode in each row, not `groups[].ranked` plus a
+duplicate flat list. The rank producer declares complete requested-page coverage
+with included=returned rows, total=available rows across selected strategies,
+omitted=total-included, and has_more according to omitted count. Raw `row_count`
+continues to mean available rows. A page with zero available candidates is a
+valid empty result, not missing evidence.
+
+Use the existing per-observation and active-evidence budgets. If the requested
+summary itself cannot fit, return honest partial/narrowing status and a
+supported smaller query when one exists, retaining no falsely complete claim.
+Keep the public `top_n` maximum of 100; the Bot can require a smaller page when
+the selected projection exceeds its 20-item or token bound. `mode=put,top_n=1`
+and the default two-strategy page must work for representative normal records.
+If no supported argument can reduce an oversized result further, state that
+limitation instead of issuing an impossible repeated narrowing instruction.
+Do not introduce
+a raw-result cache, paging framework, or fallback that ignores truncation.
+
+Both candidate producers declare `historical` with a validated authoritative
+snapshot/manifest timestamp. A seal timestamp means evidence sealed at that
+time, not live quote freshness. Do not substitute request time, filesystem
+mtime, report delivery time, or an unvalidated timestamp parsed from the run ID.
+The Host normalizes these fields through its existing freshness owner. Missing
+or invalid source time remains unknown and cannot support a historical/current
+fact. Explicit historical evidence must fail a `current_fact` submission.
+The concrete producer surfaces are `data.source` with account/run/selection
+basis, `data.scope` with account/run and requested strategy/symbol, and
+`data.freshness={status:historical,as_of:<validated sealed_at_utc>}`. Apply this
+to the existing formal and experience manifest versions through the existing
+bundle loader; invalid/missing time remains unknown. Adding only contract labels
+without these data fields is insufficient because the Host does not read meta.
+
+This slice repairs the candidate pair. Other observed freshness mismatches are
+deferred to their tool owners unless a connected C1–C4 test proves a particular
+shared-path correction is necessary; such necessity must be documented.
+
+### 15.5 Input errors and incomplete-response semantics
+
+At `portfolio_query`'s existing validator, reject account arguments that the
+selected view would ignore. Overview continues using `accounts`; supplying
+singular `account` returns an input error with the supported form. Reject
+simultaneous non-empty `account` and `accounts` rather than silently choosing,
+including when their values happen to agree. Apply this closed selector matrix:
+
+| View | Allowed non-empty selector |
+|---|---|
+| overview | `accounts`, optional |
+| holdings / cash / nav / full_report | `account`, required |
+| distribution | `account` or `accounts`, optional but mutually exclusive |
+| health / accounts | neither |
+
+Reject any non-empty selector not consumed by its view before opening the PM
+transport. Preserve existing handling of absent/empty optional selectors and
+legitimate unscoped defaults. Update the tool descriptions consistently.
+
+At the scheduler status owner, a selected key must exist and be a valid mapping
+before calling `decide`. Preserve the current production-market selection for
+an omitted or empty `schedule_key`, and the current input error for a
+whitespace-only explicit key. If the selected entry is absent or malformed,
+report `CONFIG_ERROR`. An explicitly requested unknown key is `INPUT_ERROR`;
+a present non-mapping or otherwise invalid entry is `CONFIG_ERROR`.
+`agent_tools/config.py` owns this description and schema help;
+`operations_impl.py` owns validation before `decide`. Do not change the scheduler
+engine's own defaults or scheduling decisions. Reuse the existing schedule
+validator. Preserve state missing/corrupt diagnostics, force-simulation labels,
+market/account validation and the production state-path selection. Do not
+restore the tag's hard-coded schedule or state-file defaults.
+
+Keep the existing incomplete result and progress record, with no new run state
+or database table. Classify failed business reads separately from answer
+submission and other internal tool failures using actual tool identity. Keep
+legacy `failed_count` as a mixed historical total for compatibility; add derived
+`failed_read_count`, `failed_submission_count`, and `failed_internal_count` to
+the existing `completed_checks` JSON. Successful read counts retain their
+existing meaning. `submit_answer` belongs to submission; directory activation,
+Control preview and memory are internal; known canonical pure-read business
+tools belong to reads. Unknown historical identities stay generic/internal,
+never guessed to be business reads. Count failed memory operations as internal
+without changing successful memory evidence behavior. Retained diagnostic accounts
+also enter the existing progress account scope, so current account permissions
+continue to govern progress reads and completion.
+
+Old stored progress without classified counts renders a generic failure total,
+not an asserted read count. Reconstruct classification only when the stored
+events are available and attributable; do not rewrite old audit/progress rows.
+Preserve continuation revision/CAS and replay of an already finished result.
+No shape-version bump may repurpose the CAS revision.
+
+Retain
+bounded, redacted diagnostic causes from the existing events; do not register
+failed results as successful business evidence. A failed submission does not
+increase the displayed read-failure count. For the observed shape, show two
+failed reads and one answer submission failure, not three failed reads. Store
+up to three distinct bounded diagnostic causes in the same derived checks:
+category, tool, safe code/reason, account/run when present, retryable and hint.
+Reuse error redaction and size bounds; `bot/tools.py` must preserve these
+allowlisted identifiers through error projection. Raw paths, exception payloads,
+financial data and arbitrary unknown detail keys remain excluded. Candidate
+immutable missing history explicitly sets `details.retryable=false` using the
+existing error contract; temporary I/O failures may retain truthful retryability.
+Test error→compact observation→stored progress→receipt as one negative path.
+
+The receipt states what prevented the answer, whether automatic retry is
+actually scheduled, and the conditions for a useful user continuation. Preserve
+the durable progress reference and the existing rule that continuation re-reads
+evidence. Do not promise recovery, automatic remediation, or restored evidence
+merely because a progress reference exists. Unknown cause stays unknown. Keep
+provider errors, absent data, partial data and valid empty results distinct.
+
+### 15.6 Owners and independently verifiable increments
+
+| Increment | Existing owners | Observable completion |
+|---|---|---|
+| 1: correct source or actionable evidence gap (C1, C4) | `account_run.py`, `candidate_snapshot_manifest.py`, candidate tool definitions/implementations, `daily_decision_brief_repository.py`, `tick_notification_flow.py`, `multi_tick/assistant_perception_event.py`, `agent_tools/notification_perception.py` | Actual account writer proves ordinary skip; confirmed report reference survives the existing read tool; explicit/default/report source identity and failure gaps are correct. |
+| 2: candidate answer survives the bridge (C2, C4) | `agent_tools/candidate.py`, `candidate_filter_impl.py`, `candidate_rank_impl.py`, `bot/tools.py` only for proven shared adaptation needs | PDD-style filter and top-one rank records retain business facts and pass historical answer admission with real evidence registration. |
+| 3: invalid requests and unsuccessful answers are clear (C3, C4) | `agent_tools/portfolio.py`, `operations_impl.py`, `config.py`, `bot/host_store.py`, `bot/event_store.py` | Invalid inputs fail before dependency work; incomplete receipts preserve causes and correct counts. |
+
+Paths in this table are relative to `src/application/`. The domain candidate
+engine remains the strategy owner. `bot/result_admission.py` remains the
+admission authority and must not be weakened to accommodate malformed output.
+This document owns the target integration contract; public argument text stays
+in the canonical tool definitions rather than a duplicated catalog.
+
+### 15.7 Validation and open risks
+
+Extend the existing snapshot/agent/Bot suites rather than introduce another
+harness. Fixtures publish controlled terminal manifests and representative
+opening snapshots, then call the real public tool facade and Host read/submission
+path. Mock only external providers and temporary storage boundaries. Do not mock
+the candidate handler, projection or answer admission in the connected cases.
+No live notification, provider scan or production write is required.
+
+Required cases include explicit run success; latest ordinary skip; latest
+configuration/prefetch error with false scan flags; incomplete or corrupt
+manifest; absent/wrong-account report binding; truncated notification audit;
+missing source timestamp; valid empty result; mixed accepted/rejected contracts;
+multiple different thresholds with associated contracts; top-one and multi-mode
+ranking; oversized detail with retained honest summary; account argument
+conflicts; absent/malformed schedule key; and two read failures plus one failed
+submission followed by an accurate durable receipt. Check that an unknown-time
+or cross-request observation cannot be submitted as a supported fact.
+
+Use the actual account writer and scan gate in skip fixtures; a pipeline stub
+fails if called. Inject interruption after initial metrics and before final
+publication, failed final write, malformed/legacy metrics and conflicting
+config/market metadata. Extend the existing delivery-only retry fixture to prove
+delivery-attempt run differs from the retained Brief source run; include rebuilt
+envelopes, missing revisions, digest mismatch, empty/missing successful accounts,
+no-send, wrong conversation and failed/ambiguous confirmation. Do not send real
+notifications: exercise the real preparation, validation, event and read owners
+with a controlled delivery adapter and temporary store.
+
+The filter connected fixture admits a historical point summary and rejects a
+full-query detail claim from that same observation. Rank cases cover zero rows,
+single-row and default two-strategy output, and larger-than-preview requests
+with actionable limits. Verify rule/contract/threshold/value tuples remain
+associated. Error cases preserve safe run/account/retryability through durable
+receipt. Include directory/Control failures and legacy mixed counts, retaining
+continuation CAS and finished-result replay.
+
+The implementation baseline also contains authorized system-task reports and
+trusted-scope input conflict checks. Preserve their existing admission, memory
+and channel behavior; do not generalize their fixed-report exception to
+candidate evidence. Include the affected scheduler/task-fact regression suites
+when changing shared Host or tool-adapter owners.
+
+Use `tests/test_account_run.py`, `tests/test_candidate_filter_run_resolution.py`,
+`tests/test_candidate_snapshot_manifest.py`, `tests/test_daily_decision_brief_notification_flow.py`,
+`tests/test_notification_perception_event.py`, `tests/test_notification_perception_read_tool.py`,
+`tests/test_portfolio_agent_tool.py`, `tests/test_bot_output_contract.py`,
+`tests/test_bot_s8_projection.py`, `tests/test_bot_s8_host_admission.py`, the owning
+scheduler/receipt suites and required agent contract/smoke checks. These suites
+cover the public owners; `tests/test_bot_candidate_evidence.py` and
+`tests/test_bot_failure_receipts.py` cover the connected paths.
+Run the smallest case set per increment, then the repository's required checks
+for the complete final diff once. Include wording, sensitive-artifact and diff
+checks; discover final commands from the verified implementation baseline.
+
+Open risks and ownership:
+
+- Candidate reader owner verifies actual-writer marker publication and frozen
+  account binding. Legacy records stay blocked; no heuristic compatibility path.
+- Candidate tool owner verifies the chosen point/page envelopes and display
+  bounds through the unchanged admission gate, including oversize negative cases.
+- Report resolver owner must prove the source is the delivered report intended
+  by the question. Ambiguous conversation context requires clarification rather
+  than guessing; this repair does not invent a new conversation-binding system.
+- Host owner must verify existing stored progress remains readable when the
+  receipt distinguishes failure categories; do not rewrite old audit records.
+
+Passing deterministic connected tests proves adapter and admission behavior,
+not that every model will select the correct tool on every phrasing. Any live
+model/channel canary is a separate, explicitly authorized verification step.

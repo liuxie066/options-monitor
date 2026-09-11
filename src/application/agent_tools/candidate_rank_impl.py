@@ -31,7 +31,7 @@ def _snapshot(
     payload: dict[str, Any],
     *,
     repo_base: Callable[[], Path],
-) -> tuple[dict[str, Any], dict[str, Any]]:
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     account = str(payload.get("account") or "").strip().lower()
     if not account:
         raise AgentToolError(
@@ -65,12 +65,14 @@ def _snapshot(
             raise CandidateSnapshotManifestError(
                 "candidate snapshot manifest is unavailable"
             )
-        return snapshot, manifest
+        return snapshot, manifest, dict(bundle.get("source_selection") or {})
     except CandidateSnapshotManifestError as exc:
         raise AgentToolError(
             code="DEPENDENCY_MISSING",
             message=str(exc),
-            details={"account": account, "run_id": payload.get("run_id")},
+            hint="Query an available explicit run or use notification_perception_read for the delivered report source; unchanged retries cannot restore missing history.",
+            details={"account": account, "run_id": getattr(exc, "run_id", None) or payload.get("run_id"),
+                     "reason": "candidate_snapshot_unavailable", "retryable": False},
         ) from exc
 
 
@@ -86,7 +88,7 @@ def candidate_rank_explain_tool(
     _ = resolve_output_root
     mode_filter = _mode(payload.get("mode"))
     top_n = _as_int(payload.get("top_n"), default=10, low=1, high=100)
-    snapshot, manifest = _snapshot(payload, repo_base=repo_base)
+    snapshot, manifest, selection = _snapshot(payload, repo_base=repo_base)
     modes = ["put", "call"] if mode_filter == "all" else [mode_filter]
     groups: list[dict[str, Any]] = []
     for mode in modes:
@@ -97,6 +99,7 @@ def candidate_rank_explain_tool(
             facts = dict(item.get("facts") or item)
             explanation.update(
                 {
+                    "mode": mode,
                     "candidate_id": item.get("candidate_id"),
                     "rank": item.get("rank"),
                     "symbol": facts.get("symbol"),
@@ -148,7 +151,29 @@ def candidate_rank_explain_tool(
         "account_display_name": snapshot.get("account_display_name"),
         "executable": snapshot.get("executable"),
     }
+    returned = len(ranked_flat)
+    total = sum(int(group["row_count"]) for group in groups)
+    model_fields = ("mode", "rank", "symbol", "contract_symbol", "period_net_return", "annualized_return", "net_income", "primary_drivers")
     data = {
+        "narrowing_hint": (
+            "结果超过证据预算，请指定 mode=put 或 call，并使用 top_n=1。" if mode_filter == "all"
+            else "结果超过证据预算，请使用 top_n=1。" if top_n > 1
+            else "这条排名记录仍超过证据预算；此工具没有可进一步缩小该记录的参数，当前无法完整解释。"
+        ),
+        "ranked_summary": [{key: row.get(key) for key in model_fields} for row in ranked_flat],
+        "ranking_summary": [
+            {"mode": group["mode"], "strategy_status": group["strategy_status"], "capacity_status": group["capacity_status"],
+             "rank_reason": group["ranked"][0].get("rank_reason") if group["ranked"] else None}
+            for group in groups
+        ],
+        "returned_count": returned,
+        "coverage": {"status": "complete", "complete_for": "requested_page", "included_count": returned,
+                     "total_count": total, "omitted_count": total - returned, "has_more": total > returned},
+        "freshness": {"status": "historical", "as_of": manifest.get("sealed_at_utc")},
+        "scope": {"run_id": snapshot.get("run_id"), "account": snapshot.get("account"),
+                  "market": snapshot.get("market"), "mode": mode_filter, "top_n": top_n},
+        "source": {"run_id": snapshot.get("run_id"), "account": snapshot.get("account"),
+                   "selector": "explicit_run_id" if str(payload.get("run_id") or "").strip() else "latest", **selection},
         "mode": mode_filter,
         "top_n": top_n,
         "opening_status": snapshot.get("opening_status"),
