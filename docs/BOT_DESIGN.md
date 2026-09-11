@@ -1006,6 +1006,144 @@ The fragments define general behavior only:
 
 Question-specific prompts, tool lists, and renderers are prohibited.
 
+### Task Completion And Independent Reads（已实现，模型效果待验证）
+
+本节定义两条通用行为增量及其验收。现有 Scene、金融事实、安全和输出合同继续适用；
+此处不宣称模型效果已经验证，也不代表生产已升级。
+
+#### Goal And Scope
+
+目标：Bot 将已有证据综合成用户所要求的解释、比较或判断；在查询条件已知时，
+同轮提出独立只读查询，减少不必要的模型往返。
+成功信号为短追问保持任务连续、双账户比较完整且调用无多余依赖、可恢复读取失败后继续查证。
+只修改现有 prompt owner、必要评测和本节；不改记忆、输出模板、运行时并发、权限或预算。
+不引入新 Scene、工具、SDK、数据表、业务意图路由或评测专用生产分支。
+
+#### Current Facts And Owners
+
+核对基线为 `4d40828c9d477069fe82a462148e961936b2ff5e`。
+
+- `src/application/bot/prompts/base_behavior.md` 已要求回答实际问题、承接短追问和最少澄清。
+- `src/application/bot/prompts/tool_rules.md` 已要求最少调用、优先直接报告、可恢复错误继续查证，
+  并要求目录激活、答案提交和 Control preview 各自单独调用。
+- `src/application/bot/scene.py` 按 Scene 声明顺序编译 prompt，并记录内容指纹。
+- `agent-runtime/main.ts` 固定 `toolExecution: "sequential"`；一轮多个请求仍逐个执行。
+  本节优化模型往返，不承诺工具执行并发或总耗时必然下降。
+- `tests/bot_eval/test_answer_quality.py` 与 `tests/bot_pi_test_support.py` 的显式模型回合
+  适合契约回归，不能证明真实模型受到 prompt 改动后改变行为。
+- `scripts/bot_p1_eval.py` 已有真实渠道 facade、会话关联、事件和答案质量记录；
+  固定证据评测应复用现有 public facade/Host/Pi，而不是另造模型循环。
+
+#### Rules And Data Flow
+
+`base_behavior.md` 的首条实际问题规则已合并为：
+
+> Answer the user's actual question. Tool results are intermediate evidence: complete the
+> requested explanation, comparison or judgment within existing permissions and budgets.
+> Do not substitute plans or query instructions. If evidence has a real gap, give the supported
+> partial conclusion and state what remains unresolved. Never invent results or claim unexecuted completion.
+
+`tool_rules.md` 的最少调用规则已合并为：
+
+> Use the smallest useful call sequence. Prefer one sufficient tool without broadening requested
+> or authorized scope, and direct reports over schema discovery. Request independent reads with
+> known arguments in the same turn; keep dependent reads sequential. Stop at sufficient evidence
+> or a real gap. Preserve sole-call rules for tool_directory, submit_answer and request_control_preview.
+
+其余既有约束保持原义，包括失败重试、金融事实、收尾预算和禁止声称未执行动作完成。
+这些措辞替换已有段落，不直接叠加长规则；编译后的静态 prompt 必须不超过 11,796 字符及
+3,314 conservative tokens（`tests/test_bot_s8_projection.py`）。最终换行可按门槛压缩，不能删安全语义或放宽门槛。
+
+可信入口 -> 既有会话和当前上下文 -> 编译后的两条规则 -> 模型选择工具 -> 既有 Host 准入
+-> Pi 顺序执行 -> 模型综合证据 -> 单独 submit_answer -> 既有结果准入/持久化。
+工具依赖由模型按参数和观测判断；Host 不新增依赖图、调度器、分类器或答案模板。
+短追问中的旧证据只能用于定位和保持上下文；当前财务断言仍须满足现有 observation 准入。
+
+失败行为和状态机保持既有 owner：可恢复错误修正输入或换有效证据；无变化的相同失败不循环。
+不可恢复缺口只支持相应范围的部分判断；预算/取消/模型失败不伪装成任务完成。
+新增规则不得要求越过收尾 reserve，不得将 preview 视为执行，不得将一项读取失败解释为金额零。
+
+#### One Implementation Slice
+
+一个行为切片：两条规则进入现有 Scene，三个代表场景完成真实模型前后对照。
+生产源码改动仅为两个 prompt 文件；`tests/bot_eval/prompt_rules_eval.py` 承载固定证据实验，
+必要契约检查位于同目录的 `test_prompt_rules_eval.py`，复用既有测试辅助工具。
+测试驱动调用现有 `run_channel_request` -> Host -> Pi -> 真实模型链，
+仅在 Host 构建 effective payload 后，以进程内 `unittest.mock` 替换
+`src.application.bot.tools.call_read_tool` 的业务读取结果。不得修改生产协议、Host、Pi runtime，
+不得用 recovered observations 预加载替代模型选工具，也不得使用预写模型回合。
+
+替身按工具名及完整 effective payload 的精确白名单返回证据，检查请求账户、授权账户及结果 scope；
+它替代了下游业务读取校验，不能仅凭 Host allowlist 就视为账户校验通过。
+意外调用、scope 不匹配或非瞬态相同失败重复调用锁存为试验失败，即使后来答案正确也不能通过。
+错误和修正后的成功 payload 在运行前固定；真实 compact_observation 和最终答案准入继续执行。
+替身不得穿透访问真实数据源。目录激活、submit_answer 等仍走现有 Host 协议，不由业务替身伪造。
+实验报告标记 `fixed_redacted`，独立于现有 P1 v4 生产报告及通过结论。
+若现有测试边界无法实现这一链路，记录阻塞，不能扩大生产改动。
+
+#### Validation Plan
+
+先核对模型配置、凭据是否可用（只记录存在性，不记录秘密）及授权样本位置；缺失时停止实际模型试验，
+保留未完成状态。随后冻结案例输入、脱敏证据及其来源、model/provider/settings、运行时/工具 schema 指纹和预算，
+记录基线 prompt 指纹。使用固定证据和真实模型，模型回答/选工具不得预录、替换或注入。
+业务证据只来自已授权可读取的脱敏样本；虚构数字只能明确标为合成契约测试，不能冒称真实业务回放。
+不发送渠道通知，不访问生产写路径；Host/Pi 会话和评测输出使用临时独立目录。
+故障只在测试的工具执行替身注入，不能破坏实际数据源。每个试验使用新子进程加载对应 prompt，
+避免 `load_general_scene` 的进程缓存复用旧文本；独立 Host/Pi/长期记忆存储及请求、会话 ID。每个试验从干净会话开始，
+短追问前置回合与追问必须使用同一条真实 Pi 会话；不同版本、案例和重复次数之间不得串历史或长期记忆。
+
+| 场景 | 固定输入与证据 | 必须观察到的行为 |
+| --- | --- | --- |
+| 短追问 | 固定业务判断请求及可回答证据，再问“结论呢？”；前置回答由真实模型产生 | 分别判断首轮任务完成和追问连续性；保持目标、账户和期间，按本轮准入取证并完成判断。首轮已完成后的复述不能算补完失败任务；不伪造未完成的 assistant 前置回答 |
+| 双账户比较 | 固定 lx、sy 的同一 as-of、同一原生币种可用现金证据，使用必须指定 account 的 query_cash_headroom，问题明确两个账户 | 两个正确 effective account 查询在同一 assistant 回合提出，工具仍顺序执行，随后单独提交答案；两账户事实及比较关系正确，不跨币种相加。聚合单次调用不算本案例覆盖；无可比较样本则不可用，不算通过 |
+| 工具失败后继续查证 | 首次读取返回固定可恢复错误及真实可用的修正/替代路径，成功结果固定 | 模型修正输入或使用有效替代，提交有依据的回答；不原样死循环、不把失败当零、不杜撰成功 |
+
+修改前与修改后各运行三个场景、各三次，共 18 次场景试验；短追问每次包含其前置回合。
+按场景和重复次数交替执行 A/B，保持小时间窗口并记录实际顺序。
+不得挑掉失败运行或在看见结果后偷偷换输入。错误若由模型环境或适配器造成，应记为不可用试验并说明原因，
+不能算成功。任何纠错后的补跑都单独记录，原结果保留。
+
+记录答案与依据、模型回合分组、工具调用参数与结果身份、总耗时、token（缺失明确说明）、
+终止原因、prompt/schema/样本指纹及配置模型身份。provider 返回的实际身份单独记录；无可核验身份则记 unverified，
+不能把配置别名当作模型证明。同轮读取以按序的 model_turn_completed、turn_end、tool_execution_start 及 call_id
+关联为证；明确允许独立的目录激活和单独答案提交阶段。分组缺失或有歧义则证据不可用，不能仅以工具数推断。
+按固定样本的事实、单位、scope 和关系评审真实答案语义，逐项写判定及支持证据，不以固定词句判断。
+任务完成、账户/期间 scope、关键事实/比较关系、恢复路径、不伪造均为不可抵消的布尔验收项；
+首轮完成与追问连续性单列，任何必要项失败都不能用其它评分补足。不修改 P1 的既有评分或报告 schema。
+修改后三场景各三次满足上述行为、权限/证据/输出与预算检查，才记为小样本验收通过。
+原版已经通过则报告持平；声称减少往返需要对应原版的可比较实测，不把三次通过表述为统计成功率或因果证明。
+
+本地自动回归：
+
+```bash
+./.venv/bin/python -m pytest tests/test_bot_s8_projection.py tests/test_bot_phase1.py tests/bot_eval/test_answer_quality.py tests/test_bot_conversation_memory.py tests/test_bot_output_contract.py tests/test_bot_p1_eval.py tests/bot_eval/test_prompt_rules_eval.py
+./.venv/bin/python scripts/guardrails_check.py --check-doc-wording --check-runtime-config-tracking --check-sensitive-artifacts
+git diff --check
+```
+
+当前本地回归 262 项通过，编译 prompt 为 11,757 字符 / 3,290 conservative tokens；
+这些结果仅证明本地契约，不证明真实模型效果。真实模型前后对照入口为：
+
+```bash
+./.venv/bin/python tests/bot_eval/prompt_rules_eval.py run --pack PACK.json --assistant-config ASSISTANT.json --config-path CONFIG.json --output REPORT.json
+./.venv/bin/python tests/bot_eval/prompt_rules_eval.py review --report REPORT.json --review REVIEW.json --output REVIEWED_REPORT.json
+```
+
+大写文件名是调用者提供的输入和输出路径。证据包记录来源、授权范围、固定观测和逐项语义要求；
+人工判定以原始报告的 SHA-256 绑定，每项须提供布尔结果及支持证据。
+评测入口区分结构契约通过、实际模型完成、语义质量通过及证据不足，保留每次结果。
+模型配置或凭据不可用时预检记录阻塞原因，不启动试验；合成测试样本不能用于实际对照验收。
+
+#### Trade-offs And Open Evidence
+
+- 选择 prompt 局部补充，复用现有执行和记录；不改实际并发，因为它改变治理/取消边界且不是本节目标。
+- 固定证据控制数据变化，但不能证明线上新鲜数据、真实渠道送达或生产时延；这些不属于本次验收。
+- 真实模型验证当前缺少有效模型配置、可用凭据及授权的同口径脱敏样本；18 次试验尚未执行，不宣称规则有效。
+- 同轮普通慢读取缺少逐次调用前的收尾 reserve 准入；现有检查在整批结束后，存在超时无最终答案风险。
+  由 Bot Host/Pi runtime owner 另行处理，本节不改变运行时；固定快速证据试验不能证明慢工具或生产收尾安全。
+- 既有能力故障由其 owner 另行处理，不以“任务完成”规则掩盖丢失历史、错误 scope 或拒收有效证据。
+- 本节的本地固定证据实验是范围有限的 prompt 验证，不替代下文 P1 生产验收，也不改变发布门槛。
+
 Runtime context slots have three authorities:
 
 ```text

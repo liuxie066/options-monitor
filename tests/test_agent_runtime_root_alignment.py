@@ -67,6 +67,16 @@ def test_runtime_artifact_tools_default_to_om_runtime_root(
                     "run_id": run_id,
                     "accounts": ["lx"],
                     "no_send": False,
+                    "report_refs": [{
+                        "account": "lx",
+                        "market": "US",
+                        "market_date": now.date().isoformat(),
+                        "revision": 0,
+                        "source_kind": "successful_brief",
+                        "source_digest": "a" * 64,
+                        "delivery_key": "test-runtime-root-delivery",
+                        "source_run_id": run_id,
+                    }],
                     "send_summary": {
                         "sent_accounts": ["lx"],
                         "failure_count": 0,

@@ -458,7 +458,7 @@ SCHEDULER_STATUS_TOOL = build_agent_tool(
         "config_path": "optional explicit config path",
         "state_dir": "optional state dir; defaults to the production runtime state dir",
         "state": "optional explicit scheduler state file",
-        "schedule_key": "optional explicit schedule key; defaults to the production market selection",
+        "schedule_key": "optional existing schedule key; omitted or empty uses production market selection; unknown explicit key is INPUT_ERROR, malformed selected config is CONFIG_ERROR",
         "account": "optional account label",
         "force": "optional bool to preview force-mode scheduler decision",
     },

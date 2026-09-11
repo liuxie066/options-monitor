@@ -5,6 +5,8 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from tests.candidate_evidence_helpers import seal_opening_candidate_fixture
 
 
@@ -39,6 +41,7 @@ def _perception_audit_row(
             "run_id": run_id,
             "accounts": accounts,
             "no_send": no_send,
+            "report_refs": [{"account": account, "market": "US", "market_date": event_at_utc.date().isoformat(), "revision": 0, "source_kind": "successful_brief", "source_digest": "a" * 64, "delivery_key": "test-delivery", "source_run_id": run_id} for account in sent],
             "send_summary": {
                 "sent_accounts": sent,
                 "failure_count": failure_count,
@@ -311,7 +314,7 @@ def test_latest_notification_explicit_date_resolves_previous_day(tmp_path: Path)
     assert resolution["notification_date"] == yesterday.isoformat()
 
 
-def test_explicit_run_id_wins_over_run_selector(tmp_path: Path) -> None:
+def test_explicit_run_id_conflicts_with_run_selector(tmp_path: Path) -> None:
     _seal_run(tmp_path, "run-explicit")
     _seal_run(tmp_path, "run-notified")
     today = _today_local()
@@ -333,10 +336,8 @@ def test_explicit_run_id_wins_over_run_selector(tmp_path: Path) -> None:
         }
     )
 
-    assert out["ok"] is True
-    resolution = out["meta"]["source_files"][0]["run_resolution"]
-    assert resolution["selector"] == "explicit_run_id"
-    assert resolution["resolved_run_id"] == "run-explicit"
+    assert out["ok"] is False
+    assert out["error"]["code"] == "INPUT_ERROR"
 
 
 def test_default_latest_behavior_unchanged(tmp_path: Path) -> None:
@@ -468,7 +469,7 @@ def test_truncated_window_reports_distinct_reason(tmp_path: Path, monkeypatch) -
     _seal_run(tmp_path, "run-x")
     today = _today_local()
 
-    def _truncated_iter(*, repo_root, event_kind=None, limit=None):
+    def _truncated_iter(*, repo_root, event_kind=None, conversation_id=None, limit=None):
         return {"events": [], "total_count": 9000, "truncated": True}
 
     monkeypatch.setattr(
@@ -514,3 +515,134 @@ def test_notification_run_with_missing_snapshot_reports_resolved_run_id(tmp_path
     assert out["error"]["code"] == "DEPENDENCY_MISSING"
     assert out["error"]["details"]["reason"] == "snapshot_unavailable_for_notification_run"
     assert out["error"]["details"]["run_id"] == "run-purged"
+
+
+def _report_row(*, attempt: str, source: str, hour: int, conversation: str | None = None):
+    from src.application.conversation_scope import conversation_reference
+
+    event_time = datetime.combine(_today_local(), datetime.min.time(), tzinfo=_local_tz()) + timedelta(hours=hour)
+    row = _perception_audit_row(run_id=attempt, event_at_utc=event_time.astimezone(timezone.utc), accounts=["lx"])
+    row["extra"]["report_refs"][0]["source_run_id"] = source
+    if conversation:
+        row["extra"]["conversation_scope"] = {"conversation_ref": conversation_reference(conversation)}
+    return row
+
+
+def _report_query(base: Path, **kwargs):
+    return _run_tool({"runtime_root": str(base), "account": "lx", "symbol": "NVDA",
+                      "run_selector": "latest_notification", "notification_date": _today_local().isoformat(), **kwargs})
+
+
+def test_delivered_report_uses_revision_zero_source_not_retry_attempt(tmp_path: Path):
+    _seal_run(tmp_path, "brief-source")
+    _seal_run(tmp_path, "delivery-retry")
+    row = _report_row(attempt="delivery-retry", source="brief-source", hour=12)
+    assert row["extra"]["report_refs"][0]["revision"] == 0
+    _write_shared_audit(tmp_path, [row])
+
+    out = _report_query(tmp_path)
+
+    assert out["ok"] is True, out
+    assert out["data"]["source"]["run_id"] == "brief-source"
+    assert out["meta"]["source_files"][0]["run_resolution"]["resolved_run_id"] == "brief-source"
+    events = [event for function in out["data"]["functions"] for event in function["events"]]
+    assert events and all("delivery-retry" not in json.dumps(event) for event in events)
+
+
+@pytest.mark.parametrize("scope", ["authenticated", "explicit", "both"])
+def test_report_selection_keeps_conversation_scope(tmp_path: Path, scope):
+    _seal_run(tmp_path, "my-source")
+    _seal_run(tmp_path, "other-source")
+    _write_shared_audit(tmp_path, [
+        _report_row(attempt="my-delivery", source="my-source", hour=10, conversation="my-chat"),
+        _report_row(attempt="other-delivery", source="other-source", hour=12, conversation="other-chat"),
+    ])
+    selectors = {}
+    if scope in {"authenticated", "both"}:
+        selectors["authenticated_conversation_id"] = "my-chat"
+    if scope in {"explicit", "both"}:
+        selectors["conversation_id"] = "my-chat"
+    out = _report_query(tmp_path, **selectors)
+    assert out["ok"] is True, out
+    assert out["data"]["source"]["run_id"] == "my-source"
+
+
+def test_report_cannot_override_authenticated_conversation(tmp_path: Path):
+    _seal_run(tmp_path, "other-source")
+    _write_shared_audit(tmp_path, [
+        _report_row(attempt="other-delivery", source="other-source", hour=12, conversation="other-chat"),
+    ])
+    out = _report_query(tmp_path, authenticated_conversation_id="my-chat", conversation_id="other-chat")
+    assert out["ok"] is False
+    assert out["error"]["code"] == "PERMISSION_DENIED"
+
+
+@pytest.mark.parametrize("stored_conversation", [None, "other-chat"])
+def test_authenticated_report_lookup_never_drops_filter_for_global_fallback(tmp_path: Path, stored_conversation):
+    _seal_run(tmp_path, "global-source")
+    _write_shared_audit(tmp_path, [
+        _report_row(attempt="global-delivery", source="global-source", hour=12, conversation=stored_conversation),
+    ])
+    out = _report_query(tmp_path, authenticated_conversation_id="my-chat")
+    assert out["ok"] is False
+    assert out["error"]["code"] == "DEPENDENCY_MISSING"
+    assert out["error"]["details"]["reason"] == "no_notification_run"
+
+
+@pytest.mark.parametrize("invalid", [
+    "missing", "empty", "duplicate", "wrong_account", "wrong_kind", "revision_bool", "revision_negative",
+    "digest_invalid", "date_invalid", "source_run_nonstring", "delivery_key_nonstring", "nonlist",
+])
+def test_latest_delivered_invalid_source_blocks_older_valid_report(tmp_path: Path, invalid):
+    _seal_run(tmp_path, "old-source")
+    _seal_run(tmp_path, "latest-source")
+    _seal_run(tmp_path, "latest-attempt")
+    earlier = _report_row(attempt="old-attempt", source="old-source", hour=10, conversation="my-chat")
+    latest = _report_row(attempt="latest-attempt", source="latest-source", hour=12, conversation="my-chat")
+    extra = latest["extra"]
+    ref = extra["report_refs"][0]
+    if invalid == "missing":
+        del extra["report_refs"]
+    elif invalid == "empty":
+        extra["report_refs"] = []
+    elif invalid == "duplicate":
+        extra["report_refs"].append(dict(ref))
+    elif invalid == "nonlist":
+        extra["report_refs"] = 1
+    else:
+        key, value = {
+            "wrong_account": ("account", "sy"), "wrong_kind": ("source_kind", "failed_brief"),
+            "revision_bool": ("revision", False), "revision_negative": ("revision", -1),
+            "digest_invalid": ("source_digest", "not-a-digest"), "date_invalid": ("market_date", "not-a-date"),
+            "source_run_nonstring": ("source_run_id", ["latest-source"]),
+            "delivery_key_nonstring": ("delivery_key", ["delivery"]),
+        }[invalid]
+        ref[key] = value
+    _write_shared_audit(tmp_path, [earlier, latest])
+
+    out = _report_query(tmp_path, authenticated_conversation_id="my-chat")
+
+    assert out["ok"] is False, out
+    assert out["error"]["code"] == "DEPENDENCY_MISSING", out
+    assert out["error"]["details"]["reason"] == "notification_source_unavailable", out
+    assert out["error"]["details"]["retryable"] is False
+    assert not out.get("data")
+
+
+@pytest.mark.parametrize("corruption", ["malformed_line", "nonobject_line", "invalid_utf8", "directory"])
+def test_notification_audit_corruption_blocks_older_delivered_source(tmp_path: Path, corruption):
+    _seal_run(tmp_path, "old-source")
+    _write_shared_audit(tmp_path, [
+        _report_row(attempt="old-attempt", source="old-source", hour=10, conversation="my-chat"),
+    ])
+    audit = tmp_path / "output_shared" / "state" / "audit_events.jsonl"
+    if corruption == "directory":
+        audit.unlink()
+        audit.mkdir()
+    else:
+        suffix = {"malformed_line": b"{\n", "nonobject_line": b"[]\n", "invalid_utf8": b"\xff\n"}[corruption]
+        audit.write_bytes(audit.read_bytes() + suffix)
+    out = _report_query(tmp_path, authenticated_conversation_id="my-chat")
+    assert out["ok"] is False, out
+    assert out["error"]["code"] == "DEPENDENCY_MISSING", out
+    assert out["error"]["details"]["reason"] == "notification_audit_incomplete"

@@ -187,6 +187,7 @@ def compact_observation(
                 if (safe_error or {}).get("hint")
                 else {}
             ),
+            **({"reason": str((safe_error or {}).get("reason"))} if (safe_error or {}).get("reason") else {}),
             **({"field": str((safe_error or {}).get("field"))} if (safe_error or {}).get("field") else {}),
             **({"details": (safe_error or {}).get("details")} if (safe_error or {}).get("details") else {}),
         })
@@ -235,7 +236,10 @@ def compact_observation(
         "result_contract": _compact_output_contract(output_contract),
     })
     if _contains_projection_truncation(value) or conservative_json_tokens(observation) > MAX_OBSERVATION_TOKENS:
-        observation = bounded_narrowing_observation(observation)
+        hint = data.get("narrowing_hint")
+        observation = bounded_narrowing_observation(
+            observation, **({"message": _clip(hint, 320)} if isinstance(hint, str) and hint.strip() else {}),
+        )
     return observation
 
 
@@ -1001,6 +1005,10 @@ def _safe_error(error: dict[str, Any] | None) -> dict[str, Any] | None:
                 "consumer",
                 "reason_code",
                 "blocked_by",
+                "account",
+                "run_id",
+                "reason",
+                "hint",
             }
         }
         if safe_details:

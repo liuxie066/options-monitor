@@ -18,7 +18,7 @@ from src.application.bot.contracts import (
     new_id,
     utc_now_iso,
 )
-from src.application.bot.event_store import public_progress_event, incomplete_progress_response
+from src.application.bot.event_store import public_progress_event, incomplete_progress_response, safe_failure_cause
 from src.infrastructure.private_storage import connect_private_sqlite, private_path
 
 
@@ -727,6 +727,8 @@ class BotHostStore:
     @staticmethod
     def _progress(row: dict[str, Any], result: AppResult | None = None) -> dict[str, Any]:
         from src.application.bot.memory import scope_from_contract
+        from src.application.agent_tool_registry import pure_read_tool_names
+        business_reads = pure_read_tool_names()
         try:
             contract = contract_from_payload(json.loads(row['contract_json']))
             owner = scope_from_contract(contract).owner_scope
@@ -735,12 +737,25 @@ class BotHostStore:
         events = json.loads(row.get('events_json') or '[]')
         refs, accounts = [], set()
         read_count = partial_count = failed_count = 0
+        failure_counts = {"read": 0, "submission": 0, "internal": 0}
+        failure_causes = []
         sources = []
         budget_reason = None
         for event in events:
             data = event.get('payload', {})
             if event.get('type') == 'agent_budget_fallback':
                 budget_reason = data.get('reason')
+            if event.get('type') in {'tool_result', 'memory_tool_result'} and data.get('ok') is False:
+                tool_name = data.get('tool_name')
+                category = ('internal' if event.get('type') == 'memory_tool_result' or tool_name == 'bot_memory'
+                            else 'submission' if tool_name == 'submit_answer'
+                            else 'read' if tool_name in business_reads else 'internal')
+                failure_counts[category] += 1
+                cause = safe_failure_cause({**data, "tool_name": "bot_memory"} if event.get('type') == 'memory_tool_result' else data, category)
+                if cause.get('account'):
+                    accounts.add(cause['account'].lower())
+                if cause not in failure_causes and len(failure_causes) < 3:
+                    failure_causes.append(cause)
             if event.get('type') == 'tool_result' and data.get('tool_name') != 'bot_memory':
                 if data.get('ok') is False:
                     failed_count += 1
@@ -770,7 +785,7 @@ class BotHostStore:
         return {'progress_ref': row['run_id'], 'revision': 1, 'owner_scope': owner,
                 'goal': json.loads(row['contract_json']).get('input', {}).get('user_message', '')[:2000],
                 'accounts': sorted(accounts), 'evidence_refs': refs[-12:],
-                'completed_checks': {'read_count': read_count, 'partial_count': partial_count, 'failed_count': failed_count, 'sources': sources[:4]},
+                'completed_checks': {'read_count': read_count, 'partial_count': partial_count, 'failed_count': failed_count, 'failed_read_count': failure_counts['read'], 'failed_submission_count': failure_counts['submission'], 'failed_internal_count': failure_counts['internal'], 'failure_causes': failure_causes, 'sources': sources[:4]},
                 'termination_reason': ((result.error or {}).get('reason') or budget_reason or (result.error or {}).get('code')) if result else row.get('termination_reason'),
                 'next_step': '重新读取当前证据，继续原问题；旧引用仅作导航。', 'resolved_by': None, 'resolved_at': None}
 
