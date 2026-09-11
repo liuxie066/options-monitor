@@ -26,7 +26,7 @@ from src.application.bot.model_config import load_assistant_llm_config, model_ap
 from src.application.account_config import accounts_from_config
 from src.application.agent_tool_config import load_runtime_config
 
-BASELINE_REF = "3e496cf6"
+BASELINE_REF = "HEAD"
 PACK_SCHEMA = "om.bot.prompt_rules_pack.v1"
 REPORT_SCHEMA = "om.bot.prompt_rules_eval.v1"
 REVIEW_SCHEMA = "om.bot.prompt_rules_review.v1"
