@@ -525,3 +525,32 @@ def test_cash_bridge_is_unavailable_without_opening_transport(monkeypatch) -> No
     assert data["combined"]["reason"] == "portfolio_cash_facts_not_onboarded"
     assert warnings == []
     assert meta == {}
+
+
+@pytest.mark.parametrize("view", ["health", "accounts", "overview", "holdings", "cash", "nav", "full_report", "distribution"])
+@pytest.mark.parametrize("selector", [{}, {"account": "lx"}, {"accounts": ["lx"]}, {"account": "lx", "accounts": ["lx"]}])
+def test_portfolio_closed_account_matrix_before_transport(monkeypatch, view, selector):
+    from src.application.tool_execution import execute_tool
+    required = {"holdings", "cash", "nav", "full_report"}
+    allowed = (not selector if view in {"health", "accounts"}
+               else "account" not in selector if view == "overview"
+               else selector == {"account": "lx"} if view in required
+               else len(selector) <= 1)
+    calls = []
+    class Client:
+        def read_view(self, *args, **kwargs):
+            calls.append((args, kwargs))
+            return {}
+    monkeypatch.setattr(portfolio, "_portfolio_client", lambda: Client())
+    response = execute_tool("portfolio_query", {"view": view, **selector})
+    assert response["ok"] is allowed, response
+    assert bool(calls) is allowed
+    if not allowed:
+        assert response["error"]["code"] == "INPUT_ERROR"
+
+
+@pytest.mark.parametrize("view", ["health", "accounts", "overview", "distribution"])
+def test_portfolio_empty_optional_account_keeps_unscoped_default(monkeypatch, view):
+    data, _, _, seen = _call({"view": view, "account": " "}, monkeypatch, {})
+    assert data["scope"] == {"view": view}
+    assert "account" not in parse_qs(urlsplit(seen["request"].full_url).query)

@@ -1112,3 +1112,36 @@ def test_run_one_account_reuses_validated_close_inputs_and_result_text(
         "candidate text\n\nvalidated result text"
     )
     assert "unvalidated path text" not in outcome.result.notification_text
+
+
+@pytest.mark.parametrize("decision,expected", [
+    ({"source": "account_scheduler", "should_run": False}, True),
+    ({"source": "account_scheduler", "should_run": 0}, False),
+    ({"source": "account_scheduler", "should_run": None}, False),
+    ({"source": "account_scheduler", "should_run": True}, False),
+    ({"source": "account_scheduler_schema_error", "should_run": False}, False),
+    ({"source": "account_scheduler_exception", "should_run": False}, False),
+    ({"source": "global_scheduler", "should_run": False}, False),
+    ({"should_run": False}, False),
+    ({}, False),
+])
+def test_terminal_skip_marker_requires_positive_account_scheduler_decision(
+    tmp_path, monkeypatch, decision, expected,
+):
+    from src.application import account_run
+
+    request = replace(
+        _make_request(tmp_path), should_run_global=False,
+        scan_decision_by_account={"lx": decision},
+    )
+    # Keep the real scan gate; a due account with no symbols is not a scheduler skip.
+    monkeypatch.setattr(account_run, "resolve_watchlist_config", lambda _: [])
+    monkeypatch.setattr(account_run, "run_pipeline_script", lambda **_: pytest.fail("pipeline started"))
+    outcome = account_run.run_one_account(
+        request=request, runlog=_FakeRunlog(), audit_fn=lambda *a, **k: None,
+        fail_schema_validation=lambda **_: pytest.fail("schema failed"),
+    )
+    path = request.account_config_authority.state_path.parent / "account_metrics.json"
+    metrics = json.loads(path.read_text())
+    assert (metrics.get("scan_outcome") == "scheduler_skipped") is expected
+    assert (outcome.acct_metrics.get("scan_outcome") == "scheduler_skipped") is expected

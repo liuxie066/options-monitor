@@ -32,6 +32,7 @@ def build_notification_perception_event(
     notify_failures: list[dict[str, Any]] | None = None,
     send_attempted_count: int | None = None,
     send_confirmed_count: int | None = None,
+    report_refs: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     messages = account_messages if isinstance(account_messages, dict) else {}
     candidates = notify_candidates if isinstance(notify_candidates, list) else []
@@ -49,7 +50,7 @@ def build_notification_perception_event(
         symbols=symbol_summary.get("symbols", []),
         action=str(delivery.get("action") or event_kind),
     )
-    return _strip_empty(
+    event = _strip_empty(
         {
             "schema_version": NOTIFICATION_PERCEPTION_EVENT_SCHEMA_VERSION,
             "event_type": NOTIFICATION_PERCEPTION_EVENT_TYPE,
@@ -100,6 +101,7 @@ def build_notification_perception_event(
                 }
             ),
             "safe_slots": safe_slots,
+            "report_refs": report_refs,
             "summary": _summary(
                 event_kind=str(event_kind or "notification_event"),
                 accounts=accounts,
@@ -109,6 +111,9 @@ def build_notification_perception_event(
             ),
         }
     )
+    if sent_accounts is not None:
+        event["send_summary"]["sent_accounts"] = _string_list(sent_accounts)
+    return event
 
 
 def mask_notification_target(target: Any) -> str | None:
