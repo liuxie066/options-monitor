@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from contextlib import closing
+from pathlib import Path
+
 from .external_event_key import ensure_execution_writer_guard
 from .repository_trade_schema import _execution_candidate_rows, validated_execution_identity_metadata
 
@@ -63,6 +66,65 @@ def _wheel_activation_row(row: sqlite3.Row) -> dict[str, Any]:
             if row["deactivation_request_hash"] is not None
             else None
         ),
+    }
+
+
+def read_wheel_activation_windows_read_only(
+    sqlite_path: str | Path | None,
+    market: str,
+    account: str,
+) -> dict[str, Any]:
+    """Read one activation history without initializing ledger state."""
+
+    market_value, account_value = _wheel_activation_scope(market, account)
+    if sqlite_path is None:
+        return {"windows": [], "source_status": "missing_database"}
+    path = Path(sqlite_path).expanduser()
+    if not path.exists():
+        return {"windows": [], "source_status": "missing_database"}
+    if not path.is_file():
+        return {"windows": [], "source_status": "unreadable"}
+    try:
+        resolved = path.resolve()
+        with resolved.open("rb") as source:
+            header = source.read(20)
+        wal = resolved.with_name(resolved.name + "-wal")
+        shm = resolved.with_name(resolved.name + "-shm")
+        wal_mode = header[18:20] == b"\x02\x02"
+        if wal.exists() != shm.exists() or (
+            wal_mode and not (wal.is_file() and shm.is_file())
+        ):
+            return {"windows": [], "source_status": "unreadable"}
+        with closing(
+            sqlite3.connect(f"{resolved.as_uri()}?mode=ro", uri=True, timeout=1)
+        ) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only=ON")
+            conn.execute("BEGIN")
+            table = conn.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'wheel_activation_windows'"
+            ).fetchone()
+            if table is None:
+                return {"windows": [], "source_status": "missing_table"}
+            rows = conn.execute(
+                """
+                SELECT market, account, generation, activated_at_ms,
+                       deactivated_at_ms, policy_hash,
+                       activation_request_id, activation_request_hash,
+                       deactivation_request_id, deactivation_request_hash
+                FROM wheel_activation_windows
+                WHERE market = ? AND account = ?
+                ORDER BY generation ASC
+                """,
+                (market_value, account_value),
+            ).fetchall()
+        windows = [_wheel_activation_row(row) for row in rows]
+    except (KeyError, OSError, sqlite3.Error, TypeError, ValueError):
+        return {"windows": [], "source_status": "unreadable"}
+    return {
+        "windows": windows,
+        "source_status": "available",
     }
 
 

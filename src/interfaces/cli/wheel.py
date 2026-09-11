@@ -7,6 +7,11 @@ from pathlib import Path
 from typing import Any
 
 import src.application.wheel as wheel_application
+from src.application.agent_tool_contracts import (
+    AgentToolError,
+    build_error_payload,
+    build_response,
+)
 from src.application.agent_tool_config import load_runtime_config
 from src.application.cash_conversion import load_cash_fx_payload
 from src.application.ledger.api import (
@@ -23,7 +28,6 @@ from src.application.wheel.capacity import (
     load_shared_cash_capacity_fact,
     load_shared_coverage_fact,
 )
-from src.application.wheel.config import build_wheel_policy_hash
 from src.application.wheel.workflows import (
     cancel_wheel_intent,
     confirm_wheel_linkage,
@@ -93,6 +97,7 @@ def _add_activation_runtime(parser: argparse.ArgumentParser, *, write: bool) -> 
     parser.add_argument("--runtime-root")
     parser.add_argument("--format", choices=("text", "json"), default="text")
     if write:
+        parser.add_argument("--expected-source-sha256")
         add_write_flags(parser, high_risk=True)
 
 
@@ -297,27 +302,32 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
     is_activation_status = (
         args.wheel_command == "activation" and args.activation_action == "status"
     )
-    apply_changes = False if is_activation_status else _write_requested(args)
-    config_path, cfg, repo = _open_runtime(args, apply_changes=apply_changes)
     if args.wheel_command == "activation":
-        activation_args: dict[str, Any] = {
-            "action": args.activation_action,
-            "market": args.market,
-            "account": args.account,
-        }
-        if not is_activation_status:
-            activation_args.update(
-                expected_current_generation=args.expected_current_generation,
-                request_id=args.request_id,
-                actor=args.actor,
-                policy_sha256=build_wheel_policy_hash(
-                    cfg,
-                    market=args.market,
-                    account=args.account,
-                ),
-                apply_changes=apply_changes,
+        apply_changes = False if is_activation_status else _write_requested(args)
+        if apply_changes and not str(args.expected_source_sha256 or "").strip():
+            raise SystemExit(
+                "Wheel activation apply requires --expected-source-sha256 from preview"
             )
-        return wheel_application.change_wheel_activation(repo, **activation_args)
+        return wheel_application.change_wheel_activation(
+            repo_root=Path(__file__).resolve().parents[3],
+            action=args.activation_action,
+            market=args.market,
+            account=args.account,
+            config_path=args.config_path,
+            config_key=args.market,
+            data_config=args.data_config,
+            runtime_root=args.runtime_root,
+            expected_current_generation=getattr(
+                args, "expected_current_generation", None
+            ),
+            request_id=getattr(args, "request_id", None),
+            actor=getattr(args, "actor", None),
+            expected_source_sha256=getattr(args, "expected_source_sha256", None),
+            apply_changes=apply_changes,
+        )
+
+    apply_changes = _write_requested(args)
+    config_path, cfg, repo = _open_runtime(args, apply_changes=apply_changes)
 
     instant = int(getattr(args, "as_of_ms", None) or _now_ms())
     if args.wheel_command == "branch":
@@ -503,7 +513,24 @@ def _print_result(result: dict[str, Any], *, output_format: str) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    _print_result(execute(args), output_format=args.format)
+    try:
+        result = execute(args)
+    except (AgentToolError, ValueError) as exc:
+        err = (
+            exc
+            if isinstance(exc, AgentToolError)
+            else AgentToolError(code="INPUT_ERROR", message=str(exc))
+        )
+        _print_result(
+            build_response(
+                tool_name="wheel",
+                ok=False,
+                error=build_error_payload(err),
+            ),
+            output_format=args.format,
+        )
+        return 2
+    _print_result(result, output_format=args.format)
     return 0
 
 

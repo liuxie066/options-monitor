@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import sqlite3
 from collections.abc import Mapping, Sequence
-from contextlib import closing
 from pathlib import Path
 from typing import Any
 
+from src.application.ledger.api import read_wheel_activation_windows_read_only
 from src.application.wheel.config import (
     evaluate_wheel_activation_readiness,
     resolve_wheel_activation_descriptor,
@@ -38,11 +37,6 @@ def _read_latest_wheel_activation_windows(
     market: str,
     accounts: Sequence[str],
 ) -> tuple[dict[str, dict[str, Any]], str]:
-    if sqlite_path is None:
-        return {}, "missing_database"
-    path = Path(sqlite_path).expanduser()
-    if not path.exists() or not path.is_file():
-        return {}, "missing_database"
     normalized_accounts = tuple(
         dict.fromkeys(
             str(item).strip().lower()
@@ -52,35 +46,18 @@ def _read_latest_wheel_activation_windows(
     )
     if not normalized_accounts:
         return {}, "available"
-    placeholders = ", ".join("?" for _item in normalized_accounts)
-    try:
-        with closing(
-            sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
-        ) as conn:
-            conn.row_factory = sqlite3.Row
-            table = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'wheel_activation_windows'"
-            ).fetchone()
-            if table is None:
-                return {}, "missing_table"
-            rows = conn.execute(
-                f"""
-                SELECT market, account, generation, activated_at_ms,
-                       deactivated_at_ms, policy_hash
-                FROM wheel_activation_windows
-                WHERE market = ? AND account IN ({placeholders})
-                ORDER BY account ASC, generation DESC
-                """,
-                (market, *normalized_accounts),
-            ).fetchall()
-    except (OSError, sqlite3.Error):
-        return {}, "unreadable"
     latest: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        account = str(row["account"])
-        if account not in latest:
-            latest[account] = {key: row[key] for key in _WHEEL_WINDOW_FIELDS}
-    return latest, "available"
+    source_status = "available"
+    for account in normalized_accounts:
+        result = read_wheel_activation_windows_read_only(sqlite_path, market, account)
+        status = str(result["source_status"])
+        if status != "available":
+            source_status = status
+            continue
+        windows = result["windows"]
+        if windows:
+            latest[account] = dict(windows[-1])
+    return latest, source_status
 
 
 def build_wheel_activation_readiness(
@@ -132,6 +109,16 @@ def build_wheel_activation_readiness(
     for account in normalized_accounts:
         descriptor: dict[str, Any] | None = None
         durable_window = windows.get(account)
+        descriptor_error = False
+        if normalized_market:
+            try:
+                descriptor = resolve_wheel_activation_descriptor(
+                    config,
+                    market=normalized_market,
+                    account=account,
+                )
+            except (TypeError, ValueError):
+                descriptor_error = True
         if not normalized_market:
             readiness = {
                 "ready": False,
@@ -139,24 +126,25 @@ def build_wheel_activation_readiness(
                 "monitoring_gate": "disabled",
                 "reason_code": "market_unavailable",
             }
+        elif descriptor_error:
+            readiness = {
+                "ready": False,
+                "enabled_for_new_lifecycle": False,
+                "monitoring_gate": "config_mismatch",
+                "reason_code": "descriptor_mismatch",
+            }
+        elif storage_status not in {"available", "not_required"}:
+            readiness = {
+                "ready": False,
+                "enabled_for_new_lifecycle": False,
+                "monitoring_gate": "disabled",
+                "reason_code": storage_status,
+            }
         else:
-            try:
-                descriptor = resolve_wheel_activation_descriptor(
-                    config,
-                    market=normalized_market,
-                    account=account,
-                )
-                readiness = evaluate_wheel_activation_readiness(
-                    descriptor,
-                    durable_window,
-                )
-            except (TypeError, ValueError):
-                readiness = {
-                    "ready": False,
-                    "enabled_for_new_lifecycle": False,
-                    "monitoring_gate": "config_mismatch",
-                    "reason_code": "descriptor_mismatch",
-                }
+            readiness = evaluate_wheel_activation_readiness(
+                descriptor,
+                durable_window,
+            )
         descriptor_identity = _wheel_window_identity(descriptor)
         durable_identity = _wheel_window_identity(durable_window)
         effective_identity = durable_identity or descriptor_identity or {

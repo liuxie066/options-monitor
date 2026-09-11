@@ -1005,3 +1005,220 @@ checks 后再按实际改动范围运行 repository analyze、完整测试和文
   第二个现金模型。
 - 实际 fees 或 cash conversion 不完整时可能让部分历史事实只能停在 data unavailable；不得用估算值
   覆盖已发生但缺失的真实成交费用。
+
+## 14. 一次操作完成 Wheel 启停
+
+### 14.1 目标与边界
+
+一次市场、账户级启用或停用操作完成 durable window、配置同步和实际 readiness 回读。
+操作者不再复制 activation descriptor；只有目标监控状态经回读确认，才报告完成。
+本节替代 §13.6 中分开的窗口写入和配置安装步骤，并明确关闭窗口后的 policy drift 诊断；
+historical event-time eligibility、current action matrix、策略参数及分支继续／结束决定保持不变。
+
+CLI 与 Agent 均调用 `change_wheel_activation`，依次完成窗口提交、配置发布和实际状态回读。
+窗口 receipt 单独表示账本效果；操作只有通过最终 readiness 回读才报告完成。
+
+验收 S1～S4 和批准原文由 workflow artifact 的 Scope Contract 唯一保存：S1 统一操作，S2 真实结果，
+S3 同请求恢复，S4 保留隔离和业务规则。不新增表、开关、后台恢复服务、通用事务协调器或依赖。
+不回填历史指派，不删除启停历史，不借此发布、部署或修改生产。
+仅有旧 `wheel.enabled=true` 的安装不得被静默激活。
+
+### 14.2 真源与公开合同
+
+- SQLite activation windows 唯一拥有启停时间、generation、request identity 和历史区间。
+  YAML 拥有策略参数和窗口 descriptor 副本，runtime JSON 由既有配置构建链生成。
+  静态 config build 仍不查询数据库、不创建窗口。
+- `wheel.enabled` 仅保留解析兼容，不获得新的运行时作用。操作文档使用既有 activation 命令，
+  实际状态由目标账户 readiness 表示。
+- 沿用 CLI `wheel activation enable|disable|status` 和 Agent `wheel_activation`。
+  保留 action、market、account、request ID、actor、expected current generation 及现有 preview/confirm/apply。
+  preview 增加 `expected_source_sha256`、解析后的目标路径和待发布字段／文件差异；apply 必须带回
+  该 source SHA。这是防止过期预览的输入，不是新开关。已有写调用缺少它时拒绝写入并提示先预览。
+- market/account 必须属于当前配置；账户使用既有规范化规则。enable 仅将目标账户纳入该市场
+  `wheel.accounts` 并安装其 descriptor；disable 保留账户列表，只关闭窗口并安装 closed descriptor。
+  不覆盖其它账户成员、descriptor 或策略值。
+- status 直接比较指定账户的最新窗口与 runtime descriptor，即使旧 `wheel.accounts` 未包含它。
+  保留 current/latest window，返回 membership、monitoring gate、ready、reason；不能用市场聚合结果
+  代替目标账户结果。未加入成员列表的 open window 不得显示可监控；closed window 可独立确认停用。
+  数据库存储不可用时 status=unavailable，可读但无窗口时为 no_window，已有窗口才返回 open/closed。
+  runtime/数据库不可读、表不存在及无窗口分别报告；不可用不能伪装成空账本。
+  YAML 缺失时仍返回已知 runtime/window 事实和 source unavailable，preview/apply 则明确失败。
+- enable 完成要求目标成员存在、最新窗口与 descriptor（含 policy hash）精确一致且 enabled/ready。
+  disable 完成要求 market/account/generation/activation/deactivation 时间精确匹配最新已关闭窗口，
+  monitoring gate=disabled、reason=closed_window；`ready=false` 沿用关闭状态语义。
+  closed descriptor 的当前配置 policy hash 与历史窗口不同，单独报告 policy drift，不阻塞停用完成；
+  不放宽 open window 的 hash 一致性，也不修改历史 policy hash。
+- 成功结果保留原窗口 receipt，增加 config audit、readiness、original request/CAS、失败阶段与重试指引。
+  `write_applied` 表示本次产生过持久化修改，不等于整体完成；仅补配置也须反映写入。
+  失败复用 `AgentToolError.details` 保存以上已知事实、发布／恢复状态及 source SHA；CLI 和 Agent
+  都保留该结构。响应丢失后的重试需区分此前已写入与本次未写入，不能重新编造审计回执。
+  当前 request 始终是主操作身份；窗口 receipt 与 config audit 各保留自己的 `write_applied`。
+  另返回 `recovered_transactions`：既有 audit ID、恢复方向、实际处理的 targets、source 前后 SHA
+  及该次恢复的写入事实。顶层 `write_applied` 汇总本次调用的窗口、配置和恢复写入；旧 journal
+  的恢复不是当前窗口已写入。只清理 committed journal 时也明确标注 cleanup，不冒充配置发布。
+  恢复中途失败保留已完成的 target effects；无法确认的写入须报告证据未知，不能断言没有发生。
+  Agent manifest 如实声明窗口及配置写入；保留现有写入授权和 confirm gate，不新增权限开关。
+
+### 14.3 最小共享流程
+
+`src/application/wheel/workflows.py` 拥有启停编排；既有窗口 transaction 保留为内部步骤。
+CLI 与 Agent 只适配参数及既有权限，不能各自实现同步。复用
+`src/application/config_authoring_transaction.py` 的 lock、源哈希、备份和 journal/recovery；
+`src/application/wheel/runtime_readiness.py` 及 `src/application/wheel/config.py` 拥有只读比较；
+`src/application/ledger/api.py` 暴露需要的窗口读取／写入，非 ledger 模块不导入 repository internals。
+
+**目标绑定与只读入口。** 在既有 config/path owner 增加必要的窄解析函数，将 repo root、runtime root、
+canonical YAML、目标 runtime、market/account 和 SQLite store 解析一次，供 guard、lock、workflow
+及回读共同使用。按现有 deployment metadata/路径布局核对身份；发布目标必须就是被检查的 runtime。
+显式 runtime root 与 config 来源冲突或 store 不一致时拒绝；不得从 cwd 猜测生产文件。
+无需新通用 context 类。status/preview 在构造 writer repository 之前选择已有只读连接路径
+（SQLite `mode=ro`），不初始化 schema、DB、WAL/SHM、锁文件、journal 或 state 目录；
+缺少账本、旧 schema 或 pending authoring journal 显式报告，由 apply 的既有受控恢复处理。
+允许临时构建目录并清理；不在 preview 修复状态。
+
+apply 沿用部署文档的单一 runtime owner 模式：操作进程与 canonical YAML、runtime 及待恢复
+target 使用同一 owner。任何恢复或窗口写入前检查现有 target 的 uid/gid/mode 与本进程在目标
+目录创建替换文件的身份是否一致；不一致或无法证明保留访问身份时拒绝，并提示使用原部署用户。
+沿用现有 mode 保留，不自动 chown、提升权限或迁移 ACL；混合 owner／定制 ACL 布局交部署 owner
+处理。共享配置事务入口对所有待恢复目标执行访问身份检查，普通配置发布也不能绕过；
+Wheel 另行核对目标属于同一 deployment。检查只覆盖本次可能发布／恢复的目标，不扫描或改写整个 runtime。
+
+**锁入口。** 在 config transaction owner 内抽出同一 authoring lock 的受控上下文与持锁发布步骤。
+普通 config publisher 保留外层入口；Wheel 在该上下文内做窗口和发布，内部发布不再次 flock。
+锁持有与恢复由 owner 管理，不提供任意 `skip_lock`，不新增锁文件或通用协调器。
+恢复未完成 journal 必须发生在读取 source、构建待发布内容之前；普通 publisher 同样遵守此顺序。
+固定 lock 顺序为现有 deployment authoring lock -> 短 SQLite transaction。
+
+**apply 顺序。**
+
+1. 通过既有权限和目标身份验证后获取 authoring lock，恢复 journal，再读取最新 source 和窗口。
+   先检索原请求再做首次 CAS，核验 action/request/actor/原 expected generation/policy identity，
+   并核验请求未被后续操作替代。无新写入且完整后置条件已满足的重试可直接回读确认。
+2. 任何新窗口／配置写入之前，核验 preview 的 source SHA 及目标有效配置差异。
+   用当前 canonical YAML 通过既有 resolver 得到 runtime shape；enable 用该 shape 计算 policy hash，
+   disable 用 durable open window 的 policy hash 做原窗口 CAS。不能用 raw YAML 或旧 runtime 重算原请求。
+   预构建目标配置并确定 §14.4 的最小文件集；除目标成员及 descriptor 差异，待发布有效值必须与
+   已安装 runtime 一致。有其它待发布修改时拒绝，不通过 Wheel 启停顺带部署它们。
+3. 在短 SQLite transaction 内重新验证请求和 latest window，执行既有窗口写入。
+   generation/time 只由数据库分配，commit 是启停生效点；不把 preview 的占位时间写入。
+   disable 关闭窗口后立即阻止依赖 current-enabled 的动作；不持 SQLite 写锁构建或安装文件。
+4. 用真实提交窗口的 readback descriptor 重新构建目标 YAML/runtime，复用原 source SHA
+   的最终检查与既有文件发布事务。只能修改目标账户字段；不得手工拼改 runtime JSON。
+   文件失败不回滚数据库历史时间；重试继续同一窗口。
+5. 从磁盘重新读目标 runtime 和最新窗口，对指定账户计算 §14.2 后置条件，并复查 supersession。
+   未达到后置条件就返回带 durable facts 的未完成错误；不调用 tick、broker、通知或重启来验收。
+
+锁只串行化受控配置操作，不锁扫描／trade writer。数据库与文件没有跨存储原子性；
+窗口提交到配置安装之间及同步失败时，current actions fail closed。真实指派仍按事件发生时间
+及当时有效窗口判断，不能被配置同步延迟吞掉；这不意味着分支已经开始推荐。
+
+### 14.4 发布范围、恢复与并发
+
+**最小发布范围。** 默认只生成目标市场，调用现有 publisher 的 `markets=[target]`、
+`include_assistant=false`。当前市场 freshness 比较 `market_user.effective`，无需因整个 YAML 的 SHA
+改变而刷新另一市场。对同 deployment、同源且已存在的另一市场快照，在 preview 和 apply
+检查候选 YAML 是否保留其有效配置和 freshness：支持 effective fingerprint 时保持文件字节不变；
+仍依赖整源 SHA 的旧快照才加入本次已有 publisher 的 markets，在确认有效值不变后更新生成元数据。
+身份不可确认或存在有效值 drift 时拒绝，不新增兼容元数据写器、不创建未安装市场的快照。
+
+Assistant resolver 仅消费 assistant/inbound 及 defaults；`assistant/config_loader.py` 和
+`bot/model_config.py` 校验、读取内容，没有对 Wheel 修改触发整源 SHA freshness gate。
+因此本操作不生成／刷新 assistant 文件，保留其原生成来源记录，也不要求无关 assistant 配置可构建。
+所有准备安装的 runtime 都比较完整运行配置（仅排除既有 `_generated`、`_resolved` 元数据）；
+仅目标市场允许目标账户成员／descriptor 的既定差异。构建默认值变化等其它 drift 也须拒绝。
+
+**重试合同。** SQLite request identity 保持原 action/market/account/request ID/actor/
+expected generation/policy hash；source SHA 是本次配置写入的预览条件，不加入旧 DB request hash。
+preview 先识别匹配的 durable request，再执行首次操作 CAS，返回无需修改、需完成配置或 superseded。
+复用请求时从 durable receipt 校验原 identity；新的 source preview 不得重置原 expected generation。
+同一 generation 内的 enable 被 disable、以及任一动作后出现新 generation，都属于 superseded；
+旧 disable 在 re-enable 后也不能重新安装 closed descriptor。此判断在锁内、窗口 transaction 内及
+最终回读核验，不能只比较 request ID 或 generation 而遗漏 action/postcondition。
+
+| 情况 | 必须行为 |
+|---|---|
+| preview 或 apply 前的身份／权限校验失败 | 不恢复 journal，不写窗口或配置；给出阻塞原因和已知状态 |
+| apply 恢复 journal 后，source SHA 或有效差异校验失败 | 不产生当前请求的窗口／descriptor 写入；已发生的 journal 恢复单独返回 recovered audit 及写入事实 |
+| journal 恢复本身失败 | 不执行当前请求；保留已处理 target、原 audit 和恢复错误，明确无法确认的磁盘状态 |
+| SQLite 提交失败 | 不发布新 descriptor；返回失败及已知 durable 状态 |
+| 窗口已提交、配置发布失败 | 明确未完成、窗口事实及本次写入；保留 config audit/恢复错误，指引同请求重试 |
+| 文件发布成功、回读失败／响应丢失 | 重试先核验原请求和真实后置条件；已完成只回读确认，不生成窗口或重复发布 |
+| 原 SHA 已变，但无写入的重试可证明完整后置条件 | 可以确认既有完成；旧 SHA 不是重新发布的许可 |
+| 原 SHA 已变，仍需补配置 | 返回原 request/CAS 和当前状态，重新 preview 获取 source SHA，再以同一 DB identity 补配置；不得绕过 SHA 检查 |
+| 同请求内容改变或旧请求被后续操作替代 | 冲突并报告当前状态，不安装历史 descriptor |
+| 已安装 policy 改变后停用 | disable 使用 durable 窗口 hash 关闭；closed readiness 单独报告 policy drift，不恢复旧 policy；再次 enable 用当前策略 |
+| 同账户并发启停 | authoring lock 串行，SQLite CAS 再核验；落败请求不发布配置 |
+| 其它账户／市场或同源受控编辑 | 使用同 deployment lock；过期预览拒绝，新的预览仅合并目标字段 |
+| 手工编辑绕过锁 | 写入前再次比较 source SHA；检测到冲突即停止并保留窗口事实，不盲目覆盖 |
+
+SHA 检查不能提供对不遵守锁协议的文件编辑者的原子 CAS；检查后的极窄竞争沿用现有 publisher
+限制，不在本任务增加通用文件事务系统。运维写入须使用受控入口。
+
+### 14.5 一个交付增量与验证
+
+一个可发布的行为增量覆盖 S1～S4，内部有两个开发里程碑，全部通过才交付：
+
+1. **公开操作闭环（S1、S2、S4）**：在临时 YAML、runtime、真实 SQLite 上从 CLI 和 Agent
+   分别验证 enable、disable、re-enable、目标账户未加入旧 wheel.accounts、旧 enabled 无窗口、
+   缺 YAML/DB/schema、冲突路径和目标账户与市场聚合不一致；断言 receipt、最终文件与目标 readiness。
+   status/preview 前后比较目录和 DB 文件指纹，证明没有初始化／迁移副作用。
+2. **恢复与隔离（S3、S4）**：在 DB commit 后、文件安装中和回读前注入失败，从公开入口
+   重试，断言原 generation/time、原 CAS identity、不重复效果和 Agent error.details 的 durable facts。
+   覆盖响应丢失后旧 SHA 无写回读、需新 preview 的同请求恢复、双向 supersession、policy drift 停用、
+   双进程锁/CAS、source drift、无关有效配置拒绝，以及 effective sibling/legacy sibling/assistant 的文件范围。
+   从两个入口覆盖 pending journal roll-forward/roll-back 后 stale preview 被拒绝、恢复中途失败：
+   核对真实文件、recovered audit、窗口／配置分项和顶层写入事实，不把恢复计作当前启停成功。
+   使用临时 `0600` 文件验证 mode/owner 保持；模拟执行身份不匹配，断言在恢复及窗口提交前拒绝。
+
+扩展既有 `tests/test_wheel_cli.py`、`tests/test_wheel_agent_tools.py`、
+`tests/test_wheel_activation.py`、`tests/test_wheel_runtime_readiness.py`；
+运行 `tests/test_config_authoring_transaction.py` 覆盖普通 config 发布与 Wheel 共享锁、恢复后读取、
+不发生锁重入死锁及部分文件失败的回归。测试 owner 以实现 baseline 实际路径为准。
+
+复用现有 S4 历史事件与动作矩阵测试，补窗口提交后配置失败的耦合场景：有效窗口内真实指派
+按 historical event-time 建分支；缺 descriptor 时不开始新 intent/start，但既有 conversion/end
+仍按原矩阵处理；晚到事件不能按处理时刻错误纳入窗口。无需重写整套 Wheel 策略测试。
+
+完成 focused Wheel activation/readiness/tick 集成、配置生成验证、Agent contract/smoke，
+并检查 import boundaries、dependency graph 及项目 guardrails。全部使用临时数据和模拟外部接口；
+不增加测试框架。文档限本节、必要的旧启停说明和公开合同，不改无关策略。
+
+### 14.6 取舍与交付边界
+
+复用窗口与配置事务完成单一操作，保留 descriptor/readiness 安全核验。
+拒绝让旧 enabled 绕过窗口、后台自动 reconcile、第三种状态存储和自动恢复旧策略。
+两次持久化之间的暂时不可监控状态由明确错误、原请求及现有 journal 恢复处理，不声称原子完成。
+
+既有 publisher 使用 YAML safe_dump，会改变格式并丢失注释；沿用现有备份，必须保留非目标 authored 值。
+注释保留工具不在本次范围，归 config authoring owner，用户提出该要求时单独处理。
+旧入口 apply 新增 source SHA 前置输入，需要同步 CLI help/Agent schema/操作说明和调用测试。
+发布前验证运行版本与冻结实现基线；实现授权不包含发布、部署或生产变更。
+
+### 14.7 操作与回执
+
+先查询目标账户的当前 generation，再预览。首次启用的 generation 为 0；已有历史时使用
+`latest_window.generation`。下例的路径、请求 ID 和 actor 由操作者填写：
+
+```bash
+./om wheel activation status --market us --account lx --config /runtime/config.us.json --format json
+./om wheel activation enable --market us --account lx --config /runtime/config.us.json \
+  --expected-current-generation 0 --request-id <request-id> --actor <actor> --format json
+```
+
+确认预览的 `paths`、`planned_changes` 和 source SHA 后，在同一命令追加
+`--expected-source-sha256 <expected_source_sha256> --apply --confirm`。
+停用使用 `activation disable` 和当前 generation；同样先预览，再确认应用。
+无需另行编辑 `wheel.enabled`、成员列表或 descriptor。
+
+Agent `wheel_activation` 使用相同的 `expected_source_sha256`、`apply`、`confirm` 参数。
+`window_receipt` 与 `config_audit` 分别记录窗口和文件发布；`recovered_transactions` 单独记录旧事务恢复。
+错误的这些事实位于 `error.details`。`write_applied=true` 仅表示本次发生了写入，必须同时检查
+`status` 与目标 `readiness` 才能判断操作完成。
+
+不完整操作应保留原 request ID、actor 和 expected generation，重新预览后继续应用。
+已经完成的同请求重试不会重建窗口或重复发布；被后续启停取代的请求返回冲突。
+只读查询遇到无法无副作用读取的 WAL 状态时明确返回 `unreadable`，不初始化或修复数据库。
+
+有效配置比较使用既有 Wheel materializer 展开缺省 call/put 参数后比较；这允许首次显式写入
+等价默认值，同时保留其它字段并拒绝任何策略值变化。文件访问身份检查沿用部署用户，
+不自动迁移 owner、group 或定制 ACL。
