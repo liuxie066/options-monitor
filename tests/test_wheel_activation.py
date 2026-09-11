@@ -6,6 +6,12 @@ from pathlib import Path
 import pytest
 
 import src.application.ledger.repository_assigned_stock as assigned_stock_repository
+import src.application.ledger.store_resolution as store_resolution
+from src.application.ledger.api import (
+    open_wheel_activation_repository,
+    read_wheel_activation_windows_read_only,
+    resolve_position_ledger_sqlite_path,
+)
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 
 
@@ -208,3 +214,116 @@ def test_wheel_activation_write_rolls_back_with_caller_transaction(
             raise RuntimeError("forced rollback")
 
     assert repo.list_wheel_activation_windows(market="us", account="lx") == []
+
+
+def test_wheel_activation_read_only_history_is_exact_and_explicit_when_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    missing_path = tmp_path / "missing.sqlite3"
+    assert read_wheel_activation_windows_read_only(
+        missing_path, "us", "lx"
+    ) == {"windows": [], "source_status": "missing_database"}
+    assert not missing_path.exists()
+
+    no_table_path = tmp_path / "no-table.sqlite3"
+    with sqlite3.connect(no_table_path) as conn:
+        conn.execute("CREATE TABLE unrelated (value INTEGER)")
+    assert read_wheel_activation_windows_read_only(
+        no_table_path, "us", "lx"
+    ) == {"windows": [], "source_status": "missing_table"}
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    timestamps = iter((1_000, 2_000, 3_000, 4_000))
+    monkeypatch.setattr(assigned_stock_repository, "now_ms", lambda: next(timestamps))
+    first = _open_window(repo)
+    closed = _close_window(repo)
+    second = _open_window(
+        repo,
+        expected_generation=1,
+        policy_hash="d" * 64,
+        request_id="activate-2",
+        request_hash="e" * 64,
+    )
+    _open_window(
+        repo,
+        market="hk",
+        policy_hash="f" * 64,
+        request_id="activate-hk",
+        request_hash="1" * 64,
+    )
+
+    result = read_wheel_activation_windows_read_only(repo.db_path, "US", "lx")
+
+    assert result == {
+        "windows": [closed["window"], second["window"]],
+        "source_status": "available",
+    }
+    assert result["windows"][0]["activation_request_id"] == first["window"][
+        "activation_request_id"
+    ]
+    assert result["windows"][0]["deactivation_request_id"] == "deactivate-1"
+
+
+def test_wheel_activation_read_only_does_not_create_wal_sidecars(
+    tmp_path: Path,
+) -> None:
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    _open_window(repo)
+    active_connection = repo._connect()
+    try:
+        wal = Path(f"{repo.db_path}-wal")
+        shm = Path(f"{repo.db_path}-shm")
+        assert wal.exists() and shm.exists()
+        before_names = {item.name for item in tmp_path.iterdir()}
+        before_database = Path(repo.db_path).read_bytes()
+        before_wal = wal.read_bytes()
+
+        result = read_wheel_activation_windows_read_only(repo.db_path, "us", "lx")
+
+        assert result["source_status"] == "available"
+        assert {item.name for item in tmp_path.iterdir()} == before_names
+        assert Path(repo.db_path).read_bytes() == before_database
+        assert wal.read_bytes() == before_wal
+    finally:
+        active_connection.close()
+
+    Path(f"{repo.db_path}-wal").unlink(missing_ok=True)
+    Path(f"{repo.db_path}-shm").touch()
+    assert read_wheel_activation_windows_read_only(
+        repo.db_path, "us", "lx"
+    ) == {"windows": [], "source_status": "unreadable"}
+    Path(f"{repo.db_path}-shm").unlink(missing_ok=True)
+    assert not Path(f"{repo.db_path}-wal").exists()
+    assert not Path(f"{repo.db_path}-shm").exists()
+
+
+def test_wheel_activation_path_resolution_is_pure_and_writer_skips_bootstrap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        store_resolution.sqlite3,
+        "connect",
+        lambda *_args, **_kwargs: pytest.fail("path resolution opened SQLite"),
+    )
+    runtime_root = tmp_path / "runtime"
+    path = resolve_position_ledger_sqlite_path(
+        base=tmp_path,
+        data_config=tmp_path / "portfolio.runtime.json",
+        runtime_root=runtime_root,
+    )
+    assert path == (
+        runtime_root / "output_shared" / "state" / "option_positions.sqlite3"
+    ).resolve()
+
+    monkeypatch.undo()
+    import src.application.ledger.bootstrap as ledger_bootstrap
+
+    monkeypatch.setattr(
+        ledger_bootstrap,
+        "load_option_positions_repo",
+        lambda *_args, **_kwargs: pytest.fail("activation writer ran bootstrap"),
+    )
+    repo = open_wheel_activation_repository(path)
+    assert repo.db_path == path

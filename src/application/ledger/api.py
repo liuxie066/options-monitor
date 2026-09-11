@@ -73,6 +73,9 @@ from src.application.ledger.external_event_key import (
 from src.application.ledger.read_only_evidence import (
     open_trade_reconciliation_evidence_repo,
 )
+from src.application.ledger.repository_assigned_stock import (
+    read_wheel_activation_windows_read_only,
+)
 from src.application.ledger.errors import LedgerPreflightError
 from src.application.ledger.cash_conversion_migration import (
     CashConversionBackfillResult,
@@ -259,6 +262,7 @@ from src.application.ledger.repository import (
     with_sqlite_repo_transaction,
     with_sqlite_repo_writer_lock,
 )
+from src.application.ledger.wheel_repository import open_wheel_activation_repository
 from src.application.ledger.writer import (
     record_lifecycle_attempt_audit_atomically,
     record_lifecycle_observation_attempt_atomically,
@@ -307,6 +311,7 @@ __all__ = [
     "futu_compatibility_source_key",
     "applied_execution_association_conflicts",
     "read_execution_event_candidates",
+    "read_wheel_activation_windows_read_only",
     "broker_execution_identity",
     "execution_identity_from_input",
     "build_lifecycle_migration_inventory",
@@ -390,6 +395,7 @@ __all__ = [
     "normalize_position_lot_fields",
     "normalize_position_lot_snapshot",
     "open_performance_evidence_repository",
+    "open_wheel_activation_repository",
     "open_position_ledger",
     "open_position_ledger_from_data_config",
     "open_position_ledger_from_runtime_config",
