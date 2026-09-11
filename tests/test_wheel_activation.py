@@ -289,10 +289,10 @@ def test_wheel_activation_read_only_does_not_create_wal_sidecars(
         active_connection.close()
 
     Path(f"{repo.db_path}-wal").unlink(missing_ok=True)
-    Path(f"{repo.db_path}-shm").unlink(missing_ok=True)
     assert read_wheel_activation_windows_read_only(
         repo.db_path, "us", "lx"
     ) == {"windows": [], "source_status": "unreadable"}
+    Path(f"{repo.db_path}-shm").unlink(missing_ok=True)
     assert not Path(f"{repo.db_path}-wal").exists()
     assert not Path(f"{repo.db_path}-shm").exists()
 
