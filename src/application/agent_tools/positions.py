@@ -44,7 +44,6 @@ from src.application.wheel.capacity import (
     load_shared_cash_capacity_fact,
     load_shared_coverage_fact,
 )
-from src.application.wheel.config import build_wheel_policy_hash
 from src.application.wheel.workflows import (
     cancel_wheel_intent,
     confirm_wheel_linkage,
@@ -874,31 +873,25 @@ def _wheel_activation_tool(
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     def _run() -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-        _config_path, cfg, repo, meta = _wheel_runtime(payload)
         action = str(payload.get("action") or "")
         market = str(payload.get("market") or "")
         account = str(payload.get("account") or "")
-        args: dict[str, Any] = {
-            "action": action,
-            "market": market,
-            "account": account,
-        }
-        if action != "status":
-            args.update(
-                expected_current_generation=int(
-                    payload.get("expected_current_generation") or 0
-                ),
-                request_id=str(payload.get("request_id") or ""),
-                actor=str(payload.get("actor") or ""),
-                policy_sha256=build_wheel_policy_hash(
-                    cfg,
-                    market=market,
-                    account=account,
-                ),
-                apply_changes=bool(payload.get("apply", False)),
-            )
-        result = wheel_application.change_wheel_activation(repo, **args)
-        return result, [], meta
+        result = wheel_application.change_wheel_activation(
+            repo_root=repo_base(),
+            action=action,
+            market=market,
+            account=account,
+            config_path=payload.get("config_path"),
+            config_key=payload.get("config_key") or market,
+            data_config=payload.get("data_config"),
+            runtime_root=payload.get("runtime_root"),
+            expected_current_generation=payload.get("expected_current_generation"),
+            request_id=payload.get("request_id"),
+            actor=payload.get("actor"),
+            expected_source_sha256=payload.get("expected_source_sha256"),
+            apply_changes=bool(payload.get("apply", False)),
+        )
+        return result, [], {"repo_base": _mask_path_str(repo_base())}
 
     return _wheel_result(_run)
 
@@ -1337,6 +1330,7 @@ _WHEEL_ACTIVATION_INPUT: dict[str, Any] = {
     "expected_current_generation": {"type": "integer", "minimum": 0},
     "request_id": "required for enable or disable",
     "actor": "required for enable or disable",
+    "expected_source_sha256": "required for apply enable or disable; copy from preview",
     "apply": {"type": "boolean", "description": "default false previews only"},
     "confirm": {"type": "boolean", "description": "required true with apply=true"},
 }
@@ -1462,6 +1456,11 @@ def _validate_wheel_activation(payload: dict[str, Any]) -> None:
         "expected_current_generation",
         "request_id",
         "actor",
+        *(
+            ("expected_source_sha256",)
+            if bool(payload.get("apply", False))
+            else ()
+        ),
     )
 
 
@@ -1659,7 +1658,11 @@ WHEEL_ACTIVATION_TOOL = build_agent_tool(
     description="Read, preview, enable, or disable one local market/account Wheel activation window.",
     requires=("runtime_config", "sqlite_data_config"),
     capabilities=("wheel", "local_write"),
-    side_effects=("writes_wheel_activation_window",),
+    side_effects=(
+        "writes_wheel_activation_window",
+        "writes_config_yaml",
+        "publishes_generated_runtime_configs",
+    ),
     input_schema=_WHEEL_ACTIVATION_INPUT,
     handler=_wheel_activation_tool,
     read_only=False,
@@ -1671,7 +1674,7 @@ WHEEL_ACTIVATION_TOOL = build_agent_tool(
     input_validator=_validate_wheel_activation,
     output_contract={
         "schema_version": "wheel_activation.output.v1",
-        "source_label": "OM 本地 SQLite Wheel activation windows",
+        "source_label": "OM canonical YAML, runtime JSON, and SQLite Wheel activation windows",
         "fact_fields": [
             "action",
             "market",
@@ -1679,7 +1682,26 @@ WHEEL_ACTIVATION_TOOL = build_agent_tool(
             "status",
             "current_window",
             "latest_window",
+            "window_receipt",
             "expected_config_descriptor",
+            "expected_source_sha256",
+            "paths",
+            "config_audit",
+            "readiness",
+            "ready",
+            "enabled_for_new_lifecycle",
+            "monitoring_gate",
+            "reason_code",
+            "membership",
+            "source_status",
+            "storage_status",
+            "pending_authoring_journal",
+            "policy_drift",
+            "original_request",
+            "recovered_transactions",
+            "failure_phase",
+            "readback_status",
+            "retry_hint",
             "request_id",
             "actor",
             "request_hash",
@@ -1690,6 +1712,9 @@ WHEEL_ACTIVATION_TOOL = build_agent_tool(
         ],
         "missing_data_fields": [],
         "freshness_fields": [
+            "expected_source_sha256",
+            "config_audit.source_revision.before_sha256",
+            "config_audit.source_revision.after_sha256",
             "expected_config_descriptor.generation",
             "expected_config_descriptor.policy_sha256",
             "current_window.generation",

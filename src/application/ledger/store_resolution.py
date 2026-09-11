@@ -154,6 +154,25 @@ def resolve_ledger_store(
     )
 
 
+def resolve_ledger_sqlite_path(
+    data_config: str | Path,
+    *,
+    runtime_root: str | Path | None = None,
+    config_path: str | Path | None = None,
+) -> Path:
+    """Resolve the canonical ledger path without opening or inspecting SQLite."""
+
+    data_config_path = Path(data_config).expanduser()
+    if not data_config_path.is_absolute():
+        data_config_path = data_config_path.resolve()
+    runtime_root_path, _source = _resolve_runtime_root(
+        data_config_path=data_config_path,
+        runtime_root=runtime_root,
+        config_path=config_path,
+    )
+    return (runtime_root_path / LEDGER_DB_RELATIVE_PATH).resolve()
+
+
 def _mtime_utc(path: Path) -> str | None:
     if not path.exists():
         return None

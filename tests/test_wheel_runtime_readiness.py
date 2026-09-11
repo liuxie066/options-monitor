@@ -56,7 +56,11 @@ def _write_activation_table(
               generation INTEGER NOT NULL,
               activated_at_ms INTEGER NOT NULL,
               deactivated_at_ms INTEGER,
-              policy_hash TEXT NOT NULL
+              policy_hash TEXT NOT NULL,
+              activation_request_id TEXT NOT NULL,
+              activation_request_hash TEXT NOT NULL,
+              deactivation_request_id TEXT,
+              deactivation_request_hash TEXT
             )
             """
         )
@@ -64,8 +68,10 @@ def _write_activation_table(
             """
             INSERT INTO wheel_activation_windows (
               market, account, generation, activated_at_ms,
-              deactivated_at_ms, policy_hash
-            ) VALUES (?, ?, ?, ?, ?, ?)
+              deactivated_at_ms, policy_hash,
+              activation_request_id, activation_request_hash,
+              deactivation_request_id, deactivation_request_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, 'activate-test', ?, ?, ?)
             """,
             (
                 market,
@@ -74,6 +80,9 @@ def _write_activation_table(
                 activated_at_ms,
                 deactivated_at_ms,
                 policy_hash,
+                "a" * 64,
+                "deactivate-test" if deactivated_at_ms is not None else None,
+                "b" * 64 if deactivated_at_ms is not None else None,
             ),
         )
 
@@ -159,6 +168,27 @@ def test_wheel_activation_readiness_matches_open_and_closed_windows(
     assert closed_readiness["monitoring_gate"] == "disabled"
     assert closed_readiness["reason_code"] == "closed_window"
     assert closed_readiness["accounts"]["lx"]["deactivated_at_ms"] == 2_000
+    assert closed_readiness["accounts"]["lx"]["policy_drift"] is False
+
+    drift_path = tmp_path / "closed-drift.sqlite3"
+    _write_activation_table(
+        drift_path,
+        market="us",
+        account="lx",
+        generation=1,
+        activated_at_ms=1_000,
+        deactivated_at_ms=2_000,
+        policy_hash="f" * 64,
+    )
+    closed_drift = build_wheel_activation_readiness(
+        config=closed_config,
+        market="us",
+        accounts=["lx"],
+        sqlite_path=drift_path,
+    )
+    assert closed_drift["monitoring_gate"] == "disabled"
+    assert closed_drift["reason_code"] == "closed_window"
+    assert closed_drift["accounts"]["lx"]["policy_drift"] is True
 
 
 def test_wheel_activation_readiness_fails_closed_for_missing_and_mismatched_state(
@@ -175,9 +205,22 @@ def test_wheel_activation_readiness_fails_closed_for_missing_and_mismatched_stat
     )
 
     assert missing["monitoring_gate"] == "disabled"
-    assert missing["reason_code"] == "missing_window"
+    assert missing["reason_code"] == "missing_database"
     assert missing["storage_status"] == "missing_database"
     assert missing_path.exists() is False
+
+    no_table_path = tmp_path / "no-table.sqlite3"
+    with sqlite3.connect(no_table_path) as conn:
+        conn.execute("CREATE TABLE unrelated (value INTEGER)")
+    no_table = build_wheel_activation_readiness(
+        config=config,
+        market="us",
+        accounts=["lx"],
+        sqlite_path=no_table_path,
+    )
+    assert no_table["monitoring_gate"] == "disabled"
+    assert no_table["reason_code"] == "missing_table"
+    assert no_table["storage_status"] == "missing_table"
 
     policy_hash = build_wheel_policy_hash(config, market="us", account="lx")
     mismatch_path = tmp_path / "mismatch.sqlite3"

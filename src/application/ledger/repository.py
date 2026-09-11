@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from .repository_schema import (
     Any,
     OptionPositionsEventReadRepo,
@@ -52,6 +54,14 @@ class SQLiteOptionPositionsRepository(
     DecisionReadRepositoryMixin,
 ):
     pass
+
+
+def open_wheel_activation_repository(
+    sqlite_path: str | Path,
+) -> SQLiteOptionPositionsRepository:
+    """Open the canonical writer without running portfolio bootstrap work."""
+
+    return SQLiteOptionPositionsRepository(Path(sqlite_path))
 
 
 def with_sqlite_repo_transaction(

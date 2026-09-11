@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Callable, cast
 
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.runtime_config_paths import authoritative_config_yaml_path as _authoritative_config_yaml_path
 from src.application.symbol_mutations import (
     default_use_for_enabled_sides,
     ensure_symbols_list as _ensure_symbols_list,
@@ -225,25 +226,3 @@ def manage_symbols_tool(
         "config_yaml_path": mask_path(config_yaml_path) if config_yaml_path is not None else None,
         "write_applied": write_applied,
     }
-
-
-def _authoritative_config_yaml_path(cfg: dict[str, Any], *, repo_root: Path) -> Path:
-    resolved = cfg.get("_resolved")
-    raw_path = str(resolved.get("config_yaml_path") or "").strip() if isinstance(resolved, dict) else ""
-    if not raw_path:
-        raise AgentToolError(
-            code="CONFIG_ERROR",
-            message="runtime config does not declare its authoritative config.yaml path",
-            hint="Rebuild it with `./om config build --source yaml --market <market>` before using manage_symbols.",
-        )
-    path = Path(raw_path).expanduser()
-    if not path.is_absolute():
-        path = repo_root / path
-    path = path.resolve()
-    if not path.exists():
-        raise AgentToolError(
-            code="CONFIG_ERROR",
-            message=f"authoritative config.yaml not found: {path}",
-            hint="Restore the YAML source or rebuild the runtime snapshot from the correct config.yaml.",
-        )
-    return path
