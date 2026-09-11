@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shlex
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,10 +11,15 @@ from typing import Any
 from src.application.config_defaults import DEFAULT_CONFIG_REF, default_config_sha256
 from src.application.config_primitives import file_sha256 as _file_sha256
 from src.application.config_primitives import path_for_metadata as _path_for_metadata
+from src.application.config_primitives import GENERATED_KEY, GENERATED_SCHEMA_VERSION
+from src.application.config_yaml import (
+    YAML_MARKET_USER_FINGERPRINT_KIND,
+    load_yaml_config_file,
+    market_user_config_fingerprint,
+    yaml_to_market_user_config,
+)
 
 
-GENERATED_KEY = "_generated"
-GENERATED_SCHEMA_VERSION = "1.0"
 RUNTIME_MARKETS = {"us", "hk"}
 RUNTIME_CONFIG_MARKET_BY_NAME = {
     "config.us.json": "us",
@@ -369,6 +375,56 @@ def build_inline_generated_metadata(
     return generated
 
 
+def _check_yaml_effective_source(
+    item: dict[str, Any], *, repo_root: Path, market: str,
+) -> dict[str, Any] | None:
+    effective = item.get("effective")
+    raw_path = item.get("path")
+    error = {"role": "market_user", "path": raw_path if isinstance(raw_path, str) else None}
+    if (
+        item.get("loaded") is not True
+        or item.get("inline", False) is not False
+        or item.get("enabled") is not True
+        or item.get("optional") is not False
+        or not isinstance(raw_path, str)
+        or not raw_path.strip()
+        or "\x00" in raw_path
+        or not isinstance(item.get("sha256"), str)
+        or not re.fullmatch(r"[0-9a-fA-F]{64}", item["sha256"])
+        or not isinstance(effective, dict)
+        or effective.get("kind") != YAML_MARKET_USER_FINGERPRINT_KIND
+        or effective.get("market") != market
+        or not isinstance(effective.get("sha256"), str)
+        or not re.fullmatch(r"[0-9a-fA-F]{64}", effective["sha256"])
+    ):
+        return {**error, "code": "invalid_source_metadata", "message": "invalid YAML market source fingerprint metadata"}
+
+    try:
+        path = _resolve_metadata_path(raw_path, repo_root=repo_root)
+        raw_cfg = load_yaml_config_file(path)
+        current = market_user_config_fingerprint(
+            yaml_to_market_user_config(raw_cfg, market=market), market=market,
+        )
+    except Exception as exc:
+        # Parser/converter messages may contain source values; expose only the error category.
+        return {
+            **error,
+            "code": "source_check_failed",
+            "message": "cannot read or convert YAML market source; fix the source and rebuild",
+            "error_type": type(exc).__name__,
+        }
+    if current["sha256"] != effective["sha256"].lower():
+        return {
+            **error,
+            "code": "source_changed",
+            "message": "YAML market configuration changed after generation",
+            "fingerprint_kind": current["kind"],
+            "expected_sha256": effective["sha256"],
+            "current_sha256": current["sha256"],
+        }
+    return None
+
+
 def check_runtime_config_freshness(
     config: dict[str, Any],
     *,
@@ -420,6 +476,10 @@ def check_runtime_config_freshness(
         for item in source_items
         if isinstance(item, dict)
     }
+    has_effective = source_format == "yaml" and any(
+        isinstance(item, dict) and item.get("role") == "market_user" and "effective" in item
+        for item in source_items
+    )
     for required_role in ("system", "market_user"):
         if required_role not in roles:
             errors.append(
@@ -429,11 +489,26 @@ def check_runtime_config_freshness(
                     "role": required_role,
                 }
             )
+        elif has_effective and sum(
+            isinstance(item, dict) and str(item.get("role") or "").strip() == required_role
+            for item in source_items
+        ) != 1:
+            errors.append({
+                "code": "duplicate_source_record",
+                "message": "runtime config generation metadata has duplicate required sources",
+                "role": required_role,
+            })
 
-    for item in source_items:
+    sources_to_check = [] if has_effective and errors else source_items
+    for item in sources_to_check:
         if not isinstance(item, dict):
             continue
         role = str(item.get("role") or "").strip()
+        if source_format == "yaml" and role == "market_user" and "effective" in item:
+            error = _check_yaml_effective_source(item, repo_root=repo_root, market=expected_market)
+            if error is not None:
+                errors.append(error)
+            continue
         loaded = bool(item.get("loaded"))
         enabled = bool(item.get("enabled", True))
         inline = bool(item.get("inline"))

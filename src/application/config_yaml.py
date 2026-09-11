@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import shlex
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -15,6 +17,8 @@ from src.application.agent_tool_contracts import AgentToolError
 from src.application.account_config import normalize_account_label
 from src.application.assistant.llm_model_profiles import resolve_authoring_assistant_config
 from src.application.config_primitives import (
+    GENERATED_KEY,
+    GENERATED_SCHEMA_VERSION,
     config_key_parts as _key_parts,
     config_path_get as _path_get,
     deep_merge_config as _deep_merge,
@@ -40,7 +44,6 @@ from src.application.layered_config import (
     build_layered_runtime_config_from_user_config,
     default_system_config_path,
 )
-from src.application.runtime_config_freshness import GENERATED_KEY, GENERATED_SCHEMA_VERSION
 from src.application.runtime_config_paths import write_json_atomic
 from src.application.runtime_paths import resolve_runtime_root
 from src.application.portfolio_management import (
@@ -55,6 +58,7 @@ from src.application.wheel.config import (
 
 
 RESOLVED_KEY = "_resolved"
+YAML_MARKET_USER_FINGERPRINT_KIND = "yaml-market-user-v1"
 
 PASSTHROUGH_KEYS = {
     "alert_policy",
@@ -127,6 +131,10 @@ def _system_defaults(system_cfg: dict[str, Any]) -> dict[str, Any]:
 
 
 def load_yaml_config_file(path: str | Path) -> dict[str, Any]:
+    return _load_yaml_config_snapshot(path)[0]
+
+
+def _load_yaml_config_snapshot(path: str | Path) -> tuple[dict[str, Any], str]:
     config_path = Path(path).expanduser().resolve()
     if not config_path.exists():
         raise AgentToolError(
@@ -135,7 +143,8 @@ def load_yaml_config_file(path: str | Path) -> dict[str, Any]:
             hint="Create config.yaml from configs/examples/config.yaml.example, or pass --config-yaml explicitly.",
         )
 
-    text = config_path.read_text(encoding="utf-8")
+    source_bytes = config_path.read_bytes()
+    text = source_bytes.decode("utf-8")
     for line_no, line in enumerate(text.splitlines(), start=1):
         if "\t" in line:
             raise AgentToolError(
@@ -167,7 +176,7 @@ def load_yaml_config_file(path: str | Path) -> dict[str, Any]:
         payload = {}
     if not isinstance(payload, dict):
         raise AgentToolError(code="CONFIG_ERROR", message=f"config.yaml must be a YAML object: {config_path}")
-    return payload
+    return payload, hashlib.sha256(source_bytes).hexdigest()
 
 
 def _reject_unknown_keys(data: dict[str, Any], *, allowed: set[str], path: str) -> None:
@@ -360,7 +369,7 @@ def _normalize_combo_yield(raw: Any, *, path: str) -> dict[str, Any]:
         allow_ranges=False,
         allowed_keys=COMBO_YIELD_AUTHORING_FIELDS,
     )
-    out["_explicit_fields"] = [key for key in out if not str(key).startswith("_")]
+    out["_explicit_fields"] = sorted(key for key in out if not str(key).startswith("_"))
     call_cfg = out.get("call")
     if isinstance(call_cfg, dict):
         _reject_unknown_authoring_keys(
@@ -368,7 +377,7 @@ def _normalize_combo_yield(raw: Any, *, path: str) -> dict[str, Any]:
             allowed=COMBO_YIELD_CALL_ALLOWED_FIELDS,
             path=f"{path}.call",
         )
-        out["_explicit_call_fields"] = [key for key in call_cfg if not str(key).startswith("_")]
+        out["_explicit_call_fields"] = sorted(key for key in call_cfg if not str(key).startswith("_"))
     return out
 
 
@@ -779,6 +788,18 @@ def yaml_to_market_user_config(raw_cfg: dict[str, Any], *, market: str) -> dict[
         raise AgentToolError(code="CONFIG_ERROR", message=str(exc)) from exc
 
 
+def market_user_config_fingerprint(user_config: dict[str, Any], *, market: str) -> dict[str, str]:
+    identity = {"kind": YAML_MARKET_USER_FINGERPRINT_KIND, "market": _normalize_market(market)}
+    body = json.dumps(
+        {**identity, "config": user_config},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return {**identity, "sha256": hashlib.sha256(body).hexdigest()}
+
+
 def _yaml_rebuild_command(*, config_path: Path, market: str, output_path: Path | None = None) -> str:
     command = [
         "./om",
@@ -801,6 +822,8 @@ def _build_yaml_generated_metadata(
     repo_root: Path,
     market: str,
     yaml_path: Path,
+    yaml_sha256: str,
+    effective: dict[str, str],
     system_path: Path | None,
     system_ref: str,
     system_sha256: str,
@@ -848,7 +871,8 @@ def _build_yaml_generated_metadata(
                 "optional": False,
                 "enabled": True,
                 "path": _path_for_metadata(yaml_path, repo_root=repo_root),
-                "sha256": _file_sha256(yaml_path),
+                "sha256": yaml_sha256,
+                "effective": effective,
             },
         ],
         "rebuild_command": _yaml_rebuild_command(
@@ -873,8 +897,9 @@ def resolve_yaml_runtime_config(
     system_cfg = None if system_path is not None else default_config()
     system_ref = str(system_path) if system_path is not None else DEFAULT_CONFIG_REF
     system_sha256 = _file_sha256(system_path) if system_path is not None else default_config_sha256()
-    raw_cfg = load_yaml_config_file(yaml_path)
+    raw_cfg, yaml_sha256 = _load_yaml_config_snapshot(yaml_path)
     user_cfg = yaml_to_market_user_config(raw_cfg, market=normalized_market)
+    effective = market_user_config_fingerprint(user_cfg, market=normalized_market)
     cfg, meta = build_layered_runtime_config_from_user_config(
         repo_root=repo_root,
         market=normalized_market,
@@ -890,6 +915,8 @@ def resolve_yaml_runtime_config(
         repo_root=repo_root,
         market=normalized_market,
         yaml_path=yaml_path,
+        yaml_sha256=yaml_sha256,
+        effective=effective,
         system_path=system_path,
         system_ref=system_ref,
         system_sha256=system_sha256,
@@ -898,7 +925,7 @@ def resolve_yaml_runtime_config(
         "source_format": "yaml",
         "market": normalized_market,
         "config_yaml_path": _path_for_metadata(yaml_path, repo_root=repo_root),
-        "config_yaml_sha256": _file_sha256(yaml_path),
+        "config_yaml_sha256": yaml_sha256,
         "default_source": _path_for_metadata(system_path, repo_root=repo_root) if system_path is not None else system_ref,
         "default_sha256": system_sha256,
         "runtime_schema": "config-json-v1",
@@ -907,7 +934,7 @@ def resolve_yaml_runtime_config(
         {
             "source_format": "yaml",
             "config_yaml_path": str(yaml_path),
-            "config_yaml_sha256": _file_sha256(yaml_path),
+            "config_yaml_sha256": yaml_sha256,
             "system_config_path": str(system_path) if system_path is not None else system_ref,
             "system_config_ref": system_ref,
             "system_config_sha256": system_sha256,
@@ -1188,6 +1215,7 @@ __all__ = [
     "default_yaml_output_config_path",
     "explain_yaml_config_key",
     "load_yaml_config_file",
+    "market_user_config_fingerprint",
     "resolve_yaml_assistant_config",
     "resolve_yaml_runtime_config",
     "runtime_strategy_keys_to_yaml_authoring",
