@@ -391,7 +391,10 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
             return finish_retry_blocker(daily_brief_prep.blocked_error_code)
         quiet_window = str(notify_delivery.get("quiet_window") or "")
         request.runlog.safe_event("notify", "skip", message=f"in quiet hours ({quiet_window})")
-        print(f"[SKIP] Currently in quiet hours (DND). Target was: {target}")
+        print(
+            "[SKIP] Currently in quiet hours (DND). "
+            f"Target was: {notification_target_reference(target)}"
+        )
         _audit_notification_perception(
             request,
             build_notification_perception_event(
