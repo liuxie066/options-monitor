@@ -80,6 +80,9 @@
 - `operation_timeline`
 - `version_check`
 - `version_update`
+- `scheduled_tasks_read`
+- `receipt_read`
+- `quality_status`
 
 ### 候选与 symbol
 
@@ -115,6 +118,19 @@
 - `close_advice`
 - `get_close_advice`
 - `close_advice_read`
+
+### Wheel
+
+- `wheel_activation`
+- `wheel_branch_decision`
+- `wheel_call_intent`
+- `wheel_call_linkage`
+- `wheel_end`
+- `wheel_intent`
+- `wheel_linkage`
+
+上述 Wheel 工具默认写本地 Wheel/trade 事件或 Wheel 激活窗口（`wheel_activation` 还会写
+`config.yaml` 并发布生成的 runtime 配置），不是只读诊断；调用前先确认输入与授权范围。
 
 ### 通知
 
