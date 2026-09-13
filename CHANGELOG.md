@@ -2,10 +2,13 @@
 
 ## Unreleased
 
+## 3.5.4 - 2026-09-13
+
 ### Improvements
 - Retired the quality HTTP endpoint and its credential binding while preserving local quality refresh, status access, and business gates.
 
 ### Bug Fixes
+- Preserved original fees when repairing ledger events and rebuilt cash conversions from the corrected event identity and amounts; missing historical FX remains pending.
 - Removed legacy secret environment variables from every generated systemd service when secure credential delivery is enabled, including services that do not consume credentials.
 
 ## 3.5.3 - 2026-09-11

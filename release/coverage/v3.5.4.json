@@ -1,0 +1,128 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.5.4",
+  "base": {
+    "tag": "v3.5.3",
+    "commit": "65ddcbdee1855d5d47753b33a9032d8239eca5bd"
+  },
+  "reviewed_head": "99c49126a9204d568f242912ae796b9dcdec3352",
+  "commits": [
+    {
+      "sha": "b5868701708f170f8f28a44b9c5be1d6b9dbe9c6",
+      "subject": "fix(ledger): preserve fees and rebuild cash conversions on repair"
+    },
+    {
+      "sha": "c36a3082e0b3e06f0886b403242186ac5fe48eff",
+      "subject": "docs(architecture): refresh ledger repair dependency graph"
+    },
+    {
+      "sha": "7eab1e25356bb7ce1458870bf62e5351644e9cb8",
+      "subject": "fix(ops): retire quality HTTP and clear legacy secret environments"
+    },
+    {
+      "sha": "04e06ac54169d5cec191373180035ac80b54ab4c",
+      "subject": "Merge pull request #276 from liuxie066/codex/repair-event-cash-20260913"
+    },
+    {
+      "sha": "0476d468b7f225e0649c9a364595f32425f1cb83",
+      "subject": "chore(merge): sync main before quality service delivery"
+    },
+    {
+      "sha": "c16a52ccf9242afad6a71a36948f8d8755b6207c",
+      "subject": "docs(architecture): refresh graph after quality HTTP retirement"
+    },
+    {
+      "sha": "99c49126a9204d568f242912ae796b9dcdec3352",
+      "subject": "Merge pull request #277 from liuxie066/codex/retire-quality-http"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Retired the quality HTTP endpoint and its credential binding while preserving local quality refresh, status access, and business gates.",
+      "commits": [
+        "7eab1e25356bb7ce1458870bf62e5351644e9cb8"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Preserved original fees when repairing ledger events and rebuilt cash conversions from the corrected event identity and amounts; missing historical FX remains pending.",
+      "commits": [
+        "b5868701708f170f8f28a44b9c5be1d6b9dbe9c6"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Removed legacy secret environment variables from every generated systemd service when secure credential delivery is enabled, including services that do not consume credentials.",
+      "commits": [
+        "7eab1e25356bb7ce1458870bf62e5351644e9cb8"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "c36a3082e0b3e06f0886b403242186ac5fe48eff",
+      "reason": "Regenerated dependency documentation; no additional runtime behavior."
+    },
+    {
+      "commit": "04e06ac54169d5cec191373180035ac80b54ab4c",
+      "reason": "Integration merge of already mapped changes; no independent user-visible behavior."
+    },
+    {
+      "commit": "0476d468b7f225e0649c9a364595f32425f1cb83",
+      "reason": "Integration merge of already mapped changes; no independent user-visible behavior."
+    },
+    {
+      "commit": "c16a52ccf9242afad6a71a36948f8d8755b6207c",
+      "reason": "Regenerated dependency documentation; no additional runtime behavior."
+    },
+    {
+      "commit": "99c49126a9204d568f242912ae796b9dcdec3352",
+      "reason": "Integration merge of already mapped changes; no independent user-visible behavior."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "b5868701708f170f8f28a44b9c5be1d6b9dbe9c6",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/276"
+      ]
+    },
+    {
+      "commit": "c36a3082e0b3e06f0886b403242186ac5fe48eff",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/276"
+      ]
+    },
+    {
+      "commit": "7eab1e25356bb7ce1458870bf62e5351644e9cb8",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/277"
+      ]
+    },
+    {
+      "commit": "04e06ac54169d5cec191373180035ac80b54ab4c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/276"
+      ]
+    },
+    {
+      "commit": "0476d468b7f225e0649c9a364595f32425f1cb83",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/277"
+      ]
+    },
+    {
+      "commit": "c16a52ccf9242afad6a71a36948f8d8755b6207c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/277"
+      ]
+    },
+    {
+      "commit": "99c49126a9204d568f242912ae796b9dcdec3352",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/277"
+      ]
+    }
+  ]
+}
