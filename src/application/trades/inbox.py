@@ -1121,6 +1121,7 @@ def trade_inbox_summary(path: str | Path) -> dict[str, Any]:
             "exhausted_count": 0,
             "handled_count": 0,
             "identity_needs_review_count": 0,
+            "identity_attention": [],
             "max_attempt_count": 0,
             "receipt_status_counts": {},
             "receipt_kind_counts": {},
@@ -1165,6 +1166,15 @@ def trade_inbox_summary(path: str | Path) -> dict[str, Any]:
                 GROUP BY status
                 """
             ).fetchall()
+            identity_attention = [
+                {**dict(row), "retryable": False,
+                 "next_action": "verify_broker_identity_before_replay"}
+                for row in conn.execute(
+                    """SELECT inbox_id, deal_id, source, received_at_ms, last_error AS reason
+                       FROM trade_inbox WHERE status = 'identity_needs_review'
+                       ORDER BY received_at_ms, inbox_id LIMIT 20"""
+                )
+            ]
     counts = {str(row["status"]): int(row["item_count"] or 0) for row in rows}
     return {
         "path": str(inbox_path),
@@ -1175,6 +1185,7 @@ def trade_inbox_summary(path: str | Path) -> dict[str, Any]:
             0,
         ),
         "conflict_count": counts.get("conflict", 0),
+        "identity_attention": identity_attention,
         "receipt_status_counts": receipt_status_counts,
         "receipt_kind_counts": receipt_kind_counts,
         "receipt_attention": receipt_attention,

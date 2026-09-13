@@ -2273,7 +2273,8 @@ def test_runtime_status_public_projection_omits_private_runtime_payloads(tmp_pat
     assert data["latest_run"]["run_id"] == "run-public-safe"
 
 
-def test_runtime_status_reads_account_trade_intake_sources(tmp_path: Path) -> None:
+@pytest.mark.parametrize("identity_count", [0, 4])
+def test_runtime_status_reads_account_trade_intake_sources(tmp_path: Path, identity_count: int) -> None:
 
     cfg_path = tmp_path / "config.us.json"
     cfg = _minimal_cfg()
@@ -2320,6 +2321,7 @@ def test_runtime_status_reads_account_trade_intake_sources(tmp_path: Path) -> No
                 "status": "listening",
                 "last_push_received_utc": "2026-01-01T00:01:00+00:00",
                 "last_push_deal_id": "lx-deal-1",
+                "inbox": {"identity_needs_review_count": identity_count},
                 "last_fee_sync": {
                     "attempted_at_ms": 1_767_225_780_000,
                     "actual_count": 1,
@@ -2414,6 +2416,17 @@ def test_runtime_status_reads_account_trade_intake_sources(tmp_path: Path) -> No
     assert trade["summary"]["last_fee_attempted_at_ms"] == 1_767_225_780_000
     assert trade["summary"]["last_fee_error"] == "provider_order_query_failed"
     assert trade["summary"]["last_fee_error_type"] == "ConnectionError"
+    assert trade["summary"]["identity_review_required"] is bool(identity_count)
+    assert ("TRADE_INTAKE_IDENTITY_REVIEW_REQUIRED" in out["data"]["summary"]["warning_codes"]) is bool(identity_count)
+    from src.application.agent_tools.diagnostics import _runtime_status_tool
+    public, warnings, _ = _runtime_status_tool({
+        "config_path": str(cfg_path), "state_dir": str(state_dir),
+        "report_dir": str(report_dir), "shared_state_dir": str(state_dir),
+        "accounts_root": str(accounts_root), "runs_root": str(runs_root),
+    })
+    assert public["trade_intake"]["summary"]["identity_review_required"] is bool(identity_count)
+    assert ("runtime_status:TRADE_INTAKE_IDENTITY_REVIEW_REQUIRED" in warnings) is bool(identity_count)
+    assert "lx-deal-1" not in json.dumps(public)
 
 
 def test_trade_intake_summary_reports_single_fee_failed_source() -> None:

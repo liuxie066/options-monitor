@@ -191,7 +191,7 @@ def test_trade_inbox_quarantines_missing_canonical_identity(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "inbox.sqlite3"
-    enqueue_trade_payload(
+    inbox_id = enqueue_trade_payload(
         path,
         payload={"deal_id": "raw-only"},
         source="push",
@@ -200,6 +200,14 @@ def test_trade_inbox_quarantines_missing_canonical_identity(
     summary = trade_inbox_summary(path)
     assert summary["pending_count"] == 0
     assert summary["identity_needs_review_count"] == 1
+    assert summary["identity_attention"] == [{
+        "inbox_id": inbox_id, "deal_id": "raw-only", "source": "push",
+        "received_at_ms": summary["identity_attention"][0]["received_at_ms"],
+        "reason": "canonical_broker_identity_missing",
+        "retryable": False, "next_action": "verify_broker_identity_before_replay",
+    }]
+    assert summary["identity_attention"][0]["received_at_ms"] > 0
+    assert claim_trade_payload(path, inbox_id=inbox_id) is None
     assert list_retryable_trade_payloads(path, retry_delay_sec=0) == []
 
 
