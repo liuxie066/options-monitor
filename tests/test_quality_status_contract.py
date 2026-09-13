@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 
@@ -8,30 +7,20 @@ from jsonschema import Draft202012Validator, FormatChecker
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT_DIR = ROOT / "contracts" / "quality-monitoring"
-MANIFEST_PATH = CONTRACT_DIR / "vendor-manifest.json"
+SCHEMA_PATH = CONTRACT_DIR / "quality_status.v1.schema.json"
 
 
-def test_vendored_quality_status_schema_matches_manifest() -> None:
-    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
-    schema_path = ROOT / manifest["schema_path"]
-    schema_bytes = schema_path.read_bytes()
-
-    assert hashlib.sha256(schema_bytes).hexdigest() == manifest["sha256"]
-    assert manifest["upstream_release_state"] == "unpublished"
-    assert str(manifest["planned_upstream_contract_release"]).startswith("contract-v")
-    assert len(manifest["upstream_commit"]) == 40
-
-    schema = json.loads(schema_bytes)
+def test_quality_status_schema_is_valid() -> None:
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
     Draft202012Validator.check_schema(schema)
-    assert schema["$id"] == manifest["schema_id"]
-    assert schema["properties"]["schema_version"]["const"] == manifest["schema_version"]
+    assert schema["$id"] == "urn:investment:quality-status:v1"
+    assert schema["properties"]["schema_version"]["const"] == "investment.quality_status.v1"
 
 
 def test_minimal_om_quality_status_fixture_validates() -> None:
-    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
-    schema = json.loads((ROOT / manifest["schema_path"]).read_text(encoding="utf-8"))
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
     payload = {
-        "schema_version": manifest["schema_version"],
+        "schema_version": "investment.quality_status.v1",
         "producer": {
             "service": "options-monitor",
             "producer_version": "test",
@@ -52,10 +41,9 @@ def test_minimal_om_quality_status_fixture_validates() -> None:
 
 
 def test_v1_rejects_unknown_top_level_fields() -> None:
-    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
-    schema = json.loads((ROOT / manifest["schema_path"]).read_text(encoding="utf-8"))
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
     payload = {
-        "schema_version": manifest["schema_version"],
+        "schema_version": "investment.quality_status.v1",
         "producer": {
             "service": "options-monitor",
             "producer_version": "test",

@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 1016 (`src`: 519, `domain`: 82, `scripts`: 11, `tests`: 404)
-- Internal import edges: 7214 total, 2939 production/script edges excluding tests
+- Python files scanned: 1015 (`src`: 518, `domain`: 82, `scripts`: 11, `tests`: 404)
+- Internal import edges: 7216 total, 2935 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -39,18 +39,18 @@ flowchart LR
   domain_services -->|2| storage
   infrastructure -->|9| application
   infrastructure -->|6| domain
-  interfaces -->|156| application
+  interfaces -->|153| application
   interfaces -->|1| domain
   interfaces -->|4| infrastructure
   scripts -->|42| application
   scripts -->|4| domain
   scripts -->|2| infrastructure
   storage -->|1| domain
-  tests -->|3199| application
+  tests -->|3203| application
   tests -->|473| domain
   tests -->|2| domain_services
   tests -->|246| infrastructure
-  tests -->|232| interfaces
+  tests -->|233| interfaces
   tests -->|21| scripts
   tests -->|20| storage
 ```
@@ -60,7 +60,7 @@ flowchart LR
 | from | to | imports |
 |---|---|---|
 | application | domain | 457 |
-| interfaces | application | 156 |
+| interfaces | application | 153 |
 | application | infrastructure | 147 |
 | application | storage | 45 |
 | scripts | application | 42 |
@@ -79,10 +79,10 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 3199 |
+| tests | application | 3203 |
 | tests | domain | 473 |
 | tests | infrastructure | 246 |
-| tests | interfaces | 232 |
+| tests | interfaces | 233 |
 | tests | scripts | 21 |
 | tests | storage | 20 |
 | tests | domain_services | 2 |
@@ -94,7 +94,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | from | to | imports |
 |---|---|---|
 | src.application | domain.domain | 215 |
-| src.interfaces | src.application | 123 |
+| src.interfaces | src.application | 120 |
 | src.application | src.infrastructure | 102 |
 | src.application.ledger | domain.domain | 80 |
 | src.application.ledger | domain.domain.ledger | 49 |

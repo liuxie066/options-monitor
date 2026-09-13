@@ -154,6 +154,43 @@ def test_render_systemd_bundle_service_hardening() -> None:
     assert "deploy_user" not in profile
     assert "deploy_home" not in profile
 
+@pytest.mark.parametrize("delivery", [None, "load-credential-encrypted", "runtime-files"])
+def test_secure_bundle_strips_secret_env_from_all_services(tmp_path: Path, delivery: str | None) -> None:
+    from src.application.secret_store import legacy_secret_env_names
+    from src.application.service_deploy import render_service_bundle
+
+    env_file = tmp_path / "ordinary.env"
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=tmp_path,
+        runtime_root=tmp_path / "runtime",
+        accounts=["lx"],
+        markets=["us", "hk"],
+        env_file=env_file,
+        include_feishu_ws=True,
+        feishu_ws_config_key="us",
+        include_quality_monitoring=True,
+        include_auto_upgrade=True,
+        include_secret_credentials=delivery is not None,
+        secret_credential_delivery=delivery or "load-credential-encrypted",
+        deploy_user="liuxie",
+    )
+    services = [item for item in bundle["files"] if item["kind"] == "systemd_service"]
+    assert services
+    assert not any("quality-http" in item["relative_path"] for item in bundle["files"])
+    unset = "UnsetEnvironment=" + " ".join(sorted(legacy_secret_env_names()))
+    assert "OM_QUALITY_READ_TOKEN" in unset
+    for item in services:
+        assert (unset in item["content"]) is (delivery is not None)
+        assert f"EnvironmentFile={env_file}" in item["content"]
+    profile = json.loads(next(item["content"] for item in bundle["files"] if item["relative_path"] == "service.profile.json"))
+    if delivery is not None:
+        bindings = profile["secret_credentials"]["service_credentials"]
+        assert "options-monitor-quality-refresh.service" not in bindings
+        assert "options-monitor-upgrade.service" not in bindings
+        assert "options-monitor-projection-verify.service" not in bindings
+
+
 def test_render_systemd_bundle_uses_per_unit_encrypted_credentials(tmp_path: Path) -> None:
     from src.application.service_deploy import render_service_bundle
     from src.application.secret_store import legacy_secret_env_names
@@ -188,11 +225,7 @@ def test_render_systemd_bundle_uses_per_unit_encrypted_credentials(tmp_path: Pat
         "UnsetEnvironment=" + " ".join(sorted(legacy_secret_env_names()))
     ) in tick
 
-    quality = files[
-        "systemd/options-monitor-quality-http.service.d/zzzz-secret-credentials.conf"
-    ]["content"]
-    assert f"om-quality-read-token:{store}/om-quality-read-token" in quality
-    assert "om-feishu-bot-app-secret" not in quality
+    assert not any("quality-http" in name for name in files)
 
     feishu_ws = files[
         "systemd/options-monitor-feishu-ws.service.d/zzzz-secret-credentials.conf"
@@ -276,11 +309,7 @@ def test_render_systemd_bundle_uses_per_unit_runtime_file_credentials(tmp_path: 
         "UnsetEnvironment=" + " ".join(sorted(legacy_secret_env_names()))
     ) in tick
 
-    quality = files[
-        "systemd/options-monitor-quality-http.service.d/zzzz-secret-credentials.conf"
-    ]["content"]
-    assert "--credential-id om-quality-read-token" in quality
-    assert "om-feishu-bot-app-secret" not in quality
+    assert not any("quality-http" in name for name in files)
 
     secret_profile = profile["secret_credentials"]
     assert secret_profile["backend"] == "systemd"
@@ -707,7 +736,7 @@ def test_render_systemd_bundle_can_include_quality_monitoring(tmp_path: Path) ->
     )
 
     files = {item["relative_path"]: item for item in bundle["files"]}
-    quality_http = files["systemd/options-monitor-quality-http.service"]["content"]
+    assert not any("quality-http" in name for name in files)
     refresh = files["systemd/options-monitor-quality-refresh.service"]["content"]
     refresh_timer = files["systemd/options-monitor-quality-refresh.timer"]["content"]
     recheck = files["systemd/options-monitor-quality-recheck.service"]["content"]
@@ -717,9 +746,6 @@ def test_render_systemd_bundle_can_include_quality_monitoring(tmp_path: Path) ->
     day_end_hk_timer = files["systemd/options-monitor-quality-day-end-hk.timer"]["content"]
     profile = json.loads(files["service.profile.json"]["content"])
 
-    assert str(repo / "om") + " quality serve --host 127.0.0.1 --port 8792" in quality_http
-    assert "Type=simple" in quality_http
-    assert "Restart=always" in quality_http
     assert str(repo / "om") + " quality refresh --config-key us --config-key hk --no-deep" in refresh
     assert "TimeoutStartSec=600" in refresh
     assert "OnUnitActiveSec=15min" in refresh_timer
@@ -731,15 +757,9 @@ def test_render_systemd_bundle_can_include_quality_monitoring(tmp_path: Path) ->
     assert "TimeoutStartSec=300" in day_end_us
     assert "OnCalendar=Mon..Fri *-*-* 16:30:00 America/New_York" in day_end_us_timer
     assert "OnCalendar=Mon..Fri *-*-* 16:30:00 Asia/Hong_Kong" in day_end_hk_timer
-    assert "systemctl enable --now options-monitor-quality-http.service" in bundle["commands"]["enable"]
     assert profile["quality_monitoring"] == {
         "enabled": True,
         "artifact_path": str(runtime / "output_shared" / "state" / "quality" / "status.v1.json"),
-        "http": {
-            "host": "127.0.0.1",
-            "port": 8792,
-            "credential_name": "quality.read_token",
-        },
         "regular_refresh_interval": "15min",
         "recheck_interval": "1min",
         "day_end_calendars": {

@@ -1,12 +1,11 @@
-# OM 运行与数据质量文档
+# OM Runtime and Data Quality
 
-本目录只负责 Options Monitor 本地质量实现和操作入口。
+OM 自己维护运行状态、账本、成交摄取、持仓对账和生命周期质量检查。
+检查结果写入本地 artifact，CLI、Tool Gateway 和业务门禁读取同一份证据。
 
-- [OM 检查实现映射](om-check-implementation.md)
-- [OM Quality Producer 操作契约](om-operator.md)
-- [跨系统正式架构](https://github.com/liuxie066/investment-quality/blob/main/docs/quality-monitoring/architecture.md)
-- [跨系统检查矩阵](https://github.com/liuxie066/investment-quality/blob/main/docs/quality-monitoring/check-matrix.md)
-- [公共 API 契约](https://github.com/liuxie066/investment-quality/blob/main/docs/quality-monitoring/api-contract.md)
-- [Phase 5 跨仓 Runbook](https://github.com/liuxie066/investment-quality/blob/main/docs/quality-monitoring/phase5-runbook.md)
+- [检查实现与回归证据](om-check-implementation.md)
+- [操作契约](om-operator.md)
+- [本地质量文件契约](../../contracts/quality-monitoring/README.md)
 
-跨系统语义以 `investment-quality` 为唯一权威。本仓不得维护其完整副本。
+HTTP 质量接口与外部质量 Hub 接入已退役。本地质量刷新、到期复查、日终对账和
+`OM_QUALITY_ONBOARDED` 门禁继续保留。

@@ -29,16 +29,19 @@ from src.infrastructure.secret_store.systemd_credentials import (
 
 def test_registry_has_unique_fixed_names_and_credential_ids() -> None:
     specs = credential_specs()
-    assert len(specs) == 8
+    assert len(specs) == 7
     assert len({item.logical_name for item in specs}) == len(specs)
     assert len({item.systemd_credential_id for item in specs}) == len(specs)
     assert all(item.systemd_credential_id.startswith("om-") for item in specs)
+    assert credential_spec("quality.read_token") is None
+    assert "OM_QUALITY_READ_TOKEN" in legacy_secret_env_names()
     assert credential_spec("bot.cursor_hmac_key") is None
     assert "OM_COPILOT_CURSOR_HMAC_KEY" in legacy_secret_env_names()
 
     import src.application.secret_store as secret_store
 
     assert not hasattr(secret_store, "BOT_CURSOR_HMAC_KEY")
+    assert not hasattr(secret_store, "QUALITY_READ_TOKEN")
 
 
 def test_env_provider_is_explicit_and_deprecated() -> None:

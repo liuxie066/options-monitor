@@ -1152,7 +1152,7 @@ def test_runtime_service_check_accepts_inactive_timer_triggered_oneshot() -> Non
                             "stdout": "active",
                         },
                         {
-                            "name": "options-monitor-quality-http.service",
+                            "name": "options-monitor-trade-intake.service",
                             "status": "ok",
                             "returncode": 0,
                             "stdout": "active",

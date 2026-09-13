@@ -1,1 +1,1 @@
-"""OM quality CLI and HTTP adapters."""
+"""OM quality CLI adapter."""
