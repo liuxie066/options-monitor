@@ -454,6 +454,90 @@ def test_trade_events_repair_apply_voids_and_replaces_event(monkeypatch, tmp_pat
     assert lots[0]["fields"]["strike"] == 500.0
 
 
+@pytest.mark.parametrize("with_fx", [True, False])
+@pytest.mark.parametrize(
+    ("overrides", "expected_native"),
+    [(["--symbol", "0883.HK", "--multiplier", "1000"], "480"),
+     (["--symbol", "0883.HK"], "48"),
+     (["--contracts", "1", "--price", "0.5"], "50")],
+)
+def test_repair_preserves_fees_and_rebuilds_cash_conversion_identity(
+    monkeypatch, tmp_path: Path, capsys, with_fx, overrides, expected_native,
+) -> None:
+    from decimal import Decimal
+
+    from domain.domain.ledger import ContractKey, TradeEvent
+    from domain.domain.ledger.cash_facts import cash_facts_for_trade_event
+    from domain.domain.performance.cash_conversion import validate_observed_cash_conversion
+    from src.application.cash_conversion import cash_fx_observation_facts
+    from src.application.ledger import writer_trade_events
+    from src.application.ledger.writer import persist_trade_event_object
+    from src.infrastructure.performance_evidence_sqlite import PerformanceEvidenceSQLiteRepository
+    import src.interfaces.cli.trade_events as cli
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "repair.sqlite3")
+    event_time = 1774419413873
+    fx = {"source": "tencent_quote", "rates": {"HKDCNY": 0.88092, "USDCNY": 6.9},
+          "timestamp": "2026-03-25T06:16:53+00:00",
+          "quote_timestamps": {pair: "2026-03-25T06:16:53+00:00" for pair in ("HKDCNY", "USDCNY")}}
+    monkeypatch.setattr(writer_trade_events, "load_cash_fx_payload", lambda *a, **k: fx)
+    event = TradeEvent(
+        event_id="cnc-open", event_type="open", event_time_ms=event_time,
+        contract_key=ContractKey.from_values(
+            broker="富途", account="lx", underlying_symbol="CNC",
+            option_type="call", position_side="short", strike=30,
+            expiration_ymd="2026-03-30",
+        ),
+        contracts=2, price=0.24, multiplier=100, currency="HKD", fees=20,
+        source="opend_push", raw_payload={"source_type": "broker_trade_event",
+            "futu_account_id": "123", "order_id": "order-cnc", "fee_provenance": {
+            "basis": "actual", "amount": "20", "source": "opend.order_fee_query",
+        }},
+    )
+    persist_trade_event_object(repo, event)
+    if with_fx:
+        PerformanceEvidenceSQLiteRepository(repo.db_path).freeze_cash_fx_daily_rates(
+            cash_fx_observation_facts(fx, observed_at_ms=event_time),
+            migrated_at_ms=event_time,
+        )
+    before = deepcopy(repo.list_trade_events())
+    assert before[0]["fees"] == 20, before[0]
+    monkeypatch.setattr(cli, "resolve_option_positions_repo", lambda **kw: (tmp_path / "data.json", repo))
+    args = ["repair", event.event_id, *overrides, "--format", "json"]
+    assert cli.main([*args, "--dry-run"]) == 0
+    preview = json.loads(capsys.readouterr().out)["repair_event"]
+    assert preview["fees"] == 20
+    assert repo.list_trade_events() == before
+    assert cli.main([*args, "--confirm"]) == 0
+    applied = json.loads(capsys.readouterr().out)
+    stored = next(row for row in repo.list_trade_events() if row["event_id"] == applied["repair_event_id"])
+    assert stored["fees"] == preview["fees"] == 20
+    assert stored["raw_payload"]["fee_provenance"] == before[0]["raw_payload"]["fee_provenance"]
+    for payload in (preview, stored):
+        repaired = TradeEvent.from_dict(payload)
+        facts = {fact.fact_kind: fact for fact in cash_facts_for_trade_event(repaired)}
+        assert facts["option_trade_cash_gross"].amount == Decimal(expected_native)
+        assert facts["option_fee_cash"].amount == Decimal("-20")
+        for fact in facts.values():
+            conversion = fact.cash_conversion
+            assert conversion["cash_fact_id"] == fact.fact_id
+            assert Decimal(conversion["native_amount"]) == fact.amount
+            if with_fx:
+                amount, error = validate_observed_cash_conversion(
+                    conversion, cash_fact_id=fact.fact_id, native_amount=fact.amount,
+                    native_currency="HKD", effective_at_ms=event_time,
+                )
+                assert error is None, json.dumps(conversion)
+                assert amount == fact.amount * Decimal("0.88092")
+            else:
+                assert conversion["status"] == "pending"
+                assert conversion["amount_cny"] is None
+    assert next(row for row in repo.list_trade_events() if row["event_id"] == event.event_id) == before[0]
+    assert cli.main([*args, "--confirm"]) == 2
+    capsys.readouterr()
+    assert len(repo.list_trade_events()) == 3
+
+
 def test_trade_events_repair_rejects_second_repair(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.trade_events as cli
 

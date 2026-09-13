@@ -26,6 +26,10 @@ from domain.domain.trade_contract_identity import (
     normalize_trade_side,
 )
 from domain.domain.wheel import effective_wheel_events
+from src.application.cash_conversion import (
+    attach_trade_event_cash_conversions,
+    load_cash_fx_payload,
+)
 from src.application.ledger.assigned_stock_projection import (
     project_assigned_stock_lifecycle_from_rows,
 )
@@ -179,6 +183,7 @@ def _repair_trade_event(*, event_id: str, core: dict[str, Any], raw_payload: dic
         currency=normalize_currency(core.get("currency")),
         source="cli_trade_event_repair",
         multiplier=float(safe_float(core.get("multiplier")) or 100.0),
+        fees=float(core.get("fees") or 0.0),
         target_lot_id=target_lot_id,
         lot_id=(str(raw_payload.get("lot_id") or raw_payload.get("lot_record_id") or "").strip() or None),
         raw_payload=raw_payload,
@@ -1436,6 +1441,8 @@ def build_manual_repair_preview(
         repair_reason=repair_reason,
     )
     core_raw_payload = dict(core.get("raw_payload") or {})
+    # Conversions belong to the original event identity and economics.
+    core_raw_payload.pop("cash_conversions", None)
     core_raw_payload.update(
         {
             "source": "om trade-events",
@@ -1446,6 +1453,11 @@ def build_manual_repair_preview(
         }
     )
     repair_event = _repair_trade_event(event_id=repair_event_id, core=core, raw_payload=core_raw_payload)
+    repair_event = attach_trade_event_cash_conversions(
+        repair_event,
+        fx_payload=load_cash_fx_payload(sqlite_repo, persist=False),
+        observed_at_ms=int(as_of_ms or now_ms()),
+    )
     void_event = _void_trade_event(
         event_id=void_event_id,
         target=target,
