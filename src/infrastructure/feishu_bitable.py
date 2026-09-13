@@ -554,15 +554,3 @@ def parse_note_kv(note: str, key: str) -> str:
         if part.startswith(key + "="):
             return part.split("=", 1)[1].strip()
     return ""
-
-
-def merge_note(note: str | None, kv: dict[str, str]) -> str:
-    base = (note or "").strip()
-    parts = []
-    if base:
-        parts.append(base)
-    for k, v in kv.items():
-        if v is None or v == "":
-            continue
-        parts.append(f"{k}={v}")
-    return ";".join(parts)
