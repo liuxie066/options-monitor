@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Improvements
+- Retired the quality HTTP endpoint and its credential binding while preserving local quality refresh, status access, and business gates.
+
+### Bug Fixes
+- Removed legacy secret environment variables from every generated systemd service when secure credential delivery is enabled, including services that do not consume credentials.
+
 ## 3.5.3 - 2026-09-11
 
 ### Bug Fixes

@@ -222,7 +222,7 @@ def _legacy_credential_migration_fixture(monkeypatch, tmp_path: Path) -> dict[st
     _install_complete_systemd_bundle(bundle, systemd_root)
     legacy_env.parent.mkdir(parents=True, exist_ok=True)
     legacy_env.write_text("OM_FEISHU_BOT_APP_SECRET=not-a-real-secret\n", encoding="utf-8")
-    compat = systemd_root / "options-monitor-quality-http.service.d" / service_drift_module.SECRET_BACKEND_COMPAT_DROPIN
+    compat = systemd_root / "options-monitor-trade-intake.service.d" / service_drift_module.SECRET_BACKEND_COMPAT_DROPIN
     compat.parent.mkdir(parents=True, exist_ok=True)
     compat.write_text(
         "[Service]\nLoadCredential=\nLoadCredentialEncrypted=\nEnvironment=OM_SECRET_BACKEND=env\n",

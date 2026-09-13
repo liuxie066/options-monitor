@@ -11,7 +11,6 @@ from src.application.quality.paths import (
     default_quality_hot_path_cutover_receipt_path,
 )
 from src.application.quality.service import OMQualityService
-from src.interfaces.quality.http import serve_quality_http
 
 
 def add_quality_commands(subparsers: Any) -> None:
@@ -56,12 +55,9 @@ def add_quality_commands(subparsers: Any) -> None:
         choices=("us", "hk"),
         dest="config_keys",
     )
-    serve = commands.add_parser("serve", help="serve the latest artifact over a loopback-only HTTP endpoint")
-    serve.add_argument("--host", default="127.0.0.1")
-    serve.add_argument("--port", type=int, default=8792)
 
 
-def handle_quality_command(args: argparse.Namespace) -> dict[str, Any] | int:
+def handle_quality_command(args: argparse.Namespace) -> dict[str, Any]:
     service = OMQualityService()
     if args.quality_command == "status":
         payload = service.read_published()
@@ -104,9 +100,6 @@ def handle_quality_command(args: argparse.Namespace) -> dict[str, Any] | int:
         )
     if args.quality_command == "recheck-due":
         return service.refresh_if_due(config_keys=args.config_keys)
-    if args.quality_command == "serve":
-        serve_quality_http(service=service, host=args.host, port=args.port)
-        return 0
     raise ValueError(f"unsupported quality command: {args.quality_command}")
 
 

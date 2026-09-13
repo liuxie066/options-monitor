@@ -1,13 +1,13 @@
-# Quality status contract vendor copy
+# OM quality status artifact contract
 
-This directory pins the public `investment.quality_status.v1` contract consumed
-by Options Monitor tests and its future quality producer.
+Options Monitor owns this local schema and validates quality artifacts against
+`quality_status.v1.schema.json` before publication. CLI, Tool Gateway and
+business gates read the same artifact without an HTTP service.
 
-The canonical contract belongs to the independent `investment-quality`
-repository. Do not edit the Schema locally. Refresh it from the upstream
-commit pin while the manifest is `unpublished`, or from the upstream contract
-release after its tag exists; update `vendor-manifest.json`, and run
-`tests/test_quality_status_contract_vendor.py`.
+The existing `investment.quality_status.v1` identifier and schema remain stable
+for saved artifacts. Historical producer names in the schema do not represent
+an active external integration. There is no upstream repository or release pin.
 
-Producer-specific fields must use the public `extensions` object. OM runtime
-code must not import Hub implementation modules.
+Schema changes must preserve consumer compatibility and explicit missing-data
+semantics. Validate them with `tests/test_quality_status_contract.py` and the
+quality producer and gate tests under `tests/quality/`.

@@ -59,7 +59,7 @@
 - [Close Advice Contract](CLOSE_ADVICE_CONTRACT.md)：严格止盈平仓、报价证据、状态机与通知边界。
 - [Option Performance Design](OPTION_PERFORMANCE_DESIGN.md)：期权净现金流、胜率、收益率、统一账本真源与公开入口的当前合同。
 - [Assigned Stock Return Design](ASSIGNED_STOCK_RETURN_DESIGN.md)：assignment 后的正股事实和收益归因。
-- [OM Runtime and Data Quality](quality-monitoring/README.md)：OM 本地检查实现与操作入口；跨系统正式设计由 `investment-quality` 维护。
+- [OM Runtime and Data Quality](quality-monitoring/README.md)：OM 本地质量检查、文件契约与操作入口。
 - [Dependency Graph](DEPENDENCY_GRAPH.md)：由生成脚本维护的 Python import graph。
 
 ## Tool Gateway、Bot 与消息入口

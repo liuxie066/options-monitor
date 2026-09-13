@@ -14,7 +14,6 @@ YAML、JSON、JSONL、命令参数、日志、support bundle 或聊天记录。
 | `feishu.holdings.app_secret` | Feishu holdings app | `OM_FEISHU_APP_SECRET` |
 | `feishu.bot.app_secret` | Feishu bot / long connection | `OM_FEISHU_BOT_APP_SECRET` |
 | `inbound.operation_hmac_key` | inbound 写操作完整性及分页游标子密钥来源 | `OM_INBOUND_OPERATION_HMAC_KEY` |
-| `quality.read_token` | `/quality/status` 读取认证 | `OM_QUALITY_READ_TOKEN` |
 
 App ID、用户 open ID、table ID、路径、URL、model 名和 feature flag 不是秘密，继续作为普通配置。
 Facebook 等后续集成遵循同一规则：App ID 是普通配置；App Secret 只有在出现真实消费方时才加入固定注册表。
@@ -81,6 +80,8 @@ credential ID。它不会创建、读取或修改 `/etc/credstore.encrypted` 中
 不会读取该密钥。
 两种安全交付 drop-in 都会用 `UnsetEnvironment=` 从进程环境中移除固定注册表里的旧 secret env 名；
 普通 env-file 仍可保留非秘密配置。
+启用 `--include-secret-credentials` 时，所有生成的 systemd service 也会清除这些旧 secret env 名，
+包括不需要凭据的质量任务、投影校验、状态和升级服务；不会因此给它们增加凭据绑定。
 安装、daemon-reload、服务重启和健康验证仍属于独立的部署授权边界。
 
 如果 Incus/LXC 宿主禁止 systemd credential 所需的 mount namespace，可显式选择：

@@ -43,7 +43,7 @@ def _secure_store(tmp_path: Path, credential_id: str) -> tuple[Path, Path]:
 
 def test_materializer_writes_only_allowlisted_runtime_files(tmp_path: Path) -> None:
     helper = _load_helper()
-    credential_id = "om-quality-read-token"
+    credential_id = "om-feishu-bot-app-secret"
     store, source = _secure_store(tmp_path, credential_id)
     runtime_root = tmp_path / "run" / "options-monitor" / "credentials"
     observed: list[tuple[str, Path, Path]] = []
@@ -53,7 +53,7 @@ def test_materializer_writes_only_allowlisted_runtime_files(tmp_path: Path) -> N
         output_path.write_text("test-secret-value\n", encoding="utf-8")
 
     result = helper.materialize_credentials(
-        unit_name="options-monitor-quality-http.service",
+        unit_name="options-monitor-trade-intake.service",
         credential_ids=(credential_id,),
         store_root=store,
         runtime_root=runtime_root,
@@ -64,7 +64,7 @@ def test_materializer_writes_only_allowlisted_runtime_files(tmp_path: Path) -> N
         decrypt_credential=fake_decrypt,
     )
 
-    target_dir = runtime_root / "options-monitor-quality-http.service"
+    target_dir = runtime_root / "options-monitor-trade-intake.service"
     target = target_dir / credential_id
     assert target.read_text(encoding="utf-8") == "test-secret-value\n"
     assert stat.S_IMODE(target_dir.stat().st_mode) == 0o510
@@ -74,14 +74,14 @@ def test_materializer_writes_only_allowlisted_runtime_files(tmp_path: Path) -> N
     assert observed[0][2].parent != target_dir
     assert result == {
         "action": "materialize",
-        "unit": "options-monitor-quality-http.service",
+        "unit": "options-monitor-trade-intake.service",
         "credential_count": 1,
         "values_exposed": False,
     }
     assert "test-secret-value" not in json.dumps(result)
 
     rotated = helper.materialize_credentials(
-        unit_name="options-monitor-quality-http.service",
+        unit_name="options-monitor-trade-intake.service",
         credential_ids=(credential_id,),
         store_root=store,
         runtime_root=runtime_root,
@@ -101,7 +101,7 @@ def test_materializer_writes_only_allowlisted_runtime_files(tmp_path: Path) -> N
     assert not any(path.name.startswith(".options-monitor-") for path in runtime_root.iterdir())
 
     cleaned = helper.cleanup_credentials(
-        unit_name="options-monitor-quality-http.service",
+        unit_name="options-monitor-trade-intake.service",
         credential_ids=(credential_id,),
         runtime_root=runtime_root,
         required_owner_uid=os.getuid(),
@@ -114,7 +114,7 @@ def test_materializer_normalizes_private_runtime_parent_for_deploy_user_traversa
     tmp_path: Path,
 ) -> None:
     helper = _load_helper()
-    credential_id = "om-quality-read-token"
+    credential_id = "om-feishu-bot-app-secret"
     store, _source = _secure_store(tmp_path, credential_id)
     runtime_parent = tmp_path / "run" / "options-monitor"
     runtime_parent.mkdir(parents=True, mode=0o700)
@@ -122,7 +122,7 @@ def test_materializer_normalizes_private_runtime_parent_for_deploy_user_traversa
     runtime_root = runtime_parent / "credentials"
 
     helper.materialize_credentials(
-        unit_name="options-monitor-quality-http.service",
+        unit_name="options-monitor-trade-intake.service",
         credential_ids=(credential_id,),
         store_root=store,
         runtime_root=runtime_root,
@@ -138,7 +138,7 @@ def test_materializer_normalizes_private_runtime_parent_for_deploy_user_traversa
         ),
     )
 
-    target = runtime_root / "options-monitor-quality-http.service" / credential_id
+    target = runtime_root / "options-monitor-trade-intake.service" / credential_id
     assert stat.S_IMODE(runtime_parent.stat().st_mode) == 0o711
     assert stat.S_IMODE(runtime_root.stat().st_mode) == 0o755
     assert target.read_text(encoding="utf-8") == "test-secret-value\n"
@@ -146,7 +146,7 @@ def test_materializer_normalizes_private_runtime_parent_for_deploy_user_traversa
 
 def test_materializer_rejects_symlinked_encrypted_source(tmp_path: Path) -> None:
     helper = _load_helper()
-    credential_id = "om-quality-read-token"
+    credential_id = "om-feishu-bot-app-secret"
     store = tmp_path / "credstore.encrypted"
     store.mkdir()
     outside = tmp_path / "outside"
@@ -155,7 +155,7 @@ def test_materializer_rejects_symlinked_encrypted_source(tmp_path: Path) -> None
 
     with pytest.raises(helper.MaterializerError, match="regular file"):
         helper.materialize_credentials(
-            unit_name="options-monitor-quality-http.service",
+            unit_name="options-monitor-trade-intake.service",
             credential_ids=(credential_id,),
             store_root=store,
             runtime_root=tmp_path / "run" / "credentials",
@@ -171,7 +171,7 @@ def test_materializer_rejects_symlinked_encrypted_store_ancestor(
     tmp_path: Path,
 ) -> None:
     helper = _load_helper()
-    credential_id = "om-quality-read-token"
+    credential_id = "om-feishu-bot-app-secret"
     real_parent = tmp_path / "real-parent"
     real_parent.mkdir()
     store, _source = _secure_store(real_parent, credential_id)
@@ -180,7 +180,7 @@ def test_materializer_rejects_symlinked_encrypted_store_ancestor(
 
     with pytest.raises(helper.MaterializerError, match="symbolic links"):
         helper.materialize_credentials(
-            unit_name="options-monitor-quality-http.service",
+            unit_name="options-monitor-trade-intake.service",
             credential_ids=(credential_id,),
             store_root=linked_parent / store.name,
             runtime_root=tmp_path / "run" / "credentials",
@@ -195,15 +195,15 @@ def test_materializer_rejects_symlinked_encrypted_store_ancestor(
 def test_materializer_cleanup_refuses_unexpected_entries(tmp_path: Path) -> None:
     helper = _load_helper()
     runtime_root = tmp_path / "run" / "credentials"
-    target = runtime_root / "options-monitor-quality-http.service"
+    target = runtime_root / "options-monitor-trade-intake.service"
     target.mkdir(parents=True)
     unexpected = target / "not-a-registered-credential"
     unexpected.write_text("must-remain", encoding="utf-8")
 
     with pytest.raises(helper.MaterializerError, match="unexpected runtime credential entry"):
         helper.cleanup_credentials(
-            unit_name="options-monitor-quality-http.service",
-            credential_ids=("om-quality-read-token",),
+            unit_name="options-monitor-trade-intake.service",
+            credential_ids=("om-feishu-bot-app-secret",),
             runtime_root=runtime_root,
             required_owner_uid=os.getuid(),
         )
@@ -229,7 +229,7 @@ def test_materializer_decrypt_never_places_plaintext_in_process_arguments(
 
     monkeypatch.setattr(helper.subprocess, "run", fake_run)
     helper._decrypt_with_systemd_creds(
-        "om-quality-read-token",
+        "om-feishu-bot-app-secret",
         source,
         output,
     )
@@ -270,9 +270,9 @@ def test_materializer_cli_requires_root_authority(
     rc = helper.main([
         "cleanup",
         "--unit",
-        "options-monitor-quality-http.service",
+        "options-monitor-trade-intake.service",
         "--credential-id",
-        "om-quality-read-token",
+        "om-feishu-bot-app-secret",
     ])
 
     assert rc == 78
@@ -307,13 +307,13 @@ def test_materializer_cli_grants_plaintext_only_to_deploy_user_uid(
     rc = helper.main([
         "materialize",
         "--unit",
-        "options-monitor-quality-http.service",
+        "options-monitor-trade-intake.service",
         "--deploy-user",
         "liuxie",
         "--store-root",
         "/etc/credstore.encrypted",
         "--credential-id",
-        "om-quality-read-token",
+        "om-feishu-bot-app-secret",
     ])
 
     assert rc == 0

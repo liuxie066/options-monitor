@@ -27,7 +27,6 @@ from src.application.secret_store import (
     FEISHU_BOT_APP_SECRET,
     FEISHU_HOLDINGS_APP_SECRET,
     INBOUND_OPERATION_HMAC_KEY,
-    QUALITY_READ_TOKEN,
     credential_spec,
     legacy_secret_env_names,
 )
@@ -70,7 +69,6 @@ PROJECTION_VERIFY_LAUNCHD_CALENDAR = {"Hour": 9, "Minute": 30}
 AUTO_UPGRADE_SYSTEMD_CALENDAR = "*-*-* 06:10:00 Asia/Shanghai"
 AUTO_UPGRADE_LAUNCHD_CALENDAR = {"Hour": 6, "Minute": 10}
 DEFAULT_OPEND_EXECUTABLE = "FutuOpenD"
-QUALITY_HTTP_PORT = 8792
 QUALITY_REFRESH_INTERVAL_SYSTEMD = "15min"
 QUALITY_RECHECK_INTERVAL_SYSTEMD = "1min"
 QUALITY_DAY_END_SYSTEMD_CALENDARS = {
@@ -589,7 +587,6 @@ def _systemd_secret_bindings(
             bind(service_name, FEISHU_BOT_APP_SECRET)
 
     bind("options-monitor-trade-intake.service", FEISHU_BOT_APP_SECRET)
-    bind("options-monitor-quality-http.service", QUALITY_READ_TOKEN)
     bind(
         "options-monitor-feishu-ws.service",
         FEISHU_BOT_APP_SECRET,
@@ -868,7 +865,6 @@ def build_service_profile(
                 or "trade-intake" in str(name)
                 or "feishu-ws" in str(name)
                 or "wechat-clawbot" in str(name)
-                or "quality-http" in str(name)
             )
         )
     ]
@@ -1139,6 +1135,12 @@ def render_service_bundle(
         owner_uid: int | None = None,
         owner_gid: int | None = None,
     ) -> None:
+        if kind == "systemd_service" and include_secret_credentials:
+            content = content.replace(
+                "[Service]\n",
+                "[Service]\nUnsetEnvironment=" + " ".join(sorted(legacy_secret_env_names())) + "\n",
+                1,
+            )
         files.append(
             RenderedServiceFile(
                 relative_path=relative_path,
@@ -1382,33 +1384,6 @@ def render_service_bundle(
                 for market in market_values
                 for arg in ("--config-key", market)
             ]
-            quality_http_service = "options-monitor-quality-http.service"
-            add(
-                f"systemd/{quality_http_service}",
-                _systemd_unit(
-                    description="Options Monitor quality artifact HTTP endpoint",
-                    repo_root=repo,
-                    runtime_root=runtime,
-                    env_file=env_file_path,
-                    deploy_user=systemd_user,
-                    deploy_home=systemd_home,
-                    exec_args=[
-                        om,
-                        "quality",
-                        "serve",
-                        "--host",
-                        "127.0.0.1",
-                        "--port",
-                        str(QUALITY_HTTP_PORT),
-                    ],
-                    service_type="simple",
-                    restart="always",
-                ),
-                install_path=f"/etc/systemd/system/{quality_http_service}",
-                kind="systemd_service",
-                service_name=quality_http_service,
-            )
-
             quality_refresh_service = "options-monitor-quality-refresh.service"
             quality_refresh_timer = "options-monitor-quality-refresh.timer"
             add(
@@ -2040,11 +2015,6 @@ def render_service_bundle(
         quality_monitoring={
             "enabled": True,
             "artifact_path": str(runtime / "output_shared" / "state" / "quality" / "status.v1.json"),
-            "http": {
-                "host": "127.0.0.1",
-                "port": QUALITY_HTTP_PORT,
-                "credential_name": QUALITY_READ_TOKEN,
-            },
             "regular_refresh_interval": QUALITY_REFRESH_INTERVAL_SYSTEMD,
             "recheck_interval": QUALITY_RECHECK_INTERVAL_SYSTEMD,
             "day_end_calendars": {
@@ -2130,7 +2100,6 @@ def _install_commands(target: ServiceTarget, *, files: list[RenderedServiceFile]
                 or "trade-intake" in item.install_path
                 or "feishu-ws" in item.install_path
                 or "wechat-clawbot" in item.install_path
-                or "quality-http" in item.install_path
                 or Path(item.install_path).name == FEISHU_AGENT_CREDENTIAL_SERVICE
             )
         ]

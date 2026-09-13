@@ -27,7 +27,6 @@ QUALITY_CURRENT_CONSUMERS = (
     "application.tick_account_execution:assert_quality_allows",
     "agent_tools.quality:read_published",
     "interfaces.quality.cli:read_published",
-    "interfaces.quality.http:read_published",
 )
 _MARKETS = ("hk", "us")
 _MAX_EVIDENCE_BYTES = 1_048_576

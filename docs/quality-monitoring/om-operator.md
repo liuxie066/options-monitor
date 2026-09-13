@@ -42,28 +42,15 @@ unexplained/legacy read、静态 consumer inventory 与 deployment-access 证据
 市场交易日列表和本地 `position_lots` 控制状态哈希，不保存账户 ID、完整持仓或
 OpenD 原始响应。
 
-只读 HTTP：
-
-```text
-./om secrets set quality.read_token
-./om quality serve --host 127.0.0.1 --port 8792
-```
-
-macOS 从 Keychain 读取；Linux systemd unit 通过选定的逐 unit credential delivery 模式只注入
-`quality.read_token`。默认为 `LoadCredentialEncrypted=`；受限容器可显式使用
-`--secret-credential-delivery runtime-files`。`OM_QUALITY_READ_TOKEN` 仅在显式
-`OM_SECRET_BACKEND=env` 的限时兼容模式下生效。
-
-- `GET /health` 只证明 endpoint 进程可用；
-- `GET /quality/status` 需要独立 bearer token，只读取已发布 artifact；
-- HTTP 请求不会调用 OpenD、不会 replay repair、不会写 evidence；
-- 默认只允许 loopback；生产受控内网绑定必须显式设置
-  `OM_QUALITY_ALLOW_REMOTE_BIND=true` 并由外围传输层保护。
+读取结果使用 `./om quality status --json` 或 `quality_status` Tool Gateway 工具。
+HTTP 服务和外部 Hub 接入已退役；本地检查、artifact 和业务门禁继续保留。
+静态 consumer inventory 已移除 HTTP reader；旧 inventory 的 cutover 证据或激活回执
+不再匹配当前程序，须按现有 cutover 流程重新验证，不能自动改写旧回执。
 
 门禁：
 
 - `OM_QUALITY_ONBOARDED=false` 时 producer 可部署和建立 baseline，但不改变消费者行为；
-- 完成生产 baseline 与 Hub onboarding 后设为 `true`；
+- 完成生产 baseline 与本地消费者接入验证后设为 `true`；
 - 此后 stale artifact 或明确 blocking 结论会阻断 close advice 和正式
   option performance；
 - 普通候选扫描不读取该门禁；
@@ -97,7 +84,6 @@ systemd renderer 默认不改变现有部署。生产准备时显式加入：
 
 该选项生成：
 
-- `options-monitor-quality-http.service`：loopback `127.0.0.1:8792`；
 - `options-monitor-quality-refresh.timer`：15 分钟常规刷新；
 - `options-monitor-quality-recheck.timer`：1 分钟轻量到期探测；
 - `options-monitor-quality-day-end-us.timer`：美东 `16:30`；
@@ -114,7 +100,7 @@ these eight fields: `provider`, `snapshot_id`, `observed_at_utc`, `complete`,
 `refresh_cache`, `account_fingerprint`, `environment`, and `market`. The current
 `origin/main` implementation still spreads four internal fields into this object;
 that is the defect being removed.
-`source_currency` and `payload_sha256` are permitted by the vendored schema but
+`source_currency` and `payload_sha256` are permitted by the local schema but
 are not emitted by this producer today.
 
 OpenD position-input fields such as `scope`, `completeness`, `quality`, and
@@ -123,8 +109,8 @@ checks. They must never be deleted or cleared merely to make publication pass,
 and they are never copied into a public source snapshot. The current
 `sourceSnapshot` schema has no source-level `extensions` slot; dataset-level
 extensions must not be used as an undocumented escape hatch. Any future
-producer-specific field requires an upstream contract decision owned by
-`investment-quality`, not a local schema edit or a new schema version.
+producer-specific field requires a compatible change to the OM-owned local
+schema and regression evidence for its consumers.
 
 The relevant call chain is:
 
@@ -156,10 +142,9 @@ Validation must include an adapter key-set regression and quality-service tests
 with enriched `snapshot_input` for both complete and incomplete/error paths, plus
 the normal release preflight and the explicit `tests/quality/*` suite. A deployed
 oneshot refresh is successful only when its exit result is success and the
-published status artifact validates and can be read back; HTTP health, timer
+published status artifact validates and can be read back; timer
 activity, or process presence alone is insufficient. Publishing and remote
-upgrade remain separate authorization gates. An upstream contract extension is
-not part of this producer-side repair.
+upgrade remain separate authorization gates. A schema extension is not part of this producer-side repair.
 
 ## Hotfix scope and implementation slices
 
@@ -178,7 +163,7 @@ not part of this producer-side repair.
    仍可通过。测试必须走 `build_position_dataset`/service 真实发布路径，而不是只测
    一个未被调用的 helper。
 
-以下不属于本 hotfix：修改 vendored schema、增加 source-level `extensions` 或新版本、
+以下不属于本 hotfix：修改本地 schema、增加 source-level `extensions` 或新版本、
 改变 OpenD 查询或消费者、重写跨文件事务、清洗历史 carry-forward artifact、修改
 发布工作流。发布前只读校验现有 status artifact；若发现历史 artifact 已含未声明字段，
 保留原始事实并另开数据修复工作，不在本 hotfix 中覆盖它。

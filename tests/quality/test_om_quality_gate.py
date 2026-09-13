@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import json
-import threading
+import argparse
+
 from collections import Counter
 from datetime import datetime, timedelta, timezone
-from http.client import HTTPConnection
-from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -20,7 +18,6 @@ from src.application.quality.gate import (
 from src.application.quality.service import OMQualityService
 from src.infrastructure.quality.artifact_repository import QualityArtifactRepository
 from src.infrastructure.quality.control_state_repository import QualityControlStateRepository
-from src.interfaces.quality.http import build_quality_handler
 
 
 def _payload(*, blocked: bool = False, observed_at: str | None = None) -> dict:
@@ -312,42 +309,16 @@ def test_quality_tool_declares_its_consumer_scope(monkeypatch) -> None:
     assert calls == [{"integrity": True}]
 
 
-def test_http_is_read_only_authenticated_and_etag_aware(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("OM_QUALITY_READ_TOKEN", "secret-read-token")
-    service = _service(tmp_path, _payload())
-    server = ThreadingHTTPServer(("127.0.0.1", 0), build_quality_handler(service))
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        conn = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
-        conn.request("GET", "/quality/status")
-        unauthorized = conn.getresponse()
-        assert unauthorized.status == 401
-        assert json.loads(unauthorized.read())["error"]["code"] == "QUALITY_AUTH_FAILED"
+def test_quality_cli_reads_local_artifact_and_rejects_retired_serve(monkeypatch, tmp_path: Path) -> None:
+    from src.interfaces.quality import cli
 
-        conn.request(
-            "GET",
-            "/quality/status",
-            headers={"Authorization": "Bearer secret-read-token"},
-        )
-        response = conn.getresponse()
-        assert response.status == 200
-        etag = response.getheader("ETag")
-        assert response.getheader("Cache-Control") == "no-store"
-        assert json.loads(response.read())["producer"]["service"] == "options-monitor"
-
-        conn.request(
-            "GET",
-            "/quality/status",
-            headers={
-                "Authorization": "Bearer secret-read-token",
-                "If-None-Match": etag,
-            },
-        )
-        unchanged = conn.getresponse()
-        assert unchanged.status == 304
-        unchanged.read()
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
+    payload = _payload()
+    service = _service(tmp_path, payload)
+    monkeypatch.setattr(cli, "OMQualityService", lambda: service)
+    parser = argparse.ArgumentParser()
+    cli.add_quality_commands(parser.add_subparsers(dest="command"))
+    args = parser.parse_args(["quality", "status", "--json"])
+    assert cli.handle_quality_command(args) == payload
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(["quality", "serve"])
+    assert exc.value.code == 2

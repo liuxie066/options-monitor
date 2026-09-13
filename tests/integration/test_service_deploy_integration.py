@@ -1584,11 +1584,11 @@ def test_service_drift_preserves_quality_monitoring_opt_in_and_detects_metadata_
     assert clean["profile_content_changed"] is False
     assert clean["extra_profile_units"] == []
     assert clean["extra_installed_units"] == []
-    assert "options-monitor-quality-http.service" in clean["expected_services"]
+    assert "options-monitor-quality-http.service" not in clean["expected_services"]
     assert "options-monitor-quality-day-end-us.timer" in clean["expected_services"]
     assert "options-monitor-quality-day-end-hk.timer" in clean["expected_services"]
 
-    profile["quality_monitoring"]["http"]["port"] = 9999
+    profile["quality_monitoring"]["regular_refresh_interval"] = "99min"
     (runtime / "service.profile.json").write_text(json.dumps(profile, ensure_ascii=False), encoding="utf-8")
 
     drifted = service_drift(repo_root=repo, runtime_root=runtime, systemd_unit_root=systemd_root)
@@ -1596,6 +1596,62 @@ def test_service_drift_preserves_quality_monitoring_opt_in_and_detects_metadata_
     assert drifted["summary"]["status"] == "warn"
     assert drifted["profile_content_changed"] is True
     assert drifted["mismatched_units"] == []
+
+
+def test_service_drift_retires_legacy_quality_http_and_keeps_local_quality(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+    from tests.service_deploy_test_support import _install_complete_systemd_bundle
+    from src.application.service_drift import service_drift
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    systemd_root = tmp_path / "systemd"
+    repo.mkdir()
+    runtime.mkdir()
+    bundle = render_service_bundle(
+        target="systemd", repo_root=repo, runtime_root=runtime,
+        accounts=["lx"], markets=["us", "hk"], include_quality_monitoring=True,
+        include_secret_credentials=True,
+    )
+    files = {item["relative_path"]: item for item in bundle["files"]}
+    profile = json.loads(files["service.profile.json"]["content"])
+    retired = "options-monitor-quality-http.service"
+    profile["services"].append({"name": retired})
+    profile["secret_credentials"]["service_credentials"][retired] = ["quality.read_token"]
+    profile["quality_monitoring"]["http"] = {"host": "127.0.0.1", "port": 8792}
+    profile.setdefault("restart", {}).setdefault("services", []).append(retired)
+    (runtime / "service.profile.json").write_text(json.dumps(profile), encoding="utf-8")
+    _install_complete_systemd_bundle(bundle, systemd_root)
+    (systemd_root / retired).write_text(
+        "[Unit]\nDescription=Options Monitor quality artifact HTTP endpoint\n"
+        "[Service]\nExecStart=/old/om quality serve\n", encoding="utf-8",
+    )
+    dropin = systemd_root / (retired + ".d") / "zzzz-secret-credentials.conf"
+    dropin.parent.mkdir()
+    dropin.write_text("[Service]\nLoadCredentialEncrypted=om-quality-read-token:/old/token\n")
+    calls = []
+
+    def run_cmd(command, **_kwargs):
+        calls.append(list(command))
+        return subprocess.CompletedProcess(command, 0, stdout="enabled\n", stderr="")
+
+    out = service_drift(
+        repo_root=repo, runtime_root=runtime, systemd_unit_root=systemd_root,
+        confirm=True, run_cmd=run_cmd,
+    )
+    refreshed = json.loads((runtime / "service.profile.json").read_text())
+    assert out["summary"]["status"] == "ok"
+    assert out["applied"]["retired_units"] == [retired]
+    assert ["systemctl", "disable", "--now", retired] in calls
+    assert not (systemd_root / retired).exists()
+    assert not dropin.exists()
+    assert retired not in refreshed["secret_credentials"]["service_credentials"]
+    assert "http" not in refreshed["quality_monitoring"]
+    assert retired not in refreshed.get("restart", {}).get("services", [])
+    for suffix in ("refresh", "recheck", "day-end-us", "day-end-hk"):
+        name = f"options-monitor-quality-{suffix}.timer"
+        assert {"name": name} in refreshed["services"]
+        assert (systemd_root / name).exists()
 
 def test_service_upgrade_verify_returns_compact_read_only_summary(tmp_path: Path) -> None:
     from src.application.service_upgrade import service_upgrade_verify, write_upgrade_status
