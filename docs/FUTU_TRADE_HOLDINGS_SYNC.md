@@ -43,6 +43,26 @@ backfill 时才会产生提示。旧 `trade_intake.holdings_sync.enabled` 只保
   `(broker, account, futu_account_id, order_id)` 精确查询终态订单和实际费用。
   当次尚未取得 actual 时，recent history backfill 只重试本次窗口内成交携带的同一订单。
 
+## 成交身份隔离与恢复
+
+缺少或冲突的券商账号、环境证据进入 `identity_needs_review`，不进入经济重试队列。
+`attempt_count=0` 表示尚未尝试入账；端口和内部账户标签不能补充物理账号身份。
+Listener 收到此类推送立即输出 `TRADE_INTAKE_IDENTITY_REVIEW_REQUIRED` 日志，
+并在启动和后续 Inbox 刷新时保留 `inbox.identity_attention`：最早 20 条隔离行的
+Inbox ID、deal ID、来源、首次接收时间、原因、`retryable=false` 和
+`next_action=verify_broker_identity_before_replay`。完整数量仍见
+`identity_needs_review_count`。
+
+`runtime_status` 从 listener 状态投影 `trade_intake.summary.identity_review_required`
+和同名告警码 `TRADE_INTAKE_IDENTITY_REVIEW_REQUIRED`，不因正常心跳、零 pending
+或另一来源正常而消除。多个来源共享 Inbox 时不累加隔离数量，也不把它归属到某个账户。
+这些是本地日志和读取告警，不主动发送外部通知。
+
+已有 recent history backfill 可凭完整券商身份独立恢复成交，并按 canonical execution
+identity 幂等入账；它不会按裸 deal ID、合约或端口绑定原隔离行。原行继续保留，告警也
+继续存在，直到身份复核完成。缺失身份的旧行不能用 `--retry-failed` 强制解封；超出
+回填窗口或需要消解旧行时，按下述一次性历史修复边界另行准备权威证据与确认。
+
 ## 生命周期观察隔离与一次性历史修复
 
 `trade_intake.settlement_observation.enabled` 是 lifecycle settlement provider

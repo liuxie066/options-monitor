@@ -58,6 +58,32 @@ def _process(repo, root: Path, entry: str, payload: dict, **kwargs):
     )
 
 
+def test_identity_quarantine_preserves_evidence_when_trusted_history_recovers(tmp_path):
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    raw = {
+        "deal_id": "fill-1", "code": "US.NVDA260918P100000",
+        "_trade_intake_source_identity_errors": ["missing:push_physical_account"],
+        "_trade_intake_source_account_evidence": {"host": "127.0.0.1", "port": 11112},
+    }
+    rejected = _process(repo, tmp_path, "push", raw)
+    inbox = resolve_execution_inbox_path(repo, tmp_path / "unused.sqlite3")
+    original = read_trade_payload(inbox, inbox_id=rejected["inbox_id"], read_only=True)
+    assert original["status"] == "identity_needs_review"
+    assert original["attempt_count"] == 0
+    assert repo.list_trade_events() == []
+    assert not resume_trade_payload(inbox, inbox_id=rejected["inbox_id"], operator="test", repo=repo)
+
+    recovered = _process(repo, tmp_path, "history", _execution(), source="backfill")
+    assert recovered["status"] == "applied"
+    assert recovered["account"] == "lx"
+    assert recovered["inbox_id"] != rejected["inbox_id"]
+    replay = _process(repo, tmp_path, "push", _execution())
+    assert replay["reason"] == "duplicate"
+    assert len(repo.list_trade_events()) == 1
+    assert len(repo.list_position_lots()) == 1
+    assert read_trade_payload(inbox, inbox_id=rejected["inbox_id"], read_only=True) == original
+
+
 def _candidate_event(repo, payload, *, stock: bool, event_id: str, conn=None):
     from domain.domain.ledger import ContractKey, TradeEvent
     from src.application.ledger.api import execution_identity_from_input

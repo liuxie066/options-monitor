@@ -155,6 +155,9 @@ def _trade_intake_summary(state_json: dict[str, Any], status_json: dict[str, Any
     return {
         "listener_status": status_json.get("status"),
         "listener_stage": status_json.get("stage"),
+        "identity_review_required": int(
+            _dict(status_json.get("inbox")).get("identity_needs_review_count") or 0
+        ) > 0,
         "last_heartbeat_utc": status_json.get("last_heartbeat_utc"),
         "last_push_received_utc": status_json.get("last_push_received_utc"),
         "last_push_deal_id": status_json.get("last_push_deal_id"),
@@ -312,6 +315,8 @@ def _aggregate_trade_intake_summaries(summaries: list[dict[str, Any]]) -> dict[s
     out: dict[str, Any] = {
         "listener_status": listener_status,
         "source_count": len(summaries),
+        # Sources may share one canonical Inbox; do not sum its quarantine count.
+        "identity_review_required": any(item.get("identity_review_required") for item in summaries),
         "reconciliation_preview_available": all(
             bool(item.get("reconciliation_preview_available"))
             for item in summaries
@@ -2400,6 +2405,12 @@ def private_runtime_status_tool(
         warnings.append(f"Requested runtime run not found: {source}={value}.")
     if not shared_last_run.get("exists"):
         warnings.append("No last_run.json found under output_shared/state.")
+    if _dict(trade_intake.get("summary")).get("identity_review_required"):
+        warning_codes.append("TRADE_INTAKE_IDENTITY_REVIEW_REQUIRED")
+        warnings.append(
+            "Trade intake has quarantined identity evidence; automatic replay is blocked. "
+            "Verify broker account and environment before replay; inspect listener inbox.identity_attention."
+        )
     auto_close_failures = _latest_run_auto_close_failures(latest_run_payload)
     if auto_close_failures:
         for item in auto_close_failures:
@@ -2982,7 +2993,7 @@ def _status_safe_trade_intake(value: Any) -> dict[str, Any]:
         key: item
         for key, item in summary.items()
         if (
-            key in {"listener_status", "listener_stage", "reconciliation_preview_available"}
+            key in {"listener_status", "listener_stage", "reconciliation_preview_available", "identity_review_required"}
             or key.endswith("_count")
             or key.endswith("_utc")
         )

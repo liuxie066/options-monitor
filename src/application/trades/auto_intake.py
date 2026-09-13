@@ -1844,6 +1844,7 @@ def _run_listener_source_loop(
             cache=inbox_summary_cache,
         )
 
+    status_state["inbox"] = current_inbox_summary()
     _refresh_lifecycle_delivery_status(
         status_state,
         repo=repo,
@@ -2127,6 +2128,11 @@ def _run_listener_source_loop(
                 status_state,
                 status="listening",
                 stage="push_identity_needs_review",
+            )
+            _log(
+                f"[WARN] TRADE_INTAKE_IDENTITY_REVIEW_REQUIRED inbox_id={inbox_id} "
+                "reason=canonical_broker_identity_missing retryable=false "
+                "next_action=verify_broker_identity_before_replay"
             )
             return
         inbox_wakeup.set()
