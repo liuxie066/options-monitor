@@ -1163,6 +1163,7 @@ def run_watchlist_pipeline_default(
                         "principal_anchor": branch.get("principal_anchor"),
                         "currency": branch.get("currency"),
                         "phase": branch.get("phase"),
+                        "reason_codes": list(branch.get("reason_codes") or []),
                         "candidate_status": status,
                         "reason_code": reason_code,
                         "raw_candidates": [],

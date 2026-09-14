@@ -700,9 +700,13 @@ def _write_lifecycle_close_from_case(
             ],
             stock_settlement={
                 "source_event_id": stock.get("source_event_id"),
+                "futu_account_id": stock.get("futu_account_id"),
+                "order_id": stock.get("order_id"),
+                "symbol": stock.get("symbol"),
                 "side": stock.get("side"),
                 "shares": stock.get("stock_qty"),
                 "price": stock.get("stock_price"),
+                **_stock_settlement_financial_fields(stock),
             },
         )
         if normalized_decision == "assignment":
@@ -831,6 +835,7 @@ def _write_v2_lifecycle_close_from_case(
             "event_time_ms": int(stock_evidence.get("trade_time_ms") or 0),
             "order_id": stock_evidence.get("order_id"),
             "clearing_date": stock_evidence.get("clearing_date"),
+            **_stock_settlement_financial_fields(stock_evidence),
         },
         "source_evidence_ids": sorted(
             str(item.get("evidence_id") or "").strip()
@@ -1027,6 +1032,15 @@ def _futu_source_key(deal: NormalizedTradeDeal) -> str:
         source_deal_id=deal.deal_id,
         execution_input=deal.execution_input,
     )
+
+
+def _stock_settlement_financial_fields(stock_evidence: dict[str, Any]) -> dict[str, Any]:
+    raw = stock_evidence.get("raw") or {}
+    payload = raw.get("raw_payload") or {}
+    return {
+        **({"currency": raw["currency"]} if raw.get("currency") else {}),
+        **{key: payload[key] for key in ("fees", "fee", "fee_provenance") if key in payload},
+    }
 
 
 def _evidence_from_deal(

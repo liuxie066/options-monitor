@@ -341,6 +341,161 @@ def capture_wheel_trade_companion_context(
     }
 
 
+def plan_wheel_assignment_companion(
+    event: Any,
+    fields: Mapping[str, Any] | None,
+    rows: Mapping[str, Any],
+    activation_window: Mapping[str, Any] | None,
+    *,
+    recorded_at_ms: int,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Plan the same assignment companion for intake and exact-event recovery."""
+    event_id = str(getattr(event, "event_id", "") or "").strip()
+    account = _event_account(event)
+    if fields is None:
+        reason = "assignment_source_lot_unavailable"
+        return None, reason
+    source_open, source_open_reason = _source_open_event(rows, fields)
+    if source_open is None:
+        reason = str(source_open_reason)
+        return None, reason
+    membership = resolve_option_strategy_membership(
+        getattr(event, "contract_key"),
+        fields,
+        source_id=str(source_open.get("event_id") or ""),
+    )
+    if membership.issues:
+        reason = "strategy_membership_unresolved"
+        return None, reason
+    if membership.strategy not in {"csp", "cc", "wheel"}:
+        return None, "strategy_not_eligible"
+    option_type = str(
+        getattr(getattr(event, "contract_key", None), "option_type", "") or ""
+    ).strip().lower()
+    if option_type not in {"put", "call"}:
+        return None, "option_type_not_eligible"
+    direction = "call" if option_type == "put" else "put"
+    internal = membership.strategy == "wheel"
+    parent_branch_id = None
+    if internal:
+        activation_window = None
+        parent_branch_id = str(
+            membership.source_wheel_branch_id
+            or membership.source_stock_lot_id
+            or ""
+        ).strip()
+        if not parent_branch_id:
+            reason = "wheel_parent_branch_unavailable"
+            return None, reason
+        parents = [
+            branch
+            for branch in _wheel_branches_from_rows(
+                rows,
+                account=account,
+                as_of_ms=_event_time_ms(event),
+            )
+            if branch.get("wheel_branch_id") == parent_branch_id
+            and branch.get("lifecycle_status") == "active"
+        ]
+        if len(parents) != 1:
+            reason = "wheel_parent_branch_not_unique"
+            return None, reason
+    else:
+        if membership.strategy == "cc" and membership.source_stock_lot_id:
+            overlaps = [
+                branch
+                for branch in _wheel_branches_from_rows(
+                    rows,
+                    account=account,
+                    as_of_ms=_event_time_ms(event),
+                )
+                if branch.get("lifecycle_status") == "active"
+                and branch.get("stock_lot_id") == membership.source_stock_lot_id
+            ]
+            if overlaps:
+                reason = (
+                    "ordinary_cc_overlaps_active_wheel_stock"
+                )
+                return None, reason
+        symbol = str(
+            getattr(getattr(event, "contract_key", None), "underlying_symbol", "")
+            or ""
+        ).strip().upper()
+        market = str(symbol_market(symbol) or "").strip().lower()
+        if not market:
+            reason = "wheel_market_unavailable"
+            return None, reason
+        if activation_window is None:
+            return None, "wheel_activation_window_unavailable"
+    multiplier, multiplier_source, multiplier_evidence_hash = _multiplier_evidence(
+        event,
+        source_open,
+    )
+    if multiplier is None or multiplier_source == "conflict" or (internal and multiplier_source == "unproven"):
+        reason = f"multiplier_{multiplier_source}"
+        return None, reason
+    if multiplier != getattr(event, "multiplier", None) or multiplier != source_open.get("multiplier"):
+        return None, "assignment_quantity_inconsistent"
+    reason = "multiplier_unproven" if multiplier_source == "unproven" else None
+    (
+        principal_anchor,
+        currency,
+        principal_anchor_reason,
+        principal_anchor_fact_ids,
+    ) = _assignment_principal_anchor(event, direction)
+    if principal_anchor_reason is not None:
+        if internal or principal_anchor_reason != "assignment_cash_facts_unavailable":
+            return None, principal_anchor_reason
+        reason = reason or principal_anchor_reason
+    stock = getattr(event, "raw_payload", None) or {}
+    stock = stock.get("stock_settlement") if isinstance(stock, Mapping) else None
+    if not isinstance(stock, Mapping):
+        return None, "assignment_stock_settlement_unavailable"
+    stock_currency = str(stock.get("currency") or "").strip().upper()
+    anchor_currency = str(currency or "").strip().upper()
+    if not anchor_currency or (internal and not stock_currency):
+        reason = "assignment_currency_unavailable"
+        return None, reason
+    if stock_currency and (
+        stock_currency != anchor_currency
+        or stock_currency != str(getattr(event, "currency", "") or "").strip().upper()
+    ):
+        reason = "assignment_currency_conflict"
+        return None, reason
+    contracts = int(getattr(event, "contracts", 0) or 0)
+    settlement_shares = stock.get("shares")
+    if isinstance(settlement_shares, bool) or contracts <= 0 or settlement_shares != contracts * multiplier:
+        reason = "assignment_quantity_inconsistent"
+        return None, reason
+    stock_lot_id = (
+        f"assigned-stock-{event_id}" if direction == "call" else None
+    )
+    companion = build_wheel_branch_created_event(
+        account=account,
+        source_assignment_event_id=event_id,
+        direction=direction,
+        occurred_at_ms=_event_time_ms(event),
+        recorded_at_ms=recorded_at_ms,
+        symbol=str(
+            getattr(getattr(event, "contract_key", None), "underlying_symbol", "")
+            or ""
+        ),
+        contracts=contracts,
+        multiplier=multiplier,
+        multiplier_source=multiplier_source,
+        multiplier_evidence_hash=multiplier_evidence_hash,
+        currency=anchor_currency,
+        principal_anchor=principal_anchor,
+        principal_anchor_reason=principal_anchor_reason,
+        principal_anchor_fact_ids=principal_anchor_fact_ids,
+        stock_lot_id=stock_lot_id,
+        parent_branch_id=parent_branch_id,
+        lifecycle_status="pending_decision" if internal else "active",
+        activation_window=activation_window,
+    )
+    return companion, reason
+
+
 def append_wheel_trade_companions(
     repo: Any,
     *,
@@ -376,144 +531,25 @@ def append_wheel_trade_companions(
         event_id = str(getattr(event, "event_id", "") or "").strip()
         account = _event_account(event)
         fields = source_fields.get(event_id)
-        if fields is None:
-            review_reason_by_trade[event_id] = "assignment_source_lot_unavailable"
-            continue
-        source_open, source_open_reason = _source_open_event(before_rows[account], fields)
-        if source_open is None:
-            review_reason_by_trade[event_id] = str(source_open_reason)
-            continue
-        membership = resolve_option_strategy_membership(
-            getattr(event, "contract_key"),
-            fields,
-            source_id=str(source_open.get("event_id") or ""),
-        )
-        if membership.issues:
-            review_reason_by_trade[event_id] = "strategy_membership_unresolved"
-            continue
-        if membership.strategy not in {"csp", "cc", "wheel"}:
-            continue
-        option_type = str(
-            getattr(getattr(event, "contract_key", None), "option_type", "") or ""
-        ).strip().lower()
-        if option_type not in {"put", "call"}:
-            continue
-        direction = "call" if option_type == "put" else "put"
-        internal = membership.strategy == "wheel"
-        parent_branch_id = None
-        activation_window = None
-        if internal:
-            parent_branch_id = str(
-                membership.source_wheel_branch_id
-                or membership.source_stock_lot_id
-                or ""
-            ).strip()
-            if not parent_branch_id:
-                review_reason_by_trade[event_id] = "wheel_parent_branch_unavailable"
-                continue
-            parents = [
-                branch
-                for branch in _wheel_branches_from_rows(
-                    before_rows[account],
-                    account=account,
-                    as_of_ms=_event_time_ms(event),
-                )
-                if branch.get("wheel_branch_id") == parent_branch_id
-                and branch.get("lifecycle_status") == "active"
-            ]
-            if len(parents) != 1:
-                review_reason_by_trade[event_id] = "wheel_parent_branch_not_unique"
-                continue
-        else:
-            if membership.strategy == "cc" and membership.source_stock_lot_id:
-                overlaps = [
-                    branch
-                    for branch in _wheel_branches_from_rows(
-                        before_rows[account],
-                        account=account,
-                        as_of_ms=_event_time_ms(event),
-                    )
-                    if branch.get("lifecycle_status") == "active"
-                    and branch.get("stock_lot_id") == membership.source_stock_lot_id
-                ]
-                if overlaps:
-                    review_reason_by_trade[event_id] = (
-                        "ordinary_cc_overlaps_active_wheel_stock"
-                    )
-                    continue
-            symbol = str(
-                getattr(getattr(event, "contract_key", None), "underlying_symbol", "")
-                or ""
-            ).strip().upper()
-            market = str(symbol_market(symbol) or "").strip().lower()
-            if not market:
-                review_reason_by_trade[event_id] = "wheel_market_unavailable"
-                continue
-            activation_window = repo.get_wheel_activation_window_for_event(
-                market=market,
-                account=account,
-                occurred_at_ms=_event_time_ms(event),
-                conn=conn,
-            )
-            if activation_window is None:
-                continue
-        multiplier, multiplier_source, multiplier_evidence_hash = _multiplier_evidence(
-            event,
-            source_open,
-        )
-        if multiplier is None or multiplier_source in {"unproven", "conflict"}:
-            review_reason_by_trade[event_id] = f"multiplier_{multiplier_source}"
-            continue
-        (
-            principal_anchor,
-            currency,
-            principal_anchor_reason,
-            principal_anchor_fact_ids,
-        ) = _assignment_principal_anchor(event, direction)
-        if principal_anchor_reason is not None:
-            review_reason_by_trade[event_id] = principal_anchor_reason
-            continue
-        stock = getattr(event, "raw_payload", None) or {}
-        stock = stock.get("stock_settlement") if isinstance(stock, Mapping) else {}
-        stock_currency = str(stock.get("currency") or "").strip().upper()
-        anchor_currency = str(currency or "").strip().upper()
-        if not stock_currency or not anchor_currency:
-            review_reason_by_trade[event_id] = "assignment_currency_unavailable"
-            continue
-        if stock_currency != anchor_currency:
-            review_reason_by_trade[event_id] = "assignment_currency_conflict"
-            continue
-        contracts = int(getattr(event, "contracts", 0) or 0)
-        settlement_shares = int(stock.get("shares") or 0)
-        if contracts <= 0 or settlement_shares != contracts * multiplier:
-            review_reason_by_trade[event_id] = "assignment_quantity_inconsistent"
-            continue
-        stock_lot_id = (
-            f"assigned-stock-{event_id}" if direction == "call" else None
-        )
-        companion = build_wheel_branch_created_event(
-            account=account,
-            source_assignment_event_id=event_id,
-            direction=direction,
-            occurred_at_ms=_event_time_ms(event),
+        symbol = str(event.contract_key.underlying_symbol)
+        market = str(symbol_market(symbol) or "").lower()
+        activation_window = repo.get_wheel_activation_window_for_event(
+            market=market, account=account, occurred_at_ms=_event_time_ms(event), conn=conn,
+        ) if market else None
+        companion, review_reason = plan_wheel_assignment_companion(
+            event, fields, before_rows[account], activation_window,
             recorded_at_ms=recorded_at_ms,
-            symbol=str(
-                getattr(getattr(event, "contract_key", None), "underlying_symbol", "")
-                or ""
-            ),
-            contracts=contracts,
-            multiplier=multiplier,
-            multiplier_source=multiplier_source,
-            multiplier_evidence_hash=multiplier_evidence_hash,
-            currency=stock_currency,
-            principal_anchor=principal_anchor,
-            principal_anchor_reason=principal_anchor_reason,
-            principal_anchor_fact_ids=principal_anchor_fact_ids,
-            stock_lot_id=stock_lot_id,
-            parent_branch_id=parent_branch_id,
-            lifecycle_status="pending_decision" if internal else "active",
-            activation_window=activation_window,
         )
+        if review_reason and review_reason not in {
+            "strategy_not_eligible", "option_type_not_eligible", "wheel_activation_window_unavailable",
+        }:
+            review_reason_by_trade[event_id] = review_reason
+        if companion is None:
+            continue
+        membership = resolve_option_strategy_membership(event.contract_key, fields)
+        internal = membership.strategy == "wheel"
+        direction = companion["payload"]["direction"]
+        settlement_shares = event.raw_payload["stock_settlement"]["shares"]
         legacy_terminal = None
         stock_lot_id = str(fields.get("source_stock_lot_id") or "").strip()
         if internal and not membership.source_wheel_branch_id and direction == "put":

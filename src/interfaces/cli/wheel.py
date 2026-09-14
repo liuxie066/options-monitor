@@ -16,6 +16,8 @@ from src.application.agent_tool_config import load_runtime_config
 from src.application.cash_conversion import load_cash_fx_payload
 from src.application.ledger.api import (
     open_position_ledger_from_runtime_config,
+    recover_wheel_assignment,
+    resolve_position_ledger_sqlite_path,
     resolve_position_data_config_path,
 )
 from src.application.wheel import (
@@ -104,6 +106,14 @@ def _add_activation_runtime(parser: argparse.ArgumentParser, *, write: bool) -> 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Manage Wheel lifecycle facts")
     commands = parser.add_subparsers(dest="wheel_command", required=True)
+
+    recover = commands.add_parser("recover", help="recover one missing assignment Wheel branch")
+    recover.add_argument("--account", required=True)
+    recover.add_argument("--market", required=True, choices=("us", "hk"))
+    recover.add_argument("--assignment-event-id", required=True)
+    recover.add_argument("--allow-completed-combo-yield", action="store_true")
+    recover.add_argument("--expected-preview-hash")
+    _add_common(recover)
 
     end = commands.add_parser("end", help="manually end one Wheel lifecycle")
     _add_identity(end)
@@ -299,6 +309,34 @@ def _cash_capacity(
 
 
 def execute(args: argparse.Namespace) -> dict[str, Any]:
+    if args.wheel_command == "recover":
+        apply_changes = _write_requested(args)
+        base = Path(__file__).resolve().parents[3]
+        config_path, cfg = load_runtime_config(
+            config_key=args.config_key, config_path=args.config_path, expected_market=args.market,
+        )
+        if args.account not in cfg.get("accounts", {}):
+            raise ValueError("recovery account is not in the target runtime config")
+        data_config = resolve_position_data_config_path(
+            base=base, cfg=cfg, data_config=args.data_config, config_path=config_path,
+        )
+        sqlite_path = resolve_position_ledger_sqlite_path(
+            base=base, cfg=cfg, data_config=data_config, config_path=config_path,
+            runtime_root=args.runtime_root,
+        )
+        # Bind the guard to the same resolved runtime used by recovery.
+        if apply_changes:
+            args.runtime_root = str(sqlite_path.parents[2])
+            if guard_ledger_write(data_config=data_config, args=args, as_json=args.format == "json") is None:
+                raise SystemExit(2)
+        return recover_wheel_assignment(
+            sqlite_path=sqlite_path, account=args.account, market=args.market,
+            assignment_event_id=args.assignment_event_id,
+            expected_preview_hash=args.expected_preview_hash,
+            apply=apply_changes, confirm=apply_changes,
+            allow_completed_combo_yield=args.allow_completed_combo_yield,
+        )
+
     is_activation_status = (
         args.wheel_command == "activation" and args.activation_action == "status"
     )

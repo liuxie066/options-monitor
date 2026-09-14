@@ -381,6 +381,7 @@ def _run_wheel_scan_failure_capture(
     *,
     reserved_by_symbol: dict[str, int],
     coverage_facts_fail: bool = False,
+    branch_reasons: list[str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], list[str]]:
     from src.application import pipeline_watchlist as mod
     from src.application.strategy_scan_status import (
@@ -436,7 +437,8 @@ def _run_wheel_scan_failure_capture(
                     "projection_hash": f"{index + 8:x}" * 64,
                     "shares_remaining": 100,
                     "active_intent_reserved_shares": reserved_by_symbol[symbol],
-                    "phase": "ready",
+                    "phase": "data_unavailable" if branch_reasons else "ready",
+                    "reason_codes": list(branch_reasons or []),
                 }
                 for index, symbol in enumerate(symbols, start=1)
             ]
@@ -694,8 +696,22 @@ def test_wheel_coverage_fact_failure_seals_unavailable_without_running_scan(
         tmp_path,
         reserved_by_symbol={"NVDA": 100},
         coverage_facts_fail=True,
+        branch_reasons=["multiplier_unproven", "assignment_cash_facts_unavailable"],
     )
 
+    reasons = ["multiplier_unproven", "assignment_cash_facts_unavailable"]
+    assert wheel["batches"][0]["reason_codes"] == reasons
+    assert brief["wheel_batches"][0]["reason_codes"] == reasons
+    assert brief["wheel_batches"][0]["recommended_contracts"] == 0
+    from src.application.daily_decision_brief_renderer import (
+        render_fixed_report, render_fixed_report_card_markdown,
+    )
+    for render in (render_fixed_report, render_fixed_report_card_markdown):
+        message = render(brief)
+        assert "合约乘数来源未核实，暂停推荐" in message
+        assert "指派交割金额或实际费用证据不完整，暂停推荐" in message
+        assert "股票覆盖数据不可用" in message
+        assert "建议｜卖出" not in message
     assert scan_calls == []
     assert wheel["capacity_allocations"] == []
     assert wheel["opening_status"] == "data_unavailable"

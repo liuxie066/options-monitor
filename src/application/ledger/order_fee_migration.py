@@ -12,6 +12,7 @@ from domain.domain.fee_calc import (
     calc_futu_stock_fee,
     estimate_futu_executed_option_fee,
 )
+from domain.domain.lifecycle_allocation import allocate_stock_settlement, validate_stock_settlement_allocation_group
 from domain.domain.ledger import TradeEvent, fee_fact_for_event
 from domain.domain.ledger.cash_facts import cash_facts_for_trade_event
 from domain.domain.ledger.fees import FeeBasis, FeeComponent
@@ -70,7 +71,7 @@ class ActualOrderFee:
         if amount < 0:
             raise ValueError("fee_amount must be non-negative")
         event_kind = str(value.get("event_kind") or "").strip().lower()
-        if event_kind not in {"option_trade", "assigned_stock_sale"}:
+        if event_kind not in {"option_trade", "assigned_stock_sale", "stock_settlement"}:
             raise ValueError("fee observation event_kind is invalid")
         dealt_quantity = _money(
             value.get("dealt_quantity"),
@@ -129,6 +130,48 @@ class _Change:
 class _Unit:
     identity: str
     changes: tuple[_Change, ...]
+    settlement_observation: ActualOrderFee | None = None
+
+
+
+def stock_settlement_fee_context(event: TradeEvent) -> dict[str, Any] | None:
+    """Return the stock order identity and quantity, never the option order's."""
+    raw = event.raw_payload or {}
+    stock = raw.get("stock_settlement")
+    if event.event_type not in {"assignment", "exercise"} or not isinstance(stock, Mapping) or not stock:
+        return None
+    result = {
+        **stock, "event_id": event.event_id, "event_time_ms": event.event_time_ms,
+        "broker": event.contract_key.broker, "account": event.contract_key.account,
+        "symbol": event.contract_key.underlying_symbol,
+        "currency": str(stock.get("currency") or event.currency or "").strip().upper(),
+    }
+    issue = futu_order_namespace_issue(stock)
+    if (stock.get("account") and str(stock["account"]).strip().lower() != event.contract_key.account
+            or raw.get("futu_account_id") and stock.get("futu_account_id")
+            and str(raw["futu_account_id"]).strip() != str(stock["futu_account_id"]).strip()):
+        issue = "stock_settlement_account_conflict"
+    try:
+        shares = to_decimal(stock.get("shares"), field_name="shares")
+        if shares <= 0 or shares != shares.to_integral_value() or shares != event.contracts * event.multiplier:
+            raise ValueError("inconsistent shares")
+        result["shares"] = int(shares)
+    except (TypeError, ValueError):
+        issue = "stock_settlement_quantity_invalid"
+    if stock.get("currency") and str(stock["currency"]).strip().upper() != event.currency:
+        issue = "stock_settlement_currency_conflict"
+    result["fee_identity_issue"] = issue
+    return result
+
+
+def _settlement_fee_fact(event: TradeEvent) -> Any:
+    from domain.domain.ledger import fee_fact_from_persisted_evidence
+    stock = event.raw_payload["stock_settlement"]
+    return fee_fact_from_persisted_evidence(
+        event_id=f"{event.event_id}:stock_settlement", component=FeeComponent.STOCK_SETTLEMENT,
+        provenance=stock.get("fee_provenance"),
+        compatibility_amount=stock.get("fees", stock.get("fee", 0)),
+    )
 
 
 def enrich_order_fees(
@@ -287,6 +330,7 @@ def _build_units(
         in {"open", "close", "expire_close", "assignment", "exercise"}
         and event.contract_key.account == account
     ]
+    settlement_events = [event for event in option_events if stock_settlement_fee_context(event) is not None]
     stock_events = [
         dict(row)
         for row in stock_rows
@@ -294,6 +338,11 @@ def _build_units(
         and str(row.get("event_type") or "").strip().lower() == "sale"
     ]
     if target_identity is not None:
+        settlement_events = [event for event in settlement_events if _order_identity(
+            event.contract_key.broker, event.contract_key.account,
+            event.raw_payload["stock_settlement"].get("futu_account_id"),
+            event.raw_payload["stock_settlement"].get("order_id"),
+        ) == target_identity]
         option_events = [
             event
             for event in option_events
@@ -319,6 +368,7 @@ def _build_units(
     scoped_times = [
         *(_event_time_ms(event) for event in option_events),
         *(_event_time_ms(event) for event in stock_events),
+        *(_event_time_ms(event) for event in settlement_events),
     ]
     count_start = (
         min(scoped_times)
@@ -336,6 +386,12 @@ def _build_units(
         start_ms=int(count_start or 1),
         end_exclusive_ms=int(count_end or 2),
     )
+    for event in settlement_events:
+        if count_start <= event.event_time_ms < count_end:
+            basis = _settlement_fee_fact(event).basis.value
+            bucket = basis_before.setdefault("stock_settlement", {item.value: 0 for item in FeeBasis})
+            bucket[basis] += 1
+            basis_before["total"][basis] += 1
     for event in (*option_events, *stock_events):
         raw = (event.raw_payload or {}) if isinstance(event, TradeEvent) else event
         namespace_issue = futu_order_namespace_issue(raw)
@@ -346,33 +402,51 @@ def _build_units(
             })
     option_groups = _group_options_by_order(option_events)
     stock_groups = _group_stocks_by_order(stock_events)
+    settlement_groups: dict[tuple[str, str, str, str], list[TradeEvent]] = {}
+    blocked_settlement_identities: set[tuple[str, str, str, str]] = set()
+    for event in settlement_events:
+        context = stock_settlement_fee_context(event)
+        identity = _order_identity(context["broker"], context["account"], context.get("futu_account_id"), context.get("order_id"))
+        if context["fee_identity_issue"] or identity is None:
+            if identity is not None:
+                blocked_settlement_identities.add(identity)
+            if target_identity is not None or _in_range(event, start_ms, end_exclusive_ms):
+                unresolved.append({"event_kind": "stock_settlement", "event_id": event.event_id,
+                                   "reason": context["fee_identity_issue"] or "order_identity_missing"})
+            continue
+        settlement_groups.setdefault(identity, []).append(event)
     units: list[_Unit] = []
     provider_observed_event_ids: set[tuple[str, str]] = set()
 
     for observation in actual_fees:
+        if observation.identity in blocked_settlement_identities:
+            unresolved.append(_order_issue(observation, "stock_settlement_order_conflict"))
+            continue
         option_group = option_groups.get(observation.identity, ())
         stock_group = stock_groups.get(observation.identity, ())
+        settlement_group = settlement_groups.get(observation.identity, ())
         provider_observed_event_ids.update(
             ("option_trade", _event_id(row)) for row in option_group
         )
         provider_observed_event_ids.update(
             ("assigned_stock_sale", _event_id(row)) for row in stock_group
         )
-        if option_group and stock_group:
+        if sum(bool(group) for group in (option_group, stock_group, settlement_group)) > 1:
             unresolved.append(_order_issue(observation, "order_identity_cross_type_conflict"))
             continue
-        if not option_group and not stock_group:
+        if not option_group and not stock_group and not settlement_group:
             unresolved.append(_order_issue(observation, "order_group_missing"))
             continue
-        rows: Sequence[Any] = option_group or stock_group
-        event_kind = "option_trade" if option_group else "assigned_stock_sale"
+        rows: Sequence[Any] = option_group or stock_group or settlement_group
+        event_kind = "stock_settlement" if settlement_group else "option_trade" if option_group else "assigned_stock_sale"
         if observation.event_kind != event_kind:
             unresolved.append(_order_issue(observation, "order_event_kind_changed_after_admission"))
             continue
         ledger_quantity = Decimal(
             sum(event.contracts for event in option_group)
             if option_group
-            else int(stock_group[0].get("shares") or 0)
+            else sum(stock_settlement_fee_context(event)["shares"] for event in settlement_group)
+            if settlement_group else int(stock_group[0].get("shares") or 0)
         )
         if ledger_quantity != observation.dealt_quantity:
             unresolved.append(_order_issue(observation, "order_quantity_changed_after_admission"))
@@ -391,11 +465,19 @@ def _build_units(
                 }
             )
             continue
-        currencies = {_event_currency(item) for item in rows}
+        currencies = {stock_settlement_fee_context(item)["currency"] if settlement_group else _event_currency(item) for item in rows}
         if currencies != {observation.currency}:
             unresolved.append(_order_issue(observation, "order_currency_mismatch"))
             continue
-        if option_group:
+        if settlement_group:
+            if len({(event.contract_key.underlying_symbol, event.raw_payload["stock_settlement"].get("side")) for event in settlement_group}) != 1:
+                unresolved.append(_order_issue(observation, "stock_settlement_order_conflict"))
+                continue
+            changes, conflict = _actual_settlement_changes(
+                settlement_group, observation=observation, applied_at_ms=applied_at_ms,
+                trade_event_json=trade_event_json,
+            )
+        elif option_group:
             if len({_option_contract_identity(item) for item in option_group}) != 1:
                 unresolved.append(_order_issue(observation, "combo_fee_allocation_unproven"))
                 continue
@@ -433,6 +515,7 @@ def _build_units(
                 _Unit(
                     identity=_unit_identity("actual", observation.identity),
                     changes=tuple(changes),
+                    settlement_observation=observation if settlement_group else None,
                 )
             )
         else:
@@ -449,7 +532,10 @@ def _build_units(
     if target_identity is not None:
         return tuple(units), tuple(unresolved), tuple(passive_outcomes), basis_before
 
+    settlement_updated_ids = {change.event_id for unit in units for change in unit.changes if change.event_kind == "stock_settlement"}
     for event in option_events:
+        if event.event_id in settlement_updated_ids:
+            continue
         zero_reason = zero_option_fee_lifecycle_reason(event)
         if (
             ("option_trade", event.event_id) in provider_observed_event_ids
@@ -595,6 +681,93 @@ def _actual_option_changes(
                 observation=observation,
             )
         )
+    return changes, None
+
+
+def _actual_settlement_changes(
+    events: Sequence[TradeEvent], *, observation: ActualOrderFee, applied_at_ms: int,
+    trade_event_json: Mapping[str, str],
+) -> tuple[list[_Change], str | None]:
+    ordered = sorted(events, key=lambda event: (event.event_time_ms, event.event_id))
+    groups: dict[str, list[TradeEvent]] = {}
+    for event in ordered:
+        raw = event.raw_payload
+        context = (
+            ("manual", raw["manual_request_id"], raw.get("manual_request_intent_hash"))
+            if raw.get("manual_request_id") else
+            ("case", raw["case_id"], raw.get("evidence_id"), raw.get("evidence_ids"))
+            if raw.get("case_id") else ("event", event.event_id)
+        )
+        groups.setdefault(json.dumps(context, sort_keys=True), []).append(event)
+    grouped = [groups[key] for key in sorted(groups)]
+    group_amounts = _allocate(observation.amount, [sum(stock_settlement_fee_context(event)["shares"] for event in group) for group in grouped])
+    allocated: dict[str, tuple[dict[str, Any], dict[str, Any] | None]] = {}
+    for group, total in zip(grouped, group_amounts, strict=True):
+        has_source = any("stock_settlement_source" in event.raw_payload for event in group)
+        if has_source:
+            try:
+                source = validate_stock_settlement_allocation_group(group)
+            except ValueError:
+                return [], "stock_settlement_source_conflict"
+        elif len(group) == 1:
+            source = dict(group[0].raw_payload["stock_settlement"])
+        else:
+            return [], "stock_settlement_source_unproven"
+        source["fees"] = canonical_decimal_text(total)
+        if "fee" in source:
+            source["fee"] = canonical_decimal_text(total)
+        source["fee_provenance"] = {
+            "basis": "actual", "amount": canonical_decimal_text(total),
+            "source": "opend.order_fee_query", "reason": "provider_reported_order_fee",
+            "provider_observed_at_ms": observation.observed_at_ms,
+            "provider_batch_id": observation.provider_batch_id,
+            "fee_details_sha256": observation.fee_details_sha256,
+        }
+        if has_source:
+            portions = allocate_stock_settlement(source, [
+                {"target_lot_id": event.raw_payload["target_lot_id"],
+                 "contracts_allocated": event.contracts, "multiplier": event.multiplier}
+                for event in group
+            ])
+            for event in group:
+                allocated[event.event_id] = (portions[event.raw_payload["target_lot_id"]], source)
+        else:
+            allocated[group[0].event_id] = (source, None)
+    changes = []
+    for event in ordered:
+        stock, source = allocated[event.event_id]
+        amount = to_decimal(stock["fees"], field_name="stock settlement fee")
+        before = _settlement_fee_fact(event)
+        if before.basis == FeeBasis.ACTUAL:
+            if before.amount != amount:
+                return [], "actual_fee_conflict"
+            continue
+        payload = json.loads(trade_event_json[event.event_id])
+        raw = dict(payload.get("raw_payload") or {})
+        if source is not None:
+            raw["stock_settlement_source"] = source
+        raw["stock_settlement"] = stock
+        conversions = dict(raw.get("cash_conversions") or {})
+        conversions["stock_settlement_fee_cash"] = _conversion_for_amount(
+            fact_id=f"stock_settlement_fee_cash:{event.event_id}", amount=-amount,
+            currency=observation.currency, effective_at_ms=event.event_time_ms,
+            previous=conversions.get("stock_settlement_fee_cash"),
+            previous_amount=-before.amount if before.amount is not None else None,
+            applied_at_ms=applied_at_ms,
+        )
+        raw["cash_conversions"] = conversions
+        payload["raw_payload"] = raw
+        decoded, diagnostics = stored_trade_event_to_ledger_event(payload)
+        if decoded is None or any(item.severity == "error" for item in diagnostics):
+            raise ValueError("stock settlement enrichment produced invalid event")
+        changes.append(_Change(
+            event_kind="stock_settlement", event_id=event.event_id, account=event.contract_key.account,
+            before_json=trade_event_json[event.event_id], after_json=_json(payload),
+            before_basis=before.basis.value, after_basis="actual",
+            provider_batch_id=observation.provider_batch_id,
+            provider_observed_at_ms=observation.observed_at_ms,
+            fee_details_sha256=observation.fee_details_sha256,
+        ))
     return changes, None
 
 
@@ -995,13 +1168,21 @@ def _apply_unit(
 ) -> dict[str, Any]:
     if conn is None:
         raise TypeError("fee enrichment requires SQLite transaction authority")
+    if unit.settlement_observation is not None:
+        rebuilt, issues, _, _ = _build_units(
+            repo, account=unit.settlement_observation.account, start_ms=None, end_exclusive_ms=None,
+            actual_fees=(unit.settlement_observation,), applied_at_ms=applied_at_ms,
+            target_identity=unit.settlement_observation.identity,
+        )
+        if issues or len(rebuilt) != 1 or rebuilt[0].changes != unit.changes:
+            raise ValueError("stock settlement order changed after admission")
     fx_payload = load_cash_fx_payload(repo, conn=conn)
     unit = replace(unit, changes=tuple(
         _fill_pending_fee_fx(change, fx_payload=fx_payload, applied_at_ms=applied_at_ms)
         for change in unit.changes
     ))
     accounts = sorted({change.account for change in unit.changes})
-    option_changed = any(change.event_kind == "option_trade" for change in unit.changes)
+    option_changed = any(change.event_kind in {"option_trade", "stock_settlement"} for change in unit.changes)
     fence = (
         capture_trade_event_decision_projection_fence(repo, conn=conn)
         if option_changed
@@ -1013,7 +1194,7 @@ def _apply_unit(
     for change in unit.changes:
         table, column = (
             ("trade_events", "event_id")
-            if change.event_kind == "option_trade"
+            if change.event_kind in {"option_trade", "stock_settlement"}
             else ("assigned_stock_events", "stock_event_id")
         )
         row = conn.execute(
@@ -1057,7 +1238,7 @@ def _apply_unit(
     for change in unit.changes:
         table, column = (
             ("trade_events", "event_id")
-            if change.event_kind == "option_trade"
+            if change.event_kind in {"option_trade", "stock_settlement"}
             else ("assigned_stock_events", "stock_event_id")
         )
         row = conn.execute(
@@ -1086,9 +1267,9 @@ def _apply_unit(
 
 def _fill_pending_fee_fx(change: _Change, *, fx_payload: Mapping[str, Any] | None, applied_at_ms: int) -> _Change:
     payload = json.loads(change.after_json)
-    raw = payload.get("raw_payload", {}) if change.event_kind == "option_trade" else payload
+    raw = payload.get("raw_payload", {}) if change.event_kind in {"option_trade", "stock_settlement"} else payload
     conversions = raw.get("cash_conversions", {})
-    key = "option_fee_cash" if change.event_kind == "option_trade" else "assigned_stock_sale_fee_cash"
+    key = "stock_settlement_fee_cash" if change.event_kind == "stock_settlement" else "option_fee_cash" if change.event_kind == "option_trade" else "assigned_stock_sale_fee_cash"
     conversion = conversions.get(key)
     if not isinstance(conversion, Mapping) or conversion.get("status") != "pending":
         return change
@@ -1310,6 +1491,8 @@ def _group_options_by_order(
 ) -> dict[tuple[str, str, str, str], tuple[TradeEvent, ...]]:
     grouped: dict[tuple[str, str, str, str], list[TradeEvent]] = {}
     for event in events:
+        if zero_option_fee_lifecycle_reason(event) or stock_settlement_fee_context(event) is not None:
+            continue
         raw = event.raw_payload or {}
         if futu_order_namespace_issue(raw):
             continue
@@ -1529,4 +1712,4 @@ def _sha256(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-__all__ = ["ActualOrderFee", "enrich_order_fees"]
+__all__ = ["ActualOrderFee", "enrich_order_fees", "stock_settlement_fee_context"]

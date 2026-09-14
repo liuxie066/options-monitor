@@ -3,6 +3,8 @@
 ## Unreleased
 
 ### Bug Fixes
+- Restored missing Wheel assignment branches as visible fail-closed monitoring state, including an explicit transition for fully closed Combo Yield funding-put assignments without changing the original trade history.
+- Refreshed unverified contract-multiplier cache entries from OpenD and recorded actual assigned-stock settlement fees separately from zero-fee option assignment events.
 - Preserved validated historical event timestamps when repairing lifecycle records, without moving old assignments behind newer ledger events.
 - Reconciled a single broker stock sale across its complete assigned-stock inventory while retaining one execution identity, conserved fees and cash, and safe replay.
 

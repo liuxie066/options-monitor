@@ -243,8 +243,23 @@ def resolve_multiplier_with_source_and_diagnostics(
             diagnostics["multiplier_evidence_hash"] = str(evidence_hash)
         diagnostics["selected_source"] = source
         diagnostics["attempted_sources"].append({"source": "cache", "status": "resolved", "value": int(cached)})
-        return int(cached), source, diagnostics
-    diagnostics["attempted_sources"].append({"source": "cache", "status": "miss"})
+        receipt_hash = str((evidence or {}).get("source_receipt_sha256") or "") if isinstance(evidence, dict) else ""
+        verified = (
+            source in {"cache", "opend"}
+            and isinstance(evidence, dict)
+            and evidence.get("schema_version") == "contract_multiplier_evidence.v1"
+            and evidence.get("source") == source
+            and evidence.get("canonical_symbol") == sym
+            and evidence.get("multiplier") == cached
+            and evidence_hash == canonical_sha256(evidence)
+            and len(receipt_hash) == 64
+            and all(c in "0123456789abcdef" for c in receipt_hash)
+        )
+        if not allow_opend_refresh or verified:
+            return int(cached), source, diagnostics
+        diagnostics["attempted_sources"][-1]["status"] = "unproven"
+    else:
+        diagnostics["attempted_sources"].append({"source": "cache", "status": "miss"})
 
     if allow_opend_refresh:
         refreshed = refresh_via_opend(
@@ -255,7 +270,9 @@ def resolve_multiplier_with_source_and_diagnostics(
             limit_expirations=limit_expirations,
             opend_fetch_config=opend_fetch_config,
         )
-        if refreshed.ok and refreshed.multiplier and int(refreshed.multiplier) > 0:
+        receipt_hash = str(getattr(refreshed, "source_receipt_sha256", None) or "").strip().lower()
+        receipt_available = len(receipt_hash) == 64 and all(c in "0123456789abcdef" for c in receipt_hash)
+        if refreshed.ok and refreshed.multiplier and int(refreshed.multiplier) > 0 and (not cached or receipt_available):
             update = store_multiplier(
                 {},
                 sym,
@@ -284,12 +301,15 @@ def resolve_multiplier_with_source_and_diagnostics(
             {
                 "source": "opend",
                 "status": "miss" if not refreshed.error else "error",
-                "error": refreshed.error,
+                "error": refreshed.error or ("multiplier_receipt_unavailable" if cached and not receipt_available else None),
             }
         )
     else:
         diagnostics["attempted_sources"].append({"source": "opend", "status": "skipped"})
 
+    if cached:
+        diagnostics["message"] = "OpenD multiplier evidence unavailable; retained unproven cache"
+        return int(cached), source, diagnostics
     diagnostics["message"] = f"recognized {sym} but multiplier could not be resolved"
     return None, None, diagnostics
 

@@ -48,6 +48,7 @@ from .writer_trade_events import (
     _canonical_rows,
     _canonical_storage_event,
     _event_with_existing_cash_conversions,
+    _event_with_audited_settlement_fee,
     _prepare_fee_evidence_for_storage,
 )
 
@@ -502,9 +503,14 @@ def apply_lifecycle_allocation_atomically(
             [item.event_id for item in projection_rows],
             conn=conn,
         )
+        projection_rows = [
+            _event_with_audited_settlement_fee(event, existing_by_id[event.event_id], conn=conn)
+            if event.event_id in existing_by_id else event
+            for event in projection_rows
+        ]
         settlement_rows = [
             event
-            for event in event_rows
+            for event in projection_rows
             if event.event_type in {"assignment", "exercise"}
         ]
         if settlement_rows:

@@ -260,3 +260,60 @@ def test_refresh_via_opend_forwards_opend_fetch_config(monkeypatch, tmp_path: Pa
     assert captured["expiration_max_wait_sec"] == 31
     assert captured["expiration_window_sec"] == 32
     assert captured["expiration_max_calls"] == 33
+
+
+def test_unproven_cache_refreshes_real_evidence_then_reuses_it(tmp_path, monkeypatch):
+    cache_path = resolve_cache_path(repo_base=tmp_path)
+    save_cache(cache_path, {"0700.HK": {"multiplier": 100, "source": "operator_seed_post_upgrade"}})
+    calls = []
+    def refresh(**kwargs):
+        calls.append(kwargs["symbol"])
+        return RefreshResult(symbol="0700.HK", ok=True, multiplier=100, source_receipt_sha256="a" * 64)
+    monkeypatch.setattr("src.application.multiplier_cache.refresh_via_opend", refresh)
+    result = resolve_multiplier_with_source_and_diagnostics(repo_base=tmp_path, symbol="0700.HK", allow_opend_refresh=True)
+    assert result[:2] == (100, "opend")
+    assert result[2]["multiplier_evidence"] == load_cache(cache_path)["0700.HK"]["multiplier_evidence"]
+    assert result[2]["attempted_sources"][1]["status"] == "unproven"
+    again = resolve_multiplier_with_source_and_diagnostics(repo_base=tmp_path, symbol="0700.HK", allow_opend_refresh=True)
+    assert again[:2] == (100, "opend")
+    assert calls == ["0700.HK"]
+
+
+def test_failed_or_receiptless_refresh_preserves_unproven_cache(tmp_path, monkeypatch):
+    cache_path = resolve_cache_path(repo_base=tmp_path)
+    save_cache(cache_path, {"0700.HK": {"multiplier": 100, "source": "manual_seed"}})
+    before = cache_path.read_bytes()
+    for refreshed in (
+        RefreshResult(symbol="0700.HK", ok=False, error="provider unavailable"),
+        RefreshResult(symbol="0700.HK", ok=True, multiplier=100),
+    ):
+        monkeypatch.setattr("src.application.multiplier_cache.refresh_via_opend", lambda **kwargs: refreshed)
+        value, source, diagnostics = resolve_multiplier_with_source_and_diagnostics(repo_base=tmp_path, symbol="0700.HK", allow_opend_refresh=True)
+        assert (value, source) == (100, "manual_seed")
+        assert diagnostics["selected_source"] == "manual_seed"
+        assert not diagnostics.get("multiplier_evidence")
+        assert diagnostics["attempted_sources"][-1]["error"]
+        assert cache_path.read_bytes() == before
+
+
+def test_explicit_payload_or_disabled_refresh_never_fetches_for_seed(tmp_path, monkeypatch):
+    cache_path = resolve_cache_path(repo_base=tmp_path)
+    save_cache(cache_path, {"0700.HK": {"multiplier": 100, "source": "manual_seed"}})
+    def no_fetch(**kwargs):
+        raise AssertionError("unexpected OpenD fetch")
+    monkeypatch.setattr("src.application.multiplier_cache.refresh_via_opend", no_fetch)
+    assert resolve_multiplier_with_source(repo_base=tmp_path, symbol="0700.HK", allow_opend_refresh=False) == (100, "manual_seed")
+    assert resolve_multiplier_with_source(repo_base=tmp_path, symbol="0700.HK", multiplier=500, allow_opend_refresh=True) == (500, "payload")
+
+
+def test_opend_label_without_receipt_does_not_suppress_refresh(tmp_path, monkeypatch):
+    cache_path = resolve_cache_path(repo_base=tmp_path)
+    save_cache(cache_path, {"0700.HK": {"multiplier": 100, "source": "opend"}})
+    calls = []
+    def refresh(**kwargs):
+        calls.append(kwargs["symbol"])
+        return RefreshResult(symbol="0700.HK", ok=True, multiplier=100, source_receipt_sha256="b" * 64)
+    monkeypatch.setattr("src.application.multiplier_cache.refresh_via_opend", refresh)
+    _, _, diagnostics = resolve_multiplier_with_source_and_diagnostics(repo_base=tmp_path, symbol="0700.HK", allow_opend_refresh=True)
+    assert calls == ["0700.HK"]
+    assert diagnostics["multiplier_evidence"]["source_receipt_sha256"] == "b" * 64

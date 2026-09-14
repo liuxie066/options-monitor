@@ -411,7 +411,7 @@ def run_wheel_call_scan(
         if raw_batch.get("lifecycle_status") != "active":
             continue
         if raw_batch.get("integrity_status") != "trusted":
-            scopes.append({**base_scope, "status": "failed", "reason_code": "wheel_integrity_conflict"})
+            scopes.append({**base_scope, "status": "failed", "reason_code": next(iter(sorted(raw_batch.get("reason_codes") or [])), "wheel_integrity_conflict")})
             continue
         gate_reason = _branch_gate_reason(raw_batch)
         if gate_reason is not None:
@@ -658,7 +658,7 @@ def run_wheel_put_scan(
                 {
                     **base_scope,
                     "status": "failed",
-                    "reason_code": "wheel_integrity_conflict",
+                    "reason_code": next(iter(sorted(branch.get("reason_codes") or [])), "wheel_integrity_conflict"),
                 }
             )
             continue
