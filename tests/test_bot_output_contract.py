@@ -77,40 +77,12 @@ def test_output_contract_matches_explicit_eval_mode(
     assert output_contract_matches(mode, response) is expected
 
 
-def test_bounded_projection_needs_narrowing_without_fabricating_page() -> None:
-    from src.application.bot.tools import compact_observation
-
-    definition = __import__("src.application.agent_tool_registry", fromlist=["get_tool_definition"]).get_tool_definition("runtime_status")
-    assert definition is not None
-    response = {"ok": True, "data": {"payload": "字" * 40_000}}
-    observed = compact_observation("runtime_status", response)
-    assert observed["status"] == "needs_narrowing"
-    assert observed["coverage"]["status"] == "partial"
-    assert observed["coverage"]["needs_narrowing"] is True
-
-
-def test_compact_catalog_rejects_missing_owner_summary() -> None:
-    from dataclasses import replace
-    from src.application.agent_tool_registry import build_compact_catalog, get_tool_definition
-
-    definition = get_tool_definition("runtime_status")
-    assert definition is not None
-    broken = replace(definition, catalog_summary="")
-    import src.application.agent_tool_registry as registry
-    original = registry.AGENT_TOOL_REGISTRY["runtime_status"]
-    registry.AGENT_TOOL_REGISTRY["runtime_status"] = broken
-    try:
-        with pytest.raises(ValueError, match="catalog_summary"):
-            build_compact_catalog(["runtime_status"])
-    finally:
-        registry.AGENT_TOOL_REGISTRY["runtime_status"] = original
 def test_scene_visible_read_tools_have_closed_s8_output_contracts():
     from src.application.agent_tool_registry import get_tool_definition
     from src.application.bot.scene import load_general_scene
-    from src.application.bot.tools import available_read_tools
 
     selected = list(load_general_scene()["tool_selection"]["names"])
-    for tool_name in available_read_tools(selected):
+    for tool_name in selected:
         definition = get_tool_definition(tool_name)
         contract = definition.resolve_output_contract({})
         assert contract["evidence_type"] in {"point", "collection", "aggregate", "diagnostic", "mixed"}
@@ -118,8 +90,24 @@ def test_scene_visible_read_tools_have_closed_s8_output_contracts():
         assert contract["coverage"] in {"point", "primary_rows", "source_declared", "unknown"}
         assert contract["freshness"] in {"source_declared", "not_applicable", "unknown"}
         assert contract["pagination"] == {
-            "mode": "keyset" if tool_name == "receipt_read" else "none"
+            "mode": "keyset" if tool_name in {
+                "receipt_read", "project_files", "candidate_filter_explain",
+                "candidate_rank_explain", "notification_perception_read",
+                "option_performance_report",
+            } else "none"
         }
+
+    for tool_name, payload in (
+        ("runtime_runs", {"action": "scoped"}),
+        ("daily_decision_brief_read", {"section": "rendered_markdown"}),
+        ("option_performance_report", {"view": "breakdowns", "group_by": "symbols"}),
+        ("option_performance_report", {"view": "rows"}),
+    ):
+        assert get_tool_definition(tool_name).resolve_output_contract(payload)["pagination"] == {"mode": "keyset"}
+    assert get_tool_definition("option_positions_read").resolve_output_contract({"action": "events"})["pagination"] == {
+        "mode": "keyset", "cursor_ttl_seconds": 1800, "snapshot_boundary": "ingest_seq",
+        "order": ["trade_time_ms DESC", "event_id DESC"],
+    }
 
     portfolio = get_tool_definition("portfolio_query")
     assert portfolio is not None

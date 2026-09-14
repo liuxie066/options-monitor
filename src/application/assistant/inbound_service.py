@@ -20,7 +20,7 @@ from src.application.assistant.operation_store import InboundOperationStore
 from src.application.assistant.permission_response import parse_permission_response
 from src.application.assistant.policy import enforce_sender_allowed
 from src.application.assistant.renderer import render_inbound_text
-from src.application.bot.channel_facade import run_channel_request
+from src.application.bot.channel_facade import analysis_control_replacement, cancel_channel_analysis, run_channel_request
 from src.application.bot.contracts import AppResult
 from src.application.tool_execution import execute_tool
 
@@ -109,6 +109,22 @@ def handle_assistant_request(
             allowed_senders=allowed_senders,
         )
         _check_request_deadline(normalized_request)
+        replacement = analysis_control_replacement(normalized_request.text) if normalized_request.channel == "feishu" else None
+        if replacement is not None:
+            outcome = cancel_channel_analysis(request=normalized_request, audit_store=store)
+            if not replacement or outcome["status"] == "not_ready":
+                message = {"cancelled": "已请求取消当前分析；迟到结果不会作为新回答提交。",
+                    "completed": "该分析已完成，已提交的回复不会撤回。",
+                    "no_active_run": "当前没有正在运行的分析。",
+                    "not_ready": "当前分析作用域不可用，本次未取消或替换。"}[outcome["status"]]
+                response = build_response(tool_name="assistant.handle", ok=outcome["status"] != "not_ready",
+                    data={"command_id": command_id, "request": normalized_request.public_payload(),
+                        "decision": {"allowed": True, "reason": "analysis_control"}, "response_text": message,
+                        "analysis_control": {key: outcome[key] for key in ("status", "target_run_id")}},
+                    meta={"audit_db": mask_path(store.path)})
+                return _record_and_return(store=store, request=normalized_request, command_id=command_id,
+                    created_at=created_at, command=None, control=None, decision="analysis_control", response=response)
+            normalized_request = replace(normalized_request, text=replacement)
         command = _parse_command(
             normalized_request,
             store=store,

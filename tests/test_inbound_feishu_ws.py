@@ -554,6 +554,7 @@ def test_feishu_ws_routes_free_form_cashflow_question_to_bot(monkeypatch: Any, t
                         "model": "gpt-5.2",
                         "api_key_env": "OM_LLM_API_KEY",
                         "context_window_tokens": 24_000,
+                        "max_output_tokens": 2048,
                     },
                 }
             }
@@ -618,6 +619,7 @@ def test_feishu_ws_free_form_bot_does_not_read_legacy_audit_context(
                         "model": "gpt-5.2",
                         "api_key_env": "OM_LLM_API_KEY",
                         "context_window_tokens": 24_000,
+                        "max_output_tokens": 2048,
                     },
                 }
             }

@@ -13,6 +13,7 @@ from src.application.llm_provider_registry import (
     provider_catalog_payload,
     provider_requires_api_key,
     require_provider_spec,
+    resolve_output_reservation,
 )
 from src.application.config_primitives import dump_yaml
 from src.application.settings import build_effective_env
@@ -189,7 +190,9 @@ def parse_model_profile(name: str, raw_profile: Any, *, path: str = "assistant.m
         timeout_seconds=_optional_int(raw_profile.get("timeout_seconds"), path=f"{path}.timeout_seconds"),
         context_window_tokens=_required_context_window_tokens(
             raw_profile.get("context_window_tokens"),
-            max_output_tokens=raw_profile.get("max_output_tokens", 2048),
+            max_output_tokens=raw_profile.get("max_output_tokens"),
+            provider=spec.provider_id,
+            model=model,
             path=f"{path}.context_window_tokens",
         ),
         max_output_tokens=_optional_int(raw_profile.get("max_output_tokens"), path=f"{path}.max_output_tokens"),
@@ -417,7 +420,11 @@ def _optional_float(value: Any, *, path: str) -> float | None:
 
 
 def _optional_int(value: Any, *, path: str) -> int | None:
-    if value is None or str(value).strip() == "":
+    if value is None:
+        return None
+    if path.endswith("max_output_tokens") and (isinstance(value, bool) or not isinstance(value, int)):
+        raise AgentToolError(code="CONFIG_ERROR", message=f"{path} must be an integer >= 64 or null")
+    if str(value).strip() == "":
         return None
     try:
         parsed = int(value)
@@ -425,8 +432,8 @@ def _optional_int(value: Any, *, path: str) -> int | None:
         raise AgentToolError(code="CONFIG_ERROR", message=f"{path} must be an integer") from exc
     if path.endswith("timeout_seconds") and not 1 <= parsed <= 120:
         raise AgentToolError(code="CONFIG_ERROR", message=f"{path} must be between 1 and 120")
-    if path.endswith("max_output_tokens") and not 64 <= parsed <= 4096:
-        raise AgentToolError(code="CONFIG_ERROR", message=f"{path} must be between 64 and 4096")
+    if path.endswith("max_output_tokens") and parsed < 64:
+        raise AgentToolError(code="CONFIG_ERROR", message=f"{path} must be an integer >= 64 or null")
     return parsed
 
 
@@ -434,6 +441,8 @@ def _required_context_window_tokens(
     value: Any,
     *,
     max_output_tokens: Any,
+    provider: str,
+    model: str,
     path: str,
 ) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
@@ -444,12 +453,10 @@ def _required_context_window_tokens(
             message=f"{path} must be between 4096 and 2000000",
         )
     parsed_output = _optional_int(max_output_tokens, path=path.rsplit(".", 1)[0] + ".max_output_tokens")
-    output_limit = 2048 if parsed_output is None else parsed_output
-    if value <= output_limit + 2_000:
-        raise AgentToolError(
-            code="CONFIG_ERROR",
-            message=f"{path} must exceed max_output_tokens by more than 2000",
-        )
+    try:
+        resolve_output_reservation(provider, model, value, parsed_output, path=path.rsplit(".", 1)[0])
+    except ValueError as exc:
+        raise AgentToolError(code="CONFIG_ERROR", message=str(exc)) from exc
     return value
 
 

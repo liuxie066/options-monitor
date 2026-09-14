@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from types import ModuleType
 from typing import Any
-import hashlib
-import json
 
 from src.application.agent_tools import (
     candidate,
@@ -17,6 +15,7 @@ from src.application.agent_tools import (
     positions,
     portfolio,
     quality,
+    project,
     runtime,
     receipts,
 )
@@ -35,6 +34,7 @@ AGENT_TOOL_MODULES: tuple[ModuleType, ...] = (
     positions,
     portfolio,
     quality,
+    project,
     close_advice,
     notifications,
     notification_perception,
@@ -79,88 +79,6 @@ def tool_names() -> tuple[str, ...]:
         for definition in AGENT_TOOL_DEFINITIONS
         if definition.enabled
     )
-
-
-def toolset_for_definition(definition: AgentTool) -> str:
-    """Return the canonical module grouping used by the Bot catalog."""
-    for module in AGENT_TOOL_MODULES:
-        if definition in _module_tools(module):
-            return module.__name__.rsplit(".", 1)[-1]
-    raise ValueError(f"tool is not in the canonical registry: {definition.name}")
-
-
-def build_compact_catalog(tool_names_value: tuple[str, ...] | list[str] | None = None) -> list[dict[str, str]]:
-    """Project the existing registry into the closed model-selection catalog."""
-    names = tuple(tool_names_value) if tool_names_value is not None else tool_names()
-    entries: list[dict[str, str]] = []
-    for name in names:
-        definition = get_tool_definition(name)
-        if definition is None or not definition.is_pure_read():
-            raise ValueError(f"catalog tool is not an enabled pure-read tool: {name}")
-        purpose = str(definition.catalog_summary or "")
-        if not purpose or purpose != purpose.strip() or "\n" in purpose or len(purpose) > 240:
-            raise ValueError(f"catalog_summary is missing or invalid: {name}")
-        contract = definition.output_contract
-        if (
-            not contract
-            or definition.bot_evidence_type() == "mixed" and "evidence_type" not in contract
-            or not isinstance(contract.get("bounded_projection"), str)
-            or not isinstance(contract.get("coverage"), str)
-            or not isinstance(contract.get("freshness"), str)
-            or not isinstance(contract.get("pagination"), dict)
-            or contract["pagination"].get("mode") not in {"none", "keyset"}
-        ):
-            raise ValueError(f"output contract metadata is missing: {name}")
-        entries.append({
-            "name": definition.name,
-            "toolset": toolset_for_definition(definition),
-            "purpose": purpose,
-            "access": "read",
-            "evidence_type": definition.bot_evidence_type(),
-        })
-    entries.sort(key=lambda item: item["name"])
-    return entries
-
-
-def build_catalog_snapshot(
-    tool_names_value: tuple[str, ...] | list[str],
-    *,
-    visible_descriptions: list[dict[str, Any]] | None = None,
-) -> list[dict[str, Any]]:
-    """Return the private, runtime-only hash material for the authorized set."""
-    rows: list[dict[str, Any]] = []
-    compact_by_name = {row["name"]: row for row in build_compact_catalog(tool_names_value)}
-    visible_by_name = {
-        str(item.get("name")): item
-        for item in (visible_descriptions or [])
-        if isinstance(item, dict) and item.get("name")
-    }
-    for name in tool_names_value:
-        definition = get_tool_definition(name)
-        if definition is None or not definition.is_pure_read():
-            raise ValueError(f"catalog tool is not an enabled pure-read tool: {name}")
-        visible = visible_by_name.get(definition.name, {})
-        rows.append({
-            "name": definition.name,
-            "toolset": toolset_for_definition(definition),
-            "description": str(visible.get("description") or definition.description),
-            "input_schema": visible.get("input_schema") or definition.execution_input_json_schema(),
-            "output_contract": visible.get("output_contract") or definition.output_contract,
-            "access": "read",
-            "purpose": compact_by_name[definition.name]["purpose"],
-            "evidence_type": compact_by_name[definition.name]["evidence_type"],
-        })
-    return sorted(rows, key=lambda item: str(item["name"]))
-
-
-def catalog_material_hash(catalog: list[dict[str, Any]], snapshot: list[dict[str, Any]]) -> str:
-    material = {
-        "authorized_names": sorted(str(item["name"]) for item in catalog),
-        "catalog": catalog,
-        "snapshot": snapshot,
-    }
-    encoded = json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def get_tool_definition(name: str) -> AgentTool | None:
@@ -226,12 +144,8 @@ __all__ = [
     "AgentToolEntry",
     "RECOMMENDED_FLOW",
     "build_agent_spec",
-    "build_compact_catalog",
-    "build_catalog_snapshot",
-    "catalog_material_hash",
     "get_tool_definition",
     "pure_read_tool_names",
     "pure_read_toolsets",
     "tool_names",
-    "toolset_for_definition",
 ]

@@ -123,7 +123,6 @@ Durable Host diagnostics are available through:
 ./om bot runs --host-db <audit-db>
 ./om bot events --host-db <audit-db> --run-id <run-id>
 ./om bot cancel --host-db <audit-db> --run-id <run-id>
-./om bot resume --host-db <audit-db> --run-id <run-id> --assistant-config <path>
 ./om bot replies --host-db <audit-db>
 ```
 

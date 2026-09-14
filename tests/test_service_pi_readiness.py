@@ -509,225 +509,6 @@ def test_post_publication_failure_before_switch_does_not_resume_old_runtime(
     assert current.resolve() == previous
 
 
-@pytest.mark.parametrize(
-    "fail_after_publish",
-    [False, True],
-    ids=["switch", "compensate"],
-)
-def test_first_pi_transition_composes_private_stage_migration_and_safe_switch(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    fail_after_publish: bool,
-) -> None:
-    import src.application.service_upgrade as module
-    from src.application.bot.pi_migration import assert_pi_storage_ready
-    from tests.bot_pi_test_support import seed_actual_legacy_pi_store
-    from tests.service_deploy_test_support import _credential_migration_runner
-
-    source = Path(__file__).resolve().parents[1]
-    production = tmp_path / "production"
-    old_release = production / "releases" / "3.5.1"
-    old_release.mkdir(parents=True)
-    (old_release / "VERSION").write_text("3.5.1\n", encoding="utf-8")
-    runtime = tmp_path / "runtime"
-    database = runtime / "output_shared" / "state" / "pi_sessions.sqlite3"
-    fixture = seed_actual_legacy_pi_store(database)
-    old_runtime = old_release / "agent-runtime"
-    shutil.copytree(
-        fixture.source_runtime,
-        old_runtime,
-        symlinks=True,
-    )
-    (old_release / "scripts").mkdir()
-    shutil.copy2(source / "scripts" / "install.sh", old_release / "scripts" / "install.sh")
-    assert (old_release / "scripts" / "install.sh").read_bytes() == (
-        source / "scripts" / "install.sh"
-    ).read_bytes()
-    current = production / "current"
-    current.symlink_to(old_release, target_is_directory=True)
-    monkeypatch.setenv(
-        "OM_INBOUND_AUDIT_DB",
-        str(database.with_name("inbound_control.sqlite3")),
-    )
-
-    store_before_stage = database.read_bytes()
-    target_control = _stage_actual_target_with_old_installer(
-        tmp_path=tmp_path,
-        old_release=old_release,
-    )
-    assert current.resolve() == old_release
-    assert database.read_bytes() == store_before_stage
-    assert_pi_storage_ready(database, old_runtime)
-    assert (
-        target_control / "src" / "application" / "bot" / "pi_migration.py"
-    ).read_bytes() == (
-        source / "src" / "application" / "bot" / "pi_migration.py"
-    ).read_bytes()
-
-    old_controller_path = tmp_path / "old-controller-python"
-    (old_controller_path / "src" / "interfaces" / "cli").mkdir(parents=True)
-    for package in (
-        old_controller_path / "src",
-        old_controller_path / "src" / "interfaces",
-        old_controller_path / "src" / "interfaces" / "cli",
-    ):
-        (package / "__init__.py").write_text("", encoding="utf-8")
-    (old_controller_path / "src" / "interfaces" / "cli" / "main.py").write_text(
-        'raise RuntimeError("old controller imported")\n',
-        encoding="utf-8",
-    )
-    cli_env = _target_cli_env(
-        target_control,
-        extra_python_path=old_controller_path,
-    )
-    migration = [
-        str(target_control / "om"),
-        "bot",
-        "migrate-pi",
-        "--pi-db",
-        str(database),
-    ]
-    preview_process, preview = _run_json(
-        [
-            *migration,
-            "--source-runtime",
-            str(old_runtime),
-            "--target-runtime",
-            str(target_control / "agent-runtime"),
-            "--dry-run",
-        ],
-        cwd=target_control,
-        env=cli_env,
-    )
-    assert preview_process.returncode == 0, preview_process.stderr
-    assert preview["direction"] == "0.84.2->0.85.1"
-    assert preview["write_applied"] is False
-    assert current.resolve() == old_release
-    assert database.read_bytes() == store_before_stage
-
-    forward_process, forward = _run_json(
-        [
-            *migration,
-            "--source-runtime",
-            str(old_runtime),
-            "--target-runtime",
-            str(target_control / "agent-runtime"),
-            "--apply",
-            "--writers-stopped",
-        ],
-        cwd=target_control,
-        env=cli_env,
-    )
-    assert forward_process.returncode == 0, forward_process.stderr
-    assert forward["receipt_phase"] == "published"
-    assert assert_pi_storage_ready(database, target_control / "agent-runtime")["ok"] is True
-    assert current.resolve() == old_release
-
-    target_release = production / "releases" / "3.5.2"
-    profile = {
-        "service_provider": "systemd",
-        "restart": {
-            "requires_sudo": False,
-            "services": ["options-monitor-feishu-ws.service"],
-        },
-    }
-    service_calls: list[list[str]] = []
-    run_service = _credential_migration_runner(service_calls)
-    update_env = dict(cli_env)
-    update_env["OM_PYTHON"] = str(_isolated_update_python(tmp_path))
-    audit_path = tmp_path / "update-audit.json"
-    update_env["PI_TEST_UPDATE_AUDIT"] = str(audit_path)
-    update = [
-        str(target_control / "om"), "update", "apply",
-        "--repo-root", str(current), "--runtime-root", str(runtime),
-        "--releases-root", str(target_release.parent), "--target-version", "3.5.2",
-        "--no-restart-services", "--preserve-activation-state",
-    ]
-
-    def run_update(*, confirm: bool, fail_activation: bool = False) -> dict:
-        env = {**update_env, "PI_TEST_FAIL_ACTIVATION": "1" if fail_activation else "0"}
-        command = [*update, *(["--confirm"] if confirm else [])]
-        process, response = _run_json(command, cwd=target_control, env=env)
-        assert process.returncode == (2 if fail_activation else 0), process.stderr + process.stdout
-        audit = json.loads(audit_path.read_text())
-        assert audit["argv"] == command[1:]
-        assert Path(audit["cwd"]).resolve() == target_control.resolve()
-        assert Path(audit["module"]).resolve() == target_control / "src/application/service_upgrade.py"
-        assert audit["sha256"] == hashlib.sha256((source / "src/application/service_upgrade.py").read_bytes()).hexdigest()
-        service_calls.extend(audit["calls"])
-        return response["data"]
-
-    preview_upgrade = run_update(confirm=False)
-    assert preview_upgrade["status"] == "dry_run"
-    assert current.resolve() == old_release
-    assert not [call for call in service_calls if "restart" in call]
-
-    if not fail_after_publish:
-        successful_upgrade = run_update(confirm=True)
-        assert successful_upgrade["status"] == "upgraded"
-        assert successful_upgrade["restarted_services"] == []
-        assert successful_upgrade["pi_storage_readiness"]["stores"] == [
-            {
-                "ok": True,
-                "status": "ready",
-                "runtime": {"version": "0.85.1"},
-                "database_format": "target",
-                "receipt_phase": "published",
-                "pi_db": str(database),
-            }
-        ]
-        assert current.resolve() == target_release
-        assert not [call for call in service_calls if "restart" in call]
-        return
-
-    failed_upgrade = run_update(confirm=True, fail_activation=True)
-    assert failed_upgrade["status"] == "service_activation_snapshot_failed"
-    assert failed_upgrade["compensation"]["status"] == "pi_storage_not_ready"
-    assert current.resolve() == old_release
-    assert not [call for call in service_calls if "restart" in call]
-
-    reverse_process, reverse = _run_json(
-        [
-            *migration,
-            "--source-runtime",
-            str(target_control / "agent-runtime"),
-            "--target-runtime",
-            str(old_runtime),
-            "--apply",
-            "--writers-stopped",
-        ],
-        cwd=target_control,
-        env=cli_env,
-    )
-    assert reverse_process.returncode == 0, reverse_process.stderr
-    assert reverse["direction"] == "0.85.1->0.84.2"
-    assert assert_pi_storage_ready(database, old_runtime)["ok"] is True
-
-    monkeypatch.setattr(module, "service_drift", lambda **_kwargs: {"summary": {"status": "ok"}})
-    monkeypatch.setattr(module, "_post_upgrade_service_health", lambda **_kwargs: {"ok": True, "status": "ok"})
-    compensation = module._compensate_service_transition(  # noqa: SLF001 - exact offline recovery order
-        repo_link=current,
-        previous_dir=old_release,
-        transition_dir=target_release,
-        runtime_root=runtime,
-        previous_profile=profile,
-        config_commit={},
-        restart_services=True,
-        activation_policy=module.SERVICE_ACTIVATION_POLICY_PRESERVE_EXISTING,
-        preserved_activation_states={},
-        run_cmd=run_service,
-        operations=[],
-    )
-    assert compensation["ok"] is True
-    assert compensation["restarted_services"] == [
-        "options-monitor-feishu-ws.service"
-    ]
-    restart_calls = [call for call in service_calls if "restart" in call]
-    assert restart_calls == [
-        ["systemctl", "restart", "options-monitor-feishu-ws.service"]
-    ]
-
-
 def test_cleanup_keeps_receipt_runtime_outside_keep_count(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import src.application.service_cleanup as module
 
@@ -836,3 +617,22 @@ def test_cleanup_fails_closed_when_receipt_cannot_be_validated(monkeypatch: pyte
     assert out["status"] == "pi_retention_unresolved"
     assert out["changed"] is False
     assert old_release.exists()
+
+
+def test_python_runtime_preserves_legacy_store_without_node(tmp_path, monkeypatch):
+    from src.application import service_upgrade as module
+    release = tmp_path / "release"
+    marker = release / "src/application/bot/runtime.py"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("# Python Bot")
+    database = tmp_path / "pi_sessions.sqlite3"
+    database.write_bytes(b"legacy store is never opened")
+    monkeypatch.setattr(module, "assert_pi_storage_ready", lambda *a: pytest.fail("Python Bot opened Pi store"))
+    observed = []
+    monkeypatch.setattr(module, "_run_required", lambda command, **kwargs: observed.append(command) or {})
+    assert module._ensure_pi_runtime(release, lambda *a: None, []) == {"runtime":"python", "ok":True}
+    assert not any("node" in arg or "npm" in arg for command in observed for arg in command)
+    ready = module._pi_storage_readiness(runtime_root=tmp_path, repo_root=release,
+                                        runtime_dir=release/"agent-runtime", release_dirs=(release,))
+    assert ready["ok"] and ready["runtime"] == "python"
+    assert database.read_bytes() == b"legacy store is never opened"

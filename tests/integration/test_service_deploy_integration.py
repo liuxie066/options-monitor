@@ -164,6 +164,7 @@ def test_deepseek_credential_is_bound_only_to_selected_assistant_service(
         "      provider: deepseek\n"
         "      model: deepseek-chat\n"
         "      context_window_tokens: 24000\n"
+        "      max_output_tokens: 2048\n"
         "      api_key_env: DEEPSEEK_API_KEY\n",
         encoding="utf-8",
     )
@@ -1363,6 +1364,7 @@ def test_service_drift_removes_legacy_cursor_binding_without_resuming_paused_tim
         "      provider: deepseek\n"
         "      model: deepseek-chat\n"
         "      context_window_tokens: 128000\n"
+        "      max_output_tokens: 2048\n"
         "      api_key_env: DEEPSEEK_API_KEY\n",
         encoding="utf-8",
     )

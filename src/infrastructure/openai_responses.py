@@ -31,8 +31,9 @@ def create_response(
     input_items: list[dict[str, Any]],
     instructions: str,
     tools: list[dict[str, Any]] | None = None,
+    tool_choice: str = "auto",
     timeout: int = 20,
-    max_output_tokens: int = 1024,
+    max_output_tokens: int | None = None,
     temperature: float | None = 0.0,
     http_post_json_fn: HttpPostJsonFn | None = None,
 ) -> dict[str, Any]:
@@ -46,11 +47,13 @@ def create_response(
         "model": model_value,
         "instructions": str(instructions or "").strip(),
         "input": [dict(item) for item in input_items],
-        "max_output_tokens": int(max_output_tokens),
         "store": False,
     }
+    if max_output_tokens is not None:
+        payload["max_output_tokens"] = int(max_output_tokens)
     if tools:
         payload["tools"] = [dict(item) for item in tools]
+        payload["tool_choice"] = tool_choice
     if temperature is not None:
         payload["temperature"] = float(temperature)
     return (http_post_json_fn or _post_json)(
@@ -60,7 +63,7 @@ def create_response(
             "Authorization": f"Bearer {api_key_value}",
             "Content-Type": "application/json",
         },
-        timeout=int(timeout),
+        timeout=float(timeout),
     )
 
 
@@ -79,6 +82,7 @@ def _post_json(
     payload: dict[str, Any],
     *,
     headers: dict[str, str] | None = None,
+    tool_choice: str = "auto",
     timeout: int = 20,
 ) -> dict[str, Any]:
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")

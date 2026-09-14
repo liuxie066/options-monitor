@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import os
 from typing import Any
 
 from src.application.agent_tool_contracts import AgentToolError
@@ -223,10 +224,143 @@ def _validate_version_update_input(payload: dict[str, Any]) -> None:
             raise AgentToolError(code="INPUT_ERROR", message=f"{name} must be a valid semver value")
 
 
+_SCOPED_RUNS_CONTRACT = {
+    "schema_version": "runtime_runs.scoped.v1", "evidence_type": "collection",
+    "bounded_projection": "contract_fields", "coverage": "source_declared",
+    "freshness": "source_declared", "pagination": {"mode": "keyset"},
+    "source_label": "已验证账户运行记录", "primary_rows": "runs",
+    "model_value_fields": ["runs", "pagination", "next_cursor", "read_status", "reasons",
+                           "unverified_newer_count", "continuation_status"],
+    "fact_fields": ["runs", "pagination"], "missing_data_fields": ["reasons"],
+}
+
+
+def _scoped_runtime_input(payload):
+    return {**payload, "action": "scoped"}
+
+
+_SCOPED_LOGS_CONTRACT = {
+    "schema_version": "runtime_logs.scoped.v1", "evidence_type": "collection",
+    "bounded_projection": "contract_fields", "coverage": "source_declared",
+    "freshness": "source_declared", "pagination": {"mode": "keyset"},
+    "source_label": "已验证账户历史诊断", "primary_rows": "diagnostics",
+    "model_value_fields": ["diagnostics", "record_relationship", "pagination", "next_cursor", "read_status",
+        "read_statuses", "missing_data", "skipped_authorized_count", "continuation_status", "limitations"],
+    "fact_fields": ["diagnostics", "pagination"], "missing_data_fields": ["missing_data"],
+}
+
+
+def _scoped_logs_input(payload):
+    return {**{key: value for key, value in payload.items() if key not in {"kind", "lines"}}, "action": "scoped"}
+
+
+def _scoped_runtime_logs(payload):
+    from src.application.agent_tools.project import project_scope, _QUERY_CONTEXT
+    from src.application.agent_tools.project_reader import ProjectReaderError
+    from src.application.agent_tools.project_runs import load_run_diagnostics
+    from src.application.runtime_paths import resolve_runtime_root
+
+    if any(key in payload for key in ("runs_root", "logs_root", "run_dir", "log_file", "profile_path", "kind", "lines")):
+        raise AgentToolError(code="INPUT_ERROR", message="scoped runtime_logs accepts only account/run/limit/cursor and trusted config")
+    scope = project_scope(payload, required=True)
+    account, run_id = payload.get("account"), payload.get("run_id")
+    if not account and len(scope["accounts"]) == 1:
+        account = scope["accounts"][0]
+    if not account or not run_id:
+        raise AgentToolError(code="INPUT_ERROR", message="account and run_id are required for scoped diagnostics")
+    resolution = resolve_runtime_root(repo_root=repo_base())
+    deadline, cancelled = _QUERY_CONTEXT.get()
+    try:
+        if resolution.source != "env:OM_RUNTIME_ROOT":
+            raise ProjectReaderError("runtime_root_unavailable")
+        data = load_run_diagnostics(runtime_root=resolution, scope=scope, account=account,
+            run_id=run_id, limit=payload.get("limit", 20), cursor=payload.get("cursor"),
+            deadline_monotonic=deadline, cancelled=cancelled)
+        return data, [], {"read_only": True}
+    except ProjectReaderError as exc:
+        code = {"cancelled": "CANCELLED", "time_deadline": "BUDGET_EXHAUSTED",
+            "permission_denied": "PERMISSION_DENIED", "scope_conflict": "PERMISSION_DENIED",
+            "market_unverifiable": "PERMISSION_DENIED", "invalid_limit": "INPUT_ERROR",
+            "invalid_run_id": "INPUT_ERROR", "cursor_invalidated": "INPUT_ERROR"}.get(exc.code, "READ_ERROR")
+        raise AgentToolError(code=code, message=exc.code,
+            hint="仅可查询授权账户和明确运行；源已变化时移除 cursor 后重读。") from None
+
+
+def _scoped_runtime_runs(payload):
+    from src.application.agent_tools.project import project_scope, _QUERY_CONTEXT
+    from src.application.agent_tools.project_reader import (
+        ProjectReaderError, _directory, reader_query_context, digest, decode_cursor, set_continuation,
+    )
+    from src.application.agent_tools.project_runs import discover_runs, load_run_record
+    from src.application.runtime_paths import resolve_runtime_root
+
+    scope = project_scope(payload, required=True)
+    resolution = resolve_runtime_root(repo_root=repo_base())
+    deadline, cancelled = _QUERY_CONTEXT.get()
+    account, run_id = payload.get("account"), payload.get("run_id")
+    limit = payload.get("limit", 20)
+    if type(limit) is not int or not 1 <= limit <= 40:
+        raise AgentToolError(code="INPUT_ERROR", message="scoped runtime_runs limit must be 1–40")
+    if run_id and not account:
+        if len(scope["accounts"]) != 1:
+            raise AgentToolError(code="INPUT_ERROR", message="account is required to inspect a run")
+        account = scope["accounts"][0]
+    query = {"account": account, "run_id": run_id, "scanned_only": bool(payload.get("scanned_only"))}
+    try:
+        if resolution.source != "env:OM_RUNTIME_ROOT":
+            raise ProjectReaderError("runtime_root_unavailable")
+        with reader_query_context():
+            descriptor = _directory(resolution.runtime_root, "", deadline, cancelled)
+            try:
+                info = os.fstat(descriptor)
+                binding = digest({"tool": "runtime_runs", "scope": scope, "query": query,
+                                  "root": [info.st_dev, info.st_ino]})
+                state = decode_cursor(payload.get("cursor"), binding)
+                options = {"runtime_root": resolution, "market": scope["market"],
+                           "authorized_accounts": scope["accounts"], "account": account,
+                           "deadline_monotonic": deadline, "cancelled": cancelled,
+                           "_reader_root": descriptor}
+                if run_id:
+                    if state:
+                        raise ProjectReaderError("cursor_invalidated")
+                    entries = [load_run_record(**options, run_id=run_id)]
+                    found = {"entries": entries, "next_state": None, "scanned": 1,
+                             "reasons": [], "unverified_newer_count": 0}
+                else:
+                    found = discover_runs(**options, limit=min(limit, 8),
+                                          cursor=state.get("scan_state") if state else None)
+            finally:
+                os.close(descriptor)
+        rows = found["entries"]
+        if query["scanned_only"]:
+            rows = [row for row in rows if row["scanned"] is True]
+        incomplete = bool(found["unverified_newer_count"])
+        next_state = found["next_state"]
+        # Discovery validates at most this page; unseen run/account pairs are not a known total.
+        result = {"runs": rows, "scope": {**scope, "query": query},
+                  "source": {"kind": "account_run_records", "revision": digest(rows)},
+                  "freshness": {"status": "historical"},
+                  "read_status": "ok" if rows else "empty",
+                  "reasons": found["reasons"], "unverified_newer_count": found["unverified_newer_count"],
+                  "pagination": {"total_count": None, "matched_count": None,
+                                 "returned_count": len(rows), "scanned_count": found["scanned"],
+                                 "requested_limit": limit},
+                  "coverage": {"status": "partial" if incomplete else "complete",
+                               "complete_for": "requested_page", "included_count": len(rows),
+                               "total_count": None, "omitted_count": None, "has_more": next_state is not None}}
+        set_continuation(result, {"binding": binding, "scan_state": next_state} if next_state else None)
+        return result, [], {"read_only": True}
+    except ProjectReaderError as exc:
+        code = "PERMISSION_DENIED" if exc.code in {"permission_denied", "scope_conflict", "market_unverifiable"} else "READ_ERROR"
+        raise AgentToolError(code=code, message=exc.code) from None
+
+
 def _runtime_runs_tool(
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     _reject_removed_payload_alias(payload, alias="openclaw_profile_path", replacement="profile_path")
+    if payload.get("action") == "scoped":
+        return _scoped_runtime_runs(payload)
     data = collect_runtime_runs(
         repo_root=repo_base(),
         runs_root=payload.get("runs_root"),
@@ -244,6 +378,8 @@ def _runtime_logs_tool(
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     _reject_removed_payload_alias(payload, alias="openclaw_profile_path", replacement="profile_path")
     _reject_removed_payload_alias(payload, alias="file", replacement="log_file")
+    if payload.get("action") == "scoped":
+        return _scoped_runtime_logs(payload)
     data = collect_runtime_logs(
         repo_root=repo_base(),
         runs_root=payload.get("runs_root"),
@@ -386,6 +522,11 @@ RUNTIME_RUNS_TOOL = build_agent_tool(
     requires=("runtime_artifacts",),
     capabilities=("runs", "read_only", "runtime_artifacts"),
     input_schema={
+        "action": {"type": "string", "enum": ["scoped"]},
+        "config_key": {"type": "string", "enum": ["us", "hk"]},
+        "config_path": {"type": "string"},
+        "account": {"type": "string", "maxLength": 64},
+        "cursor": {"type": "string", "maxLength": 8192},
         "runs_root": "optional run history root; defaults to output_runs",
         "profile_path": "optional service.profile.json path",
         "limit": "optional number of recent runs to return; defaults to 10; <=0 returns all",
@@ -401,19 +542,27 @@ RUNTIME_RUNS_TOOL = build_agent_tool(
         {"input": {"run_id": "20260515T182459Z-474761"}},
     ),
     output_contract=_RUNTIME_RUNS_OUTPUT_CONTRACT,
-    bot_input_fields=("limit", "run_id", "scanned_only"),
+    output_contract_resolver=lambda payload: _SCOPED_RUNS_CONTRACT if payload.get("action") == "scoped" else _RUNTIME_RUNS_OUTPUT_CONTRACT,
+    bot_input_normalizer=_scoped_runtime_input,
+    bot_input_fields=("action", "account", "cursor", "limit", "run_id", "scanned_only"),
 )
 
 RUNTIME_LOGS_TOOL = build_agent_tool(
     name="runtime_logs",
-    catalog_summary="读取指定运行的受限日志元数据。",
+    catalog_summary="读取授权账户运行的固定诊断字段。",
     description=(
-        "Read bounded, content-free audit or service log metadata for a known runtime failure. Use after "
-        "runtime_status or runtime_runs identifies the relevant component or run."
+        "Read authenticated historical failure reasons and stages for one account and run with action=scoped. "
+        "The legacy interface without action returns content-free log metadata."
     ),
     requires=("runtime_artifacts",),
     capabilities=("logs", "read_only", "runtime_artifacts"),
     input_schema={
+        "action": {"type": "string", "enum": ["scoped"]},
+        "config_key": {"type": "string", "enum": ["us", "hk"]},
+        "config_path": {"type": "string"},
+        "account": {"type": "string", "maxLength": 64},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 40},
+        "cursor": {"type": "string", "maxLength": 8192},
         "runs_root": "optional run history root; defaults to output_runs",
         "logs_root": "optional service log root; defaults to logs or profile runtime_root/logs",
         "profile_path": "optional service.profile.json path",
@@ -425,13 +574,15 @@ RUNTIME_LOGS_TOOL = build_agent_tool(
     },
     handler=_runtime_logs_tool,
     pure_read=True,
-    safe_default_input={"kind": "all", "lines": 50},
+    safe_default_input={},
     examples=(
         {"input": {"run_id": "20260515T182459Z-474761", "kind": "tool", "lines": 20}},
         {"input": {"kind": "service", "lines": 50}},
     ),
     output_contract=_RUNTIME_LOGS_OUTPUT_CONTRACT,
-    bot_input_fields=("run_id", "kind", "lines"),
+    output_contract_resolver=lambda payload: _SCOPED_LOGS_CONTRACT if payload.get("action") == "scoped" else _RUNTIME_LOGS_OUTPUT_CONTRACT,
+    bot_input_normalizer=_scoped_logs_input,
+    bot_input_fields=("action", "account", "run_id", "limit", "cursor"),
 )
 
 TOOLS: tuple[AgentTool, ...] = (

@@ -10,7 +10,7 @@ from src.application.payload_helpers import as_dict as _dict
 DEFAULT_LLM_API_KEY_ENV = "OM_LLM_API_KEY"
 DEFAULT_LLM_CONFIDENCE_MIN = 0.75
 DEFAULT_LLM_TIMEOUT_SECONDS = 90
-DEFAULT_LLM_MAX_OUTPUT_TOKENS = 2048
+DEFAULT_LLM_MAX_OUTPUT_TOKENS = None
 DEFAULT_CONTEXT_WINDOW_MESSAGES = 8
 DEFAULT_MARKET_SCOPE = ""
 CONFIGURABLE_BOT_TOOLSETS = frozenset({"portfolio"})
@@ -44,7 +44,7 @@ class AssistantLlmSettings:
     credential_name: str = ""
     confidence_min: float = DEFAULT_LLM_CONFIDENCE_MIN
     timeout_seconds: int = DEFAULT_LLM_TIMEOUT_SECONDS
-    max_output_tokens: int = DEFAULT_LLM_MAX_OUTPUT_TOKENS
+    max_output_tokens: int | None = DEFAULT_LLM_MAX_OUTPUT_TOKENS
 
     def public_payload(self) -> dict[str, Any]:
         return {
@@ -56,7 +56,7 @@ class AssistantLlmSettings:
             "credential_name": self.credential_name,
             "confidence_min": float(self.confidence_min),
             "timeout_seconds": int(self.timeout_seconds),
-            "max_output_tokens": int(self.max_output_tokens),
+            "max_output_tokens": self.max_output_tokens,
         }
 
 
@@ -168,13 +168,16 @@ def _llm_settings(llm_cfg: dict[str, Any], *, enabled: bool) -> AssistantLlmSett
             minimum=1,
             maximum=120,
         ),
-        max_output_tokens=_int(
-            llm_cfg.get("max_output_tokens"),
-            default=DEFAULT_LLM_MAX_OUTPUT_TOKENS,
-            minimum=64,
-            maximum=4096,
-        ),
+        max_output_tokens=_output_limit(llm_cfg.get("max_output_tokens")),
     )
+
+
+def _output_limit(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 64:
+        raise ValueError("assistant.llm.max_output_tokens must be an integer >= 64 or null")
+    return value
 
 
 def _float(value: Any, *, default: float) -> float:

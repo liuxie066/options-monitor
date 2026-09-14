@@ -199,8 +199,8 @@ def _fixture_observation(
     data: dict[str, Any],
     payload: dict[str, Any],
 ) -> dict[str, Any]:
-    from src.application.bot.tools import compact_observation
+    from src.application.bot.tools import model_observation
 
-    observation = compact_observation(tool_name, {"ok": True, "data": data}, payload)
+    observation = model_observation(tool_name, {"ok": True, "data": data})
     observation["eval_only"] = True
     return observation

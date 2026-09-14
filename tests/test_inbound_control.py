@@ -453,11 +453,13 @@ assistant:
       model: gpt-5.2
       api_key_env: OM_LLM_API_KEY
       context_window_tokens: 24000
+      max_output_tokens: 2048
     deepseek-default:
       provider: deepseek
       model: deepseek-chat
       api_key_env: DEEPSEEK_API_KEY
       context_window_tokens: 24000
+      max_output_tokens: 2048
 markets:
   us:
     accounts: [lx]
@@ -480,6 +482,7 @@ markets:
                         "model": "gpt-5.2",
                         "api_key_env": "OM_LLM_API_KEY",
                         "context_window_tokens": 24_000,
+                        "max_output_tokens": 2048,
                     },
                 },
                 "_resolved": {

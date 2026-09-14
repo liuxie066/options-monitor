@@ -147,7 +147,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
                 "confidence_min": 0.75,
                 "timeout_seconds": 90,
                 "context_window_tokens": 24000,
-                "max_output_tokens": 2048,
+                "max_output_tokens": None,
             },
         },
         "inbound": {

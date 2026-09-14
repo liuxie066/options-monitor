@@ -34,7 +34,7 @@ from src.application.channels.reply_decision import (
     permission_denied_should_stay_silent as _permission_denied_should_stay_silent,
 )
 from src.application.bot.host_store import BotHostStore
-from src.application.inbound.feishu import prepare_feishu_ack_target
+from src.application.inbound.feishu import prepare_feishu_ack_target, prepare_feishu_analysis_control
 from src.application.secret_resolver import (
     DEFAULT_FEISHU_BOT_APP_ID_ENV,
     resolve_feishu_bot_config,
@@ -393,10 +393,20 @@ def serve_feishu_ws(
                         )
                 preflight_ms = _duration_ms(preflight_started, time.monotonic())
 
-                business_status = business_worker.submit(
-                    payload,
-                    received_monotonic=received_monotonic,
-                )
+                analysis_control_failed = False
+                try:
+                    prepare_feishu_analysis_control(payload,
+                        allowed_senders=settings.allowed_senders, config_key=settings.config_key,
+                        config_path=settings.config_path, audit_db=settings.audit_db,
+                        received_monotonic=received_monotonic)
+                except Exception as exc:
+                    analysis_control_failed = True
+                    LOG.warning("Feishu analysis control unavailable event_ref=%s error_type=%s",
+                        event_ref, type(exc).__name__)
+                # Cancellation dedup binds the target, not completion of the queued
+                # request. Inbound/outbox dedup also handles redelivery after queue loss.
+                business_status = ("control_unavailable" if analysis_control_failed else
+                    business_worker.submit(payload, received_monotonic=received_monotonic))
                 ack_status = "disabled" if ack_worker is None else "not_ready"
                 if (
                     business_status == "accepted"

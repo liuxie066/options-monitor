@@ -1089,12 +1089,23 @@ def option_positions_read_tool(
         try:
             history = build_lot_event_history(repo, base=repo_base(), record_id=record_id)
         except ValueError as exc:
-            raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
+            if not str(exc).startswith("position lot or event history not found:"):
+                raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
+            history = []
+        allowed_accounts = {account} if account else set(resolve_configured_accounts(cfg))
+        if any(str(row.get("account") or "").lower() not in allowed_accounts for row in history):
+            raise AgentToolError(code="PERMISSION_DENIED", message="Lot history is outside the authorized account scope")
         data = {
             "action": action,
             "record_id": record_id,
             "events": history,
             "event_count": len(history),
+            "read_status": "ok" if history else "not_found",
+            "coverage": {"status": "complete", "complete_for": "full_query", "included_count": len(history),
+                         "total_count": len(history), "omitted_count": 0, "has_more": False},
+            "pagination": {"total_count": len(history), "matched_count": len(history), "returned_count": len(history),
+                           "scanned_count": len(history), "has_more": False},
+            "scope": {"account": account, "accounts": sorted(allowed_accounts), "record_id": record_id},
         }
     else:
         selectors = {
@@ -1108,7 +1119,31 @@ def option_positions_read_tool(
         if not any(value not in (None, "") for value in selectors.values()):
             raise AgentToolError(code="INPUT_ERROR", message="inspect requires at least one selector")
         inspected = inspect_projection_state(repo, base=repo_base(), **selectors)
-        data = {"action": action, **inspected}
+        allowed_accounts = {account} if account else set(resolve_configured_accounts(cfg))
+        scope_rows = [(row.get("fields") or {}) for row in inspected.get("current_lots") or []]
+        scope_rows.extend(inspected.get("projected_lots") or [])
+        scope_rows.extend(inspected.get("related_events") or [])
+        if any(str(row.get("account") or "").lower() not in allowed_accounts for row in scope_rows):
+            raise AgentToolError(code="PERMISSION_DENIED", message="Projection results include accounts outside the authorized scope", hint="Choose an authorized account explicitly.")
+        data = {"action": action, **inspected,
+                "read_status": "ok" if scope_rows else "not_found",
+                "coverage": {"status": "complete", "complete_for": "point"},
+                "scope": {"account": account, "accounts": sorted(allowed_accounts), **selectors}}
+
+    if action in {"list", "assigned-stock"}:
+        returned = len(data.get("rows") or [])
+        limited = action == "list" and returned >= max(1, min(500, limit))
+        data["pagination"] = {"total_count": None if limited else returned,
+                              "matched_count": None if limited else returned, "returned_count": returned,
+                              "scanned_count": None, "has_more": None if limited else False}
+        data["coverage"] = {"status": "partial" if limited else "complete",
+                            "complete_for": "requested_page" if limited else "full_query",
+                            "included_count": returned, "total_count": None if limited else returned,
+                            "omitted_count": None if limited else 0, "has_more": None if limited else False}
+    elif action == "inspect":
+        matched = len(data.get("matched_record_ids") or [])
+        data["pagination"] = {"total_count": None, "matched_count": matched, "returned_count": matched,
+                              "scanned_count": None, "has_more": False}
 
     data_warnings = data.get("warnings")
     if isinstance(data_warnings, list):
@@ -1123,6 +1158,15 @@ def option_positions_read_tool(
     if isinstance(data.get("evidence_scope"), dict):
         data.setdefault("coverage", dict(data["evidence_scope"]))
     if action == "events":
+        data["pagination"] = {"total_count": None, "matched_count": data.get("total_count"),
+                              "returned_count": data.get("returned_count", 0), "scanned_count": None,
+                              "has_more": bool(data.get("has_more")), "next_cursor": data.get("next_cursor")}
+    if action == "history":
+        event_times = [row["trade_time_ms"] for row in data["events"] if type(row.get("trade_time_ms")) is int]
+        data["freshness"] = {"status": "historical", "kind": "ledger_event_history",
+                             "as_of": datetime.fromtimestamp(max(event_times) / 1000, timezone.utc).isoformat() if event_times else None,
+                             "observed_at": datetime.now(timezone.utc).isoformat()}
+    if action in {"events", "history"}:
         data.setdefault(
             "freshness",
             {

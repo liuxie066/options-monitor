@@ -144,17 +144,14 @@ def test_setup_check_reports_pi_runtime_context_and_session_without_writes(monke
     out = run_setup_check(repo_root=root, markets=["us"], include_local_env_file=False)
     checks = {item["name"]: item for item in out["checks"]}
 
-    assert checks["install.node"]["status"] == "ok"
-    assert checks["install.node"]["value"]["version"] == "v22.19.0"
-    assert checks["install.npm"]["status"] == "ok"
-    assert checks["install.pi_packages"]["status"] == "ok"
+    assert not {"install.node", "install.npm", "install.pi_packages"} & checks.keys()
     assert checks["bot.model_context"]["status"] == "ok"
     assert checks["bot.model_context"]["value"]["context_window_tokens"] == 24_000
-    assert checks["bot.pi_session_path"]["status"] == "ok"
-    assert checks["bot.pi_session_path"]["value"]["pi_session_path"] == str(
-        runtime / "output_shared" / "state" / "pi_sessions.sqlite3"
+    assert checks["bot.session_path"]["status"] == "ok"
+    assert checks["bot.session_path"]["value"]["session_path"] == str(
+        runtime / "output_shared" / "state" / "inbound_control.sqlite3"
     )
-    assert not (runtime / "output_shared" / "state" / "pi_sessions.sqlite3").exists()
+    assert not (runtime / "output_shared" / "state" / "inbound_control.sqlite3").exists()
     assert sorted(str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*")) == before
 
 
@@ -187,7 +184,7 @@ def test_setup_check_reports_missing_or_unwritable_pi_session_parent(monkeypatch
     )
 
     missing = run_setup_check(repo_root=root, markets=["us"], include_local_env_file=False)
-    missing_check = {item["name"]: item for item in missing["checks"]}["bot.pi_session_path"]
+    missing_check = {item["name"]: item for item in missing["checks"]}["bot.session_path"]
     assert missing_check["status"] == "error"
     assert missing_check["value"]["parent_exists"] is False
     assert not missing_audit.parent.exists()
@@ -201,7 +198,7 @@ def test_setup_check_reports_missing_or_unwritable_pi_session_parent(monkeypatch
         lambda path, mode: False if Path(path) == existing_parent else real_access(path, mode),
     )
     unwritable = run_setup_check(repo_root=root, markets=["us"], include_local_env_file=False)
-    unwritable_check = {item["name"]: item for item in unwritable["checks"]}["bot.pi_session_path"]
+    unwritable_check = {item["name"]: item for item in unwritable["checks"]}["bot.session_path"]
     assert unwritable_check["status"] == "error"
     assert unwritable_check["value"]["parent_exists"] is True
     assert not (existing_parent / "pi_sessions.sqlite3").exists()
@@ -224,11 +221,11 @@ def test_setup_check_rejects_symlinked_pi_session_parent_without_resolving_or_wr
     )
 
     out = run_setup_check(repo_root=root, markets=["us"], include_local_env_file=False)
-    check = {item["name"]: item for item in out["checks"]}["bot.pi_session_path"]
+    check = {item["name"]: item for item in out["checks"]}["bot.session_path"]
 
     assert check["status"] == "error"
     assert check["value"]["parent"] == str(lexical_parent)
-    assert check["value"]["pi_session_path"] == str(lexical_parent / "pi_sessions.sqlite3")
+    assert check["value"]["session_path"] == str(lexical_parent / "inbound_control.sqlite3")
     assert check["value"]["parent_is_symlink"] is True
     assert not (physical_parent / "pi_sessions.sqlite3").exists()
 

@@ -12,7 +12,7 @@ from src.application.bot.eval_fixtures import fixture_observations
 from src.application.bot.host import run_contract
 from src.application.bot.host_store import BotHostStore
 from src.application.bot.model_config import (
-    PiModelSettings,
+    ModelSettings,
     _resolve_model_api_key,
     load_assistant_bot_settings,
     load_assistant_llm_config,
@@ -21,7 +21,7 @@ from src.application.llm_provider_registry import provider_requires_api_key
 from src.application.bot.service import prepare_contract
 
 
-_EVAL_MODEL = PiModelSettings(
+_EVAL_MODEL = ModelSettings(
     provider="deepseek",
     api_kind="openai-completions",
     model="om-eval-fixture",
@@ -99,8 +99,6 @@ def run_prepared_contract(
     host_store: BotHostStore | None = None,
     session_key: str | None = None,
     control_preview_specs: tuple[dict[str, Any], ...] = (),
-    resumed_from: str | None = None,
-    recovered_observations: tuple[dict[str, Any], ...] = (),
     reply_builder: Any = None,
 ) -> AppResult:
     received = prepared.received_monotonic if prepared.received_monotonic is not None else time.monotonic()
@@ -110,15 +108,15 @@ def run_prepared_contract(
         return _budget_exhausted(prepared.request_id)
     implicit_model_turn = model_turn_json is not None and not str(assistant_config_path or "").strip()
     if implicit_model_turn:
-        enabled_optional_toolsets, tool_loading_mode, settings_error = frozenset(), "eager", None
+        settings_error = None
     else:
-        enabled_optional_toolsets, tool_loading_mode, settings_error = load_assistant_bot_settings(
+        _unused_toolsets, _unused_mode, settings_error = load_assistant_bot_settings(
             config_path=assistant_config_path,
             require_config=bool(str(assistant_config_path or "").strip()),
         )
-    if settings_error or enabled_optional_toolsets is None:
+    if settings_error:
         return _invalid_model_config_result(prepared, settings_error or "invalid_assistant_config")
-    model_settings, debug, model_error = _resolve_pi_model(
+    model_settings, debug, model_error = _resolve_model(
         model_config_json=model_config_json,
         assistant_config_path=assistant_config_path,
         model_turn_json=model_turn_json,
@@ -152,18 +150,7 @@ def run_prepared_contract(
         if os.environ.get(name)
     }
     if api_key:
-        child_environ["OM_PI_MODEL_API_KEY"] = api_key
-    if session_key:
-        child_environ["OM_PI_SESSION_DB"] = str(
-            (
-                host_store.path.with_name("pi_sessions.sqlite3")
-                if host_store is not None
-                else Path(__file__).resolve().parents[3]
-                / "output_shared"
-                / "state"
-                / "pi_sessions.sqlite3"
-            ).absolute()
-        )
+        child_environ["OM_BOT_MODEL_API_KEY"] = api_key
     if time.monotonic() >= deadline:
         return _budget_exhausted(prepared.request_id)
     return run_contract(
@@ -175,10 +162,6 @@ def run_prepared_contract(
         host_store=host_store,
         session_key=session_key,
         control_preview_specs=control_preview_specs,
-        resumed_from=resumed_from,
-        recovered_observations=recovered_observations,
-        enabled_optional_toolsets=enabled_optional_toolsets,
-        tool_loading_mode=tool_loading_mode,
         reply_builder=reply_builder,
     )
 
@@ -189,13 +172,13 @@ def _budget_exhausted(request_id: str) -> AppResult:
         request_id=request_id, decision_trace={"termination_reason": "time_deadline"}, ok=False)
 
 
-def _resolve_pi_model(
+def _resolve_model(
     *,
     model_config_json: str | None,
     assistant_config_path: str | None,
     model_turn_json: str | None,
     execution_environment: str,
-) -> tuple[PiModelSettings | None, dict[str, Any] | None, str | None]:
+) -> tuple[ModelSettings | None, dict[str, Any] | None, str | None]:
     configured_sources = sum(bool(str(item or "").strip()) for item in (model_config_json, assistant_config_path))
     if configured_sources > 1:
         return None, None, "ambiguous_model_source"
@@ -214,7 +197,7 @@ def _eval_model(
     model_turn_json: str,
     *,
     execution_environment: str,
-) -> tuple[PiModelSettings | None, dict[str, Any] | None, str | None]:
+) -> tuple[ModelSettings | None, dict[str, Any] | None, str | None]:
     if execution_environment != "eval":
         return None, None, "model_turn_requires_eval"
     try:
@@ -249,17 +232,17 @@ def _fixture_turn(raw: Any) -> dict[str, Any]:
     return {"tool_calls": calls} if calls else {"text": str(raw.get("text") or "").strip()}
 
 
-def _model_from_json(model_config_json: str) -> tuple[PiModelSettings | None, str | None]:
+def _model_from_json(model_config_json: str) -> tuple[ModelSettings | None, str | None]:
     try:
         raw = json.loads(model_config_json)
         if not isinstance(raw, dict):
             raise ValueError("model config must be an object")
-        return PiModelSettings.from_config(raw), None
+        return ModelSettings.from_config(raw), None
     except Exception:
         return None, "invalid_model_config"
 
 
-def _model_from_assistant_config(path: str | None) -> tuple[PiModelSettings | None, str | None]:
+def _model_from_assistant_config(path: str | None) -> tuple[ModelSettings | None, str | None]:
     require_config = bool(str(path or "").strip())
     if not require_config:
         return None, None
@@ -269,7 +252,7 @@ def _model_from_assistant_config(path: str | None) -> tuple[PiModelSettings | No
     if not raw:
         return None, None
     try:
-        return PiModelSettings.from_config(raw), None
+        return ModelSettings.from_config(raw), None
     except Exception:
         return None, "invalid_model_config"
 

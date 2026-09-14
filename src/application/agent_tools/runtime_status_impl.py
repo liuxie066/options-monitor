@@ -2125,6 +2125,23 @@ def private_runtime_status_tool(
         accounts_from_config=accounts_from_config,
     )
 
+    desired_market = _desired_runtime_market(payload, cfg, config_path=config_path)
+    wheel_activation_readiness = build_wheel_activation_readiness(
+        config=cfg,
+        market=desired_market,
+        accounts=accounts,
+        sqlite_path=ledger_store.get("sqlite_path"),
+    )
+    wheel_activation_observed_at = datetime.now(timezone.utc).isoformat()
+    activation_data = {
+        "config": {"config_path": mask_path(config_path), "accounts": accounts,
+                   "config_key": payload.get("config_key")},
+        "wheel_activation_readiness": wheel_activation_readiness,
+        "wheel_activation_observed_at": wheel_activation_observed_at,
+    }
+    if payload.get("view") == "wheel_activation":
+        return activation_data, [], {"config_path": mask_path(config_path)}
+
     report_dir = _resolve_under_base(
         payload.get("report_dir"),
         base=base,
@@ -2356,13 +2373,6 @@ def private_runtime_status_tool(
         }
 
     pointer_path = shared_state_dir / "last_run_dir.txt"
-    desired_market = _desired_runtime_market(payload, cfg, config_path=config_path)
-    wheel_activation_readiness = build_wheel_activation_readiness(
-        config=cfg,
-        market=desired_market,
-        accounts=accounts,
-        sqlite_path=ledger_store.get("sqlite_path"),
-    )
     requested_run, latest_run_selection = _requested_run_dir_from_payload(payload, base=base, runs_root=runs_root)
     latest_run_payload: dict[str, Any] | None = None
     if latest_run_selection.get("requested"):
@@ -2536,11 +2546,7 @@ def private_runtime_status_tool(
         service_profile["profile"] = profile_meta
 
     data: dict[str, Any] = {
-        "config": {
-            "config_path": mask_path(config_path),
-            "accounts": accounts,
-            "config_key": payload.get("config_key"),
-        },
+        **activation_data,
         "config_authority": config_authority,
         "notification_authority": _notification_authority_payload(),
         "paths": {
@@ -2551,7 +2557,6 @@ def private_runtime_status_tool(
             "runs_root": _relative_path(runs_root, base=base),
         },
         "ledger_store": ledger_store,
-        "wheel_activation_readiness": wheel_activation_readiness,
         "shared": {
             "last_run": shared_last_run,
             "last_run_dir": _path_pointer_file_info(pointer_path, base=base),
@@ -2699,6 +2704,20 @@ def runtime_status_tool(
         repo_base=repo_base,
         mask_path=mask_path,
     )
+    if payload.get("view") == "wheel_activation":
+        readiness = _status_safe_wheel_activation_readiness(data.get("wheel_activation_readiness"))
+        observed_at = data.get("wheel_activation_observed_at")
+        readable = readiness.get("storage_status") in {"available", "not_required"}
+        return {
+            "scope": {"config_key": readiness.get("market"),
+                      "accounts": _dict(data.get("config")).get("accounts", []),
+                      "view": "wheel_activation"},
+            "wheel_activation_readiness": readiness,
+            "freshness": {
+                "status": "current" if readable and observed_at else "unknown",
+                **({"as_of": observed_at} if observed_at else {}),
+            },
+        }, [], meta
     public_data = _status_safe_runtime_payload(data)
     warning_codes = _string_list(public_data.get("summary", {}).get("warning_codes"))
     public_warnings = [f"runtime_status:{code}" for code in warning_codes]

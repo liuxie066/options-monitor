@@ -31,8 +31,9 @@ def create_chat_completion(
     model: str,
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None = None,
+    tool_choice: str = "auto",
     timeout: int = 20,
-    max_output_tokens: int = 1024,
+    max_output_tokens: int | None = None,
     temperature: float | None = 0.0,
     thinking: dict[str, Any] | None = DEFAULT_CHAT_COMPLETIONS_THINKING,
     http_post_json_fn: HttpPostJsonFn | None = None,
@@ -44,12 +45,13 @@ def create_chat_completion(
     payload: dict[str, Any] = {
         "model": model_value,
         "messages": [dict(item) for item in messages],
-        "max_tokens": int(max_output_tokens),
         "stream": False,
     }
+    if max_output_tokens is not None:
+        payload["max_tokens"] = int(max_output_tokens)
     if tools:
         payload["tools"] = [dict(item) for item in tools]
-        payload["tool_choice"] = "auto"
+        payload["tool_choice"] = tool_choice
     if thinking is not None:
         payload["thinking"] = dict(thinking)
     if temperature is not None:
@@ -58,7 +60,7 @@ def create_chat_completion(
         resolve_chat_completions_url(base_url),
         payload,
         headers=_request_headers(api_key_value),
-        timeout=int(timeout),
+        timeout=float(timeout),
     )
 
 
@@ -84,6 +86,7 @@ def _post_json(
     payload: dict[str, Any],
     *,
     headers: dict[str, str] | None = None,
+    tool_choice: str = "auto",
     timeout: int = 20,
 ) -> dict[str, Any]:
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")

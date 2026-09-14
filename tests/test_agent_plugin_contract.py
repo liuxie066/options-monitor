@@ -94,7 +94,7 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     runtime_logs = next(item for item in spec["tools"] if item["name"] == "runtime_logs")
     assert runtime_logs["risk_level"] == "read_only"
     assert runtime_logs["requires_confirm"] is False
-    assert runtime_logs["safe_default_input"] == {"kind": "all", "lines": 50}
+    assert runtime_logs["safe_default_input"] == {}  # Legacy handler retains kind=all/lines=50 defaults.
     assert "kind" in runtime_logs["input_schema"]
     assert "lines" in runtime_logs["input_schema"]
     assert "log_file" in runtime_logs["input_schema"]
@@ -331,7 +331,7 @@ def test_agent_tool_output_contracts_advertise_model_visible_data_shape() -> Non
     assert "delivery_evidence" in tools["preview_notification"]["output_contract"]["fact_fields"]
     assert "notification_authority.ordinary_scheduled_renderer" in tools["runtime_status"]["output_contract"]["fact_fields"]
     assert "shared.compatibility_notification.authority" in tools["runtime_status"]["output_contract"]["fact_fields"]
-    assert "notification_authority" in tools["runtime_status"]["output_contract"]["model_preview_fields"]
+    assert "notification_authority" in tools["runtime_status"]["output_contract"]["model_value_fields"]
 
     positions = get_tool_definition("option_positions_read")
     assert positions is not None
@@ -397,7 +397,7 @@ def test_agent_tool_output_contracts_advertise_model_visible_data_shape() -> Non
     runtime_status = get_tool_definition("runtime_status")
     assert "wheel_activation_readiness.monitoring_gate" in healthcheck.output_contract["fact_fields"]
     assert "wheel_activation_readiness.monitoring_gate" in runtime_status.output_contract["fact_fields"]
-    assert "wheel_activation_readiness" in runtime_status.output_contract["model_preview_fields"]
+    assert "wheel_activation_readiness" in runtime_status.output_contract["model_value_fields"]
 
     wheel_intent = get_tool_definition("wheel_intent")
     assert wheel_intent is not None

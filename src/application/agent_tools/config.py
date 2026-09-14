@@ -34,7 +34,7 @@ from src.application.combo_yield_config import resolve_combo_yield_cfg
 
 _CONFIG_VALIDATE_OUTPUT_CONTRACT: dict[str, Any] = {
     "schema_version": "config_validate.output.v1",
-    "evidence_type": "diagnostic", "bounded_projection": "contract_fields", "coverage": "primary_rows", "freshness": "not_applicable", "pagination": {"mode": "none"},
+    "evidence_type": "diagnostic", "bounded_projection": "contract_fields", "coverage": "point", "freshness": "not_applicable", "pagination": {"mode": "none"},
     "source_label": "OM runtime config validator",
     "primary_rows": "warnings",
     "fact_fields": [

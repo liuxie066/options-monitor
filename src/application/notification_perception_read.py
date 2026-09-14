@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from src.application.multi_tick.assistant_perception_event import (
     NOTIFICATION_PERCEPTION_EVENT_SCHEMA_VERSION,
@@ -22,24 +23,51 @@ def read_notification_perception_events(
     event_kind: str | None = None,
     limit: int = 10,
     audit_path: str | Path | None = None,
+    cursor: str | None = None,
+    deadline_monotonic: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
+    from src.application.agent_tools.project_reader import ProjectReaderError, decode_cursor, digest, set_continuation
+    from src.application.agent_tool_contracts import AgentToolError
+
     base = repo_root.resolve()
     paths = _audit_paths(base=base, run_id=run_id, audit_path=audit_path)
     rows: list[dict[str, Any]] = []
     read_statuses: list[dict[str, Any]] = []
     for path in paths:
-        file_rows, read_status = _read_jsonl(path, base=base)
+        file_rows, read_status = _read_jsonl(path, base=base, bounded=True,
+            deadline_monotonic=deadline_monotonic, cancelled=cancelled)
         rows.extend(file_rows)
         read_statuses.append(read_status)
-    filtered = [
-        row
-        for row in rows
-        if row.get("event_type") == NOTIFICATION_PERCEPTION_EVENT_TYPE
-        and _matches_event(row, conversation_id=conversation_id, event_kind=event_kind)
-    ]
+    visible = [row for row in rows if row.get("event_type") == NOTIFICATION_PERCEPTION_EVENT_TYPE
+               and _matches_event(row, conversation_id=conversation_id, event_kind=None)
+               and (not run_id or str(row.get("run_id") or "") == str(run_id).strip())]
+    filtered = [row for row in visible if _matches_event(row, conversation_id=conversation_id, event_kind=event_kind)]
     filtered.sort(key=lambda row: str(row.get("event_at_utc") or row.get("created_at_utc") or ""), reverse=True)
-    max_rows = max(0, min(int(limit or 10), 50))
-    events = [_public_event(row) for row in filtered[:max_rows]]
+    max_rows = max(1, min(int(limit or 10), 50))
+    binding = digest({"tool": "notification_perception_read", "root": str(base),
+        "paths": [str(path) for path in paths], "run_id": run_id, "conversation_id": conversation_id,
+        "event_kind": event_kind, "limit": max_rows})
+    source_hash = digest(read_statuses)
+    try:
+        state = decode_cursor(cursor, binding)
+        if state and state.get("source_hash") != source_hash:
+            raise ProjectReaderError("source_changed")
+        offset = state.get("index", 0) if state else 0
+        if type(offset) is not int or not 0 <= offset <= len(filtered):
+            raise ProjectReaderError("cursor_invalidated")
+        events = []
+        for row in filtered[offset:offset + max_rows]:
+            event = _public_event(row)
+            if len(json.dumps([*events, event], ensure_ascii=False).encode()) > 6500:
+                if not events:
+                    raise ProjectReaderError("detail_too_large")
+                break
+            events.append(event)
+    except ProjectReaderError as exc:
+        raise AgentToolError(code="INPUT_ERROR", message=exc.code,
+            hint="Repeat the query without cursor after a source change; narrow run_id or event_kind.",
+            details={"reason": exc.code}) from None
     malformed_count = sum(
         int(item.get("malformed_count") or 0)
         for item in read_statuses
@@ -60,7 +88,7 @@ def read_notification_perception_events(
         read_status = "valid_empty"
     else:
         read_status = "ok"
-    return {
+    result = {
         "schema_version": NOTIFICATION_PERCEPTION_READ_SCHEMA_VERSION,
         "summary": {
             "ok": read_status not in {"failed", "partial"},
@@ -79,6 +107,27 @@ def read_notification_perception_events(
         "read_statuses": read_statuses,
         "events": events,
     }
+    complete = read_status in {"ok", "valid_empty"}
+    matched_count = len(filtered) if complete else None
+    has_more = offset + len(events) < len(filtered)
+    result["summary"]["total_count"] = matched_count
+    result["source_hash"] = source_hash
+    result["scope"] = {"run_id": run_id, "conversation_ref": conversation_reference(conversation_id),
+        "event_kind": event_kind, "source_hash": source_hash, "page_range": {"start": offset, "end": offset + len(events)}}
+    result["pagination"] = {"total_count": len(visible) if complete else None,
+        "matched_count": matched_count, "returned_count": len(events),
+        "scanned_count": len(visible), "has_more": has_more}
+    result["coverage"] = {"status": "complete" if complete else "partial" if events else "unknown",
+        "complete_for": "requested_page", "scope": result["scope"], "included_count": len(events), "total_count": matched_count,
+        "omitted_count": matched_count - len(events) if matched_count is not None else None, "has_more": has_more}
+    set_continuation(result, {"binding": binding, "source_hash": source_hash,
+        "index": offset + len(events)} if has_more else None)
+    if conversation_id:
+        # A scoped reader must not expose other conversations' source row counts.
+        for status in read_statuses:
+            status["line_count"] = None
+            status["parsed_count"] = None
+    return result
 
 
 def iter_notification_perception_events(
@@ -155,7 +204,7 @@ def _audit_paths(*, base: Path, run_id: str | None, audit_path: str | Path | Non
     shared_state = shared_root / "state"
     if shared_root.is_symlink() or shared_state.is_symlink():
         raise ValueError("audit path must stay under output_shared")
-    return [(shared_state / "audit_events.jsonl").resolve()]
+    return [shared_state / "audit_events.jsonl"]
 
 
 def _safe_run_id(value: str | None) -> str:
@@ -177,31 +226,40 @@ def _read_jsonl(
     path: Path,
     *,
     base: Path,
+    bounded: bool = False,
+    deadline_monotonic: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     display_path = str(_display_path(path, base=base))
-    if not path.exists() or not path.is_file():
-        return [], {
-            "path": display_path,
-            "status": "missing",
-            "line_count": 0,
-            "parsed_count": 0,
-            "malformed_count": 0,
-        }
+    source_hash = None
     out: list[dict[str, Any]] = []
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeError) as exc:
-        return [], {
-            "path": display_path,
-            "status": "unreadable",
-            "line_count": None,
-            "parsed_count": 0,
-            "malformed_count": 0,
-            "error": f"{type(exc).__name__}: {exc}",
-        }
+        if bounded:
+            from src.application.agent_tools.project_reader import ProjectReaderError, _check, read_bytes
+            try:
+                raw = read_bytes(base, str(path.relative_to(base)),
+                    deadline_monotonic=deadline_monotonic, cancelled=cancelled)
+            except ProjectReaderError as exc:
+                if exc.code in {"cancelled", "time_deadline"}:
+                    raise
+                return [], {"path": display_path, "status": "missing" if exc.code == "not_found" else "unreadable",
+                    "line_count": None, "parsed_count": 0, "malformed_count": 0, "reason": exc.code}
+            source_hash = hashlib.sha256(raw).hexdigest()
+            lines = raw.decode("utf-8").splitlines()
+        else:
+            # Existing internal notification-run resolution keeps its original scan contract.
+            lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return [], {"path": display_path, "status": "missing", "line_count": 0,
+            "parsed_count": 0, "malformed_count": 0}
+    except (OSError, UnicodeDecodeError) as exc:
+        return [], {"path": display_path, "status": "unreadable", "line_count": None,
+            "parsed_count": 0, "malformed_count": 0, "reason": type(exc).__name__}
     malformed_count = 0
     nonempty_count = 0
     for line in lines:
+        if bounded:
+            _check(deadline_monotonic, cancelled)
         if not line.strip():
             continue
         nonempty_count += 1
@@ -224,6 +282,7 @@ def _read_jsonl(
             if not out
             else "ok"
         ),
+        "source_hash": source_hash,
         "line_count": nonempty_count,
         "parsed_count": len(out),
         "malformed_count": malformed_count,
@@ -232,12 +291,18 @@ def _read_jsonl(
 
 def _matches_event(row: dict[str, Any], *, conversation_id: str | None, event_kind: str | None) -> bool:
     extra = row.get("extra") if isinstance(row.get("extra"), dict) else {}
+    if row.get("run_id") and extra.get("run_id") and row["run_id"] != extra["run_id"]:
+        return False
     wanted_conversation = str(conversation_id or "").strip()
     if wanted_conversation:
         scope = extra.get("conversation_scope") if isinstance(extra.get("conversation_scope"), dict) else {}
         stored_ref = str(scope.get("conversation_ref") or "").strip()
         legacy_id = str(scope.get("conversation_id") or "").strip()
-        if stored_ref != conversation_reference(wanted_conversation) and legacy_id != wanted_conversation:
+        if not stored_ref and not legacy_id:
+            return False
+        if stored_ref and stored_ref != conversation_reference(wanted_conversation):
+            return False
+        if legacy_id and legacy_id != wanted_conversation:
             return False
     wanted_kind = str(event_kind or "").strip()
     if wanted_kind and str(extra.get("event_kind") or row.get("action") or "").strip() != wanted_kind:
@@ -287,11 +352,12 @@ def _strip_sensitive(value: Any) -> Any:
 def _resolve_path(value: str | Path, *, base: Path, containment: Path | None = None) -> Path:
     path = Path(value).expanduser()
     if not path.is_absolute():
-        path = (base / path).resolve()
-    resolved = path.resolve()
+        path = base / path
+    resolved = path.absolute()
     root = (containment or base).resolve()
     try:
-        resolved.relative_to(root)
+        if ".." in resolved.relative_to(root).parts:
+            raise ValueError("audit path contains parent traversal")
     except ValueError as exc:
         if containment is None:
             raise ValueError("audit_path must be under repo_root") from exc
@@ -301,9 +367,9 @@ def _resolve_path(value: str | Path, *, base: Path, containment: Path | None = N
 
 def _display_path(path: Path, *, base: Path) -> str:
     try:
-        return str(path.resolve().relative_to(base.resolve()))
+        return str(path.absolute().relative_to(base.resolve()))
     except ValueError:
-        return str(path.resolve())
+        return str(path.absolute())
 
 
 __all__ = [

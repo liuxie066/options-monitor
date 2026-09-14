@@ -210,10 +210,10 @@ def _config_checks(settings: AssistantLlmSettings, *, secret_provider: SecretPro
     checks.append({
         "name": "limits",
         "status": "ok",
-        "message": "provider timeout and output token limits are bounded",
+        "message": "provider default output limit" if settings.max_output_tokens is None else "configured output token limit",
         "value": {
             "timeout_seconds": int(settings.timeout_seconds),
-            "max_output_tokens": int(settings.max_output_tokens),
+            "max_output_tokens": settings.max_output_tokens,
         },
     })
     return checks

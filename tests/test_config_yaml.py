@@ -1097,11 +1097,13 @@ assistant:
       model: deepseek-chat
       api_key_env: DEEPSEEK_API_KEY
       context_window_tokens: 24000
+      max_output_tokens: 2048
     openai-default:
       provider: openai
       model: gpt-5.2
       api_key_env: OM_LLM_API_KEY
       context_window_tokens: 24000
+      max_output_tokens: 2048
 """,
     )
 
@@ -1157,6 +1159,7 @@ assistant:
       provider: ollama
       model: gpt-oss:20b
       context_window_tokens: 24000
+      max_output_tokens: 2048
 """,
     )
 
@@ -1168,6 +1171,7 @@ assistant:
         "model": "gpt-oss:20b",
         "api_key_env": "",
         "context_window_tokens": 24000,
+        "max_output_tokens": 2048,
     }
 
 
@@ -1194,6 +1198,7 @@ assistant:
       model: deepseek-chat
       api_key_env: DEEPSEEK_API_KEY
       context_window_tokens: 24000
+      max_output_tokens: 2048
 """,
     )
 
@@ -1319,9 +1324,10 @@ def test_config_init_writes_starter_yaml_and_runtime_configs(tmp_path: Path) -> 
     assert payload["assistant"]["context_window_messages"] == 8
     assert "default_market_scope" not in payload["assistant"]
     assert payload["assistant"]["active_model"] == "deepseek-default"
-    assert payload["assistant"]["models"]["deepseek-default"]["model"] == "deepseek-chat"
+    assert payload["assistant"]["models"]["deepseek-default"]["model"] == "deepseek-v4-pro"
     assert payload["assistant"]["models"]["deepseek-default"]["api_key_env"] == "DEEPSEEK_API_KEY"
-    assert payload["assistant"]["models"]["openai-default"]["api_key_env"] == "OM_LLM_API_KEY"
+    assert set(payload["assistant"]["models"]) == {"deepseek-default"}
+    assert "max_output_tokens" not in payload["assistant"]["models"]["deepseek-default"]
     assert payload["markets"]["us"]["accounts"] == ["lx", "sy"]
     assert payload["markets"]["hk"]["symbols"] == ["0700.HK", "9992.HK"]
     us_cfg = json.loads((runtime_dir / "config.us.json").read_text(encoding="utf-8"))
@@ -1342,8 +1348,8 @@ def test_config_init_writes_starter_yaml_and_runtime_configs(tmp_path: Path) -> 
     assert assistant_cfg["assistant"]["llm"]["base_url"] == "https://api.deepseek.com"
     assert assistant_cfg["assistant"]["llm"]["api_key_env"] == "DEEPSEEK_API_KEY"
     assert assistant_cfg["assistant"]["llm"]["timeout_seconds"] == 90
-    assert assistant_cfg["assistant"]["llm"]["context_window_tokens"] == 24000
-    assert assistant_cfg["assistant"]["llm"]["max_output_tokens"] == 2048
+    assert assistant_cfg["assistant"]["llm"]["context_window_tokens"] == 1_000_000
+    assert assistant_cfg["assistant"]["llm"].get("max_output_tokens") is None
     assert assistant_cfg["inbound"]["feishu_ws"]["ack_reaction"] == "THUMBSUP"
 
 

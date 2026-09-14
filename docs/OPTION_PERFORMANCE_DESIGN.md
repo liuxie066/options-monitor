@@ -77,17 +77,17 @@ contracts without reopening those completed boundaries:
 - `PeriodRequest` and every public facade accept `mtd|ytd|month|year` with exactly one matching
   selector.
 - `src.application.performance.service._serialize_report()` declares aggregate coverage and period
-  freshness at the source; `compact_observation()` remains fail-closed for missing or malformed
-  declarations.
+  freshness at the source; the Python Host passes those source-owned declarations through its
+  redacted, size-bounded model observation.
 - Root `option_net_cashflow.cny_total` reuses persisted event-time `cash_conversion.v1` facts. It is
   partial/null when any required conversion is absent or invalid; no report read fetches current FX.
 - Fee enrichment reuses an existing cash conversion only after validating it against the preceding
   fee cash fact. A valid historical business-day carry-forward keeps the canonical seven-day window;
   corrupt or unverifiable evidence is replaced by pending evidence rather than re-signed.
-- The Python Host retains only the terminal-adjacent admission category, clears it across model
-  turns, and emits a coarse Chinese receipt plus `run_id` without exposing verifier internals.
+- The Python Host reports the actual terminal error with a public `run_id`, without exposing
+  private provider or tool diagnostics.
 
-The existing answer verifier remains authoritative and fail-closed. Historical rows may still lack
+Historical rows may still lack
 complete fee or lifecycle evidence; that is metric quality, not query coverage, and the report must
 not estimate, infer, or backfill it during a read.
 
@@ -719,12 +719,13 @@ bounded collection coverage and is outside this aggregate Bot contract.
 instant. Completed natural periods and past MTD/YTD cutoffs are `historical` with an ISO `as_of` at the
 inclusive period end. Aggregate count fields describe one fully executed aggregate result; omitting
 `has_more` avoids rendering a row-pagination banner for that aggregate. Missing or malformed source
-declarations remain `unknown` and continue to fail closed in answer admission.
+declarations remain `unknown` in the model-visible evidence. The model must describe these gaps
+without presenting unknown or historical results as current facts.
 
-The answer verifier is unchanged: it still checks current-request evidence identity, authority,
-coverage, freshness, answer status, and required claim scope. The evidence declarations live at their
-source; no branch relaxes `claim_scope_not_covered`,
-`claim_freshness_not_supported`, or status-overstatement rejection.
+Evidence declarations remain owned by the report source and are preserved in the Bot projection.
+Native final-answer admission checks result status, nonempty text, and unparsed tool protocol; it
+does not semantically validate claims, coverage, or freshness. Real-model acceptance must therefore
+check that the answer represents the report's scope and limitations accurately.
 
 ## Failure Behavior
 
@@ -802,7 +803,7 @@ by quote or assigned-stock evidence.
 
 ## Implementation Ownership
 
-The implementation uses four narrow owners and changes no Node protocol, release artifact, or runtime
+The implementation uses four narrow owners and changes no release artifact or runtime
 configuration.
 
 1. **Canonical natural periods and facade propagation.** The existing period owner validates `month`
@@ -810,8 +811,8 @@ configuration.
    tool bindings, and Bot propagate only `period`, `as_of_date`, `month`, and `year`.
    Bot omits `include_rows`; direct facades retain it.
 2. **Evidence at the canonical serializer.** `_serialize_report()` emits complete aggregate
-   `coverage` and period `freshness`; public materialization passes them unchanged and
-   `compact_observation()` does not synthesize replacements.
+   `coverage` and period `freshness`; public materialization and the Python Host pass them
+   unchanged without synthesizing replacements.
 3. **Host selector attestation and terminal receipt.** Contract preparation freezes one injectable
    `report_now_ms`, derives `reference_year` and `operating_date` in `Asia/Shanghai`, and keeps the raw
    instant Host-only. A scoped `ContextVar` supplies that instant only to option performance. The Host
@@ -832,11 +833,10 @@ Focused deterministic checks cover this contract:
   complete, partial-quality, and proven-empty aggregates; past MTD and past natural month/year produce
   historical ISO freshness; current MTD/month/year produce current freshness at the frozen instant;
   Bot rejects `include_rows` while direct tool execution still accepts it.
-- One end-to-end report -> `compact_observation()` -> `admit_submit_answer()` test proves historical
-  claims are admitted for past periods while current claims are rejected; current claims are admitted
-  for current periods; partial-quality evidence admits an honestly partial answer but rejects a
-  complete answer; missing or malformed coverage/freshness stays fail-closed; a proven-empty aggregate
-  never invents a zero metric.
+- Report owner tests preserve historical/current timestamps, partial coverage, explicit unknown
+  metadata and proven-empty aggregates without inventing zero metrics. Host tests exercise native
+  final text after these reads. Real-answer acceptance separately checks
+  that the prose does not overstate scope or freshness; final reply validation is not a semantic verifier.
 - Bot Host tests prove exact explicit/bare/relative month and explicit-year attestation, rejection
   of wrong, future, multiple, or conflicting selectors before a ledger read, and reuse of the frozen
   `operating_date`. Contract/scene tests prove
@@ -849,9 +849,8 @@ Focused deterministic checks cover this contract:
   previous-December month. An expiration date outside the report phrase never authorizes a period,
   and a second period phrase is rejected. Prompt/catalog tests prove natural periods are selectable
   without restoring range. Existing runtime-context prompt-budget checks remain at or below baseline.
-- Receipt tests prove the four allowlisted categories, fallback wording, public `run_id`, no raw reason
-  or answer leakage, and no stale relabel when an earlier rejected submission is followed by a model,
-  tool, schema, budget, or cancellation terminal.
+- Receipt tests prove public `run_id`, no private diagnostic leakage, and preservation of the actual
+  model, tool, schema, budget, or cancellation terminal instead of relabeling it as an evidence failure.
 - One month and one year smoke per direct facade proves CLI, `/income`, and Control selector
   propagation. Existing MTD/YTD and removed-input tests remain the regression baseline; no
   facade-by-period Cartesian suite is added.
@@ -879,11 +878,10 @@ Rejected because the canonical period owner already validates calendar windows. 
 month or year in the Bot Host would duplicate business semantics, weaken facade consistency, and
 conflict with the current-message cutoff authority rule.
 
-### Relax answer admission for option performance
+### Invent complete coverage for option performance
 
-Rejected because unknown coverage is a source-contract defect, not permission to accept an
-unsupported financial claim. The report must declare its actual envelope and the verifier must remain
-fail-closed.
+Rejected because the report must declare its actual envelope. Missing source declarations remain
+unknown; natural-language answers must explain the limitation and are checked in real-model acceptance.
 
 ### Build calculators per strategy
 
@@ -922,11 +920,10 @@ proof still follow the deterministic `cc` / `unassigned` defaults and are never 
   meant an older same-numbered month must provide the year. The Host rejects conflicting selectors
   instead of guessing.
 - A complete aggregate coverage declaration proves execution of the requested ledger scope, not
-  correctness of missing fee/lifecycle inputs. Metric quality and answer-status checks remain the
-  protection against overstatement.
-- The receipt categories are deliberately coarse. Support uses `run_id` and private audit events;
-  user-facing text never exposes raw verifier reasons.
+  correctness of missing fee/lifecycle inputs. Metric quality must remain visible to the model;
+  content acceptance checks whether the answer overstates it.
+- Support uses `run_id` and private audit events; user-facing errors do not expose private diagnostics.
 
 No open source-authority question remains. Any future change that would alter
-metric meaning, ledger ownership, answer-admission rules, public error schema, or the Node protocol
+metric meaning, ledger ownership, answer-admission rules, public error schema, or the Bot runtime protocol
 returns to design review instead of expanding this work unit.

@@ -227,11 +227,7 @@ def test_validate_config_rejects_invalid_bot_toolsets() -> None:
 
     cfg = _base_cfg()
     cfg["assistant"] = {"llm": {"max_output_tokens": 4097}}
-
-    with pytest.raises(SystemExit) as _caught:
-        mod.validate_config(cfg)
-    exc = _caught.value
-    assert "assistant.llm.max_output_tokens must be <= 4096" in str(exc)
+    mod.validate_config(cfg)
 
     cfg = _base_cfg()
     cfg["assistant"] = {"llm": {"provider": "anthropic"}}
@@ -325,7 +321,7 @@ def test_validate_config_rejects_legacy_assistant_modes_and_accepts_bot_config()
         (4095, "context_window_tokens must be >= 4096"),
         (2_000_001, "context_window_tokens must be <= 2000000"),
         (2512, "context_window_tokens must be >= 4096"),
-        (4096, "must exceed max_output_tokens by more than 2000"),
+        (4096, "must exceed output reservation 4096 by more than 2000"),
     ],
 )
 def test_validate_active_bot_context_window(context_window_tokens, message) -> None:

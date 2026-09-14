@@ -52,6 +52,7 @@ _HEALTHCHECK_OUTPUT_CONTRACT: dict[str, Any] = {
     "evidence_type": "diagnostic", "bounded_projection": "contract_fields", "coverage": "primary_rows", "freshness": "source_declared", "pagination": {"mode": "none"},
     "source_label": "OM 本地健康检查",
     "primary_rows": "checks",
+    "model_value_fields": ["summary", "checks", "wheel_activation_readiness"],
     "fact_fields": [
         "summary.ok",
         "summary.critical_count",
@@ -120,7 +121,7 @@ _RUNTIME_STATUS_OUTPUT_CONTRACT: dict[str, Any] = {
         "summary.projection_verify_ok",
         "summary.service_upgrade_error",
     ],
-    "model_preview_fields": [
+    "model_value_fields": [
         "summary",
         "notification_diagnosis",
         "notification_authority",
@@ -132,6 +133,26 @@ _RUNTIME_STATUS_OUTPUT_CONTRACT: dict[str, Any] = {
     ],
 }
 
+def _runtime_status_output_contract(payload: dict[str, Any]) -> dict[str, Any]:
+    if payload.get("view") != "wheel_activation":
+        return dict(_RUNTIME_STATUS_OUTPUT_CONTRACT)
+    return {
+        **_RUNTIME_STATUS_OUTPUT_CONTRACT,
+        "schema_version": "runtime_status.wheel_activation.output.v1",
+        "source_label": "OM 当前 Wheel 配置与只读激活窗口核验",
+        "model_value_fields": ["scope", "wheel_activation_readiness"],
+        "fact_fields": [
+            "wheel_activation_readiness.market",
+            "wheel_activation_readiness.monitoring_gate",
+            "wheel_activation_readiness.reason_code",
+            "wheel_activation_readiness.storage_status",
+            "wheel_activation_readiness.accounts",
+        ],
+        "freshness_fields": ["freshness.status", "freshness.as_of"],
+        "missing_data_fields": [],
+    }
+
+
 _SCHEDULED_TASKS_OUTPUT_CONTRACT: dict[str, Any] = {
     "schema_version": "scheduled_tasks.output.v1",
     "evidence_type": "collection",
@@ -141,6 +162,7 @@ _SCHEDULED_TASKS_OUTPUT_CONTRACT: dict[str, Any] = {
     "pagination": {"mode": "none"},
     "source_label": "OM managed service profile and local service manager",
     "primary_rows": "tasks",
+    "model_value_fields": ["scope", "tasks", "count", "observed_at", "availability", "reasons"],
     "row_count_field": "count",
     "fact_fields": [
         "scope.market",
@@ -416,7 +438,8 @@ HEALTHCHECK_TOOL = build_agent_tool(
     catalog_summary="检查运行依赖、配置与服务就绪状态。",
     description=(
         "Run dependency and configuration readiness checks. Use for broad readiness diagnosis; use runtime_status "
-        "for the latest operational snapshot and runtime_logs only after a failing component is identified."
+        "for the latest operational snapshot and runtime_logs only after a failing component is identified. "
+        "For Wheel activation status, use runtime_status with view=wheel_activation."
     ),
     requires=("runtime_config", "sqlite_data_config", "opend"),
     capabilities=("diagnostics", "read_only"),
@@ -442,14 +465,18 @@ HEALTHCHECK_TOOL = build_agent_tool(
 
 RUNTIME_STATUS_TOOL = build_agent_tool(
     name="runtime_status",
-    catalog_summary="读取当前运行健康状态与关键运行摘要。",
+    catalog_summary="读取运行健康摘要；view=wheel_activation 核验当前 Wheel 激活状态。",
     description=(
         "Summarize current overall runtime health from existing artifacts. Use first for current status questions; "
-        "use runtime_runs for historical run selection and runtime_logs for bounded, content-free log metadata."
+        "use runtime_runs for historical run selection and runtime_logs for bounded, content-free log metadata. "
+        "For whether Wheel is activated, use view=wheel_activation: current config and durable window checks, "
+        "independent of scan freshness. Activation does not prove a scan ran or a trade occurred."
     ),
     requires=("runtime_config",),
     capabilities=("status", "read_only"),
     input_schema={
+        "view": {"type": "string", "enum": ["summary", "wheel_activation"],
+                 "description": "Defaults to summary; wheel_activation checks current activation only"},
         "config_key": {"type": "string", "enum": ["us", "hk"], "description": "Market config"},
         "config_path": "optional explicit config path",
         "accounts": {
@@ -488,8 +515,9 @@ RUNTIME_STATUS_TOOL = build_agent_tool(
     safe_default_input={},
     examples=({"input": {"config_key": "us", "max_notification_chars": 2000}},),
     output_contract=_RUNTIME_STATUS_OUTPUT_CONTRACT,
+    output_contract_resolver=_runtime_status_output_contract,
     bot_input_fields=(
-        "config_key", "accounts", "run_id", "max_notification_chars", "max_run_age_minutes", "include_service_status"
+        "view", "config_key", "accounts", "run_id", "max_notification_chars", "max_run_age_minutes", "include_service_status"
     ),
 )
 

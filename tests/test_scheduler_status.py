@@ -202,45 +202,6 @@ def test_production_schedule_key_selector_keeps_market_list_semantics() -> None:
     assert select_scheduler_schedule_key(["HK"], {"schedule": {}}) == "schedule"
 
 
-@pytest.mark.parametrize("unavailable", ["corrupt", "unreadable", "invalid_schedule"])
-def test_scheduler_status_unavailable_decision_compacts_as_partial(
-    tmp_path: Path,
-    unavailable: str,
-) -> None:
-    from src.application.bot.tools import compact_observation
-    from src.application.tool_execution import execute_tool
-
-    config = _runtime_config(market="hk")
-    if unavailable == "invalid_schedule":
-        config["schedule_hk"] = "invalid"
-    config_path = tmp_path / "config.hk.json"
-    config_path.write_text(json.dumps(config), encoding="utf-8")
-    state = tmp_path / "state.json"
-    if unavailable == "corrupt":
-        state.write_text("{", encoding="utf-8")
-    elif unavailable == "unreadable":
-        state.mkdir()
-    else:
-        state.write_text("{}", encoding="utf-8")
-
-    payload = {
-        "config_path": str(config_path),
-        "state": str(state),
-        "account": "lx",
-    }
-    response = execute_tool("scheduler_status", payload)
-    observation = compact_observation("scheduler_status", response, payload)
-
-    if unavailable == "invalid_schedule":
-        assert response["ok"] is False and response["error"]["code"] == "CONFIG_ERROR"
-        assert observation["status"] == "failed"
-    else:
-        assert response["ok"] is True
-        assert response["data"]["decision"]["status"] == "unknown"
-        assert observation["status"] == "partial"
-        assert observation["missing_data"]["decision.status"] == "unknown"
-
-
 def test_scheduler_status_rejects_unconfigured_account_before_state_projection(
     tmp_path: Path,
 ) -> None:
@@ -264,86 +225,6 @@ def test_scheduler_status_rejects_unconfigured_account_before_state_projection(
     assert response["error"]["code"] == "INPUT_ERROR"
     assert "accounts are not configured: sy" in response["error"]["message"]
     assert hidden_timestamp not in json.dumps(response)
-
-
-@pytest.mark.parametrize(
-    ("schedule_key", "schedule_value"),
-    [
-        ("portfolio", {"risk_budget": 0.1}),
-        ("operator_schedule", {"timezone": "Asia/Hong_Kong", "unexpected": True}),
-        ("operator_schedule", {"enabled": "false"}),
-        ("operator_schedule", {"run_window": []}),
-    ],
-)
-def test_scheduler_status_strictly_rejects_non_schedule_or_invalid_schedule(
-    tmp_path: Path,
-    schedule_key: str,
-    schedule_value: object,
-) -> None:
-    from src.application.bot.tools import compact_observation
-    from src.application.tool_execution import execute_tool
-
-    config = _runtime_config(market="hk")
-    config[schedule_key] = schedule_value
-    config_path = tmp_path / "config.hk.json"
-    config_path.write_text(json.dumps(config), encoding="utf-8")
-    state = tmp_path / "state.json"
-    state.write_text("{}", encoding="utf-8")
-    payload = {
-        "config_path": str(config_path),
-        "state": str(state),
-        "schedule_key": schedule_key,
-        "account": "lx",
-    }
-
-    response = execute_tool("scheduler_status", payload)
-    observation = compact_observation("scheduler_status", response, payload)
-
-    assert response["ok"] is False
-    assert response["error"]["code"] == "CONFIG_ERROR"
-    assert response["error"]["details"]["reason"] == "schedule_invalid"
-    assert observation["status"] == "failed"
-
-
-@pytest.mark.parametrize(
-    "state_payload",
-    [
-        {"last_run_utc_by_account": []},
-        {"last_scan_utc_by_account": {"lx": None}},
-        {"last_processed_scan_target_utc_by_account": {"lx": 123}},
-        {"last_notify_utc_by_account": {"lx": "not-a-time"}},
-        {
-            "last_run_utc_by_account": {"lx": "2026-09-11T01:40:00+00:00"},
-            "last_notify_utc_by_account": {"sy": "not-a-time"},
-        },
-    ],
-)
-def test_scheduler_status_rejects_invalid_account_maps_before_decision(
-    tmp_path: Path,
-    state_payload: dict,
-) -> None:
-    from src.application.bot.tools import compact_observation
-    from src.application.tool_execution import execute_tool
-
-    config_path = tmp_path / "config.hk.json"
-    config_path.write_text(json.dumps(_runtime_config(market="hk")), encoding="utf-8")
-    state = tmp_path / "state.json"
-    state.write_text(json.dumps(state_payload), encoding="utf-8")
-    payload = {
-        "config_path": str(config_path),
-        "state": str(state),
-        "account": "lx",
-    }
-
-    response = execute_tool("scheduler_status", payload)
-    observation = compact_observation("scheduler_status", response, payload)
-
-    assert response["ok"] is True
-    assert response["data"]["state"]["status"] == "corrupt"
-    assert response["data"]["state"]["account_record_status"] == "unknown"
-    assert response["data"]["decision"]["status"] == "unknown"
-    assert response["data"]["decision"]["reason"] == "state_corrupt"
-    assert observation["status"] == "partial"
 
 
 @pytest.mark.parametrize(

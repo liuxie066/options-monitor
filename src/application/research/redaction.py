@@ -57,9 +57,9 @@ PEM_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 KEY_VALUE_RE = re.compile(
-    r"(?P<key>\b(?:api[_-]?key|access[_-]?key|authorization|auth|bearer|client[_-]?secret|cookie|credential|password|private[_-]?key|refresh[_-]?token|secret|session(?:id)?|signature|signing[_-]?key|token|webhook)\b)"
+    r"(?P<key>(?P<key_quote>[\"']?)\b(?:api[_-]?key|access[_-]?key|authorization|auth|bearer|client[_-]?secret|cookie|credential|password|private[_-]?key|refresh[_-]?token|secret|session(?:id)?|signature|signing[_-]?key|token|webhook)\b(?P=key_quote))"
     r"(?P<sep>\s*[:=]\s*)"
-    r"(?P<value>\"[^\"]*\"|'[^']*'|[^\s,;\"'&]+)",
+    r"(?P<value>\"(?:\\[\s\S]|[^\"\\])*\"|'(?:\\[\s\S]|[^'\\])*'|[^\s,;\"'&]+)",
     re.IGNORECASE,
 )
 COOKIE_HEADER_RE = re.compile(
@@ -107,25 +107,32 @@ def redact_dict(payload: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def redact_text(text: str) -> str:
-    out = PEM_RE.sub("***REDACTED_PEM***", str(text))
-    out = WEBHOOK_RE.sub("***REDACTED_URL***", out)
-    out = AUTHORIZATION_HEADER_RE.sub("Authorization: ***REDACTED***", out)
-    out = BEARER_RE.sub("Bearer ***REDACTED***", out)
-    out = BASIC_AUTH_RE.sub("Basic ***REDACTED***", out)
-    out = COOKIE_HEADER_RE.sub("Cookie: ***REDACTED***", out)
-    out = KEY_VALUE_RE.sub(
-        lambda match: f"{match.group('key')}{match.group('sep')}***REDACTED***",
-        out,
-    )
-    out = QUERY_SECRET_RE.sub(
-        lambda match: f"{match.group('prefix')}***REDACTED***",
-        out,
-    )
-    out = JWT_RE.sub("***REDACTED_JWT***", out)
-    out = PROVIDER_IDENTIFIER_RE.sub("***REDACTED_ID***", out)
-    out = LONG_NUMBER_RE.sub(lambda match: f"...{match.group(0)[-4:]}", out)
-    out = LOCAL_ABSOLUTE_PATH_RE.sub(_mask_local_path, out)
+def redact_text(text: str, *, preserve_newlines: bool = False) -> str:
+    """Redact known patterns, optionally preserving source line numbering."""
+    def replace(pattern: re.Pattern[str], replacement: Any, value: str) -> str:
+        def apply(match: re.Match[str]) -> str:
+            result = replacement(match) if callable(replacement) else replacement
+            if preserve_newlines:
+                result += "\n***REDACTED***" * max(0, match.group().count("\n") - result.count("\n"))
+            return result
+        return pattern.sub(apply, value)
+
+    out = str(text)
+    for pattern, replacement in (
+        (PEM_RE, "***REDACTED_PEM***"),
+        (KEY_VALUE_RE, lambda m: f"{m.group('key')}{m.group('sep')}***REDACTED***"),
+        (WEBHOOK_RE, "***REDACTED_URL***"),
+        (AUTHORIZATION_HEADER_RE, "Authorization: ***REDACTED***"),
+        (BEARER_RE, "Bearer ***REDACTED***"),
+        (BASIC_AUTH_RE, "Basic ***REDACTED***"),
+        (COOKIE_HEADER_RE, "Cookie: ***REDACTED***"),
+        (QUERY_SECRET_RE, lambda m: f"{m.group('prefix')}***REDACTED***"),
+        (JWT_RE, "***REDACTED_JWT***"),
+        (PROVIDER_IDENTIFIER_RE, "***REDACTED_ID***"),
+        (LONG_NUMBER_RE, lambda m: f"...{m.group(0)[-4:]}"),
+        (LOCAL_ABSOLUTE_PATH_RE, _mask_local_path),
+    ):
+        out = replace(pattern, replacement, out)
     return out
 
 

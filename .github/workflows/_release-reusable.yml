@@ -34,26 +34,15 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22.19.0'
-
       - name: Install dependencies
         run: |
           bash scripts/install_agent_plugin.sh
           ./.venv/bin/pip install pytest
 
-      - name: Prepare Pi runtime
+      - name: Python Bot release gate
         if: ${{ inputs.run_regression_gates }}
         run: |
-          npm ci --omit=dev --ignore-scripts --prefix agent-runtime
-          bash scripts/pi_runtime_smoke.sh --root "${{ github.workspace }}" --python "${{ github.workspace }}/.venv/bin/python"
-
-      - name: Pi runtime and Bot release gate
-        if: ${{ inputs.run_regression_gates }}
-        run: |
-          ./.venv/bin/python -m pytest tests/test_pi_agent_process.py
+          ./.venv/bin/python -m pytest tests/test_bot_python_runtime.py
           ./.venv/bin/python -m pytest \
             tests/test_bot_phase1.py \
             tests/test_bot_conversation_memory.py \
@@ -94,14 +83,13 @@ jobs:
         run: |
           git archive --format=tar.gz --output options-monitor-${{ inputs.tag }}.tar.gz HEAD
 
-      - name: Verify source archive Pi runtime
+      - name: Verify source archive Python Bot
         run: |
           CHECKOUT_PYTHON="${{ github.workspace }}/.venv/bin/python"
           ARCHIVE_ROOT="$(mktemp -d "${RUNNER_TEMP}/options-monitor-archive.XXXXXX")"
           tar -xzf "options-monitor-${{ inputs.tag }}.tar.gz" -C "${ARCHIVE_ROOT}"
           cd "${ARCHIVE_ROOT}"
-          npm ci --omit=dev --ignore-scripts --prefix "${ARCHIVE_ROOT}/agent-runtime"
-          bash "${ARCHIVE_ROOT}/scripts/pi_runtime_smoke.sh" --root "${ARCHIVE_ROOT}" --python "${CHECKOUT_PYTHON}"
+          "${CHECKOUT_PYTHON}" -c 'import src.application.bot.host; import src.application.bot.runtime'
 
       - name: Publish release
         uses: softprops/action-gh-release@v3

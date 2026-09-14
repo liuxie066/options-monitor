@@ -6,7 +6,7 @@ import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 from src.application.agent_tool_contracts import AgentToolError, mask_path
@@ -165,6 +165,45 @@ class InboundAuditStore:
                     str(record.get("finished_at") or utc_now_iso()),
                 ),
             )
+
+    def record_analysis_control_once(
+        self, *, channel: str, sender_id: str, conversation_id: str | None,
+        message_id: str, text: str, scope: str,
+        resolve: Callable[[sqlite3.Connection], dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Bind one provider message to its cancellation target and CAS outcome."""
+        self._ensure_schema()
+        control_channel = f"{channel}:analysis_control"
+        command_id = build_command_id(channel=control_channel, sender_id=sender_id,
+            message_id=message_id, text=text)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if self.deadline_monotonic is not None and time.monotonic() >= self.deadline_monotonic:
+                raise AgentToolError(code="BUDGET_EXHAUSTED", message="analysis control deadline exceeded")
+            row = conn.execute("SELECT sender_id, conversation_id, response_json FROM inbound_command_audit "
+                "WHERE channel = ? AND message_id = ?", (control_channel, message_id)).fetchone()
+            if row is not None:
+                result = json.loads(row["response_json"])
+                if row["sender_id"] != sender_id or row["conversation_id"] != conversation_id or result.get("scope") != scope:
+                    raise AgentToolError(code="PERMISSION_DENIED", message="analysis control identity conflict")
+                return {**result, "duplicate": True}
+            original = conn.execute("SELECT sender_id FROM inbound_command_audit WHERE channel=? AND message_id=?",
+                (channel, message_id)).fetchone()
+            if original is not None:
+                if original["sender_id"] != sender_id:
+                    raise AgentToolError(code="PERMISSION_DENIED", message="analysis control identity conflict")
+                return {"status": "already_processed", "target_run_id": None, "scope": scope, "duplicate": True}
+            result = {**resolve(conn), "scope": scope}
+            now = utc_now_iso()
+            conn.execute("""INSERT INTO inbound_command_audit
+                (command_id, channel, sender_id, conversation_id, message_id, raw_text,
+                 decision, result_ok, response_json, created_at, finished_at)
+                VALUES (?, ?, ?, ?, ?, ?, 'analysis_control', 1, ?, ?, ?)""",
+                (command_id, control_channel, sender_id, conversation_id, message_id, text,
+                 _json(result), now, now))
+            if self.deadline_monotonic is not None and time.monotonic() >= self.deadline_monotonic:
+                raise AgentToolError(code="BUDGET_EXHAUSTED", message="analysis control deadline exceeded")
+            return {**result, "duplicate": False}
 
     def update_response(self, *, command_id: str, response: dict[str, Any]) -> None:
         normalized_command_id = str(command_id or "").strip()

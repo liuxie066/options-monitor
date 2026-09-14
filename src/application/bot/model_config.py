@@ -11,18 +11,19 @@ from src.application.config_yaml import default_yaml_assistant_config_path
 from src.application.llm_provider_registry import (
     provider_requires_api_key,
     require_provider_spec,
+    resolve_output_reservation,
 )
 from src.application.secret_store import SecretProvider, resolve_secret, resolve_secret_status
 
 
-_PI_API_KINDS = {
+_API_KINDS = {
     "responses": "openai-responses",
     "chat_completions": "openai-completions",
 }
 
 
 @dataclass(frozen=True)
-class PiModelSettings:
+class ModelSettings:
     provider: str
     api_kind: str
     model: str
@@ -31,11 +32,11 @@ class PiModelSettings:
     credential_name: str
     timeout_seconds: int
     context_window_tokens: int
-    max_output_tokens: int
+    max_output_tokens: int | None
     max_attempts: int
 
     @classmethod
-    def from_config(cls, raw: dict[str, Any]) -> "PiModelSettings":
+    def from_config(cls, raw: dict[str, Any]) -> "ModelSettings":
         if not isinstance(raw, dict):
             raise ValueError("model config must be an object")
         provider = str(raw.get("provider") or "").strip().lower()
@@ -56,25 +57,19 @@ class PiModelSettings:
             minimum=1,
             maximum=120,
         )
-        max_output_tokens = _strict_int(
-            raw.get("max_output_tokens", 2048),
-            path="bot.model.max_output_tokens",
-            minimum=64,
-            maximum=4096,
-        )
+        max_output_tokens = raw.get("max_output_tokens")
         context_window_tokens = _strict_int(
             raw.get("context_window_tokens"),
             path="bot.model.context_window_tokens",
             minimum=4096,
             maximum=2_000_000,
         )
-        if context_window_tokens <= max_output_tokens + 2_000:
-            raise ValueError(
-                "bot.model.context_window_tokens must exceed max_output_tokens by more than 2000"
-            )
+        resolve_output_reservation(
+            spec.provider_id, model, context_window_tokens, max_output_tokens, path="bot.model"
+        )
         return cls(
             provider=spec.provider_id,
-            api_kind=_PI_API_KINDS[spec.api_kind],
+            api_kind=_API_KINDS[spec.api_kind],
             model=model,
             base_url=base_url,
             api_key_env=str(raw.get("api_key_env") or spec.default_api_key_env).strip(),
@@ -90,6 +85,13 @@ class PiModelSettings:
             ),
         )
 
+    @property
+    def output_reservation_tokens(self) -> int:
+        return resolve_output_reservation(
+            self.provider, self.model, self.context_window_tokens, self.max_output_tokens,
+            path="bot.model",
+        )
+
     def process_payload(self) -> dict[str, Any]:
         return {
             "provider": self.provider,
@@ -99,6 +101,7 @@ class PiModelSettings:
             "timeout_seconds": self.timeout_seconds,
             "context_window_tokens": self.context_window_tokens,
             "max_output_tokens": self.max_output_tokens,
+            "output_reservation_tokens": self.output_reservation_tokens,
             "max_attempts": self.max_attempts,
         }
 
@@ -171,7 +174,7 @@ def load_assistant_bot_settings(
         return frozenset(), mode, None
     toolsets = bot_cfg.get("toolsets")
     toolset_cfg = toolsets if isinstance(toolsets, dict) else {}
-    return frozenset(str(name) for name, enabled in toolset_cfg.items() if enabled is True), mode, None
+    return frozenset(), "eager", None
 
 
 def _load_assistant_config(
@@ -205,7 +208,7 @@ def model_api_key_configured(
     secret_provider: SecretProvider | None = None,
 ) -> tuple[bool, str | None]:
     try:
-        settings = PiModelSettings.from_config(raw)
+        settings = ModelSettings.from_config(raw)
     except Exception:
         return False, "invalid_model_config"
     if not provider_requires_api_key(settings.provider):
@@ -222,7 +225,7 @@ def model_api_key_configured(
 
 
 def _resolve_model_api_key(
-    settings: PiModelSettings,
+    settings: ModelSettings,
     *,
     environ: dict[str, str] | None = None,
     secret_provider: SecretProvider | None = None,

@@ -13,23 +13,33 @@ from src.application.bot.contracts import (
     AppEvent,
     AppResult,
     ExecutionContract,
-    contract_from_payload,
     contract_to_payload,
     new_id,
     utc_now_iso,
 )
-from src.application.bot.event_store import public_progress_event, incomplete_progress_response, safe_failure_cause
 from src.infrastructure.private_storage import connect_private_sqlite, private_path
 
 
 REPLY_DELIVERY_LEASE_SECONDS = 300
 REPLY_CAPABILITY_TTL_SECONDS = 24 * 60 * 60
-PROGRESS_RESOLUTION_CONFLICT_NOTICE = '\n原事项的进度已变化，本次回答已保存，但未将原事项标记为完成。'
 
 
 class BotHostStore:
     def __init__(self, path: str | Path) -> None:
         self.path = private_path(path)
+
+    def chat_messages(self, session_key: str) -> list[dict]:
+        self._ensure_schema()
+        with self._connect() as conn:
+            if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='bot_chat_context'").fetchone():
+                return []
+            row = conn.execute('SELECT messages_json FROM bot_chat_context WHERE session_key=?', (session_key,)).fetchone()
+        if row is None:
+            return []
+        value = json.loads(row[0])
+        if not isinstance(value, list) or any(not isinstance(m, dict) or m.get('role') not in {'user','assistant'} or not isinstance(m.get('content'), str) for m in value):
+            raise ValueError('invalid chat history')
+        return value
 
     def session_turns(self, session_key: str) -> tuple[dict[str, Any], ...]:
         return self._session_json_list(session_key, "turns_json")
@@ -167,7 +177,6 @@ class BotHostStore:
         *,
         contract: ExecutionContract,
         session_key: str | None,
-        resumed_from: str | None = None,
     ) -> None:
         self._ensure_schema()
         with self._connect() as conn:
@@ -176,8 +185,8 @@ class BotHostStore:
                 INSERT INTO bot_runs (
                     run_id, request_id, contract_id, session_key, status, cancel_requested,
                     events_json, started_at, finished_at, response_json, contract_json,
-                    resumed_from, resume_attempts, admission_state, lease_id, deadline_at
-                ) VALUES (?, ?, ?, ?, 'running', 0, '[]', ?, NULL, NULL, ?, ?, 0, 'open', ?, ?)
+                    admission_state, lease_id, deadline_at
+                ) VALUES (?, ?, ?, ?, 'running', 0, '[]', ?, NULL, NULL, ?, 'open', ?, ?)
                 """,
                 (
                     run_id,
@@ -186,7 +195,6 @@ class BotHostStore:
                     session_key,
                     utc_now_iso(),
                     json.dumps(contract_to_payload(contract), ensure_ascii=False, default=str),
-                    resumed_from,
                     new_id("lease"),
                     (datetime.now(timezone.utc) + timedelta(seconds=max(0, (contract.deadline_monotonic or time.monotonic() + 180) - time.monotonic()))).isoformat(),
                 ),
@@ -270,9 +278,9 @@ class BotHostStore:
                     (json.dumps(metrics, ensure_ascii=False, default=str), event.run_id),
                 )
 
-    def finish_run(self, result: AppResult, *, progress_resolution: dict[str, Any] | None = None,
-                   reply: dict[str, Any] | None = None, reply_builder: Any = None, progress_scope: Any = None,
-                   deadline_monotonic: float | None = None) -> AppResult:
+    def finish_run(self, result: AppResult, *,
+                   reply: dict[str, Any] | None = None, reply_builder: Any = None,
+                   deadline_monotonic: float | None = None, chat_messages: list[dict] | None = None) -> AppResult:
         self._ensure_schema(deadline_monotonic=deadline_monotonic)
         with self._connect(deadline_monotonic=deadline_monotonic) as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -291,27 +299,6 @@ class BotHostStore:
                 raise TimeoutError('answer persistence exceeded interaction deadline')
             if row['admission_state'] == 'cancel':
                 result = replace(result, status='cancelled', ok=False, user_response='Bot 运行已取消。', error={'code':'CANCELLED'})
-            progress = self._progress(row, result) if result.status in {'failed','cancelled','interrupted'} else {}
-            if progress and result.status in {'failed', 'interrupted'}:
-                result = replace(result, user_response=incomplete_progress_response(result.user_response, progress))
-            if result.status == 'answered' and progress_resolution:
-                original = conn.execute("SELECT * FROM bot_runs WHERE run_id=?", (progress_resolution['progress_ref'],)).fetchone()
-                closed = False
-                if original is not None:
-                    previous = json.loads(original['progress_json'])
-                    current_owner = self._progress(row).get('owner_scope')
-                    if (previous.get('revision') == progress_resolution['expected_revision']
-                            and previous.get('owner_scope') == current_owner and current_owner
-                            and previous.get('goal') == progress_resolution['covered_goal']
-                            and not previous.get('resolved_by') and row.get('resumed_from') == original['run_id']
-                            and progress_scope is not None and progress_scope.owner_scope == current_owner
-                            and set(previous.get('accounts', ())) <= progress_scope.allowed_accounts):
-                        previous.update(revision=previous['revision'] + 1, resolved_by=result.run_id, resolved_at=utc_now_iso())
-                        conn.execute("UPDATE bot_runs SET progress_json=? WHERE run_id=?",
-                                     (json.dumps(previous, ensure_ascii=False), original['run_id']))
-                        closed = True
-                if not closed:
-                    result = replace(result, user_response=result.user_response + PROGRESS_RESOLUTION_CONFLICT_NOTICE)
             response = {'status':result.status, 'ok':result.ok, 'user_response':result.user_response, 'error':result.error}
             events = json.loads(row['events_json'])
             for event in events:
@@ -321,8 +308,12 @@ class BotHostStore:
             conn.execute("""UPDATE bot_runs SET status=?,finished_at=?,response_json=?,progress_json=?,events_json=?,
                 admission_state=CASE WHEN admission_state='open' THEN 'discard' ELSE admission_state END
                 WHERE run_id=?""", (result.status, utc_now_iso(), json.dumps(response, ensure_ascii=False),
-                    json.dumps(progress, ensure_ascii=False), json.dumps(events, ensure_ascii=False), result.run_id))
+                    '{}', json.dumps(events, ensure_ascii=False), result.run_id))
             if result.status == 'answered':
+                if chat_messages is not None and row['session_key']:
+                    conn.execute('CREATE TABLE IF NOT EXISTS bot_chat_context (session_key TEXT PRIMARY KEY, messages_json TEXT NOT NULL)')
+                    conn.execute('INSERT INTO bot_chat_context VALUES (?,?) ON CONFLICT(session_key) DO UPDATE SET messages_json=excluded.messages_json',
+                                 (row['session_key'], json.dumps(chat_messages, ensure_ascii=False, allow_nan=False)))
                 if reply_builder is not None:
                     reply = reply_builder(result)
                 if reply:
@@ -331,21 +322,45 @@ class BotHostStore:
                 if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
                     raise TimeoutError('answer persistence exceeded interaction deadline')
         return result
-    def request_cancel(self, run_id: str) -> bool:
-        self._ensure_schema()
-        with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            cursor = conn.execute(
-                """
-                UPDATE bot_runs
-                SET cancel_requested = 1, admission_state = 'cancel'
-                WHERE run_id = ?
-                  AND status IN ('running', 'waiting_model', 'waiting_tool')
-                  AND admission_state = 'open'
-                """,
-                (run_id,),
-            )
+    def request_cancel(self, run_id: str, *, connection: sqlite3.Connection | None = None) -> bool:
+        if connection is None:
+            self._ensure_schema()
+            with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                return self.request_cancel(run_id, connection=conn)
+        cursor = connection.execute(
+            """
+            UPDATE bot_runs
+            SET cancel_requested = 1, admission_state = 'cancel'
+            WHERE run_id = ?
+              AND status IN ('running', 'waiting_model', 'waiting_tool')
+              AND admission_state = 'open'
+            """,
+            (run_id,),
+        )
         return bool(cursor.rowcount)
+
+    def cancel_session_run(self, session_key: str, *, connection: sqlite3.Connection,
+                           trusted_identity: dict[str, str]) -> dict[str, Any]:
+        """Use the inbound dedup transaction; never open or initialize another DB."""
+        database = next((row[2] for row in connection.execute("PRAGMA database_list") if row[1] == "main"), "")
+        if not database or Path(database).resolve() != self.path.resolve() or not connection.in_transaction:
+            raise ValueError("analysis cancellation requires the same inbound database transaction")
+        if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='bot_runs'").fetchone() is None:
+            return {"status": "not_ready", "target_run_id": None}
+        rows = connection.execute("""SELECT run_id, admission_state, contract_json FROM bot_runs
+            WHERE session_key = ? AND status IN ('running', 'waiting_model', 'waiting_tool')
+            ORDER BY started_at DESC LIMIT 2""", (session_key,)).fetchall()
+        if len(rows) != 1:
+            return {"status": "not_ready" if rows else "no_active_run", "target_run_id": None}
+        row = rows[0]
+        source = json.loads(row["contract_json"]).get("input", {})
+        if any(str(source.get(key) or "") != value for key, value in trusted_identity.items()):
+            return {"status": "not_ready", "target_run_id": None}
+        cancelled = self.request_cancel(row["run_id"], connection=connection)
+        status = ("cancelled" if cancelled or row["admission_state"] == "cancel"
+                  else "completed" if row["admission_state"] == "commit" else "not_ready")
+        return {"status": status, "target_run_id": row["run_id"]}
 
     def claim_admission_decision(self, run_id: str, desired: str) -> str:
         if desired not in {"commit", "discard"}:
@@ -375,8 +390,17 @@ class BotHostStore:
             return state
 
     def is_cancel_requested(self, run_id: str) -> bool:
-        self._ensure_schema()
-        with self._connect() as conn:
+        from contextlib import closing
+        from src.application.bot.migration import assert_bot_ready
+
+        # Reader checkpoints poll concurrently with Host persistence; they must
+        # not initialize schema or run outbox cleanup on every cancellation check.
+        assert_bot_ready(self.path)
+        if not self.path.exists():
+            return False
+        with closing(self._connect()) as conn:
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='bot_runs'").fetchone() is None:
+                return False
             row = conn.execute(
                 "SELECT cancel_requested FROM bot_runs WHERE run_id = ?",
                 (run_id,),
@@ -415,55 +439,11 @@ class BotHostStore:
                 return tuple(events[index + 1 :])
         return tuple(events)
 
-    def run_progress(self, run_id: str, *, after_event_id: str | None = None) -> tuple[dict[str, Any], ...]:
-        return tuple(
-            progress
-            for item in self.run_events(run_id, after_event_id=after_event_id)
-            if (progress := public_progress_event(item)) is not None
-        )
-
-    def resume_source(self, run_id: str, *, max_attempts: int = 3) -> tuple[ExecutionContract, list[dict[str, Any]], str | None] | None:
-        self._ensure_schema()
-        with self._connect() as conn:
-            conn.row_factory = sqlite3.Row
-            conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute("SELECT * FROM bot_runs WHERE run_id = ?", (run_id,)).fetchone()
-            if row is None:
-                return None
-            status = str(row["status"] or "")
-            attempts = int(row["resume_attempts"] or 0)
-            if status not in {"failed", "interrupted"} or attempts >= max(1, int(max_attempts)):
-                return None
-            try:
-                contract_payload = json.loads(str(row["contract_json"] or "{}"))
-                events = json.loads(str(row["events_json"] or "[]"))
-                contract = contract_from_payload(contract_payload)
-            except Exception:
-                return None
-            if not contract.contract_id or contract.policy.get("read_only") is not True:
-                return None
-            if str(row["admission_state"] or "") in {"commit", "cancel"}:
-                return None
-            if any(
-                isinstance(item, dict)
-                and isinstance(item.get("payload"), dict)
-                and item["payload"].get("session_commit_outcome") == "unknown"
-                for item in events
-            ):
-                return None
-            conn.execute(
-                "UPDATE bot_runs SET resume_attempts = resume_attempts + 1 WHERE run_id = ?",
-                (run_id,),
-            )
-        return contract, [dict(item) for item in events if isinstance(item, dict)], row["session_key"]
-
     def mark_stale_runs_interrupted(self, *, older_than_seconds: int = 600) -> int:
         self._ensure_schema()
         cutoff = (datetime.now(timezone.utc) - timedelta(seconds=max(1, int(older_than_seconds)))).isoformat()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            conn.row_factory = sqlite3.Row
-            stale = conn.execute("SELECT * FROM bot_runs WHERE status IN ('running','waiting_model','waiting_tool') AND started_at < ?", (cutoff,)).fetchall()
             cursor = conn.execute(
                 """
                 UPDATE bot_runs
@@ -473,16 +453,13 @@ class BotHostStore:
                     admission_state = CASE
                         WHEN admission_state = 'open' THEN 'discard'
                         ELSE admission_state
-                    END
+                    END,
+                    progress_json = '{}'
                 WHERE status IN ('running', 'waiting_model', 'waiting_tool') AND started_at < ?
                 """,
                 (utc_now_iso(), cutoff),
             )
-            changed = cursor.rowcount
-            for row in stale:
-                recovered = conn.execute("SELECT * FROM bot_runs WHERE run_id=?", (row['run_id'],)).fetchone()
-                conn.execute("UPDATE bot_runs SET progress_json=? WHERE run_id=?", (json.dumps(self._progress(dict(recovered)), ensure_ascii=False), row['run_id']))
-        return int(changed)
+        return int(cursor.rowcount)
 
     def enqueue_reply(
         self,
@@ -699,96 +676,6 @@ class BotHostStore:
                 (str(lane), str(lease_id)),
             )
 
-    def unfinished_progress(self, scope: Any, *, include_cancelled: bool = False, progress_ref: str | None = None) -> list[dict[str, Any]]:
-        self._ensure_schema()
-        with self._connect() as conn:
-            rows = conn.execute("""SELECT progress_json FROM bot_runs
-                WHERE json_extract(progress_json, '$.owner_scope') = ?
-                AND (? IS NULL OR run_id=?)
-                AND (? IS NOT NULL OR json_extract(progress_json, '$.resolved_by') IS NULL)
-                AND (? OR (status != 'cancelled' AND admission_state != 'cancel' AND cancel_requested = 0))
-                ORDER BY started_at DESC,run_id LIMIT 50""",
-                (scope.owner_scope, progress_ref, progress_ref, progress_ref, int(include_cancelled))).fetchall()
-        result = []
-        for row in rows:
-            item = json.loads(row[0])
-            if set(item.get('accounts', ())) <= scope.allowed_accounts:
-                result.append({k:v for k,v in item.items() if k != 'owner_scope'})
-                if len(result) == 8:
-                    break
-        return result
-
-    @staticmethod
-    def progress_query(payload: dict[str, Any]) -> dict[str, Any]:
-        return {key:value for key,value in payload.items() if key not in {
-            'config_key','config_path','authenticated_channel','authenticated_sender_id',
-            'authenticated_conversation_id','authority_scope','cursor','limit','offset','report_now_ms'}}
-
-    @staticmethod
-    def _progress(row: dict[str, Any], result: AppResult | None = None) -> dict[str, Any]:
-        from src.application.bot.memory import scope_from_contract
-        from src.application.agent_tool_registry import pure_read_tool_names
-        business_reads = pure_read_tool_names()
-        try:
-            contract = contract_from_payload(json.loads(row['contract_json']))
-            owner = scope_from_contract(contract).owner_scope
-        except (ValueError, KeyError, TypeError, OSError):
-            owner = None
-        events = json.loads(row.get('events_json') or '[]')
-        refs, accounts = [], set()
-        read_count = partial_count = failed_count = 0
-        failure_counts = {"read": 0, "submission": 0, "internal": 0}
-        failure_causes = []
-        sources = []
-        budget_reason = None
-        for event in events:
-            data = event.get('payload', {})
-            if event.get('type') == 'agent_budget_fallback':
-                budget_reason = data.get('reason')
-            if event.get('type') in {'tool_result', 'memory_tool_result'} and data.get('ok') is False:
-                tool_name = data.get('tool_name')
-                category = ('internal' if event.get('type') == 'memory_tool_result' or tool_name == 'bot_memory'
-                            else 'submission' if tool_name == 'submit_answer'
-                            else 'read' if tool_name in business_reads else 'internal')
-                failure_counts[category] += 1
-                cause = safe_failure_cause({**data, "tool_name": "bot_memory"} if event.get('type') == 'memory_tool_result' else data, category)
-                if cause.get('account'):
-                    accounts.add(cause['account'].lower())
-                if cause not in failure_causes and len(failure_causes) < 3:
-                    failure_causes.append(cause)
-            if event.get('type') == 'tool_result' and data.get('tool_name') != 'bot_memory':
-                if data.get('ok') is False:
-                    failed_count += 1
-                elif data.get('ok') is True and data.get('content_hash'):
-                    read_count += 1
-                    partial_count += int(data.get('coverage', {}).get('status') != 'complete' or bool(data.get('missing_data') or data.get('warnings')))
-                    source = data.get('source', {})
-                    label = str(source.get('label') or '').strip()[:80] if isinstance(source, dict) else ''
-                    if label and label not in sources:
-                        sources.append(label)
-            if event.get('type') == 'tool_result' and data.get('ok') is True and data.get('content_hash'):
-                refs.append({'ref': data.get('ref'), 'tool_name': data.get('tool_name'), 'as_of': data.get('as_of'), 'content_hash': data['content_hash'], 'query': BotHostStore.progress_query(data.get('tool_input') or {}), 'coverage': data.get('coverage', {})})
-                def collect_accounts(value: Any) -> None:
-                    if isinstance(value, dict):
-                        for key, child in value.items():
-                            if key in {'account', 'account_name', 'account_scope'} and isinstance(child, str):
-                                accounts.add(child.lower())
-                            elif key == 'accounts' and isinstance(child, list):
-                                accounts.update(item.lower() for item in child if isinstance(item, str))
-                            else:
-                                collect_accounts(child)
-                    elif isinstance(value, list):
-                        for child in value:
-                            collect_accounts(child)
-                for field in ('tool_input', 'coverage', 'value'):
-                    collect_accounts(data.get(field))
-        return {'progress_ref': row['run_id'], 'revision': 1, 'owner_scope': owner,
-                'goal': json.loads(row['contract_json']).get('input', {}).get('user_message', '')[:2000],
-                'accounts': sorted(accounts), 'evidence_refs': refs[-12:],
-                'completed_checks': {'read_count': read_count, 'partial_count': partial_count, 'failed_count': failed_count, 'failed_read_count': failure_counts['read'], 'failed_submission_count': failure_counts['submission'], 'failed_internal_count': failure_counts['internal'], 'failure_causes': failure_causes, 'sources': sources[:4]},
-                'termination_reason': ((result.error or {}).get('reason') or budget_reason or (result.error or {}).get('code')) if result else row.get('termination_reason'),
-                'next_step': '重新读取当前证据，继续原问题；旧引用仅作导航。', 'resolved_by': None, 'resolved_at': None}
-
     def _connect(self, *, deadline_monotonic: float | None = None) -> sqlite3.Connection:
         # Allow short competing commits without resetting the interaction deadline.
         timeout = 1.0 if deadline_monotonic is None else max(0, min(1.0, deadline_monotonic - time.monotonic()))
@@ -889,6 +776,8 @@ class BotHostStore:
 
 
 def _termination_reason(event: AppEvent) -> str | None:
+    if event.type == "run_metrics":
+        return str(event.payload.get("termination_reason") or "") or None
     if event.type == "agent_terminated":
         return str(event.payload.get("reason") or "completed")
     if event.type == "run_cancelled":

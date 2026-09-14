@@ -115,25 +115,6 @@ finally:
 echo "[PREFLIGHT] root=${ROOT}"
 echo "[PREFLIGHT] python=$("${PYTHON_BIN}" --version 2>&1)"
 
-NODE_BIN="$(command -v node || true)"
-NPM_BIN="$(command -v npm || true)"
-if [[ -z "${NODE_BIN}" ]]; then
-  echo "[PREFLIGHT_ERROR] Node >=22.19.0 is required" >&2
-  exit 1
-fi
-if [[ -z "${NPM_BIN}" ]]; then
-  echo "[PREFLIGHT_ERROR] npm is required" >&2
-  exit 1
-fi
-NODE_VERSION="$("${NODE_BIN}" --version 2>/dev/null || true)"
-if [[ ! "${NODE_VERSION}" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] ||
-   (( 10#${BASH_REMATCH[1]:-0} < 22 )) ||
-   (( 10#${BASH_REMATCH[1]:-0} == 22 && 10#${BASH_REMATCH[2]:-0} < 19 )); then
-  echo "[PREFLIGHT_ERROR] Node >=22.19.0 is required; observed=${NODE_VERSION:-unknown}" >&2
-  exit 1
-fi
-echo "[PREFLIGHT] node=${NODE_VERSION}"
-
 status="$(git -C "${ROOT}" status --short)"
 if [[ -n "${status}" ]]; then
   echo "[PREFLIGHT_WARN] git worktree has uncommitted changes:"
@@ -150,10 +131,7 @@ if (( FULL == 1 || FOCUSED == 1 )); then
   probe_loopback_bind
 fi
 
-run_step "Pi runtime locked install" \
-  "${NPM_BIN}" ci --omit=dev --ignore-scripts --prefix agent-runtime
-run_step "Pi runtime smoke" \
-  bash scripts/pi_runtime_smoke.sh --root "${ROOT}" --python "${PYTHON_BIN}"
+run_step "Python Bot import" "${PYTHON_BIN}" -c 'import src.application.bot.host; import src.application.bot.runtime'
 
 VERSION="$(tr -d '\n' < "${ROOT}/VERSION")"
 run_step "release metadata" \
@@ -164,8 +142,8 @@ if [[ "${CHECK_DEPS}" -eq 1 ]]; then
 fi
 
 if [[ "${FOCUSED}" -eq 1 && "${FULL}" -eq 0 ]]; then
-  run_step "Pi runtime focused tests" \
-    "${PYTHON_BIN}" -m pytest tests/test_pi_agent_process.py
+  run_step "Python Bot focused tests" \
+    "${PYTHON_BIN}" -m pytest tests/test_bot_python_runtime.py
   run_step "Bot, Control, and operations focused tests" \
     "${PYTHON_BIN}" -m pytest \
       tests/test_bot_phase1.py \
