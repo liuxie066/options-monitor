@@ -11,6 +11,7 @@ Centralizes:
 
 import ast
 from dataclasses import dataclass, field
+from datetime import date
 from decimal import Decimal, InvalidOperation
 from importlib import metadata as importlib_metadata
 from importlib import util as importlib_util
@@ -31,7 +32,7 @@ LOG = logging.getLogger(__name__)
 FUTU_EARNINGS_CALENDAR_MIN_VERSION = "10.9.6908"
 FUTU_EARNINGS_CALENDAR_CAPABILITY = "get_earnings_calendar"
 FUTU_EARNINGS_CALENDAR_UNSUPPORTED_REASON = "opend_earnings_calendar_unsupported"
-FUTU_EXPIRY_ORDER_ORIGIN_EVIDENCE = "futu_zero_price_expiry_shape.v1"
+FUTU_EXPIRY_ORDER_ORIGIN_EVIDENCE = "futu_zero_price_expiry_shape.v2"
 
 
 def _futu_decimal(value: Any) -> Decimal | None:
@@ -45,7 +46,7 @@ def _futu_decimal(value: Any) -> Decimal | None:
 
 
 def _is_native_futu_expiry_order(row: dict[str, Any]) -> bool:
-    """Identify Futu's zero-price option close generated at expiration."""
+    """Identify a zero-price option close on expiration day or the next day."""
 
     code = str(
         row.get("code")
@@ -60,6 +61,13 @@ def _is_native_futu_expiry_order(row: dict[str, Any]) -> bool:
         f"20{match.group('yy')}-{match.group('mm')}-{match.group('dd')}"
     )
     created_ymd = str(row.get("create_time") or "").strip()[:10]
+    try:
+        created_date = date.fromisoformat(created_ymd)
+        day_offset = (created_date - date.fromisoformat(expiration_ymd)).days
+    except ValueError:
+        return False
+    if created_date.isoformat() != created_ymd:
+        return False
     quantity = _futu_decimal(row.get("qty") or row.get("quantity"))
     dealt_quantity = _futu_decimal(
         row.get("dealt_qty")
@@ -68,7 +76,7 @@ def _is_native_futu_expiry_order(row: dict[str, Any]) -> bool:
     )
     return (
         bool(str(row.get("order_id") or "").strip())
-        and created_ymd == expiration_ymd
+        and day_offset in (0, 1)
         and str(
             row.get("trd_side")
             or row.get("side")

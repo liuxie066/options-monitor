@@ -85,13 +85,37 @@ def test_futu_api_client_stock_basicinfo_unwraps_quote_result() -> None:
     ]
 
 
-def test_futu_api_client_annotates_only_exact_native_expiry_order_shape() -> None:
+@pytest.mark.parametrize(
+    ("code", "create_time", "expected_auto"),
+    [
+        ("HK.TCH260730P440000", "2026-07-30 19:25:32", True),
+        ("HK.TCH260730P440000", "2026-07-31 23:59:59", True),
+        ("HK.TCH260730P440000", "2026-07-29 23:59:59", False),
+        ("HK.TCH260730P440000", "2026-08-01 00:00:00", False),
+        ("US.PDD260828C100000", "2026-08-29 00:35:08", True),
+        ("US.PDD260828C100000", "2026-08-29 00:37:49", True),
+        ("US.PDD260821C105000", "2026-08-22 01:06:53", True),
+        ("US.PDD261231C100000", "2027-01-01 00:35:08", True),
+        ("US.PDD280229C100000", "2028-03-01 00:35:08", True),
+        ("US.PDD260828C100000", "2026-08-30 00:00:00", False),
+        ("US.PDD260828C100000", "2026-02-30 00:35:08", False),
+        ("US.PDD260230C100000", "2026-02-30 00:35:08", False),
+        ("US.PDD260828C100000", "bad-date", False),
+        ("US.PDD260828C100000", "20260829", False),
+        ("US.PDD260828C100000", None, False),
+    ],
+)
+def test_futu_api_client_annotates_only_exact_native_expiry_order_shape(
+    code: str,
+    create_time: str | None,
+    expected_auto: bool,
+) -> None:
     from src.infrastructure.futu_gateway import _FutuAPIClient
 
     base_row = {
         "order_id": "synthetic-expiry-order",
-        "code": "HK.TCH260730P440000",
-        "trd_side": "BUY_BACK",
+        "code": code,
+        "trd_side": "SELL" if code.startswith("US.") else "BUY_BACK",
         "order_type": "NORMAL",
         "order_status": "FILLED_ALL",
         "qty": 2.0,
@@ -100,7 +124,7 @@ def test_futu_api_client_annotates_only_exact_native_expiry_order_shape() -> Non
         "dealt_avg_price": 0.0,
         "last_err_msg": "",
         "remark": "",
-        "create_time": "2026-07-30 19:25:32",
+        "create_time": create_time,
     }
 
     class FakeTrade:
@@ -109,9 +133,16 @@ def test_futu_api_client_annotates_only_exact_native_expiry_order_shape() -> Non
             wrong_day_row = dict(
                 base_row,
                 order_id="wrong-day",
-                create_time="2026-07-29 16:00:00",
+                create_time="2020-01-01 16:00:00",
             )
-            return 0, [base_row, positive_row, wrong_day_row], None
+            return 0, [
+                base_row, positive_row, wrong_day_row,
+                dict(base_row, order_origin="client"),
+                dict(base_row, is_broker_auto=False),
+                dict(base_row, dealt_qty=1),
+                dict(base_row, dealt_avg_price=0.01),
+                dict(base_row, remark="manual"),
+            ], None
 
     class FakeBackend:
         def __init__(self) -> None:
@@ -124,13 +155,17 @@ def test_futu_api_client_annotates_only_exact_native_expiry_order_shape() -> Non
 
     receipt = client.get_history_orders(acc_id="1001", trd_env="REAL")
 
-    assert receipt["rows"][0]["order_origin"] == "broker_auto"
-    assert (
-        receipt["rows"][0]["order_origin_evidence"]
-        == "futu_zero_price_expiry_shape.v1"
+    assert receipt["rows"][0].get("order_origin") == (
+        "broker_auto" if expected_auto else None
     )
+    assert receipt["rows"][0].get("order_origin_evidence") == (
+        "futu_zero_price_expiry_shape.v2" if expected_auto else None
+    )
+    assert all(receipt["rows"][0][key] == value for key, value in base_row.items())
     assert "order_origin" not in receipt["rows"][1]
     assert "order_origin" not in receipt["rows"][2]
+    assert receipt["rows"][3]["order_origin"] == "client"
+    assert all("order_origin" not in row for row in receipt["rows"][4:])
     assert "order_origin" not in base_row
 
 
