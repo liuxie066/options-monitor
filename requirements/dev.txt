@@ -1,4 +1,5 @@
 -r runtime.txt
 pytest
+pytest-xdist
 ruff
 jsonschema>=4.23,<5
