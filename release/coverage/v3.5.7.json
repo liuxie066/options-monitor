@@ -1,0 +1,52 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.5.7",
+  "base": {
+    "tag": "v3.5.6",
+    "commit": "ce5789266ce3cd1227a91623416b92fa882d9403"
+  },
+  "reviewed_head": "987699b80608cb7c22dc3a0f511e792b8100aea9",
+  "commits": [
+    {
+      "sha": "60a880415ba98790a5a9e64988c5d04227a72ba1",
+      "subject": "fix(wheel): allow historical void repairs"
+    },
+    {
+      "sha": "987699b80608cb7c22dc3a0f511e792b8100aea9",
+      "subject": "fix(fees): query full day for exact targets"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Allowed Wheel recovery after voids that only correct older events, while retaining rejection of invalidated assignment sources and unsafe subsequent trades.",
+      "commits": [
+        "60a880415ba98790a5a9e64988c5d04227a72ba1"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Queried complete broker trading days for exact historical order-fee targets so millisecond fills are found without widening account or order identity.",
+      "commits": [
+        "987699b80608cb7c22dc3a0f511e792b8100aea9"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "60a880415ba98790a5a9e64988c5d04227a72ba1",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/285",
+        "docs/LEDGER_ARCHITECTURE.md"
+      ]
+    },
+    {
+      "commit": "987699b80608cb7c22dc3a0f511e792b8100aea9",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/285",
+        "docs/LEDGER_ARCHITECTURE.md"
+      ]
+    }
+  ]
+}

@@ -196,6 +196,7 @@ def sync_order_fees(
                 query_start, query_end = _provider_dates(
                     int(batch[0]["oldest_event_time_ms"] if target is not None else start),
                     int(batch[0]["newest_event_time_ms"] + 1 if target is not None else end),
+                    complete_days=target is not None,
                 )
                 if target is None:
                     before_provider_call()
@@ -659,10 +660,18 @@ def _chunks(values: Sequence[Any], size: int) -> list[list[Any]]:
     return [list(values[index : index + size]) for index in range(0, len(values), size)]
 
 
-def _provider_dates(start_ms: int, end_exclusive_ms: int) -> tuple[str, str]:
+def _provider_dates(
+    start_ms: int,
+    end_exclusive_ms: int,
+    *,
+    complete_days: bool = False,
+) -> tuple[str, str]:
     tz = ZoneInfo("Asia/Hong_Kong")
     start = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc).astimezone(tz)
     end = datetime.fromtimestamp((end_exclusive_ms - 1) / 1000, tz=timezone.utc).astimezone(tz)
+    if complete_days:
+        start = start.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = end.replace(hour=23, minute=59, second=59, microsecond=0)
     return start.strftime("%Y-%m-%d %H:%M:%S"), end.strftime("%Y-%m-%d %H:%M:%S")
 
 

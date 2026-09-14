@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 3.5.7 - 2026-09-14
+
+### Bug Fixes
+- Allowed Wheel recovery after voids that only correct older events, while retaining rejection of invalidated assignment sources and unsafe subsequent trades.
+- Queried complete broker trading days for exact historical order-fee targets so millisecond fills are found without widening account or order identity.
+
 ## 3.5.6 - 2026-09-14
 
 ### Bug Fixes

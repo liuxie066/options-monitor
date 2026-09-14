@@ -210,9 +210,19 @@ def _plan(reader: Any, conn: sqlite3.Connection, path: Path, account: str, marke
                 raise ValueError(f"assignment recovery blocked: {reason}")
     if existing and existing[0]["payload_hash"] != planned["payload_hash"]:
         raise ValueError("existing Wheel event payload conflict")
+    events_by_id = {event.event_id: event for event in events}
+    historical_voids = {
+        event.event_id
+        for event in events
+        for target in [events_by_id.get(event.target_event_id or "")]
+        if event.event_type == "void"
+        and target is not None
+        and target.event_time_ms < assignment.event_time_ms
+    }
     later = [e.event_id for e in events if e.contract_key.account == account
              and e.contract_key.underlying_symbol == key.underlying_symbol
              and e.event_id != assignment_event_id and e.event_id not in allowed_later
+             and e.event_id not in historical_voids
              and e.event_time_ms >= assignment.event_time_ms]
     later.extend(str(s.get("stock_event_id") or s.get("event_id")) for s in rows["account_assigned_stock_events"]
                  if str(s.get("symbol") or (s.get("raw_payload") or {}).get("symbol") or "") == key.underlying_symbol
