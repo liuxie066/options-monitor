@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 from unittest.mock import patch
 
 import pandas as pd
@@ -80,6 +81,25 @@ def _assignment_payload(
     if actual_fee:
         settlement["fee_provenance"] = {"basis": "actual", "source": "test"}
     return {"target_lot_id": "put-lot", "stock_settlement": settlement}
+
+
+def _broker_assignment_payload(
+    multiplier: int,
+    *,
+    actual_fee: bool,
+) -> dict:
+    payload = _assignment_payload(multiplier, actual_fee=actual_fee)
+    payload.update(
+        source_type="broker_settlement_pair",
+        source_event_id="option-close|stock-settlement",
+    )
+    payload["stock_settlement"].update(
+        source_event_id="stock-settlement",
+        futu_account_id="1001",
+        order_id="stock-order",
+        symbol="NVDA",
+    )
+    return payload
 
 
 def _trusted_multiplier_payload(event_id: str, **extra: object) -> dict[str, object]:
@@ -695,6 +715,57 @@ def test_unproven_assignment_fee_creates_visible_blocked_child(tmp_path) -> None
     assert result["wheel_manual_review_reason"] in branch["reason_codes"]
 
 
+def test_broker_assignment_refreshes_wheel_evidence_after_fee_sync(tmp_path) -> None:
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    persist_trade_event_objects_atomically(
+        repo,
+        [_put_event(
+            event_id="put-open",
+            event_type="open",
+            multiplier=10,
+            raw_payload={},
+        )],
+    )
+    _open_activation(repo)
+    persist_trade_event_objects_atomically(
+        repo,
+        [_put_event(
+            event_id="put-assignment",
+            event_type="assignment",
+            multiplier=10,
+            raw_payload=_broker_assignment_payload(10, actual_fee=False),
+        )],
+    )
+
+    blocked = build_wheel_read_model(repo, "lx", 3_000)["wheel_branches"][0]
+    assert blocked["reason_codes"] == ["assignment_cash_facts_unavailable"]
+    assert (
+        repo.list_wheel_events(account="lx")[0]["payload"]["principal_anchor"]
+        is None
+    )
+
+    with repo._writer_connection(begin_immediate=True) as conn:
+        row = conn.execute(
+            "SELECT event_json FROM trade_events WHERE event_id = ?",
+            ("put-assignment",),
+        ).fetchone()
+        event = json.loads(row["event_json"])
+        event["raw_payload"]["stock_settlement"]["fee_provenance"] = {
+            "basis": "actual",
+            "source": "test fee sync",
+        }
+        conn.execute(
+            "UPDATE trade_events SET event_json = ? WHERE event_id = ?",
+            (json.dumps(event, ensure_ascii=False, sort_keys=True), "put-assignment"),
+        )
+
+    ready = build_wheel_read_model(repo, "lx", 3_000)["wheel_branches"][0]
+    assert ready["reason_codes"] == []
+    assert ready["phase"] == "ready"
+    assert ready["multiplier"] == 10
+    assert ready["principal_anchor"] == "1000.000000"
+
+
 def test_lifecycle_allocation_writer_creates_blocked_assignment_branch(tmp_path):
     from tests.test_settlement_observation import (
         _repo_with_pending_case, _collect_stock_settlement_observation,
@@ -712,5 +783,5 @@ def test_lifecycle_allocation_writer_creates_blocked_assignment_branch(tmp_path)
     assert result["poll_settlement_results"][0]["status"] == "applied"
     branch = build_wheel_read_model(repo, "lx", now_ms)["wheel_branches"][0]
     assert branch["phase"] == "data_unavailable"
-    assert {"multiplier_unproven", "assignment_cash_facts_unavailable"} <= set(branch["reason_codes"])
+    assert branch["reason_codes"] == ["assignment_cash_facts_unavailable"]
     assert len(repo.list_wheel_events()) == 1

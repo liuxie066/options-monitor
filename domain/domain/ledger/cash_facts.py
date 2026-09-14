@@ -54,6 +54,87 @@ def cash_facts_for_trade_event(event: TradeEvent) -> list[TradeCashFact]:
     ]
 
 
+def assignment_principal_anchor(
+    event: TradeEvent,
+    direction: str,
+) -> tuple[str | None, str | None, str | None, tuple[str, ...]]:
+    facts = {
+        fact.fact_kind: fact
+        for fact in cash_facts_for_trade_event(event)
+        if fact.fact_kind.startswith("stock_settlement_")
+    }
+    gross = facts.get("stock_settlement_cash_gross")
+    fee = facts.get("stock_settlement_fee_cash")
+    fact_ids = tuple(sorted(fact.fact_id for fact in facts.values()))
+    if (
+        gross is None
+        or fee is None
+        or gross.amount is None
+        or fee.amount is None
+        or not gross.currency
+        or gross.currency != fee.currency
+    ):
+        currency = (
+            gross.currency
+            if gross is not None
+            else fee.currency
+            if fee is not None
+            else None
+        )
+        return None, currency, "assignment_cash_facts_unavailable", fact_ids
+    net = Decimal(gross.amount) + Decimal(fee.amount)
+    anchor = -net if direction == "call" else net
+    if anchor < 0:
+        return None, gross.currency, "assignment_cash_facts_invalid", fact_ids
+    return format(anchor, "f"), gross.currency, None, fact_ids
+
+
+def broker_settlement_multiplier_evidence(event: TradeEvent) -> dict[str, Any] | None:
+    raw = event.raw_payload if isinstance(event.raw_payload, Mapping) else {}
+    stock = raw.get("stock_settlement")
+    stock = stock if isinstance(stock, Mapping) else {}
+    source_event_id = str(stock.get("source_event_id") or "").strip()
+    if (
+        event.event_type not in {"assignment", "exercise"}
+        or str(raw.get("source_type") or "").strip().lower()
+        != "broker_settlement_pair"
+        or not source_event_id
+        or source_event_id not in str(raw.get("source_event_id") or "").split("|")
+        or not str(stock.get("futu_account_id") or "").strip()
+        or not str(stock.get("order_id") or "").strip()
+        or str(stock.get("symbol") or "").strip().upper()
+        != event.contract_key.underlying_symbol
+    ):
+        return None
+    try:
+        shares = to_decimal(
+            stock.get("shares"), field_name="stock settlement shares"
+        )
+        contracts = Decimal(event.contracts)
+        multiplier = shares / contracts
+        recorded_multiplier = to_decimal(event.multiplier, field_name="multiplier")
+    except (ArithmeticError, TypeError, ValueError):
+        return None
+    if (
+        shares <= 0
+        or contracts <= 0
+        or multiplier != multiplier.to_integral_value()
+        or multiplier != recorded_multiplier
+    ):
+        return None
+    return {
+        "schema_version": "wheel_assignment_multiplier_evidence.v1",
+        "source_assignment_event_id": event.event_id,
+        "source_event_id": source_event_id,
+        "futu_account_id": str(stock["futu_account_id"]),
+        "order_id": str(stock["order_id"]),
+        "symbol": event.contract_key.underlying_symbol,
+        "contracts": event.contracts,
+        "shares": int(shares),
+        "multiplier": int(multiplier),
+    }
+
+
 def _option_trade_cash_facts(event: TradeEvent) -> list[TradeCashFact]:
     currency = _currency_or_none(event.currency)
     amount, reason = _option_amount(event)
@@ -161,4 +242,9 @@ def _currency_or_none(value: Any) -> str | None:
         return None
 
 
-__all__ = ["TradeCashFact", "cash_facts_for_trade_event"]
+__all__ = [
+    "TradeCashFact",
+    "assignment_principal_anchor",
+    "broker_settlement_multiplier_evidence",
+    "cash_facts_for_trade_event",
+]

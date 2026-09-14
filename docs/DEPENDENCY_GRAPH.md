@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 1025 (`src`: 523, `domain`: 82, `scripts`: 11, `tests`: 409)
-- Internal import edges: 7397 total, 2995 production/script edges excluding tests
+- Internal import edges: 7398 total, 2996 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -111,8 +111,8 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application.trades | src.application.ledger | 23 |
 | src.application | src.application.settings | 17 |
 | src.application | domain.domain.ledger | 17 |
+| domain.domain | domain.domain.ledger | 17 |
 | src.application | src.application.multi_tick | 16 |
-| domain.domain | domain.domain.ledger | 16 |
 | src.application.positions | domain.domain | 14 |
 | domain.domain.ledger | domain.domain | 14 |
 | src.application.trades | src.infrastructure | 13 |
