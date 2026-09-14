@@ -12,12 +12,16 @@ from src.application.ledger.api import (
 from src.application.trades.account_mapping import resolve_internal_account
 from domain.domain.trade_account_identity import extract_primary_account_id
 from domain.domain.trade_execution import (
+    DEAL_ID_FIELDS,
+    canonical_trade_execution_content,
     conflicting_execution_associations,
     execution_economic_content,
+    execution_source_identity_conflicts,
+    ledger_execution_event_set_is_complete,
+    ledger_event_economic_fingerprint as ledger_event_economic_fingerprint,
+    structured_deal_ids_from_ledger_event as structured_deal_ids_from_ledger_event,
+    structured_deal_keys_from_ledger_event as structured_deal_keys_from_ledger_event,
 )
-
-
-DEAL_ID_FIELDS = ("source_deal_id", "deal_id", "futu_deal_id")
 
 
 def broker_deal_key(deal: Any) -> str:
@@ -56,52 +60,6 @@ def broker_deal_key_from_payload(
     if deal_id and account and futu_account_id:
         return f"futu:{account}:{futu_account_id}:{deal_id}"
     return ""
-
-
-def structured_deal_ids_from_ledger_event(event: dict[str, Any]) -> set[str]:
-    """Return only broker deal identifiers stored in authoritative fields."""
-
-    raw = event.get("raw_payload")
-    raw_payload = raw if isinstance(raw, dict) else {}
-    out = _normalized_values(raw_payload.get(key) for key in DEAL_ID_FIELDS)
-    stock_settlement = raw_payload.get("stock_settlement")
-    if isinstance(stock_settlement, dict):
-        out.update(_normalized_values([stock_settlement.get("source_event_id")]))
-    return out
-
-
-def structured_deal_keys_from_ledger_event(event: dict[str, Any]) -> set[str]:
-    """Return proven scoped identities; an unscoped deal ID is never a key."""
-
-    raw = event.get("raw_payload")
-    raw_payload = raw if isinstance(raw, dict) else {}
-    execution = raw_payload.get("execution_input") or {}
-    execution_id = execution_identity_from_input(execution)
-    keys = {execution_id} if execution_id else set()
-    deal_ids = structured_deal_ids_from_ledger_event(event)
-    account = str(
-        event.get("account")
-        or raw_payload.get("internal_account")
-        or raw_payload.get("account")
-        or ""
-    ).strip().lower()
-    futu_account_id = str(raw_payload.get("futu_account_id") or "").strip()
-    if execution_id:
-        ref = execution["broker_account_ref"]
-        if not (
-            ref.get("broker_id") == "futu"
-            and ref.get("external_account_id") == futu_account_id
-            and ref.get("environment") == "REAL"
-            and execution.get("external_id_namespace") == "futu.deal"
-            and str(execution.get("external_execution_id")) in deal_ids
-        ):
-            return keys
-    if account and futu_account_id:
-        keys.update({
-            f"futu:{account}:{futu_account_id}:{deal_id}"
-            for deal_id in deal_ids
-        })
-    return keys
 
 
 def structured_deal_ids_from_assigned_stock_event(event: dict[str, Any]) -> set[str]:
@@ -155,20 +113,20 @@ def completed_ledger_execution_events(
     execution_id = broker_execution_identity(deal)
     if not execution_id:
         return []
+    if execution_source_identity_conflicts(deal.raw_payload, deal.execution_input):
+        raise ValueError("trade_execution_identity_conflict")
     legacy_key = broker_external_event_key(deal)
     candidates = []
     for event in active_ledger_events(events):
         raw = event.get("raw_payload") or {}
         stored_id = execution_identity_from_input(raw.get("execution_input"))
-        aliases = structured_deal_keys_from_ledger_event(event)
-        if stored_id == execution_id or legacy_key in aliases:
+        aliases = structured_deal_keys_from_ledger_event(event, include_legacy_execution_identity=True)
+        if stored_id == execution_id or execution_id in aliases or legacy_key in aliases:
             if stored_id and stored_id != execution_id:
                 raise ValueError("trade_execution_identity_conflict")
             candidates.append(event)
     if not candidates:
         return []
-    from src.application.trades.normalizer import canonical_trade_execution_content
-
     incoming = execution_economic_content(deal.execution_input)
     if applied_execution_association_conflicts(None, execution_id, incoming, applied_events=candidates):
         raise ValueError("trade_execution_applied_association_conflict")
@@ -180,6 +138,20 @@ def completed_ledger_execution_events(
             raise ValueError("trade_execution_economic_conflict")
     if not _completed_ledger_identities(candidates, identity_fn=lambda _event: {execution_id}):
         raise ValueError("trade_execution_split_incomplete")
+    for event in candidates:
+        raw = event.get("raw_payload") or {}
+        if execution_identity_from_input(raw.get("execution_input")):
+            # Canonical replay retains the original event ownership across label
+            # changes. A legacy physical match cannot prove that migration.
+            continue
+        contract = event.get("contract_key") or {}
+        accounts = {
+            str(value).strip().lower()
+            for value in (event.get("account"), contract.get("account"), raw.get("internal_account"), raw.get("account"))
+            if value not in (None, "")
+        }
+        if accounts != {str(deal.internal_account or "").strip().lower()}:
+            raise ValueError("trade_execution_identity_conflict")
     return candidates
 
 
@@ -189,115 +161,24 @@ def _completed_ledger_identities(
     identity_fn: Any,
 ) -> set[str]:
     grouped: dict[str, list[dict[str, Any]]] = {}
+    physical_groups: dict[str, list[dict[str, Any]]] = {}
     for event in active_ledger_events(events):
         for deal_id in identity_fn(event):
             grouped.setdefault(deal_id, []).append(event)
+        for key in structured_deal_keys_from_ledger_event(event, include_legacy_execution_identity=True):
+            if key.startswith("execution:"):
+                physical_groups.setdefault(key, []).append(event)
 
-    out: set[str] = set()
-    for deal_id, rows in grouped.items():
-        metadata_rows = [
-            raw
-            for row in rows
-            for raw in [_deal_completion_payload(row)]
-            if raw is not None
-        ]
-        if not metadata_rows:
-            if len(rows) == 1 or _legacy_split_set_is_complete(rows):
-                out.add(deal_id)
-            continue
-        if len(metadata_rows) != len(rows):
-            continue
-        expected_split_count = _consistent_positive_int(metadata_rows, "split_count")
-        expected_contracts = _consistent_positive_int(metadata_rows, "expected_contracts")
-        if expected_split_count is None or expected_contracts is None:
-            continue
-        split_indexes = {
-            index
-            for item in metadata_rows
-            for index in [_positive_int(item.get("split_index"))]
-            if index is not None
-        }
-        allocated_contracts = sum(
-            int(_positive_int(item.get("allocated_contracts")) or 0)
-            for item in metadata_rows
-        )
-        if (
-            len(rows) == expected_split_count
-            and split_indexes == set(range(1, expected_split_count + 1))
-            and allocated_contracts == expected_contracts
-        ):
-            out.add(deal_id)
-    return out
-
-
-def _deal_completion_payload(event: dict[str, Any]) -> dict[str, Any] | None:
-    raw = event.get("raw_payload")
-    raw_payload = raw if isinstance(raw, dict) else {}
-    value = raw_payload.get("broker_deal_completion")
-    return dict(value) if isinstance(value, dict) else None
-
-
-def _legacy_split_set_is_complete(rows: list[dict[str, Any]]) -> bool:
-    resolutions: list[dict[str, Any]] = []
-    target_lot_ids: set[str] = set()
-    for event in rows:
-        raw = event.get("raw_payload")
-        raw_payload = raw if isinstance(raw, dict) else {}
-        resolution = raw_payload.get("close_target_resolution")
-        if not isinstance(resolution, dict):
-            return False
-        resolutions.append(dict(resolution))
-        target_lot_id = str(
-            event.get("target_lot_id")
-            or raw_payload.get("target_lot_id")
-            or raw_payload.get("record_id")
-            or ""
-        ).strip()
-        if not target_lot_id:
-            return False
-        target_lot_ids.add(target_lot_id)
-
-    declared_target_sets = {
-        tuple(
-            sorted(
-                str(value or "").strip()
-                for value in list(item.get("record_ids") or [])
-                if str(value or "").strip()
-            )
-        )
-        for item in resolutions
+    conflicting_rows = {
+        id(row) for rows in physical_groups.values()
+        if not ledger_execution_event_set_is_complete(rows)
+        for row in rows
     }
-    declared_contracts = {
-        _positive_int(item.get("contracts_to_close"))
-        for item in resolutions
+    return {
+        deal_id for deal_id, rows in grouped.items()
+        if not any(id(row) in conflicting_rows for row in rows)
+        and ledger_execution_event_set_is_complete(rows)
     }
-    if len(declared_target_sets) != 1 or len(declared_contracts) != 1:
-        return False
-    expected_targets = set(next(iter(declared_target_sets)))
-    expected_contracts = next(iter(declared_contracts))
-    if expected_contracts is None:
-        return False
-    return (
-        expected_targets == target_lot_ids
-        and len(rows) == len(target_lot_ids)
-        and sum(int(event.get("contracts") or 0) for event in rows)
-        == expected_contracts
-    )
-
-
-def _consistent_positive_int(rows: list[dict[str, Any]], key: str) -> int | None:
-    values = {_positive_int(item.get(key)) for item in rows}
-    if None in values or len(values) != 1:
-        return None
-    return next(iter(values))
-
-
-def _positive_int(value: Any) -> int | None:
-    try:
-        normalized = int(value)
-    except (TypeError, ValueError):
-        return None
-    return normalized if normalized > 0 else None
 
 
 def _normalized_values(values: Iterable[Any]) -> set[str]:

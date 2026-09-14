@@ -55,6 +55,53 @@ def test_trade_intake_state_round_trip(tmp_path: Path) -> None:
     assert lookup_deal_state_entry(loaded, "deal-1")[0] == "processed_deal_ids"
 
 
+def test_reconciliation_preserves_same_key_changes_and_counts_only_applied(tmp_path: Path) -> None:
+    path = tmp_path / "state.json"
+    observed = state_module.empty_trade_intake_state()
+    for key in ("unchanged", "changed", "moved", "deleted"):
+        observed = upsert_deal_state(
+            observed, bucket="unresolved_deal_ids", deal_id=key,
+            payload={"status": "unresolved", "attempt_count": 1},
+        )
+    desired = observed
+    for key in ("unchanged", "changed", "moved", "deleted"):
+        desired = upsert_deal_state(
+            desired, bucket="processed_deal_ids", deal_id=key,
+            payload={"status": "reconciled"},
+        )
+    latest = upsert_deal_state(
+        observed, bucket="unresolved_deal_ids", deal_id="changed",
+        payload={"status": "unresolved", "attempt_count": 2},
+    )
+    latest = upsert_deal_state(
+        latest, bucket="failed_deal_ids", deal_id="moved",
+        payload=observed["unresolved_deal_ids"]["moved"],
+    )
+    latest["unresolved_deal_ids"].pop("deleted")
+    latest = upsert_deal_state(
+        latest, bucket="unresolved_deal_ids", deal_id="new",
+        payload={"status": "unresolved", "reason": "new_evidence"},
+    )
+    write_trade_intake_state(path, latest)
+
+    applied = state_module.compare_and_update_trade_intake_state_entries(
+        path, desired, deal_ids=("unchanged", "changed", "moved", "deleted"),
+        expected_state=observed,
+    )
+
+    assert applied == ("unchanged",)
+    actual = load_trade_intake_state(path)
+    assert actual == upsert_deal_state(
+        latest, bucket="processed_deal_ids", deal_id="unchanged",
+        payload=desired["processed_deal_ids"]["unchanged"],
+    )
+    before = path.read_bytes()
+    assert state_module.compare_and_update_trade_intake_state_entries(
+        path, desired, deal_ids=("unchanged", "changed"), expected_state=observed,
+    ) == ()
+    assert path.read_bytes() == before
+
+
 def test_trade_intake_audit_appends_jsonl(tmp_path: Path) -> None:
     path = tmp_path / "audit.jsonl"
     append_trade_intake_audit(path, {"phase": "received", "deal_id": "deal-1"})

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Bug Fixes
+- Accepted broker-proven short-position sellable quantities and evaluated snapshot freshness after collection while preserving strict malformed, cached, and future-data rejection.
+- Preserved complete split-execution and lifecycle stock-settlement evidence when checking ledger identity conservation, while rejecting incomplete or conflicting source groups.
+- Required durable Inbox identity evidence before receipt and portfolio-management claims, and reconciled source completion with compare-and-set recovery without duplicate economic or notification effects.
+- Canonicalized Hong Kong CNC option contracts to CNOOC (0883.HK) with the correct contract multiplier while preserving US CNC identity.
+- Surfaced persistent trade-intake identity quarantine for operator review instead of leaving historical records silently stranded.
+
 ## 3.5.4 - 2026-09-13
 
 ### Improvements

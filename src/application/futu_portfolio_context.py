@@ -164,9 +164,22 @@ def build_futu_position_snapshot(
         if quantity < 0 and side != "short":
             errors.append(f"position_quantity_side_conflict:{index}")
         sellable = _pick(row, "can_sell_qty", "can_sell_quantity", "sellable_qty")
+        if sellable is not None:
+            try:
+                available = Decimal(str(sellable))
+                if available.is_finite():
+                    if side == "short" and available < 0:
+                        available = available.copy_abs()
+                        sellable = format(available, "f")
+                    if available > quantity.copy_abs():
+                        errors.append(f"position_sellable_quantity_exceeds_position:{index}")
+                    if asset == "option" and available != available.to_integral_value():
+                        errors.append(f"position_sellable_quantity_not_integer:{index}")
+            except (InvalidOperation, ValueError):
+                pass  # Preserve invalid input for the standard snapshot validator.
         mapped.append({
             "instrument_ref": instrument, "position_side": side,
-            "quantity": format(abs(quantity), "f"),
+            "quantity": format(quantity.copy_abs(), "f"),
             "sellable_quantity": str(sellable) if sellable is not None else None,
             "sellable_quantity_source": "opend.can_sell_qty" if sellable is not None else None,
             "source_row": dict(row),

@@ -25,6 +25,7 @@ def open_trade_reconciliation_evidence_repo(
 class _ReadOnlyTradeReconciliationEvidenceRepository:
     def __init__(self, path: Path) -> None:
         self.path = path.resolve()
+        self.db_path = self.path
 
     def _connect(self) -> sqlite3.Connection:
         uri = f"{self.path.as_uri()}?mode=ro"

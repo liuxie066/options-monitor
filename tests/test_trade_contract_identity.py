@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from types import SimpleNamespace
 from dataclasses import replace
 
@@ -83,13 +84,7 @@ def test_execution_identity_scopes_physical_account_environment_and_namespace() 
 def test_ledger_completion_never_uses_an_unscoped_deal_id() -> None:
     unscoped = {"event_id": "old", "account": "lx", "raw_payload": {"source_deal_id": "42"}}
     assert completed_ledger_deal_keys([unscoped]) == set()
-    rows = [
-        {"event_id": f"split-{index}", "account": "lx", "contracts": 1, "raw_payload": {
-            "source_deal_id": "42", "futu_account_id": "123",
-            "broker_deal_completion": {"split_index": index, "split_count": 2, "allocated_contracts": 1, "expected_contracts": 2},
-        }}
-        for index in (1, 2)
-    ]
+    rows = _complete_split_rows()
     assert completed_ledger_deal_keys(rows[:1]) == set()
     assert completed_ledger_deal_keys(rows) == {"futu:lx:123:42"}
     assert structured_deal_keys_from_assigned_stock_event({"account": "sy", "futu_account_id": "999", "source_deal_id": "42"}) == {"futu:sy:999:42"}
@@ -778,3 +773,396 @@ def test_canonical_order_enrichment_empty_readback_requires_review(tmp_path, mon
     assert (replay.status, replay.reason) == ("unresolved", "trade_execution_order_binding_event_missing")
     assert repo.list_trade_events() == before
     assert repo.list_position_lots() == lots
+
+
+def _complete_split_rows(*, quantities=(1, 1), legacy=False):
+    rows = []
+    for index, quantity in enumerate(quantities, 1):
+        raw = {
+            "source_deal_id": "42", "futu_account_id": "123", "qty": sum(quantities),
+            "close_target_resolution": {
+                "contracts_to_close": sum(quantities),
+                "record_ids": [f"lot-{index}" for index in range(1, len(quantities) + 1)],
+            },
+        }
+        if not legacy:
+            raw["broker_deal_completion"] = {
+                "source_deal_id": "42", "split_index": index, "split_count": len(quantities),
+                "allocated_contracts": quantity, "expected_contracts": sum(quantities),
+            }
+        rows.append({
+            "event_id": f"split-{index}", "account": "lx", "broker": "futu",
+            "event_type": "close", "symbol": "NVDA", "option_type": "put",
+            "position_side": "short", "side": "buy", "strike": 100,
+            "expiration_ymd": "2026-09-18", "multiplier": 100, "price": 1,
+            "currency": "USD", "contracts": quantity, "target_lot_id": f"lot-{index}",
+            "raw_payload": raw,
+        })
+    return rows
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("quantities", [(1, 1), (1, 2)])
+def test_complete_split_requires_every_unique_active_allocation(legacy, quantities):
+    rows = _complete_split_rows(quantities=quantities, legacy=legacy)
+    assert completed_ledger_deal_keys(rows) == {"futu:lx:123:42"}
+    assert completed_ledger_deal_keys(rows[:1]) == set()
+    duplicate = deepcopy(rows)
+    duplicate[1]["target_lot_id"] = duplicate[0]["target_lot_id"]
+    assert completed_ledger_deal_keys(duplicate) == set()
+    from domain.domain.ledger import ContractKey, TradeEvent
+
+    void = TradeEvent(
+        event_id="void", event_type="void", event_time_ms=1_700_000_000_001,
+        contract_key=ContractKey.from_values(
+            broker="futu", account="lx", underlying_symbol="NVDA", option_type="put",
+            position_side="short", strike=100, expiration_ymd="2026-09-18",
+        ),
+        contracts=0, price=0, currency="USD", source="manual",
+        target_event_id=rows[1]["event_id"],
+    ).to_dict()
+    assert completed_ledger_deal_keys([*rows, void]) == set()
+
+
+@pytest.mark.parametrize("field", ["split_count", "split_index", "allocated_contracts", "expected_contracts", "contracts"])
+@pytest.mark.parametrize("invalid", [True, 1.5, "1.5", float("nan"), float("inf"), "-Infinity", 0, -1, None])
+def test_split_completion_rejects_non_exact_positive_quantities(field, invalid):
+    rows = _complete_split_rows()
+    target = rows[0] if field == "contracts" else rows[0]["raw_payload"]["broker_deal_completion"]
+    target[field] = invalid
+    assert completed_ledger_deal_keys(rows) == set()
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("change", ["quantity", "price", "physical", "account", "environment", "namespace", "index", "declared_target", "missing_economics", "duplicate_event", "split_open"])
+def test_split_completion_preserves_economic_identity_and_metadata_guards(legacy, change):
+    rows = _complete_split_rows(legacy=legacy)
+    row = rows[1]
+    if change == "quantity":
+        row["contracts"] = 2
+    elif change == "price":
+        row["price"] = 2
+    elif change == "physical":
+        row["raw_payload"]["futu_account_id"] = "999"
+    elif change == "account":
+        row["account"] = "sy"
+    elif change == "environment":
+        row["raw_payload"]["environment"] = "SIMULATE"
+    elif change == "namespace":
+        row["raw_payload"]["external_id_namespace"] = "other.deal"
+    elif change == "duplicate_event":
+        row["event_id"] = rows[0]["event_id"]
+    elif change == "split_open":
+        for event in rows:
+            event["event_type"] = "open"
+    elif change == "missing_economics":
+        for event in rows:
+            event.pop("multiplier")
+    elif change == "declared_target":
+        for event in rows:
+            event["raw_payload"]["close_target_resolution"]["record_ids"] = ["lot-1", "lot-1", "lot-2"]
+    elif legacy:
+        row["raw_payload"]["close_target_resolution"]["contracts_to_close"] = 3
+    else:
+        row["raw_payload"]["broker_deal_completion"]["split_index"] = 1
+    assert completed_ledger_deal_keys(rows) == set()
+
+
+@pytest.mark.parametrize("field,value", [
+    ("price", "2"), ("execution_price", "2"), ("strike", "101"),
+    ("multiplier", "10"), ("option_type", "call"), ("expiration", "2026-09-19"),
+    ("currency", "HKD"), ("trd_side", "SELL"),
+])
+def test_complete_legacy_split_cannot_override_declared_source_economics(field, value):
+    rows = _complete_split_rows()
+    for row in rows:
+        row["raw_payload"][field] = value
+    assert completed_ledger_deal_keys(rows) == set()
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_split_completion_requires_broker_quantity_even_when_metadata_agrees(legacy):
+    rows = _complete_split_rows(legacy=legacy)
+    for row in rows:
+        row["raw_payload"].pop("qty")
+    assert completed_ledger_deal_keys(rows) == set()
+
+
+@pytest.mark.parametrize("field,invalid", [
+    ("allocated_contracts", True), ("allocated_contracts", 1.5),
+    ("split_index", True), ("split_index", 1.5),
+    ("split_count", 2.5), ("expected_contracts", 2.5),
+    ("allocated_contracts", "NaN"), ("allocated_contracts", "Infinity"),
+])
+def test_direct_public_writer_rejects_malformed_persisted_split_metadata(tmp_path, field, invalid):
+    from src.application.ledger.api import record_normalized_trade_event, refresh_position_lot_projection
+
+    source, close = _direct_split_close_fixture(tmp_path / "source")
+    assert record_normalized_trade_event(source, close).created
+    rows = completed_ledger_execution_events(source.list_trade_events(), close)
+    repo, incoming = _direct_split_close_fixture(tmp_path / "replay")
+    malformed = deepcopy(rows)
+    for row in (malformed if field in {"split_count", "expected_contracts"} else malformed[:1]):
+        row["raw_payload"]["broker_deal_completion"][field] = invalid
+    for row in malformed:
+        assert repo.upsert_trade_event(row)
+    refresh_position_lot_projection(repo)
+    before_events, before_lots = repo.list_trade_events(), repo.list_position_lots()
+    before_notifications = repo.list_trade_lifecycle_notifications()
+    with pytest.raises(ValueError, match="trade_execution_split_incomplete"):
+        completed_ledger_execution_events(before_events, incoming)
+    with pytest.raises(ValueError, match="trade_execution_split_incomplete"):
+        record_normalized_trade_event(repo, incoming)
+    assert repo.list_trade_events() == before_events
+    assert repo.list_position_lots() == before_lots
+    assert repo.list_trade_lifecycle_notifications() == before_notifications
+
+
+@pytest.mark.parametrize("namespace", ["futu.deal", "verified.partition.deal"])
+@pytest.mark.parametrize("field", ["source_deal_id", "deal_id", "futu_deal_id"])
+@pytest.mark.parametrize("strip_errors", [False, True])
+def test_public_writer_rejects_same_namespace_source_identity_conflict_without_writes(tmp_path, namespace, field, strip_errors):
+    from src.application.ledger.api import record_normalized_trade_event
+    from src.application.trades.normalizer import normalize_trade_deal
+
+    repo, close = _direct_split_close_fixture(tmp_path, namespace=namespace)
+    conflicting = normalize_trade_deal({**close.raw_payload, field: "different-execution"})
+    assert "invalid:source_execution_identity" in conflicting.execution_input["errors"]
+    if strip_errors:
+        conflicting = replace(conflicting, execution_input={**conflicting.execution_input, "errors": []})
+    before = (repo.list_trade_events(), repo.list_position_lots(), repo.list_trade_lifecycle_notifications())
+    with pytest.raises(ValueError, match="trade_execution_identity_conflict"):
+        record_normalized_trade_event(repo, conflicting)
+    assert (repo.list_trade_events(), repo.list_position_lots(), repo.list_trade_lifecycle_notifications()) == before
+    assert record_normalized_trade_event(repo, close).created
+
+
+@pytest.mark.parametrize("namespace_field", [None, "external_id_namespace", "execution_id_namespace"])
+def test_source_identity_comparison_does_not_merge_distinct_namespaces(tmp_path, namespace_field):
+    from src.application.ledger.api import record_normalized_trade_event
+    from src.application.trades.normalizer import normalize_trade_deal
+    from src.application.trades.resolver import resolve_trade_deal
+    from src.application.quality.ledger_checks import build_ledger_datasets
+
+    repo, close = _direct_split_close_fixture(tmp_path, namespace="verified.partition.deal")
+    payload = {
+        "execution_input": close.execution_input, "source_deal_id": "legacy-futu-id",
+    }
+    if namespace_field:
+        payload[namespace_field] = "futu.deal"
+    incoming = normalize_trade_deal(payload)
+    assert incoming.execution_input["errors"] == []
+    assert record_normalized_trade_event(repo, incoming).created
+    rows = [row for row in repo.list_trade_events() if row["event_type"] == "close"]
+    assert completed_ledger_deal_keys(rows) == {broker_execution_identity(incoming)}
+    before = (repo.list_trade_events(), repo.list_position_lots(), repo.list_trade_lifecycle_notifications())
+    replay = resolve_trade_deal(incoming, repo=repo, state={}, apply_changes=True)
+    assert (replay.status, replay.reason) == ("skipped", "ledger_recorded")
+    assert record_normalized_trade_event(repo, incoming).created is False
+    assert (repo.list_trade_events(), repo.list_position_lots(), repo.list_trade_lifecycle_notifications()) == before
+    dataset = build_ledger_datasets(repo=repo, accounts=["lx"], market="us",
+                                    observed_at_utc="2026-09-13T14:00:00Z")[0]
+    assert dataset["status"] == "trusted"
+
+
+@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("with_order", [False, True])
+def test_conflicting_source_identity_is_rejected_before_first_intake_or_replay(tmp_path, existing, with_order):
+    from src.application.ledger.api import record_normalized_trade_event
+    from src.application.ledger.repository import SQLiteOptionPositionsRepository
+    from src.application.trades.auto_intake import _process_payload
+    from src.application.trades.inbox import read_trade_payload
+    from src.application.trades.inbox_authority import resolve_execution_inbox_path
+    from src.application.trades.normalizer import canonical_trade_execution_content, normalize_trade_deal
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    payload = {**_execution_input(), "external_order_id": None, "external_order_namespace": None}
+    if existing:
+        assert record_normalized_trade_event(repo, normalize_trade_deal(payload)).created
+    if with_order:
+        payload.update(external_order_id="late-order", external_order_namespace="futu.order")
+    bad = {**payload, "source_deal_id": "other-fill"}
+    assert "invalid:source_execution_identity" in normalize_trade_deal(bad).execution_input["errors"]
+    assert "invalid:source_execution_identity" in canonical_trade_execution_content(bad)["errors"]
+    before = (repo.list_trade_events(), repo.list_position_lots(), repo.list_trade_lifecycle_notifications())
+    result = _process_payload(
+        bad, repo=repo, state_path=tmp_path / "state.json", audit_path=tmp_path / "audit.jsonl",
+        account_mapping={"123": "lx"}, futu_account_ids=["123"], host="127.0.0.1", port=11111,
+        source="file", apply_changes=True, allow_external_lookup=False,
+    )
+    assert result["status"] in {"unresolved", "failed"}
+    assert result["reason"] != "ledger_recorded"
+    row = read_trade_payload(resolve_execution_inbox_path(repo, tmp_path / "inbox.sqlite3"),
+                             inbox_id=result["inbox_id"], read_only=True)
+    assert row["status"] == "conflict"
+    assert (row["result"] or {}).get("reason") != "ledger_recorded"
+    assert (repo.list_trade_events(), repo.list_position_lots(), repo.list_trade_lifecycle_notifications()) == before
+
+
+@pytest.mark.parametrize("shape", ["standard", "nested", "futu"])
+def test_normalizer_retains_source_identity_error_in_all_execution_shapes(shape):
+    from src.application.trades.normalizer import canonical_trade_execution_content, normalize_trade_deal
+
+    standard = _execution_input()
+    payload = standard if shape == "standard" else {"execution_input": standard}
+    if shape == "futu":
+        payload = {
+            "acc_id": "123", "deal_id": "fill-1", "environment": "REAL", "external_id_namespace": "futu.deal",
+            "code": "US.NVDA260918P00100000", "qty": "1", "price": "2.5", "multiplier": "100",
+            "trd_side": "SELL_SHORT", "create_time": "2026-09-07 10:30:00",
+        }
+    payload["source_deal_id"] = "other-fill"
+    assert "invalid:source_execution_identity" in normalize_trade_deal(payload).execution_input["errors"]
+    assert "invalid:source_execution_identity" in canonical_trade_execution_content(payload)["errors"]
+
+
+def test_completion_readback_rejects_conflicting_source_even_if_dto_errors_are_stripped(tmp_path):
+    from src.application.ledger.api import record_normalized_trade_event
+    from src.application.trades.normalizer import normalize_trade_deal
+
+    repo, close = _direct_split_close_fixture(tmp_path)
+    assert record_normalized_trade_event(repo, close).created
+    bad = normalize_trade_deal({**close.raw_payload, "source_deal_id": "other-fill"})
+    bad = replace(bad, execution_input={**bad.execution_input, "errors": []})
+    with pytest.raises(ValueError, match="trade_execution_identity_conflict"):
+        completed_ledger_execution_events(repo.list_trade_events(), bad)
+
+
+@pytest.mark.parametrize("change", ["missing_target", "duplicate_target", "source_quantity", "source_price"])
+@pytest.mark.parametrize("late_order", [False, True])
+def test_public_writer_proves_full_split_before_replay_or_order_enrichment(tmp_path, change, late_order):
+    from src.application.ledger.api import record_normalized_trade_event, refresh_position_lot_projection
+    from src.application.trades.normalizer import normalize_trade_deal
+
+    source, original = _direct_split_close_fixture(tmp_path / "source")
+    payload = {**original.raw_payload, "external_order_id": None, "external_order_namespace": None}
+    close = normalize_trade_deal(payload)
+    assert record_normalized_trade_event(source, close).created
+    rows = deepcopy(completed_ledger_execution_events(source.list_trade_events(), close))
+    repo, _ = _direct_split_close_fixture(tmp_path / "replay")
+    for row in rows:
+        raw = row["raw_payload"]
+        if change == "missing_target":
+            raw["close_target_resolution"]["record_ids"] = ["missing-lot"]
+        elif change == "duplicate_target":
+            targets = raw["close_target_resolution"]["record_ids"]
+            raw["close_target_resolution"]["record_ids"] = [*targets, targets[0]]
+        elif change == "source_quantity":
+            raw["qty"] = 3
+        else:
+            raw["execution_price"] = "9"
+        assert repo.upsert_trade_event(row)
+    refresh_position_lot_projection(repo)
+    incoming = normalize_trade_deal({**payload, **({
+        "external_order_id": "late-order", "external_order_namespace": "futu.order",
+    } if late_order else {})})
+    assert incoming.execution_input["errors"] == []
+    before = (repo.list_trade_events(), repo.list_position_lots(), repo.list_trade_lifecycle_notifications())
+    with pytest.raises(ValueError, match="trade_execution_split_incomplete"):
+        completed_ledger_execution_events(before[0], incoming)
+    with pytest.raises(ValueError, match="trade_execution_split_incomplete"):
+        record_normalized_trade_event(repo, incoming)
+    assert (repo.list_trade_events(), repo.list_position_lots(), repo.list_trade_lifecycle_notifications()) == before
+
+
+@pytest.mark.parametrize("canonical_second", [False, True])
+@pytest.mark.parametrize("second_physical", ["123", "456"])
+def test_physical_execution_conflict_blocks_alias_consumers_and_public_replay(tmp_path, canonical_second, second_physical):
+    from domain.domain.trade_execution import execution_identity_from_input
+    from src.application.ledger.api import refresh_position_lot_projection
+    from src.application.trades.backfill import _ledger_recorded_deal_keys
+    from src.application.trades.resolver import resolve_trade_deal
+    from src.application.trades.state_reconcile import _ledger_events_by_deal
+
+    repo, _payload, deal = _proven_legacy_execution_fixture(tmp_path, split=True)
+    source_key = broker_external_event_key(deal)
+    for row in repo.list_trade_events():
+        copied = deepcopy(row)
+        copied["account"] = copied["contract_key"]["account"] = "sy"
+        for field in ("event_id", "lot_id", "target_lot_id"):
+            if copied.get(field):
+                copied[field] = "sy-" + copied[field]
+        if copied["event_type"] == "open":
+            copied["lot_id"] = "sy-" + (row.get("lot_id") or "lot_" + row["event_id"])
+        raw = copied["raw_payload"]
+        raw["internal_account"] = "sy"
+        raw["futu_account_id"] = raw["acc_id"] = second_physical
+        raw["broker_account_id"] = "futu:REAL:" + second_physical
+        for field in ("target_lot_id", "record_id"):
+            if raw.get(field):
+                raw[field] = "sy-" + raw[field]
+        resolution = raw.get("close_target_resolution")
+        if resolution:
+            resolution["record_ids"] = ["sy-" + identifier for identifier in resolution["record_ids"]]
+        if copied["event_type"] == "open":
+            for field in ("source_deal_id", "deal_id", "futu_deal_id"):
+                if raw.get(field):
+                    raw[field] = "sy-" + raw[field]
+        elif canonical_second:
+            raw["execution_input"] = deepcopy(deal.execution_input)
+            raw["execution_input"]["broker_account_ref"].update(
+                account_label="sy", external_account_id=second_physical,
+                broker_account_id="futu:REAL:" + second_physical,
+            )
+            raw["execution_id"] = execution_identity_from_input(raw["execution_input"])
+        assert repo.upsert_trade_event(copied)
+    refresh_position_lot_projection(repo)
+    rows = repo.list_trade_events()
+    close_rows = [row for row in rows if row["event_type"] == "close"]
+    conflict = second_physical == "123"
+    assert (source_key in completed_ledger_deal_keys(close_rows)) is not conflict
+    assert (source_key in _ledger_recorded_deal_keys(repo)) is not conflict
+    assert (source_key in _ledger_events_by_deal(repo)) is not conflict
+    if conflict:
+        assert completed_ledger_deal_keys(close_rows) == set()
+    before = (rows, repo.list_position_lots(), repo.list_trade_lifecycle_notifications())
+    for apply in (False, True):
+        result = resolve_trade_deal(deal, repo=repo, state={}, apply_changes=apply)
+        expected = ("unresolved", "trade_execution_split_incomplete") if conflict else ("skipped", "ledger_recorded")
+        assert (result.status, result.reason) == expected
+    assert (repo.list_trade_events(), repo.list_position_lots(), repo.list_trade_lifecycle_notifications()) == before
+
+
+@pytest.mark.parametrize("change", ["physical_missing", "namespace", "environment", "broker"])
+def test_legacy_physical_grouping_requires_existing_futu_alias_scope(change):
+    from src.application.trades.deal_identity import structured_deal_keys_from_ledger_event
+
+    row = _complete_split_rows()[0]
+    raw = row["raw_payload"]
+    if change == "physical_missing":
+        raw.pop("futu_account_id")
+    elif change == "namespace":
+        raw["external_id_namespace"] = "other.deal"
+    elif change == "environment":
+        raw["environment"] = "SIMULATE"
+    else:
+        raw["broker_id"] = "other"
+    assert structured_deal_keys_from_ledger_event(row, include_legacy_execution_identity=True) == set()
+
+
+@pytest.mark.parametrize("canonical", [False, True])
+def test_public_replay_requires_canonical_proof_to_reuse_other_account_events(tmp_path, canonical):
+    from src.application.ledger.api import record_normalized_trade_event
+    from src.application.trades.normalizer import normalize_trade_deal
+    from src.application.trades.resolver import resolve_trade_deal
+
+    if canonical:
+        repo, deal = _direct_split_close_fixture(tmp_path)
+        assert record_normalized_trade_event(repo, deal).created
+    else:
+        repo, _payload, deal = _proven_legacy_execution_fixture(tmp_path, split=True)
+    incoming = deepcopy(deal.execution_input)
+    incoming["broker_account_ref"]["account_label"] = "sy"
+    wrong_account = normalize_trade_deal(incoming)
+    assert wrong_account.internal_account == "sy"
+    before = (repo.list_trade_events(), repo.list_position_lots(), repo.list_trade_lifecycle_notifications())
+    for apply in (False, True):
+        result = resolve_trade_deal(wrong_account, repo=repo, state={}, apply_changes=apply)
+        if canonical:
+            assert (result.status, result.reason) == ("skipped", "ledger_recorded")
+            assert len(result.operations) == 2
+            assert all(operation.result.to_dict()["event"]["account"] == "lx" for operation in result.operations)
+        else:
+            assert (result.status, result.reason) == ("unresolved", "trade_execution_identity_conflict")
+            assert result.operations == []
+    assert (repo.list_trade_events(), repo.list_position_lots(), repo.list_trade_lifecycle_notifications()) == before

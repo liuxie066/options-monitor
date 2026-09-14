@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
+
+from domain.domain.lifecycle_allocation import resolve_allocations, validate_stock_settlement_allocation_group
+from src.application.ledger.source_consumption import build_source_consumption_claim
 
 from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
 from src.application.ledger.projection_verify import load_projection_verify_state
@@ -692,6 +696,131 @@ def lifecycle_account_coherent_facts(
         "account_lifecycle_resolution": resolution,
         "effective_void_event_ids": _effective_void_event_ids_from_rows(rows),
     }
+
+
+def _positive_contract_count(value: Any) -> int:
+    try:
+        number = Decimal(str(value))
+        if isinstance(value, bool) or not number.is_finite() or number <= 0 or number != number.to_integral_value():
+            return 0
+        return int(number)
+    except (InvalidOperation, TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _same_decimal(left: Any, right: Any) -> bool:
+    try:
+        a, b = Decimal(str(left)), Decimal(str(right))
+        return not isinstance(left, bool) and not isinstance(right, bool) and a.is_finite() and b.is_finite() and a == b
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+
+
+def proven_lifecycle_terminal_events(case: dict[str, Any], *, facts: dict[str, Any]) -> list[dict[str, Any]]:
+    """Prove complete anchors and active terminal allocations in one coherent snapshot."""
+    manifest = case.get("target_contracts_by_lot")
+    if not isinstance(manifest, dict) or not manifest or any(not _positive_contract_count(value) for value in manifest.values()):
+        return []
+    case_resolution = next((row for row in (facts.get("account_lifecycle_resolution") or {}).get("case_resolutions", [])
+                            if row.get("case_id") == case["case_id"]), {})
+    if case_resolution.get("status") not in {"direct", "bridged"}:
+        return []
+    anchored: dict[str, int] = {}
+    for anchor in case_resolution.get("anchor_facts") or []:
+        for lot, count in (anchor.get("target_contracts_by_lot") or {}).items():
+            anchored[lot] = anchored.get(lot, 0) + _positive_contract_count(count)
+    if anchored != manifest:
+        return []
+    allocations = [row for row in facts.get("account_lifecycle_allocations") or [] if isinstance(row, dict) and row.get("case_id") == case["case_id"]]
+    voided = set(facts.get("effective_void_event_ids") or [])
+    try:
+        resolution = resolve_allocations(manifest, allocations, void_event_ids=voided)
+    except (TypeError, ValueError):
+        return []
+    if resolution.status != "ok" or resolution.remaining_contracts:
+        return []
+    rows = [row for row in facts.get("trade_events") or []
+            if row.get("event_type") != "void" and row.get("event_id") not in voided]
+    events = {row["event_id"]: row for row in rows}
+    if len(events) != len(rows):
+        return []
+    evidence_ids = {row["evidence_id"] for row in facts["account_lifecycle_evidence"]}
+    proven = []
+    evidence_groups: dict[str, list[dict[str, Any]]] = {}
+    for allocation in allocations:
+        event_id = allocation.get("canonical_terminal_event_id")
+        if allocation.get("voided") or event_id in voided:
+            continue
+        event = events.get(event_id)
+        if not event or allocation.get("evidence_id") not in evidence_ids:
+            return []
+        raw = event.get("raw_payload") or {}
+        key = event.get("contract_key") or {}
+        if (event.get("event_type") not in {"assignment", "exercise", "expire_close"}
+                or event.get("event_type") != allocation.get("terminal_type")
+                or event.get("target_lot_id") != allocation.get("target_lot_id")
+                or _positive_contract_count(event.get("contracts")) != _positive_contract_count(allocation.get("contracts_allocated"))
+                or raw.get("case_id") != case["case_id"]
+                or raw.get("evidence_id") != allocation.get("evidence_id")
+                or raw.get("allocation_id") != allocation.get("allocation_id")
+                or not _same_decimal(event.get("price"), 0)
+                or not _same_decimal(event.get("multiplier"), case.get("multiplier"))
+                or not _same_decimal(event.get("strike", key.get("strike")), case.get("strike"))):
+            return []
+        for field, fallback in (("account", "account"), ("broker", "broker"), ("symbol", "underlying_symbol"), ("option_type", "option_type"), ("expiration_ymd", "expiration_ymd"), ("position_side", "position_side")):
+            value = event.get(field) or key.get(fallback)
+            if not value or str(value) != str(case.get(field)):
+                return []
+        if event_id in {row["event_id"] for row in proven}:
+            return []
+        proven.append(event)
+        evidence_groups.setdefault(raw["evidence_id"], []).append(event)
+    for group in evidence_groups.values():
+        if not any(event["event_type"] in {"assignment", "exercise"} for event in group):
+            continue
+        for event in group:
+            settlement = (event.get("raw_payload") or {}).get("stock_settlement")
+            if not isinstance(settlement, dict) or not _positive_contract_count(settlement.get("shares")):
+                return []
+        try:
+            validate_stock_settlement_allocation_group(group)
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return []
+    return proven
+
+
+def stock_claim_matches_lifecycle_terminal_events(claim: dict[str, Any], events: list[dict[str, Any]], *, case: dict[str, Any]) -> bool:
+    """Bind a stock source claim to a group of already-proven terminal allocations."""
+    payload = claim.get("source_payload") or {}
+    try:
+        rebuilt = build_source_consumption_claim(
+            source_key=claim["source_key"], case_id=claim["case_id"],
+            owner_evidence_id=claim["owner_evidence_id"], source_role="stock_settlement",
+            economic_payload=payload,
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+    if rebuilt != claim or payload.get("account") != case.get("account") or payload.get("futu_account_id") != case.get("futu_account_id"):
+        return False
+    group = [event for event in events if (
+        (event.get("raw_payload") or {}).get("evidence_id") == claim["owner_evidence_id"]
+    )]
+    for event in group:
+        settlement = (event.get("raw_payload") or {}).get("stock_settlement")
+        if not isinstance(settlement, dict) or not _positive_contract_count(settlement.get("shares")):
+            return False
+    try:
+        settlement = validate_stock_settlement_allocation_group(group)
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
+    return (settlement.get("source_event_id") == claim["source_key"]
+        and settlement.get("futu_account_id") == payload.get("futu_account_id")
+        and settlement.get("symbol") == payload.get("symbol")
+        and settlement.get("side") == payload.get("side")
+        and _same_decimal(settlement.get("price"), payload.get("price"))
+        and _same_decimal(settlement.get("event_time_ms"), payload.get("execution_time_ms"))
+        and _positive_contract_count(settlement.get("shares")) == _positive_contract_count(payload.get("quantity"))
+        and all(payload.get(field) is None or settlement.get(field) == payload[field] for field in ("order_id", "clearing_date")))
 
 
 def lifecycle_case_coherent_facts(

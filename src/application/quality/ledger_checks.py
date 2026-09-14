@@ -3,13 +3,23 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any
 
+from domain.domain.trade_execution import ledger_execution_event_set_is_complete
 from src.application.ledger.api import (
     compare_projection_lots,
+    execution_identity_from_input,
+    lifecycle_account_coherent_facts,
+    proven_lifecycle_terminal_events,
+    stock_claim_matches_lifecycle_terminal_events,
     project_trade_event_log,
     trade_event_log,
 )
 from src.application.quality.model import check_result, dataset_status, evidence_ref
-from src.application.trades.deal_identity import active_ledger_events, structured_deal_ids_from_ledger_event
+from src.application.trades.deal_identity import (
+    active_ledger_events,
+    ledger_event_economic_fingerprint,
+    structured_deal_ids_from_ledger_event,
+    structured_deal_keys_from_ledger_event,
+)
 
 
 def _account_from_event(event: dict[str, Any]) -> str:
@@ -24,23 +34,84 @@ def _account_from_lot(row: Any) -> str:
     return str(fields.get("account") or "").strip().lower()
 
 
-def _economic_fingerprint(event: dict[str, Any]) -> tuple[Any, ...]:
-    key = event.get("contract_key") if isinstance(event.get("contract_key"), dict) else {}
-    raw = event.get("raw_payload") if isinstance(event.get("raw_payload"), dict) else {}
-    return (
-        str(event.get("event_type") or "").lower(),
-        str(event.get("broker") or key.get("broker") or "").lower(),
-        _account_from_event(event),
-        str(event.get("symbol") or key.get("underlying_symbol") or "").upper(),
-        str(event.get("option_type") or key.get("option_type") or "").lower(),
-        str(event.get("position_side") or key.get("position_side") or "").lower(),
-        str(event.get("side") or raw.get("side") or "").lower(),
-        int(event.get("contracts") or 0),
-        str(event.get("strike") or key.get("strike") or ""),
-        str(event.get("expiration_ymd") or key.get("expiration_ymd") or ""),
-        str(event.get("multiplier") or raw.get("multiplier") or ""),
-        str(event.get("price") or ""),
+def _lifecycle_stock_event(event: dict[str, Any]) -> bool:
+    raw = event.get("raw_payload") or {}
+    return event.get("event_type") in {"assignment", "exercise"} and (
+        raw.get("schema_version") == "lifecycle_terminal_event.v2" or bool(raw.get("allocation_id"))
     )
+
+
+def _stock_source_identity(event: dict[str, Any]) -> str:
+    settlement = (event.get("raw_payload") or {}).get("stock_settlement") or {}
+    if not isinstance(settlement, dict):
+        return ""
+    parts = str(settlement.get("source_event_id") or "").split(":", 3)
+    if len(parts) != 4 or parts[0] != "futu" or not all(parts[1:]):
+        return ""
+    # A lifecycle source claim uses the existing REAL Futu source-key contract.
+    # This key only locates the complete group; the claim proof admits the event.
+    return execution_identity_from_input({
+        "broker_account_ref": {"broker_id": "futu", "environment": "REAL", "external_account_id": parts[2]},
+        "external_id_namespace": "futu.deal", "external_execution_id": parts[3],
+    })
+
+
+def _stock_source_groups(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for event in events:
+        keys = structured_deal_keys_from_ledger_event(event, include_legacy_execution_identity=True)
+        stock_key = _stock_source_identity(event)
+        if stock_key:
+            keys.add(stock_key)
+        for key in keys:
+            if key.startswith("execution:"):
+                groups[key].append(event)
+    return groups
+
+
+def _proven_lifecycle_stock_event_ids(repo: Any, events: list[dict[str, Any]]) -> set[str]:
+    """Exclude only complete stock-source groups proven by coherent ledger facts."""
+    proven_ids: set[str] = set()
+    # Physical groups span the whole log, including accounts outside the request.
+    accounts = {_account_from_event(event) for event in events if _lifecycle_stock_event(event)} - {""}
+    if not accounts:
+        return proven_ids
+    groups = _stock_source_groups(events)
+    for account in sorted(accounts):
+        try:
+            facts = lifecycle_account_coherent_facts(repo, account=account)
+        except Exception:
+            # An unavailable historical reader cannot authorize an exemption.
+            continue
+        try:
+            snapshot_groups = _stock_source_groups(active_ledger_events(facts["trade_events"]))
+            claims = facts.get("account_lifecycle_source_consumptions") or []
+            for case in facts.get("account_lifecycle_cases") or []:
+                terminal = proven_lifecycle_terminal_events(case, facts=facts)
+                if not terminal:
+                    continue
+                for claim in claims:
+                    if (claim.get("case_id") != case["case_id"]
+                            or claim.get("source_role") != "stock_settlement"
+                            or not stock_claim_matches_lifecycle_terminal_events(claim, terminal, case=case)):
+                        continue
+                    group = [event for event in terminal if (
+                        _lifecycle_stock_event(event)
+                        and (event.get("raw_payload") or {}).get("evidence_id") == claim["owner_evidence_id"]
+                    )]
+                    if not group:
+                        continue
+                    key = _stock_source_identity(group[0])
+                    # Reject missing/extra active effects, concurrent voids, and changed
+                    # content, even if the earlier read and snapshot share event IDs.
+                    expected = sorted(group, key=lambda row: row["event_id"])
+                    if (key and sorted(groups.get(key, []), key=lambda row: row["event_id"]) == expected
+                            and sorted(snapshot_groups.get(key, []), key=lambda row: row["event_id"]) == expected):
+                        proven_ids.update(row["event_id"] for row in group)
+        except (KeyError, TypeError, ValueError, OverflowError, RuntimeError):
+            # Missing/invalid historical proof leaves these events explicitly untrusted.
+            continue
+    return proven_ids
 
 
 def build_ledger_datasets(
@@ -54,10 +125,35 @@ def build_ledger_datasets(
     projection = project_trade_event_log(events)
     current_lots = repo.list_position_lots()
     active_events = active_ledger_events(events)
+    proven_stock_ids = _proven_lifecycle_stock_event_ids(repo, active_events)
     deal_rows: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for event in active_events:
-        for deal_id in structured_deal_ids_from_ledger_event(event):
-            deal_rows[deal_id].append(event)
+    identities = [
+        structured_deal_keys_from_ledger_event(event, include_legacy_execution_identity=True)
+        for event in active_events
+    ]
+    canonical_by_alias: dict[str, set[str]] = defaultdict(set)
+    for keys in identities:
+        canonical = {key for key in keys if key.startswith("execution:")}
+        for key in keys:
+            canonical_by_alias[key].update(canonical)
+    for event, keys in zip(active_events, identities):
+        if _lifecycle_stock_event(event):
+            if event.get("event_id") not in proven_stock_ids:
+                deal_rows[f"unscoped:{_account_from_event(event)}:{event.get('event_id') or 'missing'}"].append(event)
+            continue
+        canonical = set().union(*(canonical_by_alias[key] for key in keys))
+        if len(canonical) == 1:
+            deal_rows[next(iter(canonical))].append(event)
+        elif keys:
+            # Ambiguous aliases remain separate; completion cannot prove a mixed execution.
+            deal_rows[sorted(keys)[0]].append(event)
+        else:
+            deal_ids = structured_deal_ids_from_ledger_event(event)
+            raw = event.get("raw_payload") or {}
+            if not deal_ids and any(field in raw for field in ("broker_deal_completion", "execution_input")):
+                deal_ids = {str(event.get("event_id") or "missing")}
+            for deal_id in deal_ids:
+                deal_rows[f"unscoped:{_account_from_event(event)}:{deal_id}"].append(event)
 
     out: list[dict[str, Any]] = []
     for account in accounts:
@@ -110,9 +206,14 @@ def build_ledger_datasets(
         duplicate_deal_ids: list[str] = []
         for deal_id, rows in deal_rows.items():
             scoped = [item for item in rows if _account_from_event(item) == account]
-            if len(scoped) <= 1:
+            if not scoped:
                 continue
-            fingerprints = {_economic_fingerprint(item) for item in scoped}
+            if not deal_id.startswith("unscoped:") and ledger_execution_event_set_is_complete(rows):
+                continue
+            fingerprints = {
+                (*ledger_event_economic_fingerprint(item), str(item.get("contracts")))
+                for item in rows
+            }
             if len(fingerprints) > 1:
                 conflict_deal_ids.append(deal_id)
             else:

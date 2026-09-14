@@ -623,6 +623,8 @@ class OMQualityService:
                         calendar_start=calendar_start,
                         calendar_end=now.date() + timedelta(days=14),
                     )
+                    scope_now = self.now_fn().astimezone(timezone.utc)
+                    scope_observed_at = utc_iso(scope_now)
                     authoritative_refresh_scopes.append(
                         {"account": account, "market": market}
                     )
@@ -634,7 +636,7 @@ class OMQualityService:
                         )
                     next_due = (
                         self._next_authoritative_refresh_due(
-                            now=now,
+                            now=scope_now,
                             market=market,
                             trading_days=snapshot.trading_days,
                         )
@@ -644,7 +646,7 @@ class OMQualityService:
                     runtime_checks.append(
                         build_opend_runtime_check(
                             snapshot=snapshot,
-                            observed_at_utc=observed_at,
+                            observed_at_utc=scope_observed_at,
                         )
                     )
                     position_dataset, control_state = build_position_dataset(
@@ -652,8 +654,8 @@ class OMQualityService:
                         local_lots=account_local_lots,
                         account=account,
                         market=market,
-                        observed_at_utc=observed_at,
-                        now=now,
+                        observed_at_utc=scope_observed_at,
+                        now=scope_now,
                         control_state=control_state,
                         lifecycle_cases=account_cases,
                         lifecycle_read_models_by_case=(
@@ -800,6 +802,7 @@ class OMQualityService:
             runtime_checks=runtime_checks,
             current_only=current_only,
         )
+        observed_at = utc_iso(self.now_fn().astimezone(timezone.utc))
         control_state["updated_at_utc"] = observed_at
         control_state["last_probe_ledger_revision"] = self._ledger_revision()
         self.control_repository.write(control_state)

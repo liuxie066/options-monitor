@@ -521,7 +521,7 @@ def test_push_missing_or_ambiguous_physical_binding_is_not_inferred(monkeypatch,
     {"deal_id": "fill-1", "code": "US.NVDA260918P100000"},
     {"deal_id": "fill-1", "acc_id": "123", "trd_env": "SIMULATE", "code": "US.NVDA260918P100000"},
 ])
-def test_real_listener_source_loop_keeps_rejected_push_in_durable_review(monkeypatch, tmp_path, row):
+def test_real_listener_source_loop_keeps_rejected_push_in_durable_review(monkeypatch, tmp_path, capsys, row):
     import json
     from src.application.ledger.repository import SQLiteOptionPositionsRepository
     from src.application.trades import auto_intake
@@ -551,3 +551,19 @@ def test_real_listener_source_loop_keeps_rejected_push_in_durable_review(monkeyp
     assert {key: payload[key] for key in row} == row
     assert stored[0][1:] == ("identity_needs_review", None)
     assert "futu_account_id" not in payload
+    status = json.loads((tmp_path / "status.json").read_text())
+    assert status["inbox"]["identity_attention"][0]["deal_id"] == "fill-1"
+    output = capsys.readouterr()
+    assert "TRADE_INTAKE_IDENTITY_REVIEW_REQUIRED" in output.out + output.err
+
+    stop = threading.Event()
+    _mock_sdk_rows(monkeypatch, rows=[], accounts=[], stop=stop)
+    assert auto_intake._run_listener_source_loop(
+        source=source, repo=repo, cfg={}, cfg_path=tmp_path / "config.json", runtime_root=tmp_path,
+        runtime_root_source="test", intake_cfg={"enabled": True, "mode": "apply", "backfill": {"enabled": False}},
+        apply_changes=True, receipt_callback=lambda _context: pytest.fail("quarantine must not send on restart"),
+        process_lock=threading.RLock(), stop_event=stop,
+    ) == 0
+    restarted = json.loads((tmp_path / "status.json").read_text())
+    assert restarted["inbox"]["identity_attention"] == status["inbox"]["identity_attention"]
+    assert repo.list_trade_events() == []

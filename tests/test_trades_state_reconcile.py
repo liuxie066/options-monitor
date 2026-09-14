@@ -12,6 +12,7 @@ from src.application.ledger.source_consumption import build_source_consumption_c
 from src.application.trades.state import (
     load_trade_intake_state,
     update_trade_intake_state_entries,
+    compare_and_update_trade_intake_state_entries,
     write_trade_intake_state,
 )
 from src.application.trades.state_reconcile import (
@@ -548,7 +549,7 @@ def test_reconcile_preserves_concurrent_unrelated_deal_state(tmp_path: Path) -> 
         ]
     )
 
-    def interleaved_update(path, state, *, deal_ids):
+    def interleaved_update(path, state, *, deal_ids, expected_state):
         concurrent = load_trade_intake_state(path)
         concurrent["processed_deal_ids"][concurrent_key] = {
             "status": "applied",
@@ -560,10 +561,8 @@ def test_reconcile_preserves_concurrent_unrelated_deal_state(tmp_path: Path) -> 
             concurrent,
             deal_ids=[concurrent_key],
         )
-        return update_trade_intake_state_entries(
-            path,
-            state,
-            deal_ids=deal_ids,
+        return compare_and_update_trade_intake_state_entries(
+            path, state, deal_ids=deal_ids, expected_state=expected_state,
         )
 
     out = reconcile_trade_intake_state(
@@ -784,7 +783,7 @@ def test_reconcile_trade_intake_state_marks_ignored_non_option_unresolved_deal_p
     assert processed["reason"] == "not_option_deal"
 
 
-def test_reconcile_trade_intake_state_marks_completed_lifecycle_deal_processed(tmp_path: Path) -> None:
+def test_reconcile_trade_intake_state_rejects_status_only_assignment(tmp_path: Path) -> None:
     state_path = tmp_path / "auto_trade_intake_state.json"
     write_trade_intake_state(
         state_path,
@@ -828,22 +827,12 @@ def test_reconcile_trade_intake_state_marks_completed_lifecycle_deal_processed(t
 
     out = reconcile_trade_intake_state(state_path=state_path, repo=repo, apply_changes=True)
 
-    assert out["planned_count"] == 1
-    assert out["applied_count"] == 1
-    assert out["actions"][0]["reason"] == "lifecycle_case_already_recorded"
-    state = load_trade_intake_state(state_path)
-    assert "3254612655429789712" not in state["unresolved_deal_ids"]
-    processed = state["processed_deal_ids"]["3254612655429789712"]
-    assert processed["status"] == "reconciled"
-    assert processed["action"] == "lifecycle"
-    assert processed["reason"] == "lifecycle_case_already_recorded"
-    assert processed["applied_record_ids"] == ["lot_manual-open-df078270b91449a1"]
-    assert processed["diagnostics"]["reconciled_lifecycle_case_id"] == "lc_futu_assignment"
-    assert processed["diagnostics"]["reconciled_lifecycle_decision_type"] == "assignment"
-    assert processed["diagnostics"]["reconciled_lifecycle_evidence_id"] == "ev_option_close"
+    assert out["planned_count"] == 0
+    assert out["applied_count"] == 0
+    assert load_trade_intake_state(state_path)["unresolved_deal_ids"]
 
 
-def test_reconcile_trade_intake_state_marks_expire_close_lifecycle_processed(tmp_path: Path) -> None:
+def test_reconcile_trade_intake_state_rejects_status_only_expiry(tmp_path: Path) -> None:
     state_path = tmp_path / "auto_trade_intake_state.json"
     write_trade_intake_state(
         state_path,
@@ -887,17 +876,12 @@ def test_reconcile_trade_intake_state_marks_expire_close_lifecycle_processed(tmp
 
     out = reconcile_trade_intake_state(state_path=state_path, repo=repo, apply_changes=True)
 
-    assert out["planned_count"] == 1
-    state = load_trade_intake_state(state_path)
-    assert "775828694842258876" not in state["unresolved_deal_ids"]
-    processed = state["processed_deal_ids"]["775828694842258876"]
-    assert processed["status"] == "reconciled"
-    assert processed["reason"] == "lifecycle_case_already_recorded"
-    assert processed["applied_record_ids"] == ["lot_0700_440p"]
-    assert processed["diagnostics"]["reconciled_lifecycle_decision_type"] == "expire_close"
+    assert out["planned_count"] == 0
+    assert out["applied_count"] == 0
+    assert load_trade_intake_state(state_path)["unresolved_deal_ids"]
 
 
-def test_reconcile_trade_intake_state_derives_v2_terminal_summary(tmp_path: Path) -> None:
+def test_reconcile_trade_intake_state_rejects_cached_terminal_summary(tmp_path: Path) -> None:
     deal_id = "futu:lx:100000000000000001:2000000000000000001"
     state_path = tmp_path / "auto_trade_intake_state.json"
     write_trade_intake_state(
@@ -954,10 +938,9 @@ def test_reconcile_trade_intake_state_derives_v2_terminal_summary(tmp_path: Path
         apply_changes=True,
     )
 
-    assert out["planned_count"] == 1
-    processed = load_trade_intake_state(state_path)["processed_deal_ids"][deal_id]
-    assert processed["applied_record_ids"] == ["lot-put-a", "lot-put-b"]
-    assert processed["diagnostics"]["reconciled_lifecycle_decision_type"] == "expire_close"
+    assert out["planned_count"] == 0
+    assert out["applied_count"] == 0
+    assert load_trade_intake_state(state_path)["unresolved_deal_ids"]
 
 
 def test_reconcile_trade_intake_state_dry_run_keeps_completed_lifecycle_file_unchanged(tmp_path: Path) -> None:
@@ -1004,12 +987,9 @@ def test_reconcile_trade_intake_state_dry_run_keeps_completed_lifecycle_file_unc
 
     out = reconcile_trade_intake_state(state_path=state_path, repo=repo, apply_changes=False)
 
-    assert out["planned_count"] == 1
+    assert out["planned_count"] == 0
     assert out["applied_count"] == 0
-    assert out["pending_after"]["unresolved_deal_ids"] == 0
-    state = load_trade_intake_state(state_path)
-    assert "deal-option-1" in state["unresolved_deal_ids"]
-    assert "deal-option-1" not in state["processed_deal_ids"]
+    assert load_trade_intake_state(state_path)["unresolved_deal_ids"]
 
 
 def test_reconcile_trade_intake_state_keeps_waiting_lifecycle_pending(tmp_path: Path) -> None:
@@ -1511,3 +1491,486 @@ def test_reconcile_does_not_complete_deal_from_numeric_target_lot_lineage(
     assert out["planned_count"] == 0
     assert out["actions"][0]["reason"] == "no_reconciliation_evidence"
     assert opening_deal_id in load_trade_intake_state(state_path)["failed_deal_ids"]
+
+
+def _completed_canonical_repo(*, bridge=False, terminal_type="expire_close"):
+    from domain.domain.lifecycle_allocation import allocation_id_for, terminal_event_id_for
+
+    case = {
+        "schema_version": "lifecycle_case.v2", "case_id": "canonical",
+        "status": "ledger_written", "account": "lx", "futu_account_id": "1001",
+        "broker": "富途", "symbol": "FUTU", "option_type": "put",
+        "position_side": "short", "strike": "120", "multiplier": 100,
+        "expiration_ymd": "2026-08-21", "target_contracts_by_lot": {"lot-1": 1},
+    }
+    source_key = "futu:lx:1001:option-1"
+    owner_case = "legacy" if bridge else "canonical"
+    evidence = {
+        "case_id": owner_case, "evidence_id": "anchor", "evidence_type": "option_zero_price_close",
+        "source_event_id": source_key, "account": "lx", "symbol": "FUTU",
+        "raw": {"price": "0"}, "contracts": 1,
+        "target_contracts_by_lot": {"lot-1": 1}, "_ledger_created_at_ms": 1_700_000_000_200,
+    }
+    payload = {**case, "contracts": 1, "price": "0", "side": "buy", "event_time_ms": 1_700_000_000_100}
+    claim = build_source_consumption_claim(source_key=source_key, case_id=owner_case,
+        owner_evidence_id="anchor", source_role="option_anchor", economic_payload=payload)
+    allocation = {
+        "case_id": "canonical", "evidence_id": "anchor", "target_lot_id": "lot-1",
+        "terminal_type": terminal_type, "contracts_allocated": 1,
+        "allocation_id": allocation_id_for(case_id="canonical", evidence_id="anchor", target_lot_id="lot-1"),
+        "canonical_terminal_event_id": terminal_event_id_for(case_id="canonical", evidence_id="anchor", target_lot_id="lot-1", terminal_type=terminal_type, contracts_allocated=1),
+    }
+    event = {**case, "event_id": allocation["canonical_terminal_event_id"],
+        "event_type": terminal_type, "target_lot_id": "lot-1", "contracts": 1, "price": 0,
+        "event_time_ms": 1_700_000_001_000, "source": "lifecycle", "currency": "USD",
+        "contract_key": {"account": "lx", "broker": "富途", "underlying_symbol": "FUTU",
+            "option_type": "put", "position_side": "short", "strike": 120, "expiration_ymd": "2026-08-21"},
+        "raw_payload": {"case_id": "canonical", "evidence_id": "anchor", "target_lot_id": "lot-1", "allocation_id": allocation["allocation_id"]}}
+    cases, evidences = [case], [evidence]
+    if bridge:
+        cases.append({"schema_version": "lifecycle_case.v1", "case_id": "legacy", "status": "superseded",
+            "superseded_by_case_id": "canonical", "account": "lx", "symbol": "FUTU"})
+        evidences.append({"schema_version": "migration_bridge_evidence.v1", "case_id": "canonical",
+            "evidence_id": "bridge", "evidence_type": "migration_bridge", "account": "lx", "symbol": "FUTU",
+            "referenced_legacy_case_id": "legacy", "referenced_legacy_evidence_id": "anchor", "allocating": False})
+    return FakeRepo([event], lifecycle_cases=cases, lifecycle_evidence=evidences,
+        lifecycle_allocations=[allocation], lifecycle_source_consumptions=[claim], position_lots=[_position_lot("lot-1")])
+
+
+@pytest.mark.parametrize("bridge", [False, True])
+def test_canonical_completion_uses_active_allocations_and_preserves_receipts(tmp_path, bridge):
+    repo = _completed_canonical_repo(bridge=bridge)
+    key = "futu:lx:1001:option-1"
+    path = tmp_path / "state.json"
+    entry = {"account": "lx", "status": "unresolved", "action": "lifecycle",
+        "futu_account_id": "1001", "source_deal_id": "option-1", "receipt": {"status": "sent"},
+        "economic_payload_hash": "historical-hash"}
+    write_trade_intake_state(path, {"unresolved_deal_ids": {key: entry}})
+    before = path.read_bytes()
+    preview = reconcile_trade_intake_state(state_path=path, repo=repo)
+    assert preview["planned_count"] == 1 and path.read_bytes() == before
+    result = reconcile_trade_intake_state(state_path=path, repo=repo, apply_changes=True)
+    assert result["applied_count"] == 1
+    processed = load_trade_intake_state(path)["processed_deal_ids"][key]
+    assert processed["receipt"] == entry["receipt"]
+    assert processed["economic_payload_hash"] == "historical-hash"
+    assert processed["diagnostics"]["reconciled_terminal_event_ids"] == [repo.events[0]["event_id"]]
+    assert reconcile_trade_intake_state(state_path=path, repo=repo, apply_changes=True)["applied_count"] == 0
+
+
+@pytest.mark.parametrize("failure", ["void", "missing_event", "wrong_event_quantity", "fractional", "boolean", "wrong_account", "wrong_price", "wrong_multiplier", "partial", "duplicate_allocation", "identity_collision", "read_failure"])
+def test_canonical_completion_rejects_unproven_terminal_effects(tmp_path, failure):
+    repo = _completed_canonical_repo()
+    key = "futu:lx:1001:option-1"
+    entry = {"account": "lx", "status": "unresolved", "action": "lifecycle", "futu_account_id": "1001"}
+    if failure == "void":
+        repo.events.append({**repo.events[0], "event_id": "void", "event_type": "void", "target_event_id": repo.events[0]["event_id"], "raw_payload": {"target_event_id": repo.events[0]["event_id"]}})
+    elif failure == "missing_event": repo.events.clear()
+    elif failure == "wrong_event_quantity": repo.events[0]["contracts"] = 2
+    elif failure == "fractional": repo.events[0]["contracts"] = 1.5
+    elif failure == "boolean": repo.events[0]["contracts"] = True
+    elif failure == "wrong_account": repo.events[0]["account"] = "sy"
+    elif failure == "wrong_price": repo.events[0]["price"] = 1
+    elif failure == "wrong_multiplier": repo.events[0]["multiplier"] = 10
+    elif failure == "partial":
+        repo.lifecycle_cases[0]["target_contracts_by_lot"]["lot-1"] = 2
+        repo.position_lots = [_position_lot("lot-1", contracts=2)]
+    elif failure == "duplicate_allocation": repo.lifecycle_allocations.append(dict(repo.lifecycle_allocations[0]))
+    elif failure == "identity_collision":
+        key = "option-1"
+        entry["futu_account_id"] = "2002"
+    elif failure == "read_failure":
+        def unavailable(**kwargs): raise OSError("read failed")
+        repo.read_lifecycle_account_rows = unavailable
+    path = tmp_path / "state.json"
+    write_trade_intake_state(path, {"unresolved_deal_ids": {key: entry}})
+    before = path.read_bytes()
+    result = reconcile_trade_intake_state(state_path=path, repo=repo, apply_changes=True)
+    assert result["applied_count"] == result["planned_count"] == 0
+    assert path.read_bytes() == before
+
+
+def _stock_completion_repo():
+    from src.application.ledger.api import execution_identity_from_input
+    repo = _completed_canonical_repo(terminal_type="assignment")
+    source_key = "futu:lx:1001:stock-1"
+    raw = {"account": "lx", "futu_account_id": "1001", "symbol": "FUTU",
+        "contracts": 100, "price": 120, "side": "buy", "trade_time_ms": 1_700_000_001_000,
+        "execution_input": {"broker_account_ref": {"broker_id": "futu", "external_account_id": "1001", "environment": "REAL"},
+            "external_id_namespace": "futu.deal", "external_execution_id": "stock-1"}}
+    source = {"evidence_id": "stock-observed", "source_event_id": source_key, "raw": raw}
+    owner = repo.lifecycle_evidence[0]
+    owner["source_evidence_ids"] = ["stock-observed"]
+    stock_claim = build_source_consumption_claim(source_key=source_key, case_id="canonical",
+        owner_evidence_id="anchor", source_role="stock_settlement", economic_payload=raw)
+    repo.lifecycle_source_consumptions.append(stock_claim)
+    repo.events[0]["raw_payload"]["stock_settlement"] = {"source_event_id": source_key,
+        "futu_account_id": "1001", "symbol": "FUTU", "shares": 100, "price": 120,
+        "side": "buy", "event_time_ms": 1_700_000_001_000}
+    key = execution_identity_from_input(raw["execution_input"])
+    state = {"account": "lx", "futu_account_id": "1001", "source_deal_id": "stock-1",
+        "status": "unresolved", "action": "lifecycle", "diagnostics": {"lifecycle_evidence": source},
+        "economic_payload_hash": stock_claim["source_payload_hash"]}
+    return repo, key, state
+
+
+@pytest.mark.parametrize("failure", [None, "wrong_environment", "missing_environment", "wrong_quantity", "wrong_price", "wrong_source_ref", "changed_state_economics"])
+def test_stock_source_requires_matching_terminal_and_explicit_execution_identity(tmp_path, failure):
+    repo, key, state = _stock_completion_repo()
+    if failure == "wrong_environment": state["diagnostics"]["lifecycle_evidence"]["raw"]["execution_input"]["broker_account_ref"]["environment"] = "SIMULATE"
+    if failure == "missing_environment": state["diagnostics"]["lifecycle_evidence"]["raw"]["execution_input"]["broker_account_ref"].pop("environment")
+    if failure == "wrong_quantity": repo.events[0]["raw_payload"]["stock_settlement"]["shares"] = 99
+    if failure == "wrong_price": repo.events[0]["raw_payload"]["stock_settlement"]["price"] = 121
+    if failure == "wrong_source_ref": repo.lifecycle_evidence[0]["source_evidence_ids"] = ["another-source"]
+    if failure == "changed_state_economics": state["diagnostics"]["lifecycle_evidence"]["raw"]["contracts"] = 200
+    path = tmp_path / "state.json"
+    write_trade_intake_state(path, {"unresolved_deal_ids": {key: state}})
+    result = reconcile_trade_intake_state(state_path=path, repo=repo, apply_changes=True)
+    assert result["applied_count"] == (1 if failure is None else 0)
+    if failure is None:
+        assert result["actions"][0]["source_key"] == "futu:lx:1001:stock-1"
+        assert result["actions"][0]["source_payload_hash"] == state["economic_payload_hash"]
+
+
+def test_reconcile_callback_filters_preview_and_apply_and_retries_after_failure(tmp_path):
+    repo = _completed_canonical_repo()
+    key = "futu:lx:1001:option-1"
+    path = tmp_path / "state.json"
+    write_trade_intake_state(path, {"unresolved_deal_ids": {key: {"account": "lx", "status": "unresolved"}}})
+    before = path.read_bytes()
+    seen = []
+    def reject(original, proposed, actions):
+        seen.append(actions[0]["source_key"])
+        return []
+    for apply in (False, True):
+        result = reconcile_trade_intake_state(state_path=path, repo=repo, apply_changes=apply, before_state_update=reject)
+        assert result["planned_count"] == result["applied_count"] == 0
+        assert result["pending_after"]["unresolved_deal_ids"] == 1
+        assert path.read_bytes() == before
+    assert seen == [key, key]
+    def unavailable(*args): raise OSError("inbox write failed")
+    with pytest.raises(OSError, match="inbox write failed"):
+        reconcile_trade_intake_state(state_path=path, repo=repo, apply_changes=True, before_state_update=unavailable)
+    assert path.read_bytes() == before
+    assert reconcile_trade_intake_state(state_path=path, repo=repo, apply_changes=True)["applied_count"] == 1
+
+
+def _normalized_completion_deal(*, asset="option", side="buy"):
+    from src.application.trades.normalizer import normalize_trade_deal
+    return normalize_trade_deal({
+        "code": "US.FUTU260821P120000" if asset == "option" else "US.FUTU",
+        "asset_type": asset, "environment": "REAL", "external_id_namespace": "futu.deal",
+        "futu_account_id": "1001", "deal_id": "option-1" if asset == "option" else "stock-1",
+        "qty": 1 if asset == "option" else 100, "price": 0 if asset == "option" else 120,
+        "trd_side": "BUY_BACK" if asset == "option" else side.upper(),
+        "position_effect": "close" if asset == "option" else None,
+        "multiplier": 100 if asset == "option" else None, "currency": "USD",
+        "trade_time_ms": 1_700_000_000_100 if asset == "option" else 1_700_000_001_000,
+    }, futu_account_mapping={"1001": "lx"}, allow_opend_refresh=False)
+
+
+@pytest.mark.parametrize("asset", ["option", "stock"])
+@pytest.mark.parametrize("change", [None, "price", "quantity", "time", "symbol", "account", "physical", "environment", "missing_quantity", "missing_time", "missing_price", "execution_price", "execution_quantity"])
+def test_reconciled_lifecycle_source_matches_current_deal_economics(asset, change):
+    from dataclasses import replace
+    from src.application.trades.state_reconcile import reconciled_source_matches_deal
+    repo = _completed_canonical_repo() if asset == "option" else _stock_completion_repo()[0]
+    source = repo.lifecycle_source_consumptions[0 if asset == "option" else -1]
+    action = {"reason": "lifecycle_case_already_recorded", "source_key": source["source_key"],
+        "source_payload": source["source_payload"], "source_payload_hash": source["source_payload_hash"]}
+    deal = _normalized_completion_deal(asset=asset)
+    changes = {"price": {"price": 42}, "quantity": {"contracts": 2}, "time": {"trade_time_ms": 1},
+        "symbol": {"symbol": "OTHER"}, "account": {"internal_account": "sy"}, "physical": {"futu_account_id": "2002"},
+        "missing_quantity": {"contracts": None}, "missing_time": {"trade_time_ms": None}, "missing_price": {"price": None}}
+    if change in changes: deal = replace(deal, **changes[change])
+    if change == "environment": deal.execution_input["broker_account_ref"]["environment"] = "SIMULATE"
+    if change == "execution_price": deal.execution_input["price"] = "42"
+    if change == "execution_quantity": deal.execution_input["quantity"] = "42"
+    assert reconciled_source_matches_deal(action, deal) is (change is None)
+
+
+@pytest.mark.parametrize("change", [None, "quantity", "price", "time", "account", "physical", "missing_quantity", "missing_price", "missing_time", "wrong_side", "execution_economic_conflict"])
+def test_reconciled_assigned_stock_sale_matches_recorded_economics(change):
+    from copy import deepcopy
+    from src.application.trades.state_reconcile import reconciled_source_matches_deal
+    deal = _normalized_completion_deal(asset="stock", side="sell")
+    event = {"event_type": "sale", "stock_event_id": "sale-1", "source_deal_id": "stock-1",
+        "account": "lx", "futu_account_id": "1001", "symbol": "FUTU", "shares": 100,
+        "price": 120, "trade_time_ms": 1_700_000_001_000, "side": "sell", "currency": "USD"}
+    changes = {"quantity": ("shares", 99), "price": ("price", 121), "time": ("trade_time_ms", 1),
+        "account": ("account", "sy"), "physical": ("futu_account_id", "2002"), "missing_quantity": ("shares", None),
+        "missing_price": ("price", None), "missing_time": ("trade_time_ms", None), "wrong_side": ("side", "buy")}
+    if change in changes:
+        field, value = changes[change]
+        event[field] = value
+    if change == "execution_economic_conflict":
+        event["execution_input"] = deepcopy(deal.execution_input)
+        event["execution_input"]["price"] = "121"
+    action = {"reason": "assigned_stock_sale_event_recorded", "assigned_stock_event": event}
+    assert reconciled_source_matches_deal(action, deal) is (change is None)
+
+
+@pytest.mark.parametrize("asset", ["stock", "option"])
+@pytest.mark.parametrize("changed_economics", [None, "quantity", "price"])
+def test_source_completion_callback_validates_lifecycle_inbox_without_optional_currency(
+    tmp_path, asset, changed_economics,
+):
+    from copy import deepcopy
+    from src.application.trades.auto_intake import _reconcile_source_completion
+    from src.application.trades.deal_identity import broker_deal_key
+    from src.application.trades.inbox import (
+        begin_trade_receipt_attempt, claim_trade_payload_refresh_intent,
+        enqueue_trade_payload, list_trade_receipt_recovery_rows,
+        list_unclaimed_trade_payload_refresh_intents, read_trade_payload,
+        record_trade_payload_refresh_intent,
+    )
+    from src.application.trades.normalizer import normalize_trade_deal
+
+    deal = _normalized_completion_deal(asset=asset)
+    payload = deepcopy(deal.execution_input)
+    if asset == "stock":
+        repo, key, state = _stock_completion_repo()
+        payload["currency"] = payload["instrument_ref"]["currency"] = None
+    else:
+        repo = _completed_canonical_repo()
+        key = "futu:lx:1001:option-1"
+        state = {"account": "lx", "futu_account_id": "1001", "source_deal_id": "option-1",
+            "status": "unresolved", "action": "lifecycle", "economic_payload_hash": "old-format-hash"}
+    if changed_economics == "quantity": payload["quantity"] = "2" if asset == "option" else "200"
+    if changed_economics == "price": payload["price"] = "42"
+    observed_deal = normalize_trade_deal(payload, futu_account_mapping={"1001": "lx"}, allow_opend_refresh=False)
+    if asset == "stock":
+        assert "missing:currency" in observed_deal.execution_input["errors"]
+        assert "missing:instrument_ref.currency" in observed_deal.execution_input["errors"]
+    inbox = tmp_path / "inbox.sqlite3"
+    inbox_id = enqueue_trade_payload(inbox, payload=payload, source="push", broker_deal_key=broker_deal_key(observed_deal), repo=repo)
+    record_trade_payload_refresh_intent(inbox, inbox_id=inbox_id, intent={"account": "lx", "request_id": "prior-intent"})
+    path = tmp_path / "state.json"
+    state["receipt"] = {"status": "skipped", "reason": "lifecycle_outbox_not_created"}
+    write_trade_intake_state(path, {"unresolved_deal_ids": {key: state}})
+    source = {"account": "lx", "account_mapping": {"1001": "lx"}, "state_path": path, "inbox_path": inbox}
+    source_before = path.read_bytes()
+    row_before = read_trade_payload(inbox, inbox_id=inbox_id, read_only=True)
+    ledger_before = deepcopy((repo.events, repo.lifecycle_cases, repo.lifecycle_evidence,
+        repo.lifecycle_allocations, repo.lifecycle_source_consumptions, repo.position_lots, repo.assigned_stock_events))
+    preview = _reconcile_source_completion(source=source, repo=repo, apply_changes=False)
+    expected = int(changed_economics is None)
+    assert preview["planned_count"] == expected
+    assert preview["applied_count"] == preview["inbox_updated_count"] == 0
+    assert path.read_bytes() == source_before
+    assert read_trade_payload(inbox, inbox_id=inbox_id, read_only=True) == row_before
+    applied = _reconcile_source_completion(source=source, repo=repo, apply_changes=True)
+    assert applied["applied_count"] == applied["inbox_updated_count"] == expected
+    assert (repo.events, repo.lifecycle_cases, repo.lifecycle_evidence, repo.lifecycle_allocations,
+        repo.lifecycle_source_consumptions, repo.position_lots, repo.assigned_stock_events) == ledger_before
+    if changed_economics:
+        assert applied["deferred"][0]["reason"] == "inbox_economic_evidence_unproven"
+        assert path.read_bytes() == source_before
+        assert read_trade_payload(inbox, inbox_id=inbox_id, read_only=True) == row_before
+        return
+    closed = read_trade_payload(inbox, inbox_id=inbox_id, read_only=True)
+    assert closed["status"] == "handled"
+    assert closed["receipt_envelope"] == row_before["receipt_envelope"]
+    assert closed["portfolio_refresh_intent_json"] == row_before["portfolio_refresh_intent_json"]
+    assert closed["portfolio_refresh_attempted_at_ms"] is None
+    assert load_trade_intake_state(path)["processed_deal_ids"][key]["receipt"] == state["receipt"]
+    assert list_trade_receipt_recovery_rows(inbox, account_ids=["1001"]) == []
+    assert list_unclaimed_trade_payload_refresh_intents(inbox, account_mapping={"1001": "lx"}) == []
+    assert claim_trade_payload_refresh_intent(inbox, inbox_id=inbox_id) is None
+    assert not begin_trade_receipt_attempt(inbox, inbox_id=inbox_id, route={"route": "test"}, message="ignored")["claimed"]
+    assert read_trade_payload(inbox, inbox_id=inbox_id, read_only=True) == closed
+    repeated = _reconcile_source_completion(source=source, repo=repo, apply_changes=True)
+    assert repeated["applied_count"] == repeated["inbox_updated_count"] == 0
+
+
+@pytest.mark.parametrize("completion", ["option", "stock", "assigned_stock_sale"])
+@pytest.mark.parametrize("explicit_namespace", [False, True])
+def test_historical_pending_source_identity_conflict_cannot_be_reconciled(
+    tmp_path, completion, explicit_namespace,
+):
+    from copy import deepcopy
+    from src.application.trades.auto_intake import _reconcile_source_completion
+    from src.application.trades.deal_identity import broker_deal_key
+    from src.application.trades.inbox import (
+        _connect, enqueue_trade_payload, read_trade_payload,
+        record_trade_payload_refresh_intent,
+    )
+    from src.application.trades.normalizer import normalize_trade_deal
+
+    asset = "option" if completion == "option" else "stock"
+    side = "sell" if completion == "assigned_stock_sale" else "buy"
+    original = _normalized_completion_deal(asset=asset, side=side)
+    execution = deepcopy(original.execution_input)
+    if asset == "stock":
+        execution["currency"] = execution["instrument_ref"]["currency"] = None
+    payload = {"execution_input": execution, "source_deal_id": "conflicting-source"}
+    if explicit_namespace:
+        payload["external_id_namespace"] = "futu.deal"
+    deal = normalize_trade_deal(payload, futu_account_mapping={"1001": "lx"}, allow_opend_refresh=False)
+    assert "invalid:source_execution_identity" in deal.execution_input["errors"]
+    if completion == "stock":
+        repo, key, state = _stock_completion_repo()
+    else:
+        key = f"futu:lx:1001:{original.deal_id}"
+        state = {"account": "lx", "futu_account_id": "1001", "source_deal_id": original.deal_id,
+            "status": "unresolved"}
+        repo = _completed_canonical_repo() if asset == "option" else FakeRepo([], assigned_stock_events=[{
+            "event_type": "sale", "stock_event_id": "sale-1", "source_deal_id": "stock-1",
+            "account": "lx", "futu_account_id": "1001", "symbol": "FUTU", "shares": 100,
+            "price": 120, "trade_time_ms": 1_700_000_001_000, "side": "sell",
+        }])
+    inbox = tmp_path / "inbox.sqlite3"
+    inbox_id = enqueue_trade_payload(inbox, payload=payload, source="push", broker_deal_key=broker_deal_key(deal), repo=repo)
+    receipt = {"status": "unknown", "reason": "sender_outcome_unknown", "attempt_id": "old-attempt"}
+    previous_result = {"status": "unresolved", "reason": "historical_pending", "receipt_kind": "pending_retry"}
+    # Reconstruct an upgrade-era durable pending row. Current enqueue rejects this
+    # conflict, but startup recovery must also validate rows admitted by old code.
+    with closing(_connect(inbox)) as conn, conn:
+        conn.execute(
+            """UPDATE trade_inbox SET status='pending', result_status='unresolved',
+               result_reason='historical_pending', last_error=NULL, result_json=?, receipt_json=?
+               WHERE inbox_id=?""",
+            (json.dumps(previous_result), json.dumps(receipt), inbox_id),
+        )
+    record_trade_payload_refresh_intent(inbox, inbox_id=inbox_id, intent={"account": "lx", "request_id": "prior-intent"})
+    state["receipt"] = dict(receipt)
+    path = tmp_path / "state.json"
+    write_trade_intake_state(path, {"unresolved_deal_ids": {key: state}})
+    source = {"account": "lx", "account_mapping": {"1001": "lx"}, "state_path": path, "inbox_path": inbox}
+    state_before = path.read_bytes()
+    row_before = read_trade_payload(inbox, inbox_id=inbox_id, read_only=True)
+    ledger_before = deepcopy(vars(repo))
+    assert row_before["status"] == "pending"
+    assert row_before["receipt"] == receipt
+    for apply in (False, True, True):
+        result = _reconcile_source_completion(source=source, repo=repo, apply_changes=apply)
+        assert result["planned_count"] == result["applied_count"] == result["inbox_updated_count"] == 0
+        assert result["deferred"] == [{"deal_id": key, "reason": "inbox_source_identity_conflict"}]
+        assert path.read_bytes() == state_before
+        assert read_trade_payload(inbox, inbox_id=inbox_id, read_only=True) == row_before
+        assert vars(repo) == ledger_before
+
+
+def _multi_lot_stock_completion_repo(*, legacy=False, mixed=False):
+    from copy import deepcopy
+    from domain.domain.lifecycle_allocation import allocation_id_for, terminal_event_id_for
+
+    repo, key, state = _stock_completion_repo()
+    case, anchor = repo.lifecycle_cases[0], repo.lifecycle_evidence[0]
+    case["target_contracts_by_lot"]["lot-2"] = 1
+    anchor["target_contracts_by_lot"]["lot-2"] = 1
+    anchor["contracts"] = 2
+    repo.position_lots.append(_position_lot("lot-2"))
+    for index, quantity in ((0, 2), (1, 100 if mixed else 200)):
+        claim = repo.lifecycle_source_consumptions[index]
+        repo.lifecycle_source_consumptions[index] = build_source_consumption_claim(
+            source_key=claim["source_key"], case_id=claim["case_id"],
+            owner_evidence_id=claim["owner_evidence_id"], source_role=claim["source_role"],
+            economic_payload={**claim["source_payload"], "quantity": str(quantity)},
+        )
+    state["diagnostics"]["lifecycle_evidence"]["raw"]["contracts"] = 100 if mixed else 200
+    state["economic_payload_hash"] = repo.lifecycle_source_consumptions[1]["source_payload_hash"]
+    evidence_id, terminal_type = ("expiry", "expire_close") if mixed else ("anchor", "assignment")
+    allocation = {**repo.lifecycle_allocations[0], "target_lot_id": "lot-2",
+        "evidence_id": evidence_id, "terminal_type": terminal_type,
+        "allocation_id": allocation_id_for(case_id="canonical", evidence_id=evidence_id, target_lot_id="lot-2"),
+        "canonical_terminal_event_id": terminal_event_id_for(case_id="canonical", evidence_id=evidence_id,
+            target_lot_id="lot-2", terminal_type=terminal_type, contracts_allocated=1)}
+    repo.lifecycle_allocations.append(allocation)
+    event = deepcopy(repo.events[0])
+    event.update(event_id=allocation["canonical_terminal_event_id"], target_lot_id="lot-2", event_type=terminal_type)
+    event["raw_payload"].update(target_lot_id="lot-2", evidence_id=evidence_id, allocation_id=allocation["allocation_id"])
+    repo.events.append(event)
+    if mixed:
+        repo.lifecycle_evidence.append({"evidence_id": evidence_id, "case_id": "canonical", "evidence_type": "expiration_confirmation"})
+        event["raw_payload"].pop("stock_settlement")
+    else:
+        source = {**event["raw_payload"]["stock_settlement"], "shares": 200}
+        for row in repo.events:
+            if legacy:
+                row["raw_payload"]["stock_settlement"] = dict(source)
+            else:
+                row["raw_payload"]["stock_settlement_source"] = dict(source)
+    return repo, key, state
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("asset", ["option", "stock"])
+@pytest.mark.parametrize("failure", [None, "allocation", "source", "fractional", "boolean", "void", "missing"])
+def test_source_completion_uses_canonical_stock_allocation_group(tmp_path, legacy, asset, failure):
+    from copy import deepcopy
+    from src.application.trades.auto_intake import _reconcile_source_completion
+    from src.application.trades.deal_identity import broker_deal_key
+    from src.application.trades.inbox import enqueue_trade_payload, read_trade_payload
+    from src.application.trades.normalizer import normalize_trade_deal
+
+    repo, key, state = _multi_lot_stock_completion_repo(legacy=legacy)
+    if failure == "allocation":
+        for event, shares in zip(repo.events, (50, 150)):
+            event["raw_payload"]["stock_settlement"]["shares"] = shares
+    elif failure == "source":
+        repo.events[0]["raw_payload"]["stock_settlement"]["source_event_id"] = "futu:lx:1001:other"
+    elif failure in {"fractional", "boolean"}:
+        repo.events[0]["raw_payload"]["stock_settlement"]["shares"] = 100.5 if failure == "fractional" else True
+    elif failure == "void":
+        repo.events.append({**repo.events[-1], "event_id": "void", "event_type": "void", "account": "lx",
+            "target_event_id": repo.events[-1]["event_id"], "raw_payload": {"target_event_id": repo.events[-1]["event_id"]}})
+    elif failure == "missing":
+        repo.events.pop()
+    payload = deepcopy(_normalized_completion_deal(asset=asset).execution_input)
+    payload["quantity"] = "200" if asset == "stock" else "2"
+    if asset == "stock":
+        payload["currency"] = payload["instrument_ref"]["currency"] = None
+    else:
+        key = "futu:lx:1001:option-1"
+        state = {"account": "lx", "futu_account_id": "1001", "source_deal_id": "option-1", "status": "unresolved"}
+    deal = normalize_trade_deal(payload, futu_account_mapping={"1001": "lx"}, allow_opend_refresh=False)
+    inbox = tmp_path / "inbox.sqlite3"
+    inbox_id = enqueue_trade_payload(inbox, payload=payload, source="push", broker_deal_key=broker_deal_key(deal), repo=repo)
+    path = tmp_path / "state.json"
+    write_trade_intake_state(path, {"unresolved_deal_ids": {key: state}})
+    source = {"account": "lx", "account_mapping": {"1001": "lx"}, "state_path": path, "inbox_path": inbox}
+    before = path.read_bytes()
+    observed = read_trade_payload(inbox, inbox_id=inbox_id, read_only=True)
+    expected = int(failure is None)
+    preview = _reconcile_source_completion(source=source, repo=repo, apply_changes=False)
+    assert preview["planned_count"] == expected
+    assert path.read_bytes() == before and read_trade_payload(inbox, inbox_id=inbox_id, read_only=True) == observed
+    result = _reconcile_source_completion(source=source, repo=repo, apply_changes=True)
+    assert result["applied_count"] == result["inbox_updated_count"] == expected
+    assert read_trade_payload(inbox, inbox_id=inbox_id, read_only=True)["status"] == ("handled" if expected else "pending")
+    if not expected:
+        assert path.read_bytes() == before
+    assert _reconcile_source_completion(source=source, repo=repo, apply_changes=True)["applied_count"] == 0
+
+
+@pytest.mark.parametrize("asset", ["stock", "option"])
+def test_source_completion_reports_all_mixed_terminal_types(tmp_path, asset):
+    from copy import deepcopy
+    from src.application.trades.auto_intake import _reconcile_source_completion
+    from src.application.trades.deal_identity import broker_deal_key
+    from src.application.trades.inbox import enqueue_trade_payload, read_trade_payload
+    from src.application.trades.normalizer import normalize_trade_deal
+
+    repo, key, state = _multi_lot_stock_completion_repo(mixed=True)
+    payload = deepcopy(_normalized_completion_deal(asset=asset).execution_input)
+    if asset == "option":
+        payload["quantity"] = "2"
+        key = "futu:lx:1001:option-1"
+        state = {"account": "lx", "futu_account_id": "1001", "source_deal_id": "option-1", "status": "unresolved"}
+    deal = normalize_trade_deal(payload, futu_account_mapping={"1001": "lx"}, allow_opend_refresh=False)
+    inbox = tmp_path / "inbox.sqlite3"
+    inbox_id = enqueue_trade_payload(inbox, payload=payload, source="push", broker_deal_key=broker_deal_key(deal), repo=repo)
+    path = tmp_path / "state.json"
+    write_trade_intake_state(path, {"unresolved_deal_ids": {key: state}})
+    source = {"account": "lx", "account_mapping": {"1001": "lx"}, "state_path": path, "inbox_path": inbox}
+    result = _reconcile_source_completion(source=source, repo=repo, apply_changes=True)
+    assert result["applied_count"] == result["inbox_updated_count"] == 1
+    assert result["actions"][0]["lifecycle_decision_type"] == "mixed"
+    assert result["actions"][0]["lifecycle_terminal_types"] == ["assignment", "expire_close"]
+    processed = load_trade_intake_state(path)["processed_deal_ids"][key]
+    assert processed["diagnostics"]["reconciled_lifecycle_decision_type"] == "mixed"
+    assert processed["diagnostics"]["reconciled_lifecycle_terminal_types"] == ["assignment", "expire_close"]
+    closed = read_trade_payload(inbox, inbox_id=inbox_id, read_only=True)
+    assert closed["result"]["action"] == "mixed"
+    assert _reconcile_source_completion(source=source, repo=repo, apply_changes=True)["applied_count"] == 0
