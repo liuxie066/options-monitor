@@ -244,6 +244,29 @@ def test_void_and_later_trade_block_recovery(tmp_path):
     assert not repo.list_wheel_events()
 
 
+def test_historical_void_recorded_after_assignment_does_not_block_recovery(tmp_path):
+    repo, assignment = _missing_branch(tmp_path)
+    old_open = replace(
+        _put_event(event_id="old-open", event_type="open", multiplier=10, raw_payload={}),
+        event_time_ms=500,
+        lot_id="old-lot",
+    )
+    persist_trade_event_objects_atomically(repo, [old_open])
+    historical_void = replace(
+        assignment,
+        event_id="void-old-open",
+        event_type="void",
+        event_time_ms=4_000,
+        contracts=0,
+        target_event_id=old_open.event_id,
+        target_lot_id=None,
+        raw_payload={},
+    )
+    persist_trade_event_objects_atomically(repo, [historical_void])
+
+    assert _recover(repo)["status"] == "preview"
+
+
 def test_enable_before_event_required(tmp_path):
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     persist_trade_event_objects_atomically(repo, [_put_event(event_id="put-open", event_type="open", multiplier=10, raw_payload={})])
