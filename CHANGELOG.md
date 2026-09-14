@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 3.5.8 - 2026-09-14
+
+### Improvements
+- Replaced the active Bot Pi/Node answer path with the Python model-and-tool loop while preserving scoped sessions, memory, cancellation, persistence, and Feishu reply delivery.
+
 ### Bug Fixes
 - Refreshed Wheel assignment economics from the canonical source event after fee sync, and accepted validated broker settlement shares as the contract-multiplier evidence for that assignment.
 

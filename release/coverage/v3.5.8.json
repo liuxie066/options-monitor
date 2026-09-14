@@ -1,0 +1,93 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.5.8",
+  "base": {
+    "tag": "v3.5.7",
+    "commit": "b961928f6875bbb3c017d83b4fe6f45565e4b213"
+  },
+  "reviewed_head": "1c6abd26b8362f3875a1a33e809ec33cc71548fe",
+  "commits": [
+    {
+      "sha": "3d08f88277443c03550760654208e7f826a1f22f",
+      "subject": "refactor(bot): replace Pi runtime with Python host"
+    },
+    {
+      "sha": "b127951062fa18ee29c5dfba25577257054173f9",
+      "subject": "Merge pull request #287 from liuxie066/codex/bot-python-runtime"
+    },
+    {
+      "sha": "d28892800f2acdc7013fd94382ba4f36d0947c65",
+      "subject": "fix(wheel): refresh assignment evidence from ledger"
+    },
+    {
+      "sha": "a49080353221b6b4516a771359ad5a51954c9de6",
+      "subject": "docs(architecture): refresh dependency graph"
+    },
+    {
+      "sha": "1c6abd26b8362f3875a1a33e809ec33cc71548fe",
+      "subject": "Merge pull request #288 from liuxie066/codex/wheel-source-evidence-refresh"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Replaced the active Bot Pi/Node answer path with the Python model-and-tool loop while preserving scoped sessions, memory, cancellation, persistence, and Feishu reply delivery.",
+      "commits": [
+        "3d08f88277443c03550760654208e7f826a1f22f"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Refreshed Wheel assignment economics from the canonical source event after fee sync, and accepted validated broker settlement shares as the contract-multiplier evidence for that assignment.",
+      "commits": [
+        "d28892800f2acdc7013fd94382ba4f36d0947c65"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "b127951062fa18ee29c5dfba25577257054173f9",
+      "reason": "Merge commit for PR #287; the user-visible change is mapped to its implementation commit."
+    },
+    {
+      "commit": "a49080353221b6b4516a771359ad5a51954c9de6",
+      "reason": "Regenerated dependency graph metadata only; no separate user-visible behavior."
+    },
+    {
+      "commit": "1c6abd26b8362f3875a1a33e809ec33cc71548fe",
+      "reason": "Merge commit for PR #288; the user-visible fix is mapped to its implementation commit."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "3d08f88277443c03550760654208e7f826a1f22f",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/287"
+      ]
+    },
+    {
+      "commit": "b127951062fa18ee29c5dfba25577257054173f9",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/287"
+      ]
+    },
+    {
+      "commit": "d28892800f2acdc7013fd94382ba4f36d0947c65",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/288"
+      ]
+    },
+    {
+      "commit": "a49080353221b6b4516a771359ad5a51954c9de6",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/288"
+      ]
+    },
+    {
+      "commit": "1c6abd26b8362f3875a1a33e809ec33cc71548fe",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/288"
+      ]
+    }
+  ]
+}
