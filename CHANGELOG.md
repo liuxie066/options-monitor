@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 3.5.5 - 2026-09-14
+
 ### Bug Fixes
 - Accepted broker-proven short-position sellable quantities and evaluated snapshot freshness after collection while preserving strict malformed, cached, and future-data rejection.
 - Preserved complete split-execution and lifecycle stock-settlement evidence when checking ledger identity conservation, while rejecting incomplete or conflicting source groups.
