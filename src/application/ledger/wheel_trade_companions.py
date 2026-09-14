@@ -5,7 +5,10 @@ from decimal import Decimal
 from typing import Any, Mapping, Sequence
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
-from domain.domain.ledger.cash_facts import cash_facts_for_trade_event
+from domain.domain.ledger.cash_facts import (
+    assignment_principal_anchor,
+    broker_settlement_multiplier_evidence,
+)
 from domain.domain.strategy_membership import resolve_option_strategy_membership
 from domain.domain.symbol_identity import symbol_market
 from domain.domain.wheel import (
@@ -193,6 +196,9 @@ def _multiplier_evidence(
     manual_receipt = bool(
         raw.get("manual_request_id") and raw.get("manual_request_intent_hash")
     )
+    assignment_settlement_evidence = broker_settlement_multiplier_evidence(assignment)
+    if assignment_settlement_evidence:
+        evidence["assignment_settlement"] = assignment_settlement_evidence
     valid_evidence_hash = len(evidence_hash) == 64 and all(
         character in "0123456789abcdef" for character in evidence_hash
     ) and evidence_hash == canonical_sha256(multiplier_evidence)
@@ -261,6 +267,13 @@ def _multiplier_evidence(
     ):
         status = source
         multiplier = assignment_multiplier
+    elif (
+        assignment_multiplier is not None
+        and assignment_multiplier == source_multiplier
+        and assignment_settlement_evidence is not None
+    ):
+        status = "broker_settlement_pair"
+        multiplier = assignment_multiplier
     else:
         status = "unproven"
         multiplier = assignment_multiplier or source_multiplier
@@ -279,35 +292,6 @@ def _multiplier_evidence(
             }
         ),
     )
-
-
-def _assignment_principal_anchor(
-    event: Any,
-    direction: str,
-) -> tuple[str | None, str | None, str | None, tuple[str, ...]]:
-    facts = {
-        fact.fact_kind: fact
-        for fact in cash_facts_for_trade_event(event)
-        if fact.fact_kind.startswith("stock_settlement_")
-    }
-    gross = facts.get("stock_settlement_cash_gross")
-    fee = facts.get("stock_settlement_fee_cash")
-    fact_ids = tuple(sorted(fact.fact_id for fact in facts.values()))
-    if (
-        gross is None
-        or fee is None
-        or gross.amount is None
-        or fee.amount is None
-        or not gross.currency
-        or gross.currency != fee.currency
-    ):
-        currency = gross.currency if gross is not None else fee.currency if fee is not None else None
-        return None, currency, "assignment_cash_facts_unavailable", fact_ids
-    net = Decimal(gross.amount) + Decimal(fee.amount)
-    anchor = -net if direction == "call" else net
-    if anchor < 0:
-        return None, gross.currency, "assignment_cash_facts_invalid", fact_ids
-    return format(anchor, "f"), gross.currency, None, fact_ids
 
 
 def capture_wheel_trade_companion_context(
@@ -442,7 +426,7 @@ def plan_wheel_assignment_companion(
         currency,
         principal_anchor_reason,
         principal_anchor_fact_ids,
-    ) = _assignment_principal_anchor(event, direction)
+    ) = assignment_principal_anchor(event, direction)
     if principal_anchor_reason is not None:
         if internal or principal_anchor_reason != "assignment_cash_facts_unavailable":
             return None, principal_anchor_reason

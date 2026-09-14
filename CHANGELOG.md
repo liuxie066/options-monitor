@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Bug Fixes
+- Refreshed Wheel assignment economics from the canonical source event after fee sync, and accepted validated broker settlement shares as the contract-multiplier evidence for that assignment.
+
 ## 3.5.7 - 2026-09-14
 
 ### Bug Fixes

@@ -8,6 +8,10 @@ from typing import Any, Mapping, Sequence
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.engine.candidate_engine import build_candidate_rank_key
 from domain.domain.ledger import TradeEvent, project_trade_events
+from domain.domain.ledger.cash_facts import (
+    assignment_principal_anchor,
+    broker_settlement_multiplier_evidence,
+)
 from domain.domain.symbol_identity import symbol_market
 from domain.domain.trade_execution import futu_order_namespace_issue
 
@@ -2633,11 +2637,12 @@ def project_wheel_branches(
             children_by_parent[parent].append(event)
 
     active_trade_events = _active_trade_events(trade_events)
-    trade_ids = {
-        str(item.get("event_id") or "").strip()
+    trade_by_id = {
+        str(item.get("event_id") or "").strip(): item
         for item in active_trade_events
         if str(item.get("event_id") or "").strip()
     }
+    trade_ids = set(trade_by_id)
     allocations_by_lot: dict[str, list[Any]] = defaultdict(list)
     allocation_projection_available = True
     try:
@@ -2707,6 +2712,13 @@ def project_wheel_branches(
         ).strip()
         if not source_assignment_event_id or source_assignment_event_id not in trade_ids:
             reasons.add("wheel_branch_source_invalid")
+        source_assignment = None
+        try:
+            source_assignment = TradeEvent.from_dict(
+                dict(trade_by_id[source_assignment_event_id])
+            )
+        except (KeyError, TypeError, ValueError, OverflowError):
+            pass
         try:
             initial_contracts = _positive_int(payload.get("contracts"), "contracts")
         except ValueError:
@@ -2722,19 +2734,49 @@ def project_wheel_branches(
             multiplier = 0
             reasons.add("wheel_branch_quantity_invalid")
         multiplier_source = str(payload.get("multiplier_source") or "").strip()
-        if not multiplier_source or not str(
+        multiplier_evidence_hash = str(
             payload.get("multiplier_evidence_hash") or ""
-        ).strip():
+        ).strip()
+        assignment_multiplier_evidence = (
+            broker_settlement_multiplier_evidence(source_assignment)
+            if source_assignment is not None
+            else None
+        )
+        if (
+            assignment_multiplier_evidence is not None
+            and assignment_multiplier_evidence["multiplier"] == multiplier
+        ):
+            multiplier_source = "broker_settlement_pair"
+            multiplier_evidence_hash = canonical_sha256(
+                assignment_multiplier_evidence
+            )
+        if not multiplier_source or not multiplier_evidence_hash:
             reasons.add("multiplier_unproven")
         elif multiplier_source == "unproven":
             reasons.add("multiplier_unproven")
         elif multiplier_source == "conflict":
             reasons.add("multiplier_conflict")
-        if payload.get("principal_anchor") in (None, ""):
+        principal_anchor = payload.get("principal_anchor")
+        currency = payload.get("currency")
+        principal_anchor_fact_ids = tuple(
+            payload.get("principal_anchor_fact_ids") or ()
+        )
+        if principal_anchor in (None, "") and source_assignment is not None:
+            (
+                current_anchor,
+                current_currency,
+                _current_anchor_reason,
+                current_fact_ids,
+            ) = assignment_principal_anchor(source_assignment, direction)
+            if current_anchor is not None:
+                principal_anchor = current_anchor
+                currency = current_currency
+                principal_anchor_fact_ids = current_fact_ids
+        if principal_anchor in (None, ""):
             reasons.add(
                 str(payload.get("principal_anchor_reason") or "principal_anchor_unavailable")
             )
-        if not str(payload.get("currency") or "").strip():
+        if not str(currency or "").strip():
             reasons.add("assignment_currency_unavailable")
         child_events = children_by_parent.get(branch_id, [])
         converted_contracts = 0
@@ -2943,6 +2985,13 @@ def project_wheel_branches(
             ],
             "assigned_stock": _stable_stock_fact(stock_row),
             "realized_put_net_pnl_in_current_stage": realized_put_net_pnl,
+            "source_assignment_facts": {
+                "multiplier_source": multiplier_source,
+                "multiplier_evidence_hash": multiplier_evidence_hash,
+                "principal_anchor": principal_anchor,
+                "principal_anchor_fact_ids": principal_anchor_fact_ids,
+                "currency": currency,
+            },
         }
         branch_generation_hash = canonical_sha256(generation_payload)
         branch = {
@@ -2971,9 +3020,9 @@ def project_wheel_branches(
                 if stock_row is not None
                 else None
             ),
-            "principal_anchor": payload.get("principal_anchor"),
+            "principal_anchor": principal_anchor,
             "realized_put_net_pnl_in_current_stage": realized_put_net_pnl,
-            "currency": payload.get("currency"),
+            "currency": currency,
             "activation_window": payload.get("activation_window"),
             "start_event_id": created["event_id"],
             "terminal_event_id": terminal_event_id,
