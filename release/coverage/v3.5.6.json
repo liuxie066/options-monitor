@@ -1,0 +1,112 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.5.6",
+  "base": {
+    "tag": "v3.5.5",
+    "commit": "1a9d01df8b10db825a6f4a49f2978dbcd81e8ac1"
+  },
+  "reviewed_head": "f33a19297a8e467b4b556e02f33262d0815fe72d",
+  "commits": [
+    {
+      "sha": "9c339508fe3bb551b6e6fe337f395ab50a3bb523",
+      "subject": "fix(ledger): preserve historical time and reconcile complete stock sale allocations"
+    },
+    {
+      "sha": "d1ac9d54b3cc8eb67b789d18a6fece0e75c1ecfc",
+      "subject": "fix(wheel): recover assignment monitoring and stock fees"
+    },
+    {
+      "sha": "fb4daba66ec12a20c5d65e6cdfbb7be1e169c4f1",
+      "subject": "Merge pull request #282 from liuxie066/codex/fix-historical-close-time"
+    },
+    {
+      "sha": "6d1c563d7ea008cb64e0cb14602a09ffa8a5b56a",
+      "subject": "chore(merge): update main baseline"
+    },
+    {
+      "sha": "f33a19297a8e467b4b556e02f33262d0815fe72d",
+      "subject": "Merge pull request #283 from liuxie066/codex/wheel-assignment-recovery"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Restored missing Wheel assignment branches as visible fail-closed monitoring state, including an explicit transition for fully closed Combo Yield funding-put assignments without changing the original trade history.",
+      "commits": [
+        "d1ac9d54b3cc8eb67b789d18a6fece0e75c1ecfc"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Refreshed unverified contract-multiplier cache entries from OpenD and recorded actual assigned-stock settlement fees separately from zero-fee option assignment events.",
+      "commits": [
+        "d1ac9d54b3cc8eb67b789d18a6fece0e75c1ecfc"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Preserved validated historical event timestamps when repairing lifecycle records, without moving old assignments behind newer ledger events.",
+      "commits": [
+        "9c339508fe3bb551b6e6fe337f395ab50a3bb523"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Reconciled a single broker stock sale across its complete assigned-stock inventory while retaining one execution identity, conserved fees and cash, and safe replay.",
+      "commits": [
+        "9c339508fe3bb551b6e6fe337f395ab50a3bb523"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "fb4daba66ec12a20c5d65e6cdfbb7be1e169c4f1",
+      "reason": "Merge-only commit for PR #282; both user-visible changes are covered by its source commit."
+    },
+    {
+      "commit": "6d1c563d7ea008cb64e0cb14602a09ffa8a5b56a",
+      "reason": "Merge-only baseline update inside PR #283; user-visible changes are covered by the Wheel source commit."
+    },
+    {
+      "commit": "f33a19297a8e467b4b556e02f33262d0815fe72d",
+      "reason": "Merge-only commit for PR #283; both user-visible changes are covered by its source commit."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "9c339508fe3bb551b6e6fe337f395ab50a3bb523",
+      "references": [
+        "docs/LEDGER_ARCHITECTURE.md",
+        "https://github.com/liuxie066/options-monitor/pull/282"
+      ]
+    },
+    {
+      "commit": "fb4daba66ec12a20c5d65e6cdfbb7be1e169c4f1",
+      "references": [
+        "docs/LEDGER_ARCHITECTURE.md",
+        "https://github.com/liuxie066/options-monitor/pull/282"
+      ]
+    },
+    {
+      "commit": "d1ac9d54b3cc8eb67b789d18a6fece0e75c1ecfc",
+      "references": [
+        "docs/WHEEL_STRATEGY_PRD.md",
+        "https://github.com/liuxie066/options-monitor/pull/283"
+      ]
+    },
+    {
+      "commit": "6d1c563d7ea008cb64e0cb14602a09ffa8a5b56a",
+      "references": [
+        "docs/WHEEL_STRATEGY_PRD.md",
+        "https://github.com/liuxie066/options-monitor/pull/283"
+      ]
+    },
+    {
+      "commit": "f33a19297a8e467b4b556e02f33262d0815fe72d",
+      "references": [
+        "docs/WHEEL_STRATEGY_PRD.md",
+        "https://github.com/liuxie066/options-monitor/pull/283"
+      ]
+    }
+  ]
+}
