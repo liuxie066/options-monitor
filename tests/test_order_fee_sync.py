@@ -350,6 +350,27 @@ def test_exact_fee_sync_changes_only_target_order_without_date_range(
         ).fetchone()[0] == 1
 
 
+def test_exact_fee_sync_queries_complete_broker_day_for_millisecond_fill(
+    tmp_path: Path,
+) -> None:
+    event_time_ms = 1_789_126_473_793
+    repo = _repo_with_bare_option_event(tmp_path, event_time_ms=event_time_ms)
+    provider = _Provider()
+
+    sync_order_fees(
+        repo,
+        account="lx",
+        provider=provider,
+        apply=False,
+        observed_at_ms=event_time_ms + 10,
+        target_identity=("富途", "lx", "123", "order-1"),
+    )
+
+    assert provider.terminal_kwargs[0]["start"] == "2026-09-11 00:00:00"
+    assert provider.terminal_kwargs[0]["end"] == "2026-09-11 23:59:59"
+    assert provider.terminal_kwargs[0]["exact"] is True
+
+
 def test_exact_fee_sync_uses_complete_order_group_across_dates(tmp_path: Path) -> None:
     repo = _repo_with_bare_option_event(tmp_path)
     first = TradeEvent.from_dict(repo.list_trade_events()[0])
