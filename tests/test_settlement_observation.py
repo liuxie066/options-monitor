@@ -862,6 +862,8 @@ class _Gateway:
 
 
 class _NativeFutuExpiryOrderGateway(_Gateway):
+    create_time = "2026-08-21 16:00:00"
+
     def get_history_orders(self, **kwargs: object) -> dict:
         from src.infrastructure.futu_gateway import (
             _annotate_futu_history_order_receipt,
@@ -881,7 +883,7 @@ class _NativeFutuExpiryOrderGateway(_Gateway):
                     "dealt_avg_price": 0.0,
                     "last_err_msg": "",
                     "remark": "",
-                    "create_time": "2026-08-21 16:00:00",
+                    "create_time": self.create_time,
                 }
             ]
         ))
@@ -984,14 +986,29 @@ def test_complete_observation_revalidates_frozen_calendar_window(
     assert "account_cash_flows" not in observation["source_receipts"]
 
 
+@pytest.mark.parametrize(
+    ("create_time", "complete"),
+    [
+        ("2026-08-21 16:00:00", True),
+        ("2026-08-22 01:06:53", True),
+        ("2026-08-23 00:00:00", False),
+        ("2026-08-20 23:59:59", False),
+    ],
+)
 def test_complete_observation_classifies_native_futu_zero_price_expiry_order(
     tmp_path: Path,
+    create_time: str,
+    complete: bool,
 ) -> None:
-    observation = _collect(tmp_path, _NativeFutuExpiryOrderGateway())
+    gateway = _NativeFutuExpiryOrderGateway()
+    gateway.create_time = create_time
+    observation = _collect(tmp_path, gateway)
 
-    assert observation["complete"] is True
+    assert observation["complete"] is complete
     assert observation["normal_order_present"] is False
-    assert observation["incomplete_reason_codes"] == []
+    assert observation["incomplete_reason_codes"] == (
+        [] if complete else ["anchor_order_classification_ambiguous"]
+    )
 
 
 def test_native_futu_positive_price_order_remains_ambiguous(
