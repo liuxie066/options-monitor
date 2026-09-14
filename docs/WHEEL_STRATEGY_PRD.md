@@ -1222,3 +1222,26 @@ Agent `wheel_activation` 使用相同的 `expected_source_sha256`、`apply`、`c
 有效配置比较使用既有 Wheel materializer 展开缺省 call/put 参数后比较；这允许首次显式写入
 等价默认值，同时保留其它字段并拒绝任何策略值变化。文件访问身份检查沿用部署用户，
 不自动迁移 owner、group 或定制 ACL。
+
+
+## 指派后 Wheel 监控接入与受控恢复
+
+目标：已在 Wheel 激活窗口内完成的普通 CSP/CC 指派，不因收益计算证据不完整而静默消失；已完整结束的 Combo Yield funding Put 可显式转入 Wheel。非目标：自动交易、放宽推荐门槛、补造费用或乘数证据、回填启用前历史、改写原始成交/指派。
+
+现状：指派入账 owner 已生成 canonical assignment；Wheel companion 在乘数来源不可证明、交割费用缺失或币种缺失时提前跳过，而现有 Wheel 分支投影原本已支持 multiplier_unproven、principal_anchor 缺失等阻塞原因。腾讯 lx、sy 指派时间晚于各自持久激活窗口；其乘数数值为 100 但来源尚未证明，交割费用此前未被手续费同步器选中。sy 的 funding Put 已指派，配对 Long Call 已到期关闭，原 Combo Yield 已结束。
+
+设计：复用 wheel_branch_created 和现有阻塞投影。身份、账户、策略、激活窗口及正整数数量一致性仍是入场条件；对数值一致但 provenance 未证实的乘数，以及缺少真实费用的本金，不伪造证明或金额，创建可见但禁止推荐的分支。币种沿用 canonical cash-fact owner 的已解析币种，显式交割币种冲突仍拒绝。上游 broker settlement pair 在已有来源具备币种/实际费用时保留这些字段；缺失不得填零。Daily Brief 用中文显示实际阻塞原因。
+
+恢复：在现有 Wheel CLI/ledger owner 增加按 account、market、assignment-event-id 定位的 recover 操作，默认只读 preview；apply 必须绑定 preview hash 并显式确认。在同一 ledger 写锁/事务内重查原指派、无 void、普通 CSP/CC 策略、历史激活窗口及现有分支；复用同一 companion 规则与确定性事件 ID，恢复只添加缺失 Wheel 事件，不重记交易、现金、股票交割或通知。已完整结束的 Combo Yield 仅在显式参数开启时允许转换，并要求有效 group identity、精确两腿成员、funding Put 是目标指派、两腿均无未平仓合约且配对腿存在有效终态事件；原组合交易历史保持不变。已存在相同分支返回无效果；不同账户/市场、启用前、活动或冲突组合、已 void 或身份/数量冲突拒绝。恢复后读取 Wheel 投影证明分支可见且证据不足仍不能推荐。恢复使用原指派时间判定资格，并以当前时间回读；恢复不重建漏失的后续 child。若源指派之后存在无法证明属于已关闭组合的成交、卖股、再次交割或关联变化，则拒绝并列出事件 ID。
+
+实施增量：1. 修复 companion 的证据不全可见性、上游已知字段保留及简报原因；2. 精确恢复 preview/apply/replay 与 CLI；3. 让手续费同步器按股票交割订单补录实际费用，并让未验证乘数缓存继续尝试 OpenD。不增加 schema、并行账本或新状态。
+
+验收：从真实指派写入 facade 覆盖入账成功且仅生成一个受阻 Wheel 分支；有效完整证据仍可正常投影；缺费用不变为零，未证实乘数不变为已验证；账户/策略/激活/void/冲突隔离；完整关闭组合只能显式转换，活动组合和无关后续交易拒绝；恢复默认无写、hash 漂移拒绝、重复执行无重复事件、回滚；简报包含腾讯及中文阻塞原因，候选/intent 路径不能消费受阻分支。运行相关 integration/CLI/renderer 检查与项目必需门禁。
+
+风险：加入监控不等于有可交易候选；乘数 provenance 未完成补证时分支保持不可推荐。生产恢复只在新版本按受控发布与升级流程安装后执行。
+
+本节仅替代 §13.4/§13.8 中普通 CSP/CC 入口的证据完整性限制；内部 Wheel 转换仍沿用原有 pending child 与证据门槛。数值非法、乘数冲突、数量不符、负本金和显式币种冲突仍拒绝。不可用本金保持 null，缺费不得当作零费用。
+
+recover preview 必须在构造 writer 前使用既有只读连接；缺库/缺 schema 不创建目录、schema 或迁移。hash 绑定解析后的 ledger 路径与文件身份、账户/市场、canonical 指派/来源 lot/open、void 和相关后续事实、历史激活窗口、已有 Wheel 事实及计划事件内容；不包含当前时钟或无关扫描日志。事务内先识别同一确定性事件的相同 payload 并返回 no-effect（自身新增事实不得使成功后的重试失效），不同 payload 冲突；首次追加前重算 hash。恢复不会刷新已有创建事件证据；后续补证需独立受控修复，不能声称本次恢复会自动解除阻塞。
+
+具体阻塞原因通过现有投影 reason_codes、扫描 scope/snapshot、Brief service 到 renderer 保留；至少分别验证真实 writer 的未知乘数来源与未知交割费用路径，以及共享 companion 的两个调用入口。生产恢复使用升级后的正式 CLI 读取明确的远端 runtime 路径，只追加授权事件，不触发补发。

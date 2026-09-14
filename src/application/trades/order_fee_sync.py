@@ -17,6 +17,7 @@ from domain.domain.option_position_identity import normalize_broker
 from domain.domain.performance.models import FeeBasis, FeeComponent, quantize_money, to_decimal
 from src.application.ledger.api import (
     enrich_order_fees,
+    stock_settlement_fee_context,
     futu_order_namespace_issue,
     zero_option_fee_lifecycle_reason,
 )
@@ -362,6 +363,7 @@ def _select_candidates(
         if event.event_type == "void" and event.target_event_id
     }
     grouped: dict[tuple[str, str, str, str], list[tuple[str, Any]]] = {}
+    blocked_identities: set[tuple[str, str, str, str]] = set()
     for event in events:
         if (
             event.event_id in voided
@@ -370,7 +372,20 @@ def _select_candidates(
             not in {"open", "close", "expire_close", "assignment", "exercise"}
         ):
             continue
-        if zero_option_fee_lifecycle_reason(event):
+        settlement = stock_settlement_fee_context(event)
+        if settlement is not None:
+            identity = _identity(event.contract_key.broker, account, settlement.get("futu_account_id"), settlement.get("order_id"))
+            problem = settlement["fee_identity_issue"] or ("order_identity_missing" if identity is None else None)
+            if normalize_broker(event.contract_key.broker) != "富途":
+                problem = "unsupported_broker_fee_schedule"
+            if problem:
+                if identity is not None:
+                    blocked_identities.add(identity)
+                if (target_identity is None or identity == target_identity) and _in_range(event.event_time_ms, start_ms, end_exclusive_ms):
+                    issues.append({"event_kind": "stock_settlement", "event_id": event.event_id, "reason": problem})
+            else:
+                grouped.setdefault(identity, []).append(("stock_settlement", settlement))
+        if zero_option_fee_lifecycle_reason(event) or settlement is not None:
             continue
         if normalize_broker(event.contract_key.broker) != "富途":
             if target_identity is None and _in_range(
@@ -462,6 +477,8 @@ def _select_candidates(
     candidates: list[dict[str, Any]] = []
     target_seen = False
     for identity, typed_rows in grouped.items():
+        if identity in blocked_identities:
+            continue
         times = [_time_ms(value) for _kind, value in typed_rows]
         if target_identity is not None:
             if identity != target_identity:
@@ -508,6 +525,17 @@ def _select_candidates(
             facts = [fee_fact_for_event(value) for value in option_rows]
             quantity = sum(int(value.contracts) for value in option_rows)
             currencies = {value.currency for value in option_rows}
+        elif kind == "stock_settlement":
+            stock = [value for _kind, value in typed_rows]
+            if len({(value["symbol"], value.get("side")) for value in stock}) != 1:
+                issues.append({**_redacted(base), "reason": "stock_settlement_order_conflict"})
+                continue
+            facts = [fee_fact_from_persisted_evidence(
+                event_id=value["event_id"], component=FeeComponent.STOCK_SETTLEMENT,
+                provenance=value.get("fee_provenance"), compatibility_amount=value.get("fees", value.get("fee", 0)),
+            ) for value in stock]
+            quantity = sum(value["shares"] for value in stock)
+            currencies = {value["currency"] for value in stock}
         else:
             stock = [value for _kind, value in typed_rows]
             if len(stock) != 1:
@@ -582,7 +610,8 @@ def _admission_problem(item: Mapping[str, Any], terminal: Any) -> str | None:
         return "terminal_fill_quantity_missing"
     if dealt_qty != Decimal(int(item.get("quantity") or 0)):
         return (
-            "stock_sale_quantity_mismatch"
+            "stock_settlement_quantity_mismatch"
+            if item.get("event_kind") == "stock_settlement" else "stock_sale_quantity_mismatch"
             if item.get("event_kind") == "assigned_stock_sale"
             else "option_order_quantity_mismatch"
         )
@@ -678,7 +707,7 @@ def _contract(event: TradeEvent) -> tuple[Any, ...]:
 
 
 def _time_ms(value: Any) -> int:
-    return value.event_time_ms if isinstance(value, TradeEvent) else int(value.get("trade_time_ms") or 0)
+    return value.event_time_ms if isinstance(value, TradeEvent) else int(value.get("trade_time_ms") or value.get("event_time_ms") or 0)
 
 
 def _row_id(value: Mapping[str, Any]) -> str:

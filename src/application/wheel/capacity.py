@@ -696,6 +696,7 @@ def finalize_wheel_capacity(
                 "projection_hash": batch.get("projection_hash"),
                 "shares_remaining": int(batch.get("shares_remaining") or 0),
                 "phase": batch.get("phase"),
+                "reason_codes": list(batch.get("reason_codes") or []),
                 "candidate_status": source_scope.get("status"),
                 "reason_code": (
                     (allocation or {}).get("allocation_reason")
@@ -910,6 +911,7 @@ def finalize_wheel_put_capacity(
                 "branch_generation_hash": branch.get("branch_generation_hash"),
                 "projection_hash": branch.get("projection_hash"),
                 "phase": branch.get("phase"),
+                "reason_codes": list(branch.get("reason_codes") or []),
                 "candidate_status": scope.get("status"),
                 "reason_code": reason,
                 "raw_candidates": raw_candidates,

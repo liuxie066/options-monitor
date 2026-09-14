@@ -384,7 +384,7 @@ def test_ordinary_call_on_active_wheel_stock_requires_manual_review(tmp_path) ->
     assert [branch["direction"] for branch in branches] == ["call"]
 
 
-def test_unproven_multiplier_preserves_assignment_without_child(tmp_path) -> None:
+def test_unproven_multiplier_creates_visible_blocked_child(tmp_path) -> None:
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     persist_trade_event_objects_atomically(
         repo,
@@ -409,7 +409,10 @@ def test_unproven_multiplier_preserves_assignment_without_child(tmp_path) -> Non
 
     assert result["created"] is True
     assert result["wheel_manual_review_reason"] == "multiplier_unproven"
-    assert not repo.list_wheel_events(account="lx")
+    assert len(repo.list_wheel_events(account="lx")) == 1
+    branch = build_wheel_read_model(repo, "lx", 3_000)["wheel_branches"][0]
+    assert branch["phase"] == "data_unavailable"
+    assert result["wheel_manual_review_reason"] in branch["reason_codes"]
     assert any(row["event_id"] == "put-assignment" for row in repo.list_trade_events())
 
 
@@ -420,7 +423,7 @@ def test_unproven_multiplier_preserves_assignment_without_child(tmp_path) -> Non
         _resolver_multiplier_payload("put-open", evidence_multiplier=100),
     ],
 )
-def test_unbound_resolver_multiplier_preserves_assignment_without_child(
+def test_unbound_resolver_multiplier_creates_visible_blocked_child(
     tmp_path,
     payload,
 ) -> None:
@@ -447,7 +450,10 @@ def test_unbound_resolver_multiplier_preserves_assignment_without_child(
     )[0].to_dict()
 
     assert result["wheel_manual_review_reason"] == "multiplier_unproven"
-    assert not repo.list_wheel_events(account="lx")
+    assert len(repo.list_wheel_events(account="lx")) == 1
+    branch = build_wheel_read_model(repo, "lx", 3_000)["wheel_branches"][0]
+    assert branch["phase"] == "data_unavailable"
+    assert result["wheel_manual_review_reason"] in branch["reason_codes"]
 
 
 def test_bound_resolver_multiplier_creates_wheel_child(tmp_path) -> None:
@@ -508,7 +514,10 @@ def test_arbitrary_multiplier_source_is_not_trusted(tmp_path) -> None:
     )[0].to_dict()
 
     assert result["wheel_manual_review_reason"] == "multiplier_unproven"
-    assert not repo.list_wheel_events(account="lx")
+    assert len(repo.list_wheel_events(account="lx")) == 1
+    branch = build_wheel_read_model(repo, "lx", 3_000)["wheel_branches"][0]
+    assert branch["phase"] == "data_unavailable"
+    assert result["wheel_manual_review_reason"] in branch["reason_codes"]
 
 
 def test_fractional_multiplier_is_rejected_before_assignment(tmp_path) -> None:
@@ -655,7 +664,7 @@ def test_batched_legacy_call_assignments_use_rolling_stock_state(tmp_path) -> No
     assert {child["lifecycle_status"] for child in children} == {"pending_decision"}
 
 
-def test_unproven_assignment_fee_preserves_assignment_without_child(tmp_path) -> None:
+def test_unproven_assignment_fee_creates_visible_blocked_child(tmp_path) -> None:
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     persist_trade_event_objects_atomically(
         repo,
@@ -680,4 +689,28 @@ def test_unproven_assignment_fee_preserves_assignment_without_child(tmp_path) ->
 
     assert result["created"] is True
     assert result["wheel_manual_review_reason"] == "assignment_cash_facts_unavailable"
-    assert not repo.list_wheel_events(account="lx")
+    assert len(repo.list_wheel_events(account="lx")) == 1
+    branch = build_wheel_read_model(repo, "lx", 3_000)["wheel_branches"][0]
+    assert branch["phase"] == "data_unavailable"
+    assert result["wheel_manual_review_reason"] in branch["reason_codes"]
+
+
+def test_lifecycle_allocation_writer_creates_blocked_assignment_branch(tmp_path):
+    from tests.test_settlement_observation import (
+        _repo_with_pending_case, _collect_stock_settlement_observation,
+        reconcile_lifecycle_close_reason,
+    )
+    repo, lifecycle_case, policy, _anchor = _repo_with_pending_case(tmp_path)
+    _open_activation(repo)
+    observation, now_ms = _collect_stock_settlement_observation(
+        repo, lifecycle_case=lifecycle_case, policy=policy, stock_deal_id="wheel-stock-settlement",
+    )
+    result = reconcile_lifecycle_close_reason(
+        repo, case_id=lifecycle_case["case_id"], now_ms=now_ms,
+        observation=observation, apply_changes=True,
+    )
+    assert result["poll_settlement_results"][0]["status"] == "applied"
+    branch = build_wheel_read_model(repo, "lx", now_ms)["wheel_branches"][0]
+    assert branch["phase"] == "data_unavailable"
+    assert {"multiplier_unproven", "assignment_cash_facts_unavailable"} <= set(branch["reason_codes"])
+    assert len(repo.list_wheel_events()) == 1

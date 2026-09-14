@@ -458,6 +458,11 @@ def _render_user_view(
                 "后续｜系统将在后续批次自动重新评估。",
             ]
         )
+        if projection == "fixed_report" and view.get("wheel_batches"):
+            lines.extend([_VISIBLE_BLANK_LINE, f"{section_mark} Wheel"])
+            for item in view["wheel_batches"]:
+                lines.extend([_VISIBLE_BLANK_LINE, f"**{_flat_title(item['title'])}**"])
+                lines.extend(_flat_field_line(detail) for detail in item.get("details") or [])
         return _bounded_markdown(lines)
 
     changes = [str(item) for item in view.get("change_summaries") or [] if str(item).strip()]
@@ -603,6 +608,11 @@ def _render_user_view_card(
                 "后续｜系统将在后续批次自动重新评估。",
             ]
         )
+        if projection == "fixed_report" and view.get("wheel_batches"):
+            lines.extend(["", "## Wheel"])
+            for item in view["wheel_batches"]:
+                lines.extend(["", f"**{_flat_title(item['title'])}**"])
+                lines.extend(_flat_field_line(detail) for detail in item.get("details") or [])
         return "\n".join(lines).strip()
 
     changes = [str(item) for item in view.get("change_summaries") or [] if str(item).strip()]
@@ -968,6 +978,10 @@ def _wheel_batch_views(
         direction = _lower(row.get("direction") or "call")
         shares = max(0, int(row.get("shares_remaining") or 0))
         contracts = max(0, int(row.get("recommended_contracts") or 0))
+        if _lower(brief.get("actionability")) == "blocked" and (
+            contracts or not row.get("reason_codes")
+        ):
+            continue
         details = (
             [f"剩余股份：{shares} 股"]
             if direction == "call"
@@ -1014,9 +1028,13 @@ def _wheel_batch_views(
                     f"预计补仓后剩余现金：{_money(remainder, market=market)}"
                 )
         else:
+            reasons = list(row.get("reason_codes") or [])
+            if row.get("reason_code"):
+                reasons.append(row["reason_code"])
             details.append(
-                "状态：" + _wheel_reason_text(
-                    row.get("reason_code") or row.get("status")
+                "状态：" + "；".join(
+                    _wheel_reason_text(reason)
+                    for reason in dict.fromkeys(reasons or [row.get("status")])
                 )
             )
         out.append(
@@ -1048,7 +1066,15 @@ def _wheel_reason_text(value: Any) -> str:
         "share_capacity_oversubscribed": "Short Call 覆盖超过持股，高风险",
         "no_candidate": "当前没有通过门槛的 Call",
         "wheel_scan_failed": "Wheel 扫描失败",
+        "wheel_scan_prerequisite_unavailable": "扫描前置数据不可用",
+        "wheel_coverage_facts_unavailable": "股票覆盖数据不可用",
+        "wheel_cash_capacity_unavailable": "现金容量数据不可用",
         "data_unavailable": "数据不可用",
+        "multiplier_unproven": "合约乘数来源未核实，暂停推荐",
+        "multiplier_conflict": "合约乘数冲突，暂停推荐",
+        "assignment_cash_facts_unavailable": "指派交割金额或实际费用证据不完整，暂停推荐",
+        "assignment_currency_unavailable": "指派交割币种缺失，暂停推荐",
+        "wheel_integrity_conflict": "批次事实存在冲突，暂停推荐",
     }.get(reason, reason or "当前等待下一轮评估")
 
 

@@ -85,6 +85,7 @@ from src.application.ledger.cash_conversion_migration import (
 from src.application.ledger.order_fee_migration import (
     ActualOrderFee,
     enrich_order_fees,
+    stock_settlement_fee_context,
 )
 from src.application.ledger.order_fee_semantics import (
     futu_order_namespace_issue,
@@ -202,6 +203,7 @@ from src.application.ledger.writer_trade_events import reconcile_normalized_exec
 from src.application.ledger.current_decision_projection import (
     capture_trade_event_decision_projection_fence,
 )
+from src.application.ledger.wheel_assignment_recovery import recover_wheel_assignment
 from src.application.ledger.wheel_trade_companions import (
     append_and_verify_wheel_intent_consumption,
 )
@@ -285,6 +287,7 @@ from src.application.ledger.lifecycle_settlement_semantics import (
 )
 
 __all__ = [
+    "recover_wheel_assignment",
     "query_lifecycle_receipts", "encode_evidence_cursor", "decode_evidence_cursor",
     "MAX_TRADE_EVENT_PAGE_ROWS",
     "CURRENT_ASSIGNED_STOCK_SCHEMA",

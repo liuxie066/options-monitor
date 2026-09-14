@@ -587,6 +587,12 @@ def test_blocked_renderer_is_short_safe_and_has_no_candidate_snapshot() -> None:
     brief = _brief()
     brief["actionability"] = "blocked"
     brief["status"] = "blocked"
+    brief["wheel_batches"] = [{
+        "symbol": "UNSAFE", "recommended_contracts": 1,
+        "reason_codes": ["multiplier_unproven"],
+    }]
+    from src.application.daily_decision_brief_renderer import render_fixed_report_card_markdown
+    assert "UNSAFE" not in render_fixed_report_card_markdown(brief)
     message = render_daily_brief_lifecycle(
         {"brief": brief, "diff": {"changes": [{"change_type": "blocked"}]}, "delivery_kind": "full"},
         context=_scheduled_context(),
@@ -597,6 +603,7 @@ def test_blocked_renderer_is_short_safe_and_has_no_candidate_snapshot() -> None:
     assert "结论｜本轮行情覆盖不足，暂时无法形成可靠决策。" in message
     assert "后续｜系统将在后续批次自动重新评估。" in message
     assert "## CSP" not in message
+    assert "UNSAFE" not in message
     assert "## 持仓" not in message
     assert "MSFT" not in message
     _assert_no_internal_leak(message)

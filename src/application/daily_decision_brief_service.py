@@ -1142,6 +1142,7 @@ def _load_wheel_snapshot_family(
             "lifecycle_status": _text(batch.get("lifecycle_status")),
             "status": _text(batch.get("phase") or batch.get("candidate_status")),
             "reason_code": _text(batch.get("reason_code")) or None,
+            "reason_codes": list(batch.get("reason_codes") or []),
             "recommended_contracts": int(batch.get("granted_contracts") or 0),
             "expiration": _text(
                 (final or {}).get("expiration")

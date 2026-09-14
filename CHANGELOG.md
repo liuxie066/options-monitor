@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Bug Fixes
+- Restored missing Wheel assignment branches as visible fail-closed monitoring state, including an explicit transition for fully closed Combo Yield funding-put assignments without changing the original trade history.
+- Refreshed unverified contract-multiplier cache entries from OpenD and recorded actual assigned-stock settlement fees separately from zero-fee option assignment events.
+
 ## 3.5.5 - 2026-09-14
 
 ### Bug Fixes

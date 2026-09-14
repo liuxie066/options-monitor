@@ -406,12 +406,15 @@ def with_sqlite_repo_writer_lock(repo: Any):
 
 
 class RepositoryCoreMixin:
-    def __init__(self, db_path: Path):
+    def __init__(self, db_path: Path, *, initialize: bool = True):
         self.db_path = private_path(db_path)
         self.data_config_path: Path | None = None
         self.bootstrap_status = "not_started"
         self.bootstrap_message: str | None = None
-        self._init_db()
+        if initialize:
+            self._init_db()
+        elif not self.db_path.is_file():
+            raise ValueError("existing ledger database is required")
 
     def _connect(self) -> sqlite3.Connection:
         conn = connect_private_sqlite(self.db_path)

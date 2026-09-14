@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.ledger import position_lots_fingerprint
 from domain.domain.lifecycle_allocation import validate_stock_settlement_allocation_group
@@ -1070,6 +1072,57 @@ def _event_with_missing_fee(
         ]
     return replace(event, fees=0.0, raw_payload=payload)
 
+def _event_with_audited_settlement_fee(event: TradeEvent, existing: dict[str, Any], *, conn: Any) -> TradeEvent:
+    """Retain audited stock fees on an incomplete-fee replay; preserve all other input."""
+    if event.event_type not in {"assignment", "exercise"}:
+        return event
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='broker_fee_enrichment_audit'").fetchone() is None:
+        return event
+    stored_json = conn.execute("SELECT event_json FROM trade_events WHERE event_id = ?", (event.event_id,)).fetchone()
+    if stored_json is None:
+        return event
+    current_hash = hashlib.sha256(str(stored_json[0]).encode("utf-8")).hexdigest()
+    audited_hashes = {row[0] for row in conn.execute(
+        "SELECT after_event_sha256 FROM broker_fee_enrichment_audit WHERE event_kind = 'stock_settlement' "
+        "AND event_id = ? AND before_basis IN ('missing', 'estimated') AND after_basis = 'actual'",
+        (event.event_id,),
+    )}
+    # FX backfill/correction can legitimately change the complete event after fees.
+    # Follow only their existing, event-bound audit edges; unaudited drift still fails.
+    fx_edges = []
+    if audited_hashes and current_hash not in audited_hashes:
+        for table in ("cash_conversion_backfill_audit", "cash_conversion_correction_audit"):
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+                fx_edges.extend(conn.execute(
+                    f"SELECT previous_event_sha256, new_event_sha256 FROM {table} "
+                    "WHERE event_kind='trade_event' AND event_id=?", (event.event_id,),
+                ))
+        while additions := {after for before, after in fx_edges if before in audited_hashes} - audited_hashes:
+            audited_hashes.update(additions)
+    if current_hash not in audited_hashes:
+        return event
+    raw = dict(event.raw_payload or {})
+    stored_raw = existing.get("raw_payload") or {}
+    for key in ("stock_settlement", "stock_settlement_source"):
+        incoming, stored = raw.get(key), stored_raw.get(key)
+        if not isinstance(incoming, dict) or not isinstance(stored, dict):
+            continue
+        provenance = incoming.get("fee_provenance") or {}
+        if provenance.get("basis", "missing") not in {"missing", "estimated"}:
+            continue
+        if not provenance and any(to_decimal(incoming.get(k) or 0, field_name=k) != 0 for k in ("fees", "fee")):
+            continue
+        updated = dict(incoming)
+        for field in ("fees", "fee", "fee_provenance"):
+            if field in stored:
+                updated[field] = stored[field]
+            else:
+                updated.pop(field, None)
+        raw[key] = updated
+    # Existing replay handling already preserves the complete frozen conversion map.
+    return _event_with_existing_cash_conversions(replace(event, raw_payload=raw), existing)
+
+
 def _event_with_existing_fee_evidence(event: TradeEvent, existing: dict[str, Any]) -> TradeEvent:
     existing_payload = existing.get("raw_payload")
     if not isinstance(existing_payload, dict):
@@ -1259,6 +1312,11 @@ def persist_trade_event_objects_atomically(
             event_ids,
             conn=conn,
         )
+        storage_events = [
+            _event_with_audited_settlement_fee(event, existing_by_id[event.event_id], conn=conn)
+            if event.event_id in existing_by_id else event
+            for event in storage_events
+        ]
         settlement_events = [
             event
             for event in storage_events
