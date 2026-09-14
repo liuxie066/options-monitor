@@ -301,6 +301,7 @@ assistant:
       model: gpt-5.2
       api_key_env: OM_LLM_API_KEY
       context_window_tokens: 24000
+      max_output_tokens: 2048
 """,
         encoding="utf-8",
     )
@@ -347,6 +348,7 @@ assistant:
       model: gpt-5.2
       api_key_env: OM_LLM_API_KEY
       context_window_tokens: 24000
+      max_output_tokens: 2048
 """,
         encoding="utf-8",
     )
@@ -402,6 +404,8 @@ assistant:
         "deepseek-chat",
         "--context-window-tokens",
         "24000",
+        "--max-output-tokens",
+        "2048",
     ])
     payload = _read_json_output(capsys)
 
@@ -453,6 +457,7 @@ assistant:
       model: gpt-5.2
       api_key_env: OM_LLM_API_KEY
       context_window_tokens: 24000
+      max_output_tokens: 2048
 """,
         encoding="utf-8",
     )
@@ -469,6 +474,7 @@ assistant:
                         "base_url": "",
                         "api_key_env": "OM_LLM_API_KEY",
                         "context_window_tokens": 24_000,
+                        "max_output_tokens": 2048,
                     },
                 }
             }
@@ -519,11 +525,13 @@ assistant:
       model: gpt-5.2
       api_key_env: OM_LLM_API_KEY
       context_window_tokens: 24000
+      max_output_tokens: 2048
     deepseek-default:
       provider: deepseek
       model: deepseek-chat
       api_key_env: DEEPSEEK_API_KEY
       context_window_tokens: 24000
+      max_output_tokens: 2048
 """,
         encoding="utf-8",
     )

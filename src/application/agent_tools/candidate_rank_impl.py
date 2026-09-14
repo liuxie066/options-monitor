@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from itertools import zip_longest
 from pathlib import Path
 from typing import Any, Callable
 
@@ -12,6 +13,8 @@ from src.application.candidate_snapshot_manifest import (
 )
 from src.application.opening_candidate_snapshot import ranked_opening_candidates
 from src.application.runtime_paths import resolve_runtime_root
+from src.application.agent_tools.candidate_filter_impl import _candidate_page
+from src.application.agent_tools.project_reader import ProjectReaderError, decode_cursor, digest
 
 
 def _as_int(value: Any, *, default: int, low: int, high: int) -> int:
@@ -89,12 +92,16 @@ def candidate_rank_explain_tool(
     mode_filter = _mode(payload.get("mode"))
     top_n = _as_int(payload.get("top_n"), default=10, low=1, high=100)
     snapshot, manifest, selection = _snapshot(payload, repo_base=repo_base)
+    requested_market = payload.get("_market")
+    markets = set(manifest.get("markets") or [])
+    if requested_market and (not markets or markets - {requested_market}):
+        raise AgentToolError(code="PERMISSION_DENIED", message="candidate source market is outside the configured scope")
     modes = ["put", "call"] if mode_filter == "all" else [mode_filter]
     groups: list[dict[str, Any]] = []
     for mode in modes:
         source_rows = ranked_opening_candidates(snapshot, mode=mode)
         ranked: list[dict[str, Any]] = []
-        for item in source_rows[:top_n]:
+        for item in source_rows:
             explanation = dict(item.get("ranking") or {})
             facts = dict(item.get("facts") or item)
             explanation.update(
@@ -139,6 +146,45 @@ def candidate_rank_explain_tool(
                 "ranked": ranked,
             }
         )
+    # Group-local recorded order stays unchanged; alternate modes so a legacy
+    # all-mode preview retains both put and call candidates.
+    grouped_rows = [[{"mode": group["mode"], **item} for item in group["ranked"]] for group in groups]
+    all_rows = [item for pair in zip_longest(*grouped_rows) for item in pair if item is not None]
+    symbol = str(payload.get("symbol") or "").strip().upper()
+    matched = [item for item in all_rows if not symbol or str(item.get("symbol") or "").upper() == symbol]
+    root = resolve_runtime_root(repo_root=repo_base(), runtime_root=payload.get("runtime_root")).runtime_root
+    page_payload = {**payload, "runtime_root": str(root)}
+    page_limit = top_n * len(modes)
+    if "limit" not in payload:
+        binding = digest({"tool": "candidate_rank_explain", "query": {
+            key: value for key, value in page_payload.items() if key != "cursor"}})
+        try:
+            state = decode_cursor(payload.get("cursor"), binding)
+        except ProjectReaderError as exc:
+            raise AgentToolError(code="INPUT_ERROR", message=exc.code,
+                hint="Repeat the query without cursor after source changes; narrow symbol/function/rule for oversized details.",
+                details={"reason": exc.code}) from None
+        start = state.get("index", 0) if state else 0
+        if type(start) is int and 0 <= start <= len(matched):
+            # Keep each mode's legacy quota, including when another mode is
+            # exhausted. The shared pager advances from this same prefix.
+            counts = dict.fromkeys(modes, 0)
+            page_limit = 0
+            for item in matched[start:start + top_n * len(modes)]:
+                if counts[item["mode"]] == top_n:
+                    break
+                counts[item["mode"]] += 1
+                page_limit += 1
+            page_limit = max(1, page_limit)
+    page, page_meta = _candidate_page(matched, page_payload,
+        tool="candidate_rank_explain", source={"snapshot": snapshot.get("content_sha256"),
+        "manifest": manifest.get("content_sha256"), "run_id": snapshot.get("run_id"), "market": snapshot.get("market")}, default=page_limit, maximum=100 * len(modes))
+    page_meta["source_run_id"] = snapshot.get("run_id")
+    page_meta["freshness"] = {"kind": "historical", "as_of": snapshot.get("sealed_at_utc")}
+    page_meta["pagination"]["total_count"] = len(all_rows)
+    for group in groups:
+        group["ranked"] = [{k: v for k, v in item.items() if k != "mode"}
+                           for item in page if item["mode"] == group["mode"]]
     ranked_flat = [item for group in groups for item in group["ranked"]]
     source = {
         "path": mask_path("state/opening_candidate_snapshot.json"),
@@ -176,6 +222,7 @@ def candidate_rank_explain_tool(
                    "selector": "explicit_run_id" if str(payload.get("run_id") or "").strip() else "latest", **selection},
         "mode": mode_filter,
         "top_n": top_n,
+        **page_meta,
         "opening_status": snapshot.get("opening_status"),
         "groups": groups,
         "ranked": ranked_flat,

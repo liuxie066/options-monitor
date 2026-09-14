@@ -22,8 +22,8 @@ Installs the latest GitHub release, or one pinned options-monitor release, into:
   <prefix>/releases/<version>
   <prefix>/current -> <prefix>/releases/<version>
 
-The installer requires Node >= 22.19.0 and npm. It downloads code, installs
-locked Python and Pi dependencies, verifies both runtimes, updates current, and
+The installer requires Python 3.12. It downloads code, installs
+locked Python dependencies, verifies the Bot runtime, updates current, and
 by default creates user-level CLI wrappers. It does not write runtime config,
 write env secrets, start services, create timers, connect to OpenD, send Feishu
 messages, or touch SQLite state.
@@ -108,27 +108,9 @@ check_python_runtime() {
     || die "Python venv module is required; executable=$PYTHON_BIN; observed=$runtime_version. Install the Python 3.12 venv package."
 }
 
-check_node_runtime() {
-  NODE_BIN="$(command -v node 2>/dev/null || true)"
-  [ -n "$NODE_BIN" ] || die "Node >= 22.19.0 is required; node was not found on PATH. Install Node 22.19.0 or newer."
-  NPM_BIN="$(command -v npm 2>/dev/null || true)"
-  [ -n "$NPM_BIN" ] || die "npm is required. Install npm for Node 22.19.0 or newer."
-  node_version="$("$NODE_BIN" --version 2>/dev/null || true)"
-  if [[ ! "$node_version" =~ ^v?([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
-    die "Node >= 22.19.0 is required; observed=${node_version:-unusable}. Install Node 22.19.0 or newer."
-  fi
-  node_major="${BASH_REMATCH[1]}"
-  node_minor="${BASH_REMATCH[2]}"
-  if (( node_major < 22 || (node_major == 22 && node_minor < 19) )); then
-    die "Node >= 22.19.0 is required; observed=$node_version. Install Node 22.19.0 or newer."
-  fi
-}
-
-run_pi_smoke() {
+run_bot_smoke() {
   release_dir="$1"
-  smoke_script="$release_dir/scripts/pi_runtime_smoke.sh"
-  [ -x "$smoke_script" ] || die "Pi runtime smoke script is missing or not executable: $smoke_script"
-  "$smoke_script" --root "$release_dir" --python "$release_dir/.venv/bin/python"
+  (cd "$release_dir" && "$release_dir/.venv/bin/python" -c 'import src.application.bot.host; import src.application.bot.runtime')
 }
 
 quote() {
@@ -325,7 +307,7 @@ bin_dir_in_path() {
 print_next_steps() {
   printf '\n[install] installed options-monitor %s\n' "$TAG"
   printf '[install] current -> %s\n\n' "$TARGET_DIR"
-  printf '[install] Pi runtime verified with Node %s\n\n' "$node_version"
+  printf '[install] Python Bot imports verified\n\n'
   if [ "$INSTALL_CLI" -eq 1 ]; then
     printf '[install] CLI wrappers installed in %s\n\n' "$(quote "$BIN_DIR")"
   fi
@@ -500,14 +482,13 @@ if [ "$TARGET_EXISTS" -eq 1 ]; then
   fi
 fi
 
-check_node_runtime
 
 if [ "$ALREADY_INSTALLED" -eq 1 ]; then
   printf '[install] options-monitor %s is already installed\n' "$TAG"
   installed_version="$(sed -n '1p' "$TARGET_DIR/VERSION" 2>/dev/null || true)"
   [ "$installed_version" = "${TAG#v}" ] \
     || die "active release VERSION mismatch; expected=${TAG#v}; observed=${installed_version:-missing}"
-  run_pi_smoke "$TARGET_DIR"
+  run_bot_smoke "$TARGET_DIR"
 else
   tmp_dir="${RELEASES_DIR}/.${TAG}.tmp.$$"
   staged_om_wrapper="${BIN_DIR}/.om.tmp.$$"
@@ -527,12 +508,7 @@ else
 
   install_optional_requirements "$tmp_dir"
 
-  printf '[install] installing locked Pi runtime dependencies\n'
-  (
-    cd "$tmp_dir"
-    "$NPM_BIN" ci --omit=dev --ignore-scripts --prefix agent-runtime
-  )
-  run_pi_smoke "$tmp_dir"
+  run_bot_smoke "$tmp_dir"
 
   if [ "$INSTALL_CLI" -eq 1 ]; then
     stage_cli_wrapper "om" "${CURRENT_LINK}/om" "$tmp_dir/om" "$staged_om_wrapper"

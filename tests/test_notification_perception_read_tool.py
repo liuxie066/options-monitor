@@ -132,14 +132,18 @@ def test_notification_perception_reader_reports_unreadable(
     audit = tmp_path / "output_shared" / "state" / "audit_events.jsonl"
     audit.parent.mkdir(parents=True)
     audit.write_text("placeholder\n", encoding="utf-8")
-    original_read_text = Path.read_text
+    import os
+    import errno
+    import src.application.agent_tools.project_reader as reader
+    original_open = os.open
 
-    def _read_text(path: Path, *args, **kwargs):  # type: ignore[no-untyped-def]
-        if path == audit:
-            raise PermissionError("denied")
-        return original_read_text(path, *args, **kwargs)
+    def denied_open(path, *args, **kwargs):
+        if str(path) == "audit_events.jsonl":
+            raise PermissionError(errno.EACCES, "denied")
+        return original_open(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "read_text", _read_text)
+    monkeypatch.setattr(reader.os, "open", denied_open)
+    monkeypatch.setattr(reader.os, "supports_dir_fd", {*os.supports_dir_fd, denied_open})
     data = read_notification_perception_events(
         repo_root=tmp_path,
         limit=10,

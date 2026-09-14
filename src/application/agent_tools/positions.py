@@ -57,7 +57,7 @@ _OPTION_PERFORMANCE_OUTPUT_CONTRACT: dict[str, Any] = {
     "bounded_projection": "contract_fields",
     "coverage": "source_declared",
     "freshness": "source_declared",
-    "pagination": {"mode": "none"},
+    "pagination": {"mode": "keyset"},
     "source_label": "OM 本地 canonical trade_events ledger",
     "fact_fields": [
         "period.kind",
@@ -110,7 +110,9 @@ _OPTION_PERFORMANCE_OUTPUT_CONTRACT: dict[str, Any] = {
         "option_net_cashflow",
         "sell_option_win_rate",
         "buy_option_win_rate",
-        "option_return",
+        "option_return", "breakdowns", "quality", "rows", "view", "group_by", "pagination",
+        "next_cursor", "continuation_status", "body_range", "body_complete", "text",
+        "available_breakdowns", "detail_query",
     ],
     "model_missing_data_fields": [
         "quality.missing",
@@ -122,7 +124,7 @@ _OPTION_PERFORMANCE_OUTPUT_CONTRACT: dict[str, Any] = {
 _OPTION_POSITIONS_LIST_OUTPUT_CONTRACT: dict[str, Any] = {
     "evidence_type": "collection",
     "bounded_projection": "contract_fields",
-    "coverage": "primary_rows",
+    "coverage": "source_declared",
     "freshness": "source_declared",
     "pagination": {"mode": "none"},
     "schema_version": "option_positions_read.list_output.v1",
@@ -200,7 +202,7 @@ _OPTION_POSITIONS_EVENTS_OUTPUT_CONTRACT = {
 _OPTION_POSITIONS_ASSIGNED_STOCK_OUTPUT_CONTRACT: dict[str, Any] = {
     "evidence_type": "collection",
     "bounded_projection": "contract_fields",
-    "coverage": "primary_rows",
+    "coverage": "source_declared",
     "freshness": "source_declared",
     "pagination": {"mode": "none"},
     "schema_version": "option_positions_read.output.v3",
@@ -309,6 +311,38 @@ _OPTION_POSITIONS_ASSIGNED_STOCK_OUTPUT_CONTRACT: dict[str, Any] = {
 }
 
 
+_OPTION_POSITIONS_HISTORY_OUTPUT_CONTRACT = {
+    "schema_version": "option_positions_read.history_output.v1", "evidence_type": "collection",
+    "bounded_projection": "contract_fields", "coverage": "source_declared", "freshness": "source_declared",
+    "pagination": {"mode": "none"}, "source_label": "OM canonical lot event history",
+    "primary_rows": "events", "row_count_field": "event_count",
+    "fact_fields": ["record_id", "events", "event_count"],
+    "model_value_fields": ["action", "record_id", "events", "event_count", "read_status", "pagination"],
+    "freshness_fields": ["freshness.as_of"], "missing_data_fields": [],
+}
+
+_OPTION_POSITIONS_INSPECT_OUTPUT_CONTRACT = {
+    "schema_version": "option_positions_read.inspect_output.v1", "evidence_type": "aggregate",
+    "bounded_projection": "contract_fields", "coverage": "source_declared", "freshness": "source_declared",
+    "pagination": {"mode": "none"}, "source_label": "OM canonical ledger projection inspection",
+    "fact_fields": ["selectors", "matched_record_ids", "current_lots", "projected_lots", "related_events", "projection_diagnostics"],
+    "model_value_fields": ["action", "selectors", "matched_record_ids", "current_lots", "projected_lots", "related_events", "projection_diagnostics", "read_status", "pagination"],
+    "freshness_fields": ["freshness.as_of"], "missing_data_fields": [],
+}
+
+
+
+def _option_performance_output_contract(payload: Mapping[str, Any]) -> dict[str, Any]:
+    contract = dict(_OPTION_PERFORMANCE_OUTPUT_CONTRACT)
+    fields = list(contract["model_value_fields"])
+    if not any(name in payload for name in ("view", "group_by", "symbol", "limit", "cursor")):
+        fields = [name for name in fields if name not in {"rows", "quality", "text", "body_range", "body_complete"}]
+    elif payload.get("view") == "summary":
+        fields = [name for name in fields if name not in {"rows", "text", "body_range", "body_complete"}]
+    contract["model_value_fields"] = fields
+    return contract
+
+
 def _mask_path_str(value: Any) -> str:
     return mask_path(value) or "..."
 
@@ -410,6 +444,10 @@ def _option_positions_output_contract(payload: dict[str, Any]) -> dict[str, Any]
         return _OPTION_POSITIONS_ASSIGNED_STOCK_OUTPUT_CONTRACT
     if action == "events":
         return _OPTION_POSITIONS_EVENTS_OUTPUT_CONTRACT
+    if action == "history":
+        return _OPTION_POSITIONS_HISTORY_OUTPUT_CONTRACT
+    if action == "inspect":
+        return _OPTION_POSITIONS_INSPECT_OUTPUT_CONTRACT
     return None
 
 
@@ -913,7 +951,18 @@ def _normalize_option_performance_bot_input(payload: Mapping[str, Any]) -> dict[
     as_of_date = normalized.get("as_of_date")
     if "as_of_date" in normalized and isinstance(as_of_date, str) and not as_of_date.strip():
         raise ValueError("as_of_date must be non-empty when provided")
+    if not any(name in normalized for name in ("view", "group_by", "symbol", "limit", "cursor")):
+        normalized["view"] = "summary"
     return normalized
+
+
+_PERFORMANCE_READ_INPUT = {
+    "view": {"type": "string", "enum": ["summary", "breakdowns", "rows"], "description": "summary preserves metrics; breakdowns/rows read existing details without recomputation"},
+    "group_by": {"type": "string", "enum": ["opening_years", "opening_months", "accounts", "currencies", "leg_types", "attribution_strategies", "parent_universes", "symbols"], "description": "Existing breakdown dimension; default symbols"},
+    "symbol": {"type": "string", "minLength": 1, "maxLength": 128, "description": "Select one existing symbol breakdown or detail rows"},
+    "limit": {"type": "integer", "minimum": 1, "maximum": 40},
+    "cursor": {"type": "string", "minLength": 1, "maxLength": 8192, "description": "Continue with unchanged filters; ledger changes invalidate the cursor"},
+}
 
 
 OPTION_PERFORMANCE_REPORT_TOOL = build_agent_tool(
@@ -953,6 +1002,7 @@ OPTION_PERFORMANCE_REPORT_TOOL = build_agent_tool(
             "description": "Required YYYY only when period is year.",
         },
         "include_rows": {"type": "boolean"},
+        **_PERFORMANCE_READ_INPUT,
     },
     handler=_option_performance_report_tool,
     pure_read=True,
@@ -966,6 +1016,7 @@ OPTION_PERFORMANCE_REPORT_TOOL = build_agent_tool(
         {"input": {"period": "mtd", "include_rows": True}},
     ),
     output_contract=_OPTION_PERFORMANCE_OUTPUT_CONTRACT,
+    output_contract_resolver=_option_performance_output_contract,
     bot_input_fields=(
         "config_key",
         "account",
@@ -973,11 +1024,12 @@ OPTION_PERFORMANCE_REPORT_TOOL = build_agent_tool(
         "period",
         "as_of_date",
         "month",
-        "year",
+        "year", "view", "group_by", "symbol", "limit", "cursor",
     ),
     bot_input_schema={
         "type": "object",
         "properties": {
+            **_PERFORMANCE_READ_INPUT,
             "config_key": {"type": "string", "enum": ["us", "hk"]},
             "account": {
                 "type": "string",

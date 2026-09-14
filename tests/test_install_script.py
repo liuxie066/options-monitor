@@ -22,7 +22,7 @@ def test_install_script_is_shell_parseable_and_has_no_service_side_effects() -> 
     assert "Default: latest published GitHub release, never main." in text
     assert "xcode-select --install" in text
     assert "python3.12-venv" in text
-    assert "Node >= 22.19.0" in text
+    assert "Node >=" not in text
     assert "systemctl enable" not in text
     assert "launchctl bootstrap" not in text
     assert "OM_FEISHU_BOT_APP_SECRET" not in text
@@ -149,7 +149,8 @@ exit 0
 SH
   cat > "$venv/bin/python" <<'SH'
 #!/usr/bin/env bash
-exit 0
+printf 'python import smoke\n' >> "${FAKE_SMOKE_LOG:?}"
+[[ "${FAKE_SMOKE_FAIL:-0}" != "1" ]]
 SH
   chmod +x "$venv/bin/pip" "$venv/bin/python"
   exit 0
@@ -258,9 +259,7 @@ def test_install_script_reinstall_current_release_is_idempotent(tmp_path: Path) 
     assert first.returncode == 0, first.stderr + first.stdout
     assert second.returncode == 0, second.stderr + second.stdout
     assert "[install] options-monitor v9.9.9 is already installed" in second.stdout
-    assert (tmp_path / "npm.log").read_text(encoding="utf-8").splitlines() == [
-        "ci --omit=dev --ignore-scripts --prefix agent-runtime"
-    ]
+    assert not (tmp_path / "npm.log").exists()
 
 
 def test_install_script_rejects_force_for_active_release_before_mutation(tmp_path: Path) -> None:
@@ -268,7 +267,7 @@ def test_install_script_rejects_force_for_active_release_before_mutation(tmp_pat
     first = _run_installer(tmp_path, env=env)
     prefix = tmp_path / "apps" / "options-monitor"
     active = prefix / "releases" / "v9.9.9"
-    marker = active / "agent-runtime" / "node_modules" / "preserve-me"
+    marker = active / "preserve-me"
     marker.write_text("active\n", encoding="utf-8")
     before = (prefix / "current").resolve()
     active_cli = (active / "om").read_bytes()
@@ -311,13 +310,13 @@ def test_install_script_force_replaces_inactive_target_only_after_smoke(tmp_path
     assert (prefix / "current").resolve() == inactive.resolve()
 
 
-def test_install_script_pi_failures_preserve_active_release(tmp_path: Path) -> None:
+def test_install_script_python_import_failures_preserve_active_release(tmp_path: Path) -> None:
     env = _installer_env(tmp_path)
     first = _run_installer(tmp_path, env=env)
     prefix = tmp_path / "apps" / "options-monitor"
     active = (prefix / "current").resolve()
 
-    for flag in ("FAKE_NPM_FAIL", "FAKE_PI_IMPORT_FAIL", "FAKE_SMOKE_FAIL"):
+    for flag in ("FAKE_SMOKE_FAIL",):
         env["FAKE_RELEASE_PATCH"] = "10"
         env[flag] = "1"
         result = _run_installer_without_version(
@@ -433,7 +432,7 @@ def test_install_script_current_switch_has_no_missing_link_window(tmp_path: Path
     assert missing_reads == []
 
 
-def test_install_script_rejects_old_node_without_changing_current(tmp_path: Path) -> None:
+def test_install_script_accepts_old_node(tmp_path: Path) -> None:
     env = _installer_env(tmp_path)
     first = _run_installer(tmp_path, env=env)
     prefix = tmp_path / "apps" / "options-monitor"
@@ -450,18 +449,17 @@ def test_install_script_rejects_old_node_without_changing_current(tmp_path: Path
         env=env,
     )
 
-    assert first.returncode == 0, first.stderr + first.stdout
-    assert result.returncode != 0
-    assert "Node >= 22.19.0 is required" in result.stderr
-    assert (prefix / "current").resolve() == active
-    assert not (prefix / "releases" / "v9.9.10").exists()
+    assert first.returncode == 0, first.stderr
+    assert result.returncode == 0, result.stderr
+    assert (prefix / "current").resolve() != active
+    assert not (tmp_path / "npm.log").exists()
 
 
 @pytest.mark.parametrize(
     ("missing_tool", "expected"),
     (("node", "node was not found on PATH"), ("npm", "npm is required")),
 )
-def test_install_script_rejects_missing_node_or_npm_without_changing_current(
+def test_install_script_accepts_missing_node_or_npm(
     tmp_path: Path,
     missing_tool: str,
     expected: str,
@@ -484,66 +482,12 @@ def test_install_script_rejects_missing_node_or_npm_without_changing_current(
         env=env,
     )
 
-    assert first.returncode == 0, first.stderr + first.stdout
-    assert result.returncode != 0
-    assert expected in result.stderr
-    assert (prefix / "current").resolve() == active
-    assert not (prefix / "releases" / "v9.9.10").exists()
+    assert first.returncode == 0, first.stderr
+    assert result.returncode == 0, result.stderr
+    assert (prefix / "current").resolve() != active
+    assert not (tmp_path / "npm.log").exists()
 
 
-def test_pi_runtime_smoke_is_hermetic_and_leaves_no_session_state(tmp_path: Path) -> None:
-    inherited_runtime = tmp_path / "inherited-runtime"
-    inherited_runtime.mkdir()
-    inherited_session = inherited_runtime / "pi_sessions.sqlite3"
-    inherited_env = tmp_path / "inherited.env"
-    inherited_env.write_text(f"OM_PI_SESSION_DB={inherited_session}\n", encoding="utf-8")
-    smoke_tmp = tmp_path / "smoke-tmp"
-    smoke_tmp.mkdir()
-    python_injection = tmp_path / "python-injection"
-    python_injection.mkdir()
-    injection_sentinel = tmp_path / "sitecustomize-ran"
-    (python_injection / "sitecustomize.py").write_text(
-        "import os; open(os.environ['OM_TEST_SITE_SENTINEL'], 'w').write('ran')\n",
-        encoding="utf-8",
-    )
-    before = set(smoke_tmp.iterdir())
-    env = os.environ.copy()
-    env.update(
-        {
-            "TMPDIR": str(smoke_tmp),
-            "OM_RUNTIME_ROOT": str(inherited_runtime),
-            "OM_ENV_FILE": str(inherited_env),
-            "OM_PI_SESSION_DB": str(inherited_session),
-            "OM_PI_MODEL_API_KEY": "must-not-be-used",
-            "OM_LLM_API_KEY": "must-not-be-used",
-            "HTTP_PROXY": "http://127.0.0.1:9",
-            "HTTPS_PROXY": "http://127.0.0.1:9",
-            "PYTHONPATH": str(python_injection),
-            "PYTHONHOME": str(tmp_path / "invalid-python-home"),
-            "OM_TEST_SITE_SENTINEL": str(injection_sentinel),
-        }
-    )
-
-    result = subprocess.run(
-        [
-            str(ROOT / "scripts" / "pi_runtime_smoke.sh"),
-            "--root",
-            str(ROOT),
-            "--python",
-            sys.executable,
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=60,
-    )
-
-    assert result.returncode == 0, result.stderr + result.stdout
-    assert "[pi-runtime] smoke passed" in result.stdout
-    assert not inherited_session.exists()
-    assert not injection_sentinel.exists()
-    assert set(smoke_tmp.iterdir()) == before
 
 
 def test_install_script_no_install_cli_skips_wrappers(tmp_path: Path) -> None:

@@ -8,7 +8,6 @@ from uuid import uuid4
 
 BOT_SAFE_ERROR_CODES = {
     "BUDGET_EXHAUSTED",
-    "ANSWER_ADMISSION_FAILED",
     "CANCELLED",
     "CONFIG_ERROR",
     "CONFIRMATION_REQUIRED",
@@ -99,13 +98,8 @@ class SceneManifest:
     tool_descriptions: list[dict[str, Any]] = field(default_factory=list)
     tool_static_payloads: dict[str, dict[str, Any]] = field(default_factory=dict)
     scene_version: str = ""
-    selected_toolsets: tuple[str, ...] = ()
     fixed_tool_input: dict[str, Any] = field(default_factory=dict)
     provenance: dict[str, Any] = field(default_factory=dict)
-    tool_loading_mode: str = "eager"
-    tool_catalog: list[dict[str, str]] = field(default_factory=list)
-    catalog_snapshot: list[dict[str, Any]] = field(default_factory=list)
-    catalog_hash: str = ""
 
 
 @dataclass(frozen=True)

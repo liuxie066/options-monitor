@@ -13,9 +13,8 @@ from src.application import service_deploy
 from src.application.agent_tools import scheduled_tasks_impl
 from src.application.config_yaml import build_yaml_runtime_config_file
 from src.application.inbound.feishu_ws import FeishuWsSettings, handle_feishu_ws_event
-from tests.test_bot_task_report import TASK_MARKER, task_claim
 from tests.test_inbound_feishu_ws import _message_payload
-from tests.test_pi_agent_process import _chat_response, _loopback_server
+from tests.bot_http_test_support import _chat_response, _loopback_server
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -34,6 +33,7 @@ def _assistant_config(tmp_path: Path, provider_url: str) -> Path:
                         "model": "om-test",
                         "base_url": provider_url + "/v1",
                         "context_window_tokens": 128000,
+                        "max_output_tokens": 2048,
                         "max_attempts": 1,
                     },
                 }
@@ -53,24 +53,6 @@ def _build_runtime_config(runtime_root: Path, *, market: str) -> Path:
         output_config_path=path,
     )
     return path
-
-
-def _claim(text: str, observation_id: str) -> dict:
-    return {
-        "text": text,
-        "kind": "current_fact",
-        "required_scope": "point",
-        "observation_ids": [observation_id],
-    }
-
-
-def _answer(text: str, claims: list[dict]) -> dict:
-    return {
-        "mode": "evidence",
-        "status": "complete",
-        "answer_markdown": text,
-        "claims": claims,
-    }
 
 
 def _observations(payload: dict) -> list[dict]:
@@ -95,7 +77,7 @@ def _reply_text(reply: dict) -> str:
     return reply["content"]["body"]["elements"][0]["content"]
 
 
-def test_feishu_key_only_scope_runs_real_pi_and_scheduler_tool(monkeypatch, tmp_path):
+def test_feishu_key_only_scope_runs_python_bot_and_runtime_status(monkeypatch, tmp_path):
     config = _build_runtime_config(tmp_path, market="us")
     state = tmp_path / "output_shared" / "state" / "scheduler_state_us.json"
     state.parent.mkdir(parents=True)
@@ -110,25 +92,18 @@ def test_feishu_key_only_scope_runs_real_pi_and_scheduler_tool(monkeypatch, tmp_
     def submit(payload):
         observations = _observations(payload)
         seen.extend(observations)
-        scheduler = next(obs for obs in observations if obs.get("tool_name") == "scheduler_status")
-        return _chat_response(
-            tool_name="submit_answer",
-            tool_arguments=_answer(
-                "US 账户 lx 的业务调度状态已读取。",
-                [_claim("US 账户 lx 的业务调度状态已读取。", scheduler["ref"])],
-            ),
-            finish_reason="tool_calls",
-            call_id="answer",
-        )
+        status = next(obs for obs in observations if obs.get("tool_name") == "runtime_status")
+        assert status["ok"] is True
+        return _chat_response(text="US 账户 lx 的运行状态已读取。")
 
     replies: list[dict] = []
     responses = [
         {
             "body": _chat_response(
-                tool_name="scheduler_status",
-                tool_arguments={"account": "lx"},
+                tool_name="runtime_status",
+                tool_arguments={},
                 finish_reason="tool_calls",
-                call_id="scheduler",
+                call_id="runtime",
             )
         },
         {"body": submit},
@@ -153,18 +128,9 @@ def test_feishu_key_only_scope_runs_real_pi_and_scheduler_tool(monkeypatch, tmp_
 
     assert out["ok"], out
     assert len(requests) == 2
-    assert replies and "业务调度状态已读取" in _reply_text(replies[-1])
-    scheduler = next(obs for obs in seen if obs.get("tool_name") == "scheduler_status")
-    assert scheduler["ok"] is True
-    assert scheduler["value"]["filters"] == {
-        "account": "lx",
-        "force": False,
-        "market": "us",
-        "schedule_key": "schedule",
-    }
-    assert scheduler["value"]["state"]["last_run_utc_for_account"] == "2026-09-11T01:40:00+00:00"
-    assert scheduler["value"]["state"]["selection"] == "production_default"
-    assert scheduler["value"]["schedule"]["selection"] == "production_default"
+    assert replies and "运行状态已读取" in _reply_text(replies[-1])
+    status = next(obs for obs in seen if obs.get("tool_name") == "runtime_status")
+    assert status["ok"] is True
     assert config.exists()
 
 
@@ -209,7 +175,7 @@ def test_feishu_initial_config_failure_precedes_model_and_tool(monkeypatch, tmp_
     assert bot_runs == 0
 
 
-def test_feishu_hk_scheduler_history_and_disabled_timer_remain_distinct(monkeypatch, tmp_path):
+def test_feishu_hk_can_use_two_active_read_tools(monkeypatch, tmp_path):
     config = _build_runtime_config(tmp_path, market="hk")
     state = tmp_path / "output_shared" / "state" / "scheduler_state_hk.json"
     state.parent.mkdir(parents=True)
@@ -254,42 +220,30 @@ def test_feishu_hk_scheduler_history_and_disabled_timer_remain_distinct(monkeypa
     monkeypatch.setenv("OM_PI_SESSION_DB", str(tmp_path / "pi.sqlite3"))
     seen: list[dict] = []
 
-    explanation = (
-        "账户 lx 的最近调度记录来自 scheduler_state_hk.json；业务通知窗口由运行配置的业务日程单独判断。"
-        "任务启用和活动状态来自 OS 读取，均不代表业务窗口或扫描成功。"
-    )
-
     def submit(payload):
         observations = _observations(payload)
         seen.extend(observations)
-        scheduler = next(obs for obs in observations if obs.get("tool_name") == "scheduler_status")
-        tasks = next(obs for obs in observations if obs.get("tool_name") == "scheduled_tasks_read")
-        return _chat_response(
-            tool_name="submit_answer",
-            tool_arguments=_answer(
-                TASK_MARKER + "\n\n" + explanation,
-                [task_claim(tasks["ref"]), _claim(explanation, scheduler["ref"])],
-            ),
-            finish_reason="tool_calls",
-            call_id="answer",
-        )
+        status = next(obs for obs in observations if obs.get("tool_name") == "runtime_status")
+        context = next(obs for obs in observations if obs.get("tool_name") == "project_context")
+        assert status["ok"] is True and context["ok"] is True
+        return _chat_response(text="HK 运行状态和项目范围已读取。")
 
     replies: list[dict] = []
     responses = [
         {
             "body": _chat_response(
-                tool_name="scheduler_status",
-                tool_arguments={"account": "lx"},
+                tool_name="runtime_status",
+                tool_arguments={},
                 finish_reason="tool_calls",
-                call_id="scheduler",
+                call_id="runtime",
             )
         },
         {
             "body": _chat_response(
-                tool_name="scheduled_tasks_read",
+                tool_name="project_context",
                 tool_arguments={},
                 finish_reason="tool_calls",
-                call_id="tasks",
+                call_id="context",
             )
         },
         {"body": submit},
@@ -314,16 +268,6 @@ def test_feishu_hk_scheduler_history_and_disabled_timer_remain_distinct(monkeypa
 
     assert out["ok"], out
     assert len(requests) == 3
-    scheduler = next(obs for obs in seen if obs.get("tool_name") == "scheduler_status")
-    assert scheduler["value"]["schedule"]["key"] == "schedule"
-    assert scheduler["value"]["state"]["last_run_utc_for_account"] == "2026-09-11T01:40:00+00:00"
-    assert scheduler["value"]["state"]["last_notify_utc_for_account"] == "2026-09-11T01:41:00+00:00"
-    tasks = next(obs for obs in seen if obs.get("tool_name") == "scheduled_tasks_read")
-    assert tasks["value"]["tasks"]
-    assert all(row["enabled"] == "disabled" for row in tasks["value"]["tasks"])
-    assert all(row["active"] == "inactive" for row in tasks["value"]["tasks"])
-    text = _reply_text(replies[-1])
-    assert "启用=disabled；活动=inactive" in text
-    assert explanation in text
-    assert "未运行" not in text and "未通知" not in text
-    assert probes
+    assert all(obs["ok"] is True for obs in seen)
+    assert "运行状态和项目范围已读取" in _reply_text(replies[-1])
+    assert probes == []

@@ -53,6 +53,31 @@ def prepare_feishu_ack_target(
     }
 
 
+def prepare_feishu_analysis_control(
+    payload: dict[str, Any], *, allowed_senders: str | None, config_key: str | None,
+    config_path: str | None, audit_db: str | None, received_monotonic: float,
+) -> dict[str, Any] | None:
+    from src.application.assistant.audit import InboundAuditStore
+    from src.application.bot.channel_facade import analysis_control_replacement, cancel_channel_analysis
+
+    if _extract_event_type(payload) != "im.message.receive_v1":
+        return None
+    try:
+        request = feishu_payload_to_inbound_request(payload, config_key=config_key,
+            config_path=config_path, audit_db=audit_db, received_monotonic=received_monotonic)
+    except AgentToolError:
+        return None
+    if analysis_control_replacement(request.text) is None:
+        return None
+    decision = check_sender_allowed(channel="feishu", sender_id=request.sender_id, allowed_senders=allowed_senders)
+    if not decision.allowed:
+        raise AgentToolError(code="PERMISSION_DENIED", message="analysis control sender is not authorized")
+    if time.monotonic() >= received_monotonic + 180:
+        raise AgentToolError(code="BUDGET_EXHAUSTED", message="analysis control deadline exceeded")
+    return cancel_channel_analysis(request=request,
+        audit_store=InboundAuditStore(audit_db, deadline_monotonic=received_monotonic + 180))
+
+
 def handle_feishu_payload(
     payload: dict[str, Any],
     *,

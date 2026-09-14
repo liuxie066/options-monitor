@@ -1008,7 +1008,7 @@ def _assistant_config_from_runtime_defaults(cfg: dict[str, Any]) -> dict[str, An
             "confidence_min": 0.75,
             "timeout_seconds": 90,
             "context_window_tokens": 24000,
-            "max_output_tokens": 2048,
+            "max_output_tokens": None,
         },
     }
 

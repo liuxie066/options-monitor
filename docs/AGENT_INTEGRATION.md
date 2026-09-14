@@ -65,6 +65,95 @@ Errors are normalized to stable codes such as:
 - 这些是顶层错误 envelope 的稳定代码。
 - 某些底层诊断项（例如 OpenD readiness probe 的细粒度失败原因）可能会体现在 `checks[]` 中，而不是顶层错误 code 枚举中。
 
+## Project reference and run evidence tools
+
+The canonical `project` toolset provides `project_context` (configuration/account
+and resource navigation) and `project_files` (list, literal search and paged read).
+The Bot Scene exposes both through the existing catalog; no shell, SQL, code
+execution or source-editing tool is added.
+
+For `resource=project`, `list` returns only the requested directory's immediate
+allowed children, with `kind=file|directory`. Directory names have no trailing
+slash and can be used directly for another `list` or `search`; only files can be
+read. An empty `relative_name` means the project root. Root list/search visit
+`src`, `domain`, `agent-runtime`, `docs`, `configs`, then allowed root Markdown
+files, retaining only existing allowed resources. `configs` permits only the
+existing example configuration path. Search remains recursive, case-sensitive
+literal matching with the first match per file. An explicit directory confines
+search to that subtree; a file path searches only that file, without listing siblings.
+Each match includes up to eight lines on each side, bounded to 1800 characters and
+always retaining the match, plus inclusive `context_start_line`/`context_end_line`.
+Use `read` with that file and start line for further implementation context.
+Long lines still start reading at the line beginning and continue by cursor. Documents remain reachable by continuation or explicit
+`relative_name=docs`. List coverage describes one layer, not its descendants.
+Each page has at most 40 entries; the existing 2,000-byte entries soft stop can
+end it earlier with continuation. Partial search is not project-wide absence.
+Project list/search cursors bind the traversal version and reject older traversal
+semantics. Page revisions bind stable returned evidence, including matching file
+hashes, rather than cursor signatures or timestamps. Project reads keep the default
+80/max 200 lines and 9000-byte output ceiling, reserving room for Bot/Host metadata;
+continuous text pages are no longer independently cut at 4000 characters. Other
+resources keep their existing paging behavior. Ordinary file/directory mismatches
+return `INPUT_ERROR` with `not_directory` or `is_directory` and a corrective hint;
+links and excluded resources remain `PERMISSION_DENIED`. Missing resources remain
+`READ_ERROR`, while no search match is a successful result with explicit coverage.
+
+```bash
+./om-agent run --tool project_context --input-json '{"config_key":"us"}'
+./om-agent run --tool project_files --input-json '{"action":"search","query":"wheel","relative_name":"src"}'
+./om-agent run --tool project_files --input-json '{"action":"read","relative_name":"docs/ARCHITECTURE.md","start_line":1,"max_lines":80}'
+./om-agent run --tool project_files --input-json '{"resource":"run","action":"list","config_key":"us","account":"lx"}'
+```
+
+Roots come from trusted project/runtime resolvers; the Bot cannot supply paths
+or roots. Runtime reading rejects the development `repo_default` root. Project
+reading permits approved documentation/source categories; runtime reading permits
+only account/market-bound candidate owner snapshots and status indexes validated
+against their formal manifest. Manifest/config/dependency bytes used internally
+for validation are not exposed as generic readable resources. Existing candidate,
+Daily Brief and receipt tools remain the preferred structured evidence owners.
+
+All filesystem reading is bounded and descriptor-based, without following links.
+A whole UTF-8 file must fit 1 MiB before redaction and paging; a bundle/search has
+an 8 MiB body budget. Directories over 10,000 entries require narrower scope.
+`value.next_cursor` is signed and binds query, source identity and configured
+scope; continue with the same filters and omit `start_line`. Source changes reject
+continuation. Missing signing capability returns `continuation_status` rather
+than an unusable cursor. `body_range` preserves source line numbering, with
+character offsets into redacted text; a returned page is not full-file coverage.
+
+Source snippets support `reference_fact` only, never current account facts.
+Historical run bodies retain account/run/time/hash provenance. Host-generated
+navigation and query-failure acknowledgements support exact `tool_status` claims
+only; the original failed observation stays failed. Status-only answers remain
+insufficient evidence, and do not complete an unfinished business investigation.
+Explicit Bot account inputs are checked against the configured account set before
+execution; aggregate tools without an account retain their existing defaults.
+
+## Bot evidence projection and Wheel activation
+
+For “Wheel 有没有正常激活？”, use the existing read-only status tool:
+
+```bash
+./om-agent run --tool runtime_status --input-json '{"config_key":"us","accounts":["lx"],"view":"wheel_activation"}'
+```
+
+`view` defaults to `summary`. The `wheel_activation` view compares the selected
+accounts' runtime configuration with durable activation windows, returning the
+market, account identities, monitoring gate, new-lifecycle eligibility and reason
+codes. Its `freshness.as_of` is the activation read time; unavailable storage
+remains `unknown`. The summary view retains scan-artifact freshness. Activation
+evidence does not establish that a scan ran, candidates exist or trades occurred.
+
+Bot `model_value_fields` explicitly selects result paths. Selected values retain
+JSON structure, empty values and all rows until the complete redacted observation
+is checked against the 4,000-token budget. Field count and nesting depth do not
+alone make evidence incomplete. Results with upstream truncation markers or an
+oversized observation still require narrowing, and cannot support complete claims.
+The Host rechecks the budget after attaching evidence metadata. Filtering is an
+option only where the tool actually supports it; identical retries do not repair
+an output limitation.
+
 ## Claude Code
 
 Use the launcher as a local command tool. Typical pattern:
@@ -171,7 +260,7 @@ preview; it cannot confirm, cancel, apply, or receive direct notification,
 config-write, ledger/trade, broker-write, service-control, or upgrade tools.
 
 The Host persists structured conversation memory, durable runs, cancellation,
-safe pure-read resume, coarse progress events, and an idempotent reply outbox.
+durable run events, cancellation, and an idempotent reply outbox.
 These are Host governance mechanisms, not additional business-routing layers.
 
 Remote channels require:

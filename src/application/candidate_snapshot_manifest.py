@@ -17,18 +17,21 @@ from src.application.cc_lp_candidate_snapshot import (
     CC_LP_CANDIDATE_SNAPSHOT_SCHEMA,
     CcLpCandidateSnapshotError,
     load_cc_lp_candidate_snapshot,
+    validate_cc_lp_candidate_snapshot,
 )
 from src.application.combo_yield_candidate_snapshot import (
     COMBO_YIELD_CANDIDATE_SNAPSHOT_FILE,
     COMBO_YIELD_CANDIDATE_SNAPSHOT_SCHEMA,
     ComboYieldCandidateSnapshotError,
     load_combo_yield_candidate_snapshot,
+    validate_combo_yield_candidate_snapshot,
 )
 from src.application.opening_candidate_snapshot import (
     OPENING_CANDIDATE_SNAPSHOT_FILE,
     OPENING_CANDIDATE_SNAPSHOT_SCHEMA,
     OpeningCandidateSnapshotError,
     load_opening_candidate_snapshot,
+    validate_opening_candidate_snapshot,
 )
 from src.application.wheel.candidate_snapshot import (
     WHEEL_CANDIDATE_SNAPSHOT_FILE_V1,
@@ -37,6 +40,7 @@ from src.application.wheel.candidate_snapshot import (
     WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V2,
     WheelCandidateSnapshotError,
     load_wheel_candidate_snapshot,
+    validate_wheel_candidate_snapshot,
 )
 from src.application.source_receipts import sha256_bytes
 from src.application.futu_quote_routing import runtime_config_market
@@ -49,8 +53,11 @@ from src.application.strategy_scan_status import (
     STRATEGY_SCAN_STATUS_INDEX_V4_SCHEMA,
     StrategyScanStatusError,
     load_strategy_scan_status_index_v2,
+    validate_strategy_scan_status_index_v2,
     load_strategy_scan_status_index_v3,
+    validate_strategy_scan_status_index_v3,
     load_strategy_scan_status_index_v4,
+    validate_strategy_scan_status_index_v4,
 )
 from src.application.tick_run_workspace import (
     AccountRunConfigError,
@@ -753,6 +760,172 @@ def validate_candidate_snapshot_manifest(
         raise CandidateSnapshotManifestError(str(exc)) from exc
 
 
+def _validate_source_status_bytes(row: Mapping[str, Any], encoded: bytes) -> None:
+    if sha256_bytes(encoded) != row["source_status_sha256"]:
+        raise CandidateSnapshotManifestError("candidate source status hash mismatch")
+    if row.get("strategy_family") != "wheel":
+        return
+    try:
+        payload = json.loads(encoded.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CandidateSnapshotManifestError(
+            "candidate Wheel source status is unreadable"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise CandidateSnapshotManifestError(
+            "candidate Wheel source status is invalid"
+        )
+    content_hash = payload.get("content_sha256")
+    content = {key: value for key, value in payload.items() if key != "content_sha256"}
+    computed = sha256_bytes(
+        json.dumps(
+            content,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    )
+    if (
+        content_hash != row.get("source_status_content_sha256")
+        or computed != content_hash
+    ):
+        raise CandidateSnapshotManifestError(
+            "candidate Wheel source status content binding mismatch"
+        )
+
+def _validate_owner_binding(snapshot: Mapping[str, Any], entry: Mapping[str, Any],
+                            manifest: Mapping[str, Any], index: Mapping[str, Any], encoded: bytes) -> None:
+    owner = str(entry["candidate_owner"])
+    manifest_v3 = manifest["schema_version"] == CANDIDATE_SNAPSHOT_MANIFEST_V3_SCHEMA
+    if sha256_bytes(encoded) != entry["sha256"]:
+        raise CandidateSnapshotManifestError(f"candidate owner snapshot hash mismatch: {owner}")
+    if snapshot.get("schema_version") != entry.get("schema_version"):
+        if owner == "wheel":
+            raise CandidateSnapshotManifestError("artifact_version_mismatch")
+        raise CandidateSnapshotManifestError(
+            f"candidate owner schema binding mismatch: {owner}"
+        )
+    if snapshot.get("content_sha256") != entry["content_sha256"]:
+        raise CandidateSnapshotManifestError(
+            f"candidate owner content binding mismatch: {owner}"
+        )
+    if snapshot.get("account_config_sha256") != manifest["account_config_sha256"]:
+        raise CandidateSnapshotManifestError(
+            f"candidate owner config binding mismatch: {owner}"
+        )
+    if snapshot.get("strategy_policy_sha256") != manifest["strategy_policy_sha256"]:
+        raise CandidateSnapshotManifestError(
+            f"candidate owner policy binding mismatch: {owner}"
+        )
+    covered = _snapshot_strategy_scopes(
+        snapshot,
+        owner=owner,
+        index_items=list(index.get("items") or []),
+        require_wheel_direction=manifest_v3,
+    )
+    if covered != entry["covered_scopes"]:
+        raise CandidateSnapshotManifestError(
+            f"candidate owner scope binding mismatch: {owner}"
+        )
+    if snapshot.get("opening_status") != entry.get("opening_status"):
+        raise CandidateSnapshotManifestError(
+            f"candidate owner status binding mismatch: {owner}"
+        )
+
+def _validate_index_binding(manifest: Mapping[str, Any], index: Mapping[str, Any], encoded: bytes,
+                            *, run_id: str, account: str) -> None:
+    binding = manifest["status_index"]
+    manifest_v3 = manifest["schema_version"] == CANDIDATE_SNAPSHOT_MANIFEST_V3_SCHEMA
+    validators = {
+        STRATEGY_SCAN_STATUS_INDEX_V2_SCHEMA: validate_strategy_scan_status_index_v2,
+        STRATEGY_SCAN_STATUS_INDEX_V3_SCHEMA: validate_strategy_scan_status_index_v3,
+        STRATEGY_SCAN_STATUS_INDEX_V4_SCHEMA: validate_strategy_scan_status_index_v4,
+    }
+    validators[binding["schema_version"]](
+        index, expected_run_id=run_id, expected_account=account,
+        expected_account_config_sha256=manifest["account_config_sha256"],
+    )
+    if sha256_bytes(encoded) != binding["sha256"]:
+        raise CandidateSnapshotManifestError("candidate status index hash mismatch")
+    if index["content_sha256"] != binding["content_sha256"]:
+        raise CandidateSnapshotManifestError("candidate status index content binding mismatch")
+    if _expected_scopes(index, require_wheel_direction=manifest_v3) != manifest["expected_scopes"]:
+        raise CandidateSnapshotManifestError("candidate status index scope binding mismatch")
+
+def _validate_bundle_inventory(manifest_name: str, manifest: Mapping[str, Any],
+                               account_names: list[str], state_names: list[str]) -> None:
+    v3 = manifest["schema_version"] == CANDIDATE_SNAPSHOT_MANIFEST_V3_SCHEMA
+    expected_name = CANDIDATE_SNAPSHOT_MANIFEST_V3_FILE if v3 else CANDIDATE_SNAPSHOT_MANIFEST_V1_FILE
+    if manifest_name != expected_name or set(state_names).intersection(_FORMAL_MANIFEST_FILES) != {expected_name}:
+        raise CandidateSnapshotManifestError("artifact_version_mismatch")
+    owner_files = _OWNER_FILES_V3 if v3 else _OWNER_FILES_V1
+    expected_files = {owner_files[owner] for owner in manifest["expected_owners"]}
+    all_files = set(_OWNER_FILES_V1.values()) | set(_OWNER_FILES_V3.values())
+    if set(state_names).intersection(all_files) != expected_files:
+        raise CandidateSnapshotManifestError("artifact_version_mismatch")
+    from fnmatch import fnmatchcase
+    conflict_pattern = "*_wheel_scan_status.json" if v3 else "*_wheel_*_scan_status.v2.json"
+    if any(fnmatchcase(name, conflict_pattern) for name in account_names):
+        raise CandidateSnapshotManifestError("artifact_version_mismatch")
+    conflicting_indexes = ({STRATEGY_SCAN_STATUS_INDEX_V2_FILE, STRATEGY_SCAN_STATUS_INDEX_V3_FILE}
+                           if v3 else {STRATEGY_SCAN_STATUS_INDEX_V4_FILE})
+    if conflicting_indexes.intersection(account_names):
+        raise CandidateSnapshotManifestError("artifact_version_mismatch")
+
+def validate_candidate_snapshot_bundle_bytes(
+    *, manifest_name: str, files: Mapping[str, bytes],
+    account_names: list[str], state_names: list[str],
+    run_id: str, account: str,
+    dependencies: Mapping[str, bytes],
+    check: Callable[[], None] = lambda: None,
+) -> dict[str, Any]:
+    """Validate exactly the supplied account-relative bytes without filesystem I/O."""
+    def decoded(name: str) -> dict[str, Any]:
+        check()
+        try:
+            value = json.loads(files[name].decode("utf-8"))
+        except (KeyError, UnicodeDecodeError, ValueError) as exc:
+            raise CandidateSnapshotManifestError("candidate bundle data unavailable") from exc
+        if not isinstance(value, dict):
+            raise CandidateSnapshotManifestError("candidate bundle data invalid")
+        return value
+
+    manifest = decoded("state/" + manifest_name)
+    validate_candidate_snapshot_manifest(manifest, expected_run_id=run_id, expected_account=account)
+    _validate_bundle_inventory(manifest_name, manifest, account_names, state_names)
+    v3 = manifest["schema_version"] == CANDIDATE_SNAPSHOT_MANIFEST_V3_SCHEMA
+    binding = manifest["status_index"]
+    index = decoded(binding["relpath"])
+    _validate_index_binding(manifest, index, files[binding["relpath"]], run_id=run_id, account=account)
+    if v3:
+        for row in index["items"]:
+            check()
+            _validate_source_status_bytes(row, files[row["source_status_path"]])
+    owner_validators = {
+        "opening": validate_opening_candidate_snapshot,
+        "sp_lc": validate_combo_yield_candidate_snapshot,
+        "cc_lp": validate_cc_lp_candidate_snapshot,
+        "wheel": validate_wheel_candidate_snapshot,
+    }
+    owners = {}
+    for entry in manifest["owner_snapshots"]:
+        owner = entry["candidate_owner"]
+        snapshot = decoded(entry["relpath"])
+        kwargs = {"require_current_contract": True} if owner == "opening" else {}
+        owner_validators[owner](snapshot, expected_run_id=run_id, expected_account=account, **kwargs)
+        for dependency in snapshot.get("dependencies") or []:
+            check()
+            name = dependency.get("relpath")
+            if name and (name not in dependencies or sha256_bytes(dependencies[name]) != dependency["sha256"]):
+                raise CandidateSnapshotManifestError("candidate dependency binding mismatch")
+        _validate_owner_binding(snapshot, entry, manifest, index, files[entry["relpath"]])
+        owners[owner] = snapshot
+    check()
+    # Keep original JSON identity; legacy adaptation is for typed business reads.
+    return {"manifest": manifest, "status_index": index, "owners": owners}
+
+
 def load_candidate_snapshot_bundle(
     *,
     base: Path,
@@ -801,40 +974,25 @@ def load_candidate_snapshot_bundle(
     )
     if manifest_filename != expected_manifest_filename:
         raise CandidateSnapshotManifestError("artifact_version_mismatch")
-    owner_files = _OWNER_FILES_V3 if manifest_v3 else _OWNER_FILES_V1
     account_dir = _run_account_dir(base, run_id_norm, account_norm)
     _assert_status_version_files(account_dir, manifest_v3=manifest_v3)
+    _validate_bundle_inventory(
+        manifest_filename, manifest,
+        [item.name for item in account_dir.iterdir() if item.exists()],
+        list(set(present_manifests) | {item.name for item in state_dir.iterdir() if item.exists()}),
+    )
     index_binding = dict(manifest["status_index"])
     index_path = account_dir / str(index_binding["relpath"])
-    conflicting_indexes = (
-        (STRATEGY_SCAN_STATUS_INDEX_V2_FILE, STRATEGY_SCAN_STATUS_INDEX_V3_FILE)
-        if manifest_v3
-        else (STRATEGY_SCAN_STATUS_INDEX_V4_FILE,)
-    )
-    if any((account_dir / filename).exists() for filename in conflicting_indexes):
-        raise CandidateSnapshotManifestError("artifact_version_mismatch")
     if not index_path.is_file() or index_path.is_symlink():
         raise CandidateSnapshotManifestError("candidate status index is unavailable")
-    if sha256_bytes(index_path.read_bytes()) != index_binding["sha256"]:
-        raise CandidateSnapshotManifestError("candidate status index hash mismatch")
+    index_encoded = index_path.read_bytes()
     index = _load_status_index(
         index_path,
         run_id=run_id_norm,
         account=account_norm,
         account_config_sha256=str(manifest["account_config_sha256"]),
     )
-    if index.get("content_sha256") != index_binding["content_sha256"]:
-        raise CandidateSnapshotManifestError("candidate status index content binding mismatch")
-    scopes = _expected_scopes(index)
-    if manifest_v3:
-        scopes = _expected_scopes(index, require_wheel_direction=True)
-    if scopes != manifest["expected_scopes"]:
-        raise CandidateSnapshotManifestError("candidate status index scope binding mismatch")
-    _assert_exact_owner_files(
-        account_dir,
-        expected_owners=list(manifest["expected_owners"]),
-        owner_files=owner_files,
-    )
+    _validate_index_binding(manifest, index, index_encoded, run_id=run_id_norm, account=account_norm)
     if manifest_v3:
         _validate_v4_source_status_bindings(account_dir, index)
 
@@ -847,48 +1005,14 @@ def load_candidate_snapshot_bundle(
             raise CandidateSnapshotManifestError(
                 f"candidate owner snapshot is unavailable: {owner}"
             )
-        if sha256_bytes(snapshot_path.read_bytes()) != entry["sha256"]:
-            raise CandidateSnapshotManifestError(
-                f"candidate owner snapshot hash mismatch: {owner}"
-            )
+        snapshot_encoded = snapshot_path.read_bytes()
         snapshot = _load_owner_snapshot(
             base=Path(base),
             run_id=run_id_norm,
             account=account_norm,
             owner=owner,
         )
-        if snapshot.get("schema_version") != entry.get("schema_version"):
-            if owner == "wheel":
-                raise CandidateSnapshotManifestError("artifact_version_mismatch")
-            raise CandidateSnapshotManifestError(
-                f"candidate owner schema binding mismatch: {owner}"
-            )
-        if snapshot.get("content_sha256") != entry["content_sha256"]:
-            raise CandidateSnapshotManifestError(
-                f"candidate owner content binding mismatch: {owner}"
-            )
-        if snapshot.get("account_config_sha256") != manifest["account_config_sha256"]:
-            raise CandidateSnapshotManifestError(
-                f"candidate owner config binding mismatch: {owner}"
-            )
-        if snapshot.get("strategy_policy_sha256") != manifest["strategy_policy_sha256"]:
-            raise CandidateSnapshotManifestError(
-                f"candidate owner policy binding mismatch: {owner}"
-            )
-        covered = _snapshot_strategy_scopes(
-            snapshot,
-            owner=owner,
-            index_items=list(index.get("items") or []),
-            require_wheel_direction=manifest_v3,
-        )
-        if covered != entry["covered_scopes"]:
-            raise CandidateSnapshotManifestError(
-                f"candidate owner scope binding mismatch: {owner}"
-            )
-        if snapshot.get("opening_status") != entry.get("opening_status"):
-            raise CandidateSnapshotManifestError(
-                f"candidate owner status binding mismatch: {owner}"
-            )
+        _validate_owner_binding(snapshot, entry, manifest, index, snapshot_encoded)
         owners[owner] = snapshot
     if sorted(owners) != manifest["expected_owners"]:
         raise CandidateSnapshotManifestError("candidate owner bundle is incomplete")
@@ -918,38 +1042,7 @@ def _validate_v4_source_status_bindings(
         if not source_path.is_file() or source_path.is_symlink():
             raise CandidateSnapshotManifestError("candidate source status is unavailable")
         encoded = source_path.read_bytes()
-        if sha256_bytes(encoded) != row["source_status_sha256"]:
-            raise CandidateSnapshotManifestError("candidate source status hash mismatch")
-        if row.get("strategy_family") != "wheel":
-            continue
-        try:
-            payload = json.loads(encoded.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise CandidateSnapshotManifestError(
-                "candidate Wheel source status is unreadable"
-            ) from exc
-        if not isinstance(payload, dict):
-            raise CandidateSnapshotManifestError(
-                "candidate Wheel source status is invalid"
-            )
-        content_hash = payload.get("content_sha256")
-        content = {key: value for key, value in payload.items() if key != "content_sha256"}
-        computed = sha256_bytes(
-            json.dumps(
-                content,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-                allow_nan=False,
-            ).encode("utf-8")
-        )
-        if (
-            content_hash != row.get("source_status_content_sha256")
-            or computed != content_hash
-        ):
-            raise CandidateSnapshotManifestError(
-                "candidate Wheel source status content binding mismatch"
-            )
+        _validate_source_status_bytes(row, encoded)
 
 
 def _adapt_legacy_wheel_bundle(bundle: Mapping[str, Any]) -> dict[str, Any]:

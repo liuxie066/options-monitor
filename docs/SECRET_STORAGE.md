@@ -49,7 +49,7 @@ Facebook 等后续集成遵循同一规则：App ID 是普通配置；App Secret
 `option_positions_read action=events` 不注册或配置独立游标密钥。运行时适配层使用
 HMAC-SHA256 和固定域 `options-monitor/bot/trade-event-cursor/v1`，从
 `inbound.operation_hmac_key` 派生只用于交易事件游标的子密钥；主密钥和子密钥都不会进入
-Node、模型、日志或游标内容。缺少 inbound 密钥时分页明确失败。轮换 inbound 密钥会让尚未
+Bot 模型、日志或游标内容。缺少 inbound 密钥时分页明确失败。轮换 inbound 密钥会让尚未
 过期的旧游标立即失效，用户需要重新发起查询。已退役的
 `OM_COPILOT_CURSOR_HMAC_KEY` 仍在 systemd `UnsetEnvironment` 清理列表中，但不再是可配置凭据。
 

@@ -21,7 +21,6 @@ from src.application.bot.pi_migration import (
 )
 from src.infrastructure.pi_agent_process import run_pi_migration_bridge
 from tests.bot_pi_test_support import seed_actual_legacy_pi_store
-from tests.test_pi_agent_process import _run_session, _start_payload
 
 
 def _file_inventory(root: Path) -> dict[str, bytes]:
@@ -104,96 +103,6 @@ def _add_unreachable_committed_branch(database: Path, session_id: str) -> None:
         connection.commit()
 
 
-def test_actual_forward_admitted_turn_reverse_preserves_current_history(tmp_path):
-    fixture = seed_actual_legacy_pi_store(tmp_path / "pi_sessions.sqlite3")
-    database, old, new = fixture.database, fixture.source_runtime, fixture.target_runtime
-    assert assert_pi_storage_ready(database, old)["ok"] is True
-    with pytest.raises(ValueError, match="incompatible"):
-        assert_pi_storage_ready(database, new)
-
-    forward = migrate_pi(pi_db=database, source_runtime=old, target_runtime=new,
-                         apply=True, writers_stopped=True)
-    assert forward["ok"] is True
-    receipt = read_pi_migration_receipt(database)
-    assert receipt["phase"] == "published"
-    retained_backups = {
-        Path(receipt["backup"]["path"]): Path(receipt["backup"]["path"]).read_bytes(),
-    }
-    with pytest.raises(ValueError):
-        assert_pi_storage_ready(database, old)
-    result = _run_session(
-        database, fixture.session_id,
-        _start_payload(session_id=fixture.session_id, user_message="post-migration question",
-                       debug={"fixture_response": "post-migration answer", "delay_ms": 0,
-                              "expected_history": ["old summary", "retained question", "retained answer"]}),
-        run_id="post_migration_turn",
-    )
-    assert result["ok"] is True, result
-    assert result["result"]["committed"] is True
-    assert assert_pi_storage_ready(database, new)["ok"] is True
-    assert migrate_pi(pi_db=database, source_runtime=old, target_runtime=new,
-                      apply=True, writers_stopped=True)["already_applied"] is True
-
-    before_path = tmp_path / "current-target.json"
-    run_pi_migration_bridge("export", new, {
-        "expected-version": "0.85.1", "database": database, "output": before_path,
-    })
-    current = json.loads(before_path.read_text())
-    reverse = migrate_pi(pi_db=database, source_runtime=new, target_runtime=old,
-                         apply=True, writers_stopped=True)
-    assert reverse["ok"] is True
-    assert assert_pi_storage_ready(database, old)["ok"] is True
-    receipt = read_pi_migration_receipt(database)
-    assert receipt["prior"]["target"]["runtime"]["version"] == "0.85.1"
-    reverse_backup = Path(receipt["backup"]["path"])
-    retained_backups[reverse_backup] = reverse_backup.read_bytes()
-    after_path = tmp_path / "current-legacy.json"
-    run_pi_migration_bridge("export", old, {
-        "expected-version": "0.84.2", "database": database, "output": after_path,
-    })
-    restored = json.loads(after_path.read_text())
-    assert restored == current
-    entries = restored["sessions"][0]["entries"]
-    assert any(entry.get("data", {}).get("run_id") == "post_migration_turn" for entry in entries)
-    assert any(entry.get("type") == "compaction" for entry in entries)
-
-    assert migrate_pi(pi_db=database, source_runtime=old, target_runtime=new,
-                      apply=True, writers_stopped=True)["write_applied"] is True
-    receipt = read_pi_migration_receipt(database)
-    second_forward_backup = Path(receipt["backup"]["path"])
-    retained_backups[second_forward_backup] = second_forward_backup.read_bytes()
-    second_turn = _run_session(
-        database, fixture.session_id,
-        _start_payload(session_id=fixture.session_id, user_message="second upgrade question",
-                       debug={"fixture_response": "second upgrade answer", "delay_ms": 0}),
-        run_id="second_post_migration_turn",
-    )
-    assert second_turn["ok"] is True, second_turn
-    second_current_path = tmp_path / "second-current-target.json"
-    run_pi_migration_bridge("export", new, {
-        "expected-version": "0.85.1", "database": database, "output": second_current_path,
-    })
-    second_current = json.loads(second_current_path.read_text())
-
-    assert migrate_pi(pi_db=database, source_runtime=new, target_runtime=old,
-                      apply=True, writers_stopped=True)["write_applied"] is True
-    receipt = read_pi_migration_receipt(database)
-    second_reverse_backup = Path(receipt["backup"]["path"])
-    retained_backups[second_reverse_backup] = second_reverse_backup.read_bytes()
-    final_path = tmp_path / "second-current-legacy.json"
-    run_pi_migration_bridge("export", old, {
-        "expected-version": "0.84.2", "database": database, "output": final_path,
-    })
-    assert json.loads(final_path.read_text()) == second_current
-
-    chain = []
-    current_receipt = receipt
-    while current_receipt is not None:
-        chain.append(current_receipt)
-        current_receipt = current_receipt.get("prior")
-    assert len(chain) == 4
-    assert {Path(item["backup"]["path"]) for item in chain} == set(retained_backups)
-    assert all(path.read_bytes() == contents for path, contents in retained_backups.items())
 
 
 def test_preview_preserves_exact_file_inventory_including_sidecars(tmp_path):

@@ -6,7 +6,7 @@ import math
 from copy import deepcopy
 from typing import Any, Callable
 
-from src.application.agent_tool_registry import get_tool_definition, pure_read_tool_names, pure_read_toolsets
+from src.application.agent_tool_registry import get_tool_definition, pure_read_tool_names
 from src.application.bot.contracts import safe_error_code
 from src.application.research.redaction import redact_value
 from src.application.tool_execution import execute_tool
@@ -16,21 +16,21 @@ MAX_SUMMARY_CHARS = 600
 MAX_PREVIEW_ITEMS = 20
 MAX_PREVIEW_DEPTH = 4
 MAX_OBSERVATION_TOKENS = 4_000
+MAX_NATIVE_OBSERVATION_TOKENS = 8_000
+
+_BOT_RETIRED_READ_TOOLS = frozenset({"preview_notification", "portfolio_cash_bridge"})
 
 _BOT_HIDDEN_INPUT_NAMES = frozenset({"data_config"})
 _BOT_HIDDEN_INPUT_SUFFIXES = ("_path", "_paths", "_dir", "_root")
 
 
-def available_read_tools(toolsets: list[str] | tuple[str, ...] | None = None) -> tuple[str, ...]:
-    if not toolsets:
-        return tuple(sorted(pure_read_tool_names()))
-    registry = pure_read_toolsets()
-    names = {
-        name
-        for toolset in toolsets
-        for name in registry.get(str(toolset), ())
-    }
-    return tuple(sorted(names))
+def is_active_bot_read_tool(name: str) -> bool:
+    definition = get_tool_definition(name)
+    return name not in _BOT_RETIRED_READ_TOOLS and definition is not None and definition.is_pure_read()
+
+
+def available_read_tools() -> tuple[str, ...]:
+    return tuple(sorted(name for name in pure_read_tool_names() if is_active_bot_read_tool(name)))
 
 
 def build_tool_payload(
@@ -41,7 +41,7 @@ def build_tool_payload(
     fixed_input: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     definition = get_tool_definition(tool_name)
-    if definition is None or not definition.is_pure_read():
+    if not is_active_bot_read_tool(tool_name):
         return None, f"unsupported read-only tool: {tool_name}"
     explicit_payload: dict[str, Any] = {}
     static = (static_payloads or {}).get(tool_name)
@@ -83,6 +83,24 @@ def build_tool_payload(
         if explicit not in (None, "") and explicit != value:
             return None, f"tool input conflicts with trusted scope: {name}"
         payload[name] = value.strip() if isinstance(value, str) else value
+    if "account" in fields and payload.get("account") not in (None, ""):
+        from src.application.account_config import accounts_from_config, normalize_account_label
+        from src.application.agent_tool_config import load_runtime_config
+        from src.application.agent_tool_contracts import AgentToolError
+
+        trusted = dict(payload)
+        for key in ("config_key", "config_path"):
+            if (fixed_input or {}).get(key) not in (None, ""):
+                trusted[key] = fixed_input[key]
+        try:
+            _, config = load_runtime_config(config_key=trusted.get("config_key"), config_path=trusted.get("config_path"))
+            account = normalize_account_label(payload["account"])
+            allowed = accounts_from_config(config, fallback=())
+        except (AgentToolError, ValueError, OSError):
+            return None, "无法验证账户配置；先使用 project_context 确认有效范围。"
+        if account not in allowed:
+            return None, "account is outside the configured scope; use project_context to discover valid scope"
+        payload["account"] = account
     return payload, None
 
 
@@ -102,12 +120,23 @@ def call_read_tool(
         return _tool_error(tool_name, "INPUT_ERROR", f"unknown tool: {tool_name}")
     if not definition.is_pure_read():
         return _tool_error(tool_name, "POLICY_ERROR", f"tool is not pure read-only: {tool_name}")
+    if not is_active_bot_read_tool(tool_name):
+        return _tool_error(tool_name, "POLICY_ERROR", f"tool is unavailable in Bot: {tool_name}")
     if tool_name == "option_performance_report" and now_ms is not None:
         from src.application.agent_tools.materialization_impl import (
             option_performance_report_now_ms,
         )
 
         with option_performance_report_now_ms(now_ms):
+            return execute_tool(tool_name, payload)
+    if tool_name in {"project_context", "project_files", "runtime_runs", "runtime_logs", "notification_perception_read"}:
+        from src.application.agent_tools.project import project_query_context
+
+        with project_query_context(
+            deadline_monotonic=deadline_monotonic,
+            cancelled=cancelled,
+            project_token_limit=6500,
+        ):
             return execute_tool(tool_name, payload)
     if tool_name == "scheduled_tasks_read":
         from src.application.agent_tools.scheduled_tasks_impl import scheduled_tasks_query_context
@@ -125,7 +154,7 @@ def tool_descriptions(
     descriptions: list[dict[str, Any]] = []
     for name in tool_names:
         definition = get_tool_definition(name)
-        if definition is None or not definition.is_pure_read():
+        if not is_active_bot_read_tool(name):
             continue
         resolution_input = {
             key: value
@@ -133,6 +162,8 @@ def tool_descriptions(
             if value is not None
         }
         resolution_input.update(dict((static_payloads or {}).get(name) or {}))
+        if definition.bot_input_normalizer is not None:
+            resolution_input = definition.bot_input_normalizer(resolution_input)
         bot_schema = _bot_input_schema(definition)
         visible_properties = bot_schema.get("properties")
         visible_fields = set(visible_properties) if isinstance(visible_properties, dict) else set()
@@ -161,95 +192,12 @@ def compact_observation(
     response: dict[str, Any],
     payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    definition = get_tool_definition(tool_name)
-    output_contract = definition.resolve_output_contract(payload or {}) if definition is not None else {}
-    ok = bool(response.get("ok")) if isinstance(response, dict) else False
-    data = response.get("data") if isinstance(response, dict) and isinstance(response.get("data"), dict) else {}
-    error = response.get("error") if isinstance(response, dict) and isinstance(response.get("error"), dict) else None
-    warnings = [
-        _clip(item, 320)
-        for item in (response.get("warnings") or [])
-        if isinstance(item, (str, int, float, bool)) and str(item).strip()
-    ][:8] if isinstance(response, dict) else []
-    if not ok or error:
-        safe_error = _safe_error(error)
-        code = str((safe_error or {}).get("code") or "TOOL_ERROR")
-        failed_observation = redact_value({
-            "tool_name": tool_name,
-            "ok": False,
-            "status": "failed",
-            "error": code,
-            "code": code,
-            "message": str((safe_error or {}).get("message") or "tool failed"),
-            "retryable": bool((safe_error or {}).get("retryable", False)),
-            **(
-                {"hint": str((safe_error or {}).get("hint"))}
-                if (safe_error or {}).get("hint")
-                else {}
-            ),
-            **({"reason": str((safe_error or {}).get("reason"))} if (safe_error or {}).get("reason") else {}),
-            **({"field": str((safe_error or {}).get("field"))} if (safe_error or {}).get("field") else {}),
-            **({"details": (safe_error or {}).get("details")} if (safe_error or {}).get("details") else {}),
-        })
-        if conservative_json_tokens(failed_observation) <= MAX_OBSERVATION_TOKENS:
-            return failed_observation
-        return bounded_failed_observation(failed_observation, tool_name=tool_name)
-    model_missing_fields = output_contract.get("model_missing_data_fields")
-    has_model_missing_surface = bool(model_missing_fields) and any(
-        _values_at_path(data, str(path).split("."))
-        for path in model_missing_fields
-    )
-    missing_data = _contract_values(
-        data,
-        model_missing_fields if has_model_missing_surface else output_contract.get("missing_data_fields"),
-        missing_only=True,
-    )
-    row_count = _row_count(data, output_contract)
-    scope = _scope(data)
-    value = _model_value(data, output_contract)
-    coverage = _coverage_envelope(
-        data,
-        value,
-        output_contract,
-        payload=payload or {},
-    )
-    freshness = _freshness_envelope(data, output_contract)
-    coverage_status = str(coverage.get("status") or "unknown")
-    observation_status = (
-        "partial"
-        if missing_data or warnings or coverage_status != "complete"
-        else ("not_found" if row_count == 0 else "complete")
-    )
-    observation = redact_model_observation({
-        "tool_name": tool_name,
-        "ok": True,
-        "status": observation_status,
-        "summary": _summary(tool_name, data, None, output_contract),
-        "value": value,
-        "source": _source(data, output_contract),
-        **({"scope": scope} if scope else {}),
-        "coverage": coverage,
-        "freshness": freshness,
-        **({"as_of": freshness["as_of"]} if freshness.get("as_of") else {}),
-        **({"missing_data": missing_data} if missing_data else {}),
-        **({"warnings": warnings} if warnings else {}),
-        "result_contract": _compact_output_contract(output_contract),
-    })
-    if _contains_projection_truncation(value) or conservative_json_tokens(observation) > MAX_OBSERVATION_TOKENS:
-        hint = data.get("narrowing_hint")
-        observation = bounded_narrowing_observation(
-            observation, **({"message": _clip(hint, 320)} if isinstance(hint, str) and hint.strip() else {}),
-        )
-    return observation
+    del payload
+    return model_observation(tool_name, response)
 
 
 def conservative_json_tokens(value: Any) -> int:
-    """Estimate serialized JSON without undercounting Chinese text.
-
-    This is the shared Python-side evidence projection estimate.  Final
-    provider-input admission remains owned by the Node Runtime and Pi's
-    estimator.
-    """
+    """Estimate serialized JSON without undercounting Chinese text."""
 
     serialized = json.dumps(
         value,
@@ -267,7 +215,8 @@ def bounded_narrowing_observation(
     observation: dict[str, Any],
     *,
     tool_name: str | None = None,
-    message: str = "结果超过单次证据预算，请缩小账户、时间、标的或结果范围后重试。",
+    message: str = ("结果不完整或超过单次证据预算。若工具支持过滤或分页，请缩小范围；"
+                    "否则说明工具输出限制，不要重复相同查询。"),
     warning: str = "bounded_projection_requires_narrowing",
     minimal: bool = False,
 ) -> dict[str, Any]:
@@ -281,6 +230,13 @@ def bounded_narrowing_observation(
     ]
     if warning not in warnings:
         warnings.append(warning)
+    original_value = observation.get("value") if isinstance(observation.get("value"), dict) else {}
+    continuation = {key: original_value[key] for key in ("next_cursor", "detail_query", "continuation_status")
+                    if original_value.get(key) is not None}
+    if conservative_json_tokens(continuation) > 1500:
+        continuation = {"continuation_status": "owner_query_exceeds_observation_budget"}
+    elif not continuation:
+        continuation = {"continuation_status": "owner_has_no_continuation_for_this_output"}
     bounded = {
         key: value
         for key, value in {
@@ -288,7 +244,7 @@ def bounded_narrowing_observation(
             "ok": True,
             "status": "needs_narrowing",
             "summary": observation.get("summary"),
-            "value": {"message": message},
+            "value": {"message": message, **continuation},
             "source": observation.get("source"),
             "scope": observation.get("scope"),
             "coverage": bounded_coverage,
@@ -319,8 +275,8 @@ def bounded_narrowing_observation(
         "tool_name": tool_name or observation.get("tool_name"),
         "ok": True,
         "status": "needs_narrowing",
+        "value": {"message": message, **continuation},
         "summary": _clip(observation.get("summary"), MAX_SUMMARY_CHARS),
-        "value": {"message": message},
         "coverage": {
             "status": "partial",
             "complete_for": "point",
@@ -363,10 +319,53 @@ def bounded_failed_observation(
 
 
 def redact_model_observation(observation: dict[str, Any]) -> dict[str, Any]:
-    """Redact model data while preserving an opaque keyset continuation token."""
+    """Redact model data, retaining typed project hashes and opaque cursors."""
 
     original = deepcopy(observation)
     redacted = redact_value(original)
+    if original.get("ok") is True and original.get("tool_name") == "project_context":
+        # This owner field is a closed provenance enum, never the runtime path.
+        for container in (None, "value"):
+            source_parent = original if container is None else original.get(container)
+            target_parent = redacted if container is None else redacted.get(container)
+            if not isinstance(source_parent, dict) or not isinstance(target_parent, dict):
+                continue
+            source, target = source_parent.get("source"), target_parent.get("source")
+            if isinstance(source, dict) and isinstance(target, dict):
+                value = source.get("runtime_root_source")
+                if value in ("argument", "env:OM_RUNTIME_ROOT", "repo_default"):
+                    target["runtime_root_source"] = value
+    if original.get("ok") is True and original.get("tool_name") in {
+        "project_context", "project_files", "runtime_runs", "runtime_logs",
+        "candidate_filter_explain", "candidate_rank_explain", "option_performance_report",
+        "notification_perception_read", "daily_decision_brief_read",
+    }:
+        def restore_hashes(source: Any, target: Any) -> None:
+            if not isinstance(source, dict) or not isinstance(target, dict):
+                return
+            for field in ("revision", "content_hash", "config_revision", "source_hash", "ledger_input_hash"):
+                value = source.get(field)
+                if not isinstance(value, str):
+                    continue
+                raw_hash = value.removeprefix("sha256:")
+                if len(raw_hash) == 64 and all(char in "0123456789abcdefABCDEF" for char in raw_hash):
+                    target[field] = value
+
+        # Only typed provenance locations from canonical read owners retain hashes.
+        for path in (("source",), ("scope",), ("coverage", "scope"),
+                     ("value",), ("value", "source"), ("value", "scope"),
+                     ("value", "quality"), ("value", "coverage", "scope")):
+            source, target = original, redacted
+            for key in path:
+                source = source.get(key) if isinstance(source, dict) else None
+                target = target.get(key) if isinstance(target, dict) else None
+            restore_hashes(source, target)
+        source_value, target_value = original.get("value"), redacted.get("value")
+        if isinstance(source_value, dict) and isinstance(target_value, dict):
+            source_entries, target_entries = source_value.get("entries"), target_value.get("entries")
+            if isinstance(source_entries, list) and isinstance(target_entries, list):
+                for source, target in zip(source_entries, target_entries, strict=False):
+                    restore_hashes(source, target)
     contract = original.get("result_contract")
     pagination = contract.get("pagination") if isinstance(contract, dict) else None
     if not isinstance(pagination, dict) or pagination.get("mode") != "keyset":
@@ -540,14 +539,14 @@ def _row_count(data: dict[str, Any], output_contract: dict[str, Any]) -> int | N
 def _source(data: dict[str, Any], output_contract: dict[str, Any]) -> dict[str, Any]:
     source = data.get("source")
     if isinstance(source, dict):
-        return _preview(source)
+        return deepcopy(source)
     label = str(output_contract.get("source_label") or "").strip()
     return {"label": label} if label else {}
 
 
 def _scope(data: dict[str, Any]) -> dict[str, Any]:
     value = data.get("scope") if isinstance(data.get("scope"), dict) else data.get("filters")
-    return _preview(value) if isinstance(value, dict) else {}
+    return deepcopy(value) if isinstance(value, dict) else {}
 
 
 def _coverage_envelope(
@@ -674,7 +673,7 @@ def _normalize_declared_coverage(
     ):
         return None
     if isinstance(value.get("scope"), dict):
-        normalized["scope"] = _preview(value["scope"])
+        normalized["scope"] = deepcopy(value["scope"])
     if _is_iso_timestamp(value.get("as_of")):
         normalized["as_of"] = str(value["as_of"])
     return normalized
@@ -728,6 +727,7 @@ def _freshness_envelope(
 def _request_scope(payload: dict[str, Any]) -> dict[str, Any]:
     allowed = {
         "account",
+        "accounts",
         "action",
         "as_of_date",
         "broker",
@@ -739,9 +739,10 @@ def _request_scope(payload: dict[str, Any]) -> dict[str, Any]:
         "run_id",
         "status",
         "symbol",
+        "view",
         "year",
     }
-    return _preview({key: value for key, value in payload.items() if key in allowed})
+    return deepcopy({key: value for key, value in payload.items() if key in allowed})
 
 
 def _first_timestamp(value: Any) -> str | None:
@@ -800,14 +801,13 @@ def _contains_projection_truncation(value: Any) -> bool:
 
 
 def _agent_description(description: str, output_contract: dict[str, Any]) -> str:
-    compact = _compact_output_contract(output_contract)
     parts = [str(description).strip()]
-    if compact.get("primary_rows"):
-        parts.append(f"Returns primary collection `{compact['primary_rows']}`.")
-    if compact.get("fact_fields"):
-        parts.append("Key result fields: " + ", ".join(compact["fact_fields"]) + ".")
-    if compact.get("source_label"):
-        parts.append(f"Source: {compact['source_label']}.")
+    if output_contract.get("primary_rows"):
+        parts.append(f"Returns primary collection `{output_contract['primary_rows']}`.")
+    if output_contract.get("fact_fields"):
+        parts.append("Key result fields: " + ", ".join(output_contract["fact_fields"]) + ".")
+    if output_contract.get("source_label"):
+        parts.append(f"Source: {output_contract['source_label']}.")
     return " ".join(part for part in parts if part)
 
 
@@ -833,35 +833,18 @@ def _compact_output_contract(output_contract: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _field_priorities(output_contract: dict[str, Any]) -> dict[str, list[str]]:
-    priorities: dict[str, list[str]] = {}
-    fields = [
-        *(output_contract.get("model_preview_fields") or ()),
-        *(output_contract.get("fact_fields") or ()),
-        *(output_contract.get("freshness_fields") or ()),
-        *(output_contract.get("missing_data_fields") or ()),
-    ]
-    for raw_path in fields:
-        parts = [part for part in str(raw_path).split(".") if part]
-        for index, part in enumerate(parts):
-            parent = ".".join(parts[:index])
-            key = part[:-2] if part.endswith("[]") else part
-            priorities.setdefault(parent, [])
-            if key not in priorities[parent]:
-                priorities[parent].append(key)
-    return priorities
-
-
 def _model_value(data: dict[str, Any], output_contract: dict[str, Any]) -> dict[str, Any]:
-    if output_contract.get("schema_version") == "scheduled_tasks.output.v1":
-        # This owner already returns a safe inventory; the observation token
-        # limit below narrows it as a whole instead of changing its count.
-        return {key: deepcopy(data[key]) for key in
-            ("scope", "tasks", "count", "observed_at", "availability", "reasons") if key in data}
+    # Preserve complete values until the serialized observation budget is checked.
+    # Object width/depth alone says nothing about evidence completeness or size.
     fields = output_contract.get("model_value_fields")
-    if fields:
-        return _contract_values(data, fields, preview_max_depth=6)
-    return _preview(data, priorities=_field_priorities(output_contract))
+    if not fields:
+        return deepcopy(data)
+    out: dict[str, Any] = {}
+    for path in fields:
+        values = _values_at_path(data, str(path).split("."))
+        if values:
+            out[str(path)] = deepcopy(values[0] if len(values) == 1 else values)
+    return out
 
 
 def _preview(
@@ -1070,6 +1053,7 @@ def _clip(value: Any, limit: int) -> str:
 
 __all__ = [
     "available_read_tools",
+    "is_active_bot_read_tool",
     "audit_tool_input",
     "bounded_failed_observation",
     "bounded_narrowing_observation",
@@ -1081,3 +1065,47 @@ __all__ = [
     "audit_tool_event_payload",
     "tool_descriptions",
 ]
+
+
+def model_observation(tool_name: str, response: dict[str, Any]) -> dict[str, Any]:
+    """Pass source-owned data once, redacted and bounded; never expire successful reads."""
+    clean = _without_model_provenance(redact_value(response))
+    if not isinstance(clean, dict):
+        return {"ok": False, "tool_name": tool_name, "error": {"code": "INVALID_RESULT"}}
+    data = clean.get("data")
+    if tool_name == "runtime_runs" and isinstance(data, dict):
+        for row in data.get("runs") or ():
+            if not isinstance(row, dict):
+                continue
+            row.setdefault("outcomes", {
+                "usable_scan_result": row.get("scanned"),
+                "pipeline_completed_successfully": row.get("ran_pipeline"),
+            })
+            row.pop("scanned", None)
+            row.pop("ran_pipeline", None)
+            row.pop("terminal", None)
+    if tool_name == "project_files" and isinstance(data, dict) and data.get("action") == "read":
+        start = (data.get("body_range") or {}).get("start_line")
+        if type(start) is int and isinstance(data.get("text"), str):
+            data["text"] = "\n".join(f"{start + offset}|{line}" for offset, line in enumerate(data["text"].split("\n")))
+            data["text_format"] = "line_numbered"
+    if conservative_json_tokens(clean) > MAX_NATIVE_OBSERVATION_TOKENS:
+        data = clean.get("data") if isinstance(clean.get("data"), dict) else {}
+        return {"ok": False, "tool_name": tool_name, "status": "needs_narrowing",
+                "error": {"code": "NEEDS_NARROWING", "message": "Result exceeds this response budget; request a smaller page or source range. No complete result was read."},
+                "source": data.get("source"), "scope": data.get("scope"),
+                "coverage": {"status": "partial"}}
+    return {**clean, "tool_name": tool_name}
+
+
+def _without_model_provenance(value: Any) -> Any:
+    """Opaque digests are useful for Host validation, not for causal analysis."""
+    if isinstance(value, dict):
+        return {
+            key: _without_model_provenance(item)
+            for key, item in value.items()
+            if key not in {"revision", "content_hash", "config_revision", "source_hash", "ledger_input_hash"}
+        }
+    if isinstance(value, list):
+        return [_without_model_provenance(item) for item in value]
+    return value

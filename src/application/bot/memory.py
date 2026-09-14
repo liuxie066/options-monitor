@@ -343,7 +343,7 @@ def memory_tool_description() -> dict:
         "A partial result contains bounded previews, not the complete saved text; truncated items retain id/revision for management. "
         "Writes require the current user turn's verbatim source_quote, expected_epoch, expected_revision (0 for remember), "
         "and a unique idempotency_key. preference content must be an exact quote excerpt; experience needs original "
-        "verified source_refs and its authorized account_scope. correct/forget need one exact id; clarify ambiguity. "
+        "tool-result memory_source_ref values as source_refs and its authorized account_scope. correct/forget need one exact id; clarify ambiguity. "
         "No secrets, action authority, source edits or business writes. Confirm maintenance only from a successful readback receipt. "
         "If a write fails, retry the same idempotency key or submit exactly: 记忆操作未确认，请重试同一幂等键或重新查询。",
         "input_schema": {"type": "object", "properties": {
@@ -360,25 +360,15 @@ def memory_tool_description() -> dict:
 
 def bounded_memory_context(memory: dict, progress: list[dict], bound: dict | None = None,
                            *, limit: int = 3500) -> dict:
-    """Bound the combined injection; complete bound goal takes precedence over optional recall."""
+    """Bound legacy memory injection without carrying resumable run state."""
     from src.application.bot.tools import conservative_json_tokens
 
+    del progress, bound
     result = {'memory': {**memory, 'items': list(memory.get('items', []))},
-              'unfinished_progress': [], 'bound_progress': bound, 'additional_progress': False}
+              'unfinished_progress': [], 'bound_progress': None, 'additional_progress': False}
     while result['memory']['items'] and conservative_json_tokens(result) > limit:
         result['memory']['items'].pop()
         result['memory']['partial'] = True
     if conservative_json_tokens(result) > limit:
-        raise ValueError('MEMORY_BOUND_PROGRESS_TOO_LARGE')
-    for item in progress:
-        if bound and item.get('progress_ref') == bound.get('progress_ref'):
-            continue
-        candidate = {'progress_ref': item['progress_ref'], 'revision': item['revision'],
-                     'goal': str(item.get('goal', ''))[:160], 'accounts': item.get('accounts', []),
-                     'detail_required': True}
-        result['unfinished_progress'].append(candidate)
-        if conservative_json_tokens(result) > limit:
-            result['unfinished_progress'].pop()
-            result['additional_progress'] = True
-            break
+        raise ValueError('MEMORY_CONTEXT_TOO_LARGE')
     return result

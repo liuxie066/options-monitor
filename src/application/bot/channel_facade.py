@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -30,13 +31,46 @@ from src.application.runtime_config_freshness import (
     ensure_runtime_config_freshness,
     infer_runtime_config_market,
 )
-from src.infrastructure.pi_agent_process import derive_pi_session_id
+from src.application.bot.session import derive_session_id
 
 
 class BotConfigScopeError(ValueError):
     def __init__(self, reason: str):
         self.reason = reason
         super().__init__(reason)
+
+
+def analysis_control_replacement(text: str) -> str | None:
+    """Only complete, unquoted analysis-control utterances have authority."""
+    value = str(text or "").strip()
+    if value in {"取消分析", "停止分析"}:
+        return ""
+    match = re.fullmatch(r"取消当前分析[，,]\s*改为[：:]?\s*(\S[^\r\n]*)", value)
+    return match.group(1).strip() if match else None
+
+
+def cancel_channel_analysis(*, request: Any, audit_store: Any) -> dict[str, Any]:
+    # Sender authorization is performed by the inbound owner before this facade.
+    if not request.message_id or not request.sender_id or request.channel != "feishu":
+        raise AgentToolError(code="INPUT_ERROR", message="analysis control identity unavailable")
+    try:
+        _, resolved_path, authority_scope = resolve_trusted_config_scope(
+            config_key=request.config_key, config_path=request.config_path)
+    except BotConfigScopeError as exc:
+        raise AgentToolError(code="CHANNEL_NOT_READY", message=config_scope_error_message(exc.reason)) from exc
+    conversation = (None if request.conversation_id == f"{request.channel}:{request.sender_id}"
+                    else request.conversation_id)
+    session_key = _channel_session_key(channel=request.channel, sender_id=request.sender_id,
+        conversation_id=conversation, authority_scope=authority_scope)
+    identity = {"authenticated_channel": request.channel, "authenticated_sender_id": request.sender_id,
+        "authenticated_conversation_id": str(conversation or ""), "authority_scope": authority_scope,
+        "config_path": resolved_path}
+    store = BotHostStore(audit_store.path)
+    return audit_store.record_analysis_control_once(channel=request.channel, sender_id=request.sender_id,
+        conversation_id=request.conversation_id or f"{request.channel}:{request.sender_id}",
+        message_id=request.message_id, text=request.text,
+        scope=session_key, resolve=lambda connection: store.cancel_session_run(session_key,
+            connection=connection, trusted_identity=identity))
 
 
 def run_channel_request(
@@ -273,7 +307,7 @@ def _channel_session_key(
     if not channel_key or not sender_key:
         raise ValueError("authenticated channel identity is required")
     conversation_key = str(conversation_id or "").strip() or f"sender:{sender_key}"
-    return derive_pi_session_id(
+    return derive_session_id(
         channel_key,
         sender_key,
         conversation_key,

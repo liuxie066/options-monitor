@@ -271,11 +271,11 @@ VERSION="$(cat VERSION)"
 - 精确匹配对应的日期化版本段落并严格校验新分类
 - 使用完整 Git 历史验证 commit-to-release-note coverage，不接受漏项、无理由排除或审阅后夹带代码
 - 渲染只包含目标版本的 Release Notes
-- 重新校验 release metadata / coverage，并验证最终 source archive 中的 Pi runtime
+- 重新校验 release metadata / coverage，并验证最终 source archive 中的 Python Bot runtime
 - 发布对应 GitHub Release
 
 因此常规发布只需要把版本元数据改好，通过 Pull Request 合入 `main`；不需要再手动补打上同名 tag。
-自动 release job 复用同一次 `Guardrails` 已通过的回归结果，不重复运行同一批 Python / Pi
+自动 release job 复用同一次 `Guardrails` 已通过的回归结果，不重复运行同一批 Python Bot
 测试。普通开发提交因为不修改 `VERSION`，不会进入 release job。
 
 如果 VERSION push 已触发发布但门禁失败，应先在 `main` 修复根因并重新完成 release delta

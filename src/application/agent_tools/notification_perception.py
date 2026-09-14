@@ -15,7 +15,7 @@ _OUTPUT_CONTRACT: dict[str, Any] = {
     "bounded_projection": "contract_fields",
     "coverage": "source_declared",
     "freshness": "source_declared",
-    "pagination": {"mode": "none"},
+    "pagination": {"mode": "keyset"},
     "schema_version": "notification_perception_read.output.v1",
     "source_label": "OM tick audit assistant_perception events",
     "primary_rows": "event_summaries",
@@ -65,13 +65,28 @@ def _notification_perception_read_tool(
         repo_root=repo_base(),
         runtime_root=payload.get("runtime_root"),
     )
-    data = read_notification_perception_events(
-        repo_root=runtime_resolution.runtime_root,
-        run_id=payload.get("run_id"),
-        conversation_id=conversation_id,
-        event_kind=payload.get("event_kind"),
-        limit=int(payload.get("limit") or 10),
-    )
+    from src.application.agent_tools.project import _QUERY_CONTEXT
+    from src.application.agent_tools.project_reader import ProjectReaderError
+
+    deadline, cancelled = _QUERY_CONTEXT.get()
+    try:
+        data = read_notification_perception_events(
+            repo_root=runtime_resolution.runtime_root,
+            run_id=payload.get("run_id"),
+            conversation_id=conversation_id,
+            event_kind=payload.get("event_kind"),
+            limit=int(payload.get("limit") or 10),
+            cursor=payload.get("cursor"),
+            deadline_monotonic=deadline,
+            cancelled=cancelled,
+        )
+    except ProjectReaderError as exc:
+        if exc.code == "cancelled":
+            raise AgentToolError(code="CANCELLED", message=exc.code, hint="查询已取消。") from None
+        if exc.code == "time_deadline":
+            raise AgentToolError(code="BUDGET_EXHAUSTED", message=exc.code,
+                hint="本次查询时间已到；可缩小范围后重试。") from None
+        raise
     summary = data.get("summary") if isinstance(data.get("summary"), dict) else {}
     events = data.get("events") if isinstance(data.get("events"), list) else []
     data["event_summaries"] = [
@@ -87,26 +102,15 @@ def _notification_perception_read_tool(
         "source": runtime_resolution.source,
     }
     data["scope"] = {
+        **data.get("scope", {}),
         "run_id": summary.get("run_id"),
         "conversation_ref": summary.get("conversation_ref"),
         "event_kind": summary.get("event_kind"),
     }
-    data["coverage"] = {
-        "status": "complete" if summary.get("status") in {"ok", "valid_empty"} else "partial",
-        "complete_for": "requested_page",
-        "included_count": len(events),
-        "total_count": summary.get("total_count", 0),
-        "omitted_count": max(0, summary.get("total_count", 0) - len(events)),
-        "has_more": summary.get("total_count", 0) > len(events),
-        "returned_count": summary.get("returned_count", 0),
-        "limit": summary.get("limit"),
-        "malformed_count": summary.get("malformed_count", 0),
-        "unreadable_count": summary.get("unreadable_count", 0),
-    }
     data["freshness"] = {
-        "status": "historical",
-        "as_of": events[0].get("created_at_utc") if events and isinstance(events[0], dict) else None,
         "kind": "audit_snapshot",
+        "status": "historical" if events else "unknown",
+        "as_of": events[0].get("created_at_utc") if events and isinstance(events[0], dict) else None,
         "latest_event_at_utc": events[0].get("created_at_utc") if events and isinstance(events[0], dict) else None,
     }
     warnings: list[str] = []
@@ -150,7 +154,8 @@ NOTIFICATION_PERCEPTION_READ_TOOL = build_agent_tool(
         "conversation_id": "optional assistant conversation scope such as wechat:<chat_key>",
         "authenticated_conversation_id": "host-injected authenticated conversation scope",
         "event_kind": "optional event kind filter",
-        "limit": "optional number of events to return; defaults to 10",
+        "limit": {"type": "integer", "minimum": 1, "maximum": 50, "description": "Page size, defaults to 10; continue with cursor and the same query"},
+        "cursor": {"type": "string", "maxLength": 8192},
         "runtime_root": (
             "optional canonical runtime root; defaults to "
             "OM_RUNTIME_ROOT then repository fallback"
@@ -169,6 +174,7 @@ NOTIFICATION_PERCEPTION_READ_TOOL = build_agent_tool(
         "run_id",
         "event_kind",
         "limit",
+        "cursor",
         "runtime_root",
     ),
 )

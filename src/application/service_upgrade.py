@@ -1634,6 +1634,12 @@ def _ensure_pi_runtime(
     *,
     previous_dir: Path | None = None,
 ) -> dict[str, Any]:
+    # Old releases still need their own Pi preparation when explicitly selected for rollback.
+    if (target_dir / "src/application/bot/runtime.py").is_file():
+        _run_required([str(target_dir / ".venv/bin/python"), "-c",
+                       "import src.application.bot.host; import src.application.bot.runtime"],
+                      cwd=target_dir, run_cmd=run_cmd, operations=operations, timeout=30)
+        return {"runtime": "python", "ok": True}
     package_lock = target_dir / "agent-runtime" / "package-lock.json"
     smoke_script = target_dir / "scripts" / "pi_runtime_smoke.sh"
     details: dict[str, Any] = {
@@ -2332,6 +2338,9 @@ def _pi_storage_readiness(
     runtime_dir: Path,
     release_dirs: tuple[Path, ...],
 ) -> dict[str, Any]:
+    if (runtime_dir.parent / "src/application/bot/runtime.py").is_file():
+        # The Python runtime never opens or converts legacy Pi storage.
+        return {"ok": True, "stores": [], "runtime": "python"}
     stores: list[dict[str, Any]] = []
     for pi_db in pi_session_database_paths(
         runtime_root=runtime_root,

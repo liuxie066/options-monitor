@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections import Counter
 from collections.abc import Mapping
 from datetime import date, datetime, timezone
@@ -19,11 +20,55 @@ from src.application.notification_perception_read import (
     iter_notification_perception_events,
 )
 from src.application.runtime_paths import resolve_runtime_root
+from src.application.agent_tools.project_reader import (
+    ProjectReaderError, decode_cursor, digest, set_continuation,
+)
 
 
 _FUNCTION_MODE = {"sell_put": "put", "sell_call": "call"}
 _RUN_SELECTORS = {"latest", "latest_notification"}
 _DELIVERED_EVENT_KIND = "notification_delivery_completed"
+
+
+def _candidate_page(rows: list[dict[str, Any]], payload: dict[str, Any], *,
+                    tool: str, source: dict[str, Any], default: int = 20,
+                    maximum: int = 40) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Page recorded candidate facts, preserving the owning snapshot's order."""
+    raw_limit = payload.get("limit", default)
+    if type(raw_limit) is not int or not 1 <= raw_limit <= maximum:
+        raise AgentToolError(code="INPUT_ERROR", message=f"limit must be 1..{maximum}")
+    binding = digest({"tool": tool, "query": {k: v for k, v in payload.items() if k != "cursor"}})
+    source_hash = digest(source)
+    try:
+        state = decode_cursor(payload.get("cursor"), binding)
+        if state and state.get("source_hash") != source_hash:
+            raise ProjectReaderError("source_changed")
+        start = state.get("index", 0) if state else 0
+        if type(start) is not int or not 0 <= start <= len(rows):
+            raise ProjectReaderError("cursor_invalidated")
+        page = []
+        for row in rows[start:start + raw_limit]:
+            # Reserve room for group metadata, provenance and the signed cursor.
+            if len(json.dumps([*page, row], ensure_ascii=False).encode()) > 4000:
+                if not page:
+                    raise ProjectReaderError("detail_too_large")
+                break
+            page.append(row)
+        end = start + len(page)
+        scope = {"account": payload.get("account"), "market": source.get("market"),
+            "run_id": source.get("run_id"), "source_hash": source_hash, "page_range": {"start": start, "end": end}}
+        result = {"source_hash": source_hash, "scope": scope, "pagination": {
+            "total_count": len(rows), "matched_count": len(rows),
+            "returned_count": len(page), "scanned_count": len(rows), "has_more": end < len(rows),
+        }, "coverage": {"status": "complete", "complete_for": "requested_page",
+            "scope": scope, "included_count": len(page), "total_count": len(rows),
+            "omitted_count": len(rows) - len(page), "has_more": end < len(rows)}}
+        set_continuation(result, {"binding": binding, "source_hash": source_hash, "index": end} if end < len(rows) else None)
+        return page, result
+    except ProjectReaderError as exc:
+        raise AgentToolError(code="INPUT_ERROR", message=exc.code,
+            hint="Repeat the query without cursor after source changes; narrow symbol/function/rule for oversized details.",
+            details={"reason": exc.code}) from None
 
 
 def _local_timezone() -> timezone:
@@ -279,6 +324,10 @@ def candidate_filter_explain_tool(
 
     run_resolution.update(bundle.get("source_selection") or {})
     manifest = bundle.get("manifest") or {}
+    requested_market = payload.get("_market")
+    markets = set(manifest.get("markets") or [])
+    if requested_market and (not markets or markets - {requested_market}):
+        raise AgentToolError(code="PERMISSION_DENIED", message="candidate source market is outside the configured scope")
     requested_mode = _FUNCTION_MODE.get(function_filter)
     scoped = [
         dict(item)
@@ -304,6 +353,21 @@ def candidate_filter_explain_tool(
         )
         for function in functions
     ]
+    all_events = [{"function": group["function"], **event}
+                  for group in summaries for event in group["events"]]
+    rule = str(payload.get("rule") or "").strip()
+    matched_events = [event for event in all_events if not rule or event["rule"] == rule]
+    effective_payload = {**payload, "runtime_root": str(base), "symbol": symbol, "account": account}
+    page, page_meta = _candidate_page(matched_events, effective_payload,
+        tool="candidate_filter_explain", source={"snapshot": snapshot.get("content_sha256"),
+        "manifest": (bundle.get("manifest") or {}).get("content_sha256"), "run_id": snapshot.get("run_id"),
+        "market": snapshot.get("market")})
+    page_meta["source_run_id"] = snapshot.get("run_id")
+    page_meta["freshness"] = {"kind": "historical", "as_of": snapshot.get("sealed_at_utc")}
+    page_meta["pagination"]["total_count"] = len(all_events)
+    for group in summaries:
+        group["events"] = [{k: v for k, v in item.items() if k != "function"}
+                           for item in page if item["function"] == group["function"]]
     status_counts = Counter(str(item.get("status") or "unknown") for item in scoped)
     function_counts = Counter(
         "sell_put" if item.get("strategy_mode") == "put" else "sell_call"
@@ -356,6 +420,7 @@ def candidate_filter_explain_tool(
             "status_counts": dict(status_counts),
             "function_counts": dict(function_counts),
             "functions": summaries,
+            **page_meta,
         },
         ([] if scoped else ["no_matching_snapshot_scope"]),
         {"source_files": [source]},
@@ -431,7 +496,7 @@ def _summarize_function(
             }
             for reason, count in rejection_counts.most_common(8)
         ],
-        "events": events[:20],
+        "events": events,
     }
 
 

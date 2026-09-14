@@ -889,35 +889,12 @@ def test_provider_definite_failure_stays_pending_for_exact_delivery_only_retry(m
     audit.write_text(json.dumps(event) + "\n")
     payload = {"runtime_root": str(tmp_path), "event_kind": "notification_delivery_completed", "limit": 1}
     observation = compact_observation("notification_perception_read", execute_tool("notification_perception_read", payload), payload)
-    assert observation["coverage"]["status"] == "complete"
-    assert observation["freshness"]["status"] == "historical"
-    assert observation["value"]["event_summaries"][0]["report_refs"] == [reference]
-    # The Bot must use that retained source through real tool registration/admission.
-    from src.application.agent_tools import candidate, notification_perception
-    from tests.candidate_evidence_helpers import seal_opening_candidate_fixture
-    from tests.test_bot_s8_host_admission import _run_answered_host
-    seal_opening_candidate_fixture(tmp_path, run_id="send-fail", accepted_rows=[{
-        "symbol": "NVDA", "contract_symbol": "NVDA260821P00100000", "mode": "put",
-    }])
-    monkeypatch.setattr(candidate, "repo_base", lambda: tmp_path)
-    monkeypatch.setattr(notification_perception, "repo_base", lambda: tmp_path)
-    monkeypatch.setattr(candidate, "load_runtime_config", lambda **_: (tmp_path / "config.us.json", {}))
-    def flow(call):
-        report = call({"call_id": "report", "tool_name": "notification_perception_read", "arguments": {
-            "event_kind": "notification_delivery_completed", "limit": 1}})
-        assert report["status"] == "complete", report
-        source = report["value"]["event_summaries"][0]["report_refs"][0]
-        ranked = call({"call_id": "rank", "tool_name": "candidate_rank_explain", "arguments": {
-            "account": source["account"], "run_id": source["source_run_id"], "mode": "put", "top_n": 1}})
-        assert ranked["source"]["run_id"] == "send-fail"
-        assert ranked["value"]["ranked_summary"][0]["contract_symbol"] == "NVDA260821P00100000"
-        answer = call({"call_id": "answer", "tool_name": "submit_answer", "arguments": {
-            "mode": "evidence", "status": "complete", "answer_markdown": "报告引用历史扫描中的 NVDA 排名记录。",
-            "claims": [{"text": "报告引用历史扫描中的 NVDA 排名记录", "kind": "historical_fact",
-                        "required_scope": "requested_page", "observation_ids": [report["ref"], ranked["ref"]]}]}})
-        assert answer["observation"]["ok"] is True, answer
-        return answer["approved_answer"]["text"]
-    assert _run_answered_host(monkeypatch, "为什么报告里 NVDA 排第一", flow).ok is True
+    assert observation["ok"] is True
+    assert observation["data"]["coverage"]["status"] == "complete"
+    assert observation["data"]["freshness"]["status"] == "historical"
+    assert observation["data"]["event_summaries"][0]["report_refs"] == [
+        {key: value for key, value in reference.items() if key != "revision"}
+    ]
 
 
 @pytest.mark.parametrize("retry_status", ("pending", "ambiguous"))

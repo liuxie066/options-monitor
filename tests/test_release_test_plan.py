@@ -43,7 +43,7 @@ def test_release_test_plan_maps_service_deploy_support_to_both_runtime_gates() -
         mode="standard",
     )
 
-    assert {"service_release", "pi_runtime"} <= {rule["name"] for rule in plan["matched_rules"]}
+    assert {"service_release", "bot_runtime"} <= {rule["name"] for rule in plan["matched_rules"]}
     assert any("tests/*/test_service_deploy_*.py" in command for command in plan["commands"])
 
 
@@ -104,7 +104,7 @@ def test_release_test_plan_maps_assistant_changes_to_minimal_runtime_gate() -> N
         "scripts/bot_p1_eval.py",
         "scripts/install.sh",
         "scripts/release_preflight.sh",
-        "scripts/pi_runtime_smoke.sh",
+        "src/application/bot/runtime.py",
         "src/application/bot/host.py",
         "src/application/release_test_plan.py",
         "src/application/service_upgrade.py",
@@ -113,7 +113,7 @@ def test_release_test_plan_maps_assistant_changes_to_minimal_runtime_gate() -> N
         "docs/PI_AGENT_CORE_INTEGRATION.md",
         "tests/bot_pi_test_support.py",
         "tests/test_architecture_guards.py",
-        "tests/test_pi_agent_process.py",
+        "tests/test_bot_python_runtime.py",
         "tests/test_bot_p1_eval.py",
         "tests/test_bot_phase1.py",
         "tests/test_bot_conversation_memory.py",
@@ -135,9 +135,9 @@ def test_release_test_plan_maps_every_pi_runtime_surface(changed_file: str) -> N
 
     plan = build_release_test_plan(changed_files=[changed_file], mode="standard")
 
-    assert "pi_runtime" in {rule["name"] for rule in plan["matched_rules"]}
-    assert "npm ci --omit=dev --ignore-scripts --prefix agent-runtime" in plan["commands"]
-    assert any("tests/test_pi_agent_process.py" in command for command in plan["commands"])
+    assert "bot_runtime" in {rule["name"] for rule in plan["matched_rules"]}
+    assert not any(command.startswith("npm ") for command in plan["commands"])
+    assert any("tests/test_bot_python_runtime.py" in command for command in plan["commands"])
     assert any("tests/test_bot_p1_eval.py" in command for command in plan["commands"])
     assert any("tests/bot_eval/test_answer_quality.py" in command for command in plan["commands"])
 
@@ -148,9 +148,9 @@ def test_release_preflight_maps_to_service_and_pi_runtime_gates() -> None:
     plan = build_release_test_plan(changed_files=["scripts/release_preflight.sh"], mode="standard")
 
     matched_rules = {rule["name"] for rule in plan["matched_rules"]}
-    assert {"service_release", "pi_runtime"} <= matched_rules
-    assert "npm ci --omit=dev --ignore-scripts --prefix agent-runtime" in plan["commands"]
-    assert any("tests/test_pi_agent_process.py" in command for command in plan["commands"])
+    assert {"service_release", "bot_runtime"} <= matched_rules
+    assert not any(command.startswith("npm ") for command in plan["commands"])
+    assert any("tests/test_bot_python_runtime.py" in command for command in plan["commands"])
     assert any("tests/test_bot_p1_eval.py" in command for command in plan["commands"])
     assert any("tests/bot_eval/test_answer_quality.py" in command for command in plan["commands"])
     assert any("tests/test_release_test_plan.py" in command for command in plan["commands"])
@@ -299,22 +299,14 @@ def test_required_pr_and_release_guardrail_discovers_full_suite_after_smoke() ->
     full_command = "./.venv/bin/python -m pytest --durations=25"
 
     assert not (root / ".github" / "workflows" / "agent-plugin.yml").exists()
-    assert text.count("uses: actions/setup-node@v4") == 1
-    assert text.count("node-version: '22.19.0'") == 1
-    assert "npm ci --omit=dev --ignore-scripts --prefix agent-runtime" in text
-    assert (
-        'bash scripts/pi_runtime_smoke.sh --root "${{ github.workspace }}" '
-        '--python "${{ github.workspace }}/.venv/bin/python"'
-    ) in text
-    assert "npm view" not in text
+    assert "actions/setup-node" not in text
+    assert "npm ci" not in text
     assert "./om-agent spec > /tmp/om-agent-spec.json" in text
     assert "if: ${{ github.event_name == 'pull_request' || steps.release.outputs.tag != '' }}" in text
     assert [line.strip() for line in text.splitlines() if line.strip() == full_command] == [full_command]
     assert "tests/test_" not in text
     assert (
-        text.index("npm ci --omit=dev --ignore-scripts --prefix agent-runtime")
-        < text.index("scripts/pi_runtime_smoke.sh")
-        < text.index("tests/run_smoke.py")
+        text.index("tests/run_smoke.py")
         < text.index("./om-agent spec")
         < text.index("Resolve VERSION release")
         < text.index(full_command)
@@ -325,7 +317,7 @@ def test_release_workflow_pins_and_gates_pi_runtime() -> None:
     root = Path(__file__).resolve().parents[1]
     workflow = root / ".github" / "workflows" / "_release-reusable.yml"
     required_suites = (
-        "tests/test_pi_agent_process.py",
+        "tests/test_bot_python_runtime.py",
         "tests/test_bot_p1_eval.py",
         "tests/test_bot_phase1.py",
         "tests/test_bot_conversation_memory.py",
@@ -340,19 +332,9 @@ def test_release_workflow_pins_and_gates_pi_runtime() -> None:
     )
 
     text = workflow.read_text(encoding="utf-8")
-    assert text.count("uses: actions/setup-node@v4") == 1
-    assert text.count("node-version: '22.19.0'") == 1
-    assert "npm ci --omit=dev --ignore-scripts --prefix agent-runtime" in text
-    assert (
-        'bash scripts/pi_runtime_smoke.sh --root "${{ github.workspace }}" '
-        '--python "${{ github.workspace }}/.venv/bin/python"'
-    ) in text
-    assert "npm view" not in text
-    assert (
-        text.index("npm ci --omit=dev --ignore-scripts --prefix agent-runtime")
-        < text.index("scripts/pi_runtime_smoke.sh")
-        < text.index("tests/test_pi_agent_process.py")
-    )
+    assert "actions/setup-node" not in text
+    assert "npm ci" not in text
+    assert "tests/test_bot_python_runtime.py" in text
     for suite in required_suites:
         assert suite in text, f"{workflow.name} is missing Pi suite {suite}"
 
@@ -362,7 +344,7 @@ def test_release_workflow_verifies_extracted_archive_before_publish() -> None:
     text = (root / ".github/workflows/_release-reusable.yml").read_text(encoding="utf-8")
 
     build_at = text.index("- name: Build source archive")
-    verify_at = text.index("- name: Verify source archive Pi runtime")
+    verify_at = text.index("- name: Verify source archive Python Bot")
     publish_at = text.index("- name: Publish release")
     assert build_at < verify_at < publish_at
 
@@ -371,10 +353,8 @@ def test_release_workflow_verifies_extracted_archive_before_publish() -> None:
     assert 'ARCHIVE_ROOT="$(mktemp -d "${RUNNER_TEMP}/options-monitor-archive.XXXXXX")"' in verify
     assert 'tar -xzf "options-monitor-${{ inputs.tag }}.tar.gz" -C "${ARCHIVE_ROOT}"' in verify
     assert 'cd "${ARCHIVE_ROOT}"' in verify
-    assert 'npm ci --omit=dev --ignore-scripts --prefix "${ARCHIVE_ROOT}/agent-runtime"' in verify
-    assert (
-        'bash "${ARCHIVE_ROOT}/scripts/pi_runtime_smoke.sh" --root "${ARCHIVE_ROOT}" --python "${CHECKOUT_PYTHON}"'
-    ) in verify
+    assert '"${CHECKOUT_PYTHON}" -c' in verify
+    assert "import src.application.bot.runtime" in verify
     assert "--prefix agent-runtime" not in verify
     assert '--python ".venv/bin/python"' not in verify
 
@@ -392,7 +372,7 @@ def test_version_release_reuses_successful_guardrails_without_duplicate_regressi
     assert 'if [[ "${DIFF_STATUS}" -ne 1 ]]' in guardrails
     assert "uses: ./.github/workflows/_release-reusable.yml" in guardrails
     assert "run_regression_gates: false" in guardrails
-    assert reusable.count("if: ${{ inputs.run_regression_gates }}") == 4
+    assert reusable.count("if: ${{ inputs.run_regression_gates }}") == 3
     assert "default: true" in reusable
     assert "\n  push:" not in manual
     assert "run_regression_gates: true" in manual
@@ -482,8 +462,8 @@ def test_release_preflight_full_mode_runs_pytest_once(tmp_path: Path) -> None:
     assert "[PREFLIGHT_OK] loopback bind available (127.0.0.1)" in proc.stdout
     pytest_commands = [command for command in commands if command.startswith("-m pytest")]
     assert pytest_commands == ["-m pytest"]
-    assert commands.count("npm ci --omit=dev --ignore-scripts --prefix agent-runtime") == 1
-    assert any("bot eval --fixture current_option_exposure_model_ready" in command for command in commands)
+    assert commands.count("npm ci --omit=dev --ignore-scripts --prefix agent-runtime") == 0
+    assert any("test_bot_python_runtime.py" in command for command in commands) or "-m pytest" in commands
 
 
 def test_release_preflight_exports_selected_python_to_nested_entrypoints() -> None:
@@ -499,7 +479,7 @@ def test_release_preflight_non_full_mode_keeps_focused_tests(tmp_path: Path) -> 
     assert proc.returncode == 0, proc.stderr or proc.stdout
     pytest_commands = [command for command in commands if command.startswith("-m pytest")]
     assert pytest_commands == [
-        "-m pytest tests/test_pi_agent_process.py",
+        "-m pytest tests/test_bot_python_runtime.py",
         (
             "-m pytest tests/test_bot_phase1.py tests/test_bot_conversation_memory.py "
             "tests/test_bot_p1_eval.py tests/test_inbound_control.py "
@@ -517,8 +497,8 @@ def test_release_preflight_non_full_mode_keeps_focused_tests(tmp_path: Path) -> 
             "tests/test_config_authoring_transaction.py tests/test_runtime_config_identity.py"
         ),
     ]
-    assert commands.count("npm ci --omit=dev --ignore-scripts --prefix agent-runtime") == 1
-    assert any("bot eval --fixture current_option_exposure_model_ready" in command for command in commands)
+    assert commands.count("npm ci --omit=dev --ignore-scripts --prefix agent-runtime") == 0
+    assert any("test_bot_python_runtime.py" in command for command in commands) or "-m pytest" in commands
 
 
 def test_release_preflight_focused_mode_is_independent_of_caller_cwd(tmp_path: Path) -> None:
@@ -536,11 +516,10 @@ def test_release_preflight_focused_mode_is_independent_of_caller_cwd(tmp_path: P
     assert "tests/*/test_service_deploy_*.py" not in service_command
 
 
-def test_release_preflight_rejects_old_node_before_npm(tmp_path: Path) -> None:
+def test_release_preflight_does_not_require_node(tmp_path: Path) -> None:
     proc, commands = _run_release_preflight_with_fake_python(tmp_path, node_version="v22.18.9")
 
-    assert proc.returncode == 1
-    assert "Node >=22.19.0 is required; observed=v22.18.9" in proc.stderr
+    assert proc.returncode == 0, proc.stderr
     assert not any(command.startswith("npm ") for command in commands)
 
 

@@ -86,6 +86,45 @@ PROVIDER_SPECS: dict[str, LlmProviderSpec] = {
 }
 
 
+def resolve_output_reservation(
+    provider: str,
+    model: str,
+    context_window_tokens: int,
+    max_output_tokens: int | None,
+    *,
+    path: str = "model",
+) -> int:
+    """Validate the optional wire cap and resolve its context reservation."""
+    if isinstance(context_window_tokens, bool) or not isinstance(context_window_tokens, int):
+        raise ValueError(f"{path}.context_window_tokens must be an integer")
+    if not 4096 <= context_window_tokens <= 2_000_000:
+        raise ValueError(f"{path}.context_window_tokens must be between 4096 and 2000000")
+    if max_output_tokens is not None and (
+        isinstance(max_output_tokens, bool)
+        or not isinstance(max_output_tokens, int)
+        or max_output_tokens < 64
+    ):
+        raise ValueError(f"{path}.max_output_tokens must be an integer >= 64 or null")
+    # Native capability reference: https://api-docs.deepseek.com/quick_start/agent_integrations/pi_mono/
+    known = provider == "deepseek" and model in {"deepseek-v4-pro", "deepseek-v4-flash"}
+    if known and context_window_tokens > 1_000_000:
+        raise ValueError(f"{path}.context_window_tokens exceeds {model} maximum 1000000")
+    if known and max_output_tokens is not None and max_output_tokens > 384_000:
+        raise ValueError(f"{path}.max_output_tokens exceeds {model} maximum 384000")
+    if max_output_tokens is None:
+        if not known:
+            raise ValueError(f"{path}.max_output_tokens must be specified explicitly for unknown model {provider}/{model}")
+        reservation = 384_000
+    else:
+        reservation = max_output_tokens
+    if context_window_tokens <= reservation + 2000:
+        raise ValueError(
+            f"{path}.context_window_tokens must exceed output reservation {reservation} by more than 2000; "
+            "configure sufficient context or an explicit max_output_tokens limit"
+        )
+    return reservation
+
+
 def normalize_llm_provider(provider: str) -> str:
     return str(provider or "").strip().lower()
 

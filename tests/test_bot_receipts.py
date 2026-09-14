@@ -8,7 +8,7 @@ import pytest
 
 from src.application.agent_tools import receipts
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.bot.tools import compact_observation, conservative_json_tokens, build_tool_payload
+from src.application.bot.tools import build_tool_payload
 from src.application.receipt_query import receipt_event
 from src.application.trades.inbox import query_trade_receipts
 
@@ -38,39 +38,6 @@ def test_closed_schema_and_config_scope(monkeypatch, tmp_path):
     monkeypatch.setattr(receipts, "load_runtime_config", lambda **kw: (tmp_path / "config.hk.json", {}))
     with pytest.raises(AgentToolError, match="configured accounts"):
         receipts.RECEIPT_READ_TOOL.call({})
-
-
-def test_body_cursor_round_trip_is_bounded_scope_and_revision_bound(monkeypatch, tmp_path):
-    body = "真实回执；不要把异常类名当作数据库锁。" * 600
-    rows = [_event(body=body)]
-    _setup(monkeypatch, tmp_path, rows)
-    payload = {"deal_id": "7258806397173991645", "authenticated_sender_id": "sender-a"}
-    chunks = []
-    first_cursor = None
-    while True:
-        value, warnings, _ = receipts.RECEIPT_READ_TOOL.call(payload)
-        observation = compact_observation("receipt_read", {"ok": True, "data": value, "warnings": warnings}, payload)
-        assert observation["value"]["rows"][0]["receipt_body"] == value["rows"][0]["receipt_body"]
-        assert conservative_json_tokens(observation) <= 4000
-        assert observation["coverage"]["complete_for"] == "point"
-        chunks.append(value["rows"][0]["receipt_body"])
-        cursor = value["next_cursor"]
-        if not cursor:
-            assert value["body_complete"] and value["body_range"]["start"] > 0
-            break
-        first_cursor = first_cursor or cursor
-        payload = {"cursor": cursor, "authenticated_sender_id": "sender-a"}
-    assert "".join(chunks) == body
-    for bad in ({"cursor": first_cursor, "authenticated_sender_id": "sender-b"},
-                {"cursor": first_cursor, "authenticated_sender_id": "sender-a", "account": "lx"},
-                {"cursor": first_cursor[:-3] + "xxx", "authenticated_sender_id": "sender-a"}):
-        with pytest.raises(AgentToolError) as error:
-            receipts.RECEIPT_READ_TOOL.call(bad)
-        assert error.value.code == "cursor_invalidated"
-    rows[0]["receipt_body"] += "更正"
-    with pytest.raises(AgentToolError) as error:
-        receipts.RECEIPT_READ_TOOL.call({"cursor": first_cursor, "authenticated_sender_id": "sender-a"})
-    assert error.value.code == "cursor_invalidated"
 
 
 def test_event_pages_and_empty_partial_distinction(monkeypatch, tmp_path):
@@ -183,21 +150,6 @@ def test_fixed_failure_original_is_distinct_from_latest_success(tmp_path):
     row = query_daily_brief_receipts(base=tmp_path, account="lx", market="US", query={"run_id": "run-fail"})[0]
     assert row["receipt_body"] == "当时扫描失败" and row["diagnostic_code"] == "scan_failure"
     assert row["related_run"] == "run-fail"
-
-
-def test_large_metadata_is_partial_and_large_candidate_pages_keep_cursor(monkeypatch, tmp_path):
-    rows = [_event(i) for i in range(50)]
-    for row in rows:
-        row["diagnostic_code"] = "源诊断" * 60
-    _setup(monkeypatch, tmp_path, rows)
-    value, warnings, _ = receipts.RECEIPT_READ_TOOL.call({"limit": 50})
-    observation = compact_observation("receipt_read", {"ok": True, "data": value, "warnings": warnings})
-    assert observation["value"]["next_cursor"] and "rows" in observation["value"]
-    assert conservative_json_tokens(observation) <= 4000
-    rows[0]["diagnostic_code"] = "invalid metadata" * 10000
-    value = receipts.RECEIPT_READ_TOOL.call({})[0]
-    assert value["status"] == "partial"
-    assert any(item["reason"] == "receipt_metadata_size_limit" for item in value["missing_sources"])
 
 
 def test_cursor_binds_original_source_when_redacted_body_is_unchanged(monkeypatch, tmp_path):

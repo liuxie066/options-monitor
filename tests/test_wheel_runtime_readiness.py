@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+
+import pytest
 from pathlib import Path
 
 from src.application.healthcheck import build_wheel_activation_readiness
@@ -253,10 +255,9 @@ def test_wheel_activation_readiness_fails_closed_for_missing_and_mismatched_stat
     assert no_descriptor["reason_code"] == "missing_descriptor"
 
 
-def test_runtime_status_and_healthcheck_expose_same_read_only_activation_readiness(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
+@pytest.fixture
+def activation_runtime(tmp_path: Path, monkeypatch, request):
+    state = getattr(request, "param", "enabled")
     config_path = tmp_path / "config.us.json"
     data_config_path = tmp_path / "portfolio.runtime.json"
     data_config_path.write_text(
@@ -266,7 +267,7 @@ def test_runtime_status_and_healthcheck_expose_same_read_only_activation_readine
         encoding="utf-8",
     )
     config = _public_cfg_with_futu("portfolio.runtime.json")
-    config["wheel"] = _wheel_config(account="user1")["wheel"]
+    config["wheel"] = _wheel_config(account="user1", deactivated_at_ms=2000 if state == "disabled" else None)["wheel"]
     policy_hash = build_wheel_policy_hash(
         config,
         market="us",
@@ -282,31 +283,55 @@ def test_runtime_status_and_healthcheck_expose_same_read_only_activation_readine
               market, account, generation, activated_at_ms, deactivated_at_ms,
               policy_hash, activation_request_id, activation_request_hash,
               deactivation_request_id, deactivation_request_hash
-            ) VALUES ('us', 'user1', 1, 1000, NULL, ?, 'activation-test', ?, NULL, NULL)
+            ) VALUES ('us', 'user1', 1, 1000, ?, ?, 'activation-test', ?, ?, ?)
             """,
-            (policy_hash, "a" * 64),
+            (2000 if state == "disabled" else None, "b" * 64 if state == "mismatch" else policy_hash, "a" * 64,
+             "deactivation-test" if state == "disabled" else None, "c" * 64 if state == "disabled" else None),
         )
 
-    _patch_healthcheck_dependencies(monkeypatch)
-    runtime_status = execute_tool(
-        "runtime_status",
-        {"config_path": str(config_path), "accounts": ["user1"]},
-    )
-    healthcheck = execute_tool(
-        "healthcheck",
-        {"config_path": str(config_path), "accounts": ["user1"]},
-    )
+    # Finish fixture WAL writes before byte-level read-only assertions. A sqlite
+    # connection context commits but does not close; delayed GC can checkpoint it.
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    conn.close()
 
-    runtime_readiness = runtime_status["data"]["wheel_activation_readiness"]
-    health_readiness = healthcheck["data"]["wheel_activation_readiness"]
-    assert runtime_readiness == health_readiness
-    assert runtime_readiness["monitoring_gate"] == "enabled"
-    assert runtime_readiness["accounts"]["user1"]["policy_hash"] == policy_hash
-    assert runtime_status["data"]["summary"]["wheel_activation_monitoring_gate"] == "enabled"
-    assert healthcheck["data"]["summary"]["wheel_activation_monitoring_gate"] == "enabled"
-    readiness_check = next(
-        item
-        for item in healthcheck["data"]["checks"]
-        if item["name"] == "wheel_activation_readiness"
-    )
-    assert readiness_check["status"] == "ok"
+    _patch_healthcheck_dependencies(monkeypatch)
+    monkeypatch.setattr("src.application.agent_tools.diagnostics.repo_base", lambda: tmp_path)
+    if state in {"missing_database", "missing_table", "unreadable"}:
+        sqlite_path.unlink()
+        if state == "missing_table":
+            with sqlite3.connect(sqlite_path) as conn:
+                conn.execute("CREATE TABLE unrelated (id INTEGER)")
+        elif state == "unreadable":
+            sqlite_path.write_bytes(b"invalid sqlite database")
+    return config_path, sqlite_path, policy_hash, state
+
+
+def test_bot_answers_wheel_activation_through_gateway_and_admission(activation_runtime, monkeypatch):
+    from tests.test_bot_python_runtime import MODEL, answer, call, run_contract, script
+    from src.application.bot.contracts import BotRequest, BotScope
+    from src.application.bot.service import prepare_contract
+    config_path, sqlite_path, _policy_hash, _state = activation_runtime
+    before = sqlite_path.read_bytes()
+    contract = prepare_contract(BotRequest(request_id="wheel", source_entry="test", user_message="Wheel 有没有正常激活？",
+        explicit_scope=BotScope(config_path=str(config_path))))
+    seen = []
+    result = run_contract(contract, model_settings=MODEL, model_request=script([
+        call("runtime_status", {"accounts":["user1"], "view":"wheel_activation"}),
+        answer("Wheel 已正常激活，激活不代表已经扫描或成交。")], seen))
+    observation = json.loads(seen[-1]["messages"][-1]["content"])
+    assert observation["ok"], observation
+    assert observation["data"]["wheel_activation_readiness"]["monitoring_gate"] == "enabled"
+    assert result.ok and sqlite_path.read_bytes() == before
+
+
+def test_wheel_activation_view_respects_requested_accounts(activation_runtime) -> None:
+    config_path, _sqlite_path, _policy_hash, _state = activation_runtime
+    response = execute_tool("runtime_status", {
+        "config_path": str(config_path), "accounts": ["other"], "view": "wheel_activation",
+    })
+    assert response["ok"] is True
+    assert response["data"]["scope"]["accounts"] == ["other"]
+    readiness = response["data"]["wheel_activation_readiness"]
+    assert readiness["accounts"] == {}
+    assert readiness["monitoring_gate"] == "disabled"
+    assert readiness["reason_code"] == "not_configured"

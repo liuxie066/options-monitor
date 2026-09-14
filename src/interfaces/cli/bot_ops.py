@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import time
-from dataclasses import replace
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -14,10 +13,8 @@ from src.application.bot.channel_facade import (
     config_scope_error_message,
     resolve_trusted_config_scope,
 )
-from src.application.bot.host import session_run_slot
 from src.application.bot.host_store import BotHostStore
-from src.application.bot.local_harness import run_local_request, run_prepared_contract
-from src.application.research.redaction import redact_value
+from src.application.bot.local_harness import run_local_request
 
 
 def add_bot_commands(subparsers: Any) -> argparse.ArgumentParser:
@@ -85,14 +82,6 @@ def add_bot_commands(subparsers: Any) -> argparse.ArgumentParser:
     cancel = bot_sub.add_parser("cancel", help="request cancellation of a running Bot run")
     cancel.add_argument("--host-db", required=True)
     cancel.add_argument("--run-id", required=True)
-
-    resume = bot_sub.add_parser("resume", help="resume a failed or interrupted read-only Bot run")
-    resume.add_argument("--host-db", required=True)
-    resume.add_argument("--run-id", required=True)
-    resume.add_argument("--include-events", action="store_true")
-    resume_model = resume.add_mutually_exclusive_group()
-    resume_model.add_argument("--model-config-json", default=None)
-    resume_model.add_argument("--assistant-config", default=None)
 
     events = bot_sub.add_parser("events", help="poll durable Bot run events")
     events.add_argument("--host-db", required=True)
@@ -218,7 +207,6 @@ def handle_bot_command(args: argparse.Namespace) -> dict[str, Any]:
             "status": "answered",
             "run_id": args.run_id,
             "events": list(events),
-            "progress": list(store.run_progress(args.run_id, after_event_id=args.after_event_id)),
         }
 
     if args.bot_command == "replies":
@@ -227,40 +215,6 @@ def handle_bot_command(args: argparse.Namespace) -> dict[str, Any]:
             "status": "answered",
             "replies": [_reply_summary(item) for item in BotHostStore(args.host_db).list_replies(limit=args.limit)],
         }
-
-    if args.bot_command == "resume":
-        store = BotHostStore(args.host_db)
-        store.mark_stale_runs_interrupted()
-        source = store.resume_source(args.run_id)
-        if source is None:
-            return {
-                "ok": False,
-                "status": "not_ready",
-                "run_id": args.run_id,
-                "user_response": "该运行不可恢复、恢复次数已耗尽，或不是只读 Bot 合同。",
-            }
-        contract, events, session_key = source
-        contract = replace(contract, received_monotonic=received_monotonic, deadline_monotonic=received_monotonic + 180)
-        recovered = _successful_observations(events)
-        slot_key = session_key or f"resume:{args.run_id}"
-        with session_run_slot(slot_key, host_store=store, ttl_seconds=300, deadline_monotonic=contract.deadline_monotonic) as entered:
-            if not entered:
-                return {
-                    "ok": False,
-                    "status": "not_ready",
-                    "run_id": args.run_id,
-                    "user_response": "该会话已有 Bot 运行正在执行。",
-                }
-            result = run_prepared_contract(
-                contract,
-                model_config_json=args.model_config_json,
-                assistant_config_path=args.assistant_config,
-                host_store=store,
-                session_key=session_key,
-                resumed_from=args.run_id,
-                recovered_observations=recovered,
-            )
-        return to_payload(result, include_events=bool(args.include_events))
 
     if args.bot_command == "eval":
         request = BotRequest(
@@ -322,28 +276,6 @@ def _run_local_request(
     )
 
 
-def _successful_observations(events: list[dict[str, Any]]) -> tuple[dict[str, Any], ...]:
-    recovered: list[dict[str, Any]] = []
-    total_chars = 0
-    for item in reversed(events):
-        payload = item.get("payload")
-        if (
-            item.get("type") != "tool_result"
-            or not isinstance(payload, dict)
-            or payload.get("ok") is not True
-        ):
-            continue
-        observation = dict(redact_value(payload))
-        encoded = json.dumps(observation, ensure_ascii=False, default=str)
-        if len(encoded) > 12_000 or total_chars + len(encoded) > 48_000:
-            continue
-        recovered.append(observation)
-        total_chars += len(encoded)
-        if len(recovered) == 8:
-            break
-    return tuple(reversed(recovered))
-
-
 def _run_summary(record: dict[str, Any]) -> dict[str, Any]:
     response: dict[str, Any] = {}
     try:
@@ -357,8 +289,6 @@ def _run_summary(record: dict[str, Any]) -> dict[str, Any]:
         "status": record.get("status"),
         "started_at": record.get("started_at"),
         "finished_at": record.get("finished_at"),
-        "resumed_from": record.get("resumed_from"),
-        "resume_attempts": int(record.get("resume_attempts") or 0),
         "termination_reason": record.get("termination_reason"),
         "metrics": _json_dict(record.get("metrics_json")),
         "response_status": response.get("status"),

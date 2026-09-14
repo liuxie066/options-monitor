@@ -14,7 +14,9 @@ from src.application.agent_tools.candidate_filter_impl import candidate_filter_e
 from src.application.agent_tools.candidate_rank_impl import candidate_rank_explain_tool
 from src.application.agent_tools.base import AgentTool, build_agent_tool
 from src.application.agent_tool_config import load_runtime_config
-from src.application.agent_tool_contracts import mask_path
+from src.application.agent_tool_contracts import AgentToolError, mask_path
+from src.application.account_config import accounts_from_config
+from src.application.runtime_config_freshness import infer_runtime_config_market
 from src.application.agent_tool_config import repo_base
 from src.application.agent_tool_config import resolve_output_root
 from src.application.symbol_aliases import symbol_aliases_from_config
@@ -49,7 +51,7 @@ _CANDIDATE_FILTER_OUTPUT_CONTRACT: dict[str, Any] = {
     "bounded_projection": "contract_fields",
     "coverage": "source_declared",
     "freshness": "source_declared",
-    "pagination": {"mode": "none"},
+    "pagination": {"mode": "keyset"},
     "source_label": "OM sealed opening candidate snapshot",
     "primary_rows": "summary",
     "row_count_field": "summary_count",
@@ -93,7 +95,7 @@ _CANDIDATE_RANK_OUTPUT_CONTRACT: dict[str, Any] = {
     "bounded_projection": "contract_fields",
     "coverage": "source_declared",
     "freshness": "source_declared",
-    "pagination": {"mode": "none"},
+    "pagination": {"mode": "keyset"},
     "source_label": "OM sealed opening candidate snapshot",
     "primary_rows": "ranked_summary",
     "row_count_field": "returned_count",
@@ -116,11 +118,25 @@ _CANDIDATE_RANK_OUTPUT_CONTRACT: dict[str, Any] = {
 }
 
 
+def _configured_candidate_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], Any, Any]:
+    if not (payload.get("config_key") or payload.get("config_path")):
+        return dict(payload), None, None
+    path, cfg = load_runtime_config(config_key=payload.get("config_key"), config_path=payload.get("config_path"))
+    account = str(payload.get("account") or "").strip().lower()
+    if account not in accounts_from_config(cfg, fallback=()):
+        raise AgentToolError(code="PERMISSION_DENIED", message="account is outside the configured scope")
+    market = infer_runtime_config_market(config=cfg, config_key=payload.get("config_key"), config_path=path)
+    if market not in {"us", "hk"}:
+        raise AgentToolError(code="PERMISSION_DENIED", message="candidate query market is unbound")
+    return {**payload, "config_path": str(path), "_market": market.upper()}, path, cfg
+
+
 def _candidate_rank_explain_tool(
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    tool_payload, _, _ = _configured_candidate_payload(payload)
     return candidate_rank_explain_tool(
-        payload,
+        tool_payload,
         repo_base=repo_base,
         resolve_output_root=resolve_output_root,
         mask_path=mask_path,
@@ -130,18 +146,8 @@ def _candidate_rank_explain_tool(
 def _candidate_filter_explain_tool(
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    config_path = None
-    symbol_aliases = None
-    if str(payload.get("config_key") or "").strip() or str(payload.get("config_path") or "").strip():
-        config_path, cfg = load_runtime_config(
-            config_key=payload.get("config_key"),
-            config_path=payload.get("config_path"),
-        )
-        symbol_aliases = symbol_aliases_from_config(cfg)
-
-    tool_payload = dict(payload)
-    if config_path is not None:
-        tool_payload["config_path"] = str(config_path)
+    tool_payload, config_path, cfg = _configured_candidate_payload(payload)
+    symbol_aliases = symbol_aliases_from_config(cfg) if cfg is not None else None
 
     data, warnings, meta = candidate_filter_explain_tool(
         tool_payload,
@@ -167,7 +173,12 @@ CANDIDATE_RANK_EXPLAIN_TOOL = build_agent_tool(
     capabilities=("ranking_explain", "read_only"),
     input_schema={
         "mode": "optional put|call|all; defaults to all",
+        "config_key": {"type": "string", "enum": ["us", "hk"]},
+        "config_path": "optional explicit config path",
         "top_n": "optional int, max 100; defaults to 10",
+        "limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": "Optional page size; defaults to top_n. Continue with cursor and the same query."},
+        "cursor": {"type": "string", "maxLength": 8192},
+        "symbol": {"type": "string", "maxLength": 100, "description": "Optional exact symbol filter before paging"},
         "run_id": "optional exact output_runs run id; omitted selects latest eligible terminal scan, skipping only proven scheduler skips",
         "runtime_root": "optional explicit runtime root; defaults to OM_RUNTIME_ROOT then repo root",
         "account": {
@@ -184,7 +195,7 @@ CANDIDATE_RANK_EXPLAIN_TOOL = build_agent_tool(
         {"input": {"account": "sy", "run_id": "20260514T100000Z", "mode": "call"}},
     ),
     output_contract=_CANDIDATE_RANK_OUTPUT_CONTRACT,
-    bot_input_fields=("mode", "top_n", "run_id", "account"),
+    bot_input_fields=("config_key", "mode", "top_n", "run_id", "account", "symbol", "limit", "cursor"),
 )
 
 CANDIDATE_FILTER_EXPLAIN_TOOL = build_agent_tool(
@@ -192,7 +203,9 @@ CANDIDATE_FILTER_EXPLAIN_TOOL = build_agent_tool(
     catalog_summary="解释候选机会的筛选结果与排除原因。",
     description=(
         "Explain the recorded opening decision for a symbol from a terminal manifest-bound account snapshot. The tool never re-filters rows. "
-        "Explicit run_id and run_selector are mutually exclusive. With run_selector=latest_notification it resolves the validated source run of the most recent report actually delivered "
+        "Explicit run_id and run_selector are mutually exclusive. Omitted run_id or run_selector=latest selects the latest eligible terminal scan, skipping only proven scheduler skips. "
+        "Use latest_notification only when the question refers to a delivered notification. "
+        "With run_selector=latest_notification it resolves the validated source run of the most recent report actually delivered "
         "to the account on notification_date (default: today, runtime host local timezone), so a user can ask why a symbol was "
         "filtered right after a monitoring notification arrives."
     ),
@@ -218,6 +231,9 @@ CANDIDATE_FILTER_EXPLAIN_TOOL = build_agent_tool(
         },
         "conversation_id": "optional operator notification conversation scope",
         "authenticated_conversation_id": "host-injected authenticated notification conversation scope",
+        "limit": {"type": "integer", "minimum": 1, "maximum": 40, "description": "Event page size, default 20; continue with cursor and the same query"},
+        "cursor": {"type": "string", "maxLength": 8192},
+        "rule": {"type": "string", "maxLength": 100, "description": "Optional exact recorded rejection rule filter"},
         "function": (
             "optional "
             + strategy_key_help(
@@ -254,6 +270,7 @@ CANDIDATE_FILTER_EXPLAIN_TOOL = build_agent_tool(
         "run_id",
         "run_selector",
         "notification_date",
+        "rule", "limit", "cursor",
     ),
     bot_input_normalizer=_normalize_candidate_filter_bot_input,
 )

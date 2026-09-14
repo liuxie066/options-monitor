@@ -330,8 +330,8 @@ def test_bot_local_harness_is_phase1_composition_only() -> None:
     assert "operations_diagnostics" not in harness_text
     assert "candidate_filter_diagnostics" not in harness_text
     assert "analysis_query" not in harness_text
-    assert "PiModelSettings" in harness_text
-    assert "def _resolve_pi_model(" in harness_text
+    assert "ModelSettings" in harness_text
+    assert "def _resolve_model(" in harness_text
 
 
 def test_bot_has_no_retired_python_agent_runtime() -> None:
