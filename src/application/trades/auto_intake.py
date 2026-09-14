@@ -47,11 +47,13 @@ from src.application.trades.order_fee_sync import (
     sync_order_fees,
 )
 from src.application.trades.deal_identity import (
-    broker_deal_key_from_payload, completed_ledger_execution_events,
+    broker_deal_key, broker_deal_key_from_payload, completed_ledger_execution_events,
     structured_deal_keys_from_ledger_event,
 )
 from src.infrastructure.futu_history_deals import OpenDHistoryDealClient
-from src.application.trades.state_reconcile import reconcile_trade_intake_state
+from src.application.trades.state_reconcile import (
+    reconcile_trade_intake_state, reconciled_source_matches_deal,
+)
 from src.infrastructure.futu_trade_push import (
     OpenDTradePushListener,
     TradeIntakeAuthRequired,
@@ -87,6 +89,8 @@ from src.application.trades.inbox import (
     TRADE_INTAKE_ADAPTER_VERSIONS,
     claim_trade_payload,
     read_trade_payload,
+    read_trade_payloads_for_reconciliation,
+    settle_reconciled_trade_payload,
     resume_trade_payload,
     save_trade_payload_result,
     trade_payload_commit_scope,
@@ -384,7 +388,9 @@ def recover_trade_intake_receipts(*, repo: Any, source: dict[str, Any],
             result = dict(row.get("result") or {})
             snapshot = result.get("_receipt_payload") or (row.get("receipt") or {}).get("payload")
             if snapshot:
-                deal = SimpleNamespace(**snapshot)
+                # The frozen receipt snapshot omits source fields; identity proof owns
+                # the durable Inbox payload from this same CAS observation.
+                deal = SimpleNamespace(**{**snapshot, "raw_payload": row["payload"]})
             elif result.get("receipt_kind") == "manual_required" and result.get("account"):
                 deal = SimpleNamespace(internal_account=result["account"], deal_id=result.get("deal_id"))
             else:
@@ -404,7 +410,8 @@ def recover_trade_intake_receipts(*, repo: Any, source: dict[str, Any],
                         prepared = {**prepared, **_readback_trade_receipt_result(repo=repo, deal=deal, result=result)}
                     prepared.setdefault("_receipt_payload", _receipt_deal_snapshot(deal))
                     result = prepare_trade_receipt_result(path, inbox_id=row["inbox_id"], result=prepared,
-                        expected_payload_version=row["payload_version"], expected_result=row.get("result"))
+                        expected_payload_version=row["payload_version"], expected_result=row.get("result"),
+                        expected_observation=row)
             if stop_event.is_set():
                 break
             sent = receipt_callback({"result": result, "deal": deal, "effective_payload": result["_receipt_payload"],
@@ -981,7 +988,12 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if bool(result.get("ok")) else 2
     if args.reconcile_state:
-        _data_config, repo = open_position_ledger_from_runtime_config(base=runtime_root, cfg=cfg, data_config=args.data_config)
+        if args.apply:
+            _data_config, repo = open_position_ledger_from_runtime_config(base=runtime_root, cfg=cfg, data_config=args.data_config)
+        else:
+            repo = open_trade_reconciliation_evidence_repo(resolve_position_ledger_sqlite_path(
+                base=runtime_root, cfg=cfg, data_config=args.data_config,
+            ))
         result = _reconcile_intake_sources(
             sources=sources,
             repo=repo,
@@ -1621,6 +1633,133 @@ def _resolve_source_paths(source: dict[str, Any], *, runtime_root: Path) -> dict
     return out
 
 
+def _reconcile_source_completion(
+    *, source: dict[str, Any], repo: Any, deal_ids: list[str] | None = None,
+    apply_changes: bool,
+) -> dict[str, Any]:
+    """Close Inbox first, then conditionally update source state; never replay a trade."""
+    state_path = Path(source["state_path"])
+    inbox_path = resolve_execution_inbox_path(
+        repo, source.get("inbox_path") or state_path.with_name("trade_intake_inbox.sqlite3"),
+    )
+    mapping = dict(source.get("account_mapping") or {})
+    deferred: list[dict[str, str]] = []
+    inbox_updated = 0
+
+    def settle_inbox(state, proposed, actions):
+        nonlocal inbox_updated
+        allowed = []
+        for action in actions:
+            if not action.get("write_state"):
+                continue
+            key = str(action["deal_id"])
+            original = (state.get(action["from_bucket"]) or {}).get(key) or {}
+            if action["reason"] == "not_option_deal":
+                allowed.append(key)
+                continue
+            source_deal_id = str(original.get("source_deal_id") or "")
+            identity_key = key
+            if not key.startswith(("futu:", "execution:")):
+                identity_key = str(action.get("source_key") or "")
+                physical = str(original.get("futu_account_id") or "")
+                account = str(original.get("account") or "")
+                if (not physical or mapping.get(physical) != account
+                        or identity_key != f"futu:{account}:{physical}:{key}"):
+                    deferred.append({"deal_id": key, "reason": "source_identity_unproven"})
+                    continue
+            lookup_keys = [key, identity_key]
+            if not source_deal_id and identity_key.startswith("futu:") and len(identity_key.split(":")) == 4:
+                source_deal_id = identity_key.split(":")[-1]
+            if identity_key.startswith("futu:") and len(identity_key.split(":")) == 4:
+                _, account, physical, legacy_id = identity_key.split(":")
+                if mapping.get(physical) == account:
+                    # The existing legacy key contract denotes REAL Futu deals.
+                    lookup_keys.append(broker_deal_key_from_payload({
+                        "deal_id": legacy_id, "futu_account_id": physical,
+                        "environment": "REAL", "external_id_namespace": "futu.deal",
+                    }, account_mapping=mapping))
+            rows = read_trade_payloads_for_reconciliation(
+                inbox_path, deal_ids=[*lookup_keys, source_deal_id],
+            )
+            matches = []
+            reason = None
+            for row in rows:
+                payload = row["payload"]
+                execution = payload.get("execution_input") or payload
+                physical = str((execution.get("broker_account_ref") or {}).get("external_account_id")
+                               or extract_primary_account_id(payload) or "")
+                if physical and physical not in mapping:
+                    # A shared Inbox can contain the other configured account's same deal ID.
+                    if row.get("broker_deal_key") in lookup_keys:
+                        reason = "inbox_account_mapping_unproven"
+                        break
+                    continue
+                deal = normalize_trade_deal(
+                    payload, futu_account_mapping=mapping, allow_opend_refresh=False,
+                )
+                if not physical or not deal.internal_account:
+                    reason = "inbox_identity_unproven"
+                    break
+                if identity_key not in {broker_deal_key(deal), broker_external_event_key(deal)}:
+                    if row.get("broker_deal_key") in lookup_keys:
+                        reason = "inbox_identity_conflict"
+                        break
+                    continue
+                if (deal.internal_account != original.get("account")
+                        or (source.get("account") and deal.internal_account != source["account"])):
+                    reason = "inbox_account_conflict"
+                    break
+                if row.get("_reconciliation_evidence_error"):
+                    reason = row["_reconciliation_evidence_error"]
+                    break
+                if (row.get("identity_status") != "bound" or row["status"] not in {"pending", "handled"}
+                        or (row.get("claim_id") and int(row.get("claim_until_ms") or 0) > int(time.time() * 1000))):
+                    reason = "inbox_claim_or_review_pending"
+                    break
+                if action["reason"] == "ledger_event_already_recorded":
+                    proven = bool(completed_ledger_execution_events(repo.list_trade_events(), deal))
+                else:
+                    proven = reconciled_source_matches_deal(action, deal)
+                if not proven:
+                    reason = "inbox_economic_evidence_unproven"
+                    break
+                matches.append((row, deal))
+            if reason:
+                deferred.append({"deal_id": key, "reason": reason})
+                continue
+            # The repo lock prevents new economic claims while each Inbox observation is checked.
+            try:
+                if apply_changes:
+                    for row, deal in matches:
+                        result = {
+                            "status": "applied", "reason": action["reason"],
+                            "account": deal.internal_account, "deal_id": deal.deal_id,
+                            "action": action.get("lifecycle_decision_type") or action.get("ledger_event_type") or "assigned_stock_sale",
+                            "diagnostics": {"reconciled_source_key": broker_deal_key(deal), **{
+                                name: action[name] for name in ("lifecycle_case_id", "terminal_event_ids", "lifecycle_terminal_types",
+                                    "source_payload_hash", "ledger_event_id", "assigned_stock_event_id")
+                                if name in action
+                            }},
+                        }
+                        inbox_updated += int(settle_reconciled_trade_payload(
+                            inbox_path, observed=row, result=result,
+                        ))
+            except TradePayloadClaimLost:
+                deferred.append({"deal_id": key, "reason": "inbox_observation_changed"})
+                continue
+            allowed.append(key)
+        return allowed
+
+    # Serializes evidence, Inbox settlement and state write against every economic writer.
+    with with_sqlite_repo_writer_lock(repo) if apply_changes else contextlib.nullcontext():
+        result = reconcile_trade_intake_state(
+            state_path=state_path, audit_path=source.get("audit_path"), repo=repo,
+            deal_ids=deal_ids, apply_changes=apply_changes, before_state_update=settle_inbox,
+        )
+    result.update(inbox_updated_count=inbox_updated, deferred=deferred)
+    return result
+
+
 def _reconcile_intake_sources(
     *,
     sources: list[dict[str, Any]],
@@ -1656,10 +1795,8 @@ def _reconcile_intake_sources(
     for source in selected:
         state_path = Path(source["state_path"])
         audit_path = Path(source["audit_path"])
-        item = reconcile_trade_intake_state(
-            state_path=state_path,
-            audit_path=audit_path,
-            repo=repo,
+        item = _reconcile_source_completion(
+            source=source, repo=repo,
             deal_ids=list(deal_ids),
             apply_changes=apply_changes,
         )
@@ -1685,15 +1822,19 @@ def _reconcile_intake_sources(
         "source_count": len(results),
         "planned_count": sum(int(item.get("planned_count") or 0) for item in results),
         "applied_count": sum(int(item.get("applied_count") or 0) for item in results),
+        "inbox_updated_count": sum(int(item.get("inbox_updated_count") or 0) for item in results),
         "sources": results,
         "backup_paths": backup_paths,
     }
     return attach_write_contract(
         out,
         dry_run=not apply_changes,
-        write_applied=apply_changes and int(out["applied_count"]) > 0,
+        write_applied=apply_changes and (int(out["applied_count"]) > 0 or int(out["inbox_updated_count"]) > 0),
         backup_path=backup_paths[0] if len(backup_paths) == 1 else None,
-        rollback_hint="restore each source state backup listed in backup_paths",
+        rollback_hint=(
+            "retry reconciliation against current evidence to complete pending source updates; "
+            "restoring source state backups does not undo Inbox completion or receipt suppression"
+        ),
     )
 
 
@@ -2160,15 +2301,24 @@ def _run_listener_source_loop(
     backfill_cfg = dict(source.get("backfill") or intake_cfg.get("backfill") or {})
     reconnect_floor_sec = max(1, int(source.get("reconnect_sec") or intake_cfg.get("reconnect_sec") or 5))
     reconnect_delay_sec = reconnect_floor_sec
-    last_receipt_recovery_monotonic = None
+    last_local_recovery_monotonic = None
 
-    def _recover_receipts_if_due() -> None:
-        nonlocal last_receipt_recovery_monotonic
+    def _recover_local_intake_if_due() -> None:
+        nonlocal last_local_recovery_monotonic
         now = time.monotonic()
-        if (not apply_changes or stop.is_set() or (last_receipt_recovery_monotonic is not None
-                and now - last_receipt_recovery_monotonic < 60)):
+        if (not apply_changes or stop.is_set() or (last_local_recovery_monotonic is not None
+                and now - last_local_recovery_monotonic < 60)):
             return
-        last_receipt_recovery_monotonic = now
+        last_local_recovery_monotonic = now
+        try:
+            with process_lock:
+                status_state["last_intake_state_reconciliation"] = _reconcile_source_completion(
+                    source=source, repo=repo, apply_changes=True,
+                )
+            status_state.pop("last_intake_state_reconciliation_error", None)
+            status_state["inbox"] = current_inbox_summary()
+        except Exception as exc:
+            status_state["last_intake_state_reconciliation_error"] = f"{type(exc).__name__}: {exc}"
         try:
             with process_lock:
                 status_state["receipt_recovery"] = recover_trade_intake_receipts(
@@ -2180,9 +2330,9 @@ def _run_listener_source_loop(
 
     while not stop.is_set():
         try:
-            _recover_receipts_if_due()
+            _recover_local_intake_if_due()
             _write_listener_status(status_path, status_state, status="starting", stage="listener_start", restart_count=restart_count)
-            listener.start(cancel_event=stop, on_wait=_recover_receipts_if_due)
+            listener.start(cancel_event=stop, on_wait=_recover_local_intake_if_due)
             _log(f"[OK] auto trade intake listener started source={source.get('id')} {host}:{port}")
             if status_state.get("last_error"):
                 status_state["recovered_at"] = utc_now()
@@ -2191,7 +2341,7 @@ def _run_listener_source_loop(
             if bool(backfill_cfg.get("enabled", True)) and not bool(backfill_cfg.get("startup_check", True)) and last_backfill_monotonic is None:
                 last_backfill_monotonic = time.monotonic()
             while not stop.is_set():
-                _recover_receipts_if_due()
+                _recover_local_intake_if_due()
                 listener.check_health()
                 reconnect_delay_sec = reconnect_floor_sec
                 now_mono = time.monotonic()
@@ -2548,7 +2698,7 @@ def _run_listener_source_loop(
             _log(f"[WARN] listener source={source.get('id')} exited: {exc}; retry in {reconnect_delay_sec} sec")
             reconnect_until = time.monotonic() + reconnect_delay_sec
             while not stop.is_set() and time.monotonic() < reconnect_until:
-                _recover_receipts_if_due()
+                _recover_local_intake_if_due()
                 stop.wait(min(1, max(0, reconnect_until - time.monotonic())))
             reconnect_delay_sec = min(reconnect_delay_sec * 2, 60)
     listener.close()

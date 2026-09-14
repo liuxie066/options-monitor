@@ -46,3 +46,15 @@ def test_symbol_identity_accepts_explicit_aliases_without_runtime_config_io() ->
     assert identity is not None
     assert identity.canonical == "3690.HK"
     assert normalize_symbol_candidate("MELIHK", symbol_aliases=aliases) == "3690.HK"
+
+
+def test_hk_option_root_does_not_become_same_named_us_stock() -> None:
+    hk = resolve_symbol_identity("HK.CNC260330C30000")
+    us = resolve_symbol_identity("US.CNC260320C30000")
+    assert (hk.canonical, hk.market, hk.currency, hk.futu_code) == (
+        "0883.HK", "HK", "HKD", "HK.00883",
+    )
+    assert (us.canonical, us.market, us.currency) == ("CNC", "US", "USD")
+    assert resolve_symbol_identity("CNC").canonical == "CNC"
+    assert resolve_symbol_identity("US.MET260320C30000").canonical == "MET"
+    assert resolve_symbol_identity("HK.ABCD260330C30000") is None

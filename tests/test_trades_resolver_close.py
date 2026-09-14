@@ -525,7 +525,7 @@ def test_multi_lot_broker_close_declares_complete_deal_split_metadata(tmp_path) 
         )
 
     result = resolve_trade_deal(
-        _deal(contracts=3, trade_time_ms=5000),
+        _deal(contracts=3, trade_time_ms=5000, raw_payload={"qty": 3}),
         repo=repo,
         state={},
         apply_changes=True,

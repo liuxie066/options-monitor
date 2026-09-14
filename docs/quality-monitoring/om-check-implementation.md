@@ -152,3 +152,114 @@ quality refresh
 本地门禁已接入 `option_positions_read`、option performance、持仓物化/报告和 close-advice 读取/生成边界。消费者名称与 payload 中的 `blocked_consumers` 使用同一稳定标识。普通候选扫描不依赖持仓质量，不受无关异常影响。producer 与 gate 使用本地 V1 状态文件。
 
 生产只读 canary、定时器运行状态和 rollback 必须以当前部署证据验证，不能由本地测试替代。
+
+## 持仓质量与成交收口修复设计
+
+状态：待实现；Devflow simple。此节是本次唯一设计与范围记录。
+授权依据：用户要求「用 devflow 的简单模式修复所有 bug，然后再处理线上数据」。
+研发按 Brainstorm → Save Design → Improve Design → Impl → Review 执行；
+提交、发布和服务升级保持独立授权边界。
+
+### 目标与成功信号
+
+修复本次证据揭示的持仓输入、快照时间、拆分成交质量误报和成交完成状态
+未收口问题，验收已存在的身份隔离可见性修复，然后逐笔处理对应历史数据。
+成功要求正常空头快照可校验、正常采集不会被判未来、完整合法拆分通过质量
+检查，而异常输入、真实重复、经济冲突、缺失身份与未完成结算继续阻断。
+已完成成交的 pending 必须在真实入站运行路径可靠收口且可重试，不能仅改报表计数。
+生产完成以目标记录的证据、修复预览、持久结果及回读为准，本地测试不替代生产验收。
+
+非目标：不下单、不发送通知、不凭到期日强制平仓、不按端口猜账户、不删除合法
+拆分事件、不跳过质量门禁、不启用迁移 cutover、不新增 schema、服务、依赖或配置。
+不修改无关工作区内容。运行期读写必须绑定主机、runtime root、账户、市场与时间。
+
+### 已核对事实与剩余证据
+
+2026-09-13 晚间只读证据：/tmp/om-quality-now.json、
+/tmp/om-quality-conflicts.json、/tmp/om-intake-crosscheck.json；这些是调查输入，
+不是持久业务权威，实施线上修复前重取当前事实。
+
+- OpenD 空头 qty 与 can_sell_qty 均可为负；适配器只规范化 quantity，
+  导致标准非负 sellable_quantity 校验失败。方向冲突与非法数值仍须拒绝。
+- quality service 在采集前取 now，却将其用于采集后快照校验；
+  标准域拒绝负 age，正常采集因而可被误报来自未来。
+- lx 一笔平仓 3 张分配 1+2，sy 一笔 2 张分配 1+1，目标 lot 各不相同；
+  两者都有 broker_deal_completion 且当前完成性 helper 接受。
+  ledger_checks 只比较单行 fingerprint，未区分完整拆分与重复。
+- 19 条 source pending 中，16 条关联 case 已 ledger_written；仅凭状态尚不能
+  证明每条 source 的最终事件均有效，需要 canonical anchor、allocation 与未 void
+  的终态事件证明。state_reconcile 已有 preview/apply，不能再建第二套修账器。
+  listener 已有每分钟 lifecycle due 路径，但没有在该路径执行 source state 收口。
+- 身份隔离可见性修复已在独立提交 3bc68101；纳入完整 diff 验收而不重复实现。
+
+### 选定设计与失败语义
+
+1. 在 build_futu_position_snapshot 共同适配边界，将合法空头带符号可平量
+   规范化到标准绝对数量，同时保留 source_row。仅对已证明 short 的负数做
+   方向转换，不能用 abs 掩盖 long 的负数、非数值、无穷或数量越界。
+   所有调用者沿用标准输入校验，域模型不放宽。
+2. 在 quality service 完成采集后使用注入时钟的新读数校验该 scope；
+   数据集观察时间、刷新到期时间与本次校验保持一致。不得用快照自己的时间
+   冒充可信时钟；真正未来、过期、不完整、缓存、错账户输入仍然失败。
+3. 在现有 deal_identity owner 复用并必要时收紧完整拆分判定，供 ledger_checks
+   使用。证明同一 scoped broker execution、合约/方向/价格/乘数一致、每个
+   target lot 唯一、索引集合完整、各分配等于事件实际数量且总量等于券商成交量。
+   缺证据、混合身份、部分拆分、重复 index/target、经济冲突仍报警；
+   void 之后重算 active 事件。不能仅因 completed helper 返回 ID 就豁免真实冲突。
+4. 在 state_reconcile 复用 canonical lifecycle coherent facts，补齐已完成
+   anchor 到 source key 的关联。只接受同账户/物理身份、唯一且有效的终态证据，
+   不用 case.status 或裸 deal ID 单独证明完成；冲突、缺失、读取失败保留 pending。
+   在 listener 现有受锁保护的维护路径调用共同收口逻辑，preview 不写，apply
+   只更新证据覆盖的 source entries；共享 inbox 同样只按准确身份及完成证据收口。
+   跨 SQLite 与文件不假设原子事务：沿用现有锁、原子写及重试，对账中断后可重跑，
+   不重放券商成交、不重复写 ledger、不触发 PM 刷新或通知；并发新记录不得丢失。
+
+不选择下游过滤负数、放宽未来时间容差、按 deal ID 直接去重、按日期 expire、
+批量删除 pending 或引入新恢复队列。这些会隐藏源错误或丢失真实待办。
+
+### 三个行为增量及验证
+
+1. 正常持仓证据可用：覆盖 short/long/zero、负数与越界、NaN/布尔值、
+   延迟采集及真实 future/stale、四个账户市场 scope 隔离；运行
+   tests/test_position_snapshot_input.py、tests/test_futu_portfolio_context.py、
+   tests/quality/test_opend_position_adapter.py 与 quality service/checks。
+2. 拆分成交守恒：覆盖 1+1、1+2、缺腿、重复索引/目标、元数据与实际数量不同、
+   错账户/环境、价格冲突及 void；运行 deal identity、state reconciliation、
+   trade intake 与 quality checks 的相关现有测试。合法在线样本作脱敏离线回归。
+3. 完成状态与历史修复：覆盖 canonical adopted lifecycle、终态被 void、
+   跨账户裸 ID 碰撞、部分分配、证据读取失败、dry-run 无写、并发写保留、
+   中断重试与第二次无操作；通过真实 listener/CLI 集成验证，而非只测 helper。
+   验收身份隔离持续可见且不能进入普通自动认领；运行对应已有提交测试。
+
+最终运行相关完整测试集、ruff、项目 guardrails 和 git diff --check，随后对
+全部相对 main 的改动执行 Devflow Review；不以测试成功推断已发布或已修复生产。
+
+### 线上处理范围与验收
+
+研发验证后，针对 liuxie-incus 的 /var/lib/options-monitor 重新只读采证，
+生成逐项预览（标识、当前值、依据、预期动作、幂等键、回读与恢复方式）。
+有证据的残留按既有受控入口处理；缺证据的项目继续查原始成交/结算，不制造事件。
+范围包括 16 条 completed lifecycle 残留、两条腾讯各 100 股 @440 指派腿、
+4 条身份隔离、四个过期 open lot（合计 5 张）、3 个旧 PDD lifecycle 案例、
+sy 腾讯 400 股卖出匹配、lx NVDA 指派绑定、sy 两条腾讯指派股数不一致。
+这些集合可能重叠，按稳定记录身份去重；495 已闭合与两笔合法拆分无需改账。
+涉及具体不可逆记账修复时遵循既有预览确认契约；所需发布/升级另行取得明确授权。
+
+剩余风险：历史证券条款与结算证据可能不可得，不能承诺强制清零待办；
+线上质量仍受未修数据影响。完成报告必须分别列出已修代码、已处理数据、
+证据不足的待决策项及阻塞原因，不能将它们隐藏成 trusted。
+
+### 实施约束补充
+
+- 状态应用在现有文件锁内比较同一 key 的 bucket 与完整 payload；观察值改变时
+  跳过该条，保留最新状态，applied_count 只计实际写入。其他 key 也必须保留。
+- 本地收口与 lifecycle due/外部采集有独立异常边界；即使本轮 OpenD 失败，
+  仍可用既有持久证据收口。收口失败不能伪报 checkpoint/seal 失败。
+- 先按 inbox 观察版本条件收口，再更新 source；中断后从未完成 source 重新发现，
+  已收口 inbox 为幂等无操作。有效 claim、payload/result 变化、冲突或身份隔离
+  仍拒绝普通自动收口。历史身份隔离需独立人工证据修复路径。
+- 收口不得新增可发送 receipt 或唤醒 portfolio_refresh_intent；应保留既有交付
+  历史与抑制语义，验收必须跑收口后的 receipt/PM 恢复路径证明没有新副作用。
+- 拆分元数据与实际事件数量均为有限、非布尔、精确正整数；禁止 int 截断。
+  质量分组使用已证明的物理账户、环境、namespace 与 execution 身份，canonical
+  身份和 legacy alias 不重复计数；缺少可证明身份时保留异常，不合并猜测。

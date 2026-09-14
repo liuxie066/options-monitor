@@ -63,6 +63,33 @@ identity 幂等入账；它不会按裸 deal ID、合约或端口绑定原隔离
 继续存在，直到身份复核完成。缺失身份的旧行不能用 `--retry-failed` 强制解封；超出
 回填窗口或需要消解旧行时，按下述一次性历史修复边界另行准备权威证据与确认。
 
+已声明的来源成交 ID 与 canonical execution 在同一 namespace 内冲突时，标准化返回
+`invalid:source_execution_identity`；已有 Inbox 重试进入既有 `conflict` 状态，原因是
+`broker_source_identity_conflict`。旧结果和回执证据保留，后续正常重试不能覆盖已发现
+的冲突。不同来源 namespace 的 ID 不要求相等，但完整拆分仍须证明组内身份和经济守恒。
+回执恢复与 PM 刷新在筛选和最终领取工作时同样核对完整历史凭证，缺证据或身份冲突
+不能触发新的外部操作。已经领取并产生的发送结果仍可保存，保留真实回执事实。
+
+## 已完成成交的状态收口
+
+listener 在现有每分钟维护周期核对本地 ledger、lifecycle、来源状态与共享 Inbox。
+只有完整分配和有效终结事件能证明成交已处理；case 的 `ledger_written` 状态本身
+不构成完成证据。被 void 的终结事件、部分分配、数量冲突及缺失身份继续保留 pending。
+本地收口独立于 OpenD 采集；收口失败单独记录，不改变 lifecycle seal 的恢复状态。
+
+`./om run trade-intake --reconcile-state --dry-run` 提供只读预览；明确授权后使用
+同一入口的 `--apply` 更新状态。`--account` 与重复的 `--deal-id` 可限定范围。
+收口先核对 Inbox 的准确身份、经济内容、当前版本及完整历史凭证集，再更新来源文件；
+提交时重新比较凭证集，旧版遗留的身份矛盾也继续阻断。并发 claim、冲突或观察值
+变化时跳过该条。文件写入失败后可重试，已收口 Inbox 不重复生效。
+结果中的 `applied_deal_ids` 和 `applied_count` 仅包含实际更新的来源条目；
+`inbox_updated_count` 另计 Inbox 更新，`deferred` 说明未通过 Inbox 核对的条目。
+汇总的 `write_applied` 在来源文件或 Inbox 任一实际更新时为 true；若 Inbox 已收口而
+来源文件并发比较未通过，应按最新证据重试。来源文件备份不能回滚 Inbox 的更新。
+
+此路径保留旧结果和回执证据，不重放成交、不修改持仓事件，也不触发通知或 PM 刷新。
+已有 Inbox 文件无法读取或缺少 schema 时视为证据不可用，不能作为“没有待处理记录”。
+
 ## 生命周期观察隔离与一次性历史修复
 
 `trade_intake.settlement_observation.enabled` 是 lifecycle settlement provider

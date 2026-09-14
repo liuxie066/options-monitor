@@ -3,7 +3,9 @@ from __future__ import annotations
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.ledger import position_lots_fingerprint
 from domain.domain.lifecycle_allocation import validate_stock_settlement_allocation_group
-from domain.domain.trade_execution import execution_economic_content, normalize_execution_input
+from domain.domain.trade_execution import (
+    execution_economic_content, execution_source_identity_conflicts, ledger_execution_event_set_is_complete, normalize_execution_input,
+)
 from .event_codec import trade_event_application_payload, valid_void_target_event_id
 
 from .writer_common import (
@@ -1689,9 +1691,12 @@ def _events_for_storage(
     *,
     conn: Any | None = None,
 ) -> list[Any]:
-    execution = dict(getattr(event, "raw_payload", {}) or {}).get("execution_input")
+    raw_payload = dict(getattr(event, "raw_payload", {}) or {})
+    execution = raw_payload.get("execution_input")
     execution_id = execution_identity_from_input(execution)
     if execution_id:
+        if execution_source_identity_conflicts(raw_payload, execution):
+            raise ValueError("trade_execution_identity_conflict")
         # ponytail: scan existing event metadata; index this lookup if intake volume warrants it.
         ledger_rows = repo.list_trade_events(conn=conn)
         existing = [
@@ -1704,19 +1709,15 @@ def _events_for_storage(
                 stored = (row.get("raw_payload") or {}).get("execution_input")
                 if not isinstance(stored, dict):
                     raise ValueError("legacy_execution_evidence_required")
+                if execution_source_identity_conflicts(row.get("raw_payload") or {}, stored):
+                    raise ValueError("trade_execution_identity_conflict")
                 require_same_execution(stored, execution)
             if applied_execution_association_conflicts(
                 None, execution_id, execution_economic_content(execution), applied_events=existing,
             ):
                 raise ValueError("trade_execution_applied_association_conflict")
-            completions = [(row.get("raw_payload") or {}).get("broker_deal_completion") or {} for row in existing]
-            if len(existing) > 1 or any(completions):
-                counts = {int(item.get("split_count") or 0) for item in completions}
-                indexes = {int(item.get("split_index") or 0) for item in completions}
-                expected = {int(item.get("expected_contracts") or 0) for item in completions}
-                allocated = sum(int(item.get("allocated_contracts") or 0) for item in completions)
-                if counts != {len(existing)} or indexes != set(range(1, len(existing) + 1)) or expected != {allocated} or allocated != sum(int(row.get("contracts") or 0) for row in existing):
-                    raise ValueError("trade_execution_split_incomplete")
+            if not ledger_execution_event_set_is_complete(existing):
+                raise ValueError("trade_execution_split_incomplete")
             voided = {valid_void_target_event_id(row) for row in ledger_rows}
             if any(row["event_id"] in voided for row in existing):
                 raise ValueError("trade_execution_split_incomplete")
@@ -1867,6 +1868,8 @@ def _trade_event_from_normalized_deal(deal: Any) -> TradeEvent:
     )
     if standard_input or execution_id:
         execution = getattr(deal, "execution_input", None) or raw_payload.get("execution_input") or raw_payload
+        if execution_source_identity_conflicts(raw_payload, execution):
+            raise ValueError("trade_execution_identity_conflict")
         # Revalidate source economics before any write; split DTO quantities are allocations.
         errors = normalize_execution_input(execution)["errors"]
         errors.extend(execution.get("errors") or [])

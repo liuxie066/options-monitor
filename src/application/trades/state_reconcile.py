@@ -3,12 +3,24 @@ from __future__ import annotations
 import json
 import shutil
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable
 
+from domain.domain.trade_execution import (
+    epoch_milliseconds_instant,
+    execution_economic_content,
+    execution_source_identity_conflicts,
+)
 from src.application.ledger.api import (
+    build_source_consumption_claim,
+    canonical_source_economic_payload,
+    canonical_source_payload_hash,
+    execution_identity_from_input,
     assigned_stock_event_log,
     lifecycle_account_coherent_facts,
+    proven_lifecycle_terminal_events as _proven_lifecycle_terminal_events,
+    stock_claim_matches_lifecycle_terminal_events as _stock_claim_matches_terminal,
     open_trade_reconciliation_evidence_repo,
 )
 from src.application.trades.deal_identity import (
@@ -19,7 +31,7 @@ from src.application.trades.deal_identity import (
 )
 from src.application.trades.state import (
     load_trade_intake_state,
-    update_trade_intake_state_entries,
+    compare_and_update_trade_intake_state_entries,
     upsert_deal_state,
 )
 
@@ -101,6 +113,95 @@ def preview_trade_intake_reconciliation_from_sqlite(
     }
 
 
+def reconciled_source_matches_deal(action: dict[str, Any], deal: Any) -> bool:
+    """Bind a proven reconciliation action to the current inbox's broker economics."""
+    raw = deal.to_dict()
+    execution = raw.get("execution_input") or {}
+    if execution_source_identity_conflicts(raw.get("raw_payload") or {}, execution):
+        return False
+    ref = execution.get("broker_account_ref") or {}
+    account, physical, deal_id = raw.get("internal_account"), raw.get("futu_account_id"), raw.get("deal_id")
+    if (not account or not physical or not deal_id
+            or not execution_identity_from_input(execution)
+            or ref.get("broker_id") != "futu" or ref.get("environment") != "REAL"
+            or ref.get("external_account_id") != physical
+            or execution.get("external_id_namespace") != "futu.deal"
+            or str(execution.get("external_execution_id")) != str(deal_id)):
+        return False
+    instrument = execution.get("instrument_ref") or {}
+    try:
+        execution_time = epoch_milliseconds_instant(raw.get("trade_time_ms"))
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if (ref.get("account_label") not in (None, account)
+            or execution.get("side") != raw.get("side")
+            or not _same_decimal(execution.get("quantity"), raw.get("contracts"))
+            or not _same_decimal(execution.get("price"), raw.get("price"))
+            or execution.get("occurred_at_utc") != execution_time
+            or instrument.get("asset_type") != raw.get("asset_type")
+            or instrument.get("symbol") != raw.get("symbol")):
+        return False
+    if raw.get("asset_type") == "option" and (
+            execution.get("position_effect") != raw.get("position_effect")
+            or instrument.get("option_type") != raw.get("option_type")
+            or instrument.get("expiration_ymd") != raw.get("expiration_ymd")
+            or not _same_decimal(instrument.get("strike"), raw.get("strike"))
+            or not _same_decimal(instrument.get("multiplier"), raw.get("multiplier"))):
+        return False
+    source_key = f"futu:{account}:{physical}:{deal_id}"
+    reason = action.get("reason")
+    if reason == "lifecycle_case_already_recorded":
+        expected = action.get("source_payload")
+        if (not isinstance(expected, dict) or action.get("source_key") != source_key
+                or canonical_source_payload_hash(expected) != action.get("source_payload_hash")):
+            return False
+        role = expected.get("source_role")
+        if role == "option_anchor":
+            if raw.get("asset_type") != "option" or raw.get("position_effect") != "close" or raw.get("side") not in {"buy", "sell"}:
+                return False
+            # Closing buy covers a short; closing sell disposes of a long.
+            raw["position_side"] = "short" if raw["side"] == "buy" else "long"
+            required = ("option_type", "position_side", "strike", "expiration_ymd", "multiplier")
+        elif role == "stock_settlement" and raw.get("asset_type") == "stock":
+            required = ()
+        else:
+            return False
+    elif reason == "assigned_stock_sale_event_recorded":
+        event = action.get("assigned_stock_event") or {}
+        if (raw.get("asset_type") != "stock" or raw.get("side") != "sell"
+                or event.get("event_type") != "sale" or event.get("side") != "sell"
+                or source_key not in structured_deal_keys_from_assigned_stock_event(event)):
+            return False
+        stored_execution = event.get("execution_input")
+        if stored_execution:
+            if execution_identity_from_input(stored_execution) != execution_identity_from_input(execution):
+                return False
+            stored, incoming = execution_economic_content(stored_execution), execution_economic_content(execution)
+            if stored.get("errors") or incoming.get("errors") or stored.get("economic") != incoming.get("economic"):
+                return False
+        expected = event
+        role, required = "stock_settlement", ()
+    else:
+        return False
+    if not _positive_contract_count(raw.get("contracts")) or not _positive_contract_count(raw.get("trade_time_ms")):
+        return False
+    try:
+        actual = canonical_source_economic_payload(source_key=source_key, source_role=role,
+            payload={**raw, "account": account, "clearing_date": (raw.get("raw_payload") or {}).get("clearing_date") or (raw.get("raw_payload") or {}).get("settlement_date")})
+        proven = canonical_source_economic_payload(source_key=source_key, source_role=role, payload=expected)
+    except (TypeError, ValueError):
+        return False
+    required = ("account", "futu_account_id", "symbol", "side", "quantity", "price", "execution_time_ms", *required)
+    if any(actual.get(field) is None or proven.get(field) is None or actual[field] != proven[field] for field in required):
+        return False
+    # Old source claims may omit ancillary fields; any recorded fact still binds.
+    if any(proven.get(field) is not None and actual.get(field) != proven[field] for field in ("order_id", "clearing_date")):
+        return False
+    if reason == "assigned_stock_sale_event_recorded" and expected.get("currency") is not None and raw.get("currency") != expected["currency"]:
+        return False
+    return True
+
+
 def _pending_bucket_count(counts: dict[str, Any]) -> int:
     return sum(
         int(counts.get(name) or 0)
@@ -116,7 +217,8 @@ def reconcile_trade_intake_state(
     deal_ids: list[str] | None = None,
     apply_changes: bool = False,
     load_state_fn: Callable[[str | Path], dict[str, Any]] = load_trade_intake_state,
-    update_state_fn: Callable[..., Any] = update_trade_intake_state_entries,
+    update_state_fn: Callable[..., Any] = compare_and_update_trade_intake_state_entries,
+    before_state_update: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     state_file = Path(state_path)
     audit_file = Path(audit_path) if audit_path else None
@@ -188,14 +290,18 @@ def reconcile_trade_intake_state(
                     "action": "mark_processed",
                     "reason": "assigned_stock_sale_event_recorded",
                     "assigned_stock_event_id": payload["diagnostics"]["reconciled_assigned_stock_event_id"],
+                    "assigned_stock_event": dict(assigned_stock_events[-1]),
                     "write_state": True,
                 }
             )
             new_state = upsert_deal_state(new_state, bucket="processed_deal_ids", deal_id=deal_id, payload=payload)
             continue
 
-        lifecycle_entries = _filter_evidence_for_state_item(lifecycle_by_deal.get(deal_id) or [], state_item=item)
-        if lifecycle_entries:
+        lifecycle_entries = [
+            entry for entry in lifecycle_by_deal.get(_lifecycle_lookup_key(deal_id, item), [])
+            if _lifecycle_source_matches_state(entry, deal_id=deal_id, state_item=item)
+        ]
+        if len(lifecycle_entries) == 1:
             payload = _processed_payload_from_lifecycle(
                 deal_id=deal_id,
                 from_bucket=bucket,
@@ -211,6 +317,11 @@ def reconcile_trade_intake_state(
                     "reason": "lifecycle_case_already_recorded",
                     "lifecycle_case_id": payload["diagnostics"]["reconciled_lifecycle_case_id"],
                     "lifecycle_decision_type": payload["diagnostics"]["reconciled_lifecycle_decision_type"],
+                    "lifecycle_terminal_types": payload["diagnostics"]["reconciled_lifecycle_terminal_types"],
+                    "source_key": lifecycle_entries[0]["source_key"],
+                    "terminal_event_ids": lifecycle_entries[0]["terminal_event_ids"],
+                    "source_payload_hash": lifecycle_entries[0]["source_payload_hash"],
+                    "source_payload": lifecycle_entries[0]["source_payload"],
                     "write_state": True,
                 }
             )
@@ -266,13 +377,22 @@ def reconcile_trade_intake_state(
     writable_actions = [item for item in actions if item.get("write_state")]
     backup_path: Path | None = None
     final_state = new_state
-    if apply_changes and writable_actions:
+    applied_keys: tuple[str, ...] = ()
+    allowed = {str(item["deal_id"]) for item in writable_actions}
+    if writable_actions and before_state_update is not None:
+        allowed &= set(before_state_update(state, new_state, actions))
+        for action in writable_actions:
+            if action["deal_id"] not in allowed:
+                action["write_state"] = False
+                action.setdefault("deferred_reason", "before_state_update_rejected")
+                bucket, original = _state_entry(state, action["deal_id"])
+                new_state = upsert_deal_state(new_state, bucket=bucket, deal_id=action["deal_id"], payload=original)
+        final_state = new_state
+    if apply_changes and allowed:
         backup_path = _backup_state_file(state_file)
-        update_state_fn(
-            state_file,
-            new_state,
-            deal_ids=[str(item["deal_id"]) for item in writable_actions],
-        )
+        applied_keys = tuple(update_state_fn(
+            state_file, new_state, deal_ids=sorted(allowed), expected_state=state,
+        ))
         final_state = load_state_fn(state_file)
 
     return {
@@ -282,9 +402,10 @@ def reconcile_trade_intake_state(
         "requested_deal_ids": requested,
         "pending_before": _bucket_counts(state),
         "pending_after": _bucket_counts(final_state),
-        "planned_count": len(writable_actions),
-        "applied_count": len(writable_actions) if apply_changes else 0,
-        "state_written": bool(apply_changes and writable_actions),
+        "planned_count": len(allowed),
+        "applied_count": len(applied_keys),
+        "applied_deal_ids": list(applied_keys),
+        "state_written": bool(applied_keys),
         "actions": actions,
         "backup_path": str(backup_path) if backup_path else None,
     }
@@ -335,7 +456,8 @@ def _ledger_events_by_deal(repo: Any) -> dict[str, list[dict[str, Any]]]:
     complete_ids = completed_ledger_deal_keys(rows)
     out: dict[str, list[dict[str, Any]]] = {}
     for event in active_ledger_events(rows):
-        if not isinstance(event, dict):
+        raw = event.get("raw_payload") or {}
+        if raw.get("case_id") or raw.get("allocation_id"):
             continue
         for deal_id in _deal_ids_from_ledger_event(event):
             if deal_id not in complete_ids:
@@ -419,65 +541,140 @@ def _deal_ids_from_assigned_stock_event(event: dict[str, Any]) -> list[str]:
 
 
 def _completed_lifecycle_cases_by_deal(repo: Any) -> dict[str, list[dict[str, Any]]]:
+    """Index only coherent anchors with fully allocated, active terminal effects."""
     list_cases = getattr(repo, "list_trade_lifecycle_cases", None)
-    list_evidence = getattr(repo, "list_trade_lifecycle_evidence", None)
-    if not callable(list_cases) or not callable(list_evidence):
+    if not callable(list_cases):
         return {}
+    accounts = {_evidence_account(case) for case in _dict_rows(list_cases())}
     out: dict[str, list[dict[str, Any]]] = {}
-    for case in list_cases():
-        if not isinstance(case, dict):
-            continue
-        status = str(case.get("status") or "").strip().lower()
-        decision_type = _completed_lifecycle_decision_type(case)
-        if status != "ledger_written" or decision_type not in {"assignment", "exercise", "expire_close"}:
-            continue
-        case_id = str(case.get("case_id") or "").strip()
-        if not case_id:
-            continue
+    for account in sorted(accounts - {""}):
         try:
-            evidence_rows = list_evidence(case_id=case_id)
+            facts = lifecycle_account_coherent_facts(repo, account=account)
         except Exception:
-            evidence_rows = []
-        for evidence in evidence_rows:
-            if not isinstance(evidence, dict):
+            # Unavailable evidence never authorizes clearing a pending entry.
+            continue
+        cases = {row["case_id"]: row for row in facts["account_lifecycle_cases"]}
+        evidence = {row["evidence_id"]: row for row in facts["account_lifecycle_evidence"]}
+        claims = _dict_rows(facts.get("account_lifecycle_source_consumptions"))
+        for resolution in facts["account_lifecycle_resolution"].get("case_resolutions", []):
+            case = cases.get(resolution.get("case_id"))
+            if not case or resolution.get("status") not in {"direct", "bridged"}:
                 continue
-            deal_ids = _deal_ids_from_lifecycle_evidence(evidence)
-            if not deal_ids:
+            terminal = _proven_lifecycle_terminal_events(case, facts=facts)
+            if not terminal:
                 continue
-            entry = {
-                "case": {**dict(case), "decision_type": decision_type},
-                "evidence": dict(evidence),
-            }
-            for deal_id in deal_ids:
-                out.setdefault(deal_id, []).append(entry)
+            terminal_types = sorted({row["event_type"] for row in terminal})
+            anchors = _dict_rows(resolution.get("anchor_facts"))
+            candidates = []
+            for anchor in anchors:
+                candidates.extend(claim for claim in claims if (
+                    claim.get("source_key") == anchor.get("source_key")
+                    and claim.get("source_payload_hash") == anchor.get("source_payload_hash")
+                    and claim.get("owner_evidence_id") == anchor.get("source_owner_evidence_id")
+                    and claim.get("case_id") == anchor.get("source_owner_case_id")
+                    and claim.get("source_role") == "option_anchor"
+                ))
+            candidates.extend(claim for claim in claims if (
+                claim.get("case_id") == case["case_id"]
+                and claim.get("source_role") == "stock_settlement"
+                and _stock_claim_matches_terminal(claim, terminal, case=case)
+            ))
+            for claim in candidates:
+                owner = evidence.get(claim.get("owner_evidence_id"))
+                if not owner:
+                    continue
+                source_key = str(claim.get("source_key") or "")
+                entry = {
+                    "case": {**case, "decision_type": terminal_types[0] if len(terminal_types) == 1 else "mixed"},
+                    "evidence": owner, "source_key": source_key,
+                    "source_payload": claim["source_payload"],
+                    "source_payload_hash": claim["source_payload_hash"],
+                    "terminal_event_ids": [row["event_id"] for row in terminal],
+                    "terminal_types": terminal_types,
+                }
+                keys = _deal_ids_from_source_key(source_key)
+                execution = (owner.get("raw") or {}).get("execution_input")
+                if isinstance(execution, dict):
+                    ref = execution.get("broker_account_ref") or {}
+                    parts = source_key.split(":", 3)
+                    if (len(parts) == 4 and ref.get("broker_id") == "futu"
+                            and ref.get("external_account_id") == parts[2]
+                            and ref.get("environment") == "REAL"
+                            and execution.get("external_id_namespace") == "futu.deal"
+                            and str(execution.get("external_execution_id")) == parts[3]):
+                        identity = execution_identity_from_input(execution)
+                        if identity:
+                            keys.append(identity)
+                            entry["execution_identity"] = identity
+                for key in keys:
+                    out.setdefault(key, []).append(entry)
     return out
-
-
-def _completed_lifecycle_decision_type(case: dict[str, Any]) -> str:
-    explicit = str(case.get("decision_type") or "").strip().lower()
-    if explicit:
-        return explicit
-    summary = (
-        dict(case.get("derived_summary") or {})
-        if isinstance(case.get("derived_summary"), dict)
-        else {}
-    )
-    resolved = summary.get("resolved_contracts_by_terminal_type")
-    if not isinstance(resolved, dict):
-        return ""
-    terminal_types = {
-        str(key or "").strip().lower()
-        for key, value in resolved.items()
-        if _positive_contract_count(value) > 0
-    }
-    return next(iter(terminal_types)) if len(terminal_types) == 1 else ""
 
 
 def _positive_contract_count(value: Any) -> int:
     try:
-        return max(0, int(value or 0))
-    except (TypeError, ValueError, OverflowError):
+        number = Decimal(str(value))
+        if isinstance(value, bool) or not number.is_finite() or number <= 0 or number != number.to_integral_value():
+            return 0
+        return int(number)
+    except (InvalidOperation, TypeError, ValueError, OverflowError):
         return 0
+
+
+def _same_decimal(left: Any, right: Any) -> bool:
+    try:
+        a, b = Decimal(str(left)), Decimal(str(right))
+        return not isinstance(left, bool) and not isinstance(right, bool) and a.is_finite() and b.is_finite() and a == b
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+
+
+def _lifecycle_lookup_key(deal_id: str, state_item: dict[str, Any]) -> str:
+    if not deal_id.startswith("execution:"):
+        return deal_id
+    evidence = (state_item.get("diagnostics") or {}).get("lifecycle_evidence") or {}
+    execution = (evidence.get("raw") or {}).get("execution_input") or {}
+    ref = execution.get("broker_account_ref") or {}
+    if (execution_identity_from_input(execution) != deal_id
+            or ref.get("broker_id") != "futu" or ref.get("environment") != "REAL"
+            or ref.get("external_account_id") != state_item.get("futu_account_id")
+            or execution.get("external_id_namespace") != "futu.deal"
+            or str(execution.get("external_execution_id")) != state_item.get("source_deal_id")):
+        return deal_id
+    key = f"futu:{state_item.get('account')}:{ref['external_account_id']}:{execution['external_execution_id']}"
+    return key if evidence.get("source_event_id") == key else deal_id
+
+
+def _lifecycle_source_matches_state(entry: dict[str, Any], *, deal_id: str, state_item: dict[str, Any]) -> bool:
+    if not _evidence_matches_state_item(entry, state_item=state_item):
+        return False
+    parts = entry["source_key"].split(":", 3)
+    if len(parts) != 4 or state_item.get("account") != parts[1]:
+        return False
+    physical = state_item.get("futu_account_id")
+    if physical and str(physical) != parts[2]:
+        return False
+    if state_item.get("source_deal_id") and str(state_item["source_deal_id"]) != parts[3]:
+        return False
+    if deal_id.startswith("execution:"):
+        if entry.get("execution_identity") == deal_id:
+            return str(physical or "") == parts[2]
+        evidence = (state_item.get("diagnostics") or {}).get("lifecycle_evidence") or {}
+        if (entry["source_key"] != _lifecycle_lookup_key(deal_id, state_item)
+                or evidence.get("evidence_id") not in (entry["evidence"].get("source_evidence_ids") or [])):
+            return False
+        try:
+            claim = build_source_consumption_claim(
+                source_key=entry["source_key"], case_id=entry["case"]["case_id"],
+                owner_evidence_id=entry["evidence"]["evidence_id"],
+                source_role=entry["source_payload"]["source_role"], economic_payload=evidence.get("raw") or {},
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
+        return claim["source_payload_hash"] == entry["source_payload_hash"]
+    if deal_id != entry["source_key"] and (deal_id != parts[3] or str(physical or "") != parts[2]):
+        return False
+    return True
 
 
 def _delegated_lifecycle_cases_by_deal(repo: Any) -> dict[str, list[dict[str, Any]]]:
@@ -564,30 +761,6 @@ def _deal_ids_from_source_key(source_key: str) -> list[str]:
     return _normalize_deal_ids([source_key, parts[3]])
 
 
-def _deal_ids_from_lifecycle_evidence(evidence: dict[str, Any]) -> list[str]:
-    values: list[str] = []
-    for key in ("source_event_id", "deal_id"):
-        if evidence.get(key) not in (None, ""):
-            values.append(str(evidence.get(key)))
-    raw = evidence.get("raw")
-    raw_payload = raw if isinstance(raw, dict) else {}
-    for key in ("deal_id", "source_deal_id", "futu_deal_id"):
-        if raw_payload.get(key) not in (None, ""):
-            values.append(str(raw_payload.get(key)))
-    nested = raw_payload.get("raw_payload")
-    if isinstance(nested, dict):
-        for key in ("deal_id", "source_deal_id", "futu_deal_id"):
-            if nested.get(key) not in (None, ""):
-                values.append(str(nested.get(key)))
-    observation = evidence.get("observation")
-    if isinstance(observation, dict):
-        anchor_key = str(
-            observation.get("anchor_option_deal_key") or ""
-        ).strip()
-        values.extend(_deal_ids_from_source_key(anchor_key))
-    return _normalize_deal_ids(values)
-
-
 def _audit_events_by_deal(path: Path | None) -> dict[str, list[dict[str, Any]]]:
     if path is None or not path.exists() or not path.is_file():
         return {}
@@ -645,12 +818,14 @@ def _processed_payload_from_ledger(
     event_type = str(ledger_event.get("event_type") or "").strip()
     action = str(state_item.get("action") or "").strip() or _action_from_event_type(event_type)
     return {
+        **state_item,
         "status": "reconciled",
         "action": action or None,
         "account": state_item.get("account") or ledger_event.get("account"),
         "applied_record_ids": [record_id] if record_id else [],
         "reason": "ledger_event_already_recorded",
         "diagnostics": {
+            **dict(state_item.get("diagnostics") or {}),
             "reconciled_from_bucket": from_bucket,
             "reconciled_ledger_event_id": ledger_event.get("event_id"),
             "reconciled_ledger_event_type": event_type,
@@ -672,12 +847,14 @@ def _processed_payload_from_assigned_stock_event(
     stock_lot_id = str(assigned_stock_event.get("target_stock_lot_id") or assigned_stock_event.get("stock_lot_id") or "").strip()
     action = str(state_item.get("action") or "").strip() or "assigned_stock_sale"
     return {
+        **state_item,
         "status": "reconciled",
         "action": action,
         "account": state_item.get("account") or assigned_stock_event.get("account"),
         "applied_record_ids": [stock_lot_id] if stock_lot_id else [],
         "reason": "assigned_stock_sale_event_recorded",
         "diagnostics": {
+            **dict(state_item.get("diagnostics") or {}),
             "reconciled_from_bucket": from_bucket,
             "reconciled_assigned_stock_event_id": event_id,
             "reconciled_source_deal_id": deal_id,
@@ -698,37 +875,24 @@ def _processed_payload_from_lifecycle(
     case = lifecycle_entry.get("case") if isinstance(lifecycle_entry.get("case"), dict) else {}
     evidence = lifecycle_entry.get("evidence") if isinstance(lifecycle_entry.get("evidence"), dict) else {}
     decision_type = str(case.get("decision_type") or "").strip().lower()
-    raw_target_lot_ids = case.get("target_lot_ids")
-    target_lot_ids = (
-        [str(item).strip() for item in raw_target_lot_ids if str(item or "").strip()]
-        if isinstance(raw_target_lot_ids, list)
-        else []
-    )
-    if not target_lot_ids:
-        summary = (
-            dict(case.get("derived_summary") or {})
-            if isinstance(case.get("derived_summary"), dict)
-            else {}
-        )
-        resolved_by_lot = summary.get("resolved_contracts_by_lot")
-        if isinstance(resolved_by_lot, dict):
-            target_lot_ids = sorted(
-                str(lot_id).strip()
-                for lot_id, contracts in resolved_by_lot.items()
-                if str(lot_id or "").strip()
-                and _positive_contract_count(contracts) > 0
-            )
+    target_lot_ids = sorted(case["target_contracts_by_lot"])
     action = str(state_item.get("action") or "").strip() or decision_type or None
     return {
+        **state_item,
         "status": "reconciled",
         "action": action,
         "account": state_item.get("account") or case.get("account"),
         "applied_record_ids": target_lot_ids,
         "reason": "lifecycle_case_already_recorded",
         "diagnostics": {
+            **dict(state_item.get("diagnostics") or {}),
             "reconciled_from_bucket": from_bucket,
             "reconciled_lifecycle_case_id": case.get("case_id"),
             "reconciled_lifecycle_status": case.get("status"),
+            "reconciled_source_key": lifecycle_entry["source_key"],
+            "reconciled_source_payload_hash": lifecycle_entry["source_payload_hash"],
+            "reconciled_terminal_event_ids": lifecycle_entry["terminal_event_ids"],
+            "reconciled_lifecycle_terminal_types": lifecycle_entry["terminal_types"],
             "reconciled_lifecycle_decision_type": decision_type,
             "reconciled_lifecycle_evidence_id": evidence.get("evidence_id"),
             "reconciled_lifecycle_evidence_type": evidence.get("evidence_type"),
@@ -747,6 +911,7 @@ def _processed_payload_for_ignored_non_option(*, deal_id: str, from_bucket: str,
         "applied_record_ids": [],
         "reason": "not_option_deal",
         "diagnostics": {
+            **dict(state_item.get("diagnostics") or {}),
             "reconciled_from_bucket": from_bucket,
             "reconciled_source_deal_id": deal_id,
             "previous_status": state_item.get("status"),

@@ -190,14 +190,17 @@ def enqueue_trade_payload(
             evidence = conn.execute(
                 "SELECT payload_json FROM trade_inbox_evidence WHERE inbox_id = ?", (inbox_id,)
             ).fetchall()
+            evidence_content = [
+                _inbox_execution_content(canonical_key, json.loads(item[0])) for item in evidence
+            ]
+            source_identity_conflict = _has_source_identity_conflict(evidence_content)
             conflict = original_hash != economic_hash or any(
-                conflicting_execution_associations(
-                    _inbox_execution_content(canonical_key, json.loads(item[0])), content
-                ) for item in evidence
+                conflicting_execution_associations(item, content) for item in evidence_content
             )
             applied_conflicts = applied_execution_association_conflicts(repo, canonical_key, content)
-            if conflict or applied_conflicts:
-                reason = ("broker_economic_payload_conflict" if conflict else
+            if source_identity_conflict or conflict or applied_conflicts:
+                reason = ("broker_source_identity_conflict" if source_identity_conflict else
+                          "broker_economic_payload_conflict" if conflict else
                           "broker_applied_association_conflict")
                 conn.execute(
                     """UPDATE trade_inbox SET status = 'conflict',
@@ -209,7 +212,7 @@ def enqueue_trade_payload(
             elif str(row["economic_payload_hash"] or "") != original_hash:
                 conn.execute("UPDATE trade_inbox SET economic_payload_hash = ? WHERE inbox_id = ?",
                              (original_hash, inbox_id))
-            if not conflict and not applied_conflicts and any(
+            if not source_identity_conflict and not conflict and not applied_conflicts and any(
                 value is not None and name not in known_before
                 for name, value in content.get("associations", {}).items()
             ):
@@ -584,6 +587,100 @@ def read_trade_payload(path: str | Path, *, inbox_id: str, read_only: bool = Fal
     return _trade_payload_row(row) if row is not None else None
 
 
+def read_trade_payloads_for_reconciliation(
+    path: str | Path, *, deal_ids: Iterable[str],
+) -> list[dict[str, Any]]:
+    """Discover exact source identities, including rows requiring human review."""
+    keys = tuple(dict.fromkeys(str(value).strip() for value in deal_ids if str(value).strip()))
+    inbox_path = Path(path)
+    if not keys or not inbox_path.exists():
+        return []
+    with closing(sqlite3.connect(f"{inbox_path.resolve().as_uri()}?mode=ro", uri=True)) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("BEGIN")
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='trade_inbox'").fetchone() is None:
+            raise sqlite3.DatabaseError("trade reconciliation Inbox schema unavailable")
+        placeholders = ",".join("?" for _ in keys)
+        rows = conn.execute(
+            f"SELECT * FROM trade_inbox WHERE deal_id IN ({placeholders}) "
+            f"OR broker_deal_key IN ({placeholders}) ORDER BY received_at_ms, inbox_id",
+            (*keys, *keys),
+        )
+        return [_trade_reconciliation_observation(conn, row) for row in rows]
+
+
+def _trade_source_evidence_observation(
+    conn: sqlite3.Connection, row: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], str | None]:
+    evidence = [dict(item) for item in conn.execute(
+        "SELECT * FROM trade_inbox_evidence WHERE inbox_id=? ORDER BY source, payload_hash",
+        (row["inbox_id"],),
+    )]
+    # Historical handled rows predate the source identity contract. Every consumer
+    # must validate their durable evidence before claiming new work.
+    error = (
+        "inbox_source_evidence_missing" if not evidence else
+        "inbox_source_identity_conflict" if _has_source_identity_conflict(
+            _inbox_execution_content(str(row["broker_deal_key"] or ""), json.loads(item["payload_json"]))
+            for item in evidence
+        ) else None
+    )
+    return evidence, error
+
+
+def _trade_reconciliation_observation(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
+    observed = _trade_payload_row(row)
+    evidence, error = _trade_source_evidence_observation(conn, row)
+    # Bind the complete durable evidence set, including metadata, to this read.
+    observed["_reconciliation_evidence"] = evidence
+    observed["_reconciliation_evidence_error"] = error
+    return observed
+
+
+def settle_reconciled_trade_payload(
+    path: str | Path, *, observed: Mapping[str, Any], result: dict[str, Any],
+) -> bool:
+    """Close an unchanged row after the caller proves its canonical ledger effect."""
+    if result.get("status") != "applied":
+        raise ValueError("reconciliation requires an applied ledger result")
+    if not Path(path).exists():
+        raise TradePayloadClaimLost("trade reconciliation row missing")
+    now_ms = int(time.time() * 1000)
+    with closing(_connect(Path(path))) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT * FROM trade_inbox WHERE inbox_id = ?", (observed.get("inbox_id"),)).fetchone()
+        current = _trade_reconciliation_observation(conn, row) if row is not None else None
+        if (current is None or current != dict(observed)
+                or current["_reconciliation_evidence_error"]
+                or current["identity_status"] != "bound" or not current["broker_deal_key"]
+                or current["status"] not in {"pending", "handled"}
+                or (current["claim_id"] and int(current["claim_until_ms"] or 0) > now_ms)):
+            raise TradePayloadClaimLost("trade reconciliation observation changed or ineligible")
+        previous = current["result"] or {}
+        if previous.get("receipt_suppression_reason") == "reconciled_from_ledger":
+            if (previous.get("diagnostics") or {}).get("reconciliation_result") != result:
+                raise TradePayloadClaimLost("trade reconciliation proof changed")
+            return False
+        enriched = {
+            **result,
+            "receipt_suppression_reason": "reconciled_from_ledger",
+            "diagnostics": {
+                **dict(result.get("diagnostics") or {}),
+                "reconciliation_result": result,
+                "previous_result": current["result"],
+                "previous_receipt_envelope": current["receipt_envelope"],
+            },
+        }
+        conn.execute(
+            """UPDATE trade_inbox SET status = 'handled', result_json = ?,
+                   result_status = 'applied', result_reason = ?, receipt_recovery_allowed = 0,
+                   claim_id = NULL, claim_until_ms = NULL, updated_at_ms = ?, last_error = NULL
+               WHERE inbox_id = ?""",
+            (json.dumps(enriched, ensure_ascii=False, default=str), result.get("reason"), now_ms, current["inbox_id"]),
+        )
+    return True
+
+
 def _trade_result_policy(row: Mapping[str, Any], result: dict[str, Any]) -> dict[str, Any]:
     diagnostics = result.get("diagnostics") or {}
     status = result.get("status")
@@ -646,6 +743,18 @@ def _prepare_trade_receipt_result(conn: sqlite3.Connection, row: Mapping[str, An
         if envelope and envelope.get("schema_version") == 2:
             previous = envelope["receipts"][envelope["current_result_key"]]
             previous.update(superseded_by="lifecycle_outbox", stop_reason="lifecycle_outbox_handoff")
+    if old_result.get("receipt_suppression_reason") == "reconciled_from_ledger":
+        enriched["receipt_suppression_reason"] = "reconciled_from_ledger"
+        # Source-file recovery still owns this proof after an Inbox commit.
+        # Later business results must retain it and the original receipt history.
+        old_diagnostics = old_result.get("diagnostics") or {}
+        enriched["diagnostics"] = {
+            **dict(enriched.get("diagnostics") or {}),
+            **{key: old_diagnostics[key] for key in (
+                "reconciliation_result", "previous_result", "previous_receipt_envelope",
+            ) if key in old_diagnostics},
+        }
+        kind = None
     if kind is not None and row["delivery_purpose"] == "live":
         envelope = envelope or {"schema_version": 2, "current_result_key": kind, "receipts": {}}
         receipts = envelope["receipts"]
@@ -707,7 +816,8 @@ def save_trade_payload_result(path: str | Path, *, claim: Mapping[str, Any],
 
 def prepare_trade_receipt_result(path: str | Path, *, inbox_id: str, result: dict[str, Any],
                                  expected_payload_version: int | None = None,
-                                 expected_result: Any = _UNOBSERVED_RECEIPT_RESULT) -> dict[str, Any]:
+                                 expected_result: Any = _UNOBSERVED_RECEIPT_RESULT,
+                                 expected_observation: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Reconcile readback without an economic claim; compare the exact observed result."""
     if expected_payload_version is None and expected_result is _UNOBSERVED_RECEIPT_RESULT:
         raise TradePayloadClaimLost("receipt recovery requires observed result or payload version")
@@ -720,6 +830,10 @@ def prepare_trade_receipt_result(path: str | Path, *, inbox_id: str, result: dic
                 or (expected_result is not _UNOBSERVED_RECEIPT_RESULT
                     and json.loads(row["result_json"] or "null") != expected_result)):
             raise TradePayloadClaimLost("receipt recovery observation changed")
+        observed = _trade_reconciliation_observation(conn, row)
+        if (observed["_reconciliation_evidence_error"]
+                or (expected_observation is not None and observed != dict(expected_observation))):
+            raise TradePayloadClaimLost("receipt recovery source evidence changed or unproven")
         enriched = _prepare_trade_receipt_result(conn, row, result)
         # Readback can settle a crashed claim without consuming another economic attempt.
         status = "pending" if enriched["receipt_kind"] in {"pending_retry", "verification_pending"} else "handled"
@@ -747,8 +861,12 @@ def begin_trade_receipt_attempt(path: str | Path, *, inbox_id: str,
             or row["economic_payload_hash"] != claim.get("economic_payload_hash")
         ):
             raise TradePayloadClaimLost("trade receipt claim no longer permits delivery")
-        if row is None or row["status"] == "conflict" or row["delivery_purpose"] == "historical":
+        if (row is None or row["status"] == "conflict" or row["delivery_purpose"] == "historical"
+                or (json.loads(row["result_json"] or "null") or {}).get("receipt_suppression_reason") == "reconciled_from_ledger"):
             return {"claimed": False, "status": "suppressed"}
+        _, evidence_error = _trade_source_evidence_observation(conn, row)
+        if evidence_error:
+            return {"claimed": False, "status": "suppressed", "reason": evidence_error}
         if claim is None and row["claim_id"] and int(row["claim_until_ms"] or 0) > now_ms:
             return {"claimed": False, "status": "pending", "reason": "economic_claim_active"}
         envelope = _receipt_envelope(row["receipt_json"])
@@ -830,6 +948,9 @@ def list_trade_receipt_recovery_rows(path: str | Path, *, account_ids: Iterable[
             ref = execution.get("broker_account_ref") or {}
             physical = str(ref.get("external_account_id") or extract_primary_account_id(payload) or "").strip()
             if physical not in allowed:
+                continue
+            item = _trade_reconciliation_observation(conn, row)
+            if item["_reconciliation_evidence_error"]:
                 continue
             receipt = item["receipt"] or {}
             if (item["status"] == "pending" and item["attempt_count"] == 0
@@ -1042,9 +1163,9 @@ def list_unclaimed_trade_payload_refresh_intents(
     with closing(sqlite3.connect(f"{inbox_path.resolve().as_uri()}?mode=ro", uri=True)) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            """SELECT inbox_id, payload_json, portfolio_refresh_intent_json
-               FROM trade_inbox WHERE status = 'handled' AND delivery_purpose = 'live'
+            """SELECT * FROM trade_inbox WHERE status = 'handled' AND delivery_purpose = 'live'
                  AND source IN ('push', 'backfill')
+                 AND COALESCE(json_extract(result_json, '$.receipt_suppression_reason'), '') != 'reconciled_from_ledger'
                  AND portfolio_refresh_intent_json IS NOT NULL
                  AND portfolio_refresh_attempted_at_ms IS NULL
                ORDER BY received_at_ms, inbox_id""",
@@ -1056,6 +1177,8 @@ def list_unclaimed_trade_payload_refresh_intents(
             physical = str(ref.get("external_account_id") or extract_primary_account_id(payload) or "").strip()
             intent = _normalize_portfolio_refresh_intent(json.loads(row["portfolio_refresh_intent_json"]))
             if allowed.get(physical) != intent["account"]:
+                continue
+            if _trade_source_evidence_observation(conn, row)[1]:
                 continue
             out.append({"inbox_id": str(row["inbox_id"]), **intent})
             if len(out) >= max(1, int(limit)):
@@ -1072,12 +1195,16 @@ def claim_trade_payload_refresh_intent(
     with closing(_connect(inbox_path)) as conn:
         with conn:
             _ensure_schema(conn)
+            row = conn.execute("SELECT * FROM trade_inbox WHERE inbox_id=?", (str(inbox_id),)).fetchone()
+            if row is None or _trade_source_evidence_observation(conn, row)[1]:
+                return None
             cursor = conn.execute(
                 """
                 UPDATE trade_inbox
                 SET portfolio_refresh_attempted_at_ms = ?
                 WHERE inbox_id = ?
                   AND status != 'conflict'
+                  AND COALESCE(json_extract(result_json, '$.receipt_suppression_reason'), '') != 'reconciled_from_ledger'
                   AND portfolio_refresh_intent_json IS NOT NULL
                   AND portfolio_refresh_attempted_at_ms IS NULL
                 """,
@@ -2836,6 +2963,10 @@ def _inbox_execution_content(source_key: str, payload: dict[str, Any]) -> dict[s
         source.setdefault("internal_account", account)
         source.setdefault("futu_account_id", physical)
     return canonical_trade_execution_content(source)
+
+
+def _has_source_identity_conflict(contents: Iterable[Mapping[str, Any]]) -> bool:
+    return any("invalid:source_execution_identity" in item.get("errors", ()) for item in contents)
 
 
 def _execution_content_hash(content: Mapping[str, Any]) -> str:

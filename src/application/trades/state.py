@@ -51,6 +51,32 @@ def update_trade_intake_state_entries(
 ) -> Path:
     """Apply only the active execution's state after reloading under the file lock."""
 
+    _update_trade_intake_state_entries(path, state, deal_ids=deal_ids)
+    return Path(path)
+
+
+def compare_and_update_trade_intake_state_entries(
+    path: str | Path,
+    state: dict[str, Any],
+    *,
+    deal_ids: Iterable[str],
+    expected_state: dict[str, Any],
+) -> tuple[str, ...]:
+    """Reconcile observed entries only; preserve same-key writes made since the read."""
+
+    return _update_trade_intake_state_entries(
+        path, state, deal_ids=deal_ids, expected_state=expected_state,
+    )
+
+
+def _update_trade_intake_state_entries(
+    path: str | Path,
+    state: dict[str, Any],
+    *,
+    deal_ids: Iterable[str],
+    expected_state: dict[str, Any] | None = None,
+) -> tuple[str, ...]:
+
     p = Path(path)
     ensure_dir(p.parent)
     keys = tuple(dict.fromkeys(str(value or "").strip() for value in deal_ids if str(value or "").strip()))
@@ -58,7 +84,14 @@ def update_trade_intake_state_entries(
         raise ValueError("at least one deal_id is required for state update")
     with _trade_intake_state_lock(p):
         latest = load_trade_intake_state(p)
+        applied = []
         for key in keys:
+            if expected_state is not None and any(
+                (key in latest[name]) != (key in (expected_state.get(name) or {}))
+                or latest[name].get(key) != (expected_state.get(name) or {}).get(key)
+                for name in STATE_BUCKETS
+            ):
+                continue
             matches = [name for name in STATE_BUCKETS if key in (state.get(name) or {})]
             if len(matches) > 1:
                 raise ValueError(f"deal state appears in multiple buckets: {key}")
@@ -66,8 +99,10 @@ def update_trade_intake_state_entries(
                 latest[name].pop(key, None)
             if matches:
                 latest[matches[0]][key] = dict(state[matches[0]][key])
-        _write_trade_intake_state_unlocked(p, latest)
-    return p
+            applied.append(key)
+        if applied:
+            _write_trade_intake_state_unlocked(p, latest)
+    return tuple(applied)
 
 
 def _write_trade_intake_state_unlocked(p: Path, state: dict[str, Any]) -> None:

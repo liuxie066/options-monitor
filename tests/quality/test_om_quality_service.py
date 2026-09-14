@@ -876,3 +876,64 @@ def test_integrity_refresh_keeps_full_replay_in_separate_artifact(
     )
     assert main.read() is None
     assert service.read_integrity_published() == payload
+
+
+@pytest.mark.parametrize('source_offset_seconds', [0, 1, -301])
+def test_refresh_validates_each_scope_after_collection_with_trusted_clock(
+    tmp_path, monkeypatch, source_offset_seconds,
+) -> None:
+    from datetime import timedelta
+    from dataclasses import replace
+    from src.application.quality.model import utc_iso
+
+    ledger_path = tmp_path / 'ledger.sqlite3'
+    SQLiteOptionPositionsRepository(ledger_path)
+    clock = [datetime(2026, 7, 13, 10, tzinfo=timezone.utc)]
+    cfg = {'accounts': ['lx', 'sy'], 'account_settings': {
+        a: {'type': 'futu', 'futu': {
+            'host': '127.0.0.1', 'port': 11111, 'account_id': '123456', 'trd_env': 'REAL',
+        }} for a in ['lx', 'sy']
+    }}
+    configs = []
+    for market in ['us', 'hk']:
+        path = tmp_path / f'config.{market}.json'
+        path.write_text('{}')
+        configs.append((market, path, cfg, market))
+    monkeypatch.setattr(OMQualityService, '_load_configs', lambda *args: configs)
+    observed = {}
+
+    class DelayedOpenD(_OpenD):
+        def fetch(self, *, account, market, **kwargs):
+            clock[0] += timedelta(seconds=10)
+            stamp = utc_iso(clock[0] + timedelta(seconds=source_offset_seconds))
+            observed[(account, market)] = utc_iso(clock[0])
+            standard = _enriched_snapshot_input(account, market, complete=True)
+            standard.update(observed_at_utc=stamp, source_as_of_utc=None)
+            return replace(
+                super().fetch(account=account, market=market),
+                observed_at_utc=stamp, snapshot_input=standard,
+            )
+
+    adapter = DelayedOpenD(account_fingerprint=(
+        'sha256:8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92'
+    ))
+    service = OMQualityService(
+        artifact_repository=QualityArtifactRepository(tmp_path / 'quality.json'),
+        control_repository=QualityControlStateRepository(tmp_path / 'control.json'),
+        opend_adapter=adapter, now_fn=lambda: clock[0], instance_id='test-delayed',
+        runtime_status_fn=lambda *args: {'ok': True, 'data': {
+            'ledger_store': {'sqlite_path': str(ledger_path)},
+            'trade_intake': {'sources': []}, 'service_profile': {'loaded': True},
+        }},
+    )
+    result = service.refresh(config_keys=['us', 'hk'])
+    positions = [x for x in result['datasets'] if x['dataset_id'] == 'om.option_positions']
+    assert len(positions) == 4
+    assert len(adapter.calls) == 4
+    assert result['observed_at_utc'] == utc_iso(clock[0])
+    for position in positions:
+        scope = position['scope']
+        assert position['checks'][0]['observed_at_utc'] == observed[(scope['account'], scope['market'])]
+        assert position['status'] == ('trusted' if source_offset_seconds == 0 else 'unavailable')
+        if source_offset_seconds:
+            assert position['usable_for'] == []

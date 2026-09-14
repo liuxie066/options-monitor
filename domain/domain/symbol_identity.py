@@ -24,6 +24,7 @@ _UNDERLIER_ALIAS_FALLBACKS = {
     "美团": "3690.HK",
     "美团W": "3690.HK",
     "美团-W": "3690.HK",
+    "HK.CNC": "0883.HK",
     "中海油": "0883.HK",
     "中国海洋石油": "0883.HK",
 }
@@ -174,10 +175,14 @@ def resolve_symbol_identity(value: Any, *, symbol_aliases: SymbolAliases = None)
     option_code_match = OPTION_CODE_RE.match(upper)
     if option_code_match:
         root = option_code_match.group("root")
-        return (
-            _identity_from_alias(raw=raw, candidate=root, symbol_aliases=symbol_aliases, source_kind="option_code")
-            or _identity_from_canonical(raw=raw, candidate=root, source_kind="option_code")
+        market = option_code_match.group("market")
+        identity = (
+            _identity_from_alias(raw=raw, candidate=f"{market}.{root}", symbol_aliases=symbol_aliases, source_kind="option_code")
+            or _identity_from_alias(raw=raw, candidate=root, symbol_aliases=symbol_aliases, source_kind="option_code")
         )
+        if not identity or identity.market != market:
+            identity = _identity_from_canonical(raw=raw, candidate=root, source_kind="option_code")
+        return identity if identity and identity.market == market else None
     if upper.startswith("US."):
         return (
             _identity_from_alias(raw=raw, candidate=upper[3:], symbol_aliases=symbol_aliases, source_kind="futu_code")

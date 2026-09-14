@@ -208,3 +208,32 @@ def test_complete_stock_snapshot_supplies_only_proven_whole_share_capacity(monke
     assert stock["capacity_authority_status"] == "available"
     assert stock["eligible_underlying_shares"] == whole_shares
     assert stock["avg_cost"] == 20
+
+
+@pytest.mark.parametrize(('side', 'quantity', 'sellable', 'valid'), [
+    ('short', -2, -1, True), ('short', -2, 0, True),
+    ('short', -2, 1, True), ('long', 2, 1, True),
+    ('long', 2, -1, False), ('long', -2, -1, False),
+    ('short', -2, -3, False), ('long', 2, 3, False),
+    ('short', -2, '-0.5', False), ('short', -2, True, False),
+    ('short', -2, 'NaN', False), ('short', -2, 'Infinity', False),
+    ('short', -2, 'invalid', False),
+])
+def test_futu_available_contracts_preserve_direction_and_quantity_validation(
+    side, quantity, sellable, valid,
+) -> None:
+    row = {
+        'code': 'US.NVDA260918P100000', 'stock_owner': 'US.NVDA',
+        'sec_type': 'OPTION', 'option_type': 'PUT', 'position_side': side,
+        'qty': quantity, 'can_sell_qty': sellable, 'option_strike_price': 100,
+        'strike_time': '2026-09-18', 'option_contract_multiplier': 100,
+    }
+    snapshot = build_futu_position_snapshot(
+        rows=[row], broker_account_ref=ACCOUNT, markets=['US'], asset_types=['option'],
+        observed_at_utc=NOW.isoformat(), completeness='complete',
+    )
+    assert bool(snapshot['errors']) is not valid
+    assert snapshot['rows'][0]['source_row'] == row
+    if valid:
+        assert snapshot['rows'][0]['sellable_quantity'] == str(abs(sellable))
+        assert _scope_errors(snapshot) == []

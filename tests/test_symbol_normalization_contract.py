@@ -110,3 +110,26 @@ def test_symbol_identity_detects_option_contract_labels() -> None:
     assert looks_like_option_contract_label("260626 91P")
     assert not looks_like_option_contract_label("PDD")
     assert not looks_like_option_contract_label("PDD Holdings")
+
+
+def test_cnooc_history_deal_resolves_hk_underlier_before_multiplier_lookup(monkeypatch) -> None:
+    looked_up = []
+
+    def missing_multiplier(**kwargs):
+        looked_up.append(kwargs)
+        return None, None, {"attempted_sources": []}
+
+    monkeypatch.setattr(
+        "src.application.trades.normalizer.resolve_multiplier_with_source_and_diagnostics",
+        missing_multiplier,
+    )
+    deal = normalize_trade_deal({
+        "deal_id": "hk-cnooc-source", "futu_account_id": "1001",
+        "code": "HK.CNC260330C30000", "stock_name": "中海油 260330 30.00 购",
+        "trd_side": "SELL_SHORT", "qty": 2, "price": 0.24,
+        "create_time": "2026-03-25 14:16:53.873", "trd_env": "REAL",
+    }, futu_account_mapping={"1001": "lx"}, allow_opend_refresh=False)
+    assert deal.symbol == "0883.HK"
+    assert deal.currency == "HKD"
+    assert deal.multiplier is None
+    assert looked_up and all(call["symbol"] == "0883.HK" for call in looked_up)

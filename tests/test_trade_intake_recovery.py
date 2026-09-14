@@ -58,6 +58,800 @@ def _process(repo, root: Path, entry: str, payload: dict, **kwargs):
     )
 
 
+def _enqueue_legacy_source_conflict(monkeypatch, inbox, *, payload, key, repo):
+    from src.application.trades import inbox as inbox_module
+
+    original = inbox_module._inbox_execution_content
+    # Reproduce the baseline public reception policy: source identity errors did
+    # not participate in conflict classification (economic hashes omit errors).
+    def legacy_content(*args, **kwargs):
+        content = original(*args, **kwargs)
+        return {**content, "errors": [error for error in content.get("errors", ())
+                                     if error != "invalid:source_execution_identity"]}
+    with monkeypatch.context() as patch:
+        patch.setattr(inbox_module, "_inbox_execution_content", legacy_content)
+        return enqueue_trade_payload(inbox, payload=payload, source="file", broker_deal_key=key, repo=repo)
+
+
+def _recorded_source_pending(repo, root):
+    from src.application.trades.state import load_trade_intake_state, write_trade_intake_state
+
+    payload = _execution()
+    result = _process(repo, root, "push", payload)
+    assert result["status"] == "applied"
+    inbox = resolve_execution_inbox_path(repo, root / "inbox.sqlite3")
+    path = root / "push" / "state.json"
+    state = load_trade_intake_state(path)
+    key, previous = state["processed_deal_ids"].popitem()
+    state["unresolved_deal_ids"][key] = {**previous, "status": "unresolved", "reason": "verification_pending"}
+    write_trade_intake_state(path, state)
+    source = {"account": "lx", "account_mapping": {"123": "lx"}, "state_path": path, "inbox_path": inbox}
+    return payload, result["inbox_id"], key, source
+
+
+@pytest.mark.parametrize("missing", ["rows", "table"])
+def test_receipt_recovery_requires_historical_evidence(tmp_path, missing):
+    from src.application.trades.auto_intake import recover_trade_intake_receipts
+    from src.application.trades.inbox import begin_trade_receipt_attempt
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    _, inbox_id, _, source = _recorded_source_pending(repo, tmp_path)
+    inbox = source["inbox_path"]
+    source.update(futu_account_ids=["123"], receipt={"enabled": True})
+    before = read_trade_payload(inbox, inbox_id=inbox_id, read_only=True)
+    with sqlite3.connect(inbox) as conn:
+        conn.create_function("trade_inbox_writer_version", 0, lambda: 2)
+        conn.execute("DROP TABLE trade_inbox_evidence" if missing == "table"
+                     else "DELETE FROM trade_inbox_evidence")
+    assert begin_trade_receipt_attempt(inbox, inbox_id=inbox_id, route={"target": "test"}, message="old") == {
+        "claimed": False, "status": "suppressed", "reason": "inbox_source_evidence_missing",
+    }
+    assert recover_trade_intake_receipts(repo=repo, source=source,
+        receipt_callback=lambda _: pytest.fail("missing evidence must not reach delivery"),
+        stop_event=threading.Event()) == {"checked": 0, "sent": 0, "errors": []}
+    assert read_trade_payload(inbox, inbox_id=inbox_id, read_only=True) == before
+
+
+def test_receipt_recovery_rejects_changed_evidence_metadata(tmp_path, monkeypatch):
+    from src.application.trades import auto_intake
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    _, inbox_id, _, source = _recorded_source_pending(repo, tmp_path)
+    inbox = source["inbox_path"]
+    source.update(futu_account_ids=["123"], receipt={"enabled": True})
+    before = read_trade_payload(inbox, inbox_id=inbox_id, read_only=True)
+    prepare = auto_intake.prepare_trade_receipt_result
+    def changed_before_prepare(*args, **kwargs):
+        with sqlite3.connect(inbox) as conn:
+            conn.create_function("trade_inbox_writer_version", 0, lambda: 2)
+            conn.execute("UPDATE trade_inbox_evidence SET received_at_ms=received_at_ms+1 WHERE inbox_id=?", (inbox_id,))
+        return prepare(*args, **kwargs)
+    monkeypatch.setattr(auto_intake, "prepare_trade_receipt_result", changed_before_prepare)
+    assert auto_intake.recover_trade_intake_receipts(repo=repo, source=source,
+        receipt_callback=lambda _: pytest.fail("stale evidence must not reach delivery"),
+        stop_event=threading.Event()) == {"checked": 0, "sent": 0, "errors": []}
+    assert read_trade_payload(inbox, inbox_id=inbox_id, read_only=True) == before
+
+
+@pytest.mark.parametrize("outcome, expected_status", [
+    ({"delivery_confirmed": True}, "sent"),
+    ({"delivery_confirmed": False, "explicit_pre_acceptance_failure": True}, "failed"),
+    ({"delivery_confirmed": False}, "unknown"),
+])
+def test_later_identity_conflict_keeps_existing_receipt_outcome(tmp_path, monkeypatch, outcome, expected_status):
+    from src.application.trades.inbox import begin_trade_receipt_attempt, finish_trade_receipt_attempt
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    payload, inbox_id, key, source = _recorded_source_pending(repo, tmp_path)
+    inbox = source["inbox_path"]
+    attempt = begin_trade_receipt_attempt(inbox, inbox_id=inbox_id, route={"target": "test"}, message="old")
+    assert attempt["claimed"]
+    _enqueue_legacy_source_conflict(monkeypatch, inbox,
+        payload={**payload, "source_deal_id": "other-fill"}, key=key, repo=repo)
+    finish_trade_receipt_attempt(inbox, inbox_id=inbox_id, attempt_id=attempt["attempt_id"], result=outcome)
+    row = read_trade_payload(inbox, inbox_id=inbox_id, read_only=True)
+    assert row["receipt"]["result"] == outcome
+    assert row["receipt"]["status"] == expected_status
+    assert row["receipt"]["attempt_id"] == attempt["attempt_id"]
+    assert not begin_trade_receipt_attempt(inbox, inbox_id=inbox_id, route={"target": "test"}, message="old")["claimed"]
+    assert read_trade_payload(inbox, inbox_id=inbox_id, read_only=True) == row
+
+
+@pytest.mark.parametrize("field", ["source_deal_id", "deal_id", "futu_deal_id"])
+@pytest.mark.parametrize("receipt_status", ["pending", "failed", "sent", "unknown"])
+def test_historical_identity_conflict_blocks_receipt_and_refresh_claims(
+    tmp_path, monkeypatch, field, receipt_status,
+):
+    from src.application.trades.auto_intake import _reconcile_source_completion, recover_trade_intake_receipts
+    from src.application.trades.inbox import (
+        begin_trade_receipt_attempt, list_trade_receipt_recovery_rows,
+        list_unclaimed_trade_payload_refresh_intents, prepare_trade_receipt_result,
+        record_trade_payload_refresh_intent,
+    )
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    payload, inbox_id, key, source = _recorded_source_pending(repo, tmp_path)
+    inbox = source["inbox_path"]
+    source.update(futu_account_ids=["123"], receipt={"enabled": True})
+    row = read_trade_payload(inbox, inbox_id=inbox_id, read_only=True)
+    envelope = row["receipt_envelope"]
+    envelope["receipts"][envelope["current_result_key"]].update(
+        status=receipt_status, attempt_count=1, result={"delivery_confirmed": receipt_status == "sent"},
+    )
+    with sqlite3.connect(inbox) as conn:
+        conn.create_function("trade_inbox_writer_version", 0, lambda: 2)
+        conn.execute("UPDATE trade_inbox SET receipt_json=? WHERE inbox_id=?", (json.dumps(envelope), inbox_id))
+    record_trade_payload_refresh_intent(inbox, inbox_id=inbox_id, intent={"account": "lx", "request_id": "old-intent"})
+    _enqueue_legacy_source_conflict(monkeypatch, inbox, payload={**payload, field: "other-fill"}, key=key, repo=repo)
+    before = read_trade_payload(inbox, inbox_id=inbox_id, read_only=True)
+    assert before["status"] == "handled"
+    state_bytes = source["state_path"].read_bytes()
+    reconciled = _reconcile_source_completion(source=source, repo=repo, apply_changes=True)
+    assert reconciled["deferred"] == [{"deal_id": key, "reason": "inbox_source_identity_conflict"}]
+    assert source["state_path"].read_bytes() == state_bytes
+    assert list_trade_receipt_recovery_rows(inbox, account_ids=["123"]) == []
+    assert list_unclaimed_trade_payload_refresh_intents(inbox, account_mapping={"123": "lx"}) == []
+    recovered = recover_trade_intake_receipts(repo=repo, source=source,
+        receipt_callback=lambda _: pytest.fail("historical conflict must not reach delivery"), stop_event=threading.Event())
+    assert recovered == {"checked": 0, "sent": 0, "errors": []}
+    with pytest.raises(TradePayloadClaimLost, match="source evidence"):
+        prepare_trade_receipt_result(inbox, inbox_id=inbox_id, result=before["result"],
+            expected_payload_version=before["payload_version"], expected_result=before["result"])
+    assert begin_trade_receipt_attempt(inbox, inbox_id=inbox_id, route={"target": "test"}, message="old") == {
+        "claimed": False, "status": "suppressed", "reason": "inbox_source_identity_conflict",
+    }
+    assert claim_trade_payload_refresh_intent(inbox, inbox_id=inbox_id) is None
+    assert read_trade_payload(inbox, inbox_id=inbox_id, read_only=True) == before
+
+
+@pytest.mark.parametrize("stage", ["prepare", "send", "refresh"])
+def test_historical_evidence_only_race_blocks_external_claim(tmp_path, monkeypatch, stage):
+    from src.application.trades import auto_intake
+    from src.application.trades.inbox import (
+        begin_trade_receipt_attempt, list_unclaimed_trade_payload_refresh_intents,
+        record_trade_payload_refresh_intent,
+    )
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    payload, inbox_id, key, source = _recorded_source_pending(repo, tmp_path)
+    inbox = source["inbox_path"]
+    source.update(futu_account_ids=["123"], receipt={"enabled": True})
+    before_claim = []
+    def append_conflict():
+        before = read_trade_payload(inbox, inbox_id=inbox_id, read_only=True)
+        _enqueue_legacy_source_conflict(monkeypatch, inbox,
+            payload={**payload, "source_deal_id": "other-fill"}, key=key, repo=repo)
+        assert read_trade_payload(inbox, inbox_id=inbox_id, read_only=True) == before
+        before_claim.append(before)
+    if stage == "refresh":
+        record_trade_payload_refresh_intent(inbox, inbox_id=inbox_id, intent={"account": "lx", "request_id": "old-intent"})
+        assert len(list_unclaimed_trade_payload_refresh_intents(inbox, account_mapping={"123": "lx"})) == 1
+        append_conflict()
+        assert claim_trade_payload_refresh_intent(inbox, inbox_id=inbox_id) is None
+    else:
+        if stage == "prepare":
+            prepare = auto_intake.prepare_trade_receipt_result
+            def prepare_after_conflict(*args, **kwargs):
+                append_conflict()
+                return prepare(*args, **kwargs)
+            monkeypatch.setattr(auto_intake, "prepare_trade_receipt_result", prepare_after_conflict)
+        def callback(context):
+            assert stage == "send", "stale recovery must stop before the callback"
+            append_conflict()
+            attempt = begin_trade_receipt_attempt(inbox, inbox_id=inbox_id,
+                route={"target": "test"}, message="old", result_key=context["result"].get("receipt_result_key"))
+            assert attempt == {"claimed": False, "status": "suppressed", "reason": "inbox_source_identity_conflict"}
+            return {"status": "skipped", "delivery_confirmed": False}
+        recovered = auto_intake.recover_trade_intake_receipts(repo=repo, source=source,
+            receipt_callback=callback, stop_event=threading.Event())
+        assert recovered == {"checked": int(stage == "send"), "sent": 0, "errors": []}
+    assert len(before_claim) == 1
+    assert read_trade_payload(inbox, inbox_id=inbox_id, read_only=True) == before_claim[0]
+
+
+@pytest.mark.parametrize("field", ["source_deal_id", "deal_id", "futu_deal_id"])
+def test_reconciliation_rejects_legacy_durable_source_conflict(tmp_path, monkeypatch, field):
+    from src.application.trades.auto_intake import _reconcile_source_completion
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    payload, inbox_id, key, source = _recorded_source_pending(repo, tmp_path)
+    inbox = source["inbox_path"]
+    _enqueue_legacy_source_conflict(monkeypatch, inbox, payload={**payload, field: "other-fill"}, key=key, repo=repo)
+    before = read_trade_payload(inbox, inbox_id=inbox_id, read_only=True)
+    assert before["status"] == "handled"
+    state_bytes = source["state_path"].read_bytes()
+    events, lots = repo.list_trade_events(), repo.list_position_lots()
+    for apply in (False, True):
+        result = _reconcile_source_completion(source=source, repo=repo, apply_changes=apply)
+        assert result["planned_count"] == result["applied_count"] == result["inbox_updated_count"] == 0
+        assert result["deferred"] == [{"deal_id": key, "reason": "inbox_source_identity_conflict"}]
+        assert read_trade_payload(inbox, inbox_id=inbox_id, read_only=True) == before
+        assert source["state_path"].read_bytes() == state_bytes
+        assert (repo.list_trade_events(), repo.list_position_lots()) == (events, lots)
+
+
+@pytest.mark.parametrize("change", ["append", "replace", "delete"])
+def test_reconciliation_rejects_evidence_only_race(tmp_path, monkeypatch, change):
+    from src.application.trades import auto_intake
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    payload, inbox_id, key, source = _recorded_source_pending(repo, tmp_path)
+    inbox = source["inbox_path"]
+    before = read_trade_payload(inbox, inbox_id=inbox_id, read_only=True)
+    state_bytes = source["state_path"].read_bytes()
+    settle = auto_intake.settle_reconciled_trade_payload
+    def changed_before_commit(*args, **kwargs):
+        if change == "append":
+            _enqueue_legacy_source_conflict(monkeypatch, inbox,
+                payload={**payload, "source_deal_id": "other-fill"}, key=key, repo=repo)
+        else:
+            with sqlite3.connect(inbox) as conn:
+                conn.create_function("trade_inbox_writer_version", 0, lambda: 2)
+                if change == "replace":
+                    conn.execute("UPDATE trade_inbox_evidence SET received_at_ms=received_at_ms+1 WHERE inbox_id=?", (inbox_id,))
+                else:
+                    conn.execute("DELETE FROM trade_inbox_evidence WHERE inbox_id=?", (inbox_id,))
+        assert read_trade_payload(inbox, inbox_id=inbox_id, read_only=True) == before
+        return settle(*args, **kwargs)
+    monkeypatch.setattr(auto_intake, "settle_reconciled_trade_payload", changed_before_commit)
+    result = auto_intake._reconcile_source_completion(source=source, repo=repo, apply_changes=True)
+    assert result["applied_count"] == result["inbox_updated_count"] == 0
+    assert result["deferred"] == [{"deal_id": key, "reason": "inbox_observation_changed"}]
+    assert read_trade_payload(inbox, inbox_id=inbox_id, read_only=True) == before
+    assert source["state_path"].read_bytes() == state_bytes
+
+
+@pytest.mark.parametrize("missing", ["rows", "table"])
+def test_reconciliation_requires_historical_source_evidence(tmp_path, missing):
+    from src.application.trades.auto_intake import _reconcile_source_completion
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    _, inbox_id, key, source = _recorded_source_pending(repo, tmp_path)
+    inbox = source["inbox_path"]
+    with sqlite3.connect(inbox) as conn:
+        conn.create_function("trade_inbox_writer_version", 0, lambda: 2)
+        if missing == "table":
+            conn.execute("DROP TABLE trade_inbox_evidence")
+        else:
+            conn.execute("DELETE FROM trade_inbox_evidence WHERE inbox_id=?", (inbox_id,))
+    state_bytes = source["state_path"].read_bytes()
+    for apply in (False, True):
+        if missing == "table":
+            with pytest.raises(sqlite3.DatabaseError, match="trade_inbox_evidence"):
+                _reconcile_source_completion(source=source, repo=repo, apply_changes=apply)
+        else:
+            result = _reconcile_source_completion(source=source, repo=repo, apply_changes=apply)
+            assert result["planned_count"] == result["applied_count"] == 0
+            assert result["deferred"] == [{"deal_id": key, "reason": "inbox_source_evidence_missing"}]
+        assert source["state_path"].read_bytes() == state_bytes
+
+
+@pytest.mark.parametrize("field", ["source_deal_id", "deal_id", "futu_deal_id"])
+def test_handled_inbox_replay_preserves_conflicting_source_identity_for_review(tmp_path, field):
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    payload = {**_execution(), "external_order_id": None, "external_order_namespace": None}
+    recorded = _process(repo, tmp_path, "push", payload)
+    assert recorded["status"] == "applied"
+    inbox = resolve_execution_inbox_path(repo, tmp_path / "inbox.sqlite3")
+    before_row = read_trade_payload(inbox, inbox_id=recorded["inbox_id"], read_only=True)
+    before = (repo.list_trade_events(), repo.list_position_lots(), repo.list_trade_lifecycle_notifications())
+    result = _process(repo, tmp_path, "file", {**payload, field: "other-fill"}, source="file")
+    assert (result["status"], result["reason"]) == ("unresolved", "inbox_conflict")
+    row = read_trade_payload(inbox, inbox_id=recorded["inbox_id"], read_only=True)
+    assert row["status"] == "conflict"
+    assert row["result"] == before_row["result"]
+    assert row.get("receipt") == before_row.get("receipt")
+    clean_retry = _process(repo, tmp_path, "retry", payload)
+    assert (clean_retry["status"], clean_retry["reason"]) == ("unresolved", "inbox_conflict")
+    assert read_trade_payload(inbox, inbox_id=recorded["inbox_id"], read_only=True)["status"] == "conflict"
+    assert (repo.list_trade_events(), repo.list_position_lots(), repo.list_trade_lifecycle_notifications()) == before
+
+
+@pytest.mark.parametrize("legacy_key", [False, True])
+def test_canonical_completion_retries_inbox_before_source_without_economic_replay(tmp_path, monkeypatch, legacy_key):
+    from src.application.trades import auto_intake, state_reconcile
+    from src.application.trades.state import load_trade_intake_state, write_trade_intake_state
+    from src.application.ledger.api import open_trade_reconciliation_evidence_repo
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    payload = _execution()
+    recorded = _process(repo, tmp_path, "push", payload)
+    assert recorded["status"] == "applied"
+    inbox = resolve_execution_inbox_path(repo, tmp_path / "unused.sqlite3")
+    key = broker_deal_key_from_payload(payload, account_mapping={"123": "lx"})
+    source = {"account": "lx", "account_mapping": {"123": "lx"},
+              "state_path": tmp_path / "push" / "state.json",
+              "audit_path": tmp_path / "push" / "audit.jsonl",
+              "inbox_path": tmp_path / "unused.sqlite3"}
+    observed_state = load_trade_intake_state(source["state_path"])
+    old = observed_state["processed_deal_ids"].pop(key)
+    if legacy_key:
+        key = "futu:lx:123:fill-1"
+    observed_state["unresolved_deal_ids"][key] = {
+        **old, "status": "unresolved", "reason": "verification_pending",
+    }
+    write_trade_intake_state(source["state_path"], observed_state)
+    with sqlite3.connect(inbox) as conn:
+        conn.create_function("trade_inbox_writer_version", 0, lambda: 2)
+        conn.execute("UPDATE trade_inbox SET status='pending', result_json=?, result_status='unresolved' WHERE inbox_id=?",
+                     (json.dumps({"status": "unresolved", "reason": "verification_pending"}), recorded["inbox_id"]))
+    original_row = read_trade_payload(inbox, inbox_id=recorded["inbox_id"], read_only=True)
+    events = repo.list_trade_events()
+    lots = repo.list_position_lots()
+    preview = auto_intake._reconcile_source_completion(
+        source=source, repo=open_trade_reconciliation_evidence_repo(repo.db_path), apply_changes=False,
+    )
+    assert preview["planned_count"] == 1
+    assert preview["applied_count"] == 0
+    assert read_trade_payload(inbox, inbox_id=recorded["inbox_id"], read_only=True) == original_row
+    assert load_trade_intake_state(source["state_path"]) == observed_state
+
+    # Crash after the Inbox commit but before the source file write.
+    original_reconcile = auto_intake.reconcile_trade_intake_state
+    def interrupted(**kwargs):
+        def fail_write(*args, **kwargs):
+            raise OSError("source disk unavailable")
+        return original_reconcile(**kwargs, update_state_fn=fail_write)
+    monkeypatch.setattr(auto_intake, "reconcile_trade_intake_state", interrupted)
+    with pytest.raises(OSError, match="source disk unavailable"):
+        auto_intake._reconcile_source_completion(source=source, repo=repo, apply_changes=True)
+    settled_row = read_trade_payload(inbox, inbox_id=recorded["inbox_id"], read_only=True)
+    assert settled_row["status"] == "handled"
+    assert settled_row["receipt_envelope"] == original_row["receipt_envelope"]
+    assert load_trade_intake_state(source["state_path"]) == observed_state
+    monkeypatch.setattr(auto_intake, "reconcile_trade_intake_state", state_reconcile.reconcile_trade_intake_state)
+    retried = auto_intake._reconcile_source_completion(source=source, repo=repo, apply_changes=True)
+    assert retried["applied_count"] == 1
+    assert retried["inbox_updated_count"] == 0
+    assert auto_intake._reconcile_source_completion(source=source, repo=repo, apply_changes=True)["applied_count"] == 0
+    assert repo.list_trade_events() == events
+    assert repo.list_position_lots() == lots
+    assert read_trade_payload(inbox, inbox_id=recorded["inbox_id"], read_only=True) == settled_row
+
+
+@pytest.mark.parametrize("legacy_key", [False, True])
+@pytest.mark.parametrize("prepare_receipt_again", [False, True])
+def test_order_enrichment_preserves_interrupted_reconciliation_proof(
+    tmp_path, monkeypatch, legacy_key, prepare_receipt_again,
+):
+    from src.application.trades import auto_intake, state_reconcile
+    from src.application.trades.inbox import (
+        begin_trade_receipt_attempt, list_trade_receipt_recovery_rows,
+        list_unclaimed_trade_payload_refresh_intents, prepare_trade_receipt_result,
+        record_trade_payload_refresh_intent,
+    )
+    from src.application.trades.state import load_trade_intake_state, write_trade_intake_state
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    payload = _execution()
+    payload.pop("external_order_id")
+    payload.pop("external_order_namespace")
+    recorded = _process(repo, tmp_path, "push", payload)
+    assert recorded["status"] == "applied"
+    inbox = resolve_execution_inbox_path(repo, tmp_path / "unused.sqlite3")
+    inbox_id = recorded["inbox_id"]
+    previous = read_trade_payload(inbox, inbox_id=inbox_id, read_only=True)
+    envelope = previous["receipt_envelope"]
+    envelope["receipts"][envelope["current_result_key"]].update(
+        status="unknown", attempt_id="previous-send", attempt_count=1,
+    )
+    with sqlite3.connect(inbox) as conn:
+        conn.create_function("trade_inbox_writer_version", 0, lambda: 2)
+        conn.execute("UPDATE trade_inbox SET receipt_json=? WHERE inbox_id=?", (json.dumps(envelope), inbox_id))
+    record_trade_payload_refresh_intent(inbox, inbox_id=inbox_id, intent={"account": "lx", "request_id": "old-intent"})
+    previous = read_trade_payload(inbox, inbox_id=inbox_id, read_only=True)
+    path = tmp_path / "push" / "state.json"
+    state = load_trade_intake_state(path)
+    key, old = state["processed_deal_ids"].popitem()
+    if legacy_key:
+        key = "futu:lx:123:fill-1"
+    state["unresolved_deal_ids"][key] = {**old, "status": "unresolved"}
+    write_trade_intake_state(path, state)
+    source = {"account": "lx", "account_mapping": {"123": "lx"}, "state_path": path, "inbox_path": inbox}
+    def fail_write(*args, **kwargs):
+        raise OSError("source write interrupted")
+    monkeypatch.setattr(auto_intake, "reconcile_trade_intake_state", lambda **kwargs:
+        state_reconcile.reconcile_trade_intake_state(**kwargs, update_state_fn=fail_write))
+    with pytest.raises(OSError, match="source write interrupted"):
+        auto_intake._reconcile_source_completion(source=source, repo=repo, apply_changes=True)
+    closed = read_trade_payload(inbox, inbox_id=inbox_id, read_only=True)
+    assert closed["status"] == "handled"
+    assert load_trade_intake_state(path) == state
+    monkeypatch.setattr(auto_intake, "reconcile_trade_intake_state", state_reconcile.reconcile_trade_intake_state)
+
+    def unexpected_delivery(*args, **kwargs):
+        pytest.fail("association enrichment must not send")
+    enriched = _process(repo, tmp_path, "backfill", {
+        **payload, "external_order_id": "added-order", "external_order_namespace": "futu.order",
+    }, source="backfill", on_result_fn=unexpected_delivery)
+    assert (enriched["status"], enriched["reason"]) == ("skipped", "ledger_recorded")
+    after = read_trade_payload(inbox, inbox_id=inbox_id, read_only=True)
+    if prepare_receipt_again:
+        # Exercise the sibling result-persistence entry without an economic claim.
+        prepare_trade_receipt_result(inbox, inbox_id=inbox_id,
+            result={"status": "skipped", "reason": "ledger_recorded", "diagnostics": {"readback": "complete"}},
+            expected_payload_version=after["payload_version"], expected_result=after["result"])
+        after = read_trade_payload(inbox, inbox_id=inbox_id, read_only=True)
+        assert after["result"]["diagnostics"]["readback"] == "complete"
+    diagnostics = after["result"]["diagnostics"]
+    assert after["result"]["receipt_suppression_reason"] == "reconciled_from_ledger"
+    assert diagnostics["reconciliation_result"] == closed["result"]["diagnostics"]["reconciliation_result"]
+    assert diagnostics["previous_result"] == previous["result"]
+    assert diagnostics["previous_receipt_envelope"] == previous["receipt_envelope"]
+    assert after["receipt_envelope"] == previous["receipt_envelope"]
+    assert after["portfolio_refresh_intent_json"] == previous["portfolio_refresh_intent_json"]
+    assert after["portfolio_refresh_attempted_at_ms"] is None
+    assert list_trade_receipt_recovery_rows(inbox, account_ids=["123"]) == []
+    assert list_unclaimed_trade_payload_refresh_intents(inbox, account_mapping={"123": "lx"}) == []
+    assert claim_trade_payload_refresh_intent(inbox, inbox_id=inbox_id) is None
+    assert not begin_trade_receipt_attempt(inbox, inbox_id=inbox_id, route={}, message="old")["claimed"]
+    events, lots = repo.list_trade_events(), repo.list_position_lots()
+    assert len(events) == len(lots) == 1
+    assert events[0]["raw_payload"]["execution_input"]["external_order_id"] == "added-order"
+    preview = auto_intake._reconcile_source_completion(source=source, repo=repo, apply_changes=False)
+    assert preview["planned_count"] == 1 and preview["applied_count"] == 0
+    assert load_trade_intake_state(path) == state
+    applied = auto_intake._reconcile_source_completion(source=source, repo=repo, apply_changes=True)
+    assert applied["applied_count"] == 1 and applied["inbox_updated_count"] == 0
+    assert not applied["deferred"]
+    assert key in load_trade_intake_state(path)["processed_deal_ids"]
+    assert not load_trade_intake_state(path)["unresolved_deal_ids"]
+    state_bytes = path.read_bytes()
+    retried = auto_intake._reconcile_source_completion(source=source, repo=repo, apply_changes=True)
+    assert retried["applied_count"] == retried["inbox_updated_count"] == 0
+    assert path.read_bytes() == state_bytes
+    assert read_trade_payload(inbox, inbox_id=inbox_id, read_only=True) == after
+    assert (repo.list_trade_events(), repo.list_position_lots()) == (events, lots)
+
+
+@pytest.mark.parametrize("separate_sources", [False, True])
+@pytest.mark.parametrize("legacy_first", [False, True])
+def test_reconciliation_aliases_share_one_inbox_completion(tmp_path, separate_sources, legacy_first):
+    from src.application.trades.auto_intake import _reconcile_intake_sources
+    from src.application.trades.state import load_trade_intake_state, write_trade_intake_state
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    payload = _execution()
+    recorded = _process(repo, tmp_path, "push", payload)
+    path = tmp_path / "push" / "state.json"
+    state = load_trade_intake_state(path)
+    canonical, old = state["processed_deal_ids"].popitem()
+    keys = ["futu:lx:123:fill-1", canonical] if legacy_first else [canonical, "futu:lx:123:fill-1"]
+    sources = []
+    for index, key in enumerate(keys):
+        source_path = path if not separate_sources or index == 0 else tmp_path / "backfill" / "state.json"
+        if separate_sources:
+            write_trade_intake_state(source_path, {"unresolved_deal_ids": {key: {**old, "status": "unresolved"}}})
+        if separate_sources or index == 0:
+            sources.append({"id": str(index), "account": "lx", "account_mapping": {"123": "lx"},
+                "state_path": source_path, "audit_path": source_path.with_suffix(".jsonl"),
+                "inbox_path": tmp_path / "unused.sqlite3"})
+    if not separate_sources:
+        write_trade_intake_state(path, {"unresolved_deal_ids": {key: {**old, "status": "unresolved"} for key in keys}})
+    inbox = resolve_execution_inbox_path(repo, tmp_path / "unused.sqlite3")
+    previous = read_trade_payload(inbox, inbox_id=recorded["inbox_id"], read_only=True)
+    events, lots = repo.list_trade_events(), repo.list_position_lots()
+    kwargs = dict(sources=sources, repo=repo, account="lx", deal_ids=[], runtime_root=tmp_path, runtime_root_source="test")
+    assert _reconcile_intake_sources(**kwargs, apply_changes=False)["planned_count"] == 2
+    result = _reconcile_intake_sources(**kwargs, apply_changes=True)
+    assert result["applied_count"] == 2
+    assert sum(item["inbox_updated_count"] for item in result["sources"]) == 1
+    assert all(not item["deferred"] for item in result["sources"])
+    for source in sources:
+        assert not load_trade_intake_state(source["state_path"])["unresolved_deal_ids"]
+    closed = read_trade_payload(inbox, inbox_id=recorded["inbox_id"], read_only=True)
+    assert closed["result"]["diagnostics"]["reconciled_source_key"] == canonical
+    assert closed["result"]["deal_id"] == "fill-1"
+    assert closed["receipt_envelope"] == previous["receipt_envelope"]
+    assert closed["result"]["diagnostics"]["previous_result"] == previous["result"]
+    assert _reconcile_intake_sources(**kwargs, apply_changes=True)["applied_count"] == 0
+    assert read_trade_payload(inbox, inbox_id=recorded["inbox_id"], read_only=True) == closed
+    assert (repo.list_trade_events(), repo.list_position_lots()) == (events, lots)
+
+
+def test_reconciliation_reports_inbox_commit_when_source_cas_misses(tmp_path, monkeypatch):
+    from src.application.trades import auto_intake, state_reconcile
+    from src.application.trades.state import (
+        compare_and_update_trade_intake_state_entries, load_trade_intake_state, write_trade_intake_state,
+    )
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    recorded = _process(repo, tmp_path, "push", _execution())
+    path = tmp_path / "push" / "state.json"
+    state = load_trade_intake_state(path)
+    key, old = state["processed_deal_ids"].popitem()
+    state["unresolved_deal_ids"][key] = {**old, "status": "unresolved"}
+    write_trade_intake_state(path, state)
+    def concurrent_update(path, desired, *, deal_ids, expected_state):
+        latest = load_trade_intake_state(path)
+        latest["unresolved_deal_ids"][key]["updated_at"] = "concurrent receipt readback"
+        write_trade_intake_state(path, latest)
+        return compare_and_update_trade_intake_state_entries(path, desired, deal_ids=deal_ids, expected_state=expected_state)
+    monkeypatch.setattr(auto_intake, "reconcile_trade_intake_state", lambda **kwargs:
+        state_reconcile.reconcile_trade_intake_state(**kwargs, update_state_fn=concurrent_update))
+    source = {"id": "lx", "account": "lx", "account_mapping": {"123": "lx"},
+        "state_path": path, "audit_path": path.with_suffix(".jsonl"), "inbox_path": tmp_path / "unused.sqlite3"}
+    kwargs = dict(sources=[source], repo=repo, account="lx", deal_ids=[], runtime_root=tmp_path, runtime_root_source="test", apply_changes=True)
+    result = auto_intake._reconcile_intake_sources(**kwargs)
+    assert result["applied_count"] == 0 and result["inbox_updated_count"] == 1
+    assert result["write_applied"] is True
+    assert "retry" in result["rollback_hint"] and "does not undo Inbox" in result["rollback_hint"]
+    assert load_trade_intake_state(path)["unresolved_deal_ids"][key]["updated_at"] == "concurrent receipt readback"
+    inbox = resolve_execution_inbox_path(repo, tmp_path / "unused.sqlite3")
+    closed = read_trade_payload(inbox, inbox_id=recorded["inbox_id"], read_only=True)
+    assert closed["status"] == "handled" and closed["receipt_recovery_allowed"] == 0
+    monkeypatch.setattr(auto_intake, "reconcile_trade_intake_state", state_reconcile.reconcile_trade_intake_state)
+    retry = auto_intake._reconcile_intake_sources(**kwargs)
+    assert retry["applied_count"] == 1 and retry["inbox_updated_count"] == 0 and retry["write_applied"]
+    assert not auto_intake._reconcile_intake_sources(**kwargs)["write_applied"]
+    assert read_trade_payload(inbox, inbox_id=recorded["inbox_id"], read_only=True) == closed
+
+
+@pytest.mark.parametrize("obstacle", ["claimed", "economic_conflict", "other_account"])
+def test_source_completion_respects_inbox_claims_economics_and_account_scope(tmp_path, obstacle):
+    from src.application.trades.auto_intake import _reconcile_source_completion
+    from src.application.trades.state import load_trade_intake_state, write_trade_intake_state
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    payload = _execution()
+    recorded = _process(repo, tmp_path, "push", payload)
+    inbox = resolve_execution_inbox_path(repo, tmp_path / "unused.sqlite3")
+    key = broker_deal_key_from_payload(payload, account_mapping={"123": "lx"})
+    source = {"account": "lx", "account_mapping": {"123": "lx"},
+              "state_path": tmp_path / "push" / "state.json", "inbox_path": inbox}
+    state = load_trade_intake_state(source["state_path"])
+    old = state["processed_deal_ids"].pop(key)
+    state["unresolved_deal_ids"][key] = {**old, "status": "unresolved"}
+    write_trade_intake_state(source["state_path"], state)
+    if obstacle == "claimed":
+        with sqlite3.connect(inbox) as conn:
+            conn.create_function("trade_inbox_writer_version", 0, lambda: 2)
+            conn.execute("UPDATE trade_inbox SET status='pending', result_json=NULL, next_attempt_at_ms=0 WHERE inbox_id=?",
+                         (recorded["inbox_id"],))
+        assert claim_trade_payload(inbox, inbox_id=recorded["inbox_id"], repo=repo)
+    elif obstacle == "economic_conflict":
+        enqueue_trade_payload(inbox, payload=_execution(price="9.00"), source="backfill", broker_deal_key=key, repo=repo)
+    else:
+        foreign = _execution(physical="456")
+        foreign["broker_account_ref"]["account_label"] = "sy"
+        foreign_id = enqueue_trade_payload(inbox, payload=foreign, source="push", repo=repo,
+            broker_deal_key=broker_deal_key_from_payload(foreign, account_mapping={"456": "sy"}))
+        foreign_before = read_trade_payload(inbox, inbox_id=foreign_id, read_only=True)
+    before = read_trade_payload(inbox, inbox_id=recorded["inbox_id"], read_only=True)
+    events = repo.list_trade_events()
+    preview = _reconcile_source_completion(source=source, repo=repo, apply_changes=False)
+    result = _reconcile_source_completion(source=source, repo=repo, apply_changes=True)
+    assert preview["planned_count"] == result["applied_count"] == int(obstacle == "other_account")
+    assert repo.list_trade_events() == events
+    if obstacle == "other_account":
+        assert read_trade_payload(inbox, inbox_id=foreign_id, read_only=True) == foreign_before
+    else:
+        assert result["deferred"]
+        assert load_trade_intake_state(source["state_path"]) == state
+        assert read_trade_payload(inbox, inbox_id=recorded["inbox_id"], read_only=True) == before
+
+
+@pytest.mark.parametrize("failure", ["gateway", "state_write"])
+def test_listener_recovers_source_independently_of_gateway_and_seal_failures(tmp_path, monkeypatch, failure):
+    from src.application.trades import auto_intake
+    from src.application.trades.state import load_trade_intake_state, write_trade_intake_state
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    payload = _execution()
+    recorded = _process(repo, tmp_path, "push", payload)
+    assert recorded["status"] == "applied"
+    source = {"id": "lx", "account": "lx", "account_mapping": {"123": "lx"},
+              "futu_account_ids": ["123"], "host": "127.0.0.1", "port": 11111,
+              "state_path": tmp_path / "push" / "state.json", "audit_path": tmp_path / "push" / "audit.jsonl",
+              "status_path": tmp_path / "status.json", "inbox_path": tmp_path / "unused.sqlite3",
+              "receipt": {"enabled": False}, "backfill": {"enabled": False},
+              "settlement_observation": {"enabled": failure == "gateway"}, "combo_reconciliation_mode": "off"}
+    state = load_trade_intake_state(source["state_path"])
+    key, old = next(iter(state["processed_deal_ids"].items()))
+    state["processed_deal_ids"] = {}
+    state["unresolved_deal_ids"][key] = {**old, "status": "unresolved"}
+    write_trade_intake_state(source["state_path"], state)
+    stop = threading.Event()
+    class Listener:
+        checks = 0
+        def __init__(self, **kwargs):
+            pass
+        def start(self, **kwargs):
+            pass
+        def check_health(self):
+            self.checks += 1
+            if self.checks == 2:
+                stop.set()
+        def close(self):
+            pass
+    class History:
+        def __init__(self, **kwargs):
+            pass
+        def close(self):
+            pass
+    monkeypatch.setattr(auto_intake, "OpenDTradePushListener", Listener)
+    monkeypatch.setattr(auto_intake, "OpenDHistoryDealClient", History)
+    clock = iter(range(0, 100_000, 61))
+    monkeypatch.setattr(auto_intake.time, "monotonic", lambda: next(clock))
+    checkpoints = []
+    monkeypatch.setattr(auto_intake, "append_lifecycle_attempt_checkpoint_seal",
+                        lambda *args, **kwargs: checkpoints.append(kwargs["reason"]))
+    def gateway(**kwargs):
+        raise ConnectionError("OpenD unavailable")
+    monkeypatch.setattr(auto_intake, "build_futu_gateway", gateway)
+    monkeypatch.setattr(auto_intake, "reconcile_due_lifecycle_cases_for_source", lambda *args, **kwargs: {})
+    monkeypatch.setattr(auto_intake, "recover_order_fee_targets", lambda *args, **kwargs:
+                        {"targets": [], "selection_cursor": {"after": None}, "candidate_count": 0, "issues": []})
+    original_reconcile = auto_intake._reconcile_source_completion
+    attempts = []
+    def reconcile(**kwargs):
+        attempts.append(1)
+        if failure == "state_write" and len(attempts) == 1:
+            raise OSError("state file unavailable")
+        return original_reconcile(**kwargs)
+    monkeypatch.setattr(auto_intake, "_reconcile_source_completion", reconcile)
+    def unexpected_delivery(*args, **kwargs):
+        pytest.fail("local source reconciliation must not deliver")
+    before = repo.list_trade_events(), repo.list_position_lots()
+    assert auto_intake._run_listener_source_loop(
+        source=source, repo=repo, cfg={}, cfg_path=tmp_path / "config.json",
+        runtime_root=tmp_path, runtime_root_source="test", intake_cfg={"mode": "apply", "enabled": True},
+        apply_changes=True, receipt_callback=unexpected_delivery,
+        process_lock=threading.RLock(), stop_event=stop,
+    ) == 0
+    assert len(attempts) >= 2
+    assert not load_trade_intake_state(source["state_path"])["unresolved_deal_ids"]
+    status = json.loads(source["status_path"].read_text())
+    assert "last_intake_state_reconciliation_error" not in status
+    if failure == "gateway":
+        assert "OpenD unavailable" in status["last_lifecycle_due_error"]
+    else:
+        assert checkpoints == ["process_startup"]
+        assert "last_lifecycle_due_error" not in status
+    assert (repo.list_trade_events(), repo.list_position_lots()) == before
+
+
+@pytest.mark.parametrize("obstacle", [None, "claimed", "economics", "other_account"])
+def test_bare_source_identity_closes_matching_inbox_before_source(tmp_path, monkeypatch, obstacle):
+    from test_trades_state_reconcile import _completed_canonical_repo
+    from src.application.trades import auto_intake, state_reconcile
+    from src.application.trades.state import load_trade_intake_state, write_trade_intake_state
+
+    repo = _completed_canonical_repo()
+    payload = _execution(physical="1001", deal_id="option-1", price="0")
+    payload["instrument_ref"].update(symbol="FUTU", strike="120", expiration_ymd="2026-08-21")
+    payload.update(side="buy", position_effect="close", occurred_at_utc="2023-11-14T22:13:20.100Z")
+    payload.pop("external_order_id")
+    payload.pop("external_order_namespace")
+    if obstacle == "economics":
+        payload["price"] = "1"
+    inbox = tmp_path / "inbox.sqlite3"
+    source = {"account": "lx", "account_mapping": {"1001": "lx"},
+              "state_path": tmp_path / "state.json", "inbox_path": inbox}
+    state = {"unresolved_deal_ids": {"option-1": {"account": "lx", "status": "unresolved",
+        "futu_account_id": "1001", "source_deal_id": "option-1"}}}
+    write_trade_intake_state(source["state_path"], state)
+    original_state = load_trade_intake_state(source["state_path"])
+    inbox_id = enqueue_trade_payload(inbox, payload=payload, source="push", repo=repo,
+        broker_deal_key=broker_deal_key_from_payload(payload, account_mapping=source["account_mapping"]))
+    if obstacle == "claimed":
+        assert claim_trade_payload(inbox, inbox_id=inbox_id, repo=repo)
+    if obstacle == "other_account":
+        foreign = {**payload, "broker_account_ref": {**payload["broker_account_ref"],
+            "external_account_id": "1002", "broker_account_id": "futu:REAL:1002", "account_label": "sy"}}
+        foreign_id = enqueue_trade_payload(inbox, payload=foreign, source="push", repo=repo,
+            broker_deal_key=broker_deal_key_from_payload(foreign, account_mapping={"1002": "sy"}))
+        assert claim_trade_payload(inbox, inbox_id=foreign_id, repo=repo)
+        foreign_before = read_trade_payload(inbox, inbox_id=foreign_id, read_only=True)
+    original_row = read_trade_payload(inbox, inbox_id=inbox_id, read_only=True)
+    before_events = repo.list_trade_events()
+    preview = auto_intake._reconcile_source_completion(source=source, repo=repo, apply_changes=False)
+    assert load_trade_intake_state(source["state_path"]) == original_state
+    assert read_trade_payload(inbox, inbox_id=inbox_id, read_only=True) == original_row
+    if obstacle in {"claimed", "economics"}:
+        assert preview["planned_count"] == 0
+        result = auto_intake._reconcile_source_completion(source=source, repo=repo, apply_changes=True)
+        assert result["applied_count"] == 0 and result["deferred"]
+        assert load_trade_intake_state(source["state_path"]) == original_state
+        assert read_trade_payload(inbox, inbox_id=inbox_id, read_only=True) == original_row
+    else:
+        assert preview["planned_count"] == 1
+        def fail_write(*args, **kwargs):
+            raise OSError("source write interrupted")
+        monkeypatch.setattr(auto_intake, "reconcile_trade_intake_state", lambda **kwargs:
+            state_reconcile.reconcile_trade_intake_state(**kwargs, update_state_fn=fail_write))
+        with pytest.raises(OSError, match="source write interrupted"):
+            auto_intake._reconcile_source_completion(source=source, repo=repo, apply_changes=True)
+        closed = read_trade_payload(inbox, inbox_id=inbox_id, read_only=True)
+        assert closed["status"] == "handled"
+        assert closed["result"]["receipt_suppression_reason"] == "reconciled_from_ledger"
+        assert load_trade_intake_state(source["state_path"]) == original_state
+        monkeypatch.setattr(auto_intake, "reconcile_trade_intake_state", state_reconcile.reconcile_trade_intake_state)
+        retried = auto_intake._reconcile_source_completion(source=source, repo=repo, apply_changes=True)
+        assert retried["applied_count"] == 1 and retried["inbox_updated_count"] == 0
+        assert auto_intake._reconcile_source_completion(source=source, repo=repo, apply_changes=True)["applied_count"] == 0
+        assert read_trade_payload(inbox, inbox_id=inbox_id, read_only=True) == closed
+        if obstacle == "other_account":
+            assert read_trade_payload(inbox, inbox_id=foreign_id, read_only=True) == foreign_before
+    assert repo.list_trade_events() == before_events
+
+
+@pytest.mark.parametrize("failure", ["start", "wait", "health"])
+def test_listener_local_recovery_retries_while_opend_unavailable(tmp_path, monkeypatch, failure):
+    from src.application.trades import auto_intake
+    from src.application.trades.state import load_trade_intake_state, write_trade_intake_state
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    recorded = _process(repo, tmp_path, "push", _execution())
+    assert recorded["status"] == "applied"
+    source = {"id": "lx", "account": "lx", "account_mapping": {"123": "lx"},
+              "futu_account_ids": ["123"], "host": "127.0.0.1", "port": 11111,
+              "state_path": tmp_path / "push" / "state.json", "audit_path": tmp_path / "push" / "audit.jsonl",
+              "status_path": tmp_path / "status.json", "receipt": {"enabled": False},
+              "backfill": {"enabled": False}, "settlement_observation": {"enabled": False}}
+    state = load_trade_intake_state(source["state_path"])
+    key, old = next(iter(state["processed_deal_ids"].items()))
+    state["processed_deal_ids"] = {}
+    state["unresolved_deal_ids"][key] = {**old, "status": "unresolved"}
+    write_trade_intake_state(source["state_path"], state)
+    clock = [0.0]
+    monkeypatch.setattr(auto_intake.time, "monotonic", lambda: clock[0])
+    class Stop(threading.Event):
+        def wait(self, timeout=None):
+            # Reconnect maintenance must finish before its first wait, without OpenD.
+            assert not load_trade_intake_state(source["state_path"])["unresolved_deal_ids"]
+            self.set()
+            return True
+    stop = Stop()
+    class Listener:
+        def __init__(self, **kwargs):
+            pass
+        def start(self, *, on_wait, **kwargs):
+            if failure == "health":
+                return
+            clock[0] = 61
+            if failure == "wait":
+                on_wait()
+                stop.wait()
+                raise auto_intake.TradeIntakeStartCancelled("test finished")
+            raise ConnectionError("listener start unavailable")
+        def check_health(self):
+            clock[0] = 61
+            raise ConnectionError("listener health unavailable")
+        def close(self):
+            pass
+    class History:
+        def __init__(self, **kwargs):
+            pass
+        def close(self):
+            pass
+    monkeypatch.setattr(auto_intake, "OpenDTradePushListener", Listener)
+    monkeypatch.setattr(auto_intake, "OpenDHistoryDealClient", History)
+    actual = auto_intake._reconcile_source_completion
+    attempts = []
+    def reconcile(**kwargs):
+        attempts.append(clock[0])
+        if len(attempts) == 1:
+            raise OSError("temporary state read failure")
+        return actual(**kwargs)
+    monkeypatch.setattr(auto_intake, "_reconcile_source_completion", reconcile)
+    def unexpected(*args, **kwargs):
+        pytest.fail("offline recovery must not collect or deliver")
+    monkeypatch.setattr(auto_intake, "reconcile_due_lifecycle_cases_for_source", unexpected)
+    monkeypatch.setattr(auto_intake, "_dispatch_portfolio_refresh_intent", unexpected)
+    before = repo.list_trade_events(), repo.list_position_lots()
+    assert auto_intake._run_listener_source_loop(
+        source=source, repo=repo, cfg={}, cfg_path=tmp_path / "config.json", runtime_root=tmp_path,
+        runtime_root_source="test", intake_cfg={"mode": "apply", "enabled": True}, apply_changes=True,
+        receipt_callback=unexpected, process_lock=threading.RLock(), stop_event=stop,
+    ) == 0
+    assert attempts == [0, 61]
+    assert not load_trade_intake_state(source["state_path"])["unresolved_deal_ids"]
+    assert (repo.list_trade_events(), repo.list_position_lots()) == before
+    status = json.loads(source["status_path"].read_text())
+    assert "last_intake_state_reconciliation_error" not in status
+
+
 def test_identity_quarantine_preserves_evidence_when_trusted_history_recovers(tmp_path):
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     raw = {

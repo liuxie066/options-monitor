@@ -4,24 +4,125 @@ import json
 from pathlib import Path
 import sqlite3
 
+import pytest
+
 from src.application.trades.auto_intake import (
     _cached_trade_inbox_summary,
 )
 
 from src.application.trades.inbox import (
+    TradePayloadClaimLost,
+    begin_trade_receipt_attempt,
     claim_trade_payload,
     claim_trade_payload_refresh_intent,
     enqueue_trade_payload,
     list_retryable_trade_payloads,
+    list_trade_receipt_recovery_rows,
+    list_unclaimed_trade_payload_refresh_intents,
     mark_trade_payload_handled,
     mark_trade_payload_retryable,
     read_trade_source_evidence,
+    read_trade_payload,
+    read_trade_payloads_for_reconciliation,
     record_trade_payload_refresh_intent,
     settle_trade_payload_result,
+    settle_reconciled_trade_payload,
     trade_payload_evidence_ref,
     trade_inbox_revision,
     trade_inbox_summary,
 )
+
+
+def test_reconciliation_discovery_is_read_only_and_keeps_all_identities(tmp_path: Path) -> None:
+    path = tmp_path / "inbox.sqlite3"
+    assert read_trade_payloads_for_reconciliation(path, deal_ids=["same"]) == []
+    assert not path.exists()
+    for key in ("futu:lx:1001:same", "futu:sy:1002:same", None):
+        enqueue_trade_payload(path, payload={"deal_id": "same"}, source="push", broker_deal_key=key)
+    with sqlite3.connect(path) as conn:
+        conn.create_function("trade_inbox_writer_version", 0, lambda: 2)
+        conn.execute("UPDATE trade_inbox SET status='conflict' WHERE broker_deal_key='futu:sy:1002:same'")
+    before = path.read_bytes()
+    rows = read_trade_payloads_for_reconciliation(path, deal_ids=["same", "futu:lx:1001:same"])
+    assert len(rows) == 3
+    assert {row["status"] for row in rows} == {"pending", "conflict", "identity_needs_review"}
+    assert path.read_bytes() == before
+    assert len(read_trade_payloads_for_reconciliation(path, deal_ids=["futu:lx:1001:same"])) == 1
+
+    unavailable = tmp_path / "missing-schema.sqlite3"
+    with sqlite3.connect(unavailable):
+        pass
+    with pytest.raises(sqlite3.DatabaseError, match="schema unavailable"):
+        read_trade_payloads_for_reconciliation(unavailable, deal_ids=["same"])
+
+
+@pytest.mark.parametrize("changed", ["payload_version", "economic_payload_hash", "result_json", "receipt_json", "claim_id", "identity_status", "status"])
+def test_reconciliation_rejects_changed_observation(tmp_path: Path, changed: str) -> None:
+    path = tmp_path / "inbox.sqlite3"
+    inbox_id = enqueue_trade_payload(path, payload={"deal_id": "one"}, source="push", broker_deal_key="futu:lx:1001:one")
+    observed = read_trade_payloads_for_reconciliation(path, deal_ids=["one"])[0]
+    values = {"payload_version": 99, "economic_payload_hash": "changed", "result_json": '{"status":"failed"}',
+              "receipt_json": '{"status":"unknown"}', "claim_id": "another-worker", "identity_status": "identity_needs_review", "status": "conflict"}
+    with sqlite3.connect(path) as conn:
+        conn.create_function("trade_inbox_writer_version", 0, lambda: 2)
+        conn.execute(f"UPDATE trade_inbox SET {changed}=? WHERE inbox_id=?", (values[changed], inbox_id))
+    current = read_trade_payload(path, inbox_id=inbox_id, read_only=True)
+    with pytest.raises(TradePayloadClaimLost):
+        settle_reconciled_trade_payload(path, observed=observed, result={"status": "applied"})
+    assert read_trade_payload(path, inbox_id=inbox_id, read_only=True) == current
+
+
+@pytest.mark.parametrize("ineligible", ["claim", "conflict", "identity_needs_review"])
+def test_reconciliation_rejects_observed_ineligible_row(tmp_path: Path, ineligible: str) -> None:
+    path = tmp_path / "inbox.sqlite3"
+    inbox_id = enqueue_trade_payload(path, payload={"deal_id": "one"}, source="push", broker_deal_key="futu:lx:1001:one")
+    if ineligible == "claim":
+        assert claim_trade_payload(path, inbox_id=inbox_id)
+    else:
+        with sqlite3.connect(path) as conn:
+            conn.create_function("trade_inbox_writer_version", 0, lambda: 2)
+            conn.execute("UPDATE trade_inbox SET status=? WHERE inbox_id=?", (ineligible, inbox_id))
+    observed = read_trade_payloads_for_reconciliation(path, deal_ids=["one"])[0]
+    with pytest.raises(TradePayloadClaimLost):
+        settle_reconciled_trade_payload(path, observed=observed, result={"status": "applied"})
+    assert read_trade_payloads_for_reconciliation(path, deal_ids=["one"])[0] == observed
+
+
+@pytest.mark.parametrize("receipt_status", [None, "pending", "sent", "unknown"])
+def test_reconciliation_preserves_history_and_suppresses_all_delivery(tmp_path: Path, receipt_status: str | None) -> None:
+    path = tmp_path / "inbox.sqlite3"
+    inbox_id = enqueue_trade_payload(path, payload={"deal_id": "one", "futu_account_id": "1001"}, source="push", broker_deal_key="futu:lx:1001:one")
+    old_result = {"status": "unresolved", "reason": "waiting_settlement_evidence", "receipt_kind": "manual_required"}
+    envelope = ({"schema_version": 2, "current_result_key": "manual_required", "receipts": {
+        "manual_required": {"receipt_id": "old-receipt", "status": receipt_status, "attempt_count": 1,
+                            "result": {"delivery_confirmed": receipt_status == "sent"}, "business_result": old_result},
+    }} if receipt_status else None)
+    record_trade_payload_refresh_intent(path, inbox_id=inbox_id, intent={"account": "lx", "request_id": "refresh-one"})
+    with sqlite3.connect(path) as conn:
+        conn.create_function("trade_inbox_writer_version", 0, lambda: 2)
+        conn.execute("UPDATE trade_inbox SET result_json=?, receipt_json=?, receipt_recovery_allowed=1, attempt_count=1 WHERE inbox_id=?",
+                     (json.dumps(old_result), json.dumps(envelope) if envelope else None, inbox_id))
+    observed = read_trade_payloads_for_reconciliation(path, deal_ids=["one"])[0]
+    result = {"status": "applied", "reason": "lifecycle_case_already_recorded", "applied_record_ids": ["lot-one"]}
+    assert settle_reconciled_trade_payload(path, observed=observed, result=result)
+    closed = read_trade_payload(path, inbox_id=inbox_id, read_only=True)
+    assert closed["status"] == "handled"
+    assert closed["receipt_envelope"] == envelope
+    assert closed["result"]["diagnostics"]["previous_result"] == old_result
+    assert closed["result"]["diagnostics"]["previous_receipt_envelope"] == envelope
+    assert closed["portfolio_refresh_intent_json"] == observed["portfolio_refresh_intent_json"]
+    assert closed["portfolio_refresh_attempted_at_ms"] is None
+    closed_observation = read_trade_payloads_for_reconciliation(path, deal_ids=["one"])[0]
+    assert not settle_reconciled_trade_payload(path, observed=closed_observation, result=result)
+    assert read_trade_payload(path, inbox_id=inbox_id, read_only=True) == closed
+    assert list_retryable_trade_payloads(path, retry_delay_sec=0) == []
+    assert list_trade_receipt_recovery_rows(path, account_ids=["1001"]) == []
+    assert list_unclaimed_trade_payload_refresh_intents(path, account_mapping={"1001": "lx"}) == []
+    assert claim_trade_payload_refresh_intent(path, inbox_id=inbox_id) is None
+    assert not begin_trade_receipt_attempt(path, inbox_id=inbox_id, route={"route": "test"}, message="old")["claimed"]
+    assert read_trade_payload(path, inbox_id=inbox_id, read_only=True) == closed
+    next_id = enqueue_trade_payload(path, payload={"deal_id": "two"}, source="push", broker_deal_key="futu:lx:1001:two")
+    assert claim_trade_payload(path, inbox_id=next_id)
 
 
 def test_trade_inbox_claims_portfolio_refresh_intent_once(
