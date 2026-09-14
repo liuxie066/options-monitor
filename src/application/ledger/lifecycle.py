@@ -189,7 +189,7 @@ def _persist_lifecycle_close_events(
         contracts_to_close=contracts_to_close,
     )
     prepared: list[tuple[Any, int, Any, TradeEvent]] = []
-    as_of_ms = int(event_time_ms) if event_time_ms is not None else None
+    as_of_ms = event_time_ms
     evidence_tuple = tuple(str(item) for item in (evidence_ids or []) if str(item or "").strip())
     settlement_source = dict(stock_settlement or {})
     settlements_by_lot: dict[str, dict[str, Any]] = {}

@@ -1362,3 +1362,117 @@ def test_implementation_or_schema_cookie_mismatch_stays_untrusted(
     state = repo.read_position_projection_source_state()
     assert state["checkpoint_mode"] == "untrusted"
     assert result.checkpoint_id is None
+
+
+@pytest.mark.parametrize("checkpoint_enabled", [False, True])
+def test_historical_close_persists_after_void_and_newer_unrelated_event(
+    tmp_path: Path, checkpoint_enabled: bool, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.application.ledger.commands import persist_manual_close_event_with_ledger
+    from src.application.ledger import writer_trade_events
+
+    repo = _repo(tmp_path)
+    run_position_projection_forced_full(repo, [
+        _event("open", "open", 1_000, lot_id="lot-a"),
+        _event("old-close", "close", 2_000, target_lot_id="lot-a"),
+        _event("other", "open", 3_000, account="sy", lot_id="lot-b"),
+        _event("void-close", "void", 4_000, target_event_id="old-close"),
+    ], seed_checkpoint=True)
+    if checkpoint_enabled:
+        _enable(repo)
+        assert repo.read_newest_trusted_position_projection_checkpoint() is not None
+        assert preview_position_projection_append(repo, []).mode_used == "resumed_tail"
+    before = {row["event_id"]: row for row in repo.list_trade_events()}
+    notifications = repo.list_trade_lifecycle_notifications()
+    runtime_results = []
+    original = writer_trade_events.run_position_projection_in_transaction
+
+    def capture(*args, **kwargs):
+        result = original(*args, **kwargs)
+        runtime_results.append(result)
+        return result
+
+    monkeypatch.setattr(writer_trade_events, "run_position_projection_in_transaction", capture)
+    result = persist_manual_close_event_with_ledger(
+        repo, record_id="lot-a", contracts_to_close=1, close_price=0.5,
+        close_reason="historical repair", as_of_ms=2_000,
+    )
+    assert result.ledger_preflight.event_time_ms == 2_000
+    after = {row["event_id"]: row for row in repo.list_trade_events()}
+    assert all(after[eid] == row for eid, row in before.items())
+    new_event, = [row for eid, row in after.items() if eid not in before]
+    assert new_event["event_time_ms"] == 2_000
+    assert repo.get_position_lot_fields("lot-a")["contracts_open"] == 0
+    assert repo.get_position_lot_fields("lot-b")["contracts_open"] == 1
+    assert repo.list_trade_lifecycle_notifications() == notifications
+    assert runtime_results[-1].mode_used == "full"
+    if checkpoint_enabled:
+        assert runtime_results[-1].fallback_reason == "checkpoint_missing_or_invalidated"
+    lots = repo.list_position_lots()
+    run_position_projection_forced_full(repo, [])
+    assert repo.list_position_lots() == lots
+
+
+@pytest.mark.parametrize("checkpoint_enabled", [False, True])
+@pytest.mark.parametrize("scenario", ["before_open", "over_close", "before_identity_adjust"])
+def test_invalid_historical_close_preserves_events_and_lots(
+    tmp_path: Path, checkpoint_enabled: bool, scenario: str,
+) -> None:
+    from src.application.ledger.commands import persist_manual_close_event_with_ledger
+
+    repo = _repo(tmp_path)
+    events = [_event("open", "open", 1_000, lot_id="lot-a")]
+    if scenario == "before_identity_adjust":
+        events.append(_event("adjust", "adjust", 3_000, target_lot_id="lot-a",
+                             raw_payload={"patch": {"strike": 110}}))
+    run_position_projection_forced_full(repo, events, seed_checkpoint=True)
+    if checkpoint_enabled:
+        _enable(repo)
+    before_events, before_lots = repo.list_trade_events(), repo.list_position_lots()
+    with pytest.raises(LedgerPreflightError) as exc:
+        persist_manual_close_event_with_ledger(
+            repo, record_id="lot-a", contracts_to_close=2 if scenario == "over_close" else 1,
+            close_price=0.5, close_reason="invalid history",
+            as_of_ms=500 if scenario == "before_open" else 2_000,
+        )
+    assert exc.value.code == (
+        "close_contracts_exceed_open" if scenario == "over_close" else "close_projection_invalid"
+    )
+    assert repo.list_trade_events() == before_events
+    assert repo.list_position_lots() == before_lots
+
+
+@pytest.mark.parametrize("as_of_ms", [0, -1, True, 2000.5, "2000"])
+@pytest.mark.parametrize("entry", ["preflight", "manual_assignment", "lifecycle_assignment"])
+def test_close_rejects_invalid_explicit_time_at_public_boundaries(
+    tmp_path: Path, as_of_ms: object, entry: str,
+) -> None:
+    from src.application.ledger.commands import record_manual_assignment, record_lifecycle_assignment
+
+    repo = _repo(tmp_path)
+    run_position_projection_forced_full(repo, [_event("open", "open", 1_000, lot_id="lot-a")])
+    before_events, before_lots = repo.list_trade_events(), repo.list_position_lots()
+    with pytest.raises(LedgerPreflightError) as exc:
+        if entry == "preflight":
+            preflight_manual_close(repo, record_id="lot-a", contracts_to_close=1,
+                close_price=0.5, close_reason="invalid time", as_of_ms=as_of_ms)
+        elif entry == "manual_assignment":
+            record_manual_assignment(repo, record_id="lot-a", contracts_to_close=1,
+                stock_side="buy", stock_qty=100, stock_price=100, as_of_ms=as_of_ms)
+        else:
+            record_lifecycle_assignment(repo, broker="futu", account="lx", symbol="NVDA",
+                option_type="put", position_side="short", strike=100,
+                expiration_ymd="2026-06-19", contracts_to_close=1, event_time_ms=as_of_ms,
+                case_id=None, evidence_ids=[], stock_settlement={})
+    assert exc.value.code == "invalid_event_time"
+    assert repo.list_trade_events() == before_events
+    assert repo.list_position_lots() == before_lots
+
+
+def test_close_without_explicit_time_keeps_monotonic_default(tmp_path: Path, monkeypatch) -> None:
+    repo = _repo(tmp_path)
+    run_position_projection_forced_full(repo, [_event("open", "open", 3_000, lot_id="lot-a")])
+    monkeypatch.setattr("src.application.ledger.preflight.now_ms", lambda: 1_000)
+    result = preflight_manual_close(repo, record_id="lot-a", contracts_to_close=1,
+        close_price=0.5, close_reason="default time")
+    assert result.event_time_ms == 3_001

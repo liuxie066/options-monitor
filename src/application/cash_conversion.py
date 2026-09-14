@@ -155,6 +155,14 @@ def attach_assigned_stock_sale_cash_conversions(
             observed_at_ms=observed_at_ms,
         )
     out["cash_conversions"] = conversions
+    if "sale_allocations" in out:
+        from domain.domain.assigned_stock import assigned_stock_sale_allocations
+        out["sale_allocations"] = [
+            attach_assigned_stock_sale_cash_conversions(
+                item, fx_payload=fx_payload, observed_at_ms=observed_at_ms,
+            )
+            for item in assigned_stock_sale_allocations(out)
+        ]
     return out
 
 

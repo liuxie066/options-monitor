@@ -1674,6 +1674,15 @@ def _enrich_execution_order_identity(
             if not fields.get(name):
                 changes[prefix + name] = {"before": fields.get(name), "after": value}
                 fields[name] = value
+        if assigned_stock and after_raw.get("sale_allocations"):
+            from domain.domain.assigned_stock import assigned_stock_sale_allocations
+            for allocation in after_raw["sale_allocations"]:
+                require_same_execution(allocation["execution_input"], execution)
+                allocation["order_id"] = after_raw["order_id"]
+                allocation["external_order_namespace"] = namespace
+                allocation["execution_input"]["external_order_id"] = order_id
+                allocation["execution_input"]["external_order_namespace"] = namespace
+            assigned_stock_sale_allocations(after_raw)
         provenance = list(after_raw.get("execution_order_identity_enrichments") or [])
         provenance.append({
             "source": "normalized_execution_input", "execution_id": execution_id,
