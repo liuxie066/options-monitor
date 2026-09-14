@@ -567,7 +567,16 @@ def _preflight_lot_close(
             },
         )
 
-    event_time_ms = max(int(as_of_ms or now_ms()), current.latest_event_time_ms + 1)
+    if as_of_ms is not None and (type(as_of_ms) is not int or as_of_ms <= 0):
+        raise LedgerPreflightError(
+            "invalid_event_time",
+            f"{operation_label} ledger preflight requires a positive integer as_of_ms",
+        )
+    event_time_ms = (
+        as_of_ms
+        if as_of_ms is not None
+        else max(now_ms(), current.latest_event_time_ms + 1)
+    )
     close_event = TradeEvent(
         event_id=f"preflight:{source}:{resolved_record_id}:{event_time_ms}",
         event_type=event_type,

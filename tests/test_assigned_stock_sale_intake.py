@@ -963,3 +963,147 @@ def test_late_stock_order_conflict_leaves_ledger_unchanged(tmp_path: Path) -> No
             record_assigned_stock_event(repo, **direct_input)
         with sqlite3.connect(f"file:{repo.db_path}?mode=ro", uri=True) as conn:
             assert tuple(conn.iterdump()) == before
+
+
+def _explicit_two_lot_sale(tmp_path):
+    import copy
+    from src.application.ledger import api
+    from src.application.positions.workflows import _build_assigned_stock_sale_event
+
+    repo, first = _repo_with_assigned_stock(tmp_path)
+    ledger_manual_trades.persist_manual_open_event(repo, OpenPositionCommand(
+        broker="富途", account="lx", symbol="NVDA", option_type="put", side="short",
+        contracts=1, currency="USD", strike=110, multiplier=100,
+        expiration_ymd="2026-06-19", premium_per_share=2, opened_at_ms=1100,
+    ))
+    option = next(x for x in repo.list_position_lots() if x["fields"]["strike"] == 110)
+    api.record_manual_assignment(repo, record_id=option["record_id"], contracts_to_close=1,
+                                stock_side="buy", stock_qty=100, stock_price=110, as_of_ms=2100)
+    lots = build_assigned_stock_view(repo)["assigned_stock_lots"]
+    assert len(lots) == 2
+    deal = _stock_sale_deal(contracts=200)
+    parent = _build_assigned_stock_sale_event(
+        lots[0], target_stock_lot_id=lots[0]["stock_lot_id"], shares=200, price=105,
+        fees=3, fee_provenance={"basis": "actual", "source": "broker", "amount": "3"},
+        trade_time_ms=3000, account="lx", broker="富途", symbol="NVDA", currency="USD",
+        source_deal_id=deal.deal_id, futu_account_id=deal.futu_account_id,
+        order_id=deal.order_id, source="broker",
+    )
+    children = []
+    for index, lot in enumerate(lots, 1):
+        child = copy.deepcopy(parent)
+        child.update(stock_event_id=parent["stock_event_id"] + f":allocation:{index}",
+                     target_stock_lot_id=lot["stock_lot_id"], shares=100, fees=1.5,
+                     fee_provenance={"basis": "actual", "source": "broker", "amount": "1.5"})
+        children.append(child)
+    parent["sale_allocations"] = children
+    return repo, parent, deal
+
+
+def test_explicit_stock_sale_allocations_are_one_effect_and_replay(tmp_path):
+    from src.application.ledger import api
+    from src.application.positions.workflows import execute_broker_assigned_stock_sale
+    repo, sale, deal = _explicit_two_lot_sale(tmp_path)
+    before = repo.list_trade_events()
+    notices = repo.list_trade_lifecycle_notifications()
+    assert api.record_assigned_stock_event(repo, sale_event=sale)["created"]
+    stored = repo.list_assigned_stock_events()
+    assert len(stored) == 1 and stored[0]["shares"] == 200
+    assert not api.record_assigned_stock_event(repo, sale_event=sale)["created"]
+    assert execute_broker_assigned_stock_sale(repo, deal, dry_run=False)["idempotent_duplicate"]
+    assert repo.list_assigned_stock_events() == stored
+    assert repo.list_trade_events() == before
+    assert repo.list_trade_lifecycle_notifications() == notices
+    report = build_assigned_stock_view(repo)
+    assert all(x["shares_remaining"] == 0 for x in report["assigned_stock_lots"])
+    rows = report["assigned_stock_sale_rows"]
+    assert len(rows) == 2 and sum(x["shares"] for x in rows) == 200
+    assert sum(x["fees"] for x in rows) == 3
+    for row in rows:
+        conversion = row["cash_conversions"]["assigned_stock_sale_cash_gross"]
+        assert conversion["cash_fact_id"].endswith(row["stock_event_id"])
+        assert conversion["native_amount"] == "10500"
+
+
+@pytest.mark.parametrize("mutation", ["quantity", "target", "account", "fee", "source", "future_sale"])
+def test_stock_sale_allocations_reject_bad_or_regressive_effect_atomically(tmp_path, mutation):
+    import copy
+    from src.application.ledger import api
+    repo, sale, _ = _explicit_two_lot_sale(tmp_path)
+    bad = copy.deepcopy(sale)
+    second = bad["sale_allocations"][1]
+    if mutation == "quantity":
+        second["shares"] = 99
+    elif mutation == "target":
+        second["target_stock_lot_id"] = bad["sale_allocations"][0]["target_stock_lot_id"]
+    elif mutation == "account":
+        second["account"] = "sy"
+    elif mutation == "fee":
+        second["fee_provenance"]["amount"] = "1.6"
+    elif mutation == "source":
+        second["source_deal_id"] = "different-deal"
+    else:
+        future = copy.deepcopy(second)
+        future.update(stock_event_id="later-stock-sale", trade_time_ms=4000,
+                      source_deal_id="later", order_id="later")
+        api.record_assigned_stock_event(repo, sale_event=future)
+    before = repo.list_assigned_stock_events()
+    with pytest.raises(ValueError):
+        api.record_assigned_stock_event(repo, sale_event=bad)
+    assert repo.list_assigned_stock_events() == before
+
+
+def test_broker_full_inventory_sale_allocates_all_lots_but_partial_remains_ambiguous(tmp_path):
+    from src.application.positions.workflows import execute_broker_assigned_stock_sale, BrokerAssignedStockSaleMatchError
+    repo, _, deal = _explicit_two_lot_sale(tmp_path)
+    with pytest.raises(BrokerAssignedStockSaleMatchError, match="multiple"):
+        execute_broker_assigned_stock_sale(repo, replace(deal, contracts=50), dry_run=False)
+    preview = execute_broker_assigned_stock_sale(repo, deal, dry_run=True)
+    assert len(preview["sale_event"]["sale_allocations"]) == 2
+    assert not repo.list_assigned_stock_events()
+    result = execute_broker_assigned_stock_sale(repo, deal, dry_run=False)
+    sale = result["sale_event"]
+    assert len(repo.list_assigned_stock_events()) == 1
+    assert sum(x["shares"] for x in sale["sale_allocations"]) == 200
+    assert execute_broker_assigned_stock_sale(repo, deal, dry_run=False)["idempotent_duplicate"]
+
+
+def test_multi_lot_execution_late_order_preserves_cash_and_blocks_source_void(tmp_path):
+    from src.application.ledger import api
+    from src.application.positions.workflows import execute_broker_assigned_stock_sale
+    # Production already has the execution writer schema before this historical repair.
+    from src.application.ledger.external_event_key import ensure_execution_writer_guard
+    seed = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    with seed._connect() as conn:
+        ensure_execution_writer_guard(conn)
+    repo, _, _ = _explicit_two_lot_sale(tmp_path)
+    _prepare_sale_projection_state(repo, "clean")
+    first = execute_broker_assigned_stock_sale(repo, _standard_stock_sale_deal(contracts=200, order_id=None), dry_run=False)
+    before = first["sale_event"]
+    assert first["result"]["decision_projection"]["statuses"] == {"lx": "published"}
+    replay = execute_broker_assigned_stock_sale(repo, _standard_stock_sale_deal(contracts=200), dry_run=False)
+    assert replay["idempotent_duplicate"] and replay["result"]["identity_enriched"]
+    after = repo.list_assigned_stock_events()[0]
+    assert after["cash_conversions"] == before["cash_conversions"]
+    for old, new in zip(before["sale_allocations"], after["sale_allocations"], strict=True):
+        assert new["order_id"] == "order-stock-sale-1"
+        assert old["cash_conversions"] == new["cash_conversions"]
+    for assignment in (e for e in repo.list_trade_events() if e["event_type"] == "assignment"):
+        with pytest.raises(ValueError):
+            api.record_trade_event_void(repo, event_id=assignment["event_id"], reason="must preserve every sold lot")
+    report = build_assigned_stock_view(repo)
+    assert len(report["assigned_stock_sale_rows"]) == 2
+
+
+def test_multi_lot_source_completion_requires_conserved_allocations(tmp_path):
+    import copy
+    from src.application.positions.workflows import execute_broker_assigned_stock_sale
+    from src.application.trades.state_reconcile import reconciled_source_matches_deal
+    repo, _, _ = _explicit_two_lot_sale(tmp_path)
+    deal = _standard_stock_sale_deal(contracts=200)
+    event = execute_broker_assigned_stock_sale(repo, deal, dry_run=False)["sale_event"]
+    action = {"reason": "assigned_stock_sale_event_recorded", "assigned_stock_event": event}
+    assert reconciled_source_matches_deal(action, deal)
+    broken = copy.deepcopy(action)
+    broken["assigned_stock_event"]["sale_allocations"][1]["shares"] = 99
+    assert not reconciled_source_matches_deal(broken, deal)

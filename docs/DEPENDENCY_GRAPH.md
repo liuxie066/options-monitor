@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 1015 (`src`: 518, `domain`: 82, `scripts`: 11, `tests`: 404)
-- Internal import edges: 7332 total, 2941 production/script edges excluding tests
+- Internal import edges: 7356 total, 2945 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,7 +31,7 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|460| domain
+  application -->|464| domain
   application -->|4| domain_services
   application -->|147| infrastructure
   application -->|45| storage
@@ -46,7 +46,7 @@ flowchart LR
   scripts -->|4| domain
   scripts -->|2| infrastructure
   storage -->|1| domain
-  tests -->|3306| application
+  tests -->|3326| application
   tests -->|480| domain
   tests -->|2| domain_services
   tests -->|246| infrastructure
@@ -59,7 +59,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 460 |
+| application | domain | 464 |
 | interfaces | application | 153 |
 | application | infrastructure | 147 |
 | application | storage | 45 |
@@ -79,7 +79,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 3306 |
+| tests | application | 3326 |
 | tests | domain | 480 |
 | tests | infrastructure | 246 |
 | tests | interfaces | 233 |
@@ -93,12 +93,12 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 
 | from | to | imports |
 |---|---|---|
-| src.application | domain.domain | 216 |
+| src.application | domain.domain | 217 |
 | src.interfaces | src.application | 120 |
 | src.application | src.infrastructure | 102 |
-| src.application.ledger | domain.domain | 81 |
+| src.application.ledger | domain.domain | 83 |
 | src.application.ledger | domain.domain.ledger | 49 |
-| src.application.trades | domain.domain | 36 |
+| src.application.trades | domain.domain | 37 |
 | src.application | domain.storage | 34 |
 | scripts | src.application | 31 |
 | src.application.research | src.application | 29 |
