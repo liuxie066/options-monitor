@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections import Counter
 
+from domain.domain.assigned_stock import assigned_stock_sale_allocations
+
 from src.application.cash_conversion import (
     attach_assigned_stock_sale_cash_conversions,
     load_cash_fx_payload,
@@ -325,10 +327,17 @@ def record_assigned_stock_event_atomically(
         stable_fields = (
             "target_stock_lot_id", "account", "broker", "symbol", "side",
             "shares", "price", "fees", "currency", "trade_time_ms",
-            "source_deal_id", "futu_account_id", "source",
+            "source_deal_id", "futu_account_id", "source", "sale_allocations",
         )
+        def stable_value(row: dict[str, Any], key: str) -> Any:
+            value = row.get(key)
+            if key == "sale_allocations" and isinstance(value, list):
+                return [{k: v for k, v in item.items() if k != "cash_conversions"}
+                        for item in value]
+            return value
+
         if existing is not None and any(
-            existing.get(key) != event.get(key) for key in stable_fields
+            stable_value(existing, key) != stable_value(event, key) for key in stable_fields
         ):
             raise ValueError(
                 f"assigned stock sale conflict for stock_event_id={stock_event_id}"
@@ -368,29 +377,35 @@ def record_assigned_stock_event_atomically(
                 observed_at_ms=utc_now_ms(),
             )
 
-        shares = int(storage_event.get("shares") or 0)
-        if created and (
-            shares <= 0 or shares > int(before_lot.get("shares_remaining") or 0)
-        ):
-            raise ValueError("assigned stock sale has insufficient shares remaining")
-        remaining_after = int(before_lot.get("shares_remaining") or 0) - (
-            shares if created else 0
-        )
-        covered_shares = sum(
-            int(row.get("shares") or 0)
-            for row in before_report.get("covered_call_allocations") or []
-            if isinstance(row, dict)
-            and str(row.get("stock_lot_id") or "") == stock_lot_id
-            and int(row.get("start_at_ms") or 0) <= trade_time_hint
-            and (
-                row.get("end_at_ms") is None
-                or trade_time_hint < int(row["end_at_ms"])
+        sale_allocations = assigned_stock_sale_allocations(storage_event)
+        if created and "sale_allocations" in storage_event:
+            prior_ids = {item.get("stock_event_id")
+                         for row in before_rows["account_assigned_stock_events"]
+                         for item in assigned_stock_sale_allocations(row)}
+            if any(item.get("stock_event_id") in prior_ids for item in sale_allocations):
+                raise ValueError("assigned stock sale allocation event id already exists")
+        for allocation in sale_allocations:
+            target_id = str(allocation.get("target_stock_lot_id") or "")
+            allocation_lot = next((row for row in before_report.get("_all_assigned_stock_lots") or []
+                                   if row.get("stock_lot_id") == target_id), None)
+            if allocation_lot is None or not any(
+                row.get("event_id") == allocation_lot.get("source_assignment_event_id")
+                for row in before_rows.get("trade_events") or []
+            ):
+                raise ValueError("assigned stock sale source event is missing")
+            shares = int(allocation.get("shares") or 0)
+            if created and (shares <= 0 or shares > int(allocation_lot.get("shares_remaining") or 0)):
+                raise ValueError("assigned stock sale has insufficient shares remaining")
+            remaining_after = int(allocation_lot.get("shares_remaining") or 0) - (shares if created else 0)
+            covered_shares = sum(
+                int(row.get("shares") or 0)
+                for row in before_report.get("covered_call_allocations") or []
+                if row.get("stock_lot_id") == target_id
+                and int(row.get("start_at_ms") or 0) <= trade_time_hint
+                and (row.get("end_at_ms") is None or trade_time_hint < int(row["end_at_ms"]))
             )
-        )
-        if covered_shares > remaining_after:
-            raise ValueError(
-                "assigned stock sale validation failed: covered_call_capacity_conflict"
-            )
+            if covered_shares > remaining_after:
+                raise ValueError("assigned stock sale validation failed: covered_call_capacity_conflict")
 
         after_rows = dict(before_rows)
         after_rows["account_assigned_stock_events"] = [
@@ -402,17 +417,16 @@ def record_assigned_stock_event_atomically(
             account=selected_account,
             as_of_ms=trade_time_hint,
         )
-        if created and not any(
-            str(row.get("stock_event_id") or "") == stock_event_id
-            for row in after_report.get("assigned_stock_sale_rows") or []
-            if isinstance(row, dict)
-        ):
+        allocation_ids = {str(item.get("stock_event_id") or "") for item in sale_allocations}
+        projected_ids = {str(row.get("stock_event_id") or "")
+                         for row in after_report.get("assigned_stock_sale_rows") or []}
+        if created and not allocation_ids.issubset(projected_ids):
             review = next(
                 (
                     row
                     for row in after_report.get("assigned_stock_review_rows") or []
                     if isinstance(row, dict)
-                    and str(row.get("stock_event_id") or "") == stock_event_id
+                    and str(row.get("stock_event_id") or "") in allocation_ids
                 ),
                 {},
             )
@@ -440,12 +454,12 @@ def record_assigned_stock_event_atomically(
                 as_of_ms=final_cutoff_ms,
             )
             if created:
-                _require_preserved_assigned_stock_facts(
-                    before_final_report,
-                    final_report,
-                    stock_lot_id=stock_lot_id,
-                    stock_event_id=stock_event_id,
-                )
+                for allocation in sale_allocations:
+                    _require_preserved_assigned_stock_facts(
+                        before_final_report, final_report,
+                        stock_lot_id=allocation["target_stock_lot_id"],
+                        stock_event_id=allocation["stock_event_id"],
+                    )
         prepared["stock_lot_after"] = next(
             (
                 dict(row)

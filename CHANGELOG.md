@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Bug Fixes
+- Preserved validated historical event timestamps when repairing lifecycle records, without moving old assignments behind newer ledger events.
+- Reconciled a single broker stock sale across its complete assigned-stock inventory while retaining one execution identity, conserved fees and cash, and safe replay.
+
 ## 3.5.5 - 2026-09-14
 
 ### Bug Fixes

@@ -172,6 +172,11 @@ def reconciled_source_matches_deal(action: dict[str, Any], deal: Any) -> bool:
                 or event.get("event_type") != "sale" or event.get("side") != "sell"
                 or source_key not in structured_deal_keys_from_assigned_stock_event(event)):
             return False
+        from domain.domain.assigned_stock import assigned_stock_sale_allocations
+        try:
+            assigned_stock_sale_allocations(event)
+        except (TypeError, ValueError, ArithmeticError):
+            return False
         stored_execution = event.get("execution_input")
         if stored_execution:
             if execution_identity_from_input(stored_execution) != execution_identity_from_input(execution):
@@ -851,7 +856,8 @@ def _processed_payload_from_assigned_stock_event(
         "status": "reconciled",
         "action": action,
         "account": state_item.get("account") or assigned_stock_event.get("account"),
-        "applied_record_ids": [stock_lot_id] if stock_lot_id else [],
+        "applied_record_ids": ([row["target_stock_lot_id"] for row in assigned_stock_event["sale_allocations"]]
+                               if assigned_stock_event.get("sale_allocations") else [stock_lot_id] if stock_lot_id else []),
         "reason": "assigned_stock_sale_event_recorded",
         "diagnostics": {
             **dict(state_item.get("diagnostics") or {}),

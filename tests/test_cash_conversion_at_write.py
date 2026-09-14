@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime
 import json
 from pathlib import Path
@@ -270,16 +271,28 @@ def test_assignment_and_assigned_stock_sale_store_their_own_cny_cash(
         ),
     )
     lot = repo.list_position_lots()[0]
+    persist_trade_event_object(repo, replace(
+        _open_event("later-unrelated", price=0), event_type="verification", contracts=0,
+        event_time_ms=_ms("2026-07-24T09:00:00"), lot_id=None,
+    ))
+    request = dict(
+        record_id=lot["record_id"], contracts_to_close=1,
+        stock_side="buy", stock_qty=100, stock_price=100.0,
+        request_id="historical-assignment",
+    )
     record_manual_assignment(
         repo,
-        record_id=lot["record_id"],
-        contracts_to_close=1,
-        stock_side="buy",
-        stock_qty=100,
-        stock_price=100.0,
+        **request,
         as_of_ms=_ms("2026-07-23T09:00:00"),
     )
     assignment = next(item for item in repo.list_trade_events() if item.get("event_type") == "assignment")
+    assert assignment["event_time_ms"] == _ms("2026-07-23T09:00:00")
+    events = repo.list_trade_events()
+    notifications = repo.list_trade_lifecycle_notifications()
+    replay = record_manual_assignment(repo, **request, as_of_ms=_ms("2026-07-25T09:00:00"))
+    assert replay["result"]["created"] is False
+    assert repo.list_trade_events() == events
+    assert repo.list_trade_lifecycle_notifications() == notifications
     stock_lot_id = f"assigned-stock-{assignment['event_id']}"
     execute_manual_assigned_stock_sale(
         repo,

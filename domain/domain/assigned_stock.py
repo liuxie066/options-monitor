@@ -365,10 +365,77 @@ def _normalize_quote_snapshots(value: Any) -> list[dict[str, Any]]:
         return rows
     return []
 
+def assigned_stock_sale_allocations(event: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Validate the explicit lot effects of one broker sale; never infer a split."""
+    if "sale_allocations" not in event:
+        return [dict(event)]
+    allocations = event["sale_allocations"]
+    if not isinstance(allocations, list) or len(allocations) < 2:
+        raise ValueError("assigned stock sale requires at least two allocations")
+    parent_id = str(event.get("stock_event_id") or "")
+    targets: set[str] = set()
+    ids: set[str] = set()
+    shares = Decimal(0)
+    fees = Decimal(0)
+    estimated_fees = Decimal(0)
+    parent_fee = event.get("fee_provenance") or {}
+    if not isinstance(parent_fee, dict):
+        raise ValueError("invalid assigned stock sale fee evidence")
+    try:
+        parent_fees = Decimal(str(event.get("fees")))
+        parent_amount = Decimal(str(parent_fee.get("amount", 0)))
+        if not all(value.is_finite() and value >= 0 for value in (parent_fees, parent_amount)):
+            raise ValueError("invalid assigned stock sale fee")
+    except (InvalidOperation, TypeError) as exc:
+        raise ValueError("invalid assigned stock sale fee") from exc
+    for index, allocation in enumerate(allocations, 1):
+        if not isinstance(allocation, dict) or "sale_allocations" in allocation:
+            raise ValueError("invalid assigned stock sale allocation")
+        target = allocation.get("target_stock_lot_id")
+        event_id = allocation.get("stock_event_id")
+        if (not isinstance(target, str) or not target.strip() or target in targets
+                or not isinstance(event_id, str) or event_id != parent_id + f":allocation:{index}"
+                or event_id in ids):
+            raise ValueError("duplicate or invalid assigned stock sale allocation target")
+        targets.add(target)
+        ids.add(event_id)
+        for key in ("event_type", "account", "broker", "symbol", "side", "price", "currency",
+                    "trade_time_ms", "source_deal_id", "futu_account_id", "order_id", "source",
+                    "execution_id", "execution_input"):
+            if allocation.get(key) != event.get(key):
+                raise ValueError("assigned stock sale allocation conflicts: " + key)
+        quantity = allocation.get("shares")
+        if isinstance(quantity, bool) or not isinstance(quantity, int) or quantity <= 0:
+            raise ValueError("assigned stock allocation shares must be positive integers")
+        shares += quantity
+        try:
+            fee = Decimal(str(allocation.get("fees")))
+            proof = allocation.get("fee_provenance") or {}
+            if not isinstance(proof, dict):
+                raise ValueError("invalid assigned stock allocation fee evidence")
+            if proof.get("basis") != parent_fee.get("basis") or proof.get("source") != parent_fee.get("source"):
+                raise ValueError("assigned stock allocation fee evidence conflicts")
+            estimate = Decimal(str(proof.get("amount", 0)))
+            if not fee.is_finite() or fee < 0 or not estimate.is_finite() or estimate < 0:
+                raise ValueError("invalid assigned stock allocation fee")
+            fees += fee
+            estimated_fees += estimate
+        except (InvalidOperation, TypeError) as exc:
+            raise ValueError("invalid assigned stock allocation fee") from exc
+    if (not parent_id or event.get("event_type") != "sale" or event.get("side") != "sell"
+            or isinstance(event.get("shares"), bool) or not isinstance(event.get("shares"), int)
+            or shares != event["shares"] or fees != parent_fees
+            or estimated_fees != parent_amount
+            or event.get("target_stock_lot_id") != allocations[0]["target_stock_lot_id"]):
+        raise ValueError("assigned stock sale allocation totals conflict")
+    return [dict(item) for item in allocations]
+
+
 def _normalize_assigned_stock_events(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
-    return [dict(item) for item in value if isinstance(item, dict)]
+    return [allocation for item in value if isinstance(item, dict)
+            for allocation in assigned_stock_sale_allocations(item)]
 
 def _market_date(ms: int | None, *, symbol: str, currency: str) -> str | None:
     if ms is None or int(ms) <= 0:

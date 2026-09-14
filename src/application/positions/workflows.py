@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from decimal import Decimal
 import hashlib
 import json
 from typing import Any, Mapping
@@ -512,6 +513,13 @@ def _broker_assigned_stock_sale_match(
         "price": price,
         "trade_time_ms": trade_time_ms,
     }
+    allocation_lots = []
+    # Selling the complete inventory determines every allocation; partial sales still require a unique lot.
+    if (not viable and len(identity_candidates) > 1
+            and sum(int(row["shares_remaining"]) for row in identity_candidates) == shares
+            and all(0 < int(row.get("opened_at_ms") or 0) <= trade_time_ms for row in identity_candidates)):
+        allocation_lots = sorted(identity_candidates, key=lambda row: row["stock_lot_id"])
+        viable = [allocation_lots[0]]
     if not viable:
         raise BrokerAssignedStockSaleMatchError(
             "no_safe_match",
@@ -528,6 +536,7 @@ def _broker_assigned_stock_sale_match(
     lot = viable[0]
     return {
         "lot": lot,
+        "allocation_lots": allocation_lots,
         "existing_events": existing_events,
         "before_report": before_report,
         "selector": selector,
@@ -991,6 +1000,7 @@ def _execute_assigned_stock_sale(
     match_diagnostics: dict[str, Any] | None = None,
     dry_run: bool,
     _project_after: bool = True,
+    allocation_lots: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     stock_lot_id = str(target_stock_lot_id or "").strip()
     if not stock_lot_id:
@@ -1041,6 +1051,25 @@ def _execute_assigned_stock_sale(
             source=source,
             execution_input=execution_input,
         )
+        if allocation_lots:
+            proof = candidate.get("fee_provenance") or {}
+            totals = {"fees": Decimal(str(candidate["fees"])), "amount": Decimal(str(proof.get("amount", 0)))}
+            used = {key: Decimal(0) for key in totals}
+            allocations = []
+            for index, allocation_lot in enumerate(allocation_lots, 1):
+                count = int(allocation_lot["shares_remaining"])
+                values = {key: (total - used[key] if index == len(allocation_lots) else
+                                (total * count / int(shares)).quantize(Decimal("0.000001")))
+                          for key, total in totals.items()}
+                for key in used:
+                    used[key] += values[key]
+                allocations.append({**candidate,
+                    "stock_event_id": candidate["stock_event_id"] + f":allocation:{index}",
+                    "target_stock_lot_id": allocation_lot["stock_lot_id"], "shares": count,
+                    "fees": float(values["fees"]),
+                    "fee_provenance": {**proof, "amount": str(values["amount"])},
+                })
+            candidate["sale_allocations"] = allocations
         stored = existing_sale_event
         if stored is None:
             stored = next(
@@ -1260,6 +1289,7 @@ def _execute_broker_assigned_stock_sale_locked(
             match_diagnostics=dict(match.get("diagnostics") or {}),
             dry_run=True,
             _project_after=project_after,
+            allocation_lots=match.get("allocation_lots"),
         )
 
     if dry_run:
