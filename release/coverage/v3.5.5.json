@@ -1,0 +1,131 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.5.5",
+  "base": {
+    "tag": "v3.5.4",
+    "commit": "550f3782320c0111fe0d1ab2f4da380db1cc1dea"
+  },
+  "reviewed_head": "7ada82619bfd5f6639b1a85e250c3e68092806ba",
+  "commits": [
+    {
+      "sha": "3bc68101d5edfc9e4cf5185d4fb66fe3508b70dc",
+      "subject": "fix(trades): surface persistent intake identity quarantine"
+    },
+    {
+      "sha": "ca71ae20d95af1229630aab68645caf4cc423812",
+      "subject": "docs(architecture): refresh intake test dependency count"
+    },
+    {
+      "sha": "ab2582da0e51ee6cdda298b5492b66d25cc68a5e",
+      "subject": "Merge pull request #279 from liuxie066/codex/intake-identity-recovery"
+    },
+    {
+      "sha": "a7ef739c1d1513095d171c295ce5e22154bc117c",
+      "subject": "fix(trades): restore trustworthy position and intake evidence"
+    },
+    {
+      "sha": "b01107683e5c2f1f0c1e22412d5904d8d7ecf22a",
+      "subject": "chore(integration): merge main and refresh dependency graph"
+    },
+    {
+      "sha": "7ada82619bfd5f6639b1a85e250c3e68092806ba",
+      "subject": "Merge pull request #280 from liuxie066/codex/quality-intake-repair"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Accepted broker-proven short-position sellable quantities and evaluated snapshot freshness after collection while preserving strict malformed, cached, and future-data rejection.",
+      "commits": [
+        "a7ef739c1d1513095d171c295ce5e22154bc117c"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Preserved complete split-execution and lifecycle stock-settlement evidence when checking ledger identity conservation, while rejecting incomplete or conflicting source groups.",
+      "commits": [
+        "a7ef739c1d1513095d171c295ce5e22154bc117c"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Required durable Inbox identity evidence before receipt and portfolio-management claims, and reconciled source completion with compare-and-set recovery without duplicate economic or notification effects.",
+      "commits": [
+        "a7ef739c1d1513095d171c295ce5e22154bc117c"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Canonicalized Hong Kong CNC option contracts to CNOOC (0883.HK) with the correct contract multiplier while preserving US CNC identity.",
+      "commits": [
+        "a7ef739c1d1513095d171c295ce5e22154bc117c"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Surfaced persistent trade-intake identity quarantine for operator review instead of leaving historical records silently stranded.",
+      "commits": [
+        "3bc68101d5edfc9e4cf5185d4fb66fe3508b70dc"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "ca71ae20d95af1229630aab68645caf4cc423812",
+      "reason": "Updated generated dependency counts for the mapped identity repair; no independent runtime behavior."
+    },
+    {
+      "commit": "ab2582da0e51ee6cdda298b5492b66d25cc68a5e",
+      "reason": "Merged the identity repair already mapped to its source commit; no independent behavior."
+    },
+    {
+      "commit": "b01107683e5c2f1f0c1e22412d5904d8d7ecf22a",
+      "reason": "Integrated main and regenerated dependency documentation; all 32 reviewed source/test/document files remained byte-identical."
+    },
+    {
+      "commit": "7ada82619bfd5f6639b1a85e250c3e68092806ba",
+      "reason": "Merged the already mapped position and intake repairs; no independent behavior."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "3bc68101d5edfc9e4cf5185d4fb66fe3508b70dc",
+      "references": [
+        "docs/FUTU_TRADE_HOLDINGS_SYNC.md"
+      ]
+    },
+    {
+      "commit": "ca71ae20d95af1229630aab68645caf4cc423812",
+      "references": [
+        "docs/FUTU_TRADE_HOLDINGS_SYNC.md"
+      ]
+    },
+    {
+      "commit": "ab2582da0e51ee6cdda298b5492b66d25cc68a5e",
+      "references": [
+        "docs/FUTU_TRADE_HOLDINGS_SYNC.md"
+      ]
+    },
+    {
+      "commit": "a7ef739c1d1513095d171c295ce5e22154bc117c",
+      "references": [
+        "docs/quality-monitoring/om-check-implementation.md",
+        "https://github.com/liuxie066/options-monitor/pull/280"
+      ]
+    },
+    {
+      "commit": "b01107683e5c2f1f0c1e22412d5904d8d7ecf22a",
+      "references": [
+        "docs/quality-monitoring/om-check-implementation.md",
+        "https://github.com/liuxie066/options-monitor/pull/280"
+      ]
+    },
+    {
+      "commit": "7ada82619bfd5f6639b1a85e250c3e68092806ba",
+      "references": [
+        "docs/quality-monitoring/om-check-implementation.md",
+        "https://github.com/liuxie066/options-monitor/pull/280"
+      ]
+    }
+  ]
+}
