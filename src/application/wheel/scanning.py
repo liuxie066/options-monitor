@@ -460,7 +460,7 @@ def run_wheel_call_scan(
                     fee,
                     grant,
                 )
-            item = grant_evaluations.get(str(contracts), {})
+            item = dict(grant_evaluations.get(str(contracts), {}))
             if item.get("wheel_candidate_status") == "data_unavailable":
                 data_unavailable = True
                 continue
@@ -724,7 +724,7 @@ def run_wheel_put_scan(
                     fee,
                     grant,
                 )
-            item = grant_evaluations.get(str(requested_contracts), {})
+            item = dict(grant_evaluations.get(str(requested_contracts), {}))
             if item.get("wheel_candidate_status") == "data_unavailable":
                 data_unavailable = True
                 continue

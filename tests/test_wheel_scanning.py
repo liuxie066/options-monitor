@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -17,6 +19,11 @@ from src.application.wheel.capacity import (
     revalidate_selected_wheel_put_candidate,
 )
 from src.application.wheel.scanning import run_wheel_put_scan
+from src.application.wheel.candidate_snapshot import (
+    WheelCandidateSnapshotError,
+    load_wheel_candidate_snapshot,
+    seal_wheel_candidate_snapshot,
+)
 from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
 
@@ -81,7 +88,7 @@ def _policy() -> dict:
     }
 
 
-def test_wheel_scan_reuses_frozen_call_universe_and_builds_one_claim() -> None:
+def test_wheel_scan_reuses_frozen_call_universe_and_builds_one_claim(tmp_path: Path) -> None:
     row = phase2_opening_row(
         {
             "symbol": "NVDA",
@@ -120,6 +127,45 @@ def test_wheel_scan_reuses_frozen_call_universe_and_builds_one_claim() -> None:
     assert result["scope_results"][0]["reason_code"] == "candidates_found"
     assert len(result["raw_candidates"]["stock-1"]) == 1
     assert result["capacity_claims"][0]["requested_shares"] == 100
+
+    captured = finalize_wheel_capacity(
+        account="lx",
+        wheel_read_model=_read_model(),
+        wheel_scan=result,
+        opening_call_candidates=[],
+        coverage_facts=[{
+            "account": "lx", "symbol": "NVDA", "status": "available",
+            "shares_eligible": 100, "shares_locked": 0, "shares_reserved": 0,
+            "capacity_identity_hash": "c" * 64,
+        }],
+    )
+    seal_args = dict(
+        base=tmp_path, run_id="finite-rank", account="lx", market="us",
+        account_config_sha256="a" * 64, strategy_policy_sha256="b" * 64,
+        dependencies=[
+            {"kind": kind, "relpath": None, "sha256": "d" * 64}
+            for kind in ("required_data", "portfolio", "ledger", "fx", "earnings_rv")
+        ],
+        scope_results=captured["scope_results"], batches=captured["batches"],
+        capacity_allocations=captured["allocations"], sealed_at=AS_OF,
+    )
+    payload = seal_wheel_candidate_snapshot(**seal_args)
+    assert load_wheel_candidate_snapshot(base=tmp_path, run_id="finite-rank", account="lx") == payload
+    assert payload["opening_status"] == "candidates_found"
+    source = result["raw_candidates"]["stock-1"][0]
+    expected_key = json.loads(json.dumps(source["rank_key"], allow_nan=False))
+    batch = payload["batches"][0]
+    assert batch["granted_contracts"] == 1
+    for candidate in (batch["raw_candidates"][0], batch["final_candidate"]):
+        assert "_grant_evaluations" not in candidate
+        assert candidate["rank_key"] == expected_key
+        assert candidate["rank_key"]["covered_call_rank_key"]["sort_tuple"]
+        for field in ("remaining_symbol_concentration_after", "symbol_concentration_after_call", "symbol_concentration_after"):
+            assert candidate.get(field) is None
+
+    captured["batches"][0]["raw_candidates"][0]["rank_key"]["sort_tuple"] = (float("inf"),)
+    with pytest.raises(WheelCandidateSnapshotError, match="non-finite"):
+        seal_wheel_candidate_snapshot(**{**seal_args, "run_id": "invalid-rank"})
 
 
 def test_wheel_scan_uses_decision_time_and_ignores_ineligible_sibling() -> None:
@@ -576,7 +622,7 @@ def test_partial_capacity_grant_recomputes_final_candidate_economics() -> None:
     assert final["candidate_call_net_premium"] * 2 == raw["candidate_call_net_premium"]
 
 
-def test_wheel_put_scan_and_account_cash_grant_are_direction_aware() -> None:
+def test_wheel_put_scan_and_account_cash_grant_are_direction_aware(tmp_path: Path) -> None:
     model = {
         "account": "lx",
         "wheel_branches": [
@@ -669,6 +715,22 @@ def test_wheel_put_scan_and_account_cash_grant_are_direction_aware() -> None:
     assert batches["branch-a"]["final_candidate"]["direction"] == "put"
     assert batches["branch-a"]["final_candidate"]["cash_reservation_amount"] == 9_900
     assert batches["branch-b"]["final_candidate"] is None
+    payload = seal_wheel_candidate_snapshot(
+        base=tmp_path, run_id="finite-put-rank", account="lx", market="us",
+        account_config_sha256="a" * 64, strategy_policy_sha256="b" * 64,
+        dependencies=[
+            {"kind": kind, "relpath": None, "sha256": "d" * 64}
+            for kind in ("required_data", "portfolio", "ledger", "fx", "earnings_rv")
+        ],
+        scope_results=captured["scope_results"], batches=captured["batches"],
+        capacity_allocations=captured["allocations"], sealed_at=AS_OF,
+    )
+    assert load_wheel_candidate_snapshot(base=tmp_path, run_id="finite-put-rank", account="lx") == payload
+    final = payload["batches"][0]["final_candidate"]
+    assert "_grant_evaluations" not in final
+    assert final["rank_key"] == json.loads(json.dumps(
+        scan["raw_candidates"]["branch-a"][0]["rank_key"], allow_nan=False,
+    ))
     assert [(row["symbol"], row["direction"]) for row in captured["scope_results"]] == [
         ("NVDA", "put")
     ]
