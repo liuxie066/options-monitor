@@ -37,6 +37,7 @@ from domain.domain.wheel import (
     project_wheel_linkage_candidates,
 )
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.candidate_snapshot_contract import sha256_text
 from src.application.runtime_config_paths import authoritative_config_yaml_path
 from src.application.settings import build_effective_env
 from src.application.ledger.api import (
@@ -369,8 +370,8 @@ def _activation_status(
     elif readiness["ready"] and not membership:
         readiness.update(ready=False, enabled_for_new_lifecycle=False,
                          monitoring_gate="disabled", reason_code="account_not_configured")
-    return {"windows": windows, "current_window": _activation_descriptor(current),
-            "latest_window": _activation_descriptor(latest), "membership": membership,
+    return {"windows": windows, "current_window": _activation_descriptor(current, include_binding=True),
+            "latest_window": _activation_descriptor(latest, include_binding=True), "membership": membership,
             "storage_status": observed["source_status"], "readiness": readiness, **readiness}
 
 
@@ -583,6 +584,8 @@ def change_wheel_activation(
         replay = _activation_request_window(windows, action=action, request_id=request_id, request_hash=request_hash,
                                             policy_sha256=policy_sha, expected_generation=expected_current_generation)
         if replay:
+            if action == "enable" and int(latest.get("policy_binding_revision", 0)) > 0:
+                raise ValueError("wheel activation request superseded by policy binding")
             receipt = _activation_result(action=action, status="idempotent", market=market, account=account,
                                          request_id=request_id, actor=actor, request_hash=request_hash, window=replay,
                                          dry_run=not apply_changes, write_applied=False, idempotent=True)
@@ -876,6 +879,7 @@ def _intent_summaries(
 def _snapshot_final_candidate(
     candidate_snapshot: Mapping[str, Any],
     *,
+    current_strategy_policy_sha256: str,
     account: str,
     stock_lot_id: str | None = None,
     wheel_branch_id: str | None = None,
@@ -885,6 +889,10 @@ def _snapshot_final_candidate(
     expected_batch_generation_hash: str | None = None,
     expected_branch_generation_hash: str | None = None,
 ) -> dict[str, Any]:
+    if candidate_snapshot.get("strategy_policy_sha256") != sha256_text(
+        current_strategy_policy_sha256, "current_strategy_policy_sha256"
+    ):
+        raise ValueError("stale_snapshot: Wheel candidate strategy policy changed or unavailable")
     if str(candidate_snapshot.get("snapshot_hash") or "").strip() != expected_snapshot_hash:
         raise ValueError("stale_snapshot: Wheel candidate snapshot hash changed")
     if str(candidate_snapshot.get("account") or "").strip().lower() != account:
@@ -950,6 +958,7 @@ def create_wheel_call_intent(
     repo: Any,
     *,
     candidate_snapshot: Mapping[str, Any],
+    current_strategy_policy_sha256: str,
     account: str,
     stock_lot_id: str,
     final_candidate_id: str,
@@ -1049,6 +1058,7 @@ def create_wheel_call_intent(
             raise ValueError("stale_snapshot: Wheel batch generation changed")
         candidate = _snapshot_final_candidate(
             candidate_snapshot,
+            current_strategy_policy_sha256=current_strategy_policy_sha256,
             account=account_value,
             stock_lot_id=stock_lot_value,
             final_candidate_id=candidate_id,
@@ -1875,6 +1885,7 @@ def _create_wheel_put_intent(
     repo: Any,
     *,
     candidate_snapshot: Mapping[str, Any],
+    current_strategy_policy_sha256: str,
     account: str,
     wheel_branch_id: str,
     final_candidate_id: str,
@@ -1955,6 +1966,7 @@ def _create_wheel_put_intent(
             raise ValueError("stale_snapshot: Wheel branch generation changed")
         candidate = _snapshot_final_candidate(
             candidate_snapshot,
+            current_strategy_policy_sha256=current_strategy_policy_sha256,
             account=account,
             wheel_branch_id=wheel_branch_id,
             direction="put",
@@ -2062,6 +2074,7 @@ def create_wheel_intent(
     repo: Any,
     *,
     candidate_snapshot: Mapping[str, Any],
+    current_strategy_policy_sha256: str,
     account: str,
     wheel_branch_id: str,
     direction: str,
@@ -2089,6 +2102,7 @@ def create_wheel_intent(
         return _create_wheel_put_intent(
             repo,
             candidate_snapshot=candidate_snapshot,
+            current_strategy_policy_sha256=current_strategy_policy_sha256,
             account=account_value,
             wheel_branch_id=branch_id,
             final_candidate_id=str(final_candidate_id or "").strip(),
@@ -2123,6 +2137,7 @@ def create_wheel_intent(
     result = create_wheel_call_intent(
         repo,
         candidate_snapshot=candidate_snapshot,
+        current_strategy_policy_sha256=current_strategy_policy_sha256,
         account=account_value,
         stock_lot_id=stock_lot_id,
         final_candidate_id=final_candidate_id,
@@ -2938,10 +2953,11 @@ def _linkage_result(
     )
 
 
-def _activation_descriptor(window: Mapping[str, Any] | None) -> dict[str, Any] | None:
+def _activation_descriptor(window: Mapping[str, Any] | None, *, include_binding: bool = False) -> dict[str, Any] | None:
     if not isinstance(window, Mapping):
         return None
     return {
+        **{key: window[key] for key in ("effective_policy_hash", "policy_binding_revision") if include_binding and key in window},
         "market": str(window.get("market") or "").strip().lower(),
         "account": str(window.get("account") or "").strip().lower(),
         "generation": int(window.get("generation") or 0),

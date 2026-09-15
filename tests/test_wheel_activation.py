@@ -158,7 +158,7 @@ def test_wheel_activation_cas_rejects_conflicts_and_immutable_boundary_changes(
         )
     assert repo.get_current_wheel_activation_window(
         market="us", account="lx"
-    ) == opened["window"]
+    ) == {**opened["window"], "effective_policy_hash": opened["window"]["policy_hash"], "policy_binding_revision": 0}
     with repo._connect() as conn, pytest.raises(
         sqlite3.IntegrityError, match="append-only"
     ):
@@ -256,8 +256,9 @@ def test_wheel_activation_read_only_history_is_exact_and_explicit_when_missing(
     result = read_wheel_activation_windows_read_only(repo.db_path, "US", "lx")
 
     assert result == {
-        "windows": [closed["window"], second["window"]],
+        "windows": [closed["window"], {**second["window"], "effective_policy_hash": second["window"]["policy_hash"], "policy_binding_revision": 0}],
         "source_status": "available",
+        "policy_bindings": [],
     }
     assert result["windows"][0]["activation_request_id"] == first["window"][
         "activation_request_id"

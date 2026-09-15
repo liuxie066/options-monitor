@@ -255,7 +255,13 @@ def _malformed_activation_status_environment(
     config = json.loads(runtime.read_text(encoding="utf-8"))
     config["wheel"]["activation_by_account"]["lx"] = {"generation": 1}
     runtime.write_text(json.dumps(config), encoding="utf-8")
-    return runtime, data_config, sqlite_path, enabled["expected_config_descriptor"]
+    original = enabled["expected_config_descriptor"]
+    expected_status_window = {
+        **original,
+        "effective_policy_hash": original["policy_sha256"],
+        "policy_binding_revision": 0,
+    }
+    return runtime, data_config, sqlite_path, expected_status_window
 
 
 def _end_args(*extra: str):
@@ -692,6 +698,14 @@ def test_wheel_cli_activation_public_entry_completes_full_lifecycle(
     assert enabled["ready"] is True
     assert enabled["membership"] is True
     assert enabled["window_receipt"]["expected_config_descriptor"]["generation"] == 1
+    original_descriptor = enabled["window_receipt"]["expected_config_descriptor"]
+    assert "effective_policy_hash" not in original_descriptor
+    assert "policy_binding_revision" not in original_descriptor
+    assert enabled["current_window"] == {
+        **original_descriptor,
+        "effective_policy_hash": original_descriptor["policy_sha256"],
+        "policy_binding_revision": 0,
+    }
     assert enabled["config_audit"]["write_applied"] is True
     assert replayed["status"] == "idempotent"
     assert replayed["window_receipt"]["expected_config_descriptor"] == (

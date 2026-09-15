@@ -28,6 +28,9 @@ def _wheel_window_identity(value: Mapping[str, Any] | None) -> dict[str, Any] | 
     out = {key: value.get(key) for key in _WHEEL_WINDOW_FIELDS}
     if not out.get("policy_hash"):
         out["policy_hash"] = value.get("policy_sha256")
+    for key in ("effective_policy_hash", "policy_binding_revision"):
+        if key in value:
+            out[key] = value[key]
     return out
 
 

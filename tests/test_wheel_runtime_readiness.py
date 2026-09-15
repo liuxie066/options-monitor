@@ -38,6 +38,38 @@ def _wheel_config(
     }
 
 
+def test_effective_binding_survives_runtime_status_sanitizer(monkeypatch) -> None:
+    from src.application.agent_tools.runtime_status_impl import _status_safe_wheel_activation_readiness
+    from src.application.wheel import runtime_readiness
+
+    config = _wheel_config()
+    effective = build_wheel_policy_hash(config, market="us", account="lx")
+    window = {"market": "us", "account": "lx", "generation": 1,
+              "activated_at_ms": 1000, "deactivated_at_ms": None,
+              "policy_hash": "a" * 64, "effective_policy_hash": effective,
+              "policy_binding_revision": 1}
+    reads = []
+
+    def read(path, market, account):
+        reads.append((market, account))
+        return {"windows": [window], "source_status": "available"}
+
+    monkeypatch.setattr(runtime_readiness, "read_wheel_activation_windows_read_only", read)
+    result = _status_safe_wheel_activation_readiness(build_wheel_activation_readiness(
+        config=config, market="us", accounts=["lx", "sy"], sqlite_path=None,
+    ))
+    assert result["ready"] is True
+    assert reads == [("us", "lx")]
+    assert set(result["accounts"]) == {"lx"}
+    account = result["accounts"]["lx"]
+    for identity in (account, account["durable_window"]):
+        assert identity["policy_hash"] == "a" * 64
+        assert identity["effective_policy_hash"] == effective
+        assert identity["policy_binding_revision"] == 1
+    assert account["descriptor"]["policy_hash"] == effective
+    assert "effective_policy_hash" not in account["descriptor"]
+
+
 def _write_activation_table(
     path: Path,
     *,
@@ -121,6 +153,8 @@ def test_wheel_activation_readiness_matches_open_and_closed_windows(
     assert open_readiness["storage_status"] == "available"
     assert open_readiness["enabled_account_count"] == 1
     assert open_readiness["accounts"]["lx"] == {
+        "effective_policy_hash": open_policy_hash,
+        "policy_binding_revision": 0,
         "market": "us",
         "account": "lx",
         "generation": 1,
@@ -141,6 +175,8 @@ def test_wheel_activation_readiness_matches_open_and_closed_windows(
             "policy_hash": open_policy_hash,
         },
         "durable_window": {
+            "effective_policy_hash": open_policy_hash,
+            "policy_binding_revision": 0,
             "market": "us",
             "account": "lx",
             "generation": 1,

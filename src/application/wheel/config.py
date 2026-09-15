@@ -356,6 +356,19 @@ def evaluate_wheel_activation_readiness(
     try:
         expected = _window_identity(descriptor)
         actual = _window_identity(durable_window)
+        if "effective_policy_hash" in durable_window or "policy_binding_revision" in durable_window:
+            effective_hash = durable_window.get("effective_policy_hash")
+            revision = durable_window.get("policy_binding_revision")
+            if (
+                not isinstance(effective_hash, str)
+                or len(effective_hash) != 64
+                or any(value not in "0123456789abcdef" for value in effective_hash)
+                or type(revision) is not int
+                or revision < 0
+                or (revision == 0 and effective_hash != actual["policy_sha256"])
+            ):
+                raise ValueError("invalid Wheel effective policy binding")
+            actual["policy_sha256"] = effective_hash
     except (TypeError, ValueError):
         expected = actual = None
     if expected is None or actual is None:

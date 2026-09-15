@@ -1,5 +1,123 @@
 # 轮转策略（Wheel）PRD
 
+## 激活窗口策略绑定更新（源码实现，未交付）
+
+### 目标、依据与边界
+
+在不改变已有激活窗口、历史资格和交易事实的前提下，显式接受当前 YAML 中的新 Wheel 策略。
+2026-09-15 线上 US/HK 的 lx/sy 在 Put/Call DTE 调整为 7–90 后均出现 policy_drift；
+配置发布成功不能代替激活 readiness。用户选择 Devflow 完整链路修复；本节描述源码实现合同，
+不表示已发布或线上修复。生产修复目标仍为这四个市场/账户的新 DTE 绑定，发布升级单独授权。
+
+非目标：自动接受任意配置漂移、重开窗口、回填历史、重建分支、交易、发送通知、修改扫描门槛、
+后台自动 reconcile、重构通用配置发布系统。原窗口 generation、启停时间、policy_hash 和启停请求身份均保留。
+
+### 现状与选定方案
+
+`config.yaml -> runtime JSON -> resolve_wheel_activation_descriptor -> evaluate_wheel_activation_readiness`
+将当前策略 hash 与 SQLite 窗口绑定比较。数据库 trigger 禁止修改原 policy_hash，enable/disable
+重试也依赖该 hash；普通 publisher 不同步激活绑定。拒绝改旧 hash、移除 mismatch 校验、停用再启用。
+
+新增最小 append-only `wheel_activation_policy_bindings` 表作为显式策略变更回执，关联
+market/account/generation，保存单调 revision、原绑定 hash、目标 hash、request_id、request_hash、actor、
+完整 canonical preview/request JSON 及提交时间。回执可回读原前置证据，读取时校验 JSON 与 hash/列一致。
+首条 revision 从窗口原 hash 衔接；后续从上一条衔接。唯一请求身份和 revision、
+不可 UPDATE/DELETE、窗口必须仍为最新 open、前置 hash/revision 相等由同一 SQLite 事务验证。
+不把这类配置授权伪装为交易或 Wheel 分支事件。复用 ledger schema owner 与事务，不新增数据库或后台任务。
+主键为 `(market, account, generation, revision)`，revision 在该 generation 内从 1 连续增加；
+request_id 在绑定表的 `(market, account)` 全历史唯一，操作域为 rebind-policy，与启停请求分开。
+前后 hash 必须不同。已无 drift 的新请求 preview 返回 no_drift，不写空转回执；用旧 preview 的
+另一个请求在并发提交后必须 CAS 冲突。request_hash 包含下文完整 preview 身份，重放使用原始
+preview_hash/request_hash 校验，不根据当前源重新生成原请求身份。
+
+原始 `policy_hash` 在所有历史和启停回执中保持原义；当前读取额外暴露
+`effective_policy_hash` 和 `policy_binding_revision`，无绑定时为原 hash/revision 0。
+只读与事务内读取复用同一绑定解析 owner。readiness 仅比较有效 hash，其余身份/时间/成员/closed gate
+保持现状。历史 event-time 查窗及已有事件 payload 不改写，不用新策略回算历史。
+当前监控、prepared context、start/intent writer 必须全部经过有效绑定；不能只修 status。
+启停请求重放继续使用原 hash；旧 enable 请求不得将新绑定回滚或伪称重新接受旧策略。
+`list_wheel_activation_windows` 和历史 `get_wheel_activation_window_for_event` 保留原始行结构；
+intake、branch payload、assignment recovery 的历史窗口比较完全不加有效绑定字段。
+当前 `get_current_wheel_activation_window` 和只读 activation status 使用同一个 ledger helper
+在同一读事务内附加有效绑定；不得跨两个 SQLite 快照拼接窗口和绑定。
+无绑定表的旧库回退原 hash；表存在但 schema/链损坏时统一返回现有 unreadable 并禁止 ready，
+不新增状态词或按最后一行猜有效值。只读 status/preview 不迁移；现有初始化 repo 的工作路径
+仍可按原初始化机制建立 additive schema，不宣称所有既有 repo 读取都无写入。
+原 enable 在本 generation 出现任何绑定 revision 后返回 superseded（包括 A→B→A），不发布配置；
+disable 仍允许关闭当前窗口，保留其原 hash 和全部绑定回执；之后 re-enable 使用新 generation。
+关闭时间不得早于已提交绑定时间；同一事务设置下界，数据库 guard 也拒绝时钟回退导致的逆序关闭。
+status/readiness 的白名单同步暴露原 hash、effective hash、revision；不更改原启停 receipt 的 hash 含义。
+
+### 公开操作、失败与重试
+
+在现有 CLI 的 activation 下增加 `rebind-policy` 操作，默认只读 preview；本次只做 operator CLI，
+不扩展 Agent 写工具。复用目标路径解析、source SHA、ledger guard、config authoring lock、
+确认旗标及结构化错误；application 实现为窄函数，避免将 enable/disable 的文件恢复分支再扩张。
+既有配置锁会自动恢复 journal；本操作在 preview 及锁内 recovery 前的既有 preflight hook
+检查任何 pending journal（含待清理 committed journal）并拒绝，交原配置流程处理后重做 preview。
+不允许 rebind 顺带恢复/清理配置事务；同请求的只读确认不进入有恢复副作用的锁。
+
+preview 绑定真实 runtime/ledger 路径与文件身份、market/account、完整窗口身份、当前 revision/hash、
+当前 YAML SHA、runtime 与 YAML 有效 Wheel 策略、目标策略 hash、request ID/actor。
+输出 before/after、保持不变的窗口身份、预览 hash。apply 必须显式 confirm 和匹配预览 hash；
+用户不能任意输入目标 hash，目标从 canonical YAML 与匹配的 runtime 计算。
+CLI 输入使用 `--expected-preview-hash`，输出 `preview_hash`；apply 同时要求原 request ID/actor。
+canonical preview/request payload 包含操作域、窗口全部原身份、前置 revision/effective hash、
+目标 Wheel hash、YAML 内容 SHA、runtime 文件内容 SHA 与 resolved Wheel hash、解析后的 source/
+runtime/SQLite 路径和文件身份。账本内容 hash 不作文件身份（正常成交可改变库内容）；采用真实
+路径及 device/inode，替换文件拒绝。preview 不包含当前时钟，apply 在持锁事务内重新核对。
+配置过期、source/runtime 不同部署、成员缺失、窗口关闭/更替、描述符边界漂移、账本不可读、
+未知或损坏绑定链均拒绝，不初始化缺库来制造成功。只有 policy drift 可修复。
+
+apply 在既有配置锁及 ledger 写事务内重新读取全部前置事实，CAS 追加一条绑定，事务回读有效 hash；
+不写 YAML/runtime、不改窗口。提交后从正式 status/readiness 再读：窗口身份不变、ready=true、
+policy_drift 消失才完成；其它既有生命周期阻塞不被解释为本操作失败或清除。
+变更期间外部绕开配置锁写入造成回读漂移时，报告实际 durable receipt 与未就绪，不自动覆盖配置。
+
+相同请求及相同目标已提交时返回原 receipt/no-effect；相同 request 不同参数拒绝。
+提交响应丢失后允许原 preview 的同请求只读重放确认，但后续 rebind、关闭或新 generation 已取代它时，
+返回 superseded 并保留已知原回执，不能倒退。等待配置锁期间同请求已提交时也先识别回执。
+连续 A→B→A 依靠 revision 区分，不能只比较 hash。
+提交前失败无绑定，提交后失败不重放重复副作用；回滚策略通过新 preview/新请求追加反向绑定，
+保留审计，不删除旧回执。不执行自动补通知或立即扫描。
+
+### 实施增量与验收
+
+1. ledger 绑定回执、只读/事务读取和有效 readiness：用真实临时 SQLite 证明原窗口字节字段及历史
+   查窗不变，current readiness 从 mismatch 恢复；损坏链不可降级成原 hash。旧库无表视为 revision 0，
+   status/preview 读取不初始化/迁移；additive schema 沿用既有 repo 初始化机制。
+2. CLI preview/apply/replay 到 application/ledger/readback 的闭环：覆盖两个市场、两个账户隔离；
+   source/descriptor/generation/revision/路径漂移、关闭窗口、ABA、重复请求、响应丢失、事务回滚、
+   并发双写仅一条成功。比较 preview 前后文件指纹，覆盖原 enable/disable 的重试与 re-enable。
+3. 当前消费者集成与文档：prepared/read-model/scanning/new-intent 验证新 hash 生效。
+   现有 `_snapshot_final_candidate` 不比较策略，必须在共同新 intent 写入 owner 增加封存策略比较：
+   snapshot 的 `strategy_policy_sha256` 与当前配置由 `opening_candidate_snapshot.strategy_policy_hash`
+   计算的值比较。范围扫描先校验封存 account config 的 hash，再对当前配置应用相同股票范围；
+   不用完整市场配置与筛选后的 run 配置误比，范围内策略和股票变更仍拒绝。当前 Wheel 专用 hash 则由 `build_wheel_policy_hash` 与有效绑定比较，两种 hash
+   不混用。CLI/Agent 的 Call、Put 入口传递相同的当前策略证据，writer 事务内完成两项核对；
+   缺失证据拒绝新 intent。已有 intent 的同请求 replay、consume 仍按原历史事实处理。
+   A→B 后 A 快照不得创建新 intent；A→B→A 后不额外永久废弃内容相同且其它原有校验仍有效的
+   A 候选。revision 的 ABA 防护针对绑定请求，不新增候选 artifact revision/schema。
+   prepared context 保持 run 冻结语义：旧 run 可继续呈现旧 mismatch，不原地改写；下一新 run
+   读取有效绑定，当前 start/new-intent 无论使用哪个 run 都经过事务内 gate。补同 run/新 run
+   对照测试，操作回执说明下一次正常扫描使用新绑定，不承诺回写旧简报或旧 run。
+   既有 intent 转换与历史 assignment 不被绑定变更丢弃或重写。
+   运行 Wheel activation/config/readiness/operation/CLI、prepared/tick 相关测试及项目适用 guardrails。
+
+仅使用隔离 fixture，不访问券商、不通知、不修改生产。实现 workspace 从已核验 origin/main 隔离，
+保留主工作区无关文档及 PoC。设计评审四路使用同一完整文档快照；最终 Review 覆盖全部改动。
+
+### 风险与交付约束
+
+新增表是保留原不可变启用回执且允许策略演进所需的最小 durable 记录，不能为少一张表篡改历史。
+旧运行版本不识别新绑定；回滚必须核对目标版本与原策略，不能宣称只退代码仍保持新绑定有效。
+回滚需继续运行新策略时目标版本必须支持绑定；回到原策略时先用支持绑定的版本按新请求追加
+反向绑定并验证，再执行独立授权的代码回滚。只回滚代码并保留不同于原 hash 的策略会继续 mismatch。
+发布前用旧代码读取 fixture 证明不会错误接受新策略；若旧代码仍能放行不相容配置，必须用既有
+升级/回滚约束阻止该组合，不能仅写警告。回滚兼容性是实现验收项，不扩展为通用版本框架。
+最终生产验收需四组 readiness 和原 activation identity 对照，既有 0700.HK 分支仍可见；
+研发通过不代表该生产验收完成。原设计及新增表/公开操作已获用户确认；本地验证和审查结论见对应交接记录。
+
 - **状态**：双向 Wheel 已在源码实现并通过本地验证；尚未提交、发布或生产启用
 - **中文名**：轮转策略
 - **英文名**：Wheel

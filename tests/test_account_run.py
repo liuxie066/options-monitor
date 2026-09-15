@@ -121,7 +121,6 @@ def _install_common_patches(monkeypatch, request: Any) -> dict[str, Any]:
 
     monkeypatch.setattr(mod, "ensure_account_output_dir", lambda path: path.mkdir(parents=True, exist_ok=True))
     monkeypatch.setattr(mod, "resolve_watchlist_config", lambda cfg: list(cfg.get("symbols") or []))
-    monkeypatch.setattr(mod, "set_watchlist_config", lambda cfg, syms: cfg.__setitem__("symbols", list(syms)))
     monkeypatch.setattr(mod, "utc_now", lambda: "2026-04-25T00:00:00Z")
     monkeypatch.setattr(mod, "decide_should_notify", lambda **kwargs: True)
 

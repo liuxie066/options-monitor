@@ -18,6 +18,8 @@ from src.application.candidate_snapshot_contract import (
 )
 from src.application.tick_run_workspace import (
     AccountRunConfigError,
+    account_run_config_paths,
+    load_published_account_run_config,
     read_account_run_state_bytes_safely,
     write_account_run_state_bytes_once_safely,
 )
@@ -33,6 +35,41 @@ WHEEL_CANDIDATE_SNAPSHOT_FILE = WHEEL_CANDIDATE_SNAPSHOT_FILE_V2
 
 class WheelCandidateSnapshotError(RuntimeError):
     pass
+
+
+def current_wheel_candidate_policy_hash(
+    *, base: Path, run_id: str, account: str, config_path: Path,
+    config: Mapping[str, Any], snapshot: Mapping[str, Any],
+) -> str:
+    """Compare current policy in the exact symbol scope of a sealed account run."""
+    from src.application.account_config import build_account_runtime_config
+    from src.application.config_sections import resolve_watchlist_config, set_watchlist_config
+    from src.application.opening_candidate_snapshot import strategy_policy_hash
+
+    current_hash = strategy_policy_hash(config)
+    if current_hash == snapshot.get("strategy_policy_sha256"):
+        return current_hash
+    try:
+        state_path, compatibility_path = account_run_config_paths(base=base, run_id=run_id, account=account)
+        retained = load_published_account_run_config(
+            base=base, run_id=run_id, account=account, state_path=state_path,
+            compatibility_path=compatibility_path,
+            account_config_sha256=snapshot.get("account_config_sha256"),
+        )
+        if strategy_policy_hash(retained) != snapshot.get("strategy_policy_sha256"):
+            raise ValueError("snapshot policy does not match its account config")
+        scope = resolve_watchlist_config(retained)
+        current = build_account_runtime_config(
+            base_cfg=dict(config), cfg_path=config_path, account=account,
+            markets_to_run=list(dict.fromkeys(str(row.get("broker") or "") for row in scope)),
+            symbols_arg=",".join(str(row.get("symbol") or "") for row in scope),
+        )
+        if not scope:
+            set_watchlist_config(current, [])
+        return strategy_policy_hash(current)
+    except (AccountRunConfigError, ValueError):
+        # Already known unequal: reject new intents in the writer, after its replay check.
+        return current_hash
 
 
 def _canonical_bytes(payload: Mapping[str, Any]) -> bytes:
@@ -412,6 +449,7 @@ __all__ = [
     "WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V1",
     "WHEEL_CANDIDATE_SNAPSHOT_SCHEMA_V2",
     "WheelCandidateSnapshotError",
+    "current_wheel_candidate_policy_hash",
     "load_wheel_candidate_snapshot",
     "seal_wheel_candidate_snapshot",
     "validate_wheel_candidate_snapshot",

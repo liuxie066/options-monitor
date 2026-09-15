@@ -8,6 +8,10 @@ import re
 from typing import Any, Mapping
 
 
+from src.application.config_sections import resolve_watchlist_config, set_watchlist_config
+from src.application.symbol_mutations import normalize_symbol_read
+
+
 DEFAULT_ACCOUNTS = ("user1",)
 ACCOUNT_TYPE_FUTU = "futu"
 ACCOUNT_TYPE_EXTERNAL_HOLDINGS = "external_holdings"
@@ -638,3 +642,50 @@ def accounts_from_config_path(path: str | Path, *, fallback: tuple[str, ...] = D
     except Exception:
         data = {}
     return accounts_from_config(data, fallback=fallback)
+
+
+def _symbol_whitelist(symbols_arg: str | None, *, cfg: dict[str, Any]) -> set[str] | None:
+    if not str(symbols_arg or "").strip():
+        return None
+    out = {
+        normalize_symbol_read(item, config=cfg)
+        for item in str(symbols_arg or "").split(",")
+        if str(item).strip()
+    }
+    return {item for item in out if item} or None
+
+
+def build_account_runtime_config(
+    *,
+    base_cfg: dict[str, Any],
+    cfg_path: Path,
+    account: str,
+    markets_to_run: list[str],
+    symbols_arg: str | None = None,
+) -> dict[str, Any]:
+    """Build the exact account-scoped config shared by barrier and pipeline."""
+
+    cfg = json.loads(json.dumps(base_cfg))
+    cfg["config_source_path"] = str(Path(cfg_path).resolve())
+    cfg.setdefault("portfolio", {})
+    cfg["portfolio"]["account"] = str(account).strip().lower()
+    try:
+        symbols = resolve_watchlist_config(cfg)
+        if markets_to_run:
+            symbols = [
+                item
+                for item in symbols
+                if isinstance(item, dict) and item.get("broker") in markets_to_run
+            ]
+        whitelist = _symbol_whitelist(symbols_arg, cfg=cfg)
+        if whitelist is not None:
+            symbols = [
+                item
+                for item in symbols
+                if isinstance(item, dict)
+                and normalize_symbol_read(item.get("symbol"), config=cfg) in whitelist
+            ]
+        set_watchlist_config(cfg, symbols)
+    except Exception:
+        pass
+    return cfg

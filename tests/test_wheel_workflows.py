@@ -91,6 +91,7 @@ def test_put_intent_preview_revalidates_capacity_inside_transaction(
     snapshot = {
         "account": "lx",
         "snapshot_hash": "snapshot-1",
+        "strategy_policy_sha256": "b" * 64,
         "rows": [
             {
                 "wheel_branch_id": "wheel-put-1",
@@ -131,6 +132,7 @@ def test_put_intent_preview_revalidates_capacity_inside_transaction(
     result = wheel_workflows.create_wheel_intent(
         repo,
         candidate_snapshot=snapshot,
+        current_strategy_policy_sha256="b" * 64,
         account="lx",
         wheel_branch_id="wheel-put-1",
         direction="put",
@@ -292,7 +294,7 @@ def test_wheel_intent_replay_uses_stable_request_and_preserves_accepted_capacity
     before = repo.list_wheel_events(account="lx")
     original = next(event["payload"] for event in before if event["event_type"] == "wheel_call_intent_created")
     replay = create_wheel_call_intent(
-        repo, candidate_snapshot={}, account="lx", stock_lot_id=stock_lot_id,
+        repo, candidate_snapshot={}, current_strategy_policy_sha256="b" * 64, account="lx", stock_lot_id=stock_lot_id,
         final_candidate_id=original["final_candidate_id"], expected_snapshot_hash=original["snapshot_hash"],
         expected_batch_generation_hash=original["batch_generation_hash"],
         expires_at_ms=original["expires_at_ms"], request_id=original["request_id"], actor=original["actor"],
@@ -420,6 +422,7 @@ def _create_call_intent(
     snapshot = {
         "account": "lx",
         "snapshot_hash": "snapshot-1",
+        "strategy_policy_sha256": "b" * 64,
         "batches": [
             {
                 "stock_lot_id": stock_lot_id,
@@ -449,6 +452,7 @@ def _create_call_intent(
     created = create_wheel_call_intent(
         repo,
         candidate_snapshot=snapshot,
+        current_strategy_policy_sha256="b" * 64,
         account="lx",
         stock_lot_id=stock_lot_id,
         final_candidate_id="candidate-1",
@@ -723,6 +727,7 @@ def test_intent_creation_revalidates_current_ledger_share_coverage(
     snapshot = {
         "account": "lx",
         "snapshot_hash": "snapshot-stale",
+        "strategy_policy_sha256": "b" * 64,
         "batches": [
             {
                 "stock_lot_id": stock_lot_id,
@@ -750,6 +755,7 @@ def test_intent_creation_revalidates_current_ledger_share_coverage(
         create_wheel_call_intent(
             repo,
             candidate_snapshot=snapshot,
+            current_strategy_policy_sha256="b" * 64,
             account="lx",
             stock_lot_id=stock_lot_id,
             final_candidate_id="candidate-stale",
