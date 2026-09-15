@@ -45,3 +45,16 @@
 
 冻结面上的新增行为应停止并移到 canonical owner。冻结面上的回归修复应在变更说明中写明
 “只修不增”。Architecture guard 只为可静态断言的高价值边界增加；不把整张表复制成脆弱的源码文本测试。
+
+
+## 无调用者代码退役（2026-09-15）
+
+已移除旧 short-vol 评分分支、旧配置初始化模块、两个调度包装函数、四个 Bitable 写入/字段接口，以及 SciPy 直接依赖。
+
+- short-vol 保留 `ShortVolPortfolioContext`、`portfolio_concentration_fields` 及其辅助函数；集中度算法与缺失数据语义不变。
+- smoke 配置初始化使用现行 YAML authoring/build 和账户 mutation owner。
+- 调度只移除 `scheduled_scan_targets_for_date` 和 `resolve_markets_to_run`；底层调度 owner 保留。
+- Bitable 保留 records 读取、pagination、鉴权、HTTP、缓存和消息能力。
+- `provider_chat_completion_payload_options` 无消费者，已移除。两个 Python HTTP 请求实现由 `src/application/bot/runtime.py` 使用，必须保留；URL resolver 仍供诊断使用。
+
+删除资格以当前消费者为准。原审计基线中 Python HTTP 实现无调用者，但合并前最新 main 已引入 Bot Python runtime，因此本次不删除这些实现。普通 scheduled 正文仍由 Daily Brief 负责，Tick 兼容正文链的退役不属于本批。

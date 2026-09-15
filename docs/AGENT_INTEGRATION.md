@@ -32,7 +32,7 @@ Implementation ownership:
 - Tool write permission gate: `src/application/agent_tools/permissions.py`
 - Tool response contract: `src/application/agent_tool_contracts.py`
 - Runtime config helpers: `src/application/agent_tool_config.py`
-- Runtime config initialization/account mutation helpers: `src/application/agent_tool_init_local.py`
+- Runtime config initialization/account mutation helpers: `src/application/config_yaml_init.py`, `src/application/config_yaml_accounts.py`
 - Public CLI owner: `src/interfaces/agent/cli.py`
 - Runtime tick is not a separate single-account / multi-account split. The live chain is `./om run tick` -> `src.application.multi_account_tick.run_tick`; pass one account for single-account execution or multiple accounts for multi-account execution.
 

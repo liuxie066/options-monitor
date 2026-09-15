@@ -494,41 +494,6 @@ def bitable_list_records(tenant_token: str, app_token: str, table_id: str, page_
     return out
 
 
-def bitable_create_record(tenant_token: str, app_token: str, table_id: str, fields: dict) -> dict:
-    url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records"
-    headers = {"Authorization": f"Bearer {tenant_token}"}
-    res = http_json("POST", url, {"fields": fields}, headers=headers)
-    if res.get("code") != 0:
-        raise FeishuPermanentError(f"bitable create record failed: {res}", code=res.get("code"), response=res)
-    return res.get("data") or {}
-
-
-def bitable_update_record(tenant_token: str, app_token: str, table_id: str, record_id: str, fields: dict) -> dict:
-    url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}"
-    headers = {"Authorization": f"Bearer {tenant_token}"}
-    res = http_json("PUT", url, {"fields": fields}, headers=headers)
-    if res.get("code") != 0:
-        raise FeishuPermanentError(f"bitable update record failed: {res}", code=res.get("code"), response=res)
-    return res.get("data") or {}
-
-
-def bitable_delete_record(tenant_token: str, app_token: str, table_id: str, record_id: str) -> dict:
-    url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}"
-    headers = {"Authorization": f"Bearer {tenant_token}"}
-    res = http_json("DELETE", url, None, headers=headers)
-    if res.get("code") != 0:
-        raise FeishuPermanentError(f"bitable delete record failed: {res}", code=res.get("code"), response=res)
-    return res.get("data") or {}
-
-
-def bitable_fields(tenant_token: str, app_token: str, table_id: str) -> list[dict]:
-    url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/fields"
-    res = http_json("GET", url, None, {"Authorization": f"Bearer {tenant_token}"})
-    if res.get("code") != 0:
-        raise FeishuPermanentError(f"bitable fields failed: {res}", code=res.get("code"), response=res)
-    return res.get("data", {}).get("items", []) or []
-
-
 # -----------------
 # Small utilities (dedup)
 # -----------------

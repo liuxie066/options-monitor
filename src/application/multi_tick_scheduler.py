@@ -120,41 +120,6 @@ def resolve_market_run(
     )
 
 
-def resolve_markets_to_run(
-    *,
-    now_utc: datetime,
-    base_cfg: dict[str, Any],
-    market_config: str,
-    force_mode: bool,
-    runlog,
-    safe_data_fn: Callable[[dict[str, Any]], dict[str, Any]],
-    domain_select_markets_to_run: Callable[..., list[str]],
-    domain_markets_for_trading_day_guard: Callable[..., list[str]],
-    decide_trading_day_guard: Callable[..., dict[str, Any]],
-    reduce_trading_day_guard,
-    check_trading_day_for_market: Callable[[str], tuple[bool | None, str]],
-    on_skip: Callable[[], Any],
-) -> list[str]:
-    resolution = resolve_market_run(
-        now_utc=now_utc,
-        base_cfg=base_cfg,
-        market_config=market_config,
-        force_mode=force_mode,
-        runlog=runlog,
-        safe_data_fn=safe_data_fn,
-        domain_select_markets_to_run=domain_select_markets_to_run,
-        domain_markets_for_trading_day_guard=domain_markets_for_trading_day_guard,
-        decide_trading_day_guard=decide_trading_day_guard,
-        reduce_trading_day_guard=reduce_trading_day_guard,
-        check_trading_day_for_market=check_trading_day_for_market,
-        on_skip=on_skip,
-    )
-    if resolution.trading_day_blocked:
-        runlog.safe_event("run_end", "skip", message=resolution.skip_message)
-        raise SystemExit(0)
-    return resolution.markets_to_run
-
-
 def run_scheduler_flow(
     *,
     vpy: Path,

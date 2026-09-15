@@ -39,21 +39,6 @@ def _write_managed_wrapper(path: Path, target: Path) -> None:
     path.chmod(0o755)
 
 
-def _init_minimal_config(*, cfg_path: Path, data_cfg_path: Path, market: str = "us", symbols: list[str] | None = None) -> dict[str, object]:
-    _ensure_repo_on_path()
-
-    from src.application.agent_tool_init_local import init_local_config
-
-    return init_local_config(
-        repo_root=Path(__file__).resolve().parents[1],
-        market=market,
-        futu_acc_id="999000000000000001",
-        config_path=cfg_path,
-        data_config_path=data_cfg_path,
-        symbols=symbols or (["NVDA"] if market == "us" else ["0700.HK"]),
-    )
-
-
 def _init_yaml_authoring_config(*, output_dir: Path) -> tuple[Path, Path]:
     _ensure_repo_on_path()
 
@@ -313,19 +298,16 @@ def test_support_bundle_cli_writes_redacted_bundle() -> None:
         assert bundle["redaction"]["enabled"] is True
 
 
-def test_agent_internal_init_minimal_config() -> None:
+def test_agent_yaml_init_minimal_config() -> None:
     _ensure_repo_on_path()
     with tempfile.TemporaryDirectory() as td:
-        cfg_path = Path(td) / "config.us.json"
-        data_cfg_path = Path(td) / "portfolio.runtime.json"
-        payload = _init_minimal_config(cfg_path=cfg_path, data_cfg_path=data_cfg_path)
+        config_yaml_path, cfg_path = _init_yaml_authoring_config(output_dir=Path(td))
         cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-        assert payload["account_label"] == "user1"
-        assert cfg_path.exists()
-        assert data_cfg_path.exists()
-        assert Path(str(payload["config_path"])).name == "config.us.json"
-        assert Path(str(payload["data_config_path"])).name == "portfolio.runtime.json"
-        assert cfg["portfolio"]["data_config"] == "portfolio.runtime.json"
+        assert config_yaml_path.exists()
+        assert cfg_path.name == "config.us.json"
+        assert cfg["accounts"] == ["user1"]
+        assert cfg["account_settings"]["user1"]["futu"]["account_id"] == "999000000000000001"
+        assert cfg["symbols"][0]["symbol"] == "NVDA"
         assert "pm_config" not in cfg["portfolio"]
         assert "market" not in cfg["portfolio"]
         assert cfg["symbols"][0]["broker"] == "US"
@@ -354,23 +336,22 @@ def test_agent_internal_init_minimal_config() -> None:
         }
         assert "default_multiplier_us" not in cfg["intake"]
         assert "default_multiplier_hk" not in cfg["intake"]
-        assert payload["used_defaults"] == []
-        assert payload["warnings"] == []
 
 
-def test_agent_internal_init_reuses_existing_data_config_across_markets() -> None:
+def test_agent_yaml_init_builds_markets_from_shared_authoring() -> None:
     _ensure_repo_on_path()
     with tempfile.TemporaryDirectory() as td:
-        us_cfg_path = Path(td) / "config.us.json"
-        hk_cfg_path = Path(td) / "config.hk.json"
-        data_cfg_path = Path(td) / "portfolio.runtime.json"
-        first = _init_minimal_config(cfg_path=hk_cfg_path, data_cfg_path=data_cfg_path, market="hk")
-        second = _init_minimal_config(cfg_path=us_cfg_path, data_cfg_path=data_cfg_path, market="us")
-        assert first["data_config_reused"] is False
-        assert second["data_config_reused"] is True
-        assert us_cfg_path.exists()
-        assert hk_cfg_path.exists()
-        assert data_cfg_path.exists()
+        config_yaml_path, us_cfg_path = _init_yaml_authoring_config(output_dir=Path(td))
+        us_cfg = json.loads(us_cfg_path.read_text(encoding="utf-8"))
+        hk_cfg = json.loads((Path(td) / "config.hk.json").read_text(encoding="utf-8"))
+        for market, cfg, symbol in (("us", us_cfg, "NVDA"), ("hk", hk_cfg, "0700.HK")):
+            assert cfg["_resolved"]["source_format"] == "yaml"
+            assert Path(cfg["_resolved"]["config_yaml_path"]).resolve() == config_yaml_path.resolve()
+            assert cfg["_resolved"]["market"] == market
+            assert cfg["accounts"] == ["user1"]
+            assert cfg["account_settings"]["user1"]["futu"]["account_id"] == "999000000000000001"
+            assert cfg["symbols"][0]["symbol"] == symbol
+            assert cfg["symbols"][0]["broker"] == market.upper()
 
 
 def test_agent_launcher_add_external_holdings_account() -> None:
@@ -664,8 +645,8 @@ def main() -> None:
     test_installed_global_wrappers_work_outside_release_cwd()
     test_support_bundle_cli_writes_redacted_bundle()
     test_agent_launcher_spec_prefers_broker_field()
-    test_agent_internal_init_minimal_config()
-    test_agent_internal_init_reuses_existing_data_config_across_markets()
+    test_agent_yaml_init_minimal_config()
+    test_agent_yaml_init_builds_markets_from_shared_authoring()
     test_agent_launcher_add_external_holdings_account()
     test_agent_launcher_account_write_gate_and_dry_run()
     test_agent_launcher_add_futu_account_with_holdings_fallback()
