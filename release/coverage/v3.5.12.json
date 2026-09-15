@@ -1,0 +1,46 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.5.12",
+  "base": {
+    "tag": "v3.5.11",
+    "commit": "d0d6094bc53db3d4ce653a0a65ccb81d13cf082b"
+  },
+  "reviewed_head": "9c83d8d81931ad7c01a61553c64f9a3ad044ad82",
+  "commits": [
+    {
+      "sha": "541c19c87ffcd7ee2f786fa8da6204a37da2ef41",
+      "subject": "fix(trades): derive stock execution currency from symbol identity"
+    },
+    {
+      "sha": "9c83d8d81931ad7c01a61553c64f9a3ad044ad82",
+      "subject": "Merge pull request #301 from liuxie066/codex/trade-currency-pm-refresh"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Derived stock and ETF execution currency from the canonical symbol identity so Futu deal pushes without a currency field no longer suppress the portfolio-management holdings refresh hint, while options and unresolved symbols keep their previous behavior.",
+      "commits": [
+        "541c19c87ffcd7ee2f786fa8da6204a37da2ef41",
+        "9c83d8d81931ad7c01a61553c64f9a3ad044ad82"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "541c19c87ffcd7ee2f786fa8da6204a37da2ef41",
+      "references": [
+        "docs/FUTU_TRADE_HOLDINGS_SYNC.md",
+        "https://github.com/liuxie066/options-monitor/pull/301"
+      ]
+    },
+    {
+      "commit": "9c83d8d81931ad7c01a61553c64f9a3ad044ad82",
+      "references": [
+        "docs/FUTU_TRADE_HOLDINGS_SYNC.md",
+        "https://github.com/liuxie066/options-monitor/pull/301"
+      ]
+    }
+  ]
+}
