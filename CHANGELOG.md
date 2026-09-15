@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Bug Fixes
+- Derived stock and ETF execution currency from the canonical symbol identity so Futu deal pushes without a currency field no longer suppress the portfolio-management holdings refresh hint, while options and unresolved symbols keep their previous behavior.
+
 ## 3.5.11 - 2026-09-15
 
 ### Bug Fixes

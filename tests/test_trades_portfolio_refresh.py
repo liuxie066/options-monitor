@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 
 from src.application.trades.auto_intake import (
     _dispatch_portfolio_refresh_intent,
 )
+from src.application.trades.deal_identity import broker_deal_key
 from src.application.trades.intake import _build_portfolio_refresh_intent
+from src.application.trades.normalizer import normalize_trade_deal
 
 
 def _stock_deal(**overrides):
@@ -119,3 +122,74 @@ def test_refresh_failure_and_audit_failure_never_escape(tmp_path: Path) -> None:
         "phase=portfolio_refresh_hint_failed error_type=OSError"
     ]
     assert "sensitive" not in logs[0]
+
+
+def _futu_stock_payload(**overrides) -> dict:
+    payload = {
+        "broker_account_id": "futu:REAL:900000000000000001",
+        "futu_account_id": "900000000000000001",
+        "acc_id": "900000000000000001",
+        "trd_env": "REAL",
+        "external_id_namespace": "futu.deal",
+        "external_order_namespace": "futu.order",
+        "deal_id": "4583632043475634176",
+        "order_id": "FH1D244146DA2E8000",
+        "code": "US.VOO",
+        "stock_name": "标普500ETF-Vanguard",
+        "trd_market": "US",
+        "trd_side": "BUY",
+        "qty": 2.0,
+        "price": 695.450589,
+        "create_time": "2026-09-15 10:56:52.838",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_real_futu_stock_payload_produces_refresh_intent() -> None:
+    deal = normalize_trade_deal(
+        _futu_stock_payload(),
+        futu_account_mapping={"900000000000000001": "sy"},
+        allow_opend_refresh=False,
+    )
+
+    assert deal.execution_input["errors"] == []
+    assert deal.currency == "USD"
+    intent = _build_portfolio_refresh_intent(
+        deal, state={}, apply_changes=True, source="push", enabled=True
+    )
+    assert intent == {
+        "account": "sy",
+        "request_id": "stock-refresh:"
+        + hashlib.sha256(broker_deal_key(deal).encode()).hexdigest(),
+    }
+
+
+def test_option_and_unresolved_asset_payloads_never_produce_refresh_intent() -> None:
+    mapping = {"900000000000000001": "sy"}
+    option = normalize_trade_deal(
+        _futu_stock_payload(
+            code="US.PDD261009P77000", deal_id="d-opt", trd_side="SELL_SHORT", qty=1
+        ),
+        futu_account_mapping=mapping,
+        allow_opend_refresh=False,
+    )
+    assert option.option_type == "put"
+    assert (
+        _build_portfolio_refresh_intent(
+            option, state={}, apply_changes=True, source="push", enabled=True
+        )
+        is None
+    )
+
+    unresolved = normalize_trade_deal(
+        _futu_stock_payload(code="600519.SH", deal_id="d-cn"),
+        futu_account_mapping=mapping,
+        allow_opend_refresh=False,
+    )
+    assert (
+        _build_portfolio_refresh_intent(
+            unresolved, state={}, apply_changes=True, source="push", enabled=True
+        )
+        is None
+    )

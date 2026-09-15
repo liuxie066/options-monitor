@@ -158,3 +158,49 @@ def test_exact_decimal_and_timestamp_helpers_do_not_use_decimal_context_or_float
     assert canonical_utc_instant("2026-09-07T09:02:03.000000000123+08:00") == "2026-09-07T01:02:03.000000000123Z"
     assert epoch_milliseconds_instant("0.123456789012345678901234567890") == "1970-01-01T00:00:00.00012345678901234567890123456789Z"
     assert epoch_milliseconds_instant("-0.1") == "1969-12-31T23:59:59.9999Z"
+
+
+def _futu_stock_row(**overrides) -> dict:
+    row = {
+        "broker_account_id": "futu:REAL:900000000000000001",
+        "futu_account_id": "900000000000000001",
+        "acc_id": "900000000000000001",
+        "trd_env": "REAL",
+        "external_id_namespace": "futu.deal",
+        "external_order_namespace": "futu.order",
+        "deal_id": "4583632043475634176",
+        "order_id": "FH1D244146DA2E8000",
+        "code": "US.VOO",
+        "stock_name": "标普500ETF-Vanguard",
+        "trd_market": "US",
+        "trd_side": "BUY",
+        "qty": 2.0,
+        "price": 695.450589,
+        "create_time": "2026-09-15 10:56:52.838",
+    }
+    row.update(overrides)
+    return row
+
+
+def test_futu_stock_row_derives_currency_from_symbol_identity() -> None:
+    deal = normalize_trade_deal(_futu_stock_row(), allow_opend_refresh=False)
+    assert deal.asset_type == "stock" and deal.symbol == "VOO"
+    assert deal.execution_input["errors"] == []
+    assert deal.execution_input["currency"] == "USD"
+    assert deal.execution_input["instrument_ref"]["currency"] == "USD"
+    assert deal.currency == deal.execution_input["currency"]
+
+    hk = normalize_trade_deal(
+        _futu_stock_row(code="HK.00700", deal_id="d-hk"), allow_opend_refresh=False
+    )
+    assert hk.execution_input["errors"] == []
+    assert hk.currency == hk.execution_input["currency"] == "HKD"
+
+
+def test_unresolvable_stock_symbol_keeps_currency_missing() -> None:
+    deal = normalize_trade_deal(
+        _futu_stock_row(code="600519.SH", deal_id="d-cn"), allow_opend_refresh=False
+    )
+    assert deal.currency is None
+    assert "missing:currency" in deal.execution_input["errors"]
+    assert "missing:instrument_ref.currency" in deal.execution_input["errors"]

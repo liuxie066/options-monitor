@@ -31,6 +31,14 @@ backfill 时才会产生提示。旧 `trade_intake.holdings_sync.enabled` 只保
 - 期权成交返回 `option_deal`，不会调用 PM。
 - 股票或 ETF 使用 canonical broker deal key 去重；提示只含 `account` 和该 key
   的 SHA-256 `request_id`，不传成交增量或券商身份。
+- 正股/ETF 的 `execution_input.instrument_ref.currency`、`execution_input.currency` 与
+  `NormalizedTradeDeal.currency` 必须非空且一致，由 canonical symbol identity
+  （`domain/domain/symbol_identity.py` 的 `symbol_market`/`symbol_currency`：US→USD、
+  HK→HKD）解析；`domain/domain/trade_execution.py` 与 `src/application/trades/normalizer.py`
+  两个解析点复用同一来源，不新增第二份市场→币种映射。任一字段缺失或校验报错都会让该
+  成交不产生刷新提示；币种与 `instrument_ref.market` 同源，symbol 无法解析时保持 null，
+  不新增独立映射、不用快照或在线查询补推。载荷显式给出 currency 时仍以载荷为准，本契约
+  不新增显式值与推导值的改写。
 - Push 在该成交 Inbox 结算且账户锁释放后发送一次；结算失败时，同一 Inbox
   可在后续重复 push 或 backfill 结算后认领该意图一次。history backfill 完整处理
   本批成交后，每账户最多发送一次。
@@ -331,6 +339,24 @@ SDK 转换丢字段。无身份记录只保留证据，关联必须经既有证�
 - 修复前 retry 列表默认按 60 秒筛选、以 `attempt_count < 20` 过滤；claim 本身不检查到期
   时间、不递增计数，计数实际在结算时增加。因此崩溃重领没有统一预算保证，现有 claim 将计数与到期检查收敛在同一事务。通知失败、provider 接受但未确认、业务耗尽不能都表示为“未记录”。
 - lifecycle outbox 已有独立投递所有权；有可读回 outbox 的 lifecycle 结果不得转为普通直发。
+- 修复前正股/ETF 的 `execution_input` 只从 `src.currency`/`currency_code`/`ccy` 或期权代码
+  市场取币种，而富途 deal push 行不含 currency 字段，`US.*`、`HK.*` 正股成交因此得到
+  null；`normalize_execution_input` 报 `missing:instrument_ref.currency` 与
+  `missing:currency`，`_build_portfolio_refresh_intent` 随即返回 None，PM 刷新提示从不产生。
+  2026-09-15 sy 账户 VOO 定投（2.8758 股）实证：Inbox 行已是 `handled`/`delivery_purpose=live`，
+  但 `portfolio_refresh_intent_json` 为空，PM 当日持仓仍是上一交易日快照。同一 Inbox 的
+  110 行历史记录中该字段全部为空，说明这是所有正股/ETF 成交的共性缺陷，不是个别载荷问题。
+  修复在 `domain/domain/trade_execution.py` 与 `src/application/trades/normalizer.py`
+  两处解析点按 canonical symbol identity 兜底，使 `execution_input` 与
+  `NormalizedTradeDeal.currency` 一致；symbol 无法解析的市场与期权路径保持原行为。
+  币种进入 `execution_economic_content` 的 economic 内容，因此它是 Inbox
+  `economic_payload_hash` 与 `completed_ledger_execution_events` 身份比对的输入：
+  Inbox 与 ledger 两侧都用同一 raw broker payload 在当前代码下重算，同一成交重放
+  仍一致；`lifecycle_deal_economic_hash` 走 `source_consumption` allowlist，不含
+  currency，不受影响。已知残留：升级前已写入 ledger、且 `raw_payload` 内嵌标准
+  `execution_input`（currency=null）的正股结算类事件，在升级后 6 小时回补窗口内重推
+  会 fail-closed 为 `trade_execution_economic_conflict`，需人工复核；它不丢数据、不
+  静默改账，也未纳入本次修复范围。
 
 ### 方案与责任边界
 
@@ -540,11 +566,19 @@ Inbox 归属，避免先预览后并发发送。已有 send_started/unknown 视�
    和取消可达；子开关抑制沿原类别生效。
    断言唯一事件/lot，
    冻结内容、发送次数及持久化确认；不以函数返回成功替代投递事实。
+4. **正股成交币种与 PM 刷新提示**：以真实富途 push 行形状（`code=US.VOO`、`trd_market=US`，
+   行内既无 `currency` 也无 `market` 键）经 `normalize_trade_deal` 与
+   `_build_portfolio_refresh_intent`，断言 `execution_input["errors"] == []`、
+   `instrument_ref.currency`、`execution_input["currency"]` 与 `deal.currency` 同为 `USD`，
+   且意图非空、`request_id` 仍为 `stock-refresh:<sha256(deal_key)>`；同时断言 HK 正股为
+   `HKD`、期权币种仍只来自合约代码、symbol 无法解析时不产生意图，以及同一 raw payload
+   重复入 Inbox 不产生 `broker_economic_payload_conflict`。
 
 验证以现有 `test_trades_push_listener.py`、`test_private_storage.py`、
 `test_trade_receipt_recovery.py`、`test_trade_receipt_claim_fence.py`、
 `test_trade_receipt_concurrency.py`、`test_trades_inbox.py` 与 auto-intake 对应测试为基础，
-按入口补最小回归，不复制实现做镜像测试。执行相关 import/依赖边界、文案与敏感信息 guardrails，
+按入口补最小回归，不复制实现做镜像测试。正股币种与刷新提示沿用 `test_trade_execution_input.py`
+和 `test_trades_portfolio_refresh.py`。执行相关 import/依赖边界、文案与敏感信息 guardrails，
 测试/import 变化时重新生成 `docs/DEPENDENCY_GRAPH.md`。
 
 待落实的风险由对应 owner 处理：transport 需核对运行 SDK header 契约；private-storage
