@@ -15,7 +15,12 @@ from domain.domain.trade_contract_identity import (
 )
 from domain.domain.trade_account_identity import extract_primary_account_id
 from domain.domain.option_position_identity import normalize_broker
-from domain.domain.symbol_identity import OPTION_CODE_RE, pick_first_normalized_symbol, symbol_market
+from domain.domain.symbol_identity import (
+    OPTION_CODE_RE,
+    pick_first_normalized_symbol,
+    symbol_currency,
+    symbol_market,
+)
 
 
 EXECUTION_INPUT_VERSION = "trade_execution.v1"
@@ -487,7 +492,11 @@ def _futu_execution_input(src: dict[str, Any]) -> dict[str, Any]:
         return str(value) if isinstance(value, float) else value
 
     option_type = _pick(src, "option_type", "put_call", "call_or_put") or option_info.get("option_type")
-    currency = _pick(src, "currency", "currency_code", "ccy") or option_info.get("currency")
+    currency = (
+        _pick(src, "currency", "currency_code", "ccy")
+        or option_info.get("currency")
+        or symbol_currency(symbol)
+    )
     data_type = str(_pick(src, "data_type", "record_type", "granularity") or "execution").strip().lower()
     if data_type in {"deal", "fill", "trade"}:
         data_type = "execution"

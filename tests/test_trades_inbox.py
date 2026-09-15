@@ -497,3 +497,46 @@ def test_trade_inbox_summary_cache_is_revision_gated(
     _cached_trade_inbox_summary(path, cache=cache)
     _cached_trade_inbox_summary(path, cache=cache)
     assert summary_reads == 6
+
+
+def _futu_stock_payload(**overrides) -> dict:
+    payload = {
+        "broker_account_id": "futu:REAL:900000000000000001",
+        "futu_account_id": "900000000000000001",
+        "acc_id": "900000000000000001",
+        "trd_env": "REAL",
+        "external_id_namespace": "futu.deal",
+        "external_order_namespace": "futu.order",
+        "deal_id": "4583632043475634176",
+        "order_id": "FH1D244146DA2E8000",
+        "code": "US.VOO",
+        "trd_market": "US",
+        "trd_side": "BUY",
+        "qty": 2.0,
+        "price": 695.450589,
+        "create_time": "2026-09-15 10:56:52.838",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_derived_stock_currency_keeps_replayed_futu_payload_identical(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "inbox.sqlite3"
+    key = "futu:sy:900000000000000001:4583632043475634176"
+    inbox_id = enqueue_trade_payload(
+        path, payload=_futu_stock_payload(), source="push", broker_deal_key=key
+    )
+
+    replayed = enqueue_trade_payload(
+        path,
+        payload=_futu_stock_payload(currency="USD"),
+        source="push",
+        broker_deal_key=key,
+    )
+
+    assert replayed == inbox_id
+    summary = trade_inbox_summary(path)
+    assert summary["conflict_count"] == 0
+    assert summary["pending_count"] == 1

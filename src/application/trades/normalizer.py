@@ -29,7 +29,11 @@ from domain.domain.trade_account_identity import (
     extract_primary_account_id,
     extract_visible_account_fields,
 )
-from domain.domain.symbol_identity import normalize_symbol_candidate, pick_first_normalized_symbol
+from domain.domain.symbol_identity import (
+    normalize_symbol_candidate,
+    pick_first_normalized_symbol,
+    symbol_currency,
+)
 from src.application.symbol_aliases import symbol_aliases_from_config
 from src.application.trades.field_normalization import (
     normalize_optional_float,
@@ -215,7 +219,7 @@ def normalize_trade_deal(
         except Exception:
             currency = None
     if currency is None:
-        fallback_currency = option_code_info.get("currency")
+        fallback_currency = option_code_info.get("currency") or symbol_currency(symbol)
         if fallback_currency not in (None, ""):
             try:
                 currency = normalize_currency(fallback_currency)
