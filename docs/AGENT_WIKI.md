@@ -762,7 +762,7 @@ Do not weaken production config validation to make local tests pass. Fix the con
 - Manifest collector: `src/application/agent_tool_registry.py`
 - Write permission gate: `src/application/agent_tools/permissions.py`
 - Contracts: `src/application/agent_tool_contracts.py`
-- Config helpers: `src/application/agent_tool_config.py`, `src/application/agent_tool_init_local.py`
+- Config helpers: `src/application/agent_tool_config.py`, `src/application/config_yaml_init.py`, `src/application/config_yaml_accounts.py`
 - CLI: `src/interfaces/agent/cli.py` -> `./om-agent`
 
 When adding or changing a tool, put the implementation and manifest metadata in
