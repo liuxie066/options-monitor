@@ -13,6 +13,7 @@ from src.application.agent_tool_contracts import (
     build_response,
 )
 from src.application.agent_tool_config import load_runtime_config
+from src.application.wheel.candidate_snapshot import current_wheel_candidate_policy_hash
 from src.application.cash_conversion import load_cash_fx_payload
 from src.application.ledger.api import (
     open_position_ledger_from_runtime_config,
@@ -142,6 +143,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         command.add_argument("--request-id", required=True)
         command.add_argument("--actor", required=True)
         _add_activation_runtime(command, write=True)
+
+    rebind = activation_commands.add_parser("rebind-policy", help="accept the configured policy without reopening the window")
+    rebind.add_argument("--account", required=True)
+    rebind.add_argument("--request-id", required=True)
+    rebind.add_argument("--actor", required=True)
+    rebind.add_argument("--expected-preview-hash")
+    _add_activation_runtime(rebind, write=False)
+    add_write_flags(rebind, high_risk=True)
 
     intent = commands.add_parser("intent", help="manage Wheel option intents")
     intent_commands = intent.add_subparsers(dest="intent_action", required=True)
@@ -342,6 +351,15 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
     )
     if args.wheel_command == "activation":
         apply_changes = False if is_activation_status else _write_requested(args)
+        if args.activation_action == "rebind-policy":
+            from src.application.wheel.policy_binding import rebind_wheel_policy
+
+            return rebind_wheel_policy(
+                repo_root=Path(__file__).resolve().parents[3], market=args.market, account=args.account,
+                config_path=args.config_path, runtime_root=args.runtime_root, data_config=args.data_config,
+                request_id=args.request_id, actor=args.actor, expected_preview_hash=args.expected_preview_hash,
+                apply_changes=apply_changes,
+            )
         if apply_changes and not str(args.expected_source_sha256 or "").strip():
             raise SystemExit(
                 "Wheel activation apply requires --expected-source-sha256 from preview"
@@ -494,6 +512,10 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
             repo,
             **common,
             candidate_snapshot=snapshot,
+            current_strategy_policy_sha256=current_wheel_candidate_policy_hash(
+                base=config_path.parent, run_id=args.run_id, account=args.account,
+                config_path=config_path, config=cfg, snapshot=snapshot,
+            ),
             final_candidate_id=args.final_candidate_id,
             expected_snapshot_hash=args.expected_snapshot_hash,
             expires_at_ms=args.expires_at_ms,

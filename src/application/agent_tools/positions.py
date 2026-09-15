@@ -28,6 +28,7 @@ from src.application.positions.assigned_stock_quotes import refresh_assigned_sto
 from src.application.agent_tool_config import repo_base
 from src.application.ledger.api import open_position_ledger_from_data_config as resolve_option_positions_repo
 from src.application.agent_tools.runtime_helpers import resolve_public_data_config_path
+from src.application.wheel.candidate_snapshot import current_wheel_candidate_policy_hash
 from src.application.cash_conversion import load_cash_fx_payload
 from src.application.performance.service import build_option_period_performance
 from src.application.wheel import (
@@ -670,6 +671,11 @@ def _wheel_call_intent_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], li
             repo,
             **common,
             candidate_snapshot=snapshot,
+            current_strategy_policy_sha256=current_wheel_candidate_policy_hash(
+                base=snapshot_base, run_id=str(payload.get("run_id") or ""),
+                account=str(payload.get("account") or ""), config_path=config_path,
+                config=cfg, snapshot=snapshot,
+            ),
             final_candidate_id=str(payload.get("final_candidate_id") or ""),
             expected_snapshot_hash=str(payload.get("expected_snapshot_hash") or ""),
             expires_at_ms=int(payload.get("expires_at_ms") or 0),
@@ -806,6 +812,11 @@ def _wheel_intent_tool(
             repo,
             **common,
             candidate_snapshot=snapshot,
+            current_strategy_policy_sha256=current_wheel_candidate_policy_hash(
+                base=snapshot_base, run_id=str(payload.get("run_id") or ""),
+                account=str(payload.get("account") or ""), config_path=config_path,
+                config=cfg, snapshot=snapshot,
+            ),
             final_candidate_id=str(payload.get("final_candidate_id") or ""),
             expected_snapshot_hash=str(payload.get("expected_snapshot_hash") or ""),
             expires_at_ms=int(payload.get("expires_at_ms") or 0),

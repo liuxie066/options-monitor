@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .repository_wheel_policy import ensure_wheel_policy_bindings
 from .repository_trade_schema import EXECUTION_IDENTITY_INDEXES, _execution_identity_index_sql
 from .repository_schema import (
     Any,
@@ -559,6 +560,7 @@ class RepositoryCoreMixin:
                 )
             _ensure_wheel_events_v2(conn)
             _ensure_wheel_activation_windows(conn)
+            ensure_wheel_policy_bindings(conn)
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_assigned_stock_events_trade_time

@@ -151,3 +151,53 @@ def test_wheel_validation_is_pure_and_rejects_invalid_descriptor(
     config["wheel"]["activation_by_account"]["lx"]["deactivated_at_ms"] = 1
     with pytest.raises(SystemExit, match="deactivated_at_ms must be >"):
         validate_config(config)
+
+
+def test_readiness_uses_only_durable_effective_policy_and_preserves_boundaries() -> None:
+    descriptor = resolve_wheel_activation_descriptor(_v2_config(), market="us", account="lx")
+    window = {**descriptor, "policy_hash": "a" * 64,
+              "effective_policy_hash": descriptor["policy_hash"], "policy_binding_revision": 1}
+    assert evaluate_wheel_activation_readiness(descriptor, window)["ready"] is True
+    assert window["policy_hash"] == "a" * 64
+    for field, value in (("market", "hk"), ("account", "sy"), ("generation", 3),
+                         ("activated_at_ms", descriptor["activated_at_ms"] + 1)):
+        result = evaluate_wheel_activation_readiness(descriptor, {**window, field: value})
+        assert result["ready"] is False
+        assert result["reason_code"] == "descriptor_mismatch"
+    closed_at = descriptor["activated_at_ms"] + 1
+    result = evaluate_wheel_activation_readiness(
+        {**descriptor, "deactivated_at_ms": closed_at},
+        {**window, "deactivated_at_ms": closed_at},
+    )
+    assert result["reason_code"] == "closed_window"
+    assert result["policy_drift"] is False
+    # Config metadata cannot substitute for the config's actual policy hash.
+    assert evaluate_wheel_activation_readiness(
+        {**descriptor, "policy_hash": "b" * 64, "effective_policy_hash": descriptor["policy_hash"]},
+        window,
+    )["ready"] is False
+
+
+@pytest.mark.parametrize("binding", [
+    {"effective_policy_hash": "a" * 64},
+    {"policy_binding_revision": 1},
+    {"effective_policy_hash": None, "policy_binding_revision": 1},
+    {"effective_policy_hash": "A" * 64, "policy_binding_revision": 1},
+    {"effective_policy_hash": "a" * 63, "policy_binding_revision": 1},
+    {"effective_policy_hash": "a" * 64, "policy_binding_revision": True},
+    {"effective_policy_hash": "a" * 64, "policy_binding_revision": "1"},
+    {"effective_policy_hash": "a" * 64, "policy_binding_revision": -1},
+    {"effective_policy_hash": "a" * 64, "policy_binding_revision": 0},
+])
+def test_malformed_effective_binding_fails_closed(binding: dict) -> None:
+    descriptor = resolve_wheel_activation_descriptor(_v2_config(), market="us", account="lx")
+    result = evaluate_wheel_activation_readiness(descriptor, {**descriptor, **binding})
+    assert result["ready"] is False
+    assert result["reason_code"] == "descriptor_mismatch"
+
+
+def test_revision_zero_matches_legacy_readiness() -> None:
+    descriptor = resolve_wheel_activation_descriptor(_v2_config(), market="us", account="lx")
+    assert evaluate_wheel_activation_readiness(descriptor, {
+        **descriptor, "effective_policy_hash": descriptor["policy_hash"], "policy_binding_revision": 0,
+    }) == evaluate_wheel_activation_readiness(descriptor, descriptor)

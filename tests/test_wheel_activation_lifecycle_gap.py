@@ -96,7 +96,12 @@ def test_publish_failure_preserves_historical_assignment_rules_and_same_request_
         )
 
     failed = failure.value.details
-    durable_window = failed["latest_window"]
+    durable_window = failed["window_receipt"]["expected_config_descriptor"]
+    assert failed["latest_window"] == {
+        **durable_window,
+        "effective_policy_hash": durable_window["policy_sha256"],
+        "policy_binding_revision": 0,
+    }
     assert failed["failure_phase"] == "config_publish"
     assert failed["window_receipt"]["write_applied"] is True
     assert durable_window["generation"] == 1
@@ -113,6 +118,8 @@ def test_publish_failure_preserves_historical_assignment_rules_and_same_request_
     )
     wheel_events = repo.list_wheel_events(account="lx")
     assert assignment["wheel_event_id"] == wheel_events[0]["event_id"]
+    assert "effective_policy_hash" not in wheel_events[0]["payload"]["activation_window"]
+    assert "policy_binding_revision" not in wheel_events[0]["payload"]["activation_window"]
     assert (
         _window_descriptor(wheel_events[0]["payload"]["activation_window"])
         == durable_window
@@ -147,6 +154,7 @@ def test_publish_failure_preserves_historical_assignment_rules_and_same_request_
         create_wheel_call_intent(
             repo,
             candidate_snapshot={},
+            current_strategy_policy_sha256="b" * 64,
             account="lx",
             stock_lot_id=stock_lot_id,
             final_candidate_id="publish-gap-candidate",

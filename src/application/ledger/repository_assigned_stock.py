@@ -3,6 +3,9 @@ from __future__ import annotations
 from contextlib import closing
 from pathlib import Path
 
+from .repository_wheel_policy import (
+    WheelPolicyRepositoryMixin, effective_wheel_window, read_wheel_policy_bindings,
+)
 from .external_event_key import ensure_execution_writer_guard
 from .repository_trade_schema import _execution_candidate_rows, validated_execution_identity_metadata
 
@@ -116,16 +119,20 @@ def read_wheel_activation_windows_read_only(
                 """,
                 (market_value, account_value),
             ).fetchall()
-        windows = [_wheel_activation_row(row) for row in rows]
+            windows = [_wheel_activation_row(row) for row in rows]
+            bindings = read_wheel_policy_bindings(conn, market=market_value, account=account_value, windows=windows)
+            if windows:
+                windows[-1] = effective_wheel_window(windows[-1], bindings)
     except (KeyError, OSError, sqlite3.Error, TypeError, ValueError):
         return {"windows": [], "source_status": "unreadable"}
     return {
         "windows": windows,
+        "policy_bindings": bindings,
         "source_status": "available",
     }
 
 
-class AssignedStockRepositoryMixin:
+class AssignedStockRepositoryMixin(WheelPolicyRepositoryMixin):
     def compare_and_swap_assigned_stock_order_identity_json(
         self,
         *,
@@ -371,26 +378,18 @@ class AssignedStockRepositoryMixin:
         return [_wheel_activation_row(row) for row in rows]
 
     def get_current_wheel_activation_window(
-        self,
-        *,
-        market: str,
-        account: str,
-        conn: sqlite3.Connection | None = None,
+        self, *, market: str, account: str, conn: sqlite3.Connection | None = None,
     ) -> dict[str, Any] | None:
         market_value, account_value = _wheel_activation_scope(market, account)
-        with self._optional_conn(conn) as active_conn:
-            rows = active_conn.execute(
-                """
-                SELECT *
-                FROM wheel_activation_windows
-                WHERE market = ? AND account = ? AND deactivated_at_ms IS NULL
-                ORDER BY generation DESC
-                """,
-                (market_value, account_value),
-            ).fetchall()
-        if len(rows) > 1:
-            raise RuntimeError("wheel activation open-window uniqueness violated")
-        return _wheel_activation_row(rows[0]) if rows else None
+        with self._optional_conn(conn) as active:
+            if not active.in_transaction:
+                active.execute("BEGIN")
+            windows = self.list_wheel_activation_windows(market=market_value, account=account_value, conn=active)
+            bindings = read_wheel_policy_bindings(active, market=market_value, account=account_value, windows=windows)
+            current = [window for window in windows if window["deactivated_at_ms"] is None]
+            if len(current) > 1 or (current and current[0] != windows[-1]):
+                raise RuntimeError("wheel activation open-window uniqueness violated")
+            return effective_wheel_window(current[0], bindings) if current else None
 
     def get_wheel_activation_window_for_event(
         self,
@@ -598,7 +597,11 @@ class AssignedStockRepositoryMixin:
             raise ValueError("wheel activation generation conflict")
         if str(row["policy_hash"]) != policy_hash_value:
             raise ValueError("wheel activation policy hash conflict")
-        deactivated_at_ms = max(int(now_ms()), int(row["activated_at_ms"]) + 1)
+        bindings = self.list_wheel_policy_bindings(market=market_value, account=account_value, conn=conn)
+        latest_binding_ms = max(
+            (binding["created_at_ms"] for binding in bindings if binding["generation"] == generation), default=0,
+        )
+        deactivated_at_ms = max(int(now_ms()), int(row["activated_at_ms"]) + 1, latest_binding_ms)
         updated = conn.execute(
             """
             UPDATE wheel_activation_windows

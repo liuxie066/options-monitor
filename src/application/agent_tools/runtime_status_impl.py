@@ -2913,7 +2913,10 @@ def _status_safe_wheel_activation_readiness(value: Any) -> dict[str, Any]:
         item = _dict(raw)
         if not item:
             return None
-        return {key: item.get(key) for key in identity_fields}
+        return {
+            **{key: item.get(key) for key in identity_fields},
+            **{key: item[key] for key in ("effective_policy_hash", "policy_binding_revision") if key in item},
+        }
 
     accounts: dict[str, dict[str, Any]] = {}
     for raw_account, raw_value in _dict(source.get("accounts")).items():
@@ -2934,6 +2937,9 @@ def _status_safe_wheel_activation_readiness(value: Any) -> dict[str, Any]:
         }
         account_result["descriptor"] = identity(item.get("descriptor"))
         account_result["durable_window"] = identity(item.get("durable_window"))
+        for key in ("effective_policy_hash", "policy_binding_revision"):
+            if key in item:
+                account_result[key] = item[key]
         accounts[account] = account_result
     out = {
         **_pick(
