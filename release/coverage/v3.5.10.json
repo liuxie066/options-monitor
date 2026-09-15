@@ -1,0 +1,91 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.5.10",
+  "base": {
+    "tag": "v3.5.9",
+    "commit": "b8c530f2bca2324185acd468e03152e07784c023"
+  },
+  "reviewed_head": "18b86ca51d1c9155e6821af22ee71bc57a3911ab",
+  "commits": [
+    {
+      "sha": "77576b3bfbc317453610cb951c5501c40e85a88f",
+      "subject": "fix(upgrade): guard deployment user and parallelize release preflight"
+    },
+    {
+      "sha": "6c624c04c8b1d2bd8eaadf44282623464497b9d6",
+      "subject": "Merge pull request #296 from liuxie066/codex/upgrade-user-preflight"
+    },
+    {
+      "sha": "1f629c53176472895be134a8461419c20a4de5ef",
+      "subject": "fix(wheel): rebind active policy without rewriting activation history"
+    },
+    {
+      "sha": "1bb39ec89c9895ea74d24e4d396a290b86dc9d2b",
+      "subject": "fix(wheel): remove config import cycle and stabilize WAL fixture"
+    },
+    {
+      "sha": "18b86ca51d1c9155e6821af22ee71bc57a3911ab",
+      "subject": "Merge pull request #297 from liuxie066/codex/wheel-policy-rebind"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Ran local full release preflight tests with two workers grouped by file, preserving complete test discovery and failing on worker crashes.",
+      "commits": [
+        "77576b3bfbc317453610cb951c5501c40e85a88f",
+        "6c624c04c8b1d2bd8eaadf44282623464497b9d6"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Rebound active Wheel windows to updated strategy policies through explicit preview and confirmation, preserving activation history and rejecting stale-policy candidates for new intents.",
+      "commits": [
+        "1f629c53176472895be134a8461419c20a4de5ef",
+        "1bb39ec89c9895ea74d24e4d396a290b86dc9d2b",
+        "18b86ca51d1c9155e6821af22ee71bc57a3911ab"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Rejected upgrade and rollback commands whose effective user does not match the declared deployment user before writing state or preparing a release, preventing generated configuration ownership changes.",
+      "commits": [
+        "77576b3bfbc317453610cb951c5501c40e85a88f",
+        "6c624c04c8b1d2bd8eaadf44282623464497b9d6"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "77576b3bfbc317453610cb951c5501c40e85a88f",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/296"
+      ]
+    },
+    {
+      "commit": "6c624c04c8b1d2bd8eaadf44282623464497b9d6",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/296"
+      ]
+    },
+    {
+      "commit": "1f629c53176472895be134a8461419c20a4de5ef",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/297"
+      ]
+    },
+    {
+      "commit": "1bb39ec89c9895ea74d24e4d396a290b86dc9d2b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/297"
+      ]
+    },
+    {
+      "commit": "18b86ca51d1c9155e6821af22ee71bc57a3911ab",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/297"
+      ]
+    }
+  ]
+}

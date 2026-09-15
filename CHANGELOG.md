@@ -2,10 +2,13 @@
 
 ## Unreleased
 
+## 3.5.10 - 2026-09-15
+
 ### Improvements
 - Ran local full release preflight tests with two workers grouped by file, preserving complete test discovery and failing on worker crashes.
 
 ### Bug Fixes
+- Rebound active Wheel windows to updated strategy policies through explicit preview and confirmation, preserving activation history and rejecting stale-policy candidates for new intents.
 - Rejected upgrade and rollback commands whose effective user does not match the declared deployment user before writing state or preparing a release, preventing generated configuration ownership changes.
 
 ## 3.5.9 - 2026-09-15
