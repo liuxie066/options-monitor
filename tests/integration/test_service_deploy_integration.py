@@ -2554,6 +2554,8 @@ def test_service_upgrade_pi_prepare_failure_keeps_current_and_precedes_config(mo
     assert out["runtime_prepare"]["pi_runtime"]["node_version"] == "v22.19.0"
 
 def test_service_upgrade_restart_failure_is_non_success_and_restores_previous_symlink(monkeypatch, tmp_path: Path) -> None:
+    import pwd
+
     from src.application.service_upgrade import service_upgrade
 
     monkeypatch.setenv("OM_SYSTEMD_UNIT_ROOT", str(tmp_path / "systemd"))
@@ -2570,7 +2572,7 @@ def test_service_upgrade_restart_failure_is_non_success_and_restores_previous_sy
         json.dumps(
             {
                 "service_provider": "systemd",
-                "deploy_user": "liuxie",
+                "deploy_user": pwd.getpwuid(os.geteuid()).pw_name,
                 "restart": {
                     "requires_sudo": True,
                     "command_prefix": ["sudo", "-n", "systemctl"],
@@ -4322,3 +4324,65 @@ def test_service_credential_migration_blocks_cross_delivery_transition(
         list(fixture["runtime"].glob("service.profile.json.pre-credential-migration-*.bak"))
     ) == backup_count
     assert not any("systemd-creds" in part for command in calls for part in command)
+
+
+@pytest.mark.parametrize("operation", ["apply", "rollback"])
+@pytest.mark.parametrize("confirm", [False, True])
+@pytest.mark.parametrize("actual_uid", [0, 2002])
+def test_update_wrong_user_is_read_only_at_cli_boundary(monkeypatch, tmp_path, operation, confirm, actual_uid):
+    import argparse
+    import pwd
+    from types import SimpleNamespace
+
+    from src.application import service_upgrade as upgrade
+    from src.interfaces.cli.service_ops import add_service_update_commands, handle_service_update_command
+
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    profile = runtime / "service.profile.json"
+    profile.write_text(json.dumps({"deploy_user": "operator"}))
+    status = runtime / "upgrade_status.json"
+    status.write_text('{"status":"previous_success"}')
+    before = {p.name: (p.read_bytes(), p.stat().st_mode, p.stat().st_uid) for p in runtime.iterdir()}
+    monkeypatch.setattr(pwd, "getpwnam", lambda name: SimpleNamespace(pw_uid=1001))
+    monkeypatch.setattr(upgrade.os, "geteuid", lambda: actual_uid)
+    monkeypatch.setenv("USER", "operator")  # Environment identity cannot override effective UID.
+    monkeypatch.setenv("SUDO_USER", "operator")
+    def unexpected(*args, **kwargs):
+        pytest.fail("rejected user must not query targets, write status, or acquire a lock")
+    monkeypatch.setattr(upgrade, "service_upgrade_check", unexpected)
+    monkeypatch.setattr(upgrade, "write_upgrade_status", unexpected)
+    monkeypatch.setattr(upgrade, "_UpgradeLock", unexpected)
+    parser = argparse.ArgumentParser()
+    add_service_update_commands(parser.add_subparsers(dest="command"))
+    argv = ["update", operation, "--repo-root", str(tmp_path / "missing-repo"), "--runtime-root", str(runtime)]
+    if confirm:
+        argv += ["--confirm", "--yes"]
+    out = handle_service_update_command(parser.parse_args(argv))
+    assert out["ok"] is False
+    assert out["data"]["status"] == "deployment_user_check_failed"
+    assert "部署用户 operator" in out["data"]["message"]
+    assert out["data"]["write_applied"] is False
+    assert before == {p.name: (p.read_bytes(), p.stat().st_mode, p.stat().st_uid) for p in runtime.iterdir()}
+
+
+@pytest.mark.parametrize("uid", [0, 1001])
+def test_deployment_user_check_uses_uid_and_rejects_unknown_user(monkeypatch, tmp_path, uid):
+    import pwd
+    from types import SimpleNamespace
+    from src.application import service_upgrade as upgrade
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "VERSION").write_text("1.0.0")
+    (tmp_path / "service.profile.json").write_text(json.dumps({"deploy_user": "operator"}))
+    monkeypatch.setattr(pwd, "getpwnam", lambda name: SimpleNamespace(pw_uid=uid))
+    monkeypatch.setattr(upgrade.os, "geteuid", lambda: uid)
+    monkeypatch.setattr(upgrade, "service_upgrade_check", lambda **kwargs: {"latest_version": "1.0.0"})
+    assert upgrade.service_upgrade(repo_root=repo, runtime_root=tmp_path)["status"] == "already_current"
+    before = (tmp_path / "upgrade_status.json").read_bytes()
+    def unknown(name):
+        raise KeyError(name)
+    monkeypatch.setattr(pwd, "getpwnam", unknown)
+    assert upgrade.service_upgrade(repo_root=repo, runtime_root=tmp_path)["status"] == "deployment_user_check_failed"
+    assert (tmp_path / "upgrade_status.json").read_bytes() == before

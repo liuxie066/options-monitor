@@ -210,7 +210,7 @@ make release-preflight ARGS="--full"
 - 上一稳定 tag 到当前版本的 commit-to-release-note coverage
 - `docs/DEPENDENCY_GRAPH.md` 是否过期
 - agent plugin focused tests
-- 完整 pytest（传 `--full` 时）
+- 完整 pytest（传 `--full` 时），固定使用两个 worker、按文件分配；worker 崩溃不自动重启
 
 回环探针在依赖安装和 pytest 之前执行。如果 `socket.bind()` 返回
 `PermissionError: [Errno 1] Operation not permitted`，preflight 会明确停止并提示使用允许本机
@@ -345,6 +345,8 @@ git branch -d <exact-local-branch>
 ```
 
 `update verify` 汇总当前 symlink、版本、runtime config freshness、事件源配置、最近 upgrade status 和升级时保存的 service health 快照；`services.source=upgrade_status`，对应状态记录时间是 `upgrade.updated_at`，这不是当前 systemd live 查询。`--no-check-latest` 会跳过 git tag 查询，适合 release 已确认后快速复核远端状态。`upgrade.status` / `upgrade.last_status` 表示最近一次升级结果，`upgrade.has_status_record` 表示是否存在 `upgrade_status.json`；是否有新版本只看 `version.upgrade_available`。需要当前服务事实时，另行执行 `./om service drift --runtime-root /var/lib/options-monitor` 和对应 systemd 只读检查。
+
+当 `service.profile.json` 声明 `deploy_user` 时，升级和回滚的预览、执行都要求当前有效 UID 与该系统用户一致。无法解析用户或 UID 不一致时返回 `deployment_user_check_failed`，在目标查询、锁和状态文件写入之前停止。请以部署用户运行整个命令，仅由既有服务操作按需使用 sudo；不要用 sudo 包裹升级命令，以免原子替换后的配置归属 root。未声明部署用户的旧 profile 保留原有行为。
 
 升级默认 dry-run：
 

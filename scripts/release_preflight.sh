@@ -174,7 +174,7 @@ if [[ "${FOCUSED}" -eq 1 && "${FULL}" -eq 0 ]]; then
 fi
 
 if [[ "${FULL}" -eq 1 ]]; then
-  run_step "full pytest" "${PYTHON_BIN}" -m pytest
+  run_step "full pytest" "${PYTHON_BIN}" -m pytest -n 2 --dist loadfile --max-worker-restart=0
 else
   echo "[PREFLIGHT] full pytest skipped; pass --full for release-final validation"
 fi
