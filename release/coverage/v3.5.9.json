@@ -1,0 +1,169 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.5.9",
+  "base": {
+    "tag": "v3.5.8",
+    "commit": "d5e7b2c6cd7e522c30f0ef714f122c59cd4ff3b4"
+  },
+  "reviewed_head": "f823e5c0b4ea3bfa92af8ff09e485d99ca2b5202",
+  "commits": [
+    {
+      "sha": "26ad1a6f8ad79d14d3e9b7854231eb103620490e",
+      "subject": "fix(futu): accept expiry orders on the following calendar day"
+    },
+    {
+      "sha": "d57679bc751691a578de3c6d027b4410c0c19091",
+      "subject": "Merge pull request #290 from liuxie066/codex/futu-expiry-next-day"
+    },
+    {
+      "sha": "78024476027de321475109f386ea35988f269a86",
+      "subject": "ci(guardrails): parallelize full regression tests"
+    },
+    {
+      "sha": "f78896dc8ba2dc9ab919a66766a14bfd40e16dd0",
+      "subject": "Merge pull request #291 from liuxie066/codex/ci-regression-parallel"
+    },
+    {
+      "sha": "7b8debd52ad71f12e7663d13594838593210c7a8",
+      "subject": "refactor(cleanup): retire unused assessment and integration helpers"
+    },
+    {
+      "sha": "700e2a5cca637f5c58c9e9b50f23b4cb4eed61d1",
+      "subject": "Merge pull request #293 from liuxie066/codex/dead-code-retirement-main"
+    },
+    {
+      "sha": "ca4ae0db3cd3df5fc49d81c5157ccf996cf94420",
+      "subject": "fix(wheel): preserve rejection reasons and clarify Chinese status"
+    },
+    {
+      "sha": "cd224ef77c825001e48169a67c9cf3cb8a70bc22",
+      "subject": "chore(wheel): sync main before merge"
+    },
+    {
+      "sha": "b117f5bc8f1488262b958f4b9637dd82d290c251",
+      "subject": "docs(wheel): refresh dependency graph after regression coverage"
+    },
+    {
+      "sha": "f823e5c0b4ea3bfa92af8ff09e485d99ca2b5202",
+      "subject": "Merge pull request #294 from liuxie066/codex/wheel-reason-classification"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Reduced runtime dependencies by removing unused SciPy-backed assessment and integration helpers while preserving active strategy, scheduling, and messaging behavior.",
+      "commits": [
+        "7b8debd52ad71f12e7663d13594838593210c7a8"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Parallelized the full CI regression suite while preserving all existing checks.",
+      "commits": [
+        "78024476027de321475109f386ea35988f269a86"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Recognized Futu zero-price expiry orders recorded on the following calendar day while preserving strict source, date, and execution validation.",
+      "commits": [
+        "26ad1a6f8ad79d14d3e9b7854231eb103620490e"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Preserved Wheel candidate rejection diagnostics so normal strategy rejections are distinguished from missing data, and displayed clear Chinese status messages for both Call and Put scans.",
+      "commits": [
+        "ca4ae0db3cd3df5fc49d81c5157ccf996cf94420"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "d57679bc751691a578de3c6d027b4410c0c19091",
+      "reason": "Integration commit; behavior is covered by the corresponding implementation release note."
+    },
+    {
+      "commit": "f78896dc8ba2dc9ab919a66766a14bfd40e16dd0",
+      "reason": "Integration commit; behavior is covered by the corresponding implementation release note."
+    },
+    {
+      "commit": "700e2a5cca637f5c58c9e9b50f23b4cb4eed61d1",
+      "reason": "Integration commit; behavior is covered by the corresponding implementation release note."
+    },
+    {
+      "commit": "cd224ef77c825001e48169a67c9cf3cb8a70bc22",
+      "reason": "Integration commit; behavior is covered by the corresponding implementation release note."
+    },
+    {
+      "commit": "b117f5bc8f1488262b958f4b9637dd82d290c251",
+      "reason": "Generated dependency graph counts only; no separate runtime behavior."
+    },
+    {
+      "commit": "f823e5c0b4ea3bfa92af8ff09e485d99ca2b5202",
+      "reason": "Integration commit; behavior is covered by the corresponding implementation release note."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "26ad1a6f8ad79d14d3e9b7854231eb103620490e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/290"
+      ]
+    },
+    {
+      "commit": "d57679bc751691a578de3c6d027b4410c0c19091",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/290"
+      ]
+    },
+    {
+      "commit": "78024476027de321475109f386ea35988f269a86",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/291"
+      ]
+    },
+    {
+      "commit": "f78896dc8ba2dc9ab919a66766a14bfd40e16dd0",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/291"
+      ]
+    },
+    {
+      "commit": "7b8debd52ad71f12e7663d13594838593210c7a8",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/293"
+      ]
+    },
+    {
+      "commit": "700e2a5cca637f5c58c9e9b50f23b4cb4eed61d1",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/293"
+      ]
+    },
+    {
+      "commit": "ca4ae0db3cd3df5fc49d81c5157ccf996cf94420",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/294"
+      ]
+    },
+    {
+      "commit": "cd224ef77c825001e48169a67c9cf3cb8a70bc22",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/294"
+      ]
+    },
+    {
+      "commit": "b117f5bc8f1488262b958f4b9637dd82d290c251",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/294"
+      ]
+    },
+    {
+      "commit": "f823e5c0b4ea3bfa92af8ff09e485d99ca2b5202",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/294"
+      ]
+    }
+  ]
+}

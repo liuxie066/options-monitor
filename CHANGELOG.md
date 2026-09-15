@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 3.5.9 - 2026-09-15
+
+### Improvements
+- Reduced runtime dependencies by removing unused SciPy-backed assessment and integration helpers while preserving active strategy, scheduling, and messaging behavior.
+- Parallelized the full CI regression suite while preserving all existing checks.
+
+### Bug Fixes
+- Recognized Futu zero-price expiry orders recorded on the following calendar day while preserving strict source, date, and execution validation.
+- Preserved Wheel candidate rejection diagnostics so normal strategy rejections are distinguished from missing data, and displayed clear Chinese status messages for both Call and Put scans.
+
 ## 3.5.8 - 2026-09-14
 
 ### Improvements
