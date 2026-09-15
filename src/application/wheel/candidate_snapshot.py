@@ -42,7 +42,7 @@ def current_wheel_candidate_policy_hash(
     config: Mapping[str, Any], snapshot: Mapping[str, Any],
 ) -> str:
     """Compare current policy in the exact symbol scope of a sealed account run."""
-    from src.application.account_run import build_account_runtime_config
+    from src.application.account_config import build_account_runtime_config
     from src.application.config_sections import resolve_watchlist_config, set_watchlist_config
     from src.application.opening_candidate_snapshot import strategy_policy_hash
 

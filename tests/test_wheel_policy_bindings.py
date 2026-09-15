@@ -145,13 +145,19 @@ def test_legacy_read_does_not_initialize_schema_and_bad_empty_schema_fails(tmp_p
     original = _open(repo)
     with repo._writer_connection(begin_immediate=True) as conn:
         conn.execute(f"DROP TABLE {TABLE}")
-    before_names = {p.name for p in tmp_path.iterdir()}
-    before = {p.name: p.read_bytes() for p in tmp_path.iterdir() if p.is_file() and not p.name.endswith("-shm")}
-    result = read_wheel_activation_windows_read_only(repo.db_path, "us", "lx")
-    assert result["windows"] == [{**original, "effective_policy_hash": "a" * 64, "policy_binding_revision": 0}]
-    assert result["policy_bindings"] == []
-    assert before_names == {p.name for p in tmp_path.iterdir()}
-    assert before == {p.name: p.read_bytes() for p in tmp_path.iterdir() if p.is_file() and not p.name.endswith("-shm")}
+    # Keep the WAL pair open, as in the activation read-only regression test.
+    # SQLite may create sidecars for a clean WAL database even with mode=ro.
+    active_connection = repo._connect()
+    try:
+        before_names = {p.name for p in tmp_path.iterdir()}
+        before = {p.name: p.read_bytes() for p in tmp_path.iterdir() if p.is_file() and not p.name.endswith("-shm")}
+        result = read_wheel_activation_windows_read_only(repo.db_path, "us", "lx")
+        assert result["windows"] == [{**original, "effective_policy_hash": "a" * 64, "policy_binding_revision": 0}]
+        assert result["policy_bindings"] == []
+        assert before_names == {p.name for p in tmp_path.iterdir()}
+        assert before == {p.name: p.read_bytes() for p in tmp_path.iterdir() if p.is_file() and not p.name.endswith("-shm")}
+    finally:
+        active_connection.close()
     with sqlite3.connect(repo.db_path) as conn:
         conn.execute(f"CREATE TABLE {TABLE} (bogus TEXT)")
     assert read_wheel_activation_windows_read_only(repo.db_path, "us", "lx")["source_status"] == "unreadable"

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import re
 from dataclasses import dataclass
@@ -18,16 +17,15 @@ from domain.domain.engine import (
 from domain.domain.intermediate_objects import Decision, SchemaValidationError
 from domain.domain.multi_tick import decide_should_notify
 from domain.domain.tool_boundary import normalize_pipeline_subprocess_output
+from src.application.account_config import build_account_runtime_config as build_account_runtime_config
 from src.application.config_sections import (
     resolve_watchlist_config,
-    set_watchlist_config,
 )
 from src.application.close_advice_runner import run_close_advice
 from src.application.prepared_option_positions_context import (
     PreparedOptionPositionsContextError,
     load_prepared_option_positions_context,
 )
-from src.application.symbol_mutations import normalize_symbol_read
 from src.infrastructure.external_services import run_pipeline_script
 from src.infrastructure.io_utils import utc_now
 from src.application.multi_tick.misc import (
@@ -156,53 +154,6 @@ def _resolve_account_scan_decision(
         if "reason" in raw:
             reason = str(raw.get("reason") or "")
     return should_run, reason
-
-
-def _symbol_whitelist(symbols_arg: str | None, *, cfg: dict[str, Any]) -> set[str] | None:
-    if not str(symbols_arg or "").strip():
-        return None
-    out = {
-        normalize_symbol_read(item, config=cfg)
-        for item in str(symbols_arg or "").split(",")
-        if str(item).strip()
-    }
-    return {item for item in out if item} or None
-
-
-def build_account_runtime_config(
-    *,
-    base_cfg: dict[str, Any],
-    cfg_path: Path,
-    account: str,
-    markets_to_run: list[str],
-    symbols_arg: str | None = None,
-) -> dict[str, Any]:
-    """Build the exact account-scoped config shared by barrier and pipeline."""
-
-    cfg = json.loads(json.dumps(base_cfg))
-    cfg["config_source_path"] = str(Path(cfg_path).resolve())
-    cfg.setdefault("portfolio", {})
-    cfg["portfolio"]["account"] = str(account).strip().lower()
-    try:
-        symbols = resolve_watchlist_config(cfg)
-        if markets_to_run:
-            symbols = [
-                item
-                for item in symbols
-                if isinstance(item, dict) and item.get("broker") in markets_to_run
-            ]
-        whitelist = _symbol_whitelist(symbols_arg, cfg=cfg)
-        if whitelist is not None:
-            symbols = [
-                item
-                for item in symbols
-                if isinstance(item, dict)
-                and normalize_symbol_read(item.get("symbol"), config=cfg) in whitelist
-            ]
-        set_watchlist_config(cfg, symbols)
-    except Exception:
-        pass
-    return cfg
 
 
 def run_one_account(
