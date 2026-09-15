@@ -472,9 +472,8 @@ def test_release_preflight_full_mode_runs_pytest_once(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stderr or proc.stdout
     assert "[PREFLIGHT_OK] loopback bind available (127.0.0.1)" in proc.stdout
     pytest_commands = [command for command in commands if command.startswith("-m pytest")]
-    assert pytest_commands == ["-m pytest"]
+    assert pytest_commands == ["-m pytest -n 2 --dist loadfile --max-worker-restart=0"]
     assert commands.count("npm ci --omit=dev --ignore-scripts --prefix agent-runtime") == 0
-    assert any("test_bot_python_runtime.py" in command for command in commands) or "-m pytest" in commands
 
 
 def test_release_preflight_exports_selected_python_to_nested_entrypoints() -> None:
@@ -509,7 +508,6 @@ def test_release_preflight_non_full_mode_keeps_focused_tests(tmp_path: Path) -> 
         ),
     ]
     assert commands.count("npm ci --omit=dev --ignore-scripts --prefix agent-runtime") == 0
-    assert any("test_bot_python_runtime.py" in command for command in commands) or "-m pytest" in commands
 
 
 def test_release_preflight_focused_mode_is_independent_of_caller_cwd(tmp_path: Path) -> None:

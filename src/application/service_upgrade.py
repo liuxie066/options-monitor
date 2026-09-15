@@ -285,6 +285,35 @@ def _load_service_profile(runtime_root: Path) -> dict[str, Any]:
     return profile if isinstance(profile, dict) else {}
 
 
+def _deployment_user_error(runtime_root: Path) -> dict[str, Any] | None:
+    deploy_user = str(_load_service_profile(runtime_root).get("deploy_user") or "").strip()
+    if not deploy_user:
+        return None
+    try:
+        import pwd
+
+        expected_uid = pwd.getpwnam(deploy_user).pw_uid
+        actual_uid = os.geteuid()
+    except (ImportError, AttributeError, KeyError, OSError):
+        message = f"无法核实部署用户 {deploy_user}，请检查 service.profile.json 和系统用户。"
+    else:
+        if actual_uid == expected_uid:
+            return None
+        message = (
+            f"当前执行用户 UID={actual_uid} 与部署用户 {deploy_user} (UID={expected_uid}) 不一致；"
+            "请以部署用户执行升级或回滚，不要用 sudo 包裹整个命令。"
+        )
+    # Reject before even writing status: atomic replacement would change file ownership.
+    return {
+        "ok": False,
+        "status": "deployment_user_check_failed",
+        "changed": False,
+        "message": message,
+        "remediation": [message],
+        "operations": [],
+    }
+
+
 def _repo_root_symlink_candidates(*, repo_root: Path, runtime_root: Path) -> list[Path]:
     candidates: list[Path] = []
     profile = _load_service_profile(runtime_root)
@@ -2514,6 +2543,8 @@ def service_upgrade(
     now_fn: Callable[[], datetime] | None = None,
 ) -> dict[str, Any]:
     runtime = Path(runtime_root).expanduser().resolve()
+    if error := _deployment_user_error(runtime):
+        return {**error, "operation": "upgrade", "confirmed": bool(confirm)}
     repo_link, repo, repo_root_resolution = _coerce_repo_root_to_current_symlink(repo_root=repo_root, runtime_root=runtime)
     releases = Path(releases_root).expanduser().resolve() if releases_root else default_releases_root(repo_link)
     cache = Path(cache_root).expanduser().resolve() if cache_root else default_upgrade_cache_root(repo_link)
@@ -3030,6 +3061,8 @@ def service_rollback(
     now_fn: Callable[[], datetime] | None = None,
 ) -> dict[str, Any]:
     runtime = Path(runtime_root).expanduser().resolve()
+    if error := _deployment_user_error(runtime):
+        return {**error, "operation": "rollback", "confirmed": bool(confirm)}
     repo_link, repo, repo_root_resolution = _coerce_repo_root_to_current_symlink(repo_root=repo_root, runtime_root=runtime)
     releases = Path(releases_root).expanduser().resolve() if releases_root else default_releases_root(repo_link)
     status = load_upgrade_status(runtime_root=runtime) or {}
