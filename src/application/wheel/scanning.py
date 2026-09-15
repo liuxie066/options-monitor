@@ -129,8 +129,11 @@ def _candidate_universe(
     policy: Mapping[str, Any],
 ) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
     decisions: list[dict[str, Any]] = []
+    calculation_rejection: dict[str, Any] | None = None
 
     def compute(contract: CandidateContractInput) -> dict[str, Any] | None:
+        nonlocal calculation_rejection
+        calculation_rejection = None
         try:
             return calculate_opening_candidate_metrics(
                 contract.to_gate_payload(),
@@ -141,7 +144,8 @@ def _candidate_universe(
                     tz=timezone.utc,
                 ),
             )
-        except CandidateCalculationError:
+        except CandidateCalculationError as exc:
+            calculation_rejection = exc.to_payload()
             return None
 
     def build(
@@ -186,7 +190,11 @@ def _candidate_universe(
                 min_net_income=0,
                 required_data_frames=frames,
             ),
-            deps=CandidateScanDependencies(compute_metrics_fn=compute, build_row_fn=build),
+            deps=CandidateScanDependencies(
+                compute_metrics_fn=compute,
+                build_row_fn=build,
+                metric_reject_reason_fn=lambda _contract: calculation_rejection,
+            ),
             calculation_decision_sink_fn=decisions.extend,
         ),
         decisions,

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 
+import pytest
+
 from tests.notification_format_assertions import assert_mobile_flat_markdown
 
 
@@ -250,6 +252,7 @@ def test_fixed_report_renders_wheel_after_combo_yield() -> None:
             "shares_remaining": 100,
             "status": "ready",
             "recommended_contracts": 1,
+            "reason_code": "partial_data",
             "expiration": "2026-08-21",
             "strike": 110,
             "candidate_call_net_premium": 185,
@@ -265,6 +268,7 @@ def test_fixed_report_renders_wheel_after_combo_yield() -> None:
     assert "剩余股份｜100 股" in message
     assert "建议｜卖出 1 张 08-21 $110 Call" in message
     assert "最终全部叫走后预计总收益｜$1,320.00" in message
+    assert "暂未形成推荐" not in message
 
 
 def test_fixed_report_renders_wheel_put_branch() -> None:
@@ -280,6 +284,7 @@ def test_fixed_report_renders_wheel_put_branch() -> None:
             "principal_anchor": 10_500,
             "status": "ready",
             "recommended_contracts": 1,
+            "reason_code": "partial_data",
             "expiration": "2026-08-21",
             "strike": 100,
             "candidate_put_net_premium": 185,
@@ -294,6 +299,7 @@ def test_fixed_report_renders_wheel_put_branch() -> None:
     assert "本金锚｜$10,500.00" in message
     assert "建议｜卖出 1 张 08-21 $100 Put" in message
     assert "预计补仓后剩余现金｜$684.00" in message
+    assert "暂未形成推荐" not in message
 
 
 def test_candidate_alert_renders_only_selected_wheel_branch() -> None:
@@ -1727,3 +1733,30 @@ def test_evidence_hold_stays_in_candidate_summary_not_error_reminder() -> None:
 
     assert "原候选仅保留待恢复身份，不是当前推荐" in rendered
     assert "提醒｜" not in rendered
+
+
+@pytest.mark.parametrize("direction", ["call", "put"])
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        ("no_candidate", "当前没有通过门槛的期权"),
+        ("partial_data", "部分候选数据不完整，暂未形成推荐"),
+        ("data_unavailable", "候选数据不足，暂无法评估"),
+        ("wheel_candidate_data_unavailable", "候选数据不足，暂无法评估"),
+        ("unknown_wheel_reason", "unknown_wheel_reason"),
+    ],
+)
+def test_wheel_no_recommendation_status_is_readable(direction, reason, expected) -> None:
+    from src.application.daily_decision_brief_renderer import render_fixed_report
+
+    brief = _brief()
+    brief["wheel_batches"] = [{
+        "wheel_branch_id": "wheel-status-1", "direction": direction,
+        "symbol": "NVDA", "shares_remaining": 100, "remaining_contracts": 1,
+        "status": "ready", "reason_code": reason, "recommended_contracts": 0,
+    }]
+    message = render_fixed_report(brief, context=_scheduled_context())
+    assert f"NVDA｜Wheel {direction.title()}" in message
+    assert f"状态｜{expected}" in message
+    if reason != "unknown_wheel_reason":
+        assert reason not in message

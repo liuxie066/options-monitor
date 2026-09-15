@@ -1245,3 +1245,18 @@ Agent `wheel_activation` 使用相同的 `expected_source_sha256`、`apply`、`c
 recover preview 必须在构造 writer 前使用既有只读连接；缺库/缺 schema 不创建目录、schema 或迁移。hash 绑定解析后的 ledger 路径与文件身份、账户/市场、canonical 指派/来源 lot/open、void 和相关后续事实、历史激活窗口、已有 Wheel 事实及计划事件内容；不包含当前时钟或无关扫描日志。事务内先识别同一确定性事件的相同 payload 并返回 no-effect（自身新增事实不得使成功后的重试失效），不同 payload 冲突；首次追加前重算 hash。恢复不会刷新已有创建事件证据；后续补证需独立受控修复，不能声称本次恢复会自动解除阻塞。
 
 具体阻塞原因通过现有投影 reason_codes、扫描 scope/snapshot、Brief service 到 renderer 保留；至少分别验证真实 writer 的未知乘数来源与未知交割费用路径，以及共享 companion 的两个调用入口。生产恢复使用升级后的正式 CLI 读取明确的远端 runtime 路径，只追加授权事件，不触发补发。
+
+
+## Wheel 候选拒绝分类与简报状态
+
+目标与范围：Wheel Call/Put 保留候选计算的原始拒绝原因，区分策略拒绝、合约不适用和真实数据缺失；Daily Brief 对无推荐的已知数据状态使用中文。非目标：调整策略阈值、增加候选、改 schema、交易、通知发送、生产配置或发布升级。
+
+事实与责任链：`pipeline_watchlist -> wheel/scanning._candidate_universe -> run_candidate_scan -> evidence_summary_from_decisions -> Wheel snapshot -> daily_decision_brief_renderer`。共用分类器已将 `net_premium_non_positive` 识别为策略拒绝；修复前 Wheel 捕获 `CandidateCalculationError` 后返回 None，丢失 reason/message/metric_value/threshold，导致其被归为数据缺失。Call、Put 共用这一入口。
+
+设计：在该共用入口使用异常 `to_payload()` 保留诊断字段，经现有 scanner 的同步诊断回调交给分类器；每次计算先清空上一条诊断，避免候选间串用；不复制原因分类，不重复计算候选，不修改领域筛选。真正的数据不足仍保留 partial_data/data_unavailable，不以 no_candidate 掩盖。没有通过门槛的候选使用 no_candidate。保持现有 scope、snapshot 和生命周期结构。Daily Brief 将 no_candidate 显示为“当前没有通过门槛的期权”，避免 Put 被写成 Call；partial_data 显示为“部分候选数据不完整，暂未形成推荐”，data_unavailable 与 wheel_candidate_data_unavailable 显示为“候选数据不足，暂无法评估”。保留未知原因原码，避免伪造解释；有可用推荐时仍显示具体合约。
+
+实施增量：一次修复覆盖原始异常传递、中文状态映射和相应回归测试。拒绝直接将 partial_data 改成 no_candidate 的下游补丁，也不增加新的状态或诊断存储。
+
+验收：真实计算触发净权利金非正时，Call/Put 均输出策略拒绝且无数据缺口；全部正常拒绝为 no_candidate；共用候选计算阶段中真实缺失单独为 data_unavailable，与正常拒绝混合为 partial_data；保留后续 Wheel 批次经济数据不足的既有优先级；有效候选与拒绝候选并存仍可推荐。Call/Put 均验证真实计算触发的合约不适用仍为 contract_ineligible，不制造数据缺口；连续净权利金拒绝、真实缺失、有效候选核对原始 rule/message/metric_value/threshold 不丢失、不串用。渲染 facade 覆盖 Call/Put 无候选、部分/全部数据不足、已有推荐及未知原因。运行 Wheel scanning、snapshot/tick integration、共用扫描证据与 Daily Brief renderer 的相关测试，检查文档格式和适用 guardrails。
+
+适用边界：修正状态不保证出现交易机会；收益/Delta/波动率门槛保持不变。生产历史消息不回写。

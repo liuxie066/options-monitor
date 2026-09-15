@@ -810,3 +810,90 @@ def test_wheel_finalizers_preserve_homogeneous_scan_failure_reason() -> None:
 
     assert call_result["scope_results"][0]["reason_code"] == "wheel_scan_failed"
     assert put_result["scope_results"][0]["reason_code"] == "wheel_scan_failed"
+
+
+@pytest.mark.parametrize("direction", ["call", "put"])
+@pytest.mark.parametrize(
+    ("kinds", "status", "reason", "candidate_count"),
+    [
+        (["negative"], "completed", "no_candidate", 0),
+        (["missing"], "unavailable", "data_unavailable", 0),
+        (["negative", "missing"], "completed", "partial_data", 0),
+        (["negative", "valid"], "completed", "candidates_found", 1),
+        (["negative", "missing", "negative", "valid"], "completed", "partial_data", 1),
+        (["nonstandard"], "completed", "no_candidate", 0),
+        (["nonstandard", "valid"], "completed", "candidates_found", 1),
+    ],
+)
+def test_wheel_calculation_reasons_preserve_scan_outcomes(
+    direction, kinds, status, reason, candidate_count,
+) -> None:
+    row = phase2_opening_row({
+        "symbol": "NVDA", "option_type": direction,
+        "expiration": "2026-05-06", "dte": 35,
+        "multiplier": 100, "currency": "USD",
+        "strike": 110 if direction == "call" else 99, "spot": 100,
+        "bid": 2.0, "ask": 2.2, "last_price": 2.1, "mid": 2.1,
+        "open_interest": 500, "volume": 50,
+        "implied_volatility": 0.30, "term_matched_rv": 0.20,
+        "delta": 0.30 if direction == "call" else -0.30,
+    })
+    overrides = {
+        "negative": {"bid": 0.01, "ask": 0.02, "mid": 0.015, "last_price": 0.01},
+        "missing": {"term_matched_rv_status": "missing"},
+        "nonstandard": {"option_standard_type": "NON_STANDARD"},
+        "valid": {},
+    }
+    rows = [
+        {**row, **overrides[kind], "contract_symbol": f"NVDA-{direction}-{index}"}
+        for index, kind in enumerate(kinds)
+    ]
+    model = _read_model()
+    fee_context = {
+        "exchange_rate_converter": CurrencyConverter(
+            ExchangeRates(usd_per_cny=0.14, cny_per_hkd=0.92)
+        ),
+        "stock_assignment_fee_fact_fn": lambda *_: {"basis": "estimated", "amount": 10},
+    }
+    if direction == "put":
+        model["wheel_branches"] = [{
+            **model["batches"][0], "direction": "put", "wheel_branch_id": "stock-1",
+            "remaining_contracts": 1, "multiplier": 100, "principal_anchor": 10_010,
+            "realized_put_net_pnl_in_current_stage": 0, "currency": "USD",
+        }]
+        result = run_wheel_put_scan(
+            model, _policy(), {"frames": {"NVDA": pd.DataFrame(rows)}}, fee_context,
+            decision_time_ms=int(AS_OF.timestamp() * 1000),
+        )
+    else:
+        result = run_wheel_call_scan(
+            model, _policy(), {"frames": {"NVDA": pd.DataFrame(rows)}}, {}, fee_context,
+            decision_time_ms=int(AS_OF.timestamp() * 1000),
+        )
+    scope = result["scope_results"][0]
+    assert (scope["status"], scope["reason_code"]) == (status, reason)
+    assert len(result["raw_candidates"]["stock-1"]) == candidate_count
+    assert len(result["capacity_claims"]) == candidate_count
+    failures = [(index, kind) for index, kind in enumerate(kinds) if kind != "valid"]
+    assert len(result["calculation_decisions"]) == len(failures)
+    expected = {
+        "negative": ("policy_rejected", "net_premium_non_positive", "estimated net premium must be positive", 0),
+        "missing": ("input_invalid", "term_matched_rv_unavailable", "term-matched realized volatility is not available", "ok"),
+        "nonstandard": ("contract_ineligible", "option_non_standard", "only OpenD STANDARD option contracts are eligible", "STANDARD"),
+    }
+    for record, (index, kind) in zip(result["calculation_decisions"], failures):
+        decision = record["opening_decision"]
+        reject = decision["rejects"][0]
+        category, rule, message, threshold = expected[kind]
+        assert decision["contract_symbol"] == rows[index]["contract_symbol"]
+        assert reject["reason"] == category
+        assert reject["metric_value"]["reason_code"] == rule
+        assert reject["message"] == message
+        assert reject["threshold"] == threshold
+        metric = reject["metric_value"]["metric_value"]
+        if kind == "negative":
+            assert metric <= 0
+        elif kind == "missing":
+            assert metric["status"] == "missing"
+        else:
+            assert metric == "NON_STANDARD"
