@@ -169,24 +169,6 @@ def provider_requires_api_key(provider: str) -> bool:
     return spec.requires_api_key if spec is not None else True
 
 
-def provider_chat_completion_payload_options(provider: str) -> dict[str, Any]:
-    normalized = normalize_llm_provider(provider)
-    if normalized in {"kimi", "kimi-code"}:
-        return {
-            "temperature": None,
-            "thinking": None,
-        }
-    if normalized == "ollama":
-        return {
-            "temperature": 0.0,
-            "thinking": None,
-        }
-    return {
-        "temperature": 0.0,
-        "thinking": {"type": "disabled"},
-    }
-
-
 def provider_catalog_payload() -> dict[str, Any]:
     providers = [spec.public_payload() for spec in provider_specs()]
     return {
@@ -202,7 +184,6 @@ __all__ = [
     "LlmProviderSpec",
     "is_supported_llm_provider",
     "normalize_llm_provider",
-    "provider_chat_completion_payload_options",
     "provider_api_kind",
     "provider_catalog_payload",
     "provider_spec",
