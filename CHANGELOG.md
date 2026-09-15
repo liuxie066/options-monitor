@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 3.5.11 - 2026-09-15
+
 ### Bug Fixes
 - Fixed Wheel candidate snapshot failures caused by non-finite ranking placeholders and circular per-grant evaluation references, preserving candidate order and strict snapshot validation.
 
