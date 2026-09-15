@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 import pytest
@@ -7,6 +8,7 @@ import pytest
 from candidate_evidence_helpers import earnings_evidence
 from domain.domain.engine import (
     CandidateCalculationError,
+    build_candidate_rank_key,
     calculate_opening_candidate_metrics,
     evaluate_opening_candidate_policy,
     explain_candidate_rank,
@@ -468,3 +470,48 @@ def test_covered_call_rank_uses_anchored_period_band_then_higher_strike() -> Non
     explanation = explain_candidate_rank(ranked[0], mode="call")
     assert explanation["primary_drivers"] == ["period_net_premium_return"]
     assert "持有期净权利金收益分带" in explanation["rank_reason"]
+
+
+@pytest.mark.parametrize("mode", ["call", "put"])
+@pytest.mark.parametrize("field", ["symbol_concentration_after", "spread_ratio"])
+def test_public_rank_keys_keep_missing_last_and_are_json_finite(mode: str, field: str) -> None:
+    from domain.domain.insurance_underwriting import underwriting_rank_key
+    from domain.domain.wheel import build_wheel_call_rank_key, build_wheel_put_rank_key
+
+    base = {"period_net_return": 0.01, "symbol_concentration_after": 0.2, "spread_ratio": 0.1}
+    rows = [
+        {**base, field: value, "contract_symbol": name, "open_interest": interest}
+        for name, value, interest in (
+            ("missing_low_oi", None, 1), ("positive", 0.4, 0),
+            ("missing_high_oi", None, 2), ("zero", 0.0, 0),
+        )
+    ]
+    expected = ["zero", "positive", "missing_high_oi", "missing_low_oi"]
+    wheel_key = build_wheel_call_rank_key if mode == "call" else build_wheel_put_rank_key
+    for key in (
+        lambda row: build_candidate_rank_key(row, mode=mode)["sort_tuple"],
+        lambda row: underwriting_rank_key(row, mode=mode),
+        lambda row: wheel_key(row)["sort_tuple"],
+    ):
+        assert [r["contract_symbol"] for r in sorted(rows, key=key)] == expected
+    for row in rows:
+        json.dumps(build_candidate_rank_key(row, mode=mode), allow_nan=False)
+        json.dumps(wheel_key(row), allow_nan=False)
+
+
+@pytest.mark.parametrize("mode,profile,field", [
+    ("call", "current_tie_break", "symbol_concentration_after"),
+    ("put", "current_tie_break", "symbol_concentration_after"),
+    ("put", "concentration_first", "symbol_concentration_after"),
+    ("put", "option_market_concentration", "option_market_concentration_after"),
+])
+def test_formal_rank_profiles_keep_missing_concentration_last(mode: str, profile: str, field: str) -> None:
+    rows = [
+        {"symbol": symbol, "period_net_return": 0.01, field: concentration, "spread_ratio": spread}
+        for symbol, concentration, spread in (
+            ("MISSING_WIDE", None, 0.3), ("POSITIVE", 0.2, 0.1),
+            ("MISSING_NARROW", None, 0.1), ("ZERO", 0.0, 0.1),
+        )
+    ]
+    ranked = rank_candidate_rows(rows, mode=mode, sell_put_ranking_profile=profile)
+    assert [r["symbol"] for r in ranked] == ["ZERO", "POSITIVE", "MISSING_NARROW", "MISSING_WIDE"]

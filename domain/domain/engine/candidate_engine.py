@@ -1166,7 +1166,7 @@ def _candidate_period_return(src: dict[str, Any], *, mode: StrategyMode) -> floa
 
 
 def _known_low_sort(value: float | None) -> tuple[bool, float]:
-    return (value is None, float("inf") if value is None else float(value))
+    return (value is None, 0.0 if value is None else float(value))
 
 
 def _known_high_sort(value: float | None) -> tuple[bool, float]:
@@ -1185,18 +1185,14 @@ def _sell_put_within_symbol_tie_key(src: dict[str, Any]) -> tuple[Any, ...]:
 
 def _sell_put_concentration_sort(src: dict[str, Any]) -> tuple[bool, float]:
     explicit = _first_float(src, "symbol_concentration_after")
-    if explicit is not None:
-        return False, explicit
-    return True, float("inf")
+    return _known_low_sort(explicit)
 
 
 def _sell_put_option_market_concentration_sort(
     src: dict[str, Any],
 ) -> tuple[bool, float]:
     explicit = _first_float(src, "option_market_concentration_after")
-    if explicit is not None:
-        return False, explicit
-    return True, float("inf")
+    return _known_low_sort(explicit)
 
 
 def _sell_put_cross_symbol_tie_key(src: dict[str, Any]) -> tuple[Any, ...]:
@@ -1289,9 +1285,7 @@ def _covered_call_remaining_concentration_sort(src: dict[str, Any]) -> tuple[boo
         "symbol_concentration_after_call",
         "symbol_concentration_after",
     )
-    if explicit is not None:
-        return False, explicit
-    return True, float("inf")
+    return _known_low_sort(explicit)
 
 
 def _covered_call_cross_symbol_tie_key(src: dict[str, Any]) -> tuple[Any, ...]:
@@ -1328,7 +1322,7 @@ def _candidate_recommendation_sort_tuple(
         -float(primary_return or 0.0),
         -_candidate_tie_break_margin(src, mode=mode),
         *concentration_sort,
-        float("inf") if spread is None else float(spread),
+        *_known_low_sort(spread),
         -float(open_interest or 0.0),
         -float(net_income or 0.0),
         str(src.get("symbol") or "").strip().upper(),
