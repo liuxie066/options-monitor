@@ -1,0 +1,73 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.5.13",
+  "base": {
+    "tag": "v3.5.12",
+    "commit": "4fc161b8042f4282cdc2a7c01c06df4bfdc3f3a8"
+  },
+  "reviewed_head": "ea1440420b3b5374d64ddbcaf8334e7c443cc1c7",
+  "commits": [
+    {
+      "sha": "b7f9a19e6b43053451e5f7e5a5ed6d5c069a8646",
+      "subject": "docs(domain-model): register order domain model docs in INDEX"
+    },
+    {
+      "sha": "be4f2d26aea0a2decb0904ac66b844d52a85142a",
+      "subject": "Merge pull request #303 from liuxie066/codex/domain-model-doc-registration"
+    },
+    {
+      "sha": "3cdf76faf2278b020a4bbc503aaa170ec42ea595",
+      "subject": "feat(wheel): relax IV/RV volatility margin to ratio 1.0 and spread 0.0"
+    },
+    {
+      "sha": "ea1440420b3b5374d64ddbcaf8334e7c443cc1c7",
+      "subject": "Merge pull request #304 from liuxie066/feat/wheel-iv-rv-thresholds"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Relaxed the Wheel volatility margin so Covered Call and Cash-Secured Put candidates qualify once implied volatility is no lower than matched-term realized volatility, lowering the ratio threshold from 1.10 to 1.0 and the spread threshold from 0.05 to 0.0.",
+      "commits": [
+        "3cdf76faf2278b020a4bbc503aaa170ec42ea595",
+        "ea1440420b3b5374d64ddbcaf8334e7c443cc1c7"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "b7f9a19e6b43053451e5f7e5a5ed6d5c069a8646",
+      "reason": "Internal documentation registration for the order domain model (ORDER_DOMAIN_MODEL_DESIGN.md and ORDER_DOMAIN_MODEL_PRD.md indexed in docs/INDEX.md); no user, configuration, runtime, or operational impact."
+    },
+    {
+      "commit": "be4f2d26aea0a2decb0904ac66b844d52a85142a",
+      "reason": "Merge commit for PR #303; it contains no independent user-facing change beyond the mapped documentation commit."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "3cdf76faf2278b020a4bbc503aaa170ec42ea595",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/304"
+      ]
+    },
+    {
+      "commit": "ea1440420b3b5374d64ddbcaf8334e7c443cc1c7",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/304"
+      ]
+    },
+    {
+      "commit": "b7f9a19e6b43053451e5f7e5a5ed6d5c069a8646",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/303"
+      ]
+    },
+    {
+      "commit": "be4f2d26aea0a2decb0904ac66b844d52a85142a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/303"
+      ]
+    }
+  ]
+}
