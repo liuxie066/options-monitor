@@ -47,8 +47,8 @@ WHEEL_CALL_DEFAULTS: dict[str, Any] = {
     "min_open_interest": 300.0,
     "min_volume": 10.0,
     "max_spread_ratio": 0.40,
-    "min_iv_rv_ratio": 1.10,
-    "min_iv_minus_rv": 0.05,
+    "min_iv_rv_ratio": 1.0,
+    "min_iv_minus_rv": 0.0,
 }
 
 WHEEL_PUT_DEFAULTS: dict[str, Any] = {
@@ -61,8 +61,8 @@ WHEEL_PUT_DEFAULTS: dict[str, Any] = {
     "min_open_interest": 300.0,
     "min_volume": 10.0,
     "max_spread_ratio": 0.40,
-    "min_iv_rv_ratio": 1.10,
-    "min_iv_minus_rv": 0.05,
+    "min_iv_rv_ratio": 1.0,
+    "min_iv_minus_rv": 0.0,
 }
 
 WHEEL_DEFAULTS: dict[str, Any] = {
