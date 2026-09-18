@@ -1,0 +1,59 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.5.15",
+  "base": {
+    "tag": "v3.5.14",
+    "commit": "4911ecada71619d1ac4014aa059ea1f755440f12"
+  },
+  "reviewed_head": "d41557abf3acd44499837008de32e59113aaabcc",
+  "commits": [
+    {
+      "sha": "bce4c7df59e9459b3e90bc62118f29188e11d7cb",
+      "subject": "fix(daily-brief): accept wheel candidate identities in the validator"
+    },
+    {
+      "sha": "c9797a7a7e3b1c90cd49f896e67e9f6a092e7380",
+      "subject": "docs(dependency-graph): regenerate for the daily brief wheel identity tests"
+    },
+    {
+      "sha": "d41557abf3acd44499837008de32e59113aaabcc",
+      "subject": "Merge pull request #309 from liuxie066/codex/brief-wheel-identity"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Accepted Wheel candidate identities in Daily Brief delivery validation so a single Wheel candidate can no longer abort an entire notification tick, with the identity validator now taking its strategy families, supported markets, and branch suffix from the domain builder instead of a stale copy of that vocabulary.",
+      "commits": [
+        "bce4c7df59e9459b3e90bc62118f29188e11d7cb",
+        "d41557abf3acd44499837008de32e59113aaabcc"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "c9797a7a7e3b1c90cd49f896e67e9f6a092e7380",
+      "reason": "Regenerates docs/DEPENDENCY_GRAPH.md for the test imports the fix commit added; it records the graph that fix already produced and adds no behaviour of its own."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "bce4c7df59e9459b3e90bc62118f29188e11d7cb",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/309"
+      ]
+    },
+    {
+      "commit": "c9797a7a7e3b1c90cd49f896e67e9f6a092e7380",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/309"
+      ]
+    },
+    {
+      "commit": "d41557abf3acd44499837008de32e59113aaabcc",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/309"
+      ]
+    }
+  ]
+}
