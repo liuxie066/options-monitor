@@ -96,6 +96,7 @@ TRADE_EVENTS_COLUMN_CLASSIFICATION = {
 
 POSITION_LOTS_COLUMN_CLASSIFICATION = {
     "record_id": "integrity/identity",
+    "lot_id": "integrity/identity",
     "account": "projection-affecting",
     "fields_json": "projection-affecting",
     "source_event_id": "projection-affecting",
@@ -207,7 +208,7 @@ def _position_lot_contract_scalars(fields: dict[str, Any]) -> tuple[int | None, 
 
 def _position_lot_storage_values(
     record: PositionLotRecord,
-) -> tuple[str, str, str, str | None, int | None, float | None, float | None]:
+) -> tuple[str, str, str, str | None, int | None, float | None, float | None, str]:
     if not isinstance(record, PositionLotRecord):
         raise TypeError("replace_position_lots requires PositionLotRecord records")
     record_id = record.lot_id
@@ -234,6 +235,11 @@ def _position_lot_storage_values(
         int(expiration_ms) if expiration_ms is not None else None,
         float(strike) if strike is not None else None,
         float(multiplier) if multiplier is not None else None,
+        # Dual-write carrier: lot_id is the canonical identity name, record_id is
+        # the legacy storage name. Both are written from the same source here so
+        # that the eventual rename is data-neutral. Trailing position keeps the
+        # pre-existing tuple indexes (values[0], values[1]) stable.
+        record_id,
     )
 
 def _canonical_existing_fields_json(raw: Any) -> str | None:

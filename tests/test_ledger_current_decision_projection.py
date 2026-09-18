@@ -639,6 +639,64 @@ def test_projection_codec_reader_oracle_and_corruption_are_fail_closed(
     assert unavailable["payload"] is None
 
 
+def test_read_only_surfaces_serve_a_store_that_predates_the_lot_id_carrier(
+    tmp_path: Path,
+) -> None:
+    """The identity carrier is an addition, not a precondition, on the read side.
+
+    ``_init_db`` adds ``lot_id`` to any store a writer opens, but the read-only
+    evidence surface cannot — it opens ``mode=ro`` by construction and must
+    still serve a store that predates the column, which is the state the real
+    production store is in. Selecting ``lot_id`` unconditionally made
+    ``current_decision_runtime.read_current_decision_projection`` raise
+    ``no such column`` inside its ``except Exception``, so the *whole*
+    current-decision read degraded to ``data_unavailable`` with
+    ``reason="current_decision_read_failed"`` — an identity column the reader
+    does not strictly need, taking down the payload with it.
+    """
+
+    repo = _repo(tmp_path)
+    _bootstrap(repo, "lx")
+    baseline = read_current_decision_projection(repo, account="lx", now_ms=20_000)
+    assert baseline["status"] == "trusted"
+    # The fallback identity is the row's own record_id, so the fingerprint the
+    # reader recomputes is unchanged by dropping the column and "trusted" is a
+    # statement about the column probe alone.
+    with sqlite3.connect(repo.db_path) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM position_lots WHERE lot_id IS NOT record_id"
+        ).fetchone()[0] == 0
+        conn.execute("DROP INDEX IF EXISTS idx_position_lots_lot_id")
+        conn.execute("ALTER TABLE position_lots DROP COLUMN lot_id")
+        # The DDL bumps ``PRAGMA schema_version`` and the trust predicate compares
+        # the stored cookie against it, so re-align the cookie the way the
+        # projection runtime does on a schema change (``repository_projection_schema``
+        # step 745). Otherwise this test would be measuring the cookie guard
+        # instead of the column probe.
+        conn.execute(
+            "UPDATE position_projection_source_state SET sqlite_schema_cookie = ?",
+            (int(conn.execute("PRAGMA schema_version").fetchone()[0]),),
+        )
+        conn.commit()
+
+    read_only = open_trade_reconciliation_evidence_repo(repo.db_path)
+    # ``read_current_decision_projection_inputs_from_conn`` is the exact call
+    # that raised; the runtime above is the impact it had.
+    inputs = read_only.read_current_decision_projection_inputs("lx")
+    assert [row["lot_id"] for row in inputs["lots"]] == ["lot-lx"]
+    assert [row["record_id"] for row in inputs["lots"]] == ["lot-lx"]
+
+    degraded = read_current_decision_projection(read_only, account="lx", now_ms=20_000)
+    assert degraded["status"] == "trusted"
+    assert degraded["payload"] == baseline["payload"]
+
+    # Same dual-key contract on the evidence surface's own lot reader.
+    [lot] = read_only.list_position_lots()
+    assert lot["record_id"] == "lot-lx"
+    assert lot["lot_id"] == "lot-lx"
+    assert lot["fields"] == inputs["lots"][0]["fields"]
+
+
 def test_lifecycle_evidence_filters_before_json_decode_and_preserves_query_contract(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

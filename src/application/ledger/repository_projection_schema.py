@@ -302,6 +302,19 @@ def _create_current_decision_case_scope_guards(
 def _ensure_position_projection_schema(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "trade_events", "account", "TEXT")
     _add_column_if_missing(conn, "position_lots", "account", "TEXT")
+    # lot_id is the canonical identity carrier; the legacy storage name record_id
+    # stays in place until the convergence batch. This lives here rather than in
+    # _init_db because the gated migration apply also ensures the schema on a
+    # frozen legacy store whose position_lots never went through _init_db.
+    _add_column_if_missing(conn, "position_lots", "lot_id", "TEXT")
+    # Not _create_index_if_table_empty: that silently skips populated tables, and
+    # the carrier must be indexed on already-populated stores too. NULL legacy
+    # rows stay distinct under SQLite unique semantics until the gated backfill
+    # fills them, so a duplicate-producing backfill fails here instead of
+    # silently persisting two rows with one identity.
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_position_lots_lot_id ON position_lots(lot_id)"
+    )
     _ensure_trade_event_pagination_schema(conn)
 
     _create_index_if_table_empty(

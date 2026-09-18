@@ -53,7 +53,7 @@ def test_receipt_readback_returns_application_events_and_published_lots(tmp_path
     assert evidence["position_lots"] == repo.list_position_lots()
     assert len(evidence["position_lots"]) == 1
     lot = evidence["position_lots"][0]
-    assert set(lot) == {"record_id", "fields"}
+    assert set(lot) == {"record_id", "lot_id", "fields"}
     assert lot["fields"]["source_event_id"] == "deal-1"
 
 

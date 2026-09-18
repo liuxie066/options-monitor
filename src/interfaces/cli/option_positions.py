@@ -22,7 +22,9 @@ from src.application.ledger.api import (
     adopt_existing_combo_identity,
     apply_current_decision_projection_migration,
     apply_position_projection_migration,
+    apply_lot_identity_migration,
     build_current_decision_projection_migration_inventory,
+    build_lot_identity_migration_inventory,
     build_position_projection_migration_inventory,
     current_decision_projection_migration_status,
     deactivate_position_projection_checkpoints,
@@ -45,6 +47,7 @@ from src.application.ledger.api import (
     preview_trade_event_void,
     verify_position_lot_projection,
     verify_current_decision_projection_migration,
+    verify_lot_identity_migration,
     verify_position_projection_migration,
     supersede_post_trade_combo_pair,
 )
@@ -523,6 +526,38 @@ def _register_projection_parsers(sub: Any) -> None:
     _add_runtime_root_arg(p_projection_deactivate)
     p_projection_deactivate.add_argument('--format', default='json', choices=['json'])
     _add_local_write_flags(p_projection_deactivate, high_risk=True)
+
+    # §13.2 row 8: same conventions as projection-migration, different names.
+    # Two `apply` commands with the same parameters but opposite semantics is
+    # this batch's one operator risk surface; the distinct parent group is the
+    # mitigation, and every payload carries its own schema_version.
+    p_lot_identity = sub.add_parser(
+        'lot-identity-migration',
+        help='inventory, verify, or apply the D1-D4 lot identity migration',
+    )
+    lot_identity_sub = p_lot_identity.add_subparsers(
+        dest='lot_identity_migration_cmd',
+        required=True,
+    )
+    for command_name, help_text in (
+        ('inventory', 'emit a read-only D1-D4 pending-work inventory'),
+        (
+            'verify',
+            'replay the projection from trade_events and judge the D3 drop set '
+            '(never reuses a checkpoint)',
+        ),
+    ):
+        command = lot_identity_sub.add_parser(command_name, help=help_text)
+        _add_runtime_root_arg(command)
+        command.add_argument('--format', default='json', choices=['json'])
+    p_lot_identity_apply = lot_identity_sub.add_parser(
+        'apply',
+        help='apply a frozen inventory: backfill lot identity and strip the retired position_id',
+    )
+    _add_runtime_root_arg(p_lot_identity_apply)
+    p_lot_identity_apply.add_argument('--manifest', required=True)
+    p_lot_identity_apply.add_argument('--format', default='json', choices=['json'])
+    _add_local_write_flags(p_lot_identity_apply, high_risk=True)
 
     p_decision_projection = sub.add_parser(
         'decision-projection',
@@ -1049,6 +1084,28 @@ def main(argv: list[str] | None = None) -> int:
                 f"option-positions projection-migration {migration_command} "
                 "requires --apply and --confirm or --yes"
             )
+    elif args.cmd == "lot-identity-migration" and getattr(
+        args, "lot_identity_migration_cmd", None
+    ) == "apply":
+        write_control_key = "lot-identity-migration:apply"
+        if (
+            (bool(getattr(args, "confirm", False)) or bool(getattr(args, "yes", False)))
+            and not bool(getattr(args, "apply", False))
+        ):
+            raise SystemExit(
+                "option-positions lot-identity-migration apply "
+                "requires --apply together with --confirm or --yes"
+            )
+        write_controls[write_control_key] = _resolve_write_control(
+            args,
+            command_name="option-positions lot-identity-migration apply",
+            high_risk=True,
+        )
+        if not write_controls[write_control_key]["write_requested"]:
+            raise SystemExit(
+                "option-positions lot-identity-migration apply "
+                "requires --apply and --confirm or --yes"
+            )
     elif args.cmd == "lifecycle" and (
         getattr(args, "lifecycle_cmd", None)
         in {
@@ -1148,6 +1205,27 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:  # pragma: no cover - argparse owns the command set
             raise SystemExit(f"unsupported decision projection command: {command}")
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.cmd == "lot-identity-migration":
+        store = resolve_ledger_store(
+            data_config_path,
+            runtime_root=_runtime_root_arg(args),
+        )
+        sqlite_path = store.sqlite_path
+        command = str(args.lot_identity_migration_cmd)
+        if command == "inventory":
+            payload = build_lot_identity_migration_inventory(sqlite_path)
+        elif command == "verify":
+            payload = verify_lot_identity_migration(sqlite_path)
+        elif command == "apply":
+            payload = apply_lot_identity_migration(
+                sqlite_path,
+                _load_json_object(_resolve_path_under(args.manifest, base=base)),
+            )
+        else:  # pragma: no cover - argparse owns the command set
+            raise SystemExit(f"unsupported lot identity migration command: {command}")
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
 
