@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 3.5.15 - 2026-09-18
+
+### Bug Fixes
+- Accepted Wheel candidate identities in Daily Brief delivery validation so a single Wheel candidate can no longer abort an entire notification tick, with the identity validator now taking its strategy families, supported markets, and branch suffix from the domain builder instead of a stale copy of that vocabulary.
+
 ## 3.5.14 - 2026-09-18
 
 ### Improvements
