@@ -345,6 +345,7 @@ def plan_wheel_assignment_companion(
         return None, reason
     membership = resolve_option_strategy_membership(
         getattr(event, "contract_key"),
+        getattr(event, "position_side"),
         fields,
         source_id=str(source_open.get("event_id") or ""),
     )
@@ -530,7 +531,7 @@ def append_wheel_trade_companions(
             review_reason_by_trade[event_id] = review_reason
         if companion is None:
             continue
-        membership = resolve_option_strategy_membership(event.contract_key, fields)
+        membership = resolve_option_strategy_membership(event.contract_key, event.position_side, fields)
         internal = membership.strategy == "wheel"
         direction = companion["payload"]["direction"]
         settlement_shares = event.raw_payload["stock_settlement"]["shares"]
@@ -610,7 +611,7 @@ def prepare_wheel_intent_open_event(
         str(getattr(event, "event_type", "") or "").strip().lower() != "open"
         or str(getattr(getattr(event, "contract_key", None), "option_type", ""))
         != "call"
-        or str(getattr(getattr(event, "contract_key", None), "position_side", ""))
+        or str(getattr(event, "position_side", "") or "")
         != "short"
     ):
         return event, None, "not_short_call_open"

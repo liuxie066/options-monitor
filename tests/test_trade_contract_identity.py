@@ -815,9 +815,8 @@ def test_complete_split_requires_every_unique_active_allocation(legacy, quantiti
     void = TradeEvent(
         event_id="void", event_type="void", event_time_ms=1_700_000_000_001,
         contract_key=ContractKey.from_values(
-            broker="futu", account="lx", underlying_symbol="NVDA", option_type="put",
-            position_side="short", strike=100, expiration_ymd="2026-09-18",
-        ),
+            broker="futu", account="lx", underlying_symbol="NVDA", option_type="put", strike=100, expiration_ymd="2026-09-18",
+                ),
         contracts=0, price=0, currency="USD", source="manual",
         target_event_id=rows[1]["event_id"],
     ).to_dict()

@@ -48,10 +48,9 @@ def _combo_missing_branch(tmp_path, *, close_call: bool = True):
         account="lx",
         underlying_symbol="NVDA",
         option_type="call",
-        position_side="long",
         strike=110,
         expiration_ymd="2026-08-21",
-    )
+        )
     call = TradeEvent(
         event_id="call-open",
         event_type="open",
@@ -63,7 +62,9 @@ def _combo_missing_branch(tmp_path, *, close_call: bool = True):
         source="test",
         multiplier=10,
         lot_id="call-lot",
-        raw_payload={**metadata, "leg_role": "participation_call"},
+        # §9.2 step 3: the contract key no longer carries the position side; the
+        # combo's participation leg is a long call, so it opens with a buy.
+        raw_payload={"side": "buy", **metadata, "leg_role": "participation_call"},
     )
     persist_trade_event_objects_atomically(repo, [opening, call])
     identity = build_combo_identity(
@@ -104,7 +105,8 @@ def _combo_missing_branch(tmp_path, *, close_call: bool = True):
                 source="test",
                 multiplier=10,
                 target_lot_id="call-lot",
-                raw_payload={},
+                # §9.2 step 3: closing the combo's long participation call is a sell.
+                raw_payload={"side": "sell"},
             )],
         )
     assert not repo.list_wheel_events(account="lx")

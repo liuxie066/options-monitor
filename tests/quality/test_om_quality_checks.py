@@ -631,17 +631,18 @@ def _open_event(*, event_id: str, deal_id: str, strike: float = 100) -> dict:
             account="lx",
             underlying_symbol="NVDA",
             option_type="put",
-            position_side="short",
             strike=strike,
             expiration_ymd="2026-07-17",
-        ),
+                ),
         contracts=1,
         price=1,
         currency="USD",
         source="futu",
         multiplier=100,
         lot_id=f"lot-{event_id}",
-        raw_payload={"deal_id": deal_id},
+        # §9.2 step 3: the contract key no longer carries the position side, so the
+        # event must declare the trade side the lot direction is derived from.
+        raw_payload={"deal_id": deal_id, "side": "sell"},
     ).to_dict()
 
 
@@ -1606,6 +1607,23 @@ def test_split_quality_requires_source_economics_not_only_agreement_between_even
             raw.pop("qty")
             if canonical:
                 raw["execution_input"].pop("quantity")
+    if change == "side":
+        # §9.2 step 3: the close side is no longer redundant with the contract key,
+        # so a coherent row pair declaring ``sell`` is a valid long close. Only the
+        # target lot knows it is short, so the tamper surfaces as a projection-level
+        # ``target_contract_mismatch`` and the dataset still fails closed. The exact
+        # counts are the point: the economic layer is blind to this tamper by
+        # construction (step 3 removed ``position_side`` from deal identity), so all
+        # of the detection is projection-level and must cover both legs.
+        dataset, check = _split_conservation_check(events)
+        assert check["observed"] == {
+            "duplicate_broker_identity_count": 0,
+            "economic_conflict_count": 0,
+            "projection_error_count": 2,
+        }
+        assert check["status"] == "fail"
+        assert dataset["status"] == "untrusted"
+        return
     assert completed_ledger_deal_keys(events[-2:]) == set()
     dataset, check = _split_conservation_check(events)
     assert check["status"] == "fail"
@@ -1689,7 +1707,6 @@ def test_persisted_split_quality_checks_physical_execution_before_account_scope(
 
 
 def _public_assignment_repo(tmp_path):
-    from domain.domain.option_position_lots import OpenPositionCommand
     from domain.domain.option_lifecycle import expiration_observation_start_ms
     from src.application.ledger.manual_trades import persist_manual_open_event
     from src.application.ledger.repository import SQLiteOptionPositionsRepository
@@ -1699,12 +1716,13 @@ def _public_assignment_repo(tmp_path):
 
     repo = SQLiteOptionPositionsRepository(tmp_path / "assignment.sqlite3")
     for index, count in enumerate((1, 2)):
-        persist_manual_open_event(repo, OpenPositionCommand(
+        persist_manual_open_event(
+            repo,
             broker="富途", account="lx", symbol="TIGR", option_type="put",
             side="short", contracts=count, currency="USD", strike=6.0,
             multiplier=100, expiration_ymd="2026-05-22", premium_per_share=0.2,
             opened_at_ms=1779129617118 + index * 1000,
-        ))
+        )
     observed = expiration_observation_start_ms("2026-05-22", "US")
     discovery = discover_lifecycle_cases(repo, account="lx", observed_at_ms=observed, apply_changes=True)
     assert len(discovery["created_case_ids"]) == 1

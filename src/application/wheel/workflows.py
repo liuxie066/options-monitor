@@ -176,7 +176,7 @@ def decide_wheel_branch(
     account: str,
     wheel_branch_id: str,
     decision: str,
-    expected_branch_generation_hash: str,
+    expected_batch_generation_hash: str,
     request_id: str,
     actor: str,
     market: str,
@@ -188,7 +188,7 @@ def decide_wheel_branch(
     account_value = str(account or "").strip().lower()
     branch_id = str(wheel_branch_id or "").strip()
     decision_value = str(decision or "").strip().lower()
-    expected = str(expected_branch_generation_hash or "").strip()
+    expected = str(expected_batch_generation_hash or "").strip()
     request_value = str(request_id or "").strip()
     actor_value = str(actor or "").strip()
     market_value = _require_market(market)
@@ -250,7 +250,7 @@ def decide_wheel_branch(
             as_of_ms=instant,
             market=market_value,
         )
-        if branch["branch_generation_hash"] != expected:
+        if branch["batch_generation_hash"] != expected:
             raise ValueError("Wheel branch generation changed; refresh before confirming")
         if decision_value == "start":
             _require_current_wheel_activation(
@@ -897,7 +897,6 @@ def _snapshot_final_candidate(
     final_candidate_id: str,
     expected_snapshot_hash: str,
     expected_batch_generation_hash: str | None = None,
-    expected_branch_generation_hash: str | None = None,
 ) -> dict[str, Any]:
     if candidate_snapshot.get("strategy_policy_sha256") != sha256_text(
         current_strategy_policy_sha256, "current_strategy_policy_sha256"
@@ -911,7 +910,7 @@ def _snapshot_final_candidate(
     stock_lot_value = str(stock_lot_id or "").strip()
     direction_value = str(direction or "").strip().lower()
     expected_generation = str(
-        expected_branch_generation_hash or expected_batch_generation_hash or ""
+        expected_batch_generation_hash or ""
     ).strip()
     matches = [
         item
@@ -942,8 +941,8 @@ def _snapshot_final_candidate(
     batch_snapshot = matches[0]
     if (
         str(
-            batch_snapshot.get("branch_generation_hash")
-            or batch_snapshot.get("batch_generation_hash")
+            batch_snapshot.get("batch_generation_hash")
+            or batch_snapshot.get("branch_generation_hash")
             or ""
         ).strip()
         != expected_generation
@@ -1451,7 +1450,6 @@ def confirm_wheel_call_linkage(
                 account=account_value,
                 underlying_symbol=fields.get("symbol"),
                 option_type=fields.get("option_type"),
-                position_side=fields.get("side"),
                 strike=effective_strike(fields),
                 expiration_ymd=effective_expiration_ymd(fields),
             ),
@@ -1753,7 +1751,7 @@ def _canonical_wheel_branch(
     account: str,
     wheel_branch_id: str,
     direction: str,
-    expected_branch_generation_hash: str,
+    expected_batch_generation_hash: str,
     as_of_ms: int,
     market: str | None = None,
 ) -> dict[str, Any]:
@@ -1777,7 +1775,7 @@ def _canonical_wheel_branch(
     branch = matches[0]
     if branch.get("direction") != direction_value:
         raise ValueError("Wheel branch direction mismatch")
-    if branch.get("branch_generation_hash") != expected_branch_generation_hash:
+    if branch.get("batch_generation_hash") != expected_batch_generation_hash:
         raise ValueError("Wheel branch generation changed; refresh before confirming")
     return branch
 
@@ -1812,7 +1810,7 @@ def _wheel_linkage_candidate(
     direction: str,
     linkage_candidate_id: str,
     expected_input_hash: str,
-    expected_branch_generation_hash: str,
+    expected_batch_generation_hash: str,
 ) -> dict[str, Any]:
     matches = [
         item
@@ -1831,8 +1829,8 @@ def _wheel_linkage_candidate(
     candidate = matches[0]
     if (
         candidate.get("input_snapshot_hash") != expected_input_hash
-        or candidate.get("branch_generation_hash")
-        != expected_branch_generation_hash
+        or candidate.get("batch_generation_hash")
+        != expected_batch_generation_hash
     ):
         raise ValueError("Wheel linkage candidate input changed")
     return candidate
@@ -1900,7 +1898,7 @@ def _create_wheel_put_intent(
     wheel_branch_id: str,
     final_candidate_id: str,
     expected_snapshot_hash: str,
-    expected_branch_generation_hash: str,
+    expected_batch_generation_hash: str,
     expires_at_ms: int,
     request_id: str,
     actor: str,
@@ -1933,8 +1931,8 @@ def _create_wheel_put_intent(
                 or str(payload.get("final_candidate_id") or "")
                 != final_candidate_id
                 or str(payload.get("snapshot_hash") or "") != expected_snapshot_hash
-                or str(payload.get("branch_generation_hash") or "")
-                != expected_branch_generation_hash
+                or str(payload.get("batch_generation_hash") or "")
+                != expected_batch_generation_hash
                 or int(payload.get("expires_at_ms") or 0) != int(expires_at_ms)
                 or str(payload.get("broker_order_id") or "")
                 != str(broker_order_id or "").strip()
@@ -1972,7 +1970,7 @@ def _create_wheel_put_intent(
         )
         if branch.get("direction") != "put":
             raise ValueError("Wheel branch direction mismatch")
-        if branch.get("branch_generation_hash") != expected_branch_generation_hash:
+        if branch.get("batch_generation_hash") != expected_batch_generation_hash:
             raise ValueError("stale_snapshot: Wheel branch generation changed")
         candidate = _snapshot_final_candidate(
             candidate_snapshot,
@@ -1982,7 +1980,7 @@ def _create_wheel_put_intent(
             direction="put",
             final_candidate_id=final_candidate_id,
             expected_snapshot_hash=expected_snapshot_hash,
-            expected_branch_generation_hash=expected_branch_generation_hash,
+            expected_batch_generation_hash=expected_batch_generation_hash,
         )
         summaries = project_wheel_intents(
             rows.get("account_wheel_events") or [],
@@ -2090,7 +2088,7 @@ def create_wheel_intent(
     direction: str,
     final_candidate_id: str,
     expected_snapshot_hash: str,
-    expected_branch_generation_hash: str,
+    expected_batch_generation_hash: str,
     expires_at_ms: int,
     request_id: str,
     actor: str,
@@ -2117,8 +2115,8 @@ def create_wheel_intent(
             wheel_branch_id=branch_id,
             final_candidate_id=str(final_candidate_id or "").strip(),
             expected_snapshot_hash=str(expected_snapshot_hash or "").strip(),
-            expected_branch_generation_hash=str(
-                expected_branch_generation_hash or ""
+            expected_batch_generation_hash=str(
+                expected_batch_generation_hash or ""
             ).strip(),
             expires_at_ms=int(expires_at_ms),
             request_id=str(request_id or "").strip(),
@@ -2137,7 +2135,7 @@ def create_wheel_intent(
         account=account_value,
         wheel_branch_id=branch_id,
         direction=direction_value,
-        expected_branch_generation_hash=str(expected_branch_generation_hash or "").strip(),
+        expected_batch_generation_hash=str(expected_batch_generation_hash or "").strip(),
         as_of_ms=instant,
         market=market_value,
     )
@@ -2152,7 +2150,7 @@ def create_wheel_intent(
         stock_lot_id=stock_lot_id,
         final_candidate_id=final_candidate_id,
         expected_snapshot_hash=expected_snapshot_hash,
-        expected_batch_generation_hash=expected_branch_generation_hash,
+        expected_batch_generation_hash=expected_batch_generation_hash,
         expires_at_ms=expires_at_ms,
         request_id=request_id,
         actor=actor,
@@ -2180,7 +2178,7 @@ def cancel_wheel_intent(
     wheel_branch_id: str,
     direction: str,
     intent_id: str,
-    expected_branch_generation_hash: str,
+    expected_batch_generation_hash: str,
     request_id: str,
     actor: str,
     broker_order_inactive_confirmed: bool,
@@ -2220,8 +2218,8 @@ def cancel_wheel_intent(
                     existing[0].get("wheel_branch_id") != branch_id
                     or str(payload.get("actor") or "") != actor
                     or str(payload.get("reason") or "") != reason
-                    or str(payload.get("branch_generation_hash") or "")
-                    != expected_branch_generation_hash
+                    or str(payload.get("batch_generation_hash") or "")
+                    != expected_batch_generation_hash
                     or payload.get("broker_order_inactive_confirmed") is not True
                     or str(payload.get("market") or "").strip().lower()
                     != market_value
@@ -2247,7 +2245,7 @@ def cancel_wheel_intent(
             )
             if branch.get("direction") != "put":
                 raise ValueError("Wheel branch direction mismatch")
-            if branch.get("branch_generation_hash") != expected_branch_generation_hash:
+            if branch.get("batch_generation_hash") != expected_batch_generation_hash:
                 raise ValueError(
                     "Wheel branch generation changed; refresh before confirming"
                 )
@@ -2346,7 +2344,7 @@ def cancel_wheel_intent(
         account=account_value,
         wheel_branch_id=branch_id,
         direction=direction_value,
-        expected_branch_generation_hash=str(expected_branch_generation_hash or "").strip(),
+        expected_batch_generation_hash=str(expected_batch_generation_hash or "").strip(),
         as_of_ms=instant,
         market=market_value,
     )
@@ -2358,7 +2356,7 @@ def cancel_wheel_intent(
         account=account_value,
         stock_lot_id=stock_lot_id,
         intent_id=intent_id,
-        expected_batch_generation_hash=expected_branch_generation_hash,
+        expected_batch_generation_hash=expected_batch_generation_hash,
         request_id=request_id,
         actor=actor,
         broker_order_inactive_confirmed=broker_order_inactive_confirmed,
@@ -2384,7 +2382,7 @@ def confirm_wheel_linkage(
     direction: str,
     linkage_candidate_id: str,
     expected_input_hash: str,
-    expected_branch_generation_hash: str,
+    expected_batch_generation_hash: str,
     request_id: str,
     actor: str,
     capacity_fact: Mapping[str, Any],
@@ -2404,8 +2402,8 @@ def confirm_wheel_linkage(
             "wheel_branch_id": branch_id,
             "linkage_candidate_id": str(linkage_candidate_id or "").strip(),
             "expected_input_hash": str(expected_input_hash or "").strip(),
-            "expected_branch_generation_hash": str(
-                expected_branch_generation_hash or ""
+            "expected_batch_generation_hash": str(
+                expected_batch_generation_hash or ""
             ).strip(),
             "request_id": str(request_id or "").strip(),
             "actor": str(actor or "").strip(),
@@ -2443,8 +2441,8 @@ def confirm_wheel_linkage(
                     != values["linkage_candidate_id"]
                     or str(payload.get("input_snapshot_hash") or "")
                     != values["expected_input_hash"]
-                    or str(payload.get("branch_generation_hash") or "")
-                    != values["expected_branch_generation_hash"]
+                    or str(payload.get("batch_generation_hash") or "")
+                    != values["expected_batch_generation_hash"]
                     or str(payload.get("market") or "").strip().lower()
                     != market_value
                 ):
@@ -2475,8 +2473,8 @@ def confirm_wheel_linkage(
                 direction="put",
                 linkage_candidate_id=values["linkage_candidate_id"],
                 expected_input_hash=values["expected_input_hash"],
-                expected_branch_generation_hash=values[
-                    "expected_branch_generation_hash"
+                expected_batch_generation_hash=values[
+                    "expected_batch_generation_hash"
                 ],
             )
             branch = next(
@@ -2512,7 +2510,6 @@ def confirm_wheel_linkage(
                     account=account_value,
                     underlying_symbol=fields.get("symbol"),
                     option_type=fields.get("option_type"),
-                    position_side=fields.get("side"),
                     strike=effective_strike(fields),
                     expiration_ymd=effective_expiration_ymd(fields),
                 ),
@@ -2534,8 +2531,8 @@ def confirm_wheel_linkage(
                     "wheel_linkage_request_id": values["request_id"],
                     "linkage_candidate_id": values["linkage_candidate_id"],
                     "input_snapshot_hash": values["expected_input_hash"],
-                    "branch_generation_hash": values[
-                        "expected_branch_generation_hash"
+                    "batch_generation_hash": values[
+                        "expected_batch_generation_hash"
                     ],
                     "actor": values["actor"],
                     "source_wheel_branch_id": branch_id,
@@ -2682,7 +2679,7 @@ def confirm_wheel_linkage(
         account=account_value,
         wheel_branch_id=branch_id,
         direction=direction_value,
-        expected_branch_generation_hash=str(expected_branch_generation_hash or "").strip(),
+        expected_batch_generation_hash=str(expected_batch_generation_hash or "").strip(),
         as_of_ms=instant,
         market=market_value,
     )
@@ -2696,7 +2693,7 @@ def confirm_wheel_linkage(
         stock_lot_id=stock_lot_id,
         linkage_candidate_id=linkage_candidate_id,
         expected_input_hash=expected_input_hash,
-        expected_batch_generation_hash=expected_branch_generation_hash,
+        expected_batch_generation_hash=expected_batch_generation_hash,
         request_id=request_id,
         actor=actor,
         coverage_fact=capacity_fact,
@@ -2722,7 +2719,7 @@ def reject_wheel_linkage(
     direction: str,
     linkage_candidate_id: str,
     expected_input_hash: str,
-    expected_branch_generation_hash: str,
+    expected_batch_generation_hash: str,
     request_id: str,
     actor: str,
     reason: str,
@@ -2742,8 +2739,8 @@ def reject_wheel_linkage(
             "wheel_branch_id": branch_id,
             "linkage_candidate_id": str(linkage_candidate_id or "").strip(),
             "expected_input_hash": str(expected_input_hash or "").strip(),
-            "expected_branch_generation_hash": str(
-                expected_branch_generation_hash or ""
+            "expected_batch_generation_hash": str(
+                expected_batch_generation_hash or ""
             ).strip(),
             "request_id": str(request_id or "").strip(),
             "actor": str(actor or "").strip(),
@@ -2778,8 +2775,8 @@ def reject_wheel_linkage(
                     != values["linkage_candidate_id"]
                     or str(payload.get("input_snapshot_hash") or "")
                     != values["expected_input_hash"]
-                    or str(payload.get("branch_generation_hash") or "")
-                    != values["expected_branch_generation_hash"]
+                    or str(payload.get("batch_generation_hash") or "")
+                    != values["expected_batch_generation_hash"]
                     or str(payload.get("actor") or "") != values["actor"]
                     or str(payload.get("reason") or "") != values["reason"]
                     or str(payload.get("market") or "").strip().lower()
@@ -2812,8 +2809,8 @@ def reject_wheel_linkage(
                 direction="put",
                 linkage_candidate_id=values["linkage_candidate_id"],
                 expected_input_hash=values["expected_input_hash"],
-                expected_branch_generation_hash=values[
-                    "expected_branch_generation_hash"
+                expected_batch_generation_hash=values[
+                    "expected_batch_generation_hash"
                 ],
             )
             digest = canonical_sha256(
@@ -2842,8 +2839,8 @@ def reject_wheel_linkage(
                     "option_open_event_id": candidate["option_open_event_id"],
                     "linkage_candidate_id": values["linkage_candidate_id"],
                     "input_snapshot_hash": values["expected_input_hash"],
-                    "branch_generation_hash": values[
-                        "expected_branch_generation_hash"
+                    "batch_generation_hash": values[
+                        "expected_batch_generation_hash"
                     ],
                     "request_id": values["request_id"],
                     "actor": values["actor"],
@@ -2903,7 +2900,7 @@ def reject_wheel_linkage(
         account=account_value,
         wheel_branch_id=branch_id,
         direction=direction_value,
-        expected_branch_generation_hash=str(expected_branch_generation_hash or "").strip(),
+        expected_batch_generation_hash=str(expected_batch_generation_hash or "").strip(),
         as_of_ms=instant,
         market=market_value,
     )
@@ -2917,7 +2914,7 @@ def reject_wheel_linkage(
         stock_lot_id=stock_lot_id,
         linkage_candidate_id=linkage_candidate_id,
         expected_input_hash=expected_input_hash,
-        expected_batch_generation_hash=expected_branch_generation_hash,
+        expected_batch_generation_hash=expected_batch_generation_hash,
         request_id=request_id,
         actor=actor,
         reason=reason,
@@ -3035,7 +3032,7 @@ def _branch_decision_result(
             "event_id": event.get("event_id"),
             "request_id": payload.get("request_id"),
             "market": payload.get("market"),
-            "expected_branch_generation_hash": payload.get(
+            "expected_batch_generation_hash": payload.get(
                 "expected_generation_hash"
             ),
             "lifecycle_status_after": status_after,

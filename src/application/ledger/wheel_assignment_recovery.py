@@ -157,7 +157,7 @@ def _plan(reader: Any, conn: sqlite3.Connection, path: Path, account: str, marke
         for item in rows["account_strategy_group_identities"]
     }
     membership = resolve_option_strategy_membership(
-        key, fields, valid_combo_group_ids=valid_combo_ids,
+        key, assignment.position_side, fields, valid_combo_group_ids=valid_combo_ids,
     )
     planned_fields = fields
     allowed_later: set[str] = set()

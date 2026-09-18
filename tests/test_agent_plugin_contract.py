@@ -369,7 +369,7 @@ def test_agent_tool_output_contracts_advertise_model_visible_data_shape() -> Non
     assert "wheel_branches[].parent_branch_id" in assigned_stock_contract["fact_fields"]
     assert "wheel_branches[].direction" in assigned_stock_contract["fact_fields"]
     assert "wheel_branches[].source_assignment_event_id" in assigned_stock_contract["fact_fields"]
-    assert "wheel_branches[].branch_generation_hash" in assigned_stock_contract["fact_fields"]
+    assert "wheel_branches[].batch_generation_hash" in assigned_stock_contract["fact_fields"]
     list_wrapped_assigned_stock_contract = positions.resolve_output_contract({"action": ["assigned-stock"]})
     assert list_wrapped_assigned_stock_contract == assigned_stock_contract
 

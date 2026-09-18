@@ -21,27 +21,30 @@ def _int_or_zero(value: Any) -> int:
 
 @dataclass(frozen=True)
 class PositionLotSnapshot:
-    record_id: str | None
+    lot_id: str | None
     fields: dict[str, Any]
 
     @classmethod
     def from_record(cls, item: dict[str, Any]) -> "PositionLotSnapshot":
         fields = item.get("fields") if isinstance(item, dict) else None
         fields_dict = dict(fields) if isinstance(fields, dict) else {}
-        record_id = _text_or_none(item.get("record_id") if isinstance(item, dict) else None)
-        if record_id is None:
-            record_id = _text_or_none(fields_dict.get("record_id"))
-        return cls(record_id=record_id, fields=fields_dict)
+        lot_id = _text_or_none(
+            (item.get("lot_id") if isinstance(item, dict) else None)
+            or (item.get("record_id") if isinstance(item, dict) else None)
+        )
+        if lot_id is None:
+            lot_id = _text_or_none(fields_dict.get("record_id"))
+        return cls(lot_id=lot_id, fields=fields_dict)
 
     def as_record(self) -> dict[str, Any]:
-        return {"record_id": self.record_id, "fields": dict(self.fields)}
+        return {"lot_id": self.lot_id, "fields": dict(self.fields)}
 
 
 @dataclass(frozen=True)
 class RiskPositionView:
-    record_id: str | None
+    lot_id: str | None
     fields: dict[str, Any]
-    position_id: str | None
+    position_key: str | None
     broker: str | None
     account: str | None
     symbol: str | None
@@ -50,7 +53,6 @@ class RiskPositionView:
     status: str | None
     strike: Any
     multiplier: Any
-    expiration: Any
     expiration_ymd: str | None
     expiration_date: date | None
     contracts: int
@@ -71,9 +73,14 @@ class RiskPositionView:
         fields = view.get("fields") if isinstance(view, dict) else None
         fields_dict = dict(fields) if isinstance(fields, dict) else {}
         return cls(
-            record_id=_text_or_none(view.get("record_id")) if isinstance(view, dict) else None,
+            lot_id=_text_or_none(
+                (view.get("lot_id") if isinstance(view, dict) else None)
+                or (view.get("record_id") if isinstance(view, dict) else None)
+            ),
             fields=fields_dict,
-            position_id=_text_or_none(view.get("position_id")) if isinstance(view, dict) else None,
+            # §7.1: ``position_id`` is retired; ``position_key`` is the single
+            # derived display/aggregation key.
+            position_key=_text_or_none(view.get("position_key")) if isinstance(view, dict) else None,
             broker=_text_or_none(view.get("broker")) if isinstance(view, dict) else None,
             account=_text_or_none(view.get("account")) if isinstance(view, dict) else None,
             symbol=_text_or_none(view.get("symbol")) if isinstance(view, dict) else None,
@@ -82,7 +89,7 @@ class RiskPositionView:
             status=_text_or_none(view.get("status")) if isinstance(view, dict) else None,
             strike=view.get("strike") if isinstance(view, dict) else None,
             multiplier=view.get("multiplier") if isinstance(view, dict) else None,
-            expiration=view.get("expiration") if isinstance(view, dict) else None,
+            # §7.2: expiration_ymd is the single expiry field of the read model.
             expiration_ymd=_text_or_none(view.get("expiration_ymd")) if isinstance(view, dict) else None,
             expiration_date=(
                 view.get("expiration_date")
@@ -113,17 +120,17 @@ class RiskPositionView:
         return not self.status or self.status == "open"
 
     def as_shadow_record(self) -> dict[str, Any] | None:
-        if not self.record_id:
+        if not self.lot_id:
             return None
-        return {"record_id": self.record_id, "fields": dict(self.fields)}
+        return {"lot_id": self.lot_id, "fields": dict(self.fields)}
 
     def as_open_position_min(self, *, as_of_date: date) -> dict[str, Any]:
         days_to_expiration = (
             (self.expiration_date - as_of_date).days if self.expiration_date is not None else None
         )
         return {
-            "record_id": self.record_id,
-            "position_id": self.position_id,
+            "lot_id": self.lot_id,
+            "position_key": self.position_key,
             "broker": self.broker,
             "account": self.account,
             "symbol": self.canonical_underlying_symbol,
@@ -139,7 +146,6 @@ class RiskPositionView:
             "strike": self.strike,
             "multiplier": self.multiplier,
             "premium": self.premium,
-            "expiration": self.expiration,
             "expiration_ymd": self.expiration_ymd,
             "days_to_expiration": days_to_expiration,
             "opened_at": self.opened_at,

@@ -1151,10 +1151,7 @@ def run_watchlist_pipeline_default(
                         or branch.get("stock_lot_id"),
                         "direction": direction,
                         "stock_lot_id": branch.get("stock_lot_id"),
-                        "branch_generation_hash": branch.get("branch_generation_hash")
-                        or branch.get("batch_generation_hash"),
-                        "batch_generation_hash": branch.get("batch_generation_hash")
-                        or branch.get("branch_generation_hash"),
+                        "batch_generation_hash": branch.get("batch_generation_hash"),
                         "projection_hash": branch.get("projection_hash"),
                         "shares_remaining": int(branch.get("shares_remaining") or 0),
                         "remaining_contracts": int(

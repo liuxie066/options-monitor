@@ -39,7 +39,7 @@ def _lot(
         "symbol": symbol,
         "option_type": option_type,
         "position_side": "short" if option_type == "put" else "long",
-        "contracts_original": contracts,
+        "contracts_opened": contracts,
         "contracts_open": contracts if contracts_open is None else contracts_open,
         "currency": "USD",
         "multiplier": 100,
@@ -205,7 +205,7 @@ def test_discrete_candidate_priority_can_outweigh_more_structural_pairs() -> Non
 
 def test_partial_or_grouped_lot_fails_closed() -> None:
     partial = deepcopy(_pair()[0])
-    partial["contracts_original"] = 2
+    partial["contracts_opened"] = 2
     partial["contracts_open"] = 1
     grouped = deepcopy(_pair()[1])
     grouped["strategy_group_id"] = "existing-group"

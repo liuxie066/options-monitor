@@ -59,7 +59,7 @@ def _oracle_assigned_stock_report(
     projected = project_stored_trade_events_to_position_lots(event_rows)
     del diagnostics
     current_fields_by_lot_id = {
-        item.record_id: item.fields for item in projected.lots
+        item.lot_id: item.fields for item in projected.lots
     }
     return project_assigned_stock_lifecycle(
         [assigned_stock_trade_event_row(event) for event in events],

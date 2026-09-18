@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 from domain.domain.ledger import ContractKey, TradeEvent
+from domain.domain.trade_contract_identity import derive_trade_side
 import src.application.ledger.manual_trades as ledger_manual_trades
 import src.application.ledger.repository as ledger_repository
 
@@ -24,7 +25,7 @@ def _position_fields(
     assert exp_ms is not None
     return {
         "record_id": record_id,
-        "position_id": record_id,
+        "position_key": record_id,
         "status": "open",
         "contracts": contracts_open,
         "contracts_open": contracts_open,
@@ -54,17 +55,21 @@ def _open_event_from_fields(fields: dict[str, Any], *, event_id: str = "open-put
             account=fields.get("account"),
             underlying_symbol=fields.get("symbol"),
             option_type=fields.get("option_type"),
-            position_side=fields.get("side"),
             strike=fields.get("strike"),
             expiration_ymd=effective_expiration_ymd(fields),
-        ),
+                ),
         contracts=int(fields.get("contracts") or fields.get("contracts_open") or 0),
         price=1.0,
         currency=str(fields.get("currency") or "HKD"),
         source="test_seed_open_lot",
         multiplier=float(fields.get("multiplier") or 100),
         lot_id=str(fields.get("record_id") or ""),
-        raw_payload={"source_type": "test_seed"},
+        raw_payload={
+            # §9.2 step 3: the contract key no longer carries the position
+            # side, so translate the record's side into the trade side.
+            "side": derive_trade_side("open", fields.get("side")) or "",
+            "source_type": "test_seed",
+        },
     ).to_dict()
 
 
@@ -100,10 +105,9 @@ def _history_with_invalid_close(*, voided: bool) -> list[dict[str, Any]]:
         account=fields["account"],
         underlying_symbol=fields["symbol"],
         option_type=fields["option_type"],
-        position_side=fields["side"],
         strike=fields["strike"],
         expiration_ymd="2026-05-28",
-    )
+        )
     invalid_close_id = "invalid-close"
     events = [
         _open_event_from_fields(fields),
@@ -139,27 +143,24 @@ def _history_with_invalid_close(*, voided: bool) -> list[dict[str, Any]]:
 
 
 def test_manual_open_ledger_service_projects_new_lot(tmp_path: Path) -> None:
-    from domain.domain.option_position_lots import OpenPositionCommand
     from src.application.ledger.commands import persist_manual_open_event_with_ledger
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
 
     result = persist_manual_open_event_with_ledger(
         repo,
-        OpenPositionCommand(
-            broker="富途",
-            account="sy",
-            symbol="0700.HK",
-            option_type="put",
-            side="short",
-            contracts=6,
-            currency="HKD",
-            strike=450.0,
-            multiplier=100,
-            expiration_ymd="2026-05-28",
-            premium_per_share=8.0,
-            opened_at_ms=1000,
-        ),
+        broker="富途",
+        account="sy",
+        symbol="0700.HK",
+        option_type="put",
+        side="short",
+        contracts=6,
+        currency="HKD",
+        strike=450.0,
+        multiplier=100,
+        expiration_ymd="2026-05-28",
+        premium_per_share=8.0,
+        opened_at_ms=1000,
     )
 
     assert result.ledger_preflight.status == "ok"
@@ -176,26 +177,23 @@ def test_manual_open_ledger_service_projects_new_lot(tmp_path: Path) -> None:
 
 
 def test_manual_close_ledger_service_closes_exact_lot(tmp_path: Path) -> None:
-    from domain.domain.option_position_lots import OpenPositionCommand
     from src.application.ledger.commands import persist_manual_close_event_with_ledger
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     ledger_manual_trades.persist_manual_open_event(
         repo,
-        OpenPositionCommand(
-            broker="富途",
-            account="sy",
-            symbol="0700.HK",
-            option_type="put",
-            side="short",
-            contracts=6,
-            currency="HKD",
-            strike=450.0,
-            multiplier=100,
-            expiration_ymd="2026-05-28",
-            premium_per_share=8.0,
-            opened_at_ms=1000,
-        ),
+        broker="富途",
+        account="sy",
+        symbol="0700.HK",
+        option_type="put",
+        side="short",
+        contracts=6,
+        currency="HKD",
+        strike=450.0,
+        multiplier=100,
+        expiration_ymd="2026-05-28",
+        premium_per_share=8.0,
+        opened_at_ms=1000,
     )
     lot = repo.list_position_lots()[0]
 
@@ -221,26 +219,23 @@ def test_manual_close_ledger_service_closes_exact_lot(tmp_path: Path) -> None:
 
 
 def test_manual_adjust_ledger_service_targets_exact_lot(tmp_path: Path) -> None:
-    from domain.domain.option_position_lots import OpenPositionCommand
     from src.application.ledger.commands import persist_manual_adjust_event_with_ledger
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     ledger_manual_trades.persist_manual_open_event(
         repo,
-        OpenPositionCommand(
-            broker="富途",
-            account="sy",
-            symbol="0700.HK",
-            option_type="put",
-            side="short",
-            contracts=6,
-            currency="HKD",
-            strike=450.0,
-            multiplier=100,
-            expiration_ymd="2026-05-28",
-            premium_per_share=8.0,
-            opened_at_ms=1000,
-        ),
+        broker="富途",
+        account="sy",
+        symbol="0700.HK",
+        option_type="put",
+        side="short",
+        contracts=6,
+        currency="HKD",
+        strike=450.0,
+        multiplier=100,
+        expiration_ymd="2026-05-28",
+        premium_per_share=8.0,
+        opened_at_ms=1000,
     )
     lot = repo.list_position_lots()[0]
 
@@ -262,7 +257,7 @@ def test_manual_adjust_ledger_service_targets_exact_lot(tmp_path: Path) -> None:
     adjusted = repo.get_record_fields(lot["record_id"])
     assert adjusted["contracts"] == 5
     assert adjusted["contracts_open"] == 5
-    assert adjusted["premium"] == 8.5
+    assert adjusted["premium"] == "8.5"
     assert repo.list_trade_events()[-1]["raw_payload"]["record_id"] == lot["record_id"]
 
 

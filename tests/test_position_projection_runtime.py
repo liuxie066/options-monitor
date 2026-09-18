@@ -9,6 +9,7 @@ import tracemalloc
 import pytest
 
 from domain.domain.ledger import ContractKey, TradeEvent
+from domain.domain.trade_contract_identity import derive_trade_side
 from src.application.ledger.position_projection_publication import (
     read_current_position_projection,
 )
@@ -37,10 +38,9 @@ def _key(*, account: str = "lx", symbol: str = "NVDA") -> ContractKey:
         account=account,
         underlying_symbol=symbol,
         option_type="put",
-        position_side="short",
         strike=100,
         expiration_ymd="2026-06-19",
-    )
+        )
 
 
 def _event(
@@ -57,6 +57,10 @@ def _event(
     price: float = 1.5,
     raw_payload: dict[str, object] | None = None,
 ) -> TradeEvent:
+    # §9.2 step 3: the contract key no longer carries the position side, so the
+    # event must expose the trade side it was derived from.
+    payload = dict(raw_payload or {})
+    payload.setdefault("side", derive_trade_side(event_type, "short") or "")
     return TradeEvent(
         event_id=event_id,
         event_type=event_type,
@@ -70,7 +74,7 @@ def _event(
         lot_id=lot_id,
         target_lot_id=target_lot_id,
         target_event_id=target_event_id,
-        raw_payload=dict(raw_payload or {}),
+        raw_payload=payload,
     )
 
 

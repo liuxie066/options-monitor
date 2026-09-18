@@ -294,7 +294,7 @@ def build_option_economic_allocation(
     quantity = Decimal(contracts)
     gross_open_abs = quantize_money(open_price * multiplier * quantity)
     gross_close_abs = quantize_money(close_price * multiplier * quantity)
-    if lot.contract_key.position_side == "short":
+    if lot.position_side == "short":
         open_amount = gross_open_abs
         close_amount = -gross_close_abs
     else:
@@ -331,7 +331,7 @@ def build_option_economic_allocation(
             contracts=contracts,
             multiplier=multiplier,
             currency=lot.currency,
-            position_side=lot.contract_key.position_side,
+            position_side=lot.position_side,
             close_type=close_type,
             open_price=open_price,
             close_price=close_price,

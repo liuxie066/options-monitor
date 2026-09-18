@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 
 import pytest
 
 from domain.domain.ledger import ContractKey, TradeEvent
+from domain.domain.trade_contract_identity import derive_trade_side
 from src.application.ledger.combo_reconciliation import (
     adopt_post_trade_combo_pair,
     reconcile_combo_pair_inferences,
@@ -44,16 +46,18 @@ def _event(
             account="lx",
             underlying_symbol="NVDA",
             option_type=option_type,
-            position_side=position_side,
             strike=strike,
             expiration_ymd="2026-08-21",
-        ),
+                ),
         contracts=1,
         price=1,
         currency="USD",
         source="test",
         lot_id=record_id,
         raw_payload={
+            # §9.2 step 3: the contract key no longer carries the position side,
+            # so the fixture's side travels as the trade side of this open.
+            "side": derive_trade_side("open", position_side) or "",
             "_trade_intake_source": {
                 "schema_version": "trade_intake_source.v1",
                 "transport": "push",
@@ -126,6 +130,106 @@ def test_application_reconcile_is_post_trade_and_persists_only_inference_state(
         not item["fields"].get("strategy_group_id")
         for item in repo.list_position_lots()
     )
+
+
+def _rewrite_stored_snapshot(
+    repo: SQLiteOptionPositionsRepository,
+    *,
+    inference_id: str,
+    mutate,
+) -> None:
+    """Rewrite a persisted inference's lot snapshots in place, bypassing the writer."""
+    with repo._connect() as conn:  # noqa: SLF001 - persisted-input fixture
+        row = conn.execute(
+            "SELECT raw_json FROM combo_pair_inferences WHERE inference_id = ?",
+            (inference_id,),
+        ).fetchone()
+        assert row is not None
+        payload = json.loads(row["raw_json"])
+        for prefix in ("put", "call"):
+            mutate(payload[f"{prefix}_lot_snapshot"])
+        conn.execute(
+            "UPDATE combo_pair_inferences SET raw_json = ? WHERE inference_id = ?",
+            (
+                json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                inference_id,
+            ),
+        )
+
+
+def test_confirm_accepts_legacy_contracts_original_snapshot_key(tmp_path) -> None:
+    """§7.3 renamed the snapshot field ``contracts_original`` -> ``contracts_opened``.
+
+    Inferences persisted before the rename still carry the old key. The
+    confirmation precondition reads the stored snapshot by the *current* field
+    name, so without a read-side alias the unchanged quantity is reported as
+    ``contracts_opened`` changed and confirmation hard-fails with a misleading
+    "input facts changed" error on rows that are actually intact.
+    """
+    repo = SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    for event in (
+        _event(
+            "call-open",
+            "call-lot",
+            option_type="call",
+            position_side="long",
+            strike=110,
+            event_time_ms=BASE_TIME_MS + 1_000,
+        ),
+        _event(
+            "put-open",
+            "put-lot",
+            option_type="put",
+            position_side="short",
+            strike=100,
+            event_time_ms=BASE_TIME_MS + 2_000,
+        ),
+    ):
+        persist_trade_event_object(repo, event)
+    reconciled = reconcile_combo_pair_inferences(
+        repo=repo,
+        account="lx",
+        runtime_environment=RUNTIME_ENVIRONMENT,
+        persist=True,
+        effective_now_ms=BASE_TIME_MS + 3_000,
+    )
+    proposal = reconciled["inferences"][0]
+
+    def to_legacy(snapshot: dict) -> None:
+        assert snapshot.pop("contracts_opened") == 1
+        snapshot["contracts_original"] = 1
+
+    _rewrite_stored_snapshot(
+        repo, inference_id=proposal["inference_id"], mutate=to_legacy
+    )
+
+    preview = adopt_post_trade_combo_pair(
+        repo=repo,
+        inference_id=proposal["inference_id"],
+        expected_input_hash=proposal["input_snapshot_hash"],
+        actor="tester",
+        apply_changes=False,
+        effective_now_ms=BASE_TIME_MS + 4_000,
+    )
+    assert preview["status"] == "dry_run"
+
+    # The alias must only bridge the key rename: a genuine fact change still
+    # has to abort, otherwise the precondition has been blunted into a no-op.
+    def to_drifted_strike(snapshot: dict) -> None:
+        snapshot["strike"] = "999"
+
+    _rewrite_stored_snapshot(
+        repo, inference_id=proposal["inference_id"], mutate=to_drifted_strike
+    )
+    with pytest.raises(ValueError, match="input facts changed: .*strike"):
+        adopt_post_trade_combo_pair(
+            repo=repo,
+            inference_id=proposal["inference_id"],
+            expected_input_hash=proposal["input_snapshot_hash"],
+            actor="tester",
+            apply_changes=False,
+            effective_now_ms=BASE_TIME_MS + 4_000,
+        )
 
 
 def test_confirm_reject_and_supersede_are_exact_atomic_decisions(tmp_path) -> None:
@@ -397,7 +501,8 @@ def test_reconcile_fails_closed_when_open_event_runtime_source_is_missing(
                 strike=110,
                 event_time_ms=BASE_TIME_MS + 2_000,
             ),
-            raw_payload={},
+            # §9.2 step 3: still a long call open, but without an intake source.
+            raw_payload={"side": "buy"},
         ),
     )
 

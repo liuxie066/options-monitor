@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from domain.domain.ledger import ContractKey, TradeEvent
+from domain.domain.ledger.identity import position_key_for
 from domain.domain.option_lifecycle import expiration_observation_start_ms
 from src.application.ledger.api import (
     lifecycle_option_close_anchor_facts,
@@ -74,10 +75,9 @@ def _open_event() -> TradeEvent:
         account="lx",
         underlying_symbol="NVDA",
         option_type="put",
-        position_side="short",
         strike=100,
         expiration_ymd=EXPIRATION_YMD,
-    )
+        )
     return TradeEvent(
         event_id="open-1",
         event_type="open",
@@ -351,6 +351,10 @@ def _legacy_terminal_mapping_fixture(
                     if adopted_event
                     else {"case_id": case_id}
                 ),
+                # §9.2 step 3: the contract key no longer carries the position
+                # side, so the assignment of the short put travels as the trade
+                # side (a close of a short put is a buy).
+                "side": "buy",
                 "target_lot_id": "lot-1",
             },
         ),
@@ -687,10 +691,9 @@ def test_migration_upgrades_unique_legacy_case_with_bridge(
         account="lx",
         underlying_symbol="NVDA",
         option_type="put",
-        position_side="short",
         strike=100,
         expiration_ymd=EXPIRATION_YMD,
-    )
+        )
     legacy_id = "legacy-case-1"
     assert repo.upsert_trade_lifecycle_case(
         {
@@ -699,7 +702,7 @@ def test_migration_upgrades_unique_legacy_case_with_bridge(
             "case_key": legacy_id,
             "account": "lx",
             "broker": "futu",
-            "contract_key": contract.position_key,
+            "contract_key": position_key_for(contract, "short"),
             "position_side": "short",
             "expiration_ymd": EXPIRATION_YMD,
             "market": "US",

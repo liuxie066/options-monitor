@@ -15,7 +15,6 @@ from domain.domain.performance.cash_conversion import (
     MAX_HISTORICAL_CARRY_FORWARD_DISTANCE_MS,
     validate_observed_cash_conversion,
 )
-from domain.domain.option_position_lots import OpenPositionCommand
 from src.application.cash_conversion import build_cash_conversion
 from src.application.ledger import writer_trade_events as ledger_writer
 from src.application.ledger.commands import record_manual_assignment
@@ -45,10 +44,9 @@ def _open_event(event_id: str, *, price: float) -> TradeEvent:
             account="lx",
             underlying_symbol="NVDA",
             option_type="put",
-            position_side="short",
             strike=100,
             expiration_ymd="2026-08-21",
-        ),
+                ),
         contracts=1,
         price=price,
         currency="USD",
@@ -56,7 +54,8 @@ def _open_event(event_id: str, *, price: float) -> TradeEvent:
         multiplier=100,
         fees=0.0,
         lot_id=f"lot-{event_id}",
-        raw_payload={},
+        # §9.2 step 3: the short put side travels as the trade side.
+        raw_payload={"side": "sell"},
     )
 
 
@@ -255,20 +254,18 @@ def test_assignment_and_assigned_stock_sale_store_their_own_cny_cash(
     monkeypatch.setattr("src.application.ledger.writer_lifecycle_evidence.load_cash_fx_payload", lambda _repo, **_kwargs: fx_payload)
     persist_manual_open_event(
         repo,
-        OpenPositionCommand(
-            broker="富途",
-            account="lx",
-            symbol="NVDA",
-            option_type="put",
-            side="short",
-            contracts=1,
-            currency="USD",
-            strike=100.0,
-            multiplier=100,
-            expiration_ymd="2026-08-21",
-            premium_per_share=2.5,
-            opened_at_ms=_ms("2026-07-23T08:00:00"),
-        ),
+        broker="富途",
+        account="lx",
+        symbol="NVDA",
+        option_type="put",
+        side="short",
+        contracts=1,
+        currency="USD",
+        strike=100.0,
+        multiplier=100,
+        expiration_ymd="2026-08-21",
+        premium_per_share=2.5,
+        opened_at_ms=_ms("2026-07-23T08:00:00"),
     )
     lot = repo.list_position_lots()[0]
     persist_trade_event_object(repo, replace(
@@ -315,12 +312,13 @@ def _sale_fx_fixture(tmp_path: Path, monkeypatch, *, initialized: bool = True):
         if not initialized:
             # Represent an existing ledger from before FX evidence persistence.
             patch.setattr(ledger_writer, "load_cash_fx_payload", lambda *_args, **_kwargs: None)
-        persist_manual_open_event(repo, OpenPositionCommand(
+        persist_manual_open_event(
+            repo,
             broker="富途", account="lx", symbol="NVDA", option_type="put", side="short",
             contracts=1, currency="USD", strike=100, multiplier=100,
             expiration_ymd="2026-08-21", premium_per_share=2.5,
             opened_at_ms=_ms("2026-07-23T08:00:00"),
-        ))
+        )
         record_manual_assignment(repo, record_id=repo.list_position_lots()[0]["record_id"],
             contracts_to_close=1, stock_side="buy", stock_qty=100, stock_price=100,
             as_of_ms=_ms("2026-07-23T09:00:00"))

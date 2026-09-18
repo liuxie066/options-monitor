@@ -104,10 +104,9 @@ def _repo_with_pending_case(
         account="lx",
         underlying_symbol="NVDA",
         option_type="put",
-        position_side="short",
         strike=100,
         expiration_ymd=EXPIRATION_YMD,
-    )
+        )
     persist_trade_event_object(
         repo,
         TradeEvent(
@@ -289,10 +288,9 @@ def _add_pending_case(
         account="lx",
         underlying_symbol=symbol,
         option_type="put",
-        position_side="short",
         strike=strike,
         expiration_ymd=EXPIRATION_YMD,
-    )
+        )
     persist_trade_event_object(
         repo,
         TradeEvent(

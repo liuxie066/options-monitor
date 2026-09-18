@@ -251,7 +251,7 @@ def build_context(
         symbol = it.canonical_underlying_symbol
 
         position_row = it.as_open_position_min(as_of_date=as_of_date)
-        lifecycle = lifecycle_by_lot.get(it.record_id)
+        lifecycle = lifecycle_by_lot.get(it.lot_id)
         if lifecycle is not None:
             position_row.update(lifecycle)
         open_positions_min.append(position_row)
@@ -342,7 +342,7 @@ def build_context(
         "combo_yield_groups": build_option_group_inventory(
             [
                 {
-                    "record_id": item.record_id,
+                    "record_id": item.lot_id,
                     "account": item.account,
                     "symbol": item.canonical_underlying_symbol,
                     "option_type": item.option_type,
@@ -355,7 +355,7 @@ def build_context(
                     "leg_role": item.fields.get("leg_role"),
                     "strategy_group_id": item.fields.get("strategy_group_id"),
                     "strategy_snapshot": item.fields.get("strategy_snapshot"),
-                    **dict(lifecycle_by_lot.get(item.record_id) or {}),
+                    **dict(lifecycle_by_lot.get(item.lot_id) or {}),
                 }
                 for item in selected_items
             ]

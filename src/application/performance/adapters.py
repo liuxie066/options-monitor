@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from domain.domain.ledger import ContractKey, OptionEconomicAllocation, PositionLot, TradeEvent, fee_fact_for_event
+from domain.domain.trade_contract_identity import derive_trade_side, normalize_trade_side
 from domain.domain.performance.attribution import resolve_event_attribution
 from domain.domain.performance.models import (
     FeeBasis,
@@ -201,7 +202,7 @@ def load_option_valuation_inputs(
                     account=lot.contract_key.account,
                     broker=lot.contract_key.broker,
                     instrument=instrument,
-                    position_side=lot.contract_key.position_side,
+                    position_side=lot.position_side,
                     contracts_open=lot.contracts_open,
                     open_price=lot.premium_open,
                     open_fee_remaining=remaining_fee,
@@ -259,6 +260,14 @@ def _trade_event_from_application_payload(payload: dict[str, Any]) -> TradeEvent
     raw_payload = dict(payload.get("raw_payload") or {})
     if isinstance(payload.get("fee_provenance"), dict) and "fee_provenance" not in raw_payload:
         raw_payload["fee_provenance"] = dict(payload["fee_provenance"])
+    if "side" not in raw_payload:
+        trade_side = normalize_trade_side(payload.get("side"))
+        if trade_side is None:
+            stored_position_side = raw_key.get("position_side") or raw_key.get("side")
+            if stored_position_side:
+                trade_side = derive_trade_side(payload.get("event_type"), stored_position_side)
+        if trade_side is not None:
+            raw_payload["side"] = trade_side
     return TradeEvent(
         event_id=str(payload.get("event_id") or "").strip(),
         event_type=str(payload.get("event_type") or "").strip(),
@@ -268,7 +277,6 @@ def _trade_event_from_application_payload(payload: dict[str, Any]) -> TradeEvent
             account=raw_key.get("account"),
             underlying_symbol=raw_key.get("underlying_symbol") or raw_key.get("symbol"),
             option_type=raw_key.get("option_type"),
-            position_side=raw_key.get("position_side") or raw_key.get("side"),
             strike=raw_key.get("strike"),
             expiration_ymd=raw_key.get("expiration_ymd") or raw_key.get("expiration"),
         ),

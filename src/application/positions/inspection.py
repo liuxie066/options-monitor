@@ -12,7 +12,8 @@ from domain.domain.ledger.position_fields import (
     normalize_broker,
     normalize_option_type,
 )
-from domain.domain.ledger.identity import ContractKey
+from domain.domain.ledger.identity import ContractKey, position_key_for
+from domain.domain.option_position_identity import normalize_side
 from domain.domain.trade_contract_identity import canonical_contract_symbol
 from src.application.ledger.api import (
     list_position_lot_snapshots,
@@ -285,13 +286,12 @@ def _canonical_position_key_from_fields(fields: dict[str, object]) -> str | None
             account=fields.get("account"),
             underlying_symbol=fields.get("symbol") or fields.get("underlying_symbol"),
             option_type=fields.get("option_type"),
-            position_side=fields.get("side") or fields.get("position_side"),
             strike=effective_strike(fields),
             expiration_ymd=fields.get("expiration_ymd") or effective_expiration_ymd(fields),
         )
     except Exception:
         return None
-    return key.position_key
+    return position_key_for(key, normalize_side(fields.get("side") or fields.get("position_side")))
 
 
 def _projected_lot_view(row: Any) -> dict[str, object]:

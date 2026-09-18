@@ -277,6 +277,54 @@ Combo / Wheel 投影 & 元数据  ───────────────�
 - 保持 `instrument_ref.deliverable` 可空；当前账本不消费它，遇到即 `unsupported_contract_deliverable`（`resolver.py:294`）/ `unsupported`（`position_snapshot.py:120`），防止静默误处理。
 - 待将来实现交割（assignment/exercise）核算时，再单独定「交割类事件是否必填」，不在本次归一化范围内。
 
+### 9.4 本轮 deferred：列退役（已定策略 = 只做读模型层）
+
+> **策略（已确认）**：涉及 DB schema 的改名/退役，**本轮只落「读模型/payload 层」这一半**，**列退役记 `deferred-with-owner`**，不在本轮做存量账本数据迁移。理由：列退役需要重建表/索引/触发器 + 改写已持久化的 `fields_json`，属存量数据迁移动作，与「统一领域模型」的代码语义收敛可分离，且必须在受控迁移窗口内单独执行。
+> 每条 deferred 记录「本轮已做到哪 / 还差什么 / 前置依赖」，供后续迁移窗口直接接续。
+
+#### D1. `position_lots.expiration` 列退役（§7.2）
+
+- **权威字段**：`expiration_ymd`（`YYYY-MM-DD`）；ms `expiration` 退役。
+- **本轮已做（读模型层）**：`read_model.build_position_lot_view` / `_position_row_from_view` 不再产出 ms `expiration` 字段；`views.RiskPositionView` 删除 `expiration` 字段，展示唯一到期口径为 `expiration_ymd` + 派生 `expiration_date`/`days_to_expiration`。存量 `fields_json` 里的 ms `expiration` 仍被**读穿**（`read_model.py:128-131` 的 `expiration_timestamp_to_ymd` 兼容读）以支撑存量行。
+- **未做（DB 层，deferred）**：
+  1. 删列：`position_lots.expiration`。
+  2. 索引：`idx_position_lots_account_expiration`（`repository_projection_schema.py:315-318`，另见 `repository_projection.py:164-166` 的 `IF NOT EXISTS` 重建）需改为不含 `expiration`。
+  3. 不可变守卫触发器：`OLD.expiration IS NOT NEW.expiration`（`repository_projection_schema.py:662`）需移除该比较项。
+  4. SQL 消费点：`repository_projection.py:31/39/41/59/63` 的 `SELECT/SET ... expiration`。
+  5. 写入点：`publisher.py:689` `out["expiration"] = int(expiration_ms)`（当前它喂 `_position_lot_contract_scalars` → `effective_expiration(fields)` 派生该列）。
+  6. 存量迁移：改写已持久化 `fields_json`（去 ms `expiration`）+ 重建受影响表。
+- **前置依赖**：⑥ 股票层一等化落定（`expiration` 在股票 lot 上本就为空，需先确认股票/期权两态在 `av` 层的口径）；受控迁移窗口。
+- **Owner**：领域模型统一后续迁移批次（DB schema 迁移）。
+
+#### D2. `position_lots.record_id` 列改名 → `lot_id`（§7.1）
+
+- **权威命名**：`lot_id`（§7.1 统一，废弃 `record_id`/`position_id`/`stock_lot_id`/`option_record_id`）。
+- **本轮已做（读模型层）**：读模型与 CLI 侧统一以 `lot_id` 为准——`views.py:31-37/76-79`、`read_model.py:172` 均为 `lot_id or record_id` 兼容读，对外只暴露 `lot_id`。
+- **未做（DB 层，deferred）**：
+  1. 列改名：`position_lots.record_id` → `lot_id`（**主键列**，全库约 1716 处引用）。
+  2. 索引：`idx_position_lots_account_expiration` / `idx_position_lots_account_record`（`repository_projection_schema.py:318/325`）。
+  3. 不可变守卫触发器：`OLD.record_id IS NOT NEW.record_id`（`repository_projection_schema.py:658`）及三处 `AFTER UPDATE OF record_id, ...`（`:670/690/712`）。
+  4. 全库引用改写（repository / writer / migration / CLI / 测试）。
+- **前置依赖**：D1 同批（同表重建，分批做会重复重建）。
+- **Owner**：领域模型统一后续迁移批次（DB schema 迁移）。
+
+#### D3. ③b `fields_json` 以 `PositionLot.to_dict()` 为准（§8.1 ③ 后半 / §8 步骤4）
+
+- **权威形状**：持久化 `fields_json` 直接等于 `PositionLot.to_dict()`。
+- **本轮已做**：`PositionLot.to_dict()` 已是 `position_lots` 规范化读路径的来源（§9.2 步骤③ 完成后，`contract_key`/`position_side`/`position_key` 形状已定），且 §7.3/§7.4 的 Decimal 序列化（`canonical_decimal_text`）已落。
+- **未做（deferred）**：`publisher._base_fields_for_lot` + `_apply_lot_state_fields` 目前仍按**读模型字段集**组装 `fields_json`（含 `expiration`/`position_id`/`cash_secured_amount`/`underlying_share_locked`/`note`/`strategy_snapshot` 等读模型字段），未改为 `PositionLot.to_dict()` 的纯 lot 形状。
+- **前置依赖**：⑥ 股票层一等化落定（股票 lot 的 `shares_*`/`cost_basis_total` 形状稳定后才有唯一定义）；与 D1/D2 同属存量迁移批次。
+- **Owner**：领域模型统一后续迁移批次（`fields_json` 形状迁移）。
+
+#### D4. 存量 `fields_json` 里的 `position_id` 清洗（§7.1）
+
+- **本轮已做（代码层，已完成）**：`position_id` 已从代码中全量退役——`build_position_id` 与其 `_fmt_strike` 辅助函数删除；`build_position_lot_fields` 与 `PositionLotPatch` 不再产出该字段；`publisher._apply_lot_state_fields` 加了 `out.pop("position_id", None)`，因此遗留行**每次重发布时**都会被清掉（`_base_fields_for_lot` 会从 open 事件的存量 `fields` 快照播种，故必须显式 pop）。读侧与展示侧（`read_model`/`views`/`maintenance`/`results`/`decision_snapshot`/`positions/maintenance_receipt`/`positions/maintenance`）已全部改读 `position_key`；投影 fingerprint 已随之刷新（见 §9.4 末）。
+- **未做（deferred）**：存量 SQLite 中**从未被重新发布过**的行，其 `fields_json` 仍可能残留 `position_id`。彻底清洗需要一次性遍历 `position_lots` 重写 `fields_json`。
+- **前置依赖**：与 D3 同批（都是 `fields_json` 重写，一次遍历做完）。
+- **Owner**：领域模型统一后续迁移批次（`fields_json` 存量清洗）。
+
+> **本轮切片落点（供接续）**：§8.1 ⑩ 的 `position_id`/`record_id` → `lot_id`/`position_key` 判据中，**`position_id` 侧的代码残留已清零**（`grep -rn 'position_id' src/ domain/` 只剩 §7.1 退役注释与 `out.pop`）；**`record_id` 侧只做了读模型层**（`views.py`/`read_model.py` 的 `lot_id or record_id` 兼容读保留，DB 列见 D2）。
+
 ## 10. 实现注意项（跨界语义 + 证据仲裁边界）
 
 > 这三条不是已定决策，而是实现时必须显式处理、否则会被 `asset_type` 判别「简单带过」的边界。来源：wheel 启动时对指派（assignment）订单的校验现状（`wheel_trade_companions.py` / `wheel.py` / `cash_facts.py`），扩大到全库后，同类病根在**跨界（期权↔股票）与执行入账边界**上共有 5 个家族、约 37 个行号引用，见 §10.3。

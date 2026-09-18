@@ -779,11 +779,8 @@ def _build_operation_payload(
 def _payload_with_preview_locked_values(payload: dict[str, Any], preview: dict[str, Any]) -> dict[str, Any]:
     if payload.get("operation_type") != "manual_open":
         return payload
-    command = preview.get("command")
-    command_payload = _json_safe(command)
-    if not isinstance(command_payload, dict):
-        return payload
-    opened_at_ms = command_payload.get("opened_at_ms")
+    preview_fields = preview.get("fields") or {}
+    opened_at_ms = preview_fields.get("opened_at")
     if opened_at_ms is None:
         return payload
     out = dict(payload)

@@ -9,7 +9,6 @@ import pytest
 import src.application.ledger.manual_trades as ledger_manual_trades
 import src.application.wheel.workflows as wheel_workflows
 from domain.domain.ledger import ContractKey, TradeEvent
-from domain.domain.option_position_lots import OpenPositionCommand
 from src.application.ledger.commands import record_manual_assignment
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.ledger.writer import (
@@ -71,7 +70,7 @@ def test_put_intent_preview_revalidates_capacity_inside_transaction(
         "phase": "ready",
         "active_option_lot_ids": [],
         "active_intent_ids": [],
-        "branch_generation_hash": "generation-1",
+        "batch_generation_hash": "generation-1",
     }
     candidate = {
         "final_candidate_id": "candidate-1",
@@ -79,7 +78,7 @@ def test_put_intent_preview_revalidates_capacity_inside_transaction(
         "symbol": "NVDA",
         "wheel_branch_id": "wheel-put-1",
         "direction": "put",
-        "branch_generation_hash": "generation-1",
+        "batch_generation_hash": "generation-1",
         "capacity_identity_hash": "capacity-1",
         "granted_contracts": 1,
         "multiplier": 100,
@@ -96,7 +95,7 @@ def test_put_intent_preview_revalidates_capacity_inside_transaction(
             {
                 "wheel_branch_id": "wheel-put-1",
                 "direction": "put",
-                "branch_generation_hash": "generation-1",
+                "batch_generation_hash": "generation-1",
                 "final_candidate": candidate,
             }
         ],
@@ -138,7 +137,7 @@ def test_put_intent_preview_revalidates_capacity_inside_transaction(
         direction="put",
         final_candidate_id="candidate-1",
         expected_snapshot_hash="snapshot-1",
-        expected_branch_generation_hash="generation-1",
+        expected_batch_generation_hash="generation-1",
         expires_at_ms=2_000,
         request_id="request-1",
         actor="tester",
@@ -193,7 +192,7 @@ def test_put_linkage_rejection_preview_uses_canonical_branch(
         "account": "lx",
         "wheel_branch_id": "wheel-put-1",
         "direction": "put",
-        "branch_generation_hash": "generation-1",
+        "batch_generation_hash": "generation-1",
     }
     candidate = {
         "direction": "put",
@@ -202,7 +201,7 @@ def test_put_linkage_rejection_preview_uses_canonical_branch(
         "option_open_event_id": "put-open-1",
         "linkage_candidate_id": "candidate-1",
         "input_snapshot_hash": "input-1",
-        "branch_generation_hash": "generation-1",
+        "batch_generation_hash": "generation-1",
     }
     monkeypatch.setattr(
         wheel_workflows,
@@ -228,7 +227,7 @@ def test_put_linkage_rejection_preview_uses_canonical_branch(
         direction="put",
         linkage_candidate_id="candidate-1",
         expected_input_hash="input-1",
-        expected_branch_generation_hash="generation-1",
+        expected_batch_generation_hash="generation-1",
         request_id="request-1",
         actor="tester",
         reason="not this cycle",
@@ -273,7 +272,7 @@ def test_two_partial_fills_consume_one_wheel_intent_without_changing_trade_amoun
     consumed = [event for event in repo.list_wheel_events(account="lx") if event["event_type"] == "wheel_call_intent_consumed"]
     assert [event["payload"]["contracts"] for event in consumed] == [1, 1]
     fills = [event for event in repo.list_trade_events() if event["event_type"] == "open" and event["option_type"] == "call"]
-    assert sum(event["contracts"] * event["price"] * event["multiplier"] for event in fills) == 400
+    assert sum(event["contracts"] * float(event["price"]) * event["multiplier"] for event in fills) == 400
     assert all(event["raw_payload"]["source_stock_lot_id"] == stock_lot_id for event in fills)
 
 
@@ -327,7 +326,6 @@ def _assign_short_put(
                     account="lx",
                     underlying_symbol="NVDA",
                     option_type="put",
-                    position_side="short",
                     strike=100,
                     expiration_ymd="2026-08-21",
                 ),
@@ -337,7 +335,8 @@ def _assign_short_put(
                 source="test",
                 multiplier=100,
                 lot_id=put_lot_id,
-                raw_payload=_trusted_multiplier_payload("wheel-source-put-open"),
+                # §9.2 step 3: the short put side now travels as the trade side.
+                raw_payload=_trusted_multiplier_payload("wheel-source-put-open", side="sell"),
             )
         ],
     )
@@ -356,7 +355,6 @@ def _assign_short_put(
                     account="lx",
                     underlying_symbol="NVDA",
                     option_type="put",
-                    position_side="short",
                     strike=100,
                     expiration_ymd="2026-08-21",
                 ),
@@ -367,6 +365,7 @@ def _assign_short_put(
                 multiplier=100,
                 target_lot_id=put_lot_id,
                 raw_payload={
+                    "side": "buy",
                     "target_lot_id": put_lot_id,
                     "stock_settlement": {
                         "side": "buy",
@@ -498,7 +497,6 @@ def _open_unlinked_call(
                     account="lx",
                     underlying_symbol="NVDA",
                     option_type="call",
-                    position_side="short",
                     strike=110,
                     expiration_ymd="2026-08-21",
                 ),
@@ -508,6 +506,7 @@ def _open_unlinked_call(
                 source="test",
                 multiplier=100,
                 lot_id=call_lot_id,
+                raw_payload={"side": "sell"},
             )
         ],
     )
@@ -606,25 +605,23 @@ def test_combo_funding_put_assignment_does_not_bootstrap_wheel_and_preserves_com
     ):
         ledger_manual_trades.persist_manual_open_event(
             repo,
-            OpenPositionCommand(
-                broker="富途",
-                account="lx",
-                symbol="NVDA",
-                option_type=option_type,
-                side=side,
-                contracts=1,
-                currency="USD",
-                strike=strike,
-                multiplier=100,
-                expiration_ymd="2026-08-21",
-                premium_per_share=2.5,
-                opened_at_ms=opened_at_ms,
-                strategy_snapshot={
-                    "strategy": "combo_yield",
-                    "leg_role": role,
-                    "strategy_group_id": group_id,
-                },
-            ),
+            broker="富途",
+            account="lx",
+            symbol="NVDA",
+            option_type=option_type,
+            side=side,
+            contracts=1,
+            currency="USD",
+            strike=strike,
+            multiplier=100,
+            expiration_ymd="2026-08-21",
+            premium_per_share=2.5,
+            opened_at_ms=opened_at_ms,
+            strategy_snapshot={
+                "strategy": "combo_yield",
+                "leg_role": role,
+                "strategy_group_id": group_id,
+            },
         )
 
     lots = repo.list_position_lots()
@@ -682,21 +679,19 @@ def test_manual_assignment_runtime_boolean_does_not_authorize_wheel_lifecycle(
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     ledger_manual_trades.persist_manual_open_event(
         repo,
-        OpenPositionCommand(
-            broker="富途",
-            account="lx",
-            symbol="NVDA",
-            option_type="put",
-            side="short",
-            contracts=1,
-            currency="USD",
-            strike=100,
-            multiplier=100,
-            expiration_ymd="2026-08-21",
-            premium_per_share=2.5,
-            opened_at_ms=1_000,
-            request_id="manual-open-for-wheel-rollback",
-        ),
+        broker="富途",
+        account="lx",
+        symbol="NVDA",
+        option_type="put",
+        side="short",
+        contracts=1,
+        currency="USD",
+        strike=100,
+        multiplier=100,
+        expiration_ymd="2026-08-21",
+        premium_per_share=2.5,
+        opened_at_ms=1_000,
+        request_id="manual-open-for-wheel-rollback",
     )
 
     execute_manual_assignment(
@@ -1198,7 +1193,6 @@ def test_partial_wheel_call_assignment_keeps_batch_active(tmp_path: Path) -> Non
         account="lx",
         underlying_symbol="NVDA",
         option_type="call",
-        position_side="short",
         strike=110,
         expiration_ymd="2026-08-21",
     )
@@ -1221,6 +1215,7 @@ def test_partial_wheel_call_assignment_keeps_batch_active(tmp_path: Path) -> Non
                     strategy="wheel",
                     leg_role="wheel_call",
                     source_stock_lot_id=stock_lot_id,
+                    side="sell",
                 ),
             )
         ],
@@ -1241,6 +1236,7 @@ def test_partial_wheel_call_assignment_keeps_batch_active(tmp_path: Path) -> Non
                 multiplier=100,
                 target_lot_id=call_lot_id,
                 raw_payload={
+                    "side": "buy",
                     "target_lot_id": call_lot_id,
                     "stock_settlement": {
                         "side": "sell",
@@ -1278,7 +1274,6 @@ def test_wheel_call_assignment_closes_batch_in_same_transaction(
         account="lx",
         underlying_symbol="NVDA",
         option_type="call",
-        position_side="short",
         strike=110,
         expiration_ymd="2026-08-21",
     )
@@ -1301,6 +1296,7 @@ def test_wheel_call_assignment_closes_batch_in_same_transaction(
                     strategy="wheel",
                     leg_role="wheel_call",
                     source_stock_lot_id=stock_lot_id,
+                    side="sell",
                 ),
             )
         ],
@@ -1321,6 +1317,7 @@ def test_wheel_call_assignment_closes_batch_in_same_transaction(
                 multiplier=100,
                 target_lot_id=call_lot_id,
                 raw_payload={
+                    "side": "buy",
                     "target_lot_id": call_lot_id,
                     "stock_settlement": {
                         "side": "sell",
@@ -1351,21 +1348,19 @@ def test_wheel_start_failure_rolls_back_assignment(
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     ledger_manual_trades.persist_manual_open_event(
         repo,
-        OpenPositionCommand(
-            broker="富途",
-            account="lx",
-            symbol="NVDA",
-            option_type="put",
-            side="short",
-            contracts=1,
-            currency="USD",
-            strike=100,
-            multiplier=100,
-            expiration_ymd="2026-08-21",
-            premium_per_share=2.5,
-            opened_at_ms=1_000,
-            request_id="manual-open-for-wheel-rollback",
-        ),
+        broker="富途",
+        account="lx",
+        symbol="NVDA",
+        option_type="put",
+        side="short",
+        contracts=1,
+        currency="USD",
+        strike=100,
+        multiplier=100,
+        expiration_ymd="2026-08-21",
+        premium_per_share=2.5,
+        opened_at_ms=1_000,
+        request_id="manual-open-for-wheel-rollback",
     )
     put_lot_id = str(repo.list_position_lots()[0]["record_id"])
     _open_test_activation(repo)
@@ -1387,7 +1382,6 @@ def test_wheel_start_failure_rolls_back_assignment(
                         account="lx",
                         underlying_symbol="NVDA",
                         option_type="put",
-                        position_side="short",
                         strike=100,
                         expiration_ymd="2026-08-21",
                     ),
@@ -1398,6 +1392,7 @@ def test_wheel_start_failure_rolls_back_assignment(
                     multiplier=100,
                     target_lot_id=put_lot_id,
                     raw_payload={
+                        "side": "buy",
                         "target_lot_id": put_lot_id,
                         "stock_settlement": {
                             "side": "buy",
@@ -1446,6 +1441,6 @@ def test_bound_wheel_order_requires_proven_order_namespace(tmp_path, namespace):
                 if event["event_type"] == "wheel_call_intent_consumed"]
     assert len(consumed) == int(matched)
     event = next(event for event in repo.list_trade_events() if event["event_id"] == result["event_id"])
-    assert event["contracts"] * event["price"] * event["multiplier"] == 200
+    assert event["contracts"] * float(event["price"]) * event["multiplier"] == 200
     assert bool(event["raw_payload"].get("source_stock_lot_id")) is matched
     assert (created["intent_id"] in build_wheel_read_model(repo, "lx", 5_000)["batches"][0]["active_intent_ids"]) is not matched

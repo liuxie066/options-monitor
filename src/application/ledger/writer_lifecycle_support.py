@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from domain.domain.lifecycle_allocation import validate_stock_settlement_allocation_group
+from domain.domain.ledger.identity import position_key_for
+from domain.domain.option_position_identity import normalize_side
 
 from .writer_common import (
     Any,
@@ -79,7 +81,6 @@ def _existing_combo_adoption_leg(
         account=fields.get("account"),
         underlying_symbol=fields.get("symbol"),
         option_type=option_type,
-        position_side=position_side,
         strike=fields.get("strike"),
         expiration_ymd=fields.get("expiration_ymd"),
     )
@@ -88,7 +89,6 @@ def _existing_combo_adoption_leg(
         account=event_contract.get("account"),
         underlying_symbol=event_contract.get("underlying_symbol"),
         option_type=event_contract.get("option_type"),
-        position_side=event_contract.get("position_side"),
         strike=event_contract.get("strike"),
         expiration_ymd=event_contract.get("expiration_ymd"),
     )
@@ -833,8 +833,10 @@ def _matching_lifecycle_lots(
     position_lots: Sequence[dict[str, Any]],
     *,
     contract_key: ContractKey,
+    position_side: str,
 ) -> list[tuple[str, int, int]]:
     matches: list[tuple[str, int, int]] = []
+    target_key = position_key_for(contract_key, normalize_side(position_side))
     for item in position_lots:
         if not isinstance(item, dict):
             continue
@@ -849,13 +851,12 @@ def _matching_lifecycle_lots(
                 account=fields.get("account"),
                 underlying_symbol=fields.get("symbol"),
                 option_type=fields.get("option_type"),
-                position_side=fields.get("side"),
                 strike=effective_strike(fields),
                 expiration_ymd=effective_expiration_ymd(fields),
             )
         except (TypeError, ValueError):
             continue
-        if candidate_key.position_key != contract_key.position_key:
+        if position_key_for(candidate_key, normalize_side(fields.get("side"))) != target_key:
             continue
         try:
             opened_at = int(fields.get("opened_at") or 0)
@@ -894,6 +895,7 @@ def _validate_existing_zero_price_evidence(
     existing: dict[str, Any],
     incoming: dict[str, Any],
     contract_key: ContractKey,
+    position_side: str,
     contracts: int,
 ) -> None:
     for field in ("evidence_id", "source_type", "source_event_id", "evidence_type"):
@@ -910,8 +912,8 @@ def _validate_existing_zero_price_evidence(
         != contract_key.underlying_symbol
         or str(existing.get("option_type") or "").strip().lower()
         != contract_key.option_type
-        or str(existing.get("position_side") or "").strip().lower()
-        != contract_key.position_side
+        or normalize_side(existing.get("position_side"))
+        != normalize_side(position_side)
         or Decimal(str(existing.get("strike"))) != Decimal(contract_key.strike)
         or str(existing.get("expiration_ymd") or "").strip()
         != contract_key.expiration_ymd
@@ -987,7 +989,7 @@ def _validate_lifecycle_event_allocation_plan(
             or event.contracts != contracts
             or str(event.target_lot_id or "") != lot_id
             or event.event_type != terminal_type
-            or event.contract_key.position_key != case_contract_key
+            or event.position_key != case_contract_key
         ):
             raise ValueError("lifecycle allocation and terminal event mismatch")
         raw_payload = dict(event.raw_payload or {})

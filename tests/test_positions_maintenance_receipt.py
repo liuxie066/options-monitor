@@ -75,7 +75,7 @@ def test_auto_close_receipt_decision_skips_confirmed_duplicate() -> None:
             "applied_closed": 1,
             "candidates_should_close": 1,
             "errors": [],
-            "applied": [{"record_id": "rec_1", "position_id": "pos_1"}],
+            "applied": [{"record_id": "rec_1", "position_key": "pos_1"}],
         },
     )
 
@@ -136,7 +136,7 @@ def test_send_auto_close_receipt_uses_existing_route_and_sender(tmp_path: Path) 
             "applied_closed": 1,
             "candidates_should_close": 1,
             "errors": [],
-            "applied": [{"record_id": "rec_1", "position_id": "pos_1", "expiration_ymd": "2026-05-01"}],
+            "applied": [{"record_id": "rec_1", "position_key": "pos_1", "expiration_ymd": "2026-05-01"}],
         },
         send_fn=_send,
         normalize_fn=lambda send_result: send_result,
@@ -249,7 +249,7 @@ def test_build_auto_close_receipt_message_marks_partial_failure() -> None:
             "applied_closed": 1,
             "candidates_should_close": 2,
             "errors": ["rec_2 pos_2: sqlite locked\n    - retry later"],
-            "applied": [{"record_id": "rec_1", "position_id": "pos_1", "expiration_ymd": "2026-05-01"}],
+            "applied": [{"record_id": "rec_1", "position_key": "pos_1", "expiration_ymd": "2026-05-01"}],
         },
     )
 

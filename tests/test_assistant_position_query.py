@@ -226,7 +226,7 @@ def test_position_query_read_model_filters_month_symbol_and_option_type() -> Non
         expiration_month="2026-05",
     )
 
-    assert [row["record_id"] for row in rows] == ["lot-0700-call-may"]
+    assert [row["lot_id"] for row in rows] == ["lot-0700-call-may"]
 
 
 def test_position_query_read_model_sorts_by_expiration_before_limit() -> None:
@@ -286,7 +286,7 @@ def test_position_query_read_model_sorts_by_expiration_before_limit() -> None:
         limit=2,
     )
 
-    assert [row["record_id"] for row in rows] == ["lot-jun", "lot-jul"]
+    assert [row["lot_id"] for row in rows] == ["lot-jun", "lot-jul"]
 
 
 def test_position_query_read_model_filters_closed_positions() -> None:
@@ -298,4 +298,4 @@ def test_position_query_read_model_filters_closed_positions() -> None:
         expiration_before="2026-05-31",
     )
 
-    assert [row["record_id"] for row in rows] == ["lot-tigr-put-may-closed"]
+    assert [row["lot_id"] for row in rows] == ["lot-tigr-put-may-closed"]

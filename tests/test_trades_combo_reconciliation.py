@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from domain.domain.ledger import ContractKey, TradeEvent
+from domain.domain.trade_contract_identity import derive_trade_side
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.ledger.writer import persist_trade_event_object
 from src.application.trades.auto_intake import (
@@ -77,16 +78,18 @@ def _event(
             account="lx",
             underlying_symbol="NVDA",
             option_type=option_type,
-            position_side=side,
             strike=strike,
             expiration_ymd="2026-08-21",
-        ),
+                ),
         contracts=1,
         price=1,
         currency="USD",
         source="test",
         lot_id=lot_id,
         raw_payload={
+            # §9.2 step 3: the contract key no longer carries the position side,
+            # so the fixture's side travels as the trade side of this open.
+            "side": derive_trade_side("open", side) or "",
             "_trade_intake_source": {
                 "schema_version": "trade_intake_source.v1",
                 "transport": "push",

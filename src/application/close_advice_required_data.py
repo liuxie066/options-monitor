@@ -158,7 +158,7 @@ def build_close_advice_required_data_plan(
                 fallback_raw=False,
             )
             strike = _canonical_strike(position.get("strike"))
-            lot_id = str(position.get("record_id") or "").strip()
+            lot_id = str(position.get("lot_id") or position.get("record_id") or "").strip()
             try:
                 expiration_date = datetime.strptime(
                     str(expiration or ""),

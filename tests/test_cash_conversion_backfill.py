@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from domain.domain.ledger import ContractKey, TradeEvent
 from src.application.cash_conversion import build_cash_conversion
 from src.application.ledger.cash_conversion_migration import (
@@ -38,10 +40,9 @@ def _event(
             account=account,
             underlying_symbol="NVDA",
             option_type="put",
-            position_side="short",
             strike=100,
             expiration_ymd="2026-08-21",
-        ),
+                ),
         contracts=1,
         price=2.0,
         currency="USD",
@@ -50,6 +51,8 @@ def _event(
         fees=1.0,
         lot_id=f"lot-{event_id}",
         raw_payload={
+            # §9.2 step 3: the short put side travels as the trade side.
+            "side": "sell",
             "fee_provenance": {"basis": "actual", "source": "test"},
             **(raw_payload or {}),
         },
@@ -96,6 +99,146 @@ def _import_rate(
     }
     result = evidence_repo.import_envelope(payload, apply=True, migrated_at_ms=MIGRATION_MS)
     return str(result.envelope.fx_rates[-1].fact_id)
+
+
+# Produced verbatim by the pre-§7 encoder at revision 4fc161b8
+# (``encode_trade_event_for_storage`` on the same logical ``open-1`` event).
+# It is the shape a database written before the order-domain-model change holds
+# on disk: ``contract_key.strike``/``multiplier`` as JSON numbers, and the
+# retired ``position_side``/``position_key`` identity keys still present.
+_LEGACY_EVENT_JSON = (
+    '{"contract_key": {"account": "lx", "broker": "富途", "expiration_ymd":'
+    ' "2026-08-21", "option_type": "put", "position_key":'
+    ' "富途|lx|NVDA|2026-08-21|100P|short", "position_side": "short",'
+    ' "strike": 100.0, "underlying_symbol": "NVDA"}, "contracts": 1, "currency":'
+    ' "USD", "event_id": "open-1", "event_time_ms": 1783044000000, "event_type":'
+    ' "open", "fees": 1.0, "lot_id": "lot-open-1", "multiplier": 100.0, "price":'
+    ' 2.0, "raw_payload": {"fee_provenance": {"basis": "actual", "source":'
+    ' "test"}, "side": "sell"}, "source": "test", "target_event_id": null,'
+    ' "target_lot_id": null}'
+)
+
+
+def _seed_stored_trade_event(repo: SQLiteOptionPositionsRepository, event_json: str) -> None:
+    """Insert a trade event at the storage layer, exactly as a writer would."""
+    payload = json.loads(event_json)
+    contract_key = payload["contract_key"]
+    with repo._connect() as conn:  # noqa: SLF001 - pre-migration storage fixture
+        conn.execute(
+            "UPDATE trade_event_ingest_sequence SET last_value = last_value + 1 "
+            "WHERE singleton_id = 1"
+        )
+        ingest_seq = conn.execute(
+            "SELECT last_value FROM trade_event_ingest_sequence WHERE singleton_id = 1"
+        ).fetchone()["last_value"]
+        conn.execute(
+            """
+            INSERT INTO trade_events (
+              event_id, account, event_json, trade_time_ms,
+              created_at_ms, updated_at_ms, ingest_seq, market, position_effect
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                payload["event_id"],
+                str(contract_key["account"]),
+                event_json,
+                int(payload["event_time_ms"]),
+                1,
+                1,
+                int(ingest_seq),
+                "US",
+                str(payload["event_type"]).lower(),
+            ),
+        )
+
+
+def test_backfill_applies_to_a_pre_section7_stored_event(tmp_path: Path) -> None:
+    """A cash-conversion backfill must not rewrite unrelated stored fields.
+
+    The plan compares its replacement against the bytes already in
+    ``trade_events.event_json``. Re-encoding the decoded event would turn the
+    stored number ``strike`` into the §7.4 decimal *text* and drop the retired
+    identity keys, so on any pre-§7 database the compare-and-swap matches
+    nothing and the trade-event immutability trigger rejects the write as a
+    contract-key transition.
+    """
+    db_path = tmp_path / "option_positions.sqlite3"
+    repo = SQLiteOptionPositionsRepository(db_path)
+    _seed_stored_trade_event(repo, _LEGACY_EVENT_JSON)
+    evidence_repo = PerformanceEvidenceSQLiteRepository(db_path)
+    _import_rate(evidence_repo)
+
+    preview = backfill_cash_conversions(
+        repo,
+        evidence_repo,
+        account="lx",
+        apply=False,
+        migrated_at_ms=MIGRATION_MS,
+    )
+    assert preview.preview_conversion_count == 2
+    assert preview.changed_event_count == 1
+
+    applied = backfill_cash_conversions(
+        repo,
+        evidence_repo,
+        account="lx",
+        apply=True,
+        migrated_at_ms=MIGRATION_MS,
+    )
+    assert applied.migrated_conversion_count == 2
+    assert applied.changed_event_count == 1
+
+    with sqlite3.connect(db_path) as conn:
+        stored = json.loads(
+            conn.execute(
+                "SELECT event_json FROM trade_events WHERE event_id = 'open-1'"
+            ).fetchone()[0]
+        )
+    assert stored["raw_payload"]["cash_conversions"]["option_trade_cash_gross"][
+        "amount_cny"
+    ] == "1440"
+    # Only the migrated field moved: the stored representation of every other
+    # field survives the write untouched.
+    assert stored["contract_key"]["strike"] == 100.0
+    assert stored["contract_key"]["position_key"] == "富途|lx|NVDA|2026-08-21|100P|short"
+    assert stored["contract_key"]["position_side"] == "short"
+    assert stored["multiplier"] == 100.0
+    assert stored["lot_id"] == "lot-open-1"
+
+
+def test_stored_trade_event_rejects_a_reencoded_contract_key(tmp_path: Path) -> None:
+    """Why the backfill patches stored JSON rather than re-encoding the event.
+
+    §7.4 renders ``contract_key.strike`` as canonical decimal text. Writing that
+    text over a pre-§7 number is a contract-key transition, and the trade-event
+    immutability trigger aborts it -- so "re-encode the decoded event and write
+    it back" is not a strategy the storage layer will accept at all, whatever
+    the plan's compare-and-swap happens to be comparing.
+    """
+    db_path = tmp_path / "option_positions.sqlite3"
+    repo = SQLiteOptionPositionsRepository(db_path)
+    _seed_stored_trade_event(repo, _LEGACY_EVENT_JSON)
+
+    reencoded = json.loads(_LEGACY_EVENT_JSON)
+    reencoded["contract_key"] = {
+        "account": "lx",
+        "broker": "富途",
+        "expiration_ymd": "2026-08-21",
+        "option_type": "put",
+        "strike": "1E+2",
+        "underlying_symbol": "NVDA",
+    }
+
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute(
+            "SELECT json_type(event_json, '$.contract_key.strike') FROM trade_events"
+        ).fetchone()[0] == "real"
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            conn.execute(
+                "UPDATE trade_events SET event_json = ?, updated_at_ms = 1 "
+                "WHERE event_id = 'open-1'",
+                (json.dumps(reencoded, ensure_ascii=False, sort_keys=True),),
+            )
 
 
 def _has_table(path: Path, name: str) -> bool:

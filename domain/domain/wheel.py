@@ -105,7 +105,7 @@ def evaluate_wheel_call_candidate(
     strike = _finite_float(result.get("strike"))
     spot = _finite_float(result.get("spot"))
     net_premium_per_contract = _finite_float(
-        result.get("net_premium", result.get("net_income"))
+        result.get("net_income")
     )
     shares_remaining = _finite_float(batch.get("shares_remaining"))
     remaining_basis = _finite_float(batch.get("remaining_stock_cost_basis"))
@@ -241,7 +241,7 @@ def evaluate_wheel_put_candidate(
     strike = _finite_float(result.get("strike"))
     spot = _finite_float(result.get("spot"))
     net_premium_per_contract = _finite_float(
-        result.get("net_premium", result.get("net_income"))
+        result.get("net_income")
     )
     principal_anchor_total = _finite_float(
         branch.get(
@@ -700,7 +700,7 @@ def plan_wheel_branch_decision(
         expected_generation_hash,
         "expected_generation_hash",
     )
-    if expected != str(branch.get("branch_generation_hash") or ""):
+    if expected != str(branch.get("batch_generation_hash") or ""):
         raise ValueError("Wheel branch generation changed")
     account = _required_text(branch.get("account"), "account").lower()
     branch_id = _required_text(branch.get("wheel_branch_id"), "wheel_branch_id")
@@ -757,7 +757,10 @@ def _trade_event_fact(event: Any) -> dict[str, Any]:
         "account": key.get("account"),
         "symbol": key.get("underlying_symbol"),
         "option_type": key.get("option_type"),
-        "position_side": key.get("position_side"),
+        # §9.2 step 3: the contract key no longer carries the position side, so
+        # read it off the event (derived from the trade side) and keep the legacy
+        # key as a fallback for persisted rows.
+        "position_side": getattr(event, "position_side", None) or key.get("position_side"),
         "strike": key.get("strike"),
         "expiration_ymd": key.get("expiration_ymd"),
         "contracts": getattr(event, "contracts", None),
@@ -1003,8 +1006,8 @@ def build_wheel_intent_capacity_binding(
         "wheel_branch_id",
     )
     generation_hash = _required_text(
-        branch.get("branch_generation_hash") or branch.get("batch_generation_hash"),
-        "branch_generation_hash",
+        branch.get("batch_generation_hash"),
+        "batch_generation_hash",
     )
     contracts = _positive_int(
         final_candidate.get("granted_contracts"),
@@ -1023,8 +1026,7 @@ def build_wheel_intent_capacity_binding(
     if str(final_candidate.get("symbol") or "").strip().upper() != symbol:
         raise ValueError("Wheel candidate symbol mismatch")
     candidate_generation = str(
-        final_candidate.get("branch_generation_hash")
-        or final_candidate.get("batch_generation_hash")
+        final_candidate.get("batch_generation_hash")
         or ""
     ).strip()
     if candidate_generation and candidate_generation != generation_hash:
@@ -1050,7 +1052,7 @@ def build_wheel_intent_capacity_binding(
         return {
             "direction": direction,
             "wheel_branch_id": branch_id,
-            "branch_generation_hash": generation_hash,
+            "batch_generation_hash": generation_hash,
             "capacity_identity_hash": capacity_identity_hash,
             "reserved_amount": contracts * multiplier,
             "reservation_unit": "shares",
@@ -1083,7 +1085,7 @@ def build_wheel_intent_capacity_binding(
     return {
         "direction": direction,
         "wheel_branch_id": branch_id,
-        "branch_generation_hash": generation_hash,
+        "batch_generation_hash": generation_hash,
         "capacity_identity_hash": capacity_identity_hash,
         "reserved_amount": reserved_amount,
         "reservation_unit": "cash",
@@ -1265,7 +1267,7 @@ def plan_wheel_put_intent_create(
             "actor": actor_value,
             "final_candidate_id": candidate_id,
             "snapshot_hash": str(final_candidate.get("snapshot_hash") or "").strip(),
-            "branch_generation_hash": binding["branch_generation_hash"],
+            "batch_generation_hash": binding["batch_generation_hash"],
             "capacity_identity_hash": binding["capacity_identity_hash"],
             "symbol": symbol,
             "strike": strike,
@@ -1506,8 +1508,8 @@ def plan_wheel_put_intent_cancel(
             "reason": _required_text(reason, "reason"),
             "broker_order_inactive_confirmed": True,
             "remaining_contracts": int(intent.get("remaining_contracts") or 0),
-            "branch_generation_hash": str(
-                branch.get("branch_generation_hash") or ""
+            "batch_generation_hash": str(
+                branch.get("batch_generation_hash") or ""
             ),
             "capacity_identity_hash": payload.get("capacity_identity_hash"),
             "cash_reservation_amount": payload.get("cash_reservation_amount"),
@@ -2078,8 +2080,7 @@ def project_wheel_linkage_candidates(
     call_branches = [
         {
             **row,
-            "batch_generation_hash": row.get("batch_generation_hash")
-            or row.get("branch_generation_hash"),
+            "batch_generation_hash": row.get("batch_generation_hash"),
         }
         for row in wheel_branches
         if str(row.get("direction") or "call").strip().lower() == "call"
@@ -2099,7 +2100,7 @@ def project_wheel_linkage_candidates(
             ),
             "option_record_id": item["call_record_id"],
             "option_open_event_id": item["call_open_event_id"],
-            "branch_generation_hash": item.get("batch_generation_hash"),
+            "batch_generation_hash": item.get("batch_generation_hash"),
         }
         for item in project_wheel_call_linkage_candidates(
             call_branches,
@@ -2182,7 +2183,7 @@ def project_wheel_linkage_candidates(
                     "wheel_branch_id": branch_id,
                 }
             )[:24]
-            generation_hash = str(branch.get("branch_generation_hash") or "")
+            generation_hash = str(branch.get("batch_generation_hash") or "")
             put_candidates.append(
                 {
                     "linkage_candidate_id": f"wheel-put-linkage:{digest}",
@@ -2205,7 +2206,7 @@ def project_wheel_linkage_candidates(
                                 )
                             },
                             "wheel_branch_id": branch_id,
-                            "branch_generation_hash": generation_hash,
+                            "batch_generation_hash": generation_hash,
                         }
                     ),
                     "account": account,
@@ -2224,7 +2225,7 @@ def project_wheel_linkage_candidates(
                     "cash_reservation_currency": str(
                         fields.get("currency") or branch.get("currency") or ""
                     ).strip().upper(),
-                    "branch_generation_hash": generation_hash,
+                    "batch_generation_hash": generation_hash,
                 }
             )
     return sorted(
@@ -2610,7 +2611,7 @@ def project_wheel_branches(
                 "lifecycle_status": lifecycle_status,
                 "phase": phase,
                 "monitoring_gate": gate,
-                "branch_generation_hash": batch["batch_generation_hash"],
+                "batch_generation_hash": batch["batch_generation_hash"],
                 "legacy_call_adapter": True,
             }
         )
@@ -2919,8 +2920,8 @@ def project_wheel_branches(
                         "account": account,
                         "wheel_branch_id": branch_id,
                         "intent_id": summary["intent_id"],
-                        "branch_generation_hash": intent_payload.get(
-                            "branch_generation_hash"
+                        "batch_generation_hash": intent_payload.get(
+                            "batch_generation_hash"
                         ),
                         "capacity_identity_hash": capacity_hash,
                         "currency": currency,
@@ -2993,7 +2994,7 @@ def project_wheel_branches(
                 "currency": currency,
             },
         }
-        branch_generation_hash = canonical_sha256(generation_payload)
+        batch_generation_hash = canonical_sha256(generation_payload)
         branch = {
             "account": account,
             "market": market or None,
@@ -3034,14 +3035,14 @@ def project_wheel_branches(
                 if item.get("status") == "active"
             ),
             "active_intent_reservations": active_intent_reservations,
-            "branch_generation_hash": branch_generation_hash,
+            "batch_generation_hash": batch_generation_hash,
             "legacy_call_adapter": False,
             "candidate": None,
         }
         branch["projection_hash"] = canonical_sha256(
             {
                 "schema_version": WHEEL_PROJECTION_SCHEMA,
-                "branch_generation_hash": branch_generation_hash,
+                "batch_generation_hash": batch_generation_hash,
                 "as_of_ms": instant,
                 "derived": branch,
             }

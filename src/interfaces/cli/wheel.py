@@ -72,7 +72,7 @@ def _add_branch_identity(parser: argparse.ArgumentParser) -> None:
     identity = parser.add_mutually_exclusive_group(required=True)
     identity.add_argument("--wheel-branch-id")
     identity.add_argument("--stock-lot-id")
-    parser.add_argument("--expected-branch-generation-hash", required=True)
+    parser.add_argument("--expected-batch-generation-hash", required=True)
     parser.add_argument("--request-id", required=True)
     parser.add_argument("--actor", required=True)
 
@@ -84,9 +84,9 @@ def _add_neutral_identity(parser: argparse.ArgumentParser) -> None:
     identity.add_argument("--stock-lot-id")
     parser.add_argument("--direction", choices=("call", "put"), default="call")
     parser.add_argument(
-        "--expected-branch-generation-hash",
         "--expected-batch-generation-hash",
-        dest="expected_branch_generation_hash",
+        "--expected-batch-generation-hash",
+        dest="expected_batch_generation_hash",
         required=True,
     )
     parser.add_argument("--request-id", required=True)
@@ -436,7 +436,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
             "account": args.account,
             "wheel_branch_id": branch["wheel_branch_id"],
             "decision": args.branch_action,
-            "expected_branch_generation_hash": args.expected_branch_generation_hash,
+            "expected_batch_generation_hash": args.expected_batch_generation_hash,
             "request_id": args.request_id,
             "actor": args.actor,
             "market": args.config_key,
@@ -487,7 +487,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         "account": args.account,
         "wheel_branch_id": branch["wheel_branch_id"],
         "direction": args.direction,
-        "expected_branch_generation_hash": args.expected_branch_generation_hash,
+        "expected_batch_generation_hash": args.expected_batch_generation_hash,
         "request_id": args.request_id,
         "actor": args.actor,
         "market": args.config_key,

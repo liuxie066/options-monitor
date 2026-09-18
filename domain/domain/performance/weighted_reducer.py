@@ -219,6 +219,7 @@ def reduce_option_performance(
         open_event = opens_by_lot[lot_id]
         membership = resolve_option_strategy_membership(
             lot.contract_key,
+            lot.position_side,
             open_event.raw_payload,
             valid_combo_group_ids=valid_combo_group_ids,
             source_id=open_event.event_id,
@@ -381,7 +382,7 @@ def _failed_fact(
     *,
     missing: tuple[str, ...],
 ) -> WeightedOptionFact:
-    membership = resolve_option_strategy_membership(lot.contract_key, None)
+    membership = resolve_option_strategy_membership(lot.contract_key, lot.position_side, None)
     return WeightedOptionFact(
         fact_id=f"failed:{lot.lot_id}",
         open_lot_id=lot.lot_id,
@@ -584,7 +585,7 @@ def _opening_cash(lot: PositionLot, contracts: int) -> Decimal:
         * to_decimal(lot.multiplier, field_name="multiplier")
         * Decimal(contracts)
     )
-    return amount if lot.contract_key.position_side == "short" else -amount
+    return amount if lot.position_side == "short" else -amount
 
 
 def _actual_fee(fee: FeeFact) -> Decimal | None:
@@ -649,7 +650,7 @@ def _capital(
     if contracts <= 0 or end_at_ms < opened_at_ms:
         return None, None, {"capital_identity_missing"}
     multiplier = to_decimal(lot.multiplier, field_name="multiplier")
-    if lot.contract_key.position_side == "short":
+    if lot.position_side == "short":
         basis = to_decimal(lot.contract_key.strike, field_name="strike") * multiplier
     else:
         basis = to_decimal(lot.premium_open, field_name="premium") * multiplier

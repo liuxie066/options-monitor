@@ -329,9 +329,6 @@ def _build_correction_void_event(
         or target_event.get("symbol"),
         option_type=lifecycle_case.get("option_type")
         or target_event.get("option_type"),
-        position_side=lifecycle_case.get("position_side")
-        or target_event.get("position_side")
-        or target_event.get("side"),
         strike=lifecycle_case.get("strike")
         or target_event.get("strike"),
         expiration_ymd=lifecycle_case.get("expiration_ymd")

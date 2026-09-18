@@ -210,7 +210,7 @@ def _position_lot_storage_values(
 ) -> tuple[str, str, str, str | None, int | None, float | None, float | None]:
     if not isinstance(record, PositionLotRecord):
         raise TypeError("replace_position_lots requires PositionLotRecord records")
-    record_id = record.record_id
+    record_id = record.lot_id
     fields = record.fields
     _validate_position_lot_fields(record_id=record_id, fields=fields)
     account = str(fields.get("account") or "").strip()

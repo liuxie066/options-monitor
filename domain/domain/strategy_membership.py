@@ -99,12 +99,13 @@ def resolve_strategy_metadata(
 
 def resolve_option_strategy_membership(
     contract_key: ContractKey,
+    position_side: str,
     payload: Mapping[str, Any] | None,
     *,
     valid_combo_group_ids: set[str] | frozenset[str] = frozenset(),
     source_id: str = "",
 ) -> OptionStrategyMembership:
-    leg_type = f"{'sell' if contract_key.position_side == 'short' else 'buy'}_{contract_key.option_type}"
+    leg_type = f"{'sell' if position_side == 'short' else 'buy'}_{contract_key.option_type}"
     default = "csp" if leg_type == "sell_put" else "cc" if leg_type == "sell_call" else "unassigned"
     parent = "csp" if leg_type == "sell_put" else "cc" if leg_type == "sell_call" else None
     resolved = resolve_strategy_metadata(payload, source_id=source_id)

@@ -24,7 +24,7 @@ from src.application.ledger.repository import SQLiteOptionPositionsRepository
 def _record(index: int) -> PositionLotRecord:
     account = "lx" if index % 2 == 0 else "sy"
     return PositionLotRecord(
-        record_id=f"lot-{index:06d}",
+        lot_id=f"lot-{index:06d}",
         fields={
             "account": account,
             "broker": "futu",

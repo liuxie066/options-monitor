@@ -20,7 +20,6 @@ from domain.domain.ledger.position_fields import (
     normalize_option_type,
     normalize_side,
     normalize_status,
-    parse_exp_to_ms,
 )
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.symbol_identity import canonical_symbol
@@ -152,7 +151,9 @@ def canonicalize_position_lot_fields(fields: dict[str, Any]) -> dict[str, Any]:
             "underlying_share_locked": locked_shares,
             "cash_secured_amount": safe_float(raw.get("cash_secured_amount")),
             "close_type": normalize_close_type(raw.get("close_type")) if raw.get("close_type") else None,
-            "position_id": (str(raw.get("position_id") or raw.get("position_key") or "").strip() or None),
+            # §7.1: ``position_id`` is retired; ``position_key`` is the single
+            # derived display/aggregation key.
+            "position_key": (str(raw.get("position_key") or "").strip() or None),
             "source_event_id": (str(raw.get("source_event_id") or "").strip() or None),
             "last_close_event_id": (str(raw.get("last_close_event_id") or "").strip() or None),
             "expiration_ymd": expiration_ymd,
@@ -161,14 +162,16 @@ def canonicalize_position_lot_fields(fields: dict[str, Any]) -> dict[str, Any]:
     strike = safe_float(raw.get("strike"))
     if strike is not None:
         normalized["strike"] = strike
-    if normalized.get("expiration") in (None, "") and expiration_ymd:
-        normalized["expiration"] = parse_exp_to_ms(expiration_ymd)
+    # §7.2: ``expiration_ymd`` is the single expiry field of the read model. The
+    # stored ms ``expiration`` still arrives from persisted fields_json (it backs
+    # the position_lots.expiration column) and is read through it, but it is no
+    # longer re-derived or published as a read-model field here.
     return normalized
 
 
 def canonicalize_position_lot_record(item: dict[str, Any]) -> dict[str, Any]:
     return {
-        "record_id": item.get("record_id"),
+        "lot_id": item.get("lot_id") or item.get("record_id"),
         "fields": canonicalize_position_lot_fields(item.get("fields") or {}),
     }
 
@@ -198,16 +201,20 @@ def build_position_lot_view(
 ) -> dict[str, Any]:
     record = canonicalize_position_lot_record(item)
     fields = record.get("fields") or {}
-    expiration_date = expiration_timestamp_to_date(fields.get("expiration"))
+    # §7.2: derive from expiration_ymd first; the stored ms form is only a
+    # fallback for payloads written before expiration_ymd was authoritative.
+    expiration_date = _parse_filter_date(fields.get("expiration_ymd")) or expiration_timestamp_to_date(
+        fields.get("expiration")
+    )
     resolved_as_of_date = as_of_date or datetime.now(EXPIRATION_DATE_TZ).date()
     days_to_expiration = (expiration_date - resolved_as_of_date).days if expiration_date is not None else None
     status = str(fields.get("status") or "").strip().lower()
     expiration_state = "unknown" if days_to_expiration is None else ("expired" if days_to_expiration < 0 else "active")
     state_warning = "expired_position_marked_open" if expiration_state == "expired" and status == "open" else None
     return {
-        "record_id": record.get("record_id"),
+        "lot_id": record.get("lot_id"),
         "fields": fields,
-        "position_id": fields.get("position_id"),
+        "position_key": fields.get("position_key"),
         "broker": fields.get("broker"),
         "account": fields.get("account"),
         "symbol": fields.get("symbol"),
@@ -216,7 +223,6 @@ def build_position_lot_view(
         "status": fields.get("status"),
         "strike": fields.get("strike"),
         "multiplier": fields.get("multiplier"),
-        "expiration": fields.get("expiration"),
         "expiration_ymd": fields.get("expiration_ymd"),
         "expiration_date": expiration_date,
         "days_to_expiration": days_to_expiration,
@@ -241,7 +247,7 @@ def build_position_lot_view(
 
 def _position_row_from_view(view: dict[str, Any]) -> dict[str, Any]:
     return {
-        "record_id": view.get("record_id"),
+        "lot_id": view.get("lot_id"),
         "broker": view.get("broker"),
         "account": view.get("account"),
         "symbol": view.get("symbol"),
@@ -249,7 +255,6 @@ def _position_row_from_view(view: dict[str, Any]) -> dict[str, Any]:
         "side": view.get("side"),
         "strike": view.get("strike"),
         "multiplier": view.get("multiplier"),
-        "expiration": view.get("expiration"),
         "expiration_ymd": view.get("expiration_ymd"),
         "days_to_expiration": view.get("days_to_expiration"),
         "expiration_state": view.get("expiration_state"),
@@ -355,10 +360,10 @@ def list_position_rows(
         normalized_status = view.get("status")
         if status != "all" and normalized_status != status:
             continue
-        expiration_ymd = _parse_filter_date(view.get("expiration_ymd") or view.get("expiration"))
+        expiration_ymd = _parse_filter_date(view.get("expiration_ymd"))
         if exact_expiration is not None and expiration_ymd != exact_expiration:
             continue
-        if expiration_month and not str(view.get("expiration_ymd") or view.get("expiration") or "").startswith(expiration_month):
+        if expiration_month and not str(view.get("expiration_ymd") or "").startswith(expiration_month):
             continue
         if before_expiration is not None and (expiration_ymd is None or expiration_ymd > before_expiration):
             continue
@@ -384,7 +389,7 @@ def _parse_filter_date(value: Any) -> date | None:
 
 
 def _position_row_sort_key(row: dict[str, Any]) -> tuple[Any, ...]:
-    expiration_date = _parse_filter_date(row.get("expiration_ymd")) or expiration_timestamp_to_date(row.get("expiration"))
+    expiration_date = _parse_filter_date(row.get("expiration_ymd"))
     strike = safe_float(row.get("strike"))
     return (
         expiration_date is None,
@@ -395,7 +400,7 @@ def _position_row_sort_key(row: dict[str, Any]) -> tuple[Any, ...]:
         str(row.get("option_type") or ""),
         strike is None,
         strike if strike is not None else float("inf"),
-        str(row.get("record_id") or ""),
+        str(row.get("lot_id") or ""),
     )
 
 

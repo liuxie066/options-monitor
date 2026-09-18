@@ -22,7 +22,7 @@ from domain.domain.ledger.position_fields import (
     strategy_metadata_fields_from_payload,
 )
 from domain.domain.option_position_identity import normalize_currency
-from domain.domain.trade_contract_identity import canonical_contract_symbol
+from domain.domain.trade_contract_identity import canonical_contract_symbol, derive_trade_side
 from src.application.ledger.lot_resolver import CloseTargetResolution
 from src.application.ledger.preflight import preflight_broker_trade_close
 from src.application.ledger.results import BrokerTradeOperation, LedgerWriteResult
@@ -304,7 +304,7 @@ def _persist_lifecycle_close_events(
         )
         first_event = prepared[0][3]
         case_update.setdefault("broker", first_event.contract_key.broker)
-        case_update.setdefault("contract_key", first_event.contract_key.position_key)
+        case_update.setdefault("contract_key", first_event.position_key)
     persisted = persist_trade_event_objects_atomically(
         repo,
         [event for _match, _contracts, _preflight, event in prepared],
@@ -460,7 +460,6 @@ def _lifecycle_close_event(
             account=normalize_account(fields.get("account")),
             underlying_symbol=canonical_contract_symbol(fields.get("symbol")),
             option_type=str(fields.get("option_type") or ""),
-            position_side=str(fields.get("side") or "").strip().lower(),
             strike=(float(strike) if strike is not None else None),
             expiration_ymd=effective_expiration_ymd(fields),
         ),
@@ -497,6 +496,7 @@ def _lifecycle_close_event(
             ),
             "close_target_resolution": dict(close_target_resolution),
             "contracts_open_before": effective_contracts_open(fields),
+            "side": derive_trade_side(event_type, str(fields.get("side") or "").strip().lower()),
             **strategy_payload,
         },
     )

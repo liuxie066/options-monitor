@@ -9,7 +9,6 @@ from zoneinfo import ZoneInfo
 
 from domain.domain.ledger.position_fields import (
     EXPIRE_AUTO_CLOSE,
-    OpenPositionCommand,
     PositionLotPatch,
     build_close_patch_contract,
     build_open_adjustment_patch_contract,
@@ -143,27 +142,72 @@ def _ledger_write_result_from_any(value: Any, *, event_id: str | None, record_id
     return LedgerWriteResult(event_id=event_id, record_id=record_id, created=None)
 
 
-def persist_manual_open_event_with_ledger(repo: Any, command: OpenPositionCommand) -> OpenLedgerResult:
-    resolved_command, fields, event = _manual_open_ledger_inputs(command)
+def persist_manual_open_event_with_ledger(
+    repo: Any,
+    *,
+    broker: str,
+    account: str,
+    symbol: str,
+    option_type: str,
+    side: str,
+    contracts: int,
+    currency: str | None = None,
+    strike: float | None = None,
+    multiplier: float | None = None,
+    expiration_ymd: str | None = None,
+    premium_per_share: float | None = None,
+    underlying_share_locked: int | None = None,
+    note: str | None = None,
+    opened_at_ms: int | None = None,
+    strategy_snapshot: dict[str, Any] | None = None,
+    request_id: str | None = None,
+) -> OpenLedgerResult:
+    fields, event = _manual_open_ledger_inputs(
+        broker=broker,
+        account=account,
+        symbol=symbol,
+        option_type=option_type,
+        side=side,
+        contracts=contracts,
+        currency=currency,
+        strike=strike,
+        multiplier=multiplier,
+        expiration_ymd=expiration_ymd,
+        premium_per_share=premium_per_share,
+        underlying_share_locked=underlying_share_locked,
+        note=note,
+        opened_at_ms=opened_at_ms,
+        strategy_snapshot=strategy_snapshot,
+        request_id=request_id,
+    )
     duplicate_result = _existing_open_event_result(repo, event_id=event.event_id, record_id=event.lot_id)
     if duplicate_result is not None:
-        request_id = str(resolved_command.request_id or "").strip()
-        if request_id:
+        request_id_value = str(request_id or "").strip()
+        if request_id_value:
             assert_manual_request_event_matches(
                 repo,
                 event_id=event.event_id,
-                request_id=request_id,
+                request_id=request_id_value,
                 intent_hash=str(
                     (event.raw_payload or {}).get("manual_request_intent_hash")
                     or ""
                 ),
-                command=resolved_command,
+                broker=broker,
+                account=account,
+                symbol=symbol,
+                option_type=option_type,
+                side=side,
+                contracts=contracts,
+                currency=currency,
+                strike=strike,
+                expiration_ymd=expiration_ymd,
+                underlying_share_locked=underlying_share_locked,
+                note=note,
                 fields=fields,
             )
         return OpenLedgerResult(
             result=LedgerWriteResult.from_payload(duplicate_result),
             fields=fields,
-            command=resolved_command,
             ledger_preflight=_duplicate_open_preflight(event=event, result=duplicate_result),
             duplicate_checked_before_write=True,
         )
@@ -174,11 +218,28 @@ def persist_manual_open_event_with_ledger(repo: Any, command: OpenPositionComman
         source="manual_open_preflight",
         operation_label="manual open",
     )
-    result = persist_manual_open_event(repo, resolved_command)
+    result = persist_manual_open_event(
+        repo,
+        broker=broker,
+        account=account,
+        symbol=symbol,
+        option_type=option_type,
+        side=side,
+        contracts=contracts,
+        currency=currency,
+        strike=strike,
+        multiplier=multiplier,
+        expiration_ymd=expiration_ymd,
+        premium_per_share=premium_per_share,
+        underlying_share_locked=underlying_share_locked,
+        note=note,
+        opened_at_ms=event.event_time_ms,
+        strategy_snapshot=strategy_snapshot,
+        request_id=request_id,
+    )
     return OpenLedgerResult(
         result=LedgerWriteResult.from_payload(result),
         fields=fields,
-        command=resolved_command,
         ledger_preflight=ledger_preflight,
     )
 
@@ -609,37 +670,158 @@ def persist_manual_close_event_with_ledger(
     )
 
 
-def preview_manual_position_open(repo: Any | None, command: OpenPositionCommand) -> ManualOpenPreviewResult:
-    fields_contract = build_position_lot_fields(command)
-    fields = fields_contract.to_dict()
+def preview_manual_position_open(
+    repo: Any | None,
+    *,
+    broker: str,
+    account: str,
+    symbol: str,
+    option_type: str,
+    side: str,
+    contracts: int,
+    currency: str | None = None,
+    strike: float | None = None,
+    multiplier: float | None = None,
+    expiration_ymd: str | None = None,
+    premium_per_share: float | None = None,
+    underlying_share_locked: int | None = None,
+    note: str | None = None,
+    opened_at_ms: int | None = None,
+    strategy_snapshot: dict[str, Any] | None = None,
+    request_id: str | None = None,
+) -> ManualOpenPreviewResult:
+    fields = build_position_lot_fields(
+        broker=broker,
+        account=account,
+        symbol=symbol,
+        option_type=option_type,
+        side=side,
+        contracts=contracts,
+        currency=currency,
+        strike=strike,
+        multiplier=multiplier,
+        expiration_ymd=expiration_ymd,
+        premium_per_share=premium_per_share,
+        underlying_share_locked=underlying_share_locked,
+        note=note,
+        opened_at_ms=opened_at_ms,
+        strategy_snapshot=strategy_snapshot,
+    )
     fields.update(
         strategy_metadata_fields_from_payload(
             {
                 "strategy_snapshot": (
-                    dict(command.strategy_snapshot) if isinstance(command.strategy_snapshot, dict) else None
+                    dict(strategy_snapshot) if isinstance(strategy_snapshot, dict) else None
                 )
             }
         )
     )
-    resolved_command = command
-    if resolved_command.opened_at_ms is None:
-        resolved_command = replace(resolved_command, opened_at_ms=int(fields_contract.opened_at))
+    resolved_opened_at_ms = int(fields["opened_at"])
     ledger_preflight = None
     if repo is not None and supports_ledger_open_preflight(repo):
-        ledger_preflight = preflight_manual_open(repo, command=resolved_command)
-    return ManualOpenPreviewResult(fields=fields, command=resolved_command, ledger_preflight=ledger_preflight)
+        ledger_preflight = preflight_manual_open(
+            repo,
+            broker=broker,
+            account=account,
+            symbol=symbol,
+            option_type=option_type,
+            side=side,
+            contracts=contracts,
+            currency=currency,
+            strike=strike,
+            multiplier=multiplier,
+            expiration_ymd=expiration_ymd,
+            premium_per_share=premium_per_share,
+            underlying_share_locked=underlying_share_locked,
+            note=note,
+            opened_at_ms=resolved_opened_at_ms,
+            strategy_snapshot=strategy_snapshot,
+            request_id=request_id,
+        )
+    return ManualOpenPreviewResult(fields=fields, ledger_preflight=ledger_preflight)
 
 
-def record_manual_position_open(repo: Any, command: OpenPositionCommand) -> OpenLedgerResult:
+def record_manual_position_open(
+    repo: Any,
+    *,
+    broker: str,
+    account: str,
+    symbol: str,
+    option_type: str,
+    side: str,
+    contracts: int,
+    currency: str | None = None,
+    strike: float | None = None,
+    multiplier: float | None = None,
+    expiration_ymd: str | None = None,
+    premium_per_share: float | None = None,
+    underlying_share_locked: int | None = None,
+    note: str | None = None,
+    opened_at_ms: int | None = None,
+    strategy_snapshot: dict[str, Any] | None = None,
+    request_id: str | None = None,
+) -> OpenLedgerResult:
     if supports_ledger_open_preflight(repo):
-        return persist_manual_open_event_with_ledger(repo, command)
-    result = persist_manual_open_event(repo, command)
-    fields = build_position_lot_fields(command).to_dict()
+        return persist_manual_open_event_with_ledger(
+            repo,
+            broker=broker,
+            account=account,
+            symbol=symbol,
+            option_type=option_type,
+            side=side,
+            contracts=contracts,
+            currency=currency,
+            strike=strike,
+            multiplier=multiplier,
+            expiration_ymd=expiration_ymd,
+            premium_per_share=premium_per_share,
+            underlying_share_locked=underlying_share_locked,
+            note=note,
+            opened_at_ms=opened_at_ms,
+            strategy_snapshot=strategy_snapshot,
+            request_id=request_id,
+        )
+    result = persist_manual_open_event(
+        repo,
+        broker=broker,
+        account=account,
+        symbol=symbol,
+        option_type=option_type,
+        side=side,
+        contracts=contracts,
+        currency=currency,
+        strike=strike,
+        multiplier=multiplier,
+        expiration_ymd=expiration_ymd,
+        premium_per_share=premium_per_share,
+        underlying_share_locked=underlying_share_locked,
+        note=note,
+        opened_at_ms=opened_at_ms,
+        strategy_snapshot=strategy_snapshot,
+        request_id=request_id,
+    )
+    fields = build_position_lot_fields(
+        broker=broker,
+        account=account,
+        symbol=symbol,
+        option_type=option_type,
+        side=side,
+        contracts=contracts,
+        currency=currency,
+        strike=strike,
+        multiplier=multiplier,
+        expiration_ymd=expiration_ymd,
+        premium_per_share=premium_per_share,
+        underlying_share_locked=underlying_share_locked,
+        note=note,
+        opened_at_ms=opened_at_ms,
+        strategy_snapshot=strategy_snapshot,
+    )
     fields.update(
         strategy_metadata_fields_from_payload(
             {
                 "strategy_snapshot": (
-                    dict(command.strategy_snapshot) if isinstance(command.strategy_snapshot, dict) else None
+                    dict(strategy_snapshot) if isinstance(strategy_snapshot, dict) else None
                 )
             }
         )
@@ -647,7 +829,6 @@ def record_manual_position_open(repo: Any, command: OpenPositionCommand) -> Open
     return OpenLedgerResult(
         result=LedgerWriteResult.from_payload(result),
         fields=fields,
-        command=command,
         ledger_preflight=LedgerPreflightResult(
             status="skipped",
             read_model="unavailable",
@@ -1821,35 +2002,31 @@ def record_broker_trade_open(repo: Any, deal: Any, *, persist_trade_event_fn: An
     )
 
 
-def _broker_trade_open_command(deal: Any) -> OpenPositionCommand:
+def preview_broker_trade_open(deal: Any) -> BrokerTradeOpenPreviewResult:
     side = str(getattr(deal, "side", "") or "").strip().lower()
     raw_price = getattr(deal, "price", None)
-    return OpenPositionCommand(
-        broker="富途",
-        account=str(getattr(deal, "internal_account", "") or ""),
-        symbol=str(getattr(deal, "symbol", "") or ""),
-        option_type=str(getattr(deal, "option_type", "") or ""),
-        side="short" if side == "sell" else "long",
-        contracts=int(getattr(deal, "contracts", 0) or 0),
-        currency=str(getattr(deal, "currency", "") or ""),
-        strike=(float(getattr(deal, "strike")) if getattr(deal, "strike", None) is not None else None),
-        multiplier=float(getattr(deal, "multiplier")) if getattr(deal, "multiplier", None) is not None else None,
-        expiration_ymd=(str(getattr(deal, "expiration_ymd", "") or "").strip() or None),
-        premium_per_share=float(raw_price) if raw_price not in (None, "") else None,
-        note=(
+    command = {
+        "broker": "富途",
+        "account": str(getattr(deal, "internal_account", "") or ""),
+        "symbol": str(getattr(deal, "symbol", "") or ""),
+        "option_type": str(getattr(deal, "option_type", "") or ""),
+        "side": "short" if side == "sell" else "long",
+        "contracts": int(getattr(deal, "contracts", 0) or 0),
+        "currency": str(getattr(deal, "currency", "") or ""),
+        "strike": (float(getattr(deal, "strike")) if getattr(deal, "strike", None) is not None else None),
+        "multiplier": float(getattr(deal, "multiplier")) if getattr(deal, "multiplier", None) is not None else None,
+        "expiration_ymd": (str(getattr(deal, "expiration_ymd", "") or "").strip() or None),
+        "premium_per_share": float(raw_price) if raw_price not in (None, "") else None,
+        "note": (
             f"source=opend_push "
             f"deal_id={getattr(deal, 'deal_id', None)} "
             f"order_id={getattr(deal, 'order_id', None) or ''} "
             f"multiplier_source={getattr(deal, 'multiplier_source', None) or ''} "
             f"trade_time_ms={getattr(deal, 'trade_time_ms', None) or ''}"
         ).strip(),
-        opened_at_ms=getattr(deal, "trade_time_ms", None),
-    )
-
-
-def preview_broker_trade_open(deal: Any) -> BrokerTradeOpenPreviewResult:
-    command = _broker_trade_open_command(deal)
-    fields = build_position_lot_fields(command).to_dict()
+        "opened_at_ms": getattr(deal, "trade_time_ms", None),
+    }
+    fields = build_position_lot_fields(**command)
     fields.update(strategy_metadata_fields_from_payload(getattr(deal, "raw_payload", None)))
     return BrokerTradeOpenPreviewResult(command=command, fields=fields)
 

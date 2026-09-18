@@ -72,12 +72,12 @@ def test_sell_put_uses_tick_rounded_wait_price_and_net_cash_period_return() -> N
     assert metrics["fee_schedule_version"] == "futu_option_sell_fee.v1"
     assert metrics["fee_basis"] == "futu_us_candidate_upper_bound_2026-08-06"
     assert metrics["assignment_notional"] == 10000.0
-    assert metrics["net_cash_basis"] == metrics["assignment_notional"] - metrics["net_premium"]
+    assert metrics["net_cash_basis"] == metrics["assignment_notional"] - metrics["net_income"]
     assert metrics["period_net_return_on_cash_basis"] == round(
-        metrics["net_premium"] / metrics["net_cash_basis"],
+        metrics["net_income"] / metrics["net_cash_basis"],
         10,
     )
-    assert metrics["net_premium_cny"] == round(metrics["net_premium"] * 7.2, 6)
+    assert metrics["net_income_cny"] == round(metrics["net_income"] * 7.2, 6)
 
 
 def test_covered_call_uses_current_market_value_and_same_hk_formula_contract() -> None:
@@ -95,7 +95,7 @@ def test_covered_call_uses_current_market_value_and_same_hk_formula_contract() -
 
     assert metrics["current_market_value"] == 11000.0
     assert metrics["period_net_premium_return"] == round(
-        metrics["net_premium"] / 11000.0,
+        metrics["net_income"] / 11000.0,
         10,
     )
     assert metrics["fee_basis"].startswith("futu_hk_")
@@ -241,7 +241,7 @@ def test_scan_adapters_use_the_same_canonical_calculation() -> None:
         "raw_spread",
         "sell_limit",
         "estimated_full_sell_fees",
-        "net_premium",
+        "net_income",
         "term_matched_rv",
         "iv_rv_ratio",
         "iv_minus_rv",
@@ -439,7 +439,7 @@ def test_covered_call_rank_uses_anchored_period_band_then_higher_strike() -> Non
             "strike": 110,
             "spread_ratio": 0.03,
             "open_interest": 100,
-            "net_premium": 100,
+            "net_income": 100,
         },
         {
             "symbol": "NVDA",
@@ -448,7 +448,7 @@ def test_covered_call_rank_uses_anchored_period_band_then_higher_strike() -> Non
             "strike": 120,
             "spread_ratio": 0.04,
             "open_interest": 0,
-            "net_premium": 90,
+            "net_income": 90,
         },
         {
             "symbol": "NVDA",
@@ -457,7 +457,7 @@ def test_covered_call_rank_uses_anchored_period_band_then_higher_strike() -> Non
             "strike": 130,
             "spread_ratio": 0.01,
             "open_interest": 1000,
-            "net_premium": 80,
+            "net_income": 80,
         },
     ]
 

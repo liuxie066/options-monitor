@@ -38,11 +38,11 @@ class _Lot:
     symbol: str
     option_type: str
     position_side: str
-    contracts_original: int
+    contracts_opened: int
     contracts_open: int
     currency: str
-    multiplier: str
-    strike: str
+    multiplier: int
+    strike: Decimal
     expiration_ymd: str
     trade_time_ms: int
     strategy: str
@@ -70,11 +70,11 @@ class _Lot:
             "symbol": self.symbol,
             "option_type": self.option_type,
             "position_side": self.position_side,
-            "contracts_original": self.contracts_original,
+            "contracts_opened": self.contracts_opened,
             "contracts_open": self.contracts_open,
             "currency": self.currency,
             "multiplier": self.multiplier,
-            "strike": self.strike,
+            "strike": str(self.strike),
             "expiration_ymd": self.expiration_ymd,
             "trade_time_ms": self.trade_time_ms,
             "strategy": self.strategy,
@@ -92,7 +92,7 @@ class _Exposure:
     put_contract_key: tuple[str, str, str, str]
     call_contract_key: tuple[str, str, str, str]
     currency: str
-    multiplier: str
+    multiplier: int
     generated_at_ms: int
     valid_until_ms: int
     delivery_confirmed: bool
@@ -323,13 +323,13 @@ def _normalize_lot(raw: Mapping[str, Any]) -> tuple[_Lot | None, set[str]]:
         reasons.add("combo_lot_currency_missing")
     if not _is_ymd(expiration_ymd):
         reasons.add("combo_lot_expiration_invalid")
-    contracts_original = _positive_int(
-        item.get("contracts_original") or item.get("contracts")
+    contracts_opened = _positive_int(
+        item.get("contracts_opened") or item.get("contracts")
     )
     contracts_open = _positive_int(item.get("contracts_open"))
-    if contracts_original is None or contracts_open is None:
+    if contracts_opened is None or contracts_open is None:
         reasons.add("combo_lot_contracts_invalid")
-    elif contracts_original != contracts_open:
+    elif contracts_opened != contracts_open:
         reasons.add("combo_lot_not_fully_open")
     multiplier = _positive_decimal(item.get("multiplier"))
     strike = _positive_decimal(item.get("strike"))
@@ -362,11 +362,11 @@ def _normalize_lot(raw: Mapping[str, Any]) -> tuple[_Lot | None, set[str]]:
             symbol=symbol,
             option_type=option_type,
             position_side=position_side,
-            contracts_original=int(contracts_original),
+            contracts_opened=int(contracts_opened),
             contracts_open=int(contracts_open),
             currency=currency,
-            multiplier=str(multiplier),
-            strike=str(strike),
+            multiplier=int(multiplier),
+            strike=strike,
             expiration_ymd=expiration_ymd,
             trade_time_ms=int(trade_time_ms),
             strategy=strategy,
@@ -415,7 +415,7 @@ def _normalize_exposure(raw: Mapping[str, Any]) -> _Exposure | None:
         put_contract_key=put_contract_key,
         call_contract_key=call_contract_key,
         currency=currency,
-        multiplier=str(multiplier),
+        multiplier=int(multiplier),
         generated_at_ms=int(generated_at_ms),
         valid_until_ms=int(valid_until_ms),
         delivery_confirmed=bool(item.get("delivery_confirmed")),
@@ -434,10 +434,10 @@ def _build_edge(
         or put.market != call.market
         or put.market_date != call.market_date
         or put.symbol != call.symbol
-        or put.contracts_original != call.contracts_original
+        or put.contracts_opened != call.contracts_opened
         or put.currency != call.currency
         or put.multiplier != call.multiplier
-        or Decimal(put.strike) >= Decimal(call.strike)
+        or put.strike >= call.strike
         or put.expiration_ymd != call.expiration_ymd
     ):
         return None
@@ -538,7 +538,7 @@ def _proposal_payload(
         "put_open_event_id": edge.put.open_event_id,
         "call_record_id": edge.call.record_id,
         "call_open_event_id": edge.call.open_event_id,
-        "contracts": edge.put.contracts_original,
+        "contracts": edge.put.contracts_opened,
         "evidence_grade": edge.evidence_grade,
         "candidate_occurrence_ids": occurrence_ids,
         "candidate_exposure_ids": exposure_ids,

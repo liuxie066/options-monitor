@@ -4,8 +4,6 @@ from pathlib import Path
 
 import pytest
 
-from domain.domain.option_position_lots import OpenPositionCommand
-
 from src.application.ledger import api as ledger_api
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.positions.assigned_stock_view import build_assigned_stock_view
@@ -73,22 +71,24 @@ def test_partial_call_close_rebuild_and_sale_keep_current_coverage(
     tmp_path: Path, projection_state: str, sale_at_ms: int,
 ) -> None:
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
-    ledger_api.record_manual_position_open(repo, OpenPositionCommand(
+    ledger_api.record_manual_position_open(
+        repo,
         broker="富途", account="lx", symbol="NVDA", option_type="put", side="short",
         contracts=2, currency="USD", strike=100, multiplier=100, expiration_ymd="2026-08-21",
         premium_per_share=2, opened_at_ms=1_000,
-    ))
+    )
     put_id = repo.list_position_lots()[0]["record_id"]
     ledger_api.record_manual_assignment(
         repo, record_id=put_id, contracts_to_close=2,
         stock_side="buy", stock_qty=200, stock_price=100, as_of_ms=2_000,
     )
     stock_id = build_assigned_stock_view(repo, account="lx", as_of_ms=2_000)["assigned_stock_lots"][0]["stock_lot_id"]
-    ledger_api.record_manual_position_open(repo, OpenPositionCommand(
+    ledger_api.record_manual_position_open(
+        repo,
         broker="富途", account="lx", symbol="NVDA", option_type="call", side="short",
         contracts=2, currency="USD", strike=110, multiplier=100, expiration_ymd="2026-08-21",
         premium_per_share=2, opened_at_ms=3_000, strategy_snapshot={"source_stock_lot_id": stock_id},
-    ))
+    )
     call_id = next(row["record_id"] for row in repo.list_position_lots() if row["fields"]["option_type"] == "call")
     full = build_assigned_stock_view(repo, account="lx", as_of_ms=3_000)
     compact = ledger_api.compact_assigned_stock_view(

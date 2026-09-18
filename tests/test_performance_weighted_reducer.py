@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
@@ -14,6 +14,7 @@ from domain.domain.ledger import (
     project_trade_events,
 )
 from domain.domain.ledger.events import LedgerDiagnostic
+from domain.domain.trade_contract_identity import derive_trade_side
 from domain.domain.performance.models import MetricStatus
 from domain.domain.performance.period import PeriodRequest, normalize_performance_period
 from domain.domain.performance.weighted_reducer import (
@@ -29,6 +30,18 @@ def _ms(value: str) -> int:
     return int(datetime.fromisoformat(value).replace(tzinfo=_TZ).timestamp() * 1000)
 
 
+@dataclass(frozen=True)
+class _Leg:
+    """Fixture leg: the contract key plus the position side it was opened with.
+
+    §9.2 step 3 removed ``position_side`` from ``ContractKey``, so the side now
+    travels as the trade side on the event payload instead of on the key.
+    """
+
+    key: ContractKey
+    side: str = "short"
+
+
 def _key(
     *,
     account: str = "lx",
@@ -38,15 +51,17 @@ def _key(
     side: str = "short",
     strike: float = 100,
     expiration: str = "2026-09-30",
-) -> ContractKey:
-    return ContractKey.from_values(
-        broker=broker,
-        account=account,
-        underlying_symbol=symbol,
-        option_type=option_type,
-        position_side=side,
-        strike=strike,
-        expiration_ymd=expiration,
+) -> _Leg:
+    return _Leg(
+        key=ContractKey.from_values(
+            broker=broker,
+            account=account,
+            underlying_symbol=symbol,
+            option_type=option_type,
+            strike=strike,
+            expiration_ymd=expiration,
+        ),
+        side=side,
     )
 
 
@@ -55,7 +70,7 @@ def _event(
     event_type: str,
     at: str,
     *,
-    key: ContractKey | None = None,
+    key: _Leg | None = None,
     lot_id: str | None = None,
     target_lot_id: str | None = None,
     contracts: int = 1,
@@ -66,7 +81,9 @@ def _event(
     raw: dict | None = None,
     fx_rate: float = 7,
 ) -> TradeEvent:
+    leg = key or _key()
     payload = dict(raw or {})
+    payload["side"] = derive_trade_side(event_type, leg.side) or ""
     if fee_basis:
         payload["fee_provenance"] = {
             "basis": fee_basis,
@@ -79,7 +96,7 @@ def _event(
         event_id=event_id,
         event_type=event_type,
         event_time_ms=_ms(at),
-        contract_key=key or _key(),
+        contract_key=leg.key,
         contracts=contracts,
         price=price,
         currency="USD",

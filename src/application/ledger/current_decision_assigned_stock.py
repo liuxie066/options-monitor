@@ -29,6 +29,8 @@ from .current_decision_lifecycle import (
     _ASSIGNED_REVIEW_KEYS,
 )
 
+from domain.domain.trade_contract_identity import derive_position_side
+
 def _sale_fact_chain(event_ids: Iterable[str]) -> tuple[int, str]:
     chain = bytes(32)
     count = 0
@@ -984,6 +986,16 @@ def _settlement_transition_from_event(
         field="stock shares",
         minimum=1,
     )
+    # §9.2 step 3: the contract key no longer carries the position side, so fall
+    # back to deriving it from the trade side the event declares.
+    position_side = str(
+        _trade_event_field(event, "position_side")
+        or contract.get("position_side")
+        or contract.get("side")
+        or ""
+    ).strip().lower() or (
+        derive_position_side(event_type, _trade_event_field(event, "side")) or ""
+    )
     expected_side = {
         ("assignment", "put", "short"): "buy",
         ("assignment", "call", "short"): "sell",
@@ -993,9 +1005,7 @@ def _settlement_transition_from_event(
         (
             event_type,
             str(contract.get("option_type") or "").strip().lower(),
-            str(contract.get("position_side") or contract.get("side") or "")
-            .strip()
-            .lower(),
+            position_side,
         )
     )
     if expected_side is None:
@@ -1035,7 +1045,7 @@ def _settlement_transition_from_event(
             contract.get("option_type"), field="option_type", lower=True
         ),
         "position_side": _text(
-            contract.get("position_side") or contract.get("side"),
+            position_side,
             field="position_side",
             lower=True,
         ),

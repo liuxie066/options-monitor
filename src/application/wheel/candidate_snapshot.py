@@ -142,7 +142,7 @@ def _batches(
                 direction = required_text(row.get("direction"), "direction").lower()
                 if direction not in {"call", "put"}:
                     raise CandidateSnapshotContractError("Wheel candidate batch direction is invalid")
-                generation_hash = row.get("branch_generation_hash")
+                generation_hash = row.get("batch_generation_hash") or row.get("branch_generation_hash")
             else:
                 branch_id = required_text(row.get("stock_lot_id"), "stock_lot_id")
                 direction = "call"
@@ -153,7 +153,7 @@ def _batches(
             seen.add(identity)
             if str(row.get("account") or account).strip().lower() != account:
                 raise CandidateSnapshotContractError("Wheel candidate batch account mismatch")
-            sha256_text(generation_hash, "branch_generation_hash")
+            sha256_text(generation_hash, "batch_generation_hash")
             sha256_text(row.get("projection_hash"), "projection_hash")
             raw_candidates = row.get("raw_candidates") or []
             if not isinstance(raw_candidates, list):

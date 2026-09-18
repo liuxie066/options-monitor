@@ -95,7 +95,6 @@ def _event(
             account=account,
             underlying_symbol=symbol,
             option_type="put",
-            position_side="short",
             strike=100,
             expiration_ymd="2026-06-19",
         ),
@@ -105,6 +104,8 @@ def _event(
         source="test",
         multiplier=100,
         lot_id=lot_id or f"lot-{account}",
+        # §9.2 step 3: the short put side now travels as the trade side.
+        raw_payload={"side": "sell"},
     )
 
 
@@ -868,6 +869,11 @@ def test_legacy_snapshot_attaches_bounded_current_consumer_shadow(
     }
     assert "note" not in CURRENT_DECISION_POSITION_FIELDS
     assert "pairing_until_ms" not in CURRENT_DECISION_LIFECYCLE_FIELDS
+    # §7.1: ``position_id`` is retired in favour of the derived ``position_key``.
+    # Both halves are asserted so the allowlist cannot silently carry both keys,
+    # or neither, without a test noticing.
+    assert "position_key" in CURRENT_DECISION_POSITION_FIELDS
+    assert "position_id" not in CURRENT_DECISION_POSITION_FIELDS
 
     tampered = deepcopy(current)
     tampered["position_lots"][0]["fields"]["contracts_open"] = 9
@@ -1387,7 +1393,6 @@ def test_assigned_stock_lot_adapter_preserves_retired_adjustment_mode() -> None:
         account="lx",
         underlying_symbol="NVDA",
         option_type="put",
-        position_side="short",
         strike=100,
         expiration_ymd="2026-06-19",
     )
@@ -1407,6 +1412,8 @@ def test_assigned_stock_lot_adapter_preserves_retired_adjustment_mode() -> None:
                 raw_payload={
                     "strategy": "combo_yield",
                     "strategy_group_id": "combo-yield:lx:mixed-version",
+                    # §9.2 step 3: the short put side now travels as the trade side.
+                    "side": "sell",
                 },
             ),
             TradeEvent(
@@ -1620,7 +1627,6 @@ def test_hkd_settlement_fee_and_embedded_time_match_legacy_oracle() -> None:
             account="lx",
             underlying_symbol="0700.HK",
             option_type="put",
-            position_side="short",
             strike=100,
             expiration_ymd="2026-06-19",
         ),
@@ -1632,6 +1638,7 @@ def test_hkd_settlement_fee_and_embedded_time_match_legacy_oracle() -> None:
         target_lot_id="lot-source",
         raw_payload={
             "close_type": "assignment",
+            "side": "buy",
             "stock_settlement": dict(transition["stock_settlement"]),
         },
     )
@@ -1889,10 +1896,9 @@ def test_covered_call_linkage_without_current_identity_fails_closed() -> None:
             account="lx",
             underlying_symbol="NVDA",
             option_type="call",
-            position_side="short",
             strike=110,
             expiration_ymd="2026-06-19",
-        ),
+                ),
         contracts=1,
         price=2,
         currency="USD",
@@ -1961,10 +1967,9 @@ def test_resolved_covered_call_identity_removes_stale_review() -> None:
             account="lx",
             underlying_symbol="NVDA",
             option_type="call",
-            position_side="short",
             strike=110,
             expiration_ymd="2026-06-19",
-        ),
+                ),
         contracts=1,
         price=2,
         currency="USD",
@@ -2035,10 +2040,9 @@ def test_covered_call_group_change_revalidates_prior_allocation() -> None:
             account="lx",
             underlying_symbol="NVDA",
             option_type="call",
-            position_side="short",
             strike=110,
             expiration_ymd="2026-06-19",
-        ),
+                ),
         contracts=1,
         price=2,
         currency="USD",
@@ -2127,10 +2131,9 @@ def test_covered_call_explicit_stock_lot_survives_restart_with_conflicting_group
             account="lx",
             underlying_symbol="NVDA",
             option_type="call",
-            position_side="short",
             strike=110,
             expiration_ymd="2026-06-19",
-        ),
+                ),
         contracts=1,
         price=2,
         currency="USD",
@@ -2908,7 +2911,6 @@ def test_assignment_event_owner_advances_compact_stock_without_history(
             account="lx",
             underlying_symbol="NVDA",
             option_type="put",
-            position_side="short",
             strike=100,
             expiration_ymd="2026-06-19",
         ),
@@ -2921,6 +2923,7 @@ def test_assignment_event_owner_advances_compact_stock_without_history(
         raw_payload={
             "record_id": "lot-lx",
             "target_lot_id": "lot-lx",
+            "side": "buy",
             "stock_settlement": {
                 "side": "buy",
                 "shares": 100,
@@ -2967,7 +2970,6 @@ def test_trade_event_adapter_rejects_invalid_settlement_time(
             account="lx",
             underlying_symbol="NVDA",
             option_type="put",
-            position_side="short",
             strike=100,
             expiration_ymd="2026-06-19",
         ),
@@ -2978,6 +2980,7 @@ def test_trade_event_adapter_rejects_invalid_settlement_time(
         multiplier=100,
         target_lot_id="lot-source",
         raw_payload={
+            "side": "buy",
             "stock_settlement": {
                 "side": "buy",
                 "shares": 100,
@@ -3018,7 +3021,6 @@ def test_assigned_stock_sale_owner_publishes_partial_full_and_rolls_back(
                 account="lx",
                 underlying_symbol="NVDA",
                 option_type="put",
-                position_side="short",
                 strike=100,
                 expiration_ymd="2026-06-19",
             ),
@@ -3029,6 +3031,7 @@ def test_assigned_stock_sale_owner_publishes_partial_full_and_rolls_back(
             multiplier=100,
             target_lot_id="lot-source",
             raw_payload={
+                "side": "buy",
                 "stock_settlement": {
                     "side": "buy",
                     "shares": 100,

@@ -4,6 +4,7 @@ from functools import partial
 import pytest
 
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
+from src.application.ledger.writer_trade_events import _trade_event_from_normalized_deal
 from src.application.trades.intake import process_trade_payload
 from src.application.trades.normalizer import canonical_trade_execution_content, normalize_trade_deal
 from src.application.trades.resolver import resolve_trade_deal
@@ -124,3 +125,55 @@ def test_conflicting_multiplier_alias_is_rejected_before_cache_and_comparison(tm
     result = _process(tmp_path, payload)
     assert result["status"] == "unresolved"
     assert result["reason"] == "execution_admission_failed"
+
+
+def test_fractional_stock_size_is_refused_by_name_at_the_ledger_boundary():
+    """Admission accepts a fractional stock size; a ``TradeEvent`` cannot carry it.
+
+    ``test_valid_fractional_stock_refresh_keeps_once_semantics`` pins the intake
+    side: ``quantity="0.5"`` is legitimate and must keep routing to PM refresh, so
+    the drop cannot be fixed by rejecting fractional sizes during normalization.
+    ``TradeEvent.contracts`` is an int (§7.3 keeps a *stock* size a Decimal, but the
+    event field is whole units), so the size has no representation there. It must
+    fail by name rather than collapse to ``0``, which is indistinguishable from "no
+    quantity" and would surface as a misleading ``contracts must be > 0`` — or, for
+    the event types that skip that rule, as a silently stored ``0``.
+    """
+
+    deal = normalize_trade_deal(_stock(), futu_account_mapping={"123": "lx"}, allow_opend_refresh=False)
+    assert deal.contracts is None
+    assert deal.execution_input["quantity"] == "0.5"
+
+    with pytest.raises(ValueError, match="trade_execution_quantity_not_representable:0.5"):
+        _trade_event_from_normalized_deal(deal)
+
+
+@pytest.mark.parametrize("quantity", ["1.2.3", "abc.def"])
+def test_malformed_stock_size_is_not_reported_as_unrepresentable(quantity):
+    """A malformed size must keep reporting that it is malformed.
+
+    It must not be labelled as a size with no whole-unit representation. Note this
+    is guaranteed upstream — ``_trade_event_from_normalized_deal`` raises on the
+    execution-input ``errors`` before reaching the fractional guard — so this pins
+    the overall diagnosis rather than the guard's own implementation.
+    """
+
+    deal = normalize_trade_deal(
+        {**_stock(), "quantity": quantity}, futu_account_mapping={"123": "lx"}, allow_opend_refresh=False
+    )
+    with pytest.raises(ValueError, match="invalid:quantity:invalid_decimal") as excinfo:
+        _trade_event_from_normalized_deal(deal)
+    assert "not_representable" not in str(excinfo.value)
+
+
+@pytest.mark.parametrize("quantity,expected", [("2", 2), ("2.00", 2), ("3.0", 3)])
+def test_integral_stock_size_written_with_a_decimal_point_is_not_fractional(quantity, expected):
+    """Pins that trailing zeros do not make a size fractional (``canonical_decimal``
+    strips them). This exercises ``normalize_optional_int`` rather than the guard —
+    an integral size never reaches the guard, which is gated on ``contracts is None``.
+    """
+
+    deal = normalize_trade_deal(
+        {**_stock(), "quantity": quantity}, futu_account_mapping={"123": "lx"}, allow_opend_refresh=False
+    )
+    assert _trade_event_from_normalized_deal(deal).contracts == expected

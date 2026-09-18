@@ -24,10 +24,9 @@ def _contract(
         account=account,
         underlying_symbol=symbol,
         option_type=option_type,
-        position_side="short" if option_type == "put" else "long",
         strike=100 if option_type == "put" else 110,
         expiration_ymd="2026-08-21",
-    )
+        )
 
 
 def _open(
