@@ -2933,6 +2933,8 @@ def _status_safe_wheel_activation_readiness(value: Any) -> dict[str, Any]:
                 "monitoring_gate",
                 "reason_code",
                 "identity_source",
+                "policy_drift",
+                "remediation_command",
             }
         }
         account_result["descriptor"] = identity(item.get("descriptor"))
@@ -2953,6 +2955,7 @@ def _status_safe_wheel_activation_readiness(value: Any) -> dict[str, Any]:
                 "storage_status",
                 "account_count",
                 "enabled_account_count",
+                "remediation_command",
             },
         ),
         "reason_codes": _string_list(source.get("reason_codes")),

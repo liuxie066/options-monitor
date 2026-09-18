@@ -44,7 +44,7 @@ from src.application.layered_config import (
     build_layered_runtime_config_from_user_config,
     default_system_config_path,
 )
-from src.application.runtime_config_paths import write_json_atomic
+from src.application.runtime_config_paths import read_json_object_or_empty, write_json_atomic
 from src.application.runtime_paths import resolve_runtime_root
 from src.application.portfolio_management import (
     normalize_portfolio_management_config,
@@ -974,17 +974,69 @@ def build_yaml_runtime_config_file(
         output_path=output_path,
     )
 
+    # Advisory only. `config build` stays a pure file generator: it never reopens a window,
+    # appends a binding, or touches the ledger, so it must not refuse here either.
+    wheel_drift = _wheel_policy_drift(
+        prior=read_json_object_or_empty(output_path), current=cfg, market=normalized_market
+    )
+
     if not dry_run:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         write_json_atomic(output_path, cfg)
 
-    return {
+    result = {
         "ok": True,
         **meta,
         "output_config_path": str(output_path),
         "dry_run": bool(dry_run),
         "write_applied": not bool(dry_run),
     }
+    # A clean build keeps its existing payload shape: the drift keys appear only when there
+    # is drift to report, so `"warnings" not in payload` stays a valid "nothing to see" check.
+    if wheel_drift is not None:
+        result["wheel_policy_drift"] = wheel_drift
+        result["warnings"] = [_wheel_policy_drift_warning(wheel_drift, output_path=output_path)]
+    return result
+
+
+def _wheel_policy_drift(
+    *, prior: dict[str, Any], current: dict[str, Any], market: str
+) -> dict[str, Any] | None:
+    if not prior:
+        return None
+    from src.application.wheel.config import detect_wheel_policy_drift
+
+    try:
+        drift = detect_wheel_policy_drift(prior, current, market=market)
+    except (TypeError, ValueError):
+        return None
+    if drift is None:
+        return None
+    return {**drift, "market": market}
+
+
+def _wheel_policy_drift_warning(drift: dict[str, Any], *, output_path: Path) -> str:
+    from src.application.wheel.remediation import build_accept_policy_command
+
+    policy_accounts = [str(item) for item in drift.get("policy_accounts") or []]
+    boundary_accounts = [str(item) for item in drift.get("boundary_accounts") or []]
+    market = str(drift.get("market") or "").strip().lower()
+    parts: list[str] = []
+    if policy_accounts:
+        command = build_accept_policy_command(
+            market=market, config_path=output_path, apply=True
+        )
+        parts.append(
+            f"bound policy drift for account(s) {', '.join(policy_accounts)}; if their "
+            f"activation window is open, accept it with `{command}`"
+        )
+    if boundary_accounts:
+        parts.append(
+            f"activation boundary drift for account(s) {', '.join(boundary_accounts)}; "
+            "policy acceptance cannot clear this, restore the configured descriptor or "
+            "disable and re-enable the window"
+        )
+    return "Wheel " + "; ".join(parts) + "."
 
 
 def _assistant_config_from_runtime_defaults(cfg: dict[str, Any]) -> dict[str, Any]:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import FrozenInstanceError, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +24,31 @@ class AgentToolError(Exception):
 
     def __str__(self) -> str:
         return f"{self.code}: {self.message}"
+
+
+# `frozen=True` is meant to freeze the *payload* fields, and it must not extend to the
+# slots `BaseException` owns. Python assigns those from the interpreter side:
+# `contextlib._GeneratorContextManager.__exit__` does `exc.__traceback__ = traceback`, and
+# `BaseException.add_note` sets `__notes__` the same way. Left frozen, either one raises
+# `FrozenInstanceError` *while handling the real error*, so the agent tool call reports
+# "cannot assign to field '__traceback__'" instead of the code/message that failed.
+#
+# The assignment has to happen after the decorator runs: `dataclasses._process_class`
+# rejects a class-body `__setattr__` under `frozen=True` with
+# "TypeError: Cannot overwrite attribute __setattr__ in class AgentToolError".
+_EXCEPTION_SLOTS = frozenset(
+    {"args", "__traceback__", "__cause__", "__context__", "__suppress_context__", "__notes__"}
+)
+
+
+def _set_exception_slot_or_raise(self: AgentToolError, name: str, value: Any) -> None:
+    if name in _EXCEPTION_SLOTS:
+        BaseException.__setattr__(self, name, value)
+        return
+    raise FrozenInstanceError(f"cannot assign to field {name!r}")
+
+
+AgentToolError.__setattr__ = _set_exception_slot_or_raise
 
 
 def build_error_payload(err: AgentToolError) -> dict[str, Any]:

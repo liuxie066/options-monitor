@@ -7,6 +7,7 @@ import pytest
 from src.application.config_validator import validate_config
 from src.application.wheel.config import (
     build_wheel_policy_hash,
+    detect_wheel_policy_drift,
     evaluate_wheel_activation_readiness,
     resolve_wheel_activation_descriptor,
     resolve_wheel_config,
@@ -111,13 +112,25 @@ def test_activation_readiness_requires_exact_open_descriptor_match() -> None:
     descriptor = resolve_wheel_activation_descriptor(_v2_config(), market="us", account="lx")
     assert descriptor is not None
 
-    assert evaluate_wheel_activation_readiness(None, None)["reason_code"] == "missing_descriptor"
-    assert evaluate_wheel_activation_readiness(descriptor, None)["reason_code"] == "missing_window"
+    no_descriptor = evaluate_wheel_activation_readiness(None, None)
+    assert no_descriptor["reason_code"] == "missing_descriptor"
+    no_window = evaluate_wheel_activation_readiness(descriptor, None)
+    assert no_window["reason_code"] == "missing_window"
 
     mismatch = {**descriptor, "policy_hash": "f" * 64}
     mismatch_result = evaluate_wheel_activation_readiness(descriptor, mismatch)
     assert mismatch_result["monitoring_gate"] == "config_mismatch"
     assert mismatch_result["reason_code"] == "descriptor_mismatch"
+
+    # `policy_drift` is stated on every refusal, so `False` reads as "not a policy rebind".
+    assert no_descriptor["policy_drift"] is False
+    assert no_window["policy_drift"] is False
+    assert mismatch_result["policy_drift"] is True
+    boundary_result = evaluate_wheel_activation_readiness(
+        descriptor, {**mismatch, "generation": descriptor["generation"] + 1}
+    )
+    assert boundary_result["reason_code"] == "descriptor_mismatch"
+    assert boundary_result["policy_drift"] is False
 
     ready = evaluate_wheel_activation_readiness(descriptor, descriptor)
     assert ready == {
@@ -201,3 +214,40 @@ def test_revision_zero_matches_legacy_readiness() -> None:
     assert evaluate_wheel_activation_readiness(descriptor, {
         **descriptor, "effective_policy_hash": descriptor["policy_hash"], "policy_binding_revision": 0,
     }) == evaluate_wheel_activation_readiness(descriptor, descriptor)
+
+
+def test_detect_wheel_policy_drift_separates_policy_from_boundary_edits() -> None:
+    prior = _v2_config()
+    current = _v2_config()
+    assert detect_wheel_policy_drift(prior, current, market="us") is None
+
+    current["wheel"]["put"]["min_dte"] = 21
+    drift = detect_wheel_policy_drift(prior, current, market="us")
+    assert drift == {
+        "accounts": [{"account": "lx", "policy_changed": True, "boundary_changed": False}],
+        "policy_accounts": ["lx"],
+        "boundary_accounts": [],
+    }
+
+    current["wheel"]["activation_by_account"]["lx"]["generation"] = 3
+    drift = detect_wheel_policy_drift(prior, current, market="us")
+    assert drift["policy_accounts"] == ["lx"]
+    assert drift["boundary_accounts"] == ["lx"]
+
+    # Accounts with no descriptor on either side are never compared: no window, no binding.
+    fresh = _v2_config()
+    fresh["wheel"]["accounts"] = ["lx", "sy"]
+    assert detect_wheel_policy_drift(fresh, {**fresh, "symbols": ["NVDA"]}, market="us") is None
+
+    # A boundary-only edit is reported as boundary drift, not policy drift.
+    boundary_only = _v2_config()
+    boundary_only["wheel"]["activation_by_account"]["lx"]["activated_at_ms"] += 1
+    drift = detect_wheel_policy_drift(prior, boundary_only, market="us")
+    assert drift["policy_accounts"] == []
+    assert drift["boundary_accounts"] == ["lx"]
+
+
+def test_detect_wheel_policy_drift_ignores_unusable_inputs() -> None:
+    assert detect_wheel_policy_drift(None, _v2_config(), market="us") is None
+    assert detect_wheel_policy_drift(_v2_config(), None, market="us") is None
+    assert detect_wheel_policy_drift(_v2_config(), _v2_config(), market="eu") is None

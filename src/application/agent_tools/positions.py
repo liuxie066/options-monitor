@@ -1760,6 +1760,7 @@ WHEEL_ACTIVATION_TOOL = build_agent_tool(
             "storage_status",
             "pending_authoring_journal",
             "policy_drift",
+            "remediation_command",
             "original_request",
             "recovered_transactions",
             "failure_phase",
