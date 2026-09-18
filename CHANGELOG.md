@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 3.5.13 - 2026-09-18
+
+### Improvements
+- Relaxed the Wheel volatility margin so Covered Call and Cash-Secured Put candidates qualify once implied volatility is no lower than matched-term realized volatility, lowering the ratio threshold from 1.10 to 1.0 and the spread threshold from 0.05 to 0.0.
+
 ## 3.5.12 - 2026-09-15
 
 ### Bug Fixes
