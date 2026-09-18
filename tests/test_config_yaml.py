@@ -440,6 +440,124 @@ def test_runtime_strategy_conversion_rejects_retired_combo_yield_key() -> None:
         runtime_strategy_keys_to_yaml_authoring({"yield_enhancement": {"enabled": True}})
 
 
+def _wheel_yaml(*, put_min_dte: int = 14, generation: int = 2) -> str:
+    return _minimal_yaml().replace(
+        "  us:\n    accounts: [lx, sy]\n",
+        "  us:\n"
+        "    accounts: [lx, sy]\n"
+        "    features:\n"
+        "      wheel:\n"
+        "        enabled: true\n"
+        "        accounts: [lx]\n"
+        "        call:\n"
+        "          min_dte: 30\n"
+        "          max_dte: 45\n"
+        "        put:\n"
+        f"          min_dte: {put_min_dte}\n"
+        "          max_dte: 35\n"
+        "        activation_by_account:\n"
+        "          lx:\n"
+        f"            generation: {generation}\n"
+        "            activated_at_ms: 1700000000000\n"
+        "            deactivated_at_ms: null\n",
+        1,
+    )
+
+
+def test_yaml_runtime_build_warns_before_a_bound_window_starts_drifting(
+    tmp_path: Path,
+) -> None:
+    config_path = _write_yaml(tmp_path / "config.yaml", _wheel_yaml())
+    runtime_path = tmp_path / "config.us.json"
+    first = build_yaml_runtime_config_file(
+        repo_root=REPO_ROOT,
+        market="us",
+        config_path=config_path,
+        output_config_path=runtime_path,
+        dry_run=False,
+    )
+    # Nothing to compare against on the first build, so nothing to warn about, and the
+    # payload keeps its existing shape rather than carrying empty keys.
+    assert "wheel_policy_drift" not in first
+    assert "warnings" not in first
+    before = runtime_path.read_bytes()
+
+    # A symbol edit cannot move any account's policy hash, so it must stay silent.
+    config_path.write_text(
+        _wheel_yaml().replace("      - FUTU\n", "      - FUTU\n      - AMD\n"), encoding="utf-8"
+    )
+    quiet = build_yaml_runtime_config_file(
+        repo_root=REPO_ROOT,
+        market="us",
+        config_path=config_path,
+        output_config_path=runtime_path,
+        dry_run=True,
+    )
+    assert "wheel_policy_drift" not in quiet
+    assert "warnings" not in quiet
+
+    # A threshold edit does move it, so the dry run warns without writing anything.
+    config_path.write_text(_wheel_yaml(put_min_dte=21), encoding="utf-8")
+    warned = build_yaml_runtime_config_file(
+        repo_root=REPO_ROOT,
+        market="us",
+        config_path=config_path,
+        output_config_path=runtime_path,
+        dry_run=True,
+    )
+    assert warned["wheel_policy_drift"]["policy_accounts"] == ["lx"]
+    assert warned["wheel_policy_drift"]["boundary_accounts"] == []
+    assert warned["write_applied"] is False
+    assert runtime_path.read_bytes() == before
+    assert len(warned["warnings"]) == 1
+    message = warned["warnings"][0]
+    assert "lx" in message
+    assert "wheel activation accept-policy --market us" in message
+    assert "--apply --confirm" in message
+    assert str(runtime_path) in message
+
+    # The warning is advisory: the real build still writes the snapshot.
+    applied = build_yaml_runtime_config_file(
+        repo_root=REPO_ROOT,
+        market="us",
+        config_path=config_path,
+        output_config_path=runtime_path,
+        dry_run=False,
+    )
+    assert applied["write_applied"] is True
+    assert applied["wheel_policy_drift"]["policy_accounts"] == ["lx"]
+    assert runtime_path.read_bytes() != before
+
+
+def test_yaml_runtime_build_separates_boundary_drift_from_policy_drift(
+    tmp_path: Path,
+) -> None:
+    config_path = _write_yaml(tmp_path / "config.yaml", _wheel_yaml())
+    runtime_path = tmp_path / "config.us.json"
+    build_yaml_runtime_config_file(
+        repo_root=REPO_ROOT,
+        market="us",
+        config_path=config_path,
+        output_config_path=runtime_path,
+        dry_run=False,
+    )
+
+    config_path.write_text(_wheel_yaml(generation=3), encoding="utf-8")
+    warned = build_yaml_runtime_config_file(
+        repo_root=REPO_ROOT,
+        market="us",
+        config_path=config_path,
+        output_config_path=runtime_path,
+        dry_run=True,
+    )
+
+    assert warned["wheel_policy_drift"]["policy_accounts"] == []
+    assert warned["wheel_policy_drift"]["boundary_accounts"] == ["lx"]
+    # No command is offered, because no policy command can clear a boundary break.
+    assert "accept-policy" not in warned["warnings"][0]
+    assert "policy acceptance cannot clear this" in warned["warnings"][0]
+
+
 def test_yaml_runtime_build_defaults_to_canonical_runtime_path(tmp_path: Path) -> None:
     config_path = _write_yaml(tmp_path / "config.yaml", _minimal_yaml())
 

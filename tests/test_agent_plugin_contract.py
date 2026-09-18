@@ -392,12 +392,20 @@ def test_agent_tool_output_contracts_advertise_model_visible_data_shape() -> Non
     assert "broker_holdings_read" not in activation.requires
     assert "expected_config_descriptor" in activation.output_contract["fact_fields"]
     assert "window" not in activation.output_contract["fact_fields"]
+    assert "policy_drift" in activation.output_contract["fact_fields"]
+    assert "remediation_command" in activation.output_contract["fact_fields"]
 
     healthcheck = get_tool_definition("healthcheck")
     runtime_status = get_tool_definition("runtime_status")
     assert "wheel_activation_readiness.monitoring_gate" in healthcheck.output_contract["fact_fields"]
     assert "wheel_activation_readiness.monitoring_gate" in runtime_status.output_contract["fact_fields"]
     assert "wheel_activation_readiness" in runtime_status.output_contract["model_value_fields"]
+    for contract in (healthcheck, runtime_status):
+        assert "wheel_activation_readiness.remediation_command" in contract.output_contract["fact_fields"]
+        assert "wheel_activation_readiness.accounts[].policy_drift" in contract.output_contract["fact_fields"]
+        assert "wheel_activation_readiness.accounts[].remediation_command" in (
+            contract.output_contract["fact_fields"]
+        )
 
     wheel_intent = get_tool_definition("wheel_intent")
     assert wheel_intent is not None

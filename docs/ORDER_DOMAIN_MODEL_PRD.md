@@ -29,7 +29,7 @@
 
 ## 2. 当前事实与目标变化
 
-源码依据：本地检出 `main@d0d6094bc53db3d4ce653a0a65ccb81d13cf082b`，未核实生产部署配置。
+源码依据：§2 现状证据读自本地检出 `main@d0d6094bc53db3d4ce653a0a65ccb81d13cf082b`；本文与设计文档的落库基线为 `main@4fc161b8042f4282cdc2a7c01c06df4bfdc3f3a8`，未核实生产部署配置，也未在新基线逐条重核 §2 现状。落库基线内已落地 `541c19c8`（股票/ETF execution currency 由 symbol identity 派生），与设计文档 §4.1.2 的 currency 归属口径一致。
 
 | 现状证据（源码） | 本次目标 |
 |---|---|

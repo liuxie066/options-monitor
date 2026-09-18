@@ -152,6 +152,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     _add_activation_runtime(rebind, write=False)
     add_write_flags(rebind, high_risk=True)
 
+    accept = activation_commands.add_parser(
+        "accept-policy",
+        help=(
+            "accept the configured policy for every drifting account in one market; "
+            "rebuilds the runtime snapshot when a rebind needs it, then delegates to "
+            "rebind-policy. write_applied means a snapshot rebuild or a binding insert "
+            "happened, never that every account was accepted"
+        ),
+    )
+    accept.add_argument("--account", help="limit acceptance to one already-activated account")
+    accept.add_argument("--actor", required=True)
+    accept.add_argument(
+        "--expected-plan-hash",
+        "--expected-preview-hash",
+        dest="expected_plan_hash",
+        help="optional plan hash from a dry run; when given it must match",
+    )
+    _add_activation_runtime(accept, write=False)
+    add_write_flags(accept, high_risk=True)
+
     intent = commands.add_parser("intent", help="manage Wheel option intents")
     intent_commands = intent.add_subparsers(dest="intent_action", required=True)
     create = intent_commands.add_parser("create")
@@ -358,6 +378,20 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
                 repo_root=Path(__file__).resolve().parents[3], market=args.market, account=args.account,
                 config_path=args.config_path, runtime_root=args.runtime_root, data_config=args.data_config,
                 request_id=args.request_id, actor=args.actor, expected_preview_hash=args.expected_preview_hash,
+                apply_changes=apply_changes,
+            )
+        if args.activation_action == "accept-policy":
+            from src.application.wheel.policy_acceptance import accept_wheel_policy
+
+            return accept_wheel_policy(
+                repo_root=Path(__file__).resolve().parents[3],
+                market=args.market,
+                actor=args.actor,
+                account=getattr(args, "account", None),
+                config_path=args.config_path,
+                runtime_root=args.runtime_root,
+                data_config=args.data_config,
+                expected_plan_hash=getattr(args, "expected_plan_hash", None),
                 apply_changes=apply_changes,
             )
         if apply_changes and not str(args.expected_source_sha256 or "").strip():

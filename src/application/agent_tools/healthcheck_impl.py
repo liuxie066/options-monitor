@@ -328,6 +328,17 @@ def run_healthcheck_tool(
         wheel_activation_readiness.get("monitoring_gate") or "disabled"
     )
     wheel_account_count = int(wheel_activation_readiness.get("account_count") or 0)
+    wheel_message = (
+        "Wheel monitoring is enabled"
+        if wheel_monitoring_gate == "enabled"
+        else "Wheel monitoring is not configured"
+        if wheel_account_count == 0
+        else "Wheel monitoring is fail-closed: "
+        f"{wheel_activation_readiness.get('reason_code')}"
+    )
+    wheel_remediation = str(wheel_activation_readiness.get("remediation_command") or "").strip()
+    if wheel_remediation:
+        wheel_message = f"{wheel_message}; Run: {wheel_remediation}"
     checks.append(
         {
             "name": "wheel_activation_readiness",
@@ -338,14 +349,7 @@ def run_healthcheck_tool(
                 if wheel_monitoring_gate == "config_mismatch"
                 else "warn"
             ),
-            "message": (
-                "Wheel monitoring is enabled"
-                if wheel_monitoring_gate == "enabled"
-                else "Wheel monitoring is not configured"
-                if wheel_account_count == 0
-                else "Wheel monitoring is fail-closed: "
-                f"{wheel_activation_readiness.get('reason_code')}"
-            ),
+            "message": wheel_message,
             "value": wheel_activation_readiness,
         }
     )

@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+## 3.5.15 - 2026-09-18
+
+### Bug Fixes
+- Accepted Wheel candidate identities in Daily Brief delivery validation so a single Wheel candidate can no longer abort an entire notification tick, with the identity validator now taking its strategy families, supported markets, and branch suffix from the domain builder instead of a stale copy of that vocabulary.
+
+## 3.5.14 - 2026-09-18
+
+### Improvements
+- Accepted drifted Wheel activation policies with a single previewed and confirmed `wheel activation accept-policy` command, replacing the rebuild, preview, rebind, and readback sequence while preserving activation history and reporting per-account outcomes.
+- Attached a runnable remediation command to Wheel activation gates whose policy drifted, and warned during configuration builds when a rebuild would close an already-bound window.
+- Derived required-data prefetch fixture expirations from the trading date so the suite no longer fails once a hard-coded expiry reaches zero days to expiry.
+
+### Bug Fixes
+- Reported `policy_drift` as false for window identity and boundary refusals so a true value always identifies the drift a policy rebind can accept, and carried the field through the runtime status, healthcheck, and diagnostics views that previously dropped it.
+- Preserved the original exception raised inside an agent tool error so tool failures report their real reason instead of a dataclass assignment error.
+
+## 3.5.13 - 2026-09-18
+
+### Improvements
+- Relaxed the Wheel volatility margin so Covered Call and Cash-Secured Put candidates qualify once implied volatility is no lower than matched-term realized volatility, lowering the ratio threshold from 1.10 to 1.0 and the spread threshold from 0.05 to 0.0.
+
 ## 3.5.12 - 2026-09-15
 
 ### Bug Fixes

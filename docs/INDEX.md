@@ -55,6 +55,8 @@
 - [Futu Simulate Account Experience Scan System Design](FUTU_SIMULATE_ACCOUNT_EXPERIENCE_SYSTEM_DESIGN.md)：
   模拟账户手动体验扫描的 owner、数据合同、副作用门禁和验收映射。
 - [Ledger Architecture](LEDGER_ARCHITECTURE.md)：`trade_events -> position_lots`、lot identity 和恢复流程。
+- [Order Domain Model PRD](ORDER_DOMAIN_MODEL_PRD.md)：订单/成交/持仓统一领域模型的需求真源：目标、现状证据、成功信号与验收映射。
+- [Order Domain Model Design](ORDER_DOMAIN_MODEL_DESIGN.md)：上述需求的技术实现参考（字段表、现状映射、迁移路径）；非需求真源，决策与验收以 PRD 为准。
 - [Futu Trade And Holdings Sync](FUTU_TRADE_HOLDINGS_SYNC.md)：broker 成交摄取、持仓对账、生命周期同步和 fail-closed 边界。
 - [Close Advice Contract](CLOSE_ADVICE_CONTRACT.md)：严格止盈平仓、报价证据、状态机与通知边界。
 - [Option Performance Design](OPTION_PERFORMANCE_DESIGN.md)：期权净现金流、胜率、收益率、统一账本真源与公开入口的当前合同。

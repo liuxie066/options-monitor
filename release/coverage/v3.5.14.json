@@ -1,0 +1,109 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "3.5.14",
+  "base": {
+    "tag": "v3.5.13",
+    "commit": "056301a758574c3ab14658219b053b5b045a4a0b"
+  },
+  "reviewed_head": "9504ad958a9345668eeb333999d61662c151af89",
+  "commits": [
+    {
+      "sha": "d9f6dd60d03f985bff4d241af96f6f00eeb1629d",
+      "subject": "feat(wheel): accept policy drift in one step with accept-policy"
+    },
+    {
+      "sha": "db610b2c051cec0d9428de24382f1bdd0fed6b69",
+      "subject": "test(prefetch): derive fixture expirations from the trading date"
+    },
+    {
+      "sha": "737d04bc5c742336fbdef37b347ce3f36b25c381",
+      "subject": "Merge pull request #307 from liuxie066/codex/prefetch-expiry-dates"
+    },
+    {
+      "sha": "4a9a60f88fcea10f59074d56e072bac8e572f95f",
+      "subject": "chore(merge): merge main into feat/wheel-accept-policy to pick up the #307 expiry fix"
+    },
+    {
+      "sha": "9504ad958a9345668eeb333999d61662c151af89",
+      "subject": "Merge pull request #306 from liuxie066/feat/wheel-accept-policy"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "Accepted drifted Wheel activation policies with a single previewed and confirmed `wheel activation accept-policy` command, replacing the rebuild, preview, rebind, and readback sequence while preserving activation history and reporting per-account outcomes.",
+      "commits": [
+        "d9f6dd60d03f985bff4d241af96f6f00eeb1629d",
+        "9504ad958a9345668eeb333999d61662c151af89"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Attached a runnable remediation command to Wheel activation gates whose policy drifted, and warned during configuration builds when a rebuild would close an already-bound window.",
+      "commits": [
+        "d9f6dd60d03f985bff4d241af96f6f00eeb1629d"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Derived required-data prefetch fixture expirations from the trading date so the suite no longer fails once a hard-coded expiry reaches zero days to expiry.",
+      "commits": [
+        "db610b2c051cec0d9428de24382f1bdd0fed6b69",
+        "737d04bc5c742336fbdef37b347ce3f36b25c381"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Reported `policy_drift` as false for window identity and boundary refusals so a true value always identifies the drift a policy rebind can accept, and carried the field through the runtime status, healthcheck, and diagnostics views that previously dropped it.",
+      "commits": [
+        "d9f6dd60d03f985bff4d241af96f6f00eeb1629d"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Preserved the original exception raised inside an agent tool error so tool failures report their real reason instead of a dataclass assignment error.",
+      "commits": [
+        "d9f6dd60d03f985bff4d241af96f6f00eeb1629d"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "4a9a60f88fcea10f59074d56e072bac8e572f95f",
+      "reason": "Merge commit that brought main (already mapped #307 prefetch fix) into the accept-policy feature branch; it adds no change beyond the commits already mapped to release notes."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "d9f6dd60d03f985bff4d241af96f6f00eeb1629d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/306",
+        "docs/WHEEL_STRATEGY_PRD.md"
+      ]
+    },
+    {
+      "commit": "db610b2c051cec0d9428de24382f1bdd0fed6b69",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/307"
+      ]
+    },
+    {
+      "commit": "737d04bc5c742336fbdef37b347ce3f36b25c381",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/307"
+      ]
+    },
+    {
+      "commit": "4a9a60f88fcea10f59074d56e072bac8e572f95f",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/306"
+      ]
+    },
+    {
+      "commit": "9504ad958a9345668eeb333999d61662c151af89",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/306"
+      ]
+    }
+  ]
+}

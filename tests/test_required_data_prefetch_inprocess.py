@@ -7,6 +7,7 @@ from pathlib import Path
 import time
 from types import SimpleNamespace
 from unittest.mock import Mock
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -31,6 +32,27 @@ class _Gateway:
         self.close_calls += 1
 
 
+def _upcoming_expirations(*, offsets_days: tuple[int, ...] = (21, 49)) -> list[str]:
+    """Two upcoming expirations, relative to the live US trading date.
+
+    These were the literals `["2026-08-21", "2026-09-18"]`. Once the calendar
+    reached them the planning layer dropped both -- one already past, one at
+    0 DTE -- so `projected_expirations` came back empty and every test leaning
+    on this fixture died with "discovery or projection failed". Deriving them
+    keeps the fixture's intent (a couple of upcoming expirations) true on any
+    run date. Both offsets stay inside the `min_dte: 1` / `max_dte: 60` windows
+    the watchlists in this file use.
+
+    Derive from the real clock, not from `get_trading_date`: tests that pin the
+    trading date to a fixed past day must not have this shared list follow them,
+    or the expirations drift out of their DTE window. A test that pins the date
+    pins its own expirations too.
+    """
+
+    trading_date = datetime.now(ZoneInfo("America/New_York")).date()
+    return [(trading_date + timedelta(days=offset)).isoformat() for offset in offsets_days]
+
+
 @pytest.fixture(autouse=True)
 def _keep_prefetch_planning_offline(monkeypatch: pytest.MonkeyPatch) -> None:
     import src.application.required_data_planning as planning
@@ -44,7 +66,7 @@ def _keep_prefetch_planning_offline(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         planning,
         "list_option_expirations",
-        lambda *args, **kwargs: ["2026-08-21", "2026-09-18"],
+        lambda *args, **kwargs: _upcoming_expirations(),
     )
     monkeypatch.setattr(
         mod,
@@ -56,6 +78,21 @@ def _keep_prefetch_planning_offline(monkeypatch: pytest.MonkeyPatch) -> None:
             "markets": {},
         },
     )
+
+
+def test_shared_expiration_fixture_stays_inside_the_dte_windows() -> None:
+    """The autouse fixture must keep offering usable expirations on every run date.
+
+    If this fails, do not re-pin the dates to new literals -- that is exactly how
+    the previous pair went stale. Adjust `_upcoming_expirations` instead.
+    """
+
+    trading_date = datetime.now(ZoneInfo("America/New_York")).date()
+    expirations = _upcoming_expirations()
+    assert len(expirations) == 2
+    for raw in expirations:
+        dte = (date.fromisoformat(raw) - trading_date).days
+        assert 1 <= dte <= 60, f"{raw} is {dte} DTE, outside every watchlist window in this file"
 
 
 def _patch_0700_plan_discovery(
@@ -2867,6 +2904,7 @@ def test_spot_prefill_batches_by_binding_and_market(
 ) -> None:
     import pandas as pd
     import src.application.opend_utils as opend_utils
+    import src.application.required_data_planning as planning
 
     calls: list[tuple[str, str, list[str]]] = []
 
@@ -2889,6 +2927,14 @@ def test_spot_prefill_batches_by_binding_and_market(
         opend_utils,
         "get_trading_date",
         lambda _market: date(2026, 9, 4),
+    )
+    # Pinning the trading date means pinning the expirations with it. Left to the
+    # shared fixture they would track the real clock, drift past `max_dte` relative
+    # to this fixed 2026-09-04, and leave the symbols with no valid expiration.
+    monkeypatch.setattr(
+        planning,
+        "list_option_expirations",
+        lambda *args, **kwargs: ["2026-09-25", "2026-10-23"],
     )
     monkeypatch.setattr(
         "src.infrastructure.futu_gateway.build_ready_futu_gateway",

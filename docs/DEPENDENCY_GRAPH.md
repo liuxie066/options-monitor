@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 1033 (`src`: 524, `domain`: 82, `scripts`: 11, `tests`: 416)
-- Internal import edges: 7415 total, 3031 production/script edges excluding tests
+- Python files scanned: 1036 (`src`: 526, `domain`: 82, `scripts`: 11, `tests`: 417)
+- Internal import edges: 7445 total, 3048 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,7 +31,7 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|491| domain
+  application -->|492| domain
   application -->|4| domain_services
   application -->|146| infrastructure
   application -->|45| storage
@@ -39,15 +39,15 @@ flowchart LR
   domain_services -->|2| storage
   infrastructure -->|9| application
   infrastructure -->|6| domain
-  interfaces -->|153| application
+  interfaces -->|154| application
   interfaces -->|1| domain
   interfaces -->|4| infrastructure
   scripts -->|42| application
   scripts -->|4| domain
   scripts -->|2| infrastructure
   storage -->|1| domain
-  tests -->|3367| application
-  tests -->|419| domain
+  tests -->|3379| application
+  tests -->|420| domain
   tests -->|2| domain_services
   tests -->|238| infrastructure
   tests -->|238| interfaces
@@ -59,8 +59,8 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 491 |
-| interfaces | application | 153 |
+| application | domain | 492 |
+| interfaces | application | 154 |
 | application | infrastructure | 146 |
 | application | storage | 45 |
 | scripts | application | 42 |
@@ -79,8 +79,8 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 3367 |
-| tests | domain | 419 |
+| tests | application | 3379 |
+| tests | domain | 420 |
 | tests | infrastructure | 238 |
 | tests | interfaces | 238 |
 | tests | storage | 22 |
@@ -93,8 +93,8 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 
 | from | to | imports |
 |---|---|---|
-| src.application | domain.domain | 219 |
-| src.interfaces | src.application | 121 |
+| src.application | domain.domain | 220 |
+| src.interfaces | src.application | 122 |
 | src.application | src.infrastructure | 101 |
 | src.application.ledger | domain.domain | 100 |
 | src.application.ledger | domain.domain.ledger | 55 |
@@ -102,15 +102,15 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application | domain.storage | 34 |
 | scripts | src.application | 31 |
 | src.application.research | src.application | 29 |
-| src.application | src.application.ledger | 26 |
+| src.application | src.application.ledger | 27 |
 | src.application | domain.domain.engine | 25 |
 | src.application.multi_tick | src.application | 25 |
 | src.application.positions | src.application | 25 |
 | src.application.trades | src.application | 25 |
 | src.application.inbound | src.application | 23 |
 | src.application.trades | src.application.ledger | 23 |
+| src.application | src.application.settings | 19 |
 | domain.domain.ledger | domain.domain | 19 |
-| src.application | src.application.settings | 18 |
 | src.application | domain.domain.ledger | 17 |
 | domain.domain | domain.domain.ledger | 17 |
 | src.application | src.application.multi_tick | 16 |
@@ -179,18 +179,18 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 
 | module | incoming imports |
 |---|---|
-| src.application.agent_tool_contracts | 101 |
+| src.application.agent_tool_contracts | 102 |
 | domain.domain.symbol_identity | 73 |
-| src.application.agent_tool_config | 66 |
-| src.application.ledger.api | 65 |
+| src.application.agent_tool_config | 67 |
+| src.application.ledger.api | 66 |
 | src.application.account_config | 49 |
 | domain.domain.option_position_identity | 49 |
 | domain.domain.ledger.position_fields | 48 |
 | src.application.payload_helpers | 48 |
 | src.infrastructure.io_utils | 44 |
-| domain.domain.decision_state_fingerprint | 40 |
+| domain.domain.decision_state_fingerprint | 41 |
 | domain.domain.trade_contract_identity | 34 |
-| src.application.settings | 26 |
+| src.application.settings | 27 |
 | domain.domain.ledger | 26 |
 | src.application.runtime_paths | 24 |
 | src.infrastructure.futu_gateway | 24 |

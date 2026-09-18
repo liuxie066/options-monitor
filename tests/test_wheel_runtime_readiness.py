@@ -360,6 +360,114 @@ def test_bot_answers_wheel_activation_through_gateway_and_admission(activation_r
     assert result.ok and sqlite_path.read_bytes() == before
 
 
+def test_policy_drift_and_remediation_survive_the_status_sanitizer(
+    tmp_path: Path,
+) -> None:
+    from src.application.agent_tools.runtime_status_impl import (
+        _status_safe_wheel_activation_readiness,
+    )
+
+    config = _wheel_config()
+    drift_path = tmp_path / "drift.sqlite3"
+    _write_activation_table(
+        drift_path,
+        market="us",
+        account="lx",
+        generation=1,
+        activated_at_ms=1_000,
+        deactivated_at_ms=None,
+        policy_hash="f" * 64,
+    )
+
+    readiness = build_wheel_activation_readiness(
+        config=config,
+        market="us",
+        accounts=["lx"],
+        sqlite_path=drift_path,
+    )
+    assert readiness["monitoring_gate"] == "config_mismatch"
+    assert readiness["accounts"]["lx"]["policy_drift"] is True
+    assert "accept-policy --market us" in readiness["accounts"]["lx"]["remediation_command"]
+    assert "accept-policy --market us" in readiness["remediation_command"]
+
+    masked = _status_safe_wheel_activation_readiness(readiness)
+
+    assert masked["remediation_command"] == readiness["remediation_command"]
+    assert masked["accounts"]["lx"]["policy_drift"] is True
+    assert masked["accounts"]["lx"]["remediation_command"] == (
+        readiness["accounts"]["lx"]["remediation_command"]
+    )
+    # The masked view omits absolute paths on purpose; the operator's shell supplies them.
+    assert str(tmp_path) not in masked["accounts"]["lx"]["remediation_command"]
+
+
+def test_synthesized_refusals_state_policy_drift_is_false(tmp_path: Path) -> None:
+    no_market = build_wheel_activation_readiness(
+        config=_wheel_config(),
+        market=None,
+        accounts=["lx"],
+        sqlite_path=tmp_path / "unused.sqlite3",
+    )
+    assert no_market["accounts"]["lx"]["policy_drift"] is False
+    assert "remediation_command" not in no_market["accounts"]["lx"]
+
+    available_path = tmp_path / "available.sqlite3"
+    _write_activation_table(
+        available_path,
+        market="us",
+        account="lx",
+        generation=1,
+        activated_at_ms=1_000,
+        deactivated_at_ms=None,
+        policy_hash="f" * 64,
+    )
+    unparseable = build_wheel_activation_readiness(
+        config={"wheel": {"enabled": True, "accounts": ["lx"], "activation_by_account": "broken"}},
+        market="us",
+        accounts=["lx"],
+        sqlite_path=available_path,
+    )
+    assert unparseable["accounts"]["lx"]["reason_code"] == "descriptor_mismatch"
+    assert unparseable["accounts"]["lx"]["policy_drift"] is False
+    assert "remediation_command" not in unparseable["accounts"]["lx"]
+
+    no_descriptor = build_wheel_activation_readiness(
+        config={"wheel": {"enabled": True, "accounts": ["lx"]}},
+        market="us",
+        accounts=["lx"],
+        sqlite_path=available_path,
+    )
+    assert no_descriptor["accounts"]["lx"]["reason_code"] == "missing_descriptor"
+    assert no_descriptor["accounts"]["lx"]["policy_drift"] is False
+    assert "remediation_command" not in no_descriptor["accounts"]["lx"]
+
+    missing = build_wheel_activation_readiness(
+        config=_wheel_config(),
+        market="us",
+        accounts=["lx"],
+        sqlite_path=tmp_path / "absent.sqlite3",
+    )
+    assert missing["accounts"]["lx"]["policy_drift"] is False
+    assert "remediation_command" not in missing["accounts"]["lx"]
+
+
+@pytest.mark.parametrize("activation_runtime", ["mismatch"], indirect=True)
+def test_wheel_activation_view_exposes_the_accept_policy_command(activation_runtime) -> None:
+    config_path, _sqlite_path, _policy_hash, _state = activation_runtime
+    response = execute_tool("runtime_status", {
+        "config_path": str(config_path), "accounts": ["user1"], "view": "wheel_activation",
+    })
+
+    assert response["ok"] is True
+    readiness = response["data"]["wheel_activation_readiness"]
+    assert readiness["monitoring_gate"] == "config_mismatch"
+    account = readiness["accounts"]["user1"]
+    assert account["policy_drift"] is True
+    assert "wheel activation accept-policy --market us" in readiness["remediation_command"]
+    assert "--account user1" in account["remediation_command"]
+    assert "--apply --confirm" in account["remediation_command"]
+
+
 def test_wheel_activation_view_respects_requested_accounts(activation_runtime) -> None:
     config_path, _sqlite_path, _policy_hash, _state = activation_runtime
     response = execute_tool("runtime_status", {

@@ -38,9 +38,16 @@ _MARKET_RE = re.compile(r"^[A-Z0-9_-]+$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _REVISION_RE = re.compile(r"\.r(?P<revision>\d{4})\.json$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+# Shape only, like _MARKET_RE above: the field layout and the no-colon rule are
+# what this regex owns, while every value rule -- the strategy-family vocabulary,
+# the supported markets, symbol canonicalization, and which families carry a
+# branch suffix -- belongs to `build_daily_brief_candidate_identity`, which each
+# identity is round-tripped through below.  Enumerating families here duplicated
+# that domain vocabulary, and when the domain grew a `wheel` member this copy did
+# not, so every Wheel candidate identity was rejected as "incompatible".
 _CANDIDATE_IDENTITY_RE = re.compile(
-    r"^candidate:v1:(?P<account>[^:]+):(?P<market>US|HK|CN):(?P<symbol>[^:]+):"
-    r"(?P<family>sell_put|covered_call|combo_yield)$"
+    r"^candidate:v1:(?P<account>[^:]+):(?P<market>[A-Z0-9_-]+):(?P<symbol>[^:]+):"
+    r"(?P<family>[^:]+)(?::(?P<branch_id>[^:]+))?$"
 )
 _MISSING = object()
 _RETIRED_AI_MESSAGE_MARKERS = (
@@ -2099,6 +2106,7 @@ def _normalize_candidate_identities(
                 market=match.group("market"),
                 symbol=match.group("symbol"),
                 strategy_family=match.group("family"),
+                wheel_branch_id=match.group("branch_id"),
             )
         except ValueError as exc:
             raise ValueError(f"candidate identity is incompatible: {identity!r}") from exc

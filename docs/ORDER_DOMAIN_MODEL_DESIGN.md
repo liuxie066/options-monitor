@@ -74,7 +74,7 @@ Combo / Wheel 投影 & 元数据  ───────────────�
 | `multiplier` | int | 仅 option | 乘数（默认 100） |
 | `deliverable` | {`quantity`,`amount`,`multiplier`,`ratio`} | 仅 option 可选 | 交割规格 |
 
-> **归属与不变式**：`currency` 以 `instrument_ref.currency` 为权威，成交本体 `currency` 为派生/复制，两者必须一致（冲突即 `invalid:currency:instrument_mismatch`，现状已校验）。`multiplier` 是期权合约属性，权威存储只在 `instrument_ref`（§10.2），`TradeEvent`/`PositionLot` 侧只读投影、不重复存储。
+> **归属与不变式**：`currency` 以 `instrument_ref.currency` 为权威，成交本体 `currency` 为派生/复制，两者必须一致（冲突即 `invalid:currency:instrument_mismatch`，现状已校验；落库基线 `541c19c8` 在 Futu deal 归一化新增 `symbol_currency(symbol)` 派生来源，属 §10.3 家族 ⑤ 的收敛范围）。`multiplier` 是期权合约属性，权威存储只在 `instrument_ref`（§10.2），`TradeEvent`/`PositionLot` 侧只读投影、不重复存储。
 
 #### 4.1.3 成交本体（Execution，资产无关）
 
