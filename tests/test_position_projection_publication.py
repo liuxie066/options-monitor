@@ -142,6 +142,7 @@ def test_projection_column_classification_is_closed(tmp_path: Path) -> None:
     }
     assert set(POSITION_LOTS_COLUMN_CLASSIFICATION) == {
         "record_id",
+        "lot_id",
         "account",
         "fields_json",
         "source_event_id",

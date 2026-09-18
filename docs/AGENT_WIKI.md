@@ -587,6 +587,48 @@ checkpoints. Merging this source does not authorize a live apply/activate,
 release, deployment, service change, notification, broker write, or deletion;
 each remains a separate explicit operator action.
 
+#### Lot Identity Migration (D1-D4)
+
+A separate parent group from `projection-migration` above, with its own
+`schema_version` on every payload. `apply` exists in both groups with the same
+parameters and opposite meanings: the projection one lands a disabled
+checkpoint and is non-destructive, this one rewrites lot payloads and backfills
+identity. Always name the group.
+
+```bash
+./om option-positions --data-config <data.json> lot-identity-migration inventory
+./om option-positions --data-config <data.json> lot-identity-migration verify
+./om option-positions --data-config <data.json> lot-identity-migration apply \
+  --manifest <inventory.json> --apply --confirm
+```
+
+`inventory` and `verify` open the store read-only. `inventory` reports the
+pending D1/D2 column work, the D3 drop-set classification
+(`carried`/`reconstructible`/`lost`) and the §13.5 R6 contract-scalar carrier
+distribution; it is the manifest `apply` consumes, so a manifest is bound to one
+store.
+`verify` replays the projection from `trade_events` and judges the drop set; it
+never reuses a projection-verify checkpoint. Its `readiness_reasons` separate
+the cases an operator must not conflate:
+
+- `trade_events_not_replayable` — the stored events are not canonical
+  (`non_canonical_trade_event_schema`), so no lot-level verdict exists. This is
+  the reported state on a store whose `trade_events` predate the canonical
+  payload, and it is not a lot-identity failure.
+- `projection_replay_mismatch` — the replay ran and the stored lots differ.
+- `dropped_payload_keys_would_lose_facts` — a non-empty payload key (or a
+  `note` KV pair) has no surviving home; `blocking_keys` names them.
+
+`apply` requires the exact frozen manifest and refuses when the store moved on
+since the inventory was taken. One transition is expected rather than a
+divergence: a writer's first open of a store that predates the identity carrier
+adds it, which changes the inventory fingerprint while the store identity stays
+the same. The refusal names that drift; re-run `inventory` against the store as
+it now is (it happens once per store) rather than reaching for a wider manifest.
+`apply` runs only the safe half of the recipe — the identity backfill and the
+`position_id` cleanup — and itemizes the D1/D2/D3 destructive steps as
+`deferred` with their reason. Executing them is not authorized by this document.
+
 #### Option Performance And Portfolio Bridges
 
 Primary read entry points:
