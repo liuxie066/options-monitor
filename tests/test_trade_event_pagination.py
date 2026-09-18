@@ -25,6 +25,14 @@ from src.application.ledger.repository import SQLiteOptionPositionsRepository
 CURSOR_KEY = "test-only-cursor-signing-key"
 
 
+class _InjectedPublishFailure(sqlite3.OperationalError):
+    """The failure a test injects into the publish, so it can be told apart.
+
+    It subclasses ``OperationalError`` because that is what a real statement
+    failure is, and the handler under test branches on ``sqlite3.Error``.
+    """
+
+
 def test_public_api_exposes_trade_event_page_limit() -> None:
     assert MAX_TRADE_EVENT_PAGE_ROWS == 20
 
@@ -710,12 +718,13 @@ def test_open_refreshes_a_stale_pagination_guard_definition(tmp_path: Path) -> N
     """A store built before §7.4 must not keep a guard that aborts every write.
 
     Readiness sees the guards by name and type and reads the stored rows, never by
-    how they are *defined*, and the guards are published with ``CREATE TRIGGER IF
-    NOT EXISTS``, so a store whose guard still carries the old ``typeof(strike)``
-    whitelist never receives the widened one. Once §7.1 onwards writes the strike as
-    decimal *text*, that stale guard rejects every insert with the misleading
-    ``trade event pagination query fields are incomplete``. Opening the store has
-    to refresh the definition, without rewriting any row.
+    how they are *defined*, and that used to be enough on its own to skip the publish.
+    The publish itself used ``CREATE TRIGGER IF NOT EXISTS`` too, a no-op once the
+    name exists. Either half on its own left a store whose guard still carried the
+    old ``typeof(strike)`` whitelist rather than the widened one. Once §7.1 onwards
+    writes the strike as decimal *text*, that stale guard rejects every insert with
+    the misleading ``trade event pagination query fields are incomplete``. Opening
+    the store has to refresh the definition, without rewriting any row.
     """
 
     db_path = tmp_path / "ledger.sqlite3"
@@ -1047,6 +1056,13 @@ def test_open_leaves_no_partial_schema_when_the_publish_failure_takes_the_transa
 
     Both halves matter: dropping only the pagination indexes leaves every later
     statement a no-op, which is why the abort test's empty store shows nothing.
+
+    The comparison of the store is not left to carry this alone: with the rebuilt
+    index already created when the publish runs, a swallowing handler leaves the
+    store comparing equal to ``before`` even though the open took a different path.
+    So the test also pins that the publish was attempted and that the failure which
+    surfaced is the injected one. Neither assertion depends on which statement
+    fails first.
     """
 
     db_path = tmp_path / "ledger.sqlite3"
@@ -1064,9 +1080,12 @@ def test_open_leaves_no_partial_schema_when_the_publish_failure_takes_the_transa
         )
     before = _schema_objects(db_path)
 
+    attempted: list[str] = []
+
     def take_the_transaction_down(conn: sqlite3.Connection, **_: object) -> None:
+        attempted.append("publish")
         conn.rollback()
-        raise sqlite3.OperationalError("interrupted")
+        raise _InjectedPublishFailure("interrupted")
 
     monkeypatch.setattr(
         repository_trade_schema,
@@ -1074,15 +1093,22 @@ def test_open_leaves_no_partial_schema_when_the_publish_failure_takes_the_transa
         take_the_transaction_down,
     )
 
-    with pytest.raises(sqlite3.OperationalError):
+    with pytest.raises(sqlite3.OperationalError) as error:
         SQLiteOptionPositionsRepository(db_path)
 
-    # The decisive assertion, and the reason no message is pinned above: whichever
-    # statement fails first is what surfaces, so the error's text is not this test's
-    # subject — leaving the store untouched is. Swallowing the failure instead lets
-    # ``_init_db`` commit the rebuilt pagination index in autocommit and fail later
-    # on the shadowed name, which is exactly what this comparison refuses.
+    # The store is compared first: leaving it untouched is this test's subject, and
+    # whichever statement fails first is not. Swallowing the failure instead lets
+    # ``_init_db`` commit the rebuilt ``idx_trade_events_account_time`` — a
+    # projection index, not one of the pagination ones — in autocommit and fail
+    # later on the shadowed name, which is what this comparison refuses.
     assert _schema_objects(db_path) == before
+    # ...and what surfaced is the injected failure, not something the open ran into
+    # on its way. This is the half the comparison above cannot carry on its own: with
+    # the rebuilt index already created when the publish runs, swallowing leaves the
+    # store comparing equal to ``before`` anyway, and the open still answers to the
+    # shadowed name rather than to this.
+    assert attempted == ["publish"]
+    assert isinstance(error.value, _InjectedPublishFailure)
 
 
 def test_open_reports_the_original_cause_when_the_savepoint_is_already_gone(

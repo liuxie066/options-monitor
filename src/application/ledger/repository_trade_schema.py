@@ -94,11 +94,17 @@ TRADE_EVENT_PAGINATION_TRIGGERS = (
 _OPEND_TRADE_TIME_CORRECTION_SCHEMA = "opend_trade_time_correction.v1"
 
 # Marker embedded in the pagination projection guards. Names alone cannot tell a
-# current definition from a stale one, and ``CREATE TRIGGER IF NOT EXISTS`` is a
-# no-op once the name exists, so a store created before the §7.4 change keeps the
-# old ``typeof(strike)`` whitelist forever. Bump this marker whenever the guard
-# definition changes; ``_trade_event_pagination_guard_definitions_current``
-# compares it against ``sqlite_master.sql``.
+# current definition from a stale one. A store created before the §7.4 change used
+# to keep the old ``typeof(strike)`` whitelist for two reasons at once: the guards
+# were published with ``CREATE TRIGGER IF NOT EXISTS``, a no-op once the name
+# exists, and the open path returned on readiness alone without reaching the
+# publish. Both are fixed — the publish now drops and recreates, and readiness no
+# longer decides on its own — but a store whose rows still lack the pagination
+# fields is handed to the migration path with its stale guards untouched, so this
+# marker is what separates a stale definition from a current one. Bump it whenever
+# the guard definition changes;
+# ``_trade_event_pagination_guard_definitions_current`` compares it against
+# ``sqlite_master.sql``.
 _TRADE_EVENT_PAGINATION_GUARD_SCHEMA = "trade_event_pagination_guard.v2"
 
 _TRADE_EVENT_PAGINATION_MISSING = """
@@ -220,8 +226,10 @@ def _trade_event_ingest_seq_is_duplicated(conn: sqlite3.Connection) -> bool:
     only have been left without that index — and creating it over those rows
     would abort. Callers reach this only once
     ``_trade_event_pagination_missing_row`` has reported no offending row, so
-    every ``ingest_seq`` visible here is a whole number and ``NULL`` never
-    groups.
+    every ``ingest_seq`` visible here is a whole number and none is ``NULL``. The
+    SQL alone does not give that: ``GROUP BY`` treats ``NULL`` as equal, so two
+    ``NULL`` rows would group and be reported as duplicates. The precondition
+    above is what keeps them out.
     """
 
     return (
@@ -244,9 +252,12 @@ def _trade_event_pagination_guard_definitions_current(conn: sqlite3.Connection) 
     ``_trade_event_pagination_schema_ready`` checks that the guards exist by name
     and type and reads the stored rows, but it never looks at *how* they are defined.
     A store created before the §7.4 change therefore keeps the old
-    ``typeof(strike) NOT IN ('integer', 'real')`` whitelist indefinitely, and the
-    first write of a decimal-text strike is aborted with a misleading
-    ``trade event pagination query fields are incomplete``. Compare a marker
+    ``typeof(strike) NOT IN ('integer', 'real')`` whitelist until something
+    republishes the definition, and the first write of a decimal-text strike is
+    aborted with a misleading ``trade event pagination query fields are incomplete``.
+    Opening such a store is what republishes it; a store whose rows still lack the
+    pagination fields is left to the migration path instead, so its guards keep the
+    old whitelist until that runs. Compare a marker
     embedded in the definition instead, mirroring
     ``_ensure_opend_trade_time_correction_guard``.
     """
@@ -565,8 +576,10 @@ def _try_publish_trade_event_pagination_schema(
     instead, because the store is then not guaranteed to be back the way it was
     found and the caller has to abort. Two such failures reach the caller. One has
     already destroyed the caller's transaction, and the savepoint went with it, so
-    no undo runs at all: the original failure arrives with ``__context__`` and
-    ``__cause__`` both ``None``. The other has an undo that cannot complete, and
+    no undo runs at all: the original failure arrives with ``__cause__`` ``None``,
+    and with ``__context__`` ``None`` as well unless the caller is already handling
+    an exception when it gets here, in which case that one becomes the context. The
+    other has an undo that cannot complete, and
     there the original failure is re-raised as the message, with the undo's own
     error chained behind it as ``__context__`` rather than raised in its place. That
     second arm also covers an undo that ran but could not release — the store *is*
@@ -838,11 +851,12 @@ def _ensure_trade_event_pagination_schema(conn: sqlite3.Connection) -> None:
     which the undo restores — so the shadowed store this exists for stays ``False``
     and its gap is still reported by the pagination entry points, while a store that
     already carried every name and only needed stale definitions refreshed keeps
-    readiness true and receives those definitions refreshed in place — a stale
-    definition only keeps refusing if the publish replacing it is undone. Anything
-    the undo cannot answer for propagates, since the store is then not guaranteed to
-    be back the way it was found. Only a store whose *rows* still lack the pagination
-    fields is left to the explicit migration path.
+    readiness true and receives those definitions refreshed in place. A stale
+    definition therefore only keeps refusing if the publish replacing it is undone —
+    or on the one store that reaches no publish at all, the store whose rows
+    still lack the pagination fields, which is left to the explicit migration path
+    with its stale guards in place. Anything the undo cannot answer for propagates,
+    since the store is then not guaranteed to be back the way it was found.
     """
 
     _add_column_if_missing(conn, "trade_events", "ingest_seq", "INTEGER")
