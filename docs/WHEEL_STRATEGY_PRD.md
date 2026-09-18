@@ -46,7 +46,10 @@ intake、branch payload、assignment recovery 的历史窗口比较完全不加�
 原 enable 在本 generation 出现任何绑定 revision 后返回 superseded（包括 A→B→A），不发布配置；
 disable 仍允许关闭当前窗口，保留其原 hash 和全部绑定回执；之后 re-enable 使用新 generation。
 关闭时间不得早于已提交绑定时间；同一事务设置下界，数据库 guard 也拒绝时钟回退导致的逆序关闭。
-status/readiness 的白名单同步暴露原 hash、effective hash、revision；不更改原启停 receipt 的 hash 含义。
+status/readiness 的白名单同步暴露原 hash、effective hash、revision、`policy_drift` 与
+`remediation_command`；不更改原启停 receipt 的 hash 含义。每个非 ready 结果都显式给出
+`policy_drift`，`false` 表示这不是纯策略漂移、策略重建绑不能清除；`true` 才附
+`remediation_command`。
 
 ### 公开操作、失败与重试
 
@@ -80,6 +83,54 @@ policy_drift 消失才完成；其它既有生命周期阻塞不被解释为本�
 连续 A→B→A 依靠 revision 区分，不能只比较 hash。
 提交前失败无绑定，提交后失败不重放重复副作用；回滚策略通过新 preview/新请求追加反向绑定，
 保留审计，不删除旧回执。不执行自动补通知或立即扫描。
+
+### 市场级策略接受 accept-policy
+
+`rebind-policy` 是单账户、单预览 hash 的操作；调一次阈值要重建 snapshot、逐个账户预览、逐个
+apply 并回读。`./om wheel activation accept-policy` 把这一串收敛成一条：读 canonical YAML、判定
+哪些账户**可以**被接受、仅在需要时重建 snapshot、再逐账户委托给同一个 `rebind_wheel_policy`。
+本命令不复制任何校验，只做编排；也不新增 Agent 写工具，Agent 侧只携带给操作者执行的命令串。
+
+不得与 snapshot 写入原子耦合：`rebind_wheel_policy.prepare()` 从磁盘重解析 YAML 并重读
+`config.<market>.json`，owner/ACL preflight 要求真实文件。因此顺序固定为「重建 snapshot →
+逐账户 rebind」，中间窗口 fail-closed（gate 仍关着）且可重跑恢复。accept-policy 自己也绝不取
+`locked_config_authoring`：外层持锁会让内层 rebind 的 `flock` 自死锁，且不得留下 journal；
+串行化发生在每个账户的 rebind 内部。snapshot 只在过期时重建，以保持命令幂等，并避免无谓改变
+文件 inode 而使操作者手上未完成的 `rebind-policy --expected-preview-hash` 失效。
+
+**只有纯策略漂移可被自动接受。** 判据不是报错文本，而是分支身份：descriptor 与 durable window
+的 `market/account/generation/activated_at_ms/deactivated_at_ms` 全部相等、窗口仍开着、仅
+policy hash 不同。boundary 漂移、窗口已关闭、descriptor 缺失或不可解析一律拒绝并进入
+`plan.accounts[].classification`。**这里更正一个常见误解：`rebind-policy` 修不了 boundary 漂移。**
+绑定要求 descriptor 与窗口身份逐字段相等，边界本身错了就不是策略问题。恢复路径只有两条：
+把 descriptor 改回 YAML，或 `disable` → `enable` 开新 generation。为了让机器能区分两者，
+boundary 分支返回 `policy_drift: false` 且不给 `remediation_command`。
+
+request ID 由 `(market, account, generation, revision, actor, target_policy_hash)` 确定性派生，
+满足 `UNIQUE(market, account, request_id)`。崩溃后重跑因此精确 replay 自己的绑定而不是追加第二条；
+两个操作者接受同一 revision 也不会互撞。已提交的同请求走 `no_drift` 短路。
+
+**单账户失败记录后继续**，不首败即停：每个 `(market, account, generation)` 的窗口与绑定链是独立
+持久对象，拒绝不会污染别的账户，而失败账户本就 fail-closed；首败即停只会让可修账户继续漂移。
+系统级前置条件（存储不可用、plan 过期、ledger guard、owner/ACL、pending journal）则整轮拒绝。
+
+`write_applied` 表示「snapshot 重建与绑定插入中至少发生了一件」，**从不表示所有漂移账户都被接受**；
+判定必须同时看 `accounts[].status` 与 `readiness_after`。`status` 取 `applied`／`partial`／
+`no_drift`／`planned`／`refused`／`incomplete`；`partial` 是正常结果、exit 0，逐账户数据是一等公民。
+`--expected-plan-hash` 可选（dry run 打印，apply 可不传），因为接受者通常就是改动作者；传入时仍
+精确校验，`--apply --confirm` 与 ledger guard 仍必填。plan hash 覆盖 YAML 字节与重建前的 snapshot
+字节，因此 dry run 与 apply 对同一份输入给出同一个 hash。
+
+**`./om config build` 永不接受，只预警。** 它在写 snapshot 前比较新旧配置的账户策略 hash 与
+activation descriptor，命中时返回 `wheel_policy_drift` 与一条人类可读 `warnings`（`--dry-run` 也预警、
+也不写）。这覆盖了 gate 变红之前的那半条时间线，且全程零 ledger I/O、无锁、无 journal，
+`config build` 仍是纯文件生成器。`config symbol set` 也重建 snapshot，但 symbol 不进 policy payload，
+没有假阳性路径。
+
+`sibling_market` 的过期只报告不修（编辑另一个市场超出本 action 范围），但必须给出
+`sibling_rebuild_command`，否则那边下次 `change_wheel_activation` 会静默失败于 `CONFIG_DRIFT`。
+最后，accept-policy 只关掉绑定 gate，**不证明 wheel 已按新策略扫描**：操作者不得把
+`monitoring_gate: enabled` 读成「新策略已对开仓候选生效」。
 
 ### 实施增量与验收
 
@@ -635,9 +686,11 @@ scheduler 和通知通道。不得新增平行排序器、账本、投影表、b
     required-data plan；Wheel 不新增第二次行情读取、缓存、manifest 或快照。
 11. 扫描、CLI、Agent 读取和 Daily Brief 消费同一一致性 Wheel 读模型或已提交快照；
     消费端不得重新推导生命周期、容量或候选身份。
-12. `./om wheel` 仅提供 end、intent create/cancel 和 linkage confirm/reject。人工与 Agent
+12. `./om wheel` 提供 end、intent create/cancel、linkage confirm/reject、recover 以及
+    activation status/enable/disable/rebind-policy/accept-policy。人工与 Agent
     写入默认 preview，要求当前 hash 和显式 apply/confirm，在同一 SQLite 事务内重校验，
-    且绝不向 broker 下单、撤单或改单。
+    且绝不向 broker 下单、撤单或改单。`accept-policy` 是 operator CLI：它只接受纯策略漂移，
+    绝不取配置锁、绝不遗留 journal，也不对 boundary 漂移伪造可执行的补救命令。
 13. Wheel 失败或事实不可用只影响对应 Wheel 或共享 Call scope，不删除其他策略原始结果，
     也不把等待伪装成 action。
 14. focused workflow、projection、scan、capacity、tick、Daily Brief、CLI、Agent、config 和
@@ -1340,6 +1393,30 @@ Agent `wheel_activation` 使用相同的 `expected_source_sha256`、`apply`、`c
 有效配置比较使用既有 Wheel materializer 展开缺省 call/put 参数后比较；这允许首次显式写入
 等价默认值，同时保留其它字段并拒绝任何策略值变化。文件访问身份检查沿用部署用户，
 不自动迁移 owner、group 或定制 ACL。
+
+#### 窗口已激活时调整策略阈值
+
+只改了门槛（例如 `call.min_dte`、`put.min_abs_delta`）时，不要在 enable/disable 之间来回切窗口——
+那会换 generation、丢历史窗口身份。两步即可：
+
+```bash
+# 1. 改 config.yaml，然后裸重建 runtime snapshot
+./om config build --market us
+
+# 2. 先 dry run 看 plan，再加 --apply --confirm 真正接受
+./om wheel activation accept-policy --market us --format json
+./om wheel activation accept-policy --market us --apply --confirm --format json
+```
+
+需要限定单个账户时加 `--account lx`；`--config`／`--runtime-root` 默认取部署根目录，
+`--expected-plan-hash` 可选（dry run 输出 `plan_hash`，apply 时传入则精确校验）。
+第 1 步会打印 `wheel_policy_drift` 预警和同一条命令；**`./om config build` 本身不会接受漂移**，
+它只是让你在 gate 变红之前就看到该跑什么。
+
+若 `remediation_command` 没出现而 gate 仍为 `config_mismatch`，说明是 boundary 漂移或窗口已关闭，
+`accept-policy` 不能清除：把 `activation_by_account` 的 descriptor 改回 YAML 的值，或
+`activation disable` → `activation enable` 开新 generation。status/preview 的 `policy_drift`
+字段可机器区分这两种情况（`true` 才可自助）。
 
 
 ## 指派后 Wheel 监控接入与受控恢复

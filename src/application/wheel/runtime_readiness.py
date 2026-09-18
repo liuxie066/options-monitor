@@ -9,6 +9,10 @@ from src.application.wheel.config import (
     evaluate_wheel_activation_readiness,
     resolve_wheel_activation_descriptor,
 )
+from src.application.wheel.remediation import (
+    build_accept_policy_command,
+    policy_remediation,
+)
 
 
 WHEEL_ACTIVATION_READINESS_SCHEMA = "wheel_activation_readiness.v1"
@@ -122,12 +126,15 @@ def build_wheel_activation_readiness(
                 )
             except (TypeError, ValueError):
                 descriptor_error = True
+        # Every synthesized refusal states `policy_drift: False` explicitly, so a consumer can
+        # read `False` as "not something a policy rebind clears" instead of "unset".
         if not normalized_market:
             readiness = {
                 "ready": False,
                 "enabled_for_new_lifecycle": False,
                 "monitoring_gate": "disabled",
                 "reason_code": "market_unavailable",
+                "policy_drift": False,
             }
         elif descriptor_error:
             readiness = {
@@ -135,6 +142,7 @@ def build_wheel_activation_readiness(
                 "enabled_for_new_lifecycle": False,
                 "monitoring_gate": "config_mismatch",
                 "reason_code": "descriptor_mismatch",
+                "policy_drift": False,
             }
         elif storage_status not in {"available", "not_required"}:
             readiness = {
@@ -142,6 +150,7 @@ def build_wheel_activation_readiness(
                 "enabled_for_new_lifecycle": False,
                 "monitoring_gate": "disabled",
                 "reason_code": storage_status,
+                "policy_drift": False,
             }
         else:
             readiness = evaluate_wheel_activation_readiness(
@@ -154,7 +163,7 @@ def build_wheel_activation_readiness(
             "market": normalized_market or None,
             "account": account,
         }
-        account_results[account] = {
+        account_result = {
             **effective_identity,
             **readiness,
             "identity_source": (
@@ -167,6 +176,12 @@ def build_wheel_activation_readiness(
             "descriptor": descriptor_identity,
             "durable_window": durable_identity,
         }
+        # Masked status views share this builder, so the command carries no absolute
+        # deployment paths; the operator's shell supplies OM_RUNTIME_ROOT and the repo root.
+        account_result.update(
+            policy_remediation(readiness, market=normalized_market, account=account)
+        )
+        account_results[account] = account_result
 
     gates = {str(item["monitoring_gate"]) for item in account_results.values()}
     if "config_mismatch" in gates:
@@ -185,10 +200,18 @@ def build_wheel_activation_readiness(
     if not account_results:
         reason_codes = ["not_configured"]
     enabled_account_count = sum(bool(item["ready"]) for item in account_results.values())
+    # One market-scoped command clears every account whose drift is acceptable and reports
+    # the rest in `plan.skipped`, so the operator does not have to triage accounts first.
+    market_remediation = (
+        {"remediation_command": build_accept_policy_command(market=normalized_market)}
+        if any(item.get("remediation_command") for item in account_results.values())
+        else {}
+    )
     return {
         "schema_version": WHEEL_ACTIVATION_READINESS_SCHEMA,
         "market": normalized_market or None,
         "monitoring_gate": monitoring_gate,
+        **market_remediation,
         "ready": bool(account_results) and enabled_account_count == len(account_results),
         "reason_code": (
             None

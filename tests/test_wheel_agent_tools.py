@@ -18,6 +18,7 @@ from domain.domain.ledger.projection_state import _resumable_open_event
 from tests.test_wheel_cli import (
     _activation_environment,
     _deployment_file_bytes,
+    _drifted_activation_environment,
     _malformed_activation_status_environment,
     _prepare_activation_storage_case,
 )
@@ -29,12 +30,13 @@ def _activation_payload(
     runtime: Path,
     data_config: Path,
     runtime_root: Path,
+    account: str = "lx",
     source_sha: str | None = None,
     apply: bool = False,
 ) -> dict:
     payload = {
         "market": "us",
-        "account": "lx",
+        "account": account,
         "action": action,
         "config_path": str(runtime),
         "data_config": str(data_config),
@@ -467,6 +469,8 @@ def test_wheel_activation_agent_manifest_declares_all_writes() -> None:
         "recovered_transactions",
         "failure_phase",
         "retry_hint",
+        "policy_drift",
+        "remediation_command",
     ):
         assert field in facts
 
@@ -606,7 +610,36 @@ def test_wheel_activation_agent_status_preserves_known_window_for_malformed_desc
     assert status["ready"] is False
     assert status["monitoring_gate"] == "config_mismatch"
     assert status["reason_code"] == "descriptor_mismatch"
+    # Same contract as the CLI: an unparseable descriptor is never offered a policy command.
+    assert status["policy_drift"] is False
+    assert status.get("remediation_command") is None
     assert status["pending_authoring_journal"] is True
+    assert _deployment_file_bytes(tmp_path) == before
+
+
+def test_wheel_activation_agent_status_carries_accept_policy_command(
+    tmp_path: Path,
+) -> None:
+    _source, runtime, data_config, _sqlite_path = _drifted_activation_environment(tmp_path)
+    before = _deployment_file_bytes(tmp_path)
+
+    response = execute_tool(
+        "wheel_activation",
+        _activation_payload(
+            "status",
+            runtime=runtime,
+            data_config=data_config,
+            runtime_root=tmp_path,
+            account="sy",
+        ),
+    )
+
+    assert response["ok"] is True
+    status = response["data"]
+    assert status["monitoring_gate"] == "config_mismatch"
+    assert status["policy_drift"] is True
+    assert "wheel activation accept-policy --market us" in status["remediation_command"]
+    assert "--apply --confirm" in status["remediation_command"]
     assert _deployment_file_bytes(tmp_path) == before
 
 

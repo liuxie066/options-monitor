@@ -63,6 +63,7 @@ from src.application.wheel.config import (
 from src.application.wheel.capacity import (
     revalidate_selected_wheel_put_candidate_from_rows,
 )
+from src.application.wheel.remediation import policy_remediation
 from src.application.write_contract import attach_write_contract
 
 
@@ -345,6 +346,7 @@ def _activation_request_window(
 
 def _activation_status(
     cfg: dict[str, Any], *, sqlite_path: Path, market: str, account: str,
+    runtime_root: Path | None = None, config_path: Path | None = None,
 ) -> dict[str, Any]:
     observed = read_wheel_activation_windows_read_only(sqlite_path, market=market, account=account)
     windows = observed["windows"]
@@ -363,13 +365,20 @@ def _activation_status(
         )
     except (ValueError, TypeError):
         readiness = {"ready": False, "enabled_for_new_lifecycle": False,
-                     "monitoring_gate": "config_mismatch", "reason_code": "descriptor_mismatch"}
+                     "monitoring_gate": "config_mismatch", "reason_code": "descriptor_mismatch",
+                     "policy_drift": False}
     if observed["source_status"] != "available":
         readiness.update(ready=False, enabled_for_new_lifecycle=False,
                          monitoring_gate="disabled", reason_code=observed["source_status"])
     elif readiness["ready"] and not membership:
         readiness.update(ready=False, enabled_for_new_lifecycle=False,
                          monitoring_gate="disabled", reason_code="account_not_configured")
+    # After the overrides: a gate that was closed for another reason must never advertise
+    # a policy command, and the overrides above rewrite `reason_code` to say so.
+    readiness.update(
+        policy_remediation(readiness, market=market, account=account,
+                           config_path=config_path, runtime_root=runtime_root)
+    )
     return {"windows": windows, "current_window": _activation_descriptor(current, include_binding=True),
             "latest_window": _activation_descriptor(latest, include_binding=True), "membership": membership,
             "storage_status": observed["source_status"], "readiness": readiness, **readiness}
@@ -546,7 +555,8 @@ def change_wheel_activation(
         _, current_cfg = load_runtime_config(config_path=runtime_path, expected_market=market)
         if authoritative_config_yaml_path(current_cfg, repo_root=repo_root, require_exists=False) != source_path:
             raise ValueError("runtime YAML source identity changed during activation")
-        state = _activation_status(current_cfg, sqlite_path=sqlite_path, market=market, account=account)
+        state = _activation_status(current_cfg, sqlite_path=sqlite_path, market=market, account=account,
+                                   runtime_root=root, config_path=runtime_path)
         for key in result.get("readiness", {}):
             result.pop(key, None)
         result.update({key: value for key, value in state.items() if key != "windows"})

@@ -12,6 +12,7 @@ import src.interfaces.cli.main as cli_main
 import src.interfaces.cli.wheel as wheel_cli
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.config_authoring_transaction import publish_yaml_config_generation
+from src.application.config_yaml import build_yaml_runtime_config_file
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 
 
@@ -262,6 +263,75 @@ def _malformed_activation_status_environment(
         "policy_binding_revision": 0,
     }
     return runtime, data_config, sqlite_path, expected_status_window
+
+
+def _enable_for_account(
+    account: str,
+    *,
+    runtime: Path,
+    data_config: Path,
+    runtime_root: Path,
+    request_id: str,
+) -> dict[str, Any]:
+    preview = wheel_cli.execute(
+        wheel_cli.parse_args(
+            _activation_args(
+                "enable",
+                runtime=runtime,
+                data_config=data_config,
+                runtime_root=runtime_root,
+                account=account,
+                generation=0,
+                request_id=request_id,
+            )
+        )
+    )
+    return wheel_cli.execute(
+        wheel_cli.parse_args(
+            _activation_args(
+                "enable",
+                runtime=runtime,
+                data_config=data_config,
+                runtime_root=runtime_root,
+                account=account,
+                generation=0,
+                request_id=request_id,
+                source_sha=preview["expected_source_sha256"],
+                apply=True,
+            )
+        )
+    )
+
+
+def _drifted_activation_environment(
+    tmp_path: Path,
+) -> tuple[Path, Path, Path, Path]:
+    """An open `sy` window whose rebuilt snapshot carries a different policy hash."""
+
+    source, runtime, data_config, sqlite_path = _activation_environment(tmp_path)
+    _enable_for_account(
+        "sy",
+        runtime=runtime,
+        data_config=data_config,
+        runtime_root=tmp_path,
+        request_id="drift-enable",
+    )
+    doc = yaml.safe_load(source.read_text(encoding="utf-8"))
+    doc["markets"]["us"]["features"]["wheel"]["call"]["min_dte"] = 30
+    source.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+    rebuilt = build_yaml_runtime_config_file(
+        repo_root=REPO_ROOT,
+        market="us",
+        config_path=source,
+        output_config_path=runtime,
+        dry_run=False,
+    )
+    assert rebuilt["write_applied"] is True
+    return source, runtime, data_config, sqlite_path
+
+
+def _accept_policy_args(*extra: str) -> list[str]:
+    return ["activation", "accept-policy", "--market", "us", "--actor", "tester", *extra]
 
 
 def _end_args(*extra: str):
@@ -1000,8 +1070,109 @@ def test_public_wheel_cli_status_preserves_known_window_for_malformed_descriptor
     assert status["ready"] is False
     assert status["monitoring_gate"] == "config_mismatch"
     assert status["reason_code"] == "descriptor_mismatch"
+    # A descriptor that cannot be parsed is not drift: no policy rebind can clear it, so the
+    # gate must not advertise one.
+    assert status["policy_drift"] is False
+    assert status.get("remediation_command") is None
     assert status["pending_authoring_journal"] is True
     assert _deployment_file_bytes(tmp_path) == before
+
+
+def test_public_wheel_cli_status_offers_accept_policy_for_pure_policy_drift(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _source, runtime, data_config, _sqlite_path = _drifted_activation_environment(tmp_path)
+    before = _deployment_file_bytes(tmp_path)
+
+    exit_code, status = _run_public_wheel_cli(
+        _activation_args(
+            "status",
+            runtime=runtime,
+            data_config=data_config,
+            runtime_root=tmp_path,
+            account="sy",
+        ),
+        capsys,
+    )
+
+    assert exit_code == 0
+    assert status["ready"] is False
+    assert status["monitoring_gate"] == "config_mismatch"
+    assert status["reason_code"] == "descriptor_mismatch"
+    assert status["policy_drift"] is True
+    command = status["remediation_command"]
+    assert "wheel activation accept-policy" in command
+    assert "--market us" in command
+    assert "--apply --confirm" in command
+    assert str(runtime) in command
+    assert str(tmp_path) in command
+    assert _deployment_file_bytes(tmp_path) == before
+
+
+def test_public_wheel_cli_accept_policy_dry_run_then_apply(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source, runtime, data_config, _sqlite_path = _drifted_activation_environment(tmp_path)
+    runtime_args = ["--config", str(runtime), "--data-config", str(data_config), "--runtime-root", str(tmp_path)]
+    before = _deployment_file_bytes(tmp_path)
+
+    exit_code, planned = _run_public_wheel_cli(
+        _accept_policy_args(*runtime_args),
+        capsys,
+    )
+    assert exit_code == 0
+    assert planned["status"] == "planned"
+    assert planned["dry_run"] is True
+    assert planned["write_applied"] is False
+    assert [item["classification"] for item in planned["plan"]["accounts"]] == ["accept"]
+    assert planned["plan"]["snapshot_stale"] is False
+    assert _deployment_file_bytes(tmp_path) == before
+
+    with pytest.raises(SystemExit):
+        wheel_cli.main([*_accept_policy_args(*runtime_args, "--apply"), "--format", "json"])
+    assert _deployment_file_bytes(tmp_path) == before
+
+    exit_code, applied = _run_public_wheel_cli(
+        _accept_policy_args(*runtime_args, "--apply", "--confirm"),
+        capsys,
+    )
+    assert exit_code == 0
+    assert applied["status"] == "applied"
+    assert applied["write_applied"] is True
+    assert applied["readiness_after"]["monitoring_gate"] == "enabled"
+    assert [item["status"] for item in applied["accounts"]] == ["applied"]
+    # The snapshot already matched the YAML, so neither run rebuilt it and the plan the
+    # operator saw is byte-identical with the plan that was applied.
+    assert applied["snapshot"]["written"] is False
+    assert applied["plan_hash"] == planned["plan_hash"]
+
+
+def test_public_wheel_cli_accept_policy_text_renders_the_new_keys(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _source, runtime, data_config, _sqlite_path = _drifted_activation_environment(tmp_path)
+
+    exit_code = cli_main.main(
+        [
+            "wheel",
+            *_accept_policy_args(
+                "--config", str(runtime),
+                "--data-config", str(data_config),
+                "--runtime-root", str(tmp_path),
+            ),
+            "--format", "text",
+        ]
+    )
+    printed = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "status: planned" in printed
+    assert "write_applied: False" in printed
+    assert "plan_hash: " in printed
+    assert "readiness_after: " in printed
 
 
 def test_public_wheel_cli_rolls_forward_journal_before_stale_preview_rejection(

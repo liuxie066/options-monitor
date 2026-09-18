@@ -345,6 +345,7 @@ def evaluate_wheel_activation_readiness(
             "enabled_for_new_lifecycle": False,
             "monitoring_gate": "disabled",
             "reason_code": "missing_descriptor",
+            "policy_drift": False,
         }
     if durable_window is None:
         return {
@@ -352,6 +353,7 @@ def evaluate_wheel_activation_readiness(
             "enabled_for_new_lifecycle": False,
             "monitoring_gate": "disabled",
             "reason_code": "missing_window",
+            "policy_drift": False,
         }
     try:
         expected = _window_identity(descriptor)
@@ -377,6 +379,7 @@ def evaluate_wheel_activation_readiness(
             "enabled_for_new_lifecycle": False,
             "monitoring_gate": "config_mismatch",
             "reason_code": "descriptor_mismatch",
+            "policy_drift": False,
         }
     identity_fields = (
         "market",
@@ -388,12 +391,15 @@ def evaluate_wheel_activation_readiness(
     boundary_matches = all(expected[key] == actual[key] for key in identity_fields)
     policy_drift = expected["policy_sha256"] != actual["policy_sha256"]
     if not boundary_matches:
+        # A broken activation boundary is not policy drift: the window identity itself is
+        # wrong, so no policy rebind can accept it. Reporting False here keeps
+        # `policy_drift is True` a precise, actionable claim (see `descriptor_mismatch` below).
         return {
             "ready": False,
             "enabled_for_new_lifecycle": False,
             "monitoring_gate": "config_mismatch",
             "reason_code": "descriptor_mismatch",
-            "policy_drift": policy_drift,
+            "policy_drift": False,
         }
     if expected["deactivated_at_ms"] is not None:
         return {
@@ -404,6 +410,8 @@ def evaluate_wheel_activation_readiness(
             "policy_drift": policy_drift,
         }
     if policy_drift:
+        # The only refusal `wheel activation accept-policy` can clear: the boundary is intact
+        # and the window is open, so an append-only binding can rebind the effective policy hash.
         return {
             "ready": False,
             "enabled_for_new_lifecycle": False,
@@ -419,6 +427,53 @@ def evaluate_wheel_activation_readiness(
     }
 
 
+def detect_wheel_policy_drift(
+    prior: Mapping[str, Any] | None,
+    current: Mapping[str, Any] | None,
+    *,
+    market: str | None,
+) -> dict[str, Any] | None:
+    """Compare two Wheel configs for drift that would refuse an already-bound window.
+
+    Pure and I/O-free so `config build` can warn before publishing a snapshot that would
+    turn a ready gate into `config_mismatch`. Only accounts carrying an activation
+    descriptor are compared: an account with no window has no binding to refuse.
+    """
+
+    if not isinstance(prior, Mapping) or not isinstance(current, Mapping):
+        return None
+    market_value = str(market or "").strip().lower()
+    if market_value not in {"us", "hk"}:
+        return None
+    prior_accounts = normalize_wheel_activation_by_account(
+        _wheel_raw(prior).get("activation_by_account")
+    )
+    current_accounts = normalize_wheel_activation_by_account(
+        _wheel_raw(current).get("activation_by_account")
+    )
+    changed: list[dict[str, Any]] = []
+    for account in sorted(set(prior_accounts) | set(current_accounts)):
+        policy_changed = build_wheel_policy_hash(
+            prior, market=market_value, account=account
+        ) != build_wheel_policy_hash(current, market=market_value, account=account)
+        boundary_changed = prior_accounts.get(account) != current_accounts.get(account)
+        if policy_changed or boundary_changed:
+            changed.append(
+                {
+                    "account": account,
+                    "policy_changed": policy_changed,
+                    "boundary_changed": boundary_changed,
+                }
+            )
+    if not changed:
+        return None
+    return {
+        "accounts": changed,
+        "policy_accounts": [item["account"] for item in changed if item["policy_changed"]],
+        "boundary_accounts": [item["account"] for item in changed if item["boundary_changed"]],
+    }
+
+
 __all__ = [
     "WHEEL_ACTIVATION_DESCRIPTOR_FIELDS",
     "WHEEL_CALL_DEFAULTS",
@@ -429,6 +484,7 @@ __all__ = [
     "WHEEL_PUT_DEFAULTS",
     "build_wheel_policy_hash",
     "build_wheel_policy_payload",
+    "detect_wheel_policy_drift",
     "evaluate_wheel_activation_readiness",
     "materialize_wheel_config",
     "normalize_wheel_activation_by_account",
