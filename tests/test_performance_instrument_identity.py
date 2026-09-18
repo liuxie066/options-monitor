@@ -4,7 +4,7 @@ from decimal import Decimal
 
 import pytest
 
-from domain.domain.ledger.identity import ContractKey
+from domain.domain.ledger.identity import ContractKey, position_key_for
 from domain.domain.performance.models import OptionInstrumentKey, StockInstrumentKey, canonical_decimal_text
 
 
@@ -36,25 +36,25 @@ def test_contract_key_conversion_excludes_account_broker_and_side() -> None:
         account="lx",
         underlying_symbol="NVDA",
         option_type="put",
-        position_side="short",
         strike=100,
         expiration_ymd="2026-08-21",
-    )
+        )
     long_sy = ContractKey.from_values(
         broker="futu",
         account="sy",
         underlying_symbol="NVDA",
         option_type="put",
-        position_side="long",
         strike=100,
         expiration_ymd="2026-08-21",
-    )
+        )
 
     first = OptionInstrumentKey.from_contract_key(short_lx, currency="USD", multiplier=100)
     second = OptionInstrumentKey.from_contract_key(long_sy, currency="USD", multiplier=100)
 
     assert first.instrument_key == second.instrument_key
-    assert short_lx.position_key != long_sy.position_key
+    # §9.2 step 3: the aggregation key lives on the lot/event layer, so the
+    # account is compared through ``position_key_for`` instead of the contract key.
+    assert position_key_for(short_lx, "short") != position_key_for(long_sy, "short")
     assert "lx" not in first.instrument_key
     assert "short" not in first.instrument_key
 

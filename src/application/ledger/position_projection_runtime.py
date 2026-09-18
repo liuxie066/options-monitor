@@ -546,7 +546,7 @@ def compare_full_and_resumed_position_projection(repo: Any) -> dict[str, Any]:
             "full_source_generation": full.source_generation,
         }
     full_rows = {
-        item.record_id: dict(item.fields)
+        item.lot_id: dict(item.fields)
         for item in full.projection.lots
     }
     full_active_state = full.projection.resumable_publication_state

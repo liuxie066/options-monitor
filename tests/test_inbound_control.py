@@ -1653,7 +1653,7 @@ def test_inbound_manual_trade_update_pending_preview_then_confirm(monkeypatch: p
     assert confirmed["ok"] is True
     events = repo.list_trade_events()
     assert len(events) == 1
-    assert events[0]["price"] == 2.75
+    assert events[0]["price"] == "2.75"
 
 
 def test_inbound_pending_operations_lists_current_conversation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

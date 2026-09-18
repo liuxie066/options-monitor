@@ -3,6 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 from domain.domain.ledger import ContractKey, TradeEvent, fee_fact_for_event, project_trade_events
+from domain.domain.trade_contract_identity import derive_trade_side
 
 
 def _key(*, side: str = "short") -> ContractKey:
@@ -11,10 +12,9 @@ def _key(*, side: str = "short") -> ContractKey:
         account="lx",
         underlying_symbol="NVDA",
         option_type="put",
-        position_side=side,
         strike=100,
         expiration_ymd="2026-08-21",
-    )
+        )
 
 
 def _event(
@@ -33,6 +33,9 @@ def _event(
     raw: dict | None = None,
 ) -> TradeEvent:
     raw_payload = dict(raw or {})
+    # §9.2 step 3: the contract key no longer carries the position side, so the
+    # fixture's side travels as the trade side the projection derives it from.
+    raw_payload.setdefault("side", derive_trade_side(event_type, side) or "")
     if basis:
         raw_payload["fee_provenance"] = {"basis": basis, "source": "test", "amount": fees}
     return TradeEvent(

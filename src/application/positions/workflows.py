@@ -13,7 +13,6 @@ from domain.domain.fee_calc import (
     calc_futu_stock_fee,
 )
 from domain.domain.ledger.position_fields import (
-    OpenPositionCommand,
     effective_expiration_ymd,
     normalize_account,
     normalize_broker,
@@ -708,7 +707,34 @@ def execute_manual_open(
     request_id_value = str(request_id or "").strip()
     if not request_id_value:
         raise ValueError("manual open requires a stable request_id")
-    command = OpenPositionCommand(
+    strategy_snapshot_value = dict(strategy_snapshot) if isinstance(strategy_snapshot, dict) else None
+    if dry_run:
+        return {
+            "mode": "dry_run",
+            **preview_manual_position_open(
+                repo,
+                broker=broker,
+                account=account,
+                symbol=symbol,
+                option_type=option_type,
+                side=side,
+                contracts=int(contracts),
+                currency=currency,
+                strike=strike,
+                multiplier=multiplier,
+                expiration_ymd=expiration_ymd,
+                premium_per_share=premium_per_share,
+                underlying_share_locked=underlying_share_locked,
+                note=note,
+                opened_at_ms=opened_at_ms,
+                strategy_snapshot=strategy_snapshot_value,
+                request_id=request_id_value,
+            ).to_payload(),
+        }
+    if repo is None:
+        raise ValueError("repo is required when dry_run is false")
+    payload = record_manual_position_open(
+        repo,
         broker=broker,
         account=account,
         symbol=symbol,
@@ -723,18 +749,11 @@ def execute_manual_open(
         underlying_share_locked=underlying_share_locked,
         note=note,
         opened_at_ms=opened_at_ms,
-        strategy_snapshot=(dict(strategy_snapshot) if isinstance(strategy_snapshot, dict) else None),
+        strategy_snapshot=strategy_snapshot_value,
         request_id=request_id_value,
-    )
-    if dry_run:
-        return {"mode": "dry_run", **preview_manual_position_open(repo, command).to_payload()}
-    if repo is None:
-        raise ValueError("repo is required when dry_run is false")
-    payload = record_manual_position_open(repo, command).to_payload()
+    ).to_payload()
     result = payload["result"]
     fields = payload["fields"]
-    payload_command = payload.get("command")
-    command = payload_command if isinstance(payload_command, OpenPositionCommand) else command
     record_id = _manual_open_record_id(result)
     return _apply_result_payload(
         repo,
@@ -744,7 +763,7 @@ def execute_manual_open(
         native_event={
             "event_id": result.get("event_id"),
             "event_kind": "open_trade",
-            "event_at_utc": _ms_to_iso(command.opened_at_ms),
+            "event_at_utc": _ms_to_iso(fields.get("opened_at")),
             "source_name": "cli_manual_open",
             "source_type": "manual_trade_event",
             "broker": broker,

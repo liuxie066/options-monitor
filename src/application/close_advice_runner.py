@@ -1050,7 +1050,7 @@ def _position_to_input(
     return (
         CloseAdviceInput(
             account=normalize_account(pos.get("account")),
-            position_lot_id=str(pos.get("record_id") or "").strip() or None,
+            position_lot_id=str(pos.get("lot_id") or pos.get("record_id") or "").strip() or None,
             symbol=_norm_symbol(pos.get("symbol")),
             option_type=_norm_option_type(pos.get("option_type")),
             side=str(pos.get("side") or "").strip().lower(),
@@ -1366,7 +1366,7 @@ def _frozen_position_plan_reasons(
         )
         if not all(key):
             continue
-        lot_id = str(position.get("record_id") or "").strip()
+        lot_id = str(position.get("lot_id") or position.get("record_id") or "").strip()
         if plan is None or account_status == "unavailable":
             reasons[key] = "close_advice_plan_unavailable"
             continue
@@ -1490,7 +1490,7 @@ def _apply_required_data_row_provenance(
         frozen_manifest_sha256
     )
     row["close_advice_required_data_plan_sha256"] = frozen_plan_sha256
-    lot_id = str(position.get("record_id") or "").strip()
+    lot_id = str(position.get("lot_id") or position.get("record_id") or "").strip()
     requirement = requirements_by_lot.get(lot_id) or {}
     binding = (
         requirement.get("fetch_binding")
@@ -2139,7 +2139,7 @@ def run_close_advice(
             if binding_id:
                 frozen_binding_ids.add(binding_id)
         for position in quote_positions:
-            lot_id = str(position.get("record_id") or "").strip()
+            lot_id = str(position.get("lot_id") or position.get("record_id") or "").strip()
             requirement = frozen_requirements_by_lot.get(lot_id)
             key = _quote_key(
                 position.get("symbol"),

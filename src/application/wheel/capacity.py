@@ -689,10 +689,10 @@ def finalize_wheel_capacity(
                 "stock_lot_id": stock_lot_id,
                 "wheel_branch_id": branch_id,
                 "direction": "call",
-                "branch_generation_hash": batch.get("branch_generation_hash")
+                "batch_generation_hash": batch.get("batch_generation_hash")
                 or batch.get("batch_generation_hash"),
                 "batch_generation_hash": batch.get("batch_generation_hash")
-                or batch.get("branch_generation_hash"),
+                or batch.get("batch_generation_hash"),
                 "projection_hash": batch.get("projection_hash"),
                 "shares_remaining": int(batch.get("shares_remaining") or 0),
                 "phase": batch.get("phase"),
@@ -813,7 +813,7 @@ def _final_wheel_put_candidate(
         "allocation_input_hash": (allocation or {}).get("allocation_input_hash"),
         "cash_reservation_amount": reserved_amount,
         "cash_reservation_currency": currency,
-        "branch_generation_hash": branch.get("branch_generation_hash"),
+        "batch_generation_hash": branch.get("batch_generation_hash"),
     }
 
 
@@ -908,7 +908,7 @@ def finalize_wheel_put_capacity(
                 "symbol": str(branch.get("symbol") or "").upper(),
                 "wheel_branch_id": branch_id,
                 "direction": "put",
-                "branch_generation_hash": branch.get("branch_generation_hash"),
+                "batch_generation_hash": branch.get("batch_generation_hash"),
                 "projection_hash": branch.get("projection_hash"),
                 "phase": branch.get("phase"),
                 "reason_codes": list(branch.get("reason_codes") or []),

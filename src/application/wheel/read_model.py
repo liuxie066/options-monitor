@@ -169,7 +169,7 @@ def build_wheel_read_model_from_rows(
         "trade_events": trade_events,
         "account_wheel_events": wheel_events,
         "account_position_lots": [
-            {"record_id": item.record_id, "fields": dict(item.fields)}
+            {"record_id": item.lot_id, "fields": dict(item.fields)}
             for item in projected.lots
         ],
     }

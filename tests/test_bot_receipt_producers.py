@@ -6,7 +6,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from domain.domain.option_position_lots import OpenPositionCommand
 from domain.storage.repositories import state_repo
 from src.application.agent_tools import receipts
 from src.application.ledger.manual_trades import persist_manual_open_event
@@ -58,11 +57,12 @@ def _dispatch(repo, calls):
 def test_normal_close_producer_dispatch_and_public_read(runtime, normalized):
     root, cfg, path, repo = runtime
     for opened_at, contracts in ((100, 1), (200, 2)):
-        persist_manual_open_event(repo, OpenPositionCommand(
+        persist_manual_open_event(
+            repo,
             broker="富途", account="lx", symbol="0700.HK", option_type="put", side="short",
             contracts=contracts, currency="HKD", strike=480, multiplier=100,
             expiration_ymd="2026-04-29", premium_per_share=3.93, opened_at_ms=opened_at,
-        ))
+        )
     deal = _deal(contracts=3, trade_time_ms=5000)
     if normalized:
         deal = normalize_trade_deal({
@@ -172,10 +172,12 @@ def test_lifecycle_case_market_survives_real_state_transition_and_dispatch(runti
     )
 
     root, cfg, path, repo = runtime
-    persist_manual_open_event(repo, OpenPositionCommand(
+    persist_manual_open_event(
+        repo,
         broker="富途", account="lx", symbol="0700.HK", option_type="put", side="short",
         contracts=1, currency="HKD", strike=480, multiplier=100, expiration_ymd="2026-04-29",
-        premium_per_share=3.93, opened_at_ms=1775000000000))
+        premium_per_share=3.93, opened_at_ms=1775000000000,
+    )
     discovery = discover_expired_lifecycle_cases_atomically(
         repo, account="lx", observed_at_ms=1788934554000, apply_changes=True)
     case_id = discovery["created_case_ids"][0]

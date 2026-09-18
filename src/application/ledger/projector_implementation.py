@@ -23,7 +23,6 @@ _SEMANTIC_IMPORT_GRAPH: dict[str, tuple[str, ...]] = {
         "domain/domain/ledger/events.py",
         "domain/domain/ledger/identity.py",
         "domain/domain/ledger/lots.py",
-        "domain/domain/ledger/position_fields.py",
         "domain/domain/ledger/position_fingerprint.py",
         "domain/domain/ledger/projection.py",
         "domain/domain/ledger/projection_state.py",
@@ -38,12 +37,15 @@ _SEMANTIC_IMPORT_GRAPH: dict[str, tuple[str, ...]] = {
     ),
     "domain/domain/ledger/events.py": (
         "domain/domain/ledger/identity.py",
+        "domain/domain/money.py",
         "domain/domain/option_position_identity.py",
+        "domain/domain/trade_contract_identity.py",
     ),
     "domain/domain/ledger/fees.py": (
         "domain/domain/money.py",
     ),
     "domain/domain/ledger/identity.py": (
+        "domain/domain/money.py",
         "domain/domain/option_position_identity.py",
         "domain/domain/trade_contract_identity.py",
     ),
@@ -64,7 +66,9 @@ _SEMANTIC_IMPORT_GRAPH: dict[str, tuple[str, ...]] = {
         "domain/domain/ledger/events.py",
         "domain/domain/ledger/identity.py",
         "domain/domain/ledger/position_fields.py",
+        "domain/domain/money.py",
         "domain/domain/option_position_identity.py",
+        "domain/domain/trade_contract_identity.py",
     ),
     "domain/domain/ledger/position_fields.py": (
         "domain/domain/option_position_identity.py",
@@ -100,6 +104,7 @@ _SEMANTIC_IMPORT_GRAPH: dict[str, tuple[str, ...]] = {
     "src/application/ledger/event_codec.py": (
         "domain/domain/ledger/__init__.py",
         "domain/domain/ledger/events.py",
+        "domain/domain/trade_contract_identity.py",
     ),
     "src/application/ledger/position_records.py": (),
     "src/application/ledger/publisher.py": (
@@ -107,6 +112,7 @@ _SEMANTIC_IMPORT_GRAPH: dict[str, tuple[str, ...]] = {
         "domain/domain/ledger/events.py",
         "domain/domain/ledger/lots.py",
         "domain/domain/ledger/position_fields.py",
+        "domain/domain/money.py",
         "domain/domain/option_position_identity.py",
         "domain/domain/trade_contract_identity.py",
         "src/application/ledger/event_codec.py",
@@ -116,7 +122,7 @@ _SEMANTIC_IMPORT_GRAPH: dict[str, tuple[str, ...]] = {
 
 # Generated from the manifest and exact raw source bytes by
 # compute_projector_implementation_fingerprint().
-EXPECTED_PROJECTOR_IMPLEMENTATION_FINGERPRINT = "dbc125a947e6c9a99084665ea56944600bbefa17a604ffd3387773535f9e8341"
+EXPECTED_PROJECTOR_IMPLEMENTATION_FINGERPRINT = "0310d83e8f9fd56e9e9b14fc3f46e00b4805ef93c958b10f99d6bf858365f791"
 
 
 class ProjectorImplementationUnavailable(RuntimeError):

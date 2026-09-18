@@ -16,19 +16,21 @@ TARGET = ('富途', 'lx', 'stock-account', 'stock-order')
 def _repo(tmp_path, *, stock_override=None):
     repo = SQLiteOptionPositionsRepository(tmp_path / 'ledger.sqlite3')
     key = ContractKey.from_values(broker='富途', account='lx', underlying_symbol='0700.HK',
-                                  option_type='put', position_side='short', strike=440,
+                                  option_type='put', strike=440,
                                   expiration_ymd='2026-09-11')
     fee_zero = {'basis': 'actual', 'amount': '0', 'source': 'option_assignment_lifecycle'}
     repo.upsert_trade_event(TradeEvent(
         event_id='open', event_type='open', event_time_ms=TIME - 1, contract_key=key,
         contracts=3, price=2, currency='HKD', source='broker', multiplier=100, lot_id='lot',
-        raw_payload={'fee_provenance': fee_zero},
+        raw_payload={'side': 'sell', 'fee_provenance': fee_zero},
     ))
     for number, contracts in enumerate((1, 2)):
         repo.upsert_trade_event(TradeEvent(
             event_id=f'assignment-{number}', event_type='assignment', event_time_ms=TIME + number,
             contract_key=key, contracts=contracts, price=0, currency='HKD', source='broker',
             multiplier=100, target_lot_id='lot', raw_payload={
+                # §9.2 step 3: closing the assigned short put is a buy.
+                'side': 'buy',
                 'fee_provenance': fee_zero, 'futu_account_id': 'stock-account', 'order_id': 'option-order',
                 'stock_settlement': {'side': 'buy', 'shares': contracts * 100, 'price': 440,
                                      'currency': 'HKD', 'futu_account_id': 'stock-account',
@@ -144,7 +146,7 @@ def test_source_allocation_stays_valid_and_order_total_not_repeated(tmp_path):
     from domain.domain.lifecycle_allocation import allocate_stock_settlement, validate_stock_settlement_allocation_group
     repo = SQLiteOptionPositionsRepository(tmp_path / 'source.sqlite3')
     key = ContractKey.from_values(broker='富途', account='lx', underlying_symbol='0700.HK',
-                                  option_type='put', position_side='short', strike=440,
+                                  option_type='put', strike=440,
                                   expiration_ymd='2026-09-11')
     # Two distinct stock fills on one order; first fill splits across two option lots.
     groups = []
@@ -161,12 +163,18 @@ def test_source_allocation_stays_valid_and_order_total_not_repeated(tmp_path):
             repo.upsert_trade_event(TradeEvent(
                 event_id=f'open-{lot}', event_type='open', event_time_ms=TIME - 1,
                 contract_key=key, contracts=1, price=2, currency='HKD', source='broker', multiplier=100,
-                lot_id=lot, raw_payload={'fee_provenance': {'basis': 'actual', 'amount': '0', 'source': 'test'}},
+                lot_id=lot, raw_payload={
+                    # §9.2 step 3: the short put side travels as the trade side.
+                    'side': 'sell',
+                    'fee_provenance': {'basis': 'actual', 'amount': '0', 'source': 'test'},
+                },
             ))
             event = TradeEvent(
                 event_id=f'assignment-{lot}', event_type='assignment', event_time_ms=TIME + group_index,
                 contract_key=key, contracts=1, price=0, currency='HKD', source='broker', multiplier=100,
                 target_lot_id=lot, raw_payload={
+                    # §9.2 step 3: closing the assigned short put is a buy.
+                    'side': 'buy',
                     'case_id': f'case-{group_index}', 'evidence_id': f'evidence-{group_index}',
                     'target_lot_id': lot, 'stock_settlement': settlements[lot],
                     'stock_settlement_source': source,

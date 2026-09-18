@@ -15,11 +15,12 @@ def _event(event_id: str) -> TradeEvent:
     return TradeEvent(
         event_id=event_id, event_type="open", event_time_ms=1_000,
         contract_key=ContractKey.from_values(
-            broker="futu", account="lx", underlying_symbol="NVDA", option_type="put",
-            position_side="short", strike=100, expiration_ymd="2026-09-18",
-        ),
+            broker="futu", account="lx", underlying_symbol="NVDA", option_type="put", strike=100, expiration_ymd="2026-09-18",
+                ),
         contracts=1, price=2.5, currency="USD", source="test", multiplier=100,
-        lot_id=f"lot-{event_id}", raw_payload={"broker_deal_id": event_id},
+        lot_id=f"lot-{event_id}",
+        # §9.2 step 3: the short put side travels as the trade side.
+        raw_payload={"side": "sell", "broker_deal_id": event_id},
     )
 
 

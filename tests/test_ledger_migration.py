@@ -23,7 +23,7 @@ def _position_lot(
         "record_id": record_id,
         "fields": {
             "record_id": record_id,
-            "position_id": record_id,
+            "position_key": record_id,
             "status": "open",
             "contracts": contracts_open,
             "contracts_open": contracts_open,

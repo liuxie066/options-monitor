@@ -67,7 +67,7 @@ def _lot_dict(row: Any) -> dict[str, Any]:
         return {"record_id": "", "fields": {}}
     fields = payload.get("fields")
     return {
-        "record_id": str(payload.get("record_id") or "").strip(),
+        "record_id": str(payload.get("lot_id") or payload.get("record_id") or "").strip(),
         "fields": dict(fields) if isinstance(fields, dict) else {},
     }
 

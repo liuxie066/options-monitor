@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
 from domain.domain.lifecycle_allocation import resolve_allocations, validate_stock_settlement_allocation_group
+from domain.domain.trade_contract_identity import derive_position_side
 from src.application.ledger.source_consumption import build_source_consumption_claim
 
 from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
@@ -767,8 +768,21 @@ def proven_lifecycle_terminal_events(case: dict[str, Any], *, facts: dict[str, A
                 or not _same_decimal(event.get("multiplier"), case.get("multiplier"))
                 or not _same_decimal(event.get("strike", key.get("strike")), case.get("strike"))):
             return []
-        for field, fallback in (("account", "account"), ("broker", "broker"), ("symbol", "underlying_symbol"), ("option_type", "option_type"), ("expiration_ymd", "expiration_ymd"), ("position_side", "position_side")):
-            value = event.get(field) or key.get(fallback)
+        # §9.2 step 3: the stored contract key no longer carries the position side,
+        # so terminals without one re-derive it from the trade side they declare.
+        position_side = (
+            event.get("position_side")
+            or key.get("position_side")
+            or derive_position_side(event.get("event_type"), event.get("side") or raw.get("side"))
+        )
+        for field, value in (
+            ("account", event.get("account") or key.get("account")),
+            ("broker", event.get("broker") or key.get("broker")),
+            ("symbol", event.get("symbol") or key.get("underlying_symbol")),
+            ("option_type", event.get("option_type") or key.get("option_type")),
+            ("expiration_ymd", event.get("expiration_ymd") or key.get("expiration_ymd")),
+            ("position_side", position_side),
+        ):
             if not value or str(value) != str(case.get(field)):
                 return []
         if event_id in {row["event_id"] for row in proven}:

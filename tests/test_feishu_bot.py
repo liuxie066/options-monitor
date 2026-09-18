@@ -720,7 +720,7 @@ def test_real_notification_renderers_preserve_content_and_visible_blank_paragrap
             "candidates_should_close": 2,
             "as_of_utc": "2026-07-21T14:03:00+00:00",
             "applied": [
-                {"record_id": "rec_1", "position_id": "pos_1", "expiration_ymd": "2026-07-18"}
+                {"record_id": "rec_1", "position_key": "pos_1", "expiration_ymd": "2026-07-18"}
             ],
             "errors": ["rec_2 pos_2: sqlite locked"],
         },

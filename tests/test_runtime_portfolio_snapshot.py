@@ -45,8 +45,8 @@ from src.application.tick_run_workspace import (
 
 _CONTRACT_HASH = "f180e7bbcdd2f9bdaf6edfc540099b5c54156f3c6971ce83ef55c6fea51099c8"
 _INPUT_HASHES = {
-    "current_scale": "749ea27d7f7796469dfb4cd5371a255a5bd62141b30960d4c5bbe9046c79b0e7",
-    "current_state_10x": "7cb932b02ed81d096370ef52581374ee2632a9a02d368c78c02975c455260f15",
+    "current_scale": "9a735acf87602227578eee35c7f3a336db59f107ab11ec4e072cc1773dcb2270",
+    "current_state_10x": "4c81c6e53d4a0bfac8d4074f8691c3d516ac1df37a0646b8f0ab8b0de0e2063d",
 }
 
 

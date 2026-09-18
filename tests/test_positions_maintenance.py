@@ -26,7 +26,7 @@ def test_position_maintenance_filters_account_and_broker_in_dry_run(monkeypatch,
                 "account": "lx",
                 "status": "open",
                 "contracts": 1,
-                "position_id": "pos_keep",
+                "position_key": "pos_keep",
             },
         },
         {
@@ -59,7 +59,7 @@ def test_position_maintenance_filters_account_and_broker_in_dry_run(monkeypatch,
         return [
             {
                 "record_id": "rec_keep",
-                "position_id": "pos_keep",
+                "position_key": "pos_keep",
                 "should_close": True,
                 "expiration_ymd": "2026-05-01",
             }
@@ -131,7 +131,7 @@ def test_position_maintenance_filters_runtime_market_in_dry_run(
                 "symbol": "PDD",
                 "status": "open",
                 "contracts": 1,
-                "position_id": "PDD_20260618_85P_short",
+                "position_key": "PDD_20260618_85P_short",
             },
         },
         {
@@ -142,7 +142,7 @@ def test_position_maintenance_filters_runtime_market_in_dry_run(
                 "symbol": "0700.HK",
                 "status": "open",
                 "contracts": 1,
-                "position_id": "0700_HK_20260618_420P_short",
+                "position_key": "0700_HK_20260618_420P_short",
             },
         },
     ]
@@ -157,7 +157,7 @@ def test_position_maintenance_filters_runtime_market_in_dry_run(
         return [
             {
                 "record_id": item["record_id"],
-                "position_id": item["position_id"],
+                "position_key": item["position_key"],
                 "should_close": True,
                 "expiration_ymd": "2026-06-18",
             }
@@ -231,7 +231,7 @@ def test_position_maintenance_refreshes_assignment_quote_before_dry_run(
                     "contracts": 2,
                     "contracts_open": 2,
                     "expiration": exp_ms,
-                    "position_id": "0700_HK_20260618_420P_short",
+                    "position_key": "0700_HK_20260618_420P_short",
                 },
             }
         ],
@@ -303,7 +303,7 @@ def test_position_maintenance_waits_for_assignment_when_assignment_quote_unavail
                     "contracts": 2,
                     "contracts_open": 2,
                     "expiration": exp_ms,
-                    "position_id": "PDD_20260618_85P_short",
+                    "position_key": "PDD_20260618_85P_short",
                 },
             }
         ],
@@ -362,7 +362,7 @@ def test_position_maintenance_surfaces_grace_pending_expired_positions(monkeypat
                     "status": "open",
                     "contracts": 2,
                     "contracts_open": 2,
-                    "position_id": "0700_20260605_440P_short",
+                    "position_key": "0700_20260605_440P_short",
                 },
             }
         ],
@@ -373,7 +373,7 @@ def test_position_maintenance_surfaces_grace_pending_expired_positions(monkeypat
         lambda *_args, **_kwargs: [
             {
                 "record_id": "rec_wait",
-                "position_id": "0700_20260605_440P_short",
+                "position_key": "0700_20260605_440P_short",
                 "should_close": False,
                 "skip_reason": "grace_period_pending",
                 "expiration_ymd": "2026-06-05",
@@ -428,7 +428,7 @@ def test_position_maintenance_external_account_requires_manual_expiry_review(mon
                     "status": "open",
                     "contracts": 10,
                     "contracts_open": 10,
-                    "position_id": "pos_tigr",
+                    "position_key": "pos_tigr",
                     "expiration": expiration,
                 },
             }
@@ -545,16 +545,17 @@ def test_position_maintenance_reuses_startup_projection_recovery_once(
                 account="lx",
                 underlying_symbol="NVDA",
                 option_type="put",
-                position_side="long",
                 strike=100,
                 expiration_ymd="2026-08-28",
-            ),
+                        ),
             contracts=1,
             price=1.0,
             currency="USD",
             source="test_startup_recovery",
             multiplier=100,
             lot_id="lot_startup_recovery",
+            # §9.2 step 3: the short put side travels as the trade side.
+            raw_payload={"side": "sell"},
         )
     )
     assert seed_repo.count_trade_events() == 1
@@ -665,7 +666,7 @@ def test_position_maintenance_attaches_receipt_after_apply(monkeypatch, tmp_path
                     "account": "lx",
                     "status": "open",
                     "contracts": 1,
-                    "position_id": "pos_1",
+                    "position_key": "pos_1",
                 },
             }
         ],
@@ -678,7 +679,7 @@ def test_position_maintenance_attaches_receipt_after_apply(monkeypatch, tmp_path
                 "decisions": [
                     {
                         "record_id": "rec_1",
-                        "position_id": "pos_1",
+                        "position_key": "pos_1",
                         "should_close": True,
                         "expiration_ymd": "2026-05-01",
                     }
@@ -686,7 +687,7 @@ def test_position_maintenance_attaches_receipt_after_apply(monkeypatch, tmp_path
                 "applied": [
                     {
                         "record_id": "rec_1",
-                        "position_id": "pos_1",
+                        "position_key": "pos_1",
                         "should_close": True,
                         "expiration_ymd": "2026-05-01",
                     }
@@ -741,8 +742,8 @@ def test_position_maintenance_skips_receipt_in_no_send_mode(monkeypatch, tmp_pat
         "record_expired_position_closes",
         lambda *_args, **_kwargs: SimpleNamespace(
             to_payload=lambda: {
-                "decisions": [{"record_id": "rec_1", "position_id": "pos_1", "should_close": True}],
-                "applied": [{"record_id": "rec_1", "position_id": "pos_1", "should_close": True}],
+                "decisions": [{"record_id": "rec_1", "position_key": "pos_1", "should_close": True}],
+                "applied": [{"record_id": "rec_1", "position_key": "pos_1", "should_close": True}],
                 "errors": [],
             }
         ),

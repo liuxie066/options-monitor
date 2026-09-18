@@ -401,7 +401,7 @@ def run_wheel_call_scan(
             "strategy_mode": "wheel",
             "candidate_owner": "wheel",
             "batch_generation_hash": raw_batch.get("batch_generation_hash"),
-            "branch_generation_hash": raw_batch.get("branch_generation_hash")
+            "batch_generation_hash": raw_batch.get("batch_generation_hash")
             or raw_batch.get("batch_generation_hash"),
             "projection_hash": raw_batch.get("projection_hash"),
             "candidate_count": 0,
@@ -645,7 +645,7 @@ def run_wheel_put_scan(
             "strategy_family": "wheel",
             "strategy_mode": "wheel",
             "candidate_owner": "wheel",
-            "branch_generation_hash": branch.get("branch_generation_hash"),
+            "batch_generation_hash": branch.get("batch_generation_hash"),
             "projection_hash": branch.get("projection_hash"),
             "candidate_count": 0,
         }
@@ -734,8 +734,8 @@ def run_wheel_put_scan(
                 {
                     "wheel_branch_id": branch_id,
                     "direction": "put",
-                    "branch_generation_hash": branch.get(
-                        "branch_generation_hash"
+                    "batch_generation_hash": branch.get(
+                        "batch_generation_hash"
                     ),
                 }
             )
@@ -773,8 +773,8 @@ def run_wheel_put_scan(
                     "account": account,
                     "symbol": symbol,
                     "wheel_branch_id": branch_id,
-                    "branch_generation_hash": branch.get(
-                        "branch_generation_hash"
+                    "batch_generation_hash": branch.get(
+                        "batch_generation_hash"
                     ),
                     "candidate_id": top["candidate_id"],
                     "requested_contracts": int(top["contracts"]),

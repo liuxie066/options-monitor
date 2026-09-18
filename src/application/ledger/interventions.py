@@ -102,13 +102,11 @@ def _event_position_side(event: dict[str, Any]) -> str | None:
 
 
 def _contract_key_from_event_dict(event: dict[str, Any]) -> ContractKey:
-    position_side = _event_position_side(event) or normalize_side(event.get("side"), strict=True)
     return ContractKey.from_values(
         broker=event.get("broker"),
         account=event.get("account"),
         underlying_symbol=_canonical_trade_symbol(event.get("symbol")),
         option_type=event.get("option_type"),
-        position_side=position_side,
         strike=event.get("strike"),
         expiration_ymd=event.get("expiration_ymd"),
     )

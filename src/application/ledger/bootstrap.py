@@ -18,7 +18,7 @@ from domain.domain.ledger.position_fields import (
     now_ms,
 )
 from domain.domain.option_position_identity import normalize_currency
-from domain.domain.trade_contract_identity import canonical_contract_symbol
+from domain.domain.trade_contract_identity import canonical_contract_symbol, derive_trade_side
 from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
 from src.application.ledger.current_decision_runtime import (
     capture_trade_event_decision_projection_fence,
@@ -165,6 +165,7 @@ def _bootstrap_trade_event(item: dict[str, Any], *, source_name: str) -> Any | N
             if multiplier_evidence is not None
             else None
         ),
+        "side": derive_trade_side("open", fields.get("side")),
     }
     try:
         contract_key = ContractKey.from_values(
@@ -172,7 +173,6 @@ def _bootstrap_trade_event(item: dict[str, Any], *, source_name: str) -> Any | N
             account=normalize_account(fields.get("account")),
             underlying_symbol=_canonical_trade_symbol(fields.get("symbol")),
             option_type=str(fields.get("option_type") or ""),
-            position_side=str(fields.get("side") or "").strip().lower(),
             strike=safe_float(fields.get("strike")),
             expiration_ymd=expiration_ymd,
         )

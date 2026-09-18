@@ -170,7 +170,7 @@ def test_projection_explicit_close_does_not_cross_same_strike_different_expiry()
     )
 
     assert result.diagnostics == []
-    lots_by_id = {item.record_id: item.fields for item in result.lots}
+    lots_by_id = {item.lot_id: item.fields for item in result.lots}
     assert lots_by_id["lot_evt-open-may"]["contracts_open"] == 6
     assert lots_by_id["lot_evt-open-may"]["status"] == "open"
     assert lots_by_id["lot_evt-open-jun"]["contracts_open"] == 0
@@ -207,6 +207,6 @@ def test_projection_explicit_target_mismatch_checks_strike_and_expiry() -> None:
     )
 
     assert [item.code for item in result.diagnostics] == ["target_contract_mismatch"]
-    lots_by_id = {item.record_id: item.fields for item in result.lots}
+    lots_by_id = {item.lot_id: item.fields for item in result.lots}
     assert lots_by_id["lot_evt-open-may"]["contracts_open"] == 6
     assert lots_by_id["lot_evt-open-may"]["status"] == "open"

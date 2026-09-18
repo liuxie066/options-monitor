@@ -423,7 +423,7 @@ def format_auto_close_summary(result: dict[str, Any]) -> str:
             if not isinstance(item, dict):
                 continue
             lines.append(
-                f"- {item.get('record_id')} | {item.get('position_id')} | "
+                f"- {item.get('record_id')} | {item.get('position_key')} | "
                 f"exp={item.get('expiration_ymd') or item.get('expiration_ms')}"
             )
     if review_required:
@@ -433,7 +433,7 @@ def format_auto_close_summary(result: dict[str, Any]) -> str:
             if not isinstance(item, dict) or not item.get("skip_reason"):
                 continue
             lines.append(
-                f"- {item.get('record_id')} | {item.get('position_id')} | "
+                f"- {item.get('record_id')} | {item.get('position_key')} | "
                 f"skip={item.get('skip_reason')} | exp={item.get('expiration_ymd') or item.get('expiration_ms')}"
             )
     if grace_pending:
@@ -443,7 +443,7 @@ def format_auto_close_summary(result: dict[str, Any]) -> str:
             if not isinstance(item, dict) or item.get("skip_reason") != "grace_period_pending":
                 continue
             lines.append(
-                f"- {item.get('record_id')} | {item.get('position_id')} | "
+                f"- {item.get('record_id')} | {item.get('position_key')} | "
                 f"eligible_after={item.get('eligible_after_utc') or item.get('eligible_after_ms')}"
             )
 

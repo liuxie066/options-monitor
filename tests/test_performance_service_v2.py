@@ -9,6 +9,7 @@ import pytest
 import src.application.performance.service as performance_service
 from domain.domain.ledger import ContractKey, TradeEvent
 from domain.domain.performance.period import PeriodRequest, normalize_performance_period
+from domain.domain.trade_contract_identity import derive_trade_side
 from src.application.cash_conversion import attach_trade_event_cash_conversions
 from src.application.performance.service import (
     OptionPerformanceReadError,
@@ -71,10 +72,9 @@ def _event(
         account="lx",
         underlying_symbol="NVDA",
         option_type="put",
-        position_side="short",
         strike=100,
         expiration_ymd="2026-09-30",
-    )
+        )
     event = TradeEvent(
         event_id=event_id,
         event_type=event_type,
@@ -90,6 +90,9 @@ def _event(
         target_lot_id=target_lot_id,
         target_event_id=target_event_id,
         raw_payload={
+            # §9.2 step 3: the contract key no longer carries the position side,
+            # so the short put side travels as the trade side of the event.
+            "side": derive_trade_side(event_type, "short") or "",
             "close_type": "buy_to_close" if event_type == "close" else None,
             "fee_provenance": {"basis": "actual", "amount": 0, "source": "test"},
         },

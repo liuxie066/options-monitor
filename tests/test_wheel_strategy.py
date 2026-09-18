@@ -8,7 +8,6 @@ import pytest
 
 import src.application.ledger.manual_trades as ledger_manual_trades
 from domain.domain.ledger import ContractKey, TradeEvent
-from domain.domain.option_position_lots import OpenPositionCommand
 from domain.domain.wheel import (
     WHEEL_EVENT_TYPES,
     WHEEL_EVENT_SCHEMA_V1,
@@ -171,20 +170,18 @@ def test_repository_appends_wheel_event_once_and_reads_it_in_same_snapshot(
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     ledger_manual_trades.persist_manual_open_event(
         repo,
-        OpenPositionCommand(
-            broker="富途",
-            account="lx",
-            symbol="NVDA",
-            option_type="put",
-            side="short",
-            contracts=1,
-            currency="USD",
-            strike=100,
-            multiplier=100,
-            expiration_ymd="2026-08-21",
-            premium_per_share=2.5,
-            opened_at_ms=1_000,
-        ),
+        broker="富途",
+        account="lx",
+        symbol="NVDA",
+        option_type="put",
+        side="short",
+        contracts=1,
+        currency="USD",
+        strike=100,
+        multiplier=100,
+        expiration_ymd="2026-08-21",
+        premium_per_share=2.5,
+        opened_at_ms=1_000,
     )
     lot = repo.list_position_lots()[0]
     record_manual_assignment(
@@ -242,10 +239,9 @@ def test_read_model_reprojects_position_lots_from_same_as_of_trade_subset(
         account="lx",
         underlying_symbol="NVDA",
         option_type="put",
-        position_side="short",
         strike=100,
         expiration_ymd="2026-08-21",
-    )
+        )
     events = [
         TradeEvent(
             event_id="put-open",
@@ -257,6 +253,8 @@ def test_read_model_reprojects_position_lots_from_same_as_of_trade_subset(
             currency="USD",
             source="test",
             lot_id="put-lot",
+            # §9.2 step 3: the short put side travels as the trade side.
+            raw_payload={"side": "sell"},
         ),
         TradeEvent(
             event_id="put-close",
@@ -268,6 +266,8 @@ def test_read_model_reprojects_position_lots_from_same_as_of_trade_subset(
             currency="USD",
             source="test",
             target_lot_id="put-lot",
+            # §9.2 step 3: closing the short put is a buy.
+            raw_payload={"side": "buy"},
         ),
         TradeEvent(
             event_id="void-put-close",
@@ -540,8 +540,8 @@ def test_wheel_candidate_uses_batch_cost_floor_and_lifecycle_pnl() -> None:
         "spot": 100,
         "delta": 0.31,
         "multiplier": 100,
-        "net_premium": 190,
-        "net_premium_cny": 1_350,
+        "net_income": 190,
+        "net_income_cny": 1_350,
         "period_net_premium_return": 0.019,
         "annualized_net_premium_return": 0.16,
         "spread_ratio": 0.1,
@@ -693,7 +693,7 @@ def test_wheel_put_candidate_enforces_principal_spot_and_abs_delta() -> None:
         "delta": -0.30,
         "multiplier": 100,
         "currency": "USD",
-        "net_premium": 180,
+        "net_income": 180,
         "period_net_premium_return": 0.018,
         "annualized_net_premium_return": 0.15,
         "spread_ratio": 0.1,
@@ -746,7 +746,7 @@ def test_wheel_put_candidate_fails_closed_and_ranks_remainder_first() -> None:
             "delta": -0.30,
             "multiplier": 100,
             "currency": "USD",
-            "net_premium": 180,
+            "net_income": 180,
         },
         {"min_abs_delta": 0.25, "max_abs_delta": 0.35},
         {"basis": "estimated", "amount": 10},

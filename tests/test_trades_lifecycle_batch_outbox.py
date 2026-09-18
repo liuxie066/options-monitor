@@ -394,17 +394,20 @@ def test_dispatcher_ledger_write_serializes_auto_close_projection_refresh(
                 account="lx",
                 underlying_symbol="NVDA",
                 option_type="put",
-                position_side="short",
                 strike=100,
                 expiration_ymd="2026-04-17",
-            ),
+                        ),
             contracts=1,
             price=1.0,
             currency="USD",
             source="test_seed_open_lot",
             multiplier=100,
             lot_id="lot-expired-put",
-            raw_payload={"source_type": "test_seed"},
+            raw_payload={
+                # §9.2 step 3: the short put side travels as the trade side.
+                "side": "sell",
+                "source_type": "test_seed",
+            },
         ),
     )
     positions = [

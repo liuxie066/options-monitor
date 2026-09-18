@@ -640,7 +640,7 @@ def test_wheel_put_scan_and_account_cash_grant_are_direction_aware(tmp_path: Pat
                 "principal_anchor": 10_010,
                 "realized_put_net_pnl_in_current_stage": 0,
                 "currency": "USD",
-                "branch_generation_hash": generation * 64,
+                "batch_generation_hash": generation * 64,
                 "projection_hash": projection * 64,
             }
             for branch_id, generation, projection in (
@@ -750,7 +750,7 @@ def test_wheel_pending_put_branch_remains_visible_without_required_data() -> Non
                 "phase": "pending_decision",
                 "monitoring_gate": "enabled",
                 "remaining_contracts": 1,
-                "branch_generation_hash": "a" * 64,
+                "batch_generation_hash": "a" * 64,
                 "projection_hash": "b" * 64,
             }
         ],
@@ -837,7 +837,7 @@ def test_wheel_finalizers_preserve_homogeneous_scan_failure_reason() -> None:
                     "symbol": "NVDA",
                     "wheel_branch_id": "put-1",
                     "direction": "put",
-                    "branch_generation_hash": "a" * 64,
+                    "batch_generation_hash": "a" * 64,
                     "projection_hash": "b" * 64,
                 }
             ],

@@ -24,10 +24,9 @@ def _put_key() -> ContractKey:
         account="lx",
         underlying_symbol="NVDA",
         option_type="put",
-        position_side="short",
         strike=100,
         expiration_ymd="2026-08-21",
-    )
+        )
 
 
 def _repo_with_assignment(tmp_path) -> SQLiteOptionPositionsRepository:
@@ -45,6 +44,8 @@ def _repo_with_assignment(tmp_path) -> SQLiteOptionPositionsRepository:
             source="test",
             multiplier=100,
             lot_id="lot-put",
+            # §9.2 step 3: the short put side travels as the trade side.
+            raw_payload={"side": "sell"},
         )
     )
     repo.upsert_trade_event(
@@ -60,6 +61,8 @@ def _repo_with_assignment(tmp_path) -> SQLiteOptionPositionsRepository:
             multiplier=100,
             target_lot_id="lot-put",
             raw_payload={
+                # §9.2 step 3: closing the assigned short put is a buy.
+                "side": "buy",
                 "stock_settlement": {
                     "side": "buy",
                     "shares": 100,
@@ -108,10 +111,9 @@ def test_assigned_stock_projection_uses_adjusted_covered_call_identity(tmp_path)
         account="lx",
         underlying_symbol="NVDA",
         option_type="call",
-        position_side="short",
         strike=110,
         expiration_ymd="2026-08-21",
-    )
+        )
     repo.upsert_trade_event(
         TradeEvent(
             event_id="open-put",
@@ -124,7 +126,8 @@ def test_assigned_stock_projection_uses_adjusted_covered_call_identity(tmp_path)
             source="test",
             multiplier=100,
             lot_id="lot-put",
-            raw_payload={"strategy_group_id": "group-a"},
+            # §9.2 step 3: the short put side travels as the trade side.
+            raw_payload={"side": "sell", "strategy_group_id": "group-a"},
         )
     )
     repo.upsert_trade_event(
@@ -140,6 +143,8 @@ def test_assigned_stock_projection_uses_adjusted_covered_call_identity(tmp_path)
             multiplier=100,
             target_lot_id="lot-put",
             raw_payload={
+                # §9.2 step 3: closing the assigned short put is a buy.
+                "side": "buy",
                 "stock_settlement": {
                     "side": "buy",
                     "shares": 100,
@@ -162,6 +167,8 @@ def test_assigned_stock_projection_uses_adjusted_covered_call_identity(tmp_path)
             source="test",
             multiplier=100,
             lot_id="lot-call",
+            # §9.2 step 3: the covered call is short, so it opens with a sell.
+            raw_payload={"side": "sell"},
         )
     )
     repo.upsert_trade_event(

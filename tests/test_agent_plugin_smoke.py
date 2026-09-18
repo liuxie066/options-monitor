@@ -1328,7 +1328,7 @@ def test_trade_event_pagination_errors_explain_the_next_user_action(
 
 def test_option_positions_read_open_assigned_stock_includes_partially_sold(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
-    from domain.domain.option_position_lots import OpenPositionCommand, parse_exp_to_ms
+    from domain.domain.option_position_lots import parse_exp_to_ms
     from src.application.ledger.commands import record_manual_assignment
     from src.application.positions.workflows import execute_manual_assigned_stock_sale
 
@@ -1353,20 +1353,18 @@ def test_option_positions_read_open_assigned_stock_includes_partially_sold(monke
     repo = ledger_repository.SQLiteOptionPositionsRepository(sqlite_path)
     ledger_manual_trades.persist_manual_open_event(
         repo,
-        OpenPositionCommand(
-            broker="富途",
-            account="user1",
-            symbol="NVDA",
-            option_type="put",
-            side="short",
-            contracts=1,
-            currency="USD",
-            strike=100.0,
-            multiplier=100,
-            expiration_ymd="2026-06-19",
-            premium_per_share=2.5,
-            opened_at_ms=_ms("2026-04-03"),
-        ),
+        broker="富途",
+        account="user1",
+        symbol="NVDA",
+        option_type="put",
+        side="short",
+        contracts=1,
+        currency="USD",
+        strike=100.0,
+        multiplier=100,
+        expiration_ymd="2026-06-19",
+        premium_per_share=2.5,
+        opened_at_ms=_ms("2026-04-03"),
     )
     lot = repo.list_position_lots()[0]
     record_manual_assignment(

@@ -9,7 +9,6 @@ import pytest
 import src.application.ledger.manual_trades as ledger_manual_trades
 import src.application.ledger.repository as ledger_repository
 
-from domain.domain.option_position_lots import OpenPositionCommand
 from src.application.ledger.commands import record_manual_assignment
 from src.application.positions.assigned_stock_view import build_assigned_stock_view
 from src.application.positions.workflows import execute_manual_assigned_stock_sale
@@ -47,20 +46,18 @@ def _repo_with_assigned_stock(tmp_path: Path, *, opened_at_ms: int = 1000, assig
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     ledger_manual_trades.persist_manual_open_event(
         repo,
-        OpenPositionCommand(
-            broker="富途",
-            account="lx",
-            symbol="NVDA",
-            option_type="put",
-            side="short",
-            contracts=1,
-            currency="USD",
-            strike=100.0,
-            multiplier=100,
-            expiration_ymd="2026-06-19",
-            premium_per_share=2.5,
-            opened_at_ms=opened_at_ms,
-        ),
+        broker="富途",
+        account="lx",
+        symbol="NVDA",
+        option_type="put",
+        side="short",
+        contracts=1,
+        currency="USD",
+        strike=100.0,
+        multiplier=100,
+        expiration_ymd="2026-06-19",
+        premium_per_share=2.5,
+        opened_at_ms=opened_at_ms,
     )
     lot = repo.list_position_lots()[0]
     record_manual_assignment(
@@ -98,7 +95,10 @@ def test_resolve_trade_previews_broker_assigned_stock_sale(tmp_path: Path) -> No
     assert operation["fields"]["fees"] == 0.0
     assert operation["fields"]["fee_provenance"]["basis"] == "estimated"
     assert operation["fields"]["fee_provenance"]["amount"] == "2.5261"
-    assert result.diagnostics["assigned_stock_sale"]["stock_lot_after"]["assigned_stock_realized_pnl"] == 497.4739
+    assert (
+        result.diagnostics["assigned_stock_sale"]["stock_lot_after"]["assigned_stock_realized_pnl"]
+        == "497.4739"
+    )
 
 
 def test_resolve_trade_applies_broker_assigned_stock_sale(tmp_path: Path) -> None:
@@ -119,7 +119,7 @@ def test_resolve_trade_applies_broker_assigned_stock_sale(tmp_path: Path) -> Non
     assert events[0]["fee_provenance"]["amount"] == "2.5261"
     lifecycle = _assigned_stock_lifecycle(repo, stock_lot_id)
     assert lifecycle["status"] == "closed"
-    assert lifecycle["assigned_stock_realized_pnl"] == 497.4739
+    assert lifecycle["assigned_stock_realized_pnl"] == "497.4739"
     assert lifecycle["option_premium_attribution"] == 250.0
     assert lifecycle["assignment_lifecycle_pnl"] == 747.4739
 
@@ -139,7 +139,7 @@ def test_broker_assigned_stock_sale_does_not_admit_raw_fee_components_as_actual(
     assert event["fees"] == 0.0
     assert event["fee_provenance"]["basis"] == "estimated"
     assert event["fee_provenance"]["amount"] == "2.5261"
-    assert _assigned_stock_lifecycle(repo, stock_lot_id)["assigned_stock_realized_pnl"] == 497.4739
+    assert _assigned_stock_lifecycle(repo, stock_lot_id)["assigned_stock_realized_pnl"] == "497.4739"
 
 
 def test_manual_assigned_stock_sale_freezes_formula_estimate(tmp_path: Path) -> None:
@@ -158,7 +158,7 @@ def test_manual_assigned_stock_sale_freezes_formula_estimate(tmp_path: Path) -> 
     assert event["fees"] == 0.0
     assert event["fee_provenance"]["basis"] == "estimated"
     assert event["fee_provenance"]["amount"] == "2.5261"
-    assert _assigned_stock_lifecycle(repo, stock_lot_id)["assigned_stock_realized_pnl"] == 497.4739
+    assert _assigned_stock_lifecycle(repo, stock_lot_id)["assigned_stock_realized_pnl"] == "497.4739"
 
 
 def test_assigned_stock_sale_projects_before_and_after_from_one_transaction(
@@ -359,21 +359,19 @@ def test_backdated_sale_cannot_invalidate_existing_later_call_coverage(
     repo, stock_lot_id = _repo_with_assigned_stock(tmp_path)
     ledger_manual_trades.persist_manual_open_event(
         repo,
-        OpenPositionCommand(
-            broker="富途",
-            account="lx",
-            symbol="NVDA",
-            option_type="call",
-            side="short",
-            contracts=1,
-            currency="USD",
-            strike=110,
-            multiplier=80,
-            expiration_ymd="2026-06-19",
-            premium_per_share=2,
-            opened_at_ms=4_000,
-            strategy_snapshot={"source_stock_lot_id": stock_lot_id},
-        ),
+        broker="富途",
+        account="lx",
+        symbol="NVDA",
+        option_type="call",
+        side="short",
+        contracts=1,
+        currency="USD",
+        strike=110,
+        multiplier=80,
+        expiration_ymd="2026-06-19",
+        premium_per_share=2,
+        opened_at_ms=4_000,
+        strategy_snapshot={"source_stock_lot_id": stock_lot_id},
     )
     before = build_assigned_stock_view(repo, account="lx", as_of_ms=5_000)
     assert sum(row["shares"] for row in before["covered_call_allocations"]) == 80
@@ -418,20 +416,18 @@ def test_manual_assigned_stock_sale_preserves_aggregate_covered_call_capacity(
     )
     ledger_manual_trades.persist_manual_open_event(
         repo,
-        OpenPositionCommand(
-            broker="富途",
-            account="lx",
-            symbol="NVDA",
-            option_type="put",
-            side="short",
-            contracts=stock_shares // 100,
-            currency="USD",
-            strike=100,
-            multiplier=100,
-            expiration_ymd="2026-06-19",
-            premium_per_share=2,
-            opened_at_ms=1_000,
-        ),
+        broker="富途",
+        account="lx",
+        symbol="NVDA",
+        option_type="put",
+        side="short",
+        contracts=stock_shares // 100,
+        currency="USD",
+        strike=100,
+        multiplier=100,
+        expiration_ymd="2026-06-19",
+        premium_per_share=2,
+        opened_at_ms=1_000,
     )
     put_lot = repo.list_position_lots()[0]
     record_manual_assignment(
@@ -451,21 +447,19 @@ def test_manual_assigned_stock_sale_preserves_aggregate_covered_call_capacity(
     for index, shares in enumerate(covered_shares):
         ledger_manual_trades.persist_manual_open_event(
             repo,
-            OpenPositionCommand(
-                broker="富途",
-                account="lx",
-                symbol="NVDA",
-                option_type="call",
-                side="short",
-                contracts=1,
-                currency="USD",
-                strike=110 + index,
-                multiplier=shares,
-                expiration_ymd="2026-06-19",
-                premium_per_share=2,
-                opened_at_ms=3_000 + index,
-                strategy_snapshot={"source_stock_lot_id": stock_lot_id},
-            ),
+            broker="富途",
+            account="lx",
+            symbol="NVDA",
+            option_type="call",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=110 + index,
+            multiplier=shares,
+            expiration_ymd="2026-06-19",
+            premium_per_share=2,
+            opened_at_ms=3_000 + index,
+            strategy_snapshot={"source_stock_lot_id": stock_lot_id},
         )
 
     if allowed:
@@ -521,7 +515,7 @@ def test_resolve_trade_does_not_reopen_closed_assigned_stock_lot_after_stock_buy
     lifecycle = _assigned_stock_lifecycle(repo, stock_lot_id)
     assert lifecycle["status"] == "closed"
     assert lifecycle["shares_remaining"] == 0
-    assert lifecycle["assigned_stock_realized_pnl"] == 497.4739
+    assert lifecycle["assigned_stock_realized_pnl"] == "497.4739"
 
 
 def test_resolve_trade_broker_assigned_stock_sale_duplicate_is_idempotent(
@@ -564,20 +558,18 @@ def test_resolve_trade_broker_assigned_stock_sale_ambiguous_lot_is_unresolved(tm
     repo, _first_stock_lot_id = _repo_with_assigned_stock(tmp_path, opened_at_ms=1000, assigned_at_ms=2000)
     ledger_manual_trades.persist_manual_open_event(
         repo,
-        OpenPositionCommand(
-            broker="富途",
-            account="lx",
-            symbol="NVDA",
-            option_type="put",
-            side="short",
-            contracts=1,
-            currency="USD",
-            strike=100.0,
-            multiplier=100,
-            expiration_ymd="2026-07-17",
-            premium_per_share=2.5,
-            opened_at_ms=1100,
-        ),
+        broker="富途",
+        account="lx",
+        symbol="NVDA",
+        option_type="put",
+        side="short",
+        contracts=1,
+        currency="USD",
+        strike=100.0,
+        multiplier=100,
+        expiration_ymd="2026-07-17",
+        premium_per_share=2.5,
+        opened_at_ms=1100,
     )
     second_lot = [item for item in repo.list_position_lots() if item["fields"]["status"] == "open"][0]
     record_manual_assignment(
@@ -971,12 +963,14 @@ def _explicit_two_lot_sale(tmp_path):
     from src.application.positions.workflows import _build_assigned_stock_sale_event
 
     repo, first = _repo_with_assigned_stock(tmp_path)
-    ledger_manual_trades.persist_manual_open_event(repo, OpenPositionCommand(
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
         broker="富途", account="lx", symbol="NVDA", option_type="put", side="short",
         contracts=1, currency="USD", strike=110, multiplier=100,
         expiration_ymd="2026-06-19", premium_per_share=2, opened_at_ms=1100,
-    ))
-    option = next(x for x in repo.list_position_lots() if x["fields"]["strike"] == 110)
+    )
+    # §7.4: the published row carries money as decimal text.
+    option = next(x for x in repo.list_position_lots() if x["fields"]["strike"] == "110")
     api.record_manual_assignment(repo, record_id=option["record_id"], contracts_to_close=1,
                                 stock_side="buy", stock_qty=100, stock_price=110, as_of_ms=2100)
     lots = build_assigned_stock_view(repo)["assigned_stock_lots"]

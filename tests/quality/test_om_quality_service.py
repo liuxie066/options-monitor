@@ -297,7 +297,7 @@ def test_service_uses_account_coherent_lifecycle_read_for_position_coverage(
     repo.replace_position_lots(
         [
             PositionLotRecord(
-                record_id="lot-nvda",
+                lot_id="lot-nvda",
                 fields={
                     "account": "lx",
                     "broker": "futu",
@@ -511,7 +511,7 @@ def test_no_deep_refresh_carries_current_snapshot_and_due_probe_rechecks(
     SQLiteOptionPositionsRepository(ledger_path).replace_position_lots(
         [
             PositionLotRecord(
-                record_id="rec-nvda",
+                lot_id="rec-nvda",
                 fields={
                     "account": "lx",
                     "symbol": "NVDA",

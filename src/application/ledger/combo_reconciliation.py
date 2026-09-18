@@ -715,7 +715,7 @@ def _ledger_lot_facts(
                     or contract.get("position_side")
                     or ""
                 ).strip().lower(),
-                "contracts_original": effective_contracts(fields),
+                "contracts_opened": effective_contracts(fields),
                 "contracts_open": effective_contracts_open(fields),
                 "currency": currency,
                 "multiplier": effective_multiplier(fields),
@@ -877,14 +877,14 @@ def _validate_inference_against_current_ledger(
         runtime_environment=runtime_environment,
         events=events,
         lots=[
-            {"record_id": item.record_id, "fields": dict(item.fields)}
+            {"record_id": item.lot_id, "fields": dict(item.fields)}
             for item in projection.lots
         ],
         confirmed_open_event_ids=set(),
         effective_identity_open_event_ids=set(),
     )
     facts_by_record = {str(item["record_id"]): item for item in facts}
-    records_by_id = {str(item.record_id): item for item in projection.lots}
+    records_by_id = {str(item.lot_id): item for item in projection.lots}
     out: dict[str, Any] = {}
     for prefix in ("put", "call"):
         record_id = str(inference.get(f"{prefix}_record_id") or "").strip()
@@ -907,7 +907,7 @@ def _validate_inference_against_current_ledger(
             "symbol",
             "option_type",
             "position_side",
-            "contracts_original",
+            "contracts_opened",
             "contracts_open",
             "currency",
             "multiplier",
@@ -923,7 +923,7 @@ def _validate_inference_against_current_ledger(
             for field in snapshot_fields
             if not _combo_snapshot_values_equal(
                 fact.get(field),
-                snapshot.get(field),
+                _snapshot_field_value(snapshot, field),
                 decimal_value=field in {"multiplier", "strike"},
             )
         ]
@@ -933,7 +933,7 @@ def _validate_inference_against_current_ledger(
             )
         if (
             int(fact.get("contracts_open") or 0)
-            != int(fact.get("contracts_original") or 0)
+            != int(fact.get("contracts_opened") or 0)
             or str(fact.get("strategy_group_id") or "")
             or str(fact.get("leg_role") or "")
             or str(fact.get("strategy") or "").strip().lower() == "combo_yield"
@@ -941,6 +941,24 @@ def _validate_inference_against_current_ledger(
             raise ValueError("combo confirmation lot is no longer fully ungrouped")
         out[f"{prefix}_record"] = record
     return out
+
+
+# ``contracts_original`` was renamed to ``contracts_opened`` when the lot fields
+# adopted the §7.3 quantity vocabulary. Inferences persisted before that rename
+# still carry the old key, so shadowing it as a read-side fallback keeps their
+# snapshot comparable instead of reporting an unchanged fact set as changed.
+_SNAPSHOT_LEGACY_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
+    "contracts_opened": ("contracts_original",),
+}
+
+
+def _snapshot_field_value(snapshot: Mapping[str, Any], field: str) -> Any:
+    if field in snapshot:
+        return snapshot[field]
+    for alias in _SNAPSHOT_LEGACY_FIELD_ALIASES.get(field, ()):
+        if alias in snapshot:
+            return snapshot[alias]
+    return None
 
 
 def _combo_snapshot_values_equal(
@@ -985,7 +1003,6 @@ def _combo_adjust_event(
         account=fields.get("account"),
         underlying_symbol=fields.get("symbol"),
         option_type=fields.get("option_type"),
-        position_side=fields.get("side"),
         strike=fields.get("strike"),
         expiration_ymd=effective_expiration_ymd(fields),
     )
@@ -999,14 +1016,14 @@ def _combo_adjust_event(
         currency=str(fields.get("currency") or ""),
         source="post_trade_combo_reconciliation",
         multiplier=float(effective_multiplier(fields) or 100.0),
-        target_lot_id=str(record.record_id),
+        target_lot_id=str(record.lot_id),
         raw_payload={
             "source": "post_trade_combo_reconciliation",
             "source_type": "combo_pair_inference",
             "mode": "post_trade_combo_adoption",
             "inference_id": inference_id,
-            "record_id": str(record.record_id),
-            "target_lot_id": str(record.record_id),
+            "record_id": str(record.lot_id),
+            "target_lot_id": str(record.lot_id),
             "adjust_target_source_event_id": str(fields.get("source_event_id") or ""),
             "idempotency_key": event_id,
             "patch": patch.to_dict(),
@@ -1023,14 +1040,13 @@ def _identity_leg(record: Any, *, open_event_id: str) -> dict[str, Any]:
     record_id = str(
         record.get("record_id")
         if isinstance(record, Mapping)
-        else record.record_id
+        else record.lot_id
     )
     contract_key = ContractKey.from_values(
         broker=fields.get("broker"),
         account=fields.get("account"),
         underlying_symbol=fields.get("symbol"),
         option_type=fields.get("option_type"),
-        position_side=fields.get("side"),
         strike=fields.get("strike"),
         expiration_ymd=effective_expiration_ymd(fields),
     )
@@ -1071,7 +1087,6 @@ def _combo_void_event(
             account=contract.get("account"),
             underlying_symbol=contract.get("underlying_symbol"),
             option_type=contract.get("option_type"),
-            position_side=contract.get("position_side"),
             strike=contract.get("strike"),
             expiration_ymd=contract.get("expiration_ymd"),
         ),

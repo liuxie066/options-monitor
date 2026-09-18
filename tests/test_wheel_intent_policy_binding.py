@@ -26,18 +26,23 @@ def _environment(tmp_path, direction, monkeypatch):
     repo, _, stock_id = _assign_short_put(tmp_path, wheel_start_enabled=direction == "call")
     if direction == "put":
         key = ContractKey.from_values(broker="富途", account="lx", underlying_symbol="NVDA",
-                                      option_type="call", position_side="short", strike=110,
+                                      option_type="call", strike=110,
                                       expiration_ymd="2026-09-18")
         _open_test_activation(repo)
         for event in [
             TradeEvent(event_id="cc-open", event_type="open", event_time_ms=3_000,
                        contract_key=key, contracts=1, price=2, currency="USD", source="test",
                        multiplier=100, lot_id="cc-lot",
-                       raw_payload=_trusted_multiplier_payload("cc-open", strategy="cc",
+                       # §9.2 step 3: the contract key no longer carries the
+                       # position side, so the short call side travels as the
+                       # trade side.
+                       raw_payload=_trusted_multiplier_payload("cc-open", side="sell", strategy="cc",
                            leg_role="covered_call", source_stock_lot_id=stock_id)),
             TradeEvent(event_id="cc-assignment", event_type="assignment", event_time_ms=4_000,
                        contract_key=key, contracts=1, price=0, currency="USD", source="test",
                        multiplier=100, target_lot_id="cc-lot", raw_payload={
+                           # §9.2 step 3: closing a short call is a buy.
+                           "side": "buy",
                            "target_lot_id": "cc-lot", "stock_settlement": {
                                "side": "sell", "shares": 100, "price": 110, "fees": 1,
                                "currency": "USD", "fee_provenance": {"basis": "actual", "source": "test"}}}),
@@ -53,7 +58,7 @@ def _environment(tmp_path, direction, monkeypatch):
                  "expiration_ymd": "2026-09-18", "granted_contracts": 1, "multiplier": 100,
                  "currency": "USD", "direction": direction,
                  "wheel_branch_id": branch["wheel_branch_id"], "stock_lot_id": branch.get("stock_lot_id"),
-                 "branch_generation_hash": branch["branch_generation_hash"],
+                 "batch_generation_hash": branch["batch_generation_hash"],
                  "capacity_identity_hash": "capacity", "cash_reservation_currency": "USD"}
     snapshot = {"account": "lx", "snapshot_hash": "snapshot",
                 "strategy_policy_sha256": strategy_policy_hash(POLICY_A),
@@ -70,7 +75,7 @@ def _environment(tmp_path, direction, monkeypatch):
 def _request(branch, snapshot, capacity, resolved):
     return dict(candidate_snapshot=snapshot, account="lx", wheel_branch_id=branch["wheel_branch_id"],
                 direction=branch["direction"], final_candidate_id="candidate", expected_snapshot_hash="snapshot",
-                expected_branch_generation_hash=branch["branch_generation_hash"], expires_at_ms=10_000,
+                expected_batch_generation_hash=branch["batch_generation_hash"], expires_at_ms=10_000,
                 request_id="intent-request", actor="tester", capacity_fact=capacity,
                 new_intent_enabled=True, market="us", activation_descriptor=resolved["activation_descriptor"],
                 policy_sha256=resolved["policy_sha256"], as_of_ms=5_000)
@@ -85,7 +90,7 @@ def test_new_intent_rejects_old_policy_and_allows_restored_policy(tmp_path, monk
     if entry == "legacy_call":
         create = workflows.create_wheel_call_intent
         request["stock_lot_id"] = branch["stock_lot_id"]
-        request["expected_batch_generation_hash"] = request.pop("expected_branch_generation_hash")
+        request["expected_batch_generation_hash"] = request.pop("expected_batch_generation_hash")
         request["coverage_fact"] = request.pop("capacity_fact")
         request.pop("direction")
         request.pop("wheel_branch_id")
@@ -128,7 +133,7 @@ def test_intent_facades_supply_current_global_policy(tmp_path, monkeypatch, entr
         monkeypatch.setattr(cli, "_cash_capacity", lambda *_a, **_k: capacity)
         args = cli.parse_args(["intent", "create", "--config-key", "us", "--account", "lx",
             "--wheel-branch-id", branch["wheel_branch_id"], "--direction", direction,
-            "--expected-branch-generation-hash", branch["branch_generation_hash"],
+            "--expected-batch-generation-hash", branch["batch_generation_hash"],
             "--run-id", "old-run", "--final-candidate-id", "candidate", "--expected-snapshot-hash", "snapshot",
             "--expires-at-ms", "10000", "--request-id", "intent-request", "--actor", "tester"])
         with pytest.raises(ValueError, match="candidate strategy policy changed"):
@@ -144,7 +149,7 @@ def test_intent_facades_supply_current_global_policy(tmp_path, monkeypatch, entr
         monkeypatch.setattr(agent, "_wheel_coverage", lambda *_a, **_k: capacity)
         monkeypatch.setattr(agent, "_wheel_cash_capacity", lambda *_a, **_k: capacity)
         payload = dict(config_key="us", account="lx", action="create", direction=direction,
-            wheel_branch_id=branch["wheel_branch_id"], expected_branch_generation_hash=branch["branch_generation_hash"],
+            wheel_branch_id=branch["wheel_branch_id"], expected_batch_generation_hash=branch["batch_generation_hash"],
             run_id="old-run", final_candidate_id="candidate", expected_snapshot_hash="snapshot",
             expires_at_ms=10_000, request_id="intent-request", actor="tester", apply=False)
         tool = agent.WHEEL_INTENT_TOOL
@@ -153,7 +158,7 @@ def test_intent_facades_supply_current_global_policy(tmp_path, monkeypatch, entr
             payload.pop("direction")
             payload.pop("wheel_branch_id")
             payload["stock_lot_id"] = branch["stock_lot_id"]
-            payload["expected_batch_generation_hash"] = payload.pop("expected_branch_generation_hash")
+            payload["expected_batch_generation_hash"] = payload.pop("expected_batch_generation_hash")
         with pytest.raises(AgentToolError, match="candidate strategy policy changed"):
             tool.call(payload)
         config.clear()
@@ -182,7 +187,7 @@ def test_scoped_published_candidate_preserves_current_policy_checks(tmp_path, mo
             lambda **_: {"account": "lx", "allocation_status": "allocated", "granted_contracts": 1,
                          "capacity_identity_hash": "c" * 64, "cash_reservation_amount": 10_000,
                          "cash_reservation_currency": "USD"})
-    batch = {**branch, "projection_hash": branch["branch_generation_hash"],
+    batch = {**branch, "projection_hash": branch["batch_generation_hash"],
              "raw_candidates": [candidate], "final_candidate": candidate, "granted_contracts": 1}
     snapshot = seal_wheel_candidate_snapshot(
         base=tmp_path, run_id="scoped", account="lx", market="us",
@@ -201,7 +206,7 @@ def test_scoped_published_candidate_preserves_current_policy_checks(tmp_path, mo
         monkeypatch.setattr(cli, "_cash_capacity", lambda *_a, **_k: capacity)
         args = cli.parse_args(["intent", "create", "--config-key", "us", "--account", "lx",
             "--wheel-branch-id", branch["wheel_branch_id"], "--direction", direction,
-            "--expected-branch-generation-hash", branch["branch_generation_hash"],
+            "--expected-batch-generation-hash", branch["batch_generation_hash"],
             "--run-id", "scoped", "--final-candidate-id", "candidate", "--expected-snapshot-hash", snapshot["snapshot_hash"],
             "--expires-at-ms", "10000", "--request-id", "intent-request", "--actor", "tester"])
         invoke = lambda: cli.execute(args)
@@ -213,7 +218,7 @@ def test_scoped_published_candidate_preserves_current_policy_checks(tmp_path, mo
         monkeypatch.setattr(agent, "_wheel_coverage", lambda *_a, **_k: capacity)
         monkeypatch.setattr(agent, "_wheel_cash_capacity", lambda *_a, **_k: capacity)
         payload = dict(config_key="us", account="lx", action="create", direction=direction,
-            wheel_branch_id=branch["wheel_branch_id"], expected_branch_generation_hash=branch["branch_generation_hash"],
+            wheel_branch_id=branch["wheel_branch_id"], expected_batch_generation_hash=branch["batch_generation_hash"],
             run_id="scoped", final_candidate_id="candidate", expected_snapshot_hash=snapshot["snapshot_hash"],
             expires_at_ms=10_000, request_id="intent-request", actor="tester", apply=False)
         tool = agent.WHEEL_INTENT_TOOL
@@ -222,7 +227,7 @@ def test_scoped_published_candidate_preserves_current_policy_checks(tmp_path, mo
             payload.pop("direction")
             payload.pop("wheel_branch_id")
             payload["stock_lot_id"] = branch["stock_lot_id"]
-            payload["expected_batch_generation_hash"] = payload.pop("expected_branch_generation_hash")
+            payload["expected_batch_generation_hash"] = payload.pop("expected_batch_generation_hash")
         invoke = lambda: tool.call(payload)[0]
         error = AgentToolError
     # Real published config and sealed snapshot loaders feed the real intent gate.

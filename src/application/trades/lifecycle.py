@@ -22,7 +22,11 @@ from domain.domain.option_lifecycle import (
     FINAL_STATUSES,
     PENDING_STATUSES,
 )
-from domain.domain.trade_contract_identity import canonical_contract_symbol, normalize_contract_expiration
+from domain.domain.trade_contract_identity import (
+    canonical_contract_symbol,
+    derive_position_side,
+    normalize_contract_expiration,
+)
 from src.application.ledger.api import (
     accept_option_close_evidence,
     BrokerTradeOperation,
@@ -1428,8 +1432,16 @@ def _find_conflicting_expire_close_event(repo: Any, case: dict[str, Any]) -> dic
             continue
         if str(event.get("option_type") or "").strip().lower() != str(case.get("option_type") or "").strip().lower():
             continue
-        contract_key = event.get("contract_key") if isinstance(event.get("contract_key"), dict) else {}
-        event_position_side = str(contract_key.get("position_side") or event.get("position_side") or "").strip().lower()
+        # §9.2 step 3: the contract key no longer carries the position side, so
+        # derive it from the position effect and trade side the row declares.
+        event_position_side = (
+            str(event.get("position_side") or "").strip().lower()
+            or derive_position_side(
+                str(event.get("position_effect") or "").strip().lower(),
+                event.get("side"),
+            )
+            or ""
+        )
         if event_position_side != str(case.get("position_side") or "").strip().lower():
             continue
         if normalize_contract_expiration(event.get("expiration_ymd")) != normalize_contract_expiration(case.get("expiration_ymd")):

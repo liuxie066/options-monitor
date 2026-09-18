@@ -342,7 +342,9 @@ class BrokerTradeOperation:
 @dataclass(frozen=True)
 class ExpiredCloseDecision:
     record_id: str
-    position_id: str
+    # §7.1: ``position_id`` is retired; this carries the ``position_key``
+    # (contract identity + derived side) of the target lot.
+    position_key: str
     should_close: bool
     reason: str
     expiration_ms: int | None = None
@@ -399,7 +401,7 @@ class ExpiredCloseDecision:
             _compact_payload(
                 {
                     "record_id": self.record_id,
-                    "position_id": self.position_id,
+                    "position_key": self.position_key,
                     "expiration_ms": self.expiration_ms,
                     "raw_expiration_ms": self.raw_expiration_ms,
                     "expiration_ymd": self.expiration_ymd,
@@ -510,7 +512,6 @@ class OpenLedgerResult:
     result: LedgerWriteResult
     fields: dict[str, Any]
     ledger_preflight: LedgerPreflightResult
-    command: Any | None = None
     duplicate_checked_before_write: bool = False
 
     def __post_init__(self) -> None:
@@ -522,8 +523,6 @@ class OpenLedgerResult:
             "fields": dict(self.fields),
             "ledger_preflight": self.ledger_preflight.to_dict(),
         }
-        if self.command is not None:
-            payload["command"] = self.command
         if self.duplicate_checked_before_write:
             payload["duplicate_checked_before_write"] = True
         return payload
@@ -600,14 +599,13 @@ class TradeEventInterventionLedgerResult:
 @dataclass(frozen=True)
 class ManualOpenPreviewResult:
     fields: dict[str, Any]
-    command: Any
     ledger_preflight: LedgerPreflightResult | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "fields", dict(self.fields))
 
     def to_payload(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {"fields": dict(self.fields), "command": self.command}
+        payload: dict[str, Any] = {"fields": dict(self.fields)}
         if self.ledger_preflight is not None:
             payload["ledger_preflight"] = self.ledger_preflight.to_dict()
         return payload

@@ -42,7 +42,8 @@ CURRENT_DECISION_POSITION_FIELDS = frozenset(
         "multiplier",
         "opened_at",
         "option_type",
-        "position_id",
+        # §7.1: ``position_id`` is retired in favour of ``position_key``.
+        "position_key",
         "premium",
         "side",
         "source_event_id",

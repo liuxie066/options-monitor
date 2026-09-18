@@ -901,7 +901,6 @@ def _synthetic_event(
         account=f"bench{account_index:02d}",
         underlying_symbol="NVDA",
         option_type="call" if phase_3a_call else "put",
-        position_side="long" if phase_3a_call else "short",
         strike=(20.0 if phase_3a_call else 10.0) + (lot_index * 0.01),
         expiration_ymd="2028-12-15",
     )
@@ -1531,7 +1530,6 @@ def _phase_3a_tail_events(*, count: int, payload_bytes: int = 256) -> list[dict[
         account="bench00",
         underlying_symbol="NVDA",
         option_type="put",
-        position_side="short",
         strike=10,
         expiration_ymd="2028-12-15",
     )
@@ -1726,7 +1724,6 @@ def _phase_3a_operation(repo: Any, *, key: str, spec: Mapping[str, Any]) -> Any:
             account="bench00",
             underlying_symbol="NVDA",
             option_type="put",
-            position_side="short",
             strike=10,
             expiration_ymd="2028-12-15",
         )
@@ -1735,7 +1732,6 @@ def _phase_3a_operation(repo: Any, *, key: str, spec: Mapping[str, Any]) -> Any:
             account="bench00",
             underlying_symbol="NVDA",
             option_type="call",
-            position_side="long",
             strike=25,
             expiration_ymd="2028-12-15",
         )
@@ -1751,6 +1747,7 @@ def _phase_3a_operation(repo: Any, *, key: str, spec: Mapping[str, Any]) -> Any:
             multiplier=100,
             lot_id="lot-phase3a-special-call",
             raw_payload={
+                "side": "buy",
                 "strategy": "combo_yield",
                 "leg_role": "participation_call",
                 "strategy_group_id": "bench-special-combo",
@@ -3857,7 +3854,7 @@ def _canonical_output(
     canonical_lots = sorted(
         [
             {
-                "record_id": str(item.get("record_id") or ""),
+                "record_id": str(item.get("lot_id") or item.get("record_id") or ""),
                 "fields": dict(item.get("fields") or {}),
             }
             for item in lots

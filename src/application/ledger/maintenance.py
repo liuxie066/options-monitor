@@ -28,7 +28,7 @@ from domain.domain.ledger.position_fields import (
 )
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.symbol_identity import symbol_market
-from domain.domain.trade_contract_identity import canonical_contract_symbol
+from domain.domain.trade_contract_identity import canonical_contract_symbol, derive_trade_side
 from src.application.ledger.errors import LedgerPreflightError
 from src.application.ledger.lifecycle import persist_lifecycle_expire_close_events_atomically
 from src.application.ledger.lot_resolver import (
@@ -122,7 +122,6 @@ def persist_expire_auto_close_event(
             account=normalize_account(fields.get("account")),
             underlying_symbol=_canonical_trade_symbol(fields.get("symbol")),
             option_type=str(fields.get("option_type") or ""),
-            position_side=str(fields.get("side") or "").strip().lower(),
             strike=(float(strike) if strike is not None else None),
             expiration_ymd=effective_expiration_ymd(fields),
         ),
@@ -146,6 +145,7 @@ def persist_expire_auto_close_event(
             "auto_close_exp_src": str(exp_source or ""),
             "auto_close_grace_days": int(grace_days) if grace_days is not None else None,
             "close_target_resolution": close_target_resolution,
+            "side": derive_trade_side("expire_close", fields.get("side")),
         },
     )
     return persist_trade_event_object(repo, event)
@@ -331,12 +331,14 @@ def build_expired_close_decisions(
     for item in positions:
         fields = dict(item)
         record_id = str(fields.get("record_id") or "").strip()
-        position_id = str(fields.get("position_id") or "").strip() or "(no position_id)"
+        # §7.1: ``position_id`` is retired; the display/aggregation key is
+        # ``position_key`` (contract identity + derived side).
+        position_key = str(fields.get("position_key") or "").strip() or "(no position_key)"
         if not record_id:
             decisions.append(
                 ExpiredCloseDecision(
                     record_id="",
-                    position_id=position_id,
+                    position_key=position_key,
                     expiration_ms=None,
                     effective_exp_source="none",
                     should_close=False,
@@ -350,7 +352,7 @@ def build_expired_close_decisions(
             decisions.append(
                 ExpiredCloseDecision(
                     record_id=record_id,
-                    position_id=position_id,
+                    position_key=position_key,
                     expiration_ms=None,
                     effective_exp_source="none",
                     should_close=False,
@@ -370,7 +372,7 @@ def build_expired_close_decisions(
             decisions.append(
                 ExpiredCloseDecision(
                     record_id=record_id,
-                    position_id=position_id,
+                    position_key=position_key,
                     expiration_ms=None,
                     effective_exp_source="none",
                     should_close=False,
@@ -391,7 +393,7 @@ def build_expired_close_decisions(
             decisions.append(
                 ExpiredCloseDecision(
                     record_id=record_id,
-                    position_id=position_id,
+                    position_key=position_key,
                     expiration_ms=int(exp_ms) if exp_ms is not None else None,
                     raw_expiration_ms=raw_exp_ms,
                     expiration_ymd=exp_ymd,
@@ -408,7 +410,7 @@ def build_expired_close_decisions(
             decisions.append(
                 ExpiredCloseDecision(
                     record_id=record_id,
-                    position_id=position_id,
+                    position_key=position_key,
                     expiration_ms=None,
                     effective_exp_source="none",
                     should_close=False,
@@ -431,7 +433,7 @@ def build_expired_close_decisions(
             decisions.append(
                 ExpiredCloseDecision(
                     record_id=record_id,
-                    position_id=position_id,
+                    position_key=position_key,
                     expiration_ms=int(exp_ms),
                     raw_expiration_ms=raw_exp_ms,
                     expiration_ymd=exp_ymd,
@@ -451,7 +453,7 @@ def build_expired_close_decisions(
             decisions.append(
                 ExpiredCloseDecision(
                     record_id=record_id,
-                    position_id=position_id,
+                    position_key=position_key,
                     expiration_ms=int(exp_ms),
                     raw_expiration_ms=raw_exp_ms,
                     expiration_ymd=exp_ymd,
@@ -480,7 +482,7 @@ def build_expired_close_decisions(
             decisions.append(
                 ExpiredCloseDecision(
                     record_id=record_id,
-                    position_id=position_id,
+                    position_key=position_key,
                     expiration_ms=int(exp_ms),
                     raw_expiration_ms=raw_exp_ms,
                     expiration_ymd=exp_ymd,
@@ -514,7 +516,7 @@ def build_expired_close_decisions(
         decisions.append(
             ExpiredCloseDecision(
                 record_id=record_id,
-                position_id=position_id,
+                position_key=position_key,
                 expiration_ms=int(exp_ms),
                 raw_expiration_ms=raw_exp_ms,
                 expiration_ymd=exp_ymd,
@@ -588,9 +590,9 @@ def _fresh_auto_close_positions(repo: Any, positions: list[dict[str, Any]]) -> l
                 stale["_auto_close_skip_reason"] = "not_current_position_lot"
                 out.append(stale)
                 continue
-            if current_lot.get("position_id") in (None, "") and original.get("position_id") not in (None, ""):
+            if current_lot.get("position_key") in (None, "") and original.get("position_key") not in (None, ""):
                 current_lot = dict(current_lot)
-                current_lot["position_id"] = original.get("position_id")
+                current_lot["position_key"] = original.get("position_key")
             out.append(
                 _fresh_auto_close_position(
                     record_id=record_id,
@@ -612,8 +614,8 @@ def _fresh_auto_close_positions(repo: Any, positions: list[dict[str, Any]]) -> l
             continue
         current = dict(raw_current)
         current["record_id"] = record_id
-        if current.get("position_id") in (None, "") and original.get("position_id") not in (None, ""):
-            current["position_id"] = original.get("position_id")
+        if current.get("position_key") in (None, "") and original.get("position_key") not in (None, ""):
+            current["position_key"] = original.get("position_key")
         out.append(
             _fresh_auto_close_position(
                 record_id=record_id,
@@ -1112,15 +1114,15 @@ def auto_close_expired_positions(
                 )
             updated_fields = repo.get_record_fields(record_id)
             if effective_contracts_open(updated_fields) > 0 or normalize_status(updated_fields.get("status")) != "close":
-                errors.append(f"{record_id} {decision.position_id}: auto-close event did not close target lot")
+                errors.append(f"{record_id} {decision.position_key}: auto-close event did not close target lot")
                 continue
             if normalize_close_type(updated_fields.get("close_type")) != EXPIRE_AUTO_CLOSE:
-                errors.append(f"{record_id} {decision.position_id}: auto-close projected wrong close_type")
+                errors.append(f"{record_id} {decision.position_key}: auto-close projected wrong close_type")
                 continue
             applied.append(ExpiredCloseApplyResult(decision=decision, result=result))
         except Exception as exc:
             if decision.ledger_preflight is None:
                 decision = decision.with_ledger_preflight(_ledger_preflight_error_payload(exc))
                 decisions[index] = decision
-            errors.append(f"{decision.record_id} {decision.position_id}: {exc}")
+            errors.append(f"{decision.record_id} {decision.position_key}: {exc}")
     return ExpiredCloseRunResult(decisions=decisions, applied=applied, errors=errors)
