@@ -42,10 +42,10 @@ class PositionProjectionTailRepositoryMixin:
         ] = {}
         for record in records:
             values = _position_lot_storage_values(record)
-            lot_id = values[0]
-            if lot_id in desired:
-                raise ValueError(f"duplicate position lot record_id: {lot_id}")
-            desired[lot_id] = values
+            record_id = values[0]
+            if record_id in desired:
+                raise ValueError(f"duplicate position lot record_id: {record_id}")
+            desired[record_id] = values
 
         added = 0
         changed = 0
@@ -66,9 +66,9 @@ class PositionProjectionTailRepositoryMixin:
                 ).fetchall()
                 prior_lot_count = len(current_rows)
             else:
-                lot_ids = tuple(desired)
-                if lot_ids:
-                    placeholders = ",".join("?" for _item in lot_ids)
+                record_ids = tuple(desired)
+                if record_ids:
+                    placeholders = ",".join("?" for _item in record_ids)
                     current_rows = active_conn.execute(
                         f"""
                         SELECT record_id, account, fields_json, source_event_id,
@@ -77,7 +77,7 @@ class PositionProjectionTailRepositoryMixin:
                         WHERE record_id IN ({placeholders})
                         ORDER BY record_id ASC
                         """,
-                        lot_ids,
+                        record_ids,
                     ).fetchall()
                 else:
                     current_rows = []
@@ -92,26 +92,33 @@ class PositionProjectionTailRepositoryMixin:
                 prior_lot_count = sum(int(row["lot_count"] or 0) for row in head_rows)
             current_by_id = {str(row["record_id"]): row for row in current_rows}
 
-            for lot_id, row in current_by_id.items():
+            for record_id, row in current_by_id.items():
                 old_account = str(row["account"] or "").strip()
                 if not old_account:
                     raw_fields = json.loads(str(row["fields_json"]) or "{}")
                     old_account = str(raw_fields.get("account") if isinstance(raw_fields, dict) else "").strip()
                 if old_account:
                     all_accounts.add(old_account)
-                if lot_id in desired or not remove_missing:
+                if record_id in desired or not remove_missing:
                     continue
                 active_conn.execute(
                     "DELETE FROM position_lots WHERE record_id = ?",
-                    (lot_id,),
+                    (record_id,),
                 )
                 removed += 1
                 if old_account:
                     touched_accounts.add(old_account)
 
-            for lot_id, values in desired.items():
+            # The loop key is the storage key this diff looks rows up and binds
+            # ``WHERE record_id = ?`` with, so it is ``desired``'s key (values[0])
+            # and not the trailing carrier slot (values[7]). Those slots happen to
+            # hold one value today because ``_position_lot_storage_values``
+            # dual-writes both from one source; that is a write convention, not a
+            # guarantee, and unpacking the carrier into the loop key silently
+            # retargets the lookup and the WHERE bind onto another row.
+            for record_id, values in desired.items():
                 (
-                    _lot_id,
+                    _record_id,
                     account,
                     fields_json,
                     source_event_id,
@@ -120,7 +127,7 @@ class PositionProjectionTailRepositoryMixin:
                     multiplier,
                     lot_id,
                 ) = values
-                current = current_by_id.get(lot_id)
+                current = current_by_id.get(record_id)
                 if current is None:
                     active_conn.execute(
                         """
@@ -177,7 +184,7 @@ class PositionProjectionTailRepositoryMixin:
                         multiplier,
                         lot_id,
                         ts,
-                        lot_id,
+                        record_id,
                     ),
                 )
                 changed += 1

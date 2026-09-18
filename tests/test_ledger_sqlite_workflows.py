@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import sqlite3
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -3940,3 +3941,76 @@ def test_trade_event_repair_recovers_assignment_type_from_lifecycle_payload() ->
 
     assert repaired.event_type == "assignment"
     assert repaired.target_lot_id == "lot-pdd"
+
+
+def _identity_probe_lot(lot_id: str, *, contracts: int) -> PositionLotRecord:
+    return PositionLotRecord(
+        lot_id=lot_id,
+        fields={
+            "account": "lx",
+            "broker": "富途",
+            "symbol": "0700.HK",
+            "option_type": "put",
+            "side": "short",
+            "contracts": contracts,
+            "contracts_open": contracts,
+            "expiration": 1782691200000,
+            "strike": 470.0,
+        },
+    )
+
+
+def _diverge_carrier_slot(monkeypatch: pytest.MonkeyPatch, carrier: str) -> None:
+    """Make the trailing storage slot disagree with the slot the diff iterates on.
+
+    ``_position_lot_storage_values`` writes both slots from ``record.lot_id``, so
+    no public record shape can make them differ. Its comment presents that as a
+    dual-write convention rather than a guarantee of the storage contract, so the
+    diff has to bind the key it iterates on even when the two slots disagree.
+    """
+
+    import src.application.ledger.repository_projection_tail as projection_tail
+
+    original = projection_tail._position_lot_storage_values
+
+    def divergent(record: PositionLotRecord) -> tuple[object, ...]:
+        values = original(record)
+        return (*values[:7], carrier)
+
+    monkeypatch.setattr(projection_tail, "_position_lot_storage_values", divergent)
+
+
+def test_apply_position_lot_diff_updates_the_row_its_loop_key_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "option_positions.sqlite3"
+    repo = ledger_repository.SQLiteOptionPositionsRepository(database)
+    repo.replace_position_lots(
+        [_identity_probe_lot("lot-a", contracts=1), _identity_probe_lot("lot-b", contracts=3)]
+    )
+    _diverge_carrier_slot(monkeypatch, "lot-b")
+
+    diff = repo.apply_position_lot_diff([_identity_probe_lot("lot-a", contracts=2)])
+
+    assert (diff.added, diff.changed, diff.removed) == (0, 1, 1)
+    with sqlite3.connect(database) as conn:
+        rows = conn.execute("SELECT record_id, fields_json FROM position_lots ORDER BY record_id ASC").fetchall()
+    assert [row[0] for row in rows] == ["lot-a"]
+    assert json.loads(rows[0][1])["contracts"] == 2
+
+
+def test_apply_position_lot_diff_looks_up_the_row_its_loop_key_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "option_positions.sqlite3"
+    repo = ledger_repository.SQLiteOptionPositionsRepository(database)
+    repo.replace_position_lots([_identity_probe_lot("lot-a", contracts=1)])
+    _diverge_carrier_slot(monkeypatch, "carrier-unrelated")
+
+    diff = repo.apply_position_lot_diff([_identity_probe_lot("lot-a", contracts=2)], remove_missing=False)
+
+    assert (diff.added, diff.changed) == (0, 1)
+    assert repo.count_position_lots() == 1
+    with sqlite3.connect(database) as conn:
+        fields_json = conn.execute("SELECT fields_json FROM position_lots").fetchone()[0]
+    assert json.loads(fields_json)["contracts"] == 2
