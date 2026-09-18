@@ -84,12 +84,12 @@ def build_option_group_inventory(rows: list[dict[str, Any]]) -> list[dict[str, A
         put_expirations: set[str] = set()
         call_expirations: set[str] = set()
         labels: set[str] = set()
-        record_ids: list[str] = []
+        lot_ids: list[str] = []
 
         for row in lots:
-            record_id = _text(row.get("record_id"))
-            if record_id:
-                record_ids.append(record_id)
+            lot_id = _text(row.get("record_id"))
+            if lot_id:
+                lot_ids.append(lot_id)
             option_type = _text(row.get("option_type")).lower()
             side = _text(row.get("side")).lower()
             leg_role = _text(row.get("leg_role")).lower()
@@ -193,7 +193,7 @@ def build_option_group_inventory(rows: list[dict[str, Any]]) -> list[dict[str, A
                 "inventory_issues": unique_issues,
                 "summary_classification": classification,
                 "evidence_scope": "option_lots",
-                "record_ids": sorted(set(record_ids)),
+                "record_ids": sorted(set(lot_ids)),
             }
         )
     return inventory
@@ -256,7 +256,7 @@ def build_full_group_lifecycle(
                 issues.append("missing_assignment_settlement")
 
         shares_opened = shares_remaining = shares_sold = 0
-        stock_lot_ids: list[str] = []
+        lot_ids: list[str] = []
         stock_accounts: set[str] = set()
         stock_symbols: set[str] = set()
         for lot in stock_lots:
@@ -271,7 +271,7 @@ def build_full_group_lifecycle(
             shares_sold += sold
             lot_id = _text(lot.get("stock_lot_id"))
             if lot_id:
-                stock_lot_ids.append(lot_id)
+                lot_ids.append(lot_id)
             account = _text(lot.get("account")).lower()
             symbol = canonical_symbol(lot.get("symbol")) or _text(lot.get("symbol")).upper()
             if account:
@@ -335,7 +335,7 @@ def build_full_group_lifecycle(
                 "evidence_scope": "trade_events_and_assigned_stock_lots",
                 "option_record_ids": list(option.get("record_ids") or []),
                 "assignment_event_ids": sorted(set(assignment_event_ids)),
-                "assigned_stock_lot_ids": sorted(set(stock_lot_ids)),
+                "assigned_stock_lot_ids": sorted(set(lot_ids)),
             }
         )
     return output

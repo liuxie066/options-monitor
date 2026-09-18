@@ -273,7 +273,7 @@ def test_assignment_and_assigned_stock_sale_store_their_own_cny_cash(
         event_time_ms=_ms("2026-07-24T09:00:00"), lot_id=None,
     ))
     request = dict(
-        record_id=lot["record_id"], contracts_to_close=1,
+        lot_id=lot["record_id"], contracts_to_close=1,
         stock_side="buy", stock_qty=100, stock_price=100.0,
         request_id="historical-assignment",
     )
@@ -290,10 +290,10 @@ def test_assignment_and_assigned_stock_sale_store_their_own_cny_cash(
     assert replay["result"]["created"] is False
     assert repo.list_trade_events() == events
     assert repo.list_trade_lifecycle_notifications() == notifications
-    stock_lot_id = f"assigned-stock-{assignment['event_id']}"
+    lot_id = f"assigned-stock-{assignment['event_id']}"
     execute_manual_assigned_stock_sale(
         repo,
-        target_stock_lot_id=stock_lot_id,
+        target_lot_id=lot_id,
         shares=100,
         price=105.0,
         trade_time_ms=_ms("2026-07-23T10:00:00"),
@@ -319,7 +319,7 @@ def _sale_fx_fixture(tmp_path: Path, monkeypatch, *, initialized: bool = True):
             expiration_ymd="2026-08-21", premium_per_share=2.5,
             opened_at_ms=_ms("2026-07-23T08:00:00"),
         )
-        record_manual_assignment(repo, record_id=repo.list_position_lots()[0]["record_id"],
+        record_manual_assignment(repo, lot_id=repo.list_position_lots()[0]["record_id"],
             contracts_to_close=1, stock_side="buy", stock_qty=100, stock_price=100,
             as_of_ms=_ms("2026-07-23T09:00:00"))
     assignment = next(row for row in repo.list_trade_events() if row["event_type"] == "assignment")
@@ -340,7 +340,7 @@ def _write_sale_fx_cache(path: Path, rate: str) -> None:
 
 def _sale_request(repo, lot_id: str, *, broker: bool, dry_run: bool, identity: str = "sale-1", shares: int = 40):
     if not broker:
-        return execute_manual_assigned_stock_sale(repo, target_stock_lot_id=lot_id,
+        return execute_manual_assigned_stock_sale(repo, target_lot_id=lot_id,
             shares=shares, price=105, trade_time_ms=_ms("2026-07-23T11:00:00"),
             source_deal_id=identity, dry_run=dry_run)
     deal = normalize_trade_deal({

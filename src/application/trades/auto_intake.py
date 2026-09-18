@@ -759,8 +759,8 @@ class _ReplayRepo:
     def list_records(self, *, page_size: int = 500) -> list[dict[str, Any]]:
         return []
 
-    def get_record_fields(self, record_id: str) -> dict[str, Any]:
-        raise KeyError(record_id)
+    def get_record_fields(self, lot_id: str) -> dict[str, Any]:
+        raise KeyError(lot_id)
 
     def create_record(self, fields: dict[str, Any]) -> dict[str, Any]:
         return {"record": {"record_id": "dry_run_replay"}}

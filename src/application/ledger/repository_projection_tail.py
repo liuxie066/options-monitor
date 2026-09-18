@@ -109,6 +109,13 @@ class PositionProjectionTailRepositoryMixin:
                 if old_account:
                     touched_accounts.add(old_account)
 
+            # The loop key is the storage key this diff looks rows up and binds
+            # ``WHERE record_id = ?`` with, so it is ``desired``'s key (values[0])
+            # and not the trailing carrier slot (values[7]). Those slots happen to
+            # hold one value today because ``_position_lot_storage_values``
+            # dual-writes both from one source; that is a write convention, not a
+            # guarantee, and unpacking the carrier into the loop key silently
+            # retargets the lookup and the WHERE bind onto another row.
             for record_id, values in desired.items():
                 (
                     _record_id,
@@ -757,11 +764,11 @@ class PositionProjectionTailRepositoryMixin:
 
     def get_position_lots_by_ids(
         self,
-        record_ids: Sequence[str],
+        lot_ids: Sequence[str],
         *,
         conn: sqlite3.Connection | None = None,
     ) -> list[dict[str, Any]]:
-        normalized = tuple(dict.fromkeys(str(item or "").strip() for item in record_ids))
+        normalized = tuple(dict.fromkeys(str(item or "").strip() for item in lot_ids))
         if not normalized or any(not item for item in normalized):
             return []
         placeholders = ",".join("?" for _item in normalized)
@@ -790,7 +797,7 @@ class PositionProjectionTailRepositoryMixin:
 
     def get_position_lot_fields(
         self,
-        record_id: str,
+        lot_id: str,
         *,
         conn: sqlite3.Connection | None = None,
     ) -> dict[str, Any]:
@@ -801,14 +808,14 @@ class PositionProjectionTailRepositoryMixin:
                 FROM position_lots
                 WHERE record_id = ?
                 """,
-                (str(record_id),),
+                (str(lot_id),),
             ).fetchone()
         if row is None:
-            raise ValueError(f"position lot not found: {record_id}")
+            raise ValueError(f"position lot not found: {lot_id}")
         return position_lot_row_to_record(row)["fields"]
 
     def list_records(self, *, page_size: int = 500) -> list[dict[str, Any]]:
         return self.list_position_lots()
 
-    def get_record_fields(self, record_id: str) -> dict[str, Any]:
-        return self.get_position_lot_fields(record_id)
+    def get_record_fields(self, lot_id: str) -> dict[str, Any]:
+        return self.get_position_lot_fields(lot_id)

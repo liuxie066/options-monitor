@@ -23,15 +23,23 @@ def position_lot_row_to_record(row: Any) -> dict[str, Any]:
     # ``or ""`` rather than a bare ``str()``: a NULL record_id would otherwise
     # become the string "None", a fabricated identity that differs from the ""
     # the read-only evidence surface emits for the same row.
-    record_id = str(row["record_id"] or "")
+    stored_record_id = str(row["record_id"] or "")
     # Both identity keys are emitted so consumers can converge on lot_id without
     # a coupled rename. Two row shapes legitimately fall back to record_id: a
     # legacy row whose carrier is still NULL, and a narrower SELECT that predates
     # the carrier. The gated backfill fills the column in.
+    #
+    # The two keys stay separate facts: ``record_id`` is the stored column and
+    # ``lot_id`` is the carrier-or-fallback. Today the carrier is only ever
+    # backfilled from that column, which masks the difference; once the carrier
+    # is independently authoritative the same row has two distinct identities,
+    # and this key must not follow the carrier, because the read-only evidence
+    # surface (``read_only_evidence._read_position_lots``) and the persisted
+    # position fingerprint both read ``record_id`` from the column.
     raw_lot_id = row["lot_id"] if "lot_id" in row.keys() else None
-    lot_id = str(raw_lot_id).strip() if raw_lot_id not in (None, "") else record_id
+    lot_id = str(raw_lot_id).strip() if raw_lot_id not in (None, "") else stored_record_id
     return {
-        "record_id": record_id,
+        "record_id": stored_record_id,
         "lot_id": lot_id,
         "fields": fields,
     }

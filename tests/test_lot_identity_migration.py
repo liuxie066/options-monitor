@@ -104,22 +104,22 @@ def _legacy_store(tmp_path: Path, *, name: str = "ledger.sqlite3") -> Path:
         if (item.get("fields") or {}).get("option_type") == "put"
     )
     record_manual_assignment(
-        repo, record_id=put_lot["record_id"], contracts_to_close=1,
+        repo, lot_id=put_lot["record_id"], contracts_to_close=1,
         stock_side="buy", stock_qty=100, stock_price=100.0, as_of_ms=3000,
     )
 
     with sqlite3.connect(path) as conn:
         conn.execute("UPDATE position_lots SET lot_id = NULL")
-        for record_id, raw in conn.execute(
+        for lot_id, raw in conn.execute(
             "SELECT record_id, fields_json FROM position_lots"
         ).fetchall():
             fields = json.loads(raw)
-            fields["position_id"] = f"LEGACY-{record_id}"
+            fields["position_id"] = f"LEGACY-{lot_id}"
             conn.execute(
                 "UPDATE position_lots SET fields_json = ? WHERE record_id = ?",
                 (
                     json.dumps(fields, ensure_ascii=False, sort_keys=True, allow_nan=False),
-                    record_id,
+                    lot_id,
                 ),
             )
         conn.commit()
@@ -284,7 +284,7 @@ def test_a_note_only_scalar_survives_in_its_column(tmp_path: Path) -> None:
     """
 
     path = _legacy_store(tmp_path)
-    record_id = next(
+    lot_id = next(
         key
         for key, value in _stored_rows(path).items()
         if (value["fields"] or {}).get("option_type") == "put"
@@ -293,7 +293,7 @@ def test_a_note_only_scalar_survives_in_its_column(tmp_path: Path) -> None:
         conn.row_factory = sqlite3.Row
         raw = conn.execute(
             "SELECT fields_json, multiplier FROM position_lots WHERE record_id = ?",
-            (record_id,),
+            (lot_id,),
         ).fetchone()
         assert raw["multiplier"] == 100.0
         fields = json.loads(raw["fields_json"])
@@ -302,7 +302,7 @@ def test_a_note_only_scalar_survives_in_its_column(tmp_path: Path) -> None:
         fields["note"] = f"{fields['note']};multiplier=100"
         conn.execute(
             "UPDATE position_lots SET fields_json = ? WHERE record_id = ?",
-            (json.dumps(fields, ensure_ascii=False, sort_keys=True), record_id),
+            (json.dumps(fields, ensure_ascii=False, sort_keys=True), lot_id),
         )
         conn.commit()
 
@@ -322,7 +322,7 @@ def test_a_note_only_scalar_survives_in_its_column(tmp_path: Path) -> None:
     with sqlite3.connect(path) as conn:
         conn.execute(
             "UPDATE position_lots SET multiplier = NULL WHERE record_id = ?",
-            (record_id,),
+            (lot_id,),
         )
         conn.commit()
 
@@ -700,7 +700,7 @@ def test_end_to_end_inventory_verify_apply_verify(tmp_path: Path) -> None:
 
     rows = _stored_rows(path)
     assert len(rows) == 4
-    assert all(row["lot_id"] == record_id for record_id, row in rows.items())
+    assert all(row["lot_id"] == lot_id for lot_id, row in rows.items())
     assert all("position_id" not in row["fields"] for row in rows.values())
 
     after = module.verify_lot_identity_migration(path)

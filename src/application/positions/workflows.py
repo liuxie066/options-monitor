@@ -65,12 +65,12 @@ def _ms_to_iso(value: int | None) -> str:
 def _apply_result_payload(
     repo: Any,
     *,
-    record_id: str,
+    lot_id: str,
     result: dict[str, Any],
     payload: dict[str, Any],
     native_event: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    del record_id, native_event
+    del lot_id, native_event
     idempotent_duplicate = result.get("created") is False
     account = payload.get("account")
     if not account:
@@ -93,10 +93,10 @@ def _apply_result_payload(
     return response
 
 
-def _manual_open_record_id(result: dict[str, Any]) -> str:
-    record_id = str(result.get("record_id") or "").strip()
-    if record_id:
-        return record_id
+def _manual_open_lot_id(result: dict[str, Any]) -> str:
+    lot_id = str(result.get("record_id") or "").strip()
+    if lot_id:
+        return lot_id
     event_id = str(result.get("event_id") or "").strip()
     if not event_id:
         return ""
@@ -150,9 +150,9 @@ def _assigned_stock_sale_event_id(payload: dict[str, Any]) -> str:
     return f"assigned-stock-sale-manual-{digest}"
 
 
-def _find_assigned_stock_lot(report: dict[str, Any], stock_lot_id: str) -> dict[str, Any] | None:
+def _find_assigned_stock_lot(report: dict[str, Any], lot_id: str) -> dict[str, Any] | None:
     for row in report.get("assigned_stock_lots") or []:
-        if isinstance(row, dict) and str(row.get("stock_lot_id") or "") == stock_lot_id:
+        if isinstance(row, dict) and str(row.get("stock_lot_id") or "") == lot_id:
             return dict(row)
     return None
 
@@ -160,7 +160,7 @@ def _find_assigned_stock_lot(report: dict[str, Any], stock_lot_id: str) -> dict[
 def _build_assigned_stock_sale_event(
     lot: dict[str, Any],
     *,
-    target_stock_lot_id: str,
+    target_lot_id: str,
     shares: int,
     price: float,
     fees: float,
@@ -178,7 +178,7 @@ def _build_assigned_stock_sale_event(
 ) -> dict[str, Any]:
     payload = {
         "event_type": "sale",
-        "target_stock_lot_id": target_stock_lot_id,
+        "target_stock_lot_id": target_lot_id,
         "account": normalize_account(account) or lot.get("account"),
         "broker": normalize_broker(broker) or lot.get("broker"),
         "symbol": norm_symbol(symbol or lot.get("symbol") or ""),
@@ -384,8 +384,8 @@ def _broker_assigned_stock_sale_match(
                     assigned_stock_events=existing_events,
                     as_of_ms=trade_time_ms,
                 )
-        target_stock_lot_id = str(existing_by_source.get("target_stock_lot_id") or "").strip()
-        lot = _find_assigned_stock_lot(before_report, target_stock_lot_id)
+        target_lot_id = str(existing_by_source.get("target_stock_lot_id") or "").strip()
+        lot = _find_assigned_stock_lot(before_report, target_lot_id)
         if lot is None:
             raise BrokerAssignedStockSaleMatchError(
                 "source_conflict",
@@ -556,14 +556,21 @@ def _broker_assigned_stock_sale_match(
 
 @dataclass(frozen=True)
 class ManualCloseResolvedMatch:
-    record_id: str
+    lot_id: str
     rule: str
     selector: dict[str, Any]
     candidate: dict[str, Any]
     close_target_resolution: dict[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        # The emitted match payload keeps its stored key: `record_id` is read
+        # back by the CLI and by the assistant's manual-trade path, so only the
+        # declared field name converges -- the boundary spelling does not.
+        # Mirrors ``LedgerWriteResult.to_dict``.
+        return {
+            ("record_id" if key == "lot_id" else key): value
+            for key, value in asdict(self).items()
+        }
 
 
 class ManualCloseMatchError(ValueError):
@@ -581,7 +588,7 @@ class ManualCloseMatchError(ValueError):
         self.candidates = list(candidates or [])
 
 
-def resolve_manual_close_record_id(
+def resolve_manual_close_lot_id(
     repo: Any,
     *,
     broker: str = "富途",
@@ -650,7 +657,7 @@ def resolve_manual_close_record_id(
 
     match = resolution.single_match
     return ManualCloseResolvedMatch(
-        record_id=match.record_id,
+        lot_id=match.lot_id,
         rule=match.matched_by,
         selector=resolution.selector,
         candidate=match.candidate.to_dict() if match.candidate is not None else {},
@@ -754,10 +761,10 @@ def execute_manual_open(
     ).to_payload()
     result = payload["result"]
     fields = payload["fields"]
-    record_id = _manual_open_record_id(result)
+    lot_id = _manual_open_lot_id(result)
     return _apply_result_payload(
         repo,
-        record_id=record_id,
+        lot_id=lot_id,
         result=result,
         payload=payload,
         native_event={
@@ -776,7 +783,7 @@ def execute_manual_open(
             "currency": fields.get("currency"),
             "multiplier": fields.get("multiplier"),
             "contracts": int(contracts),
-            "snapshot_lot_id": record_id or None,
+            "snapshot_lot_id": lot_id or None,
         },
     )
 
@@ -784,7 +791,7 @@ def execute_manual_open(
 def execute_manual_close(
     repo: Any,
     *,
-    record_id: str | None = None,
+    lot_id: str | None = None,
     contracts_to_close: int,
     close_price: float | None,
     close_reason: str,
@@ -798,10 +805,10 @@ def execute_manual_close(
     expiration_ymd: str | None = None,
     as_of_ms: int | None = None,
 ) -> dict[str, Any]:
-    resolved_record_id = str(record_id or "").strip()
-    match_info: dict[str, Any] = {"rule": "explicit_record_id", "record_id": resolved_record_id}
-    if not resolved_record_id:
-        resolved_match = resolve_manual_close_record_id(
+    resolved_lot_id = str(lot_id or "").strip()
+    match_info: dict[str, Any] = {"rule": "explicit_record_id", "record_id": resolved_lot_id}
+    if not resolved_lot_id:
+        resolved_match = resolve_manual_close_lot_id(
             repo,
             broker=broker,
             account=account,
@@ -812,7 +819,7 @@ def execute_manual_close(
             expiration_ymd=expiration_ymd,
             contracts_to_close=int(contracts_to_close),
         )
-        resolved_record_id = resolved_match.record_id
+        resolved_lot_id = resolved_match.lot_id
         match_info = resolved_match.to_dict()
 
     if dry_run:
@@ -821,7 +828,7 @@ def execute_manual_close(
             "match": match_info,
             **preview_manual_position_close(
                 repo,
-                record_id=resolved_record_id,
+                lot_id=resolved_lot_id,
                 contracts_to_close=int(contracts_to_close),
                 close_price=close_price,
                 close_reason=close_reason,
@@ -830,7 +837,7 @@ def execute_manual_close(
         }
     close_payload = record_manual_position_close(
         repo,
-        record_id=resolved_record_id,
+        lot_id=resolved_lot_id,
         contracts_to_close=int(contracts_to_close),
         close_price=close_price,
         close_reason=close_reason,
@@ -844,7 +851,7 @@ def execute_manual_close(
     is_duplicate = result.get("created") is False
     return _apply_result_payload(
         repo,
-        record_id=resolved_record_id,
+        lot_id=resolved_lot_id,
         result=result,
         payload=payload,
         native_event=None if is_duplicate else {
@@ -863,7 +870,7 @@ def execute_manual_close(
             "currency": close_payload["fields"].get("currency"),
             "multiplier": close_payload["fields"].get("multiplier"),
             "contracts": int(contracts_to_close),
-            "snapshot_lot_id": resolved_record_id,
+            "snapshot_lot_id": resolved_lot_id,
         },
     )
 
@@ -871,7 +878,7 @@ def execute_manual_close(
 def execute_manual_assignment(
     repo: Any,
     *,
-    record_id: str | None = None,
+    lot_id: str | None = None,
     broker: str = "富途",
     account: str | None = None,
     symbol: str | None = None,
@@ -892,7 +899,7 @@ def execute_manual_assignment(
     if not request_id_value:
         raise ValueError("manual assignment requires a stable request_id")
     kwargs = {
-        "record_id": record_id,
+        "lot_id": lot_id,
         "broker": broker,
         "account": account,
         "symbol": symbol,
@@ -910,12 +917,12 @@ def execute_manual_assignment(
     preview = preview_manual_assignment(repo, **kwargs)
     wheel_start_enabled = False
     if isinstance(runtime_config, Mapping):
-        record_ids = list(
+        lot_ids = list(
             (preview.get("close_target_resolution") or {}).get("record_ids") or []
         )
         target_accounts = {
-            str(repo.get_position_lot_fields(str(record_id)).get("account") or "").strip()
-            for record_id in record_ids
+            str(repo.get_position_lot_fields(str(lot_id)).get("account") or "").strip()
+            for lot_id in lot_ids
         }
         target_accounts.discard("")
         if len(target_accounts) != 1:
@@ -937,7 +944,7 @@ def execute_manual_assignment(
     result = out.get("result") if isinstance(out.get("result"), dict) else {}
     return _apply_result_payload(
         repo,
-        record_id=record_id or "",
+        lot_id=lot_id or "",
         result=result,
         payload=out,
         native_event=None,
@@ -947,7 +954,7 @@ def execute_manual_assignment(
 def execute_manual_exercise(
     repo: Any,
     *,
-    record_id: str | None = None,
+    lot_id: str | None = None,
     broker: str = "富途",
     account: str | None = None,
     symbol: str | None = None,
@@ -967,7 +974,7 @@ def execute_manual_exercise(
     if not request_id_value:
         raise ValueError("manual exercise requires a stable request_id")
     kwargs = {
-        "record_id": record_id,
+        "lot_id": lot_id,
         "broker": broker,
         "account": account,
         "symbol": symbol,
@@ -988,7 +995,7 @@ def execute_manual_exercise(
     result = out.get("result") if isinstance(out.get("result"), dict) else {}
     return _apply_result_payload(
         repo,
-        record_id=record_id or "",
+        lot_id=lot_id or "",
         result=result,
         payload=out,
         native_event=None,
@@ -998,7 +1005,7 @@ def execute_manual_exercise(
 def _execute_assigned_stock_sale(
     repo: Any,
     *,
-    target_stock_lot_id: str,
+    target_lot_id: str,
     shares: int,
     price: float,
     fees: float | None = None,
@@ -1021,8 +1028,8 @@ def _execute_assigned_stock_sale(
     _project_after: bool = True,
     allocation_lots: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    stock_lot_id = str(target_stock_lot_id or "").strip()
-    if not stock_lot_id:
+    lot_id = str(target_lot_id or "").strip()
+    if not lot_id:
         raise ValueError("assigned stock sale requires target_stock_lot_id")
     if int(shares or 0) <= 0:
         raise ValueError("assigned stock sale requires shares > 0")
@@ -1039,9 +1046,9 @@ def _execute_assigned_stock_sale(
         *,
         project_after: bool = True,
     ) -> dict[str, Any]:
-        before_lot = _find_assigned_stock_lot(active_before_report, stock_lot_id)
+        before_lot = _find_assigned_stock_lot(active_before_report, lot_id)
         if before_lot is None:
-            raise ValueError(f"assigned stock lot not found: {stock_lot_id}")
+            raise ValueError(f"assigned stock lot not found: {lot_id}")
         effective_broker = normalize_broker(broker) or before_lot.get("broker")
         effective_currency = normalize_currency(currency) or before_lot.get("currency")
         effective_fees, effective_fee_provenance = _resolve_stock_sale_fee(
@@ -1054,7 +1061,7 @@ def _execute_assigned_stock_sale(
         )
         candidate = _build_assigned_stock_sale_event(
             before_lot,
-            target_stock_lot_id=stock_lot_id,
+            target_lot_id=lot_id,
             shares=int(shares),
             price=float(price),
             fees=effective_fees,
@@ -1145,7 +1152,7 @@ def _execute_assigned_stock_sale(
                     candidate_reviews[0].get("status") or "manual_review_required"
                 )
                 raise ValueError(f"assigned stock sale validation failed: {status}")
-            after_lot = _find_assigned_stock_lot(after_report, stock_lot_id)
+            after_lot = _find_assigned_stock_lot(after_report, lot_id)
         return {
             "mode": "dry_run",
             "write_model": "assigned_stock_events",
@@ -1182,7 +1189,7 @@ def _execute_assigned_stock_sale(
     result = dict(record_assigned_stock_event(
         repo,
         account=account,
-        target_stock_lot_id=stock_lot_id,
+        target_lot_id=lot_id,
         trade_time_ms=trade_time_ms,
         prepare_sale=lambda report, events: _prepare_sale(
             report,
@@ -1203,7 +1210,7 @@ def _execute_assigned_stock_sale(
         return applied
     return _apply_result_payload(
         repo,
-        record_id=stock_lot_id,
+        lot_id=lot_id,
         result=result,
         payload=applied,
         native_event=None,
@@ -1213,7 +1220,7 @@ def _execute_assigned_stock_sale(
 def execute_manual_assigned_stock_sale(
     repo: Any,
     *,
-    target_stock_lot_id: str,
+    target_lot_id: str,
     shares: int,
     price: float,
     trade_time_ms: int,
@@ -1226,7 +1233,7 @@ def execute_manual_assigned_stock_sale(
 ) -> dict[str, Any]:
     return _execute_assigned_stock_sale(
         repo,
-        target_stock_lot_id=target_stock_lot_id,
+        target_lot_id=target_lot_id,
         shares=shares,
         price=price,
         fees=None,
@@ -1277,7 +1284,7 @@ def _execute_broker_assigned_stock_sale_locked(
         lot = dict(match["lot"])
         return _execute_assigned_stock_sale(
             repo,
-            target_stock_lot_id=str(lot.get("stock_lot_id") or ""),
+            target_lot_id=str(lot.get("stock_lot_id") or ""),
             shares=int(match["shares"]),
             price=float(match["price"]),
             fees=(
@@ -1357,7 +1364,7 @@ def _execute_broker_assigned_stock_sale_locked(
         return applied
     return _apply_result_payload(
         repo,
-        record_id=str(result["sale_event"].get("target_stock_lot_id") or ""),
+        lot_id=str(result["sale_event"].get("target_stock_lot_id") or ""),
         result=result,
         payload=applied,
         native_event=None,
@@ -1367,7 +1374,7 @@ def _execute_broker_assigned_stock_sale_locked(
 def execute_manual_adjust(
     repo: Any,
     *,
-    record_id: str,
+    lot_id: str,
     contracts: int | None,
     strike: float | None,
     expiration_ymd: str | None,
@@ -1385,7 +1392,7 @@ def execute_manual_adjust(
             "mode": "dry_run",
             **preview_manual_position_adjust(
                 repo,
-                record_id=record_id,
+                lot_id=lot_id,
                 contracts=contracts,
                 strike=strike,
                 expiration_ymd=expiration_ymd,
@@ -1400,7 +1407,7 @@ def execute_manual_adjust(
         }
     adjust_payload = record_manual_position_adjust(
         repo,
-        record_id=record_id,
+        lot_id=lot_id,
         contracts=contracts,
         strike=strike,
         expiration_ymd=expiration_ymd,
@@ -1420,7 +1427,7 @@ def execute_manual_adjust(
         raw_target_contracts = fields.get("contracts_open") or fields.get("contracts") or 0
     return _apply_result_payload(
         repo,
-        record_id=record_id,
+        lot_id=lot_id,
         result=result,
         payload=adjust_payload,
         native_event={
@@ -1439,6 +1446,6 @@ def execute_manual_adjust(
             "currency": fields.get("currency"),
             "multiplier": patch.get("multiplier", fields.get("multiplier")),
             "target_contracts": int(raw_target_contracts or 0),
-            "snapshot_lot_id": record_id,
+            "snapshot_lot_id": lot_id,
         },
     )

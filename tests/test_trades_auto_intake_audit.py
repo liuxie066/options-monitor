@@ -178,7 +178,7 @@ def test_process_payload_appends_ledger_persist_audit_on_applied(monkeypatch, tm
         reason = "applied_open"
         deal_id = "deal-1"
         account = "lx"
-        operations = [BrokerTradeOperation(action="open", record_id="rec_1")]
+        operations = [BrokerTradeOperation(action="open", lot_id="rec_1")]
 
         def to_dict(self) -> dict:
             return {
@@ -806,7 +806,7 @@ def test_process_payload_moves_terminal_lifecycle_retry_to_processed(
         operations = [
             BrokerTradeOperation(
                 action="lifecycle_already_written",
-                record_id="lot-final",
+                lot_id="lot-final",
             )
         ]
         diagnostics = {
@@ -1133,7 +1133,7 @@ def test_process_payload_records_receipt_state_after_applied(tmp_path: Path) -> 
         reason = "applied_open"
         deal_id = "deal-receipt-1"
         account = "lx"
-        operations = [BrokerTradeOperation(action="open", record_id="lot_deal-receipt-1")]
+        operations = [BrokerTradeOperation(action="open", lot_id="lot_deal-receipt-1")]
 
         def to_dict(self) -> dict:
             return {

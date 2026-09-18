@@ -23,8 +23,8 @@ class FakeRepo:
     def list_trade_events(self) -> list[dict]:
         return []
 
-    def get_record_fields(self, record_id: str) -> dict:
-        raise KeyError(record_id)
+    def get_record_fields(self, lot_id: str) -> dict:
+        raise KeyError(lot_id)
 
     def create_record(self, fields: dict) -> dict:
         self.created.append(fields)
@@ -57,7 +57,7 @@ def _deal(**overrides: object) -> NormalizedTradeDeal:
 
 
 def _position_record(
-    record_id: str,
+    lot_id: str,
     *,
     symbol: str = "PDD",
     option_type: str = "put",
@@ -69,7 +69,7 @@ def _position_record(
     expiration = parse_exp_to_ms(expiration_ymd)
     assert expiration is not None
     return {
-        "record_id": record_id,
+        "record_id": lot_id,
         "fields": {
             "broker": "富途",
             "account": "lx",

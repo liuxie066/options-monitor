@@ -106,7 +106,7 @@ def validate_combo_identity(payload: dict[str, Any]) -> ComboIdentityValidation:
     for field in required:
         if canonical.get(field) in (None, "", {}):
             reasons.append(f"{field}_required")
-    record_ids = {
+    lot_ids = {
         canonical["funding_put_record_id"],
         canonical["participation_call_record_id"],
     }
@@ -114,7 +114,7 @@ def validate_combo_identity(payload: dict[str, Any]) -> ComboIdentityValidation:
         canonical["funding_put_open_event_id"],
         canonical["participation_call_open_event_id"],
     }
-    if len(record_ids) != 2:
+    if len(lot_ids) != 2:
         reasons.append("leg_record_ids_must_differ")
     if len(event_ids) != 2:
         reasons.append("leg_open_event_ids_must_differ")

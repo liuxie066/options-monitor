@@ -16,7 +16,7 @@ BASE_TIME_MS = 1_785_312_000_000
 
 
 def _lot(
-    record_id: str,
+    lot_id: str,
     *,
     option_type: str,
     strike: int,
@@ -29,8 +29,8 @@ def _lot(
     market_date: str = "2026-07-31",
 ) -> dict:
     return {
-        "record_id": record_id,
-        "open_event_id": f"open-{record_id}",
+        "record_id": lot_id,
+        "open_event_id": f"open-{lot_id}",
         "account": account,
         "broker": "futu",
         "runtime_environment": "test",

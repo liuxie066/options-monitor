@@ -68,7 +68,7 @@ from .writer_common import (
 from .writer_decision import (
     _begin_lifecycle_decision_projection,
     _defer_lifecycle_decision_projection,
-    _event_position_record_id,
+    _event_position_lot_id,
     _finish_lifecycle_decision_projection,
     _finish_trade_event_decision_projection,
     _lifecycle_resolution_after_allocations,
@@ -163,7 +163,7 @@ def persist_trade_event_object(repo: Any, event: Any) -> LedgerWriteResult:
         )
         result = {
             "event_id": storage_events[0].event_id,
-            "record_id": _event_position_record_id(storage_events[0]),
+            "record_id": _event_position_lot_id(storage_events[0]),
             "created": any(runtime.created_flags),
             "position_lot_count": int(runtime.position_lot_count),
             "decision_projection": _finish_trade_event_decision_projection(
@@ -281,7 +281,7 @@ def persist_trade_event_with_combo_identity(
         )
         _assert_combo_membership_exact(
             membership,
-            expected_record_ids={
+            expected_lot_ids={
                 str(identity["funding_put_record_id"]),
                 str(identity["participation_call_record_id"]),
             },
@@ -332,9 +332,9 @@ def adopt_existing_combo_identity_atomically(
     repo: Any,
     *,
     group_id: str,
-    funding_put_record_id: str,
+    funding_put_lot_id: str,
     funding_put_open_event_id: str,
-    participation_call_record_id: str,
+    participation_call_lot_id: str,
     participation_call_open_event_id: str,
     expected_contracts: int,
     apply_changes: bool = False,
@@ -396,7 +396,7 @@ def adopt_existing_combo_identity_atomically(
         funding_put = _existing_combo_adoption_leg(
             records_by_id=records_by_id,
             events_by_id=events_by_id,
-            record_id=funding_put_record_id,
+            lot_id=funding_put_lot_id,
             open_event_id=funding_put_open_event_id,
             group_id=group_value,
             expected_contracts=expected,
@@ -408,7 +408,7 @@ def adopt_existing_combo_identity_atomically(
         participation_call = _existing_combo_adoption_leg(
             records_by_id=records_by_id,
             events_by_id=events_by_id,
-            record_id=participation_call_record_id,
+            lot_id=participation_call_lot_id,
             open_event_id=participation_call_open_event_id,
             group_id=group_value,
             expected_contracts=expected,
@@ -453,7 +453,7 @@ def adopt_existing_combo_identity_atomically(
         )
         _assert_combo_membership_exact(
             membership,
-            expected_record_ids={
+            expected_lot_ids={
                 str(identity["funding_put_record_id"]),
                 str(identity["participation_call_record_id"]),
             },
@@ -1832,12 +1832,12 @@ def _events_for_storage(
     out: list[TradeEvent] = []
     resolution_payload = resolution.to_dict()
     for index, match in enumerate(resolution.matches):
-        event_id = event.event_id if index == 0 else f"{event.event_id}:target:{match.record_id}"
+        event_id = event.event_id if index == 0 else f"{event.event_id}:target:{match.lot_id}"
         match_payload = {
             **payload,
             "fee_order_group_id": event.event_id,
-            "record_id": match.record_id,
-            "target_lot_id": match.record_id,
+            "record_id": match.lot_id,
+            "target_lot_id": match.lot_id,
             "close_target_resolution": resolution_payload,
         }
         if execution_id:
@@ -1897,12 +1897,12 @@ def _canonical_close_events_for_storage(
     out: list[TradeEvent] = []
     resolution_payload = resolution.to_dict()
     for index, match in enumerate(resolution.matches):
-        event_id = event.event_id if index == 0 else f"{event.event_id}:target:{match.record_id}"
+        event_id = event.event_id if index == 0 else f"{event.event_id}:target:{match.lot_id}"
         raw_payload = {
             **dict(event.raw_payload or {}),
             "fee_order_group_id": event.event_id,
-            "record_id": match.record_id,
-            "target_lot_id": match.record_id,
+            "record_id": match.lot_id,
+            "target_lot_id": match.lot_id,
             "close_target_resolution": resolution_payload,
         }
         if execution_identity_from_input(raw_payload.get("execution_input")):
@@ -1921,7 +1921,7 @@ def _canonical_close_events_for_storage(
                 event,
                 event_id=event_id,
                 contracts=int(match.contracts_to_close),
-                target_lot_id=match.record_id,
+                target_lot_id=match.lot_id,
                 raw_payload=raw_payload,
             )
         )

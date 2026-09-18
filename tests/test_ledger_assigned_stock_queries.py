@@ -79,7 +79,7 @@ def test_partial_call_close_rebuild_and_sale_keep_current_coverage(
     )
     put_id = repo.list_position_lots()[0]["record_id"]
     ledger_api.record_manual_assignment(
-        repo, record_id=put_id, contracts_to_close=2,
+        repo, lot_id=put_id, contracts_to_close=2,
         stock_side="buy", stock_qty=200, stock_price=100, as_of_ms=2_000,
     )
     stock_id = build_assigned_stock_view(repo, account="lx", as_of_ms=2_000)["assigned_stock_lots"][0]["stock_lot_id"]
@@ -110,7 +110,7 @@ def test_partial_call_close_rebuild_and_sale_keep_current_coverage(
         )
         repo.upsert_current_decision_projection(ledger_api.current_decision_projection_row(payload))
     ledger_api.record_manual_position_close(
-        repo, record_id=call_id, contracts_to_close=1, close_price=1,
+        repo, lot_id=call_id, contracts_to_close=1, close_price=1,
         close_reason="BUY_BACK", as_of_ms=4_000,
     )
     full = build_assigned_stock_view(repo, account="lx", as_of_ms=sale_at_ms)
@@ -131,7 +131,7 @@ def test_partial_call_close_rebuild_and_sale_keep_current_coverage(
                 WHERE account = 'lx'
             """)
     result = execute_manual_assigned_stock_sale(
-        repo, target_stock_lot_id=stock_id, shares=100, price=105,
+        repo, target_lot_id=stock_id, shares=100, price=105,
         trade_time_ms=sale_at_ms, dry_run=False,
     )
     assert result["mode"] == "applied"

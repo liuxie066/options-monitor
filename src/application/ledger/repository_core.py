@@ -141,7 +141,7 @@ def _normalized_wheel_row(
     *,
     columns: set[str],
 ) -> dict[str, Any]:
-    stock_lot_id = row["stock_lot_id"]
+    lot_id = row["stock_lot_id"]
     event_schema_version = (
         str(row["event_schema_version"] or "").strip()
         if "event_schema_version" in columns
@@ -150,14 +150,14 @@ def _normalized_wheel_row(
     wheel_branch_id = (
         str(row["wheel_branch_id"] or "").strip()
         if "wheel_branch_id" in columns
-        else str(stock_lot_id or "").strip()
+        else str(lot_id or "").strip()
     )
     stored = {
         "event_id": row["event_id"],
         "event_schema_version": event_schema_version,
         "account": row["account"],
         "wheel_branch_id": wheel_branch_id,
-        "stock_lot_id": stock_lot_id,
+        "stock_lot_id": lot_id,
         "event_type": row["event_type"],
         "occurred_at_ms": row["occurred_at_ms"],
         "recorded_at_ms": row["recorded_at_ms"],

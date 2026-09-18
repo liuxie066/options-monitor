@@ -2358,7 +2358,7 @@ def test_option_positions_cli_history_json_includes_related_events(monkeypatch, 
     lot = repo.list_position_lots()[0]
     close_result = ledger_manual_trades.persist_manual_close_event(
         repo,
-        record_id=lot["record_id"],
+        lot_id=lot["record_id"],
         fields=lot["fields"],
         contracts_to_close=1,
         close_price=1.0,
@@ -2367,7 +2367,7 @@ def test_option_positions_cli_history_json_includes_related_events(monkeypatch, 
     )
     adjust_result = ledger_manual_trades.persist_manual_adjust_event(
         repo,
-        record_id=lot["record_id"],
+        lot_id=lot["record_id"],
         fields=repo.get_position_lot_fields(lot["record_id"]),
         premium_per_share=3.1,
         as_of_ms=2000,
@@ -2437,7 +2437,7 @@ def test_option_positions_cli_history_reads_voided_open_tombstone(
         premium_per_share=2.5,
         opened_at_ms=1000,
     )
-    lot_id = str(open_result.record_id)
+    lot_id = str(open_result.lot_id)
     ledger_interventions.persist_manual_void_event(
         repo,
         target_event_id=str(open_result.event_id),
@@ -2496,7 +2496,7 @@ def test_option_positions_cli_assigned_stock_sale_records_independent_event(monk
     lot = repo.list_position_lots()[0]
     record_manual_assignment(
         repo,
-        record_id=lot["record_id"],
+        lot_id=lot["record_id"],
         contracts_to_close=1,
         stock_side="buy",
         stock_qty=100,
@@ -2504,7 +2504,7 @@ def test_option_positions_cli_assigned_stock_sale_records_independent_event(monk
         as_of_ms=2000,
     )
     assignment_event = [item for item in repo.list_trade_events() if item.get("event_type") == "assignment"][0]
-    stock_lot_id = f"assigned-stock-{assignment_event['event_id']}"
+    lot_id = f"assigned-stock-{assignment_event['event_id']}"
 
     monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
     monkeypatch.setattr(
@@ -2516,7 +2516,7 @@ def test_option_positions_cli_assigned_stock_sale_records_independent_event(monk
             str(data_config),
             "assigned-stock-sale",
             "--target-stock-lot-id",
-            stock_lot_id,
+            lot_id,
             "--account",
             "lx",
             "--symbol",
@@ -2554,7 +2554,7 @@ def test_option_positions_cli_assigned_stock_sale_records_independent_event(monk
             str(data_config),
             "assigned-stock-sale",
             "--target-stock-lot-id",
-            stock_lot_id,
+            lot_id,
             "--account",
             "lx",
             "--symbol",
@@ -2582,7 +2582,7 @@ def test_option_positions_cli_assigned_stock_sale_records_independent_event(monk
     assert repo.list_assigned_stock_events()[0]["fee_provenance"]["basis"] == "estimated"
 
     report = build_assigned_stock_view(repo, broker="富途", account="lx", as_of_ms=3000)
-    lifecycle = [row for row in report["assigned_stock_lots"] if row["stock_lot_id"] == stock_lot_id][0]
+    lifecycle = [row for row in report["assigned_stock_lots"] if row["stock_lot_id"] == lot_id][0]
     assert lifecycle["status"] == "closed"
     assert lifecycle["assigned_stock_realized_pnl"] == "497.4739"
     assert lifecycle["option_premium_attribution"] == 250.0

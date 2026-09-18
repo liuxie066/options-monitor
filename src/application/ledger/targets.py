@@ -21,7 +21,7 @@ def _canonical_trade_symbol(value: Any) -> str:
 def assert_position_lot_target_matches_current_state(
     repo: Any,
     *,
-    record_id: str,
+    lot_id: str,
     fields: dict[str, Any],
     operation: str,
     current_fields: dict[str, Any] | None = None,
@@ -30,9 +30,9 @@ def assert_position_lot_target_matches_current_state(
         get_record_fields = getattr(repo, "get_record_fields", None)
         if not callable(get_record_fields):
             raise TypeError("option_positions repo does not expose get_record_fields")
-        raw_current_fields = get_record_fields(str(record_id))
+        raw_current_fields = get_record_fields(str(lot_id))
         if not isinstance(raw_current_fields, dict):
-            raise TypeError(f"option_positions repo returned non-dict fields for record_id={record_id}")
+            raise TypeError(f"option_positions repo returned non-dict fields for record_id={lot_id}")
         current_fields = raw_current_fields
     comparisons = (
         ("broker", normalize_broker(current_fields.get("broker")), normalize_broker(fields.get("broker"))),
@@ -64,5 +64,5 @@ def assert_position_lot_target_matches_current_state(
     mismatches = [name for name, left, right in comparisons if left != right]
     if mismatches:
         joined = ", ".join(mismatches)
-        raise ValueError(f"{operation} target fields do not match current lot state: {record_id} ({joined})")
+        raise ValueError(f"{operation} target fields do not match current lot state: {lot_id} ({joined})")
     return current_fields

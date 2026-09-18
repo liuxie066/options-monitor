@@ -273,7 +273,7 @@ def _resolve_zero_price_option_close(
     operations = [
         BrokerTradeOperation(
             action="reserve_option_close",
-            record_id=lot_id,
+            lot_id=lot_id,
             contracts_to_close=int(contracts),
             details={
                 "lifecycle_case_id": accepted.get("case_id"),
@@ -753,7 +753,7 @@ def _write_lifecycle_close_from_case(
         case,
         status="ledger_written",
         decision_type=normalized_decision,
-        target_lot_ids=list(close_target_resolution.record_ids),
+        target_lot_ids=list(close_target_resolution.lot_ids),
     )
     _upsert_case(repo, written)
     diagnostics = {
@@ -906,7 +906,7 @@ def _write_v2_lifecycle_close_from_case(
         operations = [
             BrokerTradeOperation(
                 action=f"record_{decision_type}",
-                record_id=str(item.get("target_lot_id") or "").strip() or None,
+                lot_id=str(item.get("target_lot_id") or "").strip() or None,
                 contracts_to_close=int(item.get("contracts_allocated") or 0),
                 event_id=str(
                     item.get("canonical_terminal_event_id") or ""
@@ -1798,7 +1798,7 @@ def _lifecycle_operation(action: str, diagnostics: dict[str, Any]) -> BrokerTrad
     case = diagnostics.get("lifecycle_case") or diagnostics.get("matching_lifecycle_case") or {}
     return BrokerTradeOperation(
         action=action,
-        record_id=None,
+        lot_id=None,
         details={
             "case_id": case.get("case_id") if isinstance(case, dict) else None,
             "diagnostics": diagnostics,

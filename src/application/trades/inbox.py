@@ -375,14 +375,14 @@ def _build_trade_source_evidence(
     if data_type in {"deal", "fill", "trade"}:
         data_type = "execution"
     namespace = execution.get("external_id_namespace") or payload.get("external_id_namespace")
-    record_id = (
+    lot_id = (
         execution.get("external_execution_id")
         or payload.get("external_execution_id")
         or _payload_deal_id(payload)
     )
     source_record_identity = str(broker_deal_key or "").strip()
-    if not source_record_identity and namespace and record_id:
-        source_record_identity = f"{namespace}:{record_id}"
+    if not source_record_identity and namespace and lot_id:
+        source_record_identity = f"{namespace}:{lot_id}"
     if not source_record_identity:
         source_record_identity = f"payload-sha256:{payload_hash}"
     payload_version = execution.get("schema_version") or payload.get("schema_version") or "provider/unversioned"

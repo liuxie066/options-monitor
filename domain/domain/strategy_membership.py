@@ -19,7 +19,7 @@ class StrategyMetadata:
     strategy: str = ""
     leg_role: str = ""
     strategy_group_id: str | None = None
-    source_stock_lot_id: str | None = None
+    source_lot_id: str | None = None
     source_wheel_branch_id: str | None = None
     expiry_structure: str | None = None
 
@@ -37,7 +37,7 @@ class OptionStrategyMembership:
     parent_universe: str | None
     leg_role: str | None = None
     strategy_group_id: str | None = None
-    source_stock_lot_id: str | None = None
+    source_lot_id: str | None = None
     source_wheel_branch_id: str | None = None
     issues: tuple[str, ...] = ()
 
@@ -48,7 +48,7 @@ class OptionStrategyMembership:
             "parent_universe": self.parent_universe,
             "leg_role": self.leg_role,
             "strategy_group_id": self.strategy_group_id,
-            "source_stock_lot_id": self.source_stock_lot_id,
+            "source_stock_lot_id": self.source_lot_id,
             "source_wheel_branch_id": self.source_wheel_branch_id,
             "issues": list(self.issues),
         }
@@ -89,7 +89,7 @@ def resolve_strategy_metadata(
             strategy=values["strategy"],
             leg_role=values["leg_role"],
             strategy_group_id=values["strategy_group_id"] or None,
-            source_stock_lot_id=values["source_stock_lot_id"] or None,
+            source_lot_id=values["source_stock_lot_id"] or None,
             source_wheel_branch_id=values["source_wheel_branch_id"] or None,
             expiry_structure=expiry_structure,
         ),
@@ -123,7 +123,7 @@ def resolve_option_strategy_membership(
             parent_universe=parent,
             leg_role=metadata.leg_role or None,
             strategy_group_id=(metadata.strategy_group_id if keep_relationship else None),
-            source_stock_lot_id=(metadata.source_stock_lot_id if keep_relationship else None),
+            source_lot_id=(metadata.source_lot_id if keep_relationship else None),
             source_wheel_branch_id=(
                 metadata.source_wheel_branch_id if keep_relationship else None
             ),
@@ -162,7 +162,7 @@ def resolve_option_strategy_membership(
             and metadata.source_wheel_branch_id
             and (
                 role == "wheel_call"
-                and metadata.source_stock_lot_id
+                and metadata.source_lot_id
                 and leg_type == "sell_call"
                 or role == "wheel_put" and leg_type == "sell_put"
             )
@@ -170,7 +170,7 @@ def resolve_option_strategy_membership(
         legacy_wheel_call = (
             strategy == "wheel"
             and role == "wheel_call"
-            and metadata.source_stock_lot_id
+            and metadata.source_lot_id
             and not metadata.source_wheel_branch_id
             and leg_type == "sell_call"
         )
@@ -186,7 +186,7 @@ def resolve_option_strategy_membership(
         return result(issues=("strategy_attribution_conflict",))
 
     return result(
-        keep_relationship=bool(metadata.source_stock_lot_id),
+        keep_relationship=bool(metadata.source_lot_id),
         issues=(),
     )
 

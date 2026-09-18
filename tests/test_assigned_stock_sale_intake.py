@@ -62,7 +62,7 @@ def _repo_with_assigned_stock(tmp_path: Path, *, opened_at_ms: int = 1000, assig
     lot = repo.list_position_lots()[0]
     record_manual_assignment(
         repo,
-        record_id=lot["record_id"],
+        lot_id=lot["record_id"],
         contracts_to_close=1,
         stock_side="buy",
         stock_qty=100,
@@ -73,13 +73,13 @@ def _repo_with_assigned_stock(tmp_path: Path, *, opened_at_ms: int = 1000, assig
     return repo, f"assigned-stock-{assignment_event['event_id']}"
 
 
-def _assigned_stock_lifecycle(repo, stock_lot_id: str) -> dict:
+def _assigned_stock_lifecycle(repo, lot_id: str) -> dict:
     report = build_assigned_stock_view(repo)
-    return [row for row in report["assigned_stock_lots"] if row["stock_lot_id"] == stock_lot_id][0]
+    return [row for row in report["assigned_stock_lots"] if row["stock_lot_id"] == lot_id][0]
 
 
 def test_resolve_trade_previews_broker_assigned_stock_sale(tmp_path: Path) -> None:
-    repo, stock_lot_id = _repo_with_assigned_stock(tmp_path)
+    repo, lot_id = _repo_with_assigned_stock(tmp_path)
 
     result = resolve_trade_deal(_stock_sale_deal(), repo=repo, state={}, apply_changes=False)
 
@@ -88,10 +88,10 @@ def test_resolve_trade_previews_broker_assigned_stock_sale(tmp_path: Path) -> No
     assert result.reason == "preview_assigned_stock_sale"
     assert repo.list_assigned_stock_events() == []
     operation = result.operations[0].to_payload()
-    assert operation["record_id"] == stock_lot_id
+    assert operation["record_id"] == lot_id
     assert operation["event_id"] == "assigned-stock-sale-stock-sale-1"
     assert operation["fields"]["source"] == "broker"
-    assert operation["fields"]["target_stock_lot_id"] == stock_lot_id
+    assert operation["fields"]["target_stock_lot_id"] == lot_id
     assert operation["fields"]["fees"] == 0.0
     assert operation["fields"]["fee_provenance"]["basis"] == "estimated"
     assert operation["fields"]["fee_provenance"]["amount"] == "2.5261"
@@ -102,7 +102,7 @@ def test_resolve_trade_previews_broker_assigned_stock_sale(tmp_path: Path) -> No
 
 
 def test_resolve_trade_applies_broker_assigned_stock_sale(tmp_path: Path) -> None:
-    repo, stock_lot_id = _repo_with_assigned_stock(tmp_path)
+    repo, lot_id = _repo_with_assigned_stock(tmp_path)
 
     result = resolve_trade_deal(_stock_sale_deal(), repo=repo, state={}, apply_changes=True)
 
@@ -117,7 +117,7 @@ def test_resolve_trade_applies_broker_assigned_stock_sale(tmp_path: Path) -> Non
     assert events[0]["fees"] == 0.0
     assert events[0]["fee_provenance"]["basis"] == "estimated"
     assert events[0]["fee_provenance"]["amount"] == "2.5261"
-    lifecycle = _assigned_stock_lifecycle(repo, stock_lot_id)
+    lifecycle = _assigned_stock_lifecycle(repo, lot_id)
     assert lifecycle["status"] == "closed"
     assert lifecycle["assigned_stock_realized_pnl"] == "497.4739"
     assert lifecycle["option_premium_attribution"] == 250.0
@@ -125,7 +125,7 @@ def test_resolve_trade_applies_broker_assigned_stock_sale(tmp_path: Path) -> Non
 
 
 def test_broker_assigned_stock_sale_does_not_admit_raw_fee_components_as_actual(tmp_path: Path) -> None:
-    repo, stock_lot_id = _repo_with_assigned_stock(tmp_path)
+    repo, lot_id = _repo_with_assigned_stock(tmp_path)
 
     result = resolve_trade_deal(
         _stock_sale_deal(raw_payload={"commission": -0.99, "platform_fee": -1.0}),
@@ -139,15 +139,15 @@ def test_broker_assigned_stock_sale_does_not_admit_raw_fee_components_as_actual(
     assert event["fees"] == 0.0
     assert event["fee_provenance"]["basis"] == "estimated"
     assert event["fee_provenance"]["amount"] == "2.5261"
-    assert _assigned_stock_lifecycle(repo, stock_lot_id)["assigned_stock_realized_pnl"] == "497.4739"
+    assert _assigned_stock_lifecycle(repo, lot_id)["assigned_stock_realized_pnl"] == "497.4739"
 
 
 def test_manual_assigned_stock_sale_freezes_formula_estimate(tmp_path: Path) -> None:
-    repo, stock_lot_id = _repo_with_assigned_stock(tmp_path)
+    repo, lot_id = _repo_with_assigned_stock(tmp_path)
 
     execute_manual_assigned_stock_sale(
         repo,
-        target_stock_lot_id=stock_lot_id,
+        target_lot_id=lot_id,
         shares=100,
         price=105.0,
         trade_time_ms=3000,
@@ -158,7 +158,7 @@ def test_manual_assigned_stock_sale_freezes_formula_estimate(tmp_path: Path) -> 
     assert event["fees"] == 0.0
     assert event["fee_provenance"]["basis"] == "estimated"
     assert event["fee_provenance"]["amount"] == "2.5261"
-    assert _assigned_stock_lifecycle(repo, stock_lot_id)["assigned_stock_realized_pnl"] == "497.4739"
+    assert _assigned_stock_lifecycle(repo, lot_id)["assigned_stock_realized_pnl"] == "497.4739"
 
 
 def test_assigned_stock_sale_projects_before_and_after_from_one_transaction(
@@ -167,7 +167,7 @@ def test_assigned_stock_sale_projects_before_and_after_from_one_transaction(
 ) -> None:
     import src.application.ledger.writer_lifecycle_evidence as sale_writer
 
-    repo, stock_lot_id = _repo_with_assigned_stock(tmp_path)
+    repo, lot_id = _repo_with_assigned_stock(tmp_path)
     projections: list[int] = []
     transaction_connections: list[object] = []
     original_project = sale_writer.project_assigned_stock_lifecycle_from_rows
@@ -187,7 +187,7 @@ def test_assigned_stock_sale_projects_before_and_after_from_one_transaction(
 
     execute_manual_assigned_stock_sale(
         repo,
-        target_stock_lot_id=stock_lot_id,
+        target_lot_id=lot_id,
         shares=40,
         price=105,
         trade_time_ms=3_000,
@@ -262,11 +262,11 @@ def test_backdated_sale_publishes_final_state_without_rebuilding_deferred_projec
 ) -> None:
     from src.application.ledger import api
 
-    repo, stock_lot_id = _repo_with_assigned_stock(tmp_path)
+    repo, lot_id = _repo_with_assigned_stock(tmp_path)
     _prepare_sale_projection_state(repo, projection_state)
     later = execute_manual_assigned_stock_sale(
         repo,
-        target_stock_lot_id=stock_lot_id,
+        target_lot_id=lot_id,
         shares=40,
         price=105,
         trade_time_ms=4_000,
@@ -278,7 +278,7 @@ def test_backdated_sale_publishes_final_state_without_rebuilding_deferred_projec
     ]
     earlier = execute_manual_assigned_stock_sale(
         repo,
-        target_stock_lot_id=stock_lot_id,
+        target_lot_id=lot_id,
         shares=30,
         price=105,
         trade_time_ms=3_000,
@@ -322,11 +322,11 @@ def test_backdated_sale_cannot_invalidate_existing_later_sale(
     tmp_path: Path,
     projection_state: str,
 ) -> None:
-    repo, stock_lot_id = _repo_with_assigned_stock(tmp_path)
+    repo, lot_id = _repo_with_assigned_stock(tmp_path)
     _prepare_sale_projection_state(repo, projection_state)
     execute_manual_assigned_stock_sale(
         repo,
-        target_stock_lot_id=stock_lot_id,
+        target_lot_id=lot_id,
         shares=80,
         price=105,
         trade_time_ms=4_000,
@@ -339,7 +339,7 @@ def test_backdated_sale_cannot_invalidate_existing_later_sale(
     with pytest.raises(ValueError, match="invalidates_subsequent_sale"):
         execute_manual_assigned_stock_sale(
             repo,
-            target_stock_lot_id=stock_lot_id,
+            target_lot_id=lot_id,
             shares=80,
             price=105,
             trade_time_ms=3_000,
@@ -356,7 +356,7 @@ def test_backdated_sale_cannot_invalidate_existing_later_call_coverage(
     tmp_path: Path,
     projection_state: str,
 ) -> None:
-    repo, stock_lot_id = _repo_with_assigned_stock(tmp_path)
+    repo, lot_id = _repo_with_assigned_stock(tmp_path)
     ledger_manual_trades.persist_manual_open_event(
         repo,
         broker="富途",
@@ -371,7 +371,7 @@ def test_backdated_sale_cannot_invalidate_existing_later_call_coverage(
         expiration_ymd="2026-06-19",
         premium_per_share=2,
         opened_at_ms=4_000,
-        strategy_snapshot={"source_stock_lot_id": stock_lot_id},
+        strategy_snapshot={"source_stock_lot_id": lot_id},
     )
     before = build_assigned_stock_view(repo, account="lx", as_of_ms=5_000)
     assert sum(row["shares"] for row in before["covered_call_allocations"]) == 80
@@ -382,7 +382,7 @@ def test_backdated_sale_cannot_invalidate_existing_later_call_coverage(
     with pytest.raises(ValueError, match="invalidates_subsequent_covered_call"):
         execute_manual_assigned_stock_sale(
             repo,
-            target_stock_lot_id=stock_lot_id,
+            target_lot_id=lot_id,
             shares=40,
             price=105,
             trade_time_ms=3_000,
@@ -432,14 +432,14 @@ def test_manual_assigned_stock_sale_preserves_aggregate_covered_call_capacity(
     put_lot = repo.list_position_lots()[0]
     record_manual_assignment(
         repo,
-        record_id=put_lot["record_id"],
+        lot_id=put_lot["record_id"],
         contracts_to_close=stock_shares // 100,
         stock_side="buy",
         stock_qty=stock_shares,
         stock_price=100,
         as_of_ms=2_000,
     )
-    stock_lot_id = build_assigned_stock_view(
+    lot_id = build_assigned_stock_view(
         repo,
         account="lx",
         as_of_ms=2_000,
@@ -459,38 +459,38 @@ def test_manual_assigned_stock_sale_preserves_aggregate_covered_call_capacity(
             expiration_ymd="2026-06-19",
             premium_per_share=2,
             opened_at_ms=3_000 + index,
-            strategy_snapshot={"source_stock_lot_id": stock_lot_id},
+            strategy_snapshot={"source_stock_lot_id": lot_id},
         )
 
     if allowed:
         result = execute_manual_assigned_stock_sale(
             repo,
-            target_stock_lot_id=stock_lot_id,
+            target_lot_id=lot_id,
             shares=sale_shares,
             price=105,
             trade_time_ms=5_000,
             dry_run=False,
         )
         assert result["result"]["created"] is True
-        assert _assigned_stock_lifecycle(repo, stock_lot_id)["shares_remaining"] == (
+        assert _assigned_stock_lifecycle(repo, lot_id)["shares_remaining"] == (
             stock_shares - sale_shares
         )
     else:
         with pytest.raises(ValueError, match="covered_call_capacity_conflict"):
             execute_manual_assigned_stock_sale(
                 repo,
-                target_stock_lot_id=stock_lot_id,
+                target_lot_id=lot_id,
                 shares=sale_shares,
                 price=105,
                 trade_time_ms=5_000,
                 dry_run=False,
             )
         assert repo.list_assigned_stock_events() == []
-        assert _assigned_stock_lifecycle(repo, stock_lot_id)["shares_remaining"] == stock_shares
+        assert _assigned_stock_lifecycle(repo, lot_id)["shares_remaining"] == stock_shares
 
 
 def test_resolve_trade_does_not_reopen_closed_assigned_stock_lot_after_stock_buy(tmp_path: Path) -> None:
-    repo, stock_lot_id = _repo_with_assigned_stock(tmp_path)
+    repo, lot_id = _repo_with_assigned_stock(tmp_path)
 
     sale = resolve_trade_deal(_stock_sale_deal(), repo=repo, state={}, apply_changes=True)
     buy = resolve_trade_deal(
@@ -512,7 +512,7 @@ def test_resolve_trade_does_not_reopen_closed_assigned_stock_lot_after_stock_buy
     assert later_sale.status == "skipped"
     assert later_sale.reason == "not_option_deal"
     assert len(repo.list_assigned_stock_events()) == 1
-    lifecycle = _assigned_stock_lifecycle(repo, stock_lot_id)
+    lifecycle = _assigned_stock_lifecycle(repo, lot_id)
     assert lifecycle["status"] == "closed"
     assert lifecycle["shares_remaining"] == 0
     assert lifecycle["assigned_stock_realized_pnl"] == "497.4739"
@@ -522,7 +522,7 @@ def test_resolve_trade_broker_assigned_stock_sale_duplicate_is_idempotent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    repo, _stock_lot_id = _repo_with_assigned_stock(tmp_path)
+    repo, _lot_id = _repo_with_assigned_stock(tmp_path)
 
     first = resolve_trade_deal(_stock_sale_deal(), repo=repo, state={}, apply_changes=True)
     with sqlite3.connect(f"file:{repo.db_path}?mode=ro", uri=True) as conn:
@@ -555,7 +555,7 @@ def test_resolve_trade_keeps_unmatched_stock_sale_as_non_option(tmp_path: Path) 
 
 
 def test_resolve_trade_broker_assigned_stock_sale_ambiguous_lot_is_unresolved(tmp_path: Path) -> None:
-    repo, _first_stock_lot_id = _repo_with_assigned_stock(tmp_path, opened_at_ms=1000, assigned_at_ms=2000)
+    repo, _first_lot_id = _repo_with_assigned_stock(tmp_path, opened_at_ms=1000, assigned_at_ms=2000)
     ledger_manual_trades.persist_manual_open_event(
         repo,
         broker="富途",
@@ -574,7 +574,7 @@ def test_resolve_trade_broker_assigned_stock_sale_ambiguous_lot_is_unresolved(tm
     second_lot = [item for item in repo.list_position_lots() if item["fields"]["status"] == "open"][0]
     record_manual_assignment(
         repo,
-        record_id=second_lot["record_id"],
+        lot_id=second_lot["record_id"],
         contracts_to_close=1,
         stock_side="buy",
         stock_qty=100,
@@ -612,7 +612,7 @@ def _standard_stock_sale_deal(**overrides) -> NormalizedTradeDeal:
 
 
 def test_standard_stock_sale_replay_keeps_original_event_and_economic_references(tmp_path: Path) -> None:
-    repo, stock_lot_id = _repo_with_assigned_stock(tmp_path)
+    repo, lot_id = _repo_with_assigned_stock(tmp_path)
     deal = _standard_stock_sale_deal()
     first = resolve_trade_deal(deal, repo=repo, state={}, apply_changes=True)
     before = repo.list_assigned_stock_events()
@@ -621,7 +621,7 @@ def test_standard_stock_sale_replay_keeps_original_event_and_economic_references
     assert first.status == duplicate.status == "applied"
     assert duplicate.operations[0].to_payload()["result"]["created"] is False
     assert repo.list_assigned_stock_events() == before
-    assert before[0]["target_stock_lot_id"] == stock_lot_id
+    assert before[0]["target_stock_lot_id"] == lot_id
     assert "cash_conversions" in before[0]
 
 
@@ -655,7 +655,7 @@ def test_stock_sale_same_deal_id_different_account_is_not_a_duplicate(tmp_path: 
 def test_intake_rejects_second_physical_account_after_durable_stock_sale(tmp_path: Path, apply_changes: bool) -> None:
     from src.application.trades.auto_intake import _process_payload
 
-    repo, stock_lot_id = _repo_with_assigned_stock(tmp_path)
+    repo, lot_id = _repo_with_assigned_stock(tmp_path)
 
     def process(deal, apply):
         return _process_payload(
@@ -678,7 +678,7 @@ def test_intake_rejects_second_physical_account_after_durable_stock_sale(tmp_pat
         assert tuple(conn.iterdump()) == ledger_before
     assert events[0]["futu_account_id"] == "REAL_1"
     assert events[0]["execution_input"]["broker_account_ref"]["external_account_id"] == "REAL_1"
-    assert _assigned_stock_lifecycle(repo, stock_lot_id)["shares_remaining"] == 50
+    assert _assigned_stock_lifecycle(repo, lot_id)["shares_remaining"] == 50
 
 
 def test_execution_metadata_rejects_older_sqlite_writers(tmp_path: Path) -> None:
@@ -696,7 +696,7 @@ def test_stock_sale_pending_intake_recovers_original_scope_after_label_change(tm
     from src.application.trades.inbox import enqueue_trade_payload, read_trade_payload
     from src.application.trades.inbox_authority import resolve_execution_inbox_path
 
-    repo, stock_lot_id = _repo_with_assigned_stock(tmp_path)
+    repo, lot_id = _repo_with_assigned_stock(tmp_path)
     deal = _standard_stock_sale_deal()
     inbox = resolve_execution_inbox_path(repo, tmp_path / "unused.sqlite3")
     inbox_id = enqueue_trade_payload(inbox, payload=deal.execution_input, source="file",
@@ -715,7 +715,7 @@ def test_stock_sale_pending_intake_recovers_original_scope_after_label_change(tm
     stored = read_trade_payload(inbox, inbox_id=inbox_id)
     assert stored["status"] == "handled"
     assert result["operations"][0]["result"]["created"] is False
-    assert before_events[0]["target_stock_lot_id"] == stock_lot_id
+    assert before_events[0]["target_stock_lot_id"] == lot_id
     assert before_events[0]["account"] == "lx"
     assert repo.list_assigned_stock_events() == before_events
     assert repo.list_position_lots() == before_lots
@@ -750,13 +750,13 @@ def test_stock_sale_source_effect_enrichment_checks_original_sale(tmp_path: Path
 
 
 def test_explicit_stock_open_does_not_consume_assigned_stock_lot(tmp_path: Path) -> None:
-    repo, stock_lot_id = _repo_with_assigned_stock(tmp_path)
+    repo, lot_id = _repo_with_assigned_stock(tmp_path)
     deal = _standard_stock_sale_deal(position_effect="open")
     deal = replace(deal, execution_input={**deal.execution_input, "position_effect": "open"})
     result = resolve_trade_deal(deal, repo=repo, state={}, apply_changes=True)
     assert (result.status, result.reason) == ("skipped", "not_option_deal")
     assert repo.list_assigned_stock_events() == []
-    assert _assigned_stock_lifecycle(repo, stock_lot_id)["shares_remaining"] == 100
+    assert _assigned_stock_lifecycle(repo, lot_id)["shares_remaining"] == 100
 
 
 def test_late_stock_order_enrichment_preserves_sale_and_recovers_fee_target(tmp_path: Path) -> None:
@@ -802,7 +802,7 @@ def test_late_stock_order_enrichment_publishes_final_state_after_newer_sale(
     from src.application.ledger import api
     import src.application.ledger.writer_lifecycle_evidence as sale_writer
 
-    repo, stock_lot_id = _repo_with_assigned_stock(tmp_path)
+    repo, lot_id = _repo_with_assigned_stock(tmp_path)
     deal = _standard_stock_sale_deal(contracts=40, order_id=None)
     assert resolve_trade_deal(
         deal,
@@ -814,7 +814,7 @@ def test_late_stock_order_enrichment_publishes_final_state_after_newer_sale(
     _seed_current_assigned_stock_projection(repo, as_of_ms=3_000)
     execute_manual_assigned_stock_sale(
         repo,
-        target_stock_lot_id=stock_lot_id,
+        target_lot_id=lot_id,
         shares=20,
         price=105,
         trade_time_ms=4_000,
@@ -971,13 +971,13 @@ def _explicit_two_lot_sale(tmp_path):
     )
     # §7.4: the published row carries money as decimal text.
     option = next(x for x in repo.list_position_lots() if x["fields"]["strike"] == "110")
-    api.record_manual_assignment(repo, record_id=option["record_id"], contracts_to_close=1,
+    api.record_manual_assignment(repo, lot_id=option["record_id"], contracts_to_close=1,
                                 stock_side="buy", stock_qty=100, stock_price=110, as_of_ms=2100)
     lots = build_assigned_stock_view(repo)["assigned_stock_lots"]
     assert len(lots) == 2
     deal = _stock_sale_deal(contracts=200)
     parent = _build_assigned_stock_sale_event(
-        lots[0], target_stock_lot_id=lots[0]["stock_lot_id"], shares=200, price=105,
+        lots[0], target_lot_id=lots[0]["stock_lot_id"], shares=200, price=105,
         fees=3, fee_provenance={"basis": "actual", "source": "broker", "amount": "3"},
         trade_time_ms=3000, account="lx", broker="富途", symbol="NVDA", currency="USD",
         source_deal_id=deal.deal_id, futu_account_id=deal.futu_account_id,

@@ -387,8 +387,8 @@ def run_wheel_call_scan(
     raw_by_batch: dict[str, list[dict[str, Any]]] = {}
     claims: list[dict[str, Any]] = []
     for raw_batch in batches:
-        stock_lot_id = str(raw_batch.get("stock_lot_id") or "")
-        wheel_branch_id = str(raw_batch.get("wheel_branch_id") or stock_lot_id)
+        lot_id = str(raw_batch.get("stock_lot_id") or "")
+        wheel_branch_id = str(raw_batch.get("wheel_branch_id") or lot_id)
         symbol = str(raw_batch.get("symbol") or "").strip().upper()
         base_scope = {
             "scope": "strategy",
@@ -396,7 +396,7 @@ def run_wheel_call_scan(
             "symbol": symbol,
             "direction": "call",
             "wheel_branch_id": wheel_branch_id,
-            "stock_lot_id": stock_lot_id,
+            "stock_lot_id": lot_id,
             "strategy_family": "wheel",
             "strategy_mode": "wheel",
             "candidate_owner": "wheel",
@@ -407,7 +407,7 @@ def run_wheel_call_scan(
             "candidate_count": 0,
         }
         if raw_batch.get("lifecycle_status") == "pending_decision":
-            raw_by_batch[stock_lot_id] = []
+            raw_by_batch[lot_id] = []
             scopes.append(
                 {
                     **base_scope,
@@ -431,7 +431,7 @@ def run_wheel_call_scan(
         if symbol in unavailable_symbols:
             scopes.append({**base_scope, "status": "unavailable", "reason_code": unavailable_symbols[symbol]})
             continue
-        stock = stocks.get(stock_lot_id)
+        stock = stocks.get(lot_id)
         if stock is None:
             scopes.append({**base_scope, "status": "unavailable", "reason_code": "assigned_stock_lot_unavailable"})
             continue
@@ -466,7 +466,7 @@ def run_wheel_call_scan(
                 continue
             if not item.get("accepted"):
                 continue
-            item["stock_lot_id"] = stock_lot_id
+            item["stock_lot_id"] = lot_id
             item["wheel_branch_id"] = wheel_branch_id
             item["direction"] = "call"
             item["candidate_id"] = "wheel:" + canonical_sha256(
@@ -480,7 +480,7 @@ def run_wheel_call_scan(
             item["_grant_evaluations"] = grant_evaluations
             evaluated.append(item)
         evaluated.sort(key=lambda row: tuple((row.get("rank_key") or {}).get("sort_tuple") or ()))
-        raw_by_batch[stock_lot_id] = evaluated
+        raw_by_batch[lot_id] = evaluated
         evidence = evidence_summary_from_decisions(
             decisions=decisions_by_symbol.get(symbol, []),
             accepted_count=len(common_candidates_by_symbol.get(symbol, [])),
@@ -499,7 +499,7 @@ def run_wheel_call_scan(
                     "account": account,
                     "symbol": symbol,
                     "wheel_branch_id": wheel_branch_id,
-                    "stock_lot_id": stock_lot_id,
+                    "stock_lot_id": lot_id,
                     "candidate_id": top["candidate_id"],
                     "requested_contracts": int(top["contracts"]),
                     "requested_shares": int(top["candidate_covered_shares"]),

@@ -616,13 +616,13 @@ def finalize_wheel_capacity(
     raw_by_batch = wheel_scan.get("raw_candidates")
     raw_by_batch = raw_by_batch if isinstance(raw_by_batch, Mapping) else {}
     rejected_claim_ids: set[str] = set()
-    for stock_lot_id, batch in batches_by_id.items():
-        branch_id = str(batch.get("wheel_branch_id") or stock_lot_id)
+    for lot_id, batch in batches_by_id.items():
+        branch_id = str(batch.get("wheel_branch_id") or lot_id)
         claim_id = f"wheel:call:{branch_id}"
-        allocation = by_claim.get(claim_id) or by_claim.get(f"wheel:{stock_lot_id}")
+        allocation = by_claim.get(claim_id) or by_claim.get(f"wheel:{lot_id}")
         internal_candidates = [
             dict(item)
-            for item in raw_by_batch.get(stock_lot_id) or []
+            for item in raw_by_batch.get(lot_id) or []
             if isinstance(item, Mapping)
         ]
         if (
@@ -637,7 +637,7 @@ def finalize_wheel_capacity(
             is None
         ):
             rejected_claim_ids.add(
-                claim_id if claim_id in by_claim else f"wheel:{stock_lot_id}"
+                claim_id if claim_id in by_claim else f"wheel:{lot_id}"
             )
     allocations = withdraw_opening_share_capacity_grants(
         allocations,
@@ -648,22 +648,22 @@ def finalize_wheel_capacity(
     for scope in wheel_scan.get("scope_results") or []:
         if not isinstance(scope, Mapping):
             continue
-        stock_lot_id = str(scope.get("stock_lot_id") or "")
-        batch = batches_by_id.get(stock_lot_id)
+        lot_id = str(scope.get("stock_lot_id") or "")
+        batch = batches_by_id.get(lot_id)
         if batch is None:
             continue
         internal_candidates = [
             dict(item)
-            for item in raw_by_batch.get(stock_lot_id) or []
+            for item in raw_by_batch.get(lot_id) or []
             if isinstance(item, Mapping)
         ]
         raw_candidates = [
             {key: value for key, value in item.items() if key != "_grant_evaluations"}
             for item in internal_candidates
         ]
-        branch_id = str(batch.get("wheel_branch_id") or stock_lot_id)
+        branch_id = str(batch.get("wheel_branch_id") or lot_id)
         allocation = by_claim.get(f"wheel:call:{branch_id}") or by_claim.get(
-            f"wheel:{stock_lot_id}"
+            f"wheel:{lot_id}"
         )
         granted = int((allocation or {}).get("granted_contracts") or 0)
         source_scope = next(
@@ -671,7 +671,7 @@ def finalize_wheel_capacity(
                 item
                 for item in wheel_scan.get("scope_results") or []
                 if isinstance(item, Mapping)
-                and str(item.get("stock_lot_id") or "") == stock_lot_id
+                and str(item.get("stock_lot_id") or "") == lot_id
             ),
             {},
         )
@@ -686,7 +686,7 @@ def finalize_wheel_capacity(
             {
                 "account": account,
                 "symbol": str(batch.get("symbol") or "").upper(),
-                "stock_lot_id": stock_lot_id,
+                "stock_lot_id": lot_id,
                 "wheel_branch_id": branch_id,
                 "direction": "call",
                 "batch_generation_hash": batch.get("batch_generation_hash")

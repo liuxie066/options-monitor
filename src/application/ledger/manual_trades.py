@@ -251,7 +251,7 @@ def _stable_manual_event_id(prefix: str, payload: dict[str, Any]) -> str:
     return f"{prefix}-{digest}"
 
 
-def _existing_trade_event_result(repo: Any, *, event_id: str, record_id: str | None = None) -> LedgerWriteResult | None:
+def _existing_trade_event_result(repo: Any, *, event_id: str, lot_id: str | None = None) -> LedgerWriteResult | None:
     candidate = getattr(repo, "primary_repo", repo)
     getter = getattr(candidate, "get_trade_events_by_ids", None)
     rows = (
@@ -268,7 +268,7 @@ def _existing_trade_event_result(repo: Any, *, event_id: str, record_id: str | N
     return LedgerWriteResult.from_payload(
         {
             "event_id": str(event_id),
-            "record_id": str(record_id).strip() if record_id else None,
+            "record_id": str(lot_id).strip() if lot_id else None,
             "created": False,
             "position_lot_count": int(candidate.count_position_lots()),
             **projection_diagnostics_summary(()),
@@ -289,7 +289,7 @@ def _manual_close_event_id(
     multiplier: int | None,
     expiration_ymd: str | None,
     currency: str,
-    record_id: str,
+    lot_id: str,
     target_source_event_id: str,
     close_reason: str,
 ) -> str:
@@ -308,7 +308,7 @@ def _manual_close_event_id(
             "multiplier": int(float(multiplier)) if multiplier is not None else None,
             "expiration_ymd": str(expiration_ymd or "").strip() or None,
             "currency": normalize_currency(currency),
-            "record_id": str(record_id or "").strip(),
+            "record_id": str(lot_id or "").strip(),
             "target_source_event_id": str(target_source_event_id or "").strip(),
             "close_reason": str(close_reason or "").strip(),
         },
@@ -318,7 +318,7 @@ def _manual_close_event_id(
 def existing_manual_close_event_result(
     repo: Any,
     *,
-    record_id: str,
+    lot_id: str,
     fields: dict[str, Any],
     contracts_to_close: int,
     close_price: float | None,
@@ -326,11 +326,11 @@ def existing_manual_close_event_result(
 ) -> LedgerWriteResult | None:
     broker = normalize_broker(fields.get("broker"))
     if not broker:
-        raise ValueError(f"position lot missing broker: {record_id}")
+        raise ValueError(f"position lot missing broker: {lot_id}")
     normalized_close_price = normalize_trade_price(close_price, "close_price")
     current_fields = assert_position_lot_target_matches_current_state(
         repo,
-        record_id=record_id,
+        lot_id=lot_id,
         fields=fields,
         operation="manual_close",
     )
@@ -349,11 +349,11 @@ def existing_manual_close_event_result(
         multiplier=(int(float(multiplier)) if multiplier is not None else None),
         expiration_ymd=effective_expiration_ymd(current_fields),
         currency=normalize_currency(current_fields.get("currency")),
-        record_id=str(record_id),
+        lot_id=str(lot_id),
         target_source_event_id=target_source_event_id,
         close_reason=str(close_reason or ""),
     )
-    return _existing_trade_event_result(repo, event_id=event_id, record_id=str(record_id))
+    return _existing_trade_event_result(repo, event_id=event_id, lot_id=str(lot_id))
 
 
 def _manual_adjust_event_id(
@@ -367,7 +367,7 @@ def _manual_adjust_event_id(
     multiplier: int | None,
     expiration_ymd: str | None,
     currency: str,
-    record_id: str,
+    lot_id: str,
     target_source_event_id: str,
     patch: PositionLotPatch,
 ) -> str:
@@ -385,7 +385,7 @@ def _manual_adjust_event_id(
             "multiplier": int(float(multiplier)) if multiplier is not None else None,
             "expiration_ymd": str(expiration_ymd or "").strip() or None,
             "currency": normalize_currency(currency),
-            "record_id": str(record_id or "").strip(),
+            "record_id": str(lot_id or "").strip(),
             "target_source_event_id": str(target_source_event_id or "").strip(),
             "patch": stable_patch,
         },
@@ -473,7 +473,7 @@ def persist_manual_open_event(
     existing_result = _existing_trade_event_result(
         repo,
         event_id=event_id,
-        record_id=f"lot_{event_id}",
+        lot_id=f"lot_{event_id}",
     )
     if existing_result is not None:
         if request_id_value:
@@ -540,7 +540,7 @@ def persist_manual_open_event(
 def persist_manual_close_event(
     repo: Any,
     *,
-    record_id: str,
+    lot_id: str,
     fields: dict[str, Any],
     contracts_to_close: int,
     close_price: float | None,
@@ -549,11 +549,11 @@ def persist_manual_close_event(
 ) -> LedgerWriteResult:
     broker = normalize_broker(fields.get("broker"))
     if not broker:
-        raise ValueError(f"position lot missing broker: {record_id}")
+        raise ValueError(f"position lot missing broker: {lot_id}")
     normalized_close_price = normalize_trade_price(close_price, "close_price")
     fields = assert_position_lot_target_matches_current_state(
         repo,
-        record_id=record_id,
+        lot_id=lot_id,
         fields=fields,
         operation="manual_close",
     )
@@ -576,11 +576,11 @@ def persist_manual_close_event(
         multiplier=(int(float(multiplier)) if multiplier is not None else None),
         expiration_ymd=expiration_ymd,
         currency=currency,
-        record_id=str(record_id),
+        lot_id=str(lot_id),
         target_source_event_id=target_source_event_id,
         close_reason=str(close_reason or ""),
     )
-    existing_result = _existing_trade_event_result(repo, event_id=event_id, record_id=str(record_id))
+    existing_result = _existing_trade_event_result(repo, event_id=event_id, lot_id=str(lot_id))
     if existing_result is not None:
         return existing_result
     close_patch_contract = build_close_patch_contract(
@@ -608,13 +608,13 @@ def persist_manual_close_event(
         currency=currency,
         source="cli_manual_close",
         multiplier=(float(multiplier) if multiplier is not None else 100.0),
-        target_lot_id=str(record_id),
+        target_lot_id=str(lot_id),
         raw_payload={
             "source": "om option-positions",
             "source_type": "manual_trade_event",
             "mode": "manual_close",
-            "record_id": str(record_id),
-            "target_lot_id": str(record_id),
+            "record_id": str(lot_id),
+            "target_lot_id": str(lot_id),
             "side": "buy" if str(fields.get("side") or "").strip().lower() == "short" else "sell",
             "close_target_source_event_id": target_source_event_id,
             "close_target_account": normalized_account,
@@ -630,7 +630,7 @@ def persist_manual_close_event(
 def _build_manual_adjust_event(
     repo: Any,
     *,
-    record_id: str,
+    lot_id: str,
     fields: dict[str, Any],
     current_fields: dict[str, Any] | None = None,
     contracts: int | None = None,
@@ -647,7 +647,7 @@ def _build_manual_adjust_event(
 ) -> tuple[TradeEvent, PositionLotPatch]:
     fields = assert_position_lot_target_matches_current_state(
         repo,
-        record_id=record_id,
+        lot_id=lot_id,
         fields=fields,
         operation="manual_adjust",
         current_fields=current_fields,
@@ -680,7 +680,7 @@ def _build_manual_adjust_event(
         multiplier=current_multiplier,
         expiration_ymd=exp_ms_to_ymd(fields.get("expiration")),
         currency=normalize_currency(fields.get("currency")),
-        record_id=str(record_id),
+        lot_id=str(lot_id),
         target_source_event_id=target_source_event_id,
         patch=patch_contract,
     )
@@ -701,13 +701,13 @@ def _build_manual_adjust_event(
         currency=normalize_currency(fields.get("currency")),
         source="cli_manual_adjust",
         multiplier=(float(current_multiplier) if current_multiplier is not None else 100.0),
-        target_lot_id=str(record_id),
+        target_lot_id=str(lot_id),
         raw_payload={
             "source": "om option-positions",
             "source_type": "manual_trade_event",
             "mode": "manual_adjust",
-            "record_id": str(record_id),
-            "target_lot_id": str(record_id),
+            "record_id": str(lot_id),
+            "target_lot_id": str(lot_id),
             "adjust_target_source_event_id": target_source_event_id or None,
             "idempotency_key": event_id,
             "patch": patch,
@@ -719,7 +719,7 @@ def _build_manual_adjust_event(
 def persist_manual_adjust_event(
     repo: Any,
     *,
-    record_id: str,
+    lot_id: str,
     fields: dict[str, Any],
     contracts: int | None = None,
     strike: float | None = None,
@@ -735,7 +735,7 @@ def persist_manual_adjust_event(
 ) -> LedgerWriteResult:
     event, patch_contract = _build_manual_adjust_event(
         repo,
-        record_id=record_id,
+        lot_id=lot_id,
         fields=fields,
         contracts=contracts,
         strike=strike,
@@ -749,12 +749,12 @@ def persist_manual_adjust_event(
         strategy_snapshot=strategy_snapshot,
         as_of_ms=as_of_ms,
     )
-    existing_result = _existing_trade_event_result(repo, event_id=event.event_id, record_id=str(record_id))
+    existing_result = _existing_trade_event_result(repo, event_id=event.event_id, lot_id=str(lot_id))
     if existing_result is not None:
         return existing_result.with_details(patch=patch_contract.to_dict())
     return (
         persist_trade_event_object(repo, event)
-        .with_record_id(str(record_id))
+        .with_lot_id(str(lot_id))
         .with_details(patch=patch_contract.to_dict())
     )
 
@@ -766,19 +766,19 @@ def persist_manual_adjust_events(
     """Persist multiple lot adjustments and refresh projection in one transaction."""
 
     validated: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
-    seen_record_ids: set[str] = set()
+    seen_lot_ids: set[str] = set()
     for raw in adjustments:
         item = dict(raw or {})
-        record_id = str(item.pop("record_id", "") or "").strip()
+        lot_id = str(item.pop("record_id", "") or "").strip()
         fields = item.pop("fields", None)
-        if not record_id:
+        if not lot_id:
             raise ValueError("manual adjustment batch requires record_id")
-        if record_id in seen_record_ids:
-            raise ValueError(f"manual adjustment batch contains duplicate record_id: {record_id}")
+        if lot_id in seen_lot_ids:
+            raise ValueError(f"manual adjustment batch contains duplicate record_id: {lot_id}")
         if not isinstance(fields, dict):
-            raise ValueError(f"manual adjustment batch requires fields for record_id={record_id}")
-        validated.append((record_id, dict(fields), item))
-        seen_record_ids.add(record_id)
+            raise ValueError(f"manual adjustment batch requires fields for record_id={lot_id}")
+        validated.append((lot_id, dict(fields), item))
+        seen_lot_ids.add(lot_id)
 
     if not validated:
         raise ValueError("manual adjustment batch requires at least one adjustment")
@@ -787,31 +787,31 @@ def persist_manual_adjust_events(
         if conn is None:
             raise TypeError("manual adjustment batch requires SQLite transaction authority")
         current_rows = sqlite_repo.get_position_lots_by_ids(
-            tuple(seen_record_ids),
+            tuple(seen_lot_ids),
             conn=conn,
         )
-        current_by_record_id = {
+        current_by_lot_id = {
             str(row.get("record_id") or "").strip(): dict(row.get("fields") or {})
             for row in current_rows
             if str(row.get("record_id") or "").strip()
         }
-        for record_id, fields, _item in validated:
-            current_fields = current_by_record_id.get(record_id)
+        for lot_id, fields, _item in validated:
+            current_fields = current_by_lot_id.get(lot_id)
             if current_fields is None:
-                raise ValueError(f"manual adjustment batch target lot not found: {record_id}")
+                raise ValueError(f"manual adjustment batch target lot not found: {lot_id}")
             if current_fields != fields:
                 raise ValueError(
                     "manual adjustment batch target fields changed since preflight: "
-                    f"{record_id}"
+                    f"{lot_id}"
                 )
         desired_group_ids = {
             str(item.get("strategy_group_id") or "").strip()
-            for _record_id, _fields, item in validated
+            for _lot_id, _fields, item in validated
             if str(item.get("strategy_group_id") or "").strip()
         }
         if desired_group_ids:
             group_placeholders = ",".join("?" for _item in desired_group_ids)
-            target_placeholders = ",".join("?" for _item in seen_record_ids)
+            target_placeholders = ",".join("?" for _item in seen_lot_ids)
             collision = conn.execute(
                 f"""
                 SELECT record_id
@@ -822,7 +822,7 @@ def persist_manual_adjust_events(
                 ORDER BY record_id ASC
                 LIMIT 1
                 """,
-                (*sorted(desired_group_ids), *sorted(seen_record_ids)),
+                (*sorted(desired_group_ids), *sorted(seen_lot_ids)),
             ).fetchone()
             if collision is not None:
                 raise ValueError(
@@ -831,16 +831,16 @@ def persist_manual_adjust_events(
                 )
 
         prepared: list[tuple[str, TradeEvent, PositionLotPatch]] = []
-        for record_id, fields, item in validated:
-            current_fields = current_by_record_id[record_id]
+        for lot_id, fields, item in validated:
+            current_fields = current_by_lot_id[lot_id]
             event, patch_contract = _build_manual_adjust_event(
                 sqlite_repo,
-                record_id=record_id,
+                lot_id=lot_id,
                 fields=fields,
                 current_fields=current_fields,
                 **item,
             )
-            prepared.append((record_id, event, patch_contract))
+            prepared.append((lot_id, event, patch_contract))
 
         decision_fence = capture_trade_event_decision_projection_fence(
             sqlite_repo,
@@ -848,7 +848,7 @@ def persist_manual_adjust_events(
         )
         runtime = run_position_projection_in_transaction(
             sqlite_repo,
-            [event for _record_id, event, _patch_contract in prepared],
+            [event for _lot_id, event, _patch_contract in prepared],
             conn=conn,
             mode="fast_if_safe",
         )
@@ -856,19 +856,19 @@ def persist_manual_adjust_events(
             sqlite_repo,
             conn=conn,
             fence=decision_fence,
-            events=[event for _record_id, event, _patch_contract in prepared],
+            events=[event for _lot_id, event, _patch_contract in prepared],
             created_flags=runtime.created_flags,
         )
         diagnostics = projection_diagnostics_summary(runtime.diagnostics)
         out: list[LedgerWriteResult] = []
-        for (record_id, event, patch_contract), created in zip(
+        for (lot_id, event, patch_contract), created in zip(
             prepared,
             runtime.created_flags,
             strict=True,
         ):
             payload = {
                 "event_id": event.event_id,
-                "record_id": record_id,
+                "record_id": lot_id,
                 "created": created,
                 "position_lot_count": int(runtime.position_lot_count),
                 **diagnostics,

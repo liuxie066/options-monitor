@@ -292,7 +292,7 @@ def test_wheel_linkage_agent_put_preview_uses_canonical_branch(
                 "market": "us",
                 "apply_changes": False,
                 "as_of_ms": 123,
-                "option_record_id": "put-lot-1",
+                "option_lot_id": "put-lot-1",
                 "linkage_candidate_id": "candidate-1",
                 "expected_input_hash": "input-1",
                 "reason": "not this cycle",

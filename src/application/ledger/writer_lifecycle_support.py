@@ -33,7 +33,7 @@ def _existing_combo_adoption_leg(
     *,
     records_by_id: dict[str, Any],
     events_by_id: dict[str, dict[str, Any]],
-    record_id: str,
+    lot_id: str,
     open_event_id: str,
     group_id: str,
     expected_contracts: int,
@@ -42,7 +42,7 @@ def _existing_combo_adoption_leg(
     accepted_roles: set[str],
     require_fully_open: bool,
 ) -> dict[str, Any]:
-    record_value = str(record_id or "").strip()
+    record_value = str(lot_id or "").strip()
     event_value = str(open_event_id or "").strip()
     record = records_by_id.get(record_value)
     event = events_by_id.get(event_value)
@@ -152,22 +152,22 @@ def _combo_nonnegative_contract_count(value: Any) -> int | None:
 def _assert_combo_membership_exact(
     membership: ComboMembershipResolution,
     *,
-    expected_record_ids: set[str],
+    expected_lot_ids: set[str],
     require_fully_open: bool,
 ) -> None:
-    expected = tuple(sorted(expected_record_ids))
+    expected = tuple(sorted(expected_lot_ids))
     if (
         membership.fact.get("status") != "exact"
-        or membership.global_current_record_ids != expected
-        or membership.global_historical_record_ids != expected
+        or membership.global_current_lot_ids != expected
+        or membership.global_historical_lot_ids != expected
         or membership.retag_events
         or (
             require_fully_open
-            and membership.global_live_record_ids != expected
+            and membership.global_live_lot_ids != expected
         )
         or any(
-            record_id not in expected_record_ids
-            for record_id in membership.global_live_record_ids
+            lot_id not in expected_lot_ids
+            for lot_id in membership.global_live_lot_ids
         )
     ):
         reasons = ",".join(membership.fact.get("reason_codes") or ())
@@ -183,15 +183,15 @@ def _combo_leg_from_projected_record(
     records_by_open_event: dict[str, Any],
 ) -> dict[str, Any]:
     event_id = str(intent.get(f"{prefix}_open_event_id") or "").strip()
-    expected_record_id = str(intent.get(f"{prefix}_expected_record_id") or "").strip()
+    expected_lot_id = str(intent.get(f"{prefix}_expected_record_id") or "").strip()
     role = str(intent.get(f"{prefix}_role") or "").strip().lower()
     record = records_by_open_event.get(event_id)
-    record_id = (
+    lot_id = (
         str(record.get("record_id") or "").strip()
         if isinstance(record, dict)
-        else str(getattr(record, "record_id", "") or "").strip()
+        else str(getattr(record, "lot_id", "") or "").strip()
     )
-    if record is None or record_id != expected_record_id:
+    if record is None or lot_id != expected_lot_id:
         raise ValueError(f"combo identity {prefix} projected record mismatch")
     fields = dict(
         record.get("fields", {})
@@ -223,7 +223,7 @@ def _combo_leg_from_projected_record(
         "leg_role": role,
         "contracts": expected_contracts,
         "open_event_id": event_id,
-        "record_id": record_id,
+        "record_id": lot_id,
         "contract_key": contract_key,
     }
 
@@ -325,13 +325,13 @@ def _projected_remaining_by_lot(
     wanted = {str(item or "").strip() for item in target_lot_ids}
     remaining: dict[str, int] = {}
     for record in projection_lots:
-        record_id = str(
+        lot_id = str(
             record.get("record_id")
             if isinstance(record, dict)
-            else getattr(record, "record_id", "")
+            else getattr(record, "lot_id", "")
             or ""
         ).strip()
-        if record_id not in wanted:
+        if lot_id not in wanted:
             continue
         fields = dict(
             record.get("fields", {})
@@ -339,7 +339,7 @@ def _projected_remaining_by_lot(
             else getattr(record, "fields", {})
             or {}
         )
-        remaining[record_id] = int(fields.get("contracts_open") or 0)
+        remaining[lot_id] = int(fields.get("contracts_open") or 0)
     missing = sorted(wanted - set(remaining))
     if missing:
         raise ValueError(

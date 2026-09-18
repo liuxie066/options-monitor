@@ -198,7 +198,7 @@ def _persist_lifecycle_close_events(
             settlement_source,
             (
                 {
-                    "target_lot_id": str(match.record_id),
+                    "target_lot_id": str(match.lot_id),
                     "contracts_allocated": int(match.contracts_to_close),
                     "multiplier": effective_multiplier(dict(match.candidate.raw_fields))
                     if match.candidate is not None
@@ -208,7 +208,7 @@ def _persist_lifecycle_close_events(
             ),
         )
     for match in close_target_resolution.matches:
-        record_id = str(match.record_id or "").strip()
+        lot_id = str(match.lot_id or "").strip()
         contracts = int(match.contracts_to_close or 0)
         if contracts <= 0:
             raise ValueError(f"{normalized_event_type} requires contracts_to_close > 0")
@@ -218,7 +218,7 @@ def _persist_lifecycle_close_events(
         fields = dict(match.candidate.raw_fields)
         ledger_preflight = preflight_broker_trade_close(
             repo,
-            record_id=record_id,
+            lot_id=lot_id,
             fields=fields,
             contracts_to_close=contracts,
             close_price=0.0,
@@ -233,24 +233,24 @@ def _persist_lifecycle_close_events(
             allocation_id = allocation_id_for(
                 case_id=case_id,
                 evidence_id=allocation_evidence_id,
-                target_lot_id=record_id,
+                target_lot_id=lot_id,
             )
             event_id = terminal_event_id_for(
                 case_id=case_id,
                 evidence_id=allocation_evidence_id,
-                target_lot_id=record_id,
+                target_lot_id=lot_id,
                 terminal_type=normalized_event_type,
                 contracts_allocated=contracts,
             )
         elif str(manual_request_id or "").strip():
             stable_request = str(manual_request_id).strip()
             digest = hashlib.sha256(
-                f"{normalized_event_type}|{stable_request}|{record_id}".encode("utf-8")
+                f"{normalized_event_type}|{stable_request}|{lot_id}".encode("utf-8")
             ).hexdigest()[:24]
             event_id = f"manual-{normalized_event_type}-request-{digest}"
         event = _lifecycle_close_event(
             fields=fields,
-            record_id=record_id,
+            lot_id=lot_id,
             contracts_to_close=contracts,
             event_type=normalized_event_type,
             event_time_ms=int(ledger_preflight.event_time_ms),
@@ -258,7 +258,7 @@ def _persist_lifecycle_close_events(
             case_id=case_id,
             evidence_ids=evidence_tuple,
             close_target_resolution=close_target_resolution.to_dict(),
-            stock_settlement=settlements_by_lot.get(record_id, settlement_source),
+            stock_settlement=settlements_by_lot.get(lot_id, settlement_source),
             stock_settlement_source=settlement_source if settlements_by_lot else None,
             close_reason=close_reason,
             event_id=event_id,
@@ -275,11 +275,11 @@ def _persist_lifecycle_close_events(
             "allocation_id": allocation_id_for(
                 case_id=str(case_id),
                 evidence_id=str(allocation_evidence_id),
-                target_lot_id=str(match.record_id),
+                target_lot_id=str(match.lot_id),
             ),
             "case_id": str(case_id),
             "evidence_id": str(allocation_evidence_id),
-            "target_lot_id": str(match.record_id),
+            "target_lot_id": str(match.lot_id),
             "terminal_type": normalized_event_type,
             "contracts_allocated": int(contracts),
             "canonical_terminal_event_id": event.event_id,
@@ -293,11 +293,11 @@ def _persist_lifecycle_close_events(
                 "status": "ledger_written",
                 "decision_type": normalized_event_type,
                 "target_lot_ids": [
-                    str(match.record_id)
+                    str(match.lot_id)
                     for match, _contracts, _preflight, _event in prepared
                 ],
                 "target_contracts_by_lot": {
-                    str(match.record_id): int(contracts)
+                    str(match.lot_id): int(contracts)
                     for match, contracts, _preflight, _event in prepared
                 },
             }
@@ -318,11 +318,11 @@ def _persist_lifecycle_close_events(
         persisted,
         strict=True,
     ):
-        record_id = str(match.record_id or "").strip()
+        lot_id = str(match.lot_id or "").strip()
         result_payload = _ledger_write_result(result).to_dict()
         operation = BrokerTradeOperation(
             action=normalized_event_type,
-            record_id=record_id,
+            lot_id=lot_id,
             contracts_to_close=contracts,
             matched_by=match.matched_by,
             event_id=result_payload.get("event_id"),
@@ -333,7 +333,7 @@ def _persist_lifecycle_close_events(
                 "case_id": case_id,
                 "evidence_ids": list(evidence_tuple),
                 "stock_settlement": dict(
-                    settlements_by_lot.get(record_id, settlement_source)
+                    settlements_by_lot.get(lot_id, settlement_source)
                 ),
                 "stock_settlement_source": dict(settlement_source)
                 if settlements_by_lot
@@ -429,7 +429,7 @@ def persist_exercise_event(
 def _lifecycle_close_event(
     *,
     fields: dict[str, Any],
-    record_id: str,
+    lot_id: str,
     contracts_to_close: int,
     event_type: str,
     event_time_ms: int,
@@ -448,7 +448,7 @@ def _lifecycle_close_event(
 ) -> TradeEvent:
     strike = effective_strike(fields)
     multiplier = effective_multiplier(fields)
-    canonical_event_id = str(event_id or "").strip() or f"{event_type}-{record_id}-{uuid.uuid4().hex}"
+    canonical_event_id = str(event_id or "").strip() or f"{event_type}-{lot_id}-{uuid.uuid4().hex}"
     raw_close_type = EXPIRE_AUTO_CLOSE if event_type == "expire_close" else event_type
     strategy_payload = strategy_metadata_fields_from_payload(fields)
     return TradeEvent(
@@ -468,12 +468,12 @@ def _lifecycle_close_event(
         currency=normalize_currency(fields.get("currency")),
         source=source,
         multiplier=(float(multiplier) if multiplier is not None else 100.0),
-        target_lot_id=str(record_id),
+        target_lot_id=str(lot_id),
         raw_payload={
             "source": "om option lifecycle",
             "source_type": "system_trade_event",
-            "record_id": str(record_id),
-            "target_lot_id": str(record_id),
+            "record_id": str(lot_id),
+            "target_lot_id": str(lot_id),
             "close_target_source_event_id": str(fields.get("source_event_id") or "").strip() or None,
             "close_target_account": normalize_account(fields.get("account")),
             "close_target_broker": normalize_broker(fields.get("broker")),

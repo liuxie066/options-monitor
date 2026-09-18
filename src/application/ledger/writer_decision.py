@@ -68,7 +68,7 @@ def _trade_events_by_id(
         if isinstance(item, dict) and str(item.get("event_id") or "").strip()
     }
 
-def _event_position_record_id(event: Any) -> str | None:
+def _event_position_lot_id(event: Any) -> str | None:
     payload = dict(getattr(event, "raw_payload", {}) or {})
     explicit = str(
         payload.get("record_id")

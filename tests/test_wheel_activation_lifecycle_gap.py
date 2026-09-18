@@ -110,7 +110,7 @@ def test_publish_failure_preserves_historical_assignment_rules_and_same_request_
     assert failed["ready"] is False
 
     repo = SQLiteOptionPositionsRepository(failed["paths"]["sqlite_path"])
-    assignment, stock_lot_id, _assignment_event = _persist_put_assignment(
+    assignment, lot_id, _assignment_event = _persist_put_assignment(
         repo,
         prefix="publish-gap",
         opened_at_ms=1_000,
@@ -156,7 +156,7 @@ def test_publish_failure_preserves_historical_assignment_rules_and_same_request_
             candidate_snapshot={},
             current_strategy_policy_sha256="b" * 64,
             account="lx",
-            stock_lot_id=stock_lot_id,
+            lot_id=lot_id,
             final_candidate_id="publish-gap-candidate",
             expected_snapshot_hash="publish-gap-snapshot",
             expected_batch_generation_hash=branch["batch_generation_hash"],
@@ -176,7 +176,7 @@ def test_publish_failure_preserves_historical_assignment_rules_and_same_request_
     ended = end_wheel_lifecycle(
         repo,
         account="lx",
-        stock_lot_id=stock_lot_id,
+        lot_id=lot_id,
         expected_batch_generation_hash=branch["batch_generation_hash"],
         request_id="publish-gap-end",
         actor="tester",
@@ -225,7 +225,7 @@ def test_publish_failure_preserves_historical_assignment_rules_and_same_request_
     assert reenabled["latest_window"]["generation"] == 2
     assert reenabled["latest_window"]["activated_at_ms"] == 5_000
 
-    late, _late_stock_lot_id, _late_event = _persist_put_assignment(
+    late, _late_lot_id, _late_event = _persist_put_assignment(
         repo,
         prefix="late-active-window",
         opened_at_ms=2_100,
@@ -243,7 +243,7 @@ def test_publish_failure_preserves_historical_assignment_rules_and_same_request_
     )
 
     before_gap = repo.list_wheel_events(account="lx")
-    gap, _gap_stock_lot_id, gap_event = _persist_put_assignment(
+    gap, _gap_lot_id, gap_event = _persist_put_assignment(
         repo,
         prefix="closed-window-gap",
         opened_at_ms=3_500,

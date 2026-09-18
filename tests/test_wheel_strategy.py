@@ -30,7 +30,7 @@ def _started_event(*, source_trade_event_id: str = "assign-put") -> dict:
         event_id="wheel-start-1",
         event_schema_version=WHEEL_EVENT_SCHEMA_V1,
         account="lx",
-        stock_lot_id="assigned-stock-assign-put",
+        lot_id="assigned-stock-assign-put",
         event_type="wheel_started",
         occurred_at_ms=2_000,
         recorded_at_ms=2_001,
@@ -186,7 +186,7 @@ def test_repository_appends_wheel_event_once_and_reads_it_in_same_snapshot(
     lot = repo.list_position_lots()[0]
     record_manual_assignment(
         repo,
-        record_id=lot["record_id"],
+        lot_id=lot["record_id"],
         contracts_to_close=1,
         stock_side="buy",
         stock_qty=100,
@@ -196,12 +196,12 @@ def test_repository_appends_wheel_event_once_and_reads_it_in_same_snapshot(
     assignment = next(
         item for item in repo.list_trade_events() if item["event_type"] == "assignment"
     )
-    stock_lot_id = f"assigned-stock-{assignment['event_id']}"
+    lot_id = f"assigned-stock-{assignment['event_id']}"
     event = build_wheel_event(
         event_id=f"wheel-start-{assignment['event_id']}",
         event_schema_version=WHEEL_EVENT_SCHEMA_V1,
         account="lx",
-        stock_lot_id=stock_lot_id,
+        lot_id=lot_id,
         event_type="wheel_started",
         occurred_at_ms=2_000,
         recorded_at_ms=2_001,
@@ -219,8 +219,8 @@ def test_repository_appends_wheel_event_once_and_reads_it_in_same_snapshot(
 
     assert rows["account_wheel_events"] == [event]
     assert event["event_schema_version"] == "wheel_event.v1"
-    assert event["wheel_branch_id"] == stock_lot_id
-    assert model["batches"][0]["stock_lot_id"] == stock_lot_id
+    assert event["wheel_branch_id"] == lot_id
+    assert model["batches"][0]["stock_lot_id"] == lot_id
     assert model["batches"][0]["phase"] == "ready"
     with repo._connect() as conn, pytest.raises(sqlite3.IntegrityError):
         conn.execute(
@@ -331,7 +331,7 @@ def test_repository_migrates_wheel_event_v1_without_changing_hash_or_facts(
         event_id="legacy-wheel-start",
         event_schema_version=WHEEL_EVENT_SCHEMA_V1,
         account="lx",
-        stock_lot_id="assigned-stock-legacy",
+        lot_id="assigned-stock-legacy",
         event_type="wheel_started",
         occurred_at_ms=2_000,
         recorded_at_ms=2_001,
@@ -424,7 +424,7 @@ def test_repository_appends_nullable_stock_wheel_event_v2_and_rejects_tamper(
         event_id="wheel-put-branch-created",
         account="lx",
         wheel_branch_id="wheel-put:branch-1",
-        stock_lot_id=None,
+        lot_id=None,
         event_type="wheel_branch_created",
         occurred_at_ms=2_000,
         recorded_at_ms=2_001,
@@ -450,7 +450,7 @@ def test_repository_rejects_wheel_v1_migration_when_hash_does_not_recompute(
         event_id="legacy-invalid-hash",
         event_schema_version=WHEEL_EVENT_SCHEMA_V1,
         account="lx",
-        stock_lot_id="assigned-stock-legacy",
+        lot_id="assigned-stock-legacy",
         event_type="wheel_started",
         occurred_at_ms=2_000,
         recorded_at_ms=2_001,
@@ -518,7 +518,7 @@ def test_position_lot_patch_accepts_first_class_stock_lot_link() -> None:
         },
         strategy="wheel",
         leg_role="wheel_call",
-        source_stock_lot_id="assigned-stock-assign-put",
+        source_lot_id="assigned-stock-assign-put",
         as_of_ms=3_000,
     )
 
@@ -603,7 +603,7 @@ def test_void_removes_intent_and_linkage_rejection_from_standalone_projections()
     intent = build_wheel_event(
         event_id="intent-created-1",
         account="lx",
-        stock_lot_id="stock-1",
+        lot_id="stock-1",
         event_type="wheel_call_intent_created",
         occurred_at_ms=2_000,
         recorded_at_ms=2_001,
@@ -613,7 +613,7 @@ def test_void_removes_intent_and_linkage_rejection_from_standalone_projections()
     rejection = build_wheel_event(
         event_id="linkage-rejected-1",
         account="lx",
-        stock_lot_id="stock-1",
+        lot_id="stock-1",
         event_type="wheel_call_linkage_rejected",
         occurred_at_ms=2_100,
         recorded_at_ms=2_101,
@@ -622,7 +622,7 @@ def test_void_removes_intent_and_linkage_rejection_from_standalone_projections()
     void_intent = build_wheel_event(
         event_id="void-intent-1",
         account="lx",
-        stock_lot_id="stock-1",
+        lot_id="stock-1",
         event_type="wheel_event_voided",
         occurred_at_ms=2_200,
         recorded_at_ms=2_201,
@@ -631,7 +631,7 @@ def test_void_removes_intent_and_linkage_rejection_from_standalone_projections()
     void_rejection = build_wheel_event(
         event_id="void-rejection-1",
         account="lx",
-        stock_lot_id="stock-1",
+        lot_id="stock-1",
         event_type="wheel_event_voided",
         occurred_at_ms=2_300,
         recorded_at_ms=2_301,
@@ -641,7 +641,7 @@ def test_void_removes_intent_and_linkage_rejection_from_standalone_projections()
     assert project_wheel_call_intents(
         [intent, void_intent],
         account="lx",
-        stock_lot_id="stock-1",
+        lot_id="stock-1",
         as_of_ms=3_000,
     ) == []
     candidates = project_wheel_call_linkage_candidates(

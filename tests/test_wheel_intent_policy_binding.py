@@ -89,7 +89,7 @@ def test_new_intent_rejects_old_policy_and_allows_restored_policy(tmp_path, monk
     create = workflows.create_wheel_intent
     if entry == "legacy_call":
         create = workflows.create_wheel_call_intent
-        request["stock_lot_id"] = branch["stock_lot_id"]
+        request["lot_id"] = branch["stock_lot_id"]
         request["expected_batch_generation_hash"] = request.pop("expected_batch_generation_hash")
         request["coverage_fact"] = request.pop("capacity_fact")
         request.pop("direction")

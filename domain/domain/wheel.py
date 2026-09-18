@@ -472,14 +472,14 @@ def normalize_wheel_event(event: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError(
             f"unsupported wheel event schema: {event_schema_version}"
         )
-    stock_lot_id = str(event.get("stock_lot_id") or "").strip() or None
-    if event_schema_version == WHEEL_EVENT_SCHEMA_V1 and stock_lot_id is None:
+    lot_id = str(event.get("stock_lot_id") or "").strip() or None
+    if event_schema_version == WHEEL_EVENT_SCHEMA_V1 and lot_id is None:
         raise ValueError("wheel event requires stock_lot_id")
     wheel_branch_id = str(event.get("wheel_branch_id") or "").strip()
     if event_schema_version == WHEEL_EVENT_SCHEMA_V1:
-        if wheel_branch_id and wheel_branch_id != stock_lot_id:
+        if wheel_branch_id and wheel_branch_id != lot_id:
             raise ValueError("wheel_event.v1 branch must equal stock_lot_id")
-        wheel_branch_id = str(stock_lot_id)
+        wheel_branch_id = str(lot_id)
     else:
         wheel_branch_id = _required_text(wheel_branch_id, "wheel_branch_id")
     event_type = _required_text(event.get("event_type"), "event_type").lower()
@@ -519,7 +519,7 @@ def normalize_wheel_event(event: Mapping[str, Any]) -> dict[str, Any]:
         "event_schema_version": event_schema_version,
         "account": account,
         "wheel_branch_id": wheel_branch_id,
-        "stock_lot_id": stock_lot_id,
+        "stock_lot_id": lot_id,
         "event_type": event_type,
         "occurred_at_ms": occurred_at_ms,
         "recorded_at_ms": recorded_at_ms,
@@ -539,7 +539,7 @@ def build_wheel_event(
     *,
     event_id: str,
     account: str,
-    stock_lot_id: str | None,
+    lot_id: str | None,
     wheel_branch_id: str | None = None,
     event_schema_version: str = WHEEL_EVENT_SCHEMA_V2,
     event_type: str,
@@ -554,8 +554,8 @@ def build_wheel_event(
             "event_id": event_id,
             "event_schema_version": event_schema_version,
             "account": account,
-            "wheel_branch_id": wheel_branch_id or stock_lot_id,
-            "stock_lot_id": stock_lot_id,
+            "wheel_branch_id": wheel_branch_id or lot_id,
+            "stock_lot_id": lot_id,
             "event_type": event_type,
             "occurred_at_ms": occurred_at_ms,
             "recorded_at_ms": recorded_at_ms,
@@ -606,7 +606,7 @@ def build_wheel_branch_created_event(
     principal_anchor: str | None,
     principal_anchor_reason: str | None = None,
     principal_anchor_fact_ids: Sequence[str] = (),
-    stock_lot_id: str | None = None,
+    lot_id: str | None = None,
     parent_branch_id: str | None = None,
     lifecycle_status: str = "active",
     activation_window: Mapping[str, Any] | None = None,
@@ -622,7 +622,7 @@ def build_wheel_branch_created_event(
         source_assignment_event_id,
         "source_assignment_event_id",
     )
-    stock_lot_value = str(stock_lot_id or "").strip() or None
+    stock_lot_value = str(lot_id or "").strip() or None
     if direction_value == "call" and stock_lot_value is None:
         raise ValueError("Wheel Call branch requires stock_lot_id")
     branch_id = (
@@ -672,7 +672,7 @@ def build_wheel_branch_created_event(
         event_schema_version=WHEEL_EVENT_SCHEMA_V2,
         account=account_value,
         wheel_branch_id=branch_id,
-        stock_lot_id=stock_lot_value,
+        lot_id=stock_lot_value,
         event_type="wheel_branch_created",
         occurred_at_ms=occurred_at_ms,
         recorded_at_ms=recorded_at_ms,
@@ -718,7 +718,7 @@ def plan_wheel_branch_decision(
         event_schema_version=WHEEL_EVENT_SCHEMA_V2,
         account=account,
         wheel_branch_id=branch_id,
-        stock_lot_id=str(branch.get("stock_lot_id") or "").strip() or None,
+        lot_id=str(branch.get("stock_lot_id") or "").strip() or None,
         event_type="wheel_branch_decided",
         occurred_at_ms=occurred_at_ms,
         recorded_at_ms=recorded_at_ms,
@@ -816,12 +816,12 @@ def wheel_started_event_from_assignment(
         stock.get("event_time_ms") or event.get("event_time_ms"),
         "assignment occurred_at_ms",
     )
-    stock_lot_id = f"assigned-stock-{event_id}"
+    lot_id = f"assigned-stock-{event_id}"
     return build_wheel_event(
         event_id=f"wheel-started:{event_id}",
         event_schema_version=WHEEL_EVENT_SCHEMA_V1,
         account=account,
-        stock_lot_id=stock_lot_id,
+        lot_id=lot_id,
         event_type="wheel_started",
         occurred_at_ms=occurred_at_ms,
         recorded_at_ms=recorded_at_ms,
@@ -850,13 +850,13 @@ def wheel_called_away_event_from_call_assignment(
     fields = _lot_fields(source_call_lot)
     strategy = str(fields.get("strategy") or "").strip().lower()
     leg_role = str(fields.get("leg_role") or "").strip().lower()
-    stock_lot_id = str(fields.get("source_stock_lot_id") or "").strip()
-    if strategy != "wheel" and leg_role != "wheel_call" and not stock_lot_id:
+    lot_id = str(fields.get("source_stock_lot_id") or "").strip()
+    if strategy != "wheel" and leg_role != "wheel_call" and not lot_id:
         return None
     if (
         strategy != "wheel"
         or leg_role != "wheel_call"
-        or not stock_lot_id
+        or not lot_id
         or str(fields.get("strategy_group_id") or "").strip()
         or str(fields.get("option_type") or "").strip().lower() != "call"
         or str(fields.get("side") or fields.get("position_side") or "").strip().lower()
@@ -877,8 +877,8 @@ def wheel_called_away_event_from_call_assignment(
     if multiplier <= 0 or shares != contracts * multiplier:
         raise ValueError("Wheel Call assignment settlement quantity is invalid")
     if (
-        str((stock_lot_before or {}).get("stock_lot_id") or "") != stock_lot_id
-        or str((stock_lot_after or {}).get("stock_lot_id") or "") != stock_lot_id
+        str((stock_lot_before or {}).get("stock_lot_id") or "") != lot_id
+        or str((stock_lot_after or {}).get("stock_lot_id") or "") != lot_id
         or before - after != shares
         or after < 0
     ):
@@ -895,10 +895,10 @@ def wheel_called_away_event_from_call_assignment(
         "assignment occurred_at_ms",
     )
     return build_wheel_event(
-        event_id=f"wheel-called-away:{source_event_id}:{stock_lot_id}",
+        event_id=f"wheel-called-away:{source_event_id}:{lot_id}",
         event_schema_version=WHEEL_EVENT_SCHEMA_V1,
         account=account,
-        stock_lot_id=stock_lot_id,
+        lot_id=lot_id,
         event_type="wheel_called_away",
         occurred_at_ms=occurred_at_ms,
         recorded_at_ms=recorded_at_ms,
@@ -920,7 +920,7 @@ def plan_wheel_manual_end(
     recorded_at_ms: int,
     account: str,
 ) -> dict[str, Any]:
-    stock_lot_id = _required_text(wheel_batch.get("stock_lot_id"), "stock_lot_id")
+    lot_id = _required_text(wheel_batch.get("stock_lot_id"), "stock_lot_id")
     if wheel_batch.get("lifecycle_status") != "active":
         raise ValueError("Wheel lifecycle is not active")
     if wheel_batch.get("integrity_status") != "trusted":
@@ -935,7 +935,7 @@ def plan_wheel_manual_end(
     event_digest = canonical_sha256(
         {
             "account": account_value,
-            "stock_lot_id": stock_lot_id,
+            "stock_lot_id": lot_id,
             "request_id": request,
         }
     )[:24]
@@ -947,7 +947,7 @@ def plan_wheel_manual_end(
             else WHEEL_EVENT_SCHEMA_V2
         ),
         account=account_value,
-        stock_lot_id=stock_lot_id,
+        lot_id=lot_id,
         event_type="wheel_manual_ended",
         occurred_at_ms=occurred_at_ms,
         recorded_at_ms=recorded_at_ms,
@@ -1115,7 +1115,7 @@ def plan_wheel_call_intent_create(
         raise ValueError("Wheel batch is not ready for a Call intent")
     account = _required_text(batch.get("account"), "account").lower()
     symbol = _required_text(batch.get("symbol"), "symbol").upper()
-    stock_lot_id = _required_text(batch.get("stock_lot_id"), "stock_lot_id")
+    lot_id = _required_text(batch.get("stock_lot_id"), "stock_lot_id")
     candidate_id = _required_text(
         final_candidate.get("final_candidate_id")
         or final_candidate.get("candidate_id"),
@@ -1137,7 +1137,7 @@ def plan_wheel_call_intent_create(
         raise ValueError("Wheel Call candidate account mismatch")
     if str(final_candidate.get("symbol") or "").strip().upper() != symbol:
         raise ValueError("Wheel Call candidate symbol mismatch")
-    if str(final_candidate.get("stock_lot_id") or "").strip() != stock_lot_id:
+    if str(final_candidate.get("stock_lot_id") or "").strip() != lot_id:
         raise ValueError("Wheel Call candidate stock batch mismatch")
     if int(batch.get("shares_remaining") or 0) < contracts * multiplier:
         raise ValueError("Wheel batch shares are insufficient")
@@ -1155,7 +1155,7 @@ def plan_wheel_call_intent_create(
     request = _required_text(request_id, "request_id")
     actor_value = _required_text(actor, "actor")
     digest = canonical_sha256(
-        {"account": account, "stock_lot_id": stock_lot_id, "request_id": request}
+        {"account": account, "stock_lot_id": lot_id, "request_id": request}
     )[:24]
     intent_id = f"wheel-call-intent:{digest}"
     return build_wheel_event(
@@ -1166,7 +1166,7 @@ def plan_wheel_call_intent_create(
             else WHEEL_EVENT_SCHEMA_V2
         ),
         account=account,
-        stock_lot_id=stock_lot_id,
+        lot_id=lot_id,
         event_type="wheel_call_intent_created",
         occurred_at_ms=now,
         recorded_at_ms=recorded_at_ms,
@@ -1255,7 +1255,7 @@ def plan_wheel_put_intent_create(
         event_schema_version=WHEEL_EVENT_SCHEMA_V2,
         account=account,
         wheel_branch_id=branch_id,
-        stock_lot_id=str(branch.get("stock_lot_id") or "").strip() or None,
+        lot_id=str(branch.get("stock_lot_id") or "").strip() or None,
         event_type="wheel_put_intent_created",
         occurred_at_ms=now,
         recorded_at_ms=recorded_at_ms,
@@ -1302,11 +1302,11 @@ def plan_wheel_call_intent_cancel(
     intent_id = _required_text(intent.get("intent_id"), "intent_id")
     request = _required_text(request_id, "request_id")
     account = _required_text(batch.get("account"), "account").lower()
-    stock_lot_id = _required_text(batch.get("stock_lot_id"), "stock_lot_id")
+    lot_id = _required_text(batch.get("stock_lot_id"), "stock_lot_id")
     digest = canonical_sha256(
         {
             "account": account,
-            "stock_lot_id": stock_lot_id,
+            "stock_lot_id": lot_id,
             "intent_id": intent_id,
             "request_id": request,
         }
@@ -1319,7 +1319,7 @@ def plan_wheel_call_intent_cancel(
             else WHEEL_EVENT_SCHEMA_V2
         ),
         account=account,
-        stock_lot_id=stock_lot_id,
+        lot_id=lot_id,
         event_type="wheel_call_intent_cancelled",
         occurred_at_ms=occurred_at_ms,
         recorded_at_ms=recorded_at_ms,
@@ -1402,7 +1402,7 @@ def plan_wheel_call_intent_consume(
             else WHEEL_EVENT_SCHEMA_V2
         ),
         account=str(batch.get("account") or ""),
-        stock_lot_id=str(batch.get("stock_lot_id") or ""),
+        lot_id=str(batch.get("stock_lot_id") or ""),
         event_type="wheel_call_intent_consumed",
         occurred_at_ms=occurred_at_ms,
         recorded_at_ms=recorded_at_ms,
@@ -1495,7 +1495,7 @@ def plan_wheel_put_intent_cancel(
         event_schema_version=WHEEL_EVENT_SCHEMA_V2,
         account=account,
         wheel_branch_id=branch_id,
-        stock_lot_id=str(branch.get("stock_lot_id") or "").strip() or None,
+        lot_id=str(branch.get("stock_lot_id") or "").strip() or None,
         event_type="wheel_put_intent_cancelled",
         occurred_at_ms=occurred_at_ms,
         recorded_at_ms=recorded_at_ms,
@@ -1582,7 +1582,7 @@ def plan_wheel_put_intent_consume(
         event_schema_version=WHEEL_EVENT_SCHEMA_V2,
         account=account,
         wheel_branch_id=branch_id,
-        stock_lot_id=str(branch.get("stock_lot_id") or "").strip() or None,
+        lot_id=str(branch.get("stock_lot_id") or "").strip() or None,
         event_type="wheel_put_intent_consumed",
         occurred_at_ms=occurred_at_ms,
         recorded_at_ms=recorded_at_ms,
@@ -1924,12 +1924,12 @@ def project_wheel_call_intents(
     wheel_events: Sequence[Mapping[str, Any]],
     *,
     account: str,
-    stock_lot_id: str,
+    lot_id: str,
     as_of_ms: int,
     known_trade_event_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     account_value = _required_text(account, "account").lower()
-    stock_lot_value = _required_text(stock_lot_id, "stock_lot_id")
+    stock_lot_value = _required_text(lot_id, "stock_lot_id")
     instant = _positive_int(as_of_ms, "as_of_ms")
     events, _invalid = effective_wheel_events(
         [
@@ -1987,7 +1987,7 @@ def project_wheel_call_linkage_candidates(
             )
         ):
             continue
-        call_record_id = _required_text(row.get("record_id"), "call_record_id")
+        call_lot_id = _required_text(row.get("record_id"), "call_record_id")
         call_open_event_id = _required_text(
             fields.get("source_event_id"),
             "call_open_event_id",
@@ -1995,14 +1995,14 @@ def project_wheel_call_linkage_candidates(
         account = str(fields.get("account") or "").strip().lower()
         symbol = str(fields.get("symbol") or "").strip().upper()
         for batch in wheel_batches:
-            stock_lot_id = str(batch.get("stock_lot_id") or "").strip()
+            lot_id = str(batch.get("stock_lot_id") or "").strip()
             if (
                 batch.get("lifecycle_status") != "active"
                 or batch.get("integrity_status") != "trusted"
                 or batch.get("active_call_lot_ids")
                 or str(batch.get("account") or "").strip().lower() != account
                 or str(batch.get("symbol") or "").strip().upper() != symbol
-                or (call_open_event_id, stock_lot_id) in rejected
+                or (call_open_event_id, lot_id) in rejected
             ):
                 continue
             try:
@@ -2017,7 +2017,7 @@ def project_wheel_call_linkage_candidates(
             digest = canonical_sha256(
                 {
                     "call_open_event_id": call_open_event_id,
-                    "stock_lot_id": stock_lot_id,
+                    "stock_lot_id": lot_id,
                 }
             )[:24]
             stable_call = {
@@ -2040,9 +2040,9 @@ def project_wheel_call_linkage_candidates(
                     "linkage_candidate_id": f"wheel-call-linkage:{digest}",
                     "input_snapshot_hash": canonical_sha256(
                         {
-                            "call_record_id": call_record_id,
+                            "call_record_id": call_lot_id,
                             "call": stable_call,
-                            "stock_lot_id": stock_lot_id,
+                            "stock_lot_id": lot_id,
                             "batch_generation_hash": batch.get(
                                 "batch_generation_hash"
                             ),
@@ -2050,9 +2050,9 @@ def project_wheel_call_linkage_candidates(
                     ),
                     "account": account,
                     "symbol": symbol,
-                    "call_record_id": call_record_id,
+                    "call_record_id": call_lot_id,
                     "call_open_event_id": call_open_event_id,
-                    "stock_lot_id": stock_lot_id,
+                    "stock_lot_id": lot_id,
                     "contracts": _contracts_open(fields),
                     "multiplier": int(float(fields.get("multiplier") or 0)),
                     "required_shares": required_shares,
@@ -2143,7 +2143,7 @@ def project_wheel_linkage_candidates(
             )
         ):
             continue
-        record_id = _required_text(row.get("record_id"), "option_record_id")
+        lot_id = _required_text(row.get("record_id"), "option_record_id")
         open_event_id = _required_text(
             fields.get("source_event_id"),
             "option_open_event_id",
@@ -2189,7 +2189,7 @@ def project_wheel_linkage_candidates(
                     "linkage_candidate_id": f"wheel-put-linkage:{digest}",
                     "input_snapshot_hash": canonical_sha256(
                         {
-                            "option_record_id": record_id,
+                            "option_record_id": lot_id,
                             "option": {
                                 key: fields.get(key)
                                 for key in (
@@ -2212,7 +2212,7 @@ def project_wheel_linkage_candidates(
                     "account": account,
                     "symbol": symbol,
                     "direction": "put",
-                    "option_record_id": record_id,
+                    "option_record_id": lot_id,
                     "option_open_event_id": open_event_id,
                     "wheel_branch_id": branch_id,
                     "contracts": contracts,
@@ -2282,7 +2282,7 @@ def project_wheel_lifecycles(
     lots = [(str(row.get("record_id") or "").strip(), _lot_fields(row)) for row in position_lots]
     results: list[dict[str, Any]] = []
     for group in sorted(grouped):
-        account, stock_lot_id = group
+        account, lot_id = group
         batch_events = sorted(
             grouped[group],
             key=lambda item: (int(item["occurred_at_ms"]), str(item["event_id"])),
@@ -2302,7 +2302,7 @@ def project_wheel_lifecycles(
         if len(terminals) > 1:
             reasons.add("wheel_terminal_conflict")
 
-        stock_matches = stock_rows_by_id.get(stock_lot_id, [])
+        stock_matches = stock_rows_by_id.get(lot_id, [])
         stock_row = stock_matches[0] if len(stock_matches) == 1 else None
         if len(stock_matches) > 1:
             reasons.add("assigned_stock_lot_conflict")
@@ -2321,10 +2321,10 @@ def project_wheel_lifecycles(
             reasons.add("wheel_start_stock_lot_mismatch")
 
         linked_lots: list[tuple[str, dict[str, Any]]] = []
-        for record_id, fields in lots:
+        for call_lot_id, fields in lots:
             if str(fields.get("account") or "").strip().lower() != account:
                 continue
-            if str(fields.get("source_stock_lot_id") or "").strip() != stock_lot_id:
+            if str(fields.get("source_stock_lot_id") or "").strip() != lot_id:
                 continue
             if (
                 str(fields.get("strategy") or "").strip().lower() != "wheel"
@@ -2335,9 +2335,9 @@ def project_wheel_lifecycles(
             ):
                 reasons.add("wheel_call_linkage_conflict")
                 continue
-            linked_lots.append((record_id, fields))
+            linked_lots.append((call_lot_id, fields))
         active_call_lot_ids = sorted(
-            record_id for record_id, fields in linked_lots if _contracts_open(fields) > 0
+            call_lot_id for call_lot_id, fields in linked_lots if _contracts_open(fields) > 0
         )
 
         assignment_ids = {
@@ -2345,7 +2345,7 @@ def project_wheel_lifecycles(
             for row in active_trade_events
             if _event_type(row) == "assignment"
             and str(row.get("target_lot_id") or "").strip()
-            in {record_id for record_id, _fields in linked_lots}
+            in {call_lot_id for call_lot_id, _fields in linked_lots}
         }
         called_events = [item for item in terminals if item["event_type"] == "wheel_called_away"]
         manual_events = [item for item in terminals if item["event_type"] == "wheel_manual_ended"]
@@ -2379,7 +2379,7 @@ def project_wheel_lifecycles(
             reasons.add("contract_multiplier_unavailable")
 
         locked_shares = 0
-        for _record_id, fields in linked_lots:
+        for _lot_id, fields in linked_lots:
             if _contracts_open(fields) <= 0:
                 continue
             try:
@@ -2394,7 +2394,7 @@ def project_wheel_lifecycles(
             if item["event_type"] == "wheel_call_linkage_rejected"
         }
         unresolved_lots: list[tuple[str, dict[str, Any]]] = []
-        for record_id, fields in lots:
+        for call_lot_id, fields in lots:
             if (
                 str(fields.get("account") or "").strip().lower() != account
                 or str(fields.get("symbol") or "").strip().upper()
@@ -2422,8 +2422,8 @@ def project_wheel_lifecycles(
             except (TypeError, ValueError):
                 continue
             if shares_remaining is not None and 0 < required <= shares_remaining:
-                unresolved_lots.append((record_id, fields))
-        unresolved_call_lot_ids = sorted(record_id for record_id, _fields in unresolved_lots)
+                unresolved_lots.append((call_lot_id, fields))
+        unresolved_call_lot_ids = sorted(call_lot_id for call_lot_id, _fields in unresolved_lots)
         if manual_events and (active_call_lot_ids or active_intent_ids):
             reasons.add("manual_end_has_active_call_or_intent")
         if called_events and shares_remaining != 0:
@@ -2432,7 +2432,7 @@ def project_wheel_lifecycles(
             reasons.add("called_away_event_missing")
 
         for review in review_rows:
-            if str(review.get("stock_lot_id") or "").strip() != stock_lot_id:
+            if str(review.get("stock_lot_id") or "").strip() != lot_id:
                 continue
             if str(review.get("status") or "") in {
                 "source_conflict",
@@ -2480,14 +2480,14 @@ def project_wheel_lifecycles(
             phase = "ready"
 
         related_lot_ids = {
-            record_id for record_id, _fields in [*linked_lots, *unresolved_lots]
+            call_lot_id for call_lot_id, _fields in [*linked_lots, *unresolved_lots]
         }
         related_trade_ids = {
             start_trade_id,
             *assignment_ids,
             *{
                 str(fields.get("source_event_id") or "").strip()
-                for _record_id, fields in linked_lots
+                for _lot_id, fields in linked_lots
             },
             *{
                 str(item.get("source_trade_event_id") or "").strip()
@@ -2503,7 +2503,7 @@ def project_wheel_lifecycles(
         generation_payload = {
             "schema_version": WHEEL_PROJECTION_SCHEMA,
             "account": account,
-            "stock_lot_id": stock_lot_id,
+            "stock_lot_id": lot_id,
             "wheel_events": [
                 {
                     key: event.get(key)
@@ -2522,8 +2522,8 @@ def project_wheel_lifecycles(
                 for event in batch_events
             ],
             "position_lots": [
-                {"record_id": record_id, "fields": fields}
-                for record_id, fields in [*linked_lots, *unresolved_lots]
+                {"record_id": call_lot_id, "fields": fields}
+                for call_lot_id, fields in [*linked_lots, *unresolved_lots]
             ],
             "trade_events": related_trades,
             "assigned_stock": _stable_stock_fact(stock_row),
@@ -2536,7 +2536,7 @@ def project_wheel_lifecycles(
             "account": account,
             "market": str(symbol_market(symbol) or "").strip().lower() or None,
             "symbol": symbol,
-            "stock_lot_id": stock_lot_id,
+            "stock_lot_id": lot_id,
             "lifecycle_status": lifecycle_status,
             "phase": phase,
             "integrity_status": integrity_status,
@@ -2835,8 +2835,8 @@ def project_wheel_branches(
             lifecycle_status = "converted"
 
         linked_lots = [
-            (record_id, fields)
-            for record_id, fields in lots
+            (option_lot_id, fields)
+            for option_lot_id, fields in lots
             if str(fields.get("account") or "").strip().lower() == account
             and str(fields.get("source_wheel_branch_id") or "").strip() == branch_id
         ]
@@ -2844,13 +2844,13 @@ def project_wheel_branches(
         if direction == "put":
             realized_net = Decimal(0)
             realized_net_available = allocation_projection_available
-            for record_id, fields in linked_lots:
+            for option_lot_id, fields in linked_lots:
                 try:
                     closed_contracts = int(fields.get("contracts_closed") or 0)
                 except (TypeError, ValueError):
                     realized_net_available = False
                     break
-                allocations = allocations_by_lot.get(record_id, [])
+                allocations = allocations_by_lot.get(option_lot_id, [])
                 if closed_contracts < 0 or sum(item.contracts for item in allocations) != closed_contracts:
                     realized_net_available = False
                     break
@@ -2866,12 +2866,12 @@ def project_wheel_branches(
             else:
                 reasons.add("realized_put_net_pnl_unavailable")
         active_lot_ids = sorted(
-            record_id
-            for record_id, fields in linked_lots
+            option_lot_id
+            for option_lot_id, fields in linked_lots
             if _contracts_open(fields) > 0
         )
         expected_role = f"wheel_{direction}"
-        for _record_id, fields in linked_lots:
+        for _lot_id, fields in linked_lots:
             if (
                 str(fields.get("strategy") or "").strip().lower() != "wheel"
                 or str(fields.get("leg_role") or "").strip().lower() != expected_role
@@ -2932,8 +2932,8 @@ def project_wheel_branches(
                         "remaining_contracts": remaining,
                     }
                 )
-        stock_lot_id = str(created.get("stock_lot_id") or "").strip() or None
-        stock_row = stock_by_id.get(stock_lot_id or "")
+        lot_id = str(created.get("stock_lot_id") or "").strip() or None
+        stock_row = stock_by_id.get(lot_id or "")
         if direction == "call" and stock_row is None:
             reasons.add("assigned_stock_lot_unavailable")
 
@@ -2981,8 +2981,8 @@ def project_wheel_branches(
                 key=lambda item: item["event_id"],
             ),
             "position_lots": [
-                {"record_id": record_id, "fields": fields}
-                for record_id, fields in linked_lots
+                {"record_id": option_lot_id, "fields": fields}
+                for option_lot_id, fields in linked_lots
             ],
             "assigned_stock": _stable_stock_fact(stock_row),
             "realized_put_net_pnl_in_current_stage": realized_put_net_pnl,
@@ -3002,7 +3002,7 @@ def project_wheel_branches(
             "wheel_branch_id": branch_id,
             "parent_branch_id": str(payload.get("parent_branch_id") or "").strip() or None,
             "direction": direction,
-            "stock_lot_id": stock_lot_id,
+            "stock_lot_id": lot_id,
             "source_assignment_event_id": source_assignment_event_id,
             "lifecycle_status": lifecycle_status,
             "phase": phase,

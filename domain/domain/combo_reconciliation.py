@@ -28,7 +28,7 @@ _EVIDENCE_PRIORITY = {
 
 @dataclass(frozen=True)
 class _Lot:
-    record_id: str
+    lot_id: str
     open_event_id: str
     account: str
     broker: str
@@ -60,7 +60,7 @@ class _Lot:
 
     def snapshot(self) -> dict[str, Any]:
         return {
-            "record_id": self.record_id,
+            "record_id": self.lot_id,
             "open_event_id": self.open_event_id,
             "account": self.account,
             "broker": self.broker,
@@ -167,7 +167,7 @@ def match_post_trade_combo_pairs(
     ]
     excluded_lots.extend(
         {
-            "record_id": item.record_id,
+            "record_id": item.lot_id,
             "open_event_id": item.open_event_id,
             "reason_codes": ["combo_leg_type_unsupported"],
         }
@@ -200,8 +200,8 @@ def match_post_trade_combo_pairs(
     ]
     edge_ids_by_record: dict[str, list[str]] = {}
     for edge in edges:
-        edge_ids_by_record.setdefault(edge.put.record_id, []).append(edge.inference_id)
-        edge_ids_by_record.setdefault(edge.call.record_id, []).append(edge.inference_id)
+        edge_ids_by_record.setdefault(edge.put.lot_id, []).append(edge.inference_id)
+        edge_ids_by_record.setdefault(edge.call.lot_id, []).append(edge.inference_id)
 
     optimum_score, optimum_edge_ids = _maximum_weight_matching(edges)
     forced_ids = {
@@ -216,8 +216,8 @@ def match_post_trade_combo_pairs(
         status = PROPOSAL_READY if edge.inference_id in forced_ids else AMBIGUOUS
         alternatives = sorted(
             (
-                set(edge_ids_by_record.get(edge.put.record_id, ()))
-                | set(edge_ids_by_record.get(edge.call.record_id, ()))
+                set(edge_ids_by_record.get(edge.put.lot_id, ()))
+                | set(edge_ids_by_record.get(edge.call.lot_id, ()))
             )
             - {edge.inference_id}
         )
@@ -230,12 +230,12 @@ def match_post_trade_combo_pairs(
             )
         )
 
-    connected_record_ids = {
-        record_id for record_id, inference_ids in edge_ids_by_record.items() if inference_ids
+    connected_lot_ids = {
+        lot_id for lot_id, inference_ids in edge_ids_by_record.items() if inference_ids
     }
     waiting = [
         {
-            "record_id": item.record_id,
+            "record_id": item.lot_id,
             "open_event_id": item.open_event_id,
             "account": item.account,
             "market": item.market,
@@ -246,7 +246,7 @@ def match_post_trade_combo_pairs(
             "status": "waiting_for_counterpart",
         }
         for item in normalized_lots
-        if item.record_id not in connected_record_ids
+        if item.lot_id not in connected_lot_ids
         and item in puts + calls
     ]
     waiting.sort(key=lambda item: (item["account"], item["record_id"]))
@@ -278,7 +278,7 @@ def match_post_trade_combo_pairs(
 def _normalize_lot(raw: Mapping[str, Any]) -> tuple[_Lot | None, set[str]]:
     item = dict(raw or {})
     reasons: set[str] = set()
-    record_id = _text(item.get("record_id"))
+    lot_id = _text(item.get("record_id"))
     open_event_id = _text(item.get("open_event_id"))
     account = _text(item.get("account"), lower=True)
     broker = _text(item.get("broker"), lower=True)
@@ -299,7 +299,7 @@ def _normalize_lot(raw: Mapping[str, Any]) -> tuple[_Lot | None, set[str]]:
     )
     strategy_group_id = _text(item.get("strategy_group_id"))
     leg_role = _text(item.get("leg_role"), lower=True)
-    if not record_id:
+    if not lot_id:
         reasons.add("combo_lot_record_id_missing")
     if not open_event_id:
         reasons.add("combo_lot_open_event_id_missing")
@@ -352,7 +352,7 @@ def _normalize_lot(raw: Mapping[str, Any]) -> tuple[_Lot | None, set[str]]:
         return None, reasons
     return (
         _Lot(
-            record_id=record_id,
+            lot_id=lot_id,
             open_event_id=open_event_id,
             account=account,
             broker=broker,
@@ -534,9 +534,9 @@ def _proposal_payload(
         "broker": edge.put.broker,
         "runtime_environment": edge.put.runtime_environment,
         "structure_mode": edge.structure_mode,
-        "put_record_id": edge.put.record_id,
+        "put_record_id": edge.put.lot_id,
         "put_open_event_id": edge.put.open_event_id,
-        "call_record_id": edge.call.record_id,
+        "call_record_id": edge.call.lot_id,
         "call_open_event_id": edge.call.open_event_id,
         "contracts": edge.put.contracts_opened,
         "evidence_grade": edge.evidence_grade,
@@ -572,20 +572,20 @@ def _maximum_weight_matching(
     active = [edge for edge in edges if edge.inference_id not in forbidden]
     if not active:
         return 0, set()
-    put_ids = sorted({edge.put.record_id for edge in active})
-    call_ids = sorted({edge.call.record_id for edge in active})
+    put_ids = sorted({edge.put.lot_id for edge in active})
+    call_ids = sorted({edge.call.lot_id for edge in active})
     source = 0
-    put_node = {record_id: index + 1 for index, record_id in enumerate(put_ids)}
+    put_node = {lot_id: index + 1 for index, lot_id in enumerate(put_ids)}
     call_offset = 1 + len(put_ids)
     call_node = {
-        record_id: call_offset + index for index, record_id in enumerate(call_ids)
+        lot_id: call_offset + index for index, lot_id in enumerate(call_ids)
     }
     sink = call_offset + len(call_ids)
     graph: list[list[_FlowArc]] = [[] for _ in range(sink + 1)]
-    for record_id in put_ids:
-        _add_flow_arc(graph, source, put_node[record_id], capacity=1, cost=0)
-    for record_id in call_ids:
-        _add_flow_arc(graph, call_node[record_id], sink, capacity=1, cost=0)
+    for lot_id in put_ids:
+        _add_flow_arc(graph, source, put_node[lot_id], capacity=1, cost=0)
+    for lot_id in call_ids:
+        _add_flow_arc(graph, call_node[lot_id], sink, capacity=1, cost=0)
     base = min(len(put_ids), len(call_ids)) + 1
     edge_arcs: dict[str, _FlowArc] = {}
     for edge in active:
@@ -599,8 +599,8 @@ def _maximum_weight_matching(
         )
         arc = _add_flow_arc(
             graph,
-            put_node[edge.put.record_id],
-            call_node[edge.call.record_id],
+            put_node[edge.put.lot_id],
+            call_node[edge.call.lot_id],
             capacity=1,
             cost=-weight,
             inference_id=edge.inference_id,
@@ -717,7 +717,7 @@ def _lot_sort_key(item: _Lot) -> tuple[str, str, str, str, str]:
         item.account,
         item.market_date,
         item.symbol,
-        item.record_id,
+        item.lot_id,
         item.open_event_id,
     )
 
