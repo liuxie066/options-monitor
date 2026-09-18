@@ -108,8 +108,8 @@ class WeightedOptionFact:
         return self.membership.strategy_group_id
 
     @property
-    def source_stock_lot_id(self) -> str | None:
-        return self.membership.source_stock_lot_id
+    def source_lot_id(self) -> str | None:
+        return self.membership.source_lot_id
 
 
 @dataclass(frozen=True)

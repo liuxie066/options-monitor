@@ -280,7 +280,7 @@ def _passes_report_filter(event: dict[str, Any], account_norm: str | None, broke
         return False
     return True
 
-def _assigned_stock_lot_id(event_id: str) -> str:
+def _assigned_lot_id(event_id: str) -> str:
     stable = str(event_id or "").strip()
     return f"assigned-stock-{stable}" if stable else "assigned-stock-unknown"
 
@@ -557,7 +557,7 @@ def _summarize_fee_facts(facts: list[dict[str, Any]]) -> dict[str, Any]:
         ],
     }
 
-def _explicit_stock_lot_id(event: dict[str, Any]) -> str | None:
+def _explicit_lot_id(event: dict[str, Any]) -> str | None:
     payload = _event_payload(event)
     for source in (event, payload):
         for key in ("stock_lot_id", "target_stock_lot_id", "source_stock_lot_id"):
@@ -575,17 +575,17 @@ def _lot_shares_at(lot: dict[str, Any], at_ms: int) -> int:
 
 def _active_reserved_shares(
     reservations: dict[str, list[tuple[int, int, int]]],
-    stock_lot_id: str,
+    lot_id: str,
     at_ms: int,
 ) -> int:
-    return sum(shares for start, end, shares in reservations.get(stock_lot_id, []) if start <= at_ms < end)
+    return sum(shares for start, end, shares in reservations.get(lot_id, []) if start <= at_ms < end)
 
 
 def _minimum_available_shares(
     lot: dict[str, Any],
     reservations: dict[str, list[tuple[int, int, int]]],
     *,
-    stock_lot_id: str,
+    lot_id: str,
     start_ms: int,
     end_ms: int,
 ) -> int:
@@ -594,14 +594,14 @@ def _minimum_available_shares(
         sale_at = int(sale.get("event_at") or 0)
         if start_ms <= sale_at < end_ms:
             checkpoints.add(sale_at)
-    for reserved_start, reserved_end, _shares in reservations.get(stock_lot_id, []):
+    for reserved_start, reserved_end, _shares in reservations.get(lot_id, []):
         if start_ms <= reserved_start < end_ms:
             checkpoints.add(reserved_start)
         if start_ms < reserved_end < end_ms:
             checkpoints.add(reserved_end)
     return min(
         _lot_shares_at(lot, checkpoint)
-        - _active_reserved_shares(reservations, stock_lot_id, checkpoint)
+        - _active_reserved_shares(reservations, lot_id, checkpoint)
         for checkpoint in checkpoints
     )
 
@@ -668,7 +668,7 @@ def _attribute_covered_calls(
             )
 
         key = (str(call.get("account") or ""), str(call.get("broker") or ""), str(call.get("symbol") or ""))
-        explicit_id = _explicit_stock_lot_id(open_event)
+        explicit_id = _explicit_lot_id(open_event)
         candidates = [
             lot
             for lot in lots_by_id.values()
@@ -760,7 +760,7 @@ def _attribute_covered_calls(
             if _minimum_available_shares(
                 lot,
                 staged_reservations,
-                stock_lot_id=lot_id,
+                lot_id=lot_id,
                 start_ms=opened_at,
                 end_ms=reservation_end,
             ) < allocated:
@@ -889,7 +889,7 @@ def _assigned_stock_review_row(
     *,
     status: str,
     event_id: str | None = None,
-    stock_lot_id: str | None = None,
+    lot_id: str | None = None,
     stock_event_id: str | None = None,
     month: str | None = None,
     account: str | None = None,
@@ -901,7 +901,7 @@ def _assigned_stock_review_row(
     return {
         "status": status,
         "event_id": event_id,
-        "stock_lot_id": stock_lot_id,
+        "stock_lot_id": lot_id,
         "stock_event_id": stock_event_id,
         "month": month,
         "account": account,
@@ -1141,9 +1141,9 @@ def project_assigned_stock_lifecycle(
             option_rows_by_event.setdefault(event_id, []).append(row)
     option_lots_by_id: dict[str, list[dict[str, Any]]] = {}
     for lot in option_open_lots:
-        record_id = str(lot.get("record_id") or "").strip()
-        if record_id:
-            option_lots_by_id.setdefault(record_id, []).append(lot)
+        option_lot_id = str(lot.get("record_id") or "").strip()
+        if option_lot_id:
+            option_lots_by_id.setdefault(option_lot_id, []).append(lot)
 
     lots_by_id: dict[str, dict[str, Any]] = {}
     review_rows: list[dict[str, Any]] = []
@@ -1332,7 +1332,7 @@ def project_assigned_stock_lifecycle(
             continue
         if expected_stock_side == "sell":
             payload = _event_payload(event)
-            target_stock_lot_id = next(
+            target_lot_id = next(
                 (
                     str(source.get(key) or "").strip()
                     for source in (stock, payload, event)
@@ -1354,7 +1354,7 @@ def project_assigned_stock_lifecycle(
                 {
                     "event_type": "sale",
                     "stock_event_id": event_id,
-                    "target_stock_lot_id": target_stock_lot_id,
+                    "target_stock_lot_id": target_lot_id,
                     "strategy_group_id": strategy_group_id,
                     "account": account,
                     "broker": broker,
@@ -1372,7 +1372,7 @@ def project_assigned_stock_lifecycle(
             )
             continue
         option_premium_attribution = _option_premium_attribution(option_rows)
-        stock_lot_id = _assigned_stock_lot_id(event_id)
+        lot_id = _assigned_lot_id(event_id)
         assigned_contracts = sum(int(row.get("contracts_closed") or 0) for row in option_rows)
         fee_facts: list[dict[str, Any]] = []
         source_open_event = event_by_id.get(str(_source_option_open_event_id(event, option_rows) or ""))
@@ -1450,8 +1450,8 @@ def project_assigned_stock_lifecycle(
         )
         assignment_fees = float(assignment_fees_decimal)
         assignment_notional = float(assignment_notional_decimal)
-        lots_by_id[stock_lot_id] = {
-            "stock_lot_id": stock_lot_id,
+        lots_by_id[lot_id] = {
+            "stock_lot_id": lot_id,
             "source_assignment_event_id": event_id,
             "source_option_lot_id": source_option_lot_id,
             **stock_strategy_fields,
@@ -1525,7 +1525,7 @@ def project_assigned_stock_lifecycle(
             )
             continue
         seen_stock_events.add(stock_event_id)
-        target_stock_lot_id = str(sale.get("target_stock_lot_id") or "").strip()
+        target_lot_id = str(sale.get("target_stock_lot_id") or "").strip()
         sale_account_filter = normalize_account(sale.get("account")) if sale.get("account") not in (None, "") else None
         sale_broker_filter = normalize_broker(sale.get("broker")) if sale.get("broker") not in (None, "") else None
         if account_norm and sale_account_filter != account_norm:
@@ -1535,7 +1535,7 @@ def project_assigned_stock_lifecycle(
         sale_month = _stock_event_month(sale)
         sale_at = _stock_event_time_ms(sale)
         shares = _stock_event_shares(sale)
-        if settlement_transition and not target_stock_lot_id:
+        if settlement_transition and not target_lot_id:
             group_id = str(sale.get("strategy_group_id") or "").strip()
             candidates = [
                 lot
@@ -1549,7 +1549,7 @@ def project_assigned_stock_lifecycle(
                 and (not group_id or lot.get("strategy_group_id") == group_id)
             ]
             if len(candidates) == 1:
-                target_stock_lot_id = str(candidates[0]["stock_lot_id"])
+                target_lot_id = str(candidates[0]["stock_lot_id"])
             else:
                 review_rows.append(
                     _assigned_stock_review_row(
@@ -1564,7 +1564,7 @@ def project_assigned_stock_lifecycle(
                     )
                 )
                 continue
-        lot = lots_by_id.get(target_stock_lot_id)
+        lot = lots_by_id.get(target_lot_id)
         if lot is None:
             review_rows.append(
                 _assigned_stock_review_row(
@@ -1574,7 +1574,7 @@ def project_assigned_stock_lifecycle(
                         else "manual_review_required"
                     ),
                     stock_event_id=stock_event_id,
-                    stock_lot_id=target_stock_lot_id or None,
+                    lot_id=target_lot_id or None,
                     month=sale_month,
                     account=normalize_account(sale.get("account")),
                     broker=normalize_broker(sale.get("broker")),
@@ -1625,7 +1625,7 @@ def project_assigned_stock_lifecycle(
                 _assigned_stock_review_row(
                     status="source_conflict",
                     stock_event_id=stock_event_id,
-                    stock_lot_id=target_stock_lot_id,
+                    lot_id=target_lot_id,
                     month=sale_month,
                     account=sale_account,
                     broker=sale_broker,
@@ -1665,7 +1665,7 @@ def project_assigned_stock_lifecycle(
         lot["_fee_facts"].append(sale_fee_fact)
         sale_row = {
             "stock_event_id": stock_event_id,
-            "stock_lot_id": target_stock_lot_id,
+            "stock_lot_id": target_lot_id,
             "source_assignment_event_id": lot.get("source_assignment_event_id"),
             "account": sale_account,
             "broker": sale_broker,
@@ -1870,7 +1870,7 @@ def project_assigned_stock_lifecycle(
                 _assigned_stock_review_row(
                     status="missing_quote",
                     event_id=str(lot.get("source_assignment_event_id") or ""),
-                    stock_lot_id=str(lot.get("stock_lot_id") or ""),
+                    lot_id=str(lot.get("stock_lot_id") or ""),
                     month=str(lot.get("opened_month") or ""),
                     account=str(lot.get("account") or ""),
                     broker=str(lot.get("broker") or ""),

@@ -1127,11 +1127,11 @@ def _load_wheel_snapshot_family(
             continue
         final = batch.get("final_candidate")
         final = dict(final) if isinstance(final, Mapping) else None
-        stock_lot_id = _text(batch.get("stock_lot_id"))
-        branch_id = _text(batch.get("wheel_branch_id")) or stock_lot_id
+        lot_id = _text(batch.get("stock_lot_id"))
+        branch_id = _text(batch.get("wheel_branch_id")) or lot_id
         direction = _text(batch.get("direction") or "call").lower()
         view = {
-            "position_lot_id": stock_lot_id,
+            "position_lot_id": lot_id,
             "wheel_branch_id": branch_id,
             "direction": direction,
             "symbol": symbol,
@@ -1172,8 +1172,8 @@ def _load_wheel_snapshot_family(
             {
                 **final,
                 "symbol": symbol,
-                "position_lot_id": stock_lot_id,
-                "stock_lot_id": stock_lot_id,
+                "position_lot_id": lot_id,
+                "stock_lot_id": lot_id,
                 "wheel_branch_id": branch_id,
                 "direction": direction,
                 "expiration": _text(

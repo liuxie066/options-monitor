@@ -1463,7 +1463,7 @@ def _measure_storage_status_allocation(spec: Mapping[str, Any]) -> dict[str, Any
         }
 
 
-def _phase_3a_record_id(spec: Mapping[str, Any], index: int) -> str:
+def _phase_3a_lot_id(spec: Mapping[str, Any], index: int) -> str:
     slug = str(spec.get("key") or "").replace(".", "-").replace("_", "-")
     return f"lot-{slug}-{int(index):06d}"
 
@@ -1694,7 +1694,7 @@ def _phase_3a_operation(repo: Any, *, key: str, spec: Mapping[str, Any]) -> Any:
     if key == "single_combo_metadata_close":
         return record_manual_position_close(
             repo,
-            record_id=_phase_3a_record_id(spec, 0),
+            lot_id=_phase_3a_lot_id(spec, 0),
             contracts_to_close=1,
             close_price=0.5,
             close_reason="phase_3a_benchmark",
@@ -1706,7 +1706,7 @@ def _phase_3a_operation(repo: Any, *, key: str, spec: Mapping[str, Any]) -> Any:
             repo,
             [
                 {
-                    "record_id": _phase_3a_record_id(spec, index),
+                    "record_id": _phase_3a_lot_id(spec, index),
                     "strategy": "combo_yield",
                     "leg_role": role,
                     "strategy_group_id": group_id,
@@ -1762,7 +1762,7 @@ def _phase_3a_operation(repo: Any, *, key: str, spec: Mapping[str, Any]) -> Any:
                 "symbol": "NVDA",
                 "contracts": 1,
                 "open_event_id": _phase_3a_open_event_id(spec, 0),
-                "record_id": _phase_3a_record_id(spec, 0),
+                "record_id": _phase_3a_lot_id(spec, 0),
                 "contract_key": put_key.to_dict(),
             },
             second_leg={

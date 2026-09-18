@@ -14,7 +14,7 @@ import src.application.ledger.repository as ledger_repository
 
 def _position_fields(
     *,
-    record_id: str = "lot_put_may",
+    lot_id: str = "lot_put_may",
     strike: float = 450.0,
     expiration_ymd: str = "2026-05-28",
     contracts_open: int = 6,
@@ -24,8 +24,8 @@ def _position_fields(
     exp_ms = parse_exp_to_ms(expiration_ymd)
     assert exp_ms is not None
     return {
-        "record_id": record_id,
-        "position_key": record_id,
+        "record_id": lot_id,
+        "position_key": lot_id,
         "status": "open",
         "contracts": contracts_open,
         "contracts_open": contracts_open,
@@ -169,7 +169,7 @@ def test_manual_open_ledger_service_projects_new_lot(tmp_path: Path) -> None:
     assert result.ledger_preflight.contracts_open_after == 6
     assert result.ledger_preflight.position_contracts_open_after == 6
     assert result.result.created is True
-    assert result.result.record_id == result.ledger_preflight.target_lot_id
+    assert result.result.lot_id == result.ledger_preflight.target_lot_id
     lots = repo.list_position_lots()
     assert len(lots) == 1
     assert lots[0]["record_id"] == result.ledger_preflight.target_lot_id
@@ -199,7 +199,7 @@ def test_manual_close_ledger_service_closes_exact_lot(tmp_path: Path) -> None:
 
     result = persist_manual_close_event_with_ledger(
         repo,
-        record_id=lot["record_id"],
+        lot_id=lot["record_id"],
         fields=lot["fields"],
         contracts_to_close=2,
         close_price=1.2,
@@ -241,7 +241,7 @@ def test_manual_adjust_ledger_service_targets_exact_lot(tmp_path: Path) -> None:
 
     result = persist_manual_adjust_event_with_ledger(
         repo,
-        record_id=lot["record_id"],
+        lot_id=lot["record_id"],
         fields=lot["fields"],
         contracts=5,
         premium_per_share=8.5,
@@ -269,8 +269,8 @@ def test_manual_close_ledger_preflight_rejects_target_identity_mismatch() -> Non
     projected_fields = _position_fields(strike=451.0)
 
     class MismatchedRepo:
-        def get_record_fields(self, record_id: str) -> dict[str, Any]:
-            assert record_id == "lot_put_may"
+        def get_record_fields(self, lot_id: str) -> dict[str, Any]:
+            assert lot_id == "lot_put_may"
             return dict(current_fields)
 
         def list_position_lots(self) -> list[dict[str, Any]]:
@@ -282,7 +282,7 @@ def test_manual_close_ledger_preflight_rejects_target_identity_mismatch() -> Non
     with pytest.raises(LedgerPreflightError) as exc_info:
         preflight_manual_close(
             MismatchedRepo(),
-            record_id="lot_put_may",
+            lot_id="lot_put_may",
             contracts_to_close=1,
             close_price=1.2,
             close_reason="manual_buy_to_close",
@@ -300,8 +300,8 @@ def test_manual_close_ledger_preflight_rejects_duplicate_lot_snapshot() -> None:
     fields = _position_fields()
 
     class DuplicateRepo:
-        def get_record_fields(self, record_id: str) -> dict[str, Any]:
-            assert record_id == "lot_put_may"
+        def get_record_fields(self, lot_id: str) -> dict[str, Any]:
+            assert lot_id == "lot_put_may"
             return dict(fields)
 
         def list_position_lots(self) -> list[dict[str, Any]]:
@@ -319,7 +319,7 @@ def test_manual_close_ledger_preflight_rejects_duplicate_lot_snapshot() -> None:
     with pytest.raises(LedgerPreflightError) as exc_info:
         preflight_manual_close(
             DuplicateRepo(),
-            record_id="lot_put_may",
+            lot_id="lot_put_may",
             contracts_to_close=1,
             close_price=1.2,
             close_reason="manual_buy_to_close",

@@ -504,8 +504,8 @@ def _wheel_runtime(payload: dict[str, Any]) -> tuple[Path, dict[str, Any], Any, 
     }
 
 
-def _wheel_batch(model: Mapping[str, Any], stock_lot_id: Any) -> dict[str, Any]:
-    lot_id = str(stock_lot_id or "").strip()
+def _wheel_batch(model: Mapping[str, Any], lot_id: Any) -> dict[str, Any]:
+    lot_id = str(lot_id or "").strip()
     matches = [
         dict(item)
         for item in model.get("batches") or []
@@ -523,10 +523,10 @@ def _wheel_branch(
     model: Mapping[str, Any],
     *,
     wheel_branch_id: Any,
-    stock_lot_id: Any,
+    lot_id: Any,
 ) -> dict[str, Any]:
     branch_id = str(wheel_branch_id or "").strip()
-    lot_id = str(stock_lot_id or "").strip()
+    lot_id = str(lot_id or "").strip()
     if bool(branch_id) == bool(lot_id):
         raise AgentToolError(
             code="INPUT_ERROR",
@@ -597,9 +597,13 @@ def _wheel_cash_capacity(
 
 
 def _wheel_common(payload: Mapping[str, Any], *, instant: int) -> dict[str, Any]:
+    # This dict is splatted into the wheel workflows as keyword arguments, so
+    # its keys must be the callees' *declared* parameter names -- `lot_id`.
+    # The *input* key stays `stock_lot_id`: it is the published tool schema
+    # (`tests/test_agent_plugin_contract.py` pins it), not a declaration.
     return {
         "account": str(payload.get("account") or ""),
-        "stock_lot_id": str(payload.get("stock_lot_id") or ""),
+        "lot_id": str(payload.get("stock_lot_id") or ""),
         "expected_batch_generation_hash": str(
             payload.get("expected_batch_generation_hash") or ""
         ),
@@ -698,7 +702,7 @@ def _wheel_call_linkage_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], l
         common = _wheel_common(payload, instant=instant)
         args = {
             **common,
-            "call_record_id": str(payload.get("call_record_id") or ""),
+            "call_lot_id": str(payload.get("call_record_id") or ""),
             "linkage_candidate_id": str(payload.get("linkage_candidate_id") or ""),
             "expected_input_hash": str(payload.get("expected_input_hash") or ""),
         }
@@ -744,7 +748,7 @@ def _neutral_wheel_context(
             market=str(payload.get("config_key") or ""),
         ),
         wheel_branch_id=payload.get("wheel_branch_id"),
-        stock_lot_id=payload.get("stock_lot_id"),
+        lot_id=payload.get("stock_lot_id"),
     )
     if branch.get("direction") != direction:
         raise AgentToolError(
@@ -844,7 +848,7 @@ def _wheel_linkage_tool(
         )
         args = {
             **common,
-            "option_record_id": str(payload.get("option_record_id") or ""),
+            "option_lot_id": str(payload.get("option_record_id") or ""),
             "linkage_candidate_id": str(payload.get("linkage_candidate_id") or ""),
             "expected_input_hash": str(payload.get("expected_input_hash") or ""),
         }
@@ -885,7 +889,7 @@ def _wheel_branch_decision_tool(
                 market=str(payload.get("config_key") or ""),
             ),
             wheel_branch_id=payload.get("wheel_branch_id"),
-            stock_lot_id=payload.get("stock_lot_id"),
+            lot_id=payload.get("stock_lot_id"),
         )
         action = str(payload.get("action") or "")
         args: dict[str, Any] = {

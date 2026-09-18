@@ -420,14 +420,14 @@ def test_build_context_scales_cash_secured_for_partial_close() -> None:
 def test_build_context_excludes_expired_put_after_one_day_settlement_buffer() -> None:
     observed_at = datetime(2026, 9, 4, 1, 40, tzinfo=timezone.utc)
     records = []
-    for record_id, expiration, secured in (
+    for lot_id, expiration, secured in (
         ("expired", "2026-03-30", 10_000),
         ("expired-yesterday", "2026-09-03", 11_000),
         ("expires-today", "2026-09-04", 12_000),
     ):
         records.append(
             {
-                "record_id": record_id,
+                "record_id": lot_id,
                 "fields": {
                     "broker": "富途",
                     "account": "lx",
@@ -803,7 +803,7 @@ def test_list_open_short_assignment_rows_propagates_repository_failure() -> None
 def test_build_context_exposes_quantity_aware_combo_yield_groups() -> None:
     group_id = "combo_yield:lx:combo_yield|PDD|PDD_P80_AUG|PDD_C100_SEP"
     records = []
-    for record_id, option_type, side, contracts, expiration, leg_role in (
+    for lot_id, option_type, side, contracts, expiration, leg_role in (
         ("put-1", "put", "short", 2, "2026-09-18", "sell_put"),
         ("call-1", "call", "long", 1, "2026-09-18", "enhancement_call"),
         ("call-2", "call", "long", 1, "2026-09-18", "enhancement_call"),
@@ -811,7 +811,7 @@ def test_build_context_exposes_quantity_aware_combo_yield_groups() -> None:
         expiration_ms = int(datetime.fromisoformat(expiration).replace(tzinfo=timezone.utc).timestamp() * 1000)
         records.append(
             {
-                "record_id": record_id,
+                "record_id": lot_id,
                 "fields": {
                     "broker": "富途",
                     "account": "lx",

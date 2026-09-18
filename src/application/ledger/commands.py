@@ -134,12 +134,12 @@ def supports_ledger_close_preflight(repo: Any) -> bool:
     )
 
 
-def _ledger_write_result_from_any(value: Any, *, event_id: str | None, record_id: str | None) -> LedgerWriteResult:
+def _ledger_write_result_from_any(value: Any, *, event_id: str | None, lot_id: str | None) -> LedgerWriteResult:
     if isinstance(value, LedgerWriteResult):
         return value
     if isinstance(value, dict):
         return LedgerWriteResult.from_payload(value)
-    return LedgerWriteResult(event_id=event_id, record_id=record_id, created=None)
+    return LedgerWriteResult(event_id=event_id, lot_id=lot_id, created=None)
 
 
 def persist_manual_open_event_with_ledger(
@@ -180,7 +180,7 @@ def persist_manual_open_event_with_ledger(
         strategy_snapshot=strategy_snapshot,
         request_id=request_id,
     )
-    duplicate_result = _existing_open_event_result(repo, event_id=event.event_id, record_id=event.lot_id)
+    duplicate_result = _existing_open_event_result(repo, event_id=event.event_id, lot_id=event.lot_id)
     if duplicate_result is not None:
         request_id_value = str(request_id or "").strip()
         if request_id_value:
@@ -251,7 +251,7 @@ def persist_trade_open_event_with_ledger(
     persist_trade_event_fn: Any,
 ) -> OpenLedgerResult:
     resolved_deal, fields, event = _trade_open_ledger_inputs(deal)
-    duplicate_result = _existing_open_event_result(repo, event_id=event.event_id, record_id=event.lot_id)
+    duplicate_result = _existing_open_event_result(repo, event_id=event.event_id, lot_id=event.lot_id)
     if duplicate_result is not None:
         return OpenLedgerResult(
             result=LedgerWriteResult.from_payload(duplicate_result),
@@ -268,7 +268,7 @@ def persist_trade_open_event_with_ledger(
     )
     result = persist_trade_event_fn(repo, resolved_deal)
     return OpenLedgerResult(
-        result=_ledger_write_result_from_any(result, event_id=event.event_id, record_id=event.lot_id),
+        result=_ledger_write_result_from_any(result, event_id=event.event_id, lot_id=event.lot_id),
         fields=fields,
         ledger_preflight=ledger_preflight,
     )
@@ -332,7 +332,7 @@ def persist_manual_repair_event_with_ledger(
 def persist_manual_adjust_event_with_ledger(
     repo: Any,
     *,
-    record_id: str,
+    lot_id: str,
     fields: dict[str, Any] | None = None,
     contracts: int | None = None,
     strike: float | None = None,
@@ -348,7 +348,7 @@ def persist_manual_adjust_event_with_ledger(
 ) -> ManualAdjustLedgerResult:
     preflight_result = _preflight_lot_adjust(
         repo,
-        record_id=record_id,
+        lot_id=lot_id,
         fields=fields,
         contracts=contracts,
         strike=strike,
@@ -372,7 +372,7 @@ def persist_manual_adjust_event_with_ledger(
     patch = preflight_result.patch_contract
     result = persist_manual_adjust_event(
         repo,
-        record_id=str(record_id),
+        lot_id=str(lot_id),
         fields=current_fields,
         contracts=contracts,
         strike=strike,
@@ -401,15 +401,15 @@ def record_manual_position_adjustments(
     """Preflight and persist multiple lot adjustments atomically."""
 
     normalized: list[dict[str, Any]] = []
-    seen_record_ids: set[str] = set()
+    seen_lot_ids: set[str] = set()
     for raw in adjustments:
         item = dict(raw or {})
-        record_id = str(item.pop("record_id", "") or "").strip()
-        if not record_id:
+        lot_id = str(item.pop("record_id", "") or "").strip()
+        if not lot_id:
             raise ValueError("manual adjustment batch requires record_id")
-        if record_id in seen_record_ids:
-            raise ValueError(f"manual adjustment batch contains duplicate record_id: {record_id}")
-        seen_record_ids.add(record_id)
+        if lot_id in seen_lot_ids:
+            raise ValueError(f"manual adjustment batch contains duplicate record_id: {lot_id}")
+        seen_lot_ids.add(lot_id)
         item.setdefault("fields", None)
         item.setdefault("contracts", None)
         item.setdefault("strike", None)
@@ -418,7 +418,7 @@ def record_manual_position_adjustments(
         item.setdefault("multiplier", None)
         item.setdefault("opened_at_ms", None)
         item.setdefault("as_of_ms", None)
-        normalized.append({"record_id": record_id, **item})
+        normalized.append({"record_id": lot_id, **item})
 
     preflight_results = _preflight_lot_adjustments(
         repo,
@@ -481,12 +481,12 @@ def persist_trade_close_events_with_ledger(
             f"(expected={expected_contracts}, allocated={allocated_contracts}, splits={split_count})"
         )
     for split_index, match in enumerate(matches, start=1):
-        record_id = str(getattr(match, "record_id", "") or "").strip()
+        lot_id = str(getattr(match, "lot_id", "") or "").strip()
         contracts_to_close = int(getattr(match, "contracts_to_close", 0) or 0)
-        fields = _current_record_fields(repo, record_id=record_id)
+        fields = _current_record_fields(repo, lot_id=lot_id)
         ledger_preflight = preflight_broker_trade_close(
             repo,
-            record_id=record_id,
+            lot_id=lot_id,
             fields=fields,
             contracts_to_close=contracts_to_close,
             close_price=(float(getattr(deal, "price")) if getattr(deal, "price", None) is not None else None),
@@ -495,7 +495,7 @@ def persist_trade_close_events_with_ledger(
         )
         split_deal = _split_close_deal_for_target(
             deal,
-            record_id=record_id,
+            lot_id=lot_id,
             fields=fields,
             contracts_to_close=contracts_to_close,
             close_target_resolution=close_target_resolution,
@@ -527,8 +527,8 @@ def persist_trade_close_events_with_ledger(
         persisted = [
             _ledger_write_result_from_any(
                 persist_trade_event_fn(repo, split_deal),
-                event_id=f"{getattr(deal, 'deal_id', '')}:close:{getattr(match, 'record_id', '')}",
-                record_id=str(getattr(match, "record_id", "") or "").strip(),
+                event_id=f"{getattr(deal, 'deal_id', '')}:close:{getattr(match, 'lot_id', '')}",
+                lot_id=str(getattr(match, "lot_id", "") or "").strip(),
             )
             for match, split_deal, _preflight in prepared
         ]
@@ -539,16 +539,16 @@ def persist_trade_close_events_with_ledger(
         persisted,
         strict=True,
     ):
-        record_id = str(getattr(match, "record_id", "") or "").strip()
+        lot_id = str(getattr(match, "lot_id", "") or "").strip()
         contracts_to_close = int(getattr(match, "contracts_to_close", 0) or 0)
         result_payload = _ledger_write_result_from_any(
             result,
-            event_id=f"{getattr(deal, 'deal_id', '')}:close:{record_id}",
-            record_id=record_id,
+            event_id=f"{getattr(deal, 'deal_id', '')}:close:{lot_id}",
+            lot_id=lot_id,
         ).to_dict()
         operation = BrokerTradeOperation(
             action=close_action,
-            record_id=record_id,
+            lot_id=lot_id,
             contracts_to_close=contracts_to_close,
             matched_by=str(getattr(match, "matched_by", "") or ""),
             event_id=result_payload.get("event_id"),
@@ -596,18 +596,18 @@ def _is_expiration_zero_price_close(deal: Any) -> bool:
 def persist_manual_close_event_with_ledger(
     repo: Any,
     *,
-    record_id: str,
+    lot_id: str,
     fields: dict[str, Any] | None = None,
     contracts_to_close: int,
     close_price: float | None,
     close_reason: str,
     as_of_ms: int | None = None,
 ) -> ManualCloseLedgerResult:
-    resolved_record_id = str(record_id or "").strip()
-    current_fields = _current_record_fields(repo, record_id=resolved_record_id)
+    resolved_lot_id = str(lot_id or "").strip()
+    current_fields = _current_record_fields(repo, lot_id=resolved_lot_id)
     if fields is not None:
         _assert_fields_match_current(
-            record_id=resolved_record_id,
+            lot_id=resolved_lot_id,
             fields=fields,
             current_fields=current_fields,
             operation_label="manual close",
@@ -615,7 +615,7 @@ def persist_manual_close_event_with_ledger(
 
     duplicate_result = existing_manual_close_event_result(
         repo,
-        record_id=resolved_record_id,
+        lot_id=resolved_lot_id,
         fields=current_fields,
         contracts_to_close=int(contracts_to_close),
         close_price=close_price,
@@ -630,7 +630,7 @@ def persist_manual_close_event_with_ledger(
                 status="duplicate",
                 read_model="legacy_trade_events",
                 fail_closed=False,
-                target_lot_id=resolved_record_id,
+                target_lot_id=resolved_lot_id,
                 event_id=duplicate_result.event_id,
             ),
             duplicate_checked_before_patch=True,
@@ -638,7 +638,7 @@ def persist_manual_close_event_with_ledger(
 
     ledger_preflight = preflight_manual_close(
         repo,
-        record_id=resolved_record_id,
+        lot_id=resolved_lot_id,
         fields=current_fields,
         contracts_to_close=int(contracts_to_close),
         close_price=close_price,
@@ -655,7 +655,7 @@ def persist_manual_close_event_with_ledger(
     )
     result = persist_manual_close_event(
         repo,
-        record_id=resolved_record_id,
+        lot_id=resolved_lot_id,
         fields=current_fields,
         contracts_to_close=int(contracts_to_close),
         close_price=close_price,
@@ -892,7 +892,7 @@ def resolve_manual_position_close_target(
 def _manual_assignment_target_resolution(
     repo: Any,
     *,
-    record_id: str | None,
+    lot_id: str | None,
     broker: str,
     account: str | None,
     symbol: str | None,
@@ -902,12 +902,12 @@ def _manual_assignment_target_resolution(
     expiration_ymd: str | None,
     contracts_to_close: int,
 ) -> CloseTargetResolution:
-    resolved_record_id = str(record_id or "").strip()
-    if resolved_record_id:
-        fields = _current_record_fields(repo, record_id=resolved_record_id)
+    resolved_lot_id = str(lot_id or "").strip()
+    if resolved_lot_id:
+        fields = _current_record_fields(repo, lot_id=resolved_lot_id)
         return resolve_explicit_close_target(
             repo,
-            record_id=resolved_record_id,
+            lot_id=resolved_lot_id,
             contracts_to_close=int(contracts_to_close),
             source="manual_assignment",
             fields=fields,
@@ -928,7 +928,7 @@ def _manual_assignment_target_resolution(
 def _manual_lifecycle_request_intent_hash(
     event_type: str,
     *,
-    record_id: str | None,
+    lot_id: str | None,
     broker: str,
     account: str | None,
     symbol: str | None,
@@ -943,7 +943,7 @@ def _manual_lifecycle_request_intent_hash(
 ) -> str:
     payload = {
         "event_type": str(event_type or "").strip().lower(),
-        "record_id": str(record_id or "").strip() or None,
+        "record_id": str(lot_id or "").strip() or None,
         "broker": str(broker or "").strip().lower(),
         "account": str(account or "").strip().lower() or None,
         "symbol": str(symbol or "").strip().upper() or None,
@@ -1060,7 +1060,7 @@ def _validate_lifecycle_stock_settlement(
     expected_stock_side = ""
     strike: float | None = None
     for match in resolution.matches:
-        fields = _current_record_fields(repo, record_id=match.record_id)
+        fields = _current_record_fields(repo, lot_id=match.lot_id)
         option_type = str(fields.get("option_type") or "").strip().lower()
         position_side = str(fields.get("side") or "").strip().lower()
         expected_position_side = "short" if normalized_lifecycle_type == "assignment" else "long"
@@ -1139,7 +1139,7 @@ def _validate_exercise_stock_settlement(
 def preview_manual_assignment(
     repo: Any,
     *,
-    record_id: str | None,
+    lot_id: str | None,
     broker: str = "富途",
     account: str | None = None,
     symbol: str | None = None,
@@ -1156,7 +1156,7 @@ def preview_manual_assignment(
 ) -> dict[str, Any]:
     resolution = _manual_assignment_target_resolution(
         repo,
-        record_id=record_id,
+        lot_id=lot_id,
         broker=broker,
         account=account,
         symbol=symbol,
@@ -1177,10 +1177,10 @@ def preview_manual_assignment(
         stock_settlement,
         (
             {
-                "target_lot_id": match.record_id,
+                "target_lot_id": match.lot_id,
                 "contracts_allocated": match.contracts_to_close,
                 "multiplier": effective_multiplier(
-                    _current_record_fields(repo, record_id=match.record_id)
+                    _current_record_fields(repo, lot_id=match.lot_id)
                 ),
             }
             for match in resolution.matches
@@ -1188,10 +1188,10 @@ def preview_manual_assignment(
     )
     operations: list[dict[str, Any]] = []
     for match in resolution.matches:
-        fields = _current_record_fields(repo, record_id=match.record_id)
+        fields = _current_record_fields(repo, lot_id=match.lot_id)
         ledger_preflight = preflight_broker_trade_close(
             repo,
-            record_id=match.record_id,
+            lot_id=match.lot_id,
             fields=fields,
             contracts_to_close=int(match.contracts_to_close),
             close_price=0.0,
@@ -1201,13 +1201,13 @@ def preview_manual_assignment(
         operations.append(
             BrokerTradeOperation(
                 action="assignment",
-                record_id=match.record_id,
+                lot_id=match.lot_id,
                 contracts_to_close=int(match.contracts_to_close),
                 matched_by=match.matched_by,
                 ledger_preflight=ledger_preflight,
                 close_target_resolution=resolution.to_dict(),
                 details={
-                    "stock_settlement": settlements_by_lot[match.record_id],
+                    "stock_settlement": settlements_by_lot[match.lot_id],
                     "stock_settlement_source": stock_settlement,
                 },
             ).to_payload()
@@ -1216,7 +1216,7 @@ def preview_manual_assignment(
     intent_hash = (
         _manual_lifecycle_request_intent_hash(
             "assignment",
-            record_id=record_id,
+            lot_id=lot_id,
             broker=broker,
             account=account,
             symbol=symbol,
@@ -1246,7 +1246,7 @@ def preview_manual_assignment(
 def record_manual_assignment(
     repo: Any,
     *,
-    record_id: str | None,
+    lot_id: str | None,
     broker: str = "富途",
     account: str | None = None,
     symbol: str | None = None,
@@ -1266,7 +1266,7 @@ def record_manual_assignment(
     intent_hash = (
         _manual_lifecycle_request_intent_hash(
             "assignment",
-            record_id=record_id,
+            lot_id=lot_id,
             broker=broker,
             account=account,
             symbol=symbol,
@@ -1293,7 +1293,7 @@ def record_manual_assignment(
             return replay
     preview = preview_manual_assignment(
         repo,
-        record_id=record_id,
+        lot_id=lot_id,
         broker=broker,
         account=account,
         symbol=symbol,
@@ -1310,7 +1310,7 @@ def record_manual_assignment(
     )
     resolution = _manual_assignment_target_resolution(
         repo,
-        record_id=record_id,
+        lot_id=lot_id,
         broker=broker,
         account=account,
         symbol=symbol,
@@ -1345,7 +1345,7 @@ def record_manual_assignment(
 def _manual_exercise_target_resolution(
     repo: Any,
     *,
-    record_id: str | None,
+    lot_id: str | None,
     broker: str,
     account: str | None,
     symbol: str | None,
@@ -1355,12 +1355,12 @@ def _manual_exercise_target_resolution(
     expiration_ymd: str | None,
     contracts_to_close: int,
 ) -> CloseTargetResolution:
-    resolved_record_id = str(record_id or "").strip()
-    if resolved_record_id:
-        fields = _current_record_fields(repo, record_id=resolved_record_id)
+    resolved_lot_id = str(lot_id or "").strip()
+    if resolved_lot_id:
+        fields = _current_record_fields(repo, lot_id=resolved_lot_id)
         return resolve_explicit_close_target(
             repo,
-            record_id=resolved_record_id,
+            lot_id=resolved_lot_id,
             contracts_to_close=int(contracts_to_close),
             source="manual_exercise",
             fields=fields,
@@ -1381,7 +1381,7 @@ def _manual_exercise_target_resolution(
 def preview_manual_exercise(
     repo: Any,
     *,
-    record_id: str | None,
+    lot_id: str | None,
     broker: str = "富途",
     account: str | None = None,
     symbol: str | None = None,
@@ -1398,7 +1398,7 @@ def preview_manual_exercise(
 ) -> dict[str, Any]:
     resolution = _manual_exercise_target_resolution(
         repo,
-        record_id=record_id,
+        lot_id=lot_id,
         broker=broker,
         account=account,
         symbol=symbol,
@@ -1419,10 +1419,10 @@ def preview_manual_exercise(
         stock_settlement,
         (
             {
-                "target_lot_id": match.record_id,
+                "target_lot_id": match.lot_id,
                 "contracts_allocated": match.contracts_to_close,
                 "multiplier": effective_multiplier(
-                    _current_record_fields(repo, record_id=match.record_id)
+                    _current_record_fields(repo, lot_id=match.lot_id)
                 ),
             }
             for match in resolution.matches
@@ -1430,10 +1430,10 @@ def preview_manual_exercise(
     )
     operations: list[dict[str, Any]] = []
     for match in resolution.matches:
-        fields = _current_record_fields(repo, record_id=match.record_id)
+        fields = _current_record_fields(repo, lot_id=match.lot_id)
         ledger_preflight = preflight_broker_trade_close(
             repo,
-            record_id=match.record_id,
+            lot_id=match.lot_id,
             fields=fields,
             contracts_to_close=int(match.contracts_to_close),
             close_price=0.0,
@@ -1443,13 +1443,13 @@ def preview_manual_exercise(
         operations.append(
             BrokerTradeOperation(
                 action="exercise",
-                record_id=match.record_id,
+                lot_id=match.lot_id,
                 contracts_to_close=int(match.contracts_to_close),
                 matched_by=match.matched_by,
                 ledger_preflight=ledger_preflight,
                 close_target_resolution=resolution.to_dict(),
                 details={
-                    "stock_settlement": settlements_by_lot[match.record_id],
+                    "stock_settlement": settlements_by_lot[match.lot_id],
                     "stock_settlement_source": stock_settlement,
                 },
             ).to_payload()
@@ -1458,7 +1458,7 @@ def preview_manual_exercise(
     intent_hash = (
         _manual_lifecycle_request_intent_hash(
             "exercise",
-            record_id=record_id,
+            lot_id=lot_id,
             broker=broker,
             account=account,
             symbol=symbol,
@@ -1488,7 +1488,7 @@ def preview_manual_exercise(
 def record_manual_exercise(
     repo: Any,
     *,
-    record_id: str | None,
+    lot_id: str | None,
     broker: str = "富途",
     account: str | None = None,
     symbol: str | None = None,
@@ -1507,7 +1507,7 @@ def record_manual_exercise(
     intent_hash = (
         _manual_lifecycle_request_intent_hash(
             "exercise",
-            record_id=record_id,
+            lot_id=lot_id,
             broker=broker,
             account=account,
             symbol=symbol,
@@ -1534,7 +1534,7 @@ def record_manual_exercise(
             return replay
     preview = preview_manual_exercise(
         repo,
-        record_id=record_id,
+        lot_id=lot_id,
         broker=broker,
         account=account,
         symbol=symbol,
@@ -1551,7 +1551,7 @@ def record_manual_exercise(
     )
     resolution = _manual_exercise_target_resolution(
         repo,
-        record_id=record_id,
+        lot_id=lot_id,
         broker=broker,
         account=account,
         symbol=symbol,
@@ -1696,10 +1696,10 @@ def preview_lifecycle_expire_close(
     close_target_resolution = resolve_fifo_close_targets(repo, selector, source="lifecycle_expire_close")
     operations: list[dict[str, Any]] = []
     for match in close_target_resolution.matches:
-        fields = _current_record_fields(repo, record_id=match.record_id)
+        fields = _current_record_fields(repo, lot_id=match.lot_id)
         ledger_preflight = preflight_broker_trade_close(
             repo,
-            record_id=match.record_id,
+            lot_id=match.lot_id,
             fields=fields,
             contracts_to_close=int(match.contracts_to_close),
             close_price=0.0,
@@ -1709,7 +1709,7 @@ def preview_lifecycle_expire_close(
         operations.append(
             BrokerTradeOperation(
                 action="expire_close",
-                record_id=match.record_id,
+                lot_id=match.lot_id,
                 contracts_to_close=int(match.contracts_to_close),
                 matched_by=match.matched_by,
                 ledger_preflight=ledger_preflight,
@@ -1770,7 +1770,7 @@ def record_lifecycle_expire_close(
 def preview_manual_position_close(
     repo: Any,
     *,
-    record_id: str,
+    lot_id: str,
     contracts_to_close: int,
     close_price: float | None,
     close_reason: str,
@@ -1778,14 +1778,14 @@ def preview_manual_position_close(
 ) -> ManualClosePreviewResult:
     close_target_resolution = resolve_explicit_close_target(
         repo,
-        record_id=record_id,
+        lot_id=lot_id,
         contracts_to_close=int(contracts_to_close),
         source="manual_close_explicit",
     )
     fields = close_target_resolution.single_candidate.raw_fields
     ledger_preflight = preflight_manual_close(
         repo,
-        record_id=record_id,
+        lot_id=lot_id,
         fields=fields,
         contracts_to_close=int(contracts_to_close),
         close_price=close_price,
@@ -1810,19 +1810,19 @@ def preview_manual_position_close(
 def record_manual_position_close(
     repo: Any,
     *,
-    record_id: str,
+    lot_id: str,
     contracts_to_close: int,
     close_price: float | None,
     close_reason: str,
     fields: dict[str, Any] | None = None,
     as_of_ms: int | None = None,
 ) -> ManualCloseLedgerResult:
-    current_fields = repo.get_record_fields(record_id)
+    current_fields = repo.get_record_fields(lot_id)
     from src.application.ledger.manual_trades import existing_manual_close_event_result
 
     duplicate_result = existing_manual_close_event_result(
         repo,
-        record_id=str(record_id),
+        lot_id=str(lot_id),
         fields=current_fields,
         contracts_to_close=int(contracts_to_close),
         close_price=close_price,
@@ -1831,7 +1831,7 @@ def record_manual_position_close(
     if duplicate_result is not None:
         ledger_result = persist_manual_close_event_with_ledger(
             repo,
-            record_id=record_id,
+            lot_id=lot_id,
             fields=current_fields,
             contracts_to_close=int(contracts_to_close),
             close_price=close_price,
@@ -1840,7 +1840,7 @@ def record_manual_position_close(
         )
         return ledger_result.with_close_target_resolution(
             _duplicate_close_target_resolution_payload(
-                record_id=record_id,
+                lot_id=lot_id,
                 fields=current_fields,
                 contracts_to_close=int(contracts_to_close),
             )
@@ -1848,14 +1848,14 @@ def record_manual_position_close(
 
     close_target_resolution = resolve_explicit_close_target(
         repo,
-        record_id=record_id,
+        lot_id=lot_id,
         contracts_to_close=int(contracts_to_close),
         source="manual_close_explicit",
         fields=fields,
     )
     return persist_manual_close_event_with_ledger(
         repo,
-        record_id=close_target_resolution.single_match.record_id,
+        lot_id=close_target_resolution.single_match.lot_id,
         fields=close_target_resolution.single_candidate.raw_fields,
         contracts_to_close=int(contracts_to_close),
         close_price=close_price,
@@ -1866,7 +1866,7 @@ def record_manual_position_close(
 
 def _duplicate_close_target_resolution_payload(
     *,
-    record_id: str,
+    lot_id: str,
     fields: dict[str, Any],
     contracts_to_close: int,
 ) -> dict[str, Any]:
@@ -1886,7 +1886,7 @@ def _duplicate_close_target_resolution_payload(
         "strategy": "duplicate_existing_close_event",
         "selector": selector,
         "target_count": 1,
-        "record_ids": [str(record_id)],
+        "record_ids": [str(lot_id)],
         "contracts_to_close": int(contracts_to_close),
         "targets": [],
     }
@@ -1895,7 +1895,7 @@ def _duplicate_close_target_resolution_payload(
 def preview_manual_position_adjust(
     repo: Any,
     *,
-    record_id: str,
+    lot_id: str,
     contracts: int | None,
     strike: float | None,
     expiration_ymd: str | None,
@@ -1907,10 +1907,10 @@ def preview_manual_position_adjust(
     strategy_group_id: str | None = None,
     strategy_snapshot: dict[str, Any] | None = None,
 ) -> ManualAdjustPreviewResult:
-    fields = repo.get_record_fields(record_id)
+    fields = repo.get_record_fields(lot_id)
     ledger_preflight = preflight_manual_adjust(
         repo,
-        record_id=record_id,
+        lot_id=lot_id,
         fields=fields,
         contracts=contracts,
         strike=strike,
@@ -1947,7 +1947,7 @@ def preview_manual_position_adjust(
 def record_manual_position_adjust(
     repo: Any,
     *,
-    record_id: str,
+    lot_id: str,
     fields: dict[str, Any] | None = None,
     contracts: int | None = None,
     strike: float | None = None,
@@ -1962,7 +1962,7 @@ def record_manual_position_adjust(
 ) -> ManualAdjustLedgerResult:
     return persist_manual_adjust_event_with_ledger(
         repo,
-        record_id=record_id,
+        lot_id=lot_id,
         fields=fields,
         contracts=contracts,
         strike=strike,
@@ -2054,10 +2054,10 @@ def preview_broker_trade_close(
         else "auto_trade_sell_to_close"
     )
     for match in matches:
-        fields = repo.get_record_fields(match.record_id)
+        fields = repo.get_record_fields(match.lot_id)
         operation = BrokerTradeOperation(
             action=close_action,
-            record_id=match.record_id,
+            lot_id=match.lot_id,
             contracts_to_close=match.contracts_to_close,
             patch=build_close_patch_contract(
                 fields,
@@ -2097,7 +2097,7 @@ def record_broker_trade_close(
     operations = [
         BrokerTradeOperation(
             action=close_action,
-            record_id=match.record_id,
+            lot_id=match.lot_id,
             contracts_to_close=match.contracts_to_close,
             close_target_resolution=(
                 close_target_resolution.to_dict() if close_target_resolution is not None else None
@@ -2178,7 +2178,7 @@ def find_unique_open_position_lot(
     if candidate is None:
         return None
     return {
-        "record_id": candidate.record_id,
+        "record_id": candidate.lot_id,
         "contracts_open": int(candidate.contracts_open or 0),
         "strike": candidate.strike,
         "expiration_ymd": candidate.expiration_ymd,
@@ -2247,9 +2247,9 @@ def adopt_existing_combo_identity(
     repo: Any,
     *,
     strategy_group_id: str,
-    funding_put_record_id: str,
+    funding_put_lot_id: str,
     funding_put_open_event_id: str,
-    participation_call_record_id: str,
+    participation_call_lot_id: str,
     participation_call_open_event_id: str,
     expected_contracts: int,
     apply_changes: bool = False,
@@ -2257,9 +2257,9 @@ def adopt_existing_combo_identity(
     return adopt_existing_combo_identity_atomically(
         repo,
         group_id=strategy_group_id,
-        funding_put_record_id=funding_put_record_id,
+        funding_put_lot_id=funding_put_lot_id,
         funding_put_open_event_id=funding_put_open_event_id,
-        participation_call_record_id=participation_call_record_id,
+        participation_call_lot_id=participation_call_lot_id,
         participation_call_open_event_id=(participation_call_open_event_id),
         expected_contracts=expected_contracts,
         apply_changes=apply_changes,
@@ -2311,7 +2311,7 @@ def record_assigned_stock_event(
     sale_event: dict[str, Any] | None = None,
     assigned_stock_after: dict[str, Any] | None = None,
     account: str | None = None,
-    target_stock_lot_id: str | None = None,
+    target_lot_id: str | None = None,
     trade_time_ms: int | None = None,
     prepare_sale: Any = None,
     identity_execution: dict[str, Any] | None = None,
@@ -2321,7 +2321,7 @@ def record_assigned_stock_event(
         sale_event=sale_event,
         assigned_stock_after=assigned_stock_after,
         account=account,
-        target_stock_lot_id=target_stock_lot_id,
+        target_lot_id=target_lot_id,
         trade_time_ms=trade_time_ms,
         prepare_sale=prepare_sale,
         identity_execution=identity_execution,

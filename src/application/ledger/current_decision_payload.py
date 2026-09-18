@@ -281,8 +281,8 @@ def _required_current_inputs(
 
 def _active_lot_ids(current_position_lots: Sequence[Mapping[str, Any]]) -> set[str]:
     return {
-        record_id
-        for record_id, fields in _position_lot_fields(current_position_lots).items()
+        lot_id
+        for lot_id, fields in _position_lot_fields(current_position_lots).items()
         if str(fields.get("status") or "").strip().lower() == "open"
         and int(fields.get("contracts_open") or 0) > 0
     }

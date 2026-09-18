@@ -76,6 +76,14 @@ POSITION_LOT_PATCH_FIELDS = (
     *LEGACY_POSITION_LOT_PATCH_FIELDS,
 )
 
+#: Persisted payload key -> declared field name, for the keys whose stored
+#: spelling is a boundary the convergence batch must not move.  This tuple is
+#: the *storage* key list (``decode_position_lot_patch`` rejects anything outside
+#: it), so a field whose declared name converged onto ``lot_id`` still stores its
+#: original key.  Mirrors the translation already written out longhand in
+#: ``decode_position_lot_patch``; every other key is its own field name.
+PATCH_STORAGE_KEY_TO_FIELD = {"source_stock_lot_id": "source_lot_id"}
+
 
 def safe_float(value: Any) -> float | None:
     try:
@@ -312,7 +320,7 @@ class PositionLotPatch:
     strategy: _PatchValue = _UNSET
     leg_role: _PatchValue = _UNSET
     strategy_group_id: _PatchValue = _UNSET
-    source_stock_lot_id: _PatchValue = _UNSET
+    source_lot_id: _PatchValue = _UNSET
     source_wheel_branch_id: _PatchValue = _UNSET
     strategy_snapshot: _PatchValue = _UNSET
     yield_enhancement_mode: _PatchValue = _UNSET
@@ -320,7 +328,7 @@ class PositionLotPatch:
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {}
         for key in POSITION_LOT_PATCH_FIELDS:
-            value = getattr(self, key)
+            value = getattr(self, PATCH_STORAGE_KEY_TO_FIELD.get(key, key))
             if value is _UNSET:
                 continue
             payload[key] = value
@@ -329,12 +337,12 @@ class PositionLotPatch:
     def has(self, key: str) -> bool:
         if key not in POSITION_LOT_PATCH_FIELDS:
             raise KeyError(f"unsupported position lot patch field: {key}")
-        return getattr(self, key) is not _UNSET
+        return getattr(self, PATCH_STORAGE_KEY_TO_FIELD.get(key, key)) is not _UNSET
 
     def value(self, key: str) -> int | float | str | dict[str, Any] | None:
         if key not in POSITION_LOT_PATCH_FIELDS:
             raise KeyError(f"unsupported position lot patch field: {key}")
-        value = getattr(self, key)
+        value = getattr(self, PATCH_STORAGE_KEY_TO_FIELD.get(key, key))
         if value is _UNSET:
             raise KeyError(f"position lot patch field is unset: {key}")
         return value
@@ -374,7 +382,7 @@ def decode_position_lot_patch(payload: Any) -> PositionLotPatch:
         strategy=payload.get("strategy", _UNSET),
         leg_role=payload.get("leg_role", _UNSET),
         strategy_group_id=payload.get("strategy_group_id", _UNSET),
-        source_stock_lot_id=payload.get("source_stock_lot_id", _UNSET),
+        source_lot_id=payload.get("source_stock_lot_id", _UNSET),
         source_wheel_branch_id=payload.get("source_wheel_branch_id", _UNSET),
         strategy_snapshot=payload.get("strategy_snapshot", _UNSET),
         yield_enhancement_mode=payload.get("yield_enhancement_mode", _UNSET),
@@ -612,7 +620,7 @@ def build_open_adjustment_patch_contract(
     strategy: str | None = None,
     leg_role: str | None = None,
     strategy_group_id: str | None = None,
-    source_stock_lot_id: str | None = None,
+    source_lot_id: str | None = None,
     source_wheel_branch_id: str | None = None,
     strategy_snapshot: dict[str, Any] | None = None,
     as_of_ms: int | None = None,
@@ -631,7 +639,7 @@ def build_open_adjustment_patch_contract(
             strategy,
             leg_role,
             strategy_group_id,
-            source_stock_lot_id,
+            source_lot_id,
             source_wheel_branch_id,
             strategy_snapshot,
         )
@@ -681,8 +689,8 @@ def build_open_adjustment_patch_contract(
     patch_strategy = _optional_patch_text(canonical_strategy, "strategy")
     patch_leg_role = _optional_patch_text(leg_role, "leg_role")
     patch_strategy_group_id = _optional_patch_text(strategy_group_id, "strategy_group_id")
-    patch_source_stock_lot_id = _optional_patch_text(
-        source_stock_lot_id,
+    patch_source_lot_id = _optional_patch_text(
+        source_lot_id,
         "source_stock_lot_id",
     )
     patch_source_wheel_branch_id = _optional_patch_text(
@@ -749,7 +757,7 @@ def build_open_adjustment_patch_contract(
         strategy=patch_strategy,
         leg_role=patch_leg_role,
         strategy_group_id=patch_strategy_group_id,
-        source_stock_lot_id=patch_source_stock_lot_id,
+        source_lot_id=patch_source_lot_id,
         source_wheel_branch_id=patch_source_wheel_branch_id,
         strategy_snapshot=patch_strategy_snapshot,
     )
@@ -767,7 +775,7 @@ def build_open_adjustment_patch(
     strategy: str | None = None,
     leg_role: str | None = None,
     strategy_group_id: str | None = None,
-    source_stock_lot_id: str | None = None,
+    source_lot_id: str | None = None,
     source_wheel_branch_id: str | None = None,
     strategy_snapshot: dict[str, Any] | None = None,
     as_of_ms: int | None = None,
@@ -783,7 +791,7 @@ def build_open_adjustment_patch(
         strategy=strategy,
         leg_role=leg_role,
         strategy_group_id=strategy_group_id,
-        source_stock_lot_id=source_stock_lot_id,
+        source_lot_id=source_lot_id,
         source_wheel_branch_id=source_wheel_branch_id,
         strategy_snapshot=strategy_snapshot,
         as_of_ms=as_of_ms,

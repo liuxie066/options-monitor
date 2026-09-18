@@ -387,8 +387,8 @@ def _auto_close_receipt_key_fields(
     tz_name = _market_timezone(config=config, result=result)
     business_date = _business_date(result.get("as_of_utc"), timezone_name=tz_name)
     applied_items = [item for item in list(result.get("applied") or []) if isinstance(item, dict)]
-    applied_record_ids = sorted(_optional_str(item.get("record_id")) or "" for item in applied_items)
-    applied_record_ids = [item for item in applied_record_ids if item]
+    applied_lot_ids = sorted(_optional_str(item.get("record_id")) or "" for item in applied_items)
+    applied_lot_ids = [item for item in applied_lot_ids if item]
     return {
         "kind": "auto_close_receipt",
         "account": _optional_str(result.get("account")) or "-",
@@ -400,7 +400,7 @@ def _auto_close_receipt_key_fields(
         "candidates_should_close": _int_value(result.get("candidates_should_close")),
         "applied_closed": _int_value(result.get("applied_closed")),
         "error_count": len(_errors(result)),
-        "applied_record_ids": applied_record_ids,
+        "applied_record_ids": applied_lot_ids,
     }
 
 
@@ -578,12 +578,12 @@ def _flat_error(value: Any) -> str:
 
 
 def _applied_line(item: dict[str, Any]) -> str:
-    record_id = _display(item.get("record_id"))
+    lot_id = _display(item.get("record_id"))
     # §7.1: ``position_id`` is retired; the applied payload carries the
     # ``position_key`` (contract identity + derived side).
     position_key = _display(item.get("position_key"))
     expiration = _display(item.get("expiration_ymd") or item.get("expiration_ms"))
-    return f"{record_id}｜{position_key}｜到期 {expiration}"
+    return f"{lot_id}｜{position_key}｜到期 {expiration}"
 
 
 def _display(value: Any) -> str:

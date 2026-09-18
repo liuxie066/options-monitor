@@ -664,9 +664,9 @@ def _ledger_lot_facts(
         fields = dict(row.get("fields") or {})
         if str(fields.get("account") or "").strip().lower() != account:
             continue
-        record_id = str(row.get("record_id") or "").strip()
+        lot_id = str(row.get("record_id") or "").strip()
         open_event_id = str(fields.get("source_event_id") or "").strip()
-        event = events_by_id.get(open_event_id) or open_by_lot.get(record_id) or {}
+        event = events_by_id.get(open_event_id) or open_by_lot.get(lot_id) or {}
         if not open_event_id:
             open_event_id = str(event.get("event_id") or "").strip()
         contract = dict(event.get("contract_key") or {})
@@ -689,7 +689,7 @@ def _ledger_lot_facts(
         )
         out.append(
             {
-                "record_id": record_id,
+                "record_id": lot_id,
                 "open_event_id": open_event_id,
                 "account": account,
                 "broker": broker,
@@ -887,10 +887,10 @@ def _validate_inference_against_current_ledger(
     records_by_id = {str(item.lot_id): item for item in projection.lots}
     out: dict[str, Any] = {}
     for prefix in ("put", "call"):
-        record_id = str(inference.get(f"{prefix}_record_id") or "").strip()
+        lot_id = str(inference.get(f"{prefix}_record_id") or "").strip()
         open_event_id = str(inference.get(f"{prefix}_open_event_id") or "").strip()
-        fact = facts_by_record.get(record_id)
-        record = records_by_id.get(record_id)
+        fact = facts_by_record.get(lot_id)
+        record = records_by_id.get(lot_id)
         snapshot = inference.get(f"{prefix}_lot_snapshot")
         if fact is None or record is None or not isinstance(snapshot, Mapping):
             raise ValueError("combo confirmation exact lot is missing")
@@ -1037,7 +1037,7 @@ def _identity_leg(record: Any, *, open_event_id: str) -> dict[str, Any]:
         if isinstance(record, Mapping)
         else record.fields
     )
-    record_id = str(
+    lot_id = str(
         record.get("record_id")
         if isinstance(record, Mapping)
         else record.lot_id
@@ -1059,7 +1059,7 @@ def _identity_leg(record: Any, *, open_event_id: str) -> dict[str, Any]:
         "leg_role": str(fields.get("leg_role") or "").strip().lower(),
         "contracts": int(effective_contracts(fields) or 0),
         "open_event_id": str(open_event_id or "").strip(),
-        "record_id": record_id,
+        "record_id": lot_id,
         "contract_key": contract_key.to_dict(),
         "currency": str(fields.get("currency") or "").strip().upper(),
         "multiplier": float(effective_multiplier(fields) or 0),

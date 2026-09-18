@@ -197,14 +197,14 @@ def _preview_event_to_trade_event(payload: dict[str, Any]) -> TradeEvent:
     return event
 
 
-def _open_event_lot_record_id(event: dict[str, Any]) -> str:
+def _open_event_lot_id(event: dict[str, Any]) -> str:
     event_id = str(event.get("event_id") or "").strip()
     if not event_id:
         return ""
     if str(event.get("source_type") or "").strip().lower() == "bootstrap_snapshot":
-        payload_record_id = str(_event_payload(event).get("lot_record_id") or "").strip()
-        if payload_record_id:
-            return payload_record_id
+        payload_lot_id = str(_event_payload(event).get("lot_record_id") or "").strip()
+        if payload_lot_id:
+            return payload_lot_id
     return f"lot_{event_id}"
 
 
@@ -228,7 +228,7 @@ def _repair_downstream_dependencies(events: list[dict[str, Any]], target: dict[s
     target_event_id = str(target.get("event_id") or "").strip()
     if normalize_position_effect(target.get("position_effect")) != "open":
         return []
-    target_lot_record_id = _open_event_lot_record_id(target)
+    target_lot_id = _open_event_lot_id(target)
     target_position_side = _event_position_side(target)
     target_sort_key = _event_sort_key(target)
     voided_event_ids: set[str] = set()
@@ -245,14 +245,14 @@ def _repair_downstream_dependencies(events: list[dict[str, Any]], target: dict[s
             continue
         effect = normalize_position_effect(event.get("position_effect")) or str(event.get("position_effect") or "").strip().lower()
         payload = _event_payload(event)
-        record_id = str(payload.get("record_id") or "").strip()
+        lot_id = str(payload.get("record_id") or "").strip()
         source_event_id = str(
             payload.get("close_target_source_event_id")
             or payload.get("adjust_target_source_event_id")
             or ""
         ).strip()
         explicit_target = bool(
-            (target_lot_record_id and record_id == target_lot_record_id)
+            (target_lot_id and lot_id == target_lot_id)
             or (target_event_id and source_event_id == target_event_id)
         )
         if explicit_target:
@@ -261,14 +261,14 @@ def _repair_downstream_dependencies(events: list[dict[str, Any]], target: dict[s
                     "event_id": event_id,
                     "position_effect": effect,
                     "dependency": "explicit_target",
-                    "record_id": record_id or None,
+                    "record_id": lot_id or None,
                     "source_event_id": source_event_id or None,
                 }
             )
             continue
         if effect != "close":
             continue
-        if record_id or source_event_id:
+        if lot_id or source_event_id:
             continue
         if target_position_side and _event_position_side(event) != target_position_side:
             continue
@@ -300,7 +300,7 @@ def _dependency_cutoff_ms(rows: Mapping[str, Any], target: Mapping[str, Any]) ->
     return max(1, *values)
 
 
-def _explicit_stock_lot_id(event: Mapping[str, Any]) -> str:
+def _explicit_lot_id(event: Mapping[str, Any]) -> str:
     payload = event.get("raw_payload")
     payload = payload if isinstance(payload, Mapping) else {}
     strategy_metadata = strategy_metadata_fields_from_payload(
@@ -362,7 +362,7 @@ def _stock_dependencies(
     for row in rows.get("account_assigned_stock_events") or []:
         if not isinstance(row, Mapping):
             continue
-        lot_id = _explicit_stock_lot_id(row)
+        lot_id = _explicit_lot_id(row)
         event_id = str(row.get("stock_event_id") or row.get("event_id") or "").strip()
         if lot_id in lot_ids and event_id and event_id not in effective_sale_ids:
             dependencies.add(("assigned_stock_sale", event_id, lot_id, "unresolved"))
@@ -388,7 +388,7 @@ def _stock_dependencies(
             or valid_void_target_event_id(row) is not None
         ):
             continue
-        lot_id = _explicit_stock_lot_id(row)
+        lot_id = _explicit_lot_id(row)
         if lot_id not in lot_ids or event_id in effective_sale_ids or event_id in effective_call_ids:
             continue
         kind = (
@@ -1196,9 +1196,9 @@ def _assert_only_target_lot_opened_at_changed(
     if set(before_by_id) != set(after_by_id) or target_lot_id not in before_by_id:
         raise ValueError("trade time correction changed position lot membership")
     changed_ids = {
-        record_id
-        for record_id in before_by_id
-        if before_by_id[record_id] != after_by_id[record_id]
+        lot_id
+        for lot_id in before_by_id
+        if before_by_id[lot_id] != after_by_id[lot_id]
     }
     if changed_ids != {target_lot_id}:
         raise ValueError("trade time correction changed an unexpected position lot")

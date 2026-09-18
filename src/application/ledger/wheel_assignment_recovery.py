@@ -93,8 +93,8 @@ def _completed_combo_transition(
         != assignment.target_lot_id
         or int(identity.get("original_contracts") or 0) != assignment.contracts
         or membership.fact.get("status") != "exact"
-        or set(membership.global_current_record_ids) != expected_lots
-        or membership.global_live_record_ids
+        or set(membership.global_current_lot_ids) != expected_lots
+        or membership.global_live_lot_ids
     ):
         raise ValueError("completed combo transition requires an exact fully closed group")
     voided = {

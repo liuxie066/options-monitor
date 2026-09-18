@@ -136,7 +136,7 @@ def _parse_assigned_stock(command: str, args: list[str], *, accounts: frozenset[
     account: str | None = None
     status: str = "open"
     symbol: str | None = None
-    stock_lot_id: str | None = None
+    lot_id: str | None = None
     refresh_quotes = True
     for arg in args:
         normalized = arg.lower()
@@ -155,7 +155,7 @@ def _parse_assigned_stock(command: str, args: list[str], *, accounts: frozenset[
         elif normalized in {"no-refresh", "no_refresh", "offline"}:
             refresh_quotes = False
         elif normalized.startswith("stock_lot_id="):
-            stock_lot_id = arg.split("=", 1)[1].strip() or None
+            lot_id = arg.split("=", 1)[1].strip() or None
         elif symbol is None:
             symbol = arg.upper()
         else:
@@ -172,8 +172,8 @@ def _parse_assigned_stock(command: str, args: list[str], *, accounts: frozenset[
         payload["account"] = account
     if symbol:
         payload["symbol"] = symbol
-    if stock_lot_id:
-        payload["stock_lot_id"] = stock_lot_id
+    if lot_id:
+        payload["stock_lot_id"] = lot_id
     return _intent("assigned_stock_position_query", payload)
 
 

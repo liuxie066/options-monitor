@@ -451,7 +451,7 @@ def test_wheel_cli_end_previews_by_default(monkeypatch: pytest.MonkeyPatch, tmp_
 
     assert wheel_cli.execute(_end_args()) == {"dry_run": True, "write_applied": False}
     assert calls[0]["apply_changes"] is False
-    assert calls[0]["stock_lot_id"] == "assigned-stock-1"
+    assert calls[0]["lot_id"] == "assigned-stock-1"
 
 
 def test_wheel_cli_requires_apply_with_confirmation() -> None:
@@ -1398,7 +1398,7 @@ def test_wheel_cli_put_linkage_reject_previews_canonical_branch(
         "market": "us",
         "apply_changes": False,
         "as_of_ms": calls[0]["as_of_ms"],
-        "option_record_id": "put-lot-1",
+        "option_lot_id": "put-lot-1",
         "linkage_candidate_id": "candidate-1",
         "expected_input_hash": "input-1",
         "reason": "not this cycle",

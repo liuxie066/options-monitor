@@ -660,11 +660,11 @@ def test_partial_call_close_releases_only_closed_coverage(reuse: bool, delay_ms:
     opened_at = _ms("2026-05-05T10:00:00")
     closed_at = _ms("2026-05-20T10:00:00")
     cutoff = _ms("2026-06-30T16:00:00")
-    stock_lot_id = "assigned-stock-assign-put"
+    lot_id = "assigned-stock-assign-put"
     call = _event(
         "call-a", option_type="call", side="sell", position_effect="open",
         at="2026-05-05T10:00:00", price=2, strike=110,
-        raw_payload={"stock_lot_id": stock_lot_id, "fee_provenance": {"basis": "actual", "source": "test"}},
+        raw_payload={"stock_lot_id": lot_id, "fee_provenance": {"basis": "actual", "source": "test"}},
     )
     call.update(contracts=2, fees=2)
     close = _event(
@@ -687,7 +687,7 @@ def test_partial_call_close_releases_only_closed_coverage(reuse: bool, delay_ms:
                          opened_at=closed_at + delay_ms, contracts=1, unrealized_pnl_gross=5))
     else:
         sales.append({
-            "event_type": "sale", "stock_event_id": "sale-released", "target_stock_lot_id": stock_lot_id,
+            "event_type": "sale", "stock_event_id": "sale-released", "target_stock_lot_id": lot_id,
             "account": "lx", "broker": "富途", "symbol": "NVDA", "currency": "USD",
             "side": "sell", "shares": 100, "price": 105, "fees": 0,
             "fee_provenance": {"basis": "actual", "source": "test"}, "trade_time_ms": closed_at + delay_ms,

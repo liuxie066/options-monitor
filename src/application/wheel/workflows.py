@@ -82,7 +82,7 @@ def _wheel_batch(
     rows: Mapping[str, Any],
     *,
     account: str,
-    stock_lot_id: str,
+    lot_id: str,
     as_of_ms: int,
     market: str,
 ) -> dict[str, Any]:
@@ -94,11 +94,11 @@ def _wheel_batch(
             as_of_ms=as_of_ms,
             market=market,
         )["batches"]
-        if batch["stock_lot_id"] == stock_lot_id
+        if batch["stock_lot_id"] == lot_id
     ]
     if len(matches) != 1:
         raise ValueError(
-            f"Wheel batch must resolve uniquely: stock_lot_id={stock_lot_id}"
+            f"Wheel batch must resolve uniquely: stock_lot_id={lot_id}"
         )
     return matches[0]
 
@@ -738,7 +738,7 @@ def end_wheel_lifecycle(
     repo: Any,
     *,
     account: str,
-    stock_lot_id: str,
+    lot_id: str,
     expected_batch_generation_hash: str,
     request_id: str,
     actor: str,
@@ -747,7 +747,7 @@ def end_wheel_lifecycle(
     as_of_ms: int | None = None,
 ) -> dict[str, Any]:
     account_value = str(account or "").strip().lower()
-    stock_lot_value = str(stock_lot_id or "").strip()
+    stock_lot_value = str(lot_id or "").strip()
     expected_generation = str(expected_batch_generation_hash or "").strip()
     request_value = str(request_id or "").strip()
     actor_value = str(actor or "").strip()
@@ -787,7 +787,7 @@ def end_wheel_lifecycle(
             batch = _wheel_batch(
                 rows,
                 account=account_value,
-                stock_lot_id=stock_lot_value,
+                lot_id=stock_lot_value,
                 as_of_ms=max(instant, int(event.get("occurred_at_ms") or 0)),
                 market=market_value,
             )
@@ -810,7 +810,7 @@ def end_wheel_lifecycle(
         batch = _wheel_batch(
             rows,
             account=account_value,
-            stock_lot_id=stock_lot_value,
+            lot_id=stock_lot_value,
             as_of_ms=instant,
             market=market_value,
         )
@@ -842,7 +842,7 @@ def end_wheel_lifecycle(
                 conn=conn,
             ),
             account=account_value,
-            stock_lot_id=stock_lot_value,
+            lot_id=stock_lot_value,
             as_of_ms=instant,
             market=market_value,
         )
@@ -870,13 +870,13 @@ def _intent_summaries(
     rows: Mapping[str, Any],
     *,
     account: str,
-    stock_lot_id: str,
+    lot_id: str,
     as_of_ms: int,
 ) -> list[dict[str, Any]]:
     return project_wheel_call_intents(
         rows.get("account_wheel_events") or [],
         account=account,
-        stock_lot_id=stock_lot_id,
+        lot_id=lot_id,
         as_of_ms=as_of_ms,
         known_trade_event_ids={
             str(item.get("event_id") or "").strip()
@@ -891,7 +891,7 @@ def _snapshot_final_candidate(
     *,
     current_strategy_policy_sha256: str,
     account: str,
-    stock_lot_id: str | None = None,
+    lot_id: str | None = None,
     wheel_branch_id: str | None = None,
     direction: str = "call",
     final_candidate_id: str,
@@ -907,7 +907,7 @@ def _snapshot_final_candidate(
     if str(candidate_snapshot.get("account") or "").strip().lower() != account:
         raise ValueError("stale_snapshot: Wheel candidate snapshot account mismatch")
     branch_id = str(wheel_branch_id or "").strip()
-    stock_lot_value = str(stock_lot_id or "").strip()
+    stock_lot_value = str(lot_id or "").strip()
     direction_value = str(direction or "").strip().lower()
     expected_generation = str(
         expected_batch_generation_hash or ""
@@ -969,7 +969,7 @@ def create_wheel_call_intent(
     candidate_snapshot: Mapping[str, Any],
     current_strategy_policy_sha256: str,
     account: str,
-    stock_lot_id: str,
+    lot_id: str,
     final_candidate_id: str,
     expected_snapshot_hash: str,
     expected_batch_generation_hash: str,
@@ -986,7 +986,7 @@ def create_wheel_call_intent(
     as_of_ms: int | None = None,
 ) -> dict[str, Any]:
     account_value = str(account or "").strip().lower()
-    stock_lot_value = str(stock_lot_id or "").strip()
+    stock_lot_value = str(lot_id or "").strip()
     request_value = str(request_id or "").strip()
     candidate_id = str(final_candidate_id or "").strip()
     snapshot_hash = str(expected_snapshot_hash or "").strip()
@@ -1048,7 +1048,7 @@ def create_wheel_call_intent(
             batch = _wheel_batch(
                 rows,
                 account=account_value,
-                stock_lot_id=stock_lot_value,
+                lot_id=stock_lot_value,
                 as_of_ms=instant,
                 market=market_value,
             )
@@ -1069,7 +1069,7 @@ def create_wheel_call_intent(
             candidate_snapshot,
             current_strategy_policy_sha256=current_strategy_policy_sha256,
             account=account_value,
-            stock_lot_id=stock_lot_value,
+            lot_id=stock_lot_value,
             final_candidate_id=candidate_id,
             expected_snapshot_hash=snapshot_hash,
             expected_batch_generation_hash=expected_generation,
@@ -1078,7 +1078,7 @@ def create_wheel_call_intent(
         summaries = _intent_summaries(
             rows,
             account=account_value,
-            stock_lot_id=stock_lot_value,
+            lot_id=stock_lot_value,
             as_of_ms=instant,
         )
         order_id = str(broker_order_id or "").strip()
@@ -1126,7 +1126,7 @@ def create_wheel_call_intent(
         projected = _wheel_batch(
             sqlite_repo.read_lifecycle_account_rows(account=account_value, conn=conn),
             account=account_value,
-            stock_lot_id=stock_lot_value,
+            lot_id=stock_lot_value,
             as_of_ms=instant,
             market=market_value,
         )
@@ -1153,7 +1153,7 @@ def cancel_wheel_call_intent(
     repo: Any,
     *,
     account: str,
-    stock_lot_id: str,
+    lot_id: str,
     intent_id: str,
     expected_batch_generation_hash: str,
     request_id: str,
@@ -1165,7 +1165,7 @@ def cancel_wheel_call_intent(
     as_of_ms: int | None = None,
 ) -> dict[str, Any]:
     account_value = str(account or "").strip().lower()
-    stock_lot_value = str(stock_lot_id or "").strip()
+    stock_lot_value = str(lot_id or "").strip()
     intent_value = str(intent_id or "").strip()
     expected_generation = str(expected_batch_generation_hash or "").strip()
     request_value = str(request_id or "").strip()
@@ -1223,7 +1223,7 @@ def cancel_wheel_call_intent(
         batch = _wheel_batch(
             rows,
             account=account_value,
-            stock_lot_id=stock_lot_value,
+            lot_id=stock_lot_value,
             as_of_ms=instant,
             market=market_value,
         )
@@ -1234,7 +1234,7 @@ def cancel_wheel_call_intent(
             for item in _intent_summaries(
                 rows,
                 account=account_value,
-                stock_lot_id=stock_lot_value,
+                lot_id=stock_lot_value,
                 as_of_ms=instant,
             )
             if item["intent_id"] == intent_value
@@ -1271,7 +1271,7 @@ def cancel_wheel_call_intent(
         after = _intent_summaries(
             after_rows,
             account=account_value,
-            stock_lot_id=stock_lot_value,
+            lot_id=stock_lot_value,
             as_of_ms=instant,
         )
         if any(item["intent_id"] == intent_value and item["status"] == "active" for item in after):
@@ -1284,8 +1284,8 @@ def cancel_wheel_call_intent(
 def _linkage_candidate(
     model: Mapping[str, Any],
     *,
-    call_record_id: str,
-    stock_lot_id: str,
+    call_lot_id: str,
+    lot_id: str,
     linkage_candidate_id: str,
     expected_input_hash: str,
     expected_batch_generation_hash: str,
@@ -1293,8 +1293,8 @@ def _linkage_candidate(
     matches = [
         item
         for item in model.get("linkage_candidates") or []
-        if item["call_record_id"] == call_record_id
-        and item["stock_lot_id"] == stock_lot_id
+        if item["call_record_id"] == call_lot_id
+        and item["stock_lot_id"] == lot_id
         and item["linkage_candidate_id"] == linkage_candidate_id
     ]
     if len(matches) != 1:
@@ -1326,8 +1326,8 @@ def confirm_wheel_call_linkage(
     repo: Any,
     *,
     account: str,
-    call_record_id: str,
-    stock_lot_id: str,
+    call_lot_id: str,
+    lot_id: str,
     linkage_candidate_id: str,
     expected_input_hash: str,
     expected_batch_generation_hash: str,
@@ -1339,8 +1339,8 @@ def confirm_wheel_call_linkage(
     as_of_ms: int | None = None,
 ) -> dict[str, Any]:
     account_value = str(account or "").strip().lower()
-    call_lot_value = str(call_record_id or "").strip()
-    stock_lot_value = str(stock_lot_id or "").strip()
+    call_lot_value = str(call_lot_id or "").strip()
+    stock_lot_value = str(lot_id or "").strip()
     candidate_id = str(linkage_candidate_id or "").strip()
     input_hash = str(expected_input_hash or "").strip()
     expected_generation = str(expected_batch_generation_hash or "").strip()
@@ -1394,8 +1394,8 @@ def confirm_wheel_call_linkage(
             return _linkage_result(
                 status="idempotent",
                 event_id=str(existing[0]["event_id"]),
-                call_record_id=call_lot_value,
-                stock_lot_id=stock_lot_value,
+                call_lot_id=call_lot_value,
+                lot_id=stock_lot_value,
                 request_id=request_value,
                 market=market_value,
                 dry_run=not apply_changes,
@@ -1410,8 +1410,8 @@ def confirm_wheel_call_linkage(
         )
         candidate = _linkage_candidate(
             model,
-            call_record_id=call_lot_value,
-            stock_lot_id=stock_lot_value,
+            call_lot_id=call_lot_value,
+            lot_id=stock_lot_value,
             linkage_candidate_id=candidate_id,
             expected_input_hash=input_hash,
             expected_batch_generation_hash=expected_generation,
@@ -1429,7 +1429,7 @@ def confirm_wheel_call_linkage(
             fields,
             strategy="wheel",
             leg_role="wheel_call",
-            source_stock_lot_id=stock_lot_value,
+            source_lot_id=stock_lot_value,
             source_wheel_branch_id=str(batch["wheel_branch_id"]),
             as_of_ms=instant,
         )
@@ -1492,7 +1492,7 @@ def confirm_wheel_call_linkage(
         for intent in project_wheel_call_intents(
             rows.get("account_wheel_events") or [],
             account=account_value,
-            stock_lot_id=stock_lot_value,
+            lot_id=stock_lot_value,
             as_of_ms=int(fill.get("event_time_ms") or 0),
             known_trade_event_ids=known_ids,
         ):
@@ -1521,8 +1521,8 @@ def confirm_wheel_call_linkage(
             return _linkage_result(
                 status="planned",
                 event_id=event.event_id,
-                call_record_id=call_lot_value,
-                stock_lot_id=stock_lot_value,
+                call_lot_id=call_lot_value,
+                lot_id=stock_lot_value,
                 request_id=request_value,
                 market=market_value,
                 dry_run=True,
@@ -1564,8 +1564,8 @@ def confirm_wheel_call_linkage(
         return _linkage_result(
             status="confirmed",
             event_id=event.event_id,
-            call_record_id=call_lot_value,
-            stock_lot_id=stock_lot_value,
+            call_lot_id=call_lot_value,
+            lot_id=stock_lot_value,
             request_id=request_value,
             market=market_value,
             dry_run=False,
@@ -1584,8 +1584,8 @@ def reject_wheel_call_linkage(
     repo: Any,
     *,
     account: str,
-    call_record_id: str,
-    stock_lot_id: str,
+    call_lot_id: str,
+    lot_id: str,
     linkage_candidate_id: str,
     expected_input_hash: str,
     expected_batch_generation_hash: str,
@@ -1598,8 +1598,8 @@ def reject_wheel_call_linkage(
 ) -> dict[str, Any]:
     values = {
         "account": str(account or "").strip().lower(),
-        "call_record_id": str(call_record_id or "").strip(),
-        "stock_lot_id": str(stock_lot_id or "").strip(),
+        "call_record_id": str(call_lot_id or "").strip(),
+        "stock_lot_id": str(lot_id or "").strip(),
         "linkage_candidate_id": str(linkage_candidate_id or "").strip(),
         "expected_input_hash": str(expected_input_hash or "").strip(),
         "expected_batch_generation_hash": str(
@@ -1647,8 +1647,8 @@ def reject_wheel_call_linkage(
             return _linkage_result(
                 status="idempotent",
                 event_id=event["event_id"],
-                call_record_id=values["call_record_id"],
-                stock_lot_id=values["stock_lot_id"],
+                call_lot_id=values["call_record_id"],
+                lot_id=values["stock_lot_id"],
                 request_id=values["request_id"],
                 market=values["market"],
                 dry_run=not apply_changes,
@@ -1662,8 +1662,8 @@ def reject_wheel_call_linkage(
         )
         candidate = _linkage_candidate(
             model,
-            call_record_id=values["call_record_id"],
-            stock_lot_id=values["stock_lot_id"],
+            call_lot_id=values["call_record_id"],
+            lot_id=values["stock_lot_id"],
             linkage_candidate_id=values["linkage_candidate_id"],
             expected_input_hash=values["expected_input_hash"],
             expected_batch_generation_hash=values["expected_batch_generation_hash"],
@@ -1689,7 +1689,7 @@ def reject_wheel_call_linkage(
                 else WHEEL_EVENT_SCHEMA_V2
             ),
             account=values["account"],
-            stock_lot_id=values["stock_lot_id"],
+            lot_id=values["stock_lot_id"],
             event_type="wheel_call_linkage_rejected",
             occurred_at_ms=instant,
             recorded_at_ms=instant,
@@ -1711,8 +1711,8 @@ def reject_wheel_call_linkage(
             return _linkage_result(
                 status="planned",
                 event_id=event["event_id"],
-                call_record_id=values["call_record_id"],
-                stock_lot_id=values["stock_lot_id"],
+                call_lot_id=values["call_record_id"],
+                lot_id=values["stock_lot_id"],
                 request_id=values["request_id"],
                 market=values["market"],
                 dry_run=True,
@@ -1734,8 +1734,8 @@ def reject_wheel_call_linkage(
         return _linkage_result(
             status="rejected",
             event_id=event["event_id"],
-            call_record_id=values["call_record_id"],
-            stock_lot_id=values["stock_lot_id"],
+            call_lot_id=values["call_record_id"],
+            lot_id=values["stock_lot_id"],
             request_id=values["request_id"],
             market=values["market"],
             dry_run=False,
@@ -1786,7 +1786,7 @@ def _canonical_wheel_result(
     schema_version: str,
     wheel_branch_id: str,
     direction: str,
-    option_record_id: str | None = None,
+    option_lot_id: str | None = None,
 ) -> dict[str, Any]:
     return {
         **dict(result),
@@ -1794,8 +1794,8 @@ def _canonical_wheel_result(
         "wheel_branch_id": wheel_branch_id,
         "direction": direction,
         **(
-            {"option_record_id": option_record_id}
-            if option_record_id is not None
+            {"option_record_id": option_lot_id}
+            if option_lot_id is not None
             else {}
         ),
     }
@@ -1805,7 +1805,7 @@ def _wheel_linkage_candidate(
     rows: Mapping[str, Any],
     model: Mapping[str, Any],
     *,
-    option_record_id: str,
+    option_lot_id: str,
     wheel_branch_id: str,
     direction: str,
     linkage_candidate_id: str,
@@ -1819,7 +1819,7 @@ def _wheel_linkage_candidate(
             rows.get("account_position_lots") or [],
             rows.get("account_wheel_events") or [],
         )
-        if item.get("option_record_id") == option_record_id
+        if item.get("option_record_id") == option_lot_id
         and item.get("wheel_branch_id") == wheel_branch_id
         and item.get("direction") == direction
         and item.get("linkage_candidate_id") == linkage_candidate_id
@@ -1840,7 +1840,7 @@ def _wheel_linkage_result(
     *,
     status: str,
     event_id: str,
-    option_record_id: str,
+    option_lot_id: str,
     wheel_branch_id: str,
     direction: str,
     request_id: str,
@@ -1854,7 +1854,7 @@ def _wheel_linkage_result(
             "schema_version": "wheel_linkage_result.v1",
             "status": status,
             "event_id": event_id,
-            "option_record_id": option_record_id,
+            "option_record_id": option_lot_id,
             "wheel_branch_id": wheel_branch_id,
             "direction": direction,
             "request_id": request_id,
@@ -2139,15 +2139,15 @@ def create_wheel_intent(
         as_of_ms=instant,
         market=market_value,
     )
-    stock_lot_id = str(branch.get("stock_lot_id") or "").strip()
-    if not stock_lot_id:
+    lot_id = str(branch.get("stock_lot_id") or "").strip()
+    if not lot_id:
         raise ValueError("Wheel Call branch has no stock lot")
     result = create_wheel_call_intent(
         repo,
         candidate_snapshot=candidate_snapshot,
         current_strategy_policy_sha256=current_strategy_policy_sha256,
         account=account_value,
-        stock_lot_id=stock_lot_id,
+        lot_id=lot_id,
         final_candidate_id=final_candidate_id,
         expected_snapshot_hash=expected_snapshot_hash,
         expected_batch_generation_hash=expected_batch_generation_hash,
@@ -2348,13 +2348,13 @@ def cancel_wheel_intent(
         as_of_ms=instant,
         market=market_value,
     )
-    stock_lot_id = str(branch.get("stock_lot_id") or "").strip()
-    if not stock_lot_id:
+    lot_id = str(branch.get("stock_lot_id") or "").strip()
+    if not lot_id:
         raise ValueError("Wheel Call branch has no stock lot")
     result = cancel_wheel_call_intent(
         repo,
         account=account_value,
-        stock_lot_id=stock_lot_id,
+        lot_id=lot_id,
         intent_id=intent_id,
         expected_batch_generation_hash=expected_batch_generation_hash,
         request_id=request_id,
@@ -2377,7 +2377,7 @@ def confirm_wheel_linkage(
     repo: Any,
     *,
     account: str,
-    option_record_id: str,
+    option_lot_id: str,
     wheel_branch_id: str,
     direction: str,
     linkage_candidate_id: str,
@@ -2398,7 +2398,7 @@ def confirm_wheel_linkage(
     if direction_value == "put":
         values = {
             "account": account_value,
-            "option_record_id": str(option_record_id or "").strip(),
+            "option_record_id": str(option_lot_id or "").strip(),
             "wheel_branch_id": branch_id,
             "linkage_candidate_id": str(linkage_candidate_id or "").strip(),
             "expected_input_hash": str(expected_input_hash or "").strip(),
@@ -2450,7 +2450,7 @@ def confirm_wheel_linkage(
                 return _wheel_linkage_result(
                     status="idempotent",
                     event_id=str(existing[0]["event_id"]),
-                    option_record_id=values["option_record_id"],
+                    option_lot_id=values["option_record_id"],
                     wheel_branch_id=values["wheel_branch_id"],
                     direction="put",
                     request_id=values["request_id"],
@@ -2468,7 +2468,7 @@ def confirm_wheel_linkage(
             candidate = _wheel_linkage_candidate(
                 rows,
                 model,
-                option_record_id=values["option_record_id"],
+                option_lot_id=values["option_record_id"],
                 wheel_branch_id=values["wheel_branch_id"],
                 direction="put",
                 linkage_candidate_id=values["linkage_candidate_id"],
@@ -2592,7 +2592,7 @@ def confirm_wheel_linkage(
                 return _wheel_linkage_result(
                     status="planned",
                     event_id=event.event_id,
-                    option_record_id=values["option_record_id"],
+                    option_lot_id=values["option_record_id"],
                     wheel_branch_id=branch_id,
                     direction="put",
                     request_id=values["request_id"],
@@ -2659,7 +2659,7 @@ def confirm_wheel_linkage(
             return _wheel_linkage_result(
                 status="confirmed",
                 event_id=event.event_id,
-                option_record_id=values["option_record_id"],
+                option_lot_id=values["option_record_id"],
                 wheel_branch_id=branch_id,
                 direction="put",
                 request_id=values["request_id"],
@@ -2683,14 +2683,14 @@ def confirm_wheel_linkage(
         as_of_ms=instant,
         market=market_value,
     )
-    stock_lot_id = str(branch.get("stock_lot_id") or "").strip()
-    if not stock_lot_id:
+    lot_id = str(branch.get("stock_lot_id") or "").strip()
+    if not lot_id:
         raise ValueError("Wheel Call branch has no stock lot")
     result = confirm_wheel_call_linkage(
         repo,
         account=account_value,
-        call_record_id=option_record_id,
-        stock_lot_id=stock_lot_id,
+        call_lot_id=option_lot_id,
+        lot_id=lot_id,
         linkage_candidate_id=linkage_candidate_id,
         expected_input_hash=expected_input_hash,
         expected_batch_generation_hash=expected_batch_generation_hash,
@@ -2706,7 +2706,7 @@ def confirm_wheel_linkage(
         schema_version="wheel_linkage_result.v1",
         wheel_branch_id=branch_id,
         direction=direction_value,
-        option_record_id=option_record_id,
+        option_lot_id=option_lot_id,
     )
 
 
@@ -2714,7 +2714,7 @@ def reject_wheel_linkage(
     repo: Any,
     *,
     account: str,
-    option_record_id: str,
+    option_lot_id: str,
     wheel_branch_id: str,
     direction: str,
     linkage_candidate_id: str,
@@ -2735,7 +2735,7 @@ def reject_wheel_linkage(
     if direction_value == "put":
         values = {
             "account": account_value,
-            "option_record_id": str(option_record_id or "").strip(),
+            "option_record_id": str(option_lot_id or "").strip(),
             "wheel_branch_id": branch_id,
             "linkage_candidate_id": str(linkage_candidate_id or "").strip(),
             "expected_input_hash": str(expected_input_hash or "").strip(),
@@ -2786,7 +2786,7 @@ def reject_wheel_linkage(
                 return _wheel_linkage_result(
                     status="idempotent",
                     event_id=str(event["event_id"]),
-                    option_record_id=values["option_record_id"],
+                    option_lot_id=values["option_record_id"],
                     wheel_branch_id=branch_id,
                     direction="put",
                     request_id=values["request_id"],
@@ -2804,7 +2804,7 @@ def reject_wheel_linkage(
             candidate = _wheel_linkage_candidate(
                 rows,
                 model,
-                option_record_id=values["option_record_id"],
+                option_lot_id=values["option_record_id"],
                 wheel_branch_id=values["wheel_branch_id"],
                 direction="put",
                 linkage_candidate_id=values["linkage_candidate_id"],
@@ -2825,7 +2825,7 @@ def reject_wheel_linkage(
                 event_id=f"wheel-put-linkage-rejected:{digest}",
                 event_schema_version=WHEEL_EVENT_SCHEMA_V2,
                 account=account_value,
-                stock_lot_id=None,
+                lot_id=None,
                 wheel_branch_id=branch_id,
                 event_type="wheel_put_linkage_rejected",
                 occurred_at_ms=instant,
@@ -2851,7 +2851,7 @@ def reject_wheel_linkage(
                 return _wheel_linkage_result(
                     status="planned",
                     event_id=event["event_id"],
-                    option_record_id=values["option_record_id"],
+                    option_lot_id=values["option_record_id"],
                     wheel_branch_id=branch_id,
                     direction="put",
                     request_id=values["request_id"],
@@ -2885,7 +2885,7 @@ def reject_wheel_linkage(
             return _wheel_linkage_result(
                 status="rejected",
                 event_id=event["event_id"],
-                option_record_id=values["option_record_id"],
+                option_lot_id=values["option_record_id"],
                 wheel_branch_id=branch_id,
                 direction="put",
                 request_id=values["request_id"],
@@ -2904,14 +2904,14 @@ def reject_wheel_linkage(
         as_of_ms=instant,
         market=market_value,
     )
-    stock_lot_id = str(branch.get("stock_lot_id") or "").strip()
-    if not stock_lot_id:
+    lot_id = str(branch.get("stock_lot_id") or "").strip()
+    if not lot_id:
         raise ValueError("Wheel Call branch has no stock lot")
     result = reject_wheel_call_linkage(
         repo,
         account=account_value,
-        call_record_id=option_record_id,
-        stock_lot_id=stock_lot_id,
+        call_lot_id=option_lot_id,
+        lot_id=lot_id,
         linkage_candidate_id=linkage_candidate_id,
         expected_input_hash=expected_input_hash,
         expected_batch_generation_hash=expected_batch_generation_hash,
@@ -2927,7 +2927,7 @@ def reject_wheel_linkage(
         schema_version="wheel_linkage_result.v1",
         wheel_branch_id=branch_id,
         direction=direction_value,
-        option_record_id=option_record_id,
+        option_lot_id=option_lot_id,
     )
 
 
@@ -2935,8 +2935,8 @@ def _linkage_result(
     *,
     status: str,
     event_id: str,
-    call_record_id: str,
-    stock_lot_id: str,
+    call_lot_id: str,
+    lot_id: str,
     request_id: str,
     market: str,
     dry_run: bool,
@@ -2948,8 +2948,8 @@ def _linkage_result(
             "schema_version": "wheel_call_linkage_result.v1",
             "status": status,
             "event_id": event_id,
-            "call_record_id": call_record_id,
-            "stock_lot_id": stock_lot_id,
+            "call_record_id": call_lot_id,
+            "stock_lot_id": lot_id,
             "request_id": request_id,
             "market": market,
             "intent_event_id": intent_event_id,

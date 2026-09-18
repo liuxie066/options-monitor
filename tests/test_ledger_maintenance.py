@@ -19,7 +19,7 @@ import src.application.ledger.writer as ledger_writer
 def _seed_open_lot_event(
     repo: ledger_repository.SQLiteOptionPositionsRepository,
     *,
-    record_id: str,
+    lot_id: str,
     account: str,
     symbol: str,
     option_type: str,
@@ -35,7 +35,7 @@ def _seed_open_lot_event(
     ledger_writer.persist_trade_event_object(
         repo,
         TradeEvent(
-            event_id=f"seed-{record_id}",
+            event_id=f"seed-{lot_id}",
             event_type="open",
             event_time_ms=int(opened_at_ms),
             contract_key=ContractKey.from_values(
@@ -51,14 +51,14 @@ def _seed_open_lot_event(
             currency=currency,
             source="test_seed_open_lot",
             multiplier=float(multiplier),
-            lot_id=record_id,
+            lot_id=lot_id,
             raw_payload={
                 # §9.2 step 3: the contract key no longer carries the
                 # position side, so the seed's side travels as the trade
                 # side of this open.
                 "side": derive_trade_side("open", side) or "",
                 "source_type": "test_seed",
-                "lot_record_id": record_id,
+                "lot_record_id": lot_id,
             },
         ),
     )
@@ -442,7 +442,7 @@ def test_auto_close_expired_positions_uses_effective_contracts_open_fallback(tmp
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     _seed_open_lot_event(
         repo,
-        record_id="rec_nvda",
+        lot_id="rec_nvda",
         account="lx",
         symbol="NVDA",
         option_type="put",
@@ -663,7 +663,7 @@ def test_auto_close_skips_same_record_id_when_selection_identity_changed() -> No
         def list_position_lots(self):
             return [{"record_id": "rec_lx_seed", "fields": current}]
 
-        def get_record_fields(self, _record_id):
+        def get_record_fields(self, _lot_id):
             return dict(current)
 
     fresh = mod._fresh_auto_close_positions(Repo(), [selected])
@@ -695,8 +695,8 @@ def test_auto_close_skips_when_identity_changes_after_fresh_selection(
     class Repo(ledger_repository.SQLiteOptionPositionsRepository):
         identity_changed = False
 
-        def get_record_fields(self, record_id):  # type: ignore[no-untyped-def]
-            fields = super().get_record_fields(record_id)
+        def get_record_fields(self, lot_id):  # type: ignore[no-untyped-def]
+            fields = super().get_record_fields(lot_id)
             if self.identity_changed:
                 fields = {
                     **fields,
@@ -774,7 +774,7 @@ def test_fresh_auto_close_lot_keeps_quote_when_only_source_event_id_changes() ->
         def list_position_lots(self):
             return [{"record_id": "rec_lx_seed", "fields": current}]
 
-        def get_record_fields(self, _record_id):
+        def get_record_fields(self, _lot_id):
             return dict(current)
 
     fresh = mod._fresh_auto_close_positions(Repo(), [selected])
@@ -816,7 +816,7 @@ def test_auto_close_skips_when_fresh_lot_refresh_is_unavailable(
         def list_position_lots(self):
             raise RuntimeError("fresh list unavailable")
 
-        def get_record_fields(self, _record_id):
+        def get_record_fields(self, _lot_id):
             if failure_mode == "error":
                 raise RuntimeError("fresh record unavailable")
             return None
@@ -844,7 +844,7 @@ def test_auto_close_expired_positions_closes_same_expiry_without_crossing_later_
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     _seed_open_lot_event(
         repo,
-        record_id="lot_0700_call_510_20260528",
+        lot_id="lot_0700_call_510_20260528",
         account="sy",
         symbol="0700.HK",
         option_type="call",
@@ -858,7 +858,7 @@ def test_auto_close_expired_positions_closes_same_expiry_without_crossing_later_
     )
     _seed_open_lot_event(
         repo,
-        record_id="lot_0700_put_450_20260528",
+        lot_id="lot_0700_put_450_20260528",
         account="sy",
         symbol="0700.HK",
         option_type="put",
@@ -872,7 +872,7 @@ def test_auto_close_expired_positions_closes_same_expiry_without_crossing_later_
     )
     _seed_open_lot_event(
         repo,
-        record_id="lot_0700_put_450_20260629",
+        lot_id="lot_0700_put_450_20260629",
         account="sy",
         symbol="0700.HK",
         option_type="put",
@@ -932,7 +932,7 @@ def test_auto_close_expired_positions_skips_when_lifecycle_assignment_pending(tm
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     _seed_open_lot_event(
         repo,
-        record_id="lot_tigr_put_6_20260522",
+        lot_id="lot_tigr_put_6_20260522",
         account="lx",
         symbol="TIGR",
         option_type="put",
@@ -986,7 +986,7 @@ def test_auto_close_expired_positions_records_lifecycle_expire_close_for_otm_pen
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     _seed_open_lot_event(
         repo,
-        record_id="lot_tigr_put_6_20260522",
+        lot_id="lot_tigr_put_6_20260522",
         account="lx",
         symbol="TIGR",
         option_type="put",
@@ -1067,10 +1067,10 @@ def test_lifecycle_auto_expire_rejects_identity_change_after_outer_preflight(
     from src.application.ledger.commands import persist_manual_repair_event_with_ledger
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    record_id = "lot_tigr_put_6_20260522"
+    lot_id = "lot_tigr_put_6_20260522"
     _seed_open_lot_event(
         repo,
-        record_id=record_id,
+        lot_id=lot_id,
         account="lx",
         symbol="TIGR",
         option_type="put",
@@ -1115,7 +1115,7 @@ def test_lifecycle_auto_expire_rejects_identity_change_after_outer_preflight(
         result = original_preflight(*args, **kwargs)
         persist_manual_repair_event_with_ledger(
             repo,
-            target_event_id=f"seed-{record_id}",
+            target_event_id=f"seed-{lot_id}",
             overrides={"account": "sy", "symbol": "MSFT"},
             repair_reason="simulate concurrent identity repair",
             as_of_ms=int(result.event_time_ms) + 1,
@@ -1148,7 +1148,7 @@ def test_lifecycle_auto_expire_rejects_identity_change_after_outer_preflight(
     case = repo.get_trade_lifecycle_case("lc_tigr_expire")
     assert case is not None
     assert case["status"] == "waiting_settlement_evidence"
-    assert repo.get_record_fields(record_id)["symbol"] == "MSFT"
+    assert repo.get_record_fields(lot_id)["symbol"] == "MSFT"
 
 
 def test_lifecycle_auto_expire_rolls_back_event_lot_and_allocation_when_case_write_fails(
@@ -1163,7 +1163,7 @@ def test_lifecycle_auto_expire_rolls_back_event_lot_and_allocation_when_case_wri
     repo = FailingCaseRepo(tmp_path / "option_positions.sqlite3")
     _seed_open_lot_event(
         repo,
-        record_id="lot_tigr_put_6_20260522",
+        lot_id="lot_tigr_put_6_20260522",
         account="lx",
         symbol="TIGR",
         option_type="put",
@@ -1232,7 +1232,7 @@ def test_auto_close_expired_positions_skips_when_exercise_stock_evidence_seen(tm
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     _seed_open_lot_event(
         repo,
-        record_id="lot_aapl_call_200_20260522",
+        lot_id="lot_aapl_call_200_20260522",
         account="lx",
         symbol="AAPL",
         option_type="call",
@@ -1284,7 +1284,7 @@ def test_auto_close_ignores_nested_broker_stock_evidence_for_other_contract(tmp_
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     _seed_open_lot_event(
         repo,
-        record_id="lot_0700_put_440_20260730",
+        lot_id="lot_0700_put_440_20260730",
         account="lx",
         symbol="0700.HK",
         option_type="put",
@@ -1381,8 +1381,8 @@ def test_auto_close_expired_positions_fail_closed_on_ledger_identity_mismatch(tm
     assert decisions[0]["should_close"] is False
     assert decisions[0]["skip_reason"] == "position_lot_identity_changed"
     assert decisions[0].get("ledger_preflight") is None
-    record_id = str(decisions[0]["record_id"])
-    fields = repo.get_record_fields(record_id)
+    lot_id = str(decisions[0]["record_id"])
+    fields = repo.get_record_fields(lot_id)
     assert fields["status"] == "open"
     assert fields["contracts_open"] == 6
 

@@ -103,7 +103,7 @@ def test_position_maintenance_filters_account_and_broker_in_dry_run(monkeypatch,
 
 
 @pytest.mark.parametrize(
-    ("market", "expected_record_ids"),
+    ("market", "expected_lot_ids"),
     [
         ("us", ["rec_us"]),
         ("hk", ["rec_hk"]),
@@ -113,7 +113,7 @@ def test_position_maintenance_filters_runtime_market_in_dry_run(
     monkeypatch,
     tmp_path: Path,
     market: str,
-    expected_record_ids: list[str],
+    expected_lot_ids: list[str],
 ) -> None:
     from src.application.positions import maintenance as mod
 
@@ -186,8 +186,8 @@ def test_position_maintenance_filters_runtime_market_in_dry_run(
     )
 
     assert result["market_filter"] == market.upper()
-    assert [p["record_id"] for p in captured["positions"]] == expected_record_ids
-    assert [item["record_id"] for item in result["decision_items"]] == expected_record_ids
+    assert [p["record_id"] for p in captured["positions"]] == expected_lot_ids
+    assert [item["record_id"] for item in result["decision_items"]] == expected_lot_ids
 
 
 def test_position_maintenance_refreshes_assignment_quote_before_dry_run(

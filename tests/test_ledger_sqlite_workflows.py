@@ -639,9 +639,9 @@ def test_canonical_seed_lot_survives_later_trade_event_projection(tmp_path: Path
     ledger_writer.persist_trade_event(repo, open_deal)
 
     lots = repo.list_position_lots()
-    record_ids = {row["record_id"] for row in lots}
-    assert "rec_sy_seed" in record_ids
-    assert "lot_futu:lx:REAL_1:deal-open-2" in record_ids
+    lot_ids = {row["record_id"] for row in lots}
+    assert "rec_sy_seed" in lot_ids
+    assert "lot_futu:lx:REAL_1:deal-open-2" in lot_ids
 
 
 def test_load_option_positions_repo_supports_sqlite_only_mode(tmp_path: Path) -> None:
@@ -1976,11 +1976,11 @@ def test_persist_manual_open_event_builds_position_lot(tmp_path: Path) -> None:
     )
 
     assert result.created is True
-    assert result.record_id is not None
-    assert str(result.record_id).startswith("lot_manual-open-")
+    assert result.lot_id is not None
+    assert str(result.lot_id).startswith("lot_manual-open-")
     lots = repo.list_position_lots()
     assert len(lots) == 1
-    assert lots[0]["record_id"] == result.record_id
+    assert lots[0]["record_id"] == result.lot_id
     assert lots[0]["fields"]["contracts_open"] == 2
     assert lots[0]["fields"]["status"] == "open"
 
@@ -2151,7 +2151,7 @@ def test_persist_manual_close_event_updates_position_lot(tmp_path: Path) -> None
     fields["currency"] = "港币"
     result = ledger_manual_trades.persist_manual_close_event(
         repo,
-        record_id=lot["record_id"],
+        lot_id=lot["record_id"],
         fields=fields,
         contracts_to_close=1,
         close_price=1.2,
@@ -2195,7 +2195,7 @@ def test_persist_manual_close_event_is_idempotent_on_retry(tmp_path: Path) -> No
     lot = repo.list_position_lots()[0]
     result1 = ledger_manual_trades.persist_manual_close_event(
         repo,
-        record_id=lot["record_id"],
+        lot_id=lot["record_id"],
         fields=lot["fields"],
         contracts_to_close=1,
         close_price=1.2,
@@ -2204,7 +2204,7 @@ def test_persist_manual_close_event_is_idempotent_on_retry(tmp_path: Path) -> No
     )
     result2 = ledger_manual_trades.persist_manual_close_event(
         repo,
-        record_id=lot["record_id"],
+        lot_id=lot["record_id"],
         fields=repo.get_position_lot_fields(lot["record_id"]),
         contracts_to_close=1,
         close_price=1.2,
@@ -2228,7 +2228,7 @@ def test_persist_manual_close_event_requires_broker_on_position_lot(tmp_path: Pa
     with pytest.raises(ValueError, match="position lot missing broker"):
         ledger_manual_trades.persist_manual_close_event(
             repo,
-            record_id="lot_market_only",
+            lot_id="lot_market_only",
             fields={
                 "market": "富途",
                 "account": "lx",
@@ -2287,7 +2287,7 @@ def test_persist_manual_close_event_rejects_mismatched_record_id_and_fields(tmp_
     with pytest.raises(ValueError, match="manual_close target fields do not match current lot state"):
         ledger_manual_trades.persist_manual_close_event(
             repo,
-            record_id=lots[0]["record_id"],
+            lot_id=lots[0]["record_id"],
             fields=lots[1]["fields"],
             contracts_to_close=1,
             close_price=0.5,
@@ -2661,7 +2661,7 @@ def test_persist_manual_void_event_restores_lot_when_voiding_close_event(tmp_pat
     lot = repo.list_position_lots()[0]
     close_result = ledger_manual_trades.persist_manual_close_event(
         repo,
-        record_id=lot["record_id"],
+        lot_id=lot["record_id"],
         fields=lot["fields"],
         contracts_to_close=1,
         close_price=0.5,
@@ -2706,7 +2706,7 @@ def test_persist_manual_adjust_event_updates_position_lot_projection(tmp_path: P
 
     result = ledger_manual_trades.persist_manual_adjust_event(
         repo,
-        record_id=lot["record_id"],
+        lot_id=lot["record_id"],
         fields=lot["fields"],
         contracts=2,
         strike=105.0,
@@ -2783,7 +2783,7 @@ def test_manual_strategy_snapshot_adjustment_supersedes_retired_mode(tmp_path: P
 
     ledger_manual_trades.persist_manual_adjust_event(
         repo,
-        record_id=lot["record_id"],
+        lot_id=lot["record_id"],
         fields=lot["fields"],
         strategy_snapshot={"strategy_family": "sell_put", "strategy_profile": "return_first"},
         as_of_ms=2000,
@@ -2818,14 +2818,14 @@ def test_persist_manual_adjust_event_is_idempotent_on_retry(tmp_path: Path) -> N
 
     result1 = ledger_manual_trades.persist_manual_adjust_event(
         repo,
-        record_id=lot["record_id"],
+        lot_id=lot["record_id"],
         fields=lot["fields"],
         premium_per_share=3.1,
         as_of_ms=2000,
     )
     result2 = ledger_manual_trades.persist_manual_adjust_event(
         repo,
-        record_id=lot["record_id"],
+        lot_id=lot["record_id"],
         fields=repo.get_position_lot_fields(lot["record_id"]),
         premium_per_share=3.1,
         as_of_ms=3000,
@@ -2876,7 +2876,7 @@ def test_persist_manual_adjust_event_rejects_mismatched_record_id_and_fields(tmp
     with pytest.raises(ValueError, match="manual_adjust target fields do not match current lot state"):
         ledger_manual_trades.persist_manual_adjust_event(
             repo,
-            record_id=lots[0]["record_id"],
+            lot_id=lots[0]["record_id"],
             fields=lots[1]["fields"],
             premium_per_share=2.0,
             as_of_ms=2000,
@@ -2904,7 +2904,7 @@ def test_voiding_adjust_event_restores_prior_projection_state(tmp_path: Path) ->
     lot = repo.list_position_lots()[0]
     adjust_result = ledger_manual_trades.persist_manual_adjust_event(
         repo,
-        record_id=lot["record_id"],
+        lot_id=lot["record_id"],
         fields=lot["fields"],
         premium_per_share=3.1,
         as_of_ms=2000,
@@ -3109,8 +3109,8 @@ def test_replace_position_lots_rejects_incomplete_option_lots_atomically(tmp_pat
     assert "missing expiration, strike" in str(exc)
 
     lots = repo.list_position_lots()
-    record_ids = {row["record_id"] for row in lots}
-    assert record_ids == {"lot_existing"}
+    lot_ids = {row["record_id"] for row in lots}
+    assert lot_ids == {"lot_existing"}
 
 
 def test_replace_position_lots_requires_typed_position_lot_records(tmp_path: Path) -> None:
@@ -3772,7 +3772,7 @@ def test_manual_assignment_request_retry_returns_original_result_after_lot_close
     )
     lot_id = str(repo.list_position_lots()[0]["record_id"])
     kwargs = {
-        "record_id": lot_id,
+        "lot_id": lot_id,
         "contracts_to_close": 1,
         "stock_side": "buy",
         "stock_qty": 100,
@@ -3852,7 +3852,7 @@ def test_manual_multi_lot_terminal_persists_conserved_settlement_and_replays_sou
             opened_at_ms=opened_at_ms,
         )
     kwargs = {
-        "record_id": None,
+        "lot_id": None,
         "broker": "富途",
         "account": "lx",
         "symbol": "TIGR",

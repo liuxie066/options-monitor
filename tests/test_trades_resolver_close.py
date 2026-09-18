@@ -46,22 +46,22 @@ class FakeRepo:
     def list_trade_events(self) -> list[dict]:
         return [_open_event_from_record(item) for item in self.records]
 
-    def get_record_fields(self, record_id: str) -> dict:
+    def get_record_fields(self, lot_id: str) -> dict:
         for item in self.records:
-            if item["record_id"] == record_id:
+            if item["record_id"] == lot_id:
                 return dict(item["fields"])
-        raise KeyError(record_id)
+        raise KeyError(lot_id)
 
-    def update_record(self, record_id: str, fields: dict) -> dict:
-        self.updated.append({"record_id": record_id, "fields": fields})
-        return {"record": {"record_id": record_id}}
+    def update_record(self, lot_id: str, fields: dict) -> dict:
+        self.updated.append({"record_id": lot_id, "fields": fields})
+        return {"record": {"record_id": lot_id}}
 
 
-def _record(record_id: str, opened_at: int, contracts_open: int) -> dict:
+def _record(lot_id: str, opened_at: int, contracts_open: int) -> dict:
     return {
-        "record_id": record_id,
+        "record_id": lot_id,
         "fields": {
-            "record_id": record_id,
+            "record_id": lot_id,
             "broker": "富途",
             "account": "lx",
             "symbol": "0700.HK",
@@ -109,14 +109,14 @@ def _open_event_from_record(record: dict) -> dict:
     ).to_dict()
 
 
-def _record_with_expiration(record_id: str, opened_at: int, contracts_open: int, expiration: int) -> dict:
-    row = _record(record_id, opened_at, contracts_open)
+def _record_with_expiration(lot_id: str, opened_at: int, contracts_open: int, expiration: int) -> dict:
+    row = _record(lot_id, opened_at, contracts_open)
     row["fields"]["expiration"] = expiration
     return row
 
 
-def _long_record(record_id: str, opened_at: int, contracts_open: int) -> dict:
-    row = _record(record_id, opened_at, contracts_open)
+def _long_record(lot_id: str, opened_at: int, contracts_open: int) -> dict:
+    row = _record(lot_id, opened_at, contracts_open)
     row["fields"]["side"] = "long"
     return row
 
@@ -151,7 +151,7 @@ def test_match_close_positions_uses_fifo() -> None:
 
     matches = match_close_positions(repo, _deal())
 
-    assert [(m.record_id, m.contracts_to_close) for m in matches] == [("rec1", 1), ("rec2", 2)]
+    assert [(m.lot_id, m.contracts_to_close) for m in matches] == [("rec1", 1), ("rec2", 2)]
 
 
 def test_match_close_targets_exposes_strict_resolution_contract() -> None:
@@ -162,7 +162,7 @@ def test_match_close_targets_exposes_strict_resolution_contract() -> None:
     assert resolution.source == "broker_trade_close"
     assert resolution.strategy == "strict_exact_fifo"
     assert resolution.selector["expiration_ymd"] == "2026-04-29"
-    assert resolution.record_ids == ("rec1", "rec2")
+    assert resolution.lot_ids == ("rec1", "rec2")
     assert resolution.to_dict()["contracts_to_close"] == 3
 
 
@@ -188,7 +188,7 @@ def test_broker_close_target_resolution_does_not_cross_same_strike_different_exp
 
     resolution = match_close_targets(repo, _deal(contracts=1, expiration_ymd="2026-04-29"))
 
-    assert resolution.record_ids == ("may_put",)
+    assert resolution.lot_ids == ("may_put",)
     assert resolution.to_dict()["targets"][0]["candidate"]["expiration_ymd"] == "2026-04-29"
 
 
@@ -200,7 +200,7 @@ def test_match_close_positions_ignores_market_only_persisted_rows() -> None:
 
     matches = match_close_positions(repo, _deal())
 
-    assert [(m.record_id, m.contracts_to_close) for m in matches] == [("rec2", 3)]
+    assert [(m.lot_id, m.contracts_to_close) for m in matches] == [("rec2", 3)]
 
 
 def test_match_close_positions_canonicalizes_candidate_and_deal_symbols() -> None:
@@ -210,7 +210,7 @@ def test_match_close_positions_canonicalizes_candidate_and_deal_symbols() -> Non
 
     matches = match_close_positions(repo, _deal(symbol="HK.09992", contracts=1))
 
-    assert [(m.record_id, m.contracts_to_close) for m in matches] == [("rec-pop", 1)]
+    assert [(m.lot_id, m.contracts_to_close) for m in matches] == [("rec-pop", 1)]
 
 
 def test_ledger_close_helpers_canonicalize_aliases_and_summarize_candidates() -> None:
@@ -373,7 +373,7 @@ def test_resolve_trade_close_apply_updates_records() -> None:
     )
 
     assert result.status == "applied"
-    assert [row.record_id for row in result.operations] == ["rec1", "rec2"]
+    assert [row.lot_id for row in result.operations] == ["rec1", "rec2"]
     assert result.diagnostics["close_target_resolution"]["strategy"] == "strict_exact_fifo"
     assert repo.updated == []
 
@@ -389,7 +389,7 @@ def test_resolve_trade_long_close_apply_updates_records() -> None:
     )
 
     assert result.status == "applied"
-    assert [row.record_id for row in result.operations] == ["rec1", "rec2"]
+    assert [row.lot_id for row in result.operations] == ["rec1", "rec2"]
     assert [row.action for row in result.operations] == ["sell_close", "sell_close"]
     assert repo.updated == []
 
@@ -423,7 +423,7 @@ def test_resolve_trade_close_apply_persists_per_lot_target_events(tmp_path) -> N
     )
 
     assert result.status == "applied"
-    assert [row.record_id for row in result.operations] == open_lot_ids
+    assert [row.lot_id for row in result.operations] == open_lot_ids
     assert [row.contracts_to_close for row in result.operations] == [1, 2]
     assert {row.ledger_preflight.event_type for row in result.operations} == {"close"}
     close_events = [item for item in repo.list_trade_events() if item["position_effect"] == "close"]
@@ -2204,9 +2204,9 @@ def test_resolve_trade_close_reports_failed_when_post_write_projection_does_not_
     lot_id = repo.list_position_lots()[0]["record_id"]
 
     def _persist_bad_zero_time_close(repo, deal):  # type: ignore[no-untyped-def]
-        record_id = str((deal.raw_payload or {}).get("record_id") or "")
+        lot_id = str((deal.raw_payload or {}).get("record_id") or "")
         event = TradeEvent(
-            event_id=f"{deal.deal_id}:close:{record_id}",
+            event_id=f"{deal.deal_id}:close:{lot_id}",
             event_type="close",
             event_time_ms=0,
             contract_key=ContractKey.from_values(
@@ -2222,8 +2222,8 @@ def test_resolve_trade_close_reports_failed_when_post_write_projection_does_not_
             currency=deal.currency,
             source="opend_push",
             multiplier=float(deal.multiplier or 100),
-            target_lot_id=record_id,
-            raw_payload={"record_id": record_id, "target_lot_id": record_id},
+            target_lot_id=lot_id,
+            raw_payload={"record_id": lot_id, "target_lot_id": lot_id},
         )
         return persist_trade_event_object(repo, event)
 
@@ -2261,7 +2261,7 @@ def test_match_close_positions_matches_long_lots_for_sell_close() -> None:
 
     matches = match_close_positions(repo, _deal(side="sell"))
 
-    assert [(m.record_id, m.contracts_to_close) for m in matches] == [("rec1", 1), ("rec2", 2)]
+    assert [(m.lot_id, m.contracts_to_close) for m in matches] == [("rec1", 1), ("rec2", 2)]
 
 
 def test_load_close_candidate_records_prefers_position_lots_projection() -> None:

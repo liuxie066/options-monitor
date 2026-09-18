@@ -10,10 +10,10 @@ from src.application.ledger.repository import SQLiteOptionPositionsRepository
 BASE_TIME_MS = 1_785_312_000_000
 
 
-def _lot(record_id: str, *, option_type: str, strike: int, trade_time_ms: int) -> dict:
+def _lot(lot_id: str, *, option_type: str, strike: int, trade_time_ms: int) -> dict:
     return {
-        "record_id": record_id,
-        "open_event_id": f"open-{record_id}",
+        "record_id": lot_id,
+        "open_event_id": f"open-{lot_id}",
         "account": "lx",
         "broker": "futu",
         "runtime_environment": "test",

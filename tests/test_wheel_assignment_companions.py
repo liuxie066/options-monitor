@@ -189,7 +189,7 @@ def test_ordinary_covered_call_assignment_bootstraps_active_put_branch(tmp_path)
             raw_payload=_assignment_payload(100),
         )],
     )
-    stock_lot_id = "assigned-stock-stock-source-assignment"
+    lot_id = "assigned-stock-stock-source-assignment"
     call_key = ContractKey.from_values(
         broker="富途",
         account="lx",
@@ -215,7 +215,7 @@ def test_ordinary_covered_call_assignment_bootstraps_active_put_branch(tmp_path)
                 "covered-call-open",
                 strategy="cc",
                 leg_role="covered_call",
-                source_stock_lot_id=stock_lot_id,
+                source_stock_lot_id=lot_id,
                 side="sell",
             ),
         )],
@@ -586,7 +586,7 @@ def test_batched_legacy_call_assignments_use_rolling_stock_state(tmp_path) -> No
             )
         ],
     )
-    stock_lot_id = "assigned-stock-put-assignment"
+    lot_id = "assigned-stock-put-assignment"
     call_key = ContractKey.from_values(
         broker="富途",
         account="lx",
@@ -613,7 +613,7 @@ def test_batched_legacy_call_assignments_use_rolling_stock_state(tmp_path) -> No
                     f"call-open-{index}",
                     strategy="wheel",
                     leg_role="wheel_call",
-                    source_stock_lot_id=stock_lot_id,
+                    source_stock_lot_id=lot_id,
                     side="sell",
                 ),
             )

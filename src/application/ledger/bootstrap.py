@@ -55,9 +55,9 @@ def _normalize_bootstrap_records(records: list[dict[str, Any]]) -> list[dict[str
     normalized: list[dict[str, Any]] = []
     skipped = 0
     for item in records:
-        record_id = str(item.get("record_id") or item.get("id") or "").strip()
+        lot_id = str(item.get("record_id") or item.get("id") or "").strip()
         fields = item.get("fields") or {}
-        if not record_id or not isinstance(fields, dict):
+        if not lot_id or not isinstance(fields, dict):
             skipped += 1
             continue
         broker = normalize_broker(fields.get("broker"))
@@ -71,7 +71,7 @@ def _normalize_bootstrap_records(records: list[dict[str, Any]]) -> list[dict[str
             print(
                 (
                     f"[WARN] option_positions bootstrap skipped incomplete option row "
-                    f"record_id={record_id or '(missing)'} symbol={fields.get('symbol') or ''} "
+                    f"record_id={lot_id or '(missing)'} symbol={fields.get('symbol') or ''} "
                     f"option_type={fields.get('option_type') or ''} expiration={fields.get('expiration_ymd') or fields.get('expiration') or ''} "
                     f"strike={fields.get('strike') or ''}"
                 ),
@@ -80,19 +80,19 @@ def _normalize_bootstrap_records(records: list[dict[str, Any]]) -> list[dict[str
             continue
         normalized_fields = dict(fields)
         normalized_fields["broker"] = broker
-        normalized.append({"record_id": record_id, "fields": normalized_fields})
+        normalized.append({"record_id": lot_id, "fields": normalized_fields})
     if skipped:
         print(f"[WARN] option_positions bootstrap skipped {skipped} rows without broker/market", file=sys.stderr)
     return normalized
 
 
-def _stable_bootstrap_event_id(source_name: str, record_id: str, fields: dict[str, Any]) -> str:
-    seed = json.dumps({"record_id": record_id, "fields": fields}, ensure_ascii=False, sort_keys=True)
+def _stable_bootstrap_event_id(source_name: str, lot_id: str, fields: dict[str, Any]) -> str:
+    seed = json.dumps({"record_id": lot_id, "fields": fields}, ensure_ascii=False, sort_keys=True)
     digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()[:16]
-    return f"bootstrap:{source_name}:{record_id}:{digest}"
+    return f"bootstrap:{source_name}:{lot_id}:{digest}"
 
 
-def _safe_bootstrap_trade_time_ms(record_id: str, fields: dict[str, Any]) -> int | None:
+def _safe_bootstrap_trade_time_ms(lot_id: str, fields: dict[str, Any]) -> int | None:
     saw_nonempty = False
     for key in ("opened_at", "last_action_at"):
         raw = fields.get(key)
@@ -108,7 +108,7 @@ def _safe_bootstrap_trade_time_ms(record_id: str, fields: dict[str, Any]) -> int
     print(
         (
             f"[WARN] option_positions bootstrap skipped row with invalid timestamps "
-            f"record_id={record_id or '(missing)'} opened_at={fields.get('opened_at') or ''} "
+            f"record_id={lot_id or '(missing)'} opened_at={fields.get('opened_at') or ''} "
             f"last_action_at={fields.get('last_action_at') or ''}"
         ),
         file=sys.stderr,
@@ -117,21 +117,21 @@ def _safe_bootstrap_trade_time_ms(record_id: str, fields: dict[str, Any]) -> int
 
 
 def _bootstrap_trade_event(item: dict[str, Any], *, source_name: str) -> Any | None:
-    record_id = str(item.get("record_id") or "").strip()
+    lot_id = str(item.get("record_id") or "").strip()
     fields = item.get("fields") or {}
-    if not record_id or not isinstance(fields, dict):
+    if not lot_id or not isinstance(fields, dict):
         return None
     broker = normalize_broker(fields.get("broker") or fields.get("market"))
     if not broker:
         return None
-    trade_time_ms = _safe_bootstrap_trade_time_ms(record_id, fields)
+    trade_time_ms = _safe_bootstrap_trade_time_ms(lot_id, fields)
     if trade_time_ms is None:
         return None
     raw_fields = dict(fields)
     raw_fields["broker"] = broker
     raw_multiplier = safe_float(fields.get("multiplier"))
     expiration_ymd = str(fields.get("expiration_ymd") or exp_ms_to_ymd(fields.get("expiration")) or "").strip() or None
-    event_id = _stable_bootstrap_event_id(source_name, record_id, raw_fields)
+    event_id = _stable_bootstrap_event_id(source_name, lot_id, raw_fields)
     multiplier_evidence = None
     if (
         raw_multiplier is not None
@@ -141,7 +141,7 @@ def _bootstrap_trade_event(item: dict[str, Any], *, source_name: str) -> Any | N
         source_receipt_sha256 = canonical_sha256(
             {
                 "source": source_name,
-                "lot_record_id": record_id,
+                "lot_record_id": lot_id,
                 "fields": raw_fields,
             }
         )
@@ -155,7 +155,7 @@ def _bootstrap_trade_event(item: dict[str, Any], *, source_name: str) -> Any | N
         }
     raw_payload = {
         "source_type": "bootstrap_snapshot",
-        "lot_record_id": record_id,
+        "lot_record_id": lot_id,
         "fields": raw_fields,
         "source": source_name,
         "multiplier_source": "bootstrap_snapshot" if raw_multiplier is not None else None,
@@ -180,7 +180,7 @@ def _bootstrap_trade_event(item: dict[str, Any], *, source_name: str) -> Any | N
         print(
             (
                 f"[WARN] option_positions bootstrap skipped row that cannot be converted "
-                f"record_id={record_id or '(missing)'} source={source_name} error={exc}"
+                f"record_id={lot_id or '(missing)'} source={source_name} error={exc}"
             ),
             file=sys.stderr,
         )
@@ -195,7 +195,7 @@ def _bootstrap_trade_event(item: dict[str, Any], *, source_name: str) -> Any | N
         currency=normalize_currency(fields.get("currency")),
         source=source_name,
         multiplier=(float(raw_multiplier) if raw_multiplier is not None else 100.0),
-        lot_id=record_id,
+        lot_id=lot_id,
         raw_payload=raw_payload,
     )
 

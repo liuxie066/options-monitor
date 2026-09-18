@@ -36,7 +36,7 @@ from src.application.trades.workflows import (
 
 class OptionPositionsRepoLike(Protocol):
     def list_position_lots(self) -> list[dict[str, Any]]: ...
-    def get_record_fields(self, record_id: str) -> dict[str, Any]: ...
+    def get_record_fields(self, lot_id: str) -> dict[str, Any]: ...
 
 
 @dataclass(frozen=True)
@@ -105,19 +105,19 @@ def _from_lifecycle_resolution(deal: NormalizedTradeDeal, result: LifecycleTrade
 
 def _assigned_stock_sale_operation(out: dict[str, Any]) -> BrokerTradeOperation:
     sale_event = dict(out.get("sale_event") or {})
-    stock_lot_id = str(sale_event.get("target_stock_lot_id") or "").strip() or None
+    lot_id = str(sale_event.get("target_stock_lot_id") or "").strip() or None
     stock_event_id = str(sale_event.get("stock_event_id") or "").strip() or None
     raw_result = out.get("result") if isinstance(out.get("result"), dict) else None
     result = None
     if raw_result is not None:
         result = {
             "event_id": stock_event_id,
-            "record_id": stock_lot_id,
+            "record_id": lot_id,
             **dict(raw_result),
         }
     return BrokerTradeOperation(
         action="assigned_stock_sale",
-        record_id=stock_lot_id,
+        lot_id=lot_id,
         fields=sale_event,
         matched_by="assigned_stock_lot",
         event_id=stock_event_id,
@@ -418,7 +418,7 @@ def resolve_trade_deal(
                 operations=[BrokerTradeOperation(
                     action=str(event.get("event_type") or deal.position_effect or "recorded"),
                     event_id=event.get("event_id"),
-                    record_id=event.get("target_lot_id") or event.get("lot_id"),
+                    lot_id=event.get("target_lot_id") or event.get("lot_id"),
                     result={"event": dict(event), "replayed": True,
                             **({"notification_outbox_id": notifications[0]["outbox_id"]} if notifications else {})},
                 ) for event in recorded],
@@ -848,7 +848,7 @@ def _verify_applied_close_projection(*, repo: OptionPositionsRepoLike, operation
     checks: list[dict[str, Any]] = []
     for operation in operations:
         payload = operation.to_payload()
-        record_id = str(payload.get("record_id") or "").strip()
+        lot_id = str(payload.get("record_id") or "").strip()
         raw_result = payload.get("result")
         result: dict[str, Any] = raw_result if isinstance(raw_result, dict) else {}
         raw_ledger_preflight = payload.get("ledger_preflight")
@@ -859,7 +859,7 @@ def _verify_applied_close_projection(*, repo: OptionPositionsRepoLike, operation
         if explicit_unmatched or heuristic_unmatched:
             errors.append(
                 {
-                    "record_id": record_id or None,
+                    "record_id": lot_id or None,
                     "code": "projection_unmatched_close",
                     "unmatched_explicit_close_count": explicit_unmatched,
                     "unmatched_heuristic_close_count": heuristic_unmatched,
@@ -874,7 +874,7 @@ def _verify_applied_close_projection(*, repo: OptionPositionsRepoLike, operation
         if projection_errors:
             errors.append(
                 {
-                    "record_id": record_id or None,
+                    "record_id": lot_id or None,
                     "code": "projection_error",
                     "projection_diagnostics": projection_errors,
                 }
@@ -882,21 +882,21 @@ def _verify_applied_close_projection(*, repo: OptionPositionsRepoLike, operation
 
         expected_after = ledger_preflight.get("contracts_open_after")
         has_projection_result = result.get("position_lot_count") is not None or "projection_diagnostic_count" in result
-        if record_id and expected_after is not None and has_projection_result:
+        if lot_id and expected_after is not None and has_projection_result:
             try:
-                fields = repo.get_record_fields(record_id)
+                fields = repo.get_record_fields(lot_id)
                 actual_after = _contracts_open(fields)
             except Exception as exc:
                 errors.append(
                     {
-                        "record_id": record_id,
+                        "record_id": lot_id,
                         "code": "target_lot_read_failed",
                         "error": f"{type(exc).__name__}: {exc}",
                     }
                 )
                 continue
             check = {
-                "record_id": record_id,
+                "record_id": lot_id,
                 "contracts_open_before": ledger_preflight.get("contracts_open_before"),
                 "contracts_to_close": ledger_preflight.get("contracts_to_close"),
                 "expected_contracts_open_after": _safe_int(expected_after),
@@ -904,7 +904,7 @@ def _verify_applied_close_projection(*, repo: OptionPositionsRepoLike, operation
             }
             checks.append(check)
             if actual_after != _safe_int(expected_after):
-                errors.append({"record_id": record_id, "code": "target_lot_contracts_open_mismatch", **check})
+                errors.append({"record_id": lot_id, "code": "target_lot_contracts_open_mismatch", **check})
 
     return {"ok": not errors, "checks": checks, "errors": errors}
 

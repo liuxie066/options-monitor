@@ -10,13 +10,13 @@ import src.application.ledger.repository as ledger_repository
 def test_manual_open_record_id_prefers_explicit_record_id_before_event_id_guess() -> None:
     import src.application.positions.workflows as workflows
 
-    explicit = workflows._manual_open_record_id(
+    explicit = workflows._manual_open_lot_id(
         {
             "event_id": "manual-open-should-not-win",
             "record_id": "rec_bootstrap_like_manual",
         }
     )
-    fallback = workflows._manual_open_record_id({"event_id": "manual-open-fallback"})
+    fallback = workflows._manual_open_lot_id({"event_id": "manual-open-fallback"})
 
     assert explicit == "rec_bootstrap_like_manual"
     assert fallback == "lot_manual-open-fallback"
@@ -45,7 +45,7 @@ def test_execute_manual_close_full_close_retry_is_idempotent_without_masking_val
 
     first = workflows.execute_manual_close(
         repo,
-        record_id=lot["record_id"],
+        lot_id=lot["record_id"],
         contracts_to_close=1,
         close_price=1.2,
         close_reason="manual_buy_to_close",
@@ -53,7 +53,7 @@ def test_execute_manual_close_full_close_retry_is_idempotent_without_masking_val
     )
     second = workflows.execute_manual_close(
         repo,
-        record_id=lot["record_id"],
+        lot_id=lot["record_id"],
         contracts_to_close=1,
         close_price=1.2,
         close_reason="manual_buy_to_close",
@@ -93,7 +93,7 @@ def test_manual_close_auto_match_does_not_use_legacy_list_records_fallback() -> 
             ]
 
     with pytest.raises(workflows.ManualCloseMatchError) as exc_info:
-        workflows.resolve_manual_close_record_id(
+        workflows.resolve_manual_close_lot_id(
             _LegacyOnlyRepo(),
             account="lx",
             symbol="0700.HK",

@@ -100,7 +100,7 @@ class ManualAdjustPreflightResult:
 @dataclass(frozen=True)
 class LedgerWriteResult:
     event_id: str | None = None
-    record_id: str | None = None
+    lot_id: str | None = None
     created: bool | None = None
     position_lot_count: int | None = None
     details: dict[str, Any] = field(default_factory=dict)
@@ -115,7 +115,7 @@ class LedgerWriteResult:
         known = {"event_id", "record_id", "created", "position_lot_count"}
         return cls(
             event_id=(str(payload["event_id"]) if payload.get("event_id") is not None else None),
-            record_id=(str(payload["record_id"]) if payload.get("record_id") is not None else None),
+            lot_id=(str(payload["record_id"]) if payload.get("record_id") is not None else None),
             created=(bool(payload["created"]) if payload.get("created") is not None else None),
             position_lot_count=(
                 int(payload["position_lot_count"]) if payload.get("position_lot_count") is not None else None
@@ -123,8 +123,8 @@ class LedgerWriteResult:
             details={key: value for key, value in payload.items() if key not in known},
         )
 
-    def with_record_id(self, record_id: str | None) -> "LedgerWriteResult":
-        return replace(self, record_id=(str(record_id).strip() if record_id is not None else None))
+    def with_lot_id(self, lot_id: str | None) -> "LedgerWriteResult":
+        return replace(self, lot_id=(str(lot_id).strip() if lot_id is not None else None))
 
     def with_details(self, **details: Any) -> "LedgerWriteResult":
         return replace(self, details={**self.details, **details})
@@ -135,7 +135,7 @@ class LedgerWriteResult:
             _compact_payload(
                 {
                     "event_id": self.event_id,
-                    "record_id": self.record_id,
+                    "record_id": self.lot_id,
                     "created": self.created,
                     "position_lot_count": self.position_lot_count,
                 }
@@ -227,7 +227,7 @@ class BrokerTradeOpenPreviewResult:
 @dataclass(frozen=True)
 class BrokerTradeOperation:
     action: str
-    record_id: str | None = None
+    lot_id: str | None = None
     contracts_to_close: int | None = None
     fields: dict[str, Any] | None = None
     patch: PositionLotPatch | dict[str, Any] | None = None
@@ -278,7 +278,7 @@ class BrokerTradeOperation:
         }
         return cls(
             action=str(payload.get("action") or ""),
-            record_id=(str(payload["record_id"]) if payload.get("record_id") is not None else None),
+            lot_id=(str(payload["record_id"]) if payload.get("record_id") is not None else None),
             contracts_to_close=(
                 int(payload["contracts_to_close"]) if payload.get("contracts_to_close") is not None else None
             ),
@@ -317,7 +317,7 @@ class BrokerTradeOperation:
             _compact_payload(
                 {
                     "action": self.action,
-                    "record_id": self.record_id,
+                    "record_id": self.lot_id,
                     "contracts_to_close": self.contracts_to_close,
                     "fields": dict(self.fields) if self.fields is not None else None,
                     "patch": patch,
@@ -341,7 +341,7 @@ class BrokerTradeOperation:
 
 @dataclass(frozen=True)
 class ExpiredCloseDecision:
-    record_id: str
+    lot_id: str
     # §7.1: ``position_id`` is retired; this carries the ``position_key``
     # (contract identity + derived side) of the target lot.
     position_key: str
@@ -400,7 +400,7 @@ class ExpiredCloseDecision:
         payload.update(
             _compact_payload(
                 {
-                    "record_id": self.record_id,
+                    "record_id": self.lot_id,
                     "position_key": self.position_key,
                     "expiration_ms": self.expiration_ms,
                     "raw_expiration_ms": self.raw_expiration_ms,

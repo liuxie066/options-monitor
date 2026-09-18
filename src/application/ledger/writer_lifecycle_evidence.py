@@ -106,13 +106,13 @@ def _assigned_stock_final_cutoff_ms(
 def _assigned_stock_sale_ids(
     report: dict[str, Any],
     *,
-    stock_lot_id: str,
+    lot_id: str,
 ) -> set[str]:
     return {
         str(row.get("stock_event_id") or row.get("event_id") or "").strip()
         for row in report.get("assigned_stock_sale_rows") or []
         if isinstance(row, dict)
-        and str(row.get("stock_lot_id") or "").strip() == stock_lot_id
+        and str(row.get("stock_lot_id") or "").strip() == lot_id
         and str(row.get("stock_event_id") or row.get("event_id") or "").strip()
     }
 
@@ -120,7 +120,7 @@ def _assigned_stock_sale_ids(
 def _assigned_stock_coverage_intervals(
     report: dict[str, Any],
     *,
-    stock_lot_id: str,
+    lot_id: str,
 ) -> Counter[tuple[Any, ...]]:
     return Counter(
         (
@@ -134,7 +134,7 @@ def _assigned_stock_coverage_intervals(
         )
         for row in report.get("covered_call_allocations") or []
         if isinstance(row, dict)
-        and str(row.get("stock_lot_id") or "").strip() == stock_lot_id
+        and str(row.get("stock_lot_id") or "").strip() == lot_id
     )
 
 
@@ -142,11 +142,11 @@ def _require_preserved_assigned_stock_facts(
     before: dict[str, Any],
     after: dict[str, Any],
     *,
-    stock_lot_id: str,
+    lot_id: str,
     stock_event_id: str,
 ) -> None:
-    before_sales = _assigned_stock_sale_ids(before, stock_lot_id=stock_lot_id)
-    after_sales = _assigned_stock_sale_ids(after, stock_lot_id=stock_lot_id)
+    before_sales = _assigned_stock_sale_ids(before, lot_id=lot_id)
+    after_sales = _assigned_stock_sale_ids(after, lot_id=lot_id)
     if not before_sales.issubset(after_sales):
         raise ValueError(
             "assigned stock sale validation failed: invalidates_subsequent_sale"
@@ -158,11 +158,11 @@ def _require_preserved_assigned_stock_facts(
 
     before_coverage = _assigned_stock_coverage_intervals(
         before,
-        stock_lot_id=stock_lot_id,
+        lot_id=lot_id,
     )
     after_coverage = _assigned_stock_coverage_intervals(
         after,
-        stock_lot_id=stock_lot_id,
+        lot_id=lot_id,
     )
     if not before_coverage <= after_coverage:
         raise ValueError(
@@ -176,7 +176,7 @@ def record_assigned_stock_event_atomically(
     sale_event: dict[str, Any] | None = None,
     assigned_stock_after: dict[str, Any] | None = None,
     account: str | None = None,
-    target_stock_lot_id: str | None = None,
+    target_lot_id: str | None = None,
     trade_time_ms: int | None = None,
     prepare_sale: Any = None,
     identity_execution: dict[str, Any] | None = None,
@@ -186,7 +186,7 @@ def record_assigned_stock_event_atomically(
     event_seed = dict(sale_event or {})
     account_hint = str(account or event_seed.get("account") or "").strip().lower()
     stock_lot_hint = str(
-        target_stock_lot_id
+        target_lot_id
         or event_seed.get("target_stock_lot_id")
         or event_seed.get("stock_lot_id")
         or ""
@@ -286,22 +286,22 @@ def record_assigned_stock_event_atomically(
         event_time = int(event.get("trade_time_ms") or 0)
         if event_time != trade_time_hint:
             raise ValueError("assigned stock event trade time mismatch")
-        stock_lot_id = str(
+        lot_id = str(
             event.get("target_stock_lot_id") or event.get("stock_lot_id") or ""
         ).strip()
-        if stock_lot_hint and stock_lot_id != stock_lot_hint:
+        if stock_lot_hint and lot_id != stock_lot_hint:
             raise ValueError("assigned stock event target lot mismatch")
         before_lot = next(
             (
                 dict(row)
                 for row in before_report.get("_all_assigned_stock_lots") or []
                 if isinstance(row, dict)
-                and str(row.get("stock_lot_id") or "") == stock_lot_id
+                and str(row.get("stock_lot_id") or "") == lot_id
             ),
             None,
         )
         if before_lot is None:
-            raise ValueError(f"assigned stock lot not found: {stock_lot_id}")
+            raise ValueError(f"assigned stock lot not found: {lot_id}")
         source_event_id = str(
             before_lot.get("source_assignment_event_id") or ""
         ).strip()
@@ -459,7 +459,7 @@ def record_assigned_stock_event_atomically(
                 for allocation in sale_allocations:
                     _require_preserved_assigned_stock_facts(
                         before_final_report, final_report,
-                        stock_lot_id=allocation["target_stock_lot_id"],
+                        lot_id=allocation["target_stock_lot_id"],
                         stock_event_id=allocation["stock_event_id"],
                     )
         prepared["stock_lot_after"] = next(
@@ -467,7 +467,7 @@ def record_assigned_stock_event_atomically(
                 dict(row)
                 for row in after_report.get("_all_assigned_stock_lots") or []
                 if isinstance(row, dict)
-                and str(row.get("stock_lot_id") or "") == stock_lot_id
+                and str(row.get("stock_lot_id") or "") == lot_id
             ),
             None,
         )

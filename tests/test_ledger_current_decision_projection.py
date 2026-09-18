@@ -2373,7 +2373,7 @@ def test_combo_facts_use_retained_terminal_lots(
         )
     lots = [
         {
-            "record_id": record_id,
+            "record_id": lot_id,
             "fields": {
                 "status": "open" if contracts_open else "closed",
                 "contracts_open": contracts_open,
@@ -2384,7 +2384,7 @@ def test_combo_facts_use_retained_terminal_lots(
                 "leg_role": role,
             },
         }
-        for record_id, open_event_id, role, contracts_open in (
+        for lot_id, open_event_id, role, contracts_open in (
             ("put-lot", "put-open", "funding_put", put_open),
             ("call-lot", "call-open", "participation_call", call_open),
         )
@@ -2397,8 +2397,8 @@ def test_combo_facts_use_retained_terminal_lots(
     )["current_groups"]
     assert groups[0]["status"] == expected
     assert [row["record_id"] for row in groups[0]["active_member_bindings"]] == sorted(
-        record_id
-        for record_id, contracts_open in (("put-lot", put_open), ("call-lot", call_open))
+        lot_id
+        for lot_id, contracts_open in (("put-lot", put_open), ("call-lot", call_open))
         if contracts_open
     )
 
@@ -2797,7 +2797,7 @@ def test_incremental_owner_fact_surfaces_match_the_frozen_matrix() -> None:
             "_finish_lifecycle_decision_projection",
         ),
         manual_trades.persist_manual_adjust_events: (
-            "current_by_record_id",
+            "current_by_lot_id",
             "run_position_projection_in_transaction",
             "_finish_trade_event_decision_projection",
         ),

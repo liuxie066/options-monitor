@@ -29,7 +29,7 @@ RUNTIME_ENVIRONMENT = "opend:127.0.0.1:11111"
 
 def _event(
     event_id: str,
-    record_id: str,
+    lot_id: str,
     *,
     option_type: str,
     position_side: str,
@@ -53,7 +53,7 @@ def _event(
         price=1,
         currency="USD",
         source="test",
-        lot_id=record_id,
+        lot_id=lot_id,
         raw_payload={
             # §9.2 step 3: the contract key no longer carries the position side,
             # so the fixture's side travels as the trade side of this open.

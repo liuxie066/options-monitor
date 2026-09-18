@@ -62,7 +62,7 @@ def _repo_with_assignment(
     put_lot_id = str(repo.list_position_lots()[0]["record_id"])
     result = record_manual_assignment(
         repo,
-        record_id=put_lot_id,
+        lot_id=put_lot_id,
         contracts_to_close=1,
         stock_side="buy",
         stock_qty=100,
@@ -112,14 +112,14 @@ def _durable_ledger_state(repo) -> dict:
 def _append_assigned_stock_sale(
     repo,
     *,
-    stock_lot_id: str,
+    lot_id: str,
     source_deal_id: str,
 ) -> dict:
     from src.application.positions.workflows import execute_manual_assigned_stock_sale
 
     preview = execute_manual_assigned_stock_sale(
         repo,
-        target_stock_lot_id=stock_lot_id,
+        target_lot_id=lot_id,
         shares=100,
         price=105.0,
         trade_time_ms=3_000,
@@ -585,7 +585,7 @@ def test_trade_events_repair_rejects_open_event_with_downstream_close(monkeypatc
     lot = repo.list_position_lots()[0]
     ledger_manual_trades.persist_manual_close_event(
         repo,
-        record_id=lot["record_id"],
+        lot_id=lot["record_id"],
         fields=lot["fields"],
         contracts_to_close=1,
         close_price=1.2,
@@ -630,7 +630,7 @@ def test_trade_events_identity_repair_binds_in_place_with_downstream_and_is_idem
     lot = repo.list_position_lots()[0]
     ledger_manual_trades.persist_manual_close_event(
         repo,
-        record_id=lot["record_id"],
+        lot_id=lot["record_id"],
         fields=lot["fields"],
         contracts_to_close=1,
         close_price=1.2,
@@ -716,7 +716,7 @@ def test_trade_events_opend_time_correction_updates_in_place_with_downstream_and
     lot = repo.list_position_lots()[0]
     ledger_manual_trades.persist_manual_close_event(
         repo,
-        record_id=lot["record_id"],
+        lot_id=lot["record_id"],
         fields=lot["fields"],
         contracts_to_close=1,
         close_price=1.2,
@@ -1121,7 +1121,7 @@ def test_trade_events_repair_close_record_id_updates_canonical_target_lot(monkey
     first_lot, second_lot = repo.list_position_lots()
     close_result = ledger_manual_trades.persist_manual_close_event(
         repo,
-        record_id=first_lot["record_id"],
+        lot_id=first_lot["record_id"],
         fields=first_lot["fields"],
         contracts_to_close=1,
         close_price=1.2,
@@ -1159,7 +1159,7 @@ def test_trade_events_repair_allows_open_when_downstream_close_was_canonical_voi
     lot = repo.list_position_lots()[0]
     close_result = ledger_manual_trades.persist_manual_close_event(
         repo,
-        record_id=lot["record_id"],
+        lot_id=lot["record_id"],
         fields=lot["fields"],
         contracts_to_close=1,
         close_price=1.2,
@@ -1209,7 +1209,7 @@ def test_assignment_void_apply_rechecks_sale_created_after_preflight(
     import src.application.ledger.commands as ledger_commands
     import src.interfaces.cli.trade_events as cli
 
-    repo, assignment_event_id, stock_lot_id = _repo_with_assignment(tmp_path)
+    repo, assignment_event_id, lot_id = _repo_with_assignment(tmp_path)
     monkeypatch.setattr(
         cli,
         "resolve_option_positions_repo",
@@ -1220,7 +1220,7 @@ def test_assignment_void_apply_rechecks_sale_created_after_preflight(
     def _persist_after_sale(*args, **kwargs):
         _append_assigned_stock_sale(
             repo,
-            stock_lot_id=stock_lot_id,
+            lot_id=lot_id,
             source_deal_id="sale-created-after-void-preflight",
         )
         state_after_sale = _durable_ledger_state(repo)
@@ -1247,7 +1247,7 @@ def test_assignment_repair_apply_rechecks_sale_created_after_preview(
     import src.application.ledger.interventions as interventions
     import src.interfaces.cli.trade_events as cli
 
-    repo, assignment_event_id, stock_lot_id = _repo_with_assignment(tmp_path)
+    repo, assignment_event_id, lot_id = _repo_with_assignment(tmp_path)
     monkeypatch.setattr(
         cli,
         "resolve_option_positions_repo",
@@ -1258,7 +1258,7 @@ def test_assignment_repair_apply_rechecks_sale_created_after_preview(
     def _transaction_after_sale(repo_arg, fn, **kwargs):
         _append_assigned_stock_sale(
             repo,
-            stock_lot_id=stock_lot_id,
+            lot_id=lot_id,
             source_deal_id="sale-created-after-repair-preview",
         )
         state_after_sale = _durable_ledger_state(repo)
@@ -1287,10 +1287,10 @@ def test_assignment_void_and_repair_reject_historical_sale_with_stable_dependenc
 ) -> None:
     import src.interfaces.cli.trade_events as cli
 
-    repo, assignment_event_id, stock_lot_id = _repo_with_assignment(tmp_path)
+    repo, assignment_event_id, lot_id = _repo_with_assignment(tmp_path)
     sale = _append_assigned_stock_sale(
         repo,
-        stock_lot_id=stock_lot_id,
+        lot_id=lot_id,
         source_deal_id="historical-stock-sale",
     )
     sale_event_id = str(sale["stock_event_id"])
@@ -1308,7 +1308,7 @@ def test_assignment_void_and_repair_reject_historical_sale_with_stable_dependenc
             {
                 "event_id": sale_event_id,
                 "kind": "assigned_stock_sale",
-                "lot_id": stock_lot_id,
+                "lot_id": lot_id,
                 "status": "effective",
             }
         ],
@@ -1331,7 +1331,7 @@ def test_assignment_void_rejects_closed_covered_call_once_then_allows_legally_vo
     from domain.domain.ledger import ContractKey, TradeEvent
     from src.application.ledger.writer import persist_trade_event_objects_atomically
 
-    repo, assignment_event_id, stock_lot_id = _repo_with_assignment(tmp_path)
+    repo, assignment_event_id, lot_id = _repo_with_assignment(tmp_path)
     call_event_id = "historical-covered-call-open"
     persist_trade_event_objects_atomically(
         repo,
@@ -1355,7 +1355,7 @@ def test_assignment_void_rejects_closed_covered_call_once_then_allows_legally_vo
                 multiplier=100,
                 lot_id="historical-covered-call-lot",
                 # §9.2 step 3: the covered call is short, so it opens with a sell.
-                raw_payload={"side": "sell", "source_stock_lot_id": stock_lot_id},
+                raw_payload={"side": "sell", "source_stock_lot_id": lot_id},
             )
         ],
     )
@@ -1364,7 +1364,7 @@ def test_assignment_void_rejects_closed_covered_call_once_then_allows_legally_vo
     )
     close_result = ledger_manual_trades.persist_manual_close_event(
         repo,
-        record_id=call_lot["record_id"],
+        lot_id=call_lot["record_id"],
         fields=call_lot["fields"],
         contracts_to_close=1,
         close_price=0.5,
@@ -1412,7 +1412,7 @@ def test_assignment_void_rejects_unresolved_explicit_stock_lot_reference(
     from domain.domain.ledger import ContractKey, TradeEvent
     from src.application.ledger.writer import persist_trade_event_objects_atomically
 
-    repo, assignment_event_id, stock_lot_id = _repo_with_assignment(tmp_path)
+    repo, assignment_event_id, lot_id = _repo_with_assignment(tmp_path)
     call_event_id = "unresolved-covered-call-open"
     persist_trade_event_objects_atomically(
         repo,
@@ -1438,7 +1438,7 @@ def test_assignment_void_rejects_unresolved_explicit_stock_lot_reference(
                 raw_payload={
                     # §9.2 step 3: the covered call is short, so it opens with a sell.
                     "side": "sell",
-                    "strategy_snapshot": {"source_stock_lot_id": stock_lot_id}
+                    "strategy_snapshot": {"source_stock_lot_id": lot_id}
                 },
             )
         ],
@@ -1458,7 +1458,7 @@ def test_assignment_void_rejects_unresolved_explicit_stock_lot_reference(
             {
                 "event_id": call_event_id,
                 "kind": "covered_call",
-                "lot_id": stock_lot_id,
+                "lot_id": lot_id,
                 "status": "unresolved",
             }
         ],
@@ -1477,7 +1477,7 @@ def test_assignment_void_rejects_ended_wheel_then_allows_legally_voided_wheel_hi
     from domain.domain.wheel import build_wheel_event
     from src.application.wheel import build_wheel_read_model, end_wheel_lifecycle
 
-    repo, assignment_event_id, stock_lot_id = _repo_with_assignment(
+    repo, assignment_event_id, lot_id = _repo_with_assignment(
         tmp_path,
         wheel_start_enabled=True,
     )
@@ -1485,7 +1485,7 @@ def test_assignment_void_rejects_ended_wheel_then_allows_legally_voided_wheel_hi
     ended = end_wheel_lifecycle(
         repo,
         account="lx",
-        stock_lot_id=stock_lot_id,
+        lot_id=lot_id,
         expected_batch_generation_hash=batch["batch_generation_hash"],
         request_id="end-wheel-before-intervention",
         actor="test",
@@ -1518,7 +1518,7 @@ def test_assignment_void_rejects_ended_wheel_then_allows_legally_voided_wheel_hi
         event = build_wheel_event(
             event_id=f"void-wheel-history-{index}",
             account="lx",
-            stock_lot_id=stock_lot_id,
+            lot_id=lot_id,
             event_type="wheel_event_voided",
             occurred_at_ms=4_000 + index,
             recorded_at_ms=4_000 + index,
@@ -1538,7 +1538,7 @@ def test_assignment_void_apply_preserves_ordinary_no_dependency_path(
 ) -> None:
     import src.interfaces.cli.trade_events as cli
 
-    repo, assignment_event_id, _stock_lot_id = _repo_with_assignment(tmp_path)
+    repo, assignment_event_id, _lot_id = _repo_with_assignment(tmp_path)
     monkeypatch.setattr(
         cli,
         "resolve_option_positions_repo",

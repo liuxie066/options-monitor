@@ -564,7 +564,7 @@ def _frozen_workspace(
         put_id = repo.list_position_lots()[0]["record_id"]
         ledger_api.record_manual_assignment(
             repo,
-            record_id=put_id,
+            lot_id=put_id,
             contracts_to_close=2,
             stock_side="buy",
             stock_qty=200,

@@ -117,7 +117,7 @@ class _ReadOnlyTradeReconciliationEvidenceRepository:
                     raise ValueError("stored ledger position lot JSON value must be an object")
                 else:
                     continue
-            record_id = str(row["record_id"] or "")
+            lot_id = str(row["record_id"] or "")
             # Same dual-key contract as position_lot_row_to_record, ``or ""`` on a
             # NULL identity included, so the two surfaces agree on both keys'
             # values and a legacy row whose carrier is still NULL falls back to
@@ -127,8 +127,8 @@ class _ReadOnlyTradeReconciliationEvidenceRepository:
             raw_lot_id = row["lot_id"] if "lot_id" in row.keys() else None
             out.append(
                 {
-                    "record_id": record_id,
-                    "lot_id": str(raw_lot_id).strip() if raw_lot_id not in (None, "") else record_id,
+                    "record_id": lot_id,
+                    "lot_id": str(raw_lot_id).strip() if raw_lot_id not in (None, "") else lot_id,
                     "fields": fields,
                 }
             )

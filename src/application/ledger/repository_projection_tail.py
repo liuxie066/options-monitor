@@ -42,10 +42,10 @@ class PositionProjectionTailRepositoryMixin:
         ] = {}
         for record in records:
             values = _position_lot_storage_values(record)
-            record_id = values[0]
-            if record_id in desired:
-                raise ValueError(f"duplicate position lot record_id: {record_id}")
-            desired[record_id] = values
+            lot_id = values[0]
+            if lot_id in desired:
+                raise ValueError(f"duplicate position lot record_id: {lot_id}")
+            desired[lot_id] = values
 
         added = 0
         changed = 0
@@ -66,9 +66,9 @@ class PositionProjectionTailRepositoryMixin:
                 ).fetchall()
                 prior_lot_count = len(current_rows)
             else:
-                record_ids = tuple(desired)
-                if record_ids:
-                    placeholders = ",".join("?" for _item in record_ids)
+                lot_ids = tuple(desired)
+                if lot_ids:
+                    placeholders = ",".join("?" for _item in lot_ids)
                     current_rows = active_conn.execute(
                         f"""
                         SELECT record_id, account, fields_json, source_event_id,
@@ -77,7 +77,7 @@ class PositionProjectionTailRepositoryMixin:
                         WHERE record_id IN ({placeholders})
                         ORDER BY record_id ASC
                         """,
-                        record_ids,
+                        lot_ids,
                     ).fetchall()
                 else:
                     current_rows = []
@@ -92,26 +92,26 @@ class PositionProjectionTailRepositoryMixin:
                 prior_lot_count = sum(int(row["lot_count"] or 0) for row in head_rows)
             current_by_id = {str(row["record_id"]): row for row in current_rows}
 
-            for record_id, row in current_by_id.items():
+            for lot_id, row in current_by_id.items():
                 old_account = str(row["account"] or "").strip()
                 if not old_account:
                     raw_fields = json.loads(str(row["fields_json"]) or "{}")
                     old_account = str(raw_fields.get("account") if isinstance(raw_fields, dict) else "").strip()
                 if old_account:
                     all_accounts.add(old_account)
-                if record_id in desired or not remove_missing:
+                if lot_id in desired or not remove_missing:
                     continue
                 active_conn.execute(
                     "DELETE FROM position_lots WHERE record_id = ?",
-                    (record_id,),
+                    (lot_id,),
                 )
                 removed += 1
                 if old_account:
                     touched_accounts.add(old_account)
 
-            for record_id, values in desired.items():
+            for lot_id, values in desired.items():
                 (
-                    _record_id,
+                    _lot_id,
                     account,
                     fields_json,
                     source_event_id,
@@ -120,7 +120,7 @@ class PositionProjectionTailRepositoryMixin:
                     multiplier,
                     lot_id,
                 ) = values
-                current = current_by_id.get(record_id)
+                current = current_by_id.get(lot_id)
                 if current is None:
                     active_conn.execute(
                         """
@@ -177,7 +177,7 @@ class PositionProjectionTailRepositoryMixin:
                         multiplier,
                         lot_id,
                         ts,
-                        record_id,
+                        lot_id,
                     ),
                 )
                 changed += 1
@@ -757,11 +757,11 @@ class PositionProjectionTailRepositoryMixin:
 
     def get_position_lots_by_ids(
         self,
-        record_ids: Sequence[str],
+        lot_ids: Sequence[str],
         *,
         conn: sqlite3.Connection | None = None,
     ) -> list[dict[str, Any]]:
-        normalized = tuple(dict.fromkeys(str(item or "").strip() for item in record_ids))
+        normalized = tuple(dict.fromkeys(str(item or "").strip() for item in lot_ids))
         if not normalized or any(not item for item in normalized):
             return []
         placeholders = ",".join("?" for _item in normalized)
@@ -790,7 +790,7 @@ class PositionProjectionTailRepositoryMixin:
 
     def get_position_lot_fields(
         self,
-        record_id: str,
+        lot_id: str,
         *,
         conn: sqlite3.Connection | None = None,
     ) -> dict[str, Any]:
@@ -801,14 +801,14 @@ class PositionProjectionTailRepositoryMixin:
                 FROM position_lots
                 WHERE record_id = ?
                 """,
-                (str(record_id),),
+                (str(lot_id),),
             ).fetchone()
         if row is None:
-            raise ValueError(f"position lot not found: {record_id}")
+            raise ValueError(f"position lot not found: {lot_id}")
         return position_lot_row_to_record(row)["fields"]
 
     def list_records(self, *, page_size: int = 500) -> list[dict[str, Any]]:
         return self.list_position_lots()
 
-    def get_record_fields(self, record_id: str) -> dict[str, Any]:
-        return self.get_position_lot_fields(record_id)
+    def get_record_fields(self, lot_id: str) -> dict[str, Any]:
+        return self.get_position_lot_fields(lot_id)
