@@ -11,6 +11,11 @@ MARKET_DATE = "2026-07-21"
 TARGET_1000 = "2026-07-21T10:00:00-04:00"
 IDENTITY_NVDA = "candidate:v1:lx:US:NVDA:sell_put"
 IDENTITY_AMD = "candidate:v1:lx:US:AMD:sell_put"
+WHEEL_BRANCH_ID = "assigned-stock-3fab073239d0df8e3addc843a5d6538a2a33297d2cf4405a21d3e5fbcdae16ed"
+IDENTITY_WHEEL = f"candidate:v1:lx:US:NVDA:wheel:{WHEEL_BRANCH_ID}"
+# The exact identity the HK tick rejected on 2026-09-18 after the domain builder
+# grew the `wheel` family: an Assigned Stock lot rebinding to a Wheel window.
+IDENTITY_WHEEL_HK = f"candidate:v1:lx:HK:0700.HK:wheel:{WHEEL_BRANCH_ID}"
 LEGACY_COMBO_DIGEST = "ed465e99ea01d9997906cb18d118e7f0d18750bda01ee6ba42d8927ec38a4463"
 
 
@@ -32,6 +37,13 @@ def _action(*, symbol: str = "NVDA", priority: str = "P1", contracts: int = 1) -
             "capacity": {"contracts_available": contracts},
         },
     }
+
+
+def _wheel_action(*, symbol: str = "NVDA", contracts: int = 1) -> dict:
+    action = _action(symbol=symbol, contracts=contracts)
+    action["strategy_family"] = "wheel"
+    action["wheel_branch_id"] = WHEEL_BRANCH_ID
+    return action
 
 
 def _brief(
@@ -1607,3 +1619,83 @@ def test_delivery_source_run_is_derived_from_validated_revision(tmp_path: Path) 
     readback = read_daily_decision_brief_delivery_state(base=tmp_path, account='lx', market='US')
     envelope = readback['state']['days'][MARKET_DATE]['fixed_reports'][TARGET_1000]
     assert envelope['source_run_id'] == 'source-scan'
+
+
+def test_persisted_brief_derives_wheel_candidate_identity_with_branch(tmp_path: Path) -> None:
+    """A Wheel candidate reaching the Brief keeps its branch suffix end to end.
+
+    This is the path the HK tick died on: the domain derives the identity from
+    the candidate index, and the repository re-validated it against a strategy
+    family list that had stopped matching the domain.
+    """
+
+    persisted = _persist(tmp_path, actions=[_wheel_action()])
+    assert persisted["current_candidate_identities"] == [IDENTITY_WHEEL]
+    prepared = _prepare_fixed(tmp_path, persisted)
+    assert prepared["envelope"]["candidate_identities"] == [IDENTITY_WHEEL]
+
+
+def test_candidate_identity_accepts_wheel_branch_suffix() -> None:
+    from src.application.daily_decision_brief_repository import _normalize_candidate_identities
+
+    assert _normalize_candidate_identities([IDENTITY_WHEEL], account="lx", market="US") == [IDENTITY_WHEEL]
+    assert _normalize_candidate_identities([IDENTITY_WHEEL_HK], account="lx", market="HK") == [IDENTITY_WHEEL_HK]
+
+
+def test_candidate_identity_rejects_wheel_without_branch_suffix() -> None:
+    from src.application.daily_decision_brief_repository import _normalize_candidate_identities
+
+    with pytest.raises(ValueError, match="incompatible"):
+        _normalize_candidate_identities(["candidate:v1:lx:US:NVDA:wheel"], account="lx", market="US")
+
+
+def test_candidate_identity_rejects_unknown_family() -> None:
+    from src.application.daily_decision_brief_repository import _normalize_candidate_identities
+
+    with pytest.raises(ValueError, match="incompatible"):
+        _normalize_candidate_identities(["candidate:v1:lx:US:NVDA:iron_condor"], account="lx", market="US")
+
+
+def test_candidate_identity_validator_covers_every_domain_strategy_family() -> None:
+    """The validator must accept whatever the domain builder emits.
+
+    It used to enumerate the families itself, so it kept rejecting `wheel`
+    identities long after the domain added that family.
+    """
+
+    from domain.domain.daily_decision_brief import (
+        _CANDIDATE_STRATEGY_FAMILIES,
+        build_daily_brief_candidate_identity,
+    )
+    from src.application.daily_decision_brief_repository import _normalize_candidate_identities
+
+    for family in sorted(_CANDIDATE_STRATEGY_FAMILIES):
+        identity = build_daily_brief_candidate_identity(
+            account="lx",
+            market="US",
+            symbol="NVDA",
+            strategy_family=family,
+            wheel_branch_id=WHEEL_BRANCH_ID,
+        )
+        assert _normalize_candidate_identities([identity], account="lx", market="US") == [identity]
+
+
+def test_record_candidates_round_trips_wheel_identity_through_delivery_state(tmp_path: Path) -> None:
+    from src.application.daily_decision_brief_repository import (
+        read_daily_decision_brief_delivery_state,
+        record_daily_decision_brief_candidates,
+    )
+
+    persisted = _persist(tmp_path, actions=[_action()])
+    record_daily_decision_brief_candidates(
+        base=tmp_path,
+        account="lx",
+        market="US",
+        market_trading_date=MARKET_DATE,
+        revision=persisted["current_revision"],
+        brief_digest=persisted["current_brief_digest"],
+        candidate_identities=[IDENTITY_WHEEL],
+        observed_at_utc="2026-07-21T14:00:01+00:00",
+    )
+    readback = read_daily_decision_brief_delivery_state(base=tmp_path, account="lx", market="US")
+    assert set(readback["state"]["days"][MARKET_DATE]["pending_candidates"]) == {IDENTITY_WHEEL}
