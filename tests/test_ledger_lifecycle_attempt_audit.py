@@ -113,17 +113,12 @@ def _repo(tmp_path: Path) -> SQLiteOptionPositionsRepository:
 
 
 def test_run_seal_sorts_coalesces_and_validates_heads() -> None:
-    seal = build_lifecycle_attempt_run_seal(
-        account="lx",
-        source_id="source-a",
-        completed_at_ms=2_000,
-        seal_scope="touched_heads",
-        reason="ordinary_due",
+    seal = _seal(
         heads=[
             {"account": "lx", "case_id": "case-b", "last_ordinal": 1, "chain_sha256": b"\x22" * 32},
             {"account": "lx", "case_id": "case-a", "last_ordinal": 1, "chain_sha256": b"\x11" * 32},
             {"account": "lx", "case_id": "case-b", "last_ordinal": 2, "chain_sha256": b"\x33" * 32},
-        ],
+        ]
     )
 
     assert [head["case_id"] for head in seal["heads"]] == ["case-a", "case-b"]
@@ -137,27 +132,15 @@ def test_run_seal_sorts_coalesces_and_validates_heads() -> None:
 
 
 def test_run_seal_allows_empty_checkpoint_and_rejects_cross_account_head() -> None:
-    checkpoint = build_lifecycle_attempt_run_seal(
-        account="lx",
-        source_id="source-a",
-        completed_at_ms=2_000,
-        seal_scope="all_heads_checkpoint",
-        reason="process_startup",
-        heads=[],
-    )
+    checkpoint = _seal(seal_scope="all_heads_checkpoint", reason="process_startup")
     assert checkpoint["head_count"] == 0
     assert validate_lifecycle_attempt_run_seal(checkpoint) == checkpoint
 
     with pytest.raises(ValueError, match="another account"):
-        build_lifecycle_attempt_run_seal(
-            account="lx",
-            source_id="source-a",
-            completed_at_ms=2_000,
-            seal_scope="touched_heads",
-            reason="ordinary_due",
+        _seal(
             heads=[
                 {"account": "sy", "case_id": "case-a", "last_ordinal": 1, "chain_sha256": b"\x11" * 32}
-            ],
+            ]
         )
 
 
@@ -166,21 +149,9 @@ def test_run_seal_verifier_distinguishes_touched_and_account_checkpoint_scope() 
         {"account": "lx", "case_id": "case-a", "last_ordinal": 1, "chain_sha256": b"\x11" * 32},
         {"account": "lx", "case_id": "case-b", "last_ordinal": 1, "chain_sha256": b"\x22" * 32},
     ]
-    touched = build_lifecycle_attempt_run_seal(
-        account="lx",
-        source_id="source-a",
-        completed_at_ms=2_000,
-        seal_scope="touched_heads",
-        reason="ordinary_due",
-        heads=current_heads[:1],
-    )
-    checkpoint = build_lifecycle_attempt_run_seal(
-        account="lx",
-        source_id="source-a",
-        completed_at_ms=2_000,
-        seal_scope="all_heads_checkpoint",
-        reason="process_startup",
-        heads=current_heads[:1],
+    touched = _seal(heads=current_heads[:1])
+    checkpoint = _seal(
+        seal_scope="all_heads_checkpoint", reason="process_startup", heads=current_heads[:1]
     )
 
     assert verify_lifecycle_attempt_run_seal(touched, current_heads=current_heads)["status"] == "valid"
@@ -209,6 +180,26 @@ def _invocation(offset: int) -> str:
     return str(uuid.UUID(int=offset, version=4))
 
 
+def _evidence_row(
+    observation: dict[str, object],
+    *,
+    evidence_id: str,
+    case_id: str = "case-a",
+) -> dict[str, object]:
+    return {
+        "evidence_id": evidence_id,
+        "case_id": case_id,
+        "source_type": "broker_settlement_observation",
+        "evidence_type": "expire_close",
+        "account": "lx",
+        "symbol": "NVDA",
+        "semantic_schema": observation["semantic_schema"],
+        "semantic_fingerprint": observation["semantic_fingerprint"],
+        "semantic_projection": observation["semantic_projection"],
+        "observation": observation,
+    }
+
+
 def _append_attempt(
     repo: SQLiteOptionPositionsRepository,
     envelope: audit_codec.LifecycleAttemptAuditEnvelope,
@@ -222,22 +213,11 @@ def _append_attempt(
         if evidence_observation is not None:
             assert evidence_id is not None
             repo.insert_trade_lifecycle_evidence_once(
-                {
-                    "evidence_id": evidence_id,
-                    "case_id": envelope.case_id,
-                    "source_type": "broker_settlement_observation",
-                    "evidence_type": "expire_close",
-                    "account": "lx",
-                    "symbol": "NVDA",
-                    "semantic_schema": evidence_observation["semantic_schema"],
-                    "semantic_fingerprint": evidence_observation[
-                        "semantic_fingerprint"
-                    ],
-                    "semantic_projection": evidence_observation[
-                        "semantic_projection"
-                    ],
-                    "observation": evidence_observation,
-                },
+                _evidence_row(
+                    evidence_observation,
+                    evidence_id=evidence_id,
+                    case_id=envelope.case_id,
+                ),
                 conn=conn,
             )
             created_at_ms = int(
@@ -316,18 +296,7 @@ def _seed_one_observed_attempt(
         diagnostic_sha256=None,
     )
     repo.insert_trade_lifecycle_evidence_once(
-        {
-            "evidence_id": "evidence-a",
-            "case_id": case_id,
-            "source_type": "broker_settlement_observation",
-            "evidence_type": "expire_close",
-            "account": "lx",
-            "symbol": "NVDA",
-            "semantic_schema": evidence_observation["semantic_schema"],
-            "semantic_fingerprint": evidence_observation["semantic_fingerprint"],
-            "semantic_projection": evidence_observation["semantic_projection"],
-            "observation": evidence_observation,
-        }
+        _evidence_row(evidence_observation, evidence_id="evidence-a", case_id=case_id)
     )
     with repo._connect() as conn:  # noqa: SLF001 - focused fixture
         evidence_created_at_ms = int(
@@ -455,18 +424,7 @@ def _seed_second_observed_attempt(
 
     if semantic_change:
         repo.insert_trade_lifecycle_evidence_once(
-            {
-                "evidence_id": "evidence-b",
-                "case_id": case_id,
-                "source_type": "broker_settlement_observation",
-                "evidence_type": "expire_close",
-                "account": "lx",
-                "symbol": "NVDA",
-                "semantic_schema": observation["semantic_schema"],
-                "semantic_fingerprint": observation["semantic_fingerprint"],
-                "semantic_projection": observation["semantic_projection"],
-                "observation": observation,
-            }
+            _evidence_row(observation, evidence_id="evidence-b", case_id=case_id)
         )
         with repo._connect() as conn:  # noqa: SLF001 - focused fixture
             evidence_created_at_ms = int(
@@ -611,6 +569,19 @@ def _chain_call(**overrides: object):
     }
     base.update(overrides)
     return lambda: compute_lifecycle_attempt_chain_sha256(**base)
+
+
+def _seal(**overrides: object):
+    base: dict[str, object] = {
+        "account": "lx",
+        "source_id": "source-a",
+        "completed_at_ms": 2_000,
+        "seal_scope": "touched_heads",
+        "reason": "ordinary_due",
+        "heads": [],
+    }
+    base.update(overrides)
+    return build_lifecycle_attempt_run_seal(**base)
 
 
 def _normalized_triggers(conn: sqlite3.Connection) -> dict[str, str]:
@@ -1284,18 +1255,7 @@ def test_offline_verifier_detects_evidence_suffix_and_admission_corruption(
     repo = _seeded_repo(tmp_path)
     observation = _observation(option_position_absent=False)
     repo.insert_trade_lifecycle_evidence_once(
-        {
-            "evidence_id": "evidence-unspanned",
-            "case_id": "case-a",
-            "source_type": "broker_settlement_observation",
-            "evidence_type": "expire_close",
-            "account": "lx",
-            "symbol": "NVDA",
-            "semantic_schema": observation["semantic_schema"],
-            "semantic_fingerprint": observation["semantic_fingerprint"],
-            "semantic_projection": observation["semantic_projection"],
-            "observation": observation,
-        }
+        _evidence_row(observation, evidence_id="evidence-unspanned")
     )
     _seed_second_observed_attempt(repo, semantic_change=True)
 
@@ -1454,9 +1414,7 @@ def test_atomic_sidecar_writer_tracks_initial_failure_gap_and_exact_replay(
     assert span["last_success_ordinal"] == 4
     assert span["successful_observation_count"] == 2
     assert span["intervening_failed_attempt_count"] == 1
-    assert repo.verify_trade_lifecycle_attempt_audit_case(
-        case_id="case-a"
-    )["status"] == "valid"
+    assert repo.verify_trade_lifecycle_attempt_audit_case(case_id="case-a")["status"] == "valid"
 
     with pytest.raises(ValueError, match="invocation replay mismatch"):
         _append_attempt(
@@ -1595,9 +1553,7 @@ def test_atomic_sidecar_writer_moves_one_live_receipt_and_cleans_old_blob(
     assert hashes == {second.receipt_sha256}
     assert span["first_evidence_receipt_sha256"] not in hashes
     assert span["last_receipt_sha256"] == second.receipt_sha256
-    assert repo.verify_trade_lifecycle_attempt_audit_case(
-        case_id="case-a"
-    )["status"] == "valid"
+    assert repo.verify_trade_lifecycle_attempt_audit_case(case_id="case-a")["status"] == "valid"
 
 
 def test_atomic_sidecar_writer_creates_three_spans_for_a_b_a(
@@ -1641,9 +1597,7 @@ def test_atomic_sidecar_writer_creates_three_spans_for_a_b_a(
         "audit_chain_sha256"
     ]
     assert spans[2]["closed_chain_sha256"] is None
-    assert repo.verify_trade_lifecycle_attempt_audit_case(
-        case_id="case-a"
-    )["status"] == "valid"
+    assert repo.verify_trade_lifecycle_attempt_audit_case(case_id="case-a")["status"] == "valid"
 
 
 def test_atomic_sidecar_writer_opens_new_span_for_semantic_schema_upgrade(
@@ -1708,9 +1662,7 @@ def test_atomic_sidecar_writer_opens_new_span_for_semantic_schema_upgrade(
     ]
     assert spans[0]["closed_chain_sha256"] is not None
     assert spans[1]["closed_chain_sha256"] is None
-    assert repo.verify_trade_lifecycle_attempt_audit_case(case_id="case-a")[
-        "status"
-    ] == "valid"
+    assert repo.verify_trade_lifecycle_attempt_audit_case(case_id="case-a")["status"] == "valid"
 
 
 def test_audit_only_writer_persists_failure_without_business_or_evidence(
@@ -1739,9 +1691,7 @@ def test_audit_only_writer_persists_failure_without_business_or_evidence(
     assert replay["audit_idempotent"] is True
     assert repo.get_trade_lifecycle_case("case-a") == case_before
     assert repo.list_trade_lifecycle_evidence(case_id="case-a") == []
-    assert repo.verify_trade_lifecycle_attempt_audit_case(
-        case_id="case-a"
-    )["status"] == "valid"
+    assert repo.verify_trade_lifecycle_attempt_audit_case(case_id="case-a")["status"] == "valid"
 
     observed = _envelope(invocation_id=_invocation(32), attempted_at_ms=2_100, observation=_observation())
     with pytest.raises(ValueError, match="only failed or stale"):
@@ -1785,9 +1735,7 @@ def test_atomic_sidecar_writer_keeps_identical_n_compact(
             ).fetchone()[0],
         }
     assert counts == {"audits": 5, "spans": 1, "blobs": 0, "evidence": 1}
-    assert repo.verify_trade_lifecycle_attempt_audit_case(
-        case_id="case-a"
-    )["status"] == "valid"
+    assert repo.verify_trade_lifecycle_attempt_audit_case(case_id="case-a")["status"] == "valid"
 
 
 def test_shared_receipt_blob_is_not_deleted_when_latest_span_moves(
@@ -1847,9 +1795,7 @@ def test_shared_receipt_blob_is_not_deleted_when_latest_span_moves(
         ).fetchone()
     assert references == 1
     assert stored is not None
-    assert repo.verify_trade_lifecycle_attempt_audit_case(
-        case_id="case-a"
-    )["status"] == "valid"
+    assert repo.verify_trade_lifecycle_attempt_audit_case(case_id="case-a")["status"] == "valid"
 
 
 @pytest.mark.parametrize(
@@ -1870,18 +1816,7 @@ def test_atomic_sidecar_writer_rolls_back_every_component_failure(
     admitted = _observation(receipt_note="R0")
     envelope = _envelope(invocation_id=_invocation(60), observation=_observation(receipt_note="R1"))
     repo.insert_trade_lifecycle_evidence_once(
-        {
-            "evidence_id": "evidence-a",
-            "case_id": "case-a",
-            "source_type": "broker_settlement_observation",
-            "evidence_type": "expire_close",
-            "account": "lx",
-            "symbol": "NVDA",
-            "semantic_schema": admitted["semantic_schema"],
-            "semantic_fingerprint": admitted["semantic_fingerprint"],
-            "semantic_projection": admitted["semantic_projection"],
-            "observation": admitted,
-        }
+        _evidence_row(admitted, evidence_id="evidence-a")
     )
     conn = repo._connect()  # noqa: SLF001 - focused crash contract
     try:
