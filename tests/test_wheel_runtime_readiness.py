@@ -70,14 +70,24 @@ def test_effective_binding_survives_runtime_status_sanitizer(monkeypatch) -> Non
     assert "effective_policy_hash" not in account["descriptor"]
 
 
+def _readiness_us(config: dict, sqlite_path: Path | None) -> dict:
+    """Readiness for account lx on the US market, for the given config and store."""
+    return build_wheel_activation_readiness(
+        config=config,
+        market="us",
+        accounts=["lx"],
+        sqlite_path=sqlite_path,
+    )
+
+
 def _write_activation_table(
     path: Path,
     *,
-    market: str,
-    account: str,
-    generation: int,
-    activated_at_ms: int,
-    deactivated_at_ms: int | None,
+    market: str = "us",
+    account: str = "lx",
+    generation: int = 1,
+    activated_at_ms: int = 1_000,
+    deactivated_at_ms: int | None = None,
     policy_hash: str,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -131,15 +141,7 @@ def test_wheel_activation_readiness_matches_open_and_closed_windows(
         account="lx",
     )
     open_path = tmp_path / "open.sqlite3"
-    _write_activation_table(
-        open_path,
-        market="us",
-        account="lx",
-        generation=1,
-        activated_at_ms=1_000,
-        deactivated_at_ms=None,
-        policy_hash=open_policy_hash,
-    )
+    _write_activation_table(open_path, policy_hash=open_policy_hash)
 
     open_readiness = build_wheel_activation_readiness(
         config=open_config,
@@ -188,42 +190,16 @@ def test_wheel_activation_readiness_matches_open_and_closed_windows(
 
     closed_config = _wheel_config(deactivated_at_ms=2_000)
     closed_path = tmp_path / "closed.sqlite3"
-    _write_activation_table(
-        closed_path,
-        market="us",
-        account="lx",
-        generation=1,
-        activated_at_ms=1_000,
-        deactivated_at_ms=2_000,
-        policy_hash=open_policy_hash,
-    )
-    closed_readiness = build_wheel_activation_readiness(
-        config=closed_config,
-        market="us",
-        accounts=["lx"],
-        sqlite_path=closed_path,
-    )
+    _write_activation_table(closed_path, deactivated_at_ms=2_000, policy_hash=open_policy_hash)
+    closed_readiness = _readiness_us(closed_config, closed_path)
     assert closed_readiness["monitoring_gate"] == "disabled"
     assert closed_readiness["reason_code"] == "closed_window"
     assert closed_readiness["accounts"]["lx"]["deactivated_at_ms"] == 2_000
     assert closed_readiness["accounts"]["lx"]["policy_drift"] is False
 
     drift_path = tmp_path / "closed-drift.sqlite3"
-    _write_activation_table(
-        drift_path,
-        market="us",
-        account="lx",
-        generation=1,
-        activated_at_ms=1_000,
-        deactivated_at_ms=2_000,
-        policy_hash="f" * 64,
-    )
-    closed_drift = build_wheel_activation_readiness(
-        config=closed_config,
-        market="us",
-        accounts=["lx"],
-        sqlite_path=drift_path,
-    )
+    _write_activation_table(drift_path, deactivated_at_ms=2_000, policy_hash="f" * 64)
+    closed_drift = _readiness_us(closed_config, drift_path)
     assert closed_drift["monitoring_gate"] == "disabled"
     assert closed_drift["reason_code"] == "closed_window"
     assert closed_drift["accounts"]["lx"]["policy_drift"] is True
@@ -235,12 +211,7 @@ def test_wheel_activation_readiness_fails_closed_for_missing_and_mismatched_stat
     config = _wheel_config()
     missing_path = tmp_path / "missing.sqlite3"
 
-    missing = build_wheel_activation_readiness(
-        config=config,
-        market="us",
-        accounts=["lx"],
-        sqlite_path=missing_path,
-    )
+    missing = _readiness_us(config, missing_path)
 
     assert missing["monitoring_gate"] == "disabled"
     assert missing["reason_code"] == "missing_database"
@@ -250,12 +221,7 @@ def test_wheel_activation_readiness_fails_closed_for_missing_and_mismatched_stat
     no_table_path = tmp_path / "no-table.sqlite3"
     with sqlite3.connect(no_table_path) as conn:
         conn.execute("CREATE TABLE unrelated (value INTEGER)")
-    no_table = build_wheel_activation_readiness(
-        config=config,
-        market="us",
-        accounts=["lx"],
-        sqlite_path=no_table_path,
-    )
+    no_table = _readiness_us(config, no_table_path)
     assert no_table["monitoring_gate"] == "disabled"
     assert no_table["reason_code"] == "missing_table"
     assert no_table["storage_status"] == "missing_table"
@@ -263,30 +229,14 @@ def test_wheel_activation_readiness_fails_closed_for_missing_and_mismatched_stat
     policy_hash = build_wheel_policy_hash(config, market="us", account="lx")
     mismatch_path = tmp_path / "mismatch.sqlite3"
     _write_activation_table(
-        mismatch_path,
-        market="us",
-        account="lx",
-        generation=2,
-        activated_at_ms=2_000,
-        deactivated_at_ms=None,
-        policy_hash=policy_hash,
+        mismatch_path, generation=2, activated_at_ms=2_000, policy_hash=policy_hash
     )
-    mismatch = build_wheel_activation_readiness(
-        config=config,
-        market="us",
-        accounts=["lx"],
-        sqlite_path=mismatch_path,
-    )
+    mismatch = _readiness_us(config, mismatch_path)
     assert mismatch["monitoring_gate"] == "config_mismatch"
     assert mismatch["reason_code"] == "descriptor_mismatch"
     assert mismatch["accounts"]["lx"]["generation"] == 2
 
-    no_descriptor = build_wheel_activation_readiness(
-        config={"wheel": {"enabled": True, "accounts": ["lx"]}},
-        market="us",
-        accounts=["lx"],
-        sqlite_path=mismatch_path,
-    )
+    no_descriptor = _readiness_us({"wheel": {"enabled": True, "accounts": ["lx"]}}, mismatch_path)
     assert no_descriptor["monitoring_gate"] == "disabled"
     assert no_descriptor["reason_code"] == "missing_descriptor"
 
@@ -369,22 +319,9 @@ def test_policy_drift_and_remediation_survive_the_status_sanitizer(
 
     config = _wheel_config()
     drift_path = tmp_path / "drift.sqlite3"
-    _write_activation_table(
-        drift_path,
-        market="us",
-        account="lx",
-        generation=1,
-        activated_at_ms=1_000,
-        deactivated_at_ms=None,
-        policy_hash="f" * 64,
-    )
+    _write_activation_table(drift_path, policy_hash="f" * 64)
 
-    readiness = build_wheel_activation_readiness(
-        config=config,
-        market="us",
-        accounts=["lx"],
-        sqlite_path=drift_path,
-    )
+    readiness = _readiness_us(config, drift_path)
     assert readiness["monitoring_gate"] == "config_mismatch"
     assert readiness["accounts"]["lx"]["policy_drift"] is True
     assert "accept-policy --market us" in readiness["accounts"]["lx"]["remediation_command"]
@@ -412,41 +349,21 @@ def test_synthesized_refusals_state_policy_drift_is_false(tmp_path: Path) -> Non
     assert "remediation_command" not in no_market["accounts"]["lx"]
 
     available_path = tmp_path / "available.sqlite3"
-    _write_activation_table(
+    _write_activation_table(available_path, policy_hash="f" * 64)
+    unparseable = _readiness_us(
+        {"wheel": {"enabled": True, "accounts": ["lx"], "activation_by_account": "broken"}},
         available_path,
-        market="us",
-        account="lx",
-        generation=1,
-        activated_at_ms=1_000,
-        deactivated_at_ms=None,
-        policy_hash="f" * 64,
-    )
-    unparseable = build_wheel_activation_readiness(
-        config={"wheel": {"enabled": True, "accounts": ["lx"], "activation_by_account": "broken"}},
-        market="us",
-        accounts=["lx"],
-        sqlite_path=available_path,
     )
     assert unparseable["accounts"]["lx"]["reason_code"] == "descriptor_mismatch"
     assert unparseable["accounts"]["lx"]["policy_drift"] is False
     assert "remediation_command" not in unparseable["accounts"]["lx"]
 
-    no_descriptor = build_wheel_activation_readiness(
-        config={"wheel": {"enabled": True, "accounts": ["lx"]}},
-        market="us",
-        accounts=["lx"],
-        sqlite_path=available_path,
-    )
+    no_descriptor = _readiness_us({"wheel": {"enabled": True, "accounts": ["lx"]}}, available_path)
     assert no_descriptor["accounts"]["lx"]["reason_code"] == "missing_descriptor"
     assert no_descriptor["accounts"]["lx"]["policy_drift"] is False
     assert "remediation_command" not in no_descriptor["accounts"]["lx"]
 
-    missing = build_wheel_activation_readiness(
-        config=_wheel_config(),
-        market="us",
-        accounts=["lx"],
-        sqlite_path=tmp_path / "absent.sqlite3",
-    )
+    missing = _readiness_us(_wheel_config(), tmp_path / "absent.sqlite3")
     assert missing["accounts"]["lx"]["policy_drift"] is False
     assert "remediation_command" not in missing["accounts"]["lx"]
 
