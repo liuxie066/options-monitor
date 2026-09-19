@@ -192,12 +192,10 @@ def test_fetch_preserves_quote_time_and_falls_back_when_tencent_date_is_old(monk
     assert fallback["timestamp"] == "2026-09-07T07:01:00+00:00"
 
 
-@pytest.mark.parametrize("preserve_daily_quality", [False, True])
-@pytest.mark.parametrize("correction_depth", [1, 2])
-def test_public_daily_rate_correction_preview_apply_and_readback(tmp_path, preserve_daily_quality, correction_depth) -> None:
+def _daily_correction_case(tmp_path, original_event):
+    """Freeze one day's rates, run the ordinary backfill, and expose what it produced."""
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     evidence = PerformanceEvidenceSQLiteRepository(repo.db_path)
-    original_event = event("correct-daily", ms("2026-09-07T08:00:00"))
     repo.upsert_trade_event(original_event)
     now = ms("2026-09-10T12:00:00")
     evidence.import_envelope(
@@ -208,6 +206,14 @@ def test_public_daily_rate_correction_preview_apply_and_readback(tmp_path, prese
     original = repo.list_trade_events()[0]
     before = original["raw_payload"]["cash_conversions"]["option_trade_cash_gross"]
     fixed = next(fact for fact in evidence.read_all().fx_rates if fact.fact_id == before["rate_evidence_fact_id"])
+    return repo, evidence, now, original, before, fixed
+
+
+@pytest.mark.parametrize("preserve_daily_quality", [False, True])
+@pytest.mark.parametrize("correction_depth", [1, 2])
+def test_public_daily_rate_correction_preview_apply_and_readback(tmp_path, preserve_daily_quality, correction_depth) -> None:
+    original_event = event("correct-daily", ms("2026-09-07T08:00:00"))
+    repo, evidence, now, original, before, fixed = _daily_correction_case(tmp_path, original_event)
     quality = dict(fixed.quality) if preserve_daily_quality else {"corrected": True}
     correction = replace(
         fixed, fact_id="daily-manual-correction", source_id="daily-manual-correction",
@@ -256,18 +262,8 @@ def test_public_daily_rate_correction_preview_apply_and_readback(tmp_path, prese
 
 @pytest.mark.parametrize("cross_day", [False, True])
 def test_public_daily_rate_correction_requires_same_day_supersedes_chain(tmp_path, cross_day) -> None:
-    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
-    evidence = PerformanceEvidenceSQLiteRepository(repo.db_path)
-    repo.upsert_trade_event(event("preserve-daily", ms("2026-09-07T08:00:00")))
-    now = ms("2026-09-10T12:00:00")
-    evidence.import_envelope(
-        EvidenceEnvelope(fx_rates=cash_fx_observation_facts(observation(), observed_at_ms=now)),
-        apply=True, migrated_at_ms=now,
-    )
-    backfill_cash_conversions(repo, evidence, apply=True, migrated_at_ms=now)
-    original = repo.list_trade_events()[0]
-    before = original["raw_payload"]["cash_conversions"]["option_trade_cash_gross"]
-    fixed = next(fact for fact in evidence.read_all().fx_rates if fact.fact_id == before["rate_evidence_fact_id"])
+    original_event = event("preserve-daily", ms("2026-09-07T08:00:00"))
+    repo, evidence, now, original, before, fixed = _daily_correction_case(tmp_path, original_event)
     unrelated = replace(
         fixed, fact_id="unrelated-manual-rate", source_id="unrelated-manual-rate", source="manual_correction",
         rate=Decimal("7.0"), observed_at_ms=now, quality={"corrected": True},
