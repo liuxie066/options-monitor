@@ -6,6 +6,7 @@ import json
 import sqlite3
 from copy import deepcopy
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -78,6 +79,71 @@ from src.application.positions import workflows
 from src.application.trades import lifecycle_timing
 
 
+def _contract_key(**overrides: Any) -> ContractKey:
+    base: dict[str, Any] = {
+        "broker": "futu",
+        "account": "lx",
+        "underlying_symbol": "NVDA",
+        "option_type": "put",
+        "position_side": "short",
+        "strike": 100,
+        "expiration_ymd": "2026-06-19",
+    }
+    base.update(overrides)
+    return ContractKey.from_values(**base)
+
+
+def _call_event(**overrides: Any) -> TradeEvent:
+    base: dict[str, Any] = {
+        "event_id": "call-open",
+        "event_type": "open",
+        "event_time_ms": 3_000,
+        "contract_key": _contract_key(option_type="call", strike=110),
+        "contracts": 1,
+        "price": 2,
+        "currency": "USD",
+        "source": "test",
+        "multiplier": 100,
+        "lot_id": "lot-call",
+    }
+    base.update(overrides)
+    return TradeEvent(**base)
+
+
+def _assignment_event(**overrides: Any) -> TradeEvent:
+    base: dict[str, Any] = {
+        "event_id": "terminal-a",
+        "event_type": "assignment",
+        "event_time_ms": 2_000,
+        "contract_key": _contract_key(),
+        "contracts": 1,
+        "price": 0,
+        "currency": "USD",
+        "source": "test",
+        "multiplier": 100,
+        "target_lot_id": "lot-source",
+    }
+    base.update(overrides)
+    return TradeEvent(**base)
+
+
+def _call_lot(record_id: str = "lot-call", **field_overrides: Any) -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        "status": "open",
+        "contracts_open": 1,
+        "source_event_id": "call-open",
+        "account": "lx",
+        "broker": "futu",
+        "symbol": "NVDA",
+        "currency": "USD",
+        "option_type": "call",
+        "side": "short",
+        "multiplier": 100,
+    }
+    fields.update(field_overrides)
+    return {"record_id": record_id, "fields": fields}
+
+
 def _event(
     event_id: str,
     *,
@@ -90,21 +156,59 @@ def _event(
         event_id=event_id,
         event_type="open",
         event_time_ms=event_time_ms,
-        contract_key=ContractKey.from_values(
-            broker="futu",
-            account=account,
-            underlying_symbol=symbol,
-            option_type="put",
-            position_side="short",
-            strike=100,
-            expiration_ymd="2026-06-19",
-        ),
+        contract_key=_contract_key(account=account, underlying_symbol=symbol),
         contracts=1,
         price=2,
         currency="USD",
         source="test",
         multiplier=100,
         lot_id=lot_id or f"lot-{account}",
+    )
+
+
+def _assigned_fact(transition: dict[str, object]) -> dict[str, object]:
+    return update_assigned_stock_fact(
+        empty_assigned_stock_fact("lx"),
+        transition=transition,
+        current_position_lots=[_final_option_lot(transition)],
+    )
+
+
+def _reseal_view(fact: dict[str, object]) -> None:
+    fact["current_view_hash"] = canonical_sha256(
+        {key: value for key, value in fact.items() if key != "current_view_hash"}
+    )
+
+
+def _trusted(repo: SQLiteOptionPositionsRepository, now_ms: int) -> dict[str, object]:
+    return read_current_decision_projection(repo, account="lx", now_ms=now_ms)
+
+
+def _oracle(repo: SQLiteOptionPositionsRepository, now_ms: int) -> dict[str, object]:
+    return preview_current_decision_projection_oracle(
+        repo,
+        account="lx",
+        now_ms=now_ms,
+        assigned_stock_report=_empty_assigned_report(),
+    )
+
+
+def _legacy_report(
+    events: list[dict[str, object]],
+    *,
+    allocations: list[dict[str, object]],
+    lots: list[dict[str, object]],
+) -> dict[str, object]:
+    return project_assigned_stock_lifecycle(
+        events,
+        assignment_option_rows=allocations,
+        option_open_lots=lots,
+        assigned_stock_events=[],
+        quote_snapshots=[],
+        account_norm="lx",
+        broker_norm="富途",
+        month=None,
+        as_of_ms=5_000,
     )
 
 
@@ -221,11 +325,7 @@ def test_current_decision_migration_is_manifest_bound_atomic_and_idempotent(
 
     applied = apply_current_decision_projection_migration(repo.db_path, manifest)
     assert applied["write_applied"] is True
-    assert read_current_decision_projection(
-        repo,
-        account="lx",
-        now_ms=now_ms,
-    )["status"] == "trusted"
+    assert _trusted(repo, now_ms)["status"] == "trusted"
     assert current_decision_projection_migration_status(
         repo.db_path,
         now_ms=now_ms + 1,
@@ -598,7 +698,7 @@ def test_projection_codec_reader_oracle_and_corruption_are_fail_closed(
     assert validate_current_decision_projection_payload(payload) == payload
 
     empty_payload = _bootstrap(repo, "lx")
-    trusted = read_current_decision_projection(repo, account="lx", now_ms=20_000)
+    trusted = _trusted(repo, 20_000)
     assert trusted["status"] == "trusted"
     assert trusted["payload"] == empty_payload
     read_only_repo = open_trade_reconciliation_evidence_repo(repo.db_path)
@@ -619,21 +719,16 @@ def test_projection_codec_reader_oracle_and_corruption_are_fail_closed(
     assert read_only["status"] == "trusted"
     assert read_only["payload"] == empty_payload
     assert "strategy_group_identities" not in " ".join(statements).lower()
-    assert read_current_decision_projection(repo, account="lx", now_ms=30_000)[
+    assert _trusted(repo, 30_000)[
         "payload"
     ] == empty_payload
-    assert preview_current_decision_projection_oracle(
-        repo,
-        account="lx",
-        now_ms=10_000,
-        assigned_stock_report=_empty_assigned_report(),
-    ) == empty_payload
+    assert _oracle(repo, 10_000) == empty_payload
 
     with repo._connect() as conn:  # noqa: SLF001 - corruption boundary
         conn.execute(
             "UPDATE current_decision_projections SET payload_json = '{}' WHERE account = 'lx'"
         )
-    unavailable = read_current_decision_projection(repo, account="lx", now_ms=30_000)
+    unavailable = _trusted(repo, 30_000)
     assert unavailable["status"] == "data_unavailable"
     assert unavailable["payload"] is None
 
@@ -806,8 +901,8 @@ def test_reader_is_one_transaction_account_isolated_and_now_is_read_only(
 
     monkeypatch.setattr(repo, "_connect", traced_connect)
     before = hashlib.sha256(repo.db_path.read_bytes()).hexdigest()
-    pending = read_current_decision_projection(repo, account="lx", now_ms=1_500)
-    elapsed = read_current_decision_projection(repo, account="lx", now_ms=2_500)
+    pending = _trusted(repo, 1_500)
+    elapsed = _trusted(repo, 2_500)
     after = hashlib.sha256(repo.db_path.read_bytes()).hexdigest()
 
     assert connect_count == 2
@@ -842,11 +937,7 @@ def test_legacy_snapshot_attaches_bounded_current_consumer_shadow(
     repo = _repo(tmp_path)
     _bootstrap(repo, "lx")
     rows = repo.read_decision_state_rows(account="lx")
-    current = read_current_decision_projection(
-        repo,
-        account="lx",
-        now_ms=20_000,
-    )
+    current = _trusted(repo, 20_000)
     snapshot = decision_state_snapshot_from_rows(
         rows,
         account="lx",
@@ -932,11 +1023,7 @@ def test_legacy_snapshot_shadow_compares_lifecycle_quality_at_same_clock(
     _bind_test_timing(repo, lifecycle_case)
     now_ms = 1_800_000_000_000
     rows = repo.read_decision_state_rows(account="lx")
-    current = read_current_decision_projection(
-        repo,
-        account="lx",
-        now_ms=now_ms,
-    )
+    current = _trusted(repo, now_ms)
 
     snapshot = decision_state_snapshot_from_rows(
         rows,
@@ -991,11 +1078,7 @@ def test_fact_and_payload_type_order_and_hash_corruption_fail_closed(tmp_path: P
             validate_lifecycle_case_decision_fact(candidate)
 
     transition = _buy_transition()
-    assigned = update_assigned_stock_fact(
-        empty_assigned_stock_fact("lx"),
-        transition=transition,
-        current_position_lots=[_final_option_lot(transition)],
-    )
+    assigned = _assigned_fact(transition)
     negative_basis = deepcopy(assigned)
     negative_basis["lots"][0]["remaining_cost_basis"] = "-1"
     with pytest.raises(CurrentDecisionProjectionError):
@@ -1046,12 +1129,7 @@ def test_indexed_builder_matches_full_oracle_for_real_lifecycle_case(
         "derived_summary": {"reason_state": "not_started"},
     }
     assert repo.upsert_trade_lifecycle_case(case)
-    seed = preview_current_decision_projection_oracle(
-        repo,
-        account="lx",
-        now_ms=1_500,
-        assigned_stock_report=_empty_assigned_report(),
-    )
+    seed = _oracle(repo, 1_500)
     fact = seed["lifecycle"]["operational_cases"][0]
     with repo._connect() as conn:  # noqa: SLF001 - transaction-owner proof
         assert write_lifecycle_case_decision_fact(repo, fact=fact, conn=conn)
@@ -1062,12 +1140,7 @@ def test_indexed_builder_matches_full_oracle_for_real_lifecycle_case(
             conn=conn,
         ) == fact
 
-    oracle = preview_current_decision_projection_oracle(
-        repo,
-        account="lx",
-        now_ms=1_500,
-        assigned_stock_report=_empty_assigned_report(),
-    )
+    oracle = _oracle(repo, 1_500)
     indexed = build_current_decision_projection(
         repo,
         account="lx",
@@ -1095,11 +1168,7 @@ def test_discovery_and_timing_bind_publish_one_compact_case_fact(
         )
     assert discovered_fact is not None
     assert discovered_fact["resolution"]["status"] == "missing"
-    trusted = read_current_decision_projection(
-        repo,
-        account="lx",
-        now_ms=1_800_000_000_000,
-    )
+    trusted = _trusted(repo, 1_800_000_000_000)
     assert trusted["status"] == "trusted"
 
     bound = _bind_test_timing(repo, lifecycle_case)
@@ -1118,17 +1187,8 @@ def test_discovery_and_timing_bind_publish_one_compact_case_fact(
     assert timed_fact["timing"]["timing_policy_hash"] == canonical_payload_hash(
         bound["policy"]
     )
-    trusted = read_current_decision_projection(
-        repo,
-        account="lx",
-        now_ms=1_800_000_000_000,
-    )
-    oracle = preview_current_decision_projection_oracle(
-        repo,
-        account="lx",
-        now_ms=1_800_000_000_000,
-        assigned_stock_report=_empty_assigned_report(),
-    )
+    trusted = _trusted(repo, 1_800_000_000_000)
+    oracle = _oracle(repo, 1_800_000_000_000)
     assert trusted["payload"]["lifecycle"]["operational_cases"] == oracle[
         "lifecycle"
     ]["operational_cases"]
@@ -1185,18 +1245,9 @@ def test_zero_price_close_publishes_direct_anchor_once(
     assert fact["resolution"]["status"] == "direct"
     assert fact["resolution"]["effective_reservations_by_lot"] == {"lot-lx": 1}
     assert len(fact["resolution"]["anchor_facts"]) == 1
-    trusted = read_current_decision_projection(
-        repo,
-        account="lx",
-        now_ms=1_800_000_000_000,
-    )
+    trusted = _trusted(repo, 1_800_000_000_000)
     assert trusted["status"] == "trusted"
-    oracle = preview_current_decision_projection_oracle(
-        repo,
-        account="lx",
-        now_ms=1_800_000_000_000,
-        assigned_stock_report=_empty_assigned_report(),
-    )
+    oracle = _oracle(repo, 1_800_000_000_000)
     assert trusted["payload"]["lifecycle"] == oracle["lifecycle"]
 
     before = repo.read_current_decision_storage_state("lx")
@@ -1359,18 +1410,10 @@ def test_legacy_oracle_matches_all_incremental_settlement_transitions(
         )
 
     legacy_facts = [_legacy_settlement_facts(item) for item in transitions]
-    report = project_assigned_stock_lifecycle(
+    report = _legacy_report(
         [event for event, _allocation, _lot in legacy_facts],
-        assignment_option_rows=[
-            allocation for _event, allocation, _lot in legacy_facts
-        ],
-        option_open_lots=[lot for _event, _allocation, lot in legacy_facts],
-        assigned_stock_events=[],
-        quote_snapshots=[],
-        account_norm="lx",
-        broker_norm="富途",
-        month=None,
-        as_of_ms=5_000,
+        allocations=[allocation for _event, allocation, _lot in legacy_facts],
+        lots=[lot for _event, _allocation, lot in legacy_facts],
     )
 
     assert compact_assigned_stock_view(
@@ -1382,15 +1425,7 @@ def test_legacy_oracle_matches_all_incremental_settlement_transitions(
 
 
 def test_assigned_stock_lot_adapter_preserves_retired_adjustment_mode() -> None:
-    key = ContractKey.from_values(
-        broker="futu",
-        account="lx",
-        underlying_symbol="NVDA",
-        option_type="put",
-        position_side="short",
-        strike=100,
-        expiration_ymd="2026-06-19",
-    )
+    key = _contract_key()
     projected = writer.project_stored_trade_events_to_position_lots(
         [
             TradeEvent(
@@ -1470,22 +1505,8 @@ def test_assigned_oracle_does_not_restore_mode_absent_from_bound_source_lot() ->
             "yield_enhancement_mode": "vol_convexity_enhancement",
         },
     }
-    report = project_assigned_stock_lifecycle(
-        [source_open, terminal],
-        assignment_option_rows=[allocation],
-        option_open_lots=[source_lot],
-        assigned_stock_events=[],
-        quote_snapshots=[],
-        account_norm="lx",
-        broker_norm="富途",
-        month=None,
-        as_of_ms=5_000,
-    )
-    incremental = update_assigned_stock_fact(
-        empty_assigned_stock_fact("lx"),
-        transition=transition,
-        current_position_lots=[_final_option_lot(transition)],
-    )
+    report = _legacy_report([source_open, terminal], allocations=[allocation], lots=[source_lot])
+    incremental = _assigned_fact(transition)
 
     assert "yield_enhancement_mode" not in report["assigned_stock_lots"][0]
     assert compact_assigned_stock_view(
@@ -1510,42 +1531,18 @@ def test_settlement_quantity_mismatch_fails_closed_on_both_authorities() -> None
     }
     event, allocation, lot = _legacy_settlement_facts(transition)
 
-    report = project_assigned_stock_lifecycle(
-        [event],
-        assignment_option_rows=[allocation],
-        option_open_lots=[lot],
-        assigned_stock_events=[],
-        quote_snapshots=[],
-        account_norm="lx",
-        broker_norm="富途",
-        month=None,
-        as_of_ms=5_000,
-    )
+    report = _legacy_report([event], allocations=[allocation], lots=[lot])
 
     assert report["assigned_stock_lots"] == []
     assert report["assigned_stock_review_rows"][0]["status"] == "incomplete_inventory_basis"
     allocation["source_record_id"] = "missing-option-lot"
     binding_event = deepcopy(event)
     binding_event["raw_payload"]["stock_settlement"]["shares"] = 100
-    binding_report = project_assigned_stock_lifecycle(
-        [binding_event],
-        assignment_option_rows=[allocation],
-        option_open_lots=[lot],
-        assigned_stock_events=[],
-        quote_snapshots=[],
-        account_norm="lx",
-        broker_norm="富途",
-        month=None,
-        as_of_ms=5_000,
-    )
+    binding_report = _legacy_report([binding_event], allocations=[allocation], lots=[lot])
     assert binding_report["assigned_stock_lots"] == []
     assert binding_report["assigned_stock_review_rows"][0]["status"] == "incomplete_inventory_basis"
     with pytest.raises(CurrentDecisionProjectionError, match="quantity mismatch"):
-        update_assigned_stock_fact(
-            empty_assigned_stock_fact("lx"),
-            transition=transition,
-            current_position_lots=[_final_option_lot(transition)],
-        )
+        _assigned_fact(transition)
 
 
 @pytest.mark.parametrize(
@@ -1577,17 +1574,7 @@ def test_legacy_settlement_rejects_malformed_time_or_allocation_binding(
         allocation["contracts_closed"] = 1
         allocations.append(deepcopy(allocation))
 
-    report = project_assigned_stock_lifecycle(
-        [event],
-        assignment_option_rows=allocations,
-        option_open_lots=[lot],
-        assigned_stock_events=[],
-        quote_snapshots=[],
-        account_norm="lx",
-        broker_norm="富途",
-        month=None,
-        as_of_ms=5_000,
-    )
+    report = _legacy_report([event], allocations=allocations, lots=[lot])
 
     assert report["assigned_stock_lots"] == []
     assert report["assigned_stock_review_rows"]
@@ -1611,25 +1598,10 @@ def test_hkd_settlement_fee_and_embedded_time_match_legacy_oracle() -> None:
     )
     current_lot = _final_option_lot(transition)
     current_lot["fields"]["opened_at"] = 1_000
-    event = TradeEvent(
+    event = _assignment_event(
         event_id="hk-assignment",
-        event_type="assignment",
-        event_time_ms=2_000,
-        contract_key=ContractKey.from_values(
-            broker="futu",
-            account="lx",
-            underlying_symbol="0700.HK",
-            option_type="put",
-            position_side="short",
-            strike=100,
-            expiration_ymd="2026-06-19",
-        ),
-        contracts=1,
-        price=0,
+        contract_key=_contract_key(underlying_symbol="0700.HK"),
         currency="HKD",
-        source="test",
-        multiplier=100,
-        target_lot_id="lot-source",
         raw_payload={
             "close_type": "assignment",
             "stock_settlement": dict(transition["stock_settlement"]),
@@ -1643,17 +1615,7 @@ def test_hkd_settlement_fee_and_embedded_time_match_legacy_oracle() -> None:
     legacy_event, allocation, legacy_lot = _legacy_settlement_facts(transition)
     legacy_event["trade_time_ms"] = 2_000
     legacy_event["raw_payload"]["stock_settlement"].pop("fee_provenance")
-    report = project_assigned_stock_lifecycle(
-        [legacy_event],
-        assignment_option_rows=[allocation],
-        option_open_lots=[legacy_lot],
-        assigned_stock_events=[],
-        quote_snapshots=[],
-        account_norm="lx",
-        broker_norm="富途",
-        month=None,
-        as_of_ms=5_000,
-    )
+    report = _legacy_report([legacy_event], allocations=[allocation], lots=[legacy_lot])
 
     assert incremental["lots"][0]["assigned_at_ms"] == 4_000
     assert incremental["lots"][0]["remaining_cost_basis"] == "10000"
@@ -1667,11 +1629,7 @@ def test_hkd_settlement_fee_and_embedded_time_match_legacy_oracle() -> None:
 
 def test_sale_sell_and_covered_call_transitions_are_bounded() -> None:
     transition = _buy_transition()
-    assigned = update_assigned_stock_fact(
-        empty_assigned_stock_fact("lx"),
-        transition=transition,
-        current_position_lots=[_final_option_lot(transition)],
-    )
+    assigned = _assigned_fact(transition)
     lot = dict(assigned["lots"][0])
     after = _sale_after(lot, event_id="sale-a", shares=40)
     sold = update_assigned_stock_fact(
@@ -1710,21 +1668,7 @@ def test_sale_sell_and_covered_call_transitions_are_bounded() -> None:
             ],
         },
         current_position_lots=[
-            {
-                "record_id": "lot-call",
-                "fields": {
-                    "status": "open",
-                    "contracts_open": 1,
-                    "source_event_id": "call-open",
-                    "account": "lx",
-                    "broker": "futu",
-                    "symbol": "NVDA",
-                    "currency": "USD",
-                    "option_type": "call",
-                    "side": "short",
-                    "multiplier": 100,
-                },
-            }
+            _call_lot()
         ],
     )
     assert linked["covered_call_allocations"][0]["open_event_id"] == "call-open"
@@ -1822,21 +1766,7 @@ def test_covered_call_linkage_enforces_aggregate_option_capacity() -> None:
             transition=transition,
             current_position_lots=[_final_option_lot(transition)],
         )
-    call_lot = {
-        "record_id": "lot-call",
-        "fields": {
-            "status": "open",
-            "contracts_open": 1,
-            "source_event_id": "call-open",
-            "account": "lx",
-            "broker": "futu",
-            "symbol": "NVDA",
-            "currency": "USD",
-            "option_type": "call",
-            "side": "short",
-            "multiplier": 100,
-        },
-    }
+    call_lot = _call_lot()
 
     def allocations(shares: int) -> list[dict[str, object]]:
         return [
@@ -1875,47 +1805,13 @@ def test_covered_call_linkage_enforces_aggregate_option_capacity() -> None:
 
 def test_covered_call_linkage_without_current_identity_fails_closed() -> None:
     transition = _buy_transition()
-    assigned = update_assigned_stock_fact(
-        empty_assigned_stock_fact("lx"),
-        transition=transition,
-        current_position_lots=[_final_option_lot(transition)],
+    assigned = _assigned_fact(transition)
+    call_event = _call_event(event_id="call-open-no-stock-identity", lot_id="lot-call-no-stock-identity")
+    call_lot = _call_lot(
+        record_id="lot-call-no-stock-identity",
+        source_event_id=call_event.event_id,
+        opened_at=3_000,
     )
-    call_event = TradeEvent(
-        event_id="call-open-no-stock-identity",
-        event_type="open",
-        event_time_ms=3_000,
-        contract_key=ContractKey.from_values(
-            broker="futu",
-            account="lx",
-            underlying_symbol="NVDA",
-            option_type="call",
-            position_side="short",
-            strike=110,
-            expiration_ymd="2026-06-19",
-        ),
-        contracts=1,
-        price=2,
-        currency="USD",
-        source="test",
-        multiplier=100,
-        lot_id="lot-call-no-stock-identity",
-    )
-    call_lot = {
-        "record_id": "lot-call-no-stock-identity",
-        "fields": {
-            "status": "open",
-            "contracts_open": 1,
-            "source_event_id": call_event.event_id,
-            "opened_at": 3_000,
-            "account": "lx",
-            "broker": "futu",
-            "symbol": "NVDA",
-            "currency": "USD",
-            "option_type": "call",
-            "side": "short",
-            "multiplier": 100,
-        },
-    }
 
     with pytest.raises(CurrentDecisionProjectionError, match="identity is missing"):
         advance_assigned_stock_fact_for_trade_events(
@@ -1932,11 +1828,7 @@ def test_resolved_covered_call_identity_removes_stale_review() -> None:
         "leg_role": "assigned_stock",
         "strategy_group_id": "group-a",
     }
-    assigned = update_assigned_stock_fact(
-        empty_assigned_stock_fact("lx"),
-        transition=transition,
-        current_position_lots=[_final_option_lot(transition)],
-    )
+    assigned = _assigned_fact(transition)
     assigned["review_facts"] = [
         {
             "status": "covered_call_unallocated",
@@ -1949,46 +1841,9 @@ def test_resolved_covered_call_identity_removes_stale_review() -> None:
             "details_sha256": canonical_sha256({"required_shares": 100}),
         }
     ]
-    assigned["current_view_hash"] = canonical_sha256(
-        {key: value for key, value in assigned.items() if key != "current_view_hash"}
-    )
-    call = TradeEvent(
-        event_id="call-open",
-        event_type="open",
-        event_time_ms=3_000,
-        contract_key=ContractKey.from_values(
-            broker="futu",
-            account="lx",
-            underlying_symbol="NVDA",
-            option_type="call",
-            position_side="short",
-            strike=110,
-            expiration_ymd="2026-06-19",
-        ),
-        contracts=1,
-        price=2,
-        currency="USD",
-        source="test",
-        multiplier=100,
-        lot_id="lot-call",
-    )
-    call_lot = {
-        "record_id": "lot-call",
-        "fields": {
-            "status": "open",
-            "contracts_open": 1,
-            "source_event_id": "call-open",
-            "opened_at": 3_000,
-            "account": "lx",
-            "broker": "futu",
-            "symbol": "NVDA",
-            "currency": "USD",
-            "option_type": "call",
-            "side": "short",
-            "multiplier": 100,
-            "strategy_group_id": "group-a",
-        },
-    }
+    _reseal_view(assigned)
+    call = _call_event()
+    call_lot = _call_lot(opened_at=3_000, strategy_group_id="group-a")
 
     repaired = advance_assigned_stock_fact_for_trade_events(
         assigned,
@@ -2026,43 +1881,8 @@ def test_covered_call_group_change_revalidates_prior_allocation() -> None:
         transition=alternate,
         current_position_lots=final_lots,
     )
-    call = TradeEvent(
-        event_id="call-open",
-        event_type="open",
-        event_time_ms=3_000,
-        contract_key=ContractKey.from_values(
-            broker="futu",
-            account="lx",
-            underlying_symbol="NVDA",
-            option_type="call",
-            position_side="short",
-            strike=110,
-            expiration_ymd="2026-06-19",
-        ),
-        contracts=1,
-        price=2,
-        currency="USD",
-        source="test",
-        multiplier=100,
-        lot_id="lot-call",
-    )
-    call_lot = {
-        "record_id": "lot-call",
-        "fields": {
-            "status": "open",
-            "contracts_open": 1,
-            "source_event_id": "call-open",
-            "opened_at": 3_000,
-            "account": "lx",
-            "broker": "futu",
-            "symbol": "NVDA",
-            "currency": "USD",
-            "option_type": "call",
-            "side": "short",
-            "multiplier": 100,
-            "strategy_group_id": "group-a",
-        },
-    }
+    call = _call_event()
+    call_lot = _call_lot(opened_at=3_000, strategy_group_id="group-a")
     linked = advance_assigned_stock_fact_for_trade_events(
         assigned,
         event_mutations=((call, True),),
@@ -2081,9 +1901,7 @@ def test_covered_call_group_change_revalidates_prior_allocation() -> None:
             "details_sha256": canonical_sha256({"required_shares": 100}),
         }
     ]
-    linked["current_view_hash"] = canonical_sha256(
-        {key: value for key, value in linked.items() if key != "current_view_hash"}
-    )
+    _reseal_view(linked)
     call_lot["fields"]["strategy_group_id"] = "group-b"
 
     with pytest.raises(CurrentDecisionProjectionError, match="identity mismatch"):
@@ -2118,44 +1936,8 @@ def test_covered_call_explicit_stock_lot_survives_restart_with_conflicting_group
             current_position_lots=final_lots,
         )
 
-    call = TradeEvent(
-        event_id="call-open",
-        event_type="open",
-        event_time_ms=3_000,
-        contract_key=ContractKey.from_values(
-            broker="futu",
-            account="lx",
-            underlying_symbol="NVDA",
-            option_type="call",
-            position_side="short",
-            strike=110,
-            expiration_ymd="2026-06-19",
-        ),
-        contracts=1,
-        price=2,
-        currency="USD",
-        source="test",
-        multiplier=100,
-        lot_id="call-lot",
-        raw_payload={"stock_lot_id": "assigned-stock-assign-a"},
-    )
-    call_lot = {
-        "record_id": "call-lot",
-        "fields": {
-            "status": "open",
-            "contracts_open": 1,
-            "source_event_id": "call-open",
-            "opened_at": 3_000,
-            "account": "lx",
-            "broker": "futu",
-            "symbol": "NVDA",
-            "currency": "USD",
-            "option_type": "call",
-            "side": "short",
-            "multiplier": 100,
-            "strategy_group_id": "group-b",
-        },
-    }
+    call = _call_event(lot_id="call-lot", raw_payload={"stock_lot_id": "assigned-stock-assign-a"})
+    call_lot = _call_lot(record_id="call-lot", opened_at=3_000, strategy_group_id="group-b")
 
     first = advance_assigned_stock_fact_for_trade_events(
         assigned,
@@ -2174,9 +1956,7 @@ def test_covered_call_explicit_stock_lot_survives_restart_with_conflicting_group
 
     unprovenanced = deepcopy(first)
     unprovenanced["covered_call_allocations"][0].pop("linkage_basis")
-    unprovenanced["current_view_hash"] = canonical_sha256(
-        {key: value for key, value in unprovenanced.items() if key != "current_view_hash"}
-    )
+    _reseal_view(unprovenanced)
     with pytest.raises(CurrentDecisionProjectionError, match="allocation shape"):
         advance_assigned_stock_fact_for_trade_events(
             unprovenanced,
@@ -2200,11 +1980,7 @@ def test_covered_call_candidate_resolution_is_linear_in_current_lots() -> None:
         "leg_role": "assigned_stock",
         "strategy_group_id": "group-000",
     }
-    template = update_assigned_stock_fact(
-        empty_assigned_stock_fact("lx"),
-        transition=template_transition,
-        current_position_lots=[_final_option_lot(template_transition)],
-    )["lots"][0]
+    template = _assigned_fact(template_transition)["lots"][0]
     size = 40
     lots = [
         {
@@ -2229,27 +2005,14 @@ def test_covered_call_candidate_resolution_is_linear_in_current_lots() -> None:
             for row in lots
         ]
     )
-    assigned["current_view_hash"] = canonical_sha256(
-        {key: value for key, value in assigned.items() if key != "current_view_hash"}
-    )
+    _reseal_view(assigned)
     call_lots = [
-        {
-            "record_id": f"call-lot-{index:03d}",
-            "fields": {
-                "status": "open",
-                "contracts_open": 1,
-                "source_event_id": f"call-open-{index:03d}",
-                "opened_at": 3_000,
-                "account": "lx",
-                "broker": "futu",
-                "symbol": "NVDA",
-                "currency": "USD",
-                "option_type": "call",
-                "side": "short",
-                "multiplier": 100,
-                "strategy_group_id": f"group-{index:03d}",
-            },
-        }
+        _call_lot(
+            record_id=f"call-lot-{index:03d}",
+            source_event_id=f"call-open-{index:03d}",
+            opened_at=3_000,
+            strategy_group_id=f"group-{index:03d}",
+        )
         for index in range(size)
     ]
 
@@ -2899,24 +2662,8 @@ def test_assignment_event_owner_advances_compact_stock_without_history(
         "list_assigned_stock_events",
         lambda **_kwargs: pytest.fail("assigned-stock history was read"),
     )
-    event = TradeEvent(
+    event = _assignment_event(
         event_id="assignment-owner",
-        event_type="assignment",
-        event_time_ms=2_000,
-        contract_key=ContractKey.from_values(
-            broker="futu",
-            account="lx",
-            underlying_symbol="NVDA",
-            option_type="put",
-            position_side="short",
-            strike=100,
-            expiration_ymd="2026-06-19",
-        ),
-        contracts=1,
-        price=0,
-        currency="USD",
-        source="test",
-        multiplier=100,
         target_lot_id="lot-lx",
         raw_payload={
             "record_id": "lot-lx",
@@ -2932,11 +2679,7 @@ def test_assignment_event_owner_advances_compact_stock_without_history(
     )
 
     result = writer.persist_trade_event_object(repo, event)
-    assigned = read_current_decision_projection(
-        repo,
-        account="lx",
-        now_ms=3_000,
-    )["payload"]["assigned_stock"]
+    assigned = _trusted(repo, 3_000)["payload"]["assigned_stock"]
     assert result.details["decision_projection"]["statuses"] == {
         "lx": "published"
     }
@@ -2958,25 +2701,9 @@ def test_trade_event_adapter_rejects_invalid_settlement_time(
 ) -> None:
     transition = _buy_transition()
     prior = empty_assigned_stock_fact("lx")
-    event = TradeEvent(
+    event = _assignment_event(
         event_id="assignment-backdated",
-        event_type="assignment",
         event_time_ms=event_time_ms,
-        contract_key=ContractKey.from_values(
-            broker="futu",
-            account="lx",
-            underlying_symbol="NVDA",
-            option_type="put",
-            position_side="short",
-            strike=100,
-            expiration_ymd="2026-06-19",
-        ),
-        contracts=1,
-        price=0,
-        currency="USD",
-        source="test",
-        multiplier=100,
-        target_lot_id="lot-source",
         raw_payload={
             "stock_settlement": {
                 "side": "buy",
@@ -3009,25 +2736,7 @@ def test_assigned_stock_sale_owner_publishes_partial_full_and_rolls_back(
     transition = _buy_transition()
     writer.persist_trade_event_object(
         repo,
-        TradeEvent(
-            event_id="terminal-a",
-            event_type="assignment",
-            event_time_ms=2_000,
-            contract_key=ContractKey.from_values(
-                broker="futu",
-                account="lx",
-                underlying_symbol="NVDA",
-                option_type="put",
-                position_side="short",
-                strike=100,
-                expiration_ymd="2026-06-19",
-            ),
-            contracts=1,
-            price=0,
-            currency="USD",
-            source="test",
-            multiplier=100,
-            target_lot_id="lot-source",
+        _assignment_event(
             raw_payload={
                 "stock_settlement": {
                     "side": "buy",
@@ -3178,8 +2887,4 @@ def test_assigned_stock_sale_owner_publishes_partial_full_and_rolls_back(
         sale_event=sale_b,
         assigned_stock_after=full_after,
     )
-    assert read_current_decision_projection(
-        repo,
-        account="lx",
-        now_ms=5_000,
-    )["payload"]["assigned_stock"]["lots"] == []
+    assert _trusted(repo, 5_000)["payload"]["assigned_stock"]["lots"] == []

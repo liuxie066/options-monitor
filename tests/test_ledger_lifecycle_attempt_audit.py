@@ -301,13 +301,7 @@ def _seed_one_observed_attempt(
     evidence_observation = first_evidence_observation or observation
     assert evidence_observation["semantic_schema"] == observation["semantic_schema"]
     assert evidence_observation["semantic_fingerprint"] == observation["semantic_fingerprint"]
-    envelope = build_lifecycle_attempt_audit_envelope(
-        case_id=case_id,
-        invocation_id=INVOCATION_ID,
-        attempted_at_ms=2_000,
-        outcome_kind="observed_complete",
-        observation=observation,
-    )
+    envelope = _envelope(case_id=case_id, observation=observation)
     assert envelope.semantic_fingerprint is not None
     assert envelope.receipt_sha256 is not None
     chain = compute_lifecycle_attempt_chain_sha256(
@@ -436,11 +430,10 @@ def _seed_second_observed_attempt(
         receipt_note="second",
         option_position_absent=not semantic_change,
     )
-    envelope = build_lifecycle_attempt_audit_envelope(
+    envelope = _envelope(
         case_id=case_id,
         invocation_id=INVOCATION_ID_2,
         attempted_at_ms=2_100,
-        outcome_kind="observed_complete",
         observation=observation,
     )
     assert envelope.semantic_fingerprint is not None
@@ -575,6 +568,51 @@ def _seed_second_observed_attempt(
     return chain
 
 
+def _case_repo(tmp_path: Path) -> SQLiteOptionPositionsRepository:
+    repo = _repo(tmp_path)
+    repo.upsert_trade_lifecycle_case(_case("case-a", account="lx"))
+    return repo
+
+
+def _seeded_repo(
+    tmp_path: Path,
+    *,
+    second_semantic_change: bool | None = None,
+) -> SQLiteOptionPositionsRepository:
+    repo = _case_repo(tmp_path)
+    _seed_one_observed_attempt(repo)
+    if second_semantic_change is not None:
+        _seed_second_observed_attempt(repo, semantic_change=second_semantic_change)
+    return repo
+
+
+def _envelope(**overrides: object):
+    base: dict[str, object] = {
+        "case_id": "case-a",
+        "invocation_id": INVOCATION_ID,
+        "attempted_at_ms": 2_000,
+        "outcome_kind": "observed_complete",
+    }
+    base.update(overrides)
+    return build_lifecycle_attempt_audit_envelope(**base)
+
+
+def _chain_call(**overrides: object):
+    base: dict[str, object] = {
+        "previous_chain_sha256": LIFECYCLE_ATTEMPT_CHAIN_GENESIS,
+        "case_id": "case-a",
+        "ordinal": 1,
+        "invocation_id": INVOCATION_ID,
+        "attempted_at_ms": 1,
+        "outcome_code": 1,
+        "semantic_fingerprint": bytes(32),
+        "receipt_sha256": bytes(32),
+        "diagnostic_sha256": None,
+    }
+    base.update(overrides)
+    return lambda: compute_lifecycle_attempt_chain_sha256(**base)
+
+
 def _normalized_triggers(conn: sqlite3.Connection) -> dict[str, str]:
     return {
         str(row["name"]): " ".join(str(row["sql"]).split())
@@ -605,13 +643,7 @@ def test_codec_builds_receipt_once_and_chain_has_a_frozen_unambiguous_preimage(
 
     monkeypatch.setattr(audit_codec.json, "dumps", counted_dumps)
     monkeypatch.setattr(audit_codec.zlib, "compress", counted_compress)
-    envelope = build_lifecycle_attempt_audit_envelope(
-        case_id="case-a",
-        invocation_id=INVOCATION_ID,
-        attempted_at_ms=2_000,
-        outcome_kind="observed_complete",
-        observation=observation,
-    )
+    envelope = _envelope(observation=observation)
 
     expected_receipt = real_dumps(
         observation,
@@ -661,9 +693,7 @@ def test_codec_builds_receipt_once_and_chain_has_a_frozen_unambiguous_preimage(
     )
     assert computed == hashlib.sha256(manual_preimage).digest()
 
-    failure = build_lifecycle_attempt_audit_envelope(
-        case_id="case-a",
-        invocation_id=INVOCATION_ID,
+    failure = _envelope(
         attempted_at_ms=2_001,
         outcome_kind="retryable_error",
         reason_code="timeout",
@@ -676,15 +706,8 @@ def test_codec_builds_receipt_once_and_chain_has_a_frozen_unambiguous_preimage(
 
 
 def test_codec_validates_complete_envelopes_and_rejects_corruption() -> None:
-    observed = build_lifecycle_attempt_audit_envelope(
-        case_id="case-a",
-        invocation_id=INVOCATION_ID,
-        attempted_at_ms=2_000,
-        outcome_kind="observed_complete",
-        observation=_observation(),
-    )
-    failure = build_lifecycle_attempt_audit_envelope(
-        case_id="case-a",
+    observed = _envelope(observation=_observation())
+    failure = _envelope(
         invocation_id=INVOCATION_ID_2,
         attempted_at_ms=2_001,
         outcome_kind="retryable_error",
@@ -713,8 +736,7 @@ def test_codec_validates_complete_envelopes_and_rejects_corruption() -> None:
     ("call", "match"),
     [
         (
-            lambda: build_lifecycle_attempt_audit_envelope(
-                case_id="case-a",
+            lambda: _envelope(
                 invocation_id=INVOCATION_ID.upper(),
                 attempted_at_ms=1,
                 outcome_kind="retryable_error",
@@ -722,60 +744,26 @@ def test_codec_validates_complete_envelopes_and_rejects_corruption() -> None:
             "canonical lowercase",
         ),
         (
-            lambda: build_lifecycle_attempt_audit_envelope(
-                case_id="case-a",
-                invocation_id=INVOCATION_ID,
-                attempted_at_ms=1,
-                outcome_kind="future_outcome",
-            ),
+            lambda: _envelope(attempted_at_ms=1, outcome_kind="future_outcome"),
             "unsupported lifecycle attempt outcome",
         ),
         (
-            lambda: build_lifecycle_attempt_audit_envelope(
-                case_id="case-a",
-                invocation_id=INVOCATION_ID,
+            lambda: _envelope(
                 attempted_at_ms=1,
-                outcome_kind="observed_complete",
                 observation={**_observation(), "semantic_fingerprint": "11" * 31},
             ),
             "64 lowercase hexadecimal",
         ),
         (
-            lambda: build_lifecycle_attempt_audit_envelope(
-                case_id="case-a",
-                invocation_id=INVOCATION_ID,
-                attempted_at_ms=1,
-                outcome_kind="observed_complete",
-                observation={**_observation(), "bad": float("nan")},
-            ),
+            lambda: _envelope(attempted_at_ms=1, observation={**_observation(), "bad": float("nan")}),
             "non-finite",
         ),
         (
-            lambda: compute_lifecycle_attempt_chain_sha256(
-                previous_chain_sha256=LIFECYCLE_ATTEMPT_CHAIN_GENESIS,
-                case_id="case-a",
-                ordinal=0,
-                invocation_id=INVOCATION_ID,
-                attempted_at_ms=1,
-                outcome_code=1,
-                semantic_fingerprint=bytes(32),
-                receipt_sha256=bytes(32),
-                diagnostic_sha256=None,
-            ),
+            _chain_call(ordinal=0),
             "ordinal must be >= 1",
         ),
         (
-            lambda: compute_lifecycle_attempt_chain_sha256(
-                previous_chain_sha256=b"x" * 32,
-                case_id="case-a",
-                ordinal=1,
-                invocation_id=INVOCATION_ID,
-                attempted_at_ms=1,
-                outcome_code=1,
-                semantic_fingerprint=bytes(32),
-                receipt_sha256=bytes(32),
-                diagnostic_sha256=None,
-            ),
+            _chain_call(previous_chain_sha256=b"x" * 32),
             "must extend chain genesis",
         ),
     ],
@@ -887,8 +875,7 @@ def test_additive_schema_is_idempotent_without_changing_business_triggers(
 def test_schema_constraints_case_trigger_and_business_revisions_are_clean(
     tmp_path: Path,
 ) -> None:
-    repo = _repo(tmp_path)
-    repo.upsert_trade_lifecycle_case(_case("case-a", account="lx"))
+    repo = _case_repo(tmp_path)
     repo.upsert_trade_lifecycle_case(_case("case-b", account="sy"))
     repo.insert_trade_lifecycle_evidence_once(
         {
@@ -978,8 +965,7 @@ def test_account_head_query_uses_case_account_index_and_reads_no_attempt_rows(
 def test_offline_verifier_replays_chain_and_detects_head_or_span_corruption(
     tmp_path: Path,
 ) -> None:
-    repo = _repo(tmp_path)
-    repo.upsert_trade_lifecycle_case(_case("case-a", account="lx"))
+    repo = _case_repo(tmp_path)
     chain, invocation = _seed_one_observed_attempt(repo)
 
     head = repo.get_trade_lifecycle_attempt_audit_head(case_id="case-a")
@@ -1036,9 +1022,7 @@ def test_offline_verifier_accepts_retained_blob_or_closed_semantic_span(
     tmp_path: Path,
     semantic_change: bool,
 ) -> None:
-    repo = _repo(tmp_path)
-    repo.upsert_trade_lifecycle_case(_case("case-a", account="lx"))
-    _seed_one_observed_attempt(repo)
+    repo = _seeded_repo(tmp_path)
     _seed_second_observed_attempt(repo, semantic_change=semantic_change)
 
     verified = repo.verify_trade_lifecycle_attempt_audit_case(case_id="case-a")
@@ -1052,8 +1036,7 @@ def test_offline_verifier_accepts_retained_blob_or_closed_semantic_span(
 def test_offline_verifier_accepts_pre_phase2_evidence_with_new_receipt(
     tmp_path: Path,
 ) -> None:
-    repo = _repo(tmp_path)
-    repo.upsert_trade_lifecycle_case(_case("case-a", account="lx"))
+    repo = _case_repo(tmp_path)
     first_evidence_observation = _observation(receipt_note="pre-phase2")
     first_audit_observation = _observation(receipt_note="first-sidecar")
     assert (
@@ -1082,10 +1065,7 @@ def test_offline_verifier_rejects_first_evidence_receipt_commitment_corruption(
     tmp_path: Path,
     corruption: str,
 ) -> None:
-    repo = _repo(tmp_path)
-    repo.upsert_trade_lifecycle_case(_case("case-a", account="lx"))
-    _seed_one_observed_attempt(repo)
-    _seed_second_observed_attempt(repo, semantic_change=False)
+    repo = _seeded_repo(tmp_path, second_semantic_change=False)
     with repo._connect() as conn:  # noqa: SLF001 - corruption fixture
         if corruption == "evidence_receipt":
             row = conn.execute(
@@ -1118,11 +1098,8 @@ def test_offline_verifier_rejects_first_evidence_receipt_commitment_corruption(
 def test_offline_verifier_keeps_span_numbering_separate_from_attempt_ordinal(
     tmp_path: Path,
 ) -> None:
-    repo = _repo(tmp_path)
-    repo.upsert_trade_lifecycle_case(_case("case-a", account="lx"))
-    _seed_one_observed_attempt(repo)
-    failure = build_lifecycle_attempt_audit_envelope(
-        case_id="case-a",
+    repo = _seeded_repo(tmp_path)
+    failure = _envelope(
         invocation_id="123e4567-e89b-42d3-a456-426614174002",
         attempted_at_ms=1_900,
         outcome_kind="retryable_error",
@@ -1213,9 +1190,7 @@ def test_offline_verifier_detects_span_aggregate_or_boundary_corruption(
     corruption: str,
     expected_code: str,
 ) -> None:
-    repo = _repo(tmp_path)
-    repo.upsert_trade_lifecycle_case(_case("case-a", account="lx"))
-    _seed_one_observed_attempt(repo)
+    repo = _seeded_repo(tmp_path)
     if corruption == "closed_boundary":
         _seed_second_observed_attempt(repo, semantic_change=True)
     with repo._connect() as conn:  # noqa: SLF001 - corruption fixture
@@ -1251,10 +1226,7 @@ def test_offline_verifier_detects_receipt_blob_corruption(
     tmp_path: Path,
     corruption: str,
 ) -> None:
-    repo = _repo(tmp_path)
-    repo.upsert_trade_lifecycle_case(_case("case-a", account="lx"))
-    _seed_one_observed_attempt(repo)
-    _seed_second_observed_attempt(repo, semantic_change=False)
+    repo = _seeded_repo(tmp_path, second_semantic_change=False)
     with repo._connect() as conn:  # noqa: SLF001 - corruption fixture
         if corruption == "decompress":
             conn.execute(
@@ -1265,11 +1237,9 @@ def test_offline_verifier_detects_receipt_blob_corruption(
                 (b"not-zlib", len(b"not-zlib")),
             )
         elif corruption == "hash":
-            tampered = build_lifecycle_attempt_audit_envelope(
-                case_id="case-a",
+            tampered = _envelope(
                 invocation_id="123e4567-e89b-42d3-a456-426614174002",
                 attempted_at_ms=2_200,
-                outcome_kind="observed_complete",
                 observation=_observation(receipt_note="tampered"),
             )
             conn.execute(
@@ -1311,9 +1281,7 @@ def test_offline_verifier_detects_receipt_blob_corruption(
 def test_offline_verifier_detects_evidence_suffix_and_admission_corruption(
     tmp_path: Path,
 ) -> None:
-    repo = _repo(tmp_path)
-    repo.upsert_trade_lifecycle_case(_case("case-a", account="lx"))
-    _seed_one_observed_attempt(repo)
+    repo = _seeded_repo(tmp_path)
     observation = _observation(option_position_absent=False)
     repo.insert_trade_lifecycle_evidence_once(
         {
@@ -1343,9 +1311,7 @@ def test_offline_verifier_detects_evidence_suffix_and_admission_corruption(
 def test_offline_verifier_matches_admission_to_first_evidence_creation_time(
     tmp_path: Path,
 ) -> None:
-    repo = _repo(tmp_path)
-    repo.upsert_trade_lifecycle_case(_case("case-a", account="lx"))
-    _seed_one_observed_attempt(repo)
+    repo = _seeded_repo(tmp_path)
     with repo._connect() as conn:  # noqa: SLF001 - corruption fixture
         conn.execute(
             """
@@ -1367,10 +1333,7 @@ def test_offline_verifier_matches_admission_to_first_evidence_creation_time(
 def test_sidecar_storage_types_reject_text_and_verifier_bounds_malformed_rows(
     tmp_path: Path,
 ) -> None:
-    repo = _repo(tmp_path)
-    repo.upsert_trade_lifecycle_case(_case("case-a", account="lx"))
-    _seed_one_observed_attempt(repo)
-    _seed_second_observed_attempt(repo, semantic_change=False)
+    repo = _seeded_repo(tmp_path, second_semantic_change=False)
     with repo._connect() as conn:  # noqa: SLF001 - raw storage contract
         mutations = (
             ("UPDATE trade_lifecycle_attempt_audit_heads SET last_ordinal = 'x'", ()),
@@ -1426,38 +1389,23 @@ def test_sidecar_storage_types_reject_text_and_verifier_bounds_malformed_rows(
 def test_atomic_sidecar_writer_tracks_initial_failure_gap_and_exact_replay(
     tmp_path: Path,
 ) -> None:
-    repo = _repo(tmp_path)
-    repo.upsert_trade_lifecycle_case(_case("case-a", account="lx"))
-    first_failure = build_lifecycle_attempt_audit_envelope(
-        case_id="case-a",
+    repo = _case_repo(tmp_path)
+    first_failure = _envelope(
         invocation_id=_invocation(1),
         attempted_at_ms=1_900,
         outcome_kind="retryable_error",
         reason_code="provider_busy",
     )
     observation = _observation()
-    first_success = build_lifecycle_attempt_audit_envelope(
-        case_id="case-a",
-        invocation_id=_invocation(2),
-        attempted_at_ms=2_000,
-        outcome_kind="observed_complete",
-        observation=observation,
-    )
-    intervening_failure = build_lifecycle_attempt_audit_envelope(
-        case_id="case-a",
+    first_success = _envelope(invocation_id=_invocation(2), observation=observation)
+    intervening_failure = _envelope(
         invocation_id=_invocation(3),
         attempted_at_ms=2_100,
         outcome_kind="unknown_error",
         error_class="TimeoutError",
     )
     repeated_observation = _observation(receipt_note="second receipt")
-    second_success = build_lifecycle_attempt_audit_envelope(
-        case_id="case-a",
-        invocation_id=_invocation(4),
-        attempted_at_ms=2_200,
-        outcome_kind="observed_complete",
-        observation=repeated_observation,
-    )
+    second_success = _envelope(invocation_id=_invocation(4), attempted_at_ms=2_200, observation=repeated_observation)
 
     assert _append_attempt(repo, first_failure)["audit_ordinal"] == 1
     assert _append_attempt(
@@ -1524,8 +1472,7 @@ def test_atomic_sidecar_writer_tracks_initial_failure_gap_and_exact_replay(
     assert mismatch_after == before
     assert _checkpointed_storage_bytes(repo) == bytes_before
 
-    later_failure = build_lifecycle_attempt_audit_envelope(
-        case_id="case-a",
+    later_failure = _envelope(
         invocation_id=_invocation(5),
         attempted_at_ms=2_300,
         outcome_kind="retryable_error",
@@ -1552,17 +1499,10 @@ def test_atomic_sidecar_writer_rejects_invalid_receipt_before_commit(
     corruption: str,
     match: str,
 ) -> None:
-    repo = _repo(tmp_path)
-    repo.upsert_trade_lifecycle_case(_case("case-a", account="lx"))
+    repo = _case_repo(tmp_path)
     case_before = repo.get_trade_lifecycle_case("case-a")
     observation = _observation()
-    envelope = build_lifecycle_attempt_audit_envelope(
-        case_id="case-a",
-        invocation_id=_invocation(10),
-        attempted_at_ms=2_000,
-        outcome_kind="observed_complete",
-        observation=observation,
-    )
+    envelope = _envelope(invocation_id=_invocation(10), observation=observation)
     if corruption == "noncanonical_json":
         receipt = json.dumps(
             observation,
@@ -1613,25 +1553,12 @@ def test_atomic_sidecar_writer_rejects_invalid_receipt_before_commit(
 def test_atomic_sidecar_writer_moves_one_live_receipt_and_cleans_old_blob(
     tmp_path: Path,
 ) -> None:
-    repo = _repo(tmp_path)
-    repo.upsert_trade_lifecycle_case(_case("case-a", account="lx"))
+    repo = _case_repo(tmp_path)
     admitted = _observation(receipt_note="R0")
     receipt_r1 = _observation(receipt_note="R1")
     receipt_r2 = _observation(receipt_note="R2")
-    first = build_lifecycle_attempt_audit_envelope(
-        case_id="case-a",
-        invocation_id=_invocation(11),
-        attempted_at_ms=2_000,
-        outcome_kind="observed_complete",
-        observation=receipt_r1,
-    )
-    second = build_lifecycle_attempt_audit_envelope(
-        case_id="case-a",
-        invocation_id=_invocation(12),
-        attempted_at_ms=2_100,
-        outcome_kind="observed_complete",
-        observation=receipt_r2,
-    )
+    first = _envelope(invocation_id=_invocation(11), observation=receipt_r1)
+    second = _envelope(invocation_id=_invocation(12), attempted_at_ms=2_100, observation=receipt_r2)
 
     first_result = _append_attempt(
         repo,
@@ -1676,8 +1603,7 @@ def test_atomic_sidecar_writer_moves_one_live_receipt_and_cleans_old_blob(
 def test_atomic_sidecar_writer_creates_three_spans_for_a_b_a(
     tmp_path: Path,
 ) -> None:
-    repo = _repo(tmp_path)
-    repo.upsert_trade_lifecycle_case(_case("case-a", account="lx"))
+    repo = _case_repo(tmp_path)
     observations = (
         _observation(option_position_absent=True),
         _observation(option_position_absent=False),
@@ -1685,11 +1611,9 @@ def test_atomic_sidecar_writer_creates_three_spans_for_a_b_a(
     )
     results: list[dict[str, object]] = []
     for index, observation in enumerate(observations, start=1):
-        envelope = build_lifecycle_attempt_audit_envelope(
-            case_id="case-a",
+        envelope = _envelope(
             invocation_id=_invocation(20 + index),
             attempted_at_ms=2_000 + index,
-            outcome_kind="observed_complete",
             observation=observation,
         )
         results.append(
@@ -1726,18 +1650,11 @@ def test_atomic_sidecar_writer_opens_new_span_for_semantic_schema_upgrade(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    repo = _repo(tmp_path)
-    repo.upsert_trade_lifecycle_case(_case("case-a", account="lx"))
+    repo = _case_repo(tmp_path)
     current = _observation()
     _append_attempt(
         repo,
-        build_lifecycle_attempt_audit_envelope(
-            case_id="case-a",
-            invocation_id=_invocation(30),
-            attempted_at_ms=2_000,
-            outcome_kind="observed_complete",
-            observation=current,
-        ),
+        _envelope(invocation_id=_invocation(30), observation=current),
         evidence_id="evidence-v1",
         evidence_observation=current,
     )
@@ -1772,13 +1689,7 @@ def test_atomic_sidecar_writer_opens_new_span_for_semantic_schema_upgrade(
     )
     _append_attempt(
         repo,
-        build_lifecycle_attempt_audit_envelope(
-            case_id="case-a",
-            invocation_id=_invocation(31),
-            attempted_at_ms=3_000,
-            outcome_kind="observed_complete",
-            observation=upgraded,
-        ),
+        _envelope(invocation_id=_invocation(31), attempted_at_ms=3_000, observation=upgraded),
         evidence_id="evidence-v2",
         evidence_observation=upgraded,
     )
@@ -1805,13 +1716,10 @@ def test_atomic_sidecar_writer_opens_new_span_for_semantic_schema_upgrade(
 def test_audit_only_writer_persists_failure_without_business_or_evidence(
     tmp_path: Path,
 ) -> None:
-    repo = _repo(tmp_path)
-    repo.upsert_trade_lifecycle_case(_case("case-a", account="lx"))
+    repo = _case_repo(tmp_path)
     case_before = repo.get_trade_lifecycle_case("case-a")
-    failure = build_lifecycle_attempt_audit_envelope(
-        case_id="case-a",
+    failure = _envelope(
         invocation_id=_invocation(31),
-        attempted_at_ms=2_000,
         outcome_kind="stale_generation_after_call",
         reason_code="generation_changed",
     )
@@ -1835,13 +1743,7 @@ def test_audit_only_writer_persists_failure_without_business_or_evidence(
         case_id="case-a"
     )["status"] == "valid"
 
-    observed = build_lifecycle_attempt_audit_envelope(
-        case_id="case-a",
-        invocation_id=_invocation(32),
-        attempted_at_ms=2_100,
-        outcome_kind="observed_complete",
-        observation=_observation(),
-    )
+    observed = _envelope(invocation_id=_invocation(32), attempted_at_ms=2_100, observation=_observation())
     with pytest.raises(ValueError, match="only failed or stale"):
         record_lifecycle_attempt_audit_atomically(
             repo,
@@ -1852,15 +1754,12 @@ def test_audit_only_writer_persists_failure_without_business_or_evidence(
 def test_atomic_sidecar_writer_keeps_identical_n_compact(
     tmp_path: Path,
 ) -> None:
-    repo = _repo(tmp_path)
-    repo.upsert_trade_lifecycle_case(_case("case-a", account="lx"))
+    repo = _case_repo(tmp_path)
     observation = _observation()
     for offset in range(5):
-        envelope = build_lifecycle_attempt_audit_envelope(
-            case_id="case-a",
+        envelope = _envelope(
             invocation_id=_invocation(40 + offset),
             attempted_at_ms=2_000 + offset,
-            outcome_kind="observed_complete",
             observation=observation,
         )
         _append_attempt(
@@ -1894,41 +1793,16 @@ def test_atomic_sidecar_writer_keeps_identical_n_compact(
 def test_shared_receipt_blob_is_not_deleted_when_latest_span_moves(
     tmp_path: Path,
 ) -> None:
-    repo = _repo(tmp_path)
-    repo.upsert_trade_lifecycle_case(_case("case-a", account="lx"))
+    repo = _case_repo(tmp_path)
     admitted_a = _observation(receipt_note="A admitted")
     shared_a = _observation(receipt_note="shared A receipt")
     observation_b = _observation(option_position_absent=False)
     moved_a = _observation(receipt_note="moved A receipt")
 
-    first_a = build_lifecycle_attempt_audit_envelope(
-        case_id="case-a",
-        invocation_id=_invocation(51),
-        attempted_at_ms=2_000,
-        outcome_kind="observed_complete",
-        observation=shared_a,
-    )
-    b = build_lifecycle_attempt_audit_envelope(
-        case_id="case-a",
-        invocation_id=_invocation(52),
-        attempted_at_ms=2_100,
-        outcome_kind="observed_complete",
-        observation=observation_b,
-    )
-    second_a = build_lifecycle_attempt_audit_envelope(
-        case_id="case-a",
-        invocation_id=_invocation(53),
-        attempted_at_ms=2_200,
-        outcome_kind="observed_complete",
-        observation=shared_a,
-    )
-    moved = build_lifecycle_attempt_audit_envelope(
-        case_id="case-a",
-        invocation_id=_invocation(54),
-        attempted_at_ms=2_300,
-        outcome_kind="observed_complete",
-        observation=moved_a,
-    )
+    first_a = _envelope(invocation_id=_invocation(51), observation=shared_a)
+    b = _envelope(invocation_id=_invocation(52), attempted_at_ms=2_100, observation=observation_b)
+    second_a = _envelope(invocation_id=_invocation(53), attempted_at_ms=2_200, observation=shared_a)
+    moved = _envelope(invocation_id=_invocation(54), attempted_at_ms=2_300, observation=moved_a)
 
     _append_attempt(
         repo,
@@ -1992,16 +1866,9 @@ def test_atomic_sidecar_writer_rolls_back_every_component_failure(
     operation: str,
     table: str,
 ) -> None:
-    repo = _repo(tmp_path)
-    repo.upsert_trade_lifecycle_case(_case("case-a", account="lx"))
+    repo = _case_repo(tmp_path)
     admitted = _observation(receipt_note="R0")
-    envelope = build_lifecycle_attempt_audit_envelope(
-        case_id="case-a",
-        invocation_id=_invocation(60),
-        attempted_at_ms=2_000,
-        outcome_kind="observed_complete",
-        observation=_observation(receipt_note="R1"),
-    )
+    envelope = _envelope(invocation_id=_invocation(60), observation=_observation(receipt_note="R1"))
     repo.insert_trade_lifecycle_evidence_once(
         {
             "evidence_id": "evidence-a",
