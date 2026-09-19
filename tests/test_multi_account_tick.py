@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import threading
 from pathlib import Path
@@ -7,6 +8,51 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+
+
+def _write_market_config(cfg_path: Path, market: str, symbols: list[dict]) -> None:
+    """Write the minimal runtime config these tick cases run against."""
+    cfg_path.write_text(
+        json.dumps(
+            {
+                "_generated": {
+                    "schema_version": "1.0",
+                    "generator": "options-monitor",
+                    "source_format": "yaml",
+                    "market": market,
+                },
+                "accounts": ["lx"],
+                "symbols": symbols,
+                "schedule": {"enabled": True},
+                "portfolio": {},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _reject_run_logger(*_args, **_kwargs):
+    raise AssertionError("run logger must not start")
+
+
+def _patch_config_bootstrap(monkeypatch, mod, *, schedule_market: str = "") -> None:
+    """Stub the runtime config bootstrap every artifact-free tick case reaches."""
+    monkeypatch.setattr(mod, "resolve_config_contract", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(mod, "ensure_runtime_canonical_config", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(mod, "ensure_runtime_config_identity", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(mod, "ensure_runtime_schedule_matches_market", lambda *_args, **_kwargs: {"market": schedule_market})
+
+
+def _patch_runtime_bootstrap(monkeypatch, mod, runtime_root: Path, run_logger, guard) -> None:
+    """Stub the runtime root/config/idempotency bootstrap of a stateful ``mod.main`` tick."""
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime_root))
+    monkeypatch.setattr(mod, "RunLogger", run_logger)
+    monkeypatch.setattr(mod, "resolve_config_contract", lambda *args, **kwargs: {})
+    monkeypatch.setattr(mod, "ensure_runtime_canonical_config", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mod, "ensure_runtime_schedule_matches_market", lambda *args, **kwargs: {"market": ""})
+    monkeypatch.setattr(mod.state_repo, "claim_idempotency_record", lambda *args, **kwargs: {"claimed": True})
+    monkeypatch.setattr(mod, "run_tick_guard_flow", guard)
 
 
 def test_run_tick_forwards_cli_argv_and_returns_main_exit_code(monkeypatch) -> None:
@@ -160,29 +206,8 @@ def test_explicit_empty_cli_account_fails_before_run_artifacts(
             source="test",
         ),
     )
-    monkeypatch.setattr(mod, "resolve_config_contract", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(
-        mod,
-        "ensure_runtime_canonical_config",
-        lambda *_args, **_kwargs: None,
-    )
-    monkeypatch.setattr(
-        mod,
-        "ensure_runtime_config_identity",
-        lambda *_args, **_kwargs: None,
-    )
-    monkeypatch.setattr(
-        mod,
-        "ensure_runtime_schedule_matches_market",
-        lambda *_args, **_kwargs: {},
-    )
-    monkeypatch.setattr(
-        mod,
-        "RunLogger",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("run logger must not start")
-        ),
-    )
+    _patch_config_bootstrap(monkeypatch, mod)
+    monkeypatch.setattr(mod, "RunLogger", _reject_run_logger)
 
     with pytest.raises(SystemExit, match="invalid account scope"):
         mod.main(["--config", str(config_path), "--accounts", ""])
@@ -245,31 +270,10 @@ def test_tick_rejects_retired_config_before_run_artifacts(
         "resolve_runtime_root",
         lambda **_kwargs: SimpleNamespace(runtime_root=tmp_path, source="test"),
     )
-    monkeypatch.setattr(mod, "resolve_config_contract", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(
-        mod,
-        "ensure_runtime_canonical_config",
-        lambda *_args, **_kwargs: None,
-    )
-    monkeypatch.setattr(
-        mod,
-        "ensure_runtime_config_identity",
-        lambda *_args, **_kwargs: None,
-    )
-    monkeypatch.setattr(
-        mod,
-        "ensure_runtime_schedule_matches_market",
-        lambda *_args, **_kwargs: {"market": "us"},
-    )
+    _patch_config_bootstrap(monkeypatch, mod, schedule_market="us")
     freshness_events: list[int] = []
     monkeypatch.setattr(mod, "ensure_runtime_config_freshness", lambda *_args, **_kwargs: freshness_events.append(1) or {"fresh": True})
-    monkeypatch.setattr(
-        mod,
-        "RunLogger",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("run logger must not start")
-        ),
-    )
+    monkeypatch.setattr(mod, "RunLogger", _reject_run_logger)
 
     with pytest.raises(SystemExit, match=error):
         mod.main(
@@ -603,24 +607,7 @@ def test_main_uses_env_runtime_root_for_stateful_tick_flows(monkeypatch, tmp_pat
     from src.application.tick_guard_flow import TickGuardOutcome
 
     cfg = tmp_path / "config.us.json"
-    cfg.write_text(
-        json.dumps(
-            {
-                "_generated": {
-                    "schema_version": "1.0",
-                    "generator": "options-monitor",
-                    "source_format": "yaml",
-                    "market": "us",
-                },
-                "accounts": ["lx"],
-                "symbols": [],
-                "schedule": {"enabled": True},
-                "portfolio": {},
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
+    _write_market_config(cfg, "us", [])
     runtime_root = tmp_path / "runtime"
     captured: dict[str, Any] = {}
 
@@ -644,13 +631,7 @@ def test_main_uses_env_runtime_root_for_stateful_tick_flows(monkeypatch, tmp_pat
             bj_tz=ZoneInfo("Asia/Shanghai"),
         )
 
-    monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime_root))
-    monkeypatch.setattr(mod, "RunLogger", _RunLogger)
-    monkeypatch.setattr(mod, "resolve_config_contract", lambda *args, **kwargs: {})
-    monkeypatch.setattr(mod, "ensure_runtime_canonical_config", lambda *args, **kwargs: None)
-    monkeypatch.setattr(mod, "ensure_runtime_schedule_matches_market", lambda *args, **kwargs: {"market": ""})
-    monkeypatch.setattr(mod.state_repo, "claim_idempotency_record", lambda *args, **kwargs: {"claimed": True})
-    monkeypatch.setattr(mod, "run_tick_guard_flow", _run_tick_guard_flow)
+    _patch_runtime_bootstrap(monkeypatch, mod, runtime_root, _RunLogger, _run_tick_guard_flow)
 
     rc = mod.main(["--config", str(cfg), "--accounts", "lx"])
 
@@ -681,24 +662,7 @@ def test_main_scheduler_skip_does_not_create_output_run_workspace(
     from src.application.tick_scheduler_context import TickSchedulerContext, TickSchedulerOutcome
 
     cfg = tmp_path / "config.us.json"
-    cfg.write_text(
-        json.dumps(
-            {
-                "_generated": {
-                    "schema_version": "1.0",
-                    "generator": "options-monitor",
-                    "source_format": "yaml",
-                    "market": "us",
-                },
-                "accounts": ["lx"],
-                "symbols": [{"symbol": "NVDA", "broker": "US"}],
-                "schedule": {"enabled": True},
-                "portfolio": {},
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
+    _write_market_config(cfg, "us", [{"symbol": "NVDA", "broker": "US"}])
     runtime_root = tmp_path / "runtime"
 
     class _RunLogger:
@@ -746,13 +710,7 @@ def test_main_scheduler_skip_does_not_create_output_run_workspace(
             ),
         )
 
-    monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime_root))
-    monkeypatch.setattr(mod, "RunLogger", _RunLogger)
-    monkeypatch.setattr(mod, "resolve_config_contract", lambda *args, **kwargs: {})
-    monkeypatch.setattr(mod, "ensure_runtime_canonical_config", lambda *args, **kwargs: None)
-    monkeypatch.setattr(mod, "ensure_runtime_schedule_matches_market", lambda *args, **kwargs: {"market": ""})
-    monkeypatch.setattr(mod.state_repo, "claim_idempotency_record", lambda *args, **kwargs: {"claimed": True})
-    monkeypatch.setattr(mod, "run_tick_guard_flow", _run_tick_guard_flow)
+    _patch_runtime_bootstrap(monkeypatch, mod, runtime_root, _RunLogger, _run_tick_guard_flow)
     monkeypatch.setattr(mod, "build_tick_scheduler_context", _scheduler_context)
     monkeypatch.setenv("OM_TRIGGER_SOURCE", "cron")
     monkeypatch.setattr(
@@ -905,14 +863,8 @@ def test_main_scheduler_no_scan_warms_only_after_successful_delivery(
             [],
         )
 
-    monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime_root))
     monkeypatch.setenv("OM_TRIGGER_SOURCE", "cron")
-    monkeypatch.setattr(mod, "RunLogger", _RunLogger)
-    monkeypatch.setattr(mod, "resolve_config_contract", lambda *args, **kwargs: {})
-    monkeypatch.setattr(mod, "ensure_runtime_canonical_config", lambda *args, **kwargs: None)
-    monkeypatch.setattr(mod, "ensure_runtime_schedule_matches_market", lambda *args, **kwargs: {"market": ""})
-    monkeypatch.setattr(mod.state_repo, "claim_idempotency_record", lambda *args, **kwargs: {"claimed": True})
-    monkeypatch.setattr(mod, "run_tick_guard_flow", guard)
+    _patch_runtime_bootstrap(monkeypatch, mod, runtime_root, _RunLogger, guard)
     monkeypatch.setattr(mod, "build_tick_scheduler_context", scheduler)
     monkeypatch.setattr(mod, "prepare_tick_run_workspace", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("no workspace")))
     monkeypatch.setattr(mod, "run_tick_account_execution", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("no pipeline")))
@@ -1148,23 +1100,7 @@ def test_duplicate_unsupported_tick_failure_returns_nonzero_without_rerun(monkey
     from src.application import multi_account_tick as mod
 
     cfg = tmp_path / "config.us.json"
-    cfg.write_text(
-        json.dumps(
-            {
-                "_generated": {
-                    "schema_version": "1.0",
-                    "generator": "options-monitor",
-                    "source_format": "yaml",
-                    "market": "us",
-                },
-                "accounts": ["lx"],
-                "symbols": [],
-                "schedule": {"enabled": True},
-                "portfolio": {},
-            }
-        ),
-        encoding="utf-8",
-    )
+    _write_market_config(cfg, "us", [])
     runtime_root = tmp_path / "runtime"
     events: list[dict] = []
 
@@ -1215,23 +1151,7 @@ def test_terminal_idempotency_write_failure_is_not_silently_swallowed(monkeypatc
     from src.application import multi_account_tick as mod
 
     cfg = tmp_path / "config.us.json"
-    cfg.write_text(
-        json.dumps(
-            {
-                "_generated": {
-                    "schema_version": "1.0",
-                    "generator": "options-monitor",
-                    "source_format": "yaml",
-                    "market": "us",
-                },
-                "accounts": ["lx"],
-                "symbols": [],
-                "schedule": {"enabled": True},
-                "portfolio": {},
-            }
-        ),
-        encoding="utf-8",
-    )
+    _write_market_config(cfg, "us", [])
     events: list[dict] = []
 
     class _RunLogger:
@@ -1250,15 +1170,9 @@ def test_terminal_idempotency_write_failure_is_not_silently_swallowed(monkeypatc
         )
         raise AssertionError("terminal completion failure must escape")
 
-    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path / "runtime"))
     monkeypatch.setenv("OM_TRIGGER_SOURCE", "cron")
-    monkeypatch.setattr(mod, "RunLogger", _RunLogger)
-    monkeypatch.setattr(mod, "resolve_config_contract", lambda *args, **kwargs: {})
-    monkeypatch.setattr(mod, "ensure_runtime_canonical_config", lambda *args, **kwargs: None)
-    monkeypatch.setattr(mod, "ensure_runtime_schedule_matches_market", lambda *args, **kwargs: {"market": ""})
-    monkeypatch.setattr(mod.state_repo, "claim_idempotency_record", lambda *args, **kwargs: {"claimed": True})
+    _patch_runtime_bootstrap(monkeypatch, mod, tmp_path / "runtime", _RunLogger, _guard)
     monkeypatch.setattr(mod, "_complete_tick_idempotency", lambda **_kwargs: (_ for _ in ()).throw(OSError("disk full")))
-    monkeypatch.setattr(mod, "run_tick_guard_flow", _guard)
 
     with pytest.raises(OSError, match="disk full"):
         mod.main(["--config", str(cfg), "--accounts", "lx"])

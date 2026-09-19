@@ -78,6 +78,36 @@ def _expected() -> list[dict[str, str]]:
     ]
 
 
+def _publish_index(account_dir: Path, expected: list[dict]) -> None:
+    """Publish the run-1/lx v2 scan index for ``expected`` scopes."""
+    publish_strategy_scan_status_index_v2(
+        report_dir=account_dir,
+        run_id="run-1",
+        account="lx",
+        account_config_sha256=CONFIG_HASH,
+        expected=expected,
+    )
+
+
+def _publish_manifest(base: Path, *, sealed_at: str = "2026-08-12T01:00:01Z") -> dict:
+    """Publish the run-1/lx candidate manifest every v2 case reads back."""
+    return publish_candidate_snapshot_manifest(
+        base=base,
+        run_id="run-1",
+        account="lx",
+        strategy_policy_sha256=POLICY_HASH,
+        sealed_at=sealed_at,
+    )
+
+
+def _load(base: Path, run_id: str = "run-1", account: str = "lx") -> dict:
+    return load_candidate_snapshot_bundle(base=base, run_id=run_id, account=account)
+
+
+def _load_v3(base: Path, run_id: str = "run-1", account: str = "lx") -> dict:
+    return load_candidate_snapshot_bundle_v3(base=base, run_id=run_id, account=account)
+
+
 def _seal_combo_bundle(base: Path) -> dict:
     account_dir = _account_dir(base)
     (account_dir / "nvda_combo_yield_candidates.csv").write_text(
@@ -96,13 +126,7 @@ def _seal_combo_bundle(base: Path) -> dict:
         snapshot_id="quote-1",
         receipt_relpath="quotes/quote-1/receipt.json",
     )
-    publish_strategy_scan_status_index_v2(
-        report_dir=account_dir,
-        run_id="run-1",
-        account="lx",
-        account_config_sha256=CONFIG_HASH,
-        expected=_expected(),
-    )
+    _publish_index(account_dir, _expected())
     pair = _pair()
     seal_combo_yield_candidate_snapshot(
         base=base,
@@ -144,13 +168,7 @@ def _seal_combo_bundle(base: Path) -> dict:
         ranked_pairs=[pair],
         sealed_at="2026-08-12T01:00:00Z",
     )
-    return publish_candidate_snapshot_manifest(
-        base=base,
-        run_id="run-1",
-        account="lx",
-        strategy_policy_sha256=POLICY_HASH,
-        sealed_at="2026-08-12T01:00:01Z",
-    )
+    return _publish_manifest(base)
 
 
 def test_manifest_binds_terminal_status_and_owner_snapshot(tmp_path: Path) -> None:
@@ -158,11 +176,7 @@ def test_manifest_binds_terminal_status_and_owner_snapshot(tmp_path: Path) -> No
 
     assert manifest["completion_reason"] == "complete"
     assert manifest["expected_owners"] == ["sp_lc"]
-    bundle = load_candidate_snapshot_bundle(
-        base=tmp_path,
-        run_id="run-1",
-        account="lx",
-    )
+    bundle = _load(tmp_path)
     assert bundle["manifest"] == manifest
     assert set(bundle["owners"]) == {"sp_lc"}
     assert load_latest_candidate_snapshot_bundle(
@@ -194,30 +208,14 @@ def test_latest_bundle_does_not_fall_back_past_incomplete_candidate_run(
 
 def test_manifest_supports_empty_no_applicable_scope_commit(tmp_path: Path) -> None:
     account_dir = _account_dir(tmp_path)
-    publish_strategy_scan_status_index_v2(
-        report_dir=account_dir,
-        run_id="run-1",
-        account="lx",
-        account_config_sha256=CONFIG_HASH,
-        expected=[],
-    )
+    _publish_index(account_dir, [])
 
-    manifest = publish_candidate_snapshot_manifest(
-        base=tmp_path,
-        run_id="run-1",
-        account="lx",
-        strategy_policy_sha256=POLICY_HASH,
-        sealed_at="2026-08-12T01:00:00Z",
-    )
+    manifest = _publish_manifest(tmp_path, sealed_at="2026-08-12T01:00:00Z")
 
     assert manifest["completion_reason"] == "no_applicable_scope"
     assert manifest["expected_scopes"] == []
     assert manifest["owner_snapshots"] == []
-    assert load_candidate_snapshot_bundle(
-        base=tmp_path,
-        run_id="run-1",
-        account="lx",
-    )["owners"] == {}
+    assert _load(tmp_path)["owners"] == {}
 
 
 def test_missing_manifest_does_not_salvage_owner_snapshot(tmp_path: Path) -> None:
@@ -228,22 +226,12 @@ def test_missing_manifest_does_not_salvage_owner_snapshot(tmp_path: Path) -> Non
     manifest_path.unlink()
 
     with pytest.raises(CandidateSnapshotManifestError, match="manifest is unavailable"):
-        load_candidate_snapshot_bundle(
-            base=tmp_path,
-            run_id="run-1",
-            account="lx",
-        )
+        _load(tmp_path)
 
 
 def test_manifest_rejects_owner_snapshot_not_declared_by_index(tmp_path: Path) -> None:
     account_dir = _account_dir(tmp_path)
-    publish_strategy_scan_status_index_v2(
-        report_dir=account_dir,
-        run_id="run-1",
-        account="lx",
-        account_config_sha256=CONFIG_HASH,
-        expected=[],
-    )
+    _publish_index(account_dir, [])
     seal_cc_lp_candidate_snapshot(
         base=tmp_path,
         run_id="run-1",
@@ -266,13 +254,7 @@ def test_manifest_rejects_owner_snapshot_not_declared_by_index(tmp_path: Path) -
     )
 
     with pytest.raises(CandidateSnapshotManifestError, match="unexpected: cc_lp"):
-        publish_candidate_snapshot_manifest(
-            base=tmp_path,
-            run_id="run-1",
-            account="lx",
-            strategy_policy_sha256=POLICY_HASH,
-            sealed_at="2026-08-12T01:00:01Z",
-        )
+        _publish_manifest(tmp_path)
 
 
 @pytest.mark.parametrize(
@@ -288,11 +270,7 @@ def test_manifest_rejects_tampered_bound_file(
     path.write_bytes(path.read_bytes() + b"\n")
 
     with pytest.raises(CandidateSnapshotManifestError, match="hash mismatch"):
-        load_candidate_snapshot_bundle(
-            base=tmp_path,
-            run_id="run-1",
-            account="lx",
-        )
+        _load(tmp_path)
 
 
 def test_manifest_rejects_status_snapshot_quote_binding_mismatch(tmp_path: Path) -> None:
@@ -313,13 +291,7 @@ def test_manifest_rejects_status_snapshot_quote_binding_mismatch(tmp_path: Path)
         snapshot_id="quote-index",
         receipt_relpath="quotes/index/receipt.json",
     )
-    publish_strategy_scan_status_index_v2(
-        report_dir=account_dir,
-        run_id="run-1",
-        account="lx",
-        account_config_sha256=CONFIG_HASH,
-        expected=_expected(),
-    )
+    _publish_index(account_dir, _expected())
     seal_combo_yield_candidate_snapshot(
         base=tmp_path,
         run_id="run-1",
@@ -343,13 +315,7 @@ def test_manifest_rejects_status_snapshot_quote_binding_mismatch(tmp_path: Path)
     )
 
     with pytest.raises(CandidateSnapshotManifestError, match="quote binding mismatch"):
-        publish_candidate_snapshot_manifest(
-            base=tmp_path,
-            run_id="run-1",
-            account="lx",
-            strategy_policy_sha256=POLICY_HASH,
-            sealed_at="2026-08-12T01:00:01Z",
-        )
+        _publish_manifest(tmp_path)
 
 
 def test_manifest_rejects_owner_snapshot_market_mismatch(tmp_path: Path) -> None:
@@ -370,13 +336,7 @@ def test_manifest_rejects_owner_snapshot_market_mismatch(tmp_path: Path) -> None
         snapshot_id="quote-1",
         receipt_relpath="quotes/quote-1/receipt.json",
     )
-    publish_strategy_scan_status_index_v2(
-        report_dir=account_dir,
-        run_id="run-1",
-        account="lx",
-        account_config_sha256=CONFIG_HASH,
-        expected=_expected(),
-    )
+    _publish_index(account_dir, _expected())
     seal_combo_yield_candidate_snapshot(
         base=tmp_path,
         run_id="run-1",
@@ -399,13 +359,7 @@ def test_manifest_rejects_owner_snapshot_market_mismatch(tmp_path: Path) -> None
     )
 
     with pytest.raises(CandidateSnapshotManifestError, match="market mismatch"):
-        publish_candidate_snapshot_manifest(
-            base=tmp_path,
-            run_id="run-1",
-            account="lx",
-            strategy_policy_sha256=POLICY_HASH,
-            sealed_at="2026-08-12T01:00:01Z",
-        )
+        _publish_manifest(tmp_path)
 
 
 def test_manifest_rejects_snapshot_only_terminal_reason(tmp_path: Path) -> None:
@@ -426,13 +380,7 @@ def test_manifest_rejects_snapshot_only_terminal_reason(tmp_path: Path) -> None:
         snapshot_id="quote-1",
         receipt_relpath="quotes/quote-1/receipt.json",
     )
-    publish_strategy_scan_status_index_v2(
-        report_dir=account_dir,
-        run_id="run-1",
-        account="lx",
-        account_config_sha256=CONFIG_HASH,
-        expected=_expected(),
-    )
+    _publish_index(account_dir, _expected())
     seal_combo_yield_candidate_snapshot(
         base=tmp_path,
         run_id="run-1",
@@ -456,13 +404,7 @@ def test_manifest_rejects_snapshot_only_terminal_reason(tmp_path: Path) -> None:
     )
 
     with pytest.raises(CandidateSnapshotManifestError, match="reason mismatch"):
-        publish_candidate_snapshot_manifest(
-            base=tmp_path,
-            run_id="run-1",
-            account="lx",
-            strategy_policy_sha256=POLICY_HASH,
-            sealed_at="2026-08-12T01:00:01Z",
-        )
+        _publish_manifest(tmp_path)
 
 
 def test_manifest_rejects_selected_pair_in_failed_scope(tmp_path: Path) -> None:
@@ -483,13 +425,7 @@ def test_manifest_rejects_selected_pair_in_failed_scope(tmp_path: Path) -> None:
         snapshot_id="quote-1",
         receipt_relpath="quotes/quote-1/receipt.json",
     )
-    publish_strategy_scan_status_index_v2(
-        report_dir=account_dir,
-        run_id="run-1",
-        account="lx",
-        account_config_sha256=CONFIG_HASH,
-        expected=_expected(),
-    )
+    _publish_index(account_dir, _expected())
     pair = _pair()
     seal_combo_yield_candidate_snapshot(
         base=tmp_path,
@@ -534,37 +470,19 @@ def test_manifest_rejects_selected_pair_in_failed_scope(tmp_path: Path) -> None:
     )
 
     with pytest.raises(CandidateSnapshotManifestError, match="non-completed"):
-        publish_candidate_snapshot_manifest(
-            base=tmp_path,
-            run_id="run-1",
-            account="lx",
-            strategy_policy_sha256=POLICY_HASH,
-            sealed_at="2026-08-12T01:00:01Z",
-        )
+        _publish_manifest(tmp_path)
 
 
 def test_manifest_is_write_once_and_adopts_exact_retry(tmp_path: Path) -> None:
     first = _seal_combo_bundle(tmp_path)
-    second = publish_candidate_snapshot_manifest(
-        base=tmp_path,
-        run_id="run-1",
-        account="lx",
-        strategy_policy_sha256=POLICY_HASH,
-        sealed_at="2026-08-12T01:00:01Z",
-    )
+    second = _publish_manifest(tmp_path)
     assert second == first
 
     path = _account_dir(tmp_path) / "state" / CANDIDATE_SNAPSHOT_MANIFEST_FILE
     raw = json.loads(path.read_text(encoding="utf-8"))
     assert raw == first
     with pytest.raises(CandidateSnapshotManifestError, match="conflicts"):
-        publish_candidate_snapshot_manifest(
-            base=tmp_path,
-            run_id="run-1",
-            account="lx",
-            strategy_policy_sha256=POLICY_HASH,
-            sealed_at="2026-08-12T01:00:02Z",
-        )
+        _publish_manifest(tmp_path, sealed_at="2026-08-12T01:00:02Z")
 
 
 def _publish_wheel_v4_statuses(account_dir: Path) -> None:
@@ -592,13 +510,7 @@ def _publish_wheel_v4_statuses(account_dir: Path) -> None:
                 "account_config_sha256": CONFIG_HASH,
             }
         )
-    publish_strategy_scan_status_index_v2(
-        report_dir=account_dir,
-        run_id="run-1",
-        account="lx",
-        account_config_sha256=CONFIG_HASH,
-        expected=expected,
-    )
+    _publish_index(account_dir, expected)
 
 
 def _wheel_v2_snapshot() -> dict:
@@ -673,11 +585,7 @@ def test_wheel_v4_index_publishes_and_loads_manifest_v3(
         "put",
     }
     assert (account_dir / "state" / CANDIDATE_SNAPSHOT_MANIFEST_V3_FILE).is_file()
-    loaded = load_candidate_snapshot_bundle_v3(
-        base=tmp_path,
-        run_id="run-1",
-        account="lx",
-    )
+    loaded = _load_v3(tmp_path)
     assert loaded["manifest"] == manifest
 
     (account_dir / "nvda_wheel_put_scan_status.v2.json").write_text(
@@ -707,12 +615,7 @@ def test_manifest_v3_rejects_legacy_wheel_snapshot(
     )
 
     with pytest.raises(CandidateSnapshotManifestError, match="artifact_version_mismatch"):
-        publish_candidate_snapshot_manifest(
-            base=tmp_path,
-            run_id="run-1",
-            account="lx",
-            strategy_policy_sha256=POLICY_HASH,
-        )
+        _publish_manifest(tmp_path)
 
 
 def test_legacy_wheel_bundle_adapts_to_call_and_rejects_v2_mix(
@@ -730,22 +633,16 @@ def test_legacy_wheel_bundle_adapts_to_call_and_rejects_v2_mix(
         status="completed",
         candidate_count=0,
     )
-    publish_strategy_scan_status_index_v2(
-        report_dir=account_dir,
-        run_id="run-1",
-        account="lx",
-        account_config_sha256=CONFIG_HASH,
-        expected=[
-            {
-                "market": "US",
-                "symbol": "NVDA",
-                "strategy_family": "wheel",
-                "strategy_mode": "wheel",
-                "candidate_owner": "wheel",
-                "account_config_sha256": CONFIG_HASH,
-            }
-        ],
-    )
+    _publish_index(account_dir, [
+        {
+            "market": "US",
+            "symbol": "NVDA",
+            "strategy_family": "wheel",
+            "strategy_mode": "wheel",
+            "candidate_owner": "wheel",
+            "account_config_sha256": CONFIG_HASH,
+        }
+    ])
     snapshot = {
         **_wheel_v2_snapshot(),
         "schema_version": "wheel_candidate_snapshot.v1",
@@ -766,12 +663,7 @@ def test_legacy_wheel_bundle_adapts_to_call_and_rejects_v2_mix(
         "src.application.candidate_snapshot_manifest._load_owner_snapshot",
         lambda **_kwargs: snapshot,
     )
-    publish_candidate_snapshot_manifest(
-        base=tmp_path,
-        run_id="run-1",
-        account="lx",
-        strategy_policy_sha256=POLICY_HASH,
-    )
+    _publish_manifest(tmp_path)
 
     bundle = load_candidate_snapshot_bundle(base=tmp_path, run_id="run-1", account="lx")
     assert bundle["status_index"]["items"][0]["direction"] == "call"
