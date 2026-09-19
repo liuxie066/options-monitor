@@ -9,6 +9,22 @@ from typing import Any
 import pytest
 
 
+def _lot(record_id: str, *, account: str = "sy", contracts: int = 1, **fields: Any) -> dict:
+    """One position-lot row as ``_load_expiry_close_position_lots`` returns it.
+
+    The defaults are the ``sy`` single-contract lot this module repeats most
+    often, so a call site names only the fields that differ from it.
+    """
+    base: dict[str, Any] = {
+        "broker": "富途",
+        "account": account,
+        "status": "open",
+        "contracts": contracts,
+    }
+    base.update(fields)
+    return {"record_id": record_id, "fields": base}
+
+
 def test_position_maintenance_filters_account_and_broker_in_dry_run(monkeypatch, tmp_path: Path, capsys) -> None:
     from src.application.positions import maintenance as mod
 
@@ -19,34 +35,9 @@ def test_position_maintenance_filters_account_and_broker_in_dry_run(monkeypatch,
     captured: dict[str, Any] = {}
 
     records = [
-        {
-            "record_id": "rec_keep",
-            "fields": {
-                "broker": "富途",
-                "account": "lx",
-                "status": "open",
-                "contracts": 1,
-                "position_id": "pos_keep",
-            },
-        },
-        {
-            "record_id": "rec_other_account",
-            "fields": {
-                "broker": "富途",
-                "account": "sy",
-                "status": "open",
-                "contracts": 1,
-            },
-        },
-        {
-            "record_id": "rec_other_broker",
-            "fields": {
-                "broker": "other",
-                "account": "lx",
-                "status": "open",
-                "contracts": 1,
-            },
-        },
+        _lot("rec_keep", account="lx", position_id="pos_keep"),
+        _lot("rec_other_account"),
+        _lot("rec_other_broker", broker="other", account="lx"),
     ]
 
     monkeypatch.setattr(mod, "resolve_data_config_path", lambda **_kwargs: data_config)
@@ -123,28 +114,8 @@ def test_position_maintenance_filters_runtime_market_in_dry_run(
     fake_repo = object()
     captured: dict[str, Any] = {}
     records = [
-        {
-            "record_id": "rec_us",
-            "fields": {
-                "broker": "富途",
-                "account": "sy",
-                "symbol": "PDD",
-                "status": "open",
-                "contracts": 1,
-                "position_id": "PDD_20260618_85P_short",
-            },
-        },
-        {
-            "record_id": "rec_hk",
-            "fields": {
-                "broker": "富途",
-                "account": "sy",
-                "symbol": "0700.HK",
-                "status": "open",
-                "contracts": 1,
-                "position_id": "0700_HK_20260618_420P_short",
-            },
-        },
+        _lot("rec_us", symbol="PDD", position_id="PDD_20260618_85P_short"),
+        _lot("rec_hk", symbol="0700.HK", position_id="0700_HK_20260618_420P_short"),
     ]
 
     monkeypatch.setattr(mod, "resolve_data_config_path", lambda **_kwargs: data_config)
@@ -218,22 +189,17 @@ def test_position_maintenance_refreshes_assignment_quote_before_dry_run(
         mod,
         "_load_expiry_close_position_lots",
         lambda _repo: [
-            {
-                "record_id": "rec_0700",
-                "fields": {
-                    "broker": "富途",
-                    "account": "sy",
-                    "symbol": "0700.HK",
-                    "option_type": "put",
-                    "side": "short",
-                    "strike": 420,
-                    "status": "open",
-                    "contracts": 2,
-                    "contracts_open": 2,
-                    "expiration": exp_ms,
-                    "position_id": "0700_HK_20260618_420P_short",
-                },
-            }
+            _lot(
+                "rec_0700",
+                symbol="0700.HK",
+                option_type="put",
+                side="short",
+                strike=420,
+                contracts=2,
+                contracts_open=2,
+                expiration=exp_ms,
+                position_id="0700_HK_20260618_420P_short",
+            )
         ],
     )
     monkeypatch.setattr(mod, "build_ready_futu_quote_gateway", lambda **_kwargs: _Gateway())
@@ -290,22 +256,17 @@ def test_position_maintenance_waits_for_assignment_when_assignment_quote_unavail
         mod,
         "_load_expiry_close_position_lots",
         lambda _repo: [
-            {
-                "record_id": "rec_pdd",
-                "fields": {
-                    "broker": "富途",
-                    "account": "sy",
-                    "symbol": "PDD",
-                    "option_type": "put",
-                    "side": "short",
-                    "strike": 85,
-                    "status": "open",
-                    "contracts": 2,
-                    "contracts_open": 2,
-                    "expiration": exp_ms,
-                    "position_id": "PDD_20260618_85P_short",
-                },
-            }
+            _lot(
+                "rec_pdd",
+                symbol="PDD",
+                option_type="put",
+                side="short",
+                strike=85,
+                contracts=2,
+                contracts_open=2,
+                expiration=exp_ms,
+                position_id="PDD_20260618_85P_short",
+            )
         ],
     )
     monkeypatch.setattr(
@@ -354,17 +315,7 @@ def test_position_maintenance_surfaces_grace_pending_expired_positions(monkeypat
         mod,
         "_load_expiry_close_position_lots",
         lambda _repo: [
-            {
-                "record_id": "rec_wait",
-                "fields": {
-                    "broker": "富途",
-                    "account": "lx",
-                    "status": "open",
-                    "contracts": 2,
-                    "contracts_open": 2,
-                    "position_id": "0700_20260605_440P_short",
-                },
-            }
+            _lot("rec_wait", account="lx", contracts=2, contracts_open=2, position_id="0700_20260605_440P_short")
         ],
     )
     monkeypatch.setattr(
@@ -420,18 +371,7 @@ def test_position_maintenance_external_account_requires_manual_expiry_review(mon
         mod,
         "_load_expiry_close_position_lots",
         lambda _repo: [
-            {
-                "record_id": "lot_tigr",
-                "fields": {
-                    "broker": "富途",
-                    "account": "sy",
-                    "status": "open",
-                    "contracts": 10,
-                    "contracts_open": 10,
-                    "position_id": "pos_tigr",
-                    "expiration": expiration,
-                },
-            }
+            _lot("lot_tigr", contracts=10, contracts_open=10, position_id="pos_tigr", expiration=expiration)
         ],
     )
 
@@ -658,16 +598,7 @@ def test_position_maintenance_attaches_receipt_after_apply(monkeypatch, tmp_path
         mod,
         "_load_expiry_close_position_lots",
         lambda _repo: [
-            {
-                "record_id": "rec_1",
-                "fields": {
-                    "broker": "富途",
-                    "account": "lx",
-                    "status": "open",
-                    "contracts": 1,
-                    "position_id": "pos_1",
-                },
-            }
+            _lot("rec_1", account="lx", position_id="pos_1")
         ],
     )
     monkeypatch.setattr(
@@ -730,10 +661,7 @@ def test_position_maintenance_skips_receipt_in_no_send_mode(monkeypatch, tmp_pat
         mod,
         "_load_expiry_close_position_lots",
         lambda _repo: [
-            {
-                "record_id": "rec_1",
-                "fields": {"broker": "富途", "account": "lx", "status": "open", "contracts": 1},
-            }
+            _lot("rec_1", account="lx")
         ],
     )
     monkeypatch.setattr(
@@ -772,37 +700,19 @@ def test_position_maintenance_rejects_invalid_auto_close_config(tmp_path: Path) 
 
     base_cfg = {"portfolio": {"data_config": str(tmp_path / "missing.json")}}
 
-    with pytest.raises(ValueError, match="enabled must be a boolean"):
-        mod.run_expired_position_maintenance_for_account(
-            base=tmp_path,
-            cfg={**base_cfg, "option_positions": {"auto_close": {"enabled": "false"}}},
-            account="lx",
-            report_dir=tmp_path / "reports",
-        )
+    def _rejects(match: str, auto_close: dict) -> None:
+        with pytest.raises(ValueError, match=match):
+            mod.run_expired_position_maintenance_for_account(
+                base=tmp_path,
+                cfg={**base_cfg, "option_positions": {"auto_close": auto_close}},
+                account="lx",
+                report_dir=tmp_path / "reports",
+            )
 
-    with pytest.raises(ValueError, match="grace_days must be >= 0"):
-        mod.run_expired_position_maintenance_for_account(
-            base=tmp_path,
-            cfg={**base_cfg, "option_positions": {"auto_close": {"grace_days": -1}}},
-            account="lx",
-            report_dir=tmp_path / "reports",
-        )
-
-    with pytest.raises(ValueError, match="max_close_per_run must be >= 1"):
-        mod.run_expired_position_maintenance_for_account(
-            base=tmp_path,
-            cfg={**base_cfg, "option_positions": {"auto_close": {"max_close_per_run": 0}}},
-            account="lx",
-            report_dir=tmp_path / "reports",
-        )
-
-    with pytest.raises(ValueError, match="receipt.enabled must be a boolean"):
-        mod.run_expired_position_maintenance_for_account(
-            base=tmp_path,
-            cfg={**base_cfg, "option_positions": {"auto_close": {"receipt": {"enabled": "yes"}}}},
-            account="lx",
-            report_dir=tmp_path / "reports",
-        )
+    _rejects("enabled must be a boolean", {"enabled": "false"})
+    _rejects("grace_days must be >= 0", {"grace_days": -1})
+    _rejects("max_close_per_run must be >= 1", {"max_close_per_run": 0})
+    _rejects("receipt.enabled must be a boolean", {"receipt": {"enabled": "yes"}})
 
 
 def test_position_maintenance_missing_data_config_is_failed_not_skipped(tmp_path: Path) -> None:
