@@ -35,6 +35,16 @@ def _ms(value: str) -> int:
     return int(datetime.fromisoformat(value).replace(tzinfo=TZ).timestamp() * 1000)
 
 
+def _open_nvda_lot(repo) -> None:
+    """Persist the short NVDA put this module opens before lifecycle assertions."""
+    persist_manual_open_event(repo, OpenPositionCommand(
+        broker="富途", account="lx", symbol="NVDA", option_type="put", side="short",
+        contracts=1, currency="USD", strike=100, multiplier=100,
+        expiration_ymd="2026-08-21", premium_per_share=2.5,
+        opened_at_ms=_ms("2026-07-23T08:00:00"),
+    ))
+
+
 def _open_event(event_id: str, *, price: float) -> TradeEvent:
     return TradeEvent(
         event_id=event_id,
@@ -253,23 +263,7 @@ def test_assignment_and_assigned_stock_sale_store_their_own_cny_cash(
     monkeypatch.setattr(ledger_writer, "load_cash_fx_payload", lambda _repo, **_kwargs: fx_payload)
     monkeypatch.setattr("src.application.positions.workflows.load_cash_fx_payload", lambda _repo, **_kwargs: fx_payload)
     monkeypatch.setattr("src.application.ledger.writer_lifecycle_evidence.load_cash_fx_payload", lambda _repo, **_kwargs: fx_payload)
-    persist_manual_open_event(
-        repo,
-        OpenPositionCommand(
-            broker="富途",
-            account="lx",
-            symbol="NVDA",
-            option_type="put",
-            side="short",
-            contracts=1,
-            currency="USD",
-            strike=100.0,
-            multiplier=100,
-            expiration_ymd="2026-08-21",
-            premium_per_share=2.5,
-            opened_at_ms=_ms("2026-07-23T08:00:00"),
-        ),
-    )
+    _open_nvda_lot(repo)
     lot = repo.list_position_lots()[0]
     persist_trade_event_object(repo, replace(
         _open_event("later-unrelated", price=0), event_type="verification", contracts=0,
@@ -315,12 +309,7 @@ def _sale_fx_fixture(tmp_path: Path, monkeypatch, *, initialized: bool = True):
         if not initialized:
             # Represent an existing ledger from before FX evidence persistence.
             patch.setattr(ledger_writer, "load_cash_fx_payload", lambda *_args, **_kwargs: None)
-        persist_manual_open_event(repo, OpenPositionCommand(
-            broker="富途", account="lx", symbol="NVDA", option_type="put", side="short",
-            contracts=1, currency="USD", strike=100, multiplier=100,
-            expiration_ymd="2026-08-21", premium_per_share=2.5,
-            opened_at_ms=_ms("2026-07-23T08:00:00"),
-        ))
+        _open_nvda_lot(repo)
         record_manual_assignment(repo, record_id=repo.list_position_lots()[0]["record_id"],
             contracts_to_close=1, stock_side="buy", stock_qty=100, stock_price=100,
             as_of_ms=_ms("2026-07-23T09:00:00"))

@@ -38,9 +38,41 @@ def _generated_profile(
     return runtime, profile
 
 
-def test_generated_profile_drives_deduplicated_market_inventory(tmp_path: Path) -> None:
+def _state_run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+    """Report every probed unit as ``active``/``enabled``."""
+    state = "active" if command[1] == "is-active" else "enabled"
+    return subprocess.CompletedProcess(command, 0, stdout=state + "\n", stderr="")
+
+
+def _us_inventory(profile: dict, **overrides) -> dict:
+    """Run the us-market inventory authorizing ``lx`` over ``profile``."""
     from src.application.service_deploy import scheduled_tasks_from_profile
 
+    kwargs = {"market": "us", "authorized_accounts": ["lx"]}
+    kwargs.update(overrides)
+    return scheduled_tasks_from_profile(profile, **kwargs)
+
+
+def _write_tool_runtime(runtime: Path, profile: dict, *, accounts: list[str]) -> Path:
+    """Write the runtime config plus profile that ``run_scheduled_tasks_tool`` reads."""
+    config = runtime / "config.us.json"
+    config.write_text(
+        json.dumps(
+            {
+                "_generated": {"market": "us", "source_format": "yaml"},
+                "_resolved": {"market": "us", "source_format": "yaml"},
+                "accounts": accounts,
+                "portfolio": {},
+                "symbols": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (runtime / "service.profile.json").write_text(json.dumps(profile), encoding="utf-8")
+    return config
+
+
+def test_generated_profile_drives_deduplicated_market_inventory(tmp_path: Path) -> None:
     _runtime, profile = _generated_profile(tmp_path, markets=["us"])
     profile["services"].append({"name": "options-monitor-tick-us.timer"})
     profile["services"].append({"name": "options-monitor-unknown.timer"})
@@ -50,12 +82,7 @@ def test_generated_profile_drives_deduplicated_market_inventory(tmp_path: Path) 
         state = "active" if command[1] == "is-active" else "enabled"
         return subprocess.CompletedProcess(command, 0, stdout=state + "\n", stderr="")
 
-    value = scheduled_tasks_from_profile(
-        profile,
-        market="us",
-        authorized_accounts=["lx"],
-        run_cmd=run_cmd,
-    )
+    value = _us_inventory(profile, run_cmd=run_cmd)
 
     assert value["coverage"] == "partial"
     assert value["availability"] == "partial"
@@ -72,8 +99,6 @@ def test_generated_profile_drives_deduplicated_market_inventory(tmp_path: Path) 
 
 
 def test_inventory_stops_starting_probes_after_cancellation(tmp_path: Path) -> None:
-    from src.application.service_deploy import scheduled_tasks_from_profile
-
     _runtime, profile = _generated_profile(tmp_path, markets=["us"])
     calls: list[list[str]] = []
     cancellation_checks = 0
@@ -87,13 +112,7 @@ def test_inventory_stops_starting_probes_after_cancellation(tmp_path: Path) -> N
         calls.append(list(command))
         return subprocess.CompletedProcess(command, 0, stdout="active\n", stderr="")
 
-    value = scheduled_tasks_from_profile(
-        profile,
-        market="us",
-        authorized_accounts=["lx"],
-        cancelled=cancelled,
-        run_cmd=run_cmd,
-    )
+    value = _us_inventory(profile, cancelled=cancelled, run_cmd=run_cmd)
 
     assert len(calls) == 1
     assert value["availability"] == "partial"
@@ -102,14 +121,10 @@ def test_inventory_stops_starting_probes_after_cancellation(tmp_path: Path) -> N
 
 
 def test_inventory_starts_no_probes_after_shared_deadline(tmp_path: Path) -> None:
-    from src.application.service_deploy import scheduled_tasks_from_profile
-
     _runtime, profile = _generated_profile(tmp_path, markets=["us"])
 
-    value = scheduled_tasks_from_profile(
+    value = _us_inventory(
         profile,
-        market="us",
-        authorized_accounts=["lx"],
         deadline_monotonic=5.0,
         monotonic=lambda: 55.0,
         run_cmd=lambda *_args, **_kwargs: (_ for _ in ()).throw(
@@ -123,8 +138,6 @@ def test_inventory_starts_no_probes_after_shared_deadline(tmp_path: Path) -> Non
 
 
 def test_inventory_preserves_systemd_unknown_reasons_without_raw_output(tmp_path: Path) -> None:
-    from src.application.service_deploy import scheduled_tasks_from_profile
-
     _runtime, profile = _generated_profile(tmp_path, markets=["us"])
 
     def run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
@@ -132,12 +145,7 @@ def test_inventory_preserves_systemd_unknown_reasons_without_raw_output(tmp_path
             return subprocess.CompletedProcess(command, 3, stdout="failed\n", stderr="")
         return subprocess.CompletedProcess(command, 1, stdout="masked\n", stderr="")
 
-    value = scheduled_tasks_from_profile(
-        profile,
-        market="us",
-        authorized_accounts=["lx"],
-        run_cmd=run_cmd,
-    )
+    value = _us_inventory(profile, run_cmd=run_cmd)
 
     assert value["availability"] == "partial"
     for task in value["tasks"]:
@@ -169,20 +177,9 @@ def test_inventory_rejects_malformed_profile_services_as_unavailable() -> None:
 def test_shared_tasks_excluded_by_single_market_scope_make_coverage_partial(
     tmp_path: Path,
 ) -> None:
-    from src.application.service_deploy import scheduled_tasks_from_profile
-
     _runtime, profile = _generated_profile(tmp_path, markets=["us", "hk"])
 
-    def run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
-        state = "active" if command[1] == "is-active" else "enabled"
-        return subprocess.CompletedProcess(command, 0, stdout=state + "\n", stderr="")
-
-    value = scheduled_tasks_from_profile(
-        profile,
-        market="us",
-        authorized_accounts=["lx"],
-        run_cmd=run_cmd,
-    )
+    value = _us_inventory(profile, run_cmd=_state_run_cmd)
 
     assert value["coverage"] == "partial"
     assert value["availability"] == "partial"
@@ -196,24 +193,9 @@ def test_shared_tasks_excluded_by_single_market_scope_make_coverage_partial(
 def test_shared_tasks_require_all_profile_accounts_even_for_one_market(
     tmp_path: Path,
 ) -> None:
-    from src.application.service_deploy import scheduled_tasks_from_profile
+    _runtime, profile = _generated_profile(tmp_path, markets=["us"], accounts=["lx", "sy"])
 
-    _runtime, profile = _generated_profile(
-        tmp_path,
-        markets=["us"],
-        accounts=["lx", "sy"],
-    )
-
-    def run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
-        state = "active" if command[1] == "is-active" else "enabled"
-        return subprocess.CompletedProcess(command, 0, stdout=state + "\n", stderr="")
-
-    value = scheduled_tasks_from_profile(
-        profile,
-        market="us",
-        authorized_accounts=["lx"],
-        run_cmd=run_cmd,
-    )
+    value = _us_inventory(profile, run_cmd=_state_run_cmd)
 
     assert value["coverage"] == "partial"
     assert value["reasons"] == ["shared_scope_excluded"]
@@ -239,23 +221,15 @@ def test_invalid_profile_market_scope_never_authorizes_shared_tasks(
     tmp_path: Path,
     declared_markets: object,
 ) -> None:
-    from src.application.service_deploy import scheduled_tasks_from_profile
-
     _runtime, profile = _generated_profile(tmp_path, markets=["us"])
     profile["markets"] = declared_markets
     calls: list[list[str]] = []
 
-    def run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+    def run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
         calls.append(list(command))
-        state = "active" if command[1] == "is-active" else "enabled"
-        return subprocess.CompletedProcess(command, 0, stdout=state + "\n", stderr="")
+        return _state_run_cmd(command, **kwargs)
 
-    value = scheduled_tasks_from_profile(
-        profile,
-        market="us",
-        authorized_accounts=["lx"],
-        run_cmd=run_cmd,
-    )
+    value = _us_inventory(profile, run_cmd=run_cmd)
 
     assert value["coverage"] == "partial"
     assert value["availability"] == "partial"
@@ -272,20 +246,7 @@ def test_tool_checks_profile_binding_and_propagates_query_context(monkeypatch, t
     import src.application.agent_tools.scheduled_tasks_impl as impl
 
     runtime, profile = _generated_profile(tmp_path, markets=["us"])
-    config = runtime / "config.us.json"
-    config.write_text(
-        json.dumps(
-            {
-                "_generated": {"market": "us", "source_format": "yaml"},
-                "_resolved": {"market": "us", "source_format": "yaml"},
-                "accounts": ["lx"],
-                "portfolio": {},
-                "symbols": [],
-            }
-        ),
-        encoding="utf-8",
-    )
-    (runtime / "service.profile.json").write_text(json.dumps(profile), encoding="utf-8")
+    config = _write_tool_runtime(runtime, profile, accounts=["lx"])
     captured = {}
 
     def inventory(_profile, **kwargs):  # type: ignore[no-untyped-def]
@@ -333,34 +294,13 @@ def test_tool_excludes_shared_tasks_when_config_authorizes_account_subset(
     import src.application.agent_tools.scheduled_tasks_impl as impl
     from src.application.service_deploy import scheduled_tasks_from_profile
 
-    runtime, profile = _generated_profile(
-        tmp_path,
-        markets=["us"],
-        accounts=["lx", "sy"],
-    )
-    config = runtime / "config.us.json"
-    config.write_text(
-        json.dumps(
-            {
-                "_generated": {"market": "us", "source_format": "yaml"},
-                "_resolved": {"market": "us", "source_format": "yaml"},
-                "accounts": ["lx"],
-                "portfolio": {},
-                "symbols": [],
-            }
-        ),
-        encoding="utf-8",
-    )
-    (runtime / "service.profile.json").write_text(json.dumps(profile), encoding="utf-8")
+    runtime, profile = _generated_profile(tmp_path, markets=["us"], accounts=["lx", "sy"])
+    config = _write_tool_runtime(runtime, profile, accounts=["lx"])
 
     def inventory(bound_profile, **kwargs):  # type: ignore[no-untyped-def]
-        def run_cmd(command, **_run_kwargs):  # type: ignore[no-untyped-def]
-            state = "active" if command[1] == "is-active" else "enabled"
-            return subprocess.CompletedProcess(command, 0, stdout=state + "\n", stderr="")
-
         return scheduled_tasks_from_profile(
             bound_profile,
-            run_cmd=run_cmd,
+            run_cmd=_state_run_cmd,
             **kwargs,
         )
 

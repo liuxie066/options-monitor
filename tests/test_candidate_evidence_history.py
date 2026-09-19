@@ -46,6 +46,13 @@ def _classify(base: Path, *, run_id: str = "run-1", account: str = "lx"):
     )
 
 
+def _write_state(base: Path, filename: str, content: str) -> Path:
+    """Write ``content`` into the account's ``state`` directory."""
+    path = _account_dir(base) / "state" / filename
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
 def _publish_empty_modern_bundle(base: Path) -> None:
     account_dir = _account_dir(base)
     publish_strategy_scan_status_index_v2(
@@ -154,12 +161,8 @@ def test_classifies_valid_manifest_bundle_as_supported(tmp_path: Path) -> None:
 
 
 def test_present_invalid_manifest_takes_schema_precedence(tmp_path: Path) -> None:
-    account_dir = _account_dir(tmp_path)
-    (account_dir / "state" / CANDIDATE_SNAPSHOT_MANIFEST_FILE).write_text(
-        "{}",
-        encoding="utf-8",
-    )
-    (account_dir / "legacy_sell_put_candidates.csv").write_text(
+    _write_state(tmp_path, CANDIDATE_SNAPSHOT_MANIFEST_FILE, "{}")
+    (_account_dir(tmp_path) / "legacy_sell_put_candidates.csv").write_text(
         "candidate bytes must not be fallback",
         encoding="utf-8",
     )
@@ -171,10 +174,10 @@ def test_present_invalid_manifest_takes_schema_precedence(tmp_path: Path) -> Non
 
 
 def test_modern_snapshot_without_manifest_is_missing_not_legacy(tmp_path: Path) -> None:
-    account_dir = _account_dir(tmp_path)
-    (account_dir / "state" / COMBO_YIELD_CANDIDATE_SNAPSHOT_FILE).write_text(
+    _write_state(
+        tmp_path,
+        COMBO_YIELD_CANDIDATE_SNAPSHOT_FILE,
         json.dumps({"schema_version": "combo_yield_candidate_snapshot.v2"}),
-        encoding="utf-8",
     )
 
     evidence = _classify(tmp_path)
@@ -184,10 +187,10 @@ def test_modern_snapshot_without_manifest_is_missing_not_legacy(tmp_path: Path) 
 
 
 def test_wheel_v2_snapshot_without_manifest_is_missing(tmp_path: Path) -> None:
-    account_dir = _account_dir(tmp_path)
-    (account_dir / "state" / "wheel_candidate_snapshot.v2.json").write_text(
+    _write_state(
+        tmp_path,
+        "wheel_candidate_snapshot.v2.json",
         json.dumps({"schema_version": "wheel_candidate_snapshot.v2"}),
-        encoding="utf-8",
     )
 
     evidence = _classify(tmp_path)
@@ -197,11 +200,7 @@ def test_wheel_v2_snapshot_without_manifest_is_missing(tmp_path: Path) -> None:
 
 
 def test_present_invalid_manifest_v3_takes_schema_precedence(tmp_path: Path) -> None:
-    account_dir = _account_dir(tmp_path)
-    (account_dir / "state" / CANDIDATE_SNAPSHOT_MANIFEST_V3_FILE).write_text(
-        "{}",
-        encoding="utf-8",
-    )
+    _write_state(tmp_path, CANDIDATE_SNAPSHOT_MANIFEST_V3_FILE, "{}")
 
     evidence = _classify(tmp_path)
 
@@ -258,8 +257,7 @@ def test_csv_only_is_metadata_classified_without_opening_bytes(tmp_path: Path) -
 
 
 def test_trace_only_is_snapshot_missing(tmp_path: Path) -> None:
-    account_dir = _account_dir(tmp_path)
-    (account_dir / "candidate_filter_trace.jsonl").write_text("{}\n", encoding="utf-8")
+    _write_state(tmp_path, "candidate_filter_trace.jsonl", "{}\n")
 
     assert _classify(tmp_path).classification["status"] == UNSUPPORTED_SNAPSHOT_MISSING
 
