@@ -6,7 +6,6 @@ from domain.domain.trade_execution import canonical_decimal
 from src.application.payload_helpers import optional_text as normalize_optional_text
 
 
-
 def normalize_optional_int(value: Any) -> int | None:
     try:
         normalized = canonical_decimal(str(value) if isinstance(value, float) else value)

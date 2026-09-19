@@ -24,7 +24,6 @@ def _parse_date(value: Any) -> date | None:
         return None
 
 
-
 def next_trading_day(expiration: date, trading_days: list[date]) -> date | None:
     return next((day for day in sorted(set(trading_days)) if day > expiration), None)
 

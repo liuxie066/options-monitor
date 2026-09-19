@@ -47,7 +47,6 @@ _MISSING_ENUM_VALUES = frozenset({"", "N/A", "NONE", "UNKNOWN"})
 _OPEND_OPTION_SECURITY_TYPE = "DRVT"
 
 
-
 def _enum(value: Any) -> str:
     return _text(value).upper()
 

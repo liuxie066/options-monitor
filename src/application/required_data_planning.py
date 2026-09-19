@@ -240,7 +240,6 @@ class RequiredDataFetchPlanBundle:
         return payload
 
 
-
 def _safe_int(value: Any) -> int | None:
     try:
         if value in (None, ""):

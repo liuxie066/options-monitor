@@ -170,7 +170,6 @@ def rank_cc_lp_rows(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted((dict(row) for row in rows), key=cc_lp_rank_key)
 
 
-
 def _pct_distance(numerator: float, denominator: float) -> float:
     if denominator <= 0:
         return 0.0

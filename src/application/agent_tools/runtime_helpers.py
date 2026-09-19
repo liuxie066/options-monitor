@@ -62,7 +62,6 @@ def validate_runtime_config(
     return warnings
 
 
-
 def mask_account_id(value: Any) -> str:
     raw = str(value or "").strip()
     if not raw:

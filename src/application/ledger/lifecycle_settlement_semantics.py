@@ -704,7 +704,6 @@ def _first_text(row: Mapping[str, Any], *keys: str) -> str:
     return _text(_first(row, *keys))
 
 
-
 def _lower(value: Any) -> str:
     return _text(value).lower()
 

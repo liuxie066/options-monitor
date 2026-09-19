@@ -1002,7 +1002,6 @@ def _prepared_context_account_mismatch_reason(
     )
 
 
-
 def _is_sha256(value: str) -> bool:
     return len(value) == 64 and all(char in "0123456789abcdef" for char in value)
 

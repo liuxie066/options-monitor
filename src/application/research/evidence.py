@@ -1287,7 +1287,6 @@ def _first_float(row: dict[str, Any], *keys: str) -> float | None:
     return None
 
 
-
 def _dict_or_empty(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 

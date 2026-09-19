@@ -561,7 +561,6 @@ def _canonical_text_list(value: Any) -> bool:
     )
 
 
-
 def _text(
     value: Any,
     *,

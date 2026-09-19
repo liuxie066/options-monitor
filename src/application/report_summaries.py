@@ -136,7 +136,6 @@ def _option_ccy(symbol: str) -> str | None:
     return symbol_currency(symbol)
 
 
-
 def _safe_int(value: Any) -> int | None:
     parsed = _safe_float(value)
     if parsed is None:

@@ -17,7 +17,6 @@ ALLOWED_TOOL_STATUS = {"cached", "fetched", "error", "skipped"}
 ALLOWED_SUBPROCESS_STATUS = {"ok", "error"}
 
 
-
 def validate_schema_payload(payload: dict[str, Any], *, kind: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("schema payload must be a dict")

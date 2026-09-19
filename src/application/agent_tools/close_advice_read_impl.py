@@ -1014,7 +1014,6 @@ def _float_equal(left: Any, right: float) -> bool:
     return value is not None and abs(value - float(right)) < 1e-6
 
 
-
 def _lower(value: Any) -> str:
     return str(value or "").strip().lower()
 

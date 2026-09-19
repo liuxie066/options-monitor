@@ -9,7 +9,6 @@ from src.application.quality.model import check_result, dataset_status, evidence
 from src.application.payload_helpers import parse_utc as _parse_utc
 
 
-
 def _oldest_pending_age_seconds(
     payload: Any,
     *,

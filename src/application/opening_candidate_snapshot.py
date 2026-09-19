@@ -1342,7 +1342,6 @@ def _timestamp(value: datetime | str | Any) -> str:
     return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-
 __all__ = [
     "OPENING_CANDIDATE_SNAPSHOT_FILE",
     "OPENING_CANDIDATE_SNAPSHOT_SCHEMA",

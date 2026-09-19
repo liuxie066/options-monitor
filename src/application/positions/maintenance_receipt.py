@@ -547,7 +547,6 @@ def _attach_receipt_identity(
         out["receipt_key_fields"] = dict(receipt_key_fields)
 
 
-
 def _bool_from_config(src: dict[str, Any], key: str, *, default: bool) -> bool:
     value = src.get(key, default)
     if not isinstance(value, bool):

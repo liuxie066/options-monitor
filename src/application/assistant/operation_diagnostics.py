@@ -911,7 +911,6 @@ def _loads(value: Any) -> dict[str, Any]:
     return _dict(decoded)
 
 
-
 def _string_list(values: Any) -> list[str]:
     if values is None:
         return []

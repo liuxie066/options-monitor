@@ -1183,7 +1183,6 @@ def _event_summary(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-
 def _status_only(payload: Any) -> dict[str, Any]:
     source = _dict(payload)
     allowed = {
@@ -1233,7 +1232,6 @@ def _load_assistant_behavior_config(*, config_path: str | None) -> dict[str, Any
     if cfg:
         return cfg
     return cfg
-
 
 
 def _normalize_ack_reaction(value: Any) -> str:

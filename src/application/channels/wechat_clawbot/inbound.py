@@ -776,7 +776,6 @@ def _record_keepalive_state(
     return out
 
 
-
 def _status_only(payload: Any) -> dict[str, Any]:
     source = _dict(payload)
     allowed = {
@@ -1126,7 +1125,6 @@ def _load_assistant_behavior_config(*, config_path: str | None) -> dict[str, Any
             raise
         return {}
     return cfg if cfg else {}
-
 
 
 def _config_positive_int(explicit: int | None, configured: Any, *, default: int) -> int:

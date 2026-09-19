@@ -43,7 +43,6 @@ from src.application.combo_yield_config import (
 from src.application.numeric_helpers import safe_float as _safe_float
 
 
-
 def _safe_int(value: Any) -> int | None:
     out = _safe_float(value)
     return int(out) if out is not None else None

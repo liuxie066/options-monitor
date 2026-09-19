@@ -1012,7 +1012,6 @@ def _loads(value: Any) -> dict[str, Any]:
     return decoded if isinstance(decoded, dict) else {}
 
 
-
 def _ensure_column(conn: sqlite3.Connection, name: str, column_type: str) -> None:
     rows = conn.execute("PRAGMA table_info(inbound_pending_operations)").fetchall()
     existing = {str(row[1]) for row in rows}

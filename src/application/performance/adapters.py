@@ -286,7 +286,6 @@ def _trade_event_from_application_payload(payload: dict[str, Any]) -> TradeEvent
     )
 
 
-
 def _diagnostic_metadata(payload: dict[str, Any]) -> dict[str, Any]:
     raw_key = payload.get("contract_key")
     contract_key = raw_key if isinstance(raw_key, dict) else {}

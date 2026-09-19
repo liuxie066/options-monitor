@@ -7,7 +7,6 @@ from src.application.quality.model import check_result, evidence_ref
 from src.application.payload_helpers import parse_utc as _parse_utc
 
 
-
 def build_runtime_checks(
     *,
     runtime_statuses: list[dict[str, Any]],

@@ -701,7 +701,6 @@ def _identity_hash(identity: Sequence[str]) -> str:
     return hashlib.sha256(chr(31).join(identity).encode()).hexdigest()
 
 
-
 def _time_ms(value: Any) -> int:
     return value.event_time_ms if isinstance(value, TradeEvent) else int(value.get("trade_time_ms") or value.get("event_time_ms") or 0)
 

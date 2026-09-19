@@ -33,7 +33,6 @@ _MARKETS = ("hk", "us")
 _MAX_EVIDENCE_BYTES = 1_048_576
 
 
-
 def _sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 

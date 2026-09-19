@@ -120,7 +120,6 @@ def _contract_error(exc: Exception) -> ComboYieldCandidateSnapshotError:
     return ComboYieldCandidateSnapshotError(str(exc))
 
 
-
 def _pair_id(raw: Mapping[str, Any], *, required: bool) -> str | None:
     pair_id = str(raw.get("candidate_pair_id") or "").strip()
     if not pair_id:

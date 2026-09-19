@@ -1332,7 +1332,6 @@ def _validate_option_context_account(
                 )
 
 
-
 def _required_sha256(value: Any, field: str) -> str:
     digest = _required_text(value, field).lower()
     if len(digest) != 64 or any(

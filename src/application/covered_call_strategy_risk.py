@@ -153,7 +153,6 @@ def _covered_notional_cny(
     return amount_to_cny(spot * multiplier, ccy, exchange_rate_converter=exchange_rate_converter)
 
 
-
 def _float_setting(raw: dict[str, Any], key: str, default: float) -> float:
     try:
         value = raw.get(key, default)

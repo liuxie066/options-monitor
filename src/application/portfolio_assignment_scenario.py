@@ -139,7 +139,6 @@ def _load_runtime_and_positions(
     )
 
 
-
 def _snapshot_payload(
     *,
     accounts: Sequence[str],

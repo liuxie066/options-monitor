@@ -12,7 +12,6 @@ from typing import Any
 from src.infrastructure.io_utils import utc_now as _utc_ts
 
 
-
 def create_run_id() -> str:
     dt = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     # Avoid os entropy blocking in constrained containers.

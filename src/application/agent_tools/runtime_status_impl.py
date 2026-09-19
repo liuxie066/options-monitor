@@ -1987,7 +1987,6 @@ def _run_payload_matches_market(run_payload: dict[str, Any], desired_market: str
     return not observed_markets or desired_market in observed_markets
 
 
-
 def _latest_run_auto_close_failures(latest_run_payload: dict[str, Any] | None) -> list[dict[str, Any]]:
     if not isinstance(latest_run_payload, dict):
         return []

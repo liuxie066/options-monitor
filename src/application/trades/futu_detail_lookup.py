@@ -24,7 +24,6 @@ def _rows(data: Any) -> list[dict[str, Any]]:
     return []
 
 
-
 def _matches_order(row: dict[str, Any], *, order_id: str) -> bool:
     return bool(order_id and _norm_str(row.get("order_id") or row.get("orderID")) == order_id)
 

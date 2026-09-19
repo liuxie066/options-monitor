@@ -102,7 +102,6 @@ def _cleanup(module, *, current: Path, releases: Path, **kwargs):  # type: ignor
     )
 
 
-
 def test_pi_readiness_checks_custom_and_release_local_session_stores(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import src.application.service_upgrade as module
 

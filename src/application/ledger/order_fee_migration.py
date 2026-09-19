@@ -135,7 +135,6 @@ class _Unit:
     settlement_observation: ActualOrderFee | None = None
 
 
-
 def stock_settlement_fee_context(event: TradeEvent) -> dict[str, Any] | None:
     """Return the stock order identity and quantity, never the option order's."""
     raw = event.raw_payload or {}
@@ -1586,7 +1585,6 @@ def _allocate(total: Decimal, weights: Sequence[int]) -> tuple[Decimal, ...]:
     return tuple(out)
 
 
-
 def _order_identity(
     broker: Any, account: Any, futu_account_id: Any, order_id: Any
 ) -> tuple[str, str, str, str] | None:
@@ -1666,7 +1664,6 @@ def _required_text(value: Any, *, field: str) -> str:
     if not text:
         raise ValueError(f"{field} is required")
     return text
-
 
 
 def _optional_sha256(value: Any) -> str | None:

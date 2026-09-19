@@ -72,7 +72,6 @@ def _experience_projection(payload: Mapping[str, Any]) -> dict[str, Any]:
     return {key: payload.get(key) for key in _EXPERIENCE_FIELD_NAMES}
 
 
-
 def _state_dir(base: Path, run_id: str, account: str) -> Path:
     return (
         Path(base).resolve()

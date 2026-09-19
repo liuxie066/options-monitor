@@ -2344,7 +2344,6 @@ def _coerce_utc_iso(value: datetime | str | None) -> str:
     return parsed.astimezone(timezone.utc).isoformat()
 
 
-
 def _relative_path(base: Path, path: Path) -> str:
     try:
         return path.resolve().relative_to(base.resolve()).as_posix()

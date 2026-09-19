@@ -2322,7 +2322,6 @@ def _decimal_text(value: Decimal) -> str:
     return format(normalized, "f")
 
 
-
 def _safe_zoneinfo(name: str) -> ZoneInfo:
     try:
         return ZoneInfo(name)

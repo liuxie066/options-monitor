@@ -12,7 +12,6 @@ from domain.storage.repositories import state_repo
 from domain.domain.canonical_schema import utc_now_iso as _utc_now_iso
 
 
-
 @dataclass(frozen=True)
 class ToolExecutionIntent:
     tool_name: str

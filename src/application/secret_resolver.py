@@ -24,7 +24,6 @@ DEFAULT_FEISHU_BOT_USER_OPEN_ID_ENV = "OM_FEISHU_BOT_USER_OPEN_ID"
 DEFAULT_FEISHU_BOT_ALLOWED_OPEN_IDS_ENV = "OM_FEISHU_BOT_ALLOWED_OPEN_IDS"
 
 
-
 def _env(environ: Mapping[str, str] | None, name: str) -> str:
     env = build_effective_env(environ=environ).values
     return _text(env.get(name))

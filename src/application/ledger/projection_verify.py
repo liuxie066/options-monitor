@@ -17,7 +17,6 @@ SCHEMA_KIND = "option_positions_projection_verify"
 CHECKPOINT_SCHEMA_KIND = "option_positions_projection_verify_checkpoint"
 
 
-
 def _state_dir(base: Path) -> Path:
     return Path(base).resolve() / "output_shared" / "state" / "option_positions"
 

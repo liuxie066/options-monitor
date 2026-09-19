@@ -655,7 +655,6 @@ def _resolve_output_path(value: Any, *, base: Path, default: Path) -> Path:
     return path
 
 
-
 def _as_int(value: Any) -> int:
     try:
         return int(value or 0)

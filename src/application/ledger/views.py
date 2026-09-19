@@ -8,7 +8,6 @@ from domain.domain.symbol_identity import canonical_symbol
 from src.application.payload_helpers import optional_text as _text_or_none
 
 
-
 def _int_or_zero(value: Any) -> int:
     try:
         return int(float(value or 0))

@@ -343,7 +343,6 @@ def inbound_sqlite_error(path: Path, exc: BaseException) -> AgentToolError:
     )
 
 
-
 def _json(value: Any) -> str:
     return json.dumps(value if value is not None else {}, ensure_ascii=False, sort_keys=True)
 
@@ -356,7 +355,6 @@ def _loads_object(value: Any) -> dict[str, Any]:
     except Exception:
         return {}
     return dict(loaded) if isinstance(loaded, dict) else {}
-
 
 
 def _row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:

@@ -9,7 +9,6 @@ from src.infrastructure.io_utils import atomic_write_json, read_json
 from src.infrastructure.io_utils import utc_now as _utc_now
 
 
-
 def _events_path(state_dir: Path) -> Path:
     return (state_dir / "fetch_required_data.events.jsonl").resolve()
 

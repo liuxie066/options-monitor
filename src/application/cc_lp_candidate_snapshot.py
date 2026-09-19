@@ -43,7 +43,6 @@ class CcLpCandidateSnapshotError(RuntimeError):
     """Raised when a CC+LP candidate snapshot cannot be trusted."""
 
 
-
 def _pairs(
     payload: Any,
     *,

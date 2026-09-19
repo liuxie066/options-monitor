@@ -153,7 +153,6 @@ def _explicit_reservation_manifest(
     return {lot_id: contracts}
 
 
-
 def resolve_account_lifecycle_overlay(
     *,
     account: str,

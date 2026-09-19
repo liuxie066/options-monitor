@@ -114,7 +114,6 @@ def _turn_identifier(data: dict[str, Any], *keys: str) -> str | None:
     return None
 
 
-
 def _text_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []

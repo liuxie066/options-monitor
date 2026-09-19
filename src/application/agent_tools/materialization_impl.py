@@ -67,7 +67,6 @@ def _normalize_option_type(value: Any) -> str:
     return normalize_contract_option_type(value)
 
 
-
 def _contract_key(symbol: Any, option_type: Any, expiration: Any, strike: Any) -> tuple[str, str, str, str]:
     return contract_key(symbol, option_type, expiration, strike, expiration_fallback_raw=True)
 
@@ -516,7 +515,6 @@ def option_performance_report_now_ms(now_ms: int):
         yield
     finally:
         _OPTION_PERFORMANCE_REPORT_NOW_MS.reset(token)
-
 
 
 _PERFORMANCE_GROUPS = ("opening_years", "opening_months", "accounts", "currencies", "leg_types",

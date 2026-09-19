@@ -76,7 +76,6 @@ def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
 
 
-
 def _one(conn: sqlite3.Connection, sql: str, args: tuple = ()) -> dict | None:
     cursor = conn.execute(sql, args)
     row = cursor.fetchone()

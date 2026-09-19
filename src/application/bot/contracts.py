@@ -47,7 +47,6 @@ def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid4().hex[:12]}"
 
 
-
 @dataclass(frozen=True)
 class BotScope:
     config_key: str | None = None

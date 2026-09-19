@@ -84,7 +84,6 @@ SNAPSHOT_COVERAGE_INCOMPLETE = "SNAPSHOT_COVERAGE_INCOMPLETE"
 OPTION_CHAIN_SCOPE_COVERAGE_SCHEMA = "option_chain_scope_coverage.v1"
 
 
-
 def _no_contracts_realized_volatility() -> RealizedVolatilitySnapshot:
     return RealizedVolatilitySnapshot(
         status="not_applicable_no_contracts",

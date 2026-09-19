@@ -83,8 +83,6 @@ REQUIRED_TRIGGERS = (
 )
 
 
-
-
 def _sha256(value: Any) -> str:
     return hashlib.sha256(_canonical_bytes(value)).hexdigest()
 

@@ -327,7 +327,6 @@ def _json_payload(file_info: Any) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-
 def _as_int_or_none(value: Any) -> int | None:
     if value is None or isinstance(value, bool):
         return None

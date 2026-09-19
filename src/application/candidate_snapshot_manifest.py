@@ -108,7 +108,6 @@ class CandidateSnapshotManifestError(RuntimeError):
     account: str | None = None
 
 
-
 def _run_account_dir(base: Path, run_id: str, account: str) -> Path:
     return (
         Path(base).resolve()

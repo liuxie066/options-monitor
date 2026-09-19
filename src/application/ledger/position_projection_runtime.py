@@ -1278,7 +1278,6 @@ def _application_event(event_json: str) -> dict[str, Any]:
     return trade_event_application_payload(payload)
 
 
-
 def _strict_json_loads(payload: bytes) -> Any:
     def _pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
         out: dict[str, Any] = {}
