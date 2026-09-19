@@ -311,6 +311,8 @@ Combo / Wheel 投影 & 元数据  ───────────────�
 #### D3. ③b `fields_json` 以 `PositionLot.to_dict()` 为准（§8.1 ③ 后半 / §8 步骤4）
 
 - **权威形状**：持久化 `fields_json` 直接等于 `PositionLot.to_dict()`。
+- **不变量（派生性）**：`fields_json` 必须是 `trade_events` 的**纯函数**——存在一次全量重放，使产物与存量在规范化后逐行相同。**任何「只活在 payload 里的事实」是模型缺陷，不是迁移时要处理的历史数据**；故本项不只是「改形状」，还要先消除这类事实（含 `note`-KV 承载的 `exp`/`strike`/`multiplier`、以及以 payload 键派生又自任载体的 `source_event_id`）。
+- **判据**：一次全量重放与存量的逐行对照，对照面须覆盖 payload 的键与值、以及各派生列（`account`/`expiration`/`strike`/`multiplier`/`source_event_id`）；`updated_at_ms` 是墙钟值，明确排除在比较面外。
 - **本轮已做**：`PositionLot.to_dict()` 已是 `position_lots` 规范化读路径的来源（§9.2 步骤③ 完成后，`contract_key`/`position_side`/`position_key` 形状已定），且 §7.3/§7.4 的 Decimal 序列化（`canonical_decimal_text`）已落。
 - **未做（deferred）**：`publisher._base_fields_for_lot` + `_apply_lot_state_fields` 目前仍按**读模型字段集**组装 `fields_json`（含 `expiration`/`position_id`/`cash_secured_amount`/`underlying_share_locked`/`note`/`strategy_snapshot` 等读模型字段），未改为 `PositionLot.to_dict()` 的纯 lot 形状。
 - **前置依赖**：股票 lot 的 `shares_*`/`cost_basis_total` 形状已稳定（`publisher.py:668+`/`:681`），不再等 ⑥ 落定；与 D1/D2 同属存量迁移批次（同一窗口，§9.5 M3/M6）。
