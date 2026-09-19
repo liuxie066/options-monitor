@@ -51,6 +51,25 @@ def _write_unreleased(repo: Path, body: str, *, version: str = "1.0.0") -> None:
     )
 
 
+def _unreleased_doc(body: str) -> str:
+    """Changelog text with `body` under Unreleased, followed by the 1.0.0 baseline section."""
+    return f"# Changelog\n\n## Unreleased\n\n{body}\n\n## 1.0.0 - 2026-07-20\n"
+
+
+def _apply_auto(repo: Path, preview: dict, *, base: str | None = None, target: str | None = None):
+    """Confirm the previewed auto bump; defaults come from the preview it is confirming."""
+    from src.application.version_check import update_local_version
+
+    return update_local_version(
+        base_dir=repo,
+        bump="auto",
+        apply=True,
+        recommendation_digest=preview["recommendation_digest"],
+        expected_base_version=preview["base"]["version"] if base is None else base,
+        expected_target_version=preview["recommendation"]["target_version"] if target is None else target,
+    )
+
+
 def test_remote_stable_identity_parser_supports_lightweight_and_annotated_tags() -> None:
     rows = parse_remote_stable_tag_identities(
         "\n".join(
@@ -137,13 +156,7 @@ def test_legacy_unreleased_headings_require_migration(heading: str) -> None:
 
 def test_unknown_h2_cannot_escape_unreleased_validation() -> None:
     parsed = parse_unreleased(
-        "# Changelog\n\n"
-        "## Unreleased\n\n"
-        "### Bug Fixes\n"
-        "- Fixed a defect.\n\n"
-        "## Removed\n"
-        "- Hidden release intent.\n\n"
-        "## 1.0.0 - 2026-07-20\n"
+        _unreleased_doc("### Bug Fixes\n- Fixed a defect.\n\n## Removed\n- Hidden release intent.")
     )
 
     assert parsed["status"] == "needs_input"
@@ -153,13 +166,7 @@ def test_unknown_h2_cannot_escape_unreleased_validation() -> None:
 
 def test_duplicate_category_heading_is_unsupported() -> None:
     parsed = parse_unreleased(
-        "# Changelog\n\n"
-        "## Unreleased\n\n"
-        "### Improvements\n"
-        "- First improvement.\n\n"
-        "### Improvements\n"
-        "- Second improvement.\n\n"
-        "## 1.0.0 - 2026-07-20\n"
+        _unreleased_doc("### Improvements\n- First improvement.\n\n### Improvements\n- Second improvement.")
     )
 
     assert parsed["status"] == "needs_input"
@@ -176,9 +183,7 @@ def test_duplicate_category_heading_is_unsupported() -> None:
     ],
 )
 def test_unowned_or_nested_unreleased_content_is_unsupported(body: str) -> None:
-    parsed = parse_unreleased(
-        f"# Changelog\n\n## Unreleased\n\n{body}\n\n## 1.0.0 - 2026-07-20\n"
-    )
+    parsed = parse_unreleased(_unreleased_doc(body))
 
     assert parsed["status"] == "needs_input"
     assert parsed["reason_code"] == "UNSUPPORTED_UNRELEASED_CONTENT"
@@ -249,14 +254,7 @@ def test_auto_preview_then_confirm_apply_end_to_end(tmp_path: Path) -> None:
     before_changelog = (repo / "CHANGELOG.md").read_text(encoding="utf-8")
 
     preview = update_local_version(base_dir=repo, bump="auto", apply=False)
-    applied = update_local_version(
-        base_dir=repo,
-        bump="auto",
-        apply=True,
-        recommendation_digest=preview["recommendation_digest"],
-        expected_base_version=preview["base"]["version"],
-        expected_target_version=preview["recommendation"]["target_version"],
-    )
+    applied = _apply_auto(repo, preview)
 
     assert preview["status"] == "recommended"
     assert applied["status"] == "applied"
@@ -264,14 +262,7 @@ def test_auto_preview_then_confirm_apply_end_to_end(tmp_path: Path) -> None:
     assert (repo / "VERSION").read_text(encoding="utf-8").strip() == "1.1.0"
     assert (repo / "CHANGELOG.md").read_text(encoding="utf-8") == before_changelog
 
-    retried = update_local_version(
-        base_dir=repo,
-        bump="auto",
-        apply=True,
-        recommendation_digest=preview["recommendation_digest"],
-        expected_base_version="1.0.0",
-        expected_target_version="1.1.0",
-    )
+    retried = _apply_auto(repo, preview, base="1.0.0", target="1.1.0")
     assert retried["status"] == "already_at_target"
     assert retried["write"]["changed"] is False
 
@@ -284,14 +275,7 @@ def test_auto_apply_fails_stale_when_workspace_changes_after_preview(tmp_path: P
     preview = update_local_version(base_dir=repo, bump="auto", apply=False)
     (repo / "notes.txt").write_text("changed after preview\n", encoding="utf-8")
 
-    applied = update_local_version(
-        base_dir=repo,
-        bump="auto",
-        apply=True,
-        recommendation_digest=preview["recommendation_digest"],
-        expected_base_version=preview["base"]["version"],
-        expected_target_version=preview["recommendation"]["target_version"],
-    )
+    applied = _apply_auto(repo, preview)
 
     assert applied["status"] == "stale"
     assert applied["write"]["changed"] is False

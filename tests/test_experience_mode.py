@@ -116,31 +116,32 @@ def _status_index(
     return report_dir, index
 
 
+def _seal_bundle(base: Path, index: dict, *, market: str = "US", statuses_by_owner: dict,
+                 opening_candidates: dict, opening_decisions: dict,
+                 combo_evidence_by_owner: dict, sealed_at: str | None = None) -> dict:
+    """Seal an experience bundle; only the per-case arguments differ between the tests."""
+    return seal_experience_candidate_bundle(
+        base=base, run_id=RUN_ID, account=ACCOUNT, market=market,
+        account_config_sha256=CONFIG_HASH, strategy_policy_sha256=POLICY_HASH,
+        dependencies=_dependency_rows(base), status_index=index,
+        statuses_by_owner=statuses_by_owner, opening_candidates=opening_candidates,
+        opening_decisions=opening_decisions, combo_evidence_by_owner=combo_evidence_by_owner,
+        account_display_name=DISPLAY_NAME,
+        **({"sealed_at": sealed_at} if sealed_at is not None else {}),
+    )
+
+
 def _seal_opening_bundle(base: Path) -> None:
     _report_dir, index = _status_index(base)
-    seal_experience_candidate_bundle(
-        base=base,
-        run_id=RUN_ID,
-        account=ACCOUNT,
-        market="US",
-        account_config_sha256=CONFIG_HASH,
-        strategy_policy_sha256=POLICY_HASH,
-        dependencies=_dependency_rows(base),
-        status_index=index,
+    _seal_bundle(
+        base,
+        index,
         statuses_by_owner={
-            "opening": [
-                {
-                    "symbol": "DEMO",
-                    "strategy_mode": "put",
-                    "status": "completed",
-                    "candidate_count": 1,
-                }
-            ]
+            "opening": [{"symbol": "DEMO", "strategy_mode": "put", "status": "completed", "candidate_count": 1}]
         },
         opening_candidates={"put": [{"symbol": "DEMO", "strike": 10.0}]},
         opening_decisions={"put": []},
         combo_evidence_by_owner={},
-        account_display_name=DISPLAY_NAME,
         sealed_at="2026-08-27T00:00:00+00:00",
     )
 
@@ -365,20 +366,14 @@ def test_experience_bundle_allows_no_supported_strategy_scope(tmp_path: Path) ->
         expected=[],
         experience_fields=experience_fields(DISPLAY_NAME),
     )
-    manifest = seal_experience_candidate_bundle(
-        base=tmp_path,
-        run_id=RUN_ID,
-        account=ACCOUNT,
+    manifest = _seal_bundle(
+        tmp_path,
+        index,
         market="MULTI",
-        account_config_sha256=CONFIG_HASH,
-        strategy_policy_sha256=POLICY_HASH,
-        dependencies=_dependency_rows(tmp_path),
-        status_index=index,
         statuses_by_owner={},
         opening_candidates={},
         opening_decisions={},
         combo_evidence_by_owner={},
-        account_display_name=DISPLAY_NAME,
     )
     assert manifest["markets"] == []
     assert manifest["expected_owners"] == []
@@ -400,30 +395,18 @@ def test_experience_combo_snapshot_rejects_candidate_count_mismatch(
         candidate_count=0,
     )
     with pytest.raises(ExperienceCandidateSnapshotError, match="count mismatch"):
-        seal_experience_candidate_bundle(
-            base=tmp_path,
-            run_id=RUN_ID,
-            account=ACCOUNT,
-            market="US",
-            account_config_sha256=CONFIG_HASH,
-            strategy_policy_sha256=POLICY_HASH,
-            dependencies=_dependency_rows(tmp_path),
-            status_index=index,
+        _seal_bundle(
+            tmp_path,
+            index,
             statuses_by_owner={
                 "sp_lc": [
                     {
-                        "symbol": "DEMO",
-                        "strategy_mode": "combo_yield",
-                        "owner": "sp_lc",
-                        "status": "completed",
-                        "candidate_count": 0,
+                        "symbol": "DEMO", "strategy_mode": "combo_yield", "owner": "sp_lc",
+                        "status": "completed", "candidate_count": 0,
                     }
                 ]
             },
             opening_candidates={},
             opening_decisions={},
-            combo_evidence_by_owner={
-                "sp_lc": [{"ranked_pairs": [{"symbol": "DEMO"}]}]
-            },
-            account_display_name=DISPLAY_NAME,
+            combo_evidence_by_owner={"sp_lc": [{"ranked_pairs": [{"symbol": "DEMO"}]}]},
         )
