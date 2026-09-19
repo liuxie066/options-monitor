@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import re
@@ -28,6 +27,7 @@ from src.application.channels.feishu_notification_renderer import (
     feishu_notification_envelope_sha256,
     normalize_feishu_notification_envelope,
 )
+from src.application.file_locks import exclusive_lock as _exclusive_lock
 from src.infrastructure.io_utils import utc_now as _utc_now_iso
 
 
@@ -2270,17 +2270,6 @@ def _without_source_provenance(value: Any) -> Any:
     if isinstance(value, tuple):
         return [_without_source_provenance(item) for item in value]
     return value
-
-
-@contextmanager
-def _exclusive_lock(path: Path) -> Iterator[None]:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _read_json_strict(path: Path) -> Any:

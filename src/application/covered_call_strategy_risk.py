@@ -22,6 +22,8 @@ from domain.domain.symbol_identity import symbol_currency
 from src.application.short_vol_risk_context import amount_to_cny, enrich_short_vol_contract_cny_fields
 from src.infrastructure.exchange_rates import CurrencyConverter
 from src.application.numeric_helpers import float_or_none as _float
+from src.application.payload_helpers import config_float_from_sources as _float_setting_from_sources
+from src.application.payload_helpers import config_optional_float as _optional_float_setting
 
 
 def resolve_covered_call_underwriting_config(raw: dict[str, Any] | None) -> InsuranceUnderwritingConfig:
@@ -151,31 +153,3 @@ def _covered_notional_cny(
         return None
     ccy = row.get("currency") or symbol_currency(row.get("symbol"))
     return amount_to_cny(spot * multiplier, ccy, exchange_rate_converter=exchange_rate_converter)
-
-
-def _float_setting(raw: dict[str, Any], key: str, default: float) -> float:
-    try:
-        value = raw.get(key, default)
-        if value is None:
-            return float(default)
-        return float(value)
-    except Exception:
-        return float(default)
-
-
-def _float_setting_from_sources(key: str, default: float, *sources: dict[str, Any]) -> float:
-    for source in sources:
-        if not isinstance(source, dict) or key not in source:
-            continue
-        return _float_setting(source, key, default)
-    return float(default)
-
-
-def _optional_float_setting(raw: dict[str, Any], key: str) -> float | None:
-    try:
-        value = raw.get(key)
-        if value is None or value == "":
-            return None
-        return float(value)
-    except Exception:
-        return None

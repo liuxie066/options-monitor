@@ -54,6 +54,8 @@ from src.application.payload_helpers import as_dict as _dict
 from src.application.payload_helpers import first_text as _first_text
 from src.application.channels.reply_decision import public_inbound_summary as _public_inbound_summary
 from src.application.payload_helpers import config_bool as _config_bool
+from src.application.payload_helpers import config_positive_int as _config_positive_int
+from src.application.file_locks import single_instance_lock
 
 
 ExecuteToolFn = Callable[[str, dict[str, Any]], dict[str, Any]]
@@ -1127,17 +1129,6 @@ def _load_assistant_behavior_config(*, config_path: str | None) -> dict[str, Any
     return cfg if cfg else {}
 
 
-def _config_positive_int(explicit: int | None, configured: Any, *, default: int) -> int:
-    raw = explicit if explicit is not None else configured
-    if raw is None or str(raw).strip() == "":
-        raw = default
-    try:
-        value = int(raw)
-    except Exception:
-        value = default
-    return max(1, value)
-
-
 def _config_non_negative_float(explicit: float | None, configured: Any, *, default: float) -> float:
     raw = explicit if explicit is not None else configured
     if raw is None or str(raw).strip() == "":
@@ -1164,29 +1155,8 @@ def _parse_utc_datetime(value: Any) -> datetime | None:
 
 @contextmanager
 def _single_instance_lock(lock_path: str | os.PathLike[str] | None) -> Any:
-    raw = str(lock_path or "").strip()
-    if not raw:
+    with single_instance_lock(
+        lock_path,
+        busy_message="another WeChat ClawBot inbound client is already running",
+    ):
         yield
-        return
-    path = Path(raw).expanduser()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    handle = path.open("a+", encoding="utf-8")
-    try:
-        try:
-            import fcntl
-
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise AgentToolError(
-                code="RESOURCE_BUSY",
-                message="another WeChat ClawBot inbound client is already running",
-                details={"lock_path": str(path)},
-            ) from exc
-        yield
-    finally:
-        try:
-            import fcntl
-
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        finally:
-            handle.close()

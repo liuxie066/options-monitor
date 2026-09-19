@@ -11,7 +11,9 @@ Also hosts the shared plain-text, value-coercion, timestamp-parsing and
 canonical-JSON copies that were byte-identical per module (``_text``,
 ``_optional_id``, ``_parse_utc``, ``_parse_datetime``, ``_nested``,
 ``_as_float_or_none``, ``_positive_integer``, ``_canonical_bytes``,
-``_json_bytes``, ``_config_bool``). Wall-clock "now" helpers live in
+``_json_bytes``, ``_config_bool``, ``_config_positive_int``,
+``_float_setting``, ``_float_setting_from_sources``,
+``_optional_float_setting``). Wall-clock "now" helpers live in
 ``src.infrastructure.io_utils.utc_now``; pandas-aware numeric coercion lives
 in ``src.application.numeric_helpers``.
 """
@@ -130,6 +132,45 @@ def config_bool(explicit: bool | None, configured: Any, *, default: bool) -> boo
     return bool(default)
 
 
+def config_positive_int(explicit: int | None, configured: Any, *, default: int) -> int:
+    raw = explicit if explicit is not None else configured
+    if raw is None or str(raw).strip() == "":
+        raw = default
+    try:
+        value = int(raw)
+    except Exception:
+        value = default
+    return max(1, value)
+
+
+def config_float(raw: dict[str, Any], key: str, default: float) -> float:
+    try:
+        value = raw.get(key, default)
+        if value is None:
+            return float(default)
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def config_float_from_sources(key: str, default: float, *sources: dict[str, Any]) -> float:
+    for source in sources:
+        if not isinstance(source, dict) or key not in source:
+            continue
+        return config_float(source, key, default)
+    return float(default)
+
+
+def config_optional_float(raw: dict[str, Any], key: str) -> float | None:
+    try:
+        value = raw.get(key)
+        if value is None or value == "":
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
 def canonical_json_bytes(value: Any) -> bytes:
     return json.dumps(
         value,
@@ -172,6 +213,10 @@ __all__ = [
     "canonical_json_bytes",
     "canonical_json_bytes_lines",
     "config_bool",
+    "config_float",
+    "config_float_from_sources",
+    "config_optional_float",
+    "config_positive_int",
     "first_text",
     "nested",
     "optional_text",

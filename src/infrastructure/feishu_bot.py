@@ -18,6 +18,23 @@ FEISHU_SEND_TOO_LARGE = "FEISHU_SEND_TOO_LARGE"
 _FEISHU_SEND_MESSAGE_TYPES = {"text", "post", "interactive"}
 
 
+def permanent_failure_allows_fallback(exc: FeishuPermanentError, *, too_large_code: str) -> bool:
+    """Report whether a permanent Feishu failure can be retried with a smaller payload.
+
+    ``too_large_code`` is the ``local_error_code`` the calling operation raises when
+    its payload exceeded the request budget (``FEISHU_REPLY_TOO_LARGE`` for replies,
+    ``FEISHU_SEND_TOO_LARGE`` for sends); any other permanent failure counts only
+    when it carries an explicit API code or a 4xx HTTP status.
+    """
+    response = exc.response if isinstance(exc.response, dict) else {}
+    if str(response.get("local_error_code") or "") == too_large_code:
+        return True
+    http_status = response.get("http_status")
+    return exc.code is not None or (
+        isinstance(http_status, int) and 400 <= http_status <= 499
+    )
+
+
 def reply_message(
     *,
     app_id: str,
