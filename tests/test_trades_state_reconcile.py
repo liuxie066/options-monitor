@@ -159,28 +159,41 @@ def _position_lot(lot_id: str, *, account: str = "lx", contracts: int = 1) -> di
     }
 
 
+def _write_state(
+    state_path,
+    *,
+    processed: dict | None = None,
+    failed: dict | None = None,
+    unresolved: dict | None = None,
+) -> None:
+    """Write the three intake-state buckets, defaulting the ones a case omits."""
+    write_trade_intake_state(
+        state_path,
+        {
+            "processed_deal_ids": dict(processed or {}),
+            "failed_deal_ids": dict(failed or {}),
+            "unresolved_deal_ids": dict(unresolved or {}),
+        },
+    )
+
 
 def test_readonly_sqlite_preview_reports_terminal_evidence_without_writing_state(
     tmp_path: Path,
 ) -> None:
     state_path = tmp_path / "state.json"
-    write_trade_intake_state(
+    _write_state(
         state_path,
-        {
-            "processed_deal_ids": {},
-            "failed_deal_ids": {
-                "futu:lx:1001:deal-close-1": {
-                    "status": "failed",
-                    "action": "close",
-                    "account": "lx",
-                },
-                "deal-still-pending": {
-                    "status": "unresolved",
-                    "action": "close",
-                    "account": "lx",
-                },
+        failed={
+            "futu:lx:1001:deal-close-1": {
+                "status": "failed",
+                "action": "close",
+                "account": "lx",
             },
-            "unresolved_deal_ids": {},
+            "deal-still-pending": {
+                "status": "unresolved",
+                "action": "close",
+                "account": "lx",
+            },
         },
     )
     original_state = state_path.read_bytes()
@@ -238,19 +251,15 @@ def test_readonly_sqlite_preview_delegates_canonical_lifecycle_pending(
 ) -> None:
     state_path = tmp_path / "state.json"
     source_key = "futu:lx:1001:deal-option-waiting"
-    write_trade_intake_state(
+    _write_state(
         state_path,
-        {
-            "processed_deal_ids": {},
-            "failed_deal_ids": {},
-            "unresolved_deal_ids": {
-                source_key: {
-                    "status": "unresolved",
-                    "action": "lifecycle",
-                    "account": "lx",
-                    "reason": "waiting_settlement_evidence",
-                }
-            },
+        unresolved={
+            source_key: {
+                "status": "unresolved",
+                "action": "lifecycle",
+                "account": "lx",
+                "reason": "waiting_settlement_evidence",
+            }
         },
     )
     original_state = state_path.read_bytes()
@@ -432,14 +441,10 @@ def test_readonly_sqlite_preview_delegates_canonical_lifecycle_pending(
 
 def test_reconcile_trade_intake_state_dry_run_keeps_file_unchanged(tmp_path: Path) -> None:
     state_path = tmp_path / "auto_trade_intake_state.json"
-    write_trade_intake_state(
+    _write_state(
         state_path,
-        {
-            "processed_deal_ids": {},
-            "failed_deal_ids": {
-                "futu:lx:1001:deal-close-1": {"status": "failed", "action": "close", "account": "lx", "reason": "exception:LedgerPreflightError"}
-            },
-            "unresolved_deal_ids": {},
+        failed={
+            "futu:lx:1001:deal-close-1": {"status": "failed", "action": "close", "account": "lx", "reason": "exception:LedgerPreflightError"}
         },
     )
     repo = FakeRepo(
@@ -467,19 +472,15 @@ def test_reconcile_trade_intake_state_dry_run_keeps_file_unchanged(tmp_path: Pat
 
 def test_reconcile_trade_intake_state_marks_ledger_recorded_failed_deal_processed(tmp_path: Path) -> None:
     state_path = tmp_path / "auto_trade_intake_state.json"
-    write_trade_intake_state(
+    _write_state(
         state_path,
-        {
-            "processed_deal_ids": {},
-            "failed_deal_ids": {
-                "futu:lx:1001:5646137975909129735": {
-                    "status": "failed",
-                    "action": "close",
-                    "account": "lx",
-                    "reason": "exception:LedgerPreflightError",
-                }
-            },
-            "unresolved_deal_ids": {},
+        failed={
+            "futu:lx:1001:5646137975909129735": {
+                "status": "failed",
+                "action": "close",
+                "account": "lx",
+                "reason": "exception:LedgerPreflightError",
+            }
         },
     )
     repo = FakeRepo(
@@ -518,18 +519,14 @@ def test_reconcile_preserves_concurrent_unrelated_deal_state(tmp_path: Path) -> 
     state_path = tmp_path / "auto_trade_intake_state.json"
     stale_key = "futu:lx:1001:stale"
     concurrent_key = "futu:lx:1001:concurrent"
-    write_trade_intake_state(
+    _write_state(
         state_path,
-        {
-            "processed_deal_ids": {},
-            "failed_deal_ids": {
-                stale_key: {
-                    "status": "failed",
-                    "action": "close",
-                    "account": "lx",
-                }
-            },
-            "unresolved_deal_ids": {},
+        failed={
+            stale_key: {
+                "status": "failed",
+                "action": "close",
+                "account": "lx",
+            }
         },
     )
     repo = FakeRepo(
@@ -580,19 +577,15 @@ def test_reconcile_preserves_concurrent_unrelated_deal_state(tmp_path: Path) -> 
 
 def test_reconcile_trade_intake_state_ignores_same_deal_id_for_different_account(tmp_path: Path) -> None:
     state_path = tmp_path / "auto_trade_intake_state.json"
-    write_trade_intake_state(
+    _write_state(
         state_path,
-        {
-            "processed_deal_ids": {},
-            "failed_deal_ids": {
-                "same-deal-id": {
-                    "status": "failed",
-                    "action": "open",
-                    "account": "lx",
-                    "reason": "projection_verification_failed",
-                }
-            },
-            "unresolved_deal_ids": {},
+        failed={
+            "same-deal-id": {
+                "status": "failed",
+                "action": "open",
+                "account": "lx",
+                "reason": "projection_verification_failed",
+            }
         },
     )
     repo = FakeRepo(
@@ -646,20 +639,16 @@ def test_reconcile_bare_deal_id_without_physical_scope_stays_pending(
 
 def test_reconcile_trade_intake_state_uses_lifecycle_stock_settlement_source_event(tmp_path: Path) -> None:
     state_path = tmp_path / "auto_trade_intake_state.json"
-    write_trade_intake_state(
+    _write_state(
         state_path,
-        {
-            "processed_deal_ids": {},
-            "failed_deal_ids": {},
-            "unresolved_deal_ids": {
-                "futu:lx:1001:8433576313500456302": {
-                    "status": "unresolved",
-                    "action": "lifecycle",
-                    "account": "lx",
-                    "reason": "stock_settlement_waiting_option_leg",
-                    "retryable": True,
-                }
-            },
+        unresolved={
+            "futu:lx:1001:8433576313500456302": {
+                "status": "unresolved",
+                "action": "lifecycle",
+                "account": "lx",
+                "reason": "stock_settlement_waiting_option_leg",
+                "retryable": True,
+            }
         },
     )
     repo = FakeRepo(
@@ -696,20 +685,16 @@ def test_reconcile_trade_intake_state_uses_lifecycle_stock_settlement_source_eve
 
 def test_reconcile_trade_intake_state_marks_assigned_stock_sale_event_processed(tmp_path: Path) -> None:
     state_path = tmp_path / "auto_trade_intake_state.json"
-    write_trade_intake_state(
+    _write_state(
         state_path,
-        {
-            "processed_deal_ids": {},
-            "failed_deal_ids": {},
-            "unresolved_deal_ids": {
-                "futu:lx:1001:6315806741161105994": {
-                    "status": "unresolved",
-                    "action": "assigned_stock_sale",
-                    "account": "lx",
-                    "reason": "ambiguous_assigned_stock_sale",
-                    "retryable": False,
-                }
-            },
+        unresolved={
+            "futu:lx:1001:6315806741161105994": {
+                "status": "unresolved",
+                "action": "assigned_stock_sale",
+                "account": "lx",
+                "reason": "ambiguous_assigned_stock_sale",
+                "retryable": False,
+            }
         },
     )
     repo = FakeRepo(
@@ -745,20 +730,16 @@ def test_reconcile_trade_intake_state_marks_assigned_stock_sale_event_processed(
 def test_reconcile_trade_intake_state_marks_ignored_non_option_unresolved_deal_processed(tmp_path: Path) -> None:
     state_path = tmp_path / "auto_trade_intake_state.json"
     audit_path = tmp_path / "auto_trade_intake_audit.jsonl"
-    write_trade_intake_state(
+    _write_state(
         state_path,
-        {
-            "processed_deal_ids": {},
-            "failed_deal_ids": {},
-            "unresolved_deal_ids": {
-                "4246552780115108684": {
-                    "status": "unresolved",
-                    "action": None,
-                    "account": "lx",
-                    "reason": "not_option_deal",
-                    "retryable": False,
-                }
-            },
+        unresolved={
+            "4246552780115108684": {
+                "status": "unresolved",
+                "action": None,
+                "account": "lx",
+                "reason": "not_option_deal",
+                "retryable": False,
+            }
         },
     )
     audit_path.write_text(
@@ -785,20 +766,16 @@ def test_reconcile_trade_intake_state_marks_ignored_non_option_unresolved_deal_p
 
 def test_reconcile_trade_intake_state_rejects_status_only_assignment(tmp_path: Path) -> None:
     state_path = tmp_path / "auto_trade_intake_state.json"
-    write_trade_intake_state(
+    _write_state(
         state_path,
-        {
-            "processed_deal_ids": {},
-            "failed_deal_ids": {},
-            "unresolved_deal_ids": {
-                "3254612655429789712": {
-                    "status": "unresolved",
-                    "action": "lifecycle",
-                    "account": "lx",
-                    "reason": "waiting_settlement_evidence",
-                    "retryable": True,
-                }
-            },
+        unresolved={
+            "3254612655429789712": {
+                "status": "unresolved",
+                "action": "lifecycle",
+                "account": "lx",
+                "reason": "waiting_settlement_evidence",
+                "retryable": True,
+            }
         },
     )
     repo = FakeRepo(
@@ -834,20 +811,16 @@ def test_reconcile_trade_intake_state_rejects_status_only_assignment(tmp_path: P
 
 def test_reconcile_trade_intake_state_rejects_status_only_expiry(tmp_path: Path) -> None:
     state_path = tmp_path / "auto_trade_intake_state.json"
-    write_trade_intake_state(
+    _write_state(
         state_path,
-        {
-            "processed_deal_ids": {},
-            "failed_deal_ids": {},
-            "unresolved_deal_ids": {
-                "775828694842258876": {
-                    "status": "unresolved",
-                    "action": "lifecycle",
-                    "account": "lx",
-                    "reason": "waiting_settlement_evidence",
-                    "retryable": True,
-                }
-            },
+        unresolved={
+            "775828694842258876": {
+                "status": "unresolved",
+                "action": "lifecycle",
+                "account": "lx",
+                "reason": "waiting_settlement_evidence",
+                "retryable": True,
+            }
         },
     )
     repo = FakeRepo(
@@ -884,19 +857,15 @@ def test_reconcile_trade_intake_state_rejects_status_only_expiry(tmp_path: Path)
 def test_reconcile_trade_intake_state_rejects_cached_terminal_summary(tmp_path: Path) -> None:
     deal_id = "futu:lx:100000000000000001:2000000000000000001"
     state_path = tmp_path / "auto_trade_intake_state.json"
-    write_trade_intake_state(
+    _write_state(
         state_path,
-        {
-            "processed_deal_ids": {},
-            "failed_deal_ids": {},
-            "unresolved_deal_ids": {
-                deal_id: {
-                    "status": "unresolved",
-                    "action": "lifecycle",
-                    "account": "lx",
-                    "reason": "waiting_settlement_evidence",
-                }
-            },
+        unresolved={
+            deal_id: {
+                "status": "unresolved",
+                "action": "lifecycle",
+                "account": "lx",
+                "reason": "waiting_settlement_evidence",
+            }
         },
     )
     repo = FakeRepo(
@@ -945,20 +914,16 @@ def test_reconcile_trade_intake_state_rejects_cached_terminal_summary(tmp_path: 
 
 def test_reconcile_trade_intake_state_dry_run_keeps_completed_lifecycle_file_unchanged(tmp_path: Path) -> None:
     state_path = tmp_path / "auto_trade_intake_state.json"
-    write_trade_intake_state(
+    _write_state(
         state_path,
-        {
-            "processed_deal_ids": {},
-            "failed_deal_ids": {},
-            "unresolved_deal_ids": {
-                "deal-option-1": {
-                    "status": "unresolved",
-                    "action": "lifecycle",
-                    "account": "lx",
-                    "reason": "waiting_settlement_evidence",
-                    "retryable": True,
-                }
-            },
+        unresolved={
+            "deal-option-1": {
+                "status": "unresolved",
+                "action": "lifecycle",
+                "account": "lx",
+                "reason": "waiting_settlement_evidence",
+                "retryable": True,
+            }
         },
     )
     repo = FakeRepo(
@@ -1034,20 +999,16 @@ def test_reconcile_trade_intake_state_keeps_waiting_lifecycle_pending(tmp_path: 
         economic_payload=lifecycle_evidence,
     )
     state_path = tmp_path / "auto_trade_intake_state.json"
-    write_trade_intake_state(
+    _write_state(
         state_path,
-        {
-            "processed_deal_ids": {},
-            "failed_deal_ids": {},
-            "unresolved_deal_ids": {
-                source_key: {
-                    "status": "unresolved",
-                    "action": "lifecycle",
-                    "account": "lx",
-                    "reason": "waiting_settlement_evidence",
-                    "retryable": True,
-                }
-            },
+        unresolved={
+            source_key: {
+                "status": "unresolved",
+                "action": "lifecycle",
+                "account": "lx",
+                "reason": "waiting_settlement_evidence",
+                "retryable": True,
+            }
         },
     )
     repo = FakeRepo(
@@ -1111,19 +1072,15 @@ def test_reconcile_trade_intake_state_does_not_delegate_missing_target_manifest(
         economic_payload=lifecycle_evidence,
     )
     state_path = tmp_path / "auto_trade_intake_state.json"
-    write_trade_intake_state(
+    _write_state(
         state_path,
-        {
-            "processed_deal_ids": {},
-            "failed_deal_ids": {},
-            "unresolved_deal_ids": {
-                source_key: {
-                    "status": "unresolved",
-                    "action": "lifecycle",
-                    "account": "lx",
-                    "reason": "waiting_settlement_evidence",
-                }
-            },
+        unresolved={
+            source_key: {
+                "status": "unresolved",
+                "action": "lifecycle",
+                "account": "lx",
+                "reason": "waiting_settlement_evidence",
+            }
         },
     )
     repo = FakeRepo(
@@ -1209,19 +1166,15 @@ def test_reconcile_trade_intake_state_delegates_valid_migration_bridge(
         },
     )
     state_path = tmp_path / "auto_trade_intake_state.json"
-    write_trade_intake_state(
+    _write_state(
         state_path,
-        {
-            "processed_deal_ids": {},
-            "failed_deal_ids": {},
-            "unresolved_deal_ids": {
-                source_key: {
-                    "status": "unresolved",
-                    "action": "lifecycle",
-                    "account": "lx",
-                    "reason": "lifecycle_case_futu_account_mismatch",
-                }
-            },
+        unresolved={
+            source_key: {
+                "status": "unresolved",
+                "action": "lifecycle",
+                "account": "lx",
+                "reason": "lifecycle_case_futu_account_mismatch",
+            }
         },
     )
     repo = FakeRepo(
@@ -1301,19 +1254,15 @@ def test_reconcile_trade_intake_state_does_not_delegate_ambiguous_numeric_deal_i
         lots.append(_position_lot(lot_id))
 
     state_path = tmp_path / "auto_trade_intake_state.json"
-    write_trade_intake_state(
+    _write_state(
         state_path,
-        {
-            "processed_deal_ids": {},
-            "failed_deal_ids": {},
-            "unresolved_deal_ids": {
-                deal_id: {
-                    "status": "unresolved",
-                    "action": "lifecycle",
-                    "account": "lx",
-                    "reason": "waiting_settlement_evidence",
-                }
-            },
+        unresolved={
+            deal_id: {
+                "status": "unresolved",
+                "action": "lifecycle",
+                "account": "lx",
+                "reason": "waiting_settlement_evidence",
+            }
         },
     )
     repo = FakeRepo(
@@ -1397,19 +1346,15 @@ def test_reconcile_trade_intake_state_rejects_invalid_migration_bridge(
         },
     )
     state_path = tmp_path / "auto_trade_intake_state.json"
-    write_trade_intake_state(
+    _write_state(
         state_path,
-        {
-            "processed_deal_ids": {},
-            "failed_deal_ids": {},
-            "unresolved_deal_ids": {
-                source_key: {
-                    "status": "unresolved",
-                    "action": "lifecycle",
-                    "account": "lx",
-                    "reason": "lifecycle_case_futu_account_mismatch",
-                }
-            },
+        unresolved={
+            source_key: {
+                "status": "unresolved",
+                "action": "lifecycle",
+                "account": "lx",
+                "reason": "lifecycle_case_futu_account_mismatch",
+            }
         },
     )
     repo = FakeRepo(
@@ -1431,13 +1376,9 @@ def test_reconcile_trade_intake_state_rejects_invalid_migration_bridge(
 
 def test_reconcile_trade_intake_state_keeps_pending_without_evidence(tmp_path: Path) -> None:
     state_path = tmp_path / "auto_trade_intake_state.json"
-    write_trade_intake_state(
+    _write_state(
         state_path,
-        {
-            "processed_deal_ids": {},
-            "failed_deal_ids": {"deal-failed-1": {"status": "failed", "reason": "exception:RuntimeError"}},
-            "unresolved_deal_ids": {},
-        },
+        failed={"deal-failed-1": {"status": "failed", "reason": "exception:RuntimeError"}},
     )
 
     out = reconcile_trade_intake_state(state_path=state_path, repo=FakeRepo([]), apply_changes=True)
@@ -1453,19 +1394,15 @@ def test_reconcile_does_not_complete_deal_from_numeric_target_lot_lineage(
 ) -> None:
     state_path = tmp_path / "auto_trade_intake_state.json"
     opening_deal_id = "9162790356868244299"
-    write_trade_intake_state(
+    _write_state(
         state_path,
-        {
-            "processed_deal_ids": {},
-            "failed_deal_ids": {
-                opening_deal_id: {
-                    "status": "failed",
-                    "action": "open",
-                    "account": "lx",
-                    "reason": "exception:RuntimeError",
-                }
-            },
-            "unresolved_deal_ids": {},
+        failed={
+            opening_deal_id: {
+                "status": "failed",
+                "action": "open",
+                "account": "lx",
+                "reason": "exception:RuntimeError",
+            }
         },
     )
     repo = FakeRepo(

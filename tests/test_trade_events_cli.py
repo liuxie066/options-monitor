@@ -227,6 +227,37 @@ def _append_canonical_void_event(
     )
 
 
+def _bind_cli_repo(monkeypatch, cli, repo, data_path) -> None:
+    """Point the CLI's repo resolver at ``repo`` with ``data_path`` as its config."""
+    monkeypatch.setattr(
+        cli,
+        "resolve_option_positions_repo",
+        lambda **_kwargs: (data_path, repo),
+    )
+
+
+def _open_event_cli(monkeypatch, tmp_path: Path):
+    """Build the 0700.HK open-lot repo, bind the CLI to it, and return both."""
+    import src.interfaces.cli.trade_events as cli
+
+    repo, event_id = _repo_with_open_event(tmp_path)
+    _bind_cli_repo(monkeypatch, cli, repo, tmp_path / "data.json")
+    return cli, repo, event_id
+
+
+def _persist_manual_close(repo, *, lot) -> None:
+    """Close ``lot`` through the manual close path with this module's default terms."""
+    ledger_manual_trades.persist_manual_close_event(
+        repo,
+        record_id=lot["record_id"],
+        fields=lot["fields"],
+        contracts_to_close=1,
+        close_price=1.2,
+        close_reason="manual_buy_to_close",
+        as_of_ms=2000,
+    )
+
+
 def _insert_invalid_legacy_void_event(
     repo,
     *,
@@ -255,10 +286,7 @@ def _insert_invalid_legacy_void_event(
 
 
 def test_trade_events_list_text_shows_trade_time_beijing(monkeypatch, tmp_path: Path, capsys) -> None:
-    import src.interfaces.cli.trade_events as cli
-
-    repo, _event_id = _repo_with_open_event(tmp_path)
-    monkeypatch.setattr(cli, "resolve_option_positions_repo", lambda **_kwargs: (tmp_path / "data.json", repo))
+    cli, repo, _event_id = _open_event_cli(monkeypatch, tmp_path)
 
     assert cli.main(["list", "--format", "text"]) == 0
 
@@ -374,10 +402,7 @@ def test_trade_events_list_ignores_invalid_void_when_filtering_active(monkeypatc
 
 
 def test_trade_events_show_json_includes_trade_time_beijing(monkeypatch, tmp_path: Path, capsys) -> None:
-    import src.interfaces.cli.trade_events as cli
-
-    repo, event_id = _repo_with_open_event(tmp_path)
-    monkeypatch.setattr(cli, "resolve_option_positions_repo", lambda **_kwargs: (tmp_path / "data.json", repo))
+    cli, repo, event_id = _open_event_cli(monkeypatch, tmp_path)
 
     assert cli.main(["show", event_id, "--format", "json"]) == 0
 
@@ -387,10 +412,7 @@ def test_trade_events_show_json_includes_trade_time_beijing(monkeypatch, tmp_pat
 
 
 def test_trade_events_repair_dry_run_does_not_mutate(monkeypatch, tmp_path: Path, capsys) -> None:
-    import src.interfaces.cli.trade_events as cli
-
-    repo, event_id = _repo_with_open_event(tmp_path)
-    monkeypatch.setattr(cli, "resolve_option_positions_repo", lambda **_kwargs: (tmp_path / "data.json", repo))
+    cli, repo, event_id = _open_event_cli(monkeypatch, tmp_path)
 
     assert cli.main(
         [
@@ -428,10 +450,7 @@ def test_trade_events_repair_dry_run_does_not_mutate(monkeypatch, tmp_path: Path
 
 
 def test_trade_events_repair_apply_voids_and_replaces_event(monkeypatch, tmp_path: Path, capsys) -> None:
-    import src.interfaces.cli.trade_events as cli
-
-    repo, event_id = _repo_with_open_event(tmp_path)
-    monkeypatch.setattr(cli, "resolve_option_positions_repo", lambda **_kwargs: (tmp_path / "data.json", repo))
+    cli, repo, event_id = _open_event_cli(monkeypatch, tmp_path)
 
     assert cli.main(["repair", event_id, "--strike", "500", "--confirm", "--format", "json"]) == 0
 
@@ -539,10 +558,7 @@ def test_repair_preserves_fees_and_rebuilds_cash_conversion_identity(
 
 
 def test_trade_events_repair_rejects_second_repair(monkeypatch, tmp_path: Path, capsys) -> None:
-    import src.interfaces.cli.trade_events as cli
-
-    repo, event_id = _repo_with_open_event(tmp_path)
-    monkeypatch.setattr(cli, "resolve_option_positions_repo", lambda **_kwargs: (tmp_path / "data.json", repo))
+    cli, repo, event_id = _open_event_cli(monkeypatch, tmp_path)
 
     assert cli.main(["repair", event_id, "--strike", "500", "--confirm", "--format", "json"]) == 0
     capsys.readouterr()
@@ -586,15 +602,7 @@ def test_trade_events_repair_rejects_open_event_with_downstream_close(monkeypatc
 
     repo, event_id = _repo_with_open_event(tmp_path)
     lot = repo.list_position_lots()[0]
-    ledger_manual_trades.persist_manual_close_event(
-        repo,
-        record_id=lot["record_id"],
-        fields=lot["fields"],
-        contracts_to_close=1,
-        close_price=1.2,
-        close_reason="manual_buy_to_close",
-        as_of_ms=2000,
-    )
+    _persist_manual_close(repo, lot=lot)
     monkeypatch.setattr(cli, "resolve_option_positions_repo", lambda **_kwargs: (tmp_path / "data.json", repo))
 
     assert cli.main(["repair", event_id, "--strike", "500", "--confirm"]) == 2
@@ -631,15 +639,7 @@ def test_trade_events_identity_repair_binds_in_place_with_downstream_and_is_idem
         )
     run_position_projection_forced_full(repo)
     lot = repo.list_position_lots()[0]
-    ledger_manual_trades.persist_manual_close_event(
-        repo,
-        record_id=lot["record_id"],
-        fields=lot["fields"],
-        contracts_to_close=1,
-        close_price=1.2,
-        close_reason="manual_buy_to_close",
-        as_of_ms=2000,
-    )
+    _persist_manual_close(repo, lot=lot)
     monkeypatch.setattr(cli, "resolve_option_positions_repo", lambda **_kwargs: (tmp_path / "data.json", repo))
 
     def stored_state() -> tuple[str, int, list[dict], int]:
@@ -717,21 +717,9 @@ def test_trade_events_opend_time_correction_updates_in_place_with_downstream_and
     _attach_opend_time_evidence(repo, event_id=event_id)
     run_position_projection_forced_full(repo)
     lot = repo.list_position_lots()[0]
-    ledger_manual_trades.persist_manual_close_event(
-        repo,
-        record_id=lot["record_id"],
-        fields=lot["fields"],
-        contracts_to_close=1,
-        close_price=1.2,
-        close_reason="manual_buy_to_close",
-        as_of_ms=2000,
-    )
+    _persist_manual_close(repo, lot=lot)
     _install_legacy_trade_time_immutable_trigger(repo)
-    monkeypatch.setattr(
-        cli,
-        "resolve_option_positions_repo",
-        lambda **_kwargs: (tmp_path / "data.json", repo),
-    )
+    _bind_cli_repo(monkeypatch, cli, repo, tmp_path / "data.json")
 
     def stored_state() -> tuple[str, int, int, list[dict], int]:
         with repo._connect() as conn:  # noqa: SLF001 - exact storage proof
@@ -844,11 +832,7 @@ def test_trade_events_opend_time_correction_rejects_unmatched_evidence(
         trade_time_ms=evidence_time_ms,
         quantity=quantity,
     )
-    monkeypatch.setattr(
-        cli,
-        "resolve_option_positions_repo",
-        lambda **_kwargs: (tmp_path / "data.json", repo),
-    )
+    _bind_cli_repo(monkeypatch, cli, repo, tmp_path / "data.json")
     before = repo.list_trade_events()
 
     assert cli.main(
@@ -906,10 +890,7 @@ def test_trade_events_identity_repair_rejects_invalid_identity_without_writing(
     reason: str,
     message: str,
 ) -> None:
-    import src.interfaces.cli.trade_events as cli
-
-    repo, event_id = _repo_with_open_event(tmp_path)
-    monkeypatch.setattr(cli, "resolve_option_positions_repo", lambda **_kwargs: (tmp_path / "data.json", repo))
+    cli, repo, event_id = _open_event_cli(monkeypatch, tmp_path)
     before = repo.list_trade_events()
 
     assert cli.main(
@@ -1028,10 +1009,7 @@ def test_trade_events_identity_repair_rolls_back_projection_failure(
     capsys,
 ) -> None:
     import src.application.ledger.interventions as interventions
-    import src.interfaces.cli.trade_events as cli
-
-    repo, event_id = _repo_with_open_event(tmp_path)
-    monkeypatch.setattr(cli, "resolve_option_positions_repo", lambda **_kwargs: (tmp_path / "data.json", repo))
+    cli, repo, event_id = _open_event_cli(monkeypatch, tmp_path)
     with repo._connect() as conn:  # noqa: SLF001 - rollback proof
         before_json = str(
             conn.execute(
@@ -1076,10 +1054,7 @@ def test_trade_events_identity_repair_rejects_cas_conflict_without_writing(
     tmp_path: Path,
     capsys,
 ) -> None:
-    import src.interfaces.cli.trade_events as cli
-
-    repo, event_id = _repo_with_open_event(tmp_path)
-    monkeypatch.setattr(cli, "resolve_option_positions_repo", lambda **_kwargs: (tmp_path / "data.json", repo))
+    cli, repo, event_id = _open_event_cli(monkeypatch, tmp_path)
     monkeypatch.setattr(
         type(repo),
         "compare_and_swap_trade_event_order_identity_json",
@@ -1193,10 +1168,7 @@ def test_trade_events_repair_allows_open_when_downstream_close_was_canonical_voi
 
 
 def test_trade_events_void_dry_run_includes_projection_preview(monkeypatch, tmp_path: Path, capsys) -> None:
-    import src.interfaces.cli.trade_events as cli
-
-    repo, event_id = _repo_with_open_event(tmp_path)
-    monkeypatch.setattr(cli, "resolve_option_positions_repo", lambda **_kwargs: (tmp_path / "data.json", repo))
+    cli, repo, event_id = _open_event_cli(monkeypatch, tmp_path)
 
     assert cli.main(["void", event_id, "--dry-run", "--format", "json"]) == 0
 
@@ -1219,11 +1191,7 @@ def test_assignment_void_apply_rechecks_sale_created_after_preflight(
     import src.interfaces.cli.trade_events as cli
 
     repo, assignment_event_id, stock_lot_id = _repo_with_assignment(tmp_path)
-    monkeypatch.setattr(
-        cli,
-        "resolve_option_positions_repo",
-        lambda **_kwargs: (tmp_path / "data.json", repo),
-    )
+    _bind_cli_repo(monkeypatch, cli, repo, tmp_path / "data.json")
     original_persist = ledger_commands.persist_manual_void_event
 
     def _persist_after_sale(*args, **kwargs):
@@ -1257,11 +1225,7 @@ def test_assignment_repair_apply_rechecks_sale_created_after_preview(
     import src.interfaces.cli.trade_events as cli
 
     repo, assignment_event_id, stock_lot_id = _repo_with_assignment(tmp_path)
-    monkeypatch.setattr(
-        cli,
-        "resolve_option_positions_repo",
-        lambda **_kwargs: (tmp_path / "data.json", repo),
-    )
+    _bind_cli_repo(monkeypatch, cli, repo, tmp_path / "data.json")
     original_transaction = interventions.with_sqlite_repo_transaction
 
     def _transaction_after_sale(repo_arg, fn, **kwargs):
@@ -1304,11 +1268,7 @@ def test_assignment_void_and_repair_reject_historical_sale_with_stable_dependenc
     )
     sale_event_id = str(sale["stock_event_id"])
     before = _durable_ledger_state(repo)
-    monkeypatch.setattr(
-        cli,
-        "resolve_option_positions_repo",
-        lambda **_kwargs: (tmp_path / "data.json", repo),
-    )
+    _bind_cli_repo(monkeypatch, cli, repo, tmp_path / "data.json")
 
     assert cli.main(["void", assignment_event_id, "--dry-run", "--format", "json"]) == 2
     void_error = capsys.readouterr().out
@@ -1382,11 +1342,7 @@ def test_assignment_void_rejects_closed_covered_call_once_then_allows_legally_vo
     )
     close_event_id = str(close_result.event_id)
     before = _durable_ledger_state(repo)
-    monkeypatch.setattr(
-        cli,
-        "resolve_option_positions_repo",
-        lambda **_kwargs: (tmp_path / "data.json", repo),
-    )
+    _bind_cli_repo(monkeypatch, cli, repo, tmp_path / "data.json")
 
     assert cli.main(["void", assignment_event_id, "--dry-run"]) == 2
     error = capsys.readouterr().out
@@ -1452,11 +1408,7 @@ def test_assignment_void_rejects_unresolved_explicit_stock_lot_reference(
         ],
     )
     before = _durable_ledger_state(repo)
-    monkeypatch.setattr(
-        cli,
-        "resolve_option_positions_repo",
-        lambda **_kwargs: (tmp_path / "data.json", repo),
-    )
+    _bind_cli_repo(monkeypatch, cli, repo, tmp_path / "data.json")
 
     assert cli.main(["void", assignment_event_id, "--dry-run"]) == 2
 
@@ -1509,11 +1461,7 @@ def test_assignment_void_rejects_ended_wheel_then_allows_legally_voided_wheel_hi
         if row["event_type"] == "wheel_started"
     )
     before = _durable_ledger_state(repo)
-    monkeypatch.setattr(
-        cli,
-        "resolve_option_positions_repo",
-        lambda **_kwargs: (tmp_path / "data.json", repo),
-    )
+    _bind_cli_repo(monkeypatch, cli, repo, tmp_path / "data.json")
 
     assert cli.main(["void", assignment_event_id, "--dry-run"]) == 2
     error = capsys.readouterr().out
@@ -1547,11 +1495,7 @@ def test_assignment_void_apply_preserves_ordinary_no_dependency_path(
     import src.interfaces.cli.trade_events as cli
 
     repo, assignment_event_id, _stock_lot_id = _repo_with_assignment(tmp_path)
-    monkeypatch.setattr(
-        cli,
-        "resolve_option_positions_repo",
-        lambda **_kwargs: (tmp_path / "data.json", repo),
-    )
+    _bind_cli_repo(monkeypatch, cli, repo, tmp_path / "data.json")
 
     assert cli.main(["void", assignment_event_id, "--dry-run", "--format", "json"]) == 0
     capsys.readouterr()
@@ -1574,20 +1518,14 @@ def test_assignment_void_apply_preserves_ordinary_no_dependency_path(
 
 
 def test_trade_events_rejects_apply_and_dry_run_together(monkeypatch, tmp_path: Path) -> None:
-    import src.interfaces.cli.trade_events as cli
-
-    repo, event_id = _repo_with_open_event(tmp_path)
-    monkeypatch.setattr(cli, "resolve_option_positions_repo", lambda **_kwargs: (tmp_path / "data.json", repo))
+    cli, repo, event_id = _open_event_cli(monkeypatch, tmp_path)
 
     with pytest.raises(SystemExit, match="--dry-run cannot be combined"):
         cli.main(["repair", event_id, "--strike", "500", "--apply", "--dry-run"])
 
 
 def test_trade_events_repair_apply_alone_requires_confirm(monkeypatch, tmp_path: Path) -> None:
-    import src.interfaces.cli.trade_events as cli
-
-    repo, event_id = _repo_with_open_event(tmp_path)
-    monkeypatch.setattr(cli, "resolve_option_positions_repo", lambda **_kwargs: (tmp_path / "data.json", repo))
+    cli, repo, event_id = _open_event_cli(monkeypatch, tmp_path)
 
     with pytest.raises(SystemExit, match="use --confirm or --yes"):
         cli.main(["repair", event_id, "--strike", "500", "--apply"])
@@ -1596,10 +1534,7 @@ def test_trade_events_repair_apply_alone_requires_confirm(monkeypatch, tmp_path:
 
 
 def test_trade_events_replay_dry_run_reports_projection(monkeypatch, tmp_path: Path, capsys) -> None:
-    import src.interfaces.cli.trade_events as cli
-
-    repo, _event_id = _repo_with_open_event(tmp_path)
-    monkeypatch.setattr(cli, "resolve_option_positions_repo", lambda **_kwargs: (tmp_path / "data.json", repo))
+    cli, repo, _event_id = _open_event_cli(monkeypatch, tmp_path)
 
     assert cli.main(["replay", "--dry-run", "--format", "json"]) == 0
 
