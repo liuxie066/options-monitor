@@ -12,6 +12,7 @@ from src.application.ledger.source_consumption import (
     SOURCE_PAYLOAD_SCHEMA,
     canonical_source_payload_hash,
 )
+from src.application.payload_helpers import positive_integer as _positive_integer
 
 
 ZERO_PRICE_OPTION_CLOSE_EVIDENCE = "option_zero_price_close"
@@ -151,18 +152,6 @@ def _explicit_reservation_manifest(
         return None
     return {lot_id: contracts}
 
-
-def _positive_integer(value: Any) -> int | None:
-    if isinstance(value, bool):
-        return None
-    try:
-        numeric = Decimal(str(value))
-        parsed = int(numeric)
-    except (InvalidOperation, TypeError, ValueError, OverflowError):
-        return None
-    if not numeric.is_finite() or parsed <= 0 or numeric != parsed:
-        return None
-    return parsed
 
 
 def resolve_account_lifecycle_overlay(

@@ -52,6 +52,7 @@ from src.application.wheel.config import (
 )
 from src.application.wheel.read_model import build_wheel_read_model_from_rows
 from functools import partial
+from src.application.payload_helpers import canonical_json_bytes_lines as _json_bytes
 
 
 _required_text = partial(required_text, error=lambda m: PreparedOptionPositionsContextError(m))
@@ -1330,18 +1331,6 @@ def _validate_option_context_account(
                     f"prepared option payload {field} account mismatch"
                 )
 
-
-def _json_bytes(payload: Mapping[str, Any]) -> bytes:
-    return (
-        json.dumps(
-            dict(payload),
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
-        + "\n"
-    ).encode("utf-8")
 
 
 def _required_sha256(value: Any, field: str) -> str:

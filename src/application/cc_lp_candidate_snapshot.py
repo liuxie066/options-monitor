@@ -22,6 +22,7 @@ from src.application.tick_run_workspace import (
     read_account_run_state_bytes_safely,
     write_account_run_state_bytes_once_safely,
 )
+from src.application.payload_helpers import readable_json_bytes as _canonical_json_bytes
 
 
 CC_LP_CANDIDATE_SNAPSHOT_SCHEMA = "cc_lp_candidate_snapshot.v2"
@@ -41,18 +42,6 @@ CC_LP_OPENING_STATUSES = frozenset(
 class CcLpCandidateSnapshotError(RuntimeError):
     """Raised when a CC+LP candidate snapshot cannot be trusted."""
 
-
-def _canonical_json_bytes(payload: Mapping[str, Any]) -> bytes:
-    return (
-        json.dumps(
-            dict(payload),
-            ensure_ascii=False,
-            sort_keys=True,
-            indent=2,
-            allow_nan=False,
-        )
-        + "\n"
-    ).encode("utf-8")
 
 
 def _pairs(

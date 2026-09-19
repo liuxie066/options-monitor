@@ -6,10 +6,8 @@ from pathlib import Path
 from typing import Any
 
 from src.infrastructure.io_utils import atomic_write_json, read_json
+from src.infrastructure.io_utils import utc_now as _utc_now
 
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _events_path(state_dir: Path) -> Path:

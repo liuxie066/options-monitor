@@ -18,6 +18,7 @@ from src.application.runtime_config_paths import (
     write_json_atomic,
 )
 from src.application.symbol_mutations import normalize_symbol_read
+from src.application.payload_helpers import as_float_or_none as as_float
 
 
 def normalize_broker(value: Any) -> str:
@@ -60,14 +61,6 @@ def validate_runtime_config(
         raise AgentToolError(code="CONFIG_ERROR", message=str(exc)) from exc
     return warnings
 
-
-def as_float(value: Any) -> float | None:
-    try:
-        if value in (None, ""):
-            return None
-        return float(value)
-    except Exception:
-        return None
 
 
 def mask_account_id(value: Any) -> str:

@@ -14,6 +14,7 @@ import pandas as pd
 from domain.domain.engine import rank_candidate_rows, rank_combo_yield_rows
 from domain.domain.strategy_vocab import STRATEGY_COMBO_YIELD
 from domain.domain.symbol_identity import symbol_currency
+from src.application.numeric_helpers import safe_float as _safe_float
 
 
 COMMON_EMPTY_ROW = {
@@ -134,17 +135,6 @@ def _empty_summary_row(symbol: str, strategy: str, *, extra_fields: dict[str, An
 def _option_ccy(symbol: str) -> str | None:
     return symbol_currency(symbol)
 
-
-def _safe_float(value: Any) -> float | None:
-    try:
-        if pd.isna(value):
-            return None
-    except Exception:
-        pass
-    try:
-        return float(value)
-    except Exception:
-        return None
 
 
 def _safe_int(value: Any) -> int | None:

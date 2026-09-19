@@ -32,6 +32,7 @@ from src.application.strategy_policy import (
     assert_strategy_config_resolved,
     strategy_semantics_for_side_config,
 )
+from src.application.payload_helpers import as_float_or_none as _safe_float
 
 
 OptionSide = Literal["put", "call"]
@@ -238,14 +239,6 @@ class RequiredDataFetchPlanBundle:
             payload["underlier_observation"] = self.underlier_observation.to_dict()
         return payload
 
-
-def _safe_float(value: Any) -> float | None:
-    try:
-        if value in (None, ""):
-            return None
-        return float(value)
-    except Exception:
-        return None
 
 
 def _safe_int(value: Any) -> int | None:

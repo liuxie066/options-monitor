@@ -34,6 +34,7 @@ from src.application.opening_candidate_snapshot import (
 from src.application.research.redaction import redact_value
 from src.application.runtime_logs_cli import collect_runtime_logs
 from src.application.runtime_runs_cli import collect_runtime_runs
+from src.application.payload_helpers import text as _text
 
 
 def collect_evidence(
@@ -1285,9 +1286,6 @@ def _first_float(row: dict[str, Any], *keys: str) -> float | None:
             return parsed
     return None
 
-
-def _text(value: Any) -> str:
-    return str(value or "").strip()
 
 
 def _dict_or_empty(value: Any) -> dict[str, Any]:

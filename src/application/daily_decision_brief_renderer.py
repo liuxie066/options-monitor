@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Mapping
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from src.application.payload_helpers import parse_utc as _parse_datetime
 
 _DEFAULT_MAX_ACTIONS = 5
 _DEFAULT_MAX_CANDIDATES = 3
@@ -2320,18 +2321,6 @@ def _decimal_text(value: Decimal) -> str:
         return format(normalized, "f").split(".", 1)[0]
     return format(normalized, "f")
 
-
-def _parse_datetime(value: Any) -> datetime | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
 
 
 def _safe_zoneinfo(name: str) -> ZoneInfo:

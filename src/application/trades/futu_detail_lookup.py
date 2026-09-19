@@ -6,6 +6,7 @@ from typing import Any, Iterable
 from src.infrastructure.futu_gateway import build_ready_futu_broker_gateway
 from domain.domain.trade_account_identity import extract_primary_account_id, extract_visible_account_fields
 from domain.domain.symbol_identity import resolve_symbol_identity
+from src.application.payload_helpers import text as _norm_str
 
 
 def _rows(data: Any) -> list[dict[str, Any]]:
@@ -22,9 +23,6 @@ def _rows(data: Any) -> list[dict[str, Any]]:
         return [dict(data)]
     return []
 
-
-def _norm_str(value: Any) -> str:
-    return str(value or "").strip()
 
 
 def _matches_order(row: dict[str, Any], *, order_id: str) -> bool:

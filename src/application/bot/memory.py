@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from src.application.bot.contracts import contract_from_payload
+from src.infrastructure.io_utils import utc_now as _now
 
 
 @dataclass(frozen=True)
@@ -74,9 +75,6 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
 
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _one(conn: sqlite3.Connection, sql: str, args: tuple = ()) -> dict | None:

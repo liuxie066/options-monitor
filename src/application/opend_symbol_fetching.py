@@ -1,4 +1,5 @@
 from __future__ import annotations
+from src.infrastructure.io_utils import utc_now as _utc_now_iso
 
 """Fetch required option data using Futu OpenD.
 
@@ -82,9 +83,6 @@ REQUIRED_REALIZED_VOLATILITY_INCOMPLETE = "REQUIRED_REALIZED_VOLATILITY_INCOMPLE
 SNAPSHOT_COVERAGE_INCOMPLETE = "SNAPSHOT_COVERAGE_INCOMPLETE"
 OPTION_CHAIN_SCOPE_COVERAGE_SCHEMA = "option_chain_scope_coverage.v1"
 
-
-def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _no_contracts_realized_volatility() -> RealizedVolatilitySnapshot:

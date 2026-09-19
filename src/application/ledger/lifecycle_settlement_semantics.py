@@ -6,6 +6,7 @@ from datetime import date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Mapping
 from zoneinfo import ZoneInfo
+from src.application.payload_helpers import text as _text
 
 
 SETTLEMENT_SEMANTIC_SCHEMA = "settlement_observation_semantic.v1"
@@ -702,9 +703,6 @@ def _first(row: Mapping[str, Any], *keys: str) -> Any:
 def _first_text(row: Mapping[str, Any], *keys: str) -> str:
     return _text(_first(row, *keys))
 
-
-def _text(value: Any) -> str:
-    return str(value or "").strip()
 
 
 def _lower(value: Any) -> str:

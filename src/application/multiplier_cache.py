@@ -1,4 +1,5 @@
 from __future__ import annotations
+from src.infrastructure.io_utils import utc_now
 
 """Multiplier cache and resolver.
 
@@ -37,9 +38,6 @@ from src.application.opend_fetch_config import filter_opend_fetch_kwargs
 from src.application.write_contract import attach_write_contract
 from src.application.runtime_paths import resolve_runtime_root
 from src.application.symbol_aliases import symbol_aliases_from_config
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def default_cache_path(repo_base: Path) -> Path:

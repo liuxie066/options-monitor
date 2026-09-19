@@ -52,6 +52,8 @@ from src.application.bot.host_store import BotHostStore
 from src.infrastructure.io_utils import utc_now
 from src.application.payload_helpers import as_dict as _dict
 from src.application.payload_helpers import first_text as _first_text
+from src.application.channels.reply_decision import public_inbound_summary as _public_inbound_summary
+from src.application.payload_helpers import config_bool as _config_bool
 
 
 ExecuteToolFn = Callable[[str, dict[str, Any]], dict[str, Any]]
@@ -774,29 +776,6 @@ def _record_keepalive_state(
     return out
 
 
-def _public_inbound_summary(inbound: dict[str, Any]) -> dict[str, Any]:
-    data = _dict(inbound.get("data"))
-    error = _dict(inbound.get("error"))
-    result = _dict(data.get("inbound_result")) or _dict(data.get("result"))
-    result_data = _dict(result.get("data"))
-    control = _dict(result_data.get("control"))
-    decision = _dict(result_data.get("decision"))
-    assistant = _dict(_dict(result.get("meta")).get("assistant"))
-    return {
-        key: value
-        for key, value in {
-            "ok": bool(inbound.get("ok", False)),
-            "kind": data.get("kind"),
-            "status": data.get("status") or result.get("status"),
-            "intent_name": result.get("intent_name") or control.get("intent_name"),
-            "tool_name": result.get("tool_name") or control.get("tool_name"),
-            "route": result.get("render_route") or assistant.get("route"),
-            "decision_reason": decision.get("reason"),
-            "error_code": error.get("code"),
-        }.items()
-        if value is not None
-    }
-
 
 def _status_only(payload: Any) -> dict[str, Any]:
     source = _dict(payload)
@@ -1148,20 +1127,6 @@ def _load_assistant_behavior_config(*, config_path: str | None) -> dict[str, Any
         return {}
     return cfg if cfg else {}
 
-
-def _config_bool(explicit: bool | None, configured: Any, *, default: bool) -> bool:
-    if explicit is not None:
-        return bool(explicit)
-    if isinstance(configured, bool):
-        return configured
-    if configured is None:
-        return bool(default)
-    value = str(configured or "").strip().lower()
-    if value in {"1", "true", "yes", "y", "on"}:
-        return True
-    if value in {"0", "false", "no", "n", "off"}:
-        return False
-    return bool(default)
 
 
 def _config_positive_int(explicit: int | None, configured: Any, *, default: int) -> int:

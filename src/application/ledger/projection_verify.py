@@ -10,14 +10,12 @@ from src.application.ledger.publisher import (
     PROJECTION_CONTRACT_VERSION,
     project_stored_trade_events_to_position_lots,
 )
+from src.infrastructure.io_utils import utc_now as utc_now_iso
 
 
 SCHEMA_KIND = "option_positions_projection_verify"
 CHECKPOINT_SCHEMA_KIND = "option_positions_projection_verify_checkpoint"
 
-
-def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _state_dir(base: Path) -> Path:

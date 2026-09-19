@@ -11,6 +11,7 @@ from src.application.research.checks import run_deterministic_checks
 from src.application.research.evidence import collect_evidence, redacted_evidence
 from src.application.settings.effective import parse_env_file
 from src.application.payload_helpers import as_dict as _dict
+from src.application.payload_helpers import nested as _nested
 
 
 SCHEMA_VERSION = "research.v1"
@@ -653,14 +654,6 @@ def _resolve_output_path(value: Any, *, base: Path, default: Path) -> Path:
         ) from exc
     return path
 
-
-def _nested(payload: Any, *keys: str) -> Any:
-    cur = payload
-    for key in keys:
-        if not isinstance(cur, dict):
-            return None
-        cur = cur.get(key)
-    return cur
 
 
 def _as_int(value: Any) -> int:

@@ -21,6 +21,7 @@ from domain.domain.sell_call_config import resolve_effective_sell_call_min_strik
 from domain.domain.symbol_identity import symbol_currency
 from src.application.short_vol_risk_context import amount_to_cny, enrich_short_vol_contract_cny_fields
 from src.infrastructure.exchange_rates import CurrencyConverter
+from src.application.numeric_helpers import float_or_none as _float
 
 
 def resolve_covered_call_underwriting_config(raw: dict[str, Any] | None) -> InsuranceUnderwritingConfig:
@@ -151,25 +152,6 @@ def _covered_notional_cny(
     ccy = row.get("currency") or symbol_currency(row.get("symbol"))
     return amount_to_cny(spot * multiplier, ccy, exchange_rate_converter=exchange_rate_converter)
 
-
-def _float(value: Any) -> float | None:
-    if value is None:
-        return None
-    try:
-        if pd.isna(value):
-            return None
-    except Exception:
-        pass
-    try:
-        parsed = float(value)
-    except Exception:
-        return None
-    try:
-        if parsed != parsed:
-            return None
-    except Exception:
-        pass
-    return parsed
 
 
 def _float_setting(raw: dict[str, Any], key: str, default: float) -> float:

@@ -9,6 +9,7 @@ from typing import Any
 from src.application.assistant.audit import connect_inbound_sqlite, default_audit_db_path, inbound_sqlite_error, utc_now_iso
 from src.application.assistant.operation_signature import sign_operation_fields
 from src.infrastructure.private_storage import private_path
+from src.application.payload_helpers import optional_text as _optional_str
 
 
 class InboundOperationStore:
@@ -1010,10 +1011,6 @@ def _loads(value: Any) -> dict[str, Any]:
         return {}
     return decoded if isinstance(decoded, dict) else {}
 
-
-def _optional_str(value: Any) -> str | None:
-    text = str(value or "").strip()
-    return text or None
 
 
 def _ensure_column(conn: sqlite3.Connection, name: str, column_type: str) -> None:

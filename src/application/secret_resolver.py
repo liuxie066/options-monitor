@@ -12,6 +12,7 @@ from src.application.secret_store import (
 )
 from src.application.settings import build_effective_env
 from src.application.payload_helpers import as_dict as _dict
+from src.application.payload_helpers import text as _text
 
 
 DEFAULT_FEISHU_APP_ID_ENV = "OM_FEISHU_APP_ID"
@@ -22,9 +23,6 @@ DEFAULT_FEISHU_BOT_APP_SECRET_ENV = "OM_FEISHU_BOT_APP_SECRET"
 DEFAULT_FEISHU_BOT_USER_OPEN_ID_ENV = "OM_FEISHU_BOT_USER_OPEN_ID"
 DEFAULT_FEISHU_BOT_ALLOWED_OPEN_IDS_ENV = "OM_FEISHU_BOT_ALLOWED_OPEN_IDS"
 
-
-def _text(value: Any) -> str:
-    return str(value or "").strip()
 
 
 def _env(environ: Mapping[str, str] | None, name: str) -> str:

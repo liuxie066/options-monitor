@@ -13,6 +13,8 @@ from src.application.agent_tool_contracts import AgentToolError, mask_path
 from src.application.agent_tool_config import repo_base
 from src.application.settings import build_effective_env
 from src.infrastructure.private_storage import connect_private_sqlite, private_path
+from src.infrastructure.io_utils import utc_now as utc_now_iso
+from src.application.payload_helpers import optional_text as _optional_str
 
 
 def default_audit_db_path() -> Path:
@@ -341,9 +343,6 @@ def inbound_sqlite_error(path: Path, exc: BaseException) -> AgentToolError:
     )
 
 
-def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
 
 def _json(value: Any) -> str:
     return json.dumps(value if value is not None else {}, ensure_ascii=False, sort_keys=True)
@@ -358,10 +357,6 @@ def _loads_object(value: Any) -> dict[str, Any]:
         return {}
     return dict(loaded) if isinstance(loaded, dict) else {}
 
-
-def _optional_str(value: Any) -> str | None:
-    text = str(value or "").strip()
-    return text or None
 
 
 def _row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:

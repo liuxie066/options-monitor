@@ -18,6 +18,7 @@ from src.application.notification_delivery_adapter import (
 from src.application.notification_delivery_route import resolve_notification_delivery_route
 from src.application.notification_shells import render_receipt
 from src.application.trade_time_format import format_iso_time_beijing
+from src.infrastructure.io_utils import utc_now as _utc_now
 
 _AUTO_CLOSE_RECEIPT_STATE_NAME = "auto_close_receipts.json"
 _AUTO_CLOSE_RECEIPT_STATE_MAX_ITEMS = 200
@@ -545,9 +546,6 @@ def _attach_receipt_identity(
     if isinstance(receipt_key_fields, dict):
         out["receipt_key_fields"] = dict(receipt_key_fields)
 
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _bool_from_config(src: dict[str, Any], key: str, *, default: bool) -> bool:

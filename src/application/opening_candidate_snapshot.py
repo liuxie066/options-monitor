@@ -29,6 +29,7 @@ from src.application.tick_run_workspace import (
 )
 from src.application.payload_helpers import required_text
 from functools import partial
+from src.application.payload_helpers import canonical_json_bytes_lines as _canonical_json_bytes
 
 
 _required_text = partial(required_text, error=lambda m: OpeningCandidateSnapshotError(m))
@@ -1340,18 +1341,6 @@ def _timestamp(value: datetime | str | Any) -> str:
         raise OpeningCandidateSnapshotError("sealed_at_utc must be timezone-aware")
     return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
-
-def _canonical_json_bytes(payload: Mapping[str, Any]) -> bytes:
-    return (
-        json.dumps(
-            dict(payload),
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
-        + "\n"
-    ).encode("utf-8")
 
 
 __all__ = [

@@ -40,18 +40,8 @@ from src.application.strategy_policy import SELL_PUT_FAMILY, strategy_semantics_
 from src.application.combo_yield_config import (
     derive_combo_yield_policy,
 )
+from src.application.numeric_helpers import safe_float as _safe_float
 
-
-def _safe_float(value: Any) -> float | None:
-    try:
-        if pd.isna(value):
-            return None
-    except Exception:
-        pass
-    try:
-        return float(value)
-    except Exception:
-        return None
 
 
 def _safe_int(value: Any) -> int | None:

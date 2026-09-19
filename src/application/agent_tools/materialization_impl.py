@@ -56,6 +56,7 @@ from src.application.performance.adapters import (
 )
 from src.application.performance.evidence_collection import collect_current_performance_evidence
 from src.application.symbol_mutations import normalize_symbol_read
+from src.application.payload_helpers import as_float_or_none as _as_float_or_none
 
 
 def _normalize_expiration(value: Any) -> str:
@@ -65,14 +66,6 @@ def _normalize_expiration(value: Any) -> str:
 def _normalize_option_type(value: Any) -> str:
     return normalize_contract_option_type(value)
 
-
-def _as_float_or_none(value: Any) -> float | None:
-    try:
-        if value in (None, ""):
-            return None
-        return float(value)
-    except Exception:
-        return None
 
 
 def _contract_key(symbol: Any, option_type: Any, expiration: Any, strike: Any) -> tuple[str, str, str, str]:

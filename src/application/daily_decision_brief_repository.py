@@ -28,6 +28,7 @@ from src.application.channels.feishu_notification_renderer import (
     feishu_notification_envelope_sha256,
     normalize_feishu_notification_envelope,
 )
+from src.infrastructure.io_utils import utc_now as _utc_now_iso
 
 
 CURRENT_INDEX_SCHEMA_VERSION = "daily_decision_brief_current_index.v1"
@@ -2342,9 +2343,6 @@ def _coerce_utc_iso(value: datetime | str | None) -> str:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc).isoformat()
 
-
-def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _relative_path(base: Path, path: Path) -> str:

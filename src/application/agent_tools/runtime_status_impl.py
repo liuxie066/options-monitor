@@ -29,6 +29,7 @@ from src.application.trades.account_mapping import resolve_trade_intake_config
 from src.application.trades.state_reconcile import preview_trade_intake_reconciliation_from_sqlite
 from src.application.payload_helpers import as_dict as _dict
 from src.application.payload_helpers import first_text as _first_text
+from src.application.payload_helpers import nested as _nested
 
 
 PROFILE_PATH_KEYS = ("report_dir", "state_dir", "shared_state_dir", "accounts_root", "runs_root")
@@ -1985,14 +1986,6 @@ def _run_payload_matches_market(run_payload: dict[str, Any], desired_market: str
     observed_markets = _run_payload_markets(run_payload)
     return not observed_markets or desired_market in observed_markets
 
-
-def _nested(payload: Any, *keys: str) -> Any:
-    cur = payload
-    for key in keys:
-        if not isinstance(cur, dict):
-            return None
-        cur = cur.get(key)
-    return cur
 
 
 def _latest_run_auto_close_failures(latest_run_payload: dict[str, Any] | None) -> list[dict[str, Any]]:

@@ -9,6 +9,7 @@ from domain.domain.combo_identity import (
 )
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from src.application.ledger.event_codec import valid_void_target_event_id
+from src.application.payload_helpers import text as _group_id
 
 
 COMBO_GROUP_MEMBERSHIP_SCHEMA = "account_combo_group_membership.v1"
@@ -559,9 +560,6 @@ def _canonical_text_list(value: Any) -> bool:
         and value == sorted(set(value))
     )
 
-
-def _group_id(value: Any) -> str:
-    return str(value or "").strip()
 
 
 def _text(

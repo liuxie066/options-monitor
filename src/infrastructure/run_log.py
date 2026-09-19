@@ -9,10 +9,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from src.infrastructure.io_utils import utc_now as _utc_ts
 
-
-def _utc_ts() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def create_run_id() -> str:

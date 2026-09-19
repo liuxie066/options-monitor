@@ -34,6 +34,7 @@ from src.application.ledger.repository import (
     require_position_projection_publication_repo,
 )
 from src.application.ledger.results import ProjectionRefreshResult
+from src.application.payload_helpers import canonical_json_bytes as _canonical_json_bytes
 
 
 POSITION_PROJECTION_CHECKPOINT_SCHEMA = "position_projection_checkpoint.v1"
@@ -1276,15 +1277,6 @@ def _application_event(event_json: str) -> dict[str, Any]:
         raise ValueError("stored trade event is not a JSON object")
     return trade_event_application_payload(payload)
 
-
-def _canonical_json_bytes(value: Any) -> bytes:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
 
 
 def _strict_json_loads(payload: bytes) -> Any:

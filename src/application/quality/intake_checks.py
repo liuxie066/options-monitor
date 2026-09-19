@@ -6,19 +6,8 @@ from pathlib import Path
 from typing import Any
 
 from src.application.quality.model import check_result, dataset_status, evidence_ref
+from src.application.payload_helpers import parse_utc as _parse_utc
 
-
-def _parse_utc(value: Any) -> datetime | None:
-    raw = str(value or "").strip()
-    if not raw:
-        return None
-    try:
-        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
 
 
 def _oldest_pending_age_seconds(

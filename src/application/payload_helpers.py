@@ -6,17 +6,32 @@ re-implemented per module. Pure stdlib; safe to import from anywhere in
 ``src/``. Callers bind private aliases, e.g.::
 
     from src.application.payload_helpers import as_dict as _dict
+
+Also hosts the shared plain-text, value-coercion, timestamp-parsing and
+canonical-JSON copies that were byte-identical per module (``_text``,
+``_optional_id``, ``_parse_utc``, ``_parse_datetime``, ``_nested``,
+``_as_float_or_none``, ``_positive_integer``, ``_canonical_bytes``,
+``_json_bytes``, ``_config_bool``). Wall-clock "now" helpers live in
+``src.infrastructure.io_utils.utc_now``; pandas-aware numeric coercion lives
+in ``src.application.numeric_helpers``.
 """
 
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable
+import json
+from collections.abc import Callable, Mapping
+from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 
 def as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def text(value: Any) -> str:
+    return str(value or "").strip()
 
 
 def first_text(*values: Any, default: str | None = None) -> str | None:
@@ -56,11 +71,115 @@ def text_sha256(value: str) -> str:
     return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
 
 
+def as_float_or_none(value: Any) -> float | None:
+    try:
+        if value in (None, ""):
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def nested(payload: Any, *keys: str) -> Any:
+    cur = payload
+    for key in keys:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(key)
+    return cur
+
+
+def parse_utc(value: Any) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def positive_integer(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        numeric = Decimal(str(value))
+        parsed = int(numeric)
+    except (InvalidOperation, TypeError, ValueError, OverflowError):
+        return None
+    if not numeric.is_finite() or parsed <= 0 or numeric != parsed:
+        return None
+    return parsed
+
+
+def config_bool(explicit: bool | None, configured: Any, *, default: bool) -> bool:
+    if explicit is not None:
+        return bool(explicit)
+    if isinstance(configured, bool):
+        return configured
+    if configured is None:
+        return bool(default)
+    value = str(configured or "").strip().lower()
+    if value in {"1", "true", "yes", "y", "on"}:
+        return True
+    if value in {"0", "false", "no", "n", "off"}:
+        return False
+    return bool(default)
+
+
+def canonical_json_bytes(value: Any) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def canonical_json_bytes_lines(payload: Mapping[str, Any]) -> bytes:
+    return (
+        json.dumps(
+            dict(payload),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def readable_json_bytes(payload: Mapping[str, Any]) -> bytes:
+    return (
+        json.dumps(
+            dict(payload),
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
 __all__ = [
     "as_dict",
+    "as_float_or_none",
+    "canonical_json_bytes",
+    "canonical_json_bytes_lines",
+    "config_bool",
     "first_text",
+    "nested",
     "optional_text",
+    "parse_utc",
     "positive_int_or",
+    "positive_integer",
+    "readable_json_bytes",
     "required_text",
+    "text",
     "text_sha256",
 ]

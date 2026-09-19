@@ -22,6 +22,7 @@ from src.application.ledger.api import (
     zero_option_fee_lifecycle_reason,
 )
 from src.infrastructure.futu_gateway import FutuGatewayRateLimitError
+from src.application.ledger.api import option_contract_identity as _contract
 
 
 _PROVIDER_CUTOFF_MS = int(
@@ -699,20 +700,6 @@ def _target_identity(value: Sequence[str] | None) -> tuple[str, str, str, str] |
 def _identity_hash(identity: Sequence[str]) -> str:
     return hashlib.sha256(chr(31).join(identity).encode()).hexdigest()
 
-
-def _contract(event: TradeEvent) -> tuple[Any, ...]:
-    key = event.contract_key
-    return (
-        key.broker,
-        key.account,
-        key.underlying_symbol,
-        key.option_type,
-        key.position_side,
-        key.strike,
-        key.expiration_ymd,
-        event.currency,
-        event.multiplier,
-    )
 
 
 def _time_ms(value: Any) -> int:
