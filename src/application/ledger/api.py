@@ -147,6 +147,10 @@ from src.application.ledger.store_resolution import (
     resolve_ledger_store,
 )
 from src.application.ledger.projection_verify import compare_projection_lots
+from src.application.ledger.lot_parity_probe import (
+    probe_summary as lot_parity_probe_summary,
+    run_lot_parity_probe,
+)
 from src.application.ledger.lot_identity_migration import (
     apply_lot_identity_migration,
     build_lot_identity_migration_inventory,
@@ -337,6 +341,8 @@ __all__ = [
     "CloseTargetResolution",
     "compare_projection_lots",
     "compute_projector_implementation_fingerprint",
+    "lot_parity_probe_summary",
+    "run_lot_parity_probe",
     "activate_position_projection_checkpoints",
     "apply_position_projection_migration",
     "apply_lot_identity_migration",

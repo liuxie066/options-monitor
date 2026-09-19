@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Any, cast
 
@@ -32,6 +33,8 @@ from src.application.ledger.api import (
     format_position_money,
     inspect_ledger_stores,
     ledger_store_payload,
+    lot_parity_probe_summary,
+    run_lot_parity_probe,
     list_trade_lifecycle_cases,
     list_trade_lifecycle_evidence,
     list_position_rows,
@@ -217,6 +220,24 @@ def _store_inspect_data_config(args: argparse.Namespace, *, base: Path) -> tuple
             data_path = (config_path.parent / data_path).resolve()
         return data_path, config_path
     return (config_path.parent / "portfolio.runtime.json").resolve(), config_path
+
+
+def _run_lot_parity_probe_for_report(
+    *,
+    repo: Any,
+    ledger_store: dict[str, object],
+) -> dict[str, Any]:
+    """Run the tier-1 lot parity probe on its own read-only connection.
+
+    Deliberately *not* through ``repo``: that object is the write-capable repo
+    the surrounding write commands share, and reusing it would make "zero
+    writes" an intention rather than a property of the connection. The repo is
+    consulted only to locate the store file.
+    """
+    sqlite_path = ledger_store.get("sqlite_path") or getattr(repo, "db_path", None)
+    if not sqlite_path:
+        raise ValueError("lot parity probe requires a resolvable sqlite store path")
+    return cast(dict[str, Any], run_lot_parity_probe(sqlite_path=str(sqlite_path)))
 
 
 def _print_store_inspect_text(payload: dict[str, object]) -> None:
@@ -2455,9 +2476,37 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as e:
             raise SystemExit(str(e))
         report["ledger_store"] = ledger_store
+        # Slice 1 (lot-parity-probe) enforcement channel. The probe result goes
+        # under its own key and must never be folded into ``ok``: ``ok`` also
+        # drives the checkpoint write and the ``--mode auto`` fast path, so
+        # widening it would change both receipts and checkpoint reuse.
+        #
+        # The probe runs on every verified run, including a checkpoint reuse: the
+        # cadence's contract is "the replay reproduces the store", and a reused
+        # checkpoint is a statement about the replay's inputs, not about the
+        # projection's fidelity.
+        #
+        # Its failure modes are isolated on purpose. A probe that *cannot run*
+        # (an unmigrated store shape, a missing table) is not the same fact as a
+        # probe that ran and came back red, and neither of them may take the
+        # verification report down with it: the report is the evidence, and
+        # losing it is the regression this guard exists to prevent.
+        probe_error: str | None = None
+        try:
+            probe = _run_lot_parity_probe_for_report(repo=repo, ledger_store=ledger_store)
+        except Exception as e:  # reported, never swallowed: see probe_error below
+            probe = None
+            probe_error = f"{type(e).__name__}: {e}"
+            report["lot_parity_probe_error"] = probe_error
+        else:
+            report["lot_parity_probe"] = lot_parity_probe_summary(probe)
+        probe_red = not report.get("lot_parity_probe", {}).get("green", True)
         if args.format == 'json':
+            # Printed before the non-zero exit so the report still reaches stdout.
             print(json.dumps(report, ensure_ascii=False, indent=2))
-            return 0
+            if probe_error is not None:
+                return 2
+            return 1 if probe_red else 0
         summary = report.get('summary') or {}
         print(
             "[DONE] verified trade_events projection against position_lots "
@@ -2469,6 +2518,39 @@ def main(argv: list[str] | None = None) -> int:
             f"extra_in_position_lots={int(summary.get('extra_in_position_lots', 0))} "
             f"field_mismatch={int(summary.get('field_mismatch', 0))}"
         )
+        if probe_error is not None:
+            print(f"lot parity probe could not run: {probe_error}", file=sys.stderr)
+            return 2
+        probe_result = report["lot_parity_probe"]
+        probe_attribution = probe_result.get("c_attribution") or {}
+        print(
+            "[DONE] lot parity probe (tier-1) "
+            f"green={bool(probe_result.get('green'))} "
+            f"connection_mode={probe_result.get('connection_mode')} "
+            f"a_payload={int(probe_result.get('a_payload_difference_count', 0))} "
+            f"b_columns={int(probe_result.get('b_columns_difference_count', 0))} "
+            f"c_rows={int(probe_result.get('c_rows_difference_count', 0))} "
+            f"count_mismatch={bool(probe_result.get('c_count_mismatch'))} "
+            f"writer_raises={int(probe_result.get('b_writer_raises_count', 0))} "
+            f"null_source_event_id={int(probe_attribution.get('null_source_event_id', 0))} "
+            f"ledger_missing_row={int(probe_attribution.get('ledger_missing_row', 0))} "
+            f"projection_omission={int(probe_attribution.get('projection_omission', 0))} "
+            f"other={int(probe_attribution.get('other', 0))}"
+        )
+        samples = probe_result.get("samples") or {}
+        for face, items in samples.items():
+            for item in list(items)[:3]:
+                print(
+                    "[SAMPLE] lot parity probe "
+                    f"{face}: {json.dumps(item, ensure_ascii=False, default=str)}"
+                )
+        if probe_red:
+            print(
+                "lot parity probe is red: replayed position_lots do not reproduce "
+                "the stored rows (see the lot_parity_probe report key)",
+                file=sys.stderr,
+            )
+            return 1
         return 0
 
     if args.cmd == 'void-event':
