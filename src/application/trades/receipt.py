@@ -762,20 +762,15 @@ def build_trade_intake_receipt_message(
     diagnostics = cast(dict[str, Any], diagnostics_raw) if isinstance(diagnostics_raw, dict) else {}
     needs_lot_confirmation = status == "unresolved" and reason == "ambiguous_assigned_stock_sale"
     kind = result.get("receipt_kind")
-    if kind == "verification_pending":
-        status_text = "⚠️ 记录状态待核对"
-    elif kind == "pending_retry":
-        status_text = "⚠️ 暂未记录"
-    elif kind == "recorded":
-        status_text = "✅ 已记录"
-    elif status == "failed" and reason == "projection_verification_failed":
-        status_text = "❌ 写入异常"
-    elif needs_lot_confirmation:
-        status_text = "⚠️ 待确认"
-    elif applied:
-        status_text = "✅ 已完成"
-    else:
-        status_text = "❌ 未记录"
+    status_rules = (
+        (kind == "verification_pending", "⚠️ 记录状态待核对"),
+        (kind == "pending_retry", "⚠️ 暂未记录"),
+        (kind == "recorded", "✅ 已记录"),
+        (status == "failed" and reason == "projection_verification_failed", "❌ 写入异常"),
+        (needs_lot_confirmation, "⚠️ 待确认"),
+        (applied, "✅ 已完成"),
+    )
+    status_text = next((text for condition, text in status_rules if condition), "❌ 未记录")
 
     account = _value("account", deal, result, payload) or "-"
     symbol = _value("symbol", deal, result, payload) or "-"

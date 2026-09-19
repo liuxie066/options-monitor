@@ -329,6 +329,8 @@ def backoff_delay_ms(
     kind = str(outcome_kind or "").strip().lower()
     if kind in {"blocked_static", "legacy_semantic_unavailable"}:
         return None
+    if kind == "stale_generation":
+        return 0
     if kind == "blocked_account_explicit":
         delay = 24 * 60 * 60 * 1000
     elif kind == "retryable_error":
@@ -339,8 +341,6 @@ def backoff_delay_ms(
         delay = _schedule((5, 15, 60, 360), no_progress_count) * 60_000
     elif kind == "observed_complete":
         delay = 6 * 60 * 60 * 1000
-    elif kind == "stale_generation":
-        return 0
     else:
         delay = 5 * 60 * 1000
     return max(delay, int(retry_after_ms or 0))
