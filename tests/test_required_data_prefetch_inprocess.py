@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import time
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock
 from zoneinfo import ZoneInfo
 
@@ -118,6 +119,114 @@ def _patch_0700_plan_discovery(
     fixed_trading_date = lambda market: date(2026, 6, 8)
     monkeypatch.setattr(chain_fetching, "get_trading_date", fixed_trading_date)
     monkeypatch.setattr(opend_utils, "get_trading_date", fixed_trading_date)
+
+
+def _patch_gateway(monkeypatch, gateway=None) -> None:
+    """Point the prefetch chain at an offline gateway (a fresh one by default)."""
+    monkeypatch.setattr(
+        "src.infrastructure.futu_gateway.build_ready_futu_gateway",
+        (lambda **kwargs: _Gateway()) if gateway is None else (lambda **kwargs: gateway),
+    )
+
+
+def _patch_prefetch_sources(monkeypatch, *, watchlist, gateway=None) -> None:
+    """Pin both the gateway and the watchlist the prefetch chain resolves."""
+    _patch_gateway(monkeypatch, gateway)
+    monkeypatch.setattr(mod, "resolve_watchlist_config", lambda cfg: watchlist)
+
+
+def _silence_source_snapshot_events(monkeypatch) -> None:
+    """Keep the source-snapshot journal out of the shared test layout."""
+    monkeypatch.setattr(
+        mod.state_repo,
+        "append_source_snapshot_event",
+        lambda *args, **kwargs: None,
+    )
+
+
+def _two_spec_watchlist(
+    *,
+    put_min_dte: int = 20,
+    put_max_dte: int = 25,
+    put_max_strike: float = 450,
+    call_min_dte: int = 30,
+    call_max_dte: int = 60,
+    call_min_strike: float = 550,
+    put_strategy: str | None = None,
+    broker: str | None = None,
+) -> list[dict[str, Any]]:
+    """The two-entry 0700.HK watchlist the multi-spec tests share.
+
+    One sell-put entry and one sell-call entry for the same symbol. Keys are
+    built in the order the literals used, and the defaults are those literals'
+    values.
+    """
+    put: dict[str, Any] = {"enabled": True}
+    if put_strategy is not None:
+        put["strategy"] = put_strategy
+    put["min_dte"] = put_min_dte
+    put["max_dte"] = put_max_dte
+    put["max_strike"] = put_max_strike
+
+    def entry(sell_put: dict[str, Any], sell_call: dict[str, Any]) -> dict[str, Any]:
+        row: dict[str, Any] = {"symbol": "0700.HK"}
+        if broker is not None:
+            row["broker"] = broker
+        row["fetch"] = {"source": "futu", "host": "127.0.0.1", "port": 11111}
+        row["sell_put"] = sell_put
+        row["sell_call"] = sell_call
+        return row
+
+    return [
+        entry(put, {"enabled": False}),
+        entry(
+            {"enabled": False},
+            {
+                "enabled": True,
+                "min_dte": call_min_dte,
+                "max_dte": call_max_dte,
+                "min_strike": call_min_strike,
+            },
+        ),
+    ]
+
+
+def _prefetch(
+    tmp_path: Path,
+    *,
+    producer_run_id: str | None = None,
+    shared_required: Path | None = None,
+    cfg: dict[str, Any] | None = None,
+    execution_mode: str = "inprocess",
+    max_workers: int = 1,
+    base: Path | None = None,
+    **extra: Any,
+) -> dict[str, Any]:
+    """Run `mod.prefetch_required_data` over the layout these tests share.
+
+    `cfg` defaults to the in-process runtime every call site used; `base`,
+    `shared_required` and `vpy` default to the call sites' literals.
+    """
+    if cfg is None:
+        cfg = {
+            "runtime": {
+                "prefetch": {
+                    "execution_mode": execution_mode,
+                    "max_workers": max_workers,
+                }
+            }
+        }
+    if producer_run_id is not None:
+        extra["producer_run_id"] = producer_run_id
+    return mod.prefetch_required_data(
+        vpy=tmp_path / "python",
+        base=tmp_path if base is None else base,
+        cfg=cfg,
+        shared_required=(
+            tmp_path / "shared_required" if shared_required is None else shared_required
+        ),
+        **extra,
+    )
 
 
 def _patch_us_budget_plan_discovery(monkeypatch) -> None:
@@ -448,11 +557,7 @@ def test_prefetch_builds_complete_global_plan_before_first_chain_fetch(
     fixed_trading_date = lambda market: date(2026, 6, 1)
     monkeypatch.setattr(chain_fetching, "get_trading_date", fixed_trading_date)
     monkeypatch.setattr(opend_utils, "get_trading_date", fixed_trading_date)
-    monkeypatch.setattr(
-        "src.infrastructure.futu_gateway.build_ready_futu_gateway",
-        lambda **kwargs: _Gateway(),
-    )
-    monkeypatch.setattr(mod, "resolve_watchlist_config", lambda cfg: watchlist)
+    _patch_prefetch_sources(monkeypatch, watchlist=watchlist)
     monkeypatch.setattr(mod, "has_shared_required_data", lambda symbol, root: False)
     monkeypatch.setattr(mod, "fetch_symbol", fetch)
     _patch_success_finalizer(monkeypatch)
@@ -461,18 +566,9 @@ def test_prefetch_builds_complete_global_plan_before_first_chain_fetch(
         "adapt_opend_tool_payload",
         lambda payload: {"source_name": "opend", "payload": payload},
     )
-    monkeypatch.setattr(
-        mod.state_repo,
-        "append_source_snapshot_event",
-        lambda *args, **kwargs: None,
-    )
+    _silence_source_snapshot_events(monkeypatch)
 
-    result = mod.prefetch_required_data(
-        vpy=tmp_path / "python",
-        base=tmp_path,
-        cfg={"runtime": {"prefetch": {"execution_mode": "inprocess", "max_workers": 2}}},
-        shared_required=tmp_path / "shared_required",
-    )
+    result = _prefetch(tmp_path, max_workers=2)
 
     assert events[:2] == ["plan:AAPL", "plan:MSFT"]
     assert all(item.startswith("fetch:") for item in events[2:])
@@ -530,10 +626,7 @@ def test_prefetch_fetches_earnings_once_per_market_for_shared_symbols(
     monkeypatch.setattr(mod, "resolve_watchlist_config", lambda cfg: watchlist)
     monkeypatch.setattr(mod, "has_shared_required_data", lambda symbol, root: False)
     monkeypatch.setattr(mod, "fetch_symbol", fetch)
-    monkeypatch.setattr(
-        "src.infrastructure.futu_gateway.build_ready_futu_gateway",
-        lambda **kwargs: _Gateway(),
-    )
+    _patch_gateway(monkeypatch)
     monkeypatch.setattr(
         earnings_mod,
         "build_ready_futu_quote_gateway",
@@ -550,17 +643,11 @@ def test_prefetch_fetches_earnings_once_per_market_for_shared_symbols(
         "adapt_opend_tool_payload",
         lambda payload: {"source_name": "opend", "payload": payload},
     )
-    monkeypatch.setattr(
-        mod.state_repo,
-        "append_source_snapshot_event",
-        lambda *args, **kwargs: None,
-    )
+    _silence_source_snapshot_events(monkeypatch)
 
-    result = mod.prefetch_required_data(
-        vpy=tmp_path / "python",
-        base=tmp_path,
+    result = _prefetch(
+        tmp_path,
         cfg={"runtime": {"prefetch": {"execution_mode": "inprocess"}}},
-        shared_required=tmp_path / "shared_required",
         producer_run_id="shared-earnings-run",
         scan_at_utc=datetime(2026, 8, 6, 16, 0, tzinfo=timezone.utc),
     )
@@ -605,11 +692,9 @@ def test_prefetch_fails_closed_when_global_expiration_discovery_is_incomplete(
     )
 
     with pytest.raises(RuntimeError, match="global required-data plan incomplete"):
-        mod.prefetch_required_data(
-            vpy=tmp_path / "python",
-            base=tmp_path,
+        _prefetch(
+            tmp_path,
             cfg={"runtime": {"prefetch": {"execution_mode": "inprocess"}}},
-            shared_required=tmp_path / "shared_required",
         )
 
     assert fetch_calls == []
@@ -644,11 +729,9 @@ def test_prefetch_fails_closed_before_gateway_for_symbol_without_demand(
     )
 
     with pytest.raises(ValueError, match="lacks fetch requests"):
-        mod.prefetch_required_data(
-            vpy=tmp_path / "python",
-            base=tmp_path,
+        _prefetch(
+            tmp_path,
             cfg={"runtime": {"prefetch": {"execution_mode": "inprocess"}}},
-            shared_required=tmp_path / "shared_required",
             producer_run_id="run-no-demand",
         )
 
@@ -699,12 +782,7 @@ def test_prefetch_required_data_inprocess_reuses_gateways(tmp_path: Path, monkey
     monkeypatch.setattr(mod.state_repo, "append_source_snapshot_event", fake_append)
     monkeypatch.setattr(mod.ToolExecutionService, "execute", fail_execute)
 
-    result = mod.prefetch_required_data(
-        vpy=tmp_path / "python",
-        base=tmp_path,
-        cfg={"runtime": {"prefetch": {"execution_mode": "inprocess", "max_workers": 2}}},
-        shared_required=tmp_path / "shared_required",
-    )
+    result = _prefetch(tmp_path, max_workers=2)
 
     assert result["execution_mode"] == "inprocess"
     assert result["fetched_ok"] == 3
@@ -747,11 +825,9 @@ def test_prefetch_required_data_inprocess_reuses_gateways_per_endpoint(tmp_path:
     monkeypatch.setattr(mod, "adapt_opend_tool_payload", lambda payload: {"source_name": "opend", "payload": payload})
     monkeypatch.setattr(mod.state_repo, "append_source_snapshot_event", lambda *args, **kwargs: None)
 
-    result = mod.prefetch_required_data(
-        vpy=tmp_path / "python",
-        base=tmp_path,
+    result = _prefetch(
+        tmp_path,
         cfg={"runtime": {"prefetch": {"execution_mode": "inprocess"}, "prefetch_max_workers": 1}},
-        shared_required=tmp_path / "shared_required",
     )
 
     assert result["fetched_ok"] == 3
@@ -775,11 +851,7 @@ def test_inprocess_provider_typed_error_marks_gateway_failure_without_receipt(
     gateway_successes: list[None] = []
     gateway_failures: list[Exception] = []
 
-    monkeypatch.setattr(
-        "src.infrastructure.futu_gateway.build_ready_futu_gateway",
-        lambda **kwargs: _Gateway(),
-    )
-    monkeypatch.setattr(mod, "resolve_watchlist_config", lambda cfg: watchlist)
+    _patch_prefetch_sources(monkeypatch, watchlist=watchlist)
     monkeypatch.setattr(mod, "has_shared_required_data", lambda symbol, root: False)
     monkeypatch.setattr(
         mod,
@@ -807,13 +879,7 @@ def test_inprocess_provider_typed_error_marks_gateway_failure_without_receipt(
     )
     monkeypatch.setattr(mod._gateway_pool, "close_current_thread", lambda: None)
 
-    result = mod.prefetch_required_data(
-        vpy=tmp_path / "python",
-        base=tmp_path,
-        cfg={"runtime": {"prefetch": {"execution_mode": "inprocess", "max_workers": 1}}},
-        shared_required=tmp_path / "shared_required",
-        producer_run_id="run-provider-error",
-    )
+    result = _prefetch(tmp_path, producer_run_id="run-provider-error")
 
     assert result["fetched_ok"] == 0
     assert result["errors"] == 1
@@ -836,11 +902,7 @@ def test_inprocess_artifact_failure_does_not_poison_healthy_gateway(
     gateway_successes: list[None] = []
     gateway_failures: list[Exception] = []
 
-    monkeypatch.setattr(
-        "src.infrastructure.futu_gateway.build_ready_futu_gateway",
-        lambda **kwargs: _Gateway(),
-    )
-    monkeypatch.setattr(mod, "resolve_watchlist_config", lambda cfg: watchlist)
+    _patch_prefetch_sources(monkeypatch, watchlist=watchlist)
     monkeypatch.setattr(mod, "has_shared_required_data", lambda symbol, root: False)
     monkeypatch.setattr(
         mod,
@@ -864,13 +926,7 @@ def test_inprocess_artifact_failure_does_not_poison_healthy_gateway(
     )
     monkeypatch.setattr(mod._gateway_pool, "close_current_thread", lambda: None)
 
-    result = mod.prefetch_required_data(
-        vpy=tmp_path / "python",
-        base=tmp_path,
-        cfg={"runtime": {"prefetch": {"execution_mode": "inprocess", "max_workers": 1}}},
-        shared_required=tmp_path / "shared_required",
-        producer_run_id="run-artifact-error",
-    )
+    result = _prefetch(tmp_path, producer_run_id="run-artifact-error")
 
     assert result["fetched_ok"] == 0
     assert result["errors"] == 1
@@ -943,11 +999,9 @@ def test_prefetch_required_data_subprocess_mode_preserves_existing_dispatch(tmp_
     finalized: list[dict[str, object]] = []
     _patch_success_finalizer(monkeypatch, finalized)
 
-    result = mod.prefetch_required_data(
-        vpy=tmp_path / "python",
-        base=tmp_path,
+    result = _prefetch(
+        tmp_path,
         cfg={"runtime": {"prefetch": {"execution_mode": "subprocess", "max_workers": 2}}},
-        shared_required=tmp_path / "shared_required",
     )
 
     assert result["execution_mode"] == "subprocess"
@@ -1052,16 +1106,11 @@ def test_prefetch_success_empty_uses_single_frozen_discovery_and_no_chain_fetch(
         "adapt_opend_tool_payload",
         lambda payload: {"source_name": "opend", "payload": payload},
     )
-    monkeypatch.setattr(
-        mod.state_repo,
-        "append_source_snapshot_event",
-        lambda *args, **kwargs: None,
-    )
+    _silence_source_snapshot_events(monkeypatch)
     required_root = tmp_path / "shared_required"
 
-    result = mod.prefetch_required_data(
-        vpy=tmp_path / "python",
-        base=tmp_path,
+    result = _prefetch(
+        tmp_path,
         cfg={
             "runtime": {
                 "prefetch": {
@@ -1252,12 +1301,7 @@ def test_inprocess_prefetch_passes_strategy_bounds_to_fetch_symbol(tmp_path: Pat
     monkeypatch.setattr(mod, "adapt_opend_tool_payload", lambda payload: {"source_name": "opend", "payload": payload})
     monkeypatch.setattr(mod.state_repo, "append_source_snapshot_event", lambda *args, **kwargs: None)
 
-    mod.prefetch_required_data(
-        vpy=tmp_path / "python",
-        base=tmp_path,
-        cfg={"runtime": {"prefetch": {"execution_mode": "inprocess", "max_workers": 1}}},
-        shared_required=tmp_path / "shared_required",
-    )
+    _prefetch(tmp_path)
 
     assert captured["option_types"] == "put"
     assert captured["min_dte"] == 20
@@ -1298,12 +1342,7 @@ def test_inprocess_prefetch_uses_spot_aware_plan_for_combo_yield_call_floor(tmp_
     monkeypatch.setattr(mod, "adapt_opend_tool_payload", lambda payload: {"source_name": "opend", "payload": payload})
     monkeypatch.setattr(mod.state_repo, "append_source_snapshot_event", lambda *args, **kwargs: None)
 
-    result = mod.prefetch_required_data(
-        vpy=tmp_path / "python",
-        base=tmp_path,
-        cfg={"runtime": {"prefetch": {"execution_mode": "inprocess", "max_workers": 1}}},
-        shared_required=tmp_path / "shared_required",
-    )
+    result = _prefetch(tmp_path)
 
     assert result["fetched_ok"] == 1
     side_strike_windows = captured["side_strike_windows"]
@@ -1365,12 +1404,7 @@ def test_prefetch_dedupes_same_run_symbol_and_merges_strategy_bounds(tmp_path: P
     monkeypatch.setattr(mod, "adapt_opend_tool_payload", lambda payload: {"source_name": "opend", "payload": payload})
     monkeypatch.setattr(mod.state_repo, "append_source_snapshot_event", lambda *args, **kwargs: None)
 
-    result = mod.prefetch_required_data(
-        vpy=tmp_path / "python",
-        base=tmp_path,
-        cfg={"runtime": {"prefetch": {"execution_mode": "inprocess", "max_workers": 2}}},
-        shared_required=tmp_path / "shared_required",
-    )
+    result = _prefetch(tmp_path, max_workers=2)
 
     assert len(captured_calls) == 1
     captured = captured_calls[0]
@@ -1413,40 +1447,12 @@ def test_inprocess_multi_spec_executes_each_exact_request_and_finalizes_once(
         ],
         spot=444.8,
     )
-    watchlist = [
-        {
-            "symbol": "0700.HK",
-            "broker": "HK",
-            "fetch": {
-                "source": "futu",
-                "host": "127.0.0.1",
-                "port": 11111,
-            },
-            "sell_put": {
-                "enabled": True,
-                "min_dte": 20,
-                "max_dte": 90,
-                "max_strike": 450,
-            },
-            "sell_call": {"enabled": False},
-        },
-        {
-            "symbol": "0700.HK",
-            "broker": "HK",
-            "fetch": {
-                "source": "futu",
-                "host": "127.0.0.1",
-                "port": 11111,
-            },
-            "sell_put": {"enabled": False},
-            "sell_call": {
-                "enabled": True,
-                "min_dte": 39,
-                "max_dte": 90,
-                "min_strike": 550,
-            },
-        },
-    ]
+    watchlist = _two_spec_watchlist(
+        put_max_dte=90,
+        call_min_dte=39,
+        call_max_dte=90,
+        broker='HK',
+    )
     class FacadeGateway(_Gateway):
         def __init__(self) -> None:
             super().__init__()
@@ -1537,10 +1543,7 @@ def test_inprocess_multi_spec_executes_each_exact_request_and_finalizes_once(
         save_calls.append(dict(kwargs))
         return original_save(*args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(
-        "src.infrastructure.futu_gateway.build_ready_futu_gateway",
-        lambda **kwargs: gateway,
-    )
+    _patch_gateway(monkeypatch, gateway)
     from src.application.short_vol_metrics import (
         RealizedVolatilitySnapshot,
         TermMatchedRVObservation,
@@ -1606,11 +1609,7 @@ def test_inprocess_multi_spec_executes_each_exact_request_and_finalizes_once(
         finalize_once,
     )
     monkeypatch.setattr(opend_symbol_outputs, "save_outputs", save_once)
-    monkeypatch.setattr(
-        mod.state_repo,
-        "append_source_snapshot_event",
-        lambda *args, **kwargs: None,
-    )
+    _silence_source_snapshot_events(monkeypatch)
     shared_required = tmp_path / "shared_required"
     base_cfg = {
         "symbols": watchlist,
@@ -1653,8 +1652,8 @@ def test_inprocess_multi_spec_executes_each_exact_request_and_finalizes_once(
     cold_base = tmp_path / "cold"
     cold_base.mkdir()
     cold_required = cold_base / "required_data"
-    cold = mod.prefetch_required_data(
-        vpy=tmp_path / "python",
+    cold = _prefetch(
+        tmp_path,
         base=cold_base,
         cfg=formal_cfg,
         shared_required=cold_required,
@@ -1716,9 +1715,8 @@ def test_inprocess_multi_spec_executes_each_exact_request_and_finalizes_once(
         account_configs=account_configs,
         prepared_portfolio_contexts={"lx": None, "sy": None},
     )
-    matching = mod.prefetch_required_data(
-        vpy=tmp_path / "python",
-        base=tmp_path,
+    matching = _prefetch(
+        tmp_path,
         cfg=matching_cfg,
         shared_required=tmp_path / "matching_required",
         producer_run_id="run-real-matching-warmup",
@@ -1734,9 +1732,8 @@ def test_inprocess_multi_spec_executes_each_exact_request_and_finalizes_once(
     save_calls.clear()
     gateway.snapshot_calls.clear()
 
-    result = mod.prefetch_required_data(
-        vpy=tmp_path / "python",
-        base=tmp_path,
+    result = _prefetch(
+        tmp_path,
         cfg=formal_cfg,
         shared_required=shared_required,
         producer_run_id="run-real-two-spec",
@@ -1812,39 +1809,11 @@ def test_inprocess_empty_put_rv_demand_is_carried_by_single_active_call_request(
         ["2026-06-29", "2026-07-17"],
         spot=444.8,
     )
-    watchlist = [
-        {
-            "symbol": "0700.HK",
-            "fetch": {
-                "source": "futu",
-                "host": "127.0.0.1",
-                "port": 11111,
-            },
-            "sell_put": {
-                "enabled": True,
-                "strategy": "insurance_underwriting",
-                "min_dte": 80,
-                "max_dte": 90,
-                "max_strike": 450,
-            },
-            "sell_call": {"enabled": False},
-        },
-        {
-            "symbol": "0700.HK",
-            "fetch": {
-                "source": "futu",
-                "host": "127.0.0.1",
-                "port": 11111,
-            },
-            "sell_put": {"enabled": False},
-            "sell_call": {
-                "enabled": True,
-                "min_dte": 30,
-                "max_dte": 60,
-                "min_strike": 550,
-            },
-        },
-    ]
+    watchlist = _two_spec_watchlist(
+        put_min_dte=80,
+        put_max_dte=90,
+        put_strategy='insurance_underwriting',
+    )
     gateway = _Gateway()
     fetch_calls: list[dict[str, object]] = []
     finalize_calls: list[dict[str, object]] = []
@@ -1866,11 +1835,7 @@ def test_inprocess_empty_put_rv_demand_is_carried_by_single_active_call_request(
         save_calls.append(dict(kwargs))
         return original_save(*args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(
-        "src.infrastructure.futu_gateway.build_ready_futu_gateway",
-        lambda **kwargs: gateway,
-    )
-    monkeypatch.setattr(mod, "resolve_watchlist_config", lambda cfg: watchlist)
+    _patch_prefetch_sources(monkeypatch, watchlist=watchlist, gateway=gateway)
     monkeypatch.setattr(mod, "fetch_symbol", fake_fetch_symbol)
     monkeypatch.setattr(
         mod,
@@ -1878,24 +1843,11 @@ def test_inprocess_empty_put_rv_demand_is_carried_by_single_active_call_request(
         finalize_once,
     )
     monkeypatch.setattr(opend_symbol_outputs, "save_outputs", save_once)
-    monkeypatch.setattr(
-        mod.state_repo,
-        "append_source_snapshot_event",
-        lambda *args, **kwargs: None,
-    )
+    _silence_source_snapshot_events(monkeypatch)
     shared_required = tmp_path / "shared_required"
 
-    result = mod.prefetch_required_data(
-        vpy=tmp_path / "python",
-        base=tmp_path,
-        cfg={
-            "runtime": {
-                "prefetch": {
-                    "execution_mode": "inprocess",
-                    "max_workers": 1,
-                }
-            }
-        },
+    result = _prefetch(
+        tmp_path,
         shared_required=shared_required,
         producer_run_id="run-empty-put-rv-active-call",
     )
@@ -1945,30 +1897,7 @@ def test_inprocess_multi_spec_preserves_nested_connection_failure_for_gateway(
         ["2026-06-29", "2026-07-17"],
         spot=444.8,
     )
-    watchlist = [
-        {
-            "symbol": "0700.HK",
-            "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111},
-            "sell_put": {
-                "enabled": True,
-                "min_dte": 20,
-                "max_dte": 25,
-                "max_strike": 450,
-            },
-            "sell_call": {"enabled": False},
-        },
-        {
-            "symbol": "0700.HK",
-            "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111},
-            "sell_put": {"enabled": False},
-            "sell_call": {
-                "enabled": True,
-                "min_dte": 30,
-                "max_dte": 60,
-                "min_strike": 550,
-            },
-        },
-    ]
+    watchlist = _two_spec_watchlist()
     connection_failure: dict[str, object] = {
         "symbol": "0700.HK",
         "underlier_code": "HK.00700",
@@ -1997,11 +1926,7 @@ def test_inprocess_multi_spec_preserves_nested_connection_failure_for_gateway(
             raise AssertionError("later child request must not execute")
         return connection_failure
 
-    monkeypatch.setattr(
-        "src.infrastructure.futu_gateway.build_ready_futu_gateway",
-        lambda **kwargs: _Gateway(),
-    )
-    monkeypatch.setattr(mod, "resolve_watchlist_config", lambda cfg: watchlist)
+    _patch_prefetch_sources(monkeypatch, watchlist=watchlist)
     monkeypatch.setattr(mod, "fetch_symbol", fake_fetch_symbol)
     monkeypatch.setattr(
         mod,
@@ -2019,21 +1944,11 @@ def test_inprocess_multi_spec_preserves_nested_connection_failure_for_gateway(
         lambda failure: gateway_failures.append(failure),
     )
     monkeypatch.setattr(mod._gateway_pool, "close_current_thread", lambda: None)
-    monkeypatch.setattr(
-        mod.state_repo,
-        "append_source_snapshot_event",
-        lambda *args, **kwargs: None,
-    )
+    _silence_source_snapshot_events(monkeypatch)
     shared_required = tmp_path / "shared_required"
 
-    result = mod.prefetch_required_data(
-        vpy=tmp_path / "python",
-        base=tmp_path,
-        cfg={
-            "runtime": {
-                "prefetch": {"execution_mode": "inprocess", "max_workers": 1}
-            }
-        },
+    result = _prefetch(
+        tmp_path,
         shared_required=shared_required,
         producer_run_id="run-child-connection-failure",
     )
@@ -2060,30 +1975,7 @@ def test_inprocess_multi_spec_duplicate_child_contract_fails_without_receipt(
         ["2026-06-29", "2026-07-17"],
         spot=444.8,
     )
-    watchlist = [
-        {
-            "symbol": "0700.HK",
-            "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111},
-            "sell_put": {
-                "enabled": True,
-                "min_dte": 20,
-                "max_dte": 25,
-                "max_strike": 450,
-            },
-            "sell_call": {"enabled": False},
-        },
-        {
-            "symbol": "0700.HK",
-            "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111},
-            "sell_put": {"enabled": False},
-            "sell_call": {
-                "enabled": True,
-                "min_dte": 30,
-                "max_dte": 60,
-                "min_strike": 550,
-            },
-        },
-    ]
+    watchlist = _two_spec_watchlist()
     fetch_calls: list[dict[str, object]] = []
     finalize_calls: list[dict[str, object]] = []
 
@@ -2097,32 +1989,18 @@ def test_inprocess_multi_spec_duplicate_child_contract_fails_without_receipt(
             payload["rows"].append(duplicate)
         return payload
 
-    monkeypatch.setattr(
-        "src.infrastructure.futu_gateway.build_ready_futu_gateway",
-        lambda **kwargs: _Gateway(),
-    )
-    monkeypatch.setattr(mod, "resolve_watchlist_config", lambda cfg: watchlist)
+    _patch_prefetch_sources(monkeypatch, watchlist=watchlist)
     monkeypatch.setattr(mod, "fetch_symbol", fake_fetch_symbol)
     monkeypatch.setattr(
         mod,
         "finalize_required_data_quote_candidate",
         lambda **kwargs: finalize_calls.append(dict(kwargs)),
     )
-    monkeypatch.setattr(
-        mod.state_repo,
-        "append_source_snapshot_event",
-        lambda *args, **kwargs: None,
-    )
+    _silence_source_snapshot_events(monkeypatch)
     shared_required = tmp_path / "shared_required"
 
-    result = mod.prefetch_required_data(
-        vpy=tmp_path / "python",
-        base=tmp_path,
-        cfg={
-            "runtime": {
-                "prefetch": {"execution_mode": "inprocess", "max_workers": 1}
-            }
-        },
+    result = _prefetch(
+        tmp_path,
         shared_required=shared_required,
         producer_run_id=f"run-duplicate-child-{conflicting}",
     )
@@ -2144,30 +2022,7 @@ def test_subprocess_multi_spec_fails_before_execution_or_publication(
         ["2026-06-29", "2026-07-17"],
         spot=444.8,
     )
-    watchlist = [
-        {
-            "symbol": "0700.HK",
-            "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111},
-            "sell_put": {
-                "enabled": True,
-                "min_dte": 20,
-                "max_dte": 25,
-                "max_strike": 450,
-            },
-            "sell_call": {"enabled": False},
-        },
-        {
-            "symbol": "0700.HK",
-            "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111},
-            "sell_put": {"enabled": False},
-            "sell_call": {
-                "enabled": True,
-                "min_dte": 30,
-                "max_dte": 60,
-                "min_strike": 550,
-            },
-        },
-    ]
+    watchlist = _two_spec_watchlist()
     effects: list[str] = []
 
     def forbidden(name: str):
@@ -2187,9 +2042,8 @@ def test_subprocess_multi_spec_fails_before_execution_or_publication(
     )
     shared_required = tmp_path / "shared_required"
 
-    result = mod.prefetch_required_data(
-        vpy=tmp_path / "python",
-        base=tmp_path,
+    result = _prefetch(
+        tmp_path,
         cfg={
             "runtime": {
                 "prefetch": {
@@ -2250,24 +2104,14 @@ def test_prefetch_shared_required_data_candidate_universe_stable_for_same_accoun
     monkeypatch.setattr(mod, "adapt_opend_tool_payload", lambda payload: {"source_name": "opend", "payload": payload})
     monkeypatch.setattr(mod.state_repo, "append_source_snapshot_event", lambda *args, **kwargs: None)
 
-    first = mod.prefetch_required_data(
-        vpy=tmp_path / "python",
-        base=tmp_path,
-        cfg={"runtime": {"prefetch": {"execution_mode": "inprocess", "max_workers": 1}}},
-        shared_required=shared_required,
-    )
+    first = _prefetch(tmp_path, shared_required=shared_required)
     assert first["fetched_ok"] == 1, first["results"]
     import pandas as pd
 
     parsed = shared_required / "parsed" / "0700.HK_required_data.csv"
     first_universe = set(pd.read_csv(parsed)["contract_symbol"].dropna().astype(str).tolist())
 
-    second = mod.prefetch_required_data(
-        vpy=tmp_path / "python",
-        base=tmp_path,
-        cfg={"runtime": {"prefetch": {"execution_mode": "inprocess", "max_workers": 1}}},
-        shared_required=shared_required,
-    )
+    second = _prefetch(tmp_path, shared_required=shared_required)
     second_universe = set(pd.read_csv(parsed)["contract_symbol"].dropna().astype(str).tolist())
 
     assert first["fetched_ok"] == 1
@@ -2305,16 +2149,14 @@ def test_inprocess_prefetch_executes_budgeted_waves_with_safe_option_chain_limit
     monkeypatch.setattr(mod.state_repo, "append_source_snapshot_event", lambda *args, **kwargs: None)
     _patch_us_budget_plan_discovery(monkeypatch)
 
-    result = mod.prefetch_required_data(
-        vpy=tmp_path / "python",
-        base=tmp_path,
+    result = _prefetch(
+        tmp_path,
         cfg={
             "runtime": {
                 "prefetch": {"execution_mode": "inprocess", "max_workers": 3},
                 "opend_rate_limits": {"option_chain": {"max_calls": 10, "window_sec": 30, "max_wait_sec": 90}},
             }
         },
-        shared_required=tmp_path / "shared_required",
     )
 
     assert len(captured_calls) == 3
@@ -2366,16 +2208,14 @@ def test_inprocess_prefetch_waits_after_rate_limited_wave_before_next_wave(tmp_p
     monkeypatch.setattr(mod, "_sleep_after_rate_limit_wave", lambda wait_sec: sleeps.append(float(wait_sec)))
     _patch_us_budget_plan_discovery(monkeypatch)
 
-    result = mod.prefetch_required_data(
-        vpy=tmp_path / "python",
-        base=tmp_path,
+    result = _prefetch(
+        tmp_path,
         cfg={
             "runtime": {
                 "prefetch": {"execution_mode": "inprocess", "max_workers": 3},
                 "opend_rate_limits": {"option_chain": {"max_calls": 10, "window_sec": 30, "max_wait_sec": 90}},
             }
         },
-        shared_required=tmp_path / "shared_required",
     )
 
     assert sleeps == [30.0]
@@ -2431,12 +2271,7 @@ def test_inprocess_prefetch_summary_records_partial_expiration_rate_limit_class(
     monkeypatch.setattr(mod, "adapt_opend_tool_payload", lambda payload: {"source_name": "opend", "payload": payload})
     monkeypatch.setattr(mod.state_repo, "append_source_snapshot_event", lambda *args, **kwargs: None)
 
-    result = mod.prefetch_required_data(
-        vpy=tmp_path / "python",
-        base=tmp_path,
-        cfg={"runtime": {"prefetch": {"execution_mode": "inprocess", "max_workers": 1}}},
-        shared_required=tmp_path / "shared_required",
-    )
+    result = _prefetch(tmp_path)
 
     assert result["fetched_ok"] == 0
     assert result["errors"] == 1
@@ -2495,20 +2330,11 @@ def test_prefetch_refetches_legacy_cache_without_strict_completeness_evidence(
         fetched.append(symbol)
         return _strict_success_rows_for_fetch(symbol, kwargs)
 
-    monkeypatch.setattr(
-        "src.infrastructure.futu_gateway.build_ready_futu_gateway",
-        lambda **kwargs: _Gateway(),
-    )
-    monkeypatch.setattr(mod, "resolve_watchlist_config", lambda cfg: watchlist)
+    _patch_prefetch_sources(monkeypatch, watchlist=watchlist)
     monkeypatch.setattr(mod, "fetch_symbol", fake_fetch_symbol)
     _patch_success_finalizer(monkeypatch)
 
-    result = mod.prefetch_required_data(
-        vpy=tmp_path / "python",
-        base=tmp_path,
-        cfg={"runtime": {"prefetch": {"execution_mode": "inprocess", "max_workers": 1}}},
-        shared_required=shared_required,
-    )
+    result = _prefetch(tmp_path, shared_required=shared_required)
 
     assert result["symbols_total"] == 1
     assert result["to_fetch"] == 1
@@ -2556,38 +2382,20 @@ def test_prefetch_reuses_strict_cache_without_resaving_raw_observation(
             validation_errors.append(str(exc))
             raise
 
-    monkeypatch.setattr(
-        "src.infrastructure.futu_gateway.build_ready_futu_gateway",
-        lambda **kwargs: _Gateway(),
-    )
-    monkeypatch.setattr(mod, "resolve_watchlist_config", lambda cfg: watchlist)
+    _patch_prefetch_sources(monkeypatch, watchlist=watchlist)
     monkeypatch.setattr(mod, "fetch_symbol", fake_fetch_symbol)
     monkeypatch.setattr(mod, "finalize_required_data_quote_candidate", track_finalize)
     monkeypatch.setattr(mod, "validate_required_data_quote_candidate", track_validate)
-    monkeypatch.setattr(
-        mod.state_repo,
-        "append_source_snapshot_event",
-        lambda *args, **kwargs: None,
-    )
+    _silence_source_snapshot_events(monkeypatch)
 
-    first = mod.prefetch_required_data(
-        vpy=tmp_path / "python",
-        base=tmp_path,
-        cfg={"runtime": {"prefetch": {"execution_mode": "inprocess", "max_workers": 1}}},
-        shared_required=shared_required,
-    )
+    first = _prefetch(tmp_path, shared_required=shared_required)
     assert first["fetched_ok"] == 1, first["results"]
     raw_path = shared_required / "raw" / "0700.HK_required_data.json"
     before_bytes = raw_path.read_bytes()
     before_mtime_ns = raw_path.stat().st_mtime_ns
     before_raw = json.loads(before_bytes)
 
-    second = mod.prefetch_required_data(
-        vpy=tmp_path / "python",
-        base=tmp_path,
-        cfg={"runtime": {"prefetch": {"execution_mode": "inprocess", "max_workers": 1}}},
-        shared_required=shared_required,
-    )
+    second = _prefetch(tmp_path, shared_required=shared_required)
 
     assert first["fetched_ok"] == 1
     assert second["to_fetch"] == 0, validation_errors
@@ -2649,22 +2457,12 @@ def test_prefetch_refetches_stale_strict_cache_before_publishing_current_receipt
         fetched.append(symbol)
         return _strict_success_rows_for_fetch(symbol, kwargs)
 
-    monkeypatch.setattr(
-        "src.infrastructure.futu_gateway.build_ready_futu_gateway",
-        lambda **kwargs: _Gateway(),
-    )
-    monkeypatch.setattr(mod, "resolve_watchlist_config", lambda cfg: watchlist)
+    _patch_prefetch_sources(monkeypatch, watchlist=watchlist)
     monkeypatch.setattr(mod, "fetch_symbol", fake_fetch_symbol)
-    monkeypatch.setattr(
-        mod.state_repo,
-        "append_source_snapshot_event",
-        lambda *args, **kwargs: None,
-    )
+    _silence_source_snapshot_events(monkeypatch)
 
-    result = mod.prefetch_required_data(
-        vpy=tmp_path / "python",
-        base=tmp_path,
-        cfg={"runtime": {"prefetch": {"execution_mode": "inprocess", "max_workers": 1}}},
+    result = _prefetch(
+        tmp_path,
         shared_required=shared_required,
         producer_run_id="run-after-stale",
     )
@@ -2730,22 +2528,13 @@ def test_prefetch_mixed_legacy_cache_and_fresh_partial_only_receipts_success(
             }
         return _strict_success_rows_for_fetch(symbol, kwargs)
 
-    monkeypatch.setattr(
-        "src.infrastructure.futu_gateway.build_ready_futu_gateway",
-        lambda **kwargs: _Gateway(),
-    )
-    monkeypatch.setattr(mod, "resolve_watchlist_config", lambda cfg: watchlist)
+    _patch_prefetch_sources(monkeypatch, watchlist=watchlist)
     monkeypatch.setattr(mod, "fetch_symbol", fake_fetch_symbol)
-    monkeypatch.setattr(
-        mod.state_repo,
-        "append_source_snapshot_event",
-        lambda *args, **kwargs: None,
-    )
+    _silence_source_snapshot_events(monkeypatch)
 
-    result = mod.prefetch_required_data(
-        vpy=tmp_path / "python",
-        base=tmp_path,
-        cfg={"runtime": {"prefetch": {"execution_mode": "inprocess", "max_workers": 2}}},
+    result = _prefetch(
+        tmp_path,
+        max_workers=2,
         shared_required=shared_required,
         producer_run_id="run-mixed",
     )
@@ -2815,12 +2604,7 @@ def test_prefetch_refetches_when_cached_required_data_misses_strategy_side(tmp_p
     monkeypatch.setattr(mod, "adapt_opend_tool_payload", lambda payload: {"source_name": "opend", "payload": payload})
     monkeypatch.setattr(mod.state_repo, "append_source_snapshot_event", lambda *args, **kwargs: None)
 
-    result = mod.prefetch_required_data(
-        vpy=tmp_path / "python",
-        base=tmp_path,
-        cfg={"runtime": {"prefetch": {"execution_mode": "inprocess", "max_workers": 1}}},
-        shared_required=shared_required,
-    )
+    result = _prefetch(tmp_path, shared_required=shared_required)
 
     assert fetched == ["0700.HK"]
     assert result["fetched_ok"] == 1
@@ -2851,12 +2635,7 @@ def test_inprocess_prefetch_summary_includes_symbol_duration(tmp_path: Path, mon
     monkeypatch.setattr(mod, "adapt_opend_tool_payload", lambda payload: {"source_name": "opend", "payload": payload})
     monkeypatch.setattr(mod.state_repo, "append_source_snapshot_event", lambda *args, **kwargs: None)
 
-    result = mod.prefetch_required_data(
-        vpy=tmp_path / "python",
-        base=tmp_path,
-        cfg={"runtime": {"prefetch": {"execution_mode": "inprocess"}}},
-        shared_required=tmp_path / "shared_required",
-    )
+    result = _prefetch(tmp_path, cfg={"runtime": {"prefetch": {"execution_mode": "inprocess"}}})
 
     assert result["prefetch_max_workers"] == 2
     assert result["effective_prefetch_workers"] == 1

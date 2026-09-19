@@ -19,13 +19,53 @@ def _freeze_planning_trading_date(monkeypatch) -> None:
     )
 
 
-def test_tcom_put_fetch_window_is_account_cash_invariant(monkeypatch, tmp_path: Path) -> None:
+def _stub_discovery(monkeypatch, expirations, *, spot=470.0) -> None:
+    """Freeze the two OpenD planning inputs: expirations and underlier spot."""
     import src.application.required_data_planning as mod
+
+    monkeypatch.setattr(
+        mod,
+        "list_option_expirations",
+        # a fresh list per call, as the replaced inline lambdas returned
+        lambda *args, **kwargs: list(expirations),
+    )
+    monkeypatch.setattr(
+        mod,
+        "get_underlier_spot",
+        lambda *args, **kwargs: spot,
+    )
+
+
+def _plan(tmp_path: Path, **overrides: object):
+    """Build a required-data fetch plan over the shared call-site defaults.
+
+    The defaults are the literal values the individual call sites used: a
+    put-only NVDA request for the current trading date with no side config.
+    Every call site that passed anything else states it explicitly.
+    """
+    import src.application.required_data_planning as mod
+
+    kwargs: dict[str, object] = {
+        "base": tmp_path,
+        "required_data_dir": tmp_path,
+        "symbol": "NVDA",
+        "limit_expirations": 0,
+        "want_put": True,
+        "want_call": False,
+        "sell_put_cfg": {},
+        "sell_call_cfg": {"enabled": False},
+        "fetch_host": "127.0.0.1",
+        "fetch_port": 11111,
+    }
+    kwargs.update(overrides)
+    return mod.build_required_data_fetch_plan(**kwargs)  # type: ignore[arg-type]
+
+
+def test_tcom_put_fetch_window_is_account_cash_invariant(monkeypatch, tmp_path: Path) -> None:
     import src.application.opend_utils as opend_utils
     from src.application.prefilters import apply_prefilters
 
-    monkeypatch.setattr(mod, "list_option_expirations", lambda *args, **kwargs: ["2026-08-21", "2026-09-18"])
-    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: 43.07)
+    _stub_discovery(monkeypatch, ["2026-08-21", "2026-09-18"], spot=43.07)
     monkeypatch.setattr(opend_utils, "get_trading_date", lambda market: date(2026, 7, 22))
 
     sell_put = {"enabled": True, "min_dte": 7, "max_dte": 60, "max_strike": 45.0}
@@ -50,17 +90,13 @@ def test_tcom_put_fetch_window_is_account_cash_invariant(monkeypatch, tmp_path: 
             want_call=False,
             portfolio_ctx=portfolio_ctx,
         )
-        plan = mod.build_required_data_fetch_plan(
-            base=tmp_path,
+        plan = _plan(
+            tmp_path,
             required_data_dir=tmp_path / "required_data",
             symbol="TCOM",
             limit_expirations=10,
             want_put=prefilters.want_put,
-            want_call=False,
             sell_put_cfg=prefilters.sp,
-            sell_call_cfg={"enabled": False},
-            fetch_host="127.0.0.1",
-            fetch_port=11111,
         )
         put_plan = next(item for item in plan.side_plans if item.option_type == "put")
         resolved[account] = put_plan.to_debug_dict()
@@ -265,17 +301,9 @@ def test_required_data_plan_fails_closed_when_trading_date_cannot_be_resolved(
         lambda market: (_ for _ in ()).throw(RuntimeError("calendar unavailable")),
     )
 
-    plan = mod.build_required_data_fetch_plan(
-        base=tmp_path,
-        required_data_dir=tmp_path,
-        symbol="NVDA",
-        limit_expirations=0,
-        want_put=True,
-        want_call=False,
+    plan = _plan(
+        tmp_path,
         sell_put_cfg={"enabled": True, "min_dte": 7, "max_dte": 45},
-        sell_call_cfg={"enabled": False},
-        fetch_host="127.0.0.1",
-        fetch_port=11111,
     )
 
     assert plan.projection_outcome == "parse_error"
@@ -286,24 +314,17 @@ def test_required_data_plan_fails_closed_when_trading_date_cannot_be_resolved(
 
 
 def test_tcom_put_fetch_window_fails_closed_without_opend_spot(monkeypatch, tmp_path: Path) -> None:
-    import src.application.required_data_planning as mod
     import src.application.opend_utils as opend_utils
 
-    monkeypatch.setattr(mod, "list_option_expirations", lambda *args, **kwargs: ["2026-08-21", "2026-09-18"])
-    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: None)
+    _stub_discovery(monkeypatch, ["2026-08-21", "2026-09-18"], spot=None)
     monkeypatch.setattr(opend_utils, "get_trading_date", lambda market: date(2026, 7, 22))
 
-    plan = mod.build_required_data_fetch_plan(
-        base=tmp_path,
+    plan = _plan(
+        tmp_path,
         required_data_dir=tmp_path / "required_data",
         symbol="TCOM",
         limit_expirations=10,
-        want_put=True,
-        want_call=False,
         sell_put_cfg={"enabled": True, "min_dte": 7, "max_dte": 60, "max_strike": 45.0},
-        sell_call_cfg={"enabled": False},
-        fetch_host="127.0.0.1",
-        fetch_port=11111,
     )
 
     assert plan.projection_outcome == "provider_error"
@@ -315,22 +336,16 @@ def test_tcom_put_fetch_window_fails_closed_without_opend_spot(monkeypatch, tmp_
 
 
 def test_sell_call_min_strike_builds_configured_bounds_plan(monkeypatch, tmp_path: Path) -> None:
-    import src.application.required_data_planning as mod
 
-    monkeypatch.setattr(mod, "list_option_expirations", lambda *args, **kwargs: ["2026-05-29", "2026-06-26"])
-    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: 470.0)
+    _stub_discovery(monkeypatch, ["2026-05-29", "2026-06-26"], spot=470.0)
 
-    plan = mod.build_required_data_fetch_plan(
-        base=tmp_path,
-        required_data_dir=tmp_path,
+    plan = _plan(
+        tmp_path,
         symbol="0700.HK",
         limit_expirations=2,
         want_put=False,
         want_call=True,
-        sell_put_cfg={},
         sell_call_cfg={"enabled": True, "min_dte": 10, "max_dte": 60, "min_strike": 505},
-        fetch_host="127.0.0.1",
-        fetch_port=11111,
     )
 
     assert len(plan.side_plans) == 1
@@ -345,30 +360,20 @@ def test_sell_call_min_strike_builds_configured_bounds_plan(monkeypatch, tmp_pat
 
 
 def test_wheel_call_fetch_uses_spot_floor_unbounded_max_and_rv(monkeypatch, tmp_path: Path) -> None:
-    import src.application.required_data_planning as mod
 
-    monkeypatch.setattr(
-        mod,
-        "list_option_expirations",
-        lambda *args, **kwargs: ["2026-05-29", "2026-06-12", "2026-06-26"],
-    )
-    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: 100.0)
+    _stub_discovery(monkeypatch, ["2026-05-29", "2026-06-12", "2026-06-26"], spot=100.0)
 
-    plan = mod.build_required_data_fetch_plan(
-        base=tmp_path,
-        required_data_dir=tmp_path,
-        symbol="NVDA",
-        limit_expirations=0,
+    plan = _plan(
+        tmp_path,
         want_put=False,
-        want_call=False,
+        sell_put_cfg={},
+        sell_call_cfg={},
         wheel_call_cfg={
             "enabled": True,
             "min_dte": 30,
             "max_dte": 45,
             "requires_realized_volatility": True,
         },
-        fetch_host="127.0.0.1",
-        fetch_port=11111,
     )
 
     assert len(plan.side_plans) == 1
@@ -381,30 +386,20 @@ def test_wheel_call_fetch_uses_spot_floor_unbounded_max_and_rv(monkeypatch, tmp_
 
 
 def test_wheel_put_fetch_uses_spot_cap_and_rv(monkeypatch, tmp_path: Path) -> None:
-    import src.application.required_data_planning as mod
 
-    monkeypatch.setattr(
-        mod,
-        "list_option_expirations",
-        lambda *args, **kwargs: ["2026-05-29", "2026-06-12", "2026-06-26"],
-    )
-    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: 100.0)
+    _stub_discovery(monkeypatch, ["2026-05-29", "2026-06-12", "2026-06-26"], spot=100.0)
 
-    plan = mod.build_required_data_fetch_plan(
-        base=tmp_path,
-        required_data_dir=tmp_path,
-        symbol="NVDA",
-        limit_expirations=0,
+    plan = _plan(
+        tmp_path,
         want_put=False,
-        want_call=False,
+        sell_put_cfg={},
+        sell_call_cfg={},
         wheel_put_cfg={
             "enabled": True,
             "min_dte": 30,
             "max_dte": 45,
             "requires_realized_volatility": True,
         },
-        fetch_host="127.0.0.1",
-        fetch_port=11111,
     )
 
     assert len(plan.side_plans) == 1
@@ -487,26 +482,18 @@ def test_wheel_prefetch_demand_is_added_only_for_enabled_ready_branches() -> Non
 
 
 def test_fetch_plan_prefers_live_spot_over_existing_required_data(monkeypatch, tmp_path: Path) -> None:
-    import src.application.required_data_planning as mod
 
     required_data_dir = tmp_path / "required_data"
     parsed = required_data_dir / "parsed" / "NVDA_required_data.csv"
     parsed.parent.mkdir(parents=True, exist_ok=True)
     parsed.write_text("option_type,expiration,dte,strike,spot\nput,2026-06-19,30,80,80.15\n", encoding="utf-8")
-    monkeypatch.setattr(mod, "list_option_expirations", lambda *args, **kwargs: ["2026-06-19"])
-    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: 79.8)
+    _stub_discovery(monkeypatch, ["2026-06-19"], spot=79.8)
 
-    plan = mod.build_required_data_fetch_plan(
-        base=tmp_path,
+    plan = _plan(
+        tmp_path,
         required_data_dir=required_data_dir,
-        symbol="NVDA",
         limit_expirations=1,
-        want_put=True,
-        want_call=False,
         sell_put_cfg={"enabled": True, "max_strike": 80},
-        sell_call_cfg={"enabled": False},
-        fetch_host="127.0.0.1",
-        fetch_port=11111,
     )
 
     assert plan.spot_reference == 79.8
@@ -514,26 +501,18 @@ def test_fetch_plan_prefers_live_spot_over_existing_required_data(monkeypatch, t
 
 
 def test_fetch_plan_does_not_reuse_stale_required_data_spot(monkeypatch, tmp_path: Path) -> None:
-    import src.application.required_data_planning as mod
 
     required_data_dir = tmp_path / "required_data"
     parsed = required_data_dir / "parsed" / "NVDA_required_data.csv"
     parsed.parent.mkdir(parents=True, exist_ok=True)
     parsed.write_text("option_type,expiration,dte,strike,spot\nput,2026-06-19,30,80,80.15\n", encoding="utf-8")
-    monkeypatch.setattr(mod, "list_option_expirations", lambda *args, **kwargs: ["2026-06-19"])
-    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: None)
+    _stub_discovery(monkeypatch, ["2026-06-19"], spot=None)
 
-    plan = mod.build_required_data_fetch_plan(
-        base=tmp_path,
+    plan = _plan(
+        tmp_path,
         required_data_dir=required_data_dir,
-        symbol="NVDA",
         limit_expirations=1,
-        want_put=True,
-        want_call=False,
         sell_put_cfg={"enabled": True, "max_strike": 80},
-        sell_call_cfg={"enabled": False},
-        fetch_host="127.0.0.1",
-        fetch_port=11111,
     )
 
     assert plan.spot_reference is None
@@ -544,22 +523,14 @@ def test_fetch_plan_does_not_reuse_stale_required_data_spot(monkeypatch, tmp_pat
 
 
 def test_sell_put_underwriting_fetch_plan_requires_realized_volatility(monkeypatch, tmp_path: Path) -> None:
-    import src.application.required_data_planning as mod
 
-    monkeypatch.setattr(mod, "list_option_expirations", lambda *args, **kwargs: ["2026-05-29"])
-    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: 470.0)
+    _stub_discovery(monkeypatch, ["2026-05-29"], spot=470.0)
 
-    plan = mod.build_required_data_fetch_plan(
-        base=tmp_path,
-        required_data_dir=tmp_path,
+    plan = _plan(
+        tmp_path,
         symbol="0700.HK",
         limit_expirations=1,
-        want_put=True,
-        want_call=False,
         sell_put_cfg={"enabled": True, "strategy": "insurance_underwriting"},
-        sell_call_cfg={"enabled": False},
-        fetch_host="127.0.0.1",
-        fetch_port=11111,
     )
 
     assert len(plan.merged_specs) == 1
@@ -571,23 +542,15 @@ def test_combo_only_fetch_plan_requires_funding_put_realized_volatility(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    import src.application.required_data_planning as mod
 
-    monkeypatch.setattr(mod, "list_option_expirations", lambda *args, **kwargs: ["2026-05-29"])
-    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: 470.0)
+    _stub_discovery(monkeypatch, ["2026-05-29"], spot=470.0)
 
-    plan = mod.build_required_data_fetch_plan(
-        base=tmp_path,
-        required_data_dir=tmp_path,
+    plan = _plan(
+        tmp_path,
         symbol="0700.HK",
-        limit_expirations=0,
         want_put=False,
-        want_call=False,
         sell_put_cfg={"enabled": False},
-        sell_call_cfg={"enabled": False},
         combo_yield_cfg={"enabled": True},
-        fetch_host="127.0.0.1",
-        fetch_port=11111,
     )
 
     assert plan.merged_specs[0].option_types == ("put", "call")
@@ -595,50 +558,36 @@ def test_combo_only_fetch_plan_requires_funding_put_realized_volatility(
 
 
 def test_fetch_plan_rejects_unexpanded_template_strategy_config(monkeypatch, tmp_path: Path) -> None:
-    import src.application.required_data_planning as mod
 
-    monkeypatch.setattr(mod, "list_option_expirations", lambda *args, **kwargs: ["2026-05-29"])
-    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: 470.0)
+    _stub_discovery(monkeypatch, ["2026-05-29"], spot=470.0)
 
     with pytest.raises(ValueError) as _caught:
-        mod.build_required_data_fetch_plan(
-            base=tmp_path,
-            required_data_dir=tmp_path,
-            symbol="NVDA",
+        _plan(
+            tmp_path,
             limit_expirations=1,
-            want_put=True,
-            want_call=False,
             sell_put_cfg={"enabled": True},
-            sell_call_cfg={"enabled": False},
             symbol_cfg={
                 "symbol": "NVDA",
                 "use": ["put_base"],
                 "sell_put": {"enabled": True},
             },
-            fetch_host="127.0.0.1",
-            fetch_port=11111,
         )
     exc = _caught.value
     assert "apply templates/profiles" in str(exc)
 
 
 def test_sell_call_underwriting_fetch_plan_requires_realized_volatility(monkeypatch, tmp_path: Path) -> None:
-    import src.application.required_data_planning as mod
 
-    monkeypatch.setattr(mod, "list_option_expirations", lambda *args, **kwargs: ["2026-05-29"])
-    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: 470.0)
+    _stub_discovery(monkeypatch, ["2026-05-29"], spot=470.0)
 
-    plan = mod.build_required_data_fetch_plan(
-        base=tmp_path,
-        required_data_dir=tmp_path,
+    plan = _plan(
+        tmp_path,
         symbol="0700.HK",
         limit_expirations=1,
         want_put=False,
         want_call=True,
         sell_put_cfg={"enabled": False},
         sell_call_cfg={"enabled": True, "strategy": "insurance_underwriting", "min_dte": 10, "max_dte": 60},
-        fetch_host="127.0.0.1",
-        fetch_port=11111,
     )
 
     assert len(plan.merged_specs) == 1
@@ -663,17 +612,13 @@ def test_fetch_plan_forwards_opend_discovery_rate_limits(monkeypatch, tmp_path: 
     monkeypatch.setattr(mod, "get_underlier_spot", _get_underlier_spot)
     monkeypatch.setattr(mod, "list_option_expirations", _list_option_expirations)
 
-    mod.build_required_data_fetch_plan(
-        base=tmp_path,
-        required_data_dir=tmp_path,
+    _plan(
+        tmp_path,
         symbol="0700.HK",
         limit_expirations=1,
         want_put=False,
         want_call=True,
-        sell_put_cfg={},
         sell_call_cfg={"enabled": True, "min_strike": 505},
-        fetch_host="127.0.0.1",
-        fetch_port=11111,
         snapshot_max_wait_sec=21,
         snapshot_window_sec=22,
         snapshot_max_calls=23,
@@ -691,22 +636,16 @@ def test_fetch_plan_forwards_opend_discovery_rate_limits(monkeypatch, tmp_path: 
 
 
 def test_sell_call_without_strikes_derives_bounds_from_spot(monkeypatch, tmp_path: Path) -> None:
-    import src.application.required_data_planning as mod
 
-    monkeypatch.setattr(mod, "list_option_expirations", lambda *args, **kwargs: ["2026-05-29"])
-    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: 470.0)
+    _stub_discovery(monkeypatch, ["2026-05-29"], spot=470.0)
 
-    plan = mod.build_required_data_fetch_plan(
-        base=tmp_path,
-        required_data_dir=tmp_path,
+    plan = _plan(
+        tmp_path,
         symbol="0700.HK",
         limit_expirations=1,
         want_put=False,
         want_call=True,
-        sell_put_cfg={},
         sell_call_cfg={"enabled": True},
-        fetch_host="127.0.0.1",
-        fetch_port=11111,
     )
 
     call_plan = plan.side_plans[0]
@@ -718,22 +657,16 @@ def test_sell_call_without_strikes_derives_bounds_from_spot(monkeypatch, tmp_pat
 
 
 def test_sell_call_min_strike_without_spot_fails_closed(monkeypatch, tmp_path: Path) -> None:
-    import src.application.required_data_planning as mod
 
-    monkeypatch.setattr(mod, "list_option_expirations", lambda *args, **kwargs: ["2026-05-29"])
-    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: None)
+    _stub_discovery(monkeypatch, ["2026-05-29"], spot=None)
 
-    plan = mod.build_required_data_fetch_plan(
-        base=tmp_path,
-        required_data_dir=tmp_path,
+    plan = _plan(
+        tmp_path,
         symbol="0700.HK",
         limit_expirations=1,
         want_put=False,
         want_call=True,
-        sell_put_cfg={},
         sell_call_cfg={"enabled": True, "min_strike": 505},
-        fetch_host="127.0.0.1",
-        fetch_port=11111,
     )
 
     call_plan = plan.side_plans[0]
@@ -745,22 +678,16 @@ def test_sell_call_min_strike_without_spot_fails_closed(monkeypatch, tmp_path: P
 
 
 def test_sell_call_max_strike_only_keeps_configured_far_bound(monkeypatch, tmp_path: Path) -> None:
-    import src.application.required_data_planning as mod
 
-    monkeypatch.setattr(mod, "list_option_expirations", lambda *args, **kwargs: ["2026-05-29"])
-    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: 470.0)
+    _stub_discovery(monkeypatch, ["2026-05-29"], spot=470.0)
 
-    plan = mod.build_required_data_fetch_plan(
-        base=tmp_path,
-        required_data_dir=tmp_path,
+    plan = _plan(
+        tmp_path,
         symbol="0700.HK",
         limit_expirations=1,
         want_put=False,
         want_call=True,
-        sell_put_cfg={},
         sell_call_cfg={"enabled": True, "max_strike": 550},
-        fetch_host="127.0.0.1",
-        fetch_port=11111,
     )
 
     call_plan = plan.side_plans[0]
@@ -771,22 +698,16 @@ def test_sell_call_max_strike_only_keeps_configured_far_bound(monkeypatch, tmp_p
 
 
 def test_sell_call_without_strikes_uses_spot_20pct_max(monkeypatch, tmp_path: Path) -> None:
-    import src.application.required_data_planning as mod
 
-    monkeypatch.setattr(mod, "list_option_expirations", lambda *args, **kwargs: ["2026-05-29"])
-    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: 470.0)
+    _stub_discovery(monkeypatch, ["2026-05-29"], spot=470.0)
 
-    plan = mod.build_required_data_fetch_plan(
-        base=tmp_path,
-        required_data_dir=tmp_path,
+    plan = _plan(
+        tmp_path,
         symbol="0700.HK",
         limit_expirations=1,
         want_put=False,
         want_call=True,
-        sell_put_cfg={},
         sell_call_cfg={"enabled": True},
-        fetch_host="127.0.0.1",
-        fetch_port=11111,
     )
 
     call_plan = plan.side_plans[0]
@@ -797,22 +718,15 @@ def test_sell_call_without_strikes_uses_spot_20pct_max(monkeypatch, tmp_path: Pa
 
 
 def test_sell_put_max_strike_only_derives_far_bound_from_near_bound(monkeypatch, tmp_path: Path) -> None:
-    import src.application.required_data_planning as mod
 
-    monkeypatch.setattr(mod, "list_option_expirations", lambda *args, **kwargs: ["2026-05-29"])
-    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: 470.0)
+    _stub_discovery(monkeypatch, ["2026-05-29"], spot=470.0)
 
-    plan = mod.build_required_data_fetch_plan(
-        base=tmp_path,
-        required_data_dir=tmp_path,
+    plan = _plan(
+        tmp_path,
         symbol="0700.HK",
         limit_expirations=1,
-        want_put=True,
-        want_call=False,
         sell_put_cfg={"enabled": True, "min_dte": 10, "max_dte": 60, "max_strike": 460},
         sell_call_cfg={},
-        fetch_host="127.0.0.1",
-        fetch_port=11111,
     )
 
     put_plan = plan.side_plans[0]
@@ -824,22 +738,15 @@ def test_sell_put_max_strike_only_derives_far_bound_from_near_bound(monkeypatch,
 
 
 def test_sell_put_min_strike_only_keeps_direct_lower_bound(monkeypatch, tmp_path: Path) -> None:
-    import src.application.required_data_planning as mod
 
-    monkeypatch.setattr(mod, "list_option_expirations", lambda *args, **kwargs: ["2026-05-29"])
-    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: 470.0)
+    _stub_discovery(monkeypatch, ["2026-05-29"], spot=470.0)
 
-    plan = mod.build_required_data_fetch_plan(
-        base=tmp_path,
-        required_data_dir=tmp_path,
+    plan = _plan(
+        tmp_path,
         symbol="0700.HK",
         limit_expirations=1,
-        want_put=True,
-        want_call=False,
         sell_put_cfg={"enabled": True, "min_dte": 10, "max_dte": 60, "min_strike": 420},
         sell_call_cfg={},
-        fetch_host="127.0.0.1",
-        fetch_port=11111,
     )
 
     put_plan = plan.side_plans[0]
@@ -849,22 +756,16 @@ def test_sell_put_min_strike_only_keeps_direct_lower_bound(monkeypatch, tmp_path
 
 
 def test_put_and_call_same_expirations_merge_into_single_request(monkeypatch, tmp_path: Path) -> None:
-    import src.application.required_data_planning as mod
 
-    monkeypatch.setattr(mod, "list_option_expirations", lambda *args, **kwargs: ["2026-05-29", "2026-06-26"])
-    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: 470.0)
+    _stub_discovery(monkeypatch, ["2026-05-29", "2026-06-26"], spot=470.0)
 
-    plan = mod.build_required_data_fetch_plan(
-        base=tmp_path,
-        required_data_dir=tmp_path,
+    plan = _plan(
+        tmp_path,
         symbol="0700.HK",
         limit_expirations=1,
-        want_put=True,
         want_call=True,
         sell_put_cfg={"enabled": True, "min_dte": 10, "max_dte": 60, "min_strike": 420, "max_strike": 460},
         sell_call_cfg={"enabled": True, "min_dte": 10, "max_dte": 60, "min_strike": 505},
-        fetch_host="127.0.0.1",
-        fetch_port=11111,
     )
 
     assert len(plan.merged_specs) == 1
@@ -1035,28 +936,22 @@ def test_partial_put_call_overlap_fetches_each_expiration_once() -> None:
 
 
 def test_put_and_call_different_expirations_split_requests(monkeypatch, tmp_path: Path) -> None:
-    import src.application.required_data_planning as mod
     import src.application.opend_utils as opend_utils
 
-    monkeypatch.setattr(
-        mod,
-        "list_option_expirations",
-        lambda *args, **kwargs: ["2026-05-09", "2026-05-29", "2026-06-26", "2026-08-28"],
+    _stub_discovery(
+        monkeypatch,
+        ["2026-05-09", "2026-05-29", "2026-06-26", "2026-08-28"],
+        spot=470.0,
     )
-    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: 470.0)
     monkeypatch.setattr(opend_utils, "get_trading_date", lambda _market: date(2026, 4, 30))
 
-    plan = mod.build_required_data_fetch_plan(
-        base=tmp_path,
-        required_data_dir=tmp_path,
+    plan = _plan(
+        tmp_path,
         symbol="0700.HK",
         limit_expirations=2,
-        want_put=True,
         want_call=True,
         sell_put_cfg={"enabled": True, "min_dte": 1, "max_dte": 30, "min_strike": 420, "max_strike": 460},
         sell_call_cfg={"enabled": True, "min_dte": 40, "max_dte": 120, "min_strike": 505},
-        fetch_host="127.0.0.1",
-        fetch_port=11111,
     )
 
     assert len(plan.merged_specs) == 2
@@ -1068,27 +963,18 @@ def test_required_data_plan_preserves_typed_success_empty_evidence(
     tmp_path: Path,
 ) -> None:
     import src.application.opend_utils as opend_utils
-    import src.application.required_data_planning as mod
 
-    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: None)
-    monkeypatch.setattr(mod, "list_option_expirations", lambda *args, **kwargs: [])
+    _stub_discovery(monkeypatch, [], spot=None)
     monkeypatch.setattr(
         opend_utils,
         "get_trading_date",
         lambda _market: date(2026, 7, 30),
     )
 
-    plan = mod.build_required_data_fetch_plan(
-        base=tmp_path,
-        required_data_dir=tmp_path,
+    plan = _plan(
+        tmp_path,
         symbol="0700.HK",
-        limit_expirations=0,
-        want_put=True,
-        want_call=False,
         sell_put_cfg={"enabled": True, "min_dte": 7, "max_dte": 45},
-        sell_call_cfg={"enabled": False},
-        fetch_host="127.0.0.1",
-        fetch_port=11111,
     )
 
     assert plan.projection_outcome == "success_empty"
@@ -1129,15 +1015,9 @@ def test_required_data_plan_preserves_discovery_failure_type(
         lambda _market: date(2026, 7, 30),
     )
 
-    plan = mod.build_required_data_fetch_plan(
-        base=tmp_path,
-        required_data_dir=tmp_path,
-        symbol="NVDA",
-        limit_expirations=0,
-        want_put=True,
-        want_call=False,
+    plan = _plan(
+        tmp_path,
         sell_put_cfg={"enabled": True, "min_dte": 7, "max_dte": 45},
-        sell_call_cfg={"enabled": False},
     )
 
     assert plan.projection_outcome == expected_outcome
@@ -1151,29 +1031,17 @@ def test_required_data_plan_fails_closed_when_discovery_rows_project_to_no_targe
     tmp_path: Path,
 ) -> None:
     import src.application.opend_utils as opend_utils
-    import src.application.required_data_planning as mod
 
-    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        mod,
-        "list_option_expirations",
-        lambda *args, **kwargs: ["2027-12-17"],
-    )
+    _stub_discovery(monkeypatch, ["2027-12-17"], spot=None)
     monkeypatch.setattr(
         opend_utils,
         "get_trading_date",
         lambda _market: date(2026, 7, 30),
     )
 
-    plan = mod.build_required_data_fetch_plan(
-        base=tmp_path,
-        required_data_dir=tmp_path,
-        symbol="NVDA",
-        limit_expirations=0,
-        want_put=True,
-        want_call=False,
+    plan = _plan(
+        tmp_path,
         sell_put_cfg={"enabled": True, "min_dte": 7, "max_dte": 45},
-        sell_call_cfg={"enabled": False},
     )
 
     assert plan.expiration_discovery is not None
@@ -1214,18 +1082,10 @@ def test_required_data_plan_memoizes_discovery_by_physical_binding(
     )
     cache = {}
     plans = [
-        mod.build_required_data_fetch_plan(
-            base=tmp_path,
-            required_data_dir=tmp_path,
-            symbol="NVDA",
-            limit_expirations=0,
-            want_put=True,
-            want_call=False,
+        _plan(
+            tmp_path,
             sell_put_cfg={"enabled": True, "min_dte": 7, "max_dte": 45},
-            sell_call_cfg={"enabled": False},
             fetch_source="futu",
-            fetch_host="127.0.0.1",
-            fetch_port=11111,
             expiration_discovery_cache=cache,
         )
         for _account in ("lx", "sy")
@@ -1268,18 +1128,11 @@ def test_required_data_plan_memoizes_missing_spot_by_binding_and_date(
     spot_cache: dict[tuple[object, ...], float | None] = {}
 
     plans = [
-        mod.build_required_data_fetch_plan(
-            base=tmp_path,
-            required_data_dir=tmp_path,
-            symbol="NVDA",
-            limit_expirations=0,
-            want_put=True,
-            want_call=False,
+        _plan(
+            tmp_path,
             sell_put_cfg={"enabled": True, "min_dte": 7, "max_dte": 45},
-            sell_call_cfg={"enabled": False},
             fetch_source="futu",
             fetch_host=fetch_host,
-            fetch_port=11111,
             expiration_discovery_cache=expiration_cache,
             spot_observation_cache=spot_cache,
         )
@@ -1350,18 +1203,11 @@ def test_required_data_plan_consumes_typed_unavailable_prefill_without_io(
         lambda *_args, **_kwargs: ["2026-05-15"],
     )
 
-    plan = mod.build_required_data_fetch_plan(
-        base=tmp_path,
-        required_data_dir=tmp_path,
-        symbol="NVDA",
-        limit_expirations=0,
-        want_put=True,
-        want_call=False,
+    plan = _plan(
+        tmp_path,
         sell_put_cfg={"enabled": True, "min_dte": 7, "max_dte": 45},
-        sell_call_cfg={"enabled": False},
         fetch_source="futu",
         fetch_host="OpenD.EXAMPLE",
-        fetch_port=11111,
         spot_observation_cache=spot_cache,
         planning_identity=identity,
     )
@@ -1411,18 +1257,10 @@ def test_required_data_plan_rejects_cached_discovery_date_drift_without_io(
         )
     }
 
-    plan = mod.build_required_data_fetch_plan(
-        base=tmp_path,
-        required_data_dir=tmp_path,
-        symbol="NVDA",
-        limit_expirations=0,
-        want_put=True,
-        want_call=False,
+    plan = _plan(
+        tmp_path,
         sell_put_cfg={"enabled": True, "min_dte": 7, "max_dte": 45},
-        sell_call_cfg={"enabled": False},
         fetch_source="futu",
-        fetch_host="127.0.0.1",
-        fetch_port=11111,
         expiration_discovery_cache=cache,
     )
 
@@ -1467,15 +1305,10 @@ def test_position_requirements_preserve_sorted_expiry_local_exact_strikes(
     import src.application.required_data_planning as mod
 
     _patch_position_plan_sources(monkeypatch)
-    plan = mod.build_required_data_fetch_plan(
-        base=tmp_path,
-        required_data_dir=tmp_path,
-        symbol="NVDA",
-        limit_expirations=0,
+    plan = _plan(
+        tmp_path,
         want_put=False,
-        want_call=False,
         sell_put_cfg={"enabled": False},
-        sell_call_cfg={"enabled": False},
         position_requirements=[
             {
                 "planning_status": "ready",
@@ -1529,13 +1362,8 @@ def test_strategy_merge_retains_interior_position_exact_strike(
     import src.application.required_data_planning as mod
 
     _patch_position_plan_sources(monkeypatch)
-    plan = mod.build_required_data_fetch_plan(
-        base=tmp_path,
-        required_data_dir=tmp_path,
-        symbol="NVDA",
-        limit_expirations=0,
-        want_put=True,
-        want_call=False,
+    plan = _plan(
+        tmp_path,
         sell_put_cfg={
             "enabled": True,
             "min_dte": 7,
@@ -1543,7 +1371,6 @@ def test_strategy_merge_retains_interior_position_exact_strike(
             "min_strike": 80,
             "max_strike": 120,
         },
-        sell_call_cfg={"enabled": False},
         position_requirements=[
             {
                 "planning_status": "ready",
@@ -1571,11 +1398,8 @@ def test_call_max_only_strategy_stays_lower_unbounded_when_merged_with_position(
     import src.application.required_data_planning as mod
 
     _patch_position_plan_sources(monkeypatch, spot_reference=None)
-    plan = mod.build_required_data_fetch_plan(
-        base=tmp_path,
-        required_data_dir=tmp_path,
-        symbol="NVDA",
-        limit_expirations=0,
+    plan = _plan(
+        tmp_path,
         want_put=False,
         want_call=True,
         sell_put_cfg={"enabled": False},
@@ -1613,20 +1437,14 @@ def test_put_min_only_strategy_uses_spot_upper_bound_when_merged_with_position(
     import src.application.required_data_planning as mod
 
     _patch_position_plan_sources(monkeypatch, spot_reference=110.0)
-    plan = mod.build_required_data_fetch_plan(
-        base=tmp_path,
-        required_data_dir=tmp_path,
-        symbol="NVDA",
-        limit_expirations=0,
-        want_put=True,
-        want_call=False,
+    plan = _plan(
+        tmp_path,
         sell_put_cfg={
             "enabled": True,
             "min_dte": 7,
             "max_dte": 45,
             "min_strike": 100,
         },
-        sell_call_cfg={"enabled": False},
         position_requirements=[
             {
                 "planning_status": "ready",
@@ -1664,13 +1482,8 @@ def test_position_expiration_outside_strategy_dte_expands_plan_and_is_coverable(
     )
 
     _patch_position_plan_sources(monkeypatch, spot_reference=110.0)
-    plan = mod.build_required_data_fetch_plan(
-        base=tmp_path,
-        required_data_dir=tmp_path,
-        symbol="NVDA",
-        limit_expirations=0,
-        want_put=True,
-        want_call=False,
+    plan = _plan(
+        tmp_path,
         sell_put_cfg={
             "enabled": True,
             "min_dte": 7,
@@ -1678,7 +1491,6 @@ def test_position_expiration_outside_strategy_dte_expands_plan_and_is_coverable(
             "min_strike": 80,
             "max_strike": 100,
         },
-        sell_call_cfg={"enabled": False},
         position_requirements=[
             {
                 "planning_status": "ready",
@@ -1766,15 +1578,10 @@ def test_successful_discovery_without_trading_date_rejects_position_dte(
     )
 
     with pytest.raises(mod.RequiredDataPlanningError) as exc_info:
-        mod.build_required_data_fetch_plan(
-            base=tmp_path,
-            required_data_dir=tmp_path,
-            symbol="NVDA",
-            limit_expirations=0,
+        _plan(
+            tmp_path,
             want_put=False,
-            want_call=False,
             sell_put_cfg={"enabled": False},
-            sell_call_cfg={"enabled": False},
             position_requirements=[
                 {
                     "planning_status": "ready",
@@ -1796,15 +1603,10 @@ def test_position_expiration_before_trading_date_is_rejected(
 
     _patch_position_plan_sources(monkeypatch)
     with pytest.raises(mod.RequiredDataPlanningError) as exc_info:
-        mod.build_required_data_fetch_plan(
-            base=tmp_path,
-            required_data_dir=tmp_path,
-            symbol="NVDA",
-            limit_expirations=0,
+        _plan(
+            tmp_path,
             want_put=False,
-            want_call=False,
             sell_put_cfg={"enabled": False},
-            sell_call_cfg={"enabled": False},
             position_requirements=[
                 {
                     "planning_status": "ready",
@@ -1851,15 +1653,10 @@ def test_failed_discovery_without_trading_date_preserves_failure_outcome(
         ),
     )
 
-    plan = mod.build_required_data_fetch_plan(
-        base=tmp_path,
-        required_data_dir=tmp_path,
-        symbol="NVDA",
-        limit_expirations=0,
+    plan = _plan(
+        tmp_path,
         want_put=False,
-        want_call=False,
         sell_put_cfg={"enabled": False},
-        sell_call_cfg={"enabled": False},
         position_requirements=[
             {
                 "planning_status": "ready",
@@ -1915,15 +1712,10 @@ def test_malformed_ready_position_requirement_fails_before_provider_access(
     malformed[field_name] = invalid_value
 
     with pytest.raises(mod.RequiredDataPlanningError) as exc_info:
-        mod.build_required_data_fetch_plan(
-            base=tmp_path,
-            required_data_dir=tmp_path,
-            symbol="NVDA",
-            limit_expirations=0,
+        _plan(
+            tmp_path,
             want_put=False,
-            want_call=False,
             sell_put_cfg={"enabled": False},
-            sell_call_cfg={"enabled": False},
             position_requirements=[
                 {
                     "planning_status": "ready",
@@ -1949,15 +1741,10 @@ def test_explicit_non_ready_position_requirement_remains_excluded(
     import src.application.required_data_planning as mod
 
     _patch_position_plan_sources(monkeypatch)
-    plan = mod.build_required_data_fetch_plan(
-        base=tmp_path,
-        required_data_dir=tmp_path,
-        symbol="NVDA",
-        limit_expirations=0,
+    plan = _plan(
+        tmp_path,
         want_put=False,
-        want_call=False,
         sell_put_cfg={"enabled": False},
-        sell_call_cfg={"enabled": False},
         position_requirements=[
             {
                 "planning_status": "unavailable",
