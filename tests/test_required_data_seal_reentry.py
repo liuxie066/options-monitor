@@ -45,18 +45,19 @@ def _seal(
     )
 
 
+def _sealed_workspace(tmp_path: Path, *symbols: str) -> tuple[Path, Path, dict, dict]:
+    """Run-1 workspace with an empty quote published and a first seal applied."""
+    root, manifest_path = _workspace(tmp_path)
+    _publish_empty_quote(root, run_id="run-1")
+    summary = _empty_summary(*symbols)
+    sealed = _seal(root=root, manifest_path=manifest_path, summary=summary)
+    return root, manifest_path, summary, sealed
+
+
 def test_identical_reseal_adopts_exact_manifest_bytes_and_hash(
     tmp_path: Path,
 ) -> None:
-    root, manifest_path = _workspace(tmp_path)
-    _publish_empty_quote(root, run_id="run-1")
-    summary = _empty_summary("3690.HK")
-
-    first = _seal(
-        root=root,
-        manifest_path=manifest_path,
-        summary=summary,
-    )
+    root, manifest_path, summary, first = _sealed_workspace(tmp_path, "3690.HK")
     original_bytes = manifest_path.read_bytes()
 
     second = _seal(
@@ -75,13 +76,7 @@ def test_identical_reseal_adopts_exact_manifest_bytes_and_hash(
 def test_conflicting_plan_and_status_cannot_replace_terminal_manifest(
     tmp_path: Path,
 ) -> None:
-    root, manifest_path = _workspace(tmp_path)
-    _publish_empty_quote(root, run_id="run-1")
-    first = _seal(
-        root=root,
-        manifest_path=manifest_path,
-        summary=_empty_summary("3690.HK"),
-    )
+    root, manifest_path, _, first = _sealed_workspace(tmp_path, "3690.HK")
     original_bytes = manifest_path.read_bytes()
 
     with pytest.raises(
@@ -101,10 +96,7 @@ def test_conflicting_plan_and_status_cannot_replace_terminal_manifest(
 def test_reseal_rejects_manifest_tampering_without_repairing_it(
     tmp_path: Path,
 ) -> None:
-    root, manifest_path = _workspace(tmp_path)
-    _publish_empty_quote(root, run_id="run-1")
-    summary = _empty_summary("3690.HK")
-    _seal(root=root, manifest_path=manifest_path, summary=summary)
+    root, manifest_path, summary, _ = _sealed_workspace(tmp_path, "3690.HK")
     tampered = json.loads(manifest_path.read_text(encoding="utf-8"))
     tampered["summary"]["ready"] = 0
     manifest_path.write_text(json.dumps(tampered), encoding="utf-8")
@@ -127,12 +119,7 @@ def test_reseal_rejects_close_advice_plan_hash_or_root_conflict(
     summary = _empty_summary("3690.HK")
     close_plan_path = manifest_path.parent / "close_advice_required_data_plan.json"
     close_plan_path.write_text('{"plan":"one"}\n', encoding="utf-8")
-    _seal(
-        root=root,
-        manifest_path=manifest_path,
-        summary=summary,
-        close_plan_path=close_plan_path,
-    )
+    _seal(root=root, manifest_path=manifest_path, summary=summary, close_plan_path=close_plan_path)
     original_bytes = manifest_path.read_bytes()
 
     close_plan_path.write_text('{"plan":"two"}\n', encoding="utf-8")
@@ -140,24 +127,14 @@ def test_reseal_rejects_close_advice_plan_hash_or_root_conflict(
         RequiredDataSnapshotError,
         match="close-advice required-data plan hash mismatch",
     ):
-        _seal(
-            root=root,
-            manifest_path=manifest_path,
-            summary=summary,
-            close_plan_path=close_plan_path,
-        )
+        _seal(root=root, manifest_path=manifest_path, summary=summary, close_plan_path=close_plan_path)
     assert manifest_path.read_bytes() == original_bytes
 
     close_plan_path.write_text('{"plan":"one"}\n', encoding="utf-8")
     other_root = root.parent / "other_required_data"
     other_root.mkdir()
     with pytest.raises(RequiredDataSnapshotError, match="root mismatch"):
-        _seal(
-            root=other_root,
-            manifest_path=manifest_path,
-            summary=summary,
-            close_plan_path=close_plan_path,
-        )
+        _seal(root=other_root, manifest_path=manifest_path, summary=summary, close_plan_path=close_plan_path)
     assert manifest_path.read_bytes() == original_bytes
 
 
@@ -178,27 +155,15 @@ def test_complete_partial_and_failed_manifests_are_terminal_absorbing(
     root, manifest_path = _workspace(tmp_path)
     for symbol in published_symbols:
         _publish_empty_quote(root, run_id="run-1", symbol=symbol)
-    initial = _seal(
-        root=root,
-        manifest_path=manifest_path,
-        summary=_empty_summary(*initial_symbols),
-    )
+    initial = _seal(root=root, manifest_path=manifest_path, summary=_empty_summary(*initial_symbols))
     original_bytes = manifest_path.read_bytes()
     assert initial["status"] == expected_status
 
-    conflicting_symbols = (
-        ("3690.HK", "9898.HK")
-        if initial_symbols == ("3690.HK",)
-        else ("3690.HK",)
-    )
+    conflicting_symbols = ("3690.HK", "9898.HK") if initial_symbols == ("3690.HK",) else ("3690.HK",)
     with pytest.raises(
         RequiredDataSnapshotError,
         match="terminal required-data snapshot manifest conflicts",
     ):
-        _seal(
-            root=root,
-            manifest_path=manifest_path,
-            summary=_empty_summary(*conflicting_symbols),
-        )
+        _seal(root=root, manifest_path=manifest_path, summary=_empty_summary(*conflicting_symbols))
 
     assert manifest_path.read_bytes() == original_bytes

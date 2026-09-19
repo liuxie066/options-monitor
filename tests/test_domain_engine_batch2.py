@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 
+def _legacy_scheduler(**overrides: object) -> dict:
+    """Legacy scheduler payload whose `should_notify` alias is still accepted."""
+    return {'should_run_scan': 1, 'should_notify': 0, 'reason': None, **overrides}
+
+
 def test_build_scheduler_decision_dto_uses_normalized_payload() -> None:
     from domain.domain.engine import build_scheduler_decision_dto
 
@@ -27,7 +32,7 @@ def test_build_scheduler_decision_dto_fallback_keeps_legacy_shape() -> None:
     from domain.domain.engine import build_scheduler_decision_dto
 
     out = build_scheduler_decision_dto(
-        {'should_run_scan': 1, 'should_notify': 0, 'reason': None, 'extra': 'v'},
+        _legacy_scheduler(extra='v'),
         normalize_fn=lambda _: (_ for _ in ()).throw(ValueError('bad')),
     )
 
@@ -42,9 +47,7 @@ def test_build_scheduler_decision_dto_fallback_keeps_legacy_shape() -> None:
 def test_build_scheduler_decision_dto_default_normalizer_supports_legacy_notify_alias() -> None:
     from domain.domain.engine import build_scheduler_decision_dto
 
-    out = build_scheduler_decision_dto(
-        {'should_run_scan': 1, 'should_notify': 0, 'reason': 'legacy-alias'},
-    )
+    out = build_scheduler_decision_dto(_legacy_scheduler(reason='legacy-alias'))
 
     assert out['schema_kind'] == 'scheduler_decision'
     assert out['schema_version'] == '1.0'
@@ -83,13 +86,7 @@ def test_decide_notify_window_open_prefers_account_payload() -> None:
 def test_scheduler_decision_view_from_payload_enforces_fields() -> None:
     from domain.domain.engine import SchedulerDecisionView
 
-    view = SchedulerDecisionView.from_payload(
-        {
-            'should_run_scan': 1,
-            'should_notify': 0,
-            'reason': None,
-        }
-    )
+    view = SchedulerDecisionView.from_payload(_legacy_scheduler())
     assert view.should_run_scan is True
     assert view.is_notify_window_open is False
     assert view.reason == ''
@@ -149,9 +146,7 @@ def test_decide_notification_meaningful_keeps_existing_predicate() -> None:
 def test_resolve_scheduler_decision_centralizes_legacy_alias_reads() -> None:
     from domain.domain.engine import resolve_scheduler_decision
 
-    dto, view = resolve_scheduler_decision(
-        {'should_run_scan': 1, 'should_notify': 0, 'reason': 'compat-alias'}
-    )
+    dto, view = resolve_scheduler_decision(_legacy_scheduler(reason='compat-alias'))
 
     assert dto['schema_kind'] == 'scheduler_decision'
     assert dto['schema_version'] == '1.0'
