@@ -539,70 +539,6 @@ def _scope(data: dict[str, Any]) -> dict[str, Any]:
     return deepcopy(value) if isinstance(value, dict) else {}
 
 
-def _normalize_declared_coverage(
-    value: dict[str, Any],
-    *,
-    require_included_count: bool,
-) -> dict[str, Any] | None:
-    status = str(value.get("status") or "").strip().lower()
-    complete_for = str(value.get("complete_for") or "").strip().lower()
-    if status not in {"complete", "partial", "unknown"}:
-        return None
-    if complete_for not in {"point", "requested_page", "full_query"}:
-        return None
-    normalized: dict[str, Any] = {
-        "status": status,
-        "complete_for": complete_for,
-    }
-    for key in ("included_count", "total_count", "omitted_count"):
-        raw = value.get(key)
-        if raw is None:
-            normalized[key] = None
-        elif isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
-            normalized[key] = raw
-        else:
-            return None
-    if require_included_count and normalized.get("included_count") is None:
-        return None
-    has_more = value.get("has_more")
-    if "has_more" in value and has_more is not None and not isinstance(has_more, bool):
-        return None
-    if isinstance(has_more, bool):
-        normalized["has_more"] = has_more
-    included_count = normalized.get("included_count")
-    total_count = normalized.get("total_count")
-    omitted_count = normalized.get("omitted_count")
-    if total_count is not None:
-        if included_count is not None and included_count > total_count:
-            return None
-        if omitted_count is not None and omitted_count > total_count:
-            return None
-        if (
-            included_count is not None
-            and omitted_count is not None
-            and included_count + omitted_count != total_count
-        ):
-            return None
-    if (
-        complete_for == "full_query"
-        and status == "complete"
-        and (
-            included_count is None
-            or total_count is None
-            or omitted_count is None
-            or included_count != total_count
-            or omitted_count != 0
-            or has_more is True
-        )
-    ):
-        return None
-    if isinstance(value.get("scope"), dict):
-        normalized["scope"] = deepcopy(value["scope"])
-    if _is_iso_timestamp(value.get("as_of")):
-        normalized["as_of"] = str(value["as_of"])
-    return normalized
-
-
 def _request_scope(payload: dict[str, Any]) -> dict[str, Any]:
     allowed = {
         "account",
@@ -741,30 +677,6 @@ def _preview(
             items.append({"_truncated_items": len(value) - len(items)})
         return items
     return str(value)
-
-
-def _contract_values(
-    data: dict[str, Any],
-    paths: Any,
-    *,
-    missing_only: bool = False,
-    preview_max_depth: int = MAX_PREVIEW_DEPTH,
-) -> dict[str, Any]:
-    out: dict[str, Any] = {}
-    for raw_path in paths or ():
-        path = str(raw_path or "").strip()
-        if not path:
-            continue
-        values = _values_at_path(data, path.split("."))
-        values = [value for value in values if value not in (None, "", [], {})]
-        if missing_only:
-            values = [value for value in values if _indicates_missing_data(value)]
-        if values:
-            out[path] = _preview(
-                values[0] if len(values) == 1 else values,
-                max_depth=preview_max_depth,
-            )
-    return out
 
 
 def _indicates_missing_data(value: Any) -> bool:
