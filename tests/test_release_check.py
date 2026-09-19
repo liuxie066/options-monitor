@@ -17,12 +17,13 @@ def _changelog(version_section: str) -> str:
     )
 
 
-def test_current_release_taxonomy_parses_and_renders_in_canonical_order() -> None:
-    text = _changelog(
-        """
-## 1.5.0 - 2026-07-26
+def _release_section(version: str, body: str = "### Bug Fixes\n- Fixed duplicate processing.") -> str:
+    """Changelog text holding one dated release section appended to the shared skeleton."""
+    return _changelog(f"## {version} - 2026-07-26\n\n{body}")
 
-### Bug Fixes
+
+def test_current_release_taxonomy_parses_and_renders_in_canonical_order() -> None:
+    text = _release_section("1.5.0", """### Bug Fixes
 - Fixed duplicate processing.
 
 ### New Features
@@ -33,8 +34,7 @@ def test_current_release_taxonomy_parses_and_renders_in_canonical_order() -> Non
 
 ### Breaking Changes
 - Removed an obsolete public command.
-"""
-    )
+""")
 
     parsed = parse_version_categories(text, "1.5.0")
     rendered = render_release_notes(version="1.5.0", evidence=parsed["evidence"])
@@ -55,14 +55,7 @@ def test_current_release_taxonomy_parses_and_renders_in_canonical_order() -> Non
 
 
 def test_empty_categories_are_omitted_from_rendered_notes() -> None:
-    text = _changelog(
-        """
-## 1.4.3 - 2026-07-26
-
-### Bug Fixes
-- Fixed duplicate processing.
-"""
-    )
+    text = _release_section("1.4.3")
 
     parsed = parse_version_categories(text, "1.4.3")
 
@@ -75,14 +68,7 @@ def test_empty_categories_are_omitted_from_rendered_notes() -> None:
 
 
 def test_exact_version_match_does_not_confuse_prefix_versions() -> None:
-    text = _changelog(
-        """
-## 1.4.30 - 2026-07-26
-
-### Bug Fixes
-- Fixed duplicate processing.
-"""
-    )
+    text = _release_section("1.4.30")
 
     parsed = parse_version_categories(text, "1.4.3")
 
@@ -129,11 +115,7 @@ def test_current_release_section_rejects_empty_legacy_or_unowned_content(body: s
 
 
 def test_legacy_history_can_be_read_without_weakening_current_taxonomy() -> None:
-    text = _changelog(
-        """
-## 1.4.3 - 2026-07-26
-
-### Added
+    text = _release_section("1.4.3", """### Added
 - Historical feature.
 
 ### Changed
@@ -141,8 +123,7 @@ def test_legacy_history_can_be_read_without_weakening_current_taxonomy() -> None
 
 ### Fixed
 - Historical fix.
-"""
-    )
+""")
 
     strict = parse_version_categories(text, "1.4.3")
     compatible = parse_version_categories(text, "1.4.3", allow_legacy=True)

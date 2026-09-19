@@ -11,6 +11,12 @@ BASE = Path(__file__).resolve().parents[1]
 VPY = Path(sys.executable)
 
 
+def _cli_stdout(*args: str) -> str:
+    """Run the CLI in a subprocess and return its stdout."""
+    completed = subprocess.run([str(VPY), *args], cwd=str(BASE), capture_output=True, text=True, check=True)
+    return completed.stdout or ''
+
+
 def test_parse_option_message_domain_and_cli() -> None:
 
     from src.application.parse_option_message import parse_option_message_text
@@ -20,23 +26,8 @@ def test_parse_option_message_domain_and_cli() -> None:
     assert out['ok'] is True
     assert out['parsed']['symbol'] == '0700.HK'
 
-    p = subprocess.run(
-        [
-                str(VPY),
-            '-m',
-            'src.application.parse_option_message',
-            '--text',
-            text,
-            '--accounts',
-            'lx',
-            'sy',
-        ],
-        cwd=str(BASE),
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    payload = json.loads(p.stdout)
+    stdout = _cli_stdout('-m', 'src.application.parse_option_message', '--text', text, '--accounts', 'lx', 'sy')
+    payload = json.loads(stdout)
     assert payload['ok'] is True
     assert payload['parsed']['symbol'] == '0700.HK'
 
@@ -75,20 +66,9 @@ def test_alert_engine_domain_and_cli(tmp_path: Path) -> None:
     assert '# Symbols Alerts' in result['alert_text']
     assert out_path.exists()
 
-    subprocess.run(
-        [
-            str(VPY),
-            '-m',
-            'src.application.alert_engine',
-            '--summary-input', str(summary_path),
-            '--output', str(out_path),
-            '--changes-output', str(changes_path),
-            '--previous-summary', str(prev_path),
-        ],
-        cwd=str(BASE),
-        capture_output=True,
-        text=True,
-        check=True,
+    _cli_stdout(
+        '-m', 'src.application.alert_engine', '--summary-input', str(summary_path),
+        '--output', str(out_path), '--changes-output', str(changes_path), '--previous-summary', str(prev_path),
     )
     assert changes_path.exists()
 
@@ -138,24 +118,10 @@ def test_scan_scheduler_domain_and_cli(tmp_path: Path) -> None:
     assert 'should_run_scan' in payload
     assert 'should_notify' in payload
 
-    p = subprocess.run(
-        [
-            str(VPY),
-            '-m',
-            'src.interfaces.cli.main',
-            'scheduler',
-            '--config',
-            str(cfg),
-            '--state',
-            str(state),
-            '--jsonl',
-        ],
-        cwd=str(BASE),
-        capture_output=True,
-        text=True,
-        check=True,
+    stdout = _cli_stdout(
+        '-m', 'src.interfaces.cli.main', 'scheduler', '--config', str(cfg), '--state', str(state), '--jsonl',
     )
-    line = (p.stdout or '').strip().splitlines()[-1]
+    line = (stdout or '').strip().splitlines()[-1]
     cli_payload = json.loads(line)
     assert 'should_run_scan' in cli_payload
     assert 'should_notify' in cli_payload

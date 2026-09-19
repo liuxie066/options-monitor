@@ -26,6 +26,17 @@ def _base_cfg() -> dict:
     }
 
 
+def _rejected_policy_error(policy: dict) -> str:
+    """Validate the base config carrying this alert_policy; return the SystemExit message."""
+    import src.application.config_validator as mod
+
+    cfg = _base_cfg()
+    cfg["alert_policy"] = policy
+    with pytest.raises(SystemExit) as caught:
+        mod.validate_config(cfg)
+    return str(caught.value)
+
+
 def test_default_alert_policy_matches_legacy_hardcoded_thresholds() -> None:
     from domain.domain.alert_policy import DEFAULT_ALERT_POLICY
 
@@ -66,36 +77,18 @@ def test_render_accepts_explicit_policy_kwarg_overriding_active() -> None:
 
 
 def test_validator_rejects_negative_threshold() -> None:
-    import src.application.config_validator as mod
-
-    cfg = _base_cfg()
-    cfg["alert_policy"] = {"sell_put": {"high_annual": -0.1}}
-    with pytest.raises(SystemExit) as _caught:
-        mod.validate_config(cfg)
-    exc = _caught.value
-    assert "alert_policy.sell_put.high_annual must be >= 0" in str(exc)
+    error = _rejected_policy_error({"sell_put": {"high_annual": -0.1}})
+    assert "alert_policy.sell_put.high_annual must be >= 0" in error
 
 
 def test_validator_rejects_unknown_subkey() -> None:
-    import src.application.config_validator as mod
-
-    cfg = _base_cfg()
-    cfg["alert_policy"] = {"sell_call": {"bogus_key": 0.1}}
-    with pytest.raises(SystemExit) as _caught:
-        mod.validate_config(cfg)
-    exc = _caught.value
-    assert "alert_policy.sell_call.bogus_key" in str(exc)
+    error = _rejected_policy_error({"sell_call": {"bogus_key": 0.1}})
+    assert "alert_policy.sell_call.bogus_key" in error
 
 
 def test_validator_rejects_non_dict_subsection() -> None:
-    import src.application.config_validator as mod
-
-    cfg = _base_cfg()
-    cfg["alert_policy"] = {"sell_put": [0.1, 0.2]}
-    with pytest.raises(SystemExit) as _caught:
-        mod.validate_config(cfg)
-    exc = _caught.value
-    assert "alert_policy.sell_put must be an object" in str(exc)
+    error = _rejected_policy_error({"sell_put": [0.1, 0.2]})
+    assert "alert_policy.sell_put must be an object" in error
 
 
 def test_validator_accepts_nested_alert_policy() -> None:
@@ -117,39 +110,17 @@ def test_alert_engine_classification_consumes_nested_strategy_thresholds() -> No
     previous = alert_engine.POLICY
     alert_engine.POLICY = {
         "change_annual_threshold": 0.02,
-        "sell_put": {
-            "high_annual": 0.99,
-            "high_spread_max": 0.05,
-            "medium_annual": 0.50,
-        },
-        "sell_call": {
-            "high_annual": 0.99,
-            "high_total": 0.99,
-            "medium_annual": 0.50,
-        },
+        "sell_put": {"high_annual": 0.99, "high_spread_max": 0.05, "medium_annual": 0.50},
+        "sell_call": {"high_annual": 0.99, "high_total": 0.99, "medium_annual": 0.50},
     }
     try:
-        put_level, _ = alert_engine.classify_alert(
-            pd.Series(
-                {
-                    "candidate_count": 1,
-                    "strategy": "sell_put",
-                    "annualized_return": 0.15,
-                    "spread_ratio": 0.01,
-                }
-            )
-        )
-        call_level, _ = alert_engine.classify_alert(
-            pd.Series(
-                {
-                    "candidate_count": 1,
-                    "strategy": "covered_call",
-                    "annualized_return": 0.15,
-                    "if_exercised_total_return": 0.20,
-                    "cover_avail": 1,
-                }
-            )
-        )
+        put_level, _ = alert_engine.classify_alert(pd.Series({
+            "candidate_count": 1, "strategy": "sell_put", "annualized_return": 0.15, "spread_ratio": 0.01,
+        }))
+        call_level, _ = alert_engine.classify_alert(pd.Series({
+            "candidate_count": 1, "strategy": "covered_call", "annualized_return": 0.15,
+            "if_exercised_total_return": 0.20, "cover_avail": 1,
+        }))
     finally:
         alert_engine.POLICY = previous
 
