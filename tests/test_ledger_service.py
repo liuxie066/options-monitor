@@ -43,6 +43,24 @@ def _position_fields(
     }
 
 
+def _manual_open_event_kwargs(**overrides: Any) -> dict[str, Any]:
+    return {
+        "broker": "富途",
+        "account": "sy",
+        "symbol": "0700.HK",
+        "option_type": "put",
+        "side": "short",
+        "contracts": 6,
+        "currency": "HKD",
+        "strike": 450.0,
+        "multiplier": 100,
+        "expiration_ymd": "2026-05-28",
+        "premium_per_share": 8.0,
+        "opened_at_ms": 1000,
+        **overrides,
+    }
+
+
 def _open_event_from_fields(fields: dict[str, Any], *, event_id: str = "open-put-may") -> dict[str, Any]:
     from domain.domain.ledger.position_fields import effective_expiration_ymd
 
@@ -147,21 +165,7 @@ def test_manual_open_ledger_service_projects_new_lot(tmp_path: Path) -> None:
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
 
-    result = persist_manual_open_event_with_ledger(
-        repo,
-        broker="富途",
-        account="sy",
-        symbol="0700.HK",
-        option_type="put",
-        side="short",
-        contracts=6,
-        currency="HKD",
-        strike=450.0,
-        multiplier=100,
-        expiration_ymd="2026-05-28",
-        premium_per_share=8.0,
-        opened_at_ms=1000,
-    )
+    result = persist_manual_open_event_with_ledger(repo, **_manual_open_event_kwargs())
 
     assert result.ledger_preflight.status == "ok"
     assert result.ledger_preflight.event_type == "open"
@@ -180,21 +184,7 @@ def test_manual_close_ledger_service_closes_exact_lot(tmp_path: Path) -> None:
     from src.application.ledger.commands import persist_manual_close_event_with_ledger
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="sy",
-        symbol="0700.HK",
-        option_type="put",
-        side="short",
-        contracts=6,
-        currency="HKD",
-        strike=450.0,
-        multiplier=100,
-        expiration_ymd="2026-05-28",
-        premium_per_share=8.0,
-        opened_at_ms=1000,
-    )
+    ledger_manual_trades.persist_manual_open_event(repo, **_manual_open_event_kwargs())
     lot = repo.list_position_lots()[0]
 
     result = persist_manual_close_event_with_ledger(
@@ -222,21 +212,7 @@ def test_manual_adjust_ledger_service_targets_exact_lot(tmp_path: Path) -> None:
     from src.application.ledger.commands import persist_manual_adjust_event_with_ledger
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        broker="富途",
-        account="sy",
-        symbol="0700.HK",
-        option_type="put",
-        side="short",
-        contracts=6,
-        currency="HKD",
-        strike=450.0,
-        multiplier=100,
-        expiration_ymd="2026-05-28",
-        premium_per_share=8.0,
-        opened_at_ms=1000,
-    )
+    ledger_manual_trades.persist_manual_open_event(repo, **_manual_open_event_kwargs())
     lot = repo.list_position_lots()[0]
 
     result = persist_manual_adjust_event_with_ledger(
