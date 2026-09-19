@@ -107,26 +107,29 @@ def _seal(
     pairs: bool = True,
     status: str = "completed",
     pair_overrides: dict | None = None,
+    **overrides,
 ) -> dict:
-    return seal_combo_yield_candidate_snapshot(
-        base=tmp_path,
-        run_id="run-1",
-        account="lx",
-        market="us",
-        account_config_sha256="a" * 64,
-        strategy_policy_sha256="b" * 64,
-        dependencies=_dependencies(),
-        scan_statuses=[
+    kwargs = {
+        "base": tmp_path,
+        "run_id": "run-1",
+        "account": "lx",
+        "market": "us",
+        "account_config_sha256": "a" * 64,
+        "strategy_policy_sha256": "b" * 64,
+        "dependencies": _dependencies(),
+        "scan_statuses": [
             _scope(
                 status=status,
                 reason="source_unavailable" if status != "completed" else None,
             )
         ],
-        funding_put_decisions=[],
-        pair_evaluations=[{**_pair_evaluation(), **(pair_overrides or {})}] if pairs else [],
-        rank_records=[{**_rank_record(), **(pair_overrides or {})}] if pairs else [],
-        ranked_pairs=[_pair(**(pair_overrides or {}))] if pairs else [],
-    )
+        "funding_put_decisions": [],
+        "pair_evaluations": [{**_pair_evaluation(), **(pair_overrides or {})}] if pairs else [],
+        "rank_records": [{**_rank_record(), **(pair_overrides or {})}] if pairs else [],
+        "ranked_pairs": [_pair(**(pair_overrides or {}))] if pairs else [],
+    }
+    kwargs.update(overrides)
+    return seal_combo_yield_candidate_snapshot(**kwargs)
 
 
 def test_combo_yield_snapshot_seals_full_evidence_and_loads(tmp_path: Path) -> None:
@@ -224,30 +227,14 @@ def test_combo_yield_snapshot_rejects_selected_pair_without_evidence(
     tmp_path: Path,
 ) -> None:
     with pytest.raises(ComboYieldCandidateSnapshotError, match="not eligible"):
-        seal_combo_yield_candidate_snapshot(
-            base=tmp_path,
-            run_id="run-1",
-            account="lx",
-            market="us",
-            account_config_sha256="a" * 64,
-            strategy_policy_sha256="b" * 64,
-            dependencies=_dependencies(),
-            scan_statuses=[_scope()],
-            ranked_pairs=[_pair()],
-        )
+        _seal(tmp_path, pairs=False, ranked_pairs=[_pair()])
 
 
 def test_combo_yield_snapshot_rejects_non_finite_evidence(tmp_path: Path) -> None:
     with pytest.raises(ComboYieldCandidateSnapshotError, match="non-finite"):
-        seal_combo_yield_candidate_snapshot(
-            base=tmp_path,
-            run_id="run-1",
-            account="lx",
-            market="us",
-            account_config_sha256="a" * 64,
-            strategy_policy_sha256="b" * 64,
-            dependencies=_dependencies(),
-            scan_statuses=[_scope()],
+        _seal(
+            tmp_path,
+            pairs=False,
             pair_evaluations=[{**_pair_evaluation(), "put_delta": float("inf")}],
             rank_records=[_rank_record()],
             ranked_pairs=[_pair()],
@@ -255,15 +242,8 @@ def test_combo_yield_snapshot_rejects_non_finite_evidence(tmp_path: Path) -> Non
 
 
 def test_combo_yield_snapshot_normalizes_pandas_missing_values(tmp_path: Path) -> None:
-    payload = seal_combo_yield_candidate_snapshot(
-        base=tmp_path,
-        run_id="run-1",
-        account="lx",
-        market="us",
-        account_config_sha256="a" * 64,
-        strategy_policy_sha256="b" * 64,
-        dependencies=_dependencies(),
-        scan_statuses=[_scope()],
+    payload = _seal(
+        tmp_path,
         pair_evaluations=[
             {
                 **_pair_evaluation(),
@@ -271,8 +251,6 @@ def test_combo_yield_snapshot_normalizes_pandas_missing_values(tmp_path: Path) -
                 "expiration": pd.NaT,
             }
         ],
-        rank_records=[_rank_record()],
-        ranked_pairs=[_pair()],
     )
 
     assert payload["pair_evaluations"][0]["spot"] is None
@@ -281,37 +259,16 @@ def test_combo_yield_snapshot_normalizes_pandas_missing_values(tmp_path: Path) -
 
 def test_combo_yield_snapshot_rejects_unknown_evidence_type(tmp_path: Path) -> None:
     with pytest.raises(ComboYieldCandidateSnapshotError, match="unsupported type"):
-        seal_combo_yield_candidate_snapshot(
-            base=tmp_path,
-            run_id="run-1",
-            account="lx",
-            market="us",
-            account_config_sha256="a" * 64,
-            strategy_policy_sha256="b" * 64,
-            dependencies=_dependencies(),
-            scan_statuses=[_scope()],
-            pair_evaluations=[{**_pair_evaluation(), "spot": object()}],
-            rank_records=[_rank_record()],
-            ranked_pairs=[_pair()],
-        )
+        _seal(tmp_path, pair_evaluations=[{**_pair_evaluation(), "spot": object()}])
 
 
 def test_combo_yield_snapshot_validates_funding_put_candidate_decision(
     tmp_path: Path,
 ) -> None:
-    payload = seal_combo_yield_candidate_snapshot(
-        base=tmp_path,
-        run_id="run-1",
-        account="lx",
-        market="us",
-        account_config_sha256="a" * 64,
-        strategy_policy_sha256="b" * 64,
-        dependencies=_dependencies(),
-        scan_statuses=[_scope()],
+    payload = _seal(
+        tmp_path,
+        pairs=False,
         funding_put_decisions=[_funding_put_decision()],
-        pair_evaluations=[],
-        rank_records=[],
-        ranked_pairs=[],
     )
 
     assert payload["funding_put_decisions"][0]["opening_decision"]["mode"] == "put"
@@ -327,20 +284,7 @@ def test_combo_yield_snapshot_rejects_mismatched_funding_put_decision(
     }
 
     with pytest.raises(ComboYieldCandidateSnapshotError, match="input mismatch"):
-        seal_combo_yield_candidate_snapshot(
-            base=tmp_path,
-            run_id="run-1",
-            account="lx",
-            market="us",
-            account_config_sha256="a" * 64,
-            strategy_policy_sha256="b" * 64,
-            dependencies=_dependencies(),
-            scan_statuses=[_scope()],
-            funding_put_decisions=[decision],
-            pair_evaluations=[],
-            rank_records=[],
-            ranked_pairs=[],
-        )
+        _seal(tmp_path, pairs=False, funding_put_decisions=[decision])
 
 
 def test_combo_yield_snapshot_rejects_funding_put_outside_scope(
@@ -365,17 +309,7 @@ def test_combo_yield_snapshot_rejects_funding_put_outside_scope(
     }
 
     with pytest.raises(ComboYieldCandidateSnapshotError, match="escapes snapshot scope"):
-        seal_combo_yield_candidate_snapshot(
-            base=tmp_path,
-            run_id="run-1",
-            account="lx",
-            market="us",
-            account_config_sha256="a" * 64,
-            strategy_policy_sha256="b" * 64,
-            dependencies=_dependencies(),
-            scan_statuses=[_scope()],
-            funding_put_decisions=[decision],
-        )
+        _seal(tmp_path, pairs=False, funding_put_decisions=[decision])
 
 
 @pytest.mark.parametrize(
@@ -410,17 +344,7 @@ def test_combo_yield_snapshot_rejects_pair_evidence_identity_mismatch(
     }
 
     with pytest.raises(ComboYieldCandidateSnapshotError, match=error):
-        seal_combo_yield_candidate_snapshot(
-            base=tmp_path,
-            run_id="run-1",
-            account="lx",
-            market="us",
-            account_config_sha256="a" * 64,
-            strategy_policy_sha256="b" * 64,
-            dependencies=_dependencies(),
-            scan_statuses=[_scope()],
-            pair_evaluations=[evaluation],
-        )
+        _seal(tmp_path, pairs=False, pair_evaluations=[evaluation])
 
 
 def test_combo_yield_snapshot_projections_preserve_sealed_facts(
@@ -434,19 +358,10 @@ def test_combo_yield_snapshot_projections_preserve_sealed_facts(
         "accepted": False,
         "reject_reasons": "min_net_credit_retention",
     }
-    payload = seal_combo_yield_candidate_snapshot(
-        base=tmp_path,
-        run_id="run-1",
-        account="lx",
-        market="us",
-        account_config_sha256="a" * 64,
-        strategy_policy_sha256="b" * 64,
-        dependencies=_dependencies(),
-        scan_statuses=[_scope()],
+    payload = _seal(
+        tmp_path,
         funding_put_decisions=[_funding_put_decision()],
         pair_evaluations=[_pair_evaluation(), rejected],
-        rank_records=[_rank_record()],
-        ranked_pairs=[_pair()],
     )
 
     assert project_combo_yield_candidates(payload) == payload["ranked_pairs"]
