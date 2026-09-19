@@ -22,6 +22,36 @@ _DEFAULT_COMMAND_ACCOUNTS = ("lx", "sy")
 _COMMANDS = commands_by_intent()
 _CONFIRM_TARGETS = operation_target_intents("confirm")
 _CANCEL_TARGETS = operation_target_intents("cancel")
+
+# /assigned-stock status vocabulary: every accepted token and the status it selects.
+_ASSIGNED_STOCK_STATUS_TOKENS: dict[str, str] = {
+    "all": "all",
+    "全部": "all",
+    "open": "open",
+    "持仓": "open",
+    "未卖出": "open",
+    "partially_sold": "partially_sold",
+    "partial": "partially_sold",
+    "partially-sold": "partially_sold",
+    "部分卖出": "partially_sold",
+    "closed": "closed",
+    "close": "closed",
+    "已卖出": "closed",
+    "已关闭": "closed",
+}
+
+# /income period aliases that select a period without a month/year selector.
+_INCOME_PERIOD_TOKENS: dict[str, str] = {
+    "mtd": "mtd",
+    "本月": "mtd",
+    "this-month": "mtd",
+    "ytd": "ytd",
+    "今年": "ytd",
+    "年初至今": "ytd",
+    "year-to-date": "ytd",
+}
+
+
 def parse_assistant_command(
     text: str,
     *,
@@ -144,14 +174,8 @@ def _parse_assigned_stock(command: str, args: list[str], *, accounts: frozenset[
             if account is not None and account != normalized:
                 raise _bad_arg(command, arg, "只能指定一个已配置账户。")
             account = normalized
-        elif normalized in {"all", "全部"}:
-            status = "all"
-        elif normalized in {"open", "持仓", "未卖出"}:
-            status = "open"
-        elif normalized in {"partially_sold", "partial", "partially-sold", "部分卖出"}:
-            status = "partially_sold"
-        elif normalized in {"closed", "close", "已卖出", "已关闭"}:
-            status = "closed"
+        elif normalized in _ASSIGNED_STOCK_STATUS_TOKENS:
+            status = _ASSIGNED_STOCK_STATUS_TOKENS[normalized]
         elif normalized in {"no-refresh", "no_refresh", "offline"}:
             refresh_quotes = False
         elif normalized.startswith("stock_lot_id="):
@@ -355,11 +379,8 @@ def _parse_income(
             account = normalized
         elif normalized in {"all", "全部"}:
             continue
-        elif normalized in {"mtd", "本月", "this-month"}:
-            period = "mtd"
-            selector = {}
-        elif normalized in {"ytd", "今年", "年初至今", "year-to-date"}:
-            period = "ytd"
+        elif normalized in _INCOME_PERIOD_TOKENS:
+            period = _INCOME_PERIOD_TOKENS[normalized]
             selector = {}
         elif normalized in {"上月", "last-month"}:
             period = "month"

@@ -1614,41 +1614,45 @@ def _notification_diagnosis(
     if scheduler_should_notify is None:
         scheduler_should_notify = scheduler.get("should_notify")
 
-    status = "unknown"
-    reason = "insufficient runtime output"
-    if str(trigger_context.get("delivery_mode") or "").lower() == "none":
-        status = "outer_delivery_disabled"
-        reason = "outer delivery.mode is none; task output will not be announced by the runner"
-    elif scheduler_should_run is False:
-        status = "scheduler_skipped"
-        reason = str(scheduler.get("reason") or "scheduler decided not to run")
-    elif no_send:
-        status = "no_send"
-        reason = "--no-send suppressed repository notification delivery"
-    elif account_messages_count <= 0 and str(tick_metrics.get("reason") or "") == "no_account_notification":
-        status = "no_notification_content"
-        reason = "scan produced no account notification content"
-    elif send_confirmed_count > 0 and send_failed_count > 0:
-        status = "sent_partial"
-        reason = "some account notifications were confirmed and some failed"
-    elif send_confirmed_count > 0:
-        status = "sent"
-        reason = "repository notification delivery was confirmed for at least one account"
-    elif send_attempted_count > 0:
-        status = "send_failed_or_unconfirmed"
-        reason = "repository attempted notification delivery but no account send was confirmed"
-    elif (
-        not bool(route_summary.get("configured"))
-        and (
+    def _notification_status() -> tuple[str, str]:
+        """Resolve the reported (status, reason) pair from the notification evidence.
+
+        The gates are ordered: the first one that applies wins, and the pair for
+        insufficient runtime output is the fallback.
+        """
+        if str(trigger_context.get("delivery_mode") or "").lower() == "none":
+            return (
+                "outer_delivery_disabled",
+                "outer delivery.mode is none; task output will not be announced by the runner",
+            )
+        if scheduler_should_run is False:
+            return "scheduler_skipped", str(scheduler.get("reason") or "scheduler decided not to run")
+        if no_send:
+            return "no_send", "--no-send suppressed repository notification delivery"
+        if account_messages_count <= 0 and str(tick_metrics.get("reason") or "") == "no_account_notification":
+            return "no_notification_content", "scan produced no account notification content"
+        if send_confirmed_count > 0 and send_failed_count > 0:
+            return "sent_partial", "some account notifications were confirmed and some failed"
+        if send_confirmed_count > 0:
+            return "sent", "repository notification delivery was confirmed for at least one account"
+        if send_attempted_count > 0:
+            return (
+                "send_failed_or_unconfirmed",
+                "repository attempted notification delivery but no account send was confirmed",
+            )
+        if not bool(route_summary.get("configured")) and (
             account_messages_count > 0
             or scheduler_should_notify is True
-        )
-    ):
-        status = "notification_route_missing"
-        reason = "notifications route is missing or incomplete"
-    elif tick_metrics:
-        status = str(tick_metrics.get("reason") or "not_sent")
-        reason = "latest tick metrics did not record a confirmed send"
+        ):
+            return "notification_route_missing", "notifications route is missing or incomplete"
+        if tick_metrics:
+            return (
+                str(tick_metrics.get("reason") or "not_sent"),
+                "latest tick metrics did not record a confirmed send",
+            )
+        return "unknown", "insufficient runtime output"
+
+    status, reason = _notification_status()
 
     return {
         "status": status,
