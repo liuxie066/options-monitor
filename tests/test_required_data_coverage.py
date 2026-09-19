@@ -3,12 +3,26 @@ from __future__ import annotations
 from dataclasses import replace
 import pandas as pd
 from pathlib import Path
+from typing import Any
 
 
 def _write_required_data_csv(path: Path, rows: list[dict[str, object]]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows).to_csv(path, index=False)
     return path
+
+
+def _put_rows(
+    *,
+    expiration: str = "2026-06-19",
+    dte: int = 30,
+    strikes: tuple[int, ...] = (80, 90, 100),
+    **fields: Any,
+) -> list[dict[str, Any]]:
+    return [
+        {"option_type": "put", "expiration": expiration, "dte": dte, "strike": strike, **fields}
+        for strike in strikes
+    ]
 
 
 def _expiration_discovery(trading_date: str):  # type: ignore[no-untyped-def]
@@ -26,19 +40,74 @@ def _expiration_discovery(trading_date: str):  # type: ignore[no-untyped-def]
     )
 
 
+def _fetch_plan(
+    *,
+    symbol: str,
+    option_type: str,
+    expirations: list[str],
+    spot_reference: float,
+    limit_expirations: int,
+    min_strike: float,
+    max_strike: float,
+    trading_date: str,
+    require_realized_volatility: bool,
+    max_dte: int,
+    min_dte: int = 20,
+    **spec_fields: Any,
+):  # type: ignore[no-untyped-def]
+    from src.application.required_data_planning import (
+        OptionSideFetchPlan,
+        RequiredDataFetchPlanBundle,
+        RequiredDataFetchSpec,
+        StrikeWindowPlan,
+    )
+
+    side_plan = OptionSideFetchPlan(
+        option_type=option_type,
+        min_dte=min_dte,
+        max_dte=max_dte,
+        explicit_expirations=expirations,
+        strike_window=StrikeWindowPlan(
+            min_strike=min_strike,
+            max_strike=max_strike,
+            source="test",
+            base_min_strike=min_strike,
+            base_max_strike=max_strike,
+        ),
+        planning_reason="test",
+    )
+
+    return RequiredDataFetchPlanBundle(
+        symbol=symbol,
+        spot_reference=spot_reference,
+        side_plans=[side_plan],
+        merged_specs=[
+            RequiredDataFetchSpec(
+                symbol=symbol,
+                limit_expirations=limit_expirations,
+                host="127.0.0.1",
+                port=11111,
+                option_types=(option_type,),
+                explicit_expirations=expirations,
+                min_dte=min_dte,
+                max_dte=max_dte,
+                side_strike_windows={option_type: {"min_strike": min_strike, "max_strike": max_strike}},
+                side_plans=[side_plan],
+                trading_date=trading_date,
+                **spec_fields,
+            )
+        ],
+        expiration_discovery=_expiration_discovery(trading_date),
+        require_realized_volatility=require_realized_volatility,
+    )
+
+
 def test_strategy_bounds_coverage_requires_requested_side_and_strikes(tmp_path: Path) -> None:
     from src.application.required_data_coverage import required_data_csv_covers_strategy_bounds
 
     parsed = _write_required_data_csv(
         tmp_path / "parsed" / "NVDA_required_data.csv",
-        [
-            {"option_type": "put", "expiration": "2026-06-19", "dte": 30, "strike": 80},
-            {"option_type": "put", "expiration": "2026-06-19", "dte": 30, "strike": 90},
-            {"option_type": "put", "expiration": "2026-06-19", "dte": 30, "strike": 100},
-            {"option_type": "put", "expiration": "2026-07-17", "dte": 60, "strike": 80},
-            {"option_type": "put", "expiration": "2026-07-17", "dte": 60, "strike": 90},
-            {"option_type": "put", "expiration": "2026-07-17", "dte": 60, "strike": 100},
-        ],
+        _put_rows() + _put_rows(expiration="2026-07-17", dte=60),
     )
 
     assert required_data_csv_covers_strategy_bounds(
@@ -61,14 +130,7 @@ def test_strategy_bounds_coverage_requires_requested_side_and_strikes(tmp_path: 
 def test_strategy_bounds_coverage_requires_requested_max_dte(tmp_path: Path) -> None:
     from src.application.required_data_coverage import required_data_csv_covers_strategy_bounds
 
-    parsed = _write_required_data_csv(
-        tmp_path / "parsed" / "NVDA_required_data.csv",
-        [
-            {"option_type": "put", "expiration": "2026-06-19", "dte": 30, "strike": 80},
-            {"option_type": "put", "expiration": "2026-06-19", "dte": 30, "strike": 90},
-            {"option_type": "put", "expiration": "2026-06-19", "dte": 30, "strike": 100},
-        ],
-    )
+    parsed = _write_required_data_csv(tmp_path / "parsed" / "NVDA_required_data.csv", _put_rows())
 
     assert required_data_csv_covers_strategy_bounds(
         parsed=parsed,
@@ -82,14 +144,7 @@ def test_strategy_bounds_coverage_requires_requested_max_dte(tmp_path: Path) -> 
 def test_strategy_bounds_coverage_requires_rv_when_requested(tmp_path: Path) -> None:
     from src.application.required_data_coverage import required_data_csv_covers_strategy_bounds
 
-    parsed = _write_required_data_csv(
-        tmp_path / "parsed" / "NVDA_required_data.csv",
-        [
-            {"option_type": "put", "expiration": "2026-06-19", "dte": 30, "strike": 80},
-            {"option_type": "put", "expiration": "2026-06-19", "dte": 30, "strike": 90},
-            {"option_type": "put", "expiration": "2026-06-19", "dte": 30, "strike": 100},
-        ],
-    )
+    parsed = _write_required_data_csv(tmp_path / "parsed" / "NVDA_required_data.csv", _put_rows())
 
     assert required_data_csv_covers_strategy_bounds(
         parsed=parsed,
@@ -99,17 +154,7 @@ def test_strategy_bounds_coverage_requires_rv_when_requested(tmp_path: Path) -> 
 
     parsed = _write_required_data_csv(
         tmp_path / "parsed" / "NVDA_required_data.csv",
-        [
-            {
-                "option_type": "put",
-                "expiration": "2026-06-19",
-                "dte": 30,
-                "strike": 80,
-                "term_matched_rv": 0.24,
-                "term_matched_rv_status": "ok",
-                "term_matched_rv_reason": None,
-            },
-        ],
+        _put_rows(strikes=(80,), term_matched_rv=0.24, term_matched_rv_status="ok", term_matched_rv_reason=None),
     )
 
     assert required_data_csv_covers_strategy_bounds(
@@ -121,80 +166,23 @@ def test_strategy_bounds_coverage_requires_rv_when_requested(tmp_path: Path) -> 
 
 def test_fetch_plan_coverage_requires_spot_reference_match(tmp_path: Path) -> None:
     from src.application.required_data_coverage import required_data_csv_covers_fetch_plan
-    from src.application.required_data_planning import (
-        OptionSideFetchPlan,
-        RequiredDataFetchPlanBundle,
-        RequiredDataFetchSpec,
-        StrikeWindowPlan,
-    )
 
-    side_plan = OptionSideFetchPlan(
-        option_type="put",
-        min_dte=20,
-        max_dte=60,
-        explicit_expirations=["2026-06-19"],
-        strike_window=StrikeWindowPlan(
-            min_strike=80,
-            max_strike=100,
-            source="test",
-            base_min_strike=80,
-            base_max_strike=100,
-        ),
-        planning_reason="test",
+    fetch_plan = _fetch_plan(
+        symbol="NVDA", option_type="put", expirations=["2026-06-19"], spot_reference=100.0,
+        limit_expirations=1, min_strike=80, max_strike=100, max_dte=60,
+        trading_date="2026-05-20", require_realized_volatility=False,
     )
-    fetch_plan = RequiredDataFetchPlanBundle(
-        symbol="NVDA",
-        spot_reference=100.0,
-        side_plans=[side_plan],
-        merged_specs=[
-            RequiredDataFetchSpec(
-                symbol="NVDA",
-                limit_expirations=1,
-                host="127.0.0.1",
-                port=11111,
-                option_types=("put",),
-                explicit_expirations=["2026-06-19"],
-                min_dte=20,
-                max_dte=60,
-                side_strike_windows={"put": {"min_strike": 80, "max_strike": 100}},
-                side_plans=[side_plan],
-                trading_date="2026-05-20",
-            )
-        ],
-        expiration_discovery=_expiration_discovery("2026-05-20"),
-        require_realized_volatility=False,
-    )
-    parsed = _write_required_data_csv(
-        tmp_path / "parsed" / "NVDA_required_data.csv",
-        [
-            {"option_type": "put", "expiration": "2026-06-19", "dte": 30, "strike": 80, "spot": 100.0},
-            {"option_type": "put", "expiration": "2026-06-19", "dte": 30, "strike": 90, "spot": 100.0},
-            {"option_type": "put", "expiration": "2026-06-19", "dte": 30, "strike": 100, "spot": 100.0},
-        ],
-    )
+    parsed = _write_required_data_csv(tmp_path / "parsed" / "NVDA_required_data.csv", _put_rows(spot=100.0))
 
     assert required_data_csv_covers_fetch_plan(parsed=parsed, fetch_plan=fetch_plan) is True
 
-    parsed = _write_required_data_csv(
-        tmp_path / "parsed" / "NVDA_required_data.csv",
-        [
-            {"option_type": "put", "expiration": "2026-06-19", "dte": 30, "strike": 80, "spot": 99.5},
-            {"option_type": "put", "expiration": "2026-06-19", "dte": 30, "strike": 90, "spot": 99.5},
-            {"option_type": "put", "expiration": "2026-06-19", "dte": 30, "strike": 100, "spot": 99.5},
-        ],
-    )
+    parsed = _write_required_data_csv(tmp_path / "parsed" / "NVDA_required_data.csv", _put_rows(spot=99.5))
 
     assert required_data_csv_covers_fetch_plan(parsed=parsed, fetch_plan=fetch_plan) is False
 
 
 def test_fetch_plan_coverage_requires_each_requested_expiration(tmp_path: Path) -> None:
     from src.application.required_data_coverage import required_data_csv_covers_fetch_plan
-    from src.application.required_data_planning import (
-        OptionSideFetchPlan,
-        RequiredDataFetchPlanBundle,
-        RequiredDataFetchSpec,
-        StrikeWindowPlan,
-    )
 
     parsed = _write_required_data_csv(
         tmp_path / "parsed" / "0700.HK_required_data.csv",
@@ -204,41 +192,10 @@ def test_fetch_plan_coverage_requires_each_requested_expiration(tmp_path: Path) 
             {"option_type": "put", "expiration": "2026-06-19", "dte": 30, "strike": 450},
         ],
     )
-    side_plan = OptionSideFetchPlan(
-        option_type="put",
-        min_dte=20,
-        max_dte=60,
-        explicit_expirations=["2026-06-19", "2026-07-17"],
-        strike_window=StrikeWindowPlan(
-            min_strike=360,
-            max_strike=450,
-            source="test",
-            base_min_strike=360,
-            base_max_strike=450,
-        ),
-        planning_reason="test",
-    )
-    fetch_plan = RequiredDataFetchPlanBundle(
-        symbol="0700.HK",
-        spot_reference=400,
-        side_plans=[side_plan],
-        merged_specs=[
-            RequiredDataFetchSpec(
-                symbol="0700.HK",
-                limit_expirations=2,
-                host="127.0.0.1",
-                port=11111,
-                option_types=("put",),
-                explicit_expirations=["2026-06-19", "2026-07-17"],
-                min_dte=20,
-                max_dte=60,
-                side_strike_windows={"put": {"min_strike": 360, "max_strike": 450}},
-                side_plans=[side_plan],
-                trading_date="2026-05-20",
-            )
-        ],
-        expiration_discovery=_expiration_discovery("2026-05-20"),
-        require_realized_volatility=False,
+    fetch_plan = _fetch_plan(
+        symbol="0700.HK", option_type="put", expirations=["2026-06-19", "2026-07-17"],
+        spot_reference=400, limit_expirations=2, min_strike=360, max_strike=450, max_dte=60,
+        trading_date="2026-05-20", require_realized_volatility=False,
     )
 
     assert required_data_csv_covers_fetch_plan(parsed=parsed, fetch_plan=fetch_plan) is False
@@ -246,12 +203,6 @@ def test_fetch_plan_coverage_requires_each_requested_expiration(tmp_path: Path) 
 
 def test_fetch_plan_coverage_rejects_bounded_range_missing_lower_edge(tmp_path: Path) -> None:
     from src.application.required_data_coverage import required_data_csv_covers_fetch_plan
-    from src.application.required_data_planning import (
-        OptionSideFetchPlan,
-        RequiredDataFetchPlanBundle,
-        RequiredDataFetchSpec,
-        StrikeWindowPlan,
-    )
 
     parsed = _write_required_data_csv(
         tmp_path / "parsed" / "0700.HK_required_data.csv",
@@ -261,41 +212,10 @@ def test_fetch_plan_coverage_rejects_bounded_range_missing_lower_edge(tmp_path: 
             {"option_type": "call", "expiration": "2026-06-29", "dte": 21, "strike": 670},
         ],
     )
-    side_plan = OptionSideFetchPlan(
-        option_type="call",
-        min_dte=20,
-        max_dte=90,
-        explicit_expirations=["2026-06-29"],
-        strike_window=StrikeWindowPlan(
-            min_strike=444.8,
-            max_strike=673.2,
-            source="test",
-            base_min_strike=444.8,
-            base_max_strike=673.2,
-        ),
-        planning_reason="test",
-    )
-    fetch_plan = RequiredDataFetchPlanBundle(
-        symbol="0700.HK",
-        spot_reference=444.8,
-        side_plans=[side_plan],
-        merged_specs=[
-            RequiredDataFetchSpec(
-                symbol="0700.HK",
-                limit_expirations=1,
-                host="127.0.0.1",
-                port=11111,
-                option_types=("call",),
-                explicit_expirations=["2026-06-29"],
-                min_dte=20,
-                max_dte=90,
-                side_strike_windows={"call": {"min_strike": 444.8, "max_strike": 673.2}},
-                side_plans=[side_plan],
-                trading_date="2026-06-08",
-            )
-        ],
-        expiration_discovery=_expiration_discovery("2026-06-08"),
-        require_realized_volatility=False,
+    fetch_plan = _fetch_plan(
+        symbol="0700.HK", option_type="call", expirations=["2026-06-29"], spot_reference=444.8,
+        limit_expirations=1, min_strike=444.8, max_strike=673.2, max_dte=90,
+        trading_date="2026-06-08", require_realized_volatility=False,
     )
 
     assert required_data_csv_covers_fetch_plan(parsed=parsed, fetch_plan=fetch_plan) is False
@@ -307,75 +227,19 @@ def test_fetch_plan_coverage_requires_rv_for_short_vol_spec(tmp_path: Path) -> N
         required_data_frame_covers_fetch_plan,
         required_data_frame_covers_fetch_plan_debug,
     )
-    from src.application.required_data_planning import (
-        OptionSideFetchPlan,
-        RequiredDataFetchPlanBundle,
-        RequiredDataFetchSpec,
-        StrikeWindowPlan,
-    )
 
-    parsed = _write_required_data_csv(
-        tmp_path / "parsed" / "NVDA_required_data.csv",
-        [
-            {"option_type": "put", "expiration": "2026-06-19", "dte": 30, "strike": 80},
-            {"option_type": "put", "expiration": "2026-06-19", "dte": 30, "strike": 90},
-            {"option_type": "put", "expiration": "2026-06-19", "dte": 30, "strike": 100},
-        ],
-    )
-    side_plan = OptionSideFetchPlan(
-        option_type="put",
-        min_dte=20,
-        max_dte=60,
-        explicit_expirations=["2026-06-19"],
-        strike_window=StrikeWindowPlan(
-            min_strike=80,
-            max_strike=100,
-            source="test",
-            base_min_strike=80,
-            base_max_strike=100,
-        ),
-        planning_reason="test",
-    )
-    fetch_plan = RequiredDataFetchPlanBundle(
-        symbol="NVDA",
-        spot_reference=100,
-        side_plans=[side_plan],
-        merged_specs=[
-            RequiredDataFetchSpec(
-                symbol="NVDA",
-                limit_expirations=1,
-                host="127.0.0.1",
-                port=11111,
-                option_types=("put",),
-                explicit_expirations=["2026-06-19"],
-                min_dte=20,
-                max_dte=60,
-                side_strike_windows={"put": {"min_strike": 80, "max_strike": 100}},
-                include_realized_volatility=True,
-                side_plans=[side_plan],
-                trading_date="2026-05-20",
-            )
-        ],
-        expiration_discovery=_expiration_discovery("2026-05-20"),
-        require_realized_volatility=True,
+    parsed = _write_required_data_csv(tmp_path / "parsed" / "NVDA_required_data.csv", _put_rows())
+    fetch_plan = _fetch_plan(
+        symbol="NVDA", option_type="put", expirations=["2026-06-19"], spot_reference=100,
+        limit_expirations=1, min_strike=80, max_strike=100, max_dte=60,
+        trading_date="2026-05-20", require_realized_volatility=True,
+        include_realized_volatility=True,
     )
 
     assert required_data_csv_covers_fetch_plan(parsed=parsed, fetch_plan=fetch_plan) is False
 
     valid_rows = pd.DataFrame(
-        [
-            {
-                "option_type": "put",
-                "expiration": "2026-06-19",
-                "dte": 30,
-                "strike": strike,
-                "spot": 100.0,
-                "term_matched_rv": 0.24,
-                "term_matched_rv_status": "ok",
-                "term_matched_rv_reason": None,
-            }
-            for strike in (80, 90, 100)
-        ]
+        _put_rows(spot=100.0, term_matched_rv=0.24, term_matched_rv_status="ok", term_matched_rv_reason=None)
     )
     assert required_data_frame_covers_fetch_plan(df=valid_rows, fetch_plan=fetch_plan) is True
     assert required_data_frame_covers_fetch_plan_debug(valid_rows, fetch_plan.to_debug_dict()) is True
@@ -446,22 +310,12 @@ def test_fetch_plan_coverage_requires_rv_for_short_vol_spec(tmp_path: Path) -> N
 def test_required_rv_coverage_requires_every_value_to_be_finite_and_positive() -> None:
     from src.application.required_data_coverage import required_data_frame_covers_strategy_bounds
 
-    base_row = {
-        "option_type": "put",
-        "expiration": "2026-06-19",
-        "dte": 30,
-        "strike": 100,
-    }
     for invalid in (None, float("nan"), float("inf"), 0.0, -0.1, "bad"):
         frame = pd.DataFrame(
-            [
-                {
-                    **base_row,
-                    "term_matched_rv": invalid,
-                    "term_matched_rv_status": "ok",
-                    "term_matched_rv_reason": None,
-                }
-            ]
+            _put_rows(
+                strikes=(100,), term_matched_rv=invalid,
+                term_matched_rv_status="ok", term_matched_rv_reason=None,
+            )
         )
         assert required_data_frame_covers_strategy_bounds(
             df=frame,
@@ -470,21 +324,14 @@ def test_required_rv_coverage_requires_every_value_to_be_finite_and_positive() -
         ) is False
 
     mixed = pd.DataFrame(
-        [
-            {
-                **base_row,
-                "term_matched_rv": 0.24,
-                "term_matched_rv_status": "ok",
-                "term_matched_rv_reason": None,
-            },
-            {
-                **base_row,
-                "strike": 105,
-                "term_matched_rv": 0.0,
-                "term_matched_rv_status": "ok",
-                "term_matched_rv_reason": None,
-            },
-        ]
+        _put_rows(
+            strikes=(100,), term_matched_rv=0.24,
+            term_matched_rv_status="ok", term_matched_rv_reason=None,
+        )
+        + _put_rows(
+            strikes=(105,), term_matched_rv=0.0,
+            term_matched_rv_status="ok", term_matched_rv_reason=None,
+        )
     )
     assert required_data_frame_covers_strategy_bounds(
         df=mixed,
@@ -499,26 +346,14 @@ def test_required_rv_coverage_accepts_typed_expiry_scoped_unavailability() -> No
     )
 
     frame = pd.DataFrame(
-        [
-            {
-                "option_type": "put",
-                "expiration": "2026-06-19",
-                "dte": 30,
-                "strike": 100,
-                "term_matched_rv": 0.24,
-                "term_matched_rv_status": "ok",
-                "term_matched_rv_reason": None,
-            },
-            {
-                "option_type": "put",
-                "expiration": "2026-07-17",
-                "dte": 58,
-                "strike": 100,
-                "term_matched_rv": None,
-                "term_matched_rv_status": "data_unavailable",
-                "term_matched_rv_reason": "qfq_history_session_gap",
-            },
-        ]
+        _put_rows(
+            strikes=(100,), term_matched_rv=0.24,
+            term_matched_rv_status="ok", term_matched_rv_reason=None,
+        )
+        + _put_rows(
+            expiration="2026-07-17", dte=58, strikes=(100,), term_matched_rv=None,
+            term_matched_rv_status="data_unavailable", term_matched_rv_reason="qfq_history_session_gap",
+        )
     )
 
     assert required_data_frame_covers_strategy_bounds(

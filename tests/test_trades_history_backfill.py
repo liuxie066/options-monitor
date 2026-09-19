@@ -15,6 +15,9 @@ from src.infrastructure.futu_gateway import FutuGatewayTransientError, FutuGatew
 from src.application.trades.backfill import _history_query_complete
 
 
+_NOW = datetime(2026, 6, 3, 6, 0, tzinfo=timezone.utc)
+
+
 @pytest.fixture(autouse=True)
 def _open_port(monkeypatch):
     """Tests mock the futu SDK; keep the port pre-check passing."""
@@ -23,6 +26,46 @@ def _open_port(monkeypatch):
 
     monkeypatch.setattr(futu_gateway, "port_open", lambda host, port: True)
     yield
+
+
+class _FakeData:
+    def __init__(self, rows: list[dict]) -> None:
+        self.rows = rows
+
+    def to_dict(self, orient: str) -> list[dict]:
+        assert orient == "records"
+        return self.rows
+
+
+def _install_fake_futu(monkeypatch, context) -> None:
+    monkeypatch.setitem(
+        sys.modules,
+        "futu",
+        SimpleNamespace(
+            OpenSecTradeContext=context,
+            TrdEnv=SimpleNamespace(REAL="REAL"),
+            RET_OK=0,
+        ),
+    )
+
+
+def _recording_context(calls):
+    class _FakeContext:
+        def __init__(self, **kwargs):
+            calls.append({"init": kwargs})
+
+        def history_deal_list_query(self, **kwargs):
+            calls.append({"query": kwargs})
+            return 0, SimpleNamespace(to_dict=lambda orient=None: [])
+
+        def close(self):
+            calls.append({"closed": True})
+
+    return _FakeContext
+
+
+def _fetch(client, *, accounts=("123",), now=_NOW):
+    return client.fetch(futu_account_ids=list(accounts), lookback_hours=6, now=now)
 
 
 def test_history_deal_query_dates_uses_hong_kong_trade_date_window() -> None:
@@ -54,11 +97,7 @@ def test_history_receipt_preserves_provider_coverage(coverage, status, complete,
         get_history_deals=lambda **_kwargs: {"retcode": 0, "rows": payload_rows, **coverage}
     )
 
-    rows, diagnostics = client.fetch(
-        futu_account_ids=["123"],
-        lookback_hours=6,
-        now=datetime(2026, 6, 3, 6, 0, tzinfo=timezone.utc),
-    )
+    rows, diagnostics = _fetch(client)
 
     receipt = diagnostics["account_results"][0]
     assert len(rows) == len(payload_rows)
@@ -79,10 +118,7 @@ def test_history_receipt_preserves_successful_account_when_another_fails(error_t
 
     client = OpenDHistoryDealClient(host="127.0.0.1", port=11111)
     client._gateway = SimpleNamespace(get_history_deals=query, close=lambda: None)
-    rows, diagnostics = client.fetch(
-        futu_account_ids=["123", "456"], lookback_hours=6,
-        now=datetime(2026, 6, 3, 6, 0, tzinfo=timezone.utc),
-    )
+    rows, diagnostics = _fetch(client, accounts=["123", "456"])
 
     assert len(rows) == 1
     assert diagnostics["coverage_status"] == "partial"
@@ -167,22 +203,10 @@ def test_fetch_opend_history_deals_adds_account_fields_and_diagnostics(monkeypat
         def close(self):
             calls.append({"closed": True})
 
-    monkeypatch.setitem(
-        sys.modules,
-        "futu",
-        SimpleNamespace(
-            OpenSecTradeContext=_FakeContext,
-            TrdEnv=SimpleNamespace(REAL="REAL"),
-            RET_OK=0,
-        ),
-    )
+    _install_fake_futu(monkeypatch, _FakeContext)
 
     rows, diagnostics = fetch_opend_history_deals(
-        host="127.0.0.1",
-        port=11111,
-        futu_account_ids=["123"],
-        lookback_hours=6,
-        now=datetime(2026, 6, 3, 6, 0, tzinfo=timezone.utc),
+        host="127.0.0.1", port=11111, futu_account_ids=["123"], lookback_hours=6, now=_NOW
     )
 
     assert rows == [
@@ -216,33 +240,10 @@ def test_fetch_opend_history_deals_adds_account_fields_and_diagnostics(monkeypat
 def test_fetch_opend_history_deals_skips_non_numeric_account_ids(monkeypatch) -> None:
     calls: list[dict] = []
 
-    class _FakeContext:
-        def __init__(self, **kwargs):
-            calls.append({"init": kwargs})
-
-        def history_deal_list_query(self, **kwargs):
-            calls.append({"query": kwargs})
-            return 0, SimpleNamespace(to_dict=lambda orient=None: [])
-
-        def close(self):
-            calls.append({"closed": True})
-
-    monkeypatch.setitem(
-        sys.modules,
-        "futu",
-        SimpleNamespace(
-            OpenSecTradeContext=_FakeContext,
-            TrdEnv=SimpleNamespace(REAL="REAL"),
-            RET_OK=0,
-        ),
-    )
+    _install_fake_futu(monkeypatch, _recording_context(calls))
 
     rows, diagnostics = fetch_opend_history_deals(
-        host="127.0.0.1",
-        port=11111,
-        futu_account_ids=["REAL_123"],
-        lookback_hours=6,
-        now=datetime(2026, 6, 3, 6, 0, tzinfo=timezone.utc),
+        host="127.0.0.1", port=11111, futu_account_ids=["REAL_123"], lookback_hours=6, now=_NOW
     )
 
     assert rows == []
@@ -259,34 +260,11 @@ def test_fetch_opend_history_deals_skips_non_numeric_account_ids(monkeypatch) ->
 def test_history_deal_client_reuses_one_context_across_checks(monkeypatch) -> None:
     calls: list[dict] = []
 
-    class _FakeContext:
-        def __init__(self, **kwargs):
-            calls.append({"init": kwargs})
-
-        def history_deal_list_query(self, **kwargs):
-            calls.append({"query": kwargs})
-            return 0, SimpleNamespace(to_dict=lambda orient=None: [])
-
-        def close(self):
-            calls.append({"closed": True})
-
-    monkeypatch.setitem(
-        sys.modules,
-        "futu",
-        SimpleNamespace(
-            OpenSecTradeContext=_FakeContext,
-            TrdEnv=SimpleNamespace(REAL="REAL"),
-            RET_OK=0,
-        ),
-    )
+    _install_fake_futu(monkeypatch, _recording_context(calls))
     client = OpenDHistoryDealClient(host="127.0.0.1", port=11111)
 
     for hour in (6, 7):
-        client.fetch(
-            futu_account_ids=["123"],
-            lookback_hours=6,
-            now=datetime(2026, 6, 3, hour, 0, tzinfo=timezone.utc),
-        )
+        _fetch(client, now=datetime(2026, 6, 3, hour, 0, tzinfo=timezone.utc))
     client.close()
 
     assert len([item for item in calls if "init" in item]) == 1
@@ -313,27 +291,11 @@ def test_history_deal_client_reopens_context_after_query_error(monkeypatch) -> N
         def close(self):
             calls.append({"closed": True})
 
-    monkeypatch.setitem(
-        sys.modules,
-        "futu",
-        SimpleNamespace(
-            OpenSecTradeContext=_FakeContext,
-            TrdEnv=SimpleNamespace(REAL="REAL"),
-            RET_OK=0,
-        ),
-    )
+    _install_fake_futu(monkeypatch, _FakeContext)
     client = OpenDHistoryDealClient(host="127.0.0.1", port=11111)
 
-    _rows, first = client.fetch(
-        futu_account_ids=["123"],
-        lookback_hours=6,
-        now=datetime(2026, 6, 3, 6, 0, tzinfo=timezone.utc),
-    )
-    _rows, second = client.fetch(
-        futu_account_ids=["123"],
-        lookback_hours=6,
-        now=datetime(2026, 6, 3, 7, 0, tzinfo=timezone.utc),
-    )
+    _rows, first = _fetch(client)
+    _rows, second = _fetch(client, now=datetime(2026, 6, 3, 7, 0, tzinfo=timezone.utc))
     client.close()
 
     assert "OpenD disconnected" in first["account_results"][0]["error"]
@@ -344,14 +306,6 @@ def test_history_deal_client_reopens_context_after_query_error(monkeypatch) -> N
 
 def test_history_deal_client_normalizes_terminal_orders_and_order_fees(monkeypatch) -> None:
     calls: list[dict] = []
-
-    class _FakeData:
-        def __init__(self, rows: list[dict]) -> None:
-            self.rows = rows
-
-        def to_dict(self, orient: str) -> list[dict]:
-            assert orient == "records"
-            return self.rows
 
     class _FakeContext:
         def __init__(self, **kwargs):
@@ -370,15 +324,7 @@ def test_history_deal_client_normalizes_terminal_orders_and_order_fees(monkeypat
         def close(self):
             calls.append({"closed": True})
 
-    monkeypatch.setitem(
-        sys.modules,
-        "futu",
-        SimpleNamespace(
-            OpenSecTradeContext=_FakeContext,
-            TrdEnv=SimpleNamespace(REAL="REAL"),
-            RET_OK=0,
-        ),
-    )
+    _install_fake_futu(monkeypatch, _FakeContext)
     client = OpenDHistoryDealClient(host="127.0.0.1", port=11111)
 
     orders, _ = client.fetch_terminal_orders(
@@ -413,14 +359,6 @@ def test_exact_terminal_order_uses_current_query_then_narrow_history_fallback(
 ) -> None:
     calls: list[dict] = []
 
-    class _FakeData:
-        def __init__(self, rows: list[dict]) -> None:
-            self.rows = rows
-
-        def to_dict(self, orient: str) -> list[dict]:
-            assert orient == "records"
-            return self.rows
-
     class _FakeContext:
         def __init__(self, **_kwargs):
             pass
@@ -451,15 +389,7 @@ def test_exact_terminal_order_uses_current_query_then_narrow_history_fallback(
         def close(self):
             pass
 
-    monkeypatch.setitem(
-        sys.modules,
-        "futu",
-        SimpleNamespace(
-            OpenSecTradeContext=_FakeContext,
-            TrdEnv=SimpleNamespace(REAL="REAL"),
-            RET_OK=0,
-        ),
-    )
+    _install_fake_futu(monkeypatch, _FakeContext)
     client = OpenDHistoryDealClient(host="127.0.0.1", port=11111)
 
     orders, diagnostics = client.fetch_terminal_orders(
@@ -535,15 +465,7 @@ def test_order_fee_query_rate_limit_is_shared_across_client_calls(monkeypatch) -
         def close(self):
             pass
 
-    monkeypatch.setitem(
-        sys.modules,
-        "futu",
-        SimpleNamespace(
-            OpenSecTradeContext=_FakeContext,
-            TrdEnv=SimpleNamespace(REAL="REAL"),
-            RET_OK=0,
-        ),
-    )
+    _install_fake_futu(monkeypatch, _FakeContext)
     monkeypatch.setattr(futu_history_deals.time, "monotonic", lambda: 100.0)
     client = OpenDHistoryDealClient(host="127.0.0.1", port=11111)
 
@@ -571,8 +493,4 @@ def test_backfill_raises_typed_unreachable_when_port_closed(monkeypatch) -> None
 
     client = OpenDHistoryDealClient(host="127.0.0.9", port=11119)
     with pytest.raises(FutuGatewayUnreachableError):
-        client.fetch(
-            futu_account_ids=["123"],
-            lookback_hours=6,
-            now=datetime(2026, 6, 3, 6, 0, tzinfo=timezone.utc),
-        )
+        _fetch(client)
