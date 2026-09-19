@@ -22,19 +22,36 @@ def _contract_key(asset_type: str = "option") -> ContractKey:
         )
 
 
-def _trade_event(asset_type: str = "option", quantity_unit: str | None = None) -> TradeEvent:
-    return TradeEvent(
-        event_id="evt-1",
-        event_type="open",
-        event_time_ms=1_700_000_000_000,
-        contract_key=_contract_key(asset_type),
-        contracts=1,
-        price=2.5,
-        currency="USD",
-        source="api",
-        asset_type=asset_type,
-        quantity_unit=quantity_unit,
-    )
+def _trade_event(asset_type: str = "option", quantity_unit: str | None = None, **overrides) -> TradeEvent:
+    values = {
+        "event_id": "evt-1",
+        "event_type": "open",
+        "event_time_ms": 1_700_000_000_000,
+        "contract_key": _contract_key(asset_type),
+        "contracts": 1,
+        "price": 2.5,
+        "currency": "USD",
+        "source": "api",
+        "asset_type": asset_type,
+        "quantity_unit": quantity_unit,
+    }
+    return TradeEvent(**{**values, **overrides})
+
+
+def _stock_settlement_lot(**overrides) -> PositionLot:
+    values = {
+        "lot_id": "stock-lot-1",
+        "open_event_id": "evt-assign-1",
+        "broker": "futu",
+        "account": "lx",
+        "symbol": "AAPL",
+        "position_side": "long",
+        "currency": "USD",
+        "opened_at_ms": 1_700_000_000_000,
+        "shares_opened": 100.0,
+        "cost_basis_total": 4500.0,
+    }
+    return PositionLot.from_stock_settlement(**{**values, **overrides})
 
 
 def test_derive_position_side_open_close_mapping() -> None:
@@ -123,18 +140,7 @@ def test_trade_event_explicit_quantity_unit_is_preserved() -> None:
 def test_stock_event_forces_multiplier_to_zero() -> None:
     # 股票无乘数：无论传入多少，__post_init__ 一律归零，避免期权语义渗入股票事件。
     assert _trade_event("stock").multiplier == 0.0
-    forced = TradeEvent(
-        event_id="evt-stock",
-        event_type="open",
-        event_time_ms=1_700_000_000_000,
-        contract_key=_contract_key("stock"),
-        contracts=1,
-        price=45.5,
-        currency="USD",
-        source="api",
-        multiplier=100.0,
-        asset_type="stock",
-    )
+    forced = _trade_event("stock", event_id="evt-stock", price=45.5, multiplier=100.0)
     assert forced.multiplier == 0.0
 
 
@@ -153,18 +159,7 @@ def test_option_event_still_requires_positive_multiplier() -> None:
     assert not any(
         d.code == "event_multiplier_invalid" for d in validate_trade_event(event)
     )
-    invalid = TradeEvent(
-        event_id="evt-opt",
-        event_type="open",
-        event_time_ms=1_700_000_000_000,
-        contract_key=_contract_key("option"),
-        contracts=1,
-        price=2.5,
-        currency="USD",
-        source="api",
-        multiplier=0.0,
-        asset_type="option",
-    )
+    invalid = _trade_event("option", event_id="evt-opt", multiplier=0.0)
     assert any(
         d.code == "event_multiplier_invalid" for d in validate_trade_event(invalid)
     )
@@ -186,17 +181,7 @@ def test_position_lot_propagates_asset_type_from_open_event() -> None:
 
 
 def test_stock_lot_tracks_shares_and_cost_basis() -> None:
-    event = TradeEvent(
-        event_id="evt-stock",
-        event_type="open",
-        event_time_ms=1_700_000_000_000,
-        contract_key=_contract_key("stock"),
-        contracts=120,
-        price=45.5,
-        currency="USD",
-        source="api",
-        asset_type="stock",
-    )
+    event = _trade_event("stock", event_id="evt-stock", contracts=120, price=45.5)
     lot = PositionLot.from_open_event(event, lot_id="lot-stock")
     assert lot.asset_type == "stock"
     assert lot.shares_opened == 120.0
@@ -209,28 +194,11 @@ def test_stock_lot_tracks_shares_and_cost_basis() -> None:
 
 
 def test_stock_lot_close_derives_realized_pnl_from_cost_basis() -> None:
-    event = TradeEvent(
-        event_id="evt-stock",
-        event_type="open",
-        event_time_ms=1_700_000_000_000,
-        contract_key=_contract_key("stock"),
-        contracts=100,
-        price=10.0,
-        currency="USD",
-        source="api",
-        asset_type="stock",
-    )
+    event = _trade_event("stock", event_id="evt-stock", contracts=100, price=10.0)
     lot = PositionLot.from_open_event(event, lot_id="lot-stock")
-    close = TradeEvent(
-        event_id="evt-stock-close",
-        event_type="close",
-        event_time_ms=1_700_000_100_000,
-        contract_key=_contract_key("stock"),
-        contracts=40,
-        price=12.0,
-        currency="USD",
-        source="api",
-        asset_type="stock",
+    close = _trade_event(
+        "stock", event_id="evt-stock-close", event_type="close",
+        event_time_ms=1_700_000_100_000, contracts=40, price=12.0,
     )
     closed = lot.apply_close(close, actual_fee_amount=1.0)
     assert closed.shares_open == 60.0
@@ -240,18 +208,7 @@ def test_stock_lot_close_derives_realized_pnl_from_cost_basis() -> None:
 
 
 def test_from_stock_settlement_builds_stock_lot_without_option_identity() -> None:
-    lot = PositionLot.from_stock_settlement(
-        lot_id="stock-lot-1",
-        open_event_id="evt-assign-1",
-        broker="futu",
-        account="lx",
-        symbol="AAPL",
-        position_side="long",
-        currency="USD",
-        opened_at_ms=1_700_000_000_000,
-        shares_opened=100.0,
-        cost_basis_total=4500.0,
-    )
+    lot = _stock_settlement_lot()
     assert lot.asset_type == "stock"
     assert lot.shares_opened == 100.0
     assert lot.shares_open == 100.0
@@ -270,19 +227,9 @@ def test_from_stock_settlement_builds_stock_lot_without_option_identity() -> Non
 
 
 def test_from_stock_settlement_propagates_close_state() -> None:
-    lot = PositionLot.from_stock_settlement(
-        lot_id="stock-lot-1",
-        open_event_id="evt-assign-1",
-        broker="futu",
-        account="lx",
-        symbol="AAPL",
-        position_side="long",
-        currency="USD",
-        opened_at_ms=1_700_000_000_000,
-        shares_opened=100.0,
+    lot = _stock_settlement_lot(
         shares_open=30.0,
         shares_closed=70.0,
-        cost_basis_total=4500.0,
         status="open",
         realized_pnl=123.0,
         last_event_id="evt-sale-3",
