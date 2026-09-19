@@ -23,14 +23,48 @@ def _positions() -> list[dict[str, object]]:
     ]
 
 
-def _config() -> dict[str, object]:
+def _config(*, msft_port: int = 11111) -> dict[str, object]:
     return {
         "symbols": [
             {"symbol": "AAPL", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 8}},
-            {"symbol": "MSFT", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 8}},
+            {"symbol": "MSFT", "fetch": {"source": "futu", "host": "127.0.0.1", "port": msft_port, "limit_expirations": 8}},
             {"symbol": "NVDA", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 8}},
         ]
     }
+
+
+def _fetched_rows(symbol: str, **kwargs: object) -> dict[str, object]:
+    """One option row per symbol, derived from the symbol-fetch kwargs."""
+    return {
+        "rows": [
+            {
+                "symbol": symbol,
+                "option_type": kwargs["option_types"].split(",")[0],
+                "expiration": kwargs["explicit_expirations"][0],
+                "strike": kwargs["min_strike"],
+            }
+        ],
+        "meta": {"status": "ok"},
+    }
+
+
+def _record_fetch(fetch_calls: list[dict[str, object]]):
+    """A fetch_symbol stand-in that records every call it receives."""
+
+    def fetch_symbol(symbol: str, **kwargs: object) -> dict[str, object]:
+        fetch_calls.append({"symbol": symbol, **kwargs})
+        return _fetched_rows(symbol, **kwargs)
+
+    return fetch_symbol
+
+
+def _patch_coverage_io(monkeypatch, fetch_symbol) -> None:  # type: ignore[no-untyped-def]
+    """Neutralize required-data IO so only symbol fetching is observable."""
+    monkeypatch.setattr(mod, "load_required_data_coverage", lambda *args, **kwargs: (set(), {}))
+    monkeypatch.setattr(mod, "_load_required_data_rows", lambda *args, **kwargs: [])
+    monkeypatch.setattr(mod, "_merge_required_data_rows", lambda existing_rows, new_rows, *, base_dir: list(new_rows))
+    monkeypatch.setattr("src.application.opend_symbol_fetching.fetch_symbol", fetch_symbol)
+    monkeypatch.setattr("src.application.opend_symbol_outputs.save_outputs", lambda *args, **kwargs: None)
 
 
 def test_ensure_required_data_coverage_does_not_build_implicit_gateway(tmp_path: Path, monkeypatch) -> None:
@@ -42,25 +76,7 @@ def test_ensure_required_data_coverage_does_not_build_implicit_gateway(tmp_path:
         built.append(gw)
         return gw
 
-    def fake_fetch_symbol(symbol: str, **kwargs: object) -> dict[str, object]:
-        fetch_calls.append({"symbol": symbol, **kwargs})
-        return {
-            "rows": [
-                {
-                    "symbol": symbol,
-                    "option_type": kwargs["option_types"].split(",")[0],
-                    "expiration": kwargs["explicit_expirations"][0],
-                    "strike": kwargs["min_strike"],
-                }
-            ],
-            "meta": {"status": "ok"},
-        }
-
-    monkeypatch.setattr(mod, "load_required_data_coverage", lambda *args, **kwargs: (set(), {}))
-    monkeypatch.setattr(mod, "_load_required_data_rows", lambda *args, **kwargs: [])
-    monkeypatch.setattr(mod, "_merge_required_data_rows", lambda existing_rows, new_rows, *, base_dir: list(new_rows))
-    monkeypatch.setattr("src.application.opend_symbol_fetching.fetch_symbol", fake_fetch_symbol)
-    monkeypatch.setattr("src.application.opend_symbol_outputs.save_outputs", lambda *args, **kwargs: None)
+    _patch_coverage_io(monkeypatch, _record_fetch(fetch_calls))
     monkeypatch.setattr("src.infrastructure.futu_gateway.build_ready_futu_gateway", fake_build_ready_futu_gateway)
 
     _fetch_reasons, _fetch_details, summary = mod._ensure_required_data_coverage_for_positions(
@@ -77,13 +93,6 @@ def test_ensure_required_data_coverage_does_not_build_implicit_gateway(tmp_path:
 
 
 def test_ensure_required_data_coverage_passes_endpoint_without_implicit_gateway(tmp_path: Path, monkeypatch) -> None:
-    cfg = {
-        "symbols": [
-            {"symbol": "AAPL", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 8}},
-            {"symbol": "MSFT", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 22222, "limit_expirations": 8}},
-            {"symbol": "NVDA", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 8}},
-        ]
-    }
     built: list[_Gateway] = []
     fetch_calls: list[dict[str, object]] = []
 
@@ -93,30 +102,15 @@ def test_ensure_required_data_coverage_passes_endpoint_without_implicit_gateway(
         return gw
 
     def fake_fetch_symbol(symbol: str, **kwargs: object) -> dict[str, object]:
-        gateway = kwargs["gateway"]
-        assert gateway is None
+        assert kwargs["gateway"] is None
         fetch_calls.append({"symbol": symbol, **kwargs})
-        return {
-            "rows": [
-                {
-                    "symbol": symbol,
-                    "option_type": kwargs["option_types"].split(",")[0],
-                    "expiration": kwargs["explicit_expirations"][0],
-                    "strike": kwargs["min_strike"],
-                }
-            ],
-            "meta": {"status": "ok"},
-        }
+        return _fetched_rows(symbol, **kwargs)
 
-    monkeypatch.setattr(mod, "load_required_data_coverage", lambda *args, **kwargs: (set(), {}))
-    monkeypatch.setattr(mod, "_load_required_data_rows", lambda *args, **kwargs: [])
-    monkeypatch.setattr(mod, "_merge_required_data_rows", lambda existing_rows, new_rows, *, base_dir: list(new_rows))
-    monkeypatch.setattr("src.application.opend_symbol_fetching.fetch_symbol", fake_fetch_symbol)
-    monkeypatch.setattr("src.application.opend_symbol_outputs.save_outputs", lambda *args, **kwargs: None)
+    _patch_coverage_io(monkeypatch, fake_fetch_symbol)
     monkeypatch.setattr("src.infrastructure.futu_gateway.build_ready_futu_gateway", fake_build_ready_futu_gateway)
 
     _fetch_reasons, _fetch_details, summary = mod._ensure_required_data_coverage_for_positions(
-        config=cfg,
+        config=_config(msft_port=22222),
         positions=_positions(),
         required_data_root=tmp_path / "required_data",
         base_dir=tmp_path,
@@ -137,25 +131,7 @@ def test_ensure_required_data_coverage_uses_external_gateway_without_closing(tmp
     fetch_calls: list[dict[str, object]] = []
     build_calls: list[dict[str, object]] = []
 
-    def fake_fetch_symbol(symbol: str, **kwargs: object) -> dict[str, object]:
-        fetch_calls.append({"symbol": symbol, **kwargs})
-        return {
-            "rows": [
-                {
-                    "symbol": symbol,
-                    "option_type": kwargs["option_types"].split(",")[0],
-                    "expiration": kwargs["explicit_expirations"][0],
-                    "strike": kwargs["min_strike"],
-                }
-            ],
-            "meta": {"status": "ok"},
-        }
-
-    monkeypatch.setattr(mod, "load_required_data_coverage", lambda *args, **kwargs: (set(), {}))
-    monkeypatch.setattr(mod, "_load_required_data_rows", lambda *args, **kwargs: [])
-    monkeypatch.setattr(mod, "_merge_required_data_rows", lambda existing_rows, new_rows, *, base_dir: list(new_rows))
-    monkeypatch.setattr("src.application.opend_symbol_fetching.fetch_symbol", fake_fetch_symbol)
-    monkeypatch.setattr("src.application.opend_symbol_outputs.save_outputs", lambda *args, **kwargs: None)
+    _patch_coverage_io(monkeypatch, _record_fetch(fetch_calls))
     monkeypatch.setattr("src.infrastructure.futu_gateway.build_ready_futu_gateway", lambda **kwargs: build_calls.append(kwargs))
 
     mod._ensure_required_data_coverage_for_positions(
