@@ -490,8 +490,6 @@ def scheduled_session_slots_for_date(
 
 
 # Compatibility for tests/operators that still inspect the old private helper.
-def _scheduled_run_targets(**kwargs) -> list[datetime]:
-    return _scheduled_report_targets(**kwargs)
 
 
 def _next_target_after(

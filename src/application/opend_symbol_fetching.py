@@ -302,25 +302,6 @@ def _resolve_request_trading_date(
     return parsed
 
 
-def _pick_col(row: Any, *cands: str):
-    # row can be a pandas Series or a plain dict (we prefer dicts for memory efficiency)
-    try:
-        if row is None:
-            return None
-        if isinstance(row, dict):
-            for c in cands:
-                if c in row and row[c] is not None and (not (isinstance(row[c], float) and math.isnan(row[c]))):
-                    return row[c]
-            return None
-        # pandas Series-like
-        for c in cands:
-            if c in row and pd.notna(row[c]):
-                return row[c]
-        return None
-    except Exception:
-        return None
-
-
 def _tuple_col(row: tuple[Any, ...], columns: dict[str, int], name: str) -> Any:
     idx = columns.get(name)
     if idx is None:
