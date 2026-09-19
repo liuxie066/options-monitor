@@ -50,6 +50,17 @@ def _position(
     )
 
 
+def _collect(option_positions, option_snapshot_rows_fetcher, *, period_status="partial_current", refresh_quotes=True, **kwargs):  # type: ignore[no-untyped-def]
+    return collect_current_performance_evidence(
+        period_status=period_status,
+        refresh_quotes=refresh_quotes,
+        option_positions=option_positions,
+        now_ms=NOW_MS,
+        option_snapshot_rows_fetcher=option_snapshot_rows_fetcher,
+        **kwargs,
+    )
+
+
 def test_historical_or_disabled_collection_never_calls_live_sources() -> None:
     calls = 0
 
@@ -58,20 +69,8 @@ def test_historical_or_disabled_collection_never_calls_live_sources() -> None:
         calls += 1
         return []
 
-    historical = collect_current_performance_evidence(
-        period_status="complete_past",
-        refresh_quotes=True,
-        option_positions=[_position()],
-        now_ms=NOW_MS,
-        option_snapshot_rows_fetcher=fetch,
-    )
-    disabled = collect_current_performance_evidence(
-        period_status="partial_current",
-        refresh_quotes=False,
-        option_positions=[_position()],
-        now_ms=NOW_MS,
-        option_snapshot_rows_fetcher=fetch,
-    )
+    historical = _collect([_position()], fetch, period_status="complete_past")
+    disabled = _collect([_position()], fetch, refresh_quotes=False)
 
     assert historical.status == "skipped_historical"
     assert disabled.status == "skipped_refresh_disabled"
@@ -94,15 +93,9 @@ def test_cross_account_instrument_reuse_midpoint_and_live_fx_are_collected_once(
             }
         ]
 
-    result = collect_current_performance_evidence(
-        period_status="partial_current",
-        refresh_quotes=True,
-        option_positions=[
-            _position(account="lx"),
-            _position(account="sy", market_code="US.NVDA260821P100000"),
-        ],
-        now_ms=NOW_MS,
-        option_snapshot_rows_fetcher=fetch,
+    result = _collect(
+        [_position(account="lx"), _position(account="sy", market_code="US.NVDA260821P100000")],
+        fetch,
         fx_payload_fetcher=lambda: {
             "rates": {"USDCNY": 7.12},
             "timestamp_ms": NOW_MS - 500,
@@ -124,22 +117,14 @@ def test_cross_account_instrument_reuse_midpoint_and_live_fx_are_collected_once(
 def test_last_fallback_timestamp_fallback_and_exact_code_resolution_fail_closed() -> None:
     position = _position(market_code="EXACT")
 
-    fallback = collect_current_performance_evidence(
-        period_status="partial_current",
-        refresh_quotes=True,
-        option_positions=[position],
-        now_ms=NOW_MS,
-        option_snapshot_rows_fetcher=lambda _positions: [
-            {"code": "EXACT", "bid_price": 0, "ask_price": 0, "last_price": 1.5}
-        ],
+    fallback = _collect(
+        [position],
+        lambda _positions: [{"code": "EXACT", "bid_price": 0, "ask_price": 0, "last_price": 1.5}],
         fx_payload_fetcher=lambda: {"rates": {"USDCNY": 7.1}, "timestamp_ms": NOW_MS},
     )
-    ambiguous = collect_current_performance_evidence(
-        period_status="partial_current",
-        refresh_quotes=True,
-        option_positions=[_position()],
-        now_ms=NOW_MS,
-        option_snapshot_rows_fetcher=lambda positions: [
+    ambiguous = _collect(
+        [_position()],
+        lambda positions: [
             {
                 "_requested_instrument_key": positions[0].instrument.instrument_key,
                 "code": "A",
@@ -160,14 +145,9 @@ def test_last_fallback_timestamp_fallback_and_exact_code_resolution_fail_closed(
     assert not ambiguous.valuation_marks
     assert ambiguous.diagnostics[0]["code"] == "option_code_resolution_failed"
 
-    naive_or_future = collect_current_performance_evidence(
-        period_status="partial_current",
-        refresh_quotes=True,
-        option_positions=[position],
-        now_ms=NOW_MS,
-        option_snapshot_rows_fetcher=lambda _positions: [
-            {"code": "EXACT", "last_price": 1.5, "update_time": "2026-07-17 15:00:00"}
-        ],
+    naive_or_future = _collect(
+        [position],
+        lambda _positions: [{"code": "EXACT", "last_price": 1.5, "update_time": "2026-07-17 15:00:00"}],
         fx_payload_fetcher=lambda: {"rates": {"USDCNY": 7.1}, "timestamp_ms": NOW_MS + 1},
     )
     assert naive_or_future.valuation_marks[0].effective_at_ms == NOW_MS
@@ -186,12 +166,9 @@ def test_conflicting_stored_codes_for_same_instrument_fail_closed() -> None:
         called = True
         return []
 
-    result = collect_current_performance_evidence(
-        period_status="partial_current",
-        refresh_quotes=True,
-        option_positions=[first, second],
-        now_ms=NOW_MS,
-        option_snapshot_rows_fetcher=fetch,
+    result = _collect(
+        [first, second],
+        fetch,
         fx_payload_fetcher=lambda: {"rates": {"USDCNY": 7.1}, "timestamp_ms": NOW_MS},
     )
 
@@ -201,14 +178,9 @@ def test_conflicting_stored_codes_for_same_instrument_fail_closed() -> None:
 
 
 def test_crossed_market_is_missing_and_capture_emits_v1_envelope() -> None:
-    result = collect_current_performance_evidence(
-        period_status="partial_current",
-        refresh_quotes=True,
-        option_positions=[_position(market_code="EXACT")],
-        now_ms=NOW_MS,
-        option_snapshot_rows_fetcher=lambda _positions: [
-            {"code": "EXACT", "bid_price": 2.5, "ask_price": 2.0, "last_price": 2.2}
-        ],
+    result = _collect(
+        [_position(market_code="EXACT")],
+        lambda _positions: [{"code": "EXACT", "bid_price": 2.5, "ask_price": 2.0, "last_price": 2.2}],
         fx_payload_fetcher=lambda: {"rates": {"USDCNY": 7.1}, "timestamp_ms": NOW_MS},
     )
     envelope = capture_current_performance_evidence(
@@ -269,12 +241,9 @@ def test_option_capture_identity_uses_receipt_time_not_provider_trade_time(tmp_p
     position = _position(market_code="US.NVDA260821P100000")
 
     def capture(*, bid: float, ask: float, requested_ms: int, received_ms: int):
-        return collect_current_performance_evidence(
-            period_status="partial_current",
-            refresh_quotes=True,
-            option_positions=[position],
-            now_ms=NOW_MS,
-            option_snapshot_rows_fetcher=lambda _positions: [
+        return _collect(
+            [position],
+            lambda _positions: [
                 {
                     "code": position.market_code,
                     "bid_price": bid,
@@ -412,12 +381,9 @@ def test_snapshot_adapter_preserves_broker_timestamp_columns() -> None:
 
 
 def test_external_snapshot_raw_is_json_safe_and_report_provenance_is_compact() -> None:
-    result = collect_current_performance_evidence(
-        period_status="partial_current",
-        refresh_quotes=True,
-        option_positions=[_position(market_code="EXACT")],
-        now_ms=NOW_MS,
-        option_snapshot_rows_fetcher=lambda _positions: [
+    result = _collect(
+        [_position(market_code="EXACT")],
+        lambda _positions: [
             {
                 "code": "EXACT",
                 "last_price": 1.5,

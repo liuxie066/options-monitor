@@ -75,6 +75,14 @@ def _files(root):
             for p in root.rglob("*") if p.is_file()}
 
 
+def _stale_deployment(tmp_path, monkeypatch, market="us", account="lx"):
+    """Activate a window, rebuild the config, then take a rebind preview of the now-stale snapshot."""
+    root = _deployment(tmp_path, monkeypatch)
+    _activation(root, market, account)
+    _change(root, market)
+    return root, _rebind(root, market, account)
+
+
 @pytest.mark.parametrize("market,account", [(m,a) for m in ("us","hk") for a in ("lx","sy")])
 def test_rebind_keeps_window_and_config_and_replays_once(tmp_path, monkeypatch, market, account):
     root = _deployment(tmp_path, monkeypatch)
@@ -102,10 +110,7 @@ def test_rebind_keeps_window_and_config_and_replays_once(tmp_path, monkeypatch, 
 
 
 def test_stale_config_and_pending_journal_have_no_binding_effect(tmp_path, monkeypatch):
-    root = _deployment(tmp_path, monkeypatch)
-    _activation(root, "us", "lx")
-    _change(root)
-    preview = _rebind(root)
+    root, preview = _stale_deployment(tmp_path, monkeypatch)
     _change(root, dte=80)
     with pytest.raises(AgentToolError, match="stale"):
         _rebind(root, apply=True, preview=preview["preview_hash"])
@@ -164,10 +169,7 @@ def test_cli_requires_preview_and_confirms_real_binding(tmp_path, monkeypatch):
 def test_committed_readback_failure_retries_original_receipt(tmp_path, monkeypatch):
     from src.application.wheel import policy_binding as operation
 
-    root = _deployment(tmp_path, monkeypatch)
-    _activation(root, "us", "lx")
-    _change(root)
-    preview = _rebind(root)
+    root, preview = _stale_deployment(tmp_path, monkeypatch)
     original_read = operation.read_wheel_activation_windows_read_only
 
     def fail_after_commit(*args, **kwargs):
@@ -189,10 +191,7 @@ def test_committed_readback_failure_retries_original_receipt(tmp_path, monkeypat
 
 
 def test_identical_runtime_replacement_invalidates_preview(tmp_path, monkeypatch):
-    root = _deployment(tmp_path, monkeypatch)
-    _activation(root, "us", "lx")
-    _change(root)
-    preview = _rebind(root)
+    root, preview = _stale_deployment(tmp_path, monkeypatch)
     runtime = root / "config.us.json"
     replacement = root / "replacement.json"
     replacement.write_bytes(runtime.read_bytes())
@@ -214,10 +213,7 @@ def test_same_request_committed_while_waiting_for_lock_returns_receipt(tmp_path,
     from contextlib import contextmanager
     from src.application.wheel import policy_binding as operation
 
-    root = _deployment(tmp_path, monkeypatch)
-    _activation(root, "us", "lx")
-    _change(root)
-    preview = _rebind(root)
+    root, preview = _stale_deployment(tmp_path, monkeypatch)
     original_lock = operation.locked_config_authoring
     winner = {}
 
@@ -237,10 +233,7 @@ def test_same_request_committed_while_waiting_for_lock_returns_receipt(tmp_path,
 
 
 def test_closed_replay_reports_superseded_with_original_receipt(tmp_path, monkeypatch):
-    root = _deployment(tmp_path, monkeypatch)
-    _activation(root, "us", "lx")
-    _change(root)
-    preview = _rebind(root)
+    root, preview = _stale_deployment(tmp_path, monkeypatch)
     applied = _rebind(root, apply=True, preview=preview["preview_hash"])
     _activation(root, "us", "lx", action="disable", generation=1, request="disable")
     with pytest.raises(AgentToolError, match="superseded") as error:
@@ -253,10 +246,7 @@ def test_journal_arriving_before_lock_is_not_recovered(tmp_path, monkeypatch):
     from contextlib import contextmanager
     from src.application.wheel import policy_binding as operation
 
-    root = _deployment(tmp_path, monkeypatch)
-    _activation(root, "us", "lx")
-    _change(root)
-    preview = _rebind(root)
+    root, preview = _stale_deployment(tmp_path, monkeypatch)
     original_lock = operation.locked_config_authoring
     journal = root / "output_shared/state/config_authoring_transactions/pending/manifest.json"
     before_config = (root / "config.yaml").read_bytes()
