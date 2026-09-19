@@ -14,9 +14,9 @@ from src.application.agent_tool_contracts import AgentToolError, build_error_pay
 from src.application.assistant.contracts import AssistantRequest, ControlCommand
 from src.application.assistant.operation_lifecycle import (
     build_action_lifecycle,
-    build_cancelled_operation_response,
-    build_previewed_operation_response,
+    cancel_pending_operation_or_raise,
     confirm_previewed_operation_or_raise,
+    preview_and_save_operation,
     resolve_pending_operation_or_raise,
 )
 from src.application.assistant.operation_policy import enforce_monitor_run_allowed
@@ -72,22 +72,15 @@ def _preview_and_save(
     store: InboundOperationStore,
     ttl_seconds: int,
 ) -> dict[str, Any]:
-    preview = _preview_operation(payload)
-    return build_previewed_operation_response(
-        tool_name="inbound.monitor_run",
-        operation_id=command_id,
+    return preview_and_save_operation(
+        payload,
         request=request,
+        command_id=command_id,
         store=store,
-        payload=payload,
-        preview=preview,
         ttl_seconds=ttl_seconds,
-        response_text=lambda operation: render_monitor_run_response(
-            status="previewed",
-            operation_id=command_id,
-            payload=payload,
-            preview=preview,
-            expires_at=str(operation.get("expires_at") or ""),
-        ),
+        tool_name="inbound.monitor_run",
+        preview_operation=_preview_operation,
+        render=render_monitor_run_response,
     )
 
 
@@ -187,21 +180,14 @@ def _confirm_operation(*, operation_id: str | None, request: AssistantRequest, s
 
 
 def _cancel_operation(*, operation_id: str | None, request: AssistantRequest, store: InboundOperationStore) -> dict[str, Any]:
-    operation_id, operation, operation_resolution = _resolve_monitor_run_operation(
+    return cancel_pending_operation_or_raise(
         operation_id=operation_id,
         request=request,
         store=store,
-        allow_expired=True,
-        action="取消",
-    )
-    text = f"监控执行已取消，未运行 tick。\ncommand_id: {operation_id}"
-    return build_cancelled_operation_response(
+        resolve=_resolve_monitor_run_operation,
         tool_name="inbound.monitor_run",
-        operation_id=operation_id,
-        operation=operation,
-        operation_resolution=operation_resolution,
-        store=store,
-        response_text=text,
+        subject="监控执行",
+        cancel_suffix="未运行 tick",
     )
 
 
