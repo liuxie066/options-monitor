@@ -16,6 +16,7 @@ from src.application.config_authoring_transaction import (
 )
 from src.application.config_yaml import resolve_yaml_runtime_config
 from src.application.runtime_config_freshness import GENERATED_KEY, check_runtime_config_freshness
+import src.application.config_authoring_transaction as transaction_module
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -40,9 +41,31 @@ def _write_yaml(path: Path, doc: dict) -> None:
     path.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
 
 
+def _publish(source: Path, doc: dict, runtime_root: Path, **kwargs) -> dict:
+    """Publish a YAML generation against the repo root; `**kwargs` reach the publisher verbatim."""
+    return publish_yaml_config_generation(
+        repo_root=REPO_ROOT,
+        config_yaml_path=source,
+        config_doc=doc,
+        runtime_root=runtime_root,
+        **kwargs,
+    )
+
+
+def _publish_locked(lock, source: Path, doc: dict, runtime_root: Path, **kwargs) -> dict:
+    """Publish under a held authoring lock; `**kwargs` reach the publisher verbatim."""
+    return publish_yaml_config_generation_locked(
+        lock=lock,
+        repo_root=REPO_ROOT,
+        config_yaml_path=source,
+        config_doc=doc,
+        runtime_root=runtime_root,
+        **kwargs,
+    )
+
+
 def _pending_transaction(
     *,
-    transaction_module,
     runtime_root: Path,
     source: Path,
     before_source_sha: str,
@@ -72,15 +95,7 @@ def test_config_authoring_rejects_stale_preview_without_writes(tmp_path: Path) -
     _write_yaml(config_path, changed)
 
     with pytest.raises(AgentToolError) as exc_info:
-        publish_yaml_config_generation(
-            repo_root=REPO_ROOT,
-            config_yaml_path=config_path,
-            config_doc=original,
-            runtime_root=tmp_path,
-            markets=["us", "hk"],
-            apply=True,
-            expected_source_sha256=expected,
-        )
+        _publish(config_path, original, tmp_path, markets=["us", "hk"], apply=True, expected_source_sha256=expected)
 
     assert exc_info.value.code == "STALE_PREVIEW"
     assert not (tmp_path / "config.us.json").exists()
@@ -92,7 +107,6 @@ def test_config_authoring_rejects_source_change_during_generation_prepare(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    import src.application.config_authoring_transaction as transaction_module
 
     config_path = tmp_path / "config.yaml"
     before_doc = _config_doc()
@@ -111,14 +125,7 @@ def test_config_authoring_rejects_source_change_during_generation_prepare(
     monkeypatch.setattr(transaction_module, "_prepare_generation", _prepare_then_change_source)
 
     with pytest.raises(AgentToolError) as exc_info:
-        publish_yaml_config_generation(
-            repo_root=REPO_ROOT,
-            config_yaml_path=config_path,
-            config_doc=after_doc,
-            runtime_root=tmp_path,
-            markets=["us", "hk"],
-            apply=True,
-        )
+        _publish(config_path, after_doc, tmp_path, markets=["us", "hk"], apply=True)
 
     assert exc_info.value.code == "STALE_PREVIEW"
     assert not (tmp_path / "config.us.json").exists()
@@ -130,7 +137,6 @@ def test_config_authoring_compensates_generation_when_source_commit_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    import src.application.config_authoring_transaction as transaction_module
 
     config_path = tmp_path / "config.yaml"
     before_doc = _config_doc()
@@ -163,14 +169,7 @@ def test_config_authoring_compensates_generation_when_source_commit_fails(
     monkeypatch.setattr(transaction_module, "_atomic_write_bytes", _fail_source_once)
 
     with pytest.raises(AgentToolError) as exc_info:
-        publish_yaml_config_generation(
-            repo_root=REPO_ROOT,
-            config_yaml_path=config_path,
-            config_doc=after_doc,
-            runtime_root=tmp_path,
-            markets=["us", "hk"],
-            apply=True,
-        )
+        _publish(config_path, after_doc, tmp_path, markets=["us", "hk"], apply=True)
 
     assert exc_info.value.code == "CONFIG_WRITE_FAILED"
     assert exc_info.value.details["recovery_error"] is None
@@ -204,10 +203,9 @@ def test_config_authoring_retarget_preserves_effective_fingerprint_for_new_docum
             item["effective"] for item in config[GENERATED_KEY]["sources"] if item["role"] == "market_user"
         )
 
-    result = publish_yaml_config_generation(
-        repo_root=REPO_ROOT, config_yaml_path=source, config_doc=changed,
-        runtime_root=tmp_path, markets=["us", "hk"], include_assistant=False,
-        apply=True, expected_source_sha256=before_sha,
+    result = _publish(
+        source, changed, tmp_path, markets=["us", "hk"], include_assistant=False, apply=True,
+        expected_source_sha256=before_sha,
     )
 
     assert result["write_applied"] is True
@@ -241,11 +239,7 @@ def test_config_authoring_assistant_only_edit_still_invalidates_preview_sha(tmp_
     before = source.read_bytes()
 
     with pytest.raises(AgentToolError) as exc:
-        publish_yaml_config_generation(
-            repo_root=REPO_ROOT, config_yaml_path=source, config_doc=original,
-            runtime_root=tmp_path, markets=["us", "hk"], apply=True,
-            expected_source_sha256=expected_sha,
-        )
+        _publish(source, original, tmp_path, markets=["us", "hk"], apply=True, expected_source_sha256=expected_sha)
 
     assert exc.value.code == "STALE_PREVIEW"
     assert source.read_bytes() == before
@@ -255,7 +249,6 @@ def test_config_authoring_assistant_only_edit_still_invalidates_preview_sha(tmp_
 
 
 def test_config_authoring_dry_run_creates_no_state_and_does_not_recover(tmp_path: Path) -> None:
-    import src.application.config_authoring_transaction as transaction_module
 
     source = tmp_path / "config.yaml"
     before_doc = _config_doc()
@@ -265,7 +258,6 @@ def test_config_authoring_dry_run_creates_no_state_and_does_not_recover(tmp_path
     runtime.write_text('{"old":true}\n', encoding="utf-8")
     desired_runtime = b'{"recovered":true}\n'
     manifest = _pending_transaction(
-        transaction_module=transaction_module,
         runtime_root=tmp_path,
         source=source,
         before_source_sha=before_sha,
@@ -275,14 +267,8 @@ def test_config_authoring_dry_run_creates_no_state_and_does_not_recover(tmp_path
     )
     before_state = sorted(path.relative_to(tmp_path) for path in tmp_path.rglob("*"))
 
-    result = publish_yaml_config_generation(
-        repo_root=REPO_ROOT,
-        config_yaml_path=source,
-        config_doc=before_doc,
-        runtime_root=tmp_path,
-        markets=["us"],
-        include_assistant=False,
-        apply=False,
+    result = _publish(
+        source, before_doc, tmp_path, markets=["us"], include_assistant=False, apply=False,
         expected_source_sha256=before_sha,
     )
 
@@ -294,7 +280,6 @@ def test_config_authoring_dry_run_creates_no_state_and_does_not_recover(tmp_path
 
 
 def test_regular_publisher_recovers_before_rejecting_stale_source(tmp_path: Path) -> None:
-    import src.application.config_authoring_transaction as transaction_module
 
     source = tmp_path / "config.yaml"
     before_doc = _config_doc()
@@ -308,7 +293,6 @@ def test_regular_publisher_recovers_before_rejecting_stale_source(tmp_path: Path
     runtime.write_text('{"old":true}\n', encoding="utf-8")
     desired_runtime = b'{"recovered":true}\n'
     manifest = _pending_transaction(
-        transaction_module=transaction_module,
         runtime_root=tmp_path,
         source=source,
         before_source_sha=before_sha,
@@ -322,14 +306,8 @@ def test_regular_publisher_recovers_before_rejecting_stale_source(tmp_path: Path
     source.write_bytes(after_bytes)
 
     with pytest.raises(AgentToolError) as exc:
-        publish_yaml_config_generation(
-            repo_root=REPO_ROOT,
-            config_yaml_path=source,
-            config_doc=before_doc,
-            runtime_root=tmp_path,
-            markets=["us"],
-            include_assistant=False,
-            apply=True,
+        _publish(
+            source, before_doc, tmp_path, markets=["us"], include_assistant=False, apply=True,
             expected_source_sha256=before_sha,
         )
 
@@ -352,7 +330,6 @@ def test_regular_publisher_preserves_first_recovery_when_later_manifest_read_fai
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    import src.application.config_authoring_transaction as transaction_module
 
     source = tmp_path / "config.yaml"
     doc = _config_doc()
@@ -363,7 +340,6 @@ def test_regular_publisher_preserves_first_recovery_when_later_manifest_read_fai
     first.write_bytes(b'{"old":1}\n')
     second.write_bytes(b'{"old":2}\n')
     first_manifest = _pending_transaction(
-        transaction_module=transaction_module,
         runtime_root=tmp_path,
         source=source,
         before_source_sha=source_sha,
@@ -372,7 +348,6 @@ def test_regular_publisher_preserves_first_recovery_when_later_manifest_read_fai
         audit_id="a-first-recovery",
     )
     second_manifest = _pending_transaction(
-        transaction_module=transaction_module,
         runtime_root=tmp_path,
         source=source,
         before_source_sha=source_sha,
@@ -395,14 +370,8 @@ def test_regular_publisher_preserves_first_recovery_when_later_manifest_read_fai
     monkeypatch.setattr(transaction_module, "_read_manifest", _fail_second_recovery_read)
 
     with pytest.raises(AgentToolError) as exc:
-        publish_yaml_config_generation(
-            repo_root=REPO_ROOT,
-            config_yaml_path=source,
-            config_doc=doc,
-            runtime_root=tmp_path,
-            markets=["us"],
-            include_assistant=False,
-            apply=True,
+        _publish(
+            source, doc, tmp_path, markets=["us"], include_assistant=False, apply=True,
             expected_source_sha256=source_sha,
         )
 
@@ -426,7 +395,6 @@ def test_regular_publisher_rejects_unsafe_pending_target_before_recovery(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    import src.application.config_authoring_transaction as transaction_module
 
     source = tmp_path / "config.yaml"
     doc = _config_doc()
@@ -436,7 +404,6 @@ def test_regular_publisher_rejects_unsafe_pending_target_before_recovery(
     target = tmp_path / "config.us.json"
     target.write_bytes(b'{"old":true}\n')
     manifest = _pending_transaction(
-        transaction_module=transaction_module,
         runtime_root=tmp_path,
         source=source,
         before_source_sha=source_sha,
@@ -461,14 +428,8 @@ def test_regular_publisher_rejects_unsafe_pending_target_before_recovery(
         monkeypatch.setattr(Path, "stat", _other_owner)
 
     with pytest.raises(ValueError, match="special config mode|deployment user"):
-        publish_yaml_config_generation(
-            repo_root=REPO_ROOT,
-            config_yaml_path=source,
-            config_doc=doc,
-            runtime_root=tmp_path,
-            markets=["us"],
-            include_assistant=False,
-            apply=True,
+        _publish(
+            source, doc, tmp_path, markets=["us"], include_assistant=False, apply=True,
             expected_source_sha256=source_sha,
         )
 
@@ -480,7 +441,6 @@ def test_regular_publisher_rejects_unsafe_pending_target_before_recovery(
 def test_regular_publisher_allows_safe_source_outside_runtime_root_during_recovery(
     tmp_path: Path,
 ) -> None:
-    import src.application.config_authoring_transaction as transaction_module
 
     runtime_root = tmp_path / "runtime"
     source = tmp_path / "authoring" / "config.yaml"
@@ -492,7 +452,6 @@ def test_regular_publisher_allows_safe_source_outside_runtime_root_during_recove
     runtime.parent.mkdir()
     runtime.write_bytes(b'{"old":true}\n')
     manifest = _pending_transaction(
-        transaction_module=transaction_module,
         runtime_root=runtime_root,
         source=source,
         before_source_sha=source_sha,
@@ -507,15 +466,8 @@ def test_regular_publisher_allows_safe_source_outside_runtime_root_during_recove
     changed = _config_doc()
     changed["markets"]["us"]["symbols"].append("FUTU")
 
-    result = publish_yaml_config_generation(
-        repo_root=REPO_ROOT,
-        config_yaml_path=source,
-        config_doc=changed,
-        runtime_root=runtime_root,
-        markets=["us"],
-        include_assistant=False,
-        apply=True,
-        backup=False,
+    result = _publish(
+        source, changed, runtime_root, markets=["us"], include_assistant=False, apply=True, backup=False,
         expected_source_sha256=source_sha,
     )
 
@@ -529,7 +481,6 @@ def test_regular_publisher_allows_safe_source_outside_runtime_root_during_recove
 def test_regular_publisher_rejects_missing_existing_target_before_any_journal_recovery(
     tmp_path: Path,
 ) -> None:
-    import src.application.config_authoring_transaction as transaction_module
 
     source = tmp_path / "config.yaml"
     doc = _config_doc()
@@ -541,7 +492,6 @@ def test_regular_publisher_rejects_missing_existing_target_before_any_journal_re
     earlier_target.write_bytes(b'{"old":"earlier"}\n')
     missing_target.write_bytes(b'{"old":"missing"}\n')
     earlier_manifest = _pending_transaction(
-        transaction_module=transaction_module,
         runtime_root=tmp_path,
         source=source,
         before_source_sha=source_sha,
@@ -552,7 +502,6 @@ def test_regular_publisher_rejects_missing_existing_target_before_any_journal_re
         audit_id="a-earlier-recovery",
     )
     missing_manifest = _pending_transaction(
-        transaction_module=transaction_module,
         runtime_root=tmp_path,
         source=source,
         before_source_sha=source_sha,
@@ -573,14 +522,8 @@ def test_regular_publisher_rejects_missing_existing_target_before_any_journal_re
     }
 
     with pytest.raises(AgentToolError) as exc:
-        publish_yaml_config_generation(
-            repo_root=REPO_ROOT,
-            config_yaml_path=source,
-            config_doc=doc,
-            runtime_root=tmp_path,
-            markets=["us"],
-            include_assistant=False,
-            apply=True,
+        _publish(
+            source, doc, tmp_path, markets=["us"], include_assistant=False, apply=True,
             expected_source_sha256=source_sha,
         )
 
@@ -603,7 +546,6 @@ def test_regular_publisher_rejects_missing_existing_target_before_any_journal_re
 def test_recovery_creates_target_that_did_not_exist_when_journal_was_prepared(
     tmp_path: Path,
 ) -> None:
-    import src.application.config_authoring_transaction as transaction_module
 
     source = tmp_path / "config.yaml"
     before_doc = _config_doc()
@@ -614,7 +556,6 @@ def test_recovery_creates_target_that_did_not_exist_when_journal_was_prepared(
     after_bytes = yaml.safe_dump(after_doc, sort_keys=False).encode("utf-8")
     new_target = tmp_path / "new-runtime.json"
     manifest = _pending_transaction(
-        transaction_module=transaction_module,
         runtime_root=tmp_path,
         source=source,
         before_source_sha=before_sha,
@@ -636,7 +577,6 @@ def test_recovery_creates_target_that_did_not_exist_when_journal_was_prepared(
 
 
 def test_committed_cleanup_allows_target_that_disappeared_after_commit(tmp_path: Path) -> None:
-    import src.application.config_authoring_transaction as transaction_module
 
     source = tmp_path / "config.yaml"
     _write_yaml(source, _config_doc())
@@ -644,7 +584,6 @@ def test_committed_cleanup_allows_target_that_disappeared_after_commit(tmp_path:
     target = tmp_path / "installed.json"
     target.write_bytes(b'{"installed":true}\n')
     manifest = _pending_transaction(
-        transaction_module=transaction_module,
         runtime_root=tmp_path,
         source=source,
         before_source_sha=source_sha,
@@ -673,45 +612,24 @@ def test_held_lock_publish_rejects_released_or_wrong_root(tmp_path: Path) -> Non
 
     with locked_config_authoring(runtime_root=tmp_path) as lock:
         with pytest.raises(AgentToolError, match="same runtime root"):
-            publish_yaml_config_generation_locked(
-                lock=lock,
-                repo_root=REPO_ROOT,
-                config_yaml_path=source,
-                config_doc=after_doc,
-                runtime_root=tmp_path / "other",
-                markets=["us"],
-                include_assistant=False,
+            _publish_locked(
+                lock, source, after_doc, tmp_path / "other", markets=["us"], include_assistant=False,
                 expected_source_sha256=before_sha,
             )
-        result = publish_yaml_config_generation_locked(
-            lock=lock,
-            repo_root=REPO_ROOT,
-            config_yaml_path=source,
-            config_doc=after_doc,
-            runtime_root=tmp_path,
-            markets=["us"],
-            include_assistant=False,
+        result = _publish_locked(
+            lock, source, after_doc, tmp_path, markets=["us"], include_assistant=False,
             expected_source_sha256=before_sha,
         )
 
     assert result["write_applied"] is True
     with pytest.raises(AgentToolError, match="live config authoring lock"):
-        publish_yaml_config_generation_locked(
-            lock=lock,
-            repo_root=REPO_ROOT,
-            config_yaml_path=source,
-            config_doc=after_doc,
-            runtime_root=tmp_path,
-            markets=["us"],
-            include_assistant=False,
-        )
+        _publish_locked(lock, source, after_doc, tmp_path, markets=["us"], include_assistant=False)
 
 
 def test_authoring_lock_is_released_when_recovery_is_interrupted(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    import src.application.config_authoring_transaction as transaction_module
 
     original_recovery = transaction_module._recover_incomplete_transactions
 
@@ -732,7 +650,6 @@ def test_authoring_lock_is_released_when_recovery_is_interrupted(
 
 
 def test_committed_journal_cleanup_is_not_reported_as_a_config_write(tmp_path: Path) -> None:
-    import src.application.config_authoring_transaction as transaction_module
 
     source = tmp_path / "config.yaml"
     _write_yaml(source, _config_doc())
@@ -740,7 +657,6 @@ def test_committed_journal_cleanup_is_not_reported_as_a_config_write(tmp_path: P
     runtime = tmp_path / "config.us.json"
     runtime.write_text('{"installed":true}\n', encoding="utf-8")
     manifest = _pending_transaction(
-        transaction_module=transaction_module,
         runtime_root=tmp_path,
         source=source,
         before_source_sha=source_sha,
@@ -771,7 +687,6 @@ def test_current_publish_cleanup_failure_is_not_hidden_by_cleanup_only_recovery(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    import src.application.config_authoring_transaction as transaction_module
 
     source = tmp_path / "config.yaml"
     before_doc = _config_doc()
@@ -780,7 +695,6 @@ def test_current_publish_cleanup_failure_is_not_hidden_by_cleanup_only_recovery(
     runtime = tmp_path / "config.us.json"
     runtime.write_bytes(b'{"old":true}\n')
     prior_manifest = _pending_transaction(
-        transaction_module=transaction_module,
         runtime_root=tmp_path,
         source=source,
         before_source_sha=before_sha,
@@ -804,15 +718,8 @@ def test_current_publish_cleanup_failure_is_not_hidden_by_cleanup_only_recovery(
 
         monkeypatch.setattr(transaction_module.shutil, "rmtree", _fail_current_cleanup)
         with pytest.raises(AgentToolError) as exc:
-            publish_yaml_config_generation_locked(
-                lock=lock,
-                repo_root=REPO_ROOT,
-                config_yaml_path=source,
-                config_doc=changed,
-                runtime_root=tmp_path,
-                markets=["us"],
-                include_assistant=False,
-                backup=False,
+            _publish_locked(
+                lock, source, changed, tmp_path, markets=["us"], include_assistant=False, backup=False,
                 expected_source_sha256=before_sha,
             )
 
@@ -831,7 +738,6 @@ def test_recovery_failure_reports_preflight_and_partial_target_effects(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    import src.application.config_authoring_transaction as transaction_module
 
     source = tmp_path / "config.yaml"
     before_doc = _config_doc()
@@ -846,7 +752,6 @@ def test_recovery_failure_reports_preflight_and_partial_target_effects(
     first.write_text('{"old":"us"}\n', encoding="utf-8")
     second.write_text('{"old":"hk"}\n', encoding="utf-8")
     manifest = _pending_transaction(
-        transaction_module=transaction_module,
         runtime_root=tmp_path,
         source=source,
         before_source_sha=before_sha,
@@ -893,7 +798,6 @@ def test_first_recovery_target_failure_preserves_unknown_write_effect(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    import src.application.config_authoring_transaction as transaction_module
 
     source = tmp_path / "config.yaml"
     before_doc = _config_doc()
@@ -906,7 +810,6 @@ def test_first_recovery_target_failure_preserves_unknown_write_effect(
     target = tmp_path / "config.us.json"
     target.write_text('{"old":"us"}\n', encoding="utf-8")
     manifest = _pending_transaction(
-        transaction_module=transaction_module,
         runtime_root=tmp_path,
         source=source,
         before_source_sha=before_sha,
@@ -943,7 +846,6 @@ def test_recovery_validates_every_journal_artifact_before_live_writes(
     mode: str,
     tmp_path: Path,
 ) -> None:
-    import src.application.config_authoring_transaction as transaction_module
 
     source = tmp_path / "config.yaml"
     before_doc = _config_doc()
@@ -957,7 +859,6 @@ def test_recovery_validates_every_journal_artifact_before_live_writes(
     first.write_bytes(b'{"old":"us"}\n')
     second.write_bytes(b'{"old":"hk"}\n')
     manifest = _pending_transaction(
-        transaction_module=transaction_module,
         runtime_root=tmp_path,
         source=source,
         before_source_sha=before_sha,
@@ -1005,7 +906,6 @@ def test_commit_validates_all_journal_payloads_before_first_live_write(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    import src.application.config_authoring_transaction as transaction_module
 
     source = tmp_path / "config.yaml"
     _write_yaml(source, _config_doc())
@@ -1028,15 +928,8 @@ def test_commit_validates_all_journal_payloads_before_first_live_write(
     monkeypatch.setattr(transaction_module, "_set_manifest_phase", _tamper_before_commit)
 
     with pytest.raises(AgentToolError) as exc:
-        publish_yaml_config_generation(
-            repo_root=REPO_ROOT,
-            config_yaml_path=source,
-            config_doc=after_doc,
-            runtime_root=tmp_path,
-            markets=["us", "hk"],
-            include_assistant=False,
-            apply=True,
-            backup=False,
+        _publish(
+            source, after_doc, tmp_path, markets=["us", "hk"], include_assistant=False, apply=True, backup=False,
             expected_source_sha256=before_sha,
         )
 
@@ -1060,7 +953,6 @@ def test_recovery_readback_failure_keeps_journal_and_effect_audit(
     tmp_path: Path,
     readback_failure: str,
 ) -> None:
-    import src.application.config_authoring_transaction as transaction_module
 
     source = tmp_path / "config.yaml"
     _write_yaml(source, _config_doc())
@@ -1072,7 +964,6 @@ def test_recovery_readback_failure_keeps_journal_and_effect_audit(
     runtime.write_bytes(b'{"old":true}\n')
     desired_runtime = b'{"recovered":true}\n'
     manifest = _pending_transaction(
-        transaction_module=transaction_module,
         runtime_root=tmp_path,
         source=source,
         before_source_sha=before_sha,
@@ -1116,7 +1007,6 @@ def test_manifest_is_published_after_journal_artifacts_and_directories_are_flush
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    import src.application.config_authoring_transaction as transaction_module
 
     source = tmp_path / "config.yaml"
     _write_yaml(source, _config_doc())
@@ -1183,7 +1073,6 @@ def test_later_publish_error_preserves_prior_lock_recovery_audit(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    import src.application.config_authoring_transaction as transaction_module
 
     source = tmp_path / "config.yaml"
     _write_yaml(source, _config_doc())
@@ -1195,7 +1084,6 @@ def test_later_publish_error_preserves_prior_lock_recovery_audit(
     runtime = tmp_path / "config.us.json"
     runtime.write_bytes(b'{"old":true}\n')
     manifest = _pending_transaction(
-        transaction_module=transaction_module,
         runtime_root=tmp_path,
         source=source,
         before_source_sha=before_sha,
@@ -1216,14 +1104,8 @@ def test_later_publish_error_preserves_prior_lock_recovery_audit(
             lambda **_kwargs: (_ for _ in ()).throw(OSError("injected prepare failure")),
         )
         with pytest.raises(AgentToolError) as exc:
-            publish_yaml_config_generation_locked(
-                lock=lock,
-                repo_root=REPO_ROOT,
-                config_yaml_path=source,
-                config_doc=after_doc,
-                runtime_root=tmp_path,
-                markets=["us"],
-                include_assistant=False,
+            _publish_locked(
+                lock, source, after_doc, tmp_path, markets=["us"], include_assistant=False,
                 expected_source_sha256=after_sha,
             )
 
@@ -1236,7 +1118,6 @@ def test_later_publish_error_preserves_prior_lock_recovery_audit(
 def test_pending_manifest_with_missing_target_path_reports_no_write_audit(
     tmp_path: Path,
 ) -> None:
-    import src.application.config_authoring_transaction as transaction_module
 
     source = tmp_path / "config.yaml"
     _write_yaml(source, _config_doc())
@@ -1245,7 +1126,6 @@ def test_pending_manifest_with_missing_target_path_reports_no_write_audit(
     runtime = tmp_path / "config.us.json"
     runtime.write_bytes(b'{"old":true}\n')
     manifest = _pending_transaction(
-        transaction_module=transaction_module,
         runtime_root=tmp_path,
         source=source,
         before_source_sha=source_sha,
@@ -1263,14 +1143,8 @@ def test_pending_manifest_with_missing_target_path_reports_no_write_audit(
     }
 
     with pytest.raises(AgentToolError) as exc:
-        publish_yaml_config_generation(
-            repo_root=REPO_ROOT,
-            config_yaml_path=source,
-            config_doc=_config_doc(),
-            runtime_root=tmp_path,
-            markets=["us"],
-            include_assistant=False,
-            apply=True,
+        _publish(
+            source, _config_doc(), tmp_path, markets=["us"], include_assistant=False, apply=True,
             expected_source_sha256=source_sha,
         )
 
@@ -1296,7 +1170,6 @@ def test_backup_success_then_manifest_prepare_failure_reports_durable_audit(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    import src.application.config_authoring_transaction as transaction_module
 
     source = tmp_path / "config.yaml"
     _write_yaml(source, _config_doc())
@@ -1321,14 +1194,8 @@ def test_backup_success_then_manifest_prepare_failure_reports_durable_audit(
     )
 
     with pytest.raises(AgentToolError) as exc:
-        publish_yaml_config_generation(
-            repo_root=REPO_ROOT,
-            config_yaml_path=source,
-            config_doc=changed,
-            runtime_root=tmp_path,
-            markets=["us"],
-            include_assistant=False,
-            apply=True,
+        _publish(
+            source, changed, tmp_path, markets=["us"], include_assistant=False, apply=True,
             expected_source_sha256=source_sha,
         )
 
@@ -1353,7 +1220,6 @@ def test_partial_backup_failure_reports_known_backup_effect(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    import src.application.config_authoring_transaction as transaction_module
 
     source = tmp_path / "config.yaml"
     _write_yaml(source, _config_doc())
@@ -1369,14 +1235,8 @@ def test_partial_backup_failure_reports_known_backup_effect(
     monkeypatch.setattr(transaction_module.shutil, "copy2", _partial_copy)
 
     with pytest.raises(AgentToolError) as exc:
-        publish_yaml_config_generation(
-            repo_root=REPO_ROOT,
-            config_yaml_path=source,
-            config_doc=changed,
-            runtime_root=tmp_path,
-            markets=["us"],
-            include_assistant=False,
-            apply=True,
+        _publish(
+            source, changed, tmp_path, markets=["us"], include_assistant=False, apply=True,
             expected_source_sha256=source_sha,
         )
 
@@ -1399,7 +1259,6 @@ def test_backup_failure_with_unavailable_path_observation_reports_unknown_effect
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    import src.application.config_authoring_transaction as transaction_module
 
     source = tmp_path / "config.yaml"
     _write_yaml(source, _config_doc())
@@ -1418,14 +1277,8 @@ def test_backup_failure_with_unavailable_path_observation_reports_unknown_effect
     monkeypatch.setattr(transaction_module, "_path_exists", _unknown_backup_path)
 
     with pytest.raises(AgentToolError) as exc:
-        publish_yaml_config_generation(
-            repo_root=REPO_ROOT,
-            config_yaml_path=source,
-            config_doc=_config_doc(),
-            runtime_root=tmp_path,
-            markets=["us"],
-            include_assistant=False,
-            apply=True,
+        _publish(
+            source, _config_doc(), tmp_path, markets=["us"], include_assistant=False, apply=True,
             expected_source_sha256=source_sha,
         )
 

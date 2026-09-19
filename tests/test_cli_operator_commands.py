@@ -6,6 +6,13 @@ from pathlib import Path
 
 import pytest
 
+def _write_config(tmp_path: Path, text: str) -> Path:
+    """Write the `config.yaml` the operator commands read and return its path."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(text, encoding="utf-8")
+    return config_path
+
+
 def _read_json_output(capsys) -> dict:
     return json.loads(capsys.readouterr().out)
 
@@ -184,23 +191,9 @@ def test_support_bundle_command_forwards_diagnostic_args(monkeypatch, capsys) ->
     monkeypatch.setattr(cli, "support_bundle_response", _support_bundle_response)
 
     rc = cli.main([
-        "support",
-        "bundle",
-        "--config-key",
-        "us",
-        "--accounts",
-        "lx",
-        "sy",
-        "--profile-path",
-        "service.profile.json",
-        "--env-file",
-        "options-monitor.env",
-        "--no-local-env-file",
-        "--include-healthcheck",
-        "--runtime-root",
-        "/var/lib/options-monitor",
-        "--output-dir",
-        "/tmp/support",
+        "support", "bundle", "--config-key", "us", "--accounts", "lx", "sy", "--profile-path",
+        "service.profile.json", "--env-file", "options-monitor.env", "--no-local-env-file",
+        "--include-healthcheck", "--runtime-root", "/var/lib/options-monitor", "--output-dir", "/tmp/support",
     ])
     payload = _read_json_output(capsys)
 
@@ -232,14 +225,8 @@ def test_assistant_llm_check_command_forwards_diagnostic_args(monkeypatch, capsy
     monkeypatch.setattr(cli, "check_assistant_llm", _check_assistant_llm)
 
     rc = cli.main([
-        "assistant",
-        "llm-check",
-        "--assistant-config",
-        "config.assistant.json",
-        "--env-file",
-        "options-monitor.env",
-        "--no-local-env-file",
-        "--live",
+        "assistant", "llm-check", "--assistant-config", "config.assistant.json", "--env-file",
+        "options-monitor.env", "--no-local-env-file", "--live",
     ])
     payload = _read_json_output(capsys)
 
@@ -280,9 +267,7 @@ def test_assistant_model_catalog_command_renders_provider_catalog(capsys) -> Non
 def test_assistant_model_list_text_does_not_print_credential_env_name(tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.main as cli
 
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        """\
+    config_path = _write_config(tmp_path, """\
 accounts:
   lx:
     type: external_holdings
@@ -302,9 +287,7 @@ assistant:
       api_key_env: OM_LLM_API_KEY
       context_window_tokens: 24000
       max_output_tokens: 2048
-""",
-        encoding="utf-8",
-    )
+""")
 
     rc = cli.main(["assistant", "model", "list", "--config-yaml", str(config_path), "--format", "text"])
     text = capsys.readouterr().out
@@ -327,9 +310,7 @@ def test_assistant_model_check_forwards_live_flag(tmp_path: Path, monkeypatch, c
         return {"summary": {"ok": True, "status": "ready"}, "checks": [], "config": {}}
 
     monkeypatch.setattr(cli, "check_assistant_llm", _check_assistant_llm)
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        """\
+    config_path = _write_config(tmp_path, """\
 accounts:
   lx:
     type: external_holdings
@@ -349,18 +330,10 @@ assistant:
       api_key_env: OM_LLM_API_KEY
       context_window_tokens: 24000
       max_output_tokens: 2048
-""",
-        encoding="utf-8",
-    )
+""")
 
     rc = cli.main([
-        "assistant",
-        "model",
-        "check",
-        "openai-default",
-        "--config-yaml",
-        str(config_path),
-        "--live",
+        "assistant", "model", "check", "openai-default", "--config-yaml", str(config_path), "--live",
     ])
     payload = _read_json_output(capsys)
 
@@ -372,9 +345,7 @@ assistant:
 def test_assistant_model_add_dry_run_does_not_write_config(tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.main as cli
 
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        """\
+    config_path = _write_config(tmp_path, """\
 accounts:
   lx:
     type: external_holdings
@@ -386,25 +357,12 @@ assistant:
   enabled: true
   bot:
     enabled: false
-""",
-        encoding="utf-8",
-    )
+""")
     before = config_path.read_text(encoding="utf-8")
 
     rc = cli.main([
-        "assistant",
-        "model",
-        "add",
-        "deepseek-default",
-        "--config-yaml",
-        str(config_path),
-        "--provider",
-        "deepseek",
-        "--model",
-        "deepseek-chat",
-        "--context-window-tokens",
-        "24000",
-        "--max-output-tokens",
+        "assistant", "model", "add", "deepseek-default", "--config-yaml", str(config_path), "--provider",
+        "deepseek", "--model", "deepseek-chat", "--context-window-tokens", "24000", "--max-output-tokens",
         "2048",
     ])
     payload = _read_json_output(capsys)
@@ -424,13 +382,7 @@ def test_assistant_model_add_requires_context_window_tokens(capsys) -> None:
 
     with pytest.raises(SystemExit) as exc:
         cli.main([
-            "assistant",
-            "model",
-            "add",
-            "deepseek-default",
-            "--provider",
-            "deepseek",
-            "--model",
+            "assistant", "model", "add", "deepseek-default", "--provider", "deepseek", "--model",
             "deepseek-chat",
         ])
 
@@ -443,9 +395,7 @@ def test_assistant_model_current_text_displays_authoring_and_runtime_context(
 ) -> None:
     import src.interfaces.cli.main as cli
 
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        """\
+    config_path = _write_config(tmp_path, """\
 assistant:
   enabled: true
   bot:
@@ -458,9 +408,7 @@ assistant:
       api_key_env: OM_LLM_API_KEY
       context_window_tokens: 24000
       max_output_tokens: 2048
-""",
-        encoding="utf-8",
-    )
+""")
     runtime_path = tmp_path / "config.assistant.json"
     runtime_path.write_text(
         json.dumps(
@@ -483,15 +431,8 @@ assistant:
     )
 
     rc = cli.main([
-        "assistant",
-        "model",
-        "current",
-        "--config-yaml",
-        str(config_path),
-        "--assistant-config",
-        str(runtime_path),
-        "--format",
-        "text",
+        "assistant", "model", "current", "--config-yaml", str(config_path), "--assistant-config",
+        str(runtime_path), "--format", "text",
     ])
     text = capsys.readouterr().out
 
@@ -504,9 +445,7 @@ assistant:
 def test_assistant_model_use_apply_switches_active_model_and_writes_backup(tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.main as cli
 
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        """\
+    config_path = _write_config(tmp_path, """\
 accounts:
   lx:
     type: external_holdings
@@ -532,18 +471,10 @@ assistant:
       api_key_env: DEEPSEEK_API_KEY
       context_window_tokens: 24000
       max_output_tokens: 2048
-""",
-        encoding="utf-8",
-    )
+""")
 
     rc = cli.main([
-        "assistant",
-        "model",
-        "use",
-        "deepseek-default",
-        "--config-yaml",
-        str(config_path),
-        "--apply",
+        "assistant", "model", "use", "deepseek-default", "--config-yaml", str(config_path), "--apply",
     ])
     payload = _read_json_output(capsys)
 
@@ -805,34 +736,13 @@ def test_research_collect_forwards_remote_runtime_selection(monkeypatch, capsys)
     monkeypatch.setattr(research_cli, "run_research_collect", _run_research_collect)
 
     rc = cli.main([
-        "research",
-        "collect",
-        "--config-key",
-        "us",
-        "--config-path",
-        "/var/lib/options-monitor/config.us.json",
-        "--profile-path",
-        "/var/lib/options-monitor/service.profile.json",
-        "--runs-root",
-        "/var/lib/options-monitor/output_runs",
-        "--report-dir",
-        "/var/lib/options-monitor/output_shared/reports",
-        "--shared-state-dir",
-        "/var/lib/options-monitor/output_shared/state",
-        "--accounts-root",
-        "/var/lib/options-monitor/output_accounts",
-        "--run-id",
-        "run-1",
-        "--runs-limit",
-        "3",
-        "--tail-limit",
-        "50",
-        "--max-run-age-minutes",
-        "90",
-        "--max-notification-chars",
-        "2000",
-        "--output",
-        "json",
+        "research", "collect", "--config-key", "us", "--config-path", "/var/lib/options-monitor/config.us.json",
+        "--profile-path", "/var/lib/options-monitor/service.profile.json", "--runs-root",
+        "/var/lib/options-monitor/output_runs", "--report-dir",
+        "/var/lib/options-monitor/output_shared/reports", "--shared-state-dir",
+        "/var/lib/options-monitor/output_shared/state", "--accounts-root",
+        "/var/lib/options-monitor/output_accounts", "--run-id", "run-1", "--runs-limit", "3", "--tail-limit",
+        "50", "--max-run-age-minutes", "90", "--max-notification-chars", "2000", "--output", "json",
         "--no-write-outputs",
     ])
     payload = _read_json_output(capsys)
@@ -1045,13 +955,7 @@ def test_config_build_rejects_legacy_source(capsys) -> None:
     import src.interfaces.cli.main as cli
 
     rc = cli.main([
-        "config",
-        "build",
-        "--source",
-        "legacy",
-        "--market",
-        "us",
-        "--dry-run",
+        "config", "build", "--source", "legacy", "--market", "us", "--dry-run",
     ])
     payload = _read_json_output(capsys)
 
@@ -1083,15 +987,8 @@ markets:
     )
 
     rc = cli.main([
-        "config",
-        "build",
-        "--market",
-        "us",
-        "--config-yaml",
-        str(config_yaml),
-        "--output",
-        str(tmp_path / "config.us.json"),
-        "--dry-run",
+        "config", "build", "--market", "us", "--config-yaml", str(config_yaml), "--output",
+        str(tmp_path / "config.us.json"), "--dry-run",
     ])
     payload = _read_json_output(capsys)
 
@@ -1107,12 +1004,7 @@ def test_config_build_removes_legacy_json_flags(capsys) -> None:
 
     with pytest.raises(SystemExit) as exc:
         cli.main([
-            "config",
-            "build",
-            "--market",
-            "us",
-            "--user-config",
-            "configs/examples/user.example.us.json",
+            "config", "build", "--market", "us", "--user-config", "configs/examples/user.example.us.json",
             "--dry-run",
         ])
 
@@ -1139,16 +1031,8 @@ markets:
     )
 
     rc = cli.main([
-        "config",
-        "validate",
-        "--source",
-        "yaml",
-        "--market",
-        "us",
-        "--config-yaml",
-        str(config_yaml),
-        "--config-path",
-        "config.us.json",
+        "config", "validate", "--source", "yaml", "--market", "us", "--config-yaml", str(config_yaml),
+        "--config-path", "config.us.json",
     ])
     payload = _read_json_output(capsys)
 
@@ -1162,12 +1046,7 @@ def test_config_validate_rejects_yaml_flag_with_runtime_source(capsys) -> None:
     import src.interfaces.cli.main as cli
 
     rc = cli.main([
-        "config",
-        "validate",
-        "--source",
-        "runtime",
-        "--config-yaml",
-        "config.yaml",
+        "config", "validate", "--source", "runtime", "--config-yaml", "config.yaml",
     ])
     payload = _read_json_output(capsys)
 
@@ -1189,12 +1068,7 @@ def test_config_validate_defaults_to_runtime_source(monkeypatch, capsys) -> None
     monkeypatch.setattr(cli, "_validate_runtime_config", _validate_runtime_config)
 
     rc = cli.main([
-        "config",
-        "validate",
-        "--config-path",
-        "config.us.json",
-        "--market",
-        "us",
+        "config", "validate", "--config-path", "config.us.json", "--market", "us",
     ])
     payload = _read_json_output(capsys)
 
@@ -1207,16 +1081,8 @@ def test_config_validate_rejects_related_runtime_paths_for_yaml_source(capsys) -
     import src.interfaces.cli.main as cli
 
     rc = cli.main([
-        "config",
-        "validate",
-        "--source",
-        "yaml",
-        "--market",
-        "us",
-        "--config-yaml",
-        "config.yaml",
-        "--related-config-path",
-        "config.hk.json",
+        "config", "validate", "--source", "yaml", "--market", "us", "--config-yaml", "config.yaml",
+        "--related-config-path", "config.hk.json",
     ])
     payload = _read_json_output(capsys)
 
@@ -1260,16 +1126,8 @@ def test_service_render_requires_yaml_authoring_source(capsys, tmp_path: Path) -
 
     with pytest.raises(SystemExit) as exc:
         cli.main([
-            "service",
-            "render",
-            "--target",
-            "systemd",
-            "--repo-root",
-            str(repo),
-            "--runtime-root",
-            str(runtime),
-            "--markets",
-            "us",
+            "service", "render", "--target", "systemd", "--repo-root", str(repo), "--runtime-root",
+            str(runtime), "--markets", "us",
         ])
 
     assert exc.value.code == 2
@@ -1323,12 +1181,7 @@ def test_service_drift_preserves_timer_state_only_when_requested(
     repo = tmp_path / "current"
     runtime = tmp_path / "runtime"
     assert cli.main([
-        "service",
-        "drift",
-        "--repo-root",
-        str(repo),
-        "--runtime-root",
-        str(runtime),
+        "service", "drift", "--repo-root", str(repo), "--runtime-root", str(runtime),
     ]) == 0
     assert _read_json_output(capsys)["tool_name"] == "service.drift"
     assert drift_calls[0] == {
@@ -1341,12 +1194,7 @@ def test_service_drift_preserves_timer_state_only_when_requested(
     assert load_calls == []
 
     assert cli.main([
-        "service",
-        "drift",
-        "--repo-root",
-        str(repo),
-        "--runtime-root",
-        str(runtime),
+        "service", "drift", "--repo-root", str(repo), "--runtime-root", str(runtime),
         "--preserve-activation-state",
     ]) == 0
     payload = _read_json_output(capsys)
@@ -1397,14 +1245,8 @@ def test_service_drift_preserve_fails_before_confirmed_reconcile(
     )
 
     rc = cli.main([
-        "service",
-        "drift",
-        "--repo-root",
-        str(tmp_path / "current"),
-        "--runtime-root",
-        str(tmp_path / "runtime"),
-        "--preserve-activation-state",
-        "--confirm",
+        "service", "drift", "--repo-root", str(tmp_path / "current"), "--runtime-root",
+        str(tmp_path / "runtime"), "--preserve-activation-state", "--confirm",
     ])
     payload = _read_json_output(capsys)
 
@@ -1459,41 +1301,19 @@ def test_top_level_update_commands_delegate_to_service_upgrade(monkeypatch, caps
     assert _read_json_output(capsys)["tool_name"] == "update.check"
 
     assert cli.main([
-        "update",
-        "verify",
-        "--repo-root",
-        str(repo),
-        "--runtime-root",
-        str(runtime),
-        "--no-check-latest",
+        "update", "verify", "--repo-root", str(repo), "--runtime-root", str(runtime), "--no-check-latest",
     ]) == 0
     assert _read_json_output(capsys)["tool_name"] == "update.verify"
 
     assert cli.main([
-        "update",
-        "apply",
-        "--repo-root",
-        str(repo),
-        "--runtime-root",
-        str(runtime),
-        "--target-version",
-        "1.2.70",
-        "--no-restart-services",
-        "--preserve-activation-state",
+        "update", "apply", "--repo-root", str(repo), "--runtime-root", str(runtime), "--target-version",
+        "1.2.70", "--no-restart-services", "--preserve-activation-state",
     ]) == 0
     assert _read_json_output(capsys)["tool_name"] == "update.apply"
 
     assert cli.main([
-        "update",
-        "rollback",
-        "--repo-root",
-        str(repo),
-        "--runtime-root",
-        str(runtime),
-        "--to-version",
-        "1.2.69",
-        "--no-restart-services",
-        "--preserve-activation-state",
+        "update", "rollback", "--repo-root", str(repo), "--runtime-root", str(runtime), "--to-version",
+        "1.2.69", "--no-restart-services", "--preserve-activation-state",
     ]) == 0
     assert _read_json_output(capsys)["tool_name"] == "update.rollback"
 
@@ -1577,12 +1397,7 @@ def test_config_get_reads_runtime_snapshot(capsys, tmp_path: Path) -> None:
     path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     assert cli.main([
-        "config",
-        "get",
-        "--config-path",
-        str(path),
-        "--key",
-        "runtime.prefetch.max_workers",
+        "config", "get", "--config-path", str(path), "--key", "runtime.prefetch.max_workers",
     ]) == 0
     payload = _read_json_output(capsys)
     assert payload["tool_name"] == "config.get"
@@ -1660,27 +1475,9 @@ def test_config_symbol_set_delegates_to_yaml_authoring(monkeypatch, capsys, tmp_
     monkeypatch.setattr(cli, "set_yaml_symbol_config", _set_yaml_symbol_config)
 
     assert cli.main([
-        "config",
-        "symbol",
-        "set",
-        "--config-yaml",
-        str(config_yaml),
-        "--market",
-        "hk",
-        "--symbol",
-        "09898",
-        "--covered-call-enabled",
-        "true",
-        "--covered-call-min-strike",
-        "85",
-        "--sell-put-enabled",
-        "false",
-        "--combo-yield-enabled",
-        "true",
-        "--rebuild-runtime-root",
-        str(runtime_root),
-        "--apply",
-        "--no-backup",
+        "config", "symbol", "set", "--config-yaml", str(config_yaml), "--market", "hk", "--symbol", "09898",
+        "--covered-call-enabled", "true", "--covered-call-min-strike", "85", "--sell-put-enabled", "false",
+        "--combo-yield-enabled", "true", "--rebuild-runtime-root", str(runtime_root), "--apply", "--no-backup",
     ]) == 0
 
     payload = _read_json_output(capsys)
