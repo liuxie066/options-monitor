@@ -12,14 +12,18 @@ from src.application.channels.feishu_reply_renderer import (
 )
 
 
-def test_bot_reply_uses_card_markdown_even_for_plain_sentence() -> None:
-    envelope = render_feishu_conversation_reply(
+def _render(text: str, *, reply_in_thread: bool = False, render_route: str = "deterministic_control") -> dict:
+    return render_feishu_conversation_reply(
         message_id="msg_1",
-        text="结论：系统运行正常。",
-        reply_in_thread=True,
+        text=text,
+        reply_in_thread=reply_in_thread,
         max_chars=3500,
-        render_route="bot",
+        render_route=render_route,
     )
+
+
+def test_bot_reply_uses_card_markdown_even_for_plain_sentence() -> None:
+    envelope = _render("结论：系统运行正常。", reply_in_thread=True, render_route="bot")
 
     assert envelope["schema_version"] == FEISHU_REPLY_ENVELOPE_SCHEMA_VERSION
     assert envelope["render_mode"] == "card_markdown_v2"
@@ -52,13 +56,7 @@ def test_markdown_table_uses_card_without_changing_financial_values() -> None:
         "| 买入权利金支出 | -¥244.47 | USD -36 |"
     )
 
-    envelope = render_feishu_conversation_reply(
-        message_id="msg_1",
-        text=source,
-        reply_in_thread=False,
-        max_chars=3500,
-        render_route="deterministic_control",
-    )
+    envelope = _render(source)
 
     content = envelope["transport"]["content"]["body"]["elements"][0]["content"]
     assert envelope["render_mode"] == "card_markdown_v2"
@@ -79,13 +77,7 @@ def test_markdown_table_uses_card_without_changing_financial_values() -> None:
 
 
 def test_short_plain_control_reply_stays_text() -> None:
-    envelope = render_feishu_conversation_reply(
-        message_id="msg_1",
-        text="当前没有待确认操作。",
-        reply_in_thread=False,
-        max_chars=3500,
-        render_route="deterministic_control",
-    )
+    envelope = _render("当前没有待确认操作。")
 
     assert envelope["render_mode"] == "text"
     assert envelope["transport"] == {
@@ -129,11 +121,8 @@ def test_truncation_keeps_table_structure_and_complete_rows() -> None:
         "后续解释不会保留。"
     )
 
-    rendered, truncated = truncate_feishu_markdown(
-        source,
-        max_chars=80,
-        max_bytes=FEISHU_REPLY_CONTENT_BUDGET_BYTES,
-    )
+    rendered, truncated = truncate_feishu_markdown(source, max_chars=80,
+                                                   max_bytes=FEISHU_REPLY_CONTENT_BUDGET_BYTES)
 
     assert truncated is True
     assert FEISHU_REPLY_TRUNCATION_NOTICE in rendered
@@ -144,11 +133,7 @@ def test_truncation_keeps_table_structure_and_complete_rows() -> None:
 
 
 def test_byte_budget_truncates_multibyte_content() -> None:
-    rendered, truncated = truncate_feishu_markdown(
-        "中🙂" * 20_000,
-        max_chars=0,
-        max_bytes=512,
-    )
+    rendered, truncated = truncate_feishu_markdown("中🙂" * 20_000, max_chars=0, max_bytes=512)
 
     assert truncated is True
     assert len(rendered.encode("utf-8")) <= 512

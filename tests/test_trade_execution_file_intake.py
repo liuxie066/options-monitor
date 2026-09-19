@@ -22,17 +22,14 @@ BINDING = {"broker_id": "futu", "external_account_id": "123", "environment": "RE
 
 
 def _execution(deal_id="fill-1", *, effect="open"):
-    return {
-        "schema_version": "trade_execution.v1", "broker_account_ref": dict(BINDING),
-        "instrument_ref": {"asset_type": "option", "market": "US", "symbol": "NVDA",
-                           "currency": "USD", "option_type": "put", "strike": "100",
-                           "expiration_ymd": "2026-09-18", "multiplier": "100"},
-        "external_id_namespace": "futu.deal", "external_execution_id": deal_id,
-        "external_order_namespace": "futu.order", "external_order_id": f"order-{deal_id}",
-        "side": "sell" if effect == "open" else "buy", "position_effect": effect,
-        "quantity": "1", "price": "2.50", "currency": "USD",
-        "occurred_at_utc": "2026-09-07T02:30:00Z" if effect == "open" else "2026-09-07T03:30:00Z",
-    }
+    instrument = {"asset_type": "option", "market": "US", "symbol": "NVDA", "currency": "USD",
+                  "option_type": "put", "strike": "100", "expiration_ymd": "2026-09-18", "multiplier": "100"}
+    return {"schema_version": "trade_execution.v1", "broker_account_ref": dict(BINDING), "instrument_ref": instrument,
+            "external_id_namespace": "futu.deal", "external_execution_id": deal_id,
+            "external_order_namespace": "futu.order", "external_order_id": f"order-{deal_id}",
+            "side": "sell" if effect == "open" else "buy", "position_effect": effect,
+            "quantity": "1", "price": "2.50", "currency": "USD",
+            "occurred_at_utc": "2026-09-07T02:30:00Z" if effect == "open" else "2026-09-07T03:30:00Z"}
 
 
 def _write(path, rows):
@@ -102,11 +99,8 @@ def test_api_history_and_file_share_identity_and_preserve_every_source_evidence(
     assert sources == {"push", "backfill", "file"}
     execution = before_events[0]["raw_payload"]["execution_input"]
     assert len(execution["evidence_refs"]) == 1
-    evidence = read_trade_source_evidence(
-        tmp_path / "ledger.sqlite3.trade_intake_inbox.sqlite3",
-        evidence_ref=execution["evidence_refs"][0],
-        read_only=True,
-    )
+    evidence = read_trade_source_evidence(tmp_path / "ledger.sqlite3.trade_intake_inbox.sqlite3",
+                                          evidence_ref=execution["evidence_refs"][0], read_only=True)
     assert {item["source"] for item in evidence} == {"push", "backfill", "file"}
     assert {item["adapter_version"] for item in evidence} == {
         "om.trade-intake.push.v1",
