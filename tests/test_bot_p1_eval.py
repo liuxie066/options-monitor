@@ -86,6 +86,36 @@ def _tool_input(question: str, tool: str | None) -> dict[str, str]:
     return {}
 
 
+def _tool_events(calls: list[tuple[str, dict]]) -> list[AppEvent]:
+    return [
+        _scene_event(),
+        *[
+            AppEvent(
+                f"evt_{index}",
+                "run_1",
+                "tool_call",
+                "2026-07-11T00:00:00+00:00",
+                {"tool_name": name, "tool_input": tool_input},
+            )
+            for index, (name, tool_input) in enumerate(calls, start=1)
+        ],
+    ]
+
+
+def _eval(tmp_path, **overrides: object) -> dict:
+    base: dict[str, object] = {
+        "assistant_config": "config.yaml",
+        "config_key": "us",
+        "host_db": str(tmp_path / "host.sqlite3"),
+    }
+    base.update(overrides)
+    return bot_p1_eval.run_eval(**base)
+
+
+def _set_argv(monkeypatch, *args: str) -> None:
+    monkeypatch.setattr(sys, "argv", ["bot_p1_eval.py", *args])
+
+
 def test_p1_eval_recognizes_equivalent_evidence_limit_wording() -> None:
     assert bot_p1_eval._mentions_evidence_limit("净收益不可可靠给出，因为证据不完整。")
 
@@ -121,17 +151,8 @@ def test_p1_eval_main_sets_explicit_runtime_root(monkeypatch, tmp_path) -> None:
 
     monkeypatch.delenv("OM_RUNTIME_ROOT", raising=False)
     monkeypatch.setattr(bot_p1_eval, "run_eval", run_eval)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "bot_p1_eval.py",
-            "--assistant-config",
-            "config.assistant.json",
-            "--runtime-root",
-            str(runtime_root),
-        ],
-    )
+    _set_argv(monkeypatch, "--assistant-config", "config.assistant.json",
+              "--runtime-root", str(runtime_root))
 
     assert bot_p1_eval.main() == 0
     assert observed["runtime_root"] == str(runtime_root)
@@ -148,15 +169,7 @@ def test_p1_eval_main_fails_when_evidence_gate_fails(monkeypatch) -> None:
             "answer_quality_pass": None,
         },
     )
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "bot_p1_eval.py",
-            "--assistant-config",
-            "config.assistant.json",
-        ],
-    )
+    _set_argv(monkeypatch, "--assistant-config", "config.assistant.json")
 
     assert bot_p1_eval.main() == 1
 
@@ -168,23 +181,11 @@ def test_p1_eval_runs_fixed_questions_with_follow_up_context(monkeypatch, tmp_pa
         question = kwargs["user_message"]
         calls.append((question, kwargs["conversation_id"]))
         tool = _expected_tool(question)
-        events = [_scene_event(), *([] if tool is None else [
-            AppEvent(
-                "evt_1",
-                "run_1",
-                "tool_call",
-                "2026-07-11T00:00:00+00:00",
-                {"tool_name": tool, "tool_input": _tool_input(question, tool)},
-            )
-        ])]
+        events = _tool_events([] if tool is None else [(tool, _tool_input(question, tool))])
         return AppResult(status="answered", user_response=_response(question), events=events)
 
     monkeypatch.setattr(bot_p1_eval, "run_channel_request", run_channel_request)
-    payload = bot_p1_eval.run_eval(
-        assistant_config="config.yaml",
-        config_key="us",
-        host_db=str(tmp_path / "host.sqlite3"),
-    )
+    payload = _eval(tmp_path)
 
     assert payload["structural_pass"] is True
     assert calls[:2] == [(_MTD_QUESTION, "income"), (_MTD_CORRECTION, "income")]
@@ -212,27 +213,11 @@ def test_p1_eval_treats_host_observation_continuation_as_read_only(monkeypatch, 
         question = kwargs["user_message"]
         tool = _expected_tool(question)
         tools = [tool, "__read_observation__"] if tool else []
-        events = [
-            _scene_event(),
-            *[
-            AppEvent(
-                f"evt_{index}",
-                "run_1",
-                "tool_call",
-                "2026-07-11T00:00:00+00:00",
-                {"tool_name": name, "tool_input": _tool_input(question, name)},
-            )
-            for index, name in enumerate(tools, start=1)
-            ],
-        ]
+        events = _tool_events([(name, _tool_input(question, name)) for name in tools])
         return AppResult(status="answered", user_response=_response(question), events=events)
 
     monkeypatch.setattr(bot_p1_eval, "run_channel_request", run_channel_request)
-    payload = bot_p1_eval.run_eval(
-        assistant_config="config.yaml",
-        config_key="us",
-        host_db=str(tmp_path / "host.sqlite3"),
-    )
+    payload = _eval(tmp_path)
 
     assert payload["structural_pass"] is True
 
@@ -245,23 +230,11 @@ def test_p1_eval_rejects_wrong_primary_tool_for_mtd_performance(monkeypatch, tmp
             for case in bot_p1_eval.CASES
             if case.question == question
         )
-        events = [_scene_event(), *([] if not needs_read else [
-            AppEvent(
-                "evt_1",
-                "run_1",
-                "tool_call",
-                "2026-07-11T00:00:00+00:00",
-                {"tool_name": "option_positions_read", "tool_input": {"config_key": "us"}},
-            )
-        ])]
+        events = _tool_events([] if not needs_read else [("option_positions_read", {"config_key": "us"})])
         return AppResult(status="answered", user_response=_response(question), events=events)
 
     monkeypatch.setattr(bot_p1_eval, "run_channel_request", run_channel_request)
-    payload = bot_p1_eval.run_eval(
-        assistant_config="config.yaml",
-        config_key="us",
-        host_db=str(tmp_path / "host.sqlite3"),
-    )
+    payload = _eval(tmp_path)
 
     operation_review = next(item for item in payload["cases"] if item["name"] == "operation_review")
     mtd_income = next(item for item in payload["cases"] if item["name"] == "july_mtd_option_income")
@@ -302,11 +275,7 @@ def test_p1_eval_rejects_wrong_mtd_period_and_narrowed_account(monkeypatch, tmp_
         return AppResult(status="answered", user_response="结论：测试回答")
 
     monkeypatch.setattr(bot_p1_eval, "run_channel_request", run_channel_request)
-    payload = bot_p1_eval.run_eval(
-        assistant_config="config.yaml",
-        config_key="us",
-        host_db=str(tmp_path / "host.sqlite3"),
-    )
+    payload = _eval(tmp_path)
 
     mtd_income = next(item for item in payload["cases"] if item["name"] == "july_mtd_option_income")
     assert mtd_income["checks"]["required_primary_tool_used"] is True
@@ -326,11 +295,7 @@ def test_p1_eval_records_one_case_failure_and_continues(monkeypatch, tmp_path) -
         return AppResult(status="answered", user_response="结论：测试回答")
 
     monkeypatch.setattr(bot_p1_eval, "run_channel_request", run_channel_request)
-    payload = bot_p1_eval.run_eval(
-        assistant_config="config.yaml",
-        config_key="us",
-        host_db=str(tmp_path / "host.sqlite3"),
-    )
+    payload = _eval(tmp_path)
 
     assert len(calls) == len(bot_p1_eval.CASES)
     assert payload["cases"][0]["status"] == "failed"
@@ -347,11 +312,7 @@ def test_p1_eval_requires_scene_provenance(monkeypatch, tmp_path) -> None:
         ),
     )
 
-    payload = bot_p1_eval.run_eval(
-        assistant_config="config.yaml",
-        config_key="us",
-        host_db=str(tmp_path / "host.sqlite3"),
-    )
+    payload = _eval(tmp_path)
 
     assert payload["scene_provenance_consistent"] is False
     assert payload["structural_pass"] is False
@@ -381,11 +342,7 @@ def test_p1_eval_checks_scope_conclusion_and_protocol(monkeypatch, tmp_path) -> 
         )
 
     monkeypatch.setattr(bot_p1_eval, "run_channel_request", run_channel_request)
-    payload = bot_p1_eval.run_eval(
-        assistant_config="config.yaml",
-        config_key="us",
-        host_db=str(tmp_path / "host.sqlite3"),
-    )
+    payload = _eval(tmp_path)
 
     checks = payload["cases"][0]["checks"]
     assert checks["scope_preserved"] is False
@@ -407,23 +364,11 @@ def test_p1_eval_accepts_write_preview_without_claiming_execution(monkeypatch, t
                 control_request={"intent_name": "manual_trade_open", "arguments": {"symbol": "NVDA"}},
                 events=[_scene_event()],
             )
-        events = [_scene_event(), *([] if tool is None else [
-            AppEvent(
-                "evt_1",
-                "run_1",
-                "tool_call",
-                "2026-07-11T00:00:00+00:00",
-                {"tool_name": tool, "tool_input": _tool_input(question, tool)},
-            )
-        ])]
+        events = _tool_events([] if tool is None else [(tool, _tool_input(question, tool))])
         return AppResult(status="answered", user_response=_response(question), events=events)
 
     monkeypatch.setattr(bot_p1_eval, "run_channel_request", run_channel_request)
-    payload = bot_p1_eval.run_eval(
-        assistant_config="config.yaml",
-        config_key="us",
-        host_db=str(tmp_path / "host.sqlite3"),
-    )
+    payload = _eval(tmp_path)
 
     write_case = next(item for item in payload["cases"] if item["name"] == "write_safety")
     assert payload["structural_pass"] is True
@@ -462,11 +407,7 @@ def test_p1_eval_records_model_runtime_and_tool_metrics(monkeypatch, tmp_path) -
         return AppResult(status="answered", user_response="结论：测试回答", events=events)
 
     monkeypatch.setattr(bot_p1_eval, "run_channel_request", run_channel_request)
-    payload = bot_p1_eval.run_eval(
-        assistant_config=str(config),
-        config_key="us",
-        host_db=str(tmp_path / "host.sqlite3"),
-    )
+    payload = _eval(tmp_path, assistant_config=str(config), config_key="us", host_db=str(tmp_path / "host.sqlite3"))
 
     assert payload["schema_version"] == "om.bot.p1_eval.v4"
     assert payload["runtime_version"]
@@ -488,12 +429,7 @@ def test_p1_eval_applies_complete_human_review_scores(monkeypatch, tmp_path) -> 
     scores = {dimension: 2 for dimension in bot_p1_eval._empty_human_review()}
     reviews = {case.name: dict(scores) for case in bot_p1_eval.CASES}
 
-    payload = bot_p1_eval.run_eval(
-        assistant_config="missing.json",
-        config_key="us",
-        host_db=str(tmp_path / "host.sqlite3"),
-        human_reviews=reviews,
-    )
+    payload = _eval(tmp_path, assistant_config="missing.json", human_reviews=reviews)
 
     assert payload["answer_quality_review"] == "reviewed"
     assert payload["answer_quality_pass"] is True

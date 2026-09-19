@@ -4,6 +4,7 @@ from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
+from typing import NamedTuple
 
 import pandas as pd
 
@@ -67,11 +68,22 @@ def _position(
     }
 
 
-def test_requirements_plan_is_order_independent_and_skips_disabled_account() -> None:
+def _plan(**overrides: object) -> dict:
     from src.application.close_advice_required_data import (
         build_close_advice_required_data_plan,
     )
 
+    base: dict[str, object] = {
+        "run_id": "run-1",
+        "run_started_at_utc": datetime(2026, 7, 29, 1, 40, tzinfo=timezone.utc),
+        "business_date": date(2026, 7, 29),
+        "markets_to_run": ["US"],
+    }
+    base.update(overrides)
+    return build_close_advice_required_data_plan(**base)
+
+
+def test_requirements_plan_is_order_independent_and_skips_disabled_account() -> None:
     started = datetime(2026, 7, 29, 1, 40, tzinfo=timezone.utc)
     configs = {
         "lx": _config(account="lx"),
@@ -81,26 +93,16 @@ def test_requirements_plan_is_order_independent_and_skips_disabled_account() -> 
         "lx": [_position(account="lx", lot_id="lot-lx")],
         "sy": [_position(account="sy", lot_id="lot-sy")],
     }
-    forward = build_close_advice_required_data_plan(
-        run_id="run-1",
+    forward = _plan(
         run_started_at_utc=started,
-        business_date=date(2026, 7, 29),
-        account_configs=configs,
-        base_config=configs["lx"],
-        markets_to_run=["US"],
+        account_configs=configs, base_config=configs["lx"],
         position_records_by_account=positions,
     )
-    reverse = build_close_advice_required_data_plan(
-        run_id="run-1",
+    reverse = _plan(
         run_started_at_utc=started,
-        business_date=date(2026, 7, 29),
         account_configs={"sy": configs["sy"], "lx": configs["lx"]},
         base_config=configs["lx"],
-        markets_to_run=["US"],
-        position_records_by_account={
-            "sy": positions["sy"],
-            "lx": positions["lx"],
-        },
+        position_records_by_account={"sy": positions["sy"], "lx": positions["lx"]},
     )
 
     assert forward == reverse
@@ -121,9 +123,6 @@ def test_requirements_plan_is_order_independent_and_skips_disabled_account() -> 
 
 
 def test_candidate_route_wins_and_only_conflicting_position_is_rejected() -> None:
-    from src.application.close_advice_required_data import (
-        build_close_advice_required_data_plan,
-    )
     from src.application.required_data_prefetch_planning import (
         merge_close_advice_requirements_into_prefetch_config,
     )
@@ -134,23 +133,10 @@ def test_candidate_route_wins_and_only_conflicting_position_is_rejected() -> Non
         host="127.0.0.1",
         port=11112,
     )
-    plan = build_close_advice_required_data_plan(
-        run_id="run-1",
-        run_started_at_utc=datetime(
-            2026,
-            7,
-            29,
-            1,
-            40,
-            tzinfo=timezone.utc,
-        ),
-        business_date=date(2026, 7, 29),
+    plan = _plan(
         account_configs={"lx": position_config},
         base_config=candidate,
-        markets_to_run=["US"],
-        position_records_by_account={
-            "lx": [_position(account="lx", lot_id="lot-lx")]
-        },
+        position_records_by_account={"lx": [_position(account="lx", lot_id="lot-lx")]},
     )
 
     merged, resolved_plan = (
@@ -175,9 +161,6 @@ def test_candidate_route_wins_and_only_conflicting_position_is_rejected() -> Non
 
 
 def test_ambiguous_candidate_routes_are_preserved_and_position_is_rejected() -> None:
-    from src.application.close_advice_required_data import (
-        build_close_advice_required_data_plan,
-    )
     from src.application.required_data_prefetch_planning import (
         merge_close_advice_requirements_into_prefetch_config,
     )
@@ -188,23 +171,10 @@ def test_ambiguous_candidate_routes_are_preserved_and_position_is_rejected() -> 
         _config(account="lx", port=port)["symbols"][0]
         for port in (11111, 11112)
     ]
-    plan = build_close_advice_required_data_plan(
-        run_id="run-1",
-        run_started_at_utc=datetime(
-            2026,
-            7,
-            29,
-            1,
-            40,
-            tzinfo=timezone.utc,
-        ),
-        business_date=date(2026, 7, 29),
+    plan = _plan(
         account_configs={"lx": position_config},
         base_config=candidate_config,
-        markets_to_run=["US"],
-        position_records_by_account={
-            "lx": [_position(account="lx", lot_id="lot-lx")]
-        },
+        position_records_by_account={"lx": [_position(account="lx", lot_id="lot-lx")]},
     )
 
     merged, resolved_plan = (
@@ -234,30 +204,13 @@ def test_ambiguous_candidate_routes_are_preserved_and_position_is_rejected() -> 
 
 
 def test_position_binding_uses_base_fallback_without_defaulting() -> None:
-    from src.application.close_advice_required_data import (
-        build_close_advice_required_data_plan,
-    )
-
     account_config = _config(account="lx")
     account_config["symbols"] = []
     base_config = _config(account="lx", host="10.0.0.8", port=22222)
-    plan = build_close_advice_required_data_plan(
-        run_id="run-1",
-        run_started_at_utc=datetime(
-            2026,
-            7,
-            29,
-            1,
-            40,
-            tzinfo=timezone.utc,
-        ),
-        business_date=date(2026, 7, 29),
+    plan = _plan(
         account_configs={"lx": account_config},
         base_config=base_config,
-        markets_to_run=["US"],
-        position_records_by_account={
-            "lx": [_position(account="lx", lot_id="lot-lx")]
-        },
+        position_records_by_account={"lx": [_position(account="lx", lot_id="lot-lx")]},
     )
 
     binding = plan["accounts"]["lx"]["requirements"][0][
@@ -269,28 +222,13 @@ def test_position_binding_uses_base_fallback_without_defaulting() -> None:
 
 
 def test_missing_or_unsupported_position_binding_is_typed_unavailable() -> None:
-    from src.application.close_advice_required_data import (
-        build_close_advice_required_data_plan,
-    )
-
     missing = _config(account="lx")
     missing["symbols"] = []
     unsupported = _config(account="sy")
     unsupported["symbols"][0]["fetch"]["source"] = "http"
-    plan = build_close_advice_required_data_plan(
-        run_id="run-1",
-        run_started_at_utc=datetime(
-            2026,
-            7,
-            29,
-            1,
-            40,
-            tzinfo=timezone.utc,
-        ),
-        business_date=date(2026, 7, 29),
+    plan = _plan(
         account_configs={"lx": missing, "sy": unsupported},
         base_config=missing,
-        markets_to_run=["US"],
         position_records_by_account={
             "lx": [_position(account="lx", lot_id="lot-lx")],
             "sy": [_position(account="sy", lot_id="lot-sy")],
@@ -316,31 +254,15 @@ def test_position_only_requirement_creates_one_exact_prefetch_plan(
     tmp_path: Path,
 ) -> None:
     import src.application.required_data_planning as planning
-    from src.application.close_advice_required_data import (
-        build_close_advice_required_data_plan,
-    )
     from src.application.required_data_prefetch_planning import (
         merge_close_advice_requirements_into_prefetch_config,
     )
 
     config = _config(account="lx")
-    plan = build_close_advice_required_data_plan(
-        run_id="run-1",
-        run_started_at_utc=datetime(
-            2026,
-            7,
-            29,
-            1,
-            40,
-            tzinfo=timezone.utc,
-        ),
-        business_date=date(2026, 7, 29),
+    plan = _plan(
         account_configs={"lx": config},
         base_config=config,
-        markets_to_run=["US"],
-        position_records_by_account={
-            "lx": [_position(account="lx", lot_id="lot-lx")]
-        },
+        position_records_by_account={"lx": [_position(account="lx", lot_id="lot-lx")]},
     )
     candidate_config = dict(config)
     candidate_config["symbols"] = []
@@ -401,9 +323,6 @@ def test_position_only_requirement_creates_one_exact_prefetch_plan(
 
 
 def test_position_only_route_conflict_rejects_all_affected_requirements() -> None:
-    from src.application.close_advice_required_data import (
-        build_close_advice_required_data_plan,
-    )
     from src.application.required_data_prefetch_planning import (
         merge_close_advice_requirements_into_prefetch_config,
     )
@@ -412,27 +331,11 @@ def test_position_only_route_conflict_rejects_all_affected_requirements() -> Non
         "lx": _config(account="lx", port=11111),
         "sy": _config(account="sy", port=11112),
     }
-    plan = build_close_advice_required_data_plan(
-        run_id="run-1",
-        run_started_at_utc=datetime(
-            2026,
-            7,
-            29,
-            1,
-            40,
-            tzinfo=timezone.utc,
-        ),
-        business_date=date(2026, 7, 29),
+    plan = _plan(
         account_configs=configs,
         base_config=configs["lx"],
-        markets_to_run=["US"],
         position_records_by_account={
-            account: [
-                _position(
-                    account=account,
-                    lot_id=f"lot-{account}",
-                )
-            ]
+            account: [_position(account=account, lot_id=f"lot-{account}")]
             for account in configs
         },
     )
@@ -460,31 +363,16 @@ def test_position_only_route_conflict_rejects_all_affected_requirements() -> Non
 
 
 def test_candidate_and_position_routes_normalize_host_case() -> None:
-    from src.application.close_advice_required_data import (
-        build_close_advice_required_data_plan,
-    )
     from src.application.required_data_prefetch_planning import (
         merge_close_advice_requirements_into_prefetch_config,
     )
 
     position_config = _config(account="lx", host="opend.example")
-    plan = build_close_advice_required_data_plan(
+    plan = _plan(
         run_id="run-host-case",
-        run_started_at_utc=datetime(
-            2026,
-            7,
-            29,
-            1,
-            40,
-            tzinfo=timezone.utc,
-        ),
-        business_date=date(2026, 7, 29),
         account_configs={"lx": position_config},
         base_config=position_config,
-        markets_to_run=["US"],
-        position_records_by_account={
-            "lx": [_position(account="lx", lot_id="lot-lx")]
-        },
+        position_records_by_account={"lx": [_position(account="lx", lot_id="lot-lx")]},
     )
     candidate_config = _config(account="lx", host="OpenD.EXAMPLE")
 
@@ -505,13 +393,40 @@ def test_candidate_and_position_routes_normalize_host_case() -> None:
     ]
 
 
+class _FrozenWorkspace(NamedTuple):
+    config: dict
+    context_path: Path
+    required_root: Path
+    output_dir: Path
+    manifest_path: Path
+
+    def run_kwargs(self, base_dir: Path, *, plan: bool = True, **overrides: object) -> dict:
+        kwargs: dict[str, object] = {
+            "config": self.config,
+            "context_path": self.context_path,
+            "required_data_root": self.required_root,
+            "output_dir": self.output_dir,
+            "base_dir": base_dir,
+            "markets_to_run": ["US"],
+            "required_data_snapshot_manifest": self.manifest_path,
+            "required_data_snapshot_run_id": "run-1",
+            "account": "lx",
+        }
+        if plan:
+            kwargs["close_advice_required_data_plan"] = (
+                self.manifest_path.parent / "close_advice_required_data_plan.json"
+            )
+        kwargs.update(overrides)
+        return kwargs
+
+
 def _frozen_workspace(
     tmp_path: Path,
     *,
     quote_strike: float = 100,
     position_fields: dict[str, object] | None = None,
     ledger_wheel: bool = False,
-) -> tuple[dict, Path, Path, Path, Path]:
+) -> _FrozenWorkspace:
     from domain.domain.option_position_lots import OpenPositionCommand
 
     from src.application.ledger import api as ledger_api
@@ -617,14 +532,7 @@ def _frozen_workspace(
         position_records = [record]
     plan = build_close_advice_required_data_plan(
         run_id=run_id,
-        run_started_at_utc=datetime(
-            2026,
-            7,
-            29,
-            1,
-            40,
-            tzinfo=timezone.utc,
-        ),
+        run_started_at_utc=datetime(2026, 7, 29, 1, 40, tzinfo=timezone.utc),
         business_date=date(2026, 7, 29),
         account_configs={"lx": config},
         base_config=config,
@@ -864,7 +772,9 @@ def _frozen_workspace(
         json.dumps(context),
         encoding="utf-8",
     )
-    return config, context_path, required_root, output_dir, manifest_path
+    return _FrozenWorkspace(
+        config, context_path, required_root, output_dir, manifest_path
+    )
 
 
 def test_frozen_close_advice_reads_only_sealed_snapshot(
@@ -873,13 +783,7 @@ def test_frozen_close_advice_reads_only_sealed_snapshot(
 ) -> None:
     from src.application import close_advice_runner as runner
 
-    (
-        config,
-        context_path,
-        required_root,
-        output_dir,
-        manifest_path,
-    ) = _frozen_workspace(
+    frozen = _frozen_workspace(
         tmp_path,
         position_fields={
             "strategy": "combo_yield",
@@ -887,6 +791,7 @@ def test_frozen_close_advice_reads_only_sealed_snapshot(
             "leg_role": "funding_put",
         },
     )
+    config, context_path, required_root, output_dir, manifest_path = frozen
     monkeypatch.setattr(
         runner,
         "_ensure_required_data_coverage_for_positions",
@@ -926,21 +831,7 @@ def test_frozen_close_advice_reads_only_sealed_snapshot(
         if path.is_file()
     }
 
-    result = runner.run_close_advice(
-        config=config,
-        context_path=context_path,
-        required_data_root=required_root,
-        output_dir=output_dir,
-        base_dir=tmp_path,
-        markets_to_run=["US"],
-        required_data_snapshot_manifest=manifest_path,
-        required_data_snapshot_run_id="run-1",
-        close_advice_required_data_plan=(
-            manifest_path.parent
-            / "close_advice_required_data_plan.json"
-        ),
-        account="lx",
-    )
+    result = runner.run_close_advice(**frozen.run_kwargs(tmp_path))
 
     assert result["snapshot_authority"] == "valid"
     assert result["quote_mode"] == "frozen_snapshot"
@@ -1003,31 +894,13 @@ def test_frozen_lifecycle_close_advice_preserves_wheel_stock_relationship(
         assemble_daily_decision_brief,
     )
 
-    (
-        config,
-        context_path,
-        required_root,
-        output_dir,
-        manifest_path,
-    ) = _frozen_workspace(
+    frozen = _frozen_workspace(
         tmp_path,
         ledger_wheel=True,
     )
+    config, context_path, required_root, output_dir, manifest_path = frozen
 
-    result = run_close_advice(
-        config=config,
-        context_path=context_path,
-        required_data_root=required_root,
-        output_dir=output_dir,
-        base_dir=tmp_path,
-        markets_to_run=["US"],
-        required_data_snapshot_manifest=manifest_path,
-        required_data_snapshot_run_id="run-1",
-        close_advice_required_data_plan=(
-            manifest_path.parent / "close_advice_required_data_plan.json"
-        ),
-        account="lx",
-    )
+    result = run_close_advice(**frozen.run_kwargs(tmp_path))
 
     csv_path = output_dir / "close_advice.csv"
     row = pd.read_csv(csv_path).iloc[0]
@@ -1074,22 +947,16 @@ def test_bound_plan_snapshot_returns_the_exact_validated_generation(
         load_required_data_snapshot_manifest_snapshot,
     )
 
-    (
-        _config_payload,
-        _context_path,
-        required_root,
-        _output_dir,
-        manifest_path,
-    ) = _frozen_workspace(tmp_path)
+    frozen = _frozen_workspace(tmp_path)
     manifest, _root, _manifest_bytes = (
         load_required_data_snapshot_manifest_snapshot(
-            manifest_path=manifest_path,
+            manifest_path=frozen.manifest_path,
             expected_run_id="run-1",
-            expected_required_data_root=required_root,
+            expected_required_data_root=frozen.required_root,
         )
     )
     snapshot = resolve_bound_close_advice_required_data_plan_snapshot(
-        manifest_path=manifest_path,
+        manifest_path=frozen.manifest_path,
         manifest=manifest,
         expected_run_id="run-1",
     )
@@ -1106,29 +973,10 @@ def test_frozen_close_advice_rejects_parent_manifest_generation_mismatch(
 ) -> None:
     from src.application.close_advice_runner import run_close_advice
 
-    (
-        config,
-        context_path,
-        required_root,
-        output_dir,
-        manifest_path,
-    ) = _frozen_workspace(tmp_path)
+    frozen = _frozen_workspace(tmp_path)
+    config, context_path, required_root, output_dir, manifest_path = frozen
 
-    result = run_close_advice(
-        config=config,
-        context_path=context_path,
-        required_data_root=required_root,
-        output_dir=output_dir,
-        base_dir=tmp_path,
-        markets_to_run=["US"],
-        required_data_snapshot_manifest=manifest_path,
-        required_data_snapshot_manifest_sha256="0" * 64,
-        required_data_snapshot_run_id="run-1",
-        close_advice_required_data_plan=(
-            manifest_path.parent / "close_advice_required_data_plan.json"
-        ),
-        account="lx",
-    )
+    result = run_close_advice(**frozen.run_kwargs(tmp_path, required_data_snapshot_manifest_sha256="0" * 64))
 
     assert result["status"] == "snapshot_integrity_failed"
     assert result["snapshot_authority"] == "invalid"
@@ -1145,28 +993,9 @@ def test_frozen_integrity_failure_invalidates_old_success_report(
     )
     from src.application.close_advice_runner import run_close_advice
 
-    (
-        config,
-        context_path,
-        required_root,
-        output_dir,
-        manifest_path,
-    ) = _frozen_workspace(tmp_path)
-    kwargs = {
-        "config": config,
-        "context_path": context_path,
-        "required_data_root": required_root,
-        "output_dir": output_dir,
-        "base_dir": tmp_path,
-        "markets_to_run": ["US"],
-        "required_data_snapshot_manifest": manifest_path,
-        "required_data_snapshot_run_id": "run-1",
-        "close_advice_required_data_plan": (
-            manifest_path.parent
-            / "close_advice_required_data_plan.json"
-        ),
-        "account": "lx",
-    }
+    frozen = _frozen_workspace(tmp_path)
+    config, context_path, required_root, output_dir, manifest_path = frozen
+    kwargs = frozen.run_kwargs(tmp_path)
     first = run_close_advice(**kwargs)
     assert first["snapshot_authority"] == "valid"
     old_csv = (output_dir / "close_advice.csv").read_bytes()
@@ -1194,27 +1023,9 @@ def test_close_report_manifest_binds_run_and_quote_mode(tmp_path: Path) -> None:
     )
     from src.application.close_advice_runner import run_close_advice
 
-    (
-        config,
-        context_path,
-        required_root,
-        output_dir,
-        manifest_path,
-    ) = _frozen_workspace(tmp_path)
-    result = run_close_advice(
-        config=config,
-        context_path=context_path,
-        required_data_root=required_root,
-        output_dir=output_dir,
-        base_dir=tmp_path,
-        markets_to_run=["US"],
-        required_data_snapshot_manifest=manifest_path,
-        required_data_snapshot_run_id="run-1",
-        close_advice_required_data_plan=(
-            manifest_path.parent / "close_advice_required_data_plan.json"
-        ),
-        account="lx",
-    )
+    frozen = _frozen_workspace(tmp_path)
+    config, context_path, required_root, output_dir, manifest_path = frozen
+    result = run_close_advice(**frozen.run_kwargs(tmp_path))
 
     assert result["snapshot_authority"] == "valid"
     valid = validate_close_advice_report_manifest(
@@ -1244,13 +1055,8 @@ def test_frozen_missing_exact_contract_is_position_scoped_without_fetch(
 ) -> None:
     from src.application import close_advice_runner as runner
 
-    (
-        config,
-        context_path,
-        required_root,
-        output_dir,
-        manifest_path,
-    ) = _frozen_workspace(tmp_path, quote_strike=105)
+    frozen = _frozen_workspace(tmp_path, quote_strike=105)
+    config, context_path, required_root, output_dir, manifest_path = frozen
     monkeypatch.setattr(
         runner,
         "_ensure_required_data_coverage_for_positions",
@@ -1266,21 +1072,7 @@ def test_frozen_missing_exact_contract_is_position_scoped_without_fetch(
         ),
     )
 
-    result = runner.run_close_advice(
-        config=config,
-        context_path=context_path,
-        required_data_root=required_root,
-        output_dir=output_dir,
-        base_dir=tmp_path,
-        markets_to_run=["US"],
-        required_data_snapshot_manifest=manifest_path,
-        required_data_snapshot_run_id="run-1",
-        close_advice_required_data_plan=(
-            manifest_path.parent
-            / "close_advice_required_data_plan.json"
-        ),
-        account="lx",
-    )
+    result = runner.run_close_advice(**frozen.run_kwargs(tmp_path))
 
     assert result["snapshot_authority"] == "valid"
     assert result["status"] == "degraded"
@@ -1302,13 +1094,8 @@ def test_frozen_evaluation_consumes_validated_receipt_bytes(
 ) -> None:
     from src.application import close_advice_runner as runner
 
-    (
-        config,
-        context_path,
-        required_root,
-        output_dir,
-        manifest_path,
-    ) = _frozen_workspace(tmp_path)
+    frozen = _frozen_workspace(tmp_path)
+    config, context_path, required_root, output_dir, manifest_path = frozen
     quote_csv = required_root / "parsed" / "NVDA_required_data.csv"
     original_bytes = quote_csv.read_bytes()
     original_resolve = runner.resolve_frozen_required_data_csv_bytes_batch
@@ -1339,21 +1126,7 @@ def test_frozen_evaluation_consumes_validated_receipt_bytes(
         _load_then_restore,
     )
 
-    result = runner.run_close_advice(
-        config=config,
-        context_path=context_path,
-        required_data_root=required_root,
-        output_dir=output_dir,
-        base_dir=tmp_path,
-        markets_to_run=["US"],
-        required_data_snapshot_manifest=manifest_path,
-        required_data_snapshot_run_id="run-1",
-        close_advice_required_data_plan=(
-            manifest_path.parent
-            / "close_advice_required_data_plan.json"
-        ),
-        account="lx",
-    )
+    result = runner.run_close_advice(**frozen.run_kwargs(tmp_path))
 
     assert result["snapshot_authority"] == "valid"
     assert result["evaluable_rows"] == 1
@@ -1370,13 +1143,8 @@ def test_legacy_unbound_snapshot_degrades_positions_without_fetch(
     from domain.domain.decision_state_fingerprint import canonical_sha256
     from src.application import close_advice_runner as runner
 
-    (
-        config,
-        context_path,
-        required_root,
-        output_dir,
-        manifest_path,
-    ) = _frozen_workspace(tmp_path)
+    frozen = _frozen_workspace(tmp_path)
+    config, context_path, required_root, output_dir, manifest_path = frozen
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest.pop("close_advice_required_data_plan_relpath")
     manifest.pop("close_advice_required_data_plan_sha256")
@@ -1406,17 +1174,7 @@ def test_legacy_unbound_snapshot_degrades_positions_without_fetch(
         ),
     )
 
-    result = runner.run_close_advice(
-        config=config,
-        context_path=context_path,
-        required_data_root=required_root,
-        output_dir=output_dir,
-        base_dir=tmp_path,
-        markets_to_run=["US"],
-        required_data_snapshot_manifest=manifest_path,
-        required_data_snapshot_run_id="run-1",
-        account="lx",
-    )
+    result = runner.run_close_advice(**frozen.run_kwargs(tmp_path, plan=False))
 
     assert result["snapshot_authority"] == "valid"
     assert result["status"] == "degraded"
@@ -1432,13 +1190,8 @@ def test_unsafe_bound_plan_path_fails_snapshot_authority(
     from domain.domain.decision_state_fingerprint import canonical_sha256
     from src.application.close_advice_runner import run_close_advice
 
-    (
-        config,
-        context_path,
-        required_root,
-        output_dir,
-        manifest_path,
-    ) = _frozen_workspace(tmp_path)
+    frozen = _frozen_workspace(tmp_path)
+    config, context_path, required_root, output_dir, manifest_path = frozen
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["close_advice_required_data_plan_relpath"] = "../outside.json"
     manifest.pop("content_sha256")
@@ -1448,17 +1201,7 @@ def test_unsafe_bound_plan_path_fails_snapshot_authority(
         encoding="utf-8",
     )
 
-    result = run_close_advice(
-        config=config,
-        context_path=context_path,
-        required_data_root=required_root,
-        output_dir=output_dir,
-        base_dir=tmp_path,
-        markets_to_run=["US"],
-        required_data_snapshot_manifest=manifest_path,
-        required_data_snapshot_run_id="run-1",
-        account="lx",
-    )
+    result = run_close_advice(**frozen.run_kwargs(tmp_path, plan=False))
 
     assert result["status"] == "snapshot_integrity_failed"
     assert result["snapshot_authority"] == "invalid"

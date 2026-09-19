@@ -23,6 +23,13 @@ def _post_request_body_bytes(markdown: str, *, uuid: str | None = None) -> int:
     return len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
 
 
+def _send_post_message(open_id: str, markdown: str, http_json_fn, *, uuid: str | None = None) -> dict:
+    return feishu_bot.send_post_message(
+        app_id="app_1", app_secret="secret_1", open_id=open_id,
+        markdown=markdown, uuid=uuid, http_json_fn=http_json_fn,
+    )
+
+
 def test_reply_message_sends_card_json_v2_and_serializes_content_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -40,11 +47,7 @@ def test_reply_message_sends_card_json_v2_and_serializes_content_once(
         },
     }
 
-    monkeypatch.setattr(
-        feishu_bot,
-        "with_tenant_token_retry",
-        lambda _app_id, _app_secret, fn: fn("tenant_token"),
-    )
+    monkeypatch.setattr(feishu_bot, "with_tenant_token_retry", lambda _app_id, _app_secret, fn: fn("tenant_token"))
 
     def _http_json(method: str, url: str, payload: dict, headers: dict, **kwargs) -> dict:
         calls.append(
@@ -82,11 +85,7 @@ def test_reply_message_sends_card_json_v2_and_serializes_content_once(
 
 def test_reply_text_message_remains_backward_compatible(monkeypatch: pytest.MonkeyPatch) -> None:
     payloads: list[dict] = []
-    monkeypatch.setattr(
-        feishu_bot,
-        "with_tenant_token_retry",
-        lambda _app_id, _app_secret, fn: fn("tenant_token"),
-    )
+    monkeypatch.setattr(feishu_bot, "with_tenant_token_retry", lambda _app_id, _app_secret, fn: fn("tenant_token"))
 
     feishu_bot.reply_text_message(
         app_id="app_1",
@@ -120,11 +119,7 @@ def test_send_message_sends_proactive_card_with_uuid_and_retry_logging(
             ]
         },
     }
-    monkeypatch.setattr(
-        feishu_bot,
-        "with_tenant_token_retry",
-        lambda _app_id, _app_secret, fn: fn("tenant_token"),
-    )
+    monkeypatch.setattr(feishu_bot, "with_tenant_token_retry", lambda _app_id, _app_secret, fn: fn("tenant_token"))
 
     out = feishu_bot.send_message(
         app_id="app_1",
@@ -320,11 +315,7 @@ def test_add_message_reaction_requires_message_and_emoji() -> None:
 def test_send_text_message_passes_uuid_and_enables_retry(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[dict] = []
 
-    monkeypatch.setattr(
-        feishu_bot,
-        "with_tenant_token_retry",
-        lambda app_id, app_secret, fn: fn("tenant_token"),
-    )
+    monkeypatch.setattr(feishu_bot, "with_tenant_token_retry", lambda app_id, app_secret, fn: fn("tenant_token"))
 
     def _http_json(method: str, url: str, payload: dict, headers: dict, **kwargs) -> dict:
         calls.append({"method": method, "url": url, "payload": payload, "headers": headers, "kwargs": kwargs})
@@ -351,11 +342,7 @@ def test_send_text_message_passes_uuid_and_enables_retry(monkeypatch: pytest.Mon
 def test_send_text_message_without_uuid_disables_ambiguous_retry(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[dict] = []
 
-    monkeypatch.setattr(
-        feishu_bot,
-        "with_tenant_token_retry",
-        lambda app_id, app_secret, fn: fn("tenant_token"),
-    )
+    monkeypatch.setattr(feishu_bot, "with_tenant_token_retry", lambda app_id, app_secret, fn: fn("tenant_token"))
 
     def _http_json(method: str, url: str, payload: dict, headers: dict, **kwargs) -> dict:
         calls.append({"payload": payload, "kwargs": kwargs})
@@ -377,24 +364,13 @@ def test_send_post_message_posts_md_paragraphs_without_title(monkeypatch: pytest
     calls: list[dict] = []
     markdown = '# 决策简报\n\n> 中文 "quote" 🙂\n\n- **NVDA**\n  - 合约: 1'
 
-    monkeypatch.setattr(
-        feishu_bot,
-        "with_tenant_token_retry",
-        lambda app_id, app_secret, fn: fn("tenant_token"),
-    )
+    monkeypatch.setattr(feishu_bot, "with_tenant_token_retry", lambda app_id, app_secret, fn: fn("tenant_token"))
 
     def _http_json(method: str, url: str, payload: dict, headers: dict, **kwargs) -> dict:
         calls.append({"method": method, "url": url, "payload": payload, "headers": headers, "kwargs": kwargs})
         return {"code": 0, "data": {"message_id": "om_1"}}
 
-    out = feishu_bot.send_post_message(
-        app_id="app_1",
-        app_secret="secret_1",
-        open_id="  ou_1  ",
-        markdown=f"  {markdown}  ",
-        uuid="idem-1",
-        http_json_fn=_http_json,
-    )
+    out = _send_post_message("  ou_1  ", f"  {markdown}  ", _http_json, uuid="idem-1")
 
     assert out["code"] == 0
     payload = calls[0]["payload"]
@@ -422,23 +398,13 @@ def test_send_post_message_maps_zero_width_spacer_lines_to_paragraph_breaks(
     calls: list[dict] = []
     markdown = "# OM · 决策简报 · lx\n\u200b\n状态｜扫描完成\n\u200b\n**1｜NVDA｜CSP**\n指标｜权利金 $5.25"
 
-    monkeypatch.setattr(
-        feishu_bot,
-        "with_tenant_token_retry",
-        lambda app_id, app_secret, fn: fn("tenant_token"),
-    )
+    monkeypatch.setattr(feishu_bot, "with_tenant_token_retry", lambda app_id, app_secret, fn: fn("tenant_token"))
 
     def _http_json(method: str, url: str, payload: dict, headers: dict, **kwargs) -> dict:
         calls.append({"payload": payload})
         return {"code": 0, "data": {"message_id": "om_1"}}
 
-    feishu_bot.send_post_message(
-        app_id="app_1",
-        app_secret="secret_1",
-        open_id="ou_1",
-        markdown=markdown,
-        http_json_fn=_http_json,
-    )
+    _send_post_message("ou_1", markdown, _http_json)
 
     assert json.loads(calls[0]["payload"]["content"]) == {
         "zh_cn": {
@@ -460,23 +426,13 @@ def test_send_post_message_maps_zero_width_spacer_lines_to_paragraph_breaks(
 def test_send_post_message_without_uuid_disables_ambiguous_retry(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[dict] = []
 
-    monkeypatch.setattr(
-        feishu_bot,
-        "with_tenant_token_retry",
-        lambda app_id, app_secret, fn: fn("tenant_token"),
-    )
+    monkeypatch.setattr(feishu_bot, "with_tenant_token_retry", lambda app_id, app_secret, fn: fn("tenant_token"))
 
     def _http_json(method: str, url: str, payload: dict, headers: dict, **kwargs) -> dict:
         calls.append({"payload": payload, "kwargs": kwargs})
         return {"code": 0, "data": {"message_id": "om_1"}}
 
-    feishu_bot.send_post_message(
-        app_id="app_1",
-        app_secret="secret_1",
-        open_id="ou_1",
-        markdown="# hello",
-        http_json_fn=_http_json,
-    )
+    _send_post_message("ou_1", "# hello", _http_json)
 
     assert "uuid" not in calls[0]["payload"]
     assert calls[0]["kwargs"]["retry_max_attempts"] == 1
@@ -520,14 +476,7 @@ def test_send_post_message_rejects_oversized_final_request_before_token_or_http(
     )
 
     with pytest.raises(feishu_bot.FeishuPermanentError) as raised:
-        feishu_bot.send_post_message(
-            app_id="app_1",
-            app_secret="secret_1",
-            open_id="ou_1",
-            markdown=markdown,
-            uuid=uuid,
-            http_json_fn=lambda *args, **kwargs: http_calls.append((args, kwargs)),
-        )
+        _send_post_message("ou_1", markdown, lambda *args, **kwargs: http_calls.append((args, kwargs)), uuid=uuid)
 
     assert token_calls == []
     assert http_calls == []
@@ -552,24 +501,13 @@ def test_send_post_message_measures_full_outer_request_and_sends_under_budget(
     calls: list[dict] = []
     markdown = ("中🙂\"\n" * 1000).strip()
 
-    monkeypatch.setattr(
-        feishu_bot,
-        "with_tenant_token_retry",
-        lambda app_id, app_secret, fn: fn("tenant_token"),
-    )
+    monkeypatch.setattr(feishu_bot, "with_tenant_token_retry", lambda app_id, app_secret, fn: fn("tenant_token"))
 
     def _http_json(method: str, url: str, payload: dict, headers: dict, **kwargs) -> dict:
         calls.append({"payload": payload, "kwargs": kwargs})
         return {"code": 0, "data": {"message_id": "om_1"}}
 
-    feishu_bot.send_post_message(
-        app_id="app_1",
-        app_secret="secret_1",
-        open_id="ou_1",
-        markdown=markdown,
-        uuid="idem-1",
-        http_json_fn=_http_json,
-    )
+    _send_post_message("ou_1", markdown, _http_json, uuid="idem-1")
 
     payload = calls[0]["payload"]
     assert len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) < feishu_bot.FEISHU_POST_REQUEST_BUDGET_BYTES
@@ -601,23 +539,9 @@ def test_send_post_message_enforces_exact_final_request_boundary(
 
     monkeypatch.setattr(feishu_bot, "with_tenant_token_retry", _with_token)
 
-    feishu_bot.send_post_message(
-        app_id="app_1",
-        app_secret="secret_1",
-        open_id="ou_1",
-        markdown=exact_markdown,
-        uuid=uuid,
-        http_json_fn=_http_json,
-    )
+    _send_post_message("ou_1", exact_markdown, _http_json, uuid=uuid)
     with pytest.raises(feishu_bot.FeishuPermanentError):
-        feishu_bot.send_post_message(
-            app_id="app_1",
-            app_secret="secret_1",
-            open_id="ou_1",
-            markdown=exact_markdown + "a",
-            uuid=uuid,
-            http_json_fn=_http_json,
-        )
+        _send_post_message("ou_1", exact_markdown + "a", _http_json, uuid=uuid)
 
     assert len(token_calls) == 1
     assert len(http_calls) == 1
@@ -756,25 +680,14 @@ def test_real_notification_renderers_preserve_content_and_visible_blank_paragrap
         assert_mobile_flat_markdown(message)
 
     payloads: list[dict] = []
-    monkeypatch.setattr(
-        feishu_bot,
-        "with_tenant_token_retry",
-        lambda app_id, app_secret, fn: fn("tenant_token"),
-    )
+    monkeypatch.setattr(feishu_bot, "with_tenant_token_retry", lambda app_id, app_secret, fn: fn("tenant_token"))
 
     def _http_json(method: str, url: str, payload: dict, headers: dict, **kwargs) -> dict:
         payloads.append(payload)
         return {"code": 0, "data": {"message_id": f"om_{len(payloads)}"}}
 
     for name, message in messages.items():
-        feishu_bot.send_post_message(
-            app_id="app_1",
-            app_secret="secret_1",
-            open_id="ou_1",
-            markdown=message,
-            uuid=f"fixture-{name}",
-            http_json_fn=_http_json,
-        )
+        _send_post_message("ou_1", message, _http_json, uuid=f"fixture-{name}")
 
     assert len(payloads) == len(messages)
     for payload, expected in zip(payloads, messages.values(), strict=True):

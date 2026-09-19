@@ -14,12 +14,8 @@ from src.application.ledger import repository_core
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.trades.inbox import enqueue_trade_payload
 from src.infrastructure import private_storage
-from src.infrastructure.private_storage import (
-    connect_private_sqlite,
-    ensure_private_file,
-    exclusive_private_file_lock,
-    secure_sqlite_artifacts,
-)
+from src.infrastructure.private_storage import (connect_private_sqlite, ensure_private_file,
+    exclusive_private_file_lock, secure_sqlite_artifacts,)
 
 
 def _mode(path: Path) -> int:
@@ -42,20 +38,15 @@ def test_sensitive_sqlite_and_audit_artifacts_ignore_permissive_umask(tmp_path: 
                 if sidecar.exists():
                     assert _mode(sidecar) == 0o600
 
-        audit_path = state_repo.append_shared_audit_jsonl(
-            tmp_path,
-            "audit_events.jsonl",
-            {"event_type": "private", "action": "tested"},
-        )
+        audit_path = state_repo.append_shared_audit_jsonl(tmp_path, "audit_events.jsonl",
+            {"event_type": "private", "action": "tested"},)
         assert _mode(audit_path) == 0o600
         assert _mode(audit_path.parent) == 0o700
     finally:
         os.umask(previous_umask)
 
 
-def test_sqlite_factory_closes_connection_when_initial_hardening_fails(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+def test_sqlite_factory_closes_connection_when_initial_hardening_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class Connection:
         closed = False
@@ -65,11 +56,8 @@ def test_sqlite_factory_closes_connection_when_initial_hardening_fails(
 
     connection = Connection()
     monkeypatch.setattr(private_storage.sqlite3, "connect", lambda *_args, **_kwargs: connection)
-    monkeypatch.setattr(
-        private_storage,
-        "secure_sqlite_artifacts",
-        lambda _path: (_ for _ in ()).throw(RuntimeError("hardening failed")),
-    )
+    monkeypatch.setattr(private_storage, "secure_sqlite_artifacts",
+        lambda _path: (_ for _ in ()).throw(RuntimeError("hardening failed")),)
 
     with pytest.raises(RuntimeError, match="hardening failed"):
         connect_private_sqlite(tmp_path / "private" / "inbound.sqlite3")
@@ -77,17 +65,10 @@ def test_sqlite_factory_closes_connection_when_initial_hardening_fails(
     assert connection.closed is True
 
 
-@pytest.mark.parametrize(
-    ("failure_stage", "journal_mode", "expected_hardening_calls"),
-    (("invariant", "wal", 1), ("wal", "delete", 1), ("hardening", "wal", 2)),
-)
-def test_repository_writer_closes_and_hardens_after_connection_initialization_failure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    failure_stage: str,
-    journal_mode: str,
-    expected_hardening_calls: int,
-) -> None:
+@pytest.mark.parametrize(("failure_stage", "journal_mode", "expected_hardening_calls"),
+    (("invariant", "wal", 1), ("wal", "delete", 1), ("hardening", "wal", 2)),)
+def test_repository_writer_closes_and_hardens_after_connection_initialization_failure(tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch, failure_stage: str, journal_mode: str, expected_hardening_calls: int,) -> None:
     class Cursor:
         def fetchone(self) -> tuple[str]:
             return (journal_mode,)
@@ -120,11 +101,8 @@ def test_repository_writer_closes_and_hardens_after_connection_initialization_fa
     monkeypatch.setattr(repository_core, "initialize_ledger_connection", _initialize)
     monkeypatch.setattr(repository_core, "secure_sqlite_artifacts", _secure)
 
-    expected_error = {
-        "invariant": "connection invariant failed",
-        "wal": "SQLite WAL mode is required",
-        "hardening": "post-initialize hardening failed",
-    }[failure_stage]
+    expected_error = {"invariant": "connection invariant failed", "wal": "SQLite WAL mode is required",
+        "hardening": "post-initialize hardening failed",}[failure_stage]
     with pytest.raises(RuntimeError, match=expected_error):
         with repo._writer_connection():
             raise AssertionError("writer body must not start")
@@ -140,10 +118,8 @@ def test_repository_writer_closes_and_hardens_after_connection_initialization_fa
         assert executor.submit(_reacquire_writer_lock).result(timeout=1) is True
 
 
-def test_repository_writer_lock_covers_connect_close_and_artifact_hardening(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_repository_writer_lock_covers_connect_close_and_artifact_hardening(tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,) -> None:
     class Cursor:
         def fetchone(self) -> tuple[str]:
             return ("wal",)
@@ -275,9 +251,7 @@ def test_exclusive_private_file_lock_is_reentrant_in_same_thread(tmp_path: Path)
             assert _mode(lock_path) == 0o600
 
 
-def test_exclusive_private_file_lock_nonblocking_contender_fails_and_releases(
-    tmp_path: Path,
-) -> None:
+def test_exclusive_private_file_lock_nonblocking_contender_fails_and_releases(tmp_path: Path,) -> None:
     lock_path = tmp_path / "private" / "ledger.writer.lock"
     first_entered = threading.Event()
     release_first = threading.Event()
@@ -316,11 +290,8 @@ def test_exclusive_private_file_lock_releases_after_body_exception(tmp_path: Pat
 
 
 @pytest.mark.parametrize("stage", ["stat", "chmod", "readback"])
-def test_sqlite_artifact_helper_tolerates_sidecar_disappearing(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    stage: str,
-) -> None:
+def test_sqlite_artifact_helper_tolerates_sidecar_disappearing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    stage: str,) -> None:
     database = ensure_private_file(tmp_path / "private" / "inbox.sqlite3")
     journal = Path(f"{database}-journal")
     journal.write_bytes(b"transient")
@@ -403,12 +374,8 @@ def test_trade_inbox_ignores_permissive_umask(tmp_path: Path) -> None:
     previous_umask = os.umask(0)
     try:
         database = tmp_path / "inbox" / "trade_inbox.sqlite3"
-        enqueue_trade_payload(
-            database,
-            payload={"deal_id": "synthetic-deal", "account": "test"},
-            source="test",
-            broker_deal_key="futu:test:999000000000000001:synthetic-deal",
-        )
+        enqueue_trade_payload(database, payload={"deal_id": "synthetic-deal", "account": "test"}, source="test",
+            broker_deal_key="futu:test:999000000000000001:synthetic-deal",)
 
         assert _mode(database.parent) == 0o700
         assert _mode(database) == 0o600
