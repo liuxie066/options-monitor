@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -9,6 +10,19 @@ import pytest
 BASE = Path(__file__).resolve().parents[1]
 
 FAKE_FUTU_ACC_ID_LX = "123456789012345678"
+
+
+@contextmanager
+def _patched(module, **attributes):
+    """Replace ``module`` attributes for the duration of the block."""
+    originals = {name: getattr(module, name) for name in attributes}
+    for name, value in attributes.items():
+        setattr(module, name, value)
+    try:
+        yield
+    finally:
+        for name, value in originals.items():
+            setattr(module, name, value)
 
 
 def _run_cash_query(
@@ -66,20 +80,17 @@ def test_query_sell_put_cash_uses_futu_portfolio_context_when_runtime_config_all
             "portfolio_source_name": "futu",
         }
 
-    old_fetch = m.fetch_futu_portfolio_context
-    old_open_position_ledger = m.open_position_ledger
-    old_load_option_position_records = m._load_option_position_records
-    old_build_context = m.build_option_positions_context
-    try:
-        m.fetch_futu_portfolio_context = fake_fetch_futu_portfolio_context
-        m.open_position_ledger = lambda *_a, **_k: object()  # type: ignore[assignment]
-        m._load_option_position_records = lambda *_a, **_k: []  # type: ignore[assignment]
-        m.build_option_positions_context = lambda *_a, **_k: {  # type: ignore[assignment]
+    with _patched(
+        m,
+        fetch_futu_portfolio_context=fake_fetch_futu_portfolio_context,
+        open_position_ledger=lambda *_a, **_k: object(),
+        _load_option_position_records=lambda *_a, **_k: [],
+        build_option_positions_context=lambda *_a, **_k: {
             "cash_secured_by_symbol_by_ccy": {"NVDA": {"CNY": 72000.0}},
             "cash_secured_total_by_ccy": {"CNY": 72000.0},
             "cash_secured_total_cny": 72000.0,
-        }
-
+        },
+    ):
         out_dir = BASE / "output_shared" / "state" / "test_query_sell_put_cash_futu"
         out_dir.mkdir(parents=True, exist_ok=True)
         result = m.query_sell_put_cash(
@@ -94,11 +105,6 @@ def test_query_sell_put_cash_uses_futu_portfolio_context_when_runtime_config_all
             },
             no_exchange_rates=True,
         )
-    finally:
-        m.fetch_futu_portfolio_context = old_fetch
-        m.open_position_ledger = old_open_position_ledger  # type: ignore[assignment]
-        m._load_option_position_records = old_load_option_position_records  # type: ignore[assignment]
-        m.build_option_positions_context = old_build_context  # type: ignore[assignment]
 
     assert result["portfolio_source_name"] == "futu"
     assert result["cash_available_cny"] == 130000.0
@@ -147,22 +153,18 @@ def test_query_sell_put_cash_uses_account_scoped_portfolio_source_override() -> 
         assert kwargs.get("account") == "sy"
         return {"cash_by_currency": {"CNY": 90000.0}, "stocks_by_symbol": {}, "portfolio_source_name": "holdings"}
 
-    old_fetch = m.fetch_futu_portfolio_context
-    old_load_portfolio = m.load_account_portfolio_context
-    old_open_position_ledger = m.open_position_ledger
-    old_load_option_position_records = m._load_option_position_records
-    old_build_context = m.build_option_positions_context
-    try:
-        m.fetch_futu_portfolio_context = fake_fetch_futu_portfolio_context
-        m.load_account_portfolio_context = fake_load_account_portfolio_context
-        m.open_position_ledger = lambda *_a, **_k: object()  # type: ignore[assignment]
-        m._load_option_position_records = lambda *_a, **_k: []  # type: ignore[assignment]
-        m.build_option_positions_context = lambda *_a, **_k: {  # type: ignore[assignment]
+    with _patched(
+        m,
+        fetch_futu_portfolio_context=fake_fetch_futu_portfolio_context,
+        load_account_portfolio_context=fake_load_account_portfolio_context,
+        open_position_ledger=lambda *_a, **_k: object(),
+        _load_option_position_records=lambda *_a, **_k: [],
+        build_option_positions_context=lambda *_a, **_k: {
             "cash_secured_by_symbol_by_ccy": {"NVDA": {"CNY": 12000.0}},
             "cash_secured_total_by_ccy": {"CNY": 12000.0},
             "cash_secured_total_cny": 12000.0,
-        }
-
+        },
+    ):
         out_dir = BASE / "output_shared" / "state" / "test_query_sell_put_cash_holdings_override"
         out_dir.mkdir(parents=True, exist_ok=True)
         result = m.query_sell_put_cash(
@@ -180,12 +182,6 @@ def test_query_sell_put_cash_uses_account_scoped_portfolio_source_override() -> 
             },
             no_exchange_rates=True,
         )
-    finally:
-        m.fetch_futu_portfolio_context = old_fetch
-        m.load_account_portfolio_context = old_load_portfolio
-        m.open_position_ledger = old_open_position_ledger  # type: ignore[assignment]
-        m._load_option_position_records = old_load_option_position_records  # type: ignore[assignment]
-        m.build_option_positions_context = old_build_context  # type: ignore[assignment]
 
     assert result["portfolio_source_name"] == "holdings"
     assert result["cash_available_cny"] == 90000.0
@@ -199,20 +195,17 @@ def test_query_sell_put_cash_uses_holdings_account_mapping_for_external_account(
         assert kwargs.get("account") == "ext1"
         return {"cash_by_currency": {"CNY": 50000.0}, "stocks_by_symbol": {}, "portfolio_source_name": "holdings"}
 
-    old_load_portfolio = m.load_account_portfolio_context
-    old_open_position_ledger = m.open_position_ledger
-    old_load_option_position_records = m._load_option_position_records
-    old_build_context = m.build_option_positions_context
-    try:
-        m.load_account_portfolio_context = fake_load_account_portfolio_context
-        m.open_position_ledger = lambda *_a, **_k: object()  # type: ignore[assignment]
-        m._load_option_position_records = lambda *_a, **_k: []  # type: ignore[assignment]
-        m.build_option_positions_context = lambda *_a, **_k: {  # type: ignore[assignment]
+    with _patched(
+        m,
+        load_account_portfolio_context=fake_load_account_portfolio_context,
+        open_position_ledger=lambda *_a, **_k: object(),
+        _load_option_position_records=lambda *_a, **_k: [],
+        build_option_positions_context=lambda *_a, **_k: {
             "cash_secured_by_symbol_by_ccy": {"NVDA": {"CNY": 8000.0}},
             "cash_secured_total_by_ccy": {"CNY": 8000.0},
             "cash_secured_total_cny": 8000.0,
-        }
-
+        },
+    ):
         out_dir = BASE / "output_shared" / "state" / "test_query_sell_put_cash_external_holdings"
         out_dir.mkdir(parents=True, exist_ok=True)
         result = m.query_sell_put_cash(
@@ -234,11 +227,6 @@ def test_query_sell_put_cash_uses_holdings_account_mapping_for_external_account(
             },
             no_exchange_rates=True,
         )
-    finally:
-        m.load_account_portfolio_context = old_load_portfolio
-        m.open_position_ledger = old_open_position_ledger  # type: ignore[assignment]
-        m._load_option_position_records = old_load_option_position_records  # type: ignore[assignment]
-        m.build_option_positions_context = old_build_context  # type: ignore[assignment]
 
     assert result["portfolio_source_name"] == "holdings"
     assert result["cash_available_cny"] == 50000.0
@@ -252,23 +240,20 @@ def test_query_sell_put_cash_marks_free_cash_unknown_when_cash_secured_unavailab
         assert kwargs.get("account") == "lx"
         return {"cash_by_currency": {"CNY": 130000.0}, "stocks_by_symbol": {}, "portfolio_source_name": "holdings"}
 
-    old_load_portfolio = m.load_account_portfolio_context
-    old_open_position_ledger = m.open_position_ledger
-    old_load_option_position_records = m._load_option_position_records
-    old_build_context = m.build_option_positions_context
-    try:
-        m.load_account_portfolio_context = fake_load_account_portfolio_context
-        m.open_position_ledger = lambda *_a, **_k: object()  # type: ignore[assignment]
-        m._load_option_position_records = lambda *_a, **_k: []  # type: ignore[assignment]
-        m.build_option_positions_context = lambda *_a, **_k: {  # type: ignore[assignment]
+    with _patched(
+        m,
+        load_account_portfolio_context=fake_load_account_portfolio_context,
+        open_position_ledger=lambda *_a, **_k: object(),
+        _load_option_position_records=lambda *_a, **_k: [],
+        build_option_positions_context=lambda *_a, **_k: {
             "cash_secured_by_symbol_by_ccy": {"NVDA": {"CNY": 12000.0}},
             "cash_secured_total_by_ccy": {"CNY": 12000.0},
             "cash_secured_total_cny": None,
             "cash_secured_unavailable_by_symbol": {
                 "0700.HK": "short_put_cash_secured_basis_missing",
             },
-        }
-
+        },
+    ):
         out_dir = BASE / "output_shared" / "state" / "test_query_sell_put_cash_unavailable"
         out_dir.mkdir(parents=True, exist_ok=True)
         result = m.query_sell_put_cash(
@@ -282,11 +267,6 @@ def test_query_sell_put_cash_marks_free_cash_unknown_when_cash_secured_unavailab
             },
             no_exchange_rates=True,
         )
-    finally:
-        m.load_account_portfolio_context = old_load_portfolio
-        m.open_position_ledger = old_open_position_ledger  # type: ignore[assignment]
-        m._load_option_position_records = old_load_option_position_records  # type: ignore[assignment]
-        m.build_option_positions_context = old_build_context  # type: ignore[assignment]
 
     assert result["cash_secured_usage_reliable"] is False
     assert result["cash_secured_used_cny"] is None
