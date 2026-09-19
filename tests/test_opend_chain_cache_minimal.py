@@ -9,6 +9,91 @@ from typing import Any, cast
 
 import pytest
 
+_RATE_LIMIT_MESSAGE = "获取期权链频率太高，请求失败，每30秒最多10次。"
+
+
+def _rate_limit_gateway():
+    class _Gateway:
+        def get_option_chain(self, **kwargs):  # noqa: ANN003, ANN201
+            raise RuntimeError(_RATE_LIMIT_MESSAGE)
+
+    return _Gateway()
+
+
+def _seeded_put_shard(root: Path, *, asof_date: str):
+    from src.application.option_chain_fetching import (
+        option_chain_shard_cache_path,
+        save_option_chain_shard,
+    )
+
+    cache_path = option_chain_shard_cache_path(root, "US.NVDA", "2026-09-18", option_type_scope="put")
+    save_option_chain_shard(
+        cache_path,
+        asof_date=asof_date,
+        underlier_code="US.NVDA",
+        expiration="2026-09-18",
+        rows=[
+            {
+                "code": "US.NVDA.2026-09-18.P100",
+                "strike_time": "2026-09-18",
+                "strike_price": 100,
+                "option_type": "PUT",
+                "lot_size": 100,
+            }
+        ],
+    )
+    return cache_path
+
+
+def _fetch_nvda_put_through_rate_limit(tmp_path: Path, *, saved_asof_date: str, **request_overrides):
+    from src.application.option_chain_fetching import OptionChainFetchRequest, fetch_option_chains
+
+    root = Path(tmp_path)
+    _seeded_put_shard(root, asof_date=saved_asof_date)
+    return fetch_option_chains(
+        gateway=_rate_limit_gateway(),
+        request=OptionChainFetchRequest(
+            symbol="NVDA",
+            underlier_code="US.NVDA",
+            expirations=["2026-09-18"],
+            option_types="put",
+            base_dir=root,
+            asof_date="2026-05-14",
+            chain_cache=True,
+            max_wait_sec=1,
+            **request_overrides,
+        ),
+        retry_call=lambda _name, fn, **kwargs: fn(),
+    )
+
+
+def _fetch_explicit_nvda_chain(tmp_path: Path, gateway, *, expirations: list[str]):
+    from src.application.option_chain_fetching import OptionChainFetchRequest, fetch_option_chains
+
+    return fetch_option_chains(
+        gateway=gateway,
+        request=OptionChainFetchRequest(
+            symbol="NVDA",
+            underlier_code="US.NVDA",
+            expirations=expirations,
+            base_dir=Path(tmp_path),
+            chain_cache=False,
+        ),
+        retry_call=lambda _name, fn, **kwargs: fn(),
+    )
+
+
+def _seed_parsed_pdd_csv(tmp_path: Path):
+    root = Path(tmp_path)
+    parsed = root / "parsed"
+    parsed.mkdir(parents=True)
+    csv_path = parsed / "PDD_required_data.csv"
+    csv_path.write_text(
+        "symbol,option_type,expiration,strike,mid\nPDD,put,2026-05-15,100,1.0\n", encoding="utf-8"
+    )
+    return root, csv_path
+
+
 def test_chain_cache_helpers_roundtrip(tmp_path: Path) -> None:
 
     from src.application.option_chain_fetching import (
@@ -57,50 +142,7 @@ def test_chain_cache_fresh_check(tmp_path: Path) -> None:
 
 def test_chain_fetch_uses_stale_cache_on_rate_limit(tmp_path: Path) -> None:
 
-    from src.application.option_chain_fetching import (
-        OptionChainFetchRequest,
-        fetch_option_chains,
-        option_chain_shard_cache_path,
-        save_option_chain_shard,
-    )
-
-    class _Gateway:
-        def get_option_chain(self, **kwargs):  # noqa: ANN003, ANN201
-            raise RuntimeError("获取期权链频率太高，请求失败，每30秒最多10次。")
-
-    td = tmp_path
-    root = Path(td)
-    cache_path = option_chain_shard_cache_path(root, "US.NVDA", "2026-09-18", option_type_scope="put")
-    save_option_chain_shard(
-        cache_path,
-        asof_date="2026-05-13",
-        underlier_code="US.NVDA",
-        expiration="2026-09-18",
-        rows=[
-            {
-                "code": "US.NVDA.2026-09-18.P100",
-                "strike_time": "2026-09-18",
-                "strike_price": 100,
-                "option_type": "PUT",
-                "lot_size": 100,
-            }
-        ],
-    )
-
-    result = fetch_option_chains(
-        gateway=_Gateway(),
-        request=OptionChainFetchRequest(
-            symbol="NVDA",
-            underlier_code="US.NVDA",
-            expirations=["2026-09-18"],
-            option_types="put",
-            base_dir=root,
-            asof_date="2026-05-14",
-            chain_cache=True,
-            max_wait_sec=1,
-        ),
-        retry_call=lambda _name, fn, **kwargs: fn(),
-    )
+    result = _fetch_nvda_put_through_rate_limit(tmp_path, saved_asof_date="2026-05-13")
 
     assert result.status == "partial"
     assert result.error_code == "RATE_LIMIT"
@@ -112,50 +154,8 @@ def test_chain_fetch_uses_stale_cache_on_rate_limit(tmp_path: Path) -> None:
 
 def test_chain_fetch_force_refresh_does_not_use_stale_cache_on_rate_limit(tmp_path: Path) -> None:
 
-    from src.application.option_chain_fetching import (
-        OptionChainFetchRequest,
-        fetch_option_chains,
-        option_chain_shard_cache_path,
-        save_option_chain_shard,
-    )
-
-    class _Gateway:
-        def get_option_chain(self, **kwargs):  # noqa: ANN003, ANN201
-            raise RuntimeError("获取期权链频率太高，请求失败，每30秒最多10次。")
-
-    td = tmp_path
-    root = Path(td)
-    cache_path = option_chain_shard_cache_path(root, "US.NVDA", "2026-09-18", option_type_scope="put")
-    save_option_chain_shard(
-        cache_path,
-        asof_date="2026-05-13",
-        underlier_code="US.NVDA",
-        expiration="2026-09-18",
-        rows=[
-            {
-                "code": "US.NVDA.2026-09-18.P100",
-                "strike_time": "2026-09-18",
-                "strike_price": 100,
-                "option_type": "PUT",
-                "lot_size": 100,
-            }
-        ],
-    )
-
-    result = fetch_option_chains(
-        gateway=_Gateway(),
-        request=OptionChainFetchRequest(
-            symbol="NVDA",
-            underlier_code="US.NVDA",
-            expirations=["2026-09-18"],
-            option_types="put",
-            base_dir=root,
-            asof_date="2026-05-14",
-            chain_cache=True,
-            is_force_refresh=True,
-            max_wait_sec=1,
-        ),
-        retry_call=lambda _name, fn, **kwargs: fn(),
+    result = _fetch_nvda_put_through_rate_limit(
+        tmp_path, saved_asof_date="2026-05-13", is_force_refresh=True
     )
 
     assert result.status == "error"
@@ -167,50 +167,7 @@ def test_chain_fetch_force_refresh_does_not_use_stale_cache_on_rate_limit(tmp_pa
 
 def test_chain_fetch_ignores_stale_cache_older_than_cache_horizon_on_rate_limit(tmp_path: Path) -> None:
 
-    from src.application.option_chain_fetching import (
-        OptionChainFetchRequest,
-        fetch_option_chains,
-        option_chain_shard_cache_path,
-        save_option_chain_shard,
-    )
-
-    class _Gateway:
-        def get_option_chain(self, **kwargs):  # noqa: ANN003, ANN201
-            raise RuntimeError("获取期权链频率太高，请求失败，每30秒最多10次。")
-
-    td = tmp_path
-    root = Path(td)
-    cache_path = option_chain_shard_cache_path(root, "US.NVDA", "2026-09-18", option_type_scope="put")
-    save_option_chain_shard(
-        cache_path,
-        asof_date="2026-05-06",
-        underlier_code="US.NVDA",
-        expiration="2026-09-18",
-        rows=[
-            {
-                "code": "US.NVDA.2026-09-18.P100",
-                "strike_time": "2026-09-18",
-                "strike_price": 100,
-                "option_type": "PUT",
-                "lot_size": 100,
-            }
-        ],
-    )
-
-    result = fetch_option_chains(
-        gateway=_Gateway(),
-        request=OptionChainFetchRequest(
-            symbol="NVDA",
-            underlier_code="US.NVDA",
-            expirations=["2026-09-18"],
-            option_types="put",
-            base_dir=root,
-            asof_date="2026-05-14",
-            chain_cache=True,
-            max_wait_sec=1,
-        ),
-        retry_call=lambda _name, fn, **kwargs: fn(),
-    )
+    result = _fetch_nvda_put_through_rate_limit(tmp_path, saved_asof_date="2026-05-06")
 
     assert result.status == "error"
     assert result.error_code == "RATE_LIMIT"
@@ -667,15 +624,9 @@ def test_file_rate_limiter_coordinates_instances_through_state_file(tmp_path: Pa
 
 def test_save_outputs_preserves_existing_parsed_csv_on_fetch_error(tmp_path: Path) -> None:
 
-
     import src.application.opend_symbol_outputs as m
 
-    td = tmp_path
-    root = Path(td)
-    parsed = root / "parsed"
-    parsed.mkdir(parents=True)
-    csv_path = parsed / "PDD_required_data.csv"
-    csv_path.write_text("symbol,option_type,expiration,strike,mid\nPDD,put,2026-05-15,100,1.0\n", encoding="utf-8")
+    root, csv_path = _seed_parsed_pdd_csv(tmp_path)
 
     m.save_outputs(
         Path(__file__).resolve().parents[1],
@@ -695,15 +646,9 @@ def test_save_outputs_preserves_existing_parsed_csv_on_fetch_error(tmp_path: Pat
 
 def test_save_outputs_preserves_existing_parsed_csv_on_nonempty_fetch_error(tmp_path: Path) -> None:
 
-
     import src.application.opend_symbol_outputs as m
 
-    td = tmp_path
-    root = Path(td)
-    parsed = root / "parsed"
-    parsed.mkdir(parents=True)
-    csv_path = parsed / "PDD_required_data.csv"
-    csv_path.write_text("symbol,option_type,expiration,strike,mid\nPDD,put,2026-05-15,100,1.0\n", encoding="utf-8")
+    root, csv_path = _seed_parsed_pdd_csv(tmp_path)
 
     m.save_outputs(
         Path(__file__).resolve().parents[1],
@@ -742,18 +687,7 @@ def test_explicit_option_chain_all_empty_is_success_empty(tmp_path: Path) -> Non
         def get_option_chain(self, **kwargs):  # noqa: ANN003, ANN201
             return []
 
-    td = tmp_path
-    result = fetch_option_chains(
-        gateway=_Gateway(),
-        request=OptionChainFetchRequest(
-            symbol="NVDA",
-            underlier_code="US.NVDA",
-            expirations=["2026-08-21", "2026-09-18"],
-            base_dir=Path(td),
-            chain_cache=False,
-        ),
-        retry_call=lambda _name, fn, **kwargs: fn(),
-    )
+    result = _fetch_explicit_nvda_chain(tmp_path, _Gateway(), expirations=["2026-08-21", "2026-09-18"])
 
     assert result.status == "ok"
     assert result.source_outcome == "success_empty"
@@ -775,18 +709,7 @@ def test_explicit_option_chain_empty_plus_error_fails_closed(tmp_path: Path) -> 
                 raise RuntimeError("provider unavailable")
             return []
 
-    td = tmp_path
-    result = fetch_option_chains(
-        gateway=_Gateway(),
-        request=OptionChainFetchRequest(
-            symbol="NVDA",
-            underlier_code="US.NVDA",
-            expirations=["2026-08-21", "2026-09-18"],
-            base_dir=Path(td),
-            chain_cache=False,
-        ),
-        retry_call=lambda _name, fn, **kwargs: fn(),
-    )
+    result = _fetch_explicit_nvda_chain(tmp_path, _Gateway(), expirations=["2026-08-21", "2026-09-18"])
 
     assert result.status == "error"
     assert result.source_outcome == "provider_error"
@@ -815,18 +738,7 @@ def test_explicit_option_chain_rows_plus_error_fails_closed(tmp_path: Path) -> N
                 }
             ]
 
-    td = tmp_path
-    result = fetch_option_chains(
-        gateway=_Gateway(),
-        request=OptionChainFetchRequest(
-            symbol="NVDA",
-            underlier_code="US.NVDA",
-            expirations=["2026-08-21", "2026-09-18"],
-            base_dir=Path(td),
-            chain_cache=False,
-        ),
-        retry_call=lambda _name, fn, **kwargs: fn(),
-    )
+    result = _fetch_explicit_nvda_chain(tmp_path, _Gateway(), expirations=["2026-08-21", "2026-09-18"])
 
     assert result.status == "partial"
     assert result.rows
@@ -843,18 +755,7 @@ def test_explicit_option_chain_invalid_response_is_parse_error(tmp_path: Path) -
         def get_option_chain(self, **kwargs):  # noqa: ANN003, ANN201
             return None
 
-    td = tmp_path
-    result = fetch_option_chains(
-        gateway=_Gateway(),
-        request=OptionChainFetchRequest(
-            symbol="NVDA",
-            underlier_code="US.NVDA",
-            expirations=["2026-08-21"],
-            base_dir=Path(td),
-            chain_cache=False,
-        ),
-        retry_call=lambda _name, fn, **kwargs: fn(),
-    )
+    result = _fetch_explicit_nvda_chain(tmp_path, _Gateway(), expirations=["2026-08-21"])
 
     assert result.status == "error"
     assert result.source_outcome == "parse_error"
