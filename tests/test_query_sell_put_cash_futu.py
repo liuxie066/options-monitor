@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-import json
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import pytest
 
 BASE = Path(__file__).resolve().parents[1]
 
@@ -23,44 +20,6 @@ def _patched(module, **attributes):
     finally:
         for name, value in originals.items():
             setattr(module, name, value)
-
-
-def _run_cash_query(
-    monkeypatch,
-    tmp_path: Path,
-    portfolio: dict,
-    *,
-    option_context: dict | None = None,
-    runtime_config: dict | None = None,
-    no_exchange_rates: bool = True,
-    state_dir: Path | None = None,
-) -> dict:
-    import src.application.cash_headroom_query as m
-
-    monkeypatch.setattr(
-        m, "load_account_portfolio_context", lambda **_kwargs: portfolio
-    )
-    monkeypatch.setattr(m, "_load_option_position_records", lambda *_args: [])
-    monkeypatch.setattr(
-        m,
-        "build_option_positions_context",
-        lambda *_args, **_kwargs: option_context
-        if option_context is not None
-        else {
-            "cash_secured_total_by_ccy": {"CNY": 0.0},
-            "cash_secured_total_cny": 0.0,
-        },
-    )
-    return m.query_sell_put_cash(
-        market="富途",
-        account="lx",
-        out_dir=state_dir or tmp_path / "state",
-        base_dir=BASE,
-        runtime_config=runtime_config
-        or {"portfolio": {"source": "auto", "base_currency": "CNY"}},
-        no_exchange_rates=no_exchange_rates,
-        write_cache=False,
-    )
 
 
 def test_query_sell_put_cash_uses_futu_portfolio_context_when_runtime_config_allows_it() -> None:
