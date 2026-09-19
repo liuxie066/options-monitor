@@ -44,6 +44,31 @@ def _write_json(path: Path, payload: dict) -> Path:
     return path
 
 
+def _build_us_yaml_runtime(tmp_path: Path) -> Path:
+    config_yaml = tmp_path / "config.yaml"
+    config_yaml.write_text(
+        """\
+accounts:
+  lx:
+    type: futu
+    futu_account_id: "REAL_12345678"
+markets:
+  us:
+    accounts: [lx]
+    symbols: [NVDA]
+""",
+        encoding="utf-8",
+    )
+    runtime_path = tmp_path / "config.us.json"
+    build_yaml_runtime_config_file(
+        repo_root=REPO_ROOT,
+        market="us",
+        config_path=config_yaml,
+        output_config_path=runtime_path,
+    )
+    return runtime_path
+
+
 def test_load_runtime_config_accepts_yaml_generated_runtime(tmp_path: Path) -> None:
     path = _write_json(tmp_path / "config.us.json", _inline_runtime_config(market="us"))
 
@@ -88,27 +113,7 @@ def test_load_runtime_config_rejects_missing_generated_metadata(tmp_path: Path) 
 def test_config_validate_infers_market_from_yaml_runtime_path(tmp_path: Path, capsys) -> None:
     from src.interfaces.cli.main import main
 
-    config_yaml = tmp_path / "config.yaml"
-    config_yaml.write_text(
-        """\
-accounts:
-  lx:
-    type: futu
-    futu_account_id: "REAL_12345678"
-markets:
-  us:
-    accounts: [lx]
-    symbols: [NVDA]
-""",
-        encoding="utf-8",
-    )
-    runtime_path = tmp_path / "config.us.json"
-    build_yaml_runtime_config_file(
-        repo_root=REPO_ROOT,
-        market="us",
-        config_path=config_yaml,
-        output_config_path=runtime_path,
-    )
+    runtime_path = _build_us_yaml_runtime(tmp_path)
 
     rc = main(["config", "validate", "--config-path", str(runtime_path)])
 
@@ -125,27 +130,7 @@ def test_runtime_freshness_rejects_changed_inline_defaults(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    config_yaml = tmp_path / "config.yaml"
-    config_yaml.write_text(
-        """\
-accounts:
-  lx:
-    type: futu
-    futu_account_id: "REAL_12345678"
-markets:
-  us:
-    accounts: [lx]
-    symbols: [NVDA]
-""",
-        encoding="utf-8",
-    )
-    runtime_path = tmp_path / "config.us.json"
-    build_yaml_runtime_config_file(
-        repo_root=REPO_ROOT,
-        market="us",
-        config_path=config_yaml,
-        output_config_path=runtime_path,
-    )
+    runtime_path = _build_us_yaml_runtime(tmp_path)
     payload = json.loads(runtime_path.read_text(encoding="utf-8"))
 
     monkeypatch.setattr(
@@ -164,27 +149,7 @@ markets:
 
 
 def test_old_runtime_with_retired_output_mode_requires_rebuild(tmp_path: Path) -> None:
-    config_yaml = tmp_path / "config.yaml"
-    config_yaml.write_text(
-        """\
-accounts:
-  lx:
-    type: futu
-    futu_account_id: "REAL_12345678"
-markets:
-  us:
-    accounts: [lx]
-    symbols: [NVDA]
-""",
-        encoding="utf-8",
-    )
-    runtime_path = tmp_path / "config.us.json"
-    build_yaml_runtime_config_file(
-        repo_root=REPO_ROOT,
-        market="us",
-        config_path=config_yaml,
-        output_config_path=runtime_path,
-    )
+    runtime_path = _build_us_yaml_runtime(tmp_path)
     payload = json.loads(runtime_path.read_text(encoding="utf-8"))
     payload["symbols"][0]["combo_yield"]["output_mode"] = "separate"
     system_source = next(

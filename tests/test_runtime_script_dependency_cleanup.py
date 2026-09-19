@@ -3,12 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 
 
+class _Health:
+    def to_payload(self) -> dict:
+        return {"ok": True, "message": "OpenD 健康"}
+
+
 def test_futu_doctor_runtime_returns_structured_payload(monkeypatch) -> None:
     import src.application.futu_doctor as doctor
-
-    class _Health:
-        def to_payload(self) -> dict:
-            return {"ok": True, "message": "OpenD 健康"}
 
     monkeypatch.setattr(doctor, "sdk_status", lambda: {"ok": True, "futu_sdk_importable": True})
     monkeypatch.setattr(doctor, "run_watchdog_check", lambda **_kwargs: _Health())
@@ -30,10 +31,6 @@ def test_futu_doctor_runtime_returns_structured_payload(monkeypatch) -> None:
 
 def test_futu_doctor_skips_field_probe_when_sdk_missing(monkeypatch) -> None:
     import src.application.futu_doctor as doctor
-
-    class _Health:
-        def to_payload(self) -> dict:
-            return {"ok": True, "message": "OpenD 健康"}
 
     monkeypatch.setattr(doctor, "sdk_status", lambda: {"ok": False, "futu_sdk_importable": False})
     monkeypatch.setattr(doctor, "run_watchdog_check", lambda **_kwargs: _Health())
