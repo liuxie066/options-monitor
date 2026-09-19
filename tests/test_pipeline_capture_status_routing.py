@@ -23,6 +23,44 @@ RETIRED_CANDIDATE_CSV_FRAGMENTS = (
 )
 
 
+def _account_dir(tmp_path: Path) -> Path:
+    return tmp_path / "output_runs" / RUN_ID / "accounts" / "lx"
+
+
+def _state_path(tmp_path: Path, name: str) -> Path:
+    return _account_dir(tmp_path) / "state" / name
+
+
+def _assemble_us_brief(tmp_path: Path) -> dict[str, Any]:
+    from datetime import datetime, timezone
+
+    from src.application.daily_decision_brief_service import (
+        assemble_daily_decision_brief,
+    )
+    from src.application.multi_tick.misc import AccountResult
+
+    return assemble_daily_decision_brief(
+        base=tmp_path,
+        run_id=RUN_ID,
+        account="lx",
+        market="US",
+        scheduler_decision={"in_run_window": True},
+        account_result=AccountResult("lx", True, True, "ok", ""),
+        pipeline_succeeded=True,
+        config={
+            "schedule": {
+                "timezone": "America/New_York",
+                "run_window": {
+                    "start": "09:30",
+                    "end": "16:00",
+                    "breaks": [],
+                },
+            }
+        },
+        now_utc=datetime(2026, 9, 8, 14, 0, tzinfo=timezone.utc),
+    )
+
+
 def _symbol_config(
     symbol: str,
     *,
@@ -87,7 +125,7 @@ def _run_default_capture(
     required_manifest = tmp_path / "required_data_manifest.json"
     portfolio_manifest = tmp_path / "prepared_portfolio_context.json"
     ledger_manifest = tmp_path / "prepared_option_positions_context.json"
-    account_dir = tmp_path / "output_runs" / RUN_ID / "accounts" / "lx"
+    account_dir = _account_dir(tmp_path)
     account_dir.mkdir(parents=True)
     for path in (required_manifest, portfolio_manifest, ledger_manifest):
         path.write_text("{}\n", encoding="utf-8")
@@ -396,7 +434,7 @@ def _run_wheel_scan_failure_capture(
     required_manifest = tmp_path / "required_data_manifest.json"
     portfolio_manifest = tmp_path / "prepared_portfolio_context.json"
     ledger_manifest = tmp_path / "prepared_option_positions_context.json"
-    report_dir = tmp_path / "output_runs" / RUN_ID / "accounts" / "lx"
+    report_dir = _account_dir(tmp_path)
     report_dir.mkdir(parents=True)
     for path in (required_manifest, portfolio_manifest, ledger_manifest):
         path.write_text("{}\n", encoding="utf-8")
@@ -603,33 +641,7 @@ def _run_wheel_scan_failure_capture(
         expected_account="lx",
         expected_account_config_sha256=ACCOUNT_CONFIG_SHA256,
     )
-    from datetime import datetime, timezone
-
-    from src.application.daily_decision_brief_service import (
-        assemble_daily_decision_brief,
-    )
-    from src.application.multi_tick.misc import AccountResult
-
-    brief = assemble_daily_decision_brief(
-        base=tmp_path,
-        run_id=RUN_ID,
-        account="lx",
-        market="US",
-        scheduler_decision={"in_run_window": True},
-        account_result=AccountResult("lx", True, True, "ok", ""),
-        pipeline_succeeded=True,
-        config={
-            "schedule": {
-                "timezone": "America/New_York",
-                "run_window": {
-                    "start": "09:30",
-                    "end": "16:00",
-                    "breaks": [],
-                },
-            }
-        },
-        now_utc=datetime(2026, 9, 8, 14, 0, tzinfo=timezone.utc),
-    )
+    brief = _assemble_us_brief(tmp_path)
     return wheel_snapshot, status_index, brief, scan_calls
 
 
@@ -772,7 +784,7 @@ def _run_full_symbol_capture(
     required_manifest = tmp_path / "required_data_manifest.json"
     portfolio_manifest = tmp_path / "prepared_portfolio_context.json"
     ledger_manifest = tmp_path / "prepared_option_positions_context.json"
-    account_dir = tmp_path / "output_runs" / RUN_ID / "accounts" / "lx"
+    account_dir = _account_dir(tmp_path)
     required_data_dir = tmp_path / "required_data"
     account_dir.mkdir(parents=True)
     required_data_dir.mkdir(parents=True)
@@ -1183,7 +1195,7 @@ def test_full_capture_preserves_unheld_covered_call_scope(
 
     assert observed["opening_scans"] == []
     assert observed["required_data"] == []
-    account_dir = tmp_path / "output_runs" / RUN_ID / "accounts" / "lx"
+    account_dir = _account_dir(tmp_path)
     status_index = load_strategy_scan_status_index_v2(
         account_dir / STRATEGY_SCAN_STATUS_INDEX_V2_FILE,
         expected_run_id=RUN_ID,
@@ -1264,7 +1276,7 @@ def test_candidate_csv_retirement_account_run_matrix(
         [] if scenario == "disabled" else [variant]
     )
 
-    account_dir = tmp_path / "output_runs" / RUN_ID / "accounts" / "lx"
+    account_dir = _account_dir(tmp_path)
     assert (account_dir / "symbols_summary.csv").is_file()
     forbidden = sorted(
         path.relative_to(account_dir).as_posix()
@@ -1322,15 +1334,9 @@ def test_unknown_combo_failure_is_sealed_and_visible_to_daily_brief(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    from datetime import datetime, timezone
-
     from src.application.combo_yield_candidate_snapshot import (
         load_combo_yield_candidate_snapshot,
     )
-    from src.application.daily_decision_brief_service import (
-        assemble_daily_decision_brief,
-    )
-    from src.application.multi_tick.misc import AccountResult
     from src.application import sell_put_call_helper
     from src.application.strategy_scan_status import (
         STRATEGY_SCAN_STATUS_INDEX_V2_FILE,
@@ -1354,7 +1360,7 @@ def test_unknown_combo_failure_is_sealed_and_visible_to_daily_brief(
         scenario="combo_metrics_failure",
     )
     assert pair_metrics_calls == ["called"]
-    account_dir = tmp_path / "output_runs" / RUN_ID / "accounts" / "lx"
+    account_dir = _account_dir(tmp_path)
     status_index = load_strategy_scan_status_index_v2(
         account_dir / STRATEGY_SCAN_STATUS_INDEX_V2_FILE,
         expected_run_id=RUN_ID,
@@ -1375,26 +1381,7 @@ def test_unknown_combo_failure_is_sealed_and_visible_to_daily_brief(
     )
     assert combo_snapshot["opening_status"] == "data_unavailable"
 
-    brief = assemble_daily_decision_brief(
-        base=tmp_path,
-        run_id=RUN_ID,
-        account="lx",
-        market="US",
-        scheduler_decision={"in_run_window": True},
-        account_result=AccountResult("lx", True, True, "ok", ""),
-        pipeline_succeeded=True,
-        config={
-            "schedule": {
-                "timezone": "America/New_York",
-                "run_window": {
-                    "start": "09:30",
-                    "end": "16:00",
-                    "breaks": [],
-                },
-            }
-        },
-        now_utc=datetime(2026, 9, 8, 14, 0, tzinfo=timezone.utc),
-    )
+    brief = _assemble_us_brief(tmp_path)
     assert brief["candidates"]["combo_yield"] == []
     assert not any(
         row.get("strategy_family") == "combo_yield"
@@ -1459,15 +1446,7 @@ def test_default_pipeline_routes_opening_and_legacy_sp_lc_capture_separately(
     assert [row["candidate_pair_id"] for row in combo["ranked_pairs"]] == [
         "combo_yield:0700.HK:P:C"
     ]
-    assert not (
-        tmp_path
-        / "output_runs"
-        / RUN_ID
-        / "accounts"
-        / "lx"
-        / "state"
-        / CC_LP_CANDIDATE_SNAPSHOT_FILE
-    ).exists()
+    assert not _state_path(tmp_path, CC_LP_CANDIDATE_SNAPSHOT_FILE).exists()
 
 
 def test_default_pipeline_preserves_cc_lp_not_applicable(
@@ -1505,15 +1484,7 @@ def test_default_pipeline_preserves_cc_lp_not_applicable(
     )
     assert snapshot["opening_status"] == "not_applicable"
     assert snapshot["ranked_pairs"] == []
-    assert not (
-        tmp_path
-        / "output_runs"
-        / RUN_ID
-        / "accounts"
-        / "lx"
-        / "state"
-        / COMBO_YIELD_CANDIDATE_SNAPSHOT_FILE
-    ).exists()
+    assert not _state_path(tmp_path, COMBO_YIELD_CANDIDATE_SNAPSHOT_FILE).exists()
 
 
 @pytest.mark.parametrize(
@@ -1669,138 +1640,99 @@ def test_default_pipeline_rejects_invalid_capture_contracts(
             pairs=pairs,
         )
 
-    assert not (
-        tmp_path
-        / "output_runs"
-        / RUN_ID
-        / "accounts"
-        / "lx"
-        / "state"
-        / "opening_candidate_snapshot.json"
-    ).exists()
+    assert not _state_path(tmp_path, "opening_candidate_snapshot.json").exists()
 
 
-def test_default_pipeline_rejects_cross_owner_quote_binding_conflict(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    symbol = "0700.HK"
-    with pytest.raises(ValueError, match="quote bindings conflict"):
-        _run_default_capture(
-            monkeypatch,
-            tmp_path,
-            symbols=[_symbol_config(symbol)],
-            statuses=[
-                _status(symbol, "put", "completed", quote="quote-opening"),
+@pytest.mark.parametrize(
+    ("capture_kwargs", "statuses", "error", "opening_status"),
+    [
+        (
+            {},
+            [
+                _status("0700.HK", "put", "completed", quote="quote-opening"),
                 _status(
-                    symbol,
+                    "0700.HK",
                     "combo_yield",
                     "completed",
                     variant="sp_lc",
                     quote="quote-combo",
                 ),
             ],
-        )
-
-    assert not (
-        tmp_path
-        / "output_runs"
-        / RUN_ID
-        / "accounts"
-        / "lx"
-        / "state"
-        / "candidate_snapshot_manifest.v1.json"
-    ).exists()
-
-
-def test_default_pipeline_rejects_completed_combo_without_typed_evidence(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    symbol = "0700.HK"
-    with pytest.raises(ValueError, match="completed combo yield evidence is missing"):
-        _run_default_capture(
-            monkeypatch,
-            tmp_path,
-            symbols=[_symbol_config(symbol)],
-            statuses=[
-                _status(symbol, "put", "completed"),
-                _status(
-                    symbol,
-                    "combo_yield",
-                    "completed",
-                    variant="sp_lc",
-                ),
+            "quote bindings conflict",
+            None,
+        ),
+        (
+            {"emit_combo_evidence": False},
+            [
+                _status("0700.HK", "put", "completed"),
+                _status("0700.HK", "combo_yield", "completed", variant="sp_lc"),
             ],
-            emit_combo_evidence=False,
-        )
-
-    assert not (
-        tmp_path
-        / "output_runs"
-        / RUN_ID
-        / "accounts"
-        / "lx"
-        / "state"
-        / "candidate_snapshot_manifest.v1.json"
-    ).exists()
-
-
-def test_default_pipeline_allows_failed_combo_without_typed_evidence(
+            "completed combo yield evidence is missing",
+            None,
+        ),
+        (
+            {"emit_combo_evidence": False},
+            [
+                _status("0700.HK", "put", "completed"),
+                _status("0700.HK", "combo_yield", "failed", variant="sp_lc"),
+            ],
+            None,
+            "data_unavailable",
+        ),
+        (
+            {"emit_combo_evidence": False, "emit_status_capture": False},
+            [
+                _status("0700.HK", "put", "completed"),
+                _status("0700.HK", "combo_yield", "failed", variant="sp_lc"),
+            ],
+            "completed candidate capture status is missing",
+            None,
+        ),
+    ],
+    ids=[
+        "rejects_cross_owner_quote_binding_conflict",
+        "rejects_completed_combo_without_typed_evidence",
+        "allows_failed_combo_without_typed_evidence",
+        "rejects_completed_scope_without_status_capture",
+    ],
+)
+def test_default_pipeline_enforces_combo_capture_contract(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    capture_kwargs: dict[str, Any],
+    statuses: list[dict[str, Any]],
+    error: str | None,
+    opening_status: str | None,
 ) -> None:
+    if error is not None:
+        with pytest.raises(ValueError, match=error):
+            _run_default_capture(
+                monkeypatch,
+                tmp_path,
+                symbols=[_symbol_config("0700.HK")],
+                statuses=statuses,
+                **capture_kwargs,
+            )
+
+        assert not _state_path(
+            tmp_path, "candidate_snapshot_manifest.v1.json"
+        ).exists()
+        return
+
     from src.application.combo_yield_candidate_snapshot import (
         load_combo_yield_candidate_snapshot,
     )
 
-    symbol = "0700.HK"
     _run_default_capture(
         monkeypatch,
         tmp_path,
-        symbols=[_symbol_config(symbol)],
-        statuses=[
-            _status(symbol, "put", "completed"),
-            _status(symbol, "combo_yield", "failed", variant="sp_lc"),
-        ],
-        emit_combo_evidence=False,
+        symbols=[_symbol_config("0700.HK")],
+        statuses=statuses,
+        **capture_kwargs,
     )
-
     snapshot = load_combo_yield_candidate_snapshot(
         base=tmp_path,
         run_id=RUN_ID,
         account="lx",
     )
-    assert snapshot["opening_status"] == "data_unavailable"
-
-
-def test_default_pipeline_rejects_completed_scope_without_status_capture(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    symbol = "0700.HK"
-    with pytest.raises(
-        ValueError,
-        match="completed candidate capture status is missing",
-    ):
-        _run_default_capture(
-            monkeypatch,
-            tmp_path,
-            symbols=[_symbol_config(symbol)],
-            statuses=[
-                _status(symbol, "put", "completed"),
-                _status(symbol, "combo_yield", "failed", variant="sp_lc"),
-            ],
-            emit_combo_evidence=False,
-            emit_status_capture=False,
-        )
-
-    assert not (
-        tmp_path
-        / "output_runs"
-        / RUN_ID
-        / "accounts"
-        / "lx"
-        / "state"
-        / "candidate_snapshot_manifest.v1.json"
-    ).exists()
+    assert snapshot["opening_status"] == opening_status

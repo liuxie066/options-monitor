@@ -13,37 +13,130 @@ from domain.domain.risk_capacity import (
 )
 
 
+def _pool(
+    shares_eligible: int,
+    shares_locked: int,
+    shares_reserved: int,
+) -> dict[str, object]:
+    return {
+        "account": "lx",
+        "symbol": "NVDA",
+        "status": "available",
+        "shares_eligible": shares_eligible,
+        "shares_locked": shares_locked,
+        "shares_reserved": shares_reserved,
+    }
+
+
+def _claim(
+    claim_id: str,
+    strategy_family: str,
+    requested_contracts: object,
+) -> dict[str, object]:
+    return {
+        "claim_id": claim_id,
+        "strategy_family": strategy_family,
+        "account": "lx",
+        "symbol": "NVDA",
+        "requested_contracts": requested_contracts,
+        "multiplier": 100,
+    }
+
+
+def _wheel_lot_claim(
+    claim_id: str,
+    stock_lot_id: str,
+    assignment_at_ms: int,
+) -> dict[str, object]:
+    return {
+        "claim_id": claim_id,
+        "strategy_family": "wheel",
+        "account": "lx",
+        "symbol": "NVDA",
+        "stock_lot_id": stock_lot_id,
+        "assignment_at_ms": assignment_at_ms,
+        "requested_contracts": 1,
+        "multiplier": 100,
+    }
+
+
+def _no_fx(_amount: object, _source: object, _target: object) -> None:
+    return None
+
+
+def _identity_fx(amount: object, _source: object, _target: object) -> object:
+    return amount
+
+
+def _effective_cash(**overrides: object):
+    kwargs: dict[str, object] = {
+        "cash_by_currency": {"USD": 20_000, "CNY": 70_000},
+        "cash_secured_by_currency": {"USD": 2_000},
+        "native_currency": "USD",
+        "convert_currency": _no_fx,
+    }
+    kwargs.update(overrides)
+    return compute_sell_put_effective_cash(**kwargs)
+
+
+def _cash_fact() -> dict[str, object]:
+    return {
+        "account": "lx",
+        "status": "available",
+        "cash_authority": {"status": "available", "logical_account": "lx"},
+        "cash_authority_hash": "authority-1",
+        "cash_by_currency": {"USD": 30_000},
+        "cash_secured_by_currency": {},
+        "fx_snapshot": {"rates": {}},
+    }
+
+
+def _ordinary_put_claim(claim_id: str, strike: float) -> dict[str, object]:
+    return {
+        "claim_id": claim_id,
+        "account": "lx",
+        "currency": "USD",
+        "strike": strike,
+        "multiplier": 100,
+        "requested_contracts": 1,
+    }
+
+
+def _wheel_put_claim(claim_id: str, wheel_branch_id: str, strike: float) -> dict[str, object]:
+    return {
+        "claim_id": claim_id,
+        "wheel_branch_id": wheel_branch_id,
+        "direction": "put",
+        "account": "lx",
+        "currency": "USD",
+        "strike": strike,
+        "multiplier": 100,
+        "requested_contracts": 1,
+    }
+
+
+def _wheel_capacity(
+    cash_capacity_fact: dict[str, object],
+    *,
+    ordinary_put_claims: list[dict[str, object]],
+    active_wheel_put_intents: list[dict[str, object]],
+    wheel_put_claims: list[dict[str, object]],
+):
+    return allocate_wheel_put_cash_capacity(
+        cash_capacity_fact=cash_capacity_fact,
+        ordinary_put_claims=ordinary_put_claims,
+        active_wheel_put_intents=active_wheel_put_intents,
+        wheel_put_claims=wheel_put_claims,
+        convert_currency=_identity_fx,
+    )
+
+
 def test_opening_share_capacity_prioritizes_wheel_and_grants_whole_contracts() -> None:
     allocations = allocate_opening_share_capacity(
+        [_pool(300, 100, 0)],
         [
-            {
-                "account": "lx",
-                "symbol": "NVDA",
-                "status": "available",
-                "shares_eligible": 300,
-                "shares_locked": 100,
-                "shares_reserved": 0,
-            }
-        ],
-        [
-            {
-                "claim_id": "cc",
-                "strategy_family": "covered_call",
-                "account": "lx",
-                "symbol": "NVDA",
-                "requested_contracts": 2,
-                "multiplier": 100,
-            },
-            {
-                "claim_id": "wheel",
-                "strategy_family": "wheel",
-                "account": "lx",
-                "symbol": "NVDA",
-                "stock_lot_id": "stock-1",
-                "assignment_at_ms": 1,
-                "requested_contracts": 1,
-                "multiplier": 100,
-            },
+            _claim("cc", "covered_call", 2),
+            _wheel_lot_claim("wheel", "stock-1", 1),
         ],
     )
 
@@ -55,45 +148,11 @@ def test_opening_share_capacity_prioritizes_wheel_and_grants_whole_contracts() -
 
 def test_withdraw_opening_share_capacity_grant_replays_real_order_without_regrant() -> None:
     allocations = allocate_opening_share_capacity(
+        [_pool(300, 0, 100)],
         [
-            {
-                "account": "lx",
-                "symbol": "NVDA",
-                "status": "available",
-                "shares_eligible": 300,
-                "shares_locked": 0,
-                "shares_reserved": 100,
-            }
-        ],
-        [
-            {
-                "claim_id": "covered_call:NVDA",
-                "strategy_family": "covered_call",
-                "account": "lx",
-                "symbol": "NVDA",
-                "requested_contracts": 1,
-                "multiplier": 100,
-            },
-            {
-                "claim_id": "wheel:late",
-                "strategy_family": "wheel",
-                "account": "lx",
-                "symbol": "NVDA",
-                "stock_lot_id": "late",
-                "assignment_at_ms": 2,
-                "requested_contracts": 1,
-                "multiplier": 100,
-            },
-            {
-                "claim_id": "wheel:early",
-                "strategy_family": "wheel",
-                "account": "lx",
-                "symbol": "NVDA",
-                "stock_lot_id": "early",
-                "assignment_at_ms": 1,
-                "requested_contracts": 1,
-                "multiplier": 100,
-            },
+            _claim("covered_call:NVDA", "covered_call", 1),
+            _wheel_lot_claim("wheel:late", "late", 2),
+            _wheel_lot_claim("wheel:early", "early", 1),
         ],
     )
 
@@ -130,26 +189,8 @@ def test_withdraw_opening_share_capacity_grant_replays_real_order_without_regran
 
 def test_opening_share_capacity_fails_closed_when_existing_coverage_is_excessive() -> None:
     result = allocate_opening_share_capacity(
-        [
-            {
-                "account": "lx",
-                "symbol": "NVDA",
-                "status": "available",
-                "shares_eligible": 100,
-                "shares_locked": 200,
-                "shares_reserved": 0,
-            }
-        ],
-        [
-            {
-                "claim_id": "wheel",
-                "strategy_family": "wheel",
-                "account": "lx",
-                "symbol": "NVDA",
-                "requested_contracts": 1,
-                "multiplier": 100,
-            }
-        ],
+        [_pool(100, 200, 0)],
+        [_claim("wheel", "wheel", 1)],
     )[0]
 
     assert result["granted_contracts"] == 0
@@ -159,33 +200,10 @@ def test_opening_share_capacity_fails_closed_when_existing_coverage_is_excessive
 
 def test_opening_share_capacity_invalid_claim_blocks_its_whole_pool() -> None:
     allocations = allocate_opening_share_capacity(
+        [_pool(200, 0, 0)],
         [
-            {
-                "account": "lx",
-                "symbol": "NVDA",
-                "status": "available",
-                "shares_eligible": 200,
-                "shares_locked": 0,
-                "shares_reserved": 0,
-            }
-        ],
-        [
-            {
-                "claim_id": "broken",
-                "strategy_family": "wheel",
-                "account": "lx",
-                "symbol": "NVDA",
-                "requested_contracts": "bad",
-                "multiplier": 100,
-            },
-            {
-                "claim_id": "valid",
-                "strategy_family": "covered_call",
-                "account": "lx",
-                "symbol": "NVDA",
-                "requested_contracts": 1,
-                "multiplier": 100,
-            },
+            _claim("broken", "wheel", "bad"),
+            _claim("valid", "covered_call", 1),
         ],
     )
 
@@ -196,25 +214,9 @@ def test_opening_share_capacity_invalid_claim_blocks_its_whole_pool() -> None:
 
 def test_opening_share_capacity_duplicate_claim_identity_blocks_pool() -> None:
     allocations = allocate_opening_share_capacity(
+        [_pool(200, 0, 0)],
         [
-            {
-                "account": "lx",
-                "symbol": "NVDA",
-                "status": "available",
-                "shares_eligible": 200,
-                "shares_locked": 0,
-                "shares_reserved": 0,
-            }
-        ],
-        [
-            {
-                "claim_id": "duplicate",
-                "strategy_family": family,
-                "account": "lx",
-                "symbol": "NVDA",
-                "requested_contracts": 1,
-                "multiplier": 100,
-            }
+            _claim("duplicate", family, 1)
             for family in ("wheel", "covered_call")
         ],
     )
@@ -311,10 +313,9 @@ def test_sell_put_cash_capacity_fails_closed_when_basis_missing() -> None:
 
 def test_sell_put_effective_cash_uses_positive_foreign_cash_without_haircut() -> None:
     rates = {("CNY", "USD"): 1.0 / 7.0}
-    result = compute_sell_put_effective_cash(
+    result = _effective_cash(
         cash_by_currency={"USD": 10_000, "CNY": 70_000},
         cash_secured_by_currency={"USD": 2_000, "CNY": 7_000},
-        native_currency="USD",
         convert_currency=lambda amount, source, target: amount * rates[(source, target)],
     )
 
@@ -324,12 +325,7 @@ def test_sell_put_effective_cash_uses_positive_foreign_cash_without_haircut() ->
 
 
 def test_sell_put_effective_cash_keeps_native_cash_when_foreign_fx_is_missing() -> None:
-    result = compute_sell_put_effective_cash(
-        cash_by_currency={"USD": 20_000, "CNY": 70_000},
-        cash_secured_by_currency={"USD": 2_000},
-        native_currency="USD",
-        convert_currency=lambda _amount, _source, _target: None,
-    )
+    result = _effective_cash()
 
     assert result.available
     assert result.cash_free == 18_000
@@ -337,13 +333,7 @@ def test_sell_put_effective_cash_keeps_native_cash_when_foreign_fx_is_missing() 
 
 
 def test_sell_put_effective_cash_marks_stale_fx_while_keeping_native_cash() -> None:
-    result = compute_sell_put_effective_cash(
-        cash_by_currency={"USD": 20_000, "CNY": 70_000},
-        cash_secured_by_currency={"USD": 2_000},
-        native_currency="USD",
-        convert_currency=lambda _amount, _source, _target: None,
-        fx_status="unavailable_stale",
-    )
+    result = _effective_cash(fx_status="unavailable_stale")
 
     assert result.available
     assert result.cash_free == 18_000
@@ -351,13 +341,7 @@ def test_sell_put_effective_cash_marks_stale_fx_while_keeping_native_cash() -> N
 
 
 def test_sell_put_effective_cash_blocks_when_missing_fx_is_needed() -> None:
-    result = compute_sell_put_effective_cash(
-        cash_by_currency={"USD": 20_000, "CNY": 70_000},
-        cash_secured_by_currency={"USD": 2_000},
-        native_currency="USD",
-        cash_required_native=20_000,
-        convert_currency=lambda _amount, _source, _target: None,
-    )
+    result = _effective_cash(cash_required_native=20_000)
 
     assert not result.available
     assert result.cash_free is None
@@ -365,14 +349,7 @@ def test_sell_put_effective_cash_blocks_when_missing_fx_is_needed() -> None:
 
 
 def test_sell_put_effective_cash_keeps_native_pool_when_stale_fx_is_not_needed() -> None:
-    result = compute_sell_put_effective_cash(
-        cash_by_currency={"USD": 20_000, "CNY": 70_000},
-        cash_secured_by_currency={"USD": 2_000},
-        native_currency="USD",
-        cash_required_native=10_000,
-        convert_currency=lambda _amount, _source, _target: None,
-        fx_status="unavailable_stale",
-    )
+    result = _effective_cash(cash_required_native=10_000, fx_status="unavailable_stale")
 
     assert result.available
     assert result.cash_free == 18_000
@@ -381,10 +358,9 @@ def test_sell_put_effective_cash_keeps_native_pool_when_stale_fx_is_not_needed()
 
 def test_sell_put_effective_cash_deducts_foreign_short_put_deficit() -> None:
     rates = {("HKD", "USD"): 1.0 / 7.8}
-    result = compute_sell_put_effective_cash(
+    result = _effective_cash(
         cash_by_currency={"USD": 20_000, "HKD": 1_000},
         cash_secured_by_currency={"HKD": 8_800},
-        native_currency="USD",
         cash_required_native=10_000,
         convert_currency=lambda amount, source, target: amount * rates[(source, target)],
     )
@@ -394,12 +370,10 @@ def test_sell_put_effective_cash_deducts_foreign_short_put_deficit() -> None:
 
 
 def test_sell_put_effective_cash_fails_when_foreign_lock_fx_is_missing() -> None:
-    result = compute_sell_put_effective_cash(
+    result = _effective_cash(
         cash_by_currency={"USD": 20_000, "HKD": 1_000},
         cash_secured_by_currency={"HKD": 8_800},
-        native_currency="USD",
         cash_required_native=10_000,
-        convert_currency=lambda _amount, _source, _target: None,
     )
 
     assert not result.available
@@ -552,26 +526,9 @@ def test_short_put_cash_secured_zero_open_contracts_release_explicit_cash() -> N
 
 
 def test_wheel_put_cash_capacity_reserves_ordinary_and_intents_before_wheel() -> None:
-    result = allocate_wheel_put_cash_capacity(
-        cash_capacity_fact={
-            "account": "lx",
-            "status": "available",
-            "cash_authority": {"status": "available", "logical_account": "lx"},
-            "cash_authority_hash": "authority-1",
-            "cash_by_currency": {"USD": 30_000},
-            "cash_secured_by_currency": {},
-            "fx_snapshot": {"rates": {}},
-        },
-        ordinary_put_claims=[
-            {
-                "claim_id": "ordinary",
-                "account": "lx",
-                "currency": "USD",
-                "strike": 100,
-                "multiplier": 100,
-                "requested_contracts": 1,
-            }
-        ],
+    result = _wheel_capacity(
+        _cash_fact(),
+        ordinary_put_claims=[_ordinary_put_claim("ordinary", 100)],
         active_wheel_put_intents=[
             {
                 "intent_id": "intent-1",
@@ -581,28 +538,9 @@ def test_wheel_put_cash_capacity_reserves_ordinary_and_intents_before_wheel() ->
             }
         ],
         wheel_put_claims=[
-            {
-                "claim_id": "wheel-b",
-                "wheel_branch_id": "b",
-                "direction": "put",
-                "account": "lx",
-                "currency": "USD",
-                "strike": 120,
-                "multiplier": 100,
-                "requested_contracts": 1,
-            },
-            {
-                "claim_id": "wheel-a",
-                "wheel_branch_id": "a",
-                "direction": "put",
-                "account": "lx",
-                "currency": "USD",
-                "strike": 100,
-                "multiplier": 100,
-                "requested_contracts": 1,
-            },
+            _wheel_put_claim("wheel-b", "b", 120),
+            _wheel_put_claim("wheel-a", "a", 100),
         ],
-        convert_currency=lambda amount, _source, _target: amount,
     )
     allocations = {row["wheel_branch_id"]: row for row in result["allocations"]}
 
@@ -616,55 +554,26 @@ def test_wheel_put_cash_capacity_reserves_ordinary_and_intents_before_wheel() ->
 
 
 def test_wheel_put_capacity_identity_changes_with_prior_claims_not_current_order() -> None:
-    fact = {
-        "account": "lx",
-        "status": "available",
-        "cash_authority": {"status": "available", "logical_account": "lx"},
-        "cash_authority_hash": "authority-1",
-        "cash_by_currency": {"USD": 30_000},
-        "cash_secured_by_currency": {},
-        "fx_snapshot": {"rates": {}},
-    }
-    claim_a = {
-        "claim_id": "wheel-a",
-        "wheel_branch_id": "a",
-        "direction": "put",
-        "account": "lx",
-        "currency": "USD",
-        "strike": 100,
-        "multiplier": 100,
-        "requested_contracts": 1,
-    }
+    fact = _cash_fact()
+    claim_a = _wheel_put_claim("wheel-a", "a", 100)
     claim_b = {**claim_a, "claim_id": "wheel-b", "wheel_branch_id": "b"}
-    first = allocate_wheel_put_cash_capacity(
-        cash_capacity_fact=fact,
+    first = _wheel_capacity(
+        fact,
         ordinary_put_claims=[],
         active_wheel_put_intents=[],
         wheel_put_claims=[claim_a, claim_b],
-        convert_currency=lambda amount, _source, _target: amount,
     )
-    reordered = allocate_wheel_put_cash_capacity(
-        cash_capacity_fact=fact,
+    reordered = _wheel_capacity(
+        fact,
         ordinary_put_claims=[],
         active_wheel_put_intents=[],
         wheel_put_claims=[claim_b, claim_a],
-        convert_currency=lambda amount, _source, _target: amount,
     )
-    with_prior = allocate_wheel_put_cash_capacity(
-        cash_capacity_fact=fact,
-        ordinary_put_claims=[
-            {
-                "claim_id": "ordinary",
-                "account": "lx",
-                "currency": "USD",
-                "strike": 50,
-                "multiplier": 100,
-                "requested_contracts": 1,
-            }
-        ],
+    with_prior = _wheel_capacity(
+        fact,
+        ordinary_put_claims=[_ordinary_put_claim("ordinary", 50)],
         active_wheel_put_intents=[],
         wheel_put_claims=[claim_a, claim_b],
-        convert_currency=lambda amount, _source, _target: amount,
     )
 
     assert first["capacity_identity_hash"] == reordered["capacity_identity_hash"]

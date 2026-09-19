@@ -31,6 +31,7 @@ from src.application.tick_run_workspace import (
     read_account_run_state_bytes_safely,
     write_account_run_state_bytes_once_safely,
 )
+from src.application.payload_helpers import readable_json_bytes as _json_bytes
 
 
 EXPERIENCE_CANDIDATE_DEPENDENCIES = frozenset(
@@ -69,19 +70,6 @@ def _identity(value: Any, field: str, *, lower: bool = False) -> str:
 
 def _experience_projection(payload: Mapping[str, Any]) -> dict[str, Any]:
     return {key: payload.get(key) for key in _EXPERIENCE_FIELD_NAMES}
-
-
-def _json_bytes(payload: Mapping[str, Any]) -> bytes:
-    return (
-        json.dumps(
-            dict(payload),
-            ensure_ascii=False,
-            sort_keys=True,
-            indent=2,
-            allow_nan=False,
-        )
-        + "\n"
-    ).encode("utf-8")
 
 
 def _state_dir(base: Path, run_id: str, account: str) -> Path:

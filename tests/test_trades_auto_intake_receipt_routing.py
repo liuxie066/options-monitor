@@ -38,6 +38,20 @@ def _context(
     }
 
 
+def _callback(**overrides):
+    """``_build_receipt_callback`` with the receipt routing defaults every case shares."""
+    defaults = {"cfg": {}, "receipt_config": {"enabled": True}, "repo": _OutboxRepo()}
+    return auto_intake._build_receipt_callback(**{**defaults, **overrides})
+
+
+def _forbid_direct_send(monkeypatch, message: str) -> None:
+    monkeypatch.setattr(
+        auto_intake,
+        "send_trade_intake_receipt",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError(message)),
+    )
+
+
 def test_open_receipt_uses_direct_intake_sender_once(
     monkeypatch,
     tmp_path: Path,
@@ -57,12 +71,7 @@ def test_open_receipt_uses_direct_intake_sender_once(
         "send_trade_intake_receipt",
         _send_trade_intake_receipt,
     )
-    callback = auto_intake._build_receipt_callback(
-        base=tmp_path,
-        cfg={"notifications": {"target": "wechat:ops"}},
-        receipt_config={"enabled": True},
-        repo=_OutboxRepo(),
-    )
+    callback = _callback(base=tmp_path, cfg={"notifications": {"target": "wechat:ops"}})
 
     out = callback(
         _context(
@@ -101,19 +110,8 @@ def test_close_receipt_is_outbox_managed_only_after_id_readback(
             }
         }
     )
-    monkeypatch.setattr(
-        auto_intake,
-        "send_trade_intake_receipt",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("lifecycle close must not send a direct receipt")
-        ),
-    )
-    callback = auto_intake._build_receipt_callback(
-        base=tmp_path,
-        cfg={},
-        receipt_config={"enabled": True},
-        repo=repo,
-    )
+    _forbid_direct_send(monkeypatch, "lifecycle close must not send a direct receipt")
+    callback = _callback(base=tmp_path, repo=repo)
 
     out = callback(
         _context(
@@ -155,19 +153,8 @@ def test_claimed_outbox_id_without_readback_is_not_outbox_managed(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(
-        auto_intake,
-        "send_trade_intake_receipt",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("missing outbox readback must fail closed")
-        ),
-    )
-    callback = auto_intake._build_receipt_callback(
-        base=tmp_path,
-        cfg={},
-        receipt_config={"enabled": True},
-        repo=_OutboxRepo(),
-    )
+    _forbid_direct_send(monkeypatch, "missing outbox readback must fail closed")
+    callback = _callback(base=tmp_path)
 
     out = callback(
         _context(
@@ -197,19 +184,8 @@ def test_lifecycle_waiting_state_without_outbox_does_not_direct_send(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(
-        auto_intake,
-        "send_trade_intake_receipt",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("lifecycle state is owned by the outbox")
-        ),
-    )
-    callback = auto_intake._build_receipt_callback(
-        base=tmp_path,
-        cfg={},
-        receipt_config={"enabled": True},
-        repo=_OutboxRepo(),
-    )
+    _forbid_direct_send(monkeypatch, "lifecycle state is owned by the outbox")
+    callback = _callback(base=tmp_path)
 
     out = callback(
         _context(
@@ -234,19 +210,8 @@ def test_duplicate_close_without_current_outbox_does_not_direct_send(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(
-        auto_intake,
-        "send_trade_intake_receipt",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("duplicate close remains lifecycle-outbox owned")
-        ),
-    )
-    callback = auto_intake._build_receipt_callback(
-        base=tmp_path,
-        cfg={},
-        receipt_config={"enabled": True},
-        repo=_OutboxRepo(),
-    )
+    _forbid_direct_send(monkeypatch, "duplicate close remains lifecycle-outbox owned")
+    callback = _callback(base=tmp_path)
 
     out = callback(
         _context(

@@ -5,46 +5,35 @@ from __future__ import annotations
 from src.application.portfolio_context_builder import build_context
 
 
+def _cell(text: object) -> list[dict[str, object]]:
+    return [{"text": text, "type": "text"}]
+
+
+def _rec(**fields: object) -> dict:
+    return {"fields": fields}
+
+
+def _timed_rec(last_modified_time: str, **fields: object) -> dict:
+    return {"last_modified_time": last_modified_time, "fields": fields}
+
+
 def test_build_context_requires_broker_field_and_normalizes_hk_symbol() -> None:
     records = [
-        {
-            "fields": {
-                "broker": [{"text": "富途", "type": "text"}],
-                "account": [{"text": " LX ", "type": "text"}],
-                "asset_type": "hk_stock",
-                "asset_id": [{"text": "00700", "type": "text"}],
-                "asset_name": [{"text": "腾讯控股", "type": "text"}],
-                "currency": "港币",
-                "quantity": 500,
-                "avg_cost": 503.916,
-                "asset_class": "港股资产",
-            }
-        },
-        {
-            "fields": {
-                "broker": [{"text": "富途", "type": "text"}],
-                "account": [{"text": "lx", "type": "text"}],
-                "asset_type": "cash",
-                "asset_id": [{"text": "CNY-CASH", "type": "text"}],
-                "asset_name": [{"text": "账户余额", "type": "text"}],
-                "currency": "rmb",
-                "quantity": 406.24,
-                "asset_class": "现金",
-            }
-        },
-        {
-            "fields": {
-                "broker": [{"text": "富途", "type": "text"}],
-                "account": [{"text": "lx", "type": "text"}],
-                "asset_type": "us_stock",
-                "asset_id": [{"text": "NVDA", "type": "text"}],
-                "asset_name": [{"text": "英伟达", "type": "text"}],
-                "currency": "USD",
-                "quantity": 160,
-                "avg_cost": 164.959,
-                "asset_class": "美国资产",
-            }
-        },
+        _rec(
+            broker=_cell("富途"), account=_cell(" LX "), asset_type="hk_stock",
+            asset_id=_cell("00700"), asset_name=_cell("腾讯控股"), currency="港币",
+            quantity=500, avg_cost=503.916, asset_class="港股资产",
+        ),
+        _rec(
+            broker=_cell("富途"), account=_cell("lx"), asset_type="cash",
+            asset_id=_cell("CNY-CASH"), asset_name=_cell("账户余额"), currency="rmb",
+            quantity=406.24, asset_class="现金",
+        ),
+        _rec(
+            broker=_cell("富途"), account=_cell("lx"), asset_type="us_stock",
+            asset_id=_cell("NVDA"), asset_name=_cell("英伟达"), currency="USD",
+            quantity=160, avg_cost=164.959, asset_class="美国资产",
+        ),
     ]
 
     ctx = build_context(records, broker="富途", account="lx")
@@ -64,16 +53,10 @@ def test_build_context_requires_broker_field_and_normalizes_hk_symbol() -> None:
 
 def test_build_context_accepts_legacy_market_only_holdings_rows() -> None:
     records = [
-        {
-            "fields": {
-                "market": [{"text": "富途", "type": "text"}],
-                "account": [{"text": "lx", "type": "text"}],
-                "asset_type": "cash",
-                "asset_id": [{"text": "USD-CASH", "type": "text"}],
-                "currency": "USD",
-                "quantity": 100,
-            }
-        }
+        _rec(
+            market=_cell("富途"), account=_cell("lx"), asset_type="cash",
+            asset_id=_cell("USD-CASH"), currency="USD", quantity=100,
+        )
     ]
 
     ctx = build_context(records, broker="富途", account="lx")
@@ -85,38 +68,12 @@ def test_build_context_accepts_legacy_market_only_holdings_rows() -> None:
 
 def test_build_context_accepts_broker_field_without_market() -> None:
     records = [
-        {
-            "fields": {
-                "broker": "富途",
-                "account": "lx",
-                "asset_type": "cash",
-                "asset_id": "USD-CASH",
-                "currency": "USD",
-                "quantity": "123.45",
-            }
-        },
-        {
-            "fields": {
-                "broker": "富途",
-                "account": "lx",
-                "asset_type": "us_stock",
-                "asset_id": "AAPL",
-                "asset_name": "Apple",
-                "currency": "USD",
-                "quantity": "20",
-                "avg_cost": "150",
-            }
-        },
-        {
-            "fields": {
-                "broker": "其他券商",
-                "account": "lx",
-                "asset_type": "cash",
-                "asset_id": "USD-CASH",
-                "currency": "USD",
-                "quantity": "999",
-            }
-        },
+        _rec(broker="富途", account="lx", asset_type="cash", asset_id="USD-CASH", currency="USD", quantity="123.45"),
+        _rec(
+            broker="富途", account="lx", asset_type="us_stock", asset_id="AAPL",
+            asset_name="Apple", currency="USD", quantity="20", avg_cost="150",
+        ),
+        _rec(broker="其他券商", account="lx", asset_type="cash", asset_id="USD-CASH", currency="USD", quantity="999"),
     ]
 
     ctx = build_context(records, broker="富途", account="lx")
@@ -130,30 +87,14 @@ def test_build_context_accepts_broker_field_without_market() -> None:
 
 def test_build_context_aggregates_duplicate_stock_rows_for_same_account() -> None:
     records = [
-        {
-            "fields": {
-                "broker": "富途",
-                "account": "lx",
-                "asset_type": "us_stock",
-                "asset_id": "AAPL",
-                "asset_name": "Apple",
-                "currency": "USD",
-                "quantity": "50",
-                "avg_cost": "100",
-            }
-        },
-        {
-            "fields": {
-                "broker": "富途",
-                "account": "lx",
-                "asset_type": "us_stock",
-                "asset_id": "AAPL",
-                "asset_name": "Apple",
-                "currency": "USD",
-                "quantity": "150",
-                "avg_cost": "120",
-            }
-        },
+        _rec(
+            broker="富途", account="lx", asset_type="us_stock", asset_id="AAPL",
+            asset_name="Apple", currency="USD", quantity="50", avg_cost="100",
+        ),
+        _rec(
+            broker="富途", account="lx", asset_type="us_stock", asset_id="AAPL",
+            asset_name="Apple", currency="USD", quantity="150", avg_cost="120",
+        ),
     ]
 
     ctx = build_context(records, broker="富途", account="lx")
@@ -168,26 +109,14 @@ def test_build_context_aggregates_duplicate_stock_rows_for_same_account() -> Non
 
 def test_build_context_does_not_apply_partial_cost_basis_to_all_shares() -> None:
     records = [
-        {
-            "fields": {
-                "broker": "富途",
-                "account": "lx",
-                "asset_type": "us_stock",
-                "asset_id": "AAPL",
-                "quantity": "50",
-                "avg_cost": "100",
-            }
-        },
-        {
-            "fields": {
-                "broker": "富途",
-                "account": "lx",
-                "asset_type": "us_stock",
-                "asset_id": "AAPL",
-                "quantity": "50",
-                "avg_cost": None,
-            }
-        },
+        _rec(
+            broker="富途", account="lx", asset_type="us_stock", asset_id="AAPL",
+            quantity="50", avg_cost="100",
+        ),
+        _rec(
+            broker="富途", account="lx", asset_type="us_stock", asset_id="AAPL",
+            quantity="50", avg_cost=None,
+        ),
     ]
 
     stock = build_context(records, broker="富途", account="lx")["stocks_by_symbol"]["AAPL"]
@@ -201,29 +130,14 @@ def test_build_context_does_not_apply_partial_cost_basis_to_all_shares() -> None
 
 def test_feishu_record_update_time_is_business_observation_not_read_time() -> None:
     records = [
-        {
-            "last_modified_time": "1785110400000",
-            "fields": {
-                "broker": "富途",
-                "account": "lx",
-                "asset_type": "cash",
-                "asset_id": "USD-CASH",
-                "currency": "USD",
-                "quantity": "100",
-            },
-        },
-        {
-            "last_modified_time": "1785114000000",
-            "fields": {
-                "broker": "富途",
-                "account": "lx",
-                "asset_type": "us_stock",
-                "asset_id": "NVDA",
-                "currency": "USD",
-                "quantity": "10",
-                "avg_cost": "100",
-            },
-        },
+        _timed_rec(
+            "1785110400000", broker="富途", account="lx", asset_type="cash",
+            asset_id="USD-CASH", currency="USD", quantity="100",
+        ),
+        _timed_rec(
+            "1785114000000", broker="富途", account="lx", asset_type="us_stock",
+            asset_id="NVDA", currency="USD", quantity="10", avg_cost="100",
+        ),
     ]
 
     first = build_context(records, broker="富途", account="lx")
@@ -240,16 +154,10 @@ def test_feishu_record_update_time_is_business_observation_not_read_time() -> No
 
 
 def test_missing_or_invalid_record_observation_is_unknown() -> None:
-    base = {
-        "fields": {
-            "broker": "富途",
-            "account": "lx",
-            "asset_type": "cash",
-            "asset_id": "USD-CASH",
-            "currency": "USD",
-            "quantity": "100",
-        }
-    }
+    base = _rec(
+        broker="富途", account="lx", asset_type="cash",
+        asset_id="USD-CASH", currency="USD", quantity="100",
+    )
 
     missing = build_context([base], broker="富途", account="lx")
     invalid = build_context(
@@ -267,18 +175,11 @@ def test_missing_or_invalid_record_observation_is_unknown() -> None:
 def test_owner_snapshot_time_takes_precedence_over_feishu_read_metadata() -> None:
     context = build_context(
         [
-            {
-                "last_modified_time": "1785114000000",
-                "fields": {
-                    "snapshot_observed_at": "2026-07-26T20:00:00Z",
-                    "broker": "富途",
-                    "account": "lx",
-                    "asset_type": "cash",
-                    "asset_id": "USD-CASH",
-                    "currency": "USD",
-                    "quantity": "100",
-                },
-            }
+            _timed_rec(
+                "1785114000000", snapshot_observed_at="2026-07-26T20:00:00Z",
+                broker="富途", account="lx", asset_type="cash",
+                asset_id="USD-CASH", currency="USD", quantity="100",
+            )
         ],
         broker="富途",
         account="lx",

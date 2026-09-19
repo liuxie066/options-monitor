@@ -59,6 +59,12 @@ def _close_window(
         )
 
 
+def _window_at(repo: SQLiteOptionPositionsRepository, occurred_at_ms: int) -> dict | None:
+    return repo.get_wheel_activation_window_for_event(
+        market="us", account="lx", occurred_at_ms=occurred_at_ms
+    )
+
+
 def test_wheel_activation_windows_are_transaction_timed_historical_and_idempotent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -79,12 +85,8 @@ def test_wheel_activation_windows_are_transaction_timed_historical_and_idempoten
         "idempotent": True,
         "window": opened["window"],
     }
-    assert repo.get_wheel_activation_window_for_event(
-        market="us", account="lx", occurred_at_ms=999
-    ) is None
-    assert repo.get_wheel_activation_window_for_event(
-        market="us", account="lx", occurred_at_ms=1_000
-    ) == opened["window"]
+    assert _window_at(repo, 999) is None
+    assert _window_at(repo, 1_000) == opened["window"]
 
     closed = _close_window(repo)
     replayed_close = _close_window(repo)
@@ -98,26 +100,14 @@ def test_wheel_activation_windows_are_transaction_timed_historical_and_idempoten
         "window": closed["window"],
     }
     assert repo.get_current_wheel_activation_window(market="us", account="lx") is None
-    assert repo.get_wheel_activation_window_for_event(
-        market="us", account="lx", occurred_at_ms=1_999
-    ) == closed["window"]
-    assert repo.get_wheel_activation_window_for_event(
-        market="us", account="lx", occurred_at_ms=2_000
-    ) is None
+    assert _window_at(repo, 1_999) == closed["window"]
+    assert _window_at(repo, 2_000) is None
 
     reopened = _open_window(
-        repo,
-        expected_generation=1,
-        policy_hash="d" * 64,
-        request_id="activate-2",
-        request_hash="e" * 64,
+        repo, expected_generation=1, policy_hash="d" * 64, request_id="activate-2", request_hash="e" * 64
     )
     hk_opened = _open_window(
-        repo,
-        market="hk",
-        policy_hash="f" * 64,
-        request_id="activate-hk-1",
-        request_hash="1" * 64,
+        repo, market="hk", policy_hash="f" * 64, request_id="activate-hk-1", request_hash="1" * 64
     )
 
     assert reopened["window"]["generation"] == 2
@@ -203,13 +193,8 @@ def test_wheel_activation_write_rolls_back_with_caller_transaction(
     with pytest.raises(RuntimeError, match="forced rollback"):
         with repo._writer_connection(begin_immediate=True) as conn:
             repo.open_wheel_activation_window(
-                market="us",
-                account="lx",
-                expected_current_generation=0,
-                policy_hash="a" * 64,
-                request_id="activate-rollback",
-                request_hash="b" * 64,
-                conn=conn,
+                market="us", account="lx", expected_current_generation=0, policy_hash="a" * 64,
+                request_id="activate-rollback", request_hash="b" * 64, conn=conn,
             )
             raise RuntimeError("forced rollback")
 
@@ -239,18 +224,10 @@ def test_wheel_activation_read_only_history_is_exact_and_explicit_when_missing(
     first = _open_window(repo)
     closed = _close_window(repo)
     second = _open_window(
-        repo,
-        expected_generation=1,
-        policy_hash="d" * 64,
-        request_id="activate-2",
-        request_hash="e" * 64,
+        repo, expected_generation=1, policy_hash="d" * 64, request_id="activate-2", request_hash="e" * 64
     )
     _open_window(
-        repo,
-        market="hk",
-        policy_hash="f" * 64,
-        request_id="activate-hk",
-        request_hash="1" * 64,
+        repo, market="hk", policy_hash="f" * 64, request_id="activate-hk", request_hash="1" * 64
     )
 
     result = read_wheel_activation_windows_read_only(repo.db_path, "US", "lx")

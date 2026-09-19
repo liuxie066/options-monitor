@@ -12,13 +12,16 @@ from src.application.trades.state import append_trade_intake_audit, load_trade_i
 
 
 def _stock() -> dict:
-    return {
-        "broker_account_ref": {"broker_account_id": "futu:REAL:123", "broker_id": "futu", "external_account_id": "123", "environment": "REAL", "account_label": "lx"},
-        "instrument_ref": {"asset_type": "stock", "symbol": "NVDA", "market": "US", "currency": "USD"},
-        "external_id_namespace": "futu.deal", "external_execution_id": "stock-1",
-        "side": "buy", "quantity": "0.5", "price": "100", "currency": "USD",
-        "occurred_at_utc": "2026-09-07T02:30:00Z",
-    }
+    ref = {"broker_account_id": "futu:REAL:123", "broker_id": "futu", "external_account_id": "123",
+           "environment": "REAL", "account_label": "lx"}
+    instrument = {"asset_type": "stock", "symbol": "NVDA", "market": "US", "currency": "USD"}
+    return {"broker_account_ref": ref, "instrument_ref": instrument, "external_id_namespace": "futu.deal",
+            "external_execution_id": "stock-1", "side": "buy", "quantity": "0.5", "price": "100",
+            "currency": "USD", "occurred_at_utc": "2026-09-07T02:30:00Z"}
+
+
+def _normalize(payload):
+    return normalize_trade_deal(payload, futu_account_mapping={"123": "lx"}, allow_opend_refresh=False)
 
 
 def _process(tmp_path, payload, *, normalizer=normalize_trade_deal, source="push"):
@@ -140,7 +143,7 @@ def test_fractional_stock_size_is_refused_by_name_at_the_ledger_boundary():
     the event types that skip that rule, as a silently stored ``0``.
     """
 
-    deal = normalize_trade_deal(_stock(), futu_account_mapping={"123": "lx"}, allow_opend_refresh=False)
+    deal = _normalize(_stock())
     assert deal.contracts is None
     assert deal.execution_input["quantity"] == "0.5"
 
@@ -158,9 +161,7 @@ def test_malformed_stock_size_is_not_reported_as_unrepresentable(quantity):
     the overall diagnosis rather than the guard's own implementation.
     """
 
-    deal = normalize_trade_deal(
-        {**_stock(), "quantity": quantity}, futu_account_mapping={"123": "lx"}, allow_opend_refresh=False
-    )
+    deal = _normalize({**_stock(), "quantity": quantity})
     with pytest.raises(ValueError, match="invalid:quantity:invalid_decimal") as excinfo:
         _trade_event_from_normalized_deal(deal)
     assert "not_representable" not in str(excinfo.value)
@@ -173,7 +174,5 @@ def test_integral_stock_size_written_with_a_decimal_point_is_not_fractional(quan
     an integral size never reaches the guard, which is gated on ``contracts is None``.
     """
 
-    deal = normalize_trade_deal(
-        {**_stock(), "quantity": quantity}, futu_account_mapping={"123": "lx"}, allow_opend_refresh=False
-    )
+    deal = _normalize({**_stock(), "quantity": quantity})
     assert _trade_event_from_normalized_deal(deal).contracts == expected

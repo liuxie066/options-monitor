@@ -44,6 +44,25 @@ def _candidate_row(**updates: object) -> dict[str, object]:
     return row
 
 
+def _amd_row() -> dict[str, object]:
+    return _candidate_row(
+        symbol="AMD",
+        candidate_pair_id="pair-amd-100-110",
+        put_contract_symbol="AMD260821P00100000",
+        call_contract_symbol="AMD260821C00110000",
+    )
+
+
+def _occurrence(row: dict[str, object], *, run_id: str = "run-1") -> dict[str, object]:
+    return build_combo_candidate_occurrence(
+        row,
+        account="lx",
+        market="US",
+        run_id=run_id,
+        generated_at_utc=GENERATED_AT,
+    )
+
+
 def _brief(
     row: dict[str, object],
     *,
@@ -112,44 +131,20 @@ def test_occurrence_hash_is_stable_for_column_order_and_non_finite_values() -> N
     first_row = _candidate_row(quote=float("nan"))
     second_row = dict(reversed(list(_candidate_row(quote=float("inf")).items())))
 
-    first = build_combo_candidate_occurrence(
-        first_row,
-        account="lx",
-        market="US",
-        run_id="run-1",
-        generated_at_utc=GENERATED_AT,
-    )
-    second = build_combo_candidate_occurrence(
-        second_row,
-        account="lx",
-        market="US",
-        run_id="run-1",
-        generated_at_utc=GENERATED_AT,
-    )
+    first = _occurrence(first_row)
+    second = _occurrence(second_row)
 
     assert first["candidate_occurrence_id"] == second["candidate_occurrence_id"]
     assert first["candidate_row_content_hash"] == second["candidate_row_content_hash"]
 
-    later_run = build_combo_candidate_occurrence(
-        first_row,
-        account="lx",
-        market="US",
-        run_id="run-2",
-        generated_at_utc=GENERATED_AT,
-    )
+    later_run = _occurrence(first_row, run_id="run-2")
     assert later_run["candidate_occurrence_id"] != first["candidate_occurrence_id"]
 
 
 def test_occurrence_requires_pair_without_using_real_strategy_group() -> None:
     row = _candidate_row(candidate_pair_id=None, strategy_group_id="confirmed-group")
     with pytest.raises(ValueError, match="identity is incomplete"):
-        build_combo_candidate_occurrence(
-            row,
-            account="lx",
-            market="US",
-            run_id="run-1",
-            generated_at_utc=GENERATED_AT,
-        )
+        _occurrence(row)
 
 
 def test_saved_group_only_occurrence_retains_read_only_exposure() -> None:
@@ -178,15 +173,7 @@ def test_saved_group_only_occurrence_retains_read_only_exposure() -> None:
 
 def test_exposure_requires_one_rendered_live_occurrence() -> None:
     row = _candidate_row()
-    row.update(
-        build_combo_candidate_occurrence(
-            row,
-            account="lx",
-            market="US",
-            run_id="run-1",
-            generated_at_utc=GENERATED_AT,
-        )
-    )
+    row.update(_occurrence(row))
 
     exposures = derive_combo_candidate_exposures(_brief(row))
 
@@ -224,22 +211,9 @@ def test_candidate_alert_selector_uses_the_same_fixed_limit_as_the_renderer() ->
     from src.application.daily_decision_brief_renderer import render_candidate_alert
 
     first = _candidate_row()
-    second = _candidate_row(
-        symbol="AMD",
-        candidate_pair_id="pair-amd-100-110",
-        put_contract_symbol="AMD260821P00100000",
-        call_contract_symbol="AMD260821C00110000",
-    )
+    second = _amd_row()
     for row in (first, second):
-        row.update(
-            build_combo_candidate_occurrence(
-                row,
-                account="lx",
-                market="US",
-                run_id="run-1",
-                generated_at_utc=GENERATED_AT,
-            )
-        )
+        row.update(_occurrence(row))
     brief = _brief(first)
     second_brief = _brief(second)
     brief["candidates"]["combo_yield"].append(second)
@@ -276,12 +250,7 @@ def test_fixed_report_renderers_and_evidence_share_candidate_projection(
 ) -> None:
     rows = [
         _candidate_row(),
-        _candidate_row(
-            symbol="AMD",
-            candidate_pair_id="pair-amd-100-110",
-            put_contract_symbol="AMD260821P00100000",
-            call_contract_symbol="AMD260821C00110000",
-        ),
+        _amd_row(),
         _candidate_row(
             symbol="AAPL",
             candidate_pair_id="pair-aapl-100-110",
@@ -290,15 +259,7 @@ def test_fixed_report_renderers_and_evidence_share_candidate_projection(
         ),
     ]
     for row in rows:
-        row.update(
-            build_combo_candidate_occurrence(
-                row,
-                account="lx",
-                market="US",
-                run_id="run-1",
-                generated_at_utc=GENERATED_AT,
-            )
-        )
+        row.update(_occurrence(row))
     brief = _brief(rows[0])
     for row in rows[1:]:
         row_brief = _brief(row)
@@ -375,15 +336,7 @@ def test_multiple_confirmed_candidate_alerts_remain_replayable_for_combo_evidenc
         run_id: str,
         confirmed_at_utc: str,
     ) -> tuple[str, dict[str, object]]:
-        row.update(
-            build_combo_candidate_occurrence(
-                row,
-                account="lx",
-                market="US",
-                run_id=run_id,
-                generated_at_utc=GENERATED_AT,
-            )
-        )
+        row.update(_occurrence(row, run_id=run_id))
         persisted = persist_daily_decision_brief_success(
             base=tmp_path,
             brief=_brief(row, run_id=run_id),
@@ -443,12 +396,7 @@ def test_multiple_confirmed_candidate_alerts_remain_replayable_for_combo_evidenc
         confirmed_at_utc="2026-07-17T13:41:00+00:00",
     )
     second_identity, _second_envelope = _persist_confirmed_alert(
-        _candidate_row(
-            symbol="AMD",
-            candidate_pair_id="pair-amd-100-110",
-            put_contract_symbol="AMD260821P00100000",
-            call_contract_symbol="AMD260821C00110000",
-        ),
+        _amd_row(),
         run_id="run-2",
         confirmed_at_utc="2026-07-17T13:51:00+00:00",
     )

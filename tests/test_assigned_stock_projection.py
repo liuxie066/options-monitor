@@ -153,8 +153,9 @@ def _base_projection(
     )
 
 
-def test_projection_tracks_partial_sale_principal_basis_and_missing_quote() -> None:
-    sale = {
+def _sale_event() -> dict[str, Any]:
+    """The partial-sale fixture; every call site used this exact dict."""
+    return {
         "event_type": "sale",
         "stock_event_id": "sale-1",
         "target_stock_lot_id": "assigned-stock-assign-put",
@@ -169,6 +170,49 @@ def test_projection_tracks_partial_sale_principal_basis_and_missing_quote() -> N
         "fee_provenance": {"basis": "actual", "source": "test"},
         "trade_time_ms": _ms("2026-06-15T10:00:00"),
     }
+
+
+def _call_open(**overrides: Any) -> dict[str, Any]:
+    """The long call open fixture; ``overrides`` adds the per-site extras."""
+    event = _event(
+        "open-call",
+        option_type="call",
+        side="sell",
+        position_effect="open",
+        at="2026-05-05T10:00:00",
+        price=2,
+        strike=110,
+    )
+    event.update(overrides)
+    return event
+
+
+def _call_option_lot(*, opened_at: int, **overrides: Any) -> dict[str, Any]:
+    """The open call option lot; ``overrides`` adds the per-site valuation keys."""
+    lot: dict[str, Any] = {
+        "record_id": "lot-call",
+        "open_event_id": "open-call",
+        "opened_at": opened_at,
+        "account": "lx",
+        "broker": "富途",
+        "symbol": "NVDA",
+        "option_type": "call",
+        "position_side": "short",
+        "currency": "USD",
+        "contracts": 1,
+        "remaining": 1,
+        "price": 2,
+        "multiplier": 100,
+        "strike": 110,
+        "expiration_ymd": "2026-08-21",
+        "unrealized_pnl_gross": 50,
+    }
+    lot.update(overrides)
+    return lot
+
+
+def test_projection_tracks_partial_sale_principal_basis_and_missing_quote() -> None:
+    sale = _sale_event()
 
     marked = _base_projection(assigned_stock_events=[sale])
     missing = _base_projection(assigned_stock_events=[sale], quote=None)
@@ -213,21 +257,7 @@ def test_projection_emits_stock_position_lots_as_first_class() -> None:
 
 
 def test_stock_position_lot_tracks_partial_sale_state() -> None:
-    sale = {
-        "event_type": "sale",
-        "stock_event_id": "sale-1",
-        "target_stock_lot_id": "assigned-stock-assign-put",
-        "account": "lx",
-        "broker": "富途",
-        "symbol": "NVDA",
-        "side": "sell",
-        "shares": 40,
-        "price": 110,
-        "currency": "USD",
-        "fees": 2,
-        "fee_provenance": {"basis": "actual", "source": "test"},
-        "trade_time_ms": _ms("2026-06-15T10:00:00"),
-    }
+    sale = _sale_event()
     result = _base_projection(assigned_stock_events=[sale])
     lot = result["stock_position_lots"][0]
     # §7.3/§7.4: share quantities and amounts serialize as decimal strings.
@@ -310,21 +340,7 @@ def test_projection_publishes_assigned_stock_authority_money_as_decimal_text() -
     assert opened["stock_cost_basis_total"] == "10000"
     assert opened["assigned_stock_realized_pnl"] == "0"
 
-    sale = {
-        "event_type": "sale",
-        "stock_event_id": "sale-1",
-        "target_stock_lot_id": "assigned-stock-assign-put",
-        "account": "lx",
-        "broker": "富途",
-        "symbol": "NVDA",
-        "side": "sell",
-        "shares": 40,
-        "price": 110,
-        "currency": "USD",
-        "fees": 2,
-        "fee_provenance": {"basis": "actual", "source": "test"},
-        "trade_time_ms": _ms("2026-06-15T10:00:00"),
-    }
+    sale = _sale_event()
     sold = _base_projection(assigned_stock_events=[sale])["assigned_stock_lots"][0]
     assert sold["assigned_stock_realized_pnl"] == "398"
 
@@ -361,42 +377,20 @@ def test_projection_rejects_assignment_or_exercise_stock_side_mismatch() -> None
 
 def test_covered_call_prefers_explicit_link_and_attributes_open_unrealized_once() -> None:
     opened_at = _ms("2026-05-05T10:00:00")
-    call_open = _event(
-        "open-call",
-        option_type="call",
-        side="sell",
-        position_effect="open",
-        at="2026-05-05T10:00:00",
-        price=2,
-        strike=110,
+    call_open = _call_open(
         raw_payload={
             "fee_provenance": {"basis": "actual", "source": "test"},
             "stock_lot_id": "assigned-stock-assign-put",
-        },
+        }
     )
     report = _base_projection(
         extra_events=[call_open],
         extra_option_lots=[
-            {
-                "record_id": "lot-call",
-                "open_event_id": "open-call",
-                "opened_at": opened_at,
-                "account": "lx",
-                "broker": "富途",
-                "symbol": "NVDA",
-                "option_type": "call",
-                "position_side": "short",
-                "currency": "USD",
-                "contracts": 1,
-                "remaining": 1,
-                "price": 2,
-                "multiplier": 100,
-                "strike": 110,
-                "expiration_ymd": "2026-08-21",
-                "unrealized_pnl_gross": 50,
-                "valuation_status": "selected",
-                "valuation_evidence_fact_id": "call-mark",
-            }
+            _call_option_lot(
+                opened_at=opened_at,
+                valuation_status="selected",
+                valuation_evidence_fact_id="call-mark",
+            )
         ],
     )
 
@@ -426,33 +420,8 @@ def test_covered_call_prefers_explicit_link_and_attributes_open_unrealized_once(
 
 def test_covered_call_without_linkage_identity_fails_closed() -> None:
     opened_at = _ms("2026-05-05T10:00:00")
-    call_open = _event(
-        "open-call",
-        option_type="call",
-        side="sell",
-        position_effect="open",
-        at="2026-05-05T10:00:00",
-        price=2,
-        strike=110,
-    )
-    call_lot = {
-        "record_id": "lot-call",
-        "open_event_id": "open-call",
-        "opened_at": opened_at,
-        "account": "lx",
-        "broker": "富途",
-        "symbol": "NVDA",
-        "option_type": "call",
-        "position_side": "short",
-        "currency": "USD",
-        "contracts": 1,
-        "remaining": 1,
-        "price": 2,
-        "multiplier": 100,
-        "strike": 110,
-        "expiration_ymd": "2026-08-21",
-        "unrealized_pnl_gross": 50,
-    }
+    call_open = _call_open()
+    call_lot = _call_option_lot(opened_at=opened_at)
 
     unbound = _base_projection(extra_events=[call_open], extra_option_lots=[call_lot])
     mixed = _base_projection(
@@ -472,15 +441,7 @@ def test_covered_call_without_linkage_identity_fails_closed() -> None:
 
 def test_covered_call_fails_closed_when_assigned_shares_are_sold_before_call_end() -> None:
     opened_at = _ms("2026-05-05T10:00:00")
-    call_open = _event(
-        "open-call",
-        option_type="call",
-        side="sell",
-        position_effect="open",
-        at="2026-05-05T10:00:00",
-        price=2,
-        strike=110,
-    )
+    call_open = _call_open()
     sale = {
         "event_type": "sale",
         "stock_event_id": "sale-before-call-end",
@@ -500,24 +461,7 @@ def test_covered_call_fails_closed_when_assigned_shares_are_sold_before_call_end
         assigned_stock_events=[sale],
         extra_events=[call_open],
         extra_option_lots=[
-            {
-                "record_id": "lot-call",
-                "open_event_id": "open-call",
-                "opened_at": opened_at,
-                "account": "lx",
-                "broker": "富途",
-                "symbol": "NVDA",
-                "option_type": "call",
-                "position_side": "short",
-                "currency": "USD",
-                "contracts": 1,
-                "remaining": 1,
-                "price": 2,
-                "multiplier": 100,
-                "strike": 110,
-                "expiration_ymd": "2026-08-21",
-                "unrealized_pnl_gross": 50,
-            }
+            _call_option_lot(opened_at=opened_at)
         ],
     )
 

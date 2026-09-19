@@ -25,15 +25,16 @@ def _stock_deal(**overrides):
     return SimpleNamespace(**values)
 
 
+def _refresh_intent(deal, *, state=None, source="push", enabled=True):
+    """Portfolio refresh intent for a deal; the push/first-seen case by default."""
+    return _build_portfolio_refresh_intent(
+        deal, state={} if state is None else state, apply_changes=True, source=source, enabled=enabled
+    )
+
+
 def test_stock_refresh_intent_is_first_seen_and_redacted() -> None:
     deal = _stock_deal()
-    intent = _build_portfolio_refresh_intent(
-        deal,
-        state={},
-        apply_changes=True,
-        source="push",
-        enabled=True,
-    )
+    intent = _refresh_intent(deal)
 
     assert intent is not None
     assert intent["account"] == "lx"
@@ -44,26 +45,8 @@ def test_stock_refresh_intent_is_first_seen_and_redacted() -> None:
 
     deal_key = "futu:lx:REAL_123:deal-secret-1"
     duplicate_state = {"failed_deal_ids": {deal_key: {"status": "failed"}}}
-    assert (
-        _build_portfolio_refresh_intent(
-            deal,
-            state=duplicate_state,
-            apply_changes=True,
-            source="backfill",
-            enabled=True,
-        )
-        is None
-    )
-    assert (
-        _build_portfolio_refresh_intent(
-            _stock_deal(option_type="call"),
-            state={},
-            apply_changes=True,
-            source="push",
-            enabled=True,
-        )
-        is None
-    )
+    assert _refresh_intent(deal, state=duplicate_state, source="backfill") is None
+    assert _refresh_intent(_stock_deal(option_type="call")) is None
 
 
 def test_refresh_dispatch_uses_fixed_timeout_and_audits_acceptance(
@@ -155,9 +138,7 @@ def test_real_futu_stock_payload_produces_refresh_intent() -> None:
 
     assert deal.execution_input["errors"] == []
     assert deal.currency == "USD"
-    intent = _build_portfolio_refresh_intent(
-        deal, state={}, apply_changes=True, source="push", enabled=True
-    )
+    intent = _refresh_intent(deal)
     assert intent == {
         "account": "sy",
         "request_id": "stock-refresh:"
@@ -175,21 +156,11 @@ def test_option_and_unresolved_asset_payloads_never_produce_refresh_intent() -> 
         allow_opend_refresh=False,
     )
     assert option.option_type == "put"
-    assert (
-        _build_portfolio_refresh_intent(
-            option, state={}, apply_changes=True, source="push", enabled=True
-        )
-        is None
-    )
+    assert _refresh_intent(option) is None
 
     unresolved = normalize_trade_deal(
         _futu_stock_payload(code="600519.SH", deal_id="d-cn"),
         futu_account_mapping=mapping,
         allow_opend_refresh=False,
     )
-    assert (
-        _build_portfolio_refresh_intent(
-            unresolved, state={}, apply_changes=True, source="push", enabled=True
-        )
-        is None
-    )
+    assert _refresh_intent(unresolved) is None

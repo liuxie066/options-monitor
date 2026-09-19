@@ -42,6 +42,38 @@ def _canonical_bytes(payload: dict) -> bytes:
     ).encode("utf-8")
 
 
+def _load_kwargs(
+    tmp_path,
+    run_id,
+    account,
+    authorities,
+    configs,
+    manifest,
+    **overrides,
+) -> dict:
+    """The expected-* read-back kwargs shared by the context and receipt loaders."""
+    kwargs = {
+        "manifest_path": Path(manifest["manifest_path"]),
+        "expected_base": tmp_path,
+        "expected_run_id": run_id,
+        "expected_account": account,
+        "expected_account_config_sha256": authorities[account].account_config_sha256,
+        "expected_manifest_sha256": manifest["manifest_sha256"],
+        "expected_runtime_config": configs[account],
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+def _empty_config_files(tmp_path: Path) -> tuple[Path, Path]:
+    """Write the empty data/runtime config pair every prepare case reads."""
+    data_config = tmp_path / "portfolio.runtime.json"
+    data_config.write_text("{}\n", encoding="utf-8")
+    config_path = tmp_path / "config.us.json"
+    config_path.write_text("{}\n", encoding="utf-8")
+    return data_config, config_path
+
+
 def test_cny_per_currency_rates_requires_ready_prepared_fx_authority() -> None:
     ready = {
         "prepared_authority": {"fx_status": "ready"},
@@ -127,6 +159,65 @@ def _open_position(
     )
 
 
+def _prepare_env(tmp_path: Path, run_id: str):
+    """Write the empty data/config files and publish one coherent authority set."""
+    data_config, config_path = _empty_config_files(tmp_path)
+    configs, authorities = _authorities(
+        tmp_path,
+        run_id=run_id,
+        data_config=data_config,
+    )
+    return configs, authorities, config_path, data_config
+
+
+def _prepare(
+    tmp_path: Path,
+    *,
+    run_id: str,
+    config_path: Path,
+    configs,
+    authorities,
+    **overrides: object,
+):
+    return prepare_option_positions_contexts(
+        base=tmp_path,
+        run_id=run_id,
+        config_path=config_path,
+        account_configs=configs,
+        account_config_authorities=authorities,
+        run_state_dir=tmp_path / "output_runs" / run_id / "state",
+        **overrides,
+    )
+
+
+def _fx_stub(**overrides: object):
+    """Return a ``get_exchange_rates_or_fetch_latest`` double for the tencent_quote literal."""
+
+    def _rates(**_kwargs):
+        payload = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "source": "tencent_quote",
+            "rates": {"USDCNY": 7.2, "HKDCNY": 0.92},
+        }
+        payload.update(overrides)
+        return payload
+
+    return _rates
+
+
+def _load(*, manifest: dict, tmp_path: Path, run_id: str, account: str, authorities, configs, **overrides: object):
+    """Load a prepared context straight from a manifest record; overrides replace pins verbatim."""
+    return load_prepared_option_positions_context(
+        **_load_kwargs(tmp_path, run_id, account, authorities, configs, manifest, **overrides)
+    )
+
+
+def _load_receipt(*, manifest: dict, tmp_path: Path, run_id: str, account: str, authorities, configs, **overrides: object):
+    return load_prepared_option_positions_context_receipt(
+        **_load_kwargs(tmp_path, run_id, account, authorities, configs, manifest, **overrides)
+    )
+
+
 def test_repository_reads_multi_account_generation_once(
     monkeypatch,
     tmp_path: Path,
@@ -166,15 +257,7 @@ def test_prepare_publishes_zero_position_slices_from_one_ledger_and_fx_read(
     from src.application import prepared_option_positions_context as mod
 
     run_id = "run-coherent-options"
-    data_config = tmp_path / "portfolio.runtime.json"
-    data_config.write_text("{}\n", encoding="utf-8")
-    config_path = tmp_path / "config.us.json"
-    config_path.write_text("{}\n", encoding="utf-8")
-    configs, authorities = _authorities(
-        tmp_path,
-        run_id=run_id,
-        data_config=data_config,
-    )
+    configs, authorities, config_path, data_config = _prepare_env(tmp_path, run_id)
     fx_observation = {
         "timestamp": (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
         "source": "tencent_quote",
@@ -186,28 +269,19 @@ def test_prepare_publishes_zero_position_slices_from_one_ledger_and_fx_read(
         fx_calls.append(str(cache_path))
         return fx_observation
 
-    monkeypatch.setattr(
-        mod,
-        "get_exchange_rates_or_fetch_latest",
-        _rates,
-    )
+    monkeypatch.setattr(mod, "get_exchange_rates_or_fetch_latest", _rates)
 
     def _current_read_fails(*_args, **_kwargs):
         raise RuntimeError("shadow unavailable")
 
-    monkeypatch.setattr(
-        mod,
-        "read_current_decision_projection",
-        _current_read_fails,
-    )
+    monkeypatch.setattr(mod, "read_current_decision_projection", _current_read_fails)
 
-    batch = prepare_option_positions_contexts(
-        base=tmp_path,
+    batch = _prepare(
+        tmp_path,
         run_id=run_id,
         config_path=config_path,
-        account_configs=configs,
-        account_config_authorities=authorities,
-        run_state_dir=tmp_path / "output_runs" / run_id / "state",
+        configs=configs,
+        authorities=authorities,
         persist_fx_evidence=True,
     )
 
@@ -226,13 +300,12 @@ def test_prepare_publishes_zero_position_slices_from_one_ledger_and_fx_read(
         run_id=second_run_id,
         data_config=data_config,
     )
-    repeated = prepare_option_positions_contexts(
-        base=tmp_path,
+    repeated = _prepare(
+        tmp_path,
         run_id=second_run_id,
         config_path=config_path,
-        account_configs=second_configs,
-        account_config_authorities=second_authorities,
-        run_state_dir=tmp_path / "output_runs" / second_run_id / "state",
+        configs=second_configs,
+        authorities=second_authorities,
         persist_fx_evidence=True,
     )
     assert repeated.fx_evidence_status == "idempotent"
@@ -253,16 +326,9 @@ def test_prepare_publishes_zero_position_slices_from_one_ledger_and_fx_read(
     loaded = {}
     for account in ("lx", "sy"):
         manifest = batch.manifests[account]
-        loaded[account] = load_prepared_option_positions_context(
-            manifest_path=Path(manifest["manifest_path"]),
-            expected_base=tmp_path,
-            expected_run_id=run_id,
-            expected_account=account,
-            expected_account_config_sha256=authorities[
-                account
-            ].account_config_sha256,
-            expected_manifest_sha256=manifest["manifest_sha256"],
-            expected_runtime_config=configs[account],
+        loaded[account] = _load(
+            manifest=manifest, tmp_path=tmp_path, run_id=run_id,
+            account=account, authorities=authorities, configs=configs,
         )
         assert loaded[account]["filters"] == {
             "broker": "富途",
@@ -281,14 +347,9 @@ def test_prepare_publishes_zero_position_slices_from_one_ledger_and_fx_read(
         assert loaded[account]["current_decision_shadow"]["reason"] == (
             "current_projection_read_failed:RuntimeError"
         )
-        receipt = load_prepared_option_positions_context_receipt(
-            manifest_path=Path(manifest["manifest_path"]),
-            expected_base=tmp_path,
-            expected_run_id=run_id,
-            expected_account=account,
-            expected_account_config_sha256=authorities[account].account_config_sha256,
-            expected_manifest_sha256=manifest["manifest_sha256"],
-            expected_runtime_config=configs[account],
+        receipt = _load_receipt(
+            manifest=manifest, tmp_path=tmp_path, run_id=run_id,
+            account=account, authorities=authorities, configs=configs,
         )
         assert receipt["payload"] == loaded[account]
         assert (
@@ -315,42 +376,23 @@ def test_prepare_publishes_zero_position_slices_from_one_ledger_and_fx_read(
     sy_manifest_path = Path(batch.manifests["sy"]["manifest_path"])
     sy_manifest = json.loads(sy_manifest_path.read_text(encoding="utf-8"))
     sy_manifest["application_received_at_utc"] = "2026-08-10T03:00:01+00:00"
-    sy_manifest_bytes = (
-        json.dumps(
-            sy_manifest,
-            ensure_ascii=False,
-            sort_keys=True,
-            indent=2,
-            allow_nan=False,
-        )
-        + "\n"
-    ).encode()
+    sy_manifest_bytes = _canonical_bytes(sy_manifest)
     sy_manifest_path.write_bytes(sy_manifest_bytes)
-    sy_manifest_sha256 = hashlib.sha256(sy_manifest_bytes).hexdigest()
-    assert (
-        load_prepared_option_positions_context(
-            manifest_path=sy_manifest_path,
-            expected_base=tmp_path,
-            expected_run_id=run_id,
-            expected_account="sy",
-            expected_account_config_sha256=authorities["sy"].account_config_sha256,
-            expected_manifest_sha256=sy_manifest_sha256,
-            expected_runtime_config=configs["sy"],
-        )
-        == loaded["sy"]
-    )
+    sy_manifest = {
+        "manifest_path": sy_manifest_path,
+        "manifest_sha256": hashlib.sha256(sy_manifest_bytes).hexdigest(),
+    }
+    assert _load(
+        manifest=sy_manifest, tmp_path=tmp_path, run_id=run_id,
+        account="sy", authorities=authorities, configs=configs,
+    ) == loaded["sy"]
     with pytest.raises(
         PreparedOptionPositionsContextError,
         match="application_received_at_utc",
     ):
-        load_prepared_option_positions_context_receipt(
-            manifest_path=sy_manifest_path,
-            expected_base=tmp_path,
-            expected_run_id=run_id,
-            expected_account="sy",
-            expected_account_config_sha256=authorities["sy"].account_config_sha256,
-            expected_manifest_sha256=sy_manifest_sha256,
-            expected_runtime_config=configs["sy"],
+        _load_receipt(
+            manifest=sy_manifest, tmp_path=tmp_path, run_id=run_id,
+            account="sy", authorities=authorities, configs=configs,
         )
 
     lx_manifest = batch.manifests["lx"]
@@ -364,16 +406,9 @@ def test_prepare_publishes_zero_position_slices_from_one_ledger_and_fx_read(
         PreparedOptionPositionsContextError,
         match="payload hash mismatch",
     ):
-        load_prepared_option_positions_context(
-            manifest_path=Path(lx_manifest["manifest_path"]),
-            expected_base=tmp_path,
-            expected_run_id=run_id,
-            expected_account="lx",
-            expected_account_config_sha256=authorities[
-                "lx"
-            ].account_config_sha256,
-            expected_manifest_sha256=lx_manifest["manifest_sha256"],
-            expected_runtime_config=configs["lx"],
+        _load(
+            manifest=lx_manifest, tmp_path=tmp_path, run_id=run_id,
+            account="lx", authorities=authorities, configs=configs,
         )
 
 
@@ -384,37 +419,20 @@ def test_prepare_fails_account_closed_when_wheel_projection_fails(
     from src.application import prepared_option_positions_context as mod
 
     run_id = "run-wheel-projection-failure"
-    data_config = tmp_path / "portfolio.runtime.json"
-    data_config.write_text("{}\n", encoding="utf-8")
-    config_path = tmp_path / "config.us.json"
-    config_path.write_text("{}\n", encoding="utf-8")
-    configs, authorities = _authorities(
-        tmp_path,
-        run_id=run_id,
-        data_config=data_config,
-    )
-    monkeypatch.setattr(
-        mod,
-        "get_exchange_rates_or_fetch_latest",
-        lambda **_kwargs: {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "source": "test",
-            "rates": {"USDCNY": 7.2, "HKDCNY": 0.92},
-        },
-    )
+    configs, authorities, config_path, _ = _prepare_env(tmp_path, run_id)
+    monkeypatch.setattr(mod, "get_exchange_rates_or_fetch_latest", _fx_stub(source="test"))
     monkeypatch.setattr(
         mod,
         "build_wheel_read_model_from_rows",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("broken")),
     )
 
-    batch = prepare_option_positions_contexts(
-        base=tmp_path,
+    batch = _prepare(
+        tmp_path,
         run_id=run_id,
         config_path=config_path,
-        account_configs=configs,
-        account_config_authorities=authorities,
-        run_state_dir=tmp_path / "output_runs" / run_id / "state",
+        configs=configs,
+        authorities=authorities,
     )
 
     assert set(batch.manifests) == {"lx", "sy"}
@@ -432,32 +450,15 @@ def test_prepare_default_path_does_not_persist_fx_evidence(
     from src.application import prepared_option_positions_context as mod
 
     run_id = "run-smoke-no-fx-write"
-    data_config = tmp_path / "portfolio.runtime.json"
-    data_config.write_text("{}\n", encoding="utf-8")
-    config_path = tmp_path / "config.us.json"
-    config_path.write_text("{}\n", encoding="utf-8")
-    configs, authorities = _authorities(
+    configs, authorities, config_path, _ = _prepare_env(tmp_path, run_id)
+    monkeypatch.setattr(mod, "get_exchange_rates_or_fetch_latest", _fx_stub())
+
+    batch = _prepare(
         tmp_path,
         run_id=run_id,
-        data_config=data_config,
-    )
-    monkeypatch.setattr(
-        mod,
-        "get_exchange_rates_or_fetch_latest",
-        lambda **_kwargs: {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "source": "tencent_quote",
-            "rates": {"USDCNY": 7.2, "HKDCNY": 0.92},
-        },
-    )
-
-    batch = prepare_option_positions_contexts(
-        base=tmp_path,
-        run_id=run_id,
         config_path=config_path,
-        account_configs=configs,
-        account_config_authorities=authorities,
-        run_state_dir=tmp_path / "output_runs" / run_id / "state",
+        configs=configs,
+        authorities=authorities,
     )
 
     assert batch.fx_evidence_status == "disabled"
@@ -491,28 +492,19 @@ def test_prepare_rejects_invalid_fx_evidence_batch(
     from src.application import prepared_option_positions_context as mod
 
     run_id = "run-invalid-fx-evidence"
-    data_config = tmp_path / "portfolio.runtime.json"
-    data_config.write_text("{}\n", encoding="utf-8")
-    config_path = tmp_path / "config.us.json"
-    config_path.write_text("{}\n", encoding="utf-8")
-    configs, authorities = _authorities(
-        tmp_path,
-        run_id=run_id,
-        data_config=data_config,
-    )
+    configs, authorities, config_path, _ = _prepare_env(tmp_path, run_id)
     monkeypatch.setattr(
         mod,
         "get_exchange_rates_or_fetch_latest",
         lambda **_kwargs: fx_observation,
     )
 
-    batch = prepare_option_positions_contexts(
-        base=tmp_path,
+    batch = _prepare(
+        tmp_path,
         run_id=run_id,
         config_path=config_path,
-        account_configs=configs,
-        account_config_authorities=authorities,
-        run_state_dir=tmp_path / "output_runs" / run_id / "state",
+        configs=configs,
+        authorities=authorities,
         persist_fx_evidence=True,
     )
 
@@ -662,10 +654,7 @@ def test_one_ledger_freezes_account_isolated_option_contexts(
     from src.application import prepared_option_positions_context as mod
 
     run_id = "run-account-isolated-options"
-    data_config = tmp_path / "portfolio.runtime.json"
-    data_config.write_text("{}\n", encoding="utf-8")
-    config_path = tmp_path / "config.us.json"
-    config_path.write_text("{}\n", encoding="utf-8")
+    data_config, config_path = _empty_config_files(tmp_path)
     configs, authorities = _authorities(
         tmp_path,
         run_id=run_id,
@@ -765,25 +754,16 @@ def test_one_ledger_freezes_account_isolated_option_contexts(
         match="account config hash mismatch",
     ):
         load_prepared_option_positions_context(
-            manifest_path=Path(lx_manifest["manifest_path"]),
-            expected_base=tmp_path,
-            expected_run_id=run_id,
-            expected_account="lx",
-            expected_account_config_sha256="f" * 64,
-            expected_manifest_sha256=lx_manifest["manifest_sha256"],
-            expected_runtime_config=configs["lx"],
+            **_load_kwargs(
+                tmp_path, run_id, "lx", authorities, configs, lx_manifest,
+                expected_account_config_sha256="f" * 64,
+            )
         )
 
     sy_after_lx_rejection = load_prepared_option_positions_context(
-        manifest_path=Path(batch.manifests["sy"]["manifest_path"]),
-        expected_base=tmp_path,
-        expected_run_id=run_id,
-        expected_account="sy",
-        expected_account_config_sha256=authorities[
-            "sy"
-        ].account_config_sha256,
-        expected_manifest_sha256=batch.manifests["sy"]["manifest_sha256"],
-        expected_runtime_config=configs["sy"],
+        **_load_kwargs(
+            tmp_path, run_id, "sy", authorities, configs, batch.manifests["sy"],
+        )
     )
     assert sum(
         row["contracts_open"]
@@ -795,10 +775,7 @@ def test_prepare_does_not_refresh_option_quotes(monkeypatch, tmp_path: Path) -> 
     from src.application.performance import evidence_collection
 
     run_id = "run-position-and-fx-only"
-    data_config = tmp_path / "portfolio.runtime.json"
-    data_config.write_text("{}\n", encoding="utf-8")
-    config_path = tmp_path / "config.us.json"
-    config_path.write_text("{}\n", encoding="utf-8")
+    data_config, config_path = _empty_config_files(tmp_path)
     configs, authorities = _authorities(
         tmp_path,
         run_id=run_id,

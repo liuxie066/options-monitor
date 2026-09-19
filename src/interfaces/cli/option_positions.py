@@ -185,6 +185,19 @@ def _lifecycle_dispatch_write_applied(
     )
 
 
+def _high_risk_write_control(args: argparse.Namespace, *, command_name: str) -> dict[str, bool]:
+    """Resolve the write control for a high-risk subcommand, or exit before any write."""
+
+    if (
+        bool(getattr(args, "confirm", False)) or bool(getattr(args, "yes", False))
+    ) and not bool(getattr(args, "apply", False)):
+        raise SystemExit(f"{command_name} requires --apply together with --confirm or --yes")
+    control = _resolve_write_control(args, command_name=command_name, high_risk=True)
+    if not control["write_requested"]:
+        raise SystemExit(f"{command_name} requires --apply and --confirm or --yes")
+    return control
+
+
 def _parse_json_object_arg(raw: str | None, *, name: str) -> dict[str, Any] | None:
     text = str(raw or "").strip()
     if not text:
@@ -1043,69 +1056,27 @@ def main(argv: list[str] | None = None) -> int:
         args, "decision_projection_cmd", None
     ) == "apply":
         write_control_key = "decision-projection:apply"
-        if (
-            (bool(getattr(args, "confirm", False)) or bool(getattr(args, "yes", False)))
-            and not bool(getattr(args, "apply", False))
-        ):
-            raise SystemExit(
-                "option-positions decision-projection apply requires --apply "
-                "together with --confirm or --yes"
-            )
-        write_controls[write_control_key] = _resolve_write_control(
+        write_controls[write_control_key] = _high_risk_write_control(
             args,
             command_name="option-positions decision-projection apply",
-            high_risk=True,
         )
-        if not write_controls[write_control_key]["write_requested"]:
-            raise SystemExit(
-                "option-positions decision-projection apply requires --apply "
-                "and --confirm or --yes"
-            )
     elif args.cmd == "projection-migration" and getattr(
         args, "projection_migration_cmd", None
     ) in {"apply", "activate", "deactivate"}:
         migration_command = str(args.projection_migration_cmd)
         write_control_key = f"projection-migration:{migration_command}"
-        if (
-            (bool(getattr(args, "confirm", False)) or bool(getattr(args, "yes", False)))
-            and not bool(getattr(args, "apply", False))
-        ):
-            raise SystemExit(
-                f"option-positions projection-migration {migration_command} "
-                "requires --apply together with --confirm or --yes"
-            )
-        write_controls[write_control_key] = _resolve_write_control(
+        write_controls[write_control_key] = _high_risk_write_control(
             args,
             command_name=f"option-positions projection-migration {migration_command}",
-            high_risk=True,
         )
-        if not write_controls[write_control_key]["write_requested"]:
-            raise SystemExit(
-                f"option-positions projection-migration {migration_command} "
-                "requires --apply and --confirm or --yes"
-            )
     elif args.cmd == "lot-identity-migration" and getattr(
         args, "lot_identity_migration_cmd", None
     ) == "apply":
         write_control_key = "lot-identity-migration:apply"
-        if (
-            (bool(getattr(args, "confirm", False)) or bool(getattr(args, "yes", False)))
-            and not bool(getattr(args, "apply", False))
-        ):
-            raise SystemExit(
-                "option-positions lot-identity-migration apply "
-                "requires --apply together with --confirm or --yes"
-            )
-        write_controls[write_control_key] = _resolve_write_control(
+        write_controls[write_control_key] = _high_risk_write_control(
             args,
             command_name="option-positions lot-identity-migration apply",
-            high_risk=True,
         )
-        if not write_controls[write_control_key]["write_requested"]:
-            raise SystemExit(
-                "option-positions lot-identity-migration apply "
-                "requires --apply and --confirm or --yes"
-            )
     elif args.cmd == "lifecycle" and (
         getattr(args, "lifecycle_cmd", None)
         in {

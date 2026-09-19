@@ -63,6 +63,17 @@ def _put_leg(strike: float = 90.0, **overrides):
     return ComboYieldLeg(**base)
 
 
+def _metrics(call, put, *, call_sell_fee=1.0, put_buy_fee=1.0, covered_notional=10_000.0, **kwargs):
+    return compute_cc_lp_metrics(
+        call_leg=call,
+        put_leg=put,
+        call_sell_fee=call_sell_fee,
+        put_buy_fee=put_buy_fee,
+        covered_notional=covered_notional,
+        **kwargs,
+    )
+
+
 def test_validate_cc_lp_pair_accepts_call_above_put() -> None:
     call = _call_leg(strike=110.0)
     put = _put_leg(strike=90.0)
@@ -93,14 +104,7 @@ def test_validate_cc_lp_pair_rejects_expiration_mismatch() -> None:
 def test_compute_cc_lp_metrics_uses_call_sell_put_buy() -> None:
     call = _call_leg(bid=5.0)
     put = _put_leg(ask=2.0)
-    metrics = compute_cc_lp_metrics(
-        call_leg=call,
-        put_leg=put,
-        call_sell_fee=1.0,
-        put_buy_fee=1.0,
-        covered_notional=10_000.0,
-        dte=20,
-    )
+    metrics = _metrics(call, put, dte=20)
     # call net = 5*100 - 1 = 499; put cost = 2*100 + 1 = 201; net = 298
     assert metrics.call_net_credit == 499.0
     assert metrics.put_total_cost == 201.0
@@ -118,13 +122,7 @@ def test_compute_cc_lp_metrics_rejects_covered_notional_non_positive() -> None:
     call = _call_leg()
     put = _put_leg()
     try:
-        compute_cc_lp_metrics(
-            call_leg=call,
-            put_leg=put,
-            call_sell_fee=0.0,
-            put_buy_fee=0.0,
-            covered_notional=0.0,
-        )
+        _metrics(call, put, call_sell_fee=0.0, put_buy_fee=0.0, covered_notional=0.0)
     except ValueError:
         return
     raise AssertionError("expected ValueError for non-positive covered_notional")
@@ -134,13 +132,7 @@ def test_compute_cc_lp_metrics_rejects_non_positive_call_net_credit() -> None:
     call = _call_leg(bid=0.01)  # 0.01*100 - 2 fee = -1
     put = _put_leg()
     try:
-        compute_cc_lp_metrics(
-            call_leg=call,
-            put_leg=put,
-            call_sell_fee=2.0,
-            put_buy_fee=0.0,
-            covered_notional=10_000.0,
-        )
+        _metrics(call, put, call_sell_fee=2.0, put_buy_fee=0.0)
     except ValueError:
         return
     raise AssertionError("expected ValueError for non-positive call_net_credit")
@@ -149,14 +141,7 @@ def test_compute_cc_lp_metrics_rejects_non_positive_call_net_credit() -> None:
 def test_compute_cc_lp_metrics_retention_is_positive_for_net_credit() -> None:
     call = _call_leg(bid=5.0)
     put = _put_leg(ask=2.0)
-    metrics = compute_cc_lp_metrics(
-        call_leg=call,
-        put_leg=put,
-        call_sell_fee=1.0,
-        put_buy_fee=1.0,
-        covered_notional=10_000.0,
-        dte=20,
-    )
+    metrics = _metrics(call, put, dte=20)
     assert metrics.retention > 0.0
     assert metrics.net_debit == 0.0
 

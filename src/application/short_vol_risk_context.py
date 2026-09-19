@@ -8,6 +8,7 @@ from domain.domain.option_position_identity import normalize_currency
 from domain.domain.short_vol_assessment import ShortVolPortfolioContext
 from domain.domain.symbol_identity import canonical_symbol, symbol_currency
 from src.infrastructure.exchange_rates import CurrencyConverter
+from src.application.numeric_helpers import float_or_none as _float
 
 
 PortfolioRiskContext = ShortVolPortfolioContext
@@ -210,21 +211,3 @@ def _first_float(row: dict[str, Any], *keys: str) -> float | None:
     return None
 
 
-def _float(value: Any) -> float | None:
-    if value is None:
-        return None
-    try:
-        if pd.isna(value):
-            return None
-    except Exception:
-        pass
-    try:
-        parsed = float(value)
-    except Exception:
-        return None
-    try:
-        if parsed != parsed:
-            return None
-    except Exception:
-        pass
-    return parsed

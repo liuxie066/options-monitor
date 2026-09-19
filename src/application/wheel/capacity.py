@@ -75,18 +75,17 @@ def build_shared_cash_capacity_fact(
     ).strip().lower()
     status = "available"
     reason = None
-    if not account_value or authority_account != account_value:
-        status, reason = "unavailable", "cash_authority_account_mismatch"
-    elif str(authority.get("status") or "").strip().lower() != "available":
-        status, reason = "unavailable", "cash_authority_unavailable"
-    elif not cash_by_currency:
-        status, reason = "unavailable", "cash_by_currency_missing"
-    elif cash_secured is None:
-        status, reason = "unavailable", "cash_secured_positions_unavailable"
-    elif reservations_invalid:
-        status, reason = "unavailable", "wheel_put_intent_reservations_unavailable"
-    elif not isinstance(fx_snapshot, Mapping):
-        status, reason = "unavailable", "fx_snapshot_unavailable"
+    for condition, unavailable_reason in (
+        (not account_value or authority_account != account_value, "cash_authority_account_mismatch"),
+        (str(authority.get("status") or "").strip().lower() != "available", "cash_authority_unavailable"),
+        (not cash_by_currency, "cash_by_currency_missing"),
+        (cash_secured is None, "cash_secured_positions_unavailable"),
+        (reservations_invalid, "wheel_put_intent_reservations_unavailable"),
+        (not isinstance(fx_snapshot, Mapping), "fx_snapshot_unavailable"),
+    ):
+        if condition:
+            status, reason = "unavailable", unavailable_reason
+            break
     cash_authority_hash = str(
         portfolio_context.get("capacity_identity_hash") or ""
     ).strip() or canonical_sha256(authority)

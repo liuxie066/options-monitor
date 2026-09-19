@@ -166,30 +166,20 @@ def _resolve(
 def test_disjoint_direct_anchors_are_canonical_and_order_stable() -> None:
     lifecycle_case = _case("case-a", {"lot-1": 1, "lot-2": 1})
     anchor_2, claim_2 = _direct_anchor(
-        case_id="case-a",
-        evidence_id="evidence-2",
-        source_suffix="deal-2",
-        manifest={"lot-2": 1},
-        received_at_ms=1_700_000_000_300,
+        case_id="case-a", evidence_id="evidence-2", source_suffix="deal-2",
+        manifest={"lot-2": 1}, received_at_ms=1_700_000_000_300,
     )
     anchor_1, claim_1 = _direct_anchor(
-        case_id="case-a",
-        evidence_id="evidence-1",
-        source_suffix="deal-1",
-        manifest={"lot-1": 1},
-        received_at_ms=1_700_000_000_200,
+        case_id="case-a", evidence_id="evidence-1", source_suffix="deal-1",
+        manifest={"lot-1": 1}, received_at_ms=1_700_000_000_200,
     )
     first = _resolve(
-        cases=[lifecycle_case],
-        evidence=[anchor_2, anchor_1],
-        claims=[claim_2, claim_1],
-        lots=[_lot("lot-2"), _lot("lot-1")],
+        cases=[lifecycle_case], evidence=[anchor_2, anchor_1],
+        claims=[claim_2, claim_1], lots=[_lot("lot-2"), _lot("lot-1")],
     )
     second = _resolve(
-        cases=[deepcopy(lifecycle_case)],
-        evidence=[deepcopy(anchor_1), deepcopy(anchor_2)],
-        claims=[deepcopy(claim_1), deepcopy(claim_2)],
-        lots=[_lot("lot-1"), _lot("lot-2")],
+        cases=[deepcopy(lifecycle_case)], evidence=[deepcopy(anchor_1), deepcopy(anchor_2)],
+        claims=[deepcopy(claim_1), deepcopy(claim_2)], lots=[_lot("lot-1"), _lot("lot-2")],
     )
 
     assert first == second
@@ -208,34 +198,23 @@ def test_disjoint_direct_anchors_are_canonical_and_order_stable() -> None:
 def test_incremental_direct_anchor_matches_full_resolver() -> None:
     lifecycle_case = _case("case-a", {"lot-1": 1, "lot-2": 1})
     anchor_1, claim_1 = _direct_anchor(
-        case_id="case-a",
-        evidence_id="evidence-1",
-        source_suffix="deal-1",
-        manifest={"lot-1": 1},
-        received_at_ms=1_700_000_000_200,
+        case_id="case-a", evidence_id="evidence-1", source_suffix="deal-1",
+        manifest={"lot-1": 1}, received_at_ms=1_700_000_000_200,
     )
     anchor_2, claim_2 = _direct_anchor(
-        case_id="case-a",
-        evidence_id="evidence-2",
-        source_suffix="deal-2",
-        manifest={"lot-2": 1},
-        received_at_ms=1_700_000_000_300,
+        case_id="case-a", evidence_id="evidence-2", source_suffix="deal-2",
+        manifest={"lot-2": 1}, received_at_ms=1_700_000_000_300,
     )
     prior = lifecycle_case_resolution(
         _resolve(
-            cases=[lifecycle_case],
-            evidence=[anchor_1],
-            claims=[claim_1],
-            lots=[_lot("lot-1"), _lot("lot-2")],
+            cases=[lifecycle_case], evidence=[anchor_1], claims=[claim_1], lots=[_lot("lot-1"), _lot("lot-2")]
         ),
         case_id="case-a",
     )
     full = lifecycle_case_resolution(
         _resolve(
-            cases=[lifecycle_case],
-            evidence=[anchor_1, anchor_2],
-            claims=[claim_1, claim_2],
-            lots=[_lot("lot-1"), _lot("lot-2")],
+            cases=[lifecycle_case], evidence=[anchor_1, anchor_2],
+            claims=[claim_1, claim_2], lots=[_lot("lot-1"), _lot("lot-2")],
         ),
         case_id="case-a",
     )
@@ -250,18 +229,10 @@ def test_incremental_direct_anchor_matches_full_resolver() -> None:
 
 def test_direct_anchor_without_claim_is_conflict_and_zero_reservation() -> None:
     anchor, _claim = _direct_anchor(
-        case_id="case-a",
-        evidence_id="evidence-1",
-        source_suffix="deal-1",
-        manifest={"lot-1": 1},
-        received_at_ms=1_700_000_000_200,
+        case_id="case-a", evidence_id="evidence-1", source_suffix="deal-1",
+        manifest={"lot-1": 1}, received_at_ms=1_700_000_000_200,
     )
-    resolved = _resolve(
-        cases=[_case("case-a", {"lot-1": 1})],
-        evidence=[anchor],
-        claims=[],
-        lots=[_lot("lot-1")],
-    )
+    resolved = _resolve(cases=[_case("case-a", {"lot-1": 1})], evidence=[anchor], claims=[], lots=[_lot("lot-1")])
 
     resolution = lifecycle_case_resolution(resolved, case_id="case-a")
     assert resolution is not None
@@ -274,11 +245,8 @@ def test_direct_anchor_without_claim_is_conflict_and_zero_reservation() -> None:
 
 def test_account_arbitration_conflicts_whole_component_only() -> None:
     direct, direct_claim = _direct_anchor(
-        case_id="case-direct",
-        evidence_id="evidence-direct",
-        source_suffix="deal-direct",
-        manifest={"lot-shared": 1},
-        received_at_ms=1_700_000_000_200,
+        case_id="case-direct", evidence_id="evidence-direct", source_suffix="deal-direct",
+        manifest={"lot-shared": 1}, received_at_ms=1_700_000_000_200,
     )
     legacy_evidence, legacy_claims, legacy_case = _bridge_anchor(
         case_id="case-bridge",
@@ -286,11 +254,8 @@ def test_account_arbitration_conflicts_whole_component_only() -> None:
         manifest={"lot-shared": 1},
     )
     unrelated, unrelated_claim = _direct_anchor(
-        case_id="case-unrelated",
-        evidence_id="evidence-unrelated",
-        source_suffix="deal-unrelated",
-        manifest={"lot-other": 1},
-        received_at_ms=1_700_000_000_400,
+        case_id="case-unrelated", evidence_id="evidence-unrelated", source_suffix="deal-unrelated",
+        manifest={"lot-other": 1}, received_at_ms=1_700_000_000_400,
     )
     resolved = _resolve(
         cases=[
@@ -299,8 +264,7 @@ def test_account_arbitration_conflicts_whole_component_only() -> None:
             legacy_case,
             _case("case-unrelated", {"lot-other": 1}),
         ],
-        evidence=[direct, *legacy_evidence, unrelated],
-        claims=[direct_claim, *legacy_claims, unrelated_claim],
+        evidence=[direct, *legacy_evidence, unrelated], claims=[direct_claim, *legacy_claims, unrelated_claim],
         lots=[_lot("lot-shared"), _lot("lot-other")],
     )
 
@@ -310,10 +274,7 @@ def test_account_arbitration_conflicts_whole_component_only() -> None:
         assert item["status"] == "conflict"
         assert item["effective_reservations_by_lot"] == {}
         assert item["reason_codes"] == ["reservation_target_overlap"]
-    unrelated_resolution = lifecycle_case_resolution(
-        resolved,
-        case_id="case-unrelated",
-    )
+    unrelated_resolution = lifecycle_case_resolution(resolved, case_id="case-unrelated")
     assert unrelated_resolution is not None
     assert unrelated_resolution["status"] == "direct"
     assert unrelated_resolution["effective_reservations_by_lot"] == {
@@ -323,25 +284,16 @@ def test_account_arbitration_conflicts_whole_component_only() -> None:
 
 def test_generation_token_tracks_potential_competitor_not_unrelated_case() -> None:
     anchor_a, claim_a = _direct_anchor(
-        case_id="case-a",
-        evidence_id="evidence-a",
-        source_suffix="deal-a",
-        manifest={"lot-shared": 1},
-        received_at_ms=1_700_000_000_200,
+        case_id="case-a", evidence_id="evidence-a", source_suffix="deal-a",
+        manifest={"lot-shared": 1}, received_at_ms=1_700_000_000_200,
     )
     anchor_b, claim_b = _direct_anchor(
-        case_id="case-b",
-        evidence_id="evidence-b",
-        source_suffix="deal-b",
-        manifest={"lot-shared": 1},
-        received_at_ms=1_700_000_000_300,
+        case_id="case-b", evidence_id="evidence-b", source_suffix="deal-b",
+        manifest={"lot-shared": 1}, received_at_ms=1_700_000_000_300,
     )
     unrelated, unrelated_claim = _direct_anchor(
-        case_id="case-c",
-        evidence_id="evidence-c",
-        source_suffix="deal-c",
-        manifest={"lot-other": 1},
-        received_at_ms=1_700_000_000_400,
+        case_id="case-c", evidence_id="evidence-c", source_suffix="deal-c",
+        manifest={"lot-other": 1}, received_at_ms=1_700_000_000_400,
     )
     cases = [
         _case("case-a", {"lot-shared": 1}),
@@ -349,37 +301,17 @@ def test_generation_token_tracks_potential_competitor_not_unrelated_case() -> No
         _case("case-c", {"lot-other": 1}),
     ]
     lots = [_lot("lot-shared"), _lot("lot-other")]
-    before = _resolve(
-        cases=cases,
-        evidence=[anchor_a],
-        claims=[claim_a],
-        lots=lots,
-    )
+    before = _resolve(cases=cases, evidence=[anchor_a], claims=[claim_a], lots=lots)
     unrelated_changed = _resolve(
-        cases=cases,
-        evidence=[anchor_a, unrelated],
-        claims=[claim_a, unrelated_claim],
-        lots=lots,
+        cases=cases, evidence=[anchor_a, unrelated], claims=[claim_a, unrelated_claim], lots=lots
     )
     competitor_changed = _resolve(
-        cases=cases,
-        evidence=[anchor_a, anchor_b],
-        claims=[claim_a, claim_b],
-        lots=lots,
+        cases=cases, evidence=[anchor_a, anchor_b], claims=[claim_a, claim_b], lots=lots
     )
 
-    before_token = lifecycle_case_generation_token(
-        before,
-        case_id="case-a",
-    )
-    unrelated_token = lifecycle_case_generation_token(
-        unrelated_changed,
-        case_id="case-a",
-    )
-    competitor_token = lifecycle_case_generation_token(
-        competitor_changed,
-        case_id="case-a",
-    )
+    before_token = lifecycle_case_generation_token(before, case_id="case-a")
+    unrelated_token = lifecycle_case_generation_token(unrelated_changed, case_id="case-a")
+    competitor_token = lifecycle_case_generation_token(competitor_changed, case_id="case-a")
     assert before_token is not None
     assert unrelated_token is not None
     assert competitor_token is not None

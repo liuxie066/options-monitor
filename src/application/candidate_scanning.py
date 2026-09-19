@@ -128,22 +128,21 @@ def _calculation_decision_record(
     opening_status = str(
         normalized_input.get("opening_contract_status") or ""
     ).strip().lower()
-    if opening_status == "ineligible":
-        reject_reason = REJECT_CONTRACT_INELIGIBLE
-    elif opening_status in {"data_unavailable", "market_closed"}:
-        reject_reason = REJECT_EVIDENCE_UNAVAILABLE
-    elif specific_reason == REJECT_EVIDENCE_UNAVAILABLE:
-        reject_reason = REJECT_EVIDENCE_UNAVAILABLE
-    elif specific_reason == REJECT_CONTRACT_INELIGIBLE:
-        reject_reason = REJECT_CONTRACT_INELIGIBLE
-    elif specific_reason in _DEFINITIVE_CONTRACT_EVIDENCE_REASONS:
-        reject_reason = REJECT_CONTRACT_INELIGIBLE
-    elif opening_status != "ready":
-        reject_reason = REJECT_INPUT_INVALID
-    elif specific_reason in _DEFINITIVE_CALCULATION_REASONS:
-        reject_reason = REJECT_POLICY_REJECTED
-    else:
-        reject_reason = REJECT_INPUT_INVALID
+    # Precedence list: the first rule whose condition matches wins, and the
+    # fallback is the general input-invalid reason.
+    reject_reason = REJECT_INPUT_INVALID
+    for matched, candidate_reason in (
+        (opening_status == "ineligible", REJECT_CONTRACT_INELIGIBLE),
+        (opening_status in {"data_unavailable", "market_closed"}, REJECT_EVIDENCE_UNAVAILABLE),
+        (specific_reason == REJECT_EVIDENCE_UNAVAILABLE, REJECT_EVIDENCE_UNAVAILABLE),
+        (specific_reason == REJECT_CONTRACT_INELIGIBLE, REJECT_CONTRACT_INELIGIBLE),
+        (specific_reason in _DEFINITIVE_CONTRACT_EVIDENCE_REASONS, REJECT_CONTRACT_INELIGIBLE),
+        (opening_status != "ready", REJECT_INPUT_INVALID),
+        (specific_reason in _DEFINITIVE_CALCULATION_REASONS, REJECT_POLICY_REJECTED),
+    ):
+        if matched:
+            reject_reason = candidate_reason
+            break
     opening_decision = build_candidate_decision(
         mode=config.mode,
         symbol=contract.symbol,

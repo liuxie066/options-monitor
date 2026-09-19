@@ -3,6 +3,18 @@ from __future__ import annotations
 import pytest
 
 
+def _source_plan_cfg(account: str, settings: dict, source: str) -> dict:
+    return {
+        "accounts": [account],
+        "account_settings": {account: settings},
+        "portfolio": {"source": source},
+    }
+
+
+def _single_futu_cfg(futu: dict) -> dict:
+    return {"accounts": ["lx"], "account_settings": {"lx": {"type": "futu", "futu": futu}}}
+
+
 def test_accounts_from_config_normalizes_and_dedupes() -> None:
     from src.application.account_config import accounts_from_config
 
@@ -126,15 +138,7 @@ def test_resolve_portfolio_source_keeps_auto_for_futu_account() -> None:
 def test_build_account_portfolio_source_plan_for_auto_futu_account() -> None:
     from src.application.account_config import build_account_portfolio_source_plan
 
-    cfg = {
-        "accounts": ["lx"],
-        "account_settings": {
-            "lx": {"type": "futu", "holdings_account": "LX"},
-        },
-        "portfolio": {
-            "source": "auto",
-        },
-    }
+    cfg = _source_plan_cfg("lx", {"type": "futu", "holdings_account": "LX"}, "auto")
 
     out = build_account_portfolio_source_plan(cfg, account="lx")
     assert out.account_type == "futu"
@@ -146,15 +150,7 @@ def test_build_account_portfolio_source_plan_for_auto_futu_account() -> None:
 def test_build_account_portfolio_source_plan_for_external_holdings_account() -> None:
     from src.application.account_config import build_account_portfolio_source_plan
 
-    cfg = {
-        "accounts": ["ext1"],
-        "account_settings": {
-            "ext1": {"type": "external_holdings", "holdings_account": "Feishu EXT"},
-        },
-        "portfolio": {
-            "source": "futu",
-        },
-    }
+    cfg = _source_plan_cfg("ext1", {"type": "external_holdings", "holdings_account": "Feishu EXT"}, "futu")
 
     out = build_account_portfolio_source_plan(cfg, account="ext1")
     assert out.account_type == "external_holdings"
@@ -209,18 +205,7 @@ def test_build_account_runtime_plan_does_not_truncate_non_integer_futu_ports() -
     from src.application.account_config import build_account_runtime_plan
 
     for value in (11111.9, True, "11111.0", " 11111"):
-        cfg = {
-            "accounts": ["lx"],
-            "account_settings": {
-                "lx": {
-                    "type": "futu",
-                    "futu": {
-                        "host": "127.0.0.1",
-                        "port": value,
-                    },
-                }
-            },
-        }
+        cfg = _single_futu_cfg({"host": "127.0.0.1", "port": value})
 
         assert build_account_runtime_plan(cfg, account="lx").futu_port is None
 

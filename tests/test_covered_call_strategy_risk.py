@@ -5,6 +5,12 @@ from pathlib import Path
 import pandas as pd
 
 from candidate_evidence_helpers import earnings_evidence
+from src.application.covered_call_strategy_risk import (
+    enrich_and_filter_covered_call_underwriting,
+    evaluate_covered_call_underwriting_row,
+    resolve_covered_call_underwriting_config,
+)
+from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
 
 def _earnings_evidence(*, event_date: str | None = None) -> dict:
@@ -43,18 +49,27 @@ def _candidate(**overrides):
     return row
 
 
-def test_covered_call_underwriting_enrichment_accepts_and_adds_pricing_fields(tmp_path: Path) -> None:
-    from src.application.covered_call_strategy_risk import enrich_and_filter_covered_call_underwriting
-    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+def _converter(**overrides: float) -> CurrencyConverter:
+    return CurrencyConverter(ExchangeRates(**overrides))
 
-    df = pd.DataFrame([_candidate()])
 
-    filtered = enrich_and_filter_covered_call_underwriting(
+def _enrich_underwriting(df, *, sell_call_cfg: dict, **overrides):
+    return enrich_and_filter_covered_call_underwriting(
         df_labeled=df,
         symbol="NVDA",
-        sell_call_cfg={"strategy": "insurance_underwriting", "min_strike": 120.0},
+        sell_call_cfg=sell_call_cfg,
         portfolio_ctx=None,
-        exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
+        **overrides,
+    )
+
+
+def test_covered_call_underwriting_enrichment_accepts_and_adds_pricing_fields(tmp_path: Path) -> None:
+    df = pd.DataFrame([_candidate()])
+
+    filtered = _enrich_underwriting(
+        df,
+        sell_call_cfg={"strategy": "insurance_underwriting", "min_strike": 120.0},
+        exchange_rate_converter=_converter(usd_per_cny=0.14),
     )
 
     assert len(filtered) == 1
@@ -70,11 +85,6 @@ def test_covered_call_underwriting_enrichment_accepts_and_adds_pricing_fields(tm
 
 
 def test_covered_call_blocks_near_expiry_but_retains_distant_earnings() -> None:
-    from src.application.covered_call_strategy_risk import (
-        evaluate_covered_call_underwriting_row,
-        resolve_covered_call_underwriting_config,
-    )
-
     cfg = resolve_covered_call_underwriting_config(
         {"strategy": "insurance_underwriting"}
     )
@@ -99,21 +109,16 @@ def test_covered_call_blocks_near_expiry_but_retains_distant_earnings() -> None:
 
 
 def test_covered_call_underwriting_does_not_reject_concentration_or_gap_up_budget(tmp_path: Path) -> None:
-    from src.application.covered_call_strategy_risk import enrich_and_filter_covered_call_underwriting
-    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
-
     df = pd.DataFrame([_candidate(strike=120.0)])
 
-    filtered = enrich_and_filter_covered_call_underwriting(
-        df_labeled=df,
-        symbol="NVDA",
+    filtered = _enrich_underwriting(
+        df,
         sell_call_cfg={
             "strategy": "insurance_underwriting",
             "min_strike": 100.0,
             "concentration": {"max_single_trade_nav_pct": 0.0001},
         },
-        portfolio_ctx=None,
-        exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
+        exchange_rate_converter=_converter(usd_per_cny=0.14),
     )
 
     assert len(filtered) == 1
@@ -121,31 +126,21 @@ def test_covered_call_underwriting_does_not_reject_concentration_or_gap_up_budge
 
 
 def test_covered_call_underwriting_rejects_return_below_min(tmp_path: Path) -> None:
-    from src.application.covered_call_strategy_risk import enrich_and_filter_covered_call_underwriting
-    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
-
     df = pd.DataFrame([_candidate(annualized_net_premium_return=0.08)])
 
-    filtered = enrich_and_filter_covered_call_underwriting(
-        df_labeled=df,
-        symbol="NVDA",
+    filtered = _enrich_underwriting(
+        df,
         sell_call_cfg={"strategy": "insurance_underwriting", "min_annualized_net_premium_return": 0.10},
-        portfolio_ctx=None,
-        exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
+        exchange_rate_converter=_converter(usd_per_cny=0.14),
     )
 
     assert filtered.empty
 
 
 def test_covered_call_underwriting_emits_all_decisions_and_resolved_policy() -> None:
-    from src.application.covered_call_strategy_risk import (
-        enrich_and_filter_covered_call_underwriting,
-    )
-    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
-
     captured: list[dict] = []
-    filtered = enrich_and_filter_covered_call_underwriting(
-        df_labeled=pd.DataFrame(
+    filtered = _enrich_underwriting(
+        pd.DataFrame(
             [
                 _candidate(contract_symbol="ACCEPTED"),
                 _candidate(
@@ -154,15 +149,11 @@ def test_covered_call_underwriting_emits_all_decisions_and_resolved_policy() -> 
                 ),
             ]
         ),
-        symbol="NVDA",
         sell_call_cfg={
             "strategy": "insurance_underwriting",
             "min_annualized_net_premium_return": 0.10,
         },
-        portfolio_ctx=None,
-        exchange_rate_converter=CurrencyConverter(
-            ExchangeRates(usd_per_cny=0.14)
-        ),
+        exchange_rate_converter=_converter(usd_per_cny=0.14),
         decision_sink_fn=captured.extend,
     )
 
@@ -184,26 +175,18 @@ def test_covered_call_underwriting_emits_all_decisions_and_resolved_policy() -> 
 
 
 def test_covered_call_underwriting_rejects_when_income_fx_is_missing(tmp_path: Path) -> None:
-    from src.application.covered_call_strategy_risk import enrich_and_filter_covered_call_underwriting
-    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
-
     df = pd.DataFrame([_candidate()])
 
-    filtered = enrich_and_filter_covered_call_underwriting(
-        df_labeled=df,
-        symbol="NVDA",
+    filtered = _enrich_underwriting(
+        df,
         sell_call_cfg={"strategy": "insurance_underwriting"},
-        portfolio_ctx=None,
-        exchange_rate_converter=CurrencyConverter(ExchangeRates()),
+        exchange_rate_converter=_converter(),
     )
 
     assert filtered.empty
 
 
 def test_covered_call_underwriting_ranking_prefers_upside_margin_and_deduplicates_income(tmp_path: Path) -> None:
-    from src.application.covered_call_strategy_risk import enrich_and_filter_covered_call_underwriting
-    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
-
     df = pd.DataFrame(
         [
             _candidate(contract_symbol="LOW_UPSIDE", strike=125.0, spot=110.0, net_income=210.0),
@@ -212,16 +195,14 @@ def test_covered_call_underwriting_ranking_prefers_upside_margin_and_deduplicate
         ]
     )
 
-    filtered = enrich_and_filter_covered_call_underwriting(
-        df_labeled=df,
-        symbol="NVDA",
+    filtered = _enrich_underwriting(
+        df,
         sell_call_cfg={
             "strategy": "insurance_underwriting",
             "min_strike_cost_multiplier": 1.2,
             "min_net_income": 200.0,
         },
-        portfolio_ctx=None,
-        exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
+        exchange_rate_converter=_converter(usd_per_cny=0.14),
     )
 
     assert list(filtered["contract_symbol"]) == ["HIGH_UPSIDE", "RICH", "LOW_UPSIDE"]

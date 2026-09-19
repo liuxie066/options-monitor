@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from src.application.agent_tool_config import repo_base, resolve_runtime_config_path
-from src.application.agent_tool_contracts import AgentToolError, build_response, mask_path
+from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.assistant.contracts import AssistantRequest, ControlCommand
 from src.application.assistant.llm_model_profiles import (
     configured_model_profiles_payload,
@@ -13,9 +13,9 @@ from src.application.assistant.llm_model_profiles import (
     switch_active_model_profile,
 )
 from src.application.assistant.operation_lifecycle import (
-    build_cancelled_operation_response,
-    build_previewed_operation_response,
-    confirm_previewed_operation_or_raise,
+    cancel_pending_operation_or_raise,
+    confirm_and_apply_operation,
+    preview_and_save_operation,
     resolve_pending_operation_or_raise,
 )
 from src.application.assistant.operation_policy import enforce_model_write_allowed
@@ -37,6 +37,9 @@ LIST_INTENTS = frozenset({"model_list"})
 PREVIEW_INTENTS = frozenset({"model_use"})
 CONFIRM_INTENTS = frozenset({"model_confirm", "model_cancel"})
 MODEL_OPERATION_TYPES = PREVIEW_INTENTS
+_OPERATION_SUBJECT = "模型切换"
+_EXPIRED_MESSAGE = "这条模型切换确认已过期，未写入配置。"
+_EXPIRED_HINT = "请重新发送 /model use <name> 生成新的预览。"
 
 
 def handle_model_operation(
@@ -96,92 +99,45 @@ def _preview_and_save(
     store: InboundOperationStore,
     ttl_seconds: int,
 ) -> dict[str, Any]:
-    preview = _preview_operation(payload)
-    return build_previewed_operation_response(
-        tool_name="inbound.model",
-        operation_id=command_id,
+    return preview_and_save_operation(
+        payload,
         request=request,
+        command_id=command_id,
         store=store,
-        payload=payload,
-        preview=preview,
         ttl_seconds=ttl_seconds,
-        response_text=lambda operation: render_model_response(
-            status="previewed",
-            operation_id=command_id,
-            payload=payload,
-            preview=preview,
-            expires_at=str(operation.get("expires_at") or ""),
-        ),
+        tool_name="inbound.model",
+        preview_operation=_preview_operation,
+        render=render_model_response,
     )
 
 
 def _confirm_operation(*, operation_id: str | None, request: AssistantRequest, store: InboundOperationStore) -> dict[str, Any]:
-    operation_id, operation, operation_resolution = _resolve_model_operation(
+    return confirm_and_apply_operation(
         operation_id=operation_id,
         request=request,
         store=store,
-        allow_expired=False,
-        action="确认",
-    )
-    confirmed = confirm_previewed_operation_or_raise(
-        operation_id=operation_id,
-        operation=operation,
-        operation_resolution=operation_resolution,
-        store=store,
-        subject="模型切换",
-        expired_message="这条模型切换确认已过期，未写入配置。",
-        expired_hint="请重新发送 /model use <name> 生成新的预览。",
-        hash_mismatch_message="pending model operation payload hash mismatch; refusing to write config",
-    )
-    operation_id = confirmed.operation_id
-    operation_resolution = confirmed.operation_resolution
-    payload = confirmed.payload
-    try:
-        preview = _preview_operation(payload)
-        result = _apply_operation(payload)
-    except AgentToolError as exc:
-        store.mark_failed(operation_id, result={"operation_id": operation_id, "status": "failed", "error": exc.code, "message": exc.message})
-        raise
-    except Exception as exc:
-        failed = {"operation_id": operation_id, "status": "failed", "error": type(exc).__name__, "message": str(exc)}
-        store.mark_failed(operation_id, result=failed)
-        raise AgentToolError(code="INTERNAL_ERROR", message="model switch failed before config write could be confirmed", details=failed) from exc
-    store.mark_applied(operation_id, result=result)
-    text = render_model_response(status="applied", operation_id=operation_id, payload=payload, preview=preview, result=result)
-    return build_response(
+        resolve=_resolve_model_operation,
         tool_name="inbound.model",
-        ok=True,
-        data={
-            "operation_id": operation_id,
-            **operation_resolution,
-            "operation_type": payload["operation_type"],
-            "status": "applied",
-            "payload_hash": confirmed.payload_hash,
-            "payload": payload,
-            "preview": preview,
-            "result": result,
-            "response_text": text,
-        },
-        meta={"audit_db": mask_path(store.path)},
+        subject=_OPERATION_SUBJECT,
+        expired_message=_EXPIRED_MESSAGE,
+        expired_hint=_EXPIRED_HINT,
+        hash_mismatch_message="pending model operation payload hash mismatch; refusing to write config",
+        apply_failure_message="model switch failed before config write could be confirmed",
+        preview_operation=_preview_operation,
+        apply_operation=_apply_operation,
+        render=render_model_response,
     )
 
 
 def _cancel_operation(*, operation_id: str | None, request: AssistantRequest, store: InboundOperationStore) -> dict[str, Any]:
-    operation_id, operation, operation_resolution = _resolve_model_operation(
+    return cancel_pending_operation_or_raise(
         operation_id=operation_id,
         request=request,
         store=store,
-        allow_expired=True,
-        action="取消",
-    )
-    text = f"模型切换已取消，未写入配置。\ncommand_id: {operation_id}"
-    return build_cancelled_operation_response(
+        resolve=_resolve_model_operation,
         tool_name="inbound.model",
-        operation_id=operation_id,
-        operation=operation,
-        operation_resolution=operation_resolution,
-        store=store,
-        response_text=text,
+        subject=_OPERATION_SUBJECT,
+        cancel_suffix="未写入配置",
     )
 
 
@@ -200,9 +156,9 @@ def _resolve_model_operation(
         operation_types=MODEL_OPERATION_TYPES,
         allow_expired=allow_expired,
         action=action,
-        subject="模型切换",
-        expired_message="这条模型切换确认已过期，未写入配置。",
-        expired_hint="请重新发送 /model use <name> 生成新的预览。",
+        subject=_OPERATION_SUBJECT,
+        expired_message=_EXPIRED_MESSAGE,
+        expired_hint=_EXPIRED_HINT,
         none_hint="请先发送 /model use <name> 生成预览。",
         wrong_family_message="这不是模型切换，不能用确认模型/取消模型处理。",
         not_found_message="找不到待确认的模型切换。",

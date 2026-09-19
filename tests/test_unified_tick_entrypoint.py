@@ -197,8 +197,7 @@ def test_market_session_and_opend_alert_use_single_source_of_truth(tmp_path: Pat
     direct_out = select_markets_to_run(now_utc, cfg, "auto")
     assert direct_out == []
 
-    td = tmp_path
-    base = Path(td)
+    base = tmp_path
     direct_first = should_send_opend_alert(base, "OPEND_RATE_LIMIT", cooldown_sec=600)
     direct_second = should_send_opend_alert(base, "OPEND_RATE_LIMIT", cooldown_sec=600)
     assert direct_first is True
@@ -239,8 +238,7 @@ def test_ensure_runtime_canonical_config_rejects_derived_configs() -> None:
 def test_ensure_runtime_canonical_config_requires_sibling_external_when_present(tmp_path: Path) -> None:
     from domain.domain import ensure_runtime_canonical_config
 
-    td = tmp_path
-    root = Path(td)
+    root = tmp_path
     repo = root / "options-monitor-prod"
     repo.mkdir()
     local_cfg = repo / "config.hk.json"
@@ -275,8 +273,7 @@ def test_ensure_runtime_canonical_config_requires_sibling_external_when_present(
 def test_ensure_runtime_canonical_config_allows_repo_local_when_no_sibling_external_exists(tmp_path: Path) -> None:
     from domain.domain import ensure_runtime_canonical_config
 
-    td = tmp_path
-    root = Path(td)
+    root = tmp_path
     repo = root / "options-monitor-prod"
     repo.mkdir()
     local_cfg = repo / "config.hk.json"

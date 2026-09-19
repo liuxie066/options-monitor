@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
+from src.infrastructure.io_utils import utc_now as utc_now_iso
 
 
 BOT_SAFE_ERROR_CODES = {
@@ -44,10 +45,6 @@ def safe_error_code(value: Any, *, default: str) -> str:
 
 def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid4().hex[:12]}"
-
-
-def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 @dataclass(frozen=True)

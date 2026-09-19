@@ -265,7 +265,10 @@ ledger: it derives bounded dimensions from aggregate baseline metadata, creates
 fresh temporary SQLite ledgers, and atomically publishes `fixture-manifest.json`,
 `timing.json`, `cpu-profile.json`, `allocation-profile.json`, and
 `decision.json`, plus `phase-3a-acceptance.json`. Omit `--baseline` to use
-deterministic safe defaults.
+deterministic safe defaults. Synthetic fixture construction, distribution
+statistics, and the shared schema constants live in
+`scripts/benchmark_support.py`, which this runner and
+`scripts/benchmark_current_decision_projection_slice2.py` both import.
 
 Timing uses 5 warmups and 30 measured repetitions by default. Lower values are
 allowed for plumbing checks but are labeled `non_acceptance_smoke`. `cProfile`

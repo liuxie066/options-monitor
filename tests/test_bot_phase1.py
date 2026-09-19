@@ -68,6 +68,86 @@ def _channel_session_id() -> str:
     return derive_pi_session_id("test", "test-user", "test-conversation", "key:us")
 
 
+def _model_config(**overrides: object) -> str:
+    """Serialize one model config.
+
+    The defaults are the ollama config this module repeats most often, so a call
+    site spells out only the fields that differ from it.
+    """
+    base = {
+        "provider": "ollama",
+        "model": "om-test",
+        "context_window_tokens": 24_000,
+    }
+    base.update(overrides)
+    return json.dumps(base)
+
+
+def _run_prepared(prepared, **overrides: object):
+    """Run one prepared contract with the Pi-ready assistant turn this module repeats.
+
+    A call site that deliberately has no turn passes ``model_turn_json=None``.
+    """
+    base: dict[str, object] = {"model_turn_json": json.dumps({"text": "Pi runtime ready."})}
+    base.update(overrides)
+    return local_harness.run_prepared_contract(prepared, **base)
+
+
+def _channel_request(
+    monkeypatch,
+    tmp_path,
+    example_config_path,
+    user_response: str = "结论：请明确要修改哪条预览。",
+    **overrides: object,
+):
+    """Run one channel request through a stubbed model gate.
+
+    The defaults are the pending-Control snapshot request this module repeats most
+    often, so a call site spells out only the fields that differ from it. Returns
+    the answered result and the messages the contract handed to the model.
+    """
+    captured: dict[str, object] = {}
+
+    def fake_run(prepared, **_kwargs):  # type: ignore[no-untyped-def]
+        captured["messages"] = prepared.input["messages"]
+        return AppResult(status="answered", user_response=user_response)
+
+    monkeypatch.setattr(channel_facade, "_channel_model_gate", lambda _path: None)
+    monkeypatch.setattr(channel_facade, "run_prepared_contract", fake_run)
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(example_config_path.parent))
+    base: dict[str, object] = {
+        "user_message": "改成 1.2.400",
+        "config_key": "us",
+        "assistant_config_path": str(tmp_path / "assistant.json"),
+        "channel": "wechat",
+        "sender_id": "ou_1",
+        "conversation_id": "conversation-1",
+        "host_db_path": str(tmp_path / "bot.sqlite3"),
+        "control_context": (
+            {
+                "operation_id": "in_upgrade",
+                "operation_type": "upgrade_now",
+                "status": "previewed",
+                "summary": "升级到最新版",
+            },
+        ),
+    }
+    base.update(overrides)
+    result = channel_facade.run_channel_request(**base)
+    return result, captured["messages"]
+
+
+def _build_payload(name: str, arguments: dict, **fixed_input: object):
+    """Build one Bot tool payload.
+
+    Keyword arguments are the host-fixed input, so a call site spells out exactly
+    the fixed fields it sets and nothing is added for it.
+    """
+    base: dict[str, object] = {}
+    base.update(fixed_input)
+    return bot_tools.build_tool_payload(name, arguments, fixed_input=base)
+
+
 def test_service_is_thin_and_uses_one_general_scene() -> None:
     for text in (
         "7月收益",
@@ -285,35 +365,21 @@ def test_event_cursor_only_input_selects_events_and_enforces_its_limit() -> None
     )
     assert any(error.validator == "maximum" for error in schema_errors)
 
-    payload, error = bot_tools.build_tool_payload(
-        "option_positions_read",
-        {"cursor": "opaque-cursor", "limit": 20},
-        fixed_input={"config_key": "us"},
-    )
+    payload, error = _build_payload("option_positions_read", {"cursor": "opaque-cursor", "limit": 20}, config_key="us")
     assert error is None
     assert payload is not None
     assert payload["action"] == "events"
 
-    rejected, error = bot_tools.build_tool_payload(
-        "option_positions_read",
-        {"action": "events", "limit": 21},
-        fixed_input={"config_key": "us"},
-    )
+    rejected, error = _build_payload("option_positions_read", {"action": "events", "limit": 21}, config_key="us")
     assert rejected is None
     assert error == "单次最多查询 20 条交易事件，请将数量设为 1 到 20。"
 
-    listed, error = bot_tools.build_tool_payload(
-        "option_positions_read",
-        {"action": "list", "limit": 500},
-        fixed_input={"config_key": "us"},
-    )
+    listed, error = _build_payload("option_positions_read", {"action": "list", "limit": 500}, config_key="us")
     assert error is None
     assert listed is not None and listed["limit"] == 500
 
-    rejected, error = bot_tools.build_tool_payload(
-        "option_positions_read",
-        {"action": "events", "query": {"account": "lx"}},
-        fixed_input={"config_key": "us"},
+    rejected, error = _build_payload(
+        "option_positions_read", {"action": "events", "query": {"account": "lx"}}, config_key="us"
     )
     assert rejected is None
     assert error == "unsupported fields for action=events: query"
@@ -355,12 +421,8 @@ def test_agent_tool_view_hides_paths_and_exposes_defaults() -> None:
     assert "opend_host" in external_positions.input_json_schema()["properties"]
 @pytest.mark.parametrize("period", ["mtd", "ytd"])
 def test_option_performance_payload_accepts_mtd_ytd_cutoff(period: str) -> None:
-    payload, error = bot_tools.build_tool_payload(
-        "option_performance_report",
-        {
-            "period": period,
-            "as_of_date": "2026-07-23",
-        },
+    payload, error = _build_payload(
+        "option_performance_report", {"period": period, "as_of_date": "2026-07-23"}
     )
 
     assert error is None
@@ -372,33 +434,27 @@ def test_option_performance_payload_accepts_mtd_ytd_cutoff(period: str) -> None:
 
 
 def test_option_performance_payload_accepts_natural_period_fields_but_not_rows() -> None:
-    payload, error = bot_tools.build_tool_payload(
-        "option_performance_report",
-        {"period": "month", "month": "2026-07"},
-    )
+    payload, error = _build_payload("option_performance_report", {"period": "month", "month": "2026-07"})
 
     assert error is None
     assert payload is not None
     assert payload["period"] == "month"
     assert payload["month"] == "2026-07"
 
-    rejected, rejected_error = bot_tools.build_tool_payload(
-        "option_performance_report",
-        {"period": "month", "month": "2026-07", "include_rows": True},
+    rejected, rejected_error = _build_payload(
+        "option_performance_report", {"period": "month", "month": "2026-07", "include_rows": True}
     )
     assert rejected is None
     assert rejected_error == "unsupported Bot input fields for option_performance_report: include_rows"
 
-    invalid_payload, invalid_error = bot_tools.build_tool_payload(
-        "option_performance_report",
-        {"period": "mtd", "account": ""},
+    invalid_payload, invalid_error = _build_payload(
+        "option_performance_report", {"period": "mtd", "account": ""}
     )
     assert invalid_payload is None
     assert invalid_error == "account must be non-empty when provided"
 
-    explicit_null, null_error = bot_tools.build_tool_payload(
-        "option_performance_report",
-        {"period": "mtd", "config_path": None},
+    explicit_null, null_error = _build_payload(
+        "option_performance_report", {"period": "mtd", "config_path": None}
     )
     assert explicit_null is None
     assert null_error == (
@@ -411,21 +467,14 @@ def test_option_performance_payload_accepts_natural_period_fields_but_not_rows()
     ["log_file", "runs_root", "logs_root", "profile_path", "run_dir"],
 )
 def test_bot_rejects_hidden_runtime_log_path_inputs(hidden_input: str) -> None:
-    payload, error = bot_tools.build_tool_payload(
-        "runtime_logs",
-        {"run_id": "run-x", hidden_input: "/private/secret.txt"},
-    )
+    payload, error = _build_payload("runtime_logs", {"run_id": "run-x", hidden_input: "/private/secret.txt"})
 
     assert payload is None
     assert error == f"unsupported Bot input fields for runtime_logs: {hidden_input}"
 
 
 def test_bot_runtime_logs_binds_config_but_rejects_arbitrary_log_roots() -> None:
-    payload, error = bot_tools.build_tool_payload(
-        "runtime_logs",
-        {"run_id": "run-x", "limit": 5},
-        fixed_input={"config_key": "us"},
-    )
+    payload, error = _build_payload("runtime_logs", {"run_id": "run-x", "limit": 5}, config_key="us")
 
     assert error is None
     assert payload == {"action": "scoped", "run_id": "run-x", "limit": 5, "config_key": "us"}
@@ -451,14 +500,10 @@ def test_bot_tool_description_never_exposes_host_owned_paths() -> None:
 
 
 def test_bot_binds_operation_diagnostics_to_host_authenticated_scope() -> None:
-    payload, error = bot_tools.build_tool_payload(
-        "operation_timeline",
-        {"operation_id": "op_1", "limit": 2},
-        fixed_input={
-            "authenticated_channel": "wechat",
-            "authenticated_sender_id": "sender-a",
-            "authenticated_conversation_id": "conversation-a",
-        },
+    payload, error = _build_payload(
+        "operation_timeline", {"operation_id": "op_1", "limit": 2},
+        authenticated_channel="wechat", authenticated_sender_id="sender-a",
+        authenticated_conversation_id="conversation-a",
     )
 
     assert error is None
@@ -469,10 +514,8 @@ def test_bot_binds_operation_diagnostics_to_host_authenticated_scope() -> None:
         "authenticated_sender_id": "sender-a",
         "authenticated_conversation_id": "conversation-a",
     }
-    rejected, rejected_error = bot_tools.build_tool_payload(
-        "operation_timeline",
-        {"sender_id": "sender-b"},
-        fixed_input={"authenticated_sender_id": "sender-a"},
+    rejected, rejected_error = _build_payload(
+        "operation_timeline", {"sender_id": "sender-b"}, authenticated_sender_id="sender-a"
     )
     assert rejected is None
     assert rejected_error == "unsupported Bot input fields for operation_timeline: sender_id"
@@ -480,14 +523,9 @@ def test_bot_binds_operation_diagnostics_to_host_authenticated_scope() -> None:
 
 @pytest.mark.parametrize("marker", ["all", " ALL ", ":all", "__omit__"])
 def test_option_performance_payload_omits_hosted_all_scope_markers(marker: str) -> None:
-    payload, error = bot_tools.build_tool_payload(
-        "option_performance_report",
-        {
-            "period": "mtd",
-            "account": marker,
-            "broker": marker,
-        },
-        fixed_input={"config_key": "us"},
+    payload, error = _build_payload(
+        "option_performance_report", {"period": "mtd", "account": marker, "broker": marker},
+        config_key="us",
     )
 
     assert error is None
@@ -499,14 +537,10 @@ def test_option_performance_payload_omits_hosted_all_scope_markers(marker: str) 
 
 
 def test_option_performance_payload_preserves_real_scope_filters(example_config_path) -> None:
-    payload, error = bot_tools.build_tool_payload(
+    payload, error = _build_payload(
         "option_performance_report",
-        {
-            "period": "mtd",
-            "account": " lx ",
-            "broker": " 富途 ",
-        },
-        fixed_input={"config_path": str(example_config_path)},
+        {"period": "mtd", "account": " lx ", "broker": " 富途 "},
+        config_path=str(example_config_path),
     )
 
     assert error is None
@@ -574,18 +608,6 @@ def test_option_period_tool_parameters_explain_valid_combinations() -> None:
     assert "only when period is mtd or ytd" in report_properties["as_of_date"]["description"]
 
 
-
-
-
-
-
-
-
-
-
-
-
-
 def test_eval_model_turn_skips_implicit_assistant_toolset_loading(monkeypatch) -> None:
     prepared = prepare_contract(_request("检查入口", environment="eval"), reference_year=2026)
     assert not isinstance(prepared, AppResult)
@@ -601,10 +623,7 @@ def test_eval_model_turn_skips_implicit_assistant_toolset_loading(monkeypatch) -
     monkeypatch.setattr(local_harness, "load_assistant_bot_settings", unexpected_load)
     monkeypatch.setattr(local_harness, "run_contract", fake_run)
 
-    result = local_harness.run_prepared_contract(
-        prepared,
-        model_turn_json=json.dumps({"text": "Pi runtime ready."}),
-    )
+    result = _run_prepared(prepared)
 
     assert result.status == "answered"
     assert "enabled_optional_toolsets" not in captured
@@ -619,15 +638,8 @@ def test_ordinary_run_still_rejects_invalid_implicit_assistant_toolsets(monkeypa
         return None, "eager", "invalid_assistant_config"
 
     monkeypatch.setattr(local_harness, "load_assistant_bot_settings", invalid_load)
-    result = local_harness.run_prepared_contract(
-        _contract("检查入口"),
-        model_config_json=json.dumps(
-            {
-                "provider": "ollama",
-                "model": "om-test",
-                "context_window_tokens": 24_000,
-            }
-        ),
+    result = _run_prepared(
+        _contract("检查入口"), model_turn_json=None, model_config_json=_model_config()
     )
 
     assert calls == 1
@@ -647,11 +659,7 @@ def test_eval_model_turn_with_explicit_assistant_config_fails_closed(monkeypatch
     prepared = prepare_contract(_request("检查入口", environment="eval"), reference_year=2026)
     assert not isinstance(prepared, AppResult)
 
-    result = local_harness.run_prepared_contract(
-        prepared,
-        assistant_config_path=str(config_path),
-        model_turn_json=json.dumps({"text": "Pi runtime ready."}),
-    )
+    result = _run_prepared(prepared, assistant_config_path=str(config_path))
 
     assert calls == [str(config_path)]
     assert result.error == {
@@ -668,86 +676,12 @@ def test_eval_model_turn_with_model_config_still_fails_closed(monkeypatch) -> No
     prepared = prepare_contract(_request("检查入口", environment="eval"), reference_year=2026)
     assert not isinstance(prepared, AppResult)
 
-    result = local_harness.run_prepared_contract(
-        prepared,
-        model_config_json=json.dumps(
-            {
-                "provider": "ollama",
-                "model": "om-test",
-                "context_window_tokens": 24_000,
-            }
-        ),
-        model_turn_json=json.dumps({"text": "Pi runtime ready."}),
-    )
+    result = _run_prepared(prepared, model_config_json=_model_config())
 
     assert result.error == {
         "code": "MODEL_CONFIG_ERROR",
         "reason": "model_turn_conflicts_with_model_config",
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def test_every_catalog_preview_capability_uses_the_generic_control_handoff() -> None:
@@ -770,10 +704,6 @@ def test_every_catalog_preview_capability_uses_the_generic_control_handoff() -> 
         assert request is not None
         assert request["intent_name"] == spec["intent_name"]
         assert request["source"] == "bot_control_preview"
-
-
-
-
 
 
 @pytest.mark.parametrize("intent_name", ["upgrade_confirm", "manual_trade_confirm", "symbol_cancel"])
@@ -800,35 +730,9 @@ def test_host_preserves_conversation_context() -> None:
 
 
 def test_channel_injects_only_current_authoritative_pending_snapshot(monkeypatch, tmp_path, example_config_path) -> None:
-    captured: dict[str, object] = {}
-    monkeypatch.setattr(channel_facade, "_channel_model_gate", lambda _path: None)
-
-    def fake_run(prepared, **_kwargs):  # type: ignore[no-untyped-def]
-        captured["messages"] = prepared.input["messages"]
-        return AppResult(status="answered", user_response="结论：请明确要修改哪条预览。")
-
-    monkeypatch.setattr(channel_facade, "run_prepared_contract", fake_run)
-    monkeypatch.setenv("OM_RUNTIME_ROOT", str(example_config_path.parent))
-    result = channel_facade.run_channel_request(
-        user_message="改成 1.2.400",
-        config_key="us",
-        assistant_config_path=str(tmp_path / "assistant.json"),
-        channel="wechat",
-        sender_id="ou_1",
-        conversation_id="conversation-1",
-        host_db_path=str(tmp_path / "bot.sqlite3"),
-        control_context=(
-            {
-                "operation_id": "in_upgrade",
-                "operation_type": "upgrade_now",
-                "status": "previewed",
-                "summary": "升级到最新版",
-            },
-        ),
-    )
+    result, messages = _channel_request(monkeypatch, tmp_path, example_config_path)
 
     assert result.status == "answered"
-    messages = captured["messages"]
     assert isinstance(messages, list)
     assert len(messages) == 2
     assert messages[-2]["role"] == "system"
@@ -838,35 +742,18 @@ def test_channel_injects_only_current_authoritative_pending_snapshot(monkeypatch
 
 
 def test_channel_injects_empty_pending_snapshot_to_override_stale_history(monkeypatch, tmp_path, example_config_path) -> None:
-    captured: dict[str, object] = {}
-    monkeypatch.setattr(channel_facade, "_channel_model_gate", lambda _path: None)
-
-    def fake_run(prepared, **_kwargs):  # type: ignore[no-untyped-def]
-        captured["messages"] = prepared.input["messages"]
-        return AppResult(status="answered", user_response="结论：当前没有待确认操作。")
-
-    monkeypatch.setattr(channel_facade, "run_prepared_contract", fake_run)
-    monkeypatch.setenv("OM_RUNTIME_ROOT", str(example_config_path.parent))
-    result = channel_facade.run_channel_request(
+    result, messages = _channel_request(
+        monkeypatch, tmp_path, example_config_path,
+        "结论：当前没有待确认操作。",
         user_message="刚才那个还在吗",
-        config_key="us",
-        assistant_config_path=str(tmp_path / "assistant.json"),
-        channel="wechat",
-        sender_id="ou_1",
         conversation_id="conversation-empty",
-        host_db_path=str(tmp_path / "bot.sqlite3"),
         control_context=(),
     )
 
     assert result.status == "answered"
-    messages = captured["messages"]
     assert isinstance(messages, list)
     assert len(messages) == 2
     assert "pending_operations=[]" in messages[-2]["content"]
-
-
-
-
 
 
 def test_host_store_session_run_lease_is_cross_instance(tmp_path) -> None:

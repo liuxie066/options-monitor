@@ -19,6 +19,14 @@ from tests.service_deploy_test_support import (
     _fake_git_cache_materialize,
     _fake_pi_runtime_prepare,
     _fake_release_target_query,
+    _fake_upgrade_release_runner,
+    _fake_legacy_config_build,
+    _write_cloned_release_with_server_deps,
+    _write_cloned_release_with_configs,
+    _render_bundle,
+    _drift_at,
+    _drift_roots,
+    _fake_systemd_query_runner,
     _legacy_credential_migration_fixture,
     _credential_migration_runner,
     _stub_pi_storage_readiness,
@@ -49,18 +57,10 @@ def test_render_systemd_bundle_can_own_feishu_agent_credential_assets(
     runtime_env = tmp_path / "run" / "options-monitor-feishu-agent.env"
     repo.mkdir()
 
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        accounts=["lx"],
-        markets=["us"],
-        include_opend=True,
-        include_feishu_agent_credential=True,
-        feishu_agent_credential_helper_path=helper,
-        feishu_agent_credential_store=agent_store,
-        feishu_holdings_credential_store=holdings_store,
-        feishu_agent_credential_env_file=runtime_env,
+    bundle = _render_bundle(
+        repo, runtime, accounts=["lx"], markets=["us"], include_opend=True, include_feishu_agent_credential=True,
+        feishu_agent_credential_helper_path=helper, feishu_agent_credential_store=agent_store,
+        feishu_holdings_credential_store=holdings_store, feishu_agent_credential_env_file=runtime_env,
         deploy_user="liuxie",
     )
     files = {item["relative_path"]: item for item in bundle["files"]}
@@ -169,17 +169,9 @@ def test_deepseek_credential_is_bound_only_to_selected_assistant_service(
         encoding="utf-8",
     )
 
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        accounts=["lx"],
-        markets=["us"],
-        config_yaml=config_yaml,
-        include_feishu_ws=True,
-        include_secret_credentials=True,
-        secret_credential_store_root=store,
-        deploy_user="liuxie",
+    bundle = _render_bundle(
+        repo, runtime, accounts=["lx"], markets=["us"], config_yaml=config_yaml, include_feishu_ws=True,
+        include_secret_credentials=True, secret_credential_store_root=store, deploy_user="liuxie",
     )
     files = {item["relative_path"]: item for item in bundle["files"]}
     tick = files[
@@ -213,18 +205,11 @@ def test_service_drift_installs_and_repairs_feishu_agent_credential_assets(
     helper = tmp_path / "libexec" / "credential-helper"
     repo.mkdir()
     runtime.mkdir()
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        accounts=["lx"],
-        markets=["us"],
-        include_feishu_agent_credential=True,
-        feishu_agent_credential_helper_path=helper,
-        feishu_agent_credential_store=tmp_path / "credstore" / "agent",
+    bundle = _render_bundle(
+        repo, runtime, accounts=["lx"], markets=["us"], include_feishu_agent_credential=True,
+        feishu_agent_credential_helper_path=helper, feishu_agent_credential_store=tmp_path / "credstore" / "agent",
         feishu_holdings_credential_store=tmp_path / "credstore" / "holdings",
-        feishu_agent_credential_env_file=tmp_path / "run" / "credential.env",
-        use_default_deploy_user=False,
+        feishu_agent_credential_env_file=tmp_path / "run" / "credential.env", use_default_deploy_user=False,
     )
     files = {item["relative_path"]: item for item in bundle["files"]}
     profile = json.loads(files["service.profile.json"]["content"])
@@ -258,25 +243,14 @@ def test_service_drift_installs_and_repairs_feishu_agent_credential_assets(
             execution_result["value"] = "success"
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
-    before = service_drift(
-        repo_root=repo,
-        runtime_root=runtime,
-        systemd_unit_root=systemd_root,
-        run_cmd=_run_cmd,
-    )
+    before = _drift_at(repo, runtime, systemd_root, run_cmd=_run_cmd)
 
     assert before["summary"]["status"] == "error"
     assert before["missing_required_units"] == [FEISHU_AGENT_CREDENTIAL_SERVICE]
     assert str(helper) in before["missing_managed_files"]
     assert before["missing_managed_files"]
 
-    out = service_drift(
-        repo_root=repo,
-        runtime_root=runtime,
-        systemd_unit_root=systemd_root,
-        confirm=True,
-        run_cmd=_run_cmd,
-    )
+    out = _drift_at(repo, runtime, systemd_root, confirm=True, run_cmd=_run_cmd)
 
     assert out["summary"]["status"] == "ok"
     assert out["changed"] is True
@@ -300,24 +274,13 @@ def test_service_drift_installs_and_repairs_feishu_agent_credential_assets(
 
     helper.chmod(0o644)
     execution_result["value"] = "exit-code"
-    mode_drift = service_drift(
-        repo_root=repo,
-        runtime_root=runtime,
-        systemd_unit_root=systemd_root,
-        run_cmd=_run_cmd,
-    )
+    mode_drift = _drift_at(repo, runtime, systemd_root, run_cmd=_run_cmd)
     assert mode_drift["mode_mismatched_managed_files"] == [str(helper)]
     assert mode_drift["execution_drift_units"] == [
         FEISHU_AGENT_CREDENTIAL_SERVICE
     ]
 
-    repaired = service_drift(
-        repo_root=repo,
-        runtime_root=runtime,
-        systemd_unit_root=systemd_root,
-        confirm=True,
-        run_cmd=_run_cmd,
-    )
+    repaired = _drift_at(repo, runtime, systemd_root, confirm=True, run_cmd=_run_cmd)
     assert repaired["summary"]["status"] == "ok"
     assert helper.stat().st_mode & 0o777 == 0o755
     assert repaired["applied"]["started_services"] == [
@@ -340,21 +303,10 @@ def test_service_drift_installs_and_repairs_feishu_agent_credential_assets(
         / stale_dropin.parent.name
         / stale_dropin.name
     )
-    stale_drift = service_drift(
-        repo_root=repo,
-        runtime_root=runtime,
-        systemd_unit_root=systemd_root,
-        run_cmd=_run_cmd,
-    )
+    stale_drift = _drift_at(repo, runtime, systemd_root, run_cmd=_run_cmd)
     assert stale_drift["extra_managed_files"] == [stale_key]
 
-    retired = service_drift(
-        repo_root=repo,
-        runtime_root=runtime,
-        systemd_unit_root=systemd_root,
-        confirm=True,
-        run_cmd=_run_cmd,
-    )
+    retired = _drift_at(repo, runtime, systemd_root, confirm=True, run_cmd=_run_cmd)
     assert retired["summary"]["status"] == "ok"
     assert retired["applied"]["retired_managed_files"] == [stale_key]
     assert not stale_dropin.exists()
@@ -368,19 +320,9 @@ def test_service_drift_manages_per_unit_secret_credential_dropins(
     )
     from src.application.service_drift import service_drift
 
-    repo = tmp_path / "repo"
-    runtime = tmp_path / "runtime"
-    systemd_root = tmp_path / "systemd"
-    repo.mkdir()
-    runtime.mkdir()
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        accounts=["lx"],
-        markets=["us"],
-        include_secret_credentials=True,
-        use_default_deploy_user=False,
+    repo, runtime, systemd_root = _drift_roots(tmp_path)
+    bundle = _render_bundle(
+        repo, runtime, accounts=["lx"], markets=["us"], include_secret_credentials=True, use_default_deploy_user=False,
     )
     files = {item["relative_path"]: item for item in bundle["files"]}
     profile = json.loads(files["service.profile.json"]["content"])
@@ -396,24 +338,11 @@ def test_service_drift_manages_per_unit_secret_credential_dropins(
     ]
     secret_keys = sorted(str(item["install_path"]) for item in secret_items)
 
-    before = service_drift(
-        repo_root=repo,
-        runtime_root=runtime,
-        systemd_unit_root=systemd_root,
-        managed_root_uid=os.getuid(),
-        managed_root_gid=os.getgid(),
-    )
+    before = _drift_at(repo, runtime, systemd_root, managed_root_uid=os.getuid(), managed_root_gid=os.getgid())
     assert secret_keys
     assert all(key in before["missing_managed_files"] for key in secret_keys)
 
-    installed = service_drift(
-        repo_root=repo,
-        runtime_root=runtime,
-        systemd_unit_root=systemd_root,
-        confirm=True,
-        managed_root_uid=os.getuid(),
-        managed_root_gid=os.getgid(),
-    )
+    installed = _drift_at(repo, runtime, systemd_root, confirm=True, managed_root_uid=os.getuid(), managed_root_gid=os.getgid())
     assert installed["missing_managed_files"] == []
     assert installed["mismatched_managed_files"] == []
     assert installed["applied"]["written_managed_files"] == secret_keys
@@ -429,21 +358,12 @@ def test_service_drift_manages_per_unit_secret_credential_dropins(
     )
     first_path = systemd_root / first_relative
     first_path.write_text("stale mapping\n", encoding="utf-8")
-    mismatched = service_drift(
-        repo_root=repo,
-        runtime_root=runtime,
-        systemd_unit_root=systemd_root,
-    )
+    mismatched = _drift_at(repo, runtime, systemd_root)
     assert mismatched["mismatched_managed_files"] == [
         str(first_item["install_path"])
     ]
 
-    repaired = service_drift(
-        repo_root=repo,
-        runtime_root=runtime,
-        systemd_unit_root=systemd_root,
-        confirm=True,
-    )
+    repaired = _drift_at(repo, runtime, systemd_root, confirm=True)
     assert repaired["mismatched_managed_files"] == []
     assert first_path.read_text(encoding="utf-8") == first_item["content"]
 
@@ -459,19 +379,10 @@ def test_service_drift_manages_per_unit_secret_credential_dropins(
         / stale_dropin.parent.name
         / stale_dropin.name
     )
-    stale = service_drift(
-        repo_root=repo,
-        runtime_root=runtime,
-        systemd_unit_root=systemd_root,
-    )
+    stale = _drift_at(repo, runtime, systemd_root)
     assert stale["extra_managed_files"] == [stale_key]
 
-    retired = service_drift(
-        repo_root=repo,
-        runtime_root=runtime,
-        systemd_unit_root=systemd_root,
-        confirm=True,
-    )
+    retired = _drift_at(repo, runtime, systemd_root, confirm=True)
     assert retired["applied"]["retired_managed_files"] == [stale_key]
     assert not stale_dropin.exists()
     assert profile["secret_credentials"]["enabled"] is True
@@ -495,15 +406,9 @@ def test_service_drift_manages_runtime_credential_helper_and_dropins(
         "DEFAULT_SECRET_CREDENTIAL_HELPER",
         helper_path,
     )
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        accounts=["lx"],
-        markets=["us"],
-        include_secret_credentials=True,
-        secret_credential_delivery="runtime-files",
-        use_default_deploy_user=False,
+    bundle = _render_bundle(
+        repo, runtime, accounts=["lx"], markets=["us"], include_secret_credentials=True,
+        secret_credential_delivery="runtime-files", use_default_deploy_user=False,
     )
     files = {item["relative_path"]: item for item in bundle["files"]}
     (runtime / "service.profile.json").write_text(
@@ -512,24 +417,11 @@ def test_service_drift_manages_runtime_credential_helper_and_dropins(
     )
     _write_systemd_units_from_bundle(bundle, systemd_root)
 
-    before = service_drift(
-        repo_root=repo,
-        runtime_root=runtime,
-        systemd_unit_root=systemd_root,
-        managed_root_uid=os.getuid(),
-        managed_root_gid=os.getgid(),
-    )
+    before = _drift_at(repo, runtime, systemd_root, managed_root_uid=os.getuid(), managed_root_gid=os.getgid())
     assert str(helper_path) in before["missing_managed_files"]
     assert before["missing_managed_files"]
 
-    installed = service_drift(
-        repo_root=repo,
-        runtime_root=runtime,
-        systemd_unit_root=systemd_root,
-        confirm=True,
-        managed_root_uid=os.getuid(),
-        managed_root_gid=os.getgid(),
-    )
+    installed = _drift_at(repo, runtime, systemd_root, confirm=True, managed_root_uid=os.getuid(), managed_root_gid=os.getgid())
     assert installed["missing_managed_files"] == []
     assert installed["mismatched_managed_files"] == []
     assert installed["mode_mismatched_managed_files"] == []
@@ -537,13 +429,7 @@ def test_service_drift_manages_runtime_credential_helper_and_dropins(
     assert helper_path.stat().st_mode & 0o777 == 0o755
     assert "systemd-creds" in helper_path.read_text(encoding="utf-8")
 
-    unsafe_owner = service_drift(
-        repo_root=repo,
-        runtime_root=runtime,
-        systemd_unit_root=systemd_root,
-        managed_root_uid=os.getuid() + 1,
-        managed_root_gid=os.getgid(),
-    )
+    unsafe_owner = _drift_at(repo, runtime, systemd_root, managed_root_uid=os.getuid() + 1, managed_root_gid=os.getgid())
     assert str(helper_path) in unsafe_owner["mode_mismatched_managed_files"]
 
     helper_copy = tmp_path / "credential-helper-copy"
@@ -551,13 +437,7 @@ def test_service_drift_manages_runtime_credential_helper_and_dropins(
     helper_copy.chmod(0o755)
     helper_path.unlink()
     helper_path.symlink_to(helper_copy)
-    symlinked = service_drift(
-        repo_root=repo,
-        runtime_root=runtime,
-        systemd_unit_root=systemd_root,
-        managed_root_uid=os.getuid(),
-        managed_root_gid=os.getgid(),
-    )
+    symlinked = _drift_at(repo, runtime, systemd_root, managed_root_uid=os.getuid(), managed_root_gid=os.getgid())
     assert str(helper_path) in symlinked["mode_mismatched_managed_files"]
 
 def test_service_drift_adopts_legacy_feishu_agent_credential_installation(
@@ -606,14 +486,7 @@ def test_service_drift_adopts_legacy_feishu_agent_credential_installation(
         tmp_path / "run" / "credential.env",
     )
 
-    base_bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        accounts=["lx"],
-        markets=["us"],
-        use_default_deploy_user=False,
-    )
+    base_bundle = _render_bundle(repo, runtime, accounts=["lx"], markets=["us"], use_default_deploy_user=False)
     files = {item["relative_path"]: item for item in base_bundle["files"]}
     profile = json.loads(files["service.profile.json"]["content"])
     (runtime / "service.profile.json").write_text(
@@ -630,16 +503,7 @@ def test_service_drift_adopts_legacy_feishu_agent_credential_installation(
     legacy_dropin.write_text("legacy\n", encoding="utf-8")
     calls: list[list[str]] = []
 
-    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
-        command = list(command)
-        calls.append(command)
-        if "is-enabled" in command:
-            return subprocess.CompletedProcess(command, 0, stdout="enabled\n", stderr="")
-        if "is-active" in command:
-            return subprocess.CompletedProcess(command, 0, stdout="active\n", stderr="")
-        if "show" in command and "--property=Result" in command:
-            return subprocess.CompletedProcess(command, 0, stdout="success\n", stderr="")
-        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+    _run_cmd = _fake_systemd_query_runner(lambda command, _kwargs: calls.append(command))
 
     before = service_drift_module.service_drift(
         repo_root=repo,
@@ -680,20 +544,9 @@ def test_service_drift_detects_missing_projection_verify_timer(tmp_path: Path) -
     from src.application.service_deploy import render_service_bundle
     from src.application.service_drift import service_drift
 
-    repo = tmp_path / "repo"
-    runtime = tmp_path / "runtime"
-    systemd_root = tmp_path / "systemd"
-    repo.mkdir()
-    runtime.mkdir()
+    repo, runtime, systemd_root = _drift_roots(tmp_path)
     config_yaml = runtime / "config.yaml"
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        accounts=["lx"],
-        markets=["us"],
-        config_yaml=config_yaml,
-    )
+    bundle = _render_bundle(repo, runtime, accounts=["lx"], markets=["us"], config_yaml=config_yaml)
     profile = json.loads({item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"])
     profile["services"] = [
         item
@@ -707,7 +560,7 @@ def test_service_drift_detects_missing_projection_verify_timer(tmp_path: Path) -
         skip={"options-monitor-projection-verify.service", "options-monitor-projection-verify.timer"},
     )
 
-    out = service_drift(repo_root=repo, runtime_root=runtime, systemd_unit_root=systemd_root)
+    out = _drift_at(repo, runtime, systemd_root)
 
     assert out["summary"]["status"] == "error"
     assert out["summary"]["ok"] is False
@@ -725,12 +578,8 @@ def test_service_drift_detects_mismatched_timer_content(tmp_path: Path) -> None:
     from src.application.service_deploy import render_service_bundle
     from src.application.service_drift import service_drift
 
-    repo = tmp_path / "repo"
-    runtime = tmp_path / "runtime"
-    systemd_root = tmp_path / "systemd"
-    repo.mkdir()
-    runtime.mkdir()
-    bundle = render_service_bundle(target="systemd", repo_root=repo, runtime_root=runtime, accounts=["lx"], markets=["us"])
+    repo, runtime, systemd_root = _drift_roots(tmp_path)
+    bundle = _render_bundle(repo, runtime, accounts=["lx"], markets=["us"])
     profile = json.loads({item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"])
     (runtime / "service.profile.json").write_text(json.dumps(profile, ensure_ascii=False), encoding="utf-8")
     _write_systemd_units_from_bundle(bundle, systemd_root)
@@ -747,7 +596,7 @@ def test_service_drift_detects_mismatched_timer_content(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    out = service_drift(repo_root=repo, runtime_root=runtime, systemd_unit_root=systemd_root)
+    out = _drift_at(repo, runtime, systemd_root)
 
     assert out["summary"]["status"] == "warn"
     assert out["summary"]["mismatched_count"] == 2
@@ -764,18 +613,8 @@ def test_service_drift_does_not_query_host_systemctl_for_custom_unit_root(
     import src.application.service_drift as service_drift_module
     from src.application.service_deploy import render_service_bundle
 
-    repo = tmp_path / "repo"
-    runtime = tmp_path / "runtime"
-    systemd_root = tmp_path / "systemd"
-    repo.mkdir()
-    runtime.mkdir()
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        accounts=["lx"],
-        markets=["us"],
-    )
+    repo, runtime, systemd_root = _drift_roots(tmp_path)
+    bundle = _render_bundle(repo, runtime, accounts=["lx"], markets=["us"])
     profile = json.loads(
         {item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"]
     )
@@ -805,20 +644,9 @@ def test_service_drift_confirm_writes_missing_timer_and_profile(tmp_path: Path) 
     from src.application.service_deploy import render_service_bundle
     from src.application.service_drift import service_drift
 
-    repo = tmp_path / "repo"
-    runtime = tmp_path / "runtime"
-    systemd_root = tmp_path / "systemd"
-    repo.mkdir()
-    runtime.mkdir()
+    repo, runtime, systemd_root = _drift_roots(tmp_path)
     config_yaml = runtime / "config.yaml"
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        accounts=["lx"],
-        markets=["us"],
-        config_yaml=config_yaml,
-    )
+    bundle = _render_bundle(repo, runtime, accounts=["lx"], markets=["us"], config_yaml=config_yaml)
     profile = json.loads({item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"])
     profile["services"] = [
         item
@@ -837,13 +665,7 @@ def test_service_drift_confirm_writes_missing_timer_and_profile(tmp_path: Path) 
         calls.append(list(command))
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
-    out = service_drift(
-        repo_root=repo,
-        runtime_root=runtime,
-        systemd_unit_root=systemd_root,
-        confirm=True,
-        run_cmd=_run_cmd,
-    )
+    out = _drift_at(repo, runtime, systemd_root, confirm=True, run_cmd=_run_cmd)
 
     assert out["summary"]["status"] == "ok"
     assert out["changed"] is True
@@ -860,12 +682,8 @@ def test_service_drift_confirm_updates_mismatched_timer_content(tmp_path: Path) 
     from src.application.service_deploy import render_service_bundle
     from src.application.service_drift import service_drift
 
-    repo = tmp_path / "repo"
-    runtime = tmp_path / "runtime"
-    systemd_root = tmp_path / "systemd"
-    repo.mkdir()
-    runtime.mkdir()
-    bundle = render_service_bundle(target="systemd", repo_root=repo, runtime_root=runtime, accounts=["lx"], markets=["us"])
+    repo, runtime, systemd_root = _drift_roots(tmp_path)
+    bundle = _render_bundle(repo, runtime, accounts=["lx"], markets=["us"])
     profile = json.loads({item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"])
     (runtime / "service.profile.json").write_text(json.dumps(profile, ensure_ascii=False), encoding="utf-8")
     _write_systemd_units_from_bundle(bundle, systemd_root)
@@ -883,13 +701,7 @@ def test_service_drift_confirm_updates_mismatched_timer_content(tmp_path: Path) 
         calls.append(list(command))
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
-    out = service_drift(
-        repo_root=repo,
-        runtime_root=runtime,
-        systemd_unit_root=systemd_root,
-        confirm=True,
-        run_cmd=_run_cmd,
-    )
+    out = _drift_at(repo, runtime, systemd_root, confirm=True, run_cmd=_run_cmd)
 
     assert out["summary"]["status"] == "ok"
     assert out["changed"] is True
@@ -906,12 +718,8 @@ def test_service_drift_confirm_uses_sudo_fallback_for_systemd_permission_errors(
     from src.application.service_deploy import render_service_bundle
     from src.application.service_drift import service_drift
 
-    repo = tmp_path / "repo"
-    runtime = tmp_path / "runtime"
-    systemd_root = tmp_path / "systemd"
-    repo.mkdir()
-    runtime.mkdir()
-    bundle = render_service_bundle(target="systemd", repo_root=repo, runtime_root=runtime, accounts=["lx"], markets=["us"])
+    repo, runtime, systemd_root = _drift_roots(tmp_path)
+    bundle = _render_bundle(repo, runtime, accounts=["lx"], markets=["us"])
     profile = json.loads({item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"])
     profile["services"] = [
         item
@@ -943,13 +751,7 @@ def test_service_drift_confirm_uses_sudo_fallback_for_systemd_permission_errors(
             return subprocess.CompletedProcess(command, 1, stdout="", stderr="Access denied\n")
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
-    out = service_drift(
-        repo_root=repo,
-        runtime_root=runtime,
-        systemd_unit_root=systemd_root,
-        confirm=True,
-        run_cmd=_run_cmd,
-    )
+    out = _drift_at(repo, runtime, systemd_root, confirm=True, run_cmd=_run_cmd)
 
     assert out["summary"]["status"] == "ok"
     assert any(item.get("sudo_fallback") for item in out["operations"] if item.get("operation") == "write_unit")
@@ -960,12 +762,8 @@ def test_service_drift_retires_installed_feishu_ws_when_profile_no_longer_declar
     from src.application.service_deploy import render_service_bundle
     from src.application.service_drift import service_drift
 
-    repo = tmp_path / "repo"
-    runtime = tmp_path / "runtime"
-    systemd_root = tmp_path / "systemd"
-    repo.mkdir()
-    runtime.mkdir()
-    bundle = render_service_bundle(target="systemd", repo_root=repo, runtime_root=runtime, accounts=["lx"], markets=["us"], include_feishu_ws=True)
+    repo, runtime, systemd_root = _drift_roots(tmp_path)
+    bundle = _render_bundle(repo, runtime, accounts=["lx"], markets=["us"], include_feishu_ws=True)
     profile = json.loads({item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"])
     profile.pop("feishu_ws", None)
     profile["services"] = [item for item in profile["services"] if item["name"] != "options-monitor-feishu-ws.service"]
@@ -977,13 +775,7 @@ def test_service_drift_retires_installed_feishu_ws_when_profile_no_longer_declar
         calls.append(list(command))
         return subprocess.CompletedProcess(command, 0, stdout="enabled\n", stderr="")
 
-    out = service_drift(
-        repo_root=repo,
-        runtime_root=runtime,
-        systemd_unit_root=systemd_root,
-        confirm=True,
-        run_cmd=_run_cmd,
-    )
+    out = _drift_at(repo, runtime, systemd_root, confirm=True, run_cmd=_run_cmd)
     refreshed = json.loads((runtime / "service.profile.json").read_text(encoding="utf-8"))
 
     assert "options-monitor-feishu-ws.service" not in out["expected_services"]
@@ -1000,18 +792,8 @@ def test_service_drift_retires_removed_position_advice_promotion_units(
     from src.application.service_deploy import render_service_bundle
     from src.application.service_drift import service_drift
 
-    repo = tmp_path / "repo"
-    runtime = tmp_path / "runtime"
-    systemd_root = tmp_path / "systemd"
-    repo.mkdir()
-    runtime.mkdir()
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        accounts=["lx"],
-        markets=["us"],
-    )
+    repo, runtime, systemd_root = _drift_roots(tmp_path)
+    bundle = _render_bundle(repo, runtime, accounts=["lx"], markets=["us"])
     profile = json.loads(
         {item["relative_path"]: item for item in bundle["files"]}[
             "service.profile.json"
@@ -1040,13 +822,7 @@ def test_service_drift_retires_removed_position_advice_promotion_units(
         calls.append(list(command))
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
-    out = service_drift(
-        repo_root=repo,
-        runtime_root=runtime,
-        systemd_unit_root=systemd_root,
-        confirm=True,
-        run_cmd=_run_cmd,
-    )
+    out = _drift_at(repo, runtime, systemd_root, confirm=True, run_cmd=_run_cmd)
     refreshed = json.loads(
         (runtime / "service.profile.json").read_text(encoding="utf-8")
     )
@@ -1068,18 +844,8 @@ def test_service_drift_reports_retired_ai_collector_units_without_applying(
     from src.application.service_deploy import render_service_bundle
     from src.application.service_drift import service_drift
 
-    repo = tmp_path / "repo"
-    runtime = tmp_path / "runtime"
-    systemd_root = tmp_path / "systemd"
-    repo.mkdir()
-    runtime.mkdir()
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        accounts=["lx"],
-        markets=["us"],
-    )
+    repo, runtime, systemd_root = _drift_roots(tmp_path)
+    bundle = _render_bundle(repo, runtime, accounts=["lx"], markets=["us"])
     profile = json.loads(
         {item["relative_path"]: item for item in bundle["files"]}[
             "service.profile.json"
@@ -1099,12 +865,7 @@ def test_service_drift_reports_retired_ai_collector_units_without_applying(
     for name in retired_units:
         (systemd_root / name).write_text("legacy\n", encoding="utf-8")
 
-    out = service_drift(
-        repo_root=repo,
-        runtime_root=runtime,
-        systemd_unit_root=systemd_root,
-        confirm=False,
-    )
+    out = _drift_at(repo, runtime, systemd_root, confirm=False)
 
     assert out["extra_profile_units"] == sorted(retired_units)
     assert out["extra_installed_units"] == sorted(retired_units)
@@ -1117,12 +878,8 @@ def test_service_drift_repairs_masked_expected_timer_and_reads_back_enabled(tmp_
     from src.application.service_deploy import render_service_bundle
     from src.application.service_drift import service_drift
 
-    repo = tmp_path / "repo"
-    runtime = tmp_path / "runtime"
-    systemd_root = tmp_path / "systemd"
-    repo.mkdir()
-    runtime.mkdir()
-    bundle = render_service_bundle(target="systemd", repo_root=repo, runtime_root=runtime, accounts=["lx"], markets=["us"])
+    repo, runtime, systemd_root = _drift_roots(tmp_path)
+    bundle = _render_bundle(repo, runtime, accounts=["lx"], markets=["us"])
     profile = json.loads({item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"])
     (runtime / "service.profile.json").write_text(json.dumps(profile, ensure_ascii=False), encoding="utf-8")
     _write_systemd_units_from_bundle(bundle, systemd_root)
@@ -1142,13 +899,7 @@ def test_service_drift_repairs_masked_expected_timer_and_reads_back_enabled(tmp_
             states[target] = "enabled"
         return subprocess.CompletedProcess(command, 0, stdout="enabled\n", stderr="")
 
-    out = service_drift(
-        repo_root=repo,
-        runtime_root=runtime,
-        systemd_unit_root=systemd_root,
-        confirm=True,
-        run_cmd=_run_cmd,
-    )
+    out = _drift_at(repo, runtime, systemd_root, confirm=True, run_cmd=_run_cmd)
 
     assert out["before"]["activation_states"][target] == "masked"
     assert out["before"]["activation_drift_units"] == [target]
@@ -1162,18 +913,8 @@ def test_service_drift_repairs_enabled_but_inactive_expected_timer(tmp_path: Pat
     from src.application.service_deploy import render_service_bundle
     from src.application.service_drift import service_drift
 
-    repo = tmp_path / "repo"
-    runtime = tmp_path / "runtime"
-    systemd_root = tmp_path / "systemd"
-    repo.mkdir()
-    runtime.mkdir()
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        accounts=["lx"],
-        markets=["us"],
-    )
+    repo, runtime, systemd_root = _drift_roots(tmp_path)
+    bundle = _render_bundle(repo, runtime, accounts=["lx"], markets=["us"])
     profile = json.loads(
         {item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"]
     )
@@ -1205,13 +946,7 @@ def test_service_drift_repairs_enabled_but_inactive_expected_timer(tmp_path: Pat
             return subprocess.CompletedProcess(command, 0, stdout="active\n", stderr="")
         return subprocess.CompletedProcess(command, 0, stdout="enabled\n", stderr="")
 
-    out = service_drift(
-        repo_root=repo,
-        runtime_root=runtime,
-        systemd_unit_root=systemd_root,
-        confirm=True,
-        run_cmd=_run_cmd,
-    )
+    out = _drift_at(repo, runtime, systemd_root, confirm=True, run_cmd=_run_cmd)
 
     assert out["before"]["activation_states"][target] == "enabled"
     assert out["before"]["active_states"][target] == "inactive"
@@ -1230,18 +965,8 @@ def test_service_drift_preserves_paused_timer_while_updating_definition(
         service_drift,
     )
 
-    repo = tmp_path / "repo"
-    runtime = tmp_path / "runtime"
-    systemd_root = tmp_path / "systemd"
-    repo.mkdir()
-    runtime.mkdir()
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        accounts=["lx"],
-        markets=["hk"],
-    )
+    repo, runtime, systemd_root = _drift_roots(tmp_path)
+    bundle = _render_bundle(repo, runtime, accounts=["lx"], markets=["hk"])
     files = {item["relative_path"]: item for item in bundle["files"]}
     profile = json.loads(files["service.profile.json"]["content"])
     (runtime / "service.profile.json").write_text(
@@ -1293,18 +1018,9 @@ def test_service_drift_preserves_paused_timer_while_updating_definition(
             command, 0, stdout="enabled\n", stderr=""
         )
 
-    out = service_drift(
-        repo_root=repo,
-        runtime_root=runtime,
-        systemd_unit_root=systemd_root,
-        confirm=True,
-        activation_policy=SERVICE_ACTIVATION_POLICY_PRESERVE_EXISTING,
-        preserved_activation_states={
-            target: {
-                "activation_state": "enabled",
-                "active_state": "inactive",
-            }
-        },
+    out = _drift_at(
+        repo, runtime, systemd_root, confirm=True, activation_policy=SERVICE_ACTIVATION_POLICY_PRESERVE_EXISTING,
+        preserved_activation_states={ target: { "activation_state": "enabled", "active_state": "inactive", } },
         run_cmd=_run_cmd,
     )
 
@@ -1368,20 +1084,11 @@ def test_service_drift_removes_legacy_cursor_binding_without_resuming_paused_tim
         "      api_key_env: DEEPSEEK_API_KEY\n",
         encoding="utf-8",
     )
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        accounts=["lx"],
-        markets=["hk"],
-        config_yaml=config_yaml,
-        env_file=runtime / "options-monitor.env",
-        include_feishu_ws=True,
-        include_wechat_clawbot=True,
-        wechat_clawbot_allowed_senders="wechat:test-user",
-        include_secret_credentials=True,
-        secret_credential_store_root=store,
-        use_default_deploy_user=False,
+    bundle = _render_bundle(
+        repo, runtime, accounts=["lx"], markets=["hk"], config_yaml=config_yaml,
+        env_file=runtime / "options-monitor.env", include_feishu_ws=True, include_wechat_clawbot=True,
+        wechat_clawbot_allowed_senders="wechat:test-user", include_secret_credentials=True,
+        secret_credential_store_root=store, use_default_deploy_user=False,
     )
     files = {item["relative_path"]: item for item in bundle["files"]}
     old_profile = json.loads(files["service.profile.json"]["content"])
@@ -1495,19 +1202,9 @@ def test_service_drift_discovers_installed_wechat_clawbot_as_managed_service(tmp
     from src.application.service_deploy import render_service_bundle
     from src.application.service_drift import service_drift
 
-    repo = tmp_path / "repo"
-    runtime = tmp_path / "runtime"
-    systemd_root = tmp_path / "systemd"
-    repo.mkdir()
-    runtime.mkdir()
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        accounts=["lx"],
-        markets=["us"],
-        include_wechat_clawbot=True,
-        wechat_clawbot_label="ops",
+    repo, runtime, systemd_root = _drift_roots(tmp_path)
+    bundle = _render_bundle(
+        repo, runtime, accounts=["lx"], markets=["us"], include_wechat_clawbot=True, wechat_clawbot_label="ops",
         wechat_clawbot_allowed_senders="wechat:user_1",
     )
     profile = json.loads({item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"])
@@ -1515,7 +1212,7 @@ def test_service_drift_discovers_installed_wechat_clawbot_as_managed_service(tmp
     (runtime / "service.profile.json").write_text(json.dumps(profile, ensure_ascii=False), encoding="utf-8")
     _write_systemd_units_from_bundle(bundle, systemd_root)
 
-    out = service_drift(repo_root=repo, runtime_root=runtime, systemd_unit_root=systemd_root, confirm=True)
+    out = _drift_at(repo, runtime, systemd_root, confirm=True)
     refreshed = json.loads((runtime / "service.profile.json").read_text(encoding="utf-8"))
 
     assert "options-monitor-wechat-clawbot.service" in out["expected_services"]
@@ -1538,20 +1235,12 @@ def test_service_drift_preserves_profile_opend_service(tmp_path: Path) -> None:
     repo.mkdir()
     runtime.mkdir()
     opend.mkdir(parents=True)
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        accounts=["lx"],
-        markets=["us"],
-        include_opend=True,
-        opend_root=opend,
-    )
+    bundle = _render_bundle(repo, runtime, accounts=["lx"], markets=["us"], include_opend=True, opend_root=opend)
     profile = json.loads({item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"])
     (runtime / "service.profile.json").write_text(json.dumps(profile, ensure_ascii=False), encoding="utf-8")
     _write_systemd_units_from_bundle(bundle, systemd_root)
 
-    out = service_drift(repo_root=repo, runtime_root=runtime, systemd_unit_root=systemd_root)
+    out = _drift_at(repo, runtime, systemd_root)
 
     assert out["summary"]["status"] == "ok"
     assert "options-monitor-opend.service" in out["expected_services"]
@@ -1562,25 +1251,14 @@ def test_service_drift_preserves_quality_monitoring_opt_in_and_detects_metadata_
     from src.application.service_deploy import render_service_bundle
     from src.application.service_drift import service_drift
 
-    repo = tmp_path / "repo"
-    runtime = tmp_path / "runtime"
-    systemd_root = tmp_path / "systemd"
-    repo.mkdir()
-    runtime.mkdir()
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=repo,
-        runtime_root=runtime,
-        accounts=["lx"],
-        markets=["us", "hk"],
-        include_quality_monitoring=True,
-    )
+    repo, runtime, systemd_root = _drift_roots(tmp_path)
+    bundle = _render_bundle(repo, runtime, accounts=["lx"], markets=["us", "hk"], include_quality_monitoring=True)
     profile_item = {item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]
     profile = json.loads(profile_item["content"])
     (runtime / "service.profile.json").write_text(json.dumps(profile, ensure_ascii=False), encoding="utf-8")
     _write_systemd_units_from_bundle(bundle, systemd_root)
 
-    clean = service_drift(repo_root=repo, runtime_root=runtime, systemd_unit_root=systemd_root)
+    clean = _drift_at(repo, runtime, systemd_root)
 
     assert clean["summary"]["status"] == "ok"
     assert clean["profile_content_changed"] is False
@@ -1593,7 +1271,7 @@ def test_service_drift_preserves_quality_monitoring_opt_in_and_detects_metadata_
     profile["quality_monitoring"]["regular_refresh_interval"] = "99min"
     (runtime / "service.profile.json").write_text(json.dumps(profile, ensure_ascii=False), encoding="utf-8")
 
-    drifted = service_drift(repo_root=repo, runtime_root=runtime, systemd_unit_root=systemd_root)
+    drifted = _drift_at(repo, runtime, systemd_root)
 
     assert drifted["summary"]["status"] == "warn"
     assert drifted["profile_content_changed"] is True
@@ -1605,14 +1283,9 @@ def test_service_drift_retires_legacy_quality_http_and_keeps_local_quality(tmp_p
     from tests.service_deploy_test_support import _install_complete_systemd_bundle
     from src.application.service_drift import service_drift
 
-    repo = tmp_path / "repo"
-    runtime = tmp_path / "runtime"
-    systemd_root = tmp_path / "systemd"
-    repo.mkdir()
-    runtime.mkdir()
-    bundle = render_service_bundle(
-        target="systemd", repo_root=repo, runtime_root=runtime,
-        accounts=["lx"], markets=["us", "hk"], include_quality_monitoring=True,
+    repo, runtime, systemd_root = _drift_roots(tmp_path)
+    bundle = _render_bundle(
+        repo, runtime, accounts=["lx"], markets=["us", "hk"], include_quality_monitoring=True,
         include_secret_credentials=True,
     )
     files = {item["relative_path"]: item for item in bundle["files"]}
@@ -1637,10 +1310,7 @@ def test_service_drift_retires_legacy_quality_http_and_keeps_local_quality(tmp_p
         calls.append(list(command))
         return subprocess.CompletedProcess(command, 0, stdout="enabled\n", stderr="")
 
-    out = service_drift(
-        repo_root=repo, runtime_root=runtime, systemd_unit_root=systemd_root,
-        confirm=True, run_cmd=run_cmd,
-    )
+    out = _drift_at(repo, runtime, systemd_root, confirm=True, run_cmd=run_cmd)
     refreshed = json.loads((runtime / "service.profile.json").read_text())
     assert out["summary"]["status"] == "ok"
     assert out["applied"]["retired_units"] == [retired]
@@ -1760,12 +1430,7 @@ def test_service_upgrade_verify_returns_compact_read_only_summary(tmp_path: Path
 def test_write_service_bundle_writes_relative_files(tmp_path: Path) -> None:
     from src.application.service_deploy import render_service_bundle, write_service_bundle
 
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=tmp_path / "repo",
-        runtime_root=tmp_path / "runtime",
-        markets=["us"],
-    )
+    bundle = _render_bundle(tmp_path / "repo", tmp_path / "runtime", markets=["us"])
 
     written = write_service_bundle(bundle, tmp_path / "rendered")
 
@@ -2116,34 +1781,15 @@ def test_service_upgrade_dry_run_and_confirm_switches_current_symlink(
         encoding="utf-8",
     )
     calls: list[list[str]] = []
-
-    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
-        calls.append(list(command))
-        target_query = _fake_release_target_query(list(command))
-        if target_query is not None:
-            return target_query
-        materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
-        if materialized is not None:
-            return materialized
-        if command[:2] == ["git", "clone"]:
-            target = Path(command[-1])
-            target.mkdir(parents=True)
-            (target / "VERSION").write_text("1.0.1\n", encoding="utf-8")
-            (target / "requirements").mkdir()
-            (target / "constraints").mkdir()
-            (target / "requirements.txt").write_text("-r requirements/runtime.txt\n", encoding="utf-8")
-            (target / "constraints.txt").write_text("-c constraints/runtime.txt\n", encoding="utf-8")
-            (target / "requirements" / "runtime.txt").write_text("", encoding="utf-8")
-            (target / "constraints" / "runtime.txt").write_text("", encoding="utf-8")
-            (target / "requirements" / "server.txt").write_text("", encoding="utf-8")
-            (target / "constraints" / "server.txt").write_text("", encoding="utf-8")
-            return subprocess.CompletedProcess(command, 0, stdout="cloned\n", stderr="")
-        if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
-            _create_fake_venv_python_at(Path(command[-1]))
-            return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
-        if "show" in command and "--property=Result" in command:
-            return subprocess.CompletedProcess(command, 0, stdout="success\n", stderr="")
-        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+    _run_cmd = _fake_upgrade_release_runner(
+        lambda command, _kwargs: calls.append(command),
+        clone_release=_write_cloned_release_with_server_deps,
+        tail=lambda command: (
+            subprocess.CompletedProcess(command, 0, stdout="success\n", stderr="")
+            if "show" in command and "--property=Result" in command
+            else None
+        ),
+    )
 
     dry = service_upgrade(
         repo_root=current,
@@ -2291,18 +1937,11 @@ def test_service_upgrade_restarts_feishu_ws_from_refreshed_profile_after_reconci
         encoding="utf-8",
     )
     calls: list[list[str]] = []
-
-    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
-        calls.append(list(command))
-        target_query = _fake_release_target_query(list(command), tags=("1.0.1",))
-        if target_query is not None:
-            return target_query
-        materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
-        if materialized is not None:
-            return materialized
-        if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
-            _create_fake_venv_python_at(Path(command[-1]))
-        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+    _run_cmd = _fake_upgrade_release_runner(
+        lambda command, _kwargs: calls.append(command),
+        tags=("1.0.1",),
+        venv_stdout="ok\n",
+    )
 
     out = service_upgrade(
         repo_root=current,
@@ -2382,11 +2021,7 @@ def test_service_upgrade_check_reports_no_upgrade_available(tmp_path: Path) -> N
     cache_repo = cache_root / "git" / "options-monitor.git"
     cache_repo.mkdir(parents=True)
 
-    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
-        target_query = _fake_release_target_query(list(command), tags=("1.0.1",))
-        if target_query is not None:
-            return target_query
-        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+    _run_cmd = _fake_upgrade_release_runner(tags=("1.0.1",), materialize=False)
 
     out = service_upgrade_check(repo_root=repo, runtime_root=runtime, cache_root=cache_root, run_cmd=_run_cmd)
 
@@ -2471,12 +2106,11 @@ def test_service_upgrade_confirm_noops_when_latest_is_current(tmp_path: Path) ->
     cache_repo.mkdir(parents=True)
     calls: list[list[str]] = []
 
-    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
-        calls.append(list(command))
-        target_query = _fake_release_target_query(list(command), tags=("1.0.1",))
-        if target_query is not None:
-            return target_query
-        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+    _run_cmd = _fake_upgrade_release_runner(
+        lambda command, _kwargs: calls.append(command),
+        tags=("1.0.1",),
+        materialize=False,
+    )
 
     out = service_upgrade(
         repo_root=current,
@@ -2591,32 +2225,15 @@ def test_service_upgrade_restart_failure_is_non_success_and_restores_previous_sy
         encoding="utf-8",
     )
 
-    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
-        target_query = _fake_release_target_query(list(command), tags=("1.0.1",))
-        if target_query is not None:
-            return target_query
-        materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
-        if materialized is not None:
-            return materialized
-        if command[:2] == ["git", "clone"]:
-            target = Path(command[-1])
-            target.mkdir(parents=True)
-            (target / "VERSION").write_text("1.0.1\n", encoding="utf-8")
-            (target / "requirements").mkdir()
-            (target / "constraints").mkdir()
-            (target / "requirements.txt").write_text("-r requirements/runtime.txt\n", encoding="utf-8")
-            (target / "constraints.txt").write_text("-c constraints/runtime.txt\n", encoding="utf-8")
-            (target / "requirements" / "runtime.txt").write_text("", encoding="utf-8")
-            (target / "constraints" / "runtime.txt").write_text("", encoding="utf-8")
-            (target / "requirements" / "server.txt").write_text("", encoding="utf-8")
-            (target / "constraints" / "server.txt").write_text("", encoding="utf-8")
-            return subprocess.CompletedProcess(command, 0, stdout="cloned\n", stderr="")
-        if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
-            _create_fake_venv_python_at(Path(command[-1]))
-            return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
-        if command[:4] == ["sudo", "-n", "systemctl", "restart"]:
-            return subprocess.CompletedProcess(command, 1, stdout="", stderr="Access denied\n")
-        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+    _run_cmd = _fake_upgrade_release_runner(
+        tags=("1.0.1",),
+        clone_release=_write_cloned_release_with_server_deps,
+        tail=lambda command: (
+            subprocess.CompletedProcess(command, 1, stdout="", stderr="Access denied\n")
+            if command[:4] == ["sudo", "-n", "systemctl", "restart"]
+            else None
+        ),
+    )
 
     out = service_upgrade(
         repo_root=current,
@@ -2701,34 +2318,12 @@ def test_service_upgrade_requires_yaml_authoring_source_before_switch(monkeypatc
     )
     calls: list[list[str]] = []
 
-    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
-        calls.append(list(command))
-        target_query = _fake_release_target_query(list(command), tags=("1.0.1",))
-        if target_query is not None:
-            return target_query
-        materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
-        if materialized is not None:
-            return materialized
-        if command[:2] == ["git", "clone"]:
-            target = Path(command[-1])
-            target.mkdir(parents=True)
-            (target / "VERSION").write_text("1.0.1\n", encoding="utf-8")
-            (target / "configs").mkdir()
-            (target / "configs" / "system.json").write_text("{}", encoding="utf-8")
-            (target / "requirements").mkdir()
-            (target / "constraints").mkdir()
-            (target / "requirements.txt").write_text("-r requirements/runtime.txt\n", encoding="utf-8")
-            (target / "constraints.txt").write_text("-c constraints/runtime.txt\n", encoding="utf-8")
-            (target / "requirements" / "runtime.txt").write_text("", encoding="utf-8")
-            (target / "constraints" / "runtime.txt").write_text("", encoding="utf-8")
-            return subprocess.CompletedProcess(command, 0, stdout="cloned\n", stderr="")
-        if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
-            _create_fake_venv_python_at(Path(command[-1]))
-            return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
-        if command[:6] == ["./om", "config", "build", "--source", "legacy", "--market"]:
-            Path(command[-1]).write_text('{"ok": true}\n', encoding="utf-8")
-            return subprocess.CompletedProcess(command, 0, stdout="built\n", stderr="")
-        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+    _run_cmd = _fake_upgrade_release_runner(
+        lambda command, _kwargs: calls.append(command),
+        tags=("1.0.1",),
+        clone_release=_write_cloned_release_with_configs,
+        tail=_fake_legacy_config_build,
+    )
 
     out = service_upgrade(
         repo_root=current,
@@ -2775,30 +2370,11 @@ def test_service_upgrade_missing_user_config_fails_before_switch_with_remediatio
     )
     calls: list[list[str]] = []
 
-    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
-        calls.append(list(command))
-        target_query = _fake_release_target_query(list(command), tags=("1.0.1",))
-        if target_query is not None:
-            return target_query
-        materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
-        if materialized is not None:
-            return materialized
-        if command[:2] == ["git", "clone"]:
-            target = Path(command[-1])
-            target.mkdir(parents=True)
-            (target / "VERSION").write_text("1.0.1\n", encoding="utf-8")
-            (target / "configs").mkdir()
-            (target / "requirements").mkdir()
-            (target / "constraints").mkdir()
-            (target / "requirements.txt").write_text("-r requirements/runtime.txt\n", encoding="utf-8")
-            (target / "constraints.txt").write_text("-c constraints/runtime.txt\n", encoding="utf-8")
-            (target / "requirements" / "runtime.txt").write_text("", encoding="utf-8")
-            (target / "constraints" / "runtime.txt").write_text("", encoding="utf-8")
-            return subprocess.CompletedProcess(command, 0, stdout="cloned\n", stderr="")
-        if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
-            _create_fake_venv_python_at(Path(command[-1]))
-            return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
-        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+    _run_cmd = _fake_upgrade_release_runner(
+        lambda command, _kwargs: calls.append(command),
+        tags=("1.0.1",),
+        clone_release=lambda target: _write_cloned_release_with_configs(target, system_json=False),
+    )
 
     out = service_upgrade(
         repo_root=current,
@@ -2847,24 +2423,12 @@ def test_service_upgrade_does_not_recover_legacy_user_configs_from_older_release
     )
     calls: list[dict[str, object]] = []
 
-    def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
-        calls.append({"command": list(command), "cwd": kwargs.get("cwd")})
-        target_query = _fake_release_target_query(list(command), tags=("1.0.1",))
-        if target_query is not None:
-            return target_query
-        materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
-        if materialized is not None:
-            return materialized
-        if command[:2] == ["git", "clone"]:
-            _write_upgrade_release_skeleton(Path(command[-1]), "1.0.1")
-            return subprocess.CompletedProcess(command, 0, stdout="cloned\n", stderr="")
-        if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
-            _create_fake_venv_python_at(Path(command[-1]))
-            return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
-        if command[:6] == ["./om", "config", "build", "--source", "legacy", "--market"]:
-            Path(command[-1]).write_text('{"ok": true}\n', encoding="utf-8")
-            return subprocess.CompletedProcess(command, 0, stdout="built\n", stderr="")
-        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+    _run_cmd = _fake_upgrade_release_runner(
+        lambda command, kwargs: calls.append({"command": command, "cwd": kwargs.get("cwd")}),
+        tags=("1.0.1",),
+        clone_release=lambda target: _write_upgrade_release_skeleton(target, "1.0.1"),
+        tail=_fake_legacy_config_build,
+    )
 
     out = service_upgrade(
         repo_root=current,
@@ -2915,23 +2479,11 @@ def test_service_upgrade_ignores_runtime_legacy_overlay_dir(tmp_path: Path) -> N
         encoding="utf-8",
     )
 
-    def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
-        target_query = _fake_release_target_query(list(command), tags=("1.0.1",))
-        if target_query is not None:
-            return target_query
-        materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
-        if materialized is not None:
-            return materialized
-        if command[:2] == ["git", "clone"]:
-            _write_upgrade_release_skeleton(Path(command[-1]), "1.0.1")
-            return subprocess.CompletedProcess(command, 0, stdout="cloned\n", stderr="")
-        if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
-            _create_fake_venv_python_at(Path(command[-1]))
-            return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
-        if command[:6] == ["./om", "config", "build", "--source", "legacy", "--market"]:
-            Path(command[-1]).write_text('{"ok": true}\n', encoding="utf-8")
-            return subprocess.CompletedProcess(command, 0, stdout="built\n", stderr="")
-        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+    _run_cmd = _fake_upgrade_release_runner(
+        tags=("1.0.1",),
+        clone_release=lambda target: _write_upgrade_release_skeleton(target, "1.0.1"),
+        tail=_fake_legacy_config_build,
+    )
 
     out = service_upgrade(
         repo_root=current,
@@ -2990,23 +2542,11 @@ def test_service_upgrade_ignores_runtime_config_legacy_metadata_overlay_source(t
         encoding="utf-8",
     )
 
-    def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
-        target_query = _fake_release_target_query(list(command), tags=("1.0.1",))
-        if target_query is not None:
-            return target_query
-        materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
-        if materialized is not None:
-            return materialized
-        if command[:2] == ["git", "clone"]:
-            _write_upgrade_release_skeleton(Path(command[-1]), "1.0.1")
-            return subprocess.CompletedProcess(command, 0, stdout="cloned\n", stderr="")
-        if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
-            _create_fake_venv_python_at(Path(command[-1]))
-            return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
-        if command[:6] == ["./om", "config", "build", "--source", "legacy", "--market"]:
-            Path(command[-1]).write_text('{"ok": true}\n', encoding="utf-8")
-            return subprocess.CompletedProcess(command, 0, stdout="built\n", stderr="")
-        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+    _run_cmd = _fake_upgrade_release_runner(
+        tags=("1.0.1",),
+        clone_release=lambda target: _write_upgrade_release_skeleton(target, "1.0.1"),
+        tail=_fake_legacy_config_build,
+    )
 
     out = service_upgrade(
         repo_root=current,
@@ -3056,23 +2596,16 @@ def test_service_upgrade_rebuild_failure_fails_before_switch_with_remediation(tm
     )
     calls: list[list[str]] = []
 
-    def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
-        calls.append(list(command))
-        target_query = _fake_release_target_query(list(command), tags=("1.0.1",))
-        if target_query is not None:
-            return target_query
-        materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
-        if materialized is not None:
-            return materialized
-        if command[:2] == ["git", "clone"]:
-            _write_upgrade_release_skeleton(Path(command[-1]), "1.0.1")
-            return subprocess.CompletedProcess(command, 0, stdout="cloned\n", stderr="")
-        if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
-            _create_fake_venv_python_at(Path(command[-1]))
-            return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
-        if command[:7] == ["./om", "config", "build", "--source", "yaml", "--market", "hk"]:
-            return subprocess.CompletedProcess(command, 1, stdout="", stderr="build failed")
-        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+    _run_cmd = _fake_upgrade_release_runner(
+        lambda command, _kwargs: calls.append(command),
+        tags=("1.0.1",),
+        clone_release=lambda target: _write_upgrade_release_skeleton(target, "1.0.1"),
+        tail=lambda command: (
+            subprocess.CompletedProcess(command, 1, stdout="", stderr="build failed")
+            if command[:7] == ["./om", "config", "build", "--source", "yaml", "--market", "hk"]
+            else None
+        ),
+    )
 
     out = service_upgrade(
         repo_root=current,
@@ -3138,17 +2671,7 @@ markets:
     )
     calls: list[list[str]] = []
 
-    def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
-        calls.append(list(command))
-        target_query = _fake_release_target_query(list(command), tags=("1.0.1",))
-        if target_query is not None:
-            return target_query
-        materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
-        if materialized is not None:
-            return materialized
-        if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
-            _create_fake_venv_python_at(Path(command[-1]))
-            return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
+    def _tail(command):
         if command[:6] == ["./om", "config", "build", "--source", "yaml", "--market"]:
             output_path = Path(command[-1])
             assert not output_path.exists()
@@ -3169,7 +2692,13 @@ markets:
             return subprocess.CompletedProcess(command, 0, stdout="built assistant\n", stderr="")
         if command[:6] == ["./om", "config", "build", "--source", "legacy", "--market"]:
             return subprocess.CompletedProcess(command, 1, stdout="", stderr="legacy build should not run")
-        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+        return None
+
+    _run_cmd = _fake_upgrade_release_runner(
+        lambda command, _kwargs: calls.append(command),
+        tags=("1.0.1",),
+        tail=_tail,
+    )
 
     out = service_upgrade(
         repo_root=current,
@@ -3438,26 +2967,20 @@ def test_service_upgrade_cleanup_after_success_deletes_older_releases(tmp_path: 
         encoding="utf-8",
     )
 
-    def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
-        target_query = _fake_release_target_query(list(command), tags=("1.0.1",))
-        if target_query is not None:
-            return target_query
-        materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
-        if materialized is not None:
-            return materialized
-        if command[:2] == ["git", "clone"]:
-            _write_upgrade_release_skeleton(Path(command[-1]), "1.0.1")
-            return subprocess.CompletedProcess(command, 0, stdout="cloned\n", stderr="")
-        if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
-            _create_fake_venv_python_at(Path(command[-1]))
-            return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
+    def _tail(command):
         if command[:7] == ["./om", "config", "build", "--source", "yaml", "--market", "hk"]:
             Path(command[-1]).write_text('{"ok": true}\n', encoding="utf-8")
             return subprocess.CompletedProcess(command, 0, stdout="built\n", stderr="")
         if command[:4] == ["./om", "config", "build-assistant", "--source"]:
             Path(command[-1]).write_text('{"ok": true}\n', encoding="utf-8")
             return subprocess.CompletedProcess(command, 0, stdout="built assistant\n", stderr="")
-        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+        return None
+
+    _run_cmd = _fake_upgrade_release_runner(
+        tags=("1.0.1",),
+        clone_release=lambda target: _write_upgrade_release_skeleton(target, "1.0.1"),
+        tail=_tail,
+    )
 
     out = service_upgrade(
         repo_root=current,
@@ -3693,14 +3216,7 @@ def test_runtime_status_loads_service_profile_paths(monkeypatch, tmp_path: Path)
     )
     systemd_root = tmp_path / "systemd"
     monkeypatch.setenv("OM_SYSTEMD_UNIT_ROOT", str(systemd_root))
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=tmp_path,
-        runtime_root=tmp_path,
-        accounts=["lx"],
-        markets=["us"],
-        config_paths={"us": cfg_path},
-    )
+    bundle = _render_bundle(tmp_path, tmp_path, accounts=["lx"], markets=["us"], config_paths={"us": cfg_path})
     _write_systemd_units_from_bundle(bundle, systemd_root)
     profile_path = tmp_path / "service.profile.json"
     profile = json.loads({item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"])
@@ -3747,14 +3263,7 @@ def test_runtime_status_warns_when_required_service_timer_is_missing(monkeypatch
     )
     systemd_root = tmp_path / "systemd"
     monkeypatch.setenv("OM_SYSTEMD_UNIT_ROOT", str(systemd_root))
-    bundle = render_service_bundle(
-        target="systemd",
-        repo_root=tmp_path,
-        runtime_root=tmp_path,
-        accounts=["lx"],
-        markets=["us"],
-        config_paths={"us": cfg_path},
-    )
+    bundle = _render_bundle(tmp_path, tmp_path, accounts=["lx"], markets=["us"], config_paths={"us": cfg_path})
     _write_systemd_units_from_bundle(
         bundle,
         systemd_root,

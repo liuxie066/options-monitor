@@ -5,6 +5,24 @@ from pathlib import Path
 from types import SimpleNamespace
 
 
+def _multi_tick_kwargs(tmp_path, runlog, **overrides):
+    """`finalize_multi_tick_run` kwargs the multi-tick cases share verbatim."""
+    values = {
+        "base": tmp_path,
+        "runlog": runlog,
+        "results": [SimpleNamespace(account="lx")],
+        "tick_metrics": {"run_dir": str(tmp_path / "run")},
+        "no_send": False,
+        "sent_accounts": ["lx"],
+        "channel": "wechat_clawbot",
+        "target": "wechat:ops",
+        "shared_state_dir_getter": lambda _base: tmp_path,
+        "utc_now_fn": lambda: "2026-01-01T00:00:00Z",
+        "safe_data_fn": lambda payload: payload,
+    }
+    return {**values, **overrides}
+
+
 def test_finalize_no_account_notification_records_degraded_writes_and_still_succeeds(
     fake_runlog_factory,
 ) -> None:
@@ -69,26 +87,14 @@ def test_finalize_multi_tick_run_logs_degraded_shared_write_and_returns_partial_
     mod.build_shared_last_run_payload = lambda **kwargs: {"prev": kwargs.get("prev_payload"), "meta": kwargs.get("run_meta")}
     mod.build_run_end_payload = lambda **kwargs: {"notify_failures": kwargs.get("notify_failures"), "sent_accounts": kwargs.get("sent_accounts")}
 
-    rc = mod.finalize_multi_tick_run(
-        base=tmp_path,
-        run_id="run-2",
-        runlog=fake_runlog_factory(events),
-        results=[SimpleNamespace(account="lx")],
-        tick_metrics={"run_dir": str(tmp_path / "run")},
-        no_send=False,
-        sent_accounts=["lx"],
-        notify_failures=[{"account": "sy", "error_code": "SEND_FAILED"}],
-        notify_summary={"sent": 1, "failed": 1},
-        channel="wechat_clawbot",
-        target="wechat:ops",
-        state_repo=state_repo,
+    rc = mod.finalize_multi_tick_run(**_multi_tick_kwargs(
+        tmp_path, fake_runlog_factory(events),
+        run_id="run-2", state_repo=state_repo,
+        notify_failures=[{"account": "sy", "error_code": "SEND_FAILED"}], notify_summary={"sent": 1, "failed": 1},
         read_json_fn=lambda *_args, **_kwargs: {"history": []},
-        shared_state_dir_getter=lambda _base: tmp_path,
-        utc_now_fn=lambda: "2026-01-01T00:00:00Z",
         audit_fn=lambda *args, **kwargs: audit_calls.append((args, kwargs)),
-        safe_data_fn=lambda payload: payload,
         on_success=lambda: success.__setitem__("called", success["called"] + 1),
-    )
+    ))
 
     assert rc == 1
     assert success["called"] == 0
@@ -116,26 +122,14 @@ def test_finalize_multi_tick_run_success_calls_on_success(fake_runlog_factory, t
     mod.build_shared_last_run_payload = lambda **kwargs: {"prev": kwargs.get("prev_payload"), "meta": kwargs.get("run_meta")}
     mod.build_run_end_payload = lambda **kwargs: {"sent_accounts": kwargs.get("sent_accounts"), "notify_summary": kwargs.get("notify_summary")}
 
-    rc = mod.finalize_multi_tick_run(
-        base=tmp_path,
-        run_id="run-3",
-        runlog=fake_runlog_factory(events),
-        results=[SimpleNamespace(account="lx")],
-        tick_metrics={"run_dir": str(tmp_path / "run")},
-        no_send=False,
-        sent_accounts=["lx"],
-        notify_failures=[],
-        notify_summary={"sent": 1, "failed": 0},
-        channel="wechat_clawbot",
-        target="wechat:ops",
-        state_repo=state_repo,
+    rc = mod.finalize_multi_tick_run(**_multi_tick_kwargs(
+        tmp_path, fake_runlog_factory(events),
+        run_id="run-3", state_repo=state_repo,
+        notify_failures=[], notify_summary={"sent": 1, "failed": 0},
         read_json_fn=lambda *_args, **_kwargs: {"history": [1]},
-        shared_state_dir_getter=lambda _base: tmp_path,
-        utc_now_fn=lambda: "2026-01-01T00:00:00Z",
         audit_fn=lambda *_args, **_kwargs: None,
-        safe_data_fn=lambda payload: payload,
         on_success=lambda: success.__setitem__("called", success["called"] + 1),
-    )
+    ))
 
     assert rc == 0
     assert success["called"] == 1

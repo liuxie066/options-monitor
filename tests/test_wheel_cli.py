@@ -104,6 +104,10 @@ def _activation_args(
     return values
 
 
+def _activation_cli(action: str, **kwargs: Any) -> dict[str, Any]:
+    return wheel_cli.execute(wheel_cli.parse_args(_activation_args(action, **kwargs)))
+
+
 def _apply_activation(
     action: str,
     *,
@@ -113,31 +117,23 @@ def _apply_activation(
     generation: int,
     request_id: str,
 ) -> dict[str, Any]:
-    preview = wheel_cli.execute(
-        wheel_cli.parse_args(
-            _activation_args(
-                action,
-                runtime=runtime,
-                data_config=data_config,
-                runtime_root=runtime_root,
-                generation=generation,
-                request_id=request_id,
-            )
-        )
+    preview = _activation_cli(
+        action,
+        runtime=runtime,
+        data_config=data_config,
+        runtime_root=runtime_root,
+        generation=generation,
+        request_id=request_id,
     )
-    return wheel_cli.execute(
-        wheel_cli.parse_args(
-            _activation_args(
-                action,
-                runtime=runtime,
-                data_config=data_config,
-                runtime_root=runtime_root,
-                generation=generation,
-                request_id=request_id,
-                source_sha=preview["expected_source_sha256"],
-                apply=True,
-            )
-        )
+    return _activation_cli(
+        action,
+        runtime=runtime,
+        data_config=data_config,
+        runtime_root=runtime_root,
+        generation=generation,
+        request_id=request_id,
+        source_sha=preview["expected_source_sha256"],
+        apply=True,
     )
 
 
@@ -228,6 +224,19 @@ def _run_public_wheel_cli(args: list[str], capsys: pytest.CaptureFixture[str]):
     return exit_code, json.loads(capsys.readouterr().out)
 
 
+def _run_activation_cli(action: str, *, capsys: pytest.CaptureFixture[str], **kwargs: Any):
+    return _run_public_wheel_cli(_activation_args(action, **kwargs), capsys)
+
+
+def _deployment_tree(runtime_root: Path) -> dict[str, object]:
+    return {
+        str(path.relative_to(runtime_root)): (
+            "directory" if path.is_dir() else path.read_bytes()
+        )
+        for path in runtime_root.rglob("*")
+    }
+
+
 def _deployment_file_bytes(runtime_root: Path) -> dict[str, bytes]:
     return {
         str(path.relative_to(runtime_root)): path.read_bytes()
@@ -273,33 +282,23 @@ def _enable_for_account(
     runtime_root: Path,
     request_id: str,
 ) -> dict[str, Any]:
-    preview = wheel_cli.execute(
-        wheel_cli.parse_args(
-            _activation_args(
-                "enable",
-                runtime=runtime,
-                data_config=data_config,
-                runtime_root=runtime_root,
-                account=account,
-                generation=0,
-                request_id=request_id,
-            )
-        )
+    preview = _activation_cli(
+        "enable",
+        runtime=runtime,
+        data_config=data_config,
+        runtime_root=runtime_root,
+        account=account,
+        request_id=request_id,
     )
-    return wheel_cli.execute(
-        wheel_cli.parse_args(
-            _activation_args(
-                "enable",
-                runtime=runtime,
-                data_config=data_config,
-                runtime_root=runtime_root,
-                account=account,
-                generation=0,
-                request_id=request_id,
-                source_sha=preview["expected_source_sha256"],
-                apply=True,
-            )
-        )
+    return _activation_cli(
+        "enable",
+        runtime=runtime,
+        data_config=data_config,
+        runtime_root=runtime_root,
+        account=account,
+        request_id=request_id,
+        source_sha=preview["expected_source_sha256"],
+        apply=True,
     )
 
 
@@ -328,6 +327,14 @@ def _drifted_activation_environment(
     )
     assert rebuilt["write_applied"] is True
     return source, runtime, data_config, sqlite_path
+
+
+def _deployment_args(runtime: Path, data_config: Path, runtime_root: Path) -> list[str]:
+    return [
+        "--config", str(runtime),
+        "--data-config", str(data_config),
+        "--runtime-root", str(runtime_root),
+    ]
 
 
 def _accept_policy_args(*extra: str) -> list[str]:
@@ -427,21 +434,7 @@ def _stub_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
 def test_wheel_cli_end_previews_by_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     calls = []
-    monkeypatch.setattr(
-        wheel_cli,
-        "load_runtime_config",
-        lambda **_kwargs: (tmp_path / "config.us.json", {"portfolio": {}}),
-    )
-    monkeypatch.setattr(
-        wheel_cli,
-        "resolve_position_data_config_path",
-        lambda **_kwargs: tmp_path / "portfolio.runtime.json",
-    )
-    monkeypatch.setattr(
-        wheel_cli,
-        "open_position_ledger_from_runtime_config",
-        lambda **_kwargs: (tmp_path / "portfolio.runtime.json", object()),
-    )
+    _stub_runtime(monkeypatch, tmp_path)
 
     def _end(_repo, **kwargs):
         calls.append(kwargs)
@@ -688,23 +681,13 @@ def test_public_wheel_cli_maps_activation_input_errors_without_writes(
         tmp_path,
         initialize_db=False,
     )
-    before = {
-        str(path.relative_to(tmp_path)): (
-            "directory" if path.is_dir() else path.read_bytes()
-        )
-        for path in tmp_path.rglob("*")
-    }
+    before = _deployment_tree(tmp_path)
     runtime_root = tmp_path / "other-deployment" if mismatched_runtime_root else tmp_path
 
-    exit_code, payload = _run_public_wheel_cli(
-        _activation_args(
-            "status",
-            runtime=runtime,
-            data_config=data_config,
-            runtime_root=runtime_root,
-            account=account,
-        ),
-        capsys,
+    exit_code, payload = _run_activation_cli(
+        "status", runtime=runtime, data_config=data_config, runtime_root=runtime_root,
+        account=account,
+        capsys=capsys,
     )
 
     assert exit_code == 2
@@ -715,12 +698,7 @@ def test_public_wheel_cli_maps_activation_input_errors_without_writes(
         "message": payload["error"]["message"],
     }
     assert message in payload["error"]["message"]
-    assert {
-        str(path.relative_to(tmp_path)): (
-            "directory" if path.is_dir() else path.read_bytes()
-        )
-        for path in tmp_path.rglob("*")
-    } == before
+    assert _deployment_tree(tmp_path) == before
     assert not sqlite_path.exists()
 
 
@@ -729,39 +707,16 @@ def test_wheel_cli_activation_public_entry_completes_full_lifecycle(
 ) -> None:
     source, runtime, data_config, sqlite_path = _activation_environment(tmp_path)
 
-    enable_preview = wheel_cli.execute(
-        wheel_cli.parse_args(
-            _activation_args(
-                "enable",
-                runtime=runtime,
-                data_config=data_config,
-                runtime_root=tmp_path,
-            )
-        )
+    enable_preview = _activation_cli("enable", runtime=runtime, data_config=data_config, runtime_root=tmp_path)
+    enabled = _activation_cli(
+        "enable", runtime=runtime, data_config=data_config, runtime_root=tmp_path,
+        source_sha=enable_preview["expected_source_sha256"],
+        apply=True,
     )
-    enabled = wheel_cli.execute(
-        wheel_cli.parse_args(
-            _activation_args(
-                "enable",
-                runtime=runtime,
-                data_config=data_config,
-                runtime_root=tmp_path,
-                source_sha=enable_preview["expected_source_sha256"],
-                apply=True,
-            )
-        )
-    )
-    replayed = wheel_cli.execute(
-        wheel_cli.parse_args(
-            _activation_args(
-                "enable",
-                runtime=runtime,
-                data_config=data_config,
-                runtime_root=tmp_path,
-                source_sha=enable_preview["expected_source_sha256"],
-                apply=True,
-            )
-        )
+    replayed = _activation_cli(
+        "enable", runtime=runtime, data_config=data_config, runtime_root=tmp_path,
+        source_sha=enable_preview["expected_source_sha256"],
+        apply=True,
     )
 
     assert enabled["status"] == "applied"
@@ -783,62 +738,34 @@ def test_wheel_cli_activation_public_entry_completes_full_lifecycle(
     )
     assert replayed["write_applied"] is False
 
-    disable_preview = wheel_cli.execute(
-        wheel_cli.parse_args(
-            _activation_args(
-                "disable",
-                runtime=runtime,
-                data_config=data_config,
-                runtime_root=tmp_path,
-                generation=1,
-                request_id="disable-1",
-            )
-        )
+    disable_preview = _activation_cli(
+        "disable", runtime=runtime, data_config=data_config, runtime_root=tmp_path,
+        generation=1,
+        request_id="disable-1",
     )
-    disabled = wheel_cli.execute(
-        wheel_cli.parse_args(
-            _activation_args(
-                "disable",
-                runtime=runtime,
-                data_config=data_config,
-                runtime_root=tmp_path,
-                generation=1,
-                request_id="disable-1",
-                source_sha=disable_preview["expected_source_sha256"],
-                apply=True,
-            )
-        )
+    disabled = _activation_cli(
+        "disable", runtime=runtime, data_config=data_config, runtime_root=tmp_path,
+        generation=1,
+        request_id="disable-1",
+        source_sha=disable_preview["expected_source_sha256"],
+        apply=True,
     )
     assert disabled["status"] == "applied"
     assert disabled["ready"] is False
     assert disabled["monitoring_gate"] == "disabled"
     assert disabled["reason_code"] == "closed_window"
 
-    reenable_preview = wheel_cli.execute(
-        wheel_cli.parse_args(
-            _activation_args(
-                "enable",
-                runtime=runtime,
-                data_config=data_config,
-                runtime_root=tmp_path,
-                generation=1,
-                request_id="enable-2",
-            )
-        )
+    reenable_preview = _activation_cli(
+        "enable", runtime=runtime, data_config=data_config, runtime_root=tmp_path,
+        generation=1,
+        request_id="enable-2",
     )
-    reenabled = wheel_cli.execute(
-        wheel_cli.parse_args(
-            _activation_args(
-                "enable",
-                runtime=runtime,
-                data_config=data_config,
-                runtime_root=tmp_path,
-                generation=1,
-                request_id="enable-2",
-                source_sha=reenable_preview["expected_source_sha256"],
-                apply=True,
-            )
-        )
+    reenabled = _activation_cli(
+        "enable", runtime=runtime, data_config=data_config, runtime_root=tmp_path,
+        generation=1,
+        request_id="enable-2",
+        source_sha=reenable_preview["expected_source_sha256"],
+        apply=True,
     )
     assert reenabled["status"] == "applied"
     assert reenabled["ready"] is True
@@ -864,16 +791,7 @@ def test_public_wheel_cli_preserves_committed_window_config_failure_and_retries(
     _source, runtime, data_config, sqlite_path = _activation_environment(
         tmp_path, initialize_db=False
     )
-    preview = wheel_cli.execute(
-        wheel_cli.parse_args(
-            _activation_args(
-                "enable",
-                runtime=runtime,
-                data_config=data_config,
-                runtime_root=tmp_path,
-            )
-        )
-    )
+    preview = _activation_cli("enable", runtime=runtime, data_config=data_config, runtime_root=tmp_path)
     publisher = config_transaction.publish_yaml_config_generation_locked
     monkeypatch.setattr(
         config_transaction,
@@ -888,10 +806,7 @@ def test_public_wheel_cli_preserves_committed_window_config_failure_and_retries(
     )
 
     args = _activation_args(
-        "enable",
-        runtime=runtime,
-        data_config=data_config,
-        runtime_root=tmp_path,
+        "enable", runtime=runtime, data_config=data_config, runtime_root=tmp_path,
         source_sha=preview["expected_source_sha256"],
         apply=True,
     )
@@ -923,17 +838,10 @@ def test_public_wheel_cli_preserves_committed_window_config_failure_and_retries(
         publisher,
     )
     retry_preview = wheel_cli.execute(wheel_cli.parse_args(args[:-2]))
-    retried = wheel_cli.execute(
-        wheel_cli.parse_args(
-            _activation_args(
-                "enable",
-                runtime=runtime,
-                data_config=data_config,
-                runtime_root=tmp_path,
-                source_sha=retry_preview["expected_source_sha256"],
-                apply=True,
-            )
-        )
+    retried = _activation_cli(
+        "enable", runtime=runtime, data_config=data_config, runtime_root=tmp_path,
+        source_sha=retry_preview["expected_source_sha256"],
+        apply=True,
     )
     rows = SQLiteOptionPositionsRepository(sqlite_path).list_wheel_activation_windows(
         market="us", account="lx"
@@ -950,16 +858,7 @@ def test_public_wheel_cli_preserves_readback_failure_and_idempotent_retry(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     _source, runtime, data_config, sqlite_path = _activation_environment(tmp_path)
-    preview = wheel_cli.execute(
-        wheel_cli.parse_args(
-            _activation_args(
-                "enable",
-                runtime=runtime,
-                data_config=data_config,
-                runtime_root=tmp_path,
-            )
-        )
-    )
+    preview = _activation_cli("enable", runtime=runtime, data_config=data_config, runtime_root=tmp_path)
     original_status = wheel_workflows._activation_status
     failed = False
 
@@ -972,10 +871,7 @@ def test_public_wheel_cli_preserves_readback_failure_and_idempotent_retry(
 
     monkeypatch.setattr(wheel_workflows, "_activation_status", _fail_after_publish)
     args = _activation_args(
-        "enable",
-        runtime=runtime,
-        data_config=data_config,
-        runtime_root=tmp_path,
+        "enable", runtime=runtime, data_config=data_config, runtime_root=tmp_path,
         source_sha=preview["expected_source_sha256"],
         apply=True,
     )
@@ -1023,15 +919,7 @@ def test_public_wheel_cli_activation_status_distinguishes_storage_and_window_sta
         case,
     )
 
-    exit_code, result = _run_public_wheel_cli(
-        _activation_args(
-            "status",
-            runtime=runtime,
-            data_config=data_config,
-            runtime_root=tmp_path,
-        ),
-        capsys,
-    )
+    exit_code, result = _run_activation_cli("status", runtime=runtime, data_config=data_config, runtime_root=tmp_path, capsys=capsys)
 
     assert exit_code == 0
     assert result["status"] == expected_status
@@ -1053,15 +941,7 @@ def test_public_wheel_cli_status_preserves_known_window_for_malformed_descriptor
     )
     before = _deployment_file_bytes(tmp_path)
 
-    exit_code, status = _run_public_wheel_cli(
-        _activation_args(
-            "status",
-            runtime=runtime,
-            data_config=data_config,
-            runtime_root=tmp_path,
-        ),
-        capsys,
-    )
+    exit_code, status = _run_activation_cli("status", runtime=runtime, data_config=data_config, runtime_root=tmp_path, capsys=capsys)
 
     assert exit_code == 0
     assert status["current_window"] == expected_window
@@ -1085,15 +965,10 @@ def test_public_wheel_cli_status_offers_accept_policy_for_pure_policy_drift(
     _source, runtime, data_config, _sqlite_path = _drifted_activation_environment(tmp_path)
     before = _deployment_file_bytes(tmp_path)
 
-    exit_code, status = _run_public_wheel_cli(
-        _activation_args(
-            "status",
-            runtime=runtime,
-            data_config=data_config,
-            runtime_root=tmp_path,
-            account="sy",
-        ),
-        capsys,
+    exit_code, status = _run_activation_cli(
+        "status", runtime=runtime, data_config=data_config, runtime_root=tmp_path,
+        account="sy",
+        capsys=capsys,
     )
 
     assert exit_code == 0
@@ -1115,7 +990,7 @@ def test_public_wheel_cli_accept_policy_dry_run_then_apply(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     source, runtime, data_config, _sqlite_path = _drifted_activation_environment(tmp_path)
-    runtime_args = ["--config", str(runtime), "--data-config", str(data_config), "--runtime-root", str(tmp_path)]
+    runtime_args = _deployment_args(runtime, data_config, tmp_path)
     before = _deployment_file_bytes(tmp_path)
 
     exit_code, planned = _run_public_wheel_cli(
@@ -1158,11 +1033,7 @@ def test_public_wheel_cli_accept_policy_text_renders_the_new_keys(
     exit_code = cli_main.main(
         [
             "wheel",
-            *_accept_policy_args(
-                "--config", str(runtime),
-                "--data-config", str(data_config),
-                "--runtime-root", str(tmp_path),
-            ),
+            *_accept_policy_args(*_deployment_args(runtime, data_config, tmp_path)),
             "--format", "text",
         ]
     )
@@ -1182,16 +1053,7 @@ def test_public_wheel_cli_rolls_forward_journal_before_stale_preview_rejection(
     _source, runtime, data_config, sqlite_path = _activation_environment(
         tmp_path, initialize_db=False
     )
-    preview = wheel_cli.execute(
-        wheel_cli.parse_args(
-            _activation_args(
-                "enable",
-                runtime=runtime,
-                data_config=data_config,
-                runtime_root=tmp_path,
-            )
-        )
-    )
+    preview = _activation_cli("enable", runtime=runtime, data_config=data_config, runtime_root=tmp_path)
     manifest, after_bytes, targets = _stage_activation_journal(
         tmp_path,
         symbol="AMD",
@@ -1199,16 +1061,11 @@ def test_public_wheel_cli_rolls_forward_journal_before_stale_preview_rejection(
     )
     (tmp_path / "config.yaml").write_bytes(after_bytes)
 
-    exit_code, payload = _run_public_wheel_cli(
-        _activation_args(
-            "enable",
-            runtime=runtime,
-            data_config=data_config,
-            runtime_root=tmp_path,
-            source_sha=preview["expected_source_sha256"],
-            apply=True,
-        ),
-        capsys,
+    exit_code, payload = _run_activation_cli(
+        "enable", runtime=runtime, data_config=data_config, runtime_root=tmp_path,
+        source_sha=preview["expected_source_sha256"],
+        apply=True,
+        capsys=capsys,
     )
 
     assert exit_code == 2
@@ -1232,16 +1089,7 @@ def test_public_wheel_cli_rolls_back_journal_before_stale_preview_rejection(
     source, runtime, data_config, sqlite_path = _activation_environment(
         tmp_path, initialize_db=False
     )
-    stale_preview = wheel_cli.execute(
-        wheel_cli.parse_args(
-            _activation_args(
-                "enable",
-                runtime=runtime,
-                data_config=data_config,
-                runtime_root=tmp_path,
-            )
-        )
-    )
+    stale_preview = _activation_cli("enable", runtime=runtime, data_config=data_config, runtime_root=tmp_path)
     current_doc = yaml.safe_load(source.read_text(encoding="utf-8"))
     current_doc["markets"]["us"]["symbols"].append("AMD")
     publish_yaml_config_generation(
@@ -1264,16 +1112,11 @@ def test_public_wheel_cli_rolls_back_journal_before_stale_preview_rejection(
         if not target.get("source"):
             Path(target["path"]).write_bytes(target["payload"])
 
-    exit_code, payload = _run_public_wheel_cli(
-        _activation_args(
-            "enable",
-            runtime=runtime,
-            data_config=data_config,
-            runtime_root=tmp_path,
-            source_sha=stale_preview["expected_source_sha256"],
-            apply=True,
-        ),
-        capsys,
+    exit_code, payload = _run_activation_cli(
+        "enable", runtime=runtime, data_config=data_config, runtime_root=tmp_path,
+        source_sha=stale_preview["expected_source_sha256"],
+        apply=True,
+        capsys=capsys,
     )
 
     assert exit_code == 2
@@ -1295,16 +1138,7 @@ def test_public_wheel_cli_reports_partial_recovery_without_writing_window(
     _source, runtime, data_config, sqlite_path = _activation_environment(
         tmp_path, initialize_db=False
     )
-    preview = wheel_cli.execute(
-        wheel_cli.parse_args(
-            _activation_args(
-                "enable",
-                runtime=runtime,
-                data_config=data_config,
-                runtime_root=tmp_path,
-            )
-        )
-    )
+    preview = _activation_cli("enable", runtime=runtime, data_config=data_config, runtime_root=tmp_path)
     extra_target = tmp_path / "recovery-extra.json"
     extra_target.write_bytes(b'{"old":true}\n')
     manifest, after_bytes, _targets = _stage_activation_journal(
@@ -1334,16 +1168,11 @@ def test_public_wheel_cli_reports_partial_recovery_without_writing_window(
         _fail_extra_target,
     )
 
-    exit_code, payload = _run_public_wheel_cli(
-        _activation_args(
-            "enable",
-            runtime=runtime,
-            data_config=data_config,
-            runtime_root=tmp_path,
-            source_sha=preview["expected_source_sha256"],
-            apply=True,
-        ),
-        capsys,
+    exit_code, payload = _run_activation_cli(
+        "enable", runtime=runtime, data_config=data_config, runtime_root=tmp_path,
+        source_sha=preview["expected_source_sha256"],
+        apply=True,
+        capsys=capsys,
     )
 
     assert exit_code == 2

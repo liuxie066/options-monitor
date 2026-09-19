@@ -15,6 +15,42 @@ class _FakeRunLogger:
         self.events.append(rec)
 
 
+def _normalize_notify_output(**kwargs):
+    return importlib.import_module("domain.domain").normalize_notify_subprocess_output(**kwargs)
+
+
+def _notify_retry(
+    *,
+    runlog,
+    audit_fn,
+    send_fn,
+    sleep_fn,
+    normalize_fn=_normalize_notify_output,
+    **overrides,
+):
+    """Call send_account_message_with_retry with the kwargs shared by this module's cases."""
+
+    kwargs = {
+        "base": Path("/tmp/options-monitor-test"),
+        "channel": "wechat_clawbot",
+        "target": "user:test",
+        "account": "lx",
+        "message": "hello",
+        "run_id": "run-1",
+        "runlog": runlog,
+        "audit_fn": audit_fn,
+        "send_fn": send_fn,
+        "normalize_fn": normalize_fn,
+        "safe_data_fn": lambda payload: payload,
+        "failure_fields_builder": lambda **kwargs: kwargs,
+        "sleep_fn": sleep_fn,
+    }
+    kwargs.update(overrides)
+    return importlib.import_module(
+        "src.application.scheduled_notification"
+    ).send_account_message_with_retry(**kwargs)
+
+
 def test_multi_tick_scheduled_renderer_authority_is_daily_brief_only() -> None:
     base = Path(__file__).resolve().parents[1]
     notification_flow_src = (base / "src" / "application" / "tick_notification_flow.py").read_text(encoding="utf-8")
@@ -97,8 +133,6 @@ def test_multi_tick_notify_failure_is_account_isolated() -> None:
 
 
 def test_multi_tick_notify_unconfirmed_is_not_retried() -> None:
-    helper = importlib.import_module("src.application.scheduled_notification")
-
     send_calls: list[dict] = []
     audit_events: list[dict] = []
     sleeps: list[float] = []
@@ -111,19 +145,10 @@ def test_multi_tick_notify_unconfirmed_is_not_retried() -> None:
     def _audit(event_type, action, **kwargs):
         audit_events.append({"event_type": event_type, "action": action, **kwargs})
 
-    result = helper.send_account_message_with_retry(
-        base=Path("/tmp/options-monitor-test"),
-        channel="wechat_clawbot",
-        target="user:test",
-        account="lx",
-        message="hello",
-        run_id="run-1",
+    result = _notify_retry(
         runlog=runlog,
         audit_fn=_audit,
         send_fn=_send,
-        normalize_fn=lambda **kwargs: importlib.import_module("domain.domain").normalize_notify_subprocess_output(**kwargs),
-        safe_data_fn=lambda payload: payload,
-        failure_fields_builder=lambda **kwargs: kwargs,
         sleep_fn=lambda seconds: sleeps.append(seconds),
     )
 
@@ -139,8 +164,6 @@ def test_multi_tick_notify_unconfirmed_is_not_retried() -> None:
 
 
 def test_multi_tick_notify_does_not_confirm_when_message_id_exists_without_delivery_confirmation() -> None:
-    helper = importlib.import_module("src.application.scheduled_notification")
-
     send_calls: list[dict] = []
     audit_events: list[dict] = []
     sleeps: list[float] = []
@@ -164,19 +187,11 @@ def test_multi_tick_notify_does_not_confirm_when_message_id_exists_without_deliv
     def _audit(event_type, action, **kwargs):
         audit_events.append({"event_type": event_type, "action": action, **kwargs})
 
-    result = helper.send_account_message_with_retry(
-        base=Path("/tmp/options-monitor-test"),
-        channel="wechat_clawbot",
-        target="user:test",
-        account="lx",
-        message="hello",
-        run_id="run-1",
+    result = _notify_retry(
         runlog=runlog,
         audit_fn=_audit,
         send_fn=_send,
         normalize_fn=_normalize,
-        safe_data_fn=lambda payload: payload,
-        failure_fields_builder=lambda **kwargs: kwargs,
         sleep_fn=lambda seconds: sleeps.append(seconds),
     )
 
@@ -193,8 +208,6 @@ def test_multi_tick_notify_does_not_confirm_when_message_id_exists_without_deliv
 
 
 def test_multi_tick_notify_unconfirmed_is_not_retried_even_when_explicitly_requested() -> None:
-    helper = importlib.import_module("src.application.scheduled_notification")
-
     audit_events: list[dict] = []
     sleeps: list[float] = []
     runlog = _FakeRunLogger()
@@ -205,19 +218,10 @@ def test_multi_tick_notify_unconfirmed_is_not_retried_even_when_explicitly_reque
     def _audit(event_type, action, **kwargs):
         audit_events.append({"event_type": event_type, "action": action, **kwargs})
 
-    result = helper.send_account_message_with_retry(
-        base=Path("/tmp/options-monitor-test"),
-        channel="wechat_clawbot",
-        target="user:test",
-        account="lx",
-        message="hello",
-        run_id="run-1",
+    result = _notify_retry(
         runlog=runlog,
         audit_fn=_audit,
         send_fn=_send,
-        normalize_fn=lambda **kwargs: importlib.import_module("domain.domain").normalize_notify_subprocess_output(**kwargs),
-        safe_data_fn=lambda payload: payload,
-        failure_fields_builder=lambda **kwargs: kwargs,
         sleep_fn=lambda seconds: sleeps.append(seconds),
         max_attempts=3,
         retry_delays_sec=(1.0, 3.0),
@@ -236,8 +240,6 @@ def test_multi_tick_notify_unconfirmed_is_not_retried_even_when_explicitly_reque
 
 
 def test_multi_tick_notify_failed_send_retries_once_by_default() -> None:
-    helper = importlib.import_module("src.application.scheduled_notification")
-
     audit_events: list[dict] = []
     sleeps: list[float] = []
     send_calls: list[dict] = []
@@ -250,20 +252,12 @@ def test_multi_tick_notify_failed_send_retries_once_by_default() -> None:
     def _audit(event_type, action, **kwargs):
         audit_events.append({"event_type": event_type, "action": action, **kwargs})
 
-    result = helper.send_account_message_with_retry(
-        base=Path("/tmp/options-monitor-test"),
-        channel="wechat_clawbot",
-        target="user:test",
-        account="sy",
-        message="hello",
-        run_id="run-1",
+    result = _notify_retry(
         runlog=runlog,
         audit_fn=_audit,
         send_fn=_send,
-        normalize_fn=lambda **kwargs: importlib.import_module("domain.domain").normalize_notify_subprocess_output(**kwargs),
-        safe_data_fn=lambda payload: payload,
-        failure_fields_builder=lambda **kwargs: kwargs,
         sleep_fn=lambda seconds: sleeps.append(seconds),
+        account="sy",
     )
 
     assert result["ok"] is False
@@ -279,8 +273,6 @@ def test_multi_tick_notify_failed_send_retries_once_by_default() -> None:
 
 
 def test_multi_tick_notify_records_feishu_inner_retry_without_outer_retry() -> None:
-    helper = importlib.import_module("src.application.scheduled_notification")
-
     audit_events: list[dict] = []
     send_calls: list[dict] = []
     runlog = _FakeRunLogger()
@@ -311,20 +303,14 @@ def test_multi_tick_notify_records_feishu_inner_retry_without_outer_retry() -> N
     def _audit(event_type, action, **kwargs):
         audit_events.append({"event_type": event_type, "action": action, **kwargs})
 
-    result = helper.send_account_message_with_retry(
-        base=Path("/tmp/options-monitor-test"),
-        channel="feishu_app",
-        target="ou_1",
-        account="lx",
-        message="hello",
-        run_id="run-1",
+    result = _notify_retry(
         runlog=runlog,
         audit_fn=_audit,
         send_fn=_send,
         normalize_fn=_normalize,
-        safe_data_fn=lambda payload: payload,
-        failure_fields_builder=lambda **kwargs: kwargs,
         sleep_fn=lambda seconds: None,
+        channel="feishu_app",
+        target="ou_1",
     )
 
     assert result["ok"] is True
@@ -340,9 +326,6 @@ def test_multi_tick_notify_records_feishu_inner_retry_without_outer_retry() -> N
 
 
 def test_multi_tick_notify_aggregates_provider_and_outer_retries() -> None:
-    helper = importlib.import_module(
-        "src.application.scheduled_notification"
-    )
     send_calls: list[dict] = []
     normalize_calls = 0
 
@@ -371,20 +354,15 @@ def test_multi_tick_notify_aggregates_provider_and_outer_retries() -> None:
             "fallback_used": False,
         }
 
-    result = helper.send_account_message_with_retry(
-        base=Path("/tmp/options-monitor-test"),
-        channel="feishu_app",
-        target="ou_1",
-        account="lx",
-        message="hello",
-        run_id="run-retry-aggregate",
+    result = _notify_retry(
         runlog=_FakeRunLogger(),
         audit_fn=lambda *_args, **_kwargs: None,
         send_fn=_send,
         normalize_fn=_normalize,
-        safe_data_fn=lambda payload: payload,
-        failure_fields_builder=lambda **kwargs: kwargs,
         sleep_fn=lambda _seconds: None,
+        channel="feishu_app",
+        target="ou_1",
+        run_id="run-retry-aggregate",
     )
 
     assert result["ok"] is True
@@ -431,7 +409,6 @@ def test_multi_tick_notify_without_override_preserves_legacy_transport_key() -> 
 
 
 def test_multi_tick_notify_compacts_logical_override_and_reuses_it_for_retries() -> None:
-    helper = importlib.import_module("src.application.scheduled_notification")
     adapter = importlib.import_module("src.application.notification_delivery_adapter")
     logical_key = "daily-brief:US:2026-07-19:lx:full:" + "a" * 64
     seen: list[str] = []
@@ -442,21 +419,14 @@ def test_multi_tick_notify_compacts_logical_override_and_reuses_it_for_retries()
             return SimpleNamespace(returncode=2, stdout="", stderr="retry")
         return SimpleNamespace(returncode=0, stdout='{"message_id":"m-2"}', stderr="")
 
-    result = helper.send_account_message_with_retry(
-        base=Path("/tmp/options-monitor-test"),
-        channel="wechat_clawbot",
-        target="user:test",
-        account="lx",
-        message="daily brief",
-        run_id="run-brief",
+    result = _notify_retry(
         runlog=_FakeRunLogger(),
         audit_fn=lambda *_args, **_kwargs: None,
         send_fn=_send,
-        normalize_fn=lambda **kwargs: importlib.import_module("domain.domain").normalize_notify_subprocess_output(**kwargs),
-        safe_data_fn=lambda payload: payload,
-        failure_fields_builder=lambda **kwargs: kwargs,
-        idempotency_key_override=logical_key,
         sleep_fn=lambda _seconds: None,
+        message="daily brief",
+        run_id="run-brief",
+        idempotency_key_override=logical_key,
     )
 
     expected = adapter.build_notification_transport_key(logical_key)

@@ -111,6 +111,20 @@ def _release_evidence(repo: Path) -> dict[str, object]:
     return parsed["evidence"]
 
 
+def _write_manifest(repo: Path, manifest: dict[str, object], version: str = "1.1.0") -> None:
+    """Persist ``manifest`` at the path the coverage validator will read."""
+    default_manifest_path(repo, version).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+
+def _validate(repo: Path, version: str = "1.1.0") -> dict[str, object]:
+    """Validate the manifest written for ``version`` against the repo's changelog."""
+    return validate_release_delta_coverage(
+        base_dir=repo,
+        version=version,
+        release_evidence=_release_evidence(repo),
+    )
+
+
 def test_manifest_builder_inventory_and_unreleased_notes_are_deterministic(tmp_path: Path) -> None:
     repo, reviewed = _prepared_repo(tmp_path)
 
@@ -177,11 +191,7 @@ def test_delta_coverage_accepts_protected_main_merge_of_release_commit(tmp_path:
     _git(repo, "switch", "protected-main")
     _git(repo, "merge", "--no-ff", "release", "-m", "Merge pull request #123 from release")
 
-    validate_release_delta_coverage(
-        base_dir=repo,
-        version="1.1.0",
-        release_evidence=_release_evidence(repo),
-    )
+    _validate(repo)
 
 
 def test_release_check_cli_enforces_delta_coverage(
@@ -213,17 +223,10 @@ def test_release_check_cli_enforces_delta_coverage(
 def test_delta_coverage_rejects_unreviewed_commit(tmp_path: Path) -> None:
     repo, manifest = _prepared_repo(tmp_path)
     manifest["no_release_note"] = []
-    default_manifest_path(repo, "1.1.0").write_text(
-        json.dumps(manifest, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    _write_manifest(repo, manifest)
 
     with pytest.raises(ReleaseDeltaCoverageError) as exc_info:
-        validate_release_delta_coverage(
-            base_dir=repo,
-            version="1.1.0",
-            release_evidence=_release_evidence(repo),
-        )
+        _validate(repo)
 
     assert exc_info.value.reason_code == "RELEASE_DELTA_UNREVIEWED_COMMITS"
 
@@ -231,17 +234,10 @@ def test_delta_coverage_rejects_unreviewed_commit(tmp_path: Path) -> None:
 def test_delta_coverage_rejects_commit_without_design_evidence(tmp_path: Path) -> None:
     repo, manifest = _prepared_repo(tmp_path)
     manifest["design_evidence"] = manifest["design_evidence"][:1]
-    default_manifest_path(repo, "1.1.0").write_text(
-        json.dumps(manifest, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    _write_manifest(repo, manifest)
 
     with pytest.raises(ReleaseDeltaCoverageError) as exc_info:
-        validate_release_delta_coverage(
-            base_dir=repo,
-            version="1.1.0",
-            release_evidence=_release_evidence(repo),
-        )
+        _validate(repo)
 
     assert exc_info.value.reason_code == "RELEASE_DELTA_DESIGN_EVIDENCE_MISSING"
 
@@ -249,17 +245,10 @@ def test_delta_coverage_rejects_commit_without_design_evidence(tmp_path: Path) -
 def test_delta_coverage_rejects_untracked_design_document(tmp_path: Path) -> None:
     repo, manifest = _prepared_repo(tmp_path)
     manifest["design_evidence"][0]["references"] = ["docs/missing-design.md"]
-    default_manifest_path(repo, "1.1.0").write_text(
-        json.dumps(manifest, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    _write_manifest(repo, manifest)
 
     with pytest.raises(ReleaseDeltaCoverageError) as exc_info:
-        validate_release_delta_coverage(
-            base_dir=repo,
-            version="1.1.0",
-            release_evidence=_release_evidence(repo),
-        )
+        _validate(repo)
 
     assert exc_info.value.reason_code == "RELEASE_DELTA_DESIGN_PATH_MISSING"
 
@@ -271,17 +260,10 @@ def test_delta_coverage_rejects_empty_design_references(
 ) -> None:
     repo, manifest = _prepared_repo(tmp_path)
     manifest["design_evidence"][0]["references"] = references
-    default_manifest_path(repo, "1.1.0").write_text(
-        json.dumps(manifest, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    _write_manifest(repo, manifest)
 
     with pytest.raises(ReleaseDeltaCoverageError) as exc_info:
-        validate_release_delta_coverage(
-            base_dir=repo,
-            version="1.1.0",
-            release_evidence=_release_evidence(repo),
-        )
+        _validate(repo)
 
     assert exc_info.value.reason_code == "RELEASE_DELTA_DESIGN_REFERENCE_REQUIRED"
 
@@ -301,17 +283,10 @@ def test_delta_coverage_rejects_invalid_design_reference(
 ) -> None:
     repo, manifest = _prepared_repo(tmp_path)
     manifest["design_evidence"][0]["references"] = [reference]
-    default_manifest_path(repo, "1.1.0").write_text(
-        json.dumps(manifest, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    _write_manifest(repo, manifest)
 
     with pytest.raises(ReleaseDeltaCoverageError) as exc_info:
-        validate_release_delta_coverage(
-            base_dir=repo,
-            version="1.1.0",
-            release_evidence=_release_evidence(repo),
-        )
+        _validate(repo)
 
     assert exc_info.value.reason_code == "RELEASE_DELTA_DESIGN_REFERENCE_INVALID"
 
@@ -320,10 +295,7 @@ def test_delta_coverage_accepts_legacy_manifest_before_design_cutover(tmp_path: 
     repo, manifest = _prepared_repo(tmp_path)
     manifest["schema_version"] = "release_delta_coverage.v1"
     manifest.pop("design_evidence")
-    default_manifest_path(repo, "1.1.0").write_text(
-        json.dumps(manifest, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    _write_manifest(repo, manifest)
 
     summary = validate_release_delta_coverage(
         base_dir=repo,
@@ -344,15 +316,10 @@ def test_delta_coverage_requires_design_schema_after_2_1_3(
     manifest["schema_version"] = "release_delta_coverage.v1"
     manifest["target_version"] = target_version
     manifest.pop("design_evidence")
-    path = default_manifest_path(repo, target_version)
-    path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    _write_manifest(repo, manifest, target_version)
 
     with pytest.raises(ReleaseDeltaCoverageError) as exc_info:
-        validate_release_delta_coverage(
-            base_dir=repo,
-            version=target_version,
-            release_evidence=_release_evidence(repo),
-        )
+        _validate(repo, target_version)
 
     assert exc_info.value.reason_code == "RELEASE_DELTA_DESIGN_SCHEMA_REQUIRED"
 
@@ -360,17 +327,10 @@ def test_delta_coverage_requires_design_schema_after_2_1_3(
 def test_delta_coverage_rejects_changelog_note_without_exact_mapping(tmp_path: Path) -> None:
     repo, manifest = _prepared_repo(tmp_path)
     manifest["release_notes"][0]["text"] = "A different release note."
-    default_manifest_path(repo, "1.1.0").write_text(
-        json.dumps(manifest, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    _write_manifest(repo, manifest)
 
     with pytest.raises(ReleaseDeltaCoverageError) as exc_info:
-        validate_release_delta_coverage(
-            base_dir=repo,
-            version="1.1.0",
-            release_evidence=_release_evidence(repo),
-        )
+        _validate(repo)
 
     assert exc_info.value.reason_code == "RELEASE_DELTA_NOTES_MISMATCH"
 
@@ -378,17 +338,10 @@ def test_delta_coverage_rejects_changelog_note_without_exact_mapping(tmp_path: P
 def test_delta_coverage_rejects_empty_no_note_reason(tmp_path: Path) -> None:
     repo, manifest = _prepared_repo(tmp_path)
     manifest["no_release_note"][0]["reason"] = ""
-    default_manifest_path(repo, "1.1.0").write_text(
-        json.dumps(manifest, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    _write_manifest(repo, manifest)
 
     with pytest.raises(ReleaseDeltaCoverageError) as exc_info:
-        validate_release_delta_coverage(
-            base_dir=repo,
-            version="1.1.0",
-            release_evidence=_release_evidence(repo),
-        )
+        _validate(repo)
 
     assert exc_info.value.reason_code == "RELEASE_DELTA_REASON_REQUIRED"
 
@@ -396,22 +349,11 @@ def test_delta_coverage_rejects_empty_no_note_reason(tmp_path: Path) -> None:
 def test_delta_coverage_rejects_code_hidden_in_release_metadata_commit(tmp_path: Path) -> None:
     repo, _manifest = _prepared_repo(tmp_path)
     (repo / "hidden.py").write_text("HIDDEN = True\n", encoding="utf-8")
-    _git(
-        repo,
-        "add",
-        "VERSION",
-        "CHANGELOG.md",
-        "release/coverage/v1.1.0.json",
-        "hidden.py",
-    )
+    _git(repo, "add", "VERSION", "CHANGELOG.md", "release/coverage/v1.1.0.json", "hidden.py")
     _git(repo, "commit", "-m", "chore: release 1.1.0")
 
     with pytest.raises(ReleaseDeltaCoverageError) as exc_info:
-        validate_release_delta_coverage(
-            base_dir=repo,
-            version="1.1.0",
-            release_evidence=_release_evidence(repo),
-        )
+        _validate(repo)
 
     assert exc_info.value.reason_code == "RELEASE_DELTA_RELEASE_COMMIT_SCOPE"
 
@@ -425,11 +367,7 @@ def test_delta_coverage_rejects_any_second_commit_after_review(tmp_path: Path) -
     _git(repo, "commit", "-m", "feat: late unreviewed change")
 
     with pytest.raises(ReleaseDeltaCoverageError) as exc_info:
-        validate_release_delta_coverage(
-            base_dir=repo,
-            version="1.1.0",
-            release_evidence=_release_evidence(repo),
-        )
+        _validate(repo)
 
     assert exc_info.value.reason_code == "RELEASE_DELTA_POST_REVIEW_COMMITS"
 

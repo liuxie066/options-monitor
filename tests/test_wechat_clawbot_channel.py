@@ -8,6 +8,43 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import src.application.channels.wechat_clawbot.inbound as inbound
+import src.interfaces.cli.main as cli
+import time
+from src.application.agent_tool_contracts import build_response
+from src.application.assistant.audit import InboundAuditStore
+from src.application.assistant.contracts import AssistantRequest
+from src.application.bot.host_store import BotHostStore
+from src.application.channels.status import build_channel_status
+from src.application.channels.wechat_clawbot.binding import (
+    bind_wechat_clawbot_target,
+    check_wechat_clawbot_qrcode,
+    connect_wechat_clawbot_target,
+    refresh_wechat_clawbot_binding_from_inbound_message,
+    refresh_wechat_clawbot_binding_from_reply,
+    refresh_wechat_clawbot_bindings_from_message,
+    start_wechat_clawbot_qrcode,
+)
+from src.application.channels.wechat_clawbot.inbound import (
+    _outbox_client_id,
+    _prepare_reply_outbox,
+    _retry_pending_wechat_reply,
+    build_wechat_clawbot_serve_settings,
+    check_wechat_clawbot_serve_settings,
+    poll_wechat_clawbot_once,
+    serve_wechat_clawbot,
+    wechat_clawbot_message_to_assistant_request,
+)
+from src.application.channels.wechat_clawbot.message import (
+    response_code,
+    response_message_id,
+    response_success,
+)
+from src.application.channels.wechat_clawbot.reply import reply_wechat_clawbot_text
+from src.application.channels.wechat_clawbot.state_store import WechatClawbotStateStore
+from src.application.secret_store import SecretStatus, use_secret_provider
+from src.interfaces.cli.channel_ops import handle_channel_command
+
 
 @pytest.fixture(autouse=True)
 def isolated_default_audit_path(tmp_path, monkeypatch):
@@ -15,12 +52,6 @@ def isolated_default_audit_path(tmp_path, monkeypatch):
 
 
 def test_wechat_clawbot_response_parsers_preserve_precedence_and_traversal() -> None:
-    from src.application.channels.wechat_clawbot.message import (
-        response_code,
-        response_message_id,
-        response_success,
-    )
-
     assert response_success({}) is True
     assert response_success({"ok": True, "ret": -2}) is True
     assert response_success({"ret": 0}) is True
@@ -47,9 +78,140 @@ def _write_minimal_assistant_config(tmp_path: Path) -> Path:
     return config_path
 
 
-def test_wechat_clawbot_qrcode_writes_pending_login(tmp_path: Path) -> None:
-    from src.application.channels.wechat_clawbot.binding import start_wechat_clawbot_qrcode
+def _wechat_state_dir(tmp_path: Path, *, buf: str | None = "buf_1") -> Path:
+    """Write the wechat_clawbot state dir the channel tests share."""
+    state_dir = tmp_path / "wechat-state"
+    state_dir.mkdir()
+    state = {"bot_token": "bot_1", "base_url": "https://example.invalid"}
+    if buf is not None:
+        state["get_updates_buf"] = buf
+    (state_dir / "state.json").write_text(
+        json.dumps(state, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return state_dir
 
+
+def _wechat_config_path(tmp_path: Path) -> Path:
+    """Write the channel config that targets ``wechat:ops``."""
+    config_path = tmp_path / "config.us.json"
+    config_path.write_text(
+        json.dumps({"notifications": {"provider": "wechat_clawbot", "target": "wechat:ops"}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def _write_wechat_bindings(state_dir: Path, bindings: dict) -> None:
+    (state_dir / "bindings.json").write_text(
+        json.dumps({"bindings": bindings}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def _wechat_binding(
+    state_dir: Path,
+    *,
+    to_user_id: str,
+    context_token: str,
+    **extra: object,
+) -> None:
+    """Write ``bindings.json`` holding a single ``ops`` binding."""
+    binding: dict[str, object] = {
+        "to_user_id": to_user_id,
+        "context_token": context_token,
+    }
+    binding.update(extra)
+    _write_wechat_bindings(state_dir, {"ops": binding})
+
+
+def _wechat_inbound_message(text: str = "/status") -> dict:
+    """``msgs`` entry the poll tests feed through ``get_updates``."""
+    return {
+        "from_user_id": "user_1",
+        "group_id": "group_1",
+        "context_token": "ctx_1",
+        "message_id": "msg_1",
+        "item_list": [{"type": 1, "text_item": {"text": text}}],
+    }
+
+
+def _wechat_flat_inbound_message(text: str) -> dict:
+    """``msgs`` entry carrying a top-level ``text_item`` and no ``group_id``."""
+    return {
+        "from_user_id": "user_1",
+        "context_token": "ctx_1",
+        "message_id": "msg_1",
+        "text_item": {"text": text},
+    }
+
+
+def _wechat_bind_updates(*, group_id: str | None = "group_1") -> dict:
+    """``get_updates`` payload carrying the ``bind ops`` instruction."""
+    message: dict[str, object] = {"from_user_id": "user_1"}
+    if group_id is not None:
+        message["group_id"] = group_id
+    message.update(
+        {
+            "context_token": "ctx_1",
+            "message_id": "msg_1",
+            "text_item": {"text": "bind ops"},
+        }
+    )
+    return {"data": {"get_updates_buf": "buf_2", "message_list": [message]}}
+
+
+def _wechat_execute(tool_name: str, payload: dict) -> dict:
+    """Tool executor the poll tests inject; ignores the inbound payload."""
+    del payload
+    return build_response(tool_name=tool_name, ok=True, data={"status": "ok"})
+
+
+def _wechat_reply_receipt(tmp_path: Path) -> dict:
+    """Read the audited reply receipt the poll tests assert against."""
+    audited = InboundAuditStore(str(tmp_path / "audit.sqlite3")).find_by_message(
+        channel="wechat",
+        message_id="msg_1",
+    )
+    assert audited is not None
+    stored = json.loads(str(audited["response_json"] or "{}"))
+    return stored["data"]["reply"]
+
+
+class _PollClient:
+    """Client double for the ``poll_once`` tests.
+
+    Subclasses override only the response hooks that differ; every default
+    reproduces the canned payload of the inline fake it replaced.
+    """
+
+    def __init__(self, *, bot_token: str, base_url: str, timeout: int) -> None:
+        assert bot_token == "bot_1"
+        assert base_url == "https://example.invalid"
+        del timeout
+
+    def get_updates(self, *, get_updates_buf: str):  # type: ignore[no-untyped-def]
+        assert get_updates_buf == "buf_1"
+        return {"ret": 0, "get_updates_buf": "buf_2", "msgs": []}
+
+
+class _PollReplyClient(_PollClient):
+    """``_PollClient`` that also answers the typing/reply surface."""
+
+    def get_config(self, **kwargs):  # type: ignore[no-untyped-def]
+        del kwargs
+        return {"ret": 0, "typing_ticket": "typing_ticket_1"}
+
+    def send_typing(self, **kwargs):  # type: ignore[no-untyped-def]
+        del kwargs
+        return {"ret": 0}
+
+    def send_text_message(self, **kwargs):  # type: ignore[no-untyped-def]
+        del kwargs
+        return {"ret": 0, "data": {"message_id": "reply_1"}}
+
+
+def test_wechat_clawbot_qrcode_writes_pending_login(tmp_path: Path) -> None:
     captured: dict[str, object] = {}
 
     class FakeClient:
@@ -88,8 +250,6 @@ def test_wechat_clawbot_qrcode_writes_pending_login(tmp_path: Path) -> None:
 
 
 def test_wechat_clawbot_state_store_lists_safe_bindings(tmp_path: Path) -> None:
-    from src.application.channels.wechat_clawbot.state_store import WechatClawbotStateStore
-
     state_dir = tmp_path / "wechat-state"
     store = WechatClawbotStateStore(state_dir)
     store.save_bindings(
@@ -112,8 +272,6 @@ def test_wechat_clawbot_state_store_lists_safe_bindings(tmp_path: Path) -> None:
 
 
 def test_wechat_clawbot_qr_status_persists_bot_token(tmp_path: Path) -> None:
-    from src.application.channels.wechat_clawbot.binding import check_wechat_clawbot_qrcode
-
     state_dir = tmp_path / "wechat-state"
     state_dir.mkdir()
     (state_dir / "pending_login.json").write_text(
@@ -150,14 +308,7 @@ def test_wechat_clawbot_qr_status_persists_bot_token(tmp_path: Path) -> None:
 
 
 def test_wechat_clawbot_bind_persists_context_token(tmp_path: Path) -> None:
-    from src.application.channels.wechat_clawbot.binding import bind_wechat_clawbot_target
-
-    state_dir = tmp_path / "wechat-state"
-    state_dir.mkdir()
-    (state_dir / "state.json").write_text(
-        json.dumps({"bot_token": "bot_1", "base_url": "https://example.invalid", "get_updates_buf": "buf_1"}, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    state_dir = _wechat_state_dir(tmp_path)
 
     class FakeClient:
         def __init__(self, *, bot_token: str, base_url: str, timeout: int) -> None:
@@ -166,20 +317,7 @@ def test_wechat_clawbot_bind_persists_context_token(tmp_path: Path) -> None:
 
         def get_updates(self, *, get_updates_buf: str):  # type: ignore[no-untyped-def]
             assert get_updates_buf == "buf_1"
-            return {
-                "data": {
-                    "get_updates_buf": "buf_2",
-                    "message_list": [
-                        {
-                            "from_user_id": "user_1",
-                            "group_id": "group_1",
-                            "context_token": "ctx_1",
-                            "message_id": "msg_1",
-                            "text_item": {"text": "bind ops"},
-                        }
-                    ],
-                }
-            }
+            return _wechat_bind_updates()
 
     out = bind_wechat_clawbot_target(
         base=tmp_path,
@@ -201,8 +339,6 @@ def test_wechat_clawbot_bind_persists_context_token(tmp_path: Path) -> None:
 
 
 def test_wechat_clawbot_refreshes_matching_binding_from_inbound_message(tmp_path: Path) -> None:
-    from src.application.channels.wechat_clawbot.binding import refresh_wechat_clawbot_bindings_from_message
-
     state_dir = tmp_path / "wechat-state"
     state_dir.mkdir()
     (state_dir / "bindings.json").write_text(
@@ -253,8 +389,6 @@ def test_wechat_clawbot_refreshes_matching_binding_from_inbound_message(tmp_path
 
 
 def test_wechat_clawbot_refreshes_notification_binding_from_inbound_message(tmp_path: Path) -> None:
-    from src.application.channels.wechat_clawbot.binding import refresh_wechat_clawbot_binding_from_inbound_message
-
     state_dir = tmp_path / "wechat-state"
     state_dir.mkdir()
     (state_dir / "bindings.json").write_text(
@@ -307,26 +441,15 @@ def test_wechat_clawbot_refreshes_notification_binding_from_inbound_message(tmp_
 
 
 def test_wechat_clawbot_refreshes_notification_binding_from_successful_reply(tmp_path: Path) -> None:
-    from src.application.channels.wechat_clawbot.binding import refresh_wechat_clawbot_binding_from_reply
-
     state_dir = tmp_path / "wechat-state"
     state_dir.mkdir()
-    (state_dir / "bindings.json").write_text(
-        json.dumps(
-            {
-                "bindings": {
-                    "ops": {
-                        "to_user_id": "stale_user",
-                        "context_token": "stale_ctx",
-                        "group_id": "stale_group",
-                        "chat_key": "stale_chat",
-                        "last_message_id": "msg_old",
-                    }
-                }
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
+    _wechat_binding(
+        state_dir,
+        to_user_id="stale_user",
+        context_token="stale_ctx",
+        group_id="stale_group",
+        chat_key="stale_chat",
+        last_message_id="msg_old",
     )
 
     out = refresh_wechat_clawbot_binding_from_reply(
@@ -358,9 +481,6 @@ def test_wechat_clawbot_refreshes_notification_binding_from_successful_reply(tmp
 
 
 def test_wechat_clawbot_message_adapter_builds_assistant_request(tmp_path: Path) -> None:
-    from src.application.assistant.contracts import AssistantRequest
-    from src.application.channels.wechat_clawbot.inbound import wechat_clawbot_message_to_assistant_request
-
     request = wechat_clawbot_message_to_assistant_request(
         {
             "from_user_id": "user_1",
@@ -396,14 +516,7 @@ def test_wechat_clawbot_message_adapter_builds_assistant_request(tmp_path: Path)
 
 
 def test_reply_wechat_clawbot_text_reuses_idempotent_receipt(tmp_path: Path) -> None:
-    from src.application.channels.wechat_clawbot.reply import reply_wechat_clawbot_text
-
-    state_dir = tmp_path / "wechat-state"
-    state_dir.mkdir()
-    (state_dir / "state.json").write_text(
-        json.dumps({"bot_token": "bot_1", "base_url": "https://example.invalid"}, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    state_dir = _wechat_state_dir(tmp_path, buf=None)
     sends: list[dict[str, object]] = []
     client_inits: list[dict[str, object]] = []
 
@@ -452,43 +565,21 @@ def test_reply_wechat_clawbot_text_reuses_idempotent_receipt(tmp_path: Path) -> 
 
 
 def test_wechat_clawbot_poll_once_routes_inbound_and_replies(tmp_path: Path) -> None:
-    from src.application.agent_tool_contracts import build_response
-    from src.application.assistant.audit import InboundAuditStore
-    from src.application.channels.wechat_clawbot.inbound import poll_wechat_clawbot_once
-
-    state_dir = tmp_path / "wechat-state"
-    config_path = tmp_path / "config.us.json"
-    config_path.write_text(
-        json.dumps({"notifications": {"provider": "wechat_clawbot", "target": "wechat:ops"}}, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    state_dir.mkdir()
-    (state_dir / "state.json").write_text(
-        json.dumps({"bot_token": "bot_1", "base_url": "https://example.invalid", "get_updates_buf": "buf_1"}, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    (state_dir / "bindings.json").write_text(
-        json.dumps(
-            {
-                "bindings": {
-                    "ops": {
-                        "to_user_id": "stale_user",
-                        "context_token": "ctx_old",
-                        "group_id": "stale_group",
-                        "chat_key": "stale_chat",
-                    }
-                }
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
+    state_dir = _wechat_state_dir(tmp_path)
+    config_path = _wechat_config_path(tmp_path)
+    _wechat_binding(
+        state_dir,
+        to_user_id="stale_user",
+        context_token="ctx_old",
+        group_id="stale_group",
+        chat_key="stale_chat",
     )
     calls: list[tuple[str, dict]] = []
     replies: list[dict[str, object]] = []
     typing_calls: list[dict[str, object]] = []
     events: list[str] = []
 
-    class FakeClient:
+    class FakeClient(_PollReplyClient):
         def __init__(self, *, bot_token: str, base_url: str, timeout: int) -> None:
             assert bot_token == "bot_1"
             assert base_url == "https://example.invalid"
@@ -499,15 +590,7 @@ def test_wechat_clawbot_poll_once_routes_inbound_and_replies(tmp_path: Path) -> 
             return {
                 "ret": 0,
                 "get_updates_buf": "buf_2",
-                "msgs": [
-                        {
-                            "from_user_id": "user_1",
-                            "group_id": "group_1",
-                            "context_token": "ctx_1",
-                            "message_id": "msg_1",
-                            "item_list": [{"type": 1, "text_item": {"text": "/status"}}],
-                        }
-                ],
+                "msgs": [_wechat_inbound_message()],
             }
 
         def get_config(self, **kwargs):  # type: ignore[no-untyped-def]
@@ -575,13 +658,7 @@ def test_wechat_clawbot_poll_once_routes_inbound_and_replies(tmp_path: Path) -> 
     assert bindings["ops"]["refreshed_from_reply_at_utc"]
     assert bindings["ops"]["last_inbound_message_id"] == "msg_1"
     assert bindings["ops"]["reply_message_id"] == "reply_1"
-    audited = InboundAuditStore(str(tmp_path / "audit.sqlite3")).find_by_message(
-        channel="wechat",
-        message_id="msg_1",
-    )
-    assert audited is not None
-    stored = json.loads(str(audited["response_json"] or "{}"))
-    receipt = stored["data"]["reply"]
+    receipt = _wechat_reply_receipt(tmp_path)
     assert receipt["schema_version"] == "wechat-clawbot-reply-receipt-v1"
     assert receipt["attempted"] is True
     assert receipt["ok"] is True
@@ -597,74 +674,27 @@ def test_wechat_clawbot_poll_once_routes_inbound_and_replies(tmp_path: Path) -> 
 
 
 def test_wechat_clawbot_poll_once_persists_failed_reply_receipt(tmp_path: Path) -> None:
-    from src.application.agent_tool_contracts import build_response
-    from src.application.assistant.audit import InboundAuditStore
-    from src.application.channels.wechat_clawbot.inbound import poll_wechat_clawbot_once
-
-    state_dir = tmp_path / "wechat-state"
-    config_path = tmp_path / "config.us.json"
-    config_path.write_text(
-        json.dumps({"notifications": {"provider": "wechat_clawbot", "target": "wechat:ops"}}, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    state_dir.mkdir()
-    (state_dir / "state.json").write_text(
-        json.dumps({"bot_token": "bot_1", "base_url": "https://example.invalid", "get_updates_buf": "buf_1"}, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    (state_dir / "bindings.json").write_text(
-        json.dumps(
-            {
-                "bindings": {
-                    "ops": {
-                        "to_user_id": "stale_user",
-                        "context_token": "ctx_old",
-                        "group_id": "stale_group",
-                    }
-                }
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
+    state_dir = _wechat_state_dir(tmp_path)
+    config_path = _wechat_config_path(tmp_path)
+    _wechat_binding(
+        state_dir,
+        to_user_id="stale_user",
+        context_token="ctx_old",
+        group_id="stale_group",
     )
 
-    class FakeClient:
-        def __init__(self, *, bot_token: str, base_url: str, timeout: int) -> None:
-            assert bot_token == "bot_1"
-            assert base_url == "https://example.invalid"
-            del timeout
-
+    class FakeClient(_PollReplyClient):
         def get_updates(self, *, get_updates_buf: str):  # type: ignore[no-untyped-def]
             assert get_updates_buf == "buf_1"
             return {
                 "ret": 0,
                 "get_updates_buf": "buf_2",
-                "msgs": [
-                        {
-                            "from_user_id": "user_1",
-                            "group_id": "group_1",
-                            "context_token": "ctx_1",
-                            "message_id": "msg_1",
-                            "item_list": [{"type": 1, "text_item": {"text": "/status"}}],
-                        }
-                ],
+                "msgs": [_wechat_inbound_message()],
             }
-
-        def get_config(self, **kwargs):  # type: ignore[no-untyped-def]
-            del kwargs
-            return {"ret": 0, "typing_ticket": "typing_ticket_1"}
-
-        def send_typing(self, **kwargs):  # type: ignore[no-untyped-def]
-            del kwargs
-            return {"ret": 0}
 
         def send_text_message(self, **kwargs):  # type: ignore[no-untyped-def]
             del kwargs
             return {"ret": 91, "errmsg": "context expired"}
-
-    def _execute(tool_name: str, payload: dict) -> dict:
-        del payload
-        return build_response(tool_name=tool_name, ok=True, data={"status": "ok"})
 
     out = poll_wechat_clawbot_once(
         base=tmp_path,
@@ -675,7 +705,7 @@ def test_wechat_clawbot_poll_once_persists_failed_reply_receipt(tmp_path: Path) 
         audit_db=str(tmp_path / "audit.sqlite3"),
         allowed_senders="wechat:user_1",
         client_factory=FakeClient,
-        execute_tool_fn=_execute,
+        execute_tool_fn=_wechat_execute,
     )
 
     assert out["ok"] is False
@@ -690,13 +720,7 @@ def test_wechat_clawbot_poll_once_persists_failed_reply_receipt(tmp_path: Path) 
     assert bindings["ops"]["refreshed_from_inbound_at_utc"]
     assert bindings["ops"]["last_inbound_message_id"] == "msg_1"
     assert "refreshed_from_reply_at_utc" not in bindings["ops"]
-    audited = InboundAuditStore(str(tmp_path / "audit.sqlite3")).find_by_message(
-        channel="wechat",
-        message_id="msg_1",
-    )
-    assert audited is not None
-    stored = json.loads(str(audited["response_json"] or "{}"))
-    receipt = stored["data"]["reply"]
+    receipt = _wechat_reply_receipt(tmp_path)
     assert receipt["attempted"] is True
     assert receipt["ok"] is False
     assert receipt["reason"] == "reply_failed"
@@ -709,13 +733,6 @@ def test_wechat_clawbot_poll_once_persists_failed_reply_receipt(tmp_path: Path) 
 
 @pytest.mark.parametrize("explicit_db", [True, False])
 def test_wechat_reply_outbox_retries_with_stable_client_id(tmp_path: Path, explicit_db: bool) -> None:
-    from src.application.channels.wechat_clawbot.inbound import (
-        _outbox_client_id,
-        _prepare_reply_outbox,
-        _retry_pending_wechat_reply,
-    )
-    from src.application.bot.host_store import BotHostStore
-
     database = tmp_path / ("audit.sqlite3" if explicit_db else "default-audit.sqlite3")
     audit_argument = str(database) if explicit_db else None
     message = {
@@ -768,42 +785,16 @@ def test_wechat_reply_outbox_retries_with_stable_client_id(tmp_path: Path, expli
 
 
 def test_wechat_clawbot_poll_once_accepts_empty_sendmessage_response(tmp_path: Path) -> None:
-    from src.application.agent_tool_contracts import build_response
-    from src.application.assistant.audit import InboundAuditStore
-    from src.application.channels.wechat_clawbot.inbound import poll_wechat_clawbot_once
+    state_dir = _wechat_state_dir(tmp_path)
 
-    state_dir = tmp_path / "wechat-state"
-    state_dir.mkdir()
-    (state_dir / "state.json").write_text(
-        json.dumps({"bot_token": "bot_1", "base_url": "https://example.invalid", "get_updates_buf": "buf_1"}, ensure_ascii=False),
-        encoding="utf-8",
-    )
-
-    class FakeClient:
-        def __init__(self, *, bot_token: str, base_url: str, timeout: int) -> None:
-            del timeout
-            assert bot_token == "bot_1"
-            assert base_url == "https://example.invalid"
-
+    class FakeClient(_PollReplyClient):
         def get_updates(self, *, get_updates_buf: str):  # type: ignore[no-untyped-def]
             assert get_updates_buf == "buf_1"
             return {
                 "ret": 0,
                 "get_updates_buf": "buf_2",
-                "msgs": [
-                    {
-                        "from_user_id": "user_1",
-                        "group_id": "group_1",
-                        "context_token": "ctx_1",
-                        "message_id": "msg_1",
-                        "item_list": [{"type": 1, "text_item": {"text": "/status"}}],
-                    }
-                ],
+                "msgs": [_wechat_inbound_message()],
             }
-
-        def get_config(self, **kwargs):  # type: ignore[no-untyped-def]
-            del kwargs
-            return {"ret": 0, "typing_ticket": "typing_ticket_1"}
 
         def send_typing(self, **kwargs):  # type: ignore[no-untyped-def]
             del kwargs
@@ -812,10 +803,6 @@ def test_wechat_clawbot_poll_once_accepts_empty_sendmessage_response(tmp_path: P
         def send_text_message(self, **kwargs):  # type: ignore[no-untyped-def]
             del kwargs
             return {}
-
-    def _execute(tool_name: str, payload: dict) -> dict:
-        del payload
-        return build_response(tool_name=tool_name, ok=True, data={"status": "ok"})
 
     out = poll_wechat_clawbot_once(
         base=tmp_path,
@@ -826,19 +813,13 @@ def test_wechat_clawbot_poll_once_accepts_empty_sendmessage_response(tmp_path: P
         audit_db=str(tmp_path / "audit.sqlite3"),
         allowed_senders="wechat:user_1",
         client_factory=FakeClient,
-        execute_tool_fn=_execute,
+        execute_tool_fn=_wechat_execute,
     )
 
     assert out["ok"] is True
     assert out["data"]["reply_count"] == 1
     assert out["data"]["results"][0]["reply"]["reason"] == "sent"
-    audited = InboundAuditStore(str(tmp_path / "audit.sqlite3")).find_by_message(
-        channel="wechat",
-        message_id="msg_1",
-    )
-    assert audited is not None
-    stored = json.loads(str(audited["response_json"] or "{}"))
-    receipt = stored["data"]["reply"]
+    receipt = _wechat_reply_receipt(tmp_path)
     assert receipt["attempted"] is True
     assert receipt["ok"] is True
     assert "api_response" not in receipt
@@ -846,26 +827,11 @@ def test_wechat_clawbot_poll_once_accepts_empty_sendmessage_response(tmp_path: P
 
 
 def test_wechat_clawbot_poll_once_keepalives_bound_context_without_messages(tmp_path: Path) -> None:
-    from src.application.channels.wechat_clawbot.inbound import poll_wechat_clawbot_once
-
-    state_dir = tmp_path / "wechat-state"
-    state_dir.mkdir()
-    (state_dir / "state.json").write_text(
-        json.dumps({"bot_token": "bot_1", "base_url": "https://example.invalid", "get_updates_buf": "buf_1"}, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    (state_dir / "bindings.json").write_text(
-        json.dumps({"bindings": {"ops": {"to_user_id": "user_1", "context_token": "ctx_1"}}}, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    state_dir = _wechat_state_dir(tmp_path)
+    _wechat_binding(state_dir, to_user_id="user_1", context_token="ctx_1")
     get_config_calls: list[dict[str, object]] = []
 
-    class FakeClient:
-        def __init__(self, *, bot_token: str, base_url: str, timeout: int) -> None:
-            del timeout
-            assert bot_token == "bot_1"
-            assert base_url == "https://example.invalid"
-
+    class FakeClient(_PollClient):
         def get_updates(self, *, get_updates_buf: str):  # type: ignore[no-untyped-def]
             assert get_updates_buf == "buf_1"
             return {"ret": 0, "get_updates_buf": "buf_2", "msgs": [], "private": "provider-secret"}
@@ -896,26 +862,12 @@ def test_wechat_clawbot_poll_once_keepalives_bound_context_without_messages(tmp_
 
 
 def test_wechat_clawbot_poll_once_stays_silent_for_unauthorized_sender(tmp_path: Path) -> None:
-    from src.application.channels.wechat_clawbot.inbound import poll_wechat_clawbot_once
-
-    state_dir = tmp_path / "wechat-state"
-    config_path = tmp_path / "config.us.json"
-    config_path.write_text(
-        json.dumps({"notifications": {"provider": "wechat_clawbot", "target": "wechat:ops"}}, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    state_dir.mkdir()
-    (state_dir / "state.json").write_text(
-        json.dumps({"bot_token": "bot_1", "base_url": "https://example.invalid", "get_updates_buf": "buf_1"}, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    (state_dir / "bindings.json").write_text(
-        json.dumps({"bindings": {"ops": {"to_user_id": "stale_user", "context_token": "ctx_old"}}}, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    state_dir = _wechat_state_dir(tmp_path)
+    config_path = _wechat_config_path(tmp_path)
+    _wechat_binding(state_dir, to_user_id="stale_user", context_token="ctx_old")
     replies: list[dict[str, object]] = []
 
-    class FakeClient:
+    class FakeClient(_PollClient):
         def __init__(self, *, bot_token: str, base_url: str, timeout: int) -> None:
             del bot_token, base_url, timeout
 
@@ -924,14 +876,7 @@ def test_wechat_clawbot_poll_once_stays_silent_for_unauthorized_sender(tmp_path:
             return {
                 "ret": 0,
                 "get_updates_buf": "buf_2",
-                "msgs": [
-                    {
-                        "from_user_id": "user_1",
-                        "context_token": "ctx_1",
-                        "message_id": "msg_1",
-                        "text_item": {"text": "状态"},
-                    }
-                ],
+                "msgs": [_wechat_flat_inbound_message("状态")],
             }
 
         def send_text_message(self, **kwargs):  # type: ignore[no-untyped-def]
@@ -960,26 +905,12 @@ def test_wechat_clawbot_poll_once_stays_silent_for_unauthorized_sender(tmp_path:
 
 
 def test_wechat_clawbot_poll_once_replies_to_non_silent_permission_denied(tmp_path: Path) -> None:
-    from src.application.channels.wechat_clawbot.inbound import poll_wechat_clawbot_once
-
-    state_dir = tmp_path / "wechat-state"
-    config_path = tmp_path / "config.us.json"
-    config_path.write_text(
-        json.dumps({"notifications": {"provider": "wechat_clawbot", "target": "wechat:ops"}}, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    state_dir.mkdir()
-    (state_dir / "state.json").write_text(
-        json.dumps({"bot_token": "bot_1", "base_url": "https://example.invalid", "get_updates_buf": "buf_1"}, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    (state_dir / "bindings.json").write_text(
-        json.dumps({"bindings": {"ops": {"to_user_id": "stale_user", "context_token": "ctx_old"}}}, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    state_dir = _wechat_state_dir(tmp_path)
+    config_path = _wechat_config_path(tmp_path)
+    _wechat_binding(state_dir, to_user_id="stale_user", context_token="ctx_old")
     replies: list[dict[str, object]] = []
 
-    class FakeClient:
+    class FakeClient(_PollReplyClient):
         def __init__(self, *, bot_token: str, base_url: str, timeout: int) -> None:
             del bot_token, base_url, timeout
 
@@ -988,23 +919,8 @@ def test_wechat_clawbot_poll_once_replies_to_non_silent_permission_denied(tmp_pa
             return {
                 "ret": 0,
                 "get_updates_buf": "buf_2",
-                "msgs": [
-                    {
-                        "from_user_id": "user_1",
-                        "context_token": "ctx_1",
-                        "message_id": "msg_1",
-                        "text_item": {"text": "买入 NVDA"},
-                    }
-                ],
+                "msgs": [_wechat_flat_inbound_message("买入 NVDA")],
             }
-
-        def get_config(self, **kwargs):  # type: ignore[no-untyped-def]
-            del kwargs
-            return {"ret": 0, "typing_ticket": "typing_ticket_1"}
-
-        def send_typing(self, **kwargs):  # type: ignore[no-untyped-def]
-            del kwargs
-            return {"ret": 0}
 
         def send_text_message(self, **kwargs):  # type: ignore[no-untyped-def]
             replies.append(dict(kwargs))
@@ -1052,14 +968,7 @@ def test_wechat_clawbot_poll_once_replies_to_non_silent_permission_denied(tmp_pa
 
 
 def test_wechat_clawbot_bind_failure_does_not_advance_cursor(tmp_path: Path) -> None:
-    from src.application.channels.wechat_clawbot.binding import bind_wechat_clawbot_target
-
-    state_dir = tmp_path / "wechat-state"
-    state_dir.mkdir()
-    (state_dir / "state.json").write_text(
-        json.dumps({"bot_token": "bot_1", "base_url": "https://example.invalid", "get_updates_buf": "buf_1"}, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    state_dir = _wechat_state_dir(tmp_path)
 
     class FakeClient:
         def __init__(self, *, bot_token: str, base_url: str, timeout: int) -> None:
@@ -1067,19 +976,7 @@ def test_wechat_clawbot_bind_failure_does_not_advance_cursor(tmp_path: Path) -> 
 
         def get_updates(self, *, get_updates_buf: str):  # type: ignore[no-untyped-def]
             assert get_updates_buf == "buf_1"
-            return {
-                "data": {
-                    "get_updates_buf": "buf_2",
-                    "message_list": [
-                        {
-                            "from_user_id": "user_1",
-                            "context_token": "ctx_1",
-                            "message_id": "msg_1",
-                            "text_item": {"text": "bind ops"},
-                        }
-                    ],
-                }
-            }
+            return _wechat_bind_updates(group_id=None)
 
     out = bind_wechat_clawbot_target(
         base=tmp_path,
@@ -1099,8 +996,6 @@ def test_wechat_clawbot_bind_failure_does_not_advance_cursor(tmp_path: Path) -> 
 
 
 def test_wechat_clawbot_connect_logs_in_and_binds_target(tmp_path: Path) -> None:
-    from src.application.channels.wechat_clawbot.binding import connect_wechat_clawbot_target
-
     state_dir = tmp_path / "wechat-state"
     progress_events: list[dict[str, object]] = []
 
@@ -1121,20 +1016,7 @@ def test_wechat_clawbot_connect_logs_in_and_binds_target(tmp_path: Path) -> None
         def get_updates(self, *, get_updates_buf: str):  # type: ignore[no-untyped-def]
             assert self.bot_token == "bot_1"
             assert get_updates_buf == "buf_1"
-            return {
-                "data": {
-                    "get_updates_buf": "buf_2",
-                    "message_list": [
-                        {
-                            "from_user_id": "user_1",
-                            "group_id": "group_1",
-                            "context_token": "ctx_1",
-                            "message_id": "msg_1",
-                            "text_item": {"text": "bind ops"},
-                        }
-                    ],
-                }
-            }
+            return _wechat_bind_updates()
 
     out = connect_wechat_clawbot_target(
         base=tmp_path,
@@ -1163,8 +1045,6 @@ def test_wechat_clawbot_connect_logs_in_and_binds_target(tmp_path: Path) -> None
 
 
 def test_wechat_clawbot_connect_times_out_when_qr_not_confirmed(tmp_path: Path) -> None:
-    from src.application.channels.wechat_clawbot.binding import connect_wechat_clawbot_target
-
     class FakeClient:
         def __init__(self, *, bot_token, base_url: str, timeout: int) -> None:  # type: ignore[no-untyped-def]
             del bot_token, base_url, timeout
@@ -1194,8 +1074,6 @@ def test_wechat_clawbot_connect_times_out_when_qr_not_confirmed(tmp_path: Path) 
 
 
 def test_cli_channel_wechat_clawbot_connect_routes_to_connect_handler(tmp_path: Path) -> None:
-    from src.interfaces.cli.channel_ops import handle_channel_command
-
     captured: dict[str, object] = {}
 
     def fake_connect(**kwargs):  # type: ignore[no-untyped-def]
@@ -1232,8 +1110,6 @@ def test_cli_channel_wechat_clawbot_connect_routes_to_connect_handler(tmp_path: 
 
 
 def test_cli_channel_wechat_clawbot_poll_once_routes_to_handler(tmp_path: Path) -> None:
-    from src.interfaces.cli.channel_ops import handle_channel_command
-
     captured: dict[str, object] = {}
 
     def fake_poll_once(**kwargs):  # type: ignore[no-untyped-def]
@@ -1274,17 +1150,7 @@ def test_cli_channel_wechat_clawbot_poll_once_routes_to_handler(tmp_path: Path) 
 
 
 def test_wechat_clawbot_serve_check_reports_redacted_settings(tmp_path: Path) -> None:
-    from src.application.channels.wechat_clawbot.inbound import (
-        build_wechat_clawbot_serve_settings,
-        check_wechat_clawbot_serve_settings,
-    )
-
-    state_dir = tmp_path / "wechat-state"
-    state_dir.mkdir()
-    (state_dir / "state.json").write_text(
-        json.dumps({"bot_token": "bot_1", "base_url": "https://example.invalid"}, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    state_dir = _wechat_state_dir(tmp_path, buf=None)
 
     settings = build_wechat_clawbot_serve_settings(
         base=tmp_path,
@@ -1305,11 +1171,6 @@ def test_wechat_clawbot_serve_check_reports_redacted_settings(tmp_path: Path) ->
 
 
 def test_wechat_clawbot_serve_check_requires_allowed_senders(tmp_path: Path) -> None:
-    from src.application.channels.wechat_clawbot.inbound import (
-        build_wechat_clawbot_serve_settings,
-        check_wechat_clawbot_serve_settings,
-    )
-
     state_dir = tmp_path / "wechat-state"
     state_dir.mkdir()
     (state_dir / "state.json").write_text(json.dumps({"bot_token": "bot_1"}, ensure_ascii=False), encoding="utf-8")
@@ -1328,11 +1189,6 @@ def test_wechat_clawbot_serve_check_requires_allowed_senders(tmp_path: Path) -> 
 
 
 def test_wechat_clawbot_serve_check_suggests_connect_when_bot_token_missing(tmp_path: Path) -> None:
-    from src.application.channels.wechat_clawbot.inbound import (
-        build_wechat_clawbot_serve_settings,
-        check_wechat_clawbot_serve_settings,
-    )
-
     state_dir = tmp_path / "wechat-state"
     state_dir.mkdir()
 
@@ -1353,8 +1209,6 @@ def test_wechat_clawbot_serve_check_suggests_connect_when_bot_token_missing(tmp_
 
 
 def test_wechat_clawbot_serve_settings_reads_behavior_from_assistant_config(tmp_path: Path) -> None:
-    from src.application.channels.wechat_clawbot.inbound import build_wechat_clawbot_serve_settings
-
     assistant_config = tmp_path / "config.assistant.json"
     assistant_config.write_text(
         json.dumps(
@@ -1421,8 +1275,6 @@ def test_wechat_clawbot_serve_settings_reads_behavior_from_assistant_config(tmp_
 
 
 def test_wechat_clawbot_serve_polls_until_stop_condition(tmp_path: Path) -> None:
-    from src.application.channels.wechat_clawbot.inbound import build_wechat_clawbot_serve_settings, serve_wechat_clawbot
-
     state_dir = tmp_path / "wechat-state"
     state_dir.mkdir()
     (state_dir / "state.json").write_text(json.dumps({"bot_token": "bot_1"}, ensure_ascii=False), encoding="utf-8")
@@ -1470,8 +1322,6 @@ def test_wechat_clawbot_serve_polls_until_stop_condition(tmp_path: Path) -> None
 
 
 def test_cli_channel_wechat_clawbot_serve_routes_to_handler(tmp_path: Path) -> None:
-    from src.interfaces.cli.channel_ops import handle_channel_command
-
     captured: dict[str, object] = {}
 
     def fake_build_settings(**kwargs: Any) -> str:
@@ -1526,14 +1376,9 @@ def test_cli_channel_wechat_clawbot_serve_routes_to_handler(tmp_path: Path) -> N
 
 
 def test_cli_channel_wechat_clawbot_list_reads_local_state(tmp_path: Path, capsys) -> None:
-    import src.interfaces.cli.main as cli
-
     state_dir = tmp_path / "wechat-state"
     state_dir.mkdir()
-    (state_dir / "bindings.json").write_text(
-        json.dumps({"bindings": {"ops": {"to_user_id": "user_1", "context_token": "ctx_1"}}}, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    _wechat_binding(state_dir, to_user_id="user_1", context_token="ctx_1")
 
     rc = cli.main(["channel", "wechat-clawbot", "list", "--state-dir", str(state_dir)])
     payload = json.loads(capsys.readouterr().out)
@@ -1547,8 +1392,6 @@ def test_cli_channel_wechat_clawbot_list_reads_local_state(tmp_path: Path, capsy
 
 
 def test_cli_channel_status_reports_feishu_and_wechat_without_secrets(tmp_path: Path, capsys) -> None:
-    import src.interfaces.cli.main as cli
-
     runtime = tmp_path / "runtime"
     assistant_config = runtime / "resolved" / "config.assistant.json"
     state_dir = runtime / "output_shared" / "state" / "channels" / "wechat_clawbot" / "ops"
@@ -1572,24 +1415,15 @@ def test_cli_channel_status_reports_feishu_and_wechat_without_secrets(tmp_path: 
         json.dumps({"bot_token": "bot_secret_1", "base_url": "https://example.invalid"}, ensure_ascii=False),
         encoding="utf-8",
     )
-    (state_dir / "bindings.json").write_text(
-        json.dumps(
-            {
-                "bindings": {
-                    "ops": {
-                        "to_user_id": "wx_user_1",
-                        "context_token": "ctx_secret_1",
-                        "group_id": "group_1",
-                        "chat_key": "chat_secret_1",
-                        "last_message_id": "msg_1",
-                        "last_text": "private bind text",
-                        "updated_at_utc": "2026-06-18T01:00:00+00:00",
-                    }
-                }
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
+    _wechat_binding(
+        state_dir,
+        to_user_id="wx_user_1",
+        context_token="ctx_secret_1",
+        group_id="group_1",
+        chat_key="chat_secret_1",
+        last_message_id="msg_1",
+        last_text="private bind text",
+        updated_at_utc="2026-06-18T01:00:00+00:00",
     )
     profile_path = runtime / "service.profile.json"
     profile_path.write_text(
@@ -1664,8 +1498,6 @@ def test_cli_channel_status_reports_feishu_and_wechat_without_secrets(tmp_path: 
 
 
 def test_channel_status_reports_wechat_cursor_and_service_state(tmp_path: Path) -> None:
-    from src.application.channels.status import build_channel_status
-
     runtime = tmp_path / "runtime"
     state_dir = runtime / "output_shared" / "state" / "channels" / "wechat_clawbot" / "ops"
     state_dir.mkdir(parents=True)
@@ -1680,23 +1512,14 @@ def test_channel_status_reports_wechat_cursor_and_service_state(tmp_path: Path) 
         ),
         encoding="utf-8",
     )
-    (state_dir / "bindings.json").write_text(
-        json.dumps(
-            {
-                "bindings": {
-                    "ops": {
-                        "to_user_id": "wx_user_1",
-                        "context_token": "ctx_secret_1",
-                        "group_id": "group_1",
-                        "last_message_id": "msg_1",
-                        "last_text": "private bind text",
-                        "updated_at_utc": "2026-06-18T01:00:00+00:00",
-                    }
-                }
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
+    _wechat_binding(
+        state_dir,
+        to_user_id="wx_user_1",
+        context_token="ctx_secret_1",
+        group_id="group_1",
+        last_message_id="msg_1",
+        last_text="private bind text",
+        updated_at_utc="2026-06-18T01:00:00+00:00",
     )
     calls: list[list[str]] = []
 
@@ -1749,9 +1572,6 @@ def test_channel_status_reports_wechat_cursor_and_service_state(tmp_path: Path) 
 
 
 def test_channel_status_checks_secret_metadata_without_reading_value(tmp_path: Path) -> None:
-    from src.application.channels.status import build_channel_status
-    from src.application.secret_store import SecretStatus, use_secret_provider
-
     class MetadataOnlyProvider:
         backend_name = "test"
 
@@ -1789,10 +1609,6 @@ def test_channel_status_checks_secret_metadata_without_reading_value(tmp_path: P
 @pytest.mark.parametrize('access', ['allowed', 'unauthorized', 'disabled'])
 @pytest.mark.parametrize('text', ['调查账户问题', '/income sy ytd'])
 def test_expired_wechat_batch_terminal_reply_uses_existing_outbox(tmp_path, monkeypatch, explicit_db, access, text):
-    import time
-    import src.application.channels.wechat_clawbot.inbound as inbound
-    from src.application.assistant.audit import InboundAuditStore
-    from src.application.bot.host_store import BotHostStore
     state_dir = tmp_path / 'wechat-state'
     state_dir.mkdir()
     (state_dir / 'state.json').write_text(json.dumps({'bot_token': 'fixture'}))

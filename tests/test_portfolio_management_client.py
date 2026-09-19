@@ -72,6 +72,30 @@ def _valuation_receipt(accounts=None) -> dict:
     }
 
 
+def _accepted_receipt(**overrides) -> dict:
+    return {
+        "success": True,
+        "status": "accepted",
+        "account": "lx",
+        "request_id": "stock-refresh:abc",
+        **overrides,
+    }
+
+
+def _error_envelope(
+    *,
+    error_code: str = "PM_SERVICE_UNAVAILABLE",
+    message: str = "broker unavailable",
+) -> dict:
+    return {
+        "success": False,
+        "error_code": error_code,
+        "message": message,
+        "request_id": "request-1",
+        "details": {},
+    }
+
+
 def test_origin_accepts_ipv4_ipv6_and_rejects_remote_or_embedded_paths() -> None:
     assert resolve_portfolio_service_origin("http://127.0.0.1:8765") == "http://127.0.0.1:8765"
     assert resolve_portfolio_service_origin("http://[::1]:8765") == "http://[::1]:8765"
@@ -140,17 +164,7 @@ def test_client_maps_http_error_without_retry() -> None:
             503,
             "unavailable",
             {"X-PM-API-Version": API_VERSION},
-            io.BytesIO(
-                json.dumps(
-                    {
-                        "success": False,
-                        "error_code": "PM_SERVICE_UNAVAILABLE",
-                        "message": "broker unavailable",
-                        "request_id": "request-1",
-                        "details": {},
-                    }
-                ).encode()
-            ),
+            io.BytesIO(json.dumps(_error_envelope()).encode()),
         )
 
     with pytest.raises(PortfolioManagementHTTPError) as raised:
@@ -163,18 +177,16 @@ def test_client_maps_http_error_without_retry() -> None:
 @pytest.mark.parametrize(
     ("headers", "payload", "error"),
     [
-        ({"X-PM-API-Version": "portfolio.api.v2"}, {
-            "success": False,
-            "error_code": "INPUT_VALIDATION_ERROR",
-            "message": "invalid input",
-            "request_id": "request-1",
-            "details": {},
-        }, "version mismatch"),
-        ({"X-PM-API-Version": API_VERSION}, {
-            "success": False,
-            "error_code": "INPUT_VALIDATION_ERROR",
-            "message": "invalid input",
-        }, "missing required fields"),
+        (
+            {"X-PM-API-Version": "portfolio.api.v2"},
+            _error_envelope(error_code="INPUT_VALIDATION_ERROR", message="invalid input"),
+            "version mismatch",
+        ),
+        (
+            {"X-PM-API-Version": API_VERSION},
+            {"success": False, "error_code": "INPUT_VALIDATION_ERROR", "message": "invalid input"},
+            "missing required fields",
+        ),
     ],
 )
 def test_versioned_http_error_requires_version_and_public_schema(
@@ -199,15 +211,7 @@ def test_versioned_http_error_requires_version_and_public_schema(
 
 def test_versioned_success_status_rejects_public_error_envelope() -> None:
     client = PortfolioManagementClient(
-        urlopen_fn=lambda *_args, **_kwargs: _Response(
-            {
-                "success": False,
-                "error_code": "PM_SERVICE_UNAVAILABLE",
-                "message": "unavailable",
-                "request_id": "request-1",
-                "details": {},
-            }
-        )
+        urlopen_fn=lambda *_args, **_kwargs: _Response(_error_envelope(message="unavailable"))
     )
 
     with pytest.raises(PortfolioManagementProtocolError, match="success=true"):
@@ -220,15 +224,7 @@ def test_refresh_request_is_accepted_only_and_not_retried() -> None:
     def open_ok(request, *, timeout):
         seen["url"] = request.full_url
         seen["body"] = json.loads(request.data)
-        return _Response(
-            {
-                "success": True,
-                "status": "accepted",
-                "account": "lx",
-                "request_id": "stock-refresh:abc",
-            },
-            status=202,
-        )
+        return _Response(_accepted_receipt(), status=202)
 
     result = PortfolioManagementClient(urlopen_fn=open_ok).request_holdings_refresh(
         account="lx",
@@ -254,12 +250,7 @@ def test_refresh_request_is_accepted_only_and_not_retried() -> None:
     ],
 )
 def test_refresh_request_rejects_misbound_acceptance(mutator, error) -> None:
-    receipt = {
-        "success": True,
-        "status": "accepted",
-        "account": "lx",
-        "request_id": "stock-refresh:abc",
-    }
+    receipt = _accepted_receipt()
     mutator(receipt)
     client = PortfolioManagementClient(
         urlopen_fn=lambda *_args, **_kwargs: _Response(receipt, status=202)
@@ -275,15 +266,7 @@ def test_refresh_request_rejects_misbound_acceptance(mutator, error) -> None:
 
 def test_refresh_request_rejects_200_success_status() -> None:
     client = PortfolioManagementClient(
-        urlopen_fn=lambda *_args, **_kwargs: _Response(
-            {
-                "success": True,
-                "status": "accepted",
-                "account": "lx",
-                "request_id": "stock-refresh:abc",
-            },
-            status=200,
-        )
+        urlopen_fn=lambda *_args, **_kwargs: _Response(_accepted_receipt(), status=200)
     )
 
     with pytest.raises(PortfolioManagementProtocolError, match="expected 202"):

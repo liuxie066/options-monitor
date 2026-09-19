@@ -342,20 +342,51 @@ def _save_and_publish(
         ),
         output_root=tmp_path,
     )
-    receipt_path, receipt = publish_required_data_quote_snapshot(
-        producer_root=tmp_path,
-        producer_run_id=producer_run_id,
-        symbol="NVDA",
-        raw_path=raw_path,
-        csv_path=csv_path,
-        fetch_plan=fetch_plan,
-        fetch_policy=_policy(),
+    receipt_path, receipt = _publish_quote(
+        tmp_path,
+        raw_path,
+        csv_path,
+        fetch_plan,
         expected_fetch_contract=expected_contract,
+        producer_run_id=producer_run_id,
         source_observed_at=observed_at,
         completed_at=completed_at,
         now=completed_at,
     )
     return receipt_path, receipt, raw_path, csv_path, expected_contract
+
+
+def _publish_quote(
+    tmp_path: Path,
+    raw_path: Path,
+    csv_path: Path,
+    fetch_plan: dict[str, object],
+    *,
+    expected_fetch_contract: dict[str, object] | None = None,
+    producer_run_id: str = "run-1",
+    source_observed_at: datetime = NOW,
+    completed_at: datetime = NOW + timedelta(seconds=1),
+    now: datetime | None = NOW + timedelta(seconds=1),
+    runtime_root: Path | None = None,
+    ) -> tuple[Path, dict[str, object]]:
+    return publish_required_data_quote_snapshot(
+    runtime_root=runtime_root,
+    producer_root=tmp_path,
+    producer_run_id=producer_run_id,
+    symbol="NVDA",
+    raw_path=raw_path,
+    csv_path=csv_path,
+    fetch_plan=fetch_plan,
+    fetch_policy=_policy(),
+    expected_fetch_contract=(
+    _contract(fetch_plan)
+    if expected_fetch_contract is None
+    else expected_fetch_contract
+    ),
+    source_observed_at=source_observed_at,
+    completed_at=completed_at,
+    now=now,
+)
 
 
 def test_quote_receipt_binds_exact_json_csv_and_fetch_policy(
@@ -391,19 +422,13 @@ def test_quote_receipt_can_root_exact_canonical_scan_blob(tmp_path: Path) -> Non
         _required_payload(),
         output_root=tmp_path,
     )
-    _path, receipt = publish_required_data_quote_snapshot(
-        runtime_root=tmp_path,
-        producer_root=tmp_path,
-        producer_run_id="run-1",
-        symbol="NVDA",
-        raw_path=raw_path,
-        csv_path=csv_path,
-        fetch_plan=fetch_plan,
-        fetch_policy=_policy(),
+    _path, receipt = _publish_quote(
+        tmp_path,
+        raw_path,
+        csv_path,
+        fetch_plan,
         expected_fetch_contract=expected_contract,
-        source_observed_at=NOW,
-        completed_at=NOW + timedelta(seconds=1),
-        now=NOW + timedelta(seconds=1),
+        runtime_root=tmp_path,
     )
     validated = validate_source_receipt(
         receipt,
@@ -477,19 +502,13 @@ def test_canonical_blob_directory_fsync_failure_blocks_receipt(
         SourceReceiptError,
         match="canonical blob publication failed",
     ):
-        publish_required_data_quote_snapshot(
-            runtime_root=tmp_path,
-            producer_root=tmp_path,
-            producer_run_id="run-1",
-            symbol="NVDA",
-            raw_path=raw_path,
-            csv_path=csv_path,
-            fetch_plan=fetch_plan,
-            fetch_policy=_policy(),
+        _publish_quote(
+            tmp_path,
+            raw_path,
+            csv_path,
+            fetch_plan,
             expected_fetch_contract=expected_contract,
-            source_observed_at=NOW,
-            completed_at=NOW + timedelta(seconds=1),
-            now=NOW + timedelta(seconds=1),
+            runtime_root=tmp_path,
         )
 
     assert directory_fsyncs == 5
@@ -519,19 +538,7 @@ def test_quote_receipt_rejects_partial_required_data_payload(
         SourceReceiptError,
         match="incomplete required-data payload",
     ):
-        publish_required_data_quote_snapshot(
-            producer_root=tmp_path,
-            producer_run_id="run-1",
-            symbol="NVDA",
-            raw_path=raw_path,
-            csv_path=csv_path,
-            fetch_plan=fetch_plan,
-            fetch_policy=_policy(),
-            expected_fetch_contract=_contract(fetch_plan),
-            source_observed_at=NOW,
-            completed_at=NOW + timedelta(seconds=1),
-            now=NOW + timedelta(seconds=1),
-        )
+        _publish_quote(tmp_path, raw_path, csv_path, fetch_plan)
 
 
 @pytest.mark.parametrize(
@@ -561,19 +568,7 @@ def test_quote_receipt_rejects_rows_with_non_success_source_evidence(
         SourceReceiptError,
         match="non-success required-data payload contains rows",
     ):
-        publish_required_data_quote_snapshot(
-            producer_root=tmp_path,
-            producer_run_id="run-1",
-            symbol="NVDA",
-            raw_path=raw_path,
-            csv_path=csv_path,
-            fetch_plan=fetch_plan,
-            fetch_policy=_policy(),
-            expected_fetch_contract=_contract(fetch_plan),
-            source_observed_at=NOW,
-            completed_at=NOW + timedelta(seconds=1),
-            now=NOW + timedelta(seconds=1),
-        )
+        _publish_quote(tmp_path, raw_path, csv_path, fetch_plan)
 
 
 def test_quote_receipt_rejects_missing_explicit_source_outcome(tmp_path: Path) -> None:
@@ -583,19 +578,7 @@ def test_quote_receipt_rejects_missing_explicit_source_outcome(tmp_path: Path) -
     fetch_plan = _fetch_plan()
 
     with pytest.raises(SourceReceiptError, match="explicit success-rows"):
-        publish_required_data_quote_snapshot(
-            producer_root=tmp_path,
-            producer_run_id="run-1",
-            symbol="NVDA",
-            raw_path=raw_path,
-            csv_path=csv_path,
-            fetch_plan=fetch_plan,
-            fetch_policy=_policy(),
-            expected_fetch_contract=_contract(fetch_plan),
-            source_observed_at=NOW,
-            completed_at=NOW + timedelta(seconds=1),
-            now=NOW + timedelta(seconds=1),
-        )
+        _publish_quote(tmp_path, raw_path, csv_path, fetch_plan)
 
 
 def test_quote_receipt_rejects_missing_top_level_symbol(tmp_path: Path) -> None:
@@ -605,19 +588,7 @@ def test_quote_receipt_rejects_missing_top_level_symbol(tmp_path: Path) -> None:
     fetch_plan = _fetch_plan()
 
     with pytest.raises(SourceReceiptError, match="payload symbol mismatch"):
-        publish_required_data_quote_snapshot(
-            producer_root=tmp_path,
-            producer_run_id="run-1",
-            symbol="NVDA",
-            raw_path=raw_path,
-            csv_path=csv_path,
-            fetch_plan=fetch_plan,
-            fetch_policy=_policy(),
-            expected_fetch_contract=_contract(fetch_plan),
-            source_observed_at=NOW,
-            completed_at=NOW + timedelta(seconds=1),
-            now=NOW + timedelta(seconds=1),
-        )
+        _publish_quote(tmp_path, raw_path, csv_path, fetch_plan)
 
 
 def test_quote_receipt_rejects_wrong_physical_binding(tmp_path: Path) -> None:
@@ -627,19 +598,7 @@ def test_quote_receipt_rejects_wrong_physical_binding(tmp_path: Path) -> None:
     fetch_plan = _fetch_plan()
 
     with pytest.raises(SourceReceiptError, match="payload port mismatch"):
-        publish_required_data_quote_snapshot(
-            producer_root=tmp_path,
-            producer_run_id="run-1",
-            symbol="NVDA",
-            raw_path=raw_path,
-            csv_path=csv_path,
-            fetch_plan=fetch_plan,
-            fetch_policy=_policy(),
-            expected_fetch_contract=_contract(fetch_plan),
-            source_observed_at=NOW,
-            completed_at=NOW + timedelta(seconds=1),
-            now=NOW + timedelta(seconds=1),
-        )
+        _publish_quote(tmp_path, raw_path, csv_path, fetch_plan)
 
 
 @pytest.mark.parametrize("invalid_port", [True, 11111.0])
@@ -653,19 +612,7 @@ def test_quote_receipt_rejects_non_integer_raw_port(
     fetch_plan = _fetch_plan()
 
     with pytest.raises(SourceReceiptError, match="payload port is invalid"):
-        publish_required_data_quote_snapshot(
-            producer_root=tmp_path,
-            producer_run_id="run-1",
-            symbol="NVDA",
-            raw_path=raw_path,
-            csv_path=csv_path,
-            fetch_plan=fetch_plan,
-            fetch_policy=_policy(),
-            expected_fetch_contract=_contract(fetch_plan),
-            source_observed_at=NOW,
-            completed_at=NOW + timedelta(seconds=1),
-            now=NOW + timedelta(seconds=1),
-        )
+        _publish_quote(tmp_path, raw_path, csv_path, fetch_plan)
 
     assert list(
         tmp_path.glob("source_receipts/quotes/**/receipt.json")
@@ -720,19 +667,7 @@ def test_quote_receipt_rejects_wrong_raw_underlier_identity(
     fetch_plan = _fetch_plan(projection_outcome=projection_outcome)
 
     with pytest.raises(SourceReceiptError, match="underlier identity"):
-        publish_required_data_quote_snapshot(
-            producer_root=tmp_path,
-            producer_run_id="run-1",
-            symbol="NVDA",
-            raw_path=raw_path,
-            csv_path=csv_path,
-            fetch_plan=fetch_plan,
-            fetch_policy=_policy(),
-            expected_fetch_contract=_contract(fetch_plan),
-            source_observed_at=NOW,
-            completed_at=NOW + timedelta(seconds=1),
-            now=NOW + timedelta(seconds=1),
-        )
+        _publish_quote(tmp_path, raw_path, csv_path, fetch_plan)
     assert list(
         tmp_path.glob("source_receipts/quotes/**/receipt.json")
     ) == []
@@ -760,19 +695,7 @@ def test_quote_receipt_rejects_incomplete_snapshot_evidence(tmp_path: Path) -> N
     fetch_plan = _fetch_plan()
 
     with pytest.raises(SourceReceiptError, match=r"^provider_incomplete:"):
-        publish_required_data_quote_snapshot(
-            producer_root=tmp_path,
-            producer_run_id="run-1",
-            symbol="NVDA",
-            raw_path=raw_path,
-            csv_path=csv_path,
-            fetch_plan=fetch_plan,
-            fetch_policy=_policy(),
-            expected_fetch_contract=_contract(fetch_plan),
-            source_observed_at=NOW,
-            completed_at=NOW + timedelta(seconds=1),
-            now=NOW + timedelta(seconds=1),
-        )
+        _publish_quote(tmp_path, raw_path, csv_path, fetch_plan)
 
 
 def test_quote_receipt_rejects_csv_identity_subset(tmp_path: Path) -> None:
@@ -804,19 +727,7 @@ def test_quote_receipt_rejects_csv_identity_subset(tmp_path: Path) -> None:
     fetch_plan = _fetch_plan()
 
     with pytest.raises(SourceReceiptError, match="row counts differ"):
-        publish_required_data_quote_snapshot(
-            producer_root=tmp_path,
-            producer_run_id="run-1",
-            symbol="NVDA",
-            raw_path=raw_path,
-            csv_path=csv_path,
-            fetch_plan=fetch_plan,
-            fetch_policy=_policy(),
-            expected_fetch_contract=_contract(fetch_plan),
-            source_observed_at=NOW,
-            completed_at=NOW + timedelta(seconds=1),
-            now=NOW + timedelta(seconds=1),
-        )
+        _publish_quote(tmp_path, raw_path, csv_path, fetch_plan)
 
 
 def test_quote_receipt_rejects_bad_required_realized_volatility(tmp_path: Path) -> None:
@@ -829,19 +740,7 @@ def test_quote_receipt_rejects_bad_required_realized_volatility(tmp_path: Path) 
     fetch_plan = _fetch_plan()
 
     with pytest.raises(SourceReceiptError, match="required realized volatility"):
-        publish_required_data_quote_snapshot(
-            producer_root=tmp_path,
-            producer_run_id="run-1",
-            symbol="NVDA",
-            raw_path=raw_path,
-            csv_path=csv_path,
-            fetch_plan=fetch_plan,
-            fetch_policy=_policy(),
-            expected_fetch_contract=_contract(fetch_plan),
-            source_observed_at=NOW,
-            completed_at=NOW + timedelta(seconds=1),
-            now=NOW + timedelta(seconds=1),
-        )
+        _publish_quote(tmp_path, raw_path, csv_path, fetch_plan)
 
 
 def test_direct_publisher_cannot_bypass_strict_evidence(tmp_path: Path) -> None:
@@ -859,19 +758,7 @@ def test_direct_publisher_cannot_bypass_strict_evidence(tmp_path: Path) -> None:
     fetch_plan = _fetch_plan()
 
     with pytest.raises(SourceReceiptError):
-        publish_required_data_quote_snapshot(
-            producer_root=tmp_path,
-            producer_run_id="run-1",
-            symbol="NVDA",
-            raw_path=raw_path,
-            csv_path=csv_path,
-            fetch_plan=fetch_plan,
-            fetch_policy=_policy(),
-            expected_fetch_contract=_contract(fetch_plan),
-            source_observed_at=NOW,
-            completed_at=NOW + timedelta(seconds=1),
-            now=NOW + timedelta(seconds=1),
-        )
+        _publish_quote(tmp_path, raw_path, csv_path, fetch_plan)
 
 
 def test_direct_publisher_rejects_wrong_plan_before_commit(tmp_path: Path) -> None:
@@ -888,19 +775,7 @@ def test_direct_publisher_rejects_wrong_plan_before_commit(tmp_path: Path) -> No
         SourceReceiptError,
         match="fetch plan contradicts expected contract",
     ):
-        publish_required_data_quote_snapshot(
-            producer_root=tmp_path,
-            producer_run_id="run-1",
-            symbol="NVDA",
-            raw_path=raw_path,
-            csv_path=csv_path,
-            fetch_plan=wrong_plan,
-            fetch_policy=_policy(),
-            expected_fetch_contract=_contract(expected_plan),
-            source_observed_at=NOW,
-            completed_at=NOW + timedelta(seconds=1),
-            now=NOW + timedelta(seconds=1),
-        )
+        _publish_quote(tmp_path, raw_path, csv_path, wrong_plan, expected_fetch_contract=_contract(expected_plan))
 
     assert list(tmp_path.glob("source_receipts/quotes/**/*.json")) == []
 
@@ -915,19 +790,7 @@ def test_stale_quote_is_rejected_before_any_immutable_commit(tmp_path: Path) -> 
     fetch_plan = _fetch_plan()
 
     with pytest.raises(SourceReceiptError, match="stale"):
-        publish_required_data_quote_snapshot(
-            producer_root=tmp_path,
-            producer_run_id="run-1",
-            symbol="NVDA",
-            raw_path=raw_path,
-            csv_path=csv_path,
-            fetch_plan=fetch_plan,
-            fetch_policy=_policy(),
-            expected_fetch_contract=_contract(fetch_plan),
-            source_observed_at=NOW,
-            completed_at=NOW + timedelta(seconds=1),
-            now=NOW + timedelta(minutes=31),
-        )
+        _publish_quote(tmp_path, raw_path, csv_path, fetch_plan, now=NOW + timedelta(minutes=31))
 
     assert list(tmp_path.glob("source_receipts/quotes/**/payload.json")) == []
     assert list(tmp_path.glob("source_receipts/quotes/**/receipt.json")) == []
@@ -958,18 +821,7 @@ def test_quote_commit_time_resamples_clock_and_leaves_only_orphan_payload(
 
     monkeypatch.setattr(outputs, "datetime", _AdvancingDateTime)
     with pytest.raises(SourceReceiptError, match="observation is stale"):
-        publish_required_data_quote_snapshot(
-            producer_root=tmp_path,
-            producer_run_id="run-crosses-ttl",
-            symbol="NVDA",
-            raw_path=raw_path,
-            csv_path=csv_path,
-            fetch_plan=fetch_plan,
-            fetch_policy=_policy(),
-            expected_fetch_contract=_contract(fetch_plan),
-            source_observed_at=NOW,
-            completed_at=NOW + timedelta(seconds=1),
-        )
+        _publish_quote(tmp_path, raw_path, csv_path, fetch_plan, producer_run_id="run-crosses-ttl", now=None)
 
     assert _AdvancingDateTime.calls == 3
     assert len(
@@ -1000,19 +852,7 @@ def test_receipt_last_crash_reentry_adopts_exact_commit(
 
     monkeypatch.setattr(outputs, "publish_source_receipt", _publish_then_crash)
     with pytest.raises(RuntimeError, match="after receipt commit"):
-        publish_required_data_quote_snapshot(
-            producer_root=tmp_path,
-            producer_run_id="run-1",
-            symbol="NVDA",
-            raw_path=raw_path,
-            csv_path=csv_path,
-            fetch_plan=fetch_plan,
-            fetch_policy=_policy(),
-            expected_fetch_contract=expected_contract,
-            source_observed_at=NOW,
-            completed_at=NOW + timedelta(seconds=1),
-            now=NOW + timedelta(seconds=1),
-        )
+        _publish_quote(tmp_path, raw_path, csv_path, fetch_plan, expected_fetch_contract=expected_contract)
 
     receipt_paths = list(
         tmp_path.glob("source_receipts/quotes/**/receipt.json")
@@ -1026,17 +866,12 @@ def test_receipt_last_crash_reentry_adopts_exact_commit(
     committed_payload_bytes = payload_paths[0].read_bytes()
 
     monkeypatch.setattr(outputs, "publish_source_receipt", real_publish)
-    adopted_path, adopted_receipt = publish_required_data_quote_snapshot(
-        producer_root=tmp_path,
-        producer_run_id="run-1",
-        symbol="NVDA",
-        raw_path=raw_path,
-        csv_path=csv_path,
-        fetch_plan=fetch_plan,
-        fetch_policy=_policy(),
+    adopted_path, adopted_receipt = _publish_quote(
+        tmp_path,
+        raw_path,
+        csv_path,
+        fetch_plan,
         expected_fetch_contract=expected_contract,
-        source_observed_at=NOW,
-        completed_at=NOW + timedelta(seconds=1),
         now=NOW + timedelta(seconds=2),
     )
 
@@ -1095,15 +930,11 @@ def test_same_run_rejects_second_quote_observation(tmp_path: Path) -> None:
     )
 
     with pytest.raises(SourceReceiptError, match="conflicts with committed"):
-        publish_required_data_quote_snapshot(
-            producer_root=tmp_path,
-            producer_run_id="run-1",
-            symbol="NVDA",
-            raw_path=raw_path,
-            csv_path=csv_path,
-            fetch_plan=fetch_plan,
-            fetch_policy=_policy(),
-            expected_fetch_contract=_contract(fetch_plan),
+        _publish_quote(
+            tmp_path,
+            raw_path,
+            csv_path,
+            fetch_plan,
             source_observed_at=second_observed_at,
             completed_at=second_completed_at,
             now=second_completed_at,
@@ -1119,18 +950,12 @@ def test_exact_same_run_reentry_adopts_committed_receipt(tmp_path: Path) -> None
     )
     fetch_plan = _fetch_plan()
 
-    second_path, second = publish_required_data_quote_snapshot(
-        producer_root=tmp_path,
-        producer_run_id="run-1",
-        symbol="NVDA",
-        raw_path=raw_path,
-        csv_path=csv_path,
-        fetch_plan=fetch_plan,
-        fetch_policy=_policy(),
+    second_path, second = _publish_quote(
+        tmp_path,
+        raw_path,
+        csv_path,
+        fetch_plan,
         expected_fetch_contract=expected_contract,
-        source_observed_at=NOW,
-        completed_at=NOW + timedelta(seconds=1),
-        now=NOW + timedelta(seconds=1),
     )
 
     assert second_path == first_path

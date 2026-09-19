@@ -7,6 +7,7 @@ from pathlib import Path
 import json
 import threading
 import time
+from typing import Any
 
 
 def _imports() -> tuple[type, type, type]:
@@ -20,9 +21,22 @@ def _imports() -> tuple[type, type, type]:
     )
 
 
-def test_opend_rate_gate_basic_window() -> None:
+def _gate(**overrides: object) -> Any:
+    """OpenDRateGate on the basic-window defaults, overridable per case."""
     OpenDRateGate, _, _ = _imports()
-    gate = OpenDRateGate(max_calls=3, window_sec=0.1, max_wait_sec=1.0, label="test")
+    values: dict[str, object] = {"max_calls": 3, "window_sec": 0.1, "max_wait_sec": 1.0, "label": "test"}
+    return OpenDRateGate(**{**values, **overrides})
+
+
+def _limiter(state_path: Path, **overrides: object) -> Any:
+    """FileRateLimiter bound to ``state_path``, on the shim test's defaults."""
+    _, FileRateLimiter, _ = _imports()
+    values: dict[str, object] = {"max_calls": 1, "window_sec": 10.0, "max_wait_sec": 0.05, "clock": time.monotonic}
+    return FileRateLimiter(state_path=state_path, **{**values, **overrides})
+
+
+def test_opend_rate_gate_basic_window() -> None:
+    gate = _gate()
 
     first_three = [gate.acquire() for _ in range(3)]
     started = time.monotonic()
@@ -35,8 +49,7 @@ def test_opend_rate_gate_basic_window() -> None:
 
 
 def test_opend_rate_gate_fair_wakeup_for_concurrent_threads() -> None:
-    OpenDRateGate, _, _ = _imports()
-    gate = OpenDRateGate(max_calls=3, window_sec=0.2, max_wait_sec=2.0, label="fair")
+    gate = _gate(window_sec=0.2, max_wait_sec=2.0, label="fair")
     start = threading.Barrier(10)
     arrival_lock = threading.Lock()
     completion_lock = threading.Lock()
@@ -72,8 +85,7 @@ def test_opend_rate_gate_fair_wakeup_for_concurrent_threads() -> None:
 
 
 def test_opend_rate_gate_times_out_when_budget_exceeded() -> None:
-    OpenDRateGate, _, _ = _imports()
-    gate = OpenDRateGate(max_calls=1, window_sec=10.0, max_wait_sec=0.5, label="timeout")
+    gate = _gate(max_calls=1, window_sec=10.0, max_wait_sec=0.5, label="timeout")
 
     gate.acquire()
     with pytest.raises(TimeoutError) as _caught:
@@ -83,7 +95,6 @@ def test_opend_rate_gate_times_out_when_budget_exceeded() -> None:
 
 
 def test_opend_rate_gate_merges_external_state_file(tmp_path: Path) -> None:
-    OpenDRateGate, _, _ = _imports()
     state_path = tmp_path / "opend_rate_gate_state.json"
     try:
         payload = {
@@ -93,13 +104,7 @@ def test_opend_rate_gate_merges_external_state_file(tmp_path: Path) -> None:
             "timestamps": [time.time()],
         }
         state_path.write_text(json.dumps(payload), encoding="utf-8")
-        gate = OpenDRateGate(
-            max_calls=1,
-            window_sec=0.2,
-            max_wait_sec=1.0,
-            label="merge",
-            state_path=state_path,
-        )
+        gate = _gate(max_calls=1, window_sec=0.2, label="merge", state_path=state_path)
 
         started = time.monotonic()
         waited = gate.acquire()
@@ -112,15 +117,8 @@ def test_opend_rate_gate_merges_external_state_file(tmp_path: Path) -> None:
 
 
 def test_opend_rate_gate_does_not_remerge_own_file_timestamps(tmp_path: Path) -> None:
-    OpenDRateGate, _, _ = _imports()
     state_path = tmp_path / "opend_rate_gate.json"
-    gate = OpenDRateGate(
-        max_calls=60,
-        window_sec=30.0,
-        max_wait_sec=0.01,
-        label="dedupe",
-        state_path=state_path,
-    )
+    gate = _gate(max_calls=60, window_sec=30.0, max_wait_sec=0.01, label="dedupe", state_path=state_path)
 
     for _ in range(10):
         gate.acquire()
@@ -130,11 +128,10 @@ def test_opend_rate_gate_does_not_remerge_own_file_timestamps(tmp_path: Path) ->
 
 
 def test_opend_rate_gate_file_backing_serializes_independent_instances(tmp_path: Path) -> None:
-    OpenDRateGate, _, _ = _imports()
     state_path = tmp_path / "shared_opend_rate_gate.json"
     gates = [
-        OpenDRateGate(max_calls=1, window_sec=0.2, max_wait_sec=2.0, label="shared", state_path=state_path),
-        OpenDRateGate(max_calls=1, window_sec=0.2, max_wait_sec=2.0, label="shared", state_path=state_path),
+        _gate(max_calls=1, window_sec=0.2, max_wait_sec=2.0, label="shared", state_path=state_path)
+        for _ in range(2)
     ]
     start = threading.Barrier(2)
     errors: list[BaseException] = []
@@ -160,14 +157,7 @@ def test_opend_rate_gate_file_backing_serializes_independent_instances(tmp_path:
 
 
 def test_file_rate_limiter_shim_preserves_api_and_exception_type(tmp_path: Path) -> None:
-    _, FileRateLimiter, _ = _imports()
-    limiter = FileRateLimiter(
-        state_path=tmp_path / "limiter.json",
-        max_calls=1,
-        window_sec=10.0,
-        max_wait_sec=0.05,
-        clock=time.monotonic,
-    )
+    limiter = _limiter(tmp_path / "limiter.json")
 
     waited = limiter.acquire()
     assert waited >= 0.0
@@ -180,21 +170,9 @@ def test_file_rate_limiter_shim_preserves_api_and_exception_type(tmp_path: Path)
 
 
 def test_file_rate_limiter_records_server_rate_limit_cooldown(tmp_path: Path) -> None:
-    _, FileRateLimiter, _ = _imports()
-    first = FileRateLimiter(
-        state_path=tmp_path / "limiter.json",
-        max_calls=10,
-        window_sec=0.2,
-        max_wait_sec=1.0,
-        clock=time.monotonic,
-    )
-    second = FileRateLimiter(
-        state_path=tmp_path / "limiter.json",
-        max_calls=10,
-        window_sec=0.2,
-        max_wait_sec=1.0,
-        clock=time.monotonic,
-    )
+    state_path = tmp_path / "limiter.json"
+    first = _limiter(state_path, max_calls=10, window_sec=0.2, max_wait_sec=1.0)
+    second = _limiter(state_path, max_calls=10, window_sec=0.2, max_wait_sec=1.0)
 
     first.record_rate_limit()
     started = time.monotonic()

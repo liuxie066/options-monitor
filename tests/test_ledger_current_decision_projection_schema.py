@@ -123,13 +123,9 @@ def test_phase3b_schema_upgrade_is_additive_idempotent_and_does_not_backfill(
     # backfill. This contract remains scoped to the phase-3b current-decision
     # tables and the other historical owners below.
     history_tables = (
-        "position_lots",
-        "assigned_stock_events",
-        "trade_lifecycle_cases",
-        "trade_lifecycle_evidence",
-        "trade_lifecycle_allocations",
-        "trade_lifecycle_source_consumptions",
-        "trade_lifecycle_timing_policies",
+        "position_lots", "assigned_stock_events", "trade_lifecycle_cases",
+        "trade_lifecycle_evidence", "trade_lifecycle_allocations",
+        "trade_lifecycle_source_consumptions", "trade_lifecycle_timing_policies",
         "strategy_group_identities",
     )
     history_reads = [
@@ -186,20 +182,13 @@ def test_phase3b_schema_upgrade_is_additive_idempotent_and_does_not_backfill(
         assert conn.execute("PRAGMA schema_version").fetchone()[0] == schema_cookie
 
 
-def test_case_targets_generations_assigned_stock_and_evidence_counts_are_exact(
-    tmp_path: Path,
-) -> None:
+def test_case_targets_generations_assigned_stock_and_evidence_counts_are_exact(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     case = _case("case-move", account="lx", lot_id="lot-1")
     assert repo.upsert_trade_lifecycle_case(case)
     assert _generation(repo, "lx")["case_generation"] == 1  # type: ignore[index]
     assert repo.list_trade_lifecycle_case_targets_for_lots(account="lx", target_lot_ids=["lot-1"]) == [
-        {
-            "case_id": "case-move",
-            "account": "lx",
-            "target_lot_id": "lot-1",
-            "target_contracts": 2,
-        }
+        {"case_id": "case-move", "account": "lx", "target_lot_id": "lot-1", "target_contracts": 2}
     ]
 
     assert not repo.upsert_trade_lifecycle_case(case)
@@ -224,12 +213,8 @@ def test_case_targets_generations_assigned_stock_and_evidence_counts_are_exact(
     assert repo.upsert_trade_lifecycle_case(_case("case-lx", account="lx"))
     assert repo.upsert_trade_lifecycle_case(_case("case-sy", account="sy"))
     evidence = {
-        "evidence_id": "evidence-move",
-        "case_id": "case-lx",
-        "source_type": "test",
-        "evidence_type": "settlement_observation",
-        "account": "lx",
-        "symbol": "NVDA",
+        "evidence_id": "evidence-move", "case_id": "case-lx", "source_type": "test",
+        "evidence_type": "settlement_observation", "account": "lx", "symbol": "NVDA",
     }
     lx_before = int(_generation(repo, "lx")["evidence_generation"])  # type: ignore[index]
     sy_before = int(_generation(repo, "sy")["evidence_generation"])  # type: ignore[index]
@@ -277,10 +262,8 @@ def test_case_targets_generations_assigned_stock_and_evidence_counts_are_exact(
     assert int(_generation(repo, "sy")["evidence_generation"]) == sy_before + 2  # type: ignore[index]
 
     stock_event = {
-        "stock_event_id": "stock-1",
-        "account": "lx",
-        "event_type": "assignment",
-        "trade_time_ms": 100,
+        "stock_event_id": "stock-1", "account": "lx",
+        "event_type": "assignment", "trade_time_ms": 100,
     }
     assigned_before = int(_generation(repo, "lx")["assigned_stock_generation"])  # type: ignore[index]
     assert repo.upsert_assigned_stock_event(stock_event)
@@ -301,9 +284,7 @@ def test_case_targets_generations_assigned_stock_and_evidence_counts_are_exact(
     assert _generation(repo, "sy")["assigned_stock_generation"] == 1  # type: ignore[index]
 
 
-def test_phase3b_storage_guards_fail_closed_without_partial_generation(
-    tmp_path: Path,
-) -> None:
+def test_phase3b_storage_guards_fail_closed_without_partial_generation(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     assert repo.upsert_trade_lifecycle_case(_case("case-a", account="lx"))
     before = dict(_generation(repo, "lx") or {})
@@ -323,24 +304,8 @@ def test_phase3b_storage_guards_fail_closed_without_partial_generation(
             conn.execute(generation_sql, ("bad-type", 0.5))
 
         projection_values = (
-            "lx",
-            "current_decision_projection.v1",
-            "0" * 64,
-            0,
-            0,
-            "0" * 64,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            "0" * 64,
-            "A" * 64,
-            "{}",
-            1,
+            "lx", "current_decision_projection.v1", "0" * 64, 0, 0, "0" * 64,
+            0, 0, 0, 0, 0, 0, 0, 0, "0" * 64, "A" * 64, "{}", 1,
         )
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute(
@@ -351,10 +316,7 @@ def test_phase3b_storage_guards_fail_closed_without_partial_generation(
                 """,
                 projection_values,
             )
-        with pytest.raises(
-            sqlite3.IntegrityError,
-            match="decision fact is incomplete",
-        ):
+        with pytest.raises(sqlite3.IntegrityError, match="decision fact is incomplete"):
             conn.execute(
                 """
                 UPDATE trade_lifecycle_cases
@@ -414,31 +376,25 @@ def test_phase3b_storage_guards_fail_closed_without_partial_generation(
         repo.upsert_trade_lifecycle_case(_case("bad-case", account="LX"))
 
 
-def test_phase3b_trigger_allowlist_exclusions_and_index_plans(
-    tmp_path: Path,
-) -> None:
+def test_phase3b_trigger_allowlist_exclusions_and_index_plans(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     assert repo.upsert_trade_lifecycle_case(_case("case-a", account="lx"))
     assert repo.upsert_assigned_stock_event({"stock_event_id": "stock-a", "account": "lx", "trade_time_ms": 1})
     before = dict(_generation(repo, "lx") or {})
     assert repo.insert_trade_lifecycle_migration_receipt_once(
         {
-            "target_key": "excluded",
-            "migration_schema": "test.v1",
-            "manifest_hash": "a" * 64,
-            "row_hash": "b" * 64,
+            "target_key": "excluded", "migration_schema": "test.v1",
+            "manifest_hash": "a" * 64, "row_hash": "b" * 64,
         }
     )
     assert _generation(repo, "lx") == before
 
     labels = {
-        "lifecycle_case": "trade_lifecycle_cases",
-        "lifecycle_evidence": "trade_lifecycle_evidence",
+        "lifecycle_case": "trade_lifecycle_cases", "lifecycle_evidence": "trade_lifecycle_evidence",
         "lifecycle_allocation": "trade_lifecycle_allocations",
         "lifecycle_source_consumption": "trade_lifecycle_source_consumptions",
         "lifecycle_timing": "trade_lifecycle_timing_policies",
-        "combo_identity": "strategy_group_identities",
-        "assigned_stock": "assigned_stock_events",
+        "combo_identity": "strategy_group_identities", "assigned_stock": "assigned_stock_events",
     }
     expected_generation_triggers = {
         f"trg_current_decision_{label}_{operation}": table
@@ -458,9 +414,7 @@ def test_phase3b_trigger_allowlist_exclusions_and_index_plans(
             name: by_name[name]["tbl_name"] for name in expected_generation_triggers
         } == expected_generation_triggers
         assert {
-            row["name"]
-            for row in rows
-            if "current_decision_input_generations" in str(row["sql"] or "")
+            row["name"] for row in rows if "current_decision_input_generations" in str(row["sql"] or "")
         } == set(expected_generation_triggers)
         trigger_sql = "\n".join(str(row["sql"] or "").lower() for row in rows)
         assert "json_each" not in trigger_sql

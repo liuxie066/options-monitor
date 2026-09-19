@@ -32,6 +32,19 @@ def _prices(sessions):  # type: ignore[no-untyped-def]
     return values
 
 
+def _fetch_snapshot(gateway, trading_day, expirations, base_dir, *, underlier="US.NVDA", market="US"):  # type: ignore[no-untyped-def]
+    from src.application.short_vol_metrics import fetch_realized_volatility_snapshot
+
+    return fetch_realized_volatility_snapshot(
+        gateway,
+        underlier_code=underlier,
+        trading_day=trading_day,
+        market=market,
+        expirations=expirations,
+        base_dir=base_dir,
+    )
+
+
 class _Gateway:
     def __init__(self, *, calendar, prices):  # type: ignore[no-untyped-def]
         self.calendar = list(calendar)
@@ -153,8 +166,6 @@ def test_term_matched_rv_uses_remaining_sessions_and_excludes_current_bar(
 ) -> None:
     from datetime import date
 
-    from src.application.short_vol_metrics import fetch_realized_volatility_snapshot
-
     trading_day = date(2026, 8, 6)
     past, future = _sessions_around(trading_day, before=150, after=70)
     prices = _prices(past)
@@ -162,14 +173,7 @@ def test_term_matched_rv_uses_remaining_sessions_and_excludes_current_bar(
     expiration = future[39]
     gateway = _Gateway(calendar=[*past, *future], prices=prices)
 
-    snapshot = fetch_realized_volatility_snapshot(
-        gateway,
-        underlier_code="US.NVDA",
-        trading_day=trading_day,
-        market="US",
-        expirations=[expiration.isoformat()],
-        base_dir=tmp_path,
-    )
+    snapshot = _fetch_snapshot(gateway, trading_day, [expiration.isoformat()], tmp_path)
     observation = snapshot.term_matched[expiration.isoformat()]
 
     assert snapshot.status == "ok"
@@ -195,18 +199,15 @@ def test_short_history_can_produce_term_matched_rv_without_legacy_estimate(
 ) -> None:
     from datetime import date
 
-    from src.application.short_vol_metrics import fetch_realized_volatility_snapshot
-
     trading_day = date(2026, 8, 6)
     past, future = _sessions_around(trading_day, before=39, after=30)
     expiration = future[19]
-    snapshot = fetch_realized_volatility_snapshot(
+    snapshot = _fetch_snapshot(
         _Gateway(calendar=[*past, *future], prices=_prices(past)),
-        underlier_code="US.SPCX",
-        trading_day=trading_day,
-        market="US",
-        expirations=[expiration.isoformat()],
-        base_dir=tmp_path,
+        trading_day,
+        [expiration.isoformat()],
+        tmp_path,
+        underlier="US.SPCX",
     )
     observation = snapshot.term_matched[expiration.isoformat()]
     row_fields = snapshot.to_row_fields(
@@ -229,21 +230,17 @@ def test_short_history_can_produce_term_matched_rv_without_legacy_estimate(
 def test_term_matched_rv_gap_is_scoped_to_dependent_expiry(tmp_path) -> None:
     from datetime import date
 
-    from src.application.short_vol_metrics import fetch_realized_volatility_snapshot
-
     trading_day = date(2026, 8, 6)
     past, future = _sessions_around(trading_day, before=150, after=60)
     prices = _prices(past)
     prices.pop(past[-30])
     short_expiry = future[9]
     long_expiry = future[39]
-    snapshot = fetch_realized_volatility_snapshot(
+    snapshot = _fetch_snapshot(
         _Gateway(calendar=[*past, *future], prices=prices),
-        underlier_code="US.NVDA",
-        trading_day=trading_day,
-        market="US",
-        expirations=[short_expiry.isoformat(), long_expiry.isoformat()],
-        base_dir=tmp_path,
+        trading_day,
+        [short_expiry.isoformat(), long_expiry.isoformat()],
+        tmp_path,
     )
 
     assert snapshot.status == "partial"
@@ -257,35 +254,19 @@ def test_term_matched_rv_gap_is_scoped_to_dependent_expiry(tmp_path) -> None:
 def test_qfq_cache_incrementally_rechecks_last_five_sessions(tmp_path) -> None:
     from datetime import date
 
-    from src.application.short_vol_metrics import fetch_realized_volatility_snapshot
-
     first_day = date(2026, 8, 6)
     past, future = _sessions_around(first_day, before=150, after=60)
     prices = _prices([*past, first_day])
     first = _Gateway(calendar=[*past, *future], prices=prices)
     expiration = future[19]
-    first_snapshot = fetch_realized_volatility_snapshot(
-        first,
-        underlier_code="US.NVDA",
-        trading_day=first_day,
-        market="US",
-        expirations=[expiration.isoformat()],
-        base_dir=tmp_path,
-    )
+    first_snapshot = _fetch_snapshot(first, first_day, [expiration.isoformat()], tmp_path)
     assert first_snapshot.qfq_history_evidence["cache_status"] == "created"
 
     next_day = future[1]
     past2, future2 = _sessions_around(next_day, before=152, after=60)
     prices2 = dict(prices)
     second = _Gateway(calendar=[*past2, *future2], prices=prices2)
-    second_snapshot = fetch_realized_volatility_snapshot(
-        second,
-        underlier_code="US.NVDA",
-        trading_day=next_day,
-        market="US",
-        expirations=[future2[19].isoformat()],
-        base_dir=tmp_path,
-    )
+    second_snapshot = _fetch_snapshot(second, next_day, [future2[19].isoformat()], tmp_path)
 
     assert second_snapshot.qfq_history_evidence["cache_status"] == "refreshed"
     assert second_snapshot.qfq_history_evidence["revision_detected"] is False
@@ -296,31 +277,29 @@ def test_qfq_cache_incrementally_rechecks_last_five_sessions(tmp_path) -> None:
 def test_qfq_revision_triggers_full_required_horizon_refresh(tmp_path) -> None:
     from datetime import date
 
-    from src.application.short_vol_metrics import fetch_realized_volatility_snapshot
-
     trading_day = date(2026, 8, 6)
     past, future = _sessions_around(trading_day, before=150, after=60)
     prices = _prices(past)
     expiration = future[29]
-    fetch_realized_volatility_snapshot(
+    _fetch_snapshot(
         _Gateway(calendar=[*past, *future], prices=prices),
-        underlier_code="HK.00700",
-        trading_day=trading_day,
+        trading_day,
+        [expiration.isoformat()],
+        tmp_path,
+        underlier="HK.00700",
         market="HK",
-        expirations=[expiration.isoformat()],
-        base_dir=tmp_path,
     )
     revised = dict(prices)
     revised[past[-3]] = revised[past[-3]] * 0.95
     gateway = _Gateway(calendar=[*past, *future], prices=revised)
 
-    snapshot = fetch_realized_volatility_snapshot(
+    snapshot = _fetch_snapshot(
         gateway,
-        underlier_code="HK.00700",
-        trading_day=trading_day,
+        trading_day,
+        [expiration.isoformat()],
+        tmp_path,
+        underlier="HK.00700",
         market="HK",
-        expirations=[expiration.isoformat()],
-        base_dir=tmp_path,
     )
 
     assert snapshot.status == "ok"
@@ -334,28 +313,24 @@ def test_us_and_hk_calendars_produce_market_specific_remaining_sessions(
 ) -> None:
     from datetime import date
 
-    from src.application.short_vol_metrics import fetch_realized_volatility_snapshot
-
     trading_day = date(2026, 8, 6)
     past, future = _sessions_around(trading_day, before=150, after=40)
     expiration = future[19]
     prices = _prices(past)
-    us = fetch_realized_volatility_snapshot(
+    us = _fetch_snapshot(
         _Gateway(calendar=[*past, *future], prices=prices),
-        underlier_code="US.NVDA",
-        trading_day=trading_day,
-        market="US",
-        expirations=[expiration.isoformat()],
-        base_dir=tmp_path / "us",
+        trading_day,
+        [expiration.isoformat()],
+        tmp_path / "us",
     )
     hk_future = [session for index, session in enumerate(future) if index != 5]
-    hk = fetch_realized_volatility_snapshot(
+    hk = _fetch_snapshot(
         _Gateway(calendar=[*past, *hk_future], prices=prices),
-        underlier_code="HK.00700",
-        trading_day=trading_day,
+        trading_day,
+        [expiration.isoformat()],
+        tmp_path / "hk",
+        underlier="HK.00700",
         market="HK",
-        expirations=[expiration.isoformat()],
-        base_dir=tmp_path / "hk",
     )
 
     assert us.term_matched[expiration.isoformat()].remaining_sessions == 20
@@ -365,10 +340,7 @@ def test_us_and_hk_calendars_produce_market_specific_remaining_sessions(
 def test_shorter_followup_request_preserves_earlier_cached_history(tmp_path) -> None:
     from datetime import date
 
-    from src.application.short_vol_metrics import (
-        fetch_realized_volatility_snapshot,
-        qfq_history_cache_path,
-    )
+    from src.application.short_vol_metrics import qfq_history_cache_path
 
     trading_day = date(2026, 8, 6)
     past, future = _sessions_around(trading_day, before=360, after=180)
@@ -378,23 +350,19 @@ def test_shorter_followup_request_preserves_earlier_cached_history(tmp_path) -> 
         market="US",
         underlier_code="US.NVDA",
     )
-    fetch_realized_volatility_snapshot(
+    _fetch_snapshot(
         _Gateway(calendar=[*past, *future], prices=prices),
-        underlier_code="US.NVDA",
-        trading_day=trading_day,
-        market="US",
-        expirations=[future[159].isoformat()],
-        base_dir=tmp_path,
+        trading_day,
+        [future[159].isoformat()],
+        tmp_path,
     )
     long_cache = json.loads(cache_path.read_text(encoding="utf-8"))
 
-    fetch_realized_volatility_snapshot(
+    _fetch_snapshot(
         _Gateway(calendar=[*past, *future], prices=prices),
-        underlier_code="US.NVDA",
-        trading_day=trading_day,
-        market="US",
-        expirations=[future[19].isoformat()],
-        base_dir=tmp_path,
+        trading_day,
+        [future[19].isoformat()],
+        tmp_path,
     )
     short_cache = json.loads(cache_path.read_text(encoding="utf-8"))
 
@@ -405,24 +373,14 @@ def test_shorter_followup_request_preserves_earlier_cached_history(tmp_path) -> 
 def test_invalid_qfq_cache_hash_forces_full_required_horizon_fetch(tmp_path) -> None:
     from datetime import date
 
-    from src.application.short_vol_metrics import (
-        fetch_realized_volatility_snapshot,
-        qfq_history_cache_path,
-    )
+    from src.application.short_vol_metrics import qfq_history_cache_path
 
     trading_day = date(2026, 8, 6)
     past, future = _sessions_around(trading_day, before=150, after=40)
     prices = _prices(past)
     first_gateway = _Gateway(calendar=[*past, *future], prices=prices)
     expiration = future[19]
-    fetch_realized_volatility_snapshot(
-        first_gateway,
-        underlier_code="US.NVDA",
-        trading_day=trading_day,
-        market="US",
-        expirations=[expiration.isoformat()],
-        base_dir=tmp_path,
-    )
+    _fetch_snapshot(first_gateway, trading_day, [expiration.isoformat()], tmp_path)
     cache_path = qfq_history_cache_path(
         tmp_path,
         market="US",
@@ -433,14 +391,7 @@ def test_invalid_qfq_cache_hash_forces_full_required_horizon_fetch(tmp_path) -> 
     cache_path.write_text(json.dumps(cache), encoding="utf-8")
 
     gateway = _Gateway(calendar=[*past, *future], prices=prices)
-    snapshot = fetch_realized_volatility_snapshot(
-        gateway,
-        underlier_code="US.NVDA",
-        trading_day=trading_day,
-        market="US",
-        expirations=[expiration.isoformat()],
-        base_dir=tmp_path,
-    )
+    snapshot = _fetch_snapshot(gateway, trading_day, [expiration.isoformat()], tmp_path)
 
     assert snapshot.status == "ok"
     assert gateway.history_calls[0]["start"] == gateway.calendar_calls[0]["start"]

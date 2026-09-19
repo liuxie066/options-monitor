@@ -589,6 +589,29 @@ class _RuntimeAuditRepo:
         ) or self.fallback_audit
 
 
+def _run_due(
+    source,
+    *,
+    repo=None,
+    now_ms: int = 1_000,
+    collector=None,
+    apply_changes: bool = True,
+    **kwargs,
+):
+    """Run the due-reconciliation entry point with this module's default test wiring."""
+    import src.application.trades.lifecycle_runtime as mod
+
+    if collector is not None:
+        kwargs["settlement_collector"] = collector
+    return mod.reconcile_due_lifecycle_cases_for_source(
+        _RuntimeAuditRepo() if repo is None else repo,
+        source=source,
+        now_ms=now_ms,
+        apply_changes=apply_changes,
+        **kwargs,
+    )
+
+
 @pytest.mark.parametrize(
     (
         "finished",
@@ -635,13 +658,7 @@ def test_runtime_recovers_only_expired_invocations_before_provider(
     )
     repo = _RuntimeAuditRepo(audit)
 
-    result = mod.reconcile_due_lifecycle_cases_for_source(
-        repo,
-        source=source,
-        now_ms=1_000,
-        apply_changes=True,
-        settlement_collector=collector,
-    )
+    result = _run_due(source, repo=repo, collector=collector)
 
     stored = get_settlement_attempt_state(
         source["inbox_path"],
@@ -693,13 +710,7 @@ def test_runtime_scopes_control_reads_to_current_candidates(
 
     monkeypatch.setattr(mod, "list_settlement_attempt_states", list_states)
     monkeypatch.setattr(mod, "settlement_attempt_summary", summarize)
-    result = mod.reconcile_due_lifecycle_cases_for_source(
-        _RuntimeAuditRepo(),
-        source=_runtime_source(tmp_path),
-        now_ms=1_000,
-        apply_changes=True,
-        settlement_collector=_Collector(supported=False),
-    )
+    result = _run_due(_runtime_source(tmp_path), collector=_Collector(supported=False))
 
     assert result["provider_attempt_count"] == 0
     assert captured == {
@@ -723,22 +734,10 @@ def test_static_block_is_cached_before_account_wide_read(
     collector = _Collector(supported=False)
     source = _runtime_source(tmp_path)
 
-    first = mod.reconcile_due_lifecycle_cases_for_source(
-        _RuntimeAuditRepo(),
-        source=source,
-        now_ms=1_000,
-        apply_changes=True,
-        settlement_collector=collector,
-    )
+    first = _run_due(source, collector=collector)
     later = first
     for tick in range(1, 11):
-        later = mod.reconcile_due_lifecycle_cases_for_source(
-        _RuntimeAuditRepo(),
-            source=source,
-            now_ms=1_000 + tick * 60_000,
-            apply_changes=True,
-            settlement_collector=collector,
-        )
+        later = _run_due(source, now_ms=1_000 + tick * 60_000, collector=collector)
 
     assert first["planned_case_count"] == 1
     assert counts["account_reads"] == 1
@@ -779,13 +778,7 @@ def test_disabled_provider_branch_keeps_local_due_planning(
     )
     collector = _Collector(supported=True)
 
-    result = mod.reconcile_due_lifecycle_cases_for_source(
-        _RuntimeAuditRepo(),
-        source=_runtime_source(tmp_path, enabled=False),
-        now_ms=1_000,
-        apply_changes=True,
-        settlement_collector=collector,
-    )
+    result = _run_due(_runtime_source(tmp_path, enabled=False), collector=collector)
 
     assert counts["account_reads"] == 1
     assert collector.calls == 0
@@ -817,13 +810,7 @@ def test_local_or_disabled_branch_does_not_construct_collector(
         factory_calls += 1
         raise AssertionError("collector must remain lazy")
 
-    result = mod.reconcile_due_lifecycle_cases_for_source(
-        _RuntimeAuditRepo(),
-        source=_runtime_source(tmp_path, enabled=enabled),
-        now_ms=1_000,
-        apply_changes=True,
-        settlement_collector_factory=collector_factory,
-    )
+    result = _run_due(_runtime_source(tmp_path, enabled=enabled), settlement_collector_factory=collector_factory)
 
     assert factory_calls == 0
     assert counts["account_reads"] == 1
@@ -844,29 +831,11 @@ def test_unknown_error_uses_bounded_backoff_without_replanning(
     collector = _Collector(supported=True, outcome_kind="unknown_error")
     source = _runtime_source(tmp_path)
 
-    first = mod.reconcile_due_lifecycle_cases_for_source(
-        _RuntimeAuditRepo(),
-        source=source,
-        now_ms=1_000,
-        apply_changes=True,
-        settlement_collector=collector,
-    )
+    first = _run_due(source, collector=collector)
     counts["control_now_ms"] = 61_000
-    second = mod.reconcile_due_lifecycle_cases_for_source(
-        _RuntimeAuditRepo(),
-        source=source,
-        now_ms=61_000,
-        apply_changes=True,
-        settlement_collector=collector,
-    )
+    second = _run_due(source, now_ms=61_000, collector=collector)
     counts["control_now_ms"] = 301_000
-    third = mod.reconcile_due_lifecycle_cases_for_source(
-        _RuntimeAuditRepo(),
-        source=source,
-        now_ms=301_000,
-        apply_changes=True,
-        settlement_collector=collector,
-    )
+    third = _run_due(source, now_ms=301_000, collector=collector)
 
     assert first["provider_results"][0]["outcome"]["kind"] == "unknown_error"
     assert second["skipped_counts"]["backoff"] == 1
@@ -903,13 +872,7 @@ def test_provider_failure_commits_real_audit_before_inbox_receipt(
     )
     source = _runtime_source(tmp_path)
 
-    result = mod.reconcile_due_lifecycle_cases_for_source(
-        repo,
-        source=source,
-        now_ms=1_000,
-        apply_changes=True,
-        settlement_collector=_Collector(supported=True),
-    )
+    result = _run_due(source, repo=repo, collector=_Collector(supported=True))
     state = get_settlement_attempt_state(
         source["inbox_path"],
         source_id="lx",
@@ -953,31 +916,10 @@ def test_seal_failure_does_not_recall_provider_or_reseal_stable_head(
     def fail_seal(_seal):
         raise OSError("disk full")
 
-    failed = mod.reconcile_due_lifecycle_cases_for_source(
-        repo,
-        source=source,
-        now_ms=1_000,
-        apply_changes=True,
-        settlement_collector=collector,
-        seal_sink=fail_seal,
-    )
+    failed = _run_due(source, repo=repo, collector=collector, seal_sink=fail_seal)
     later_seals: list[dict] = []
-    second = mod.reconcile_due_lifecycle_cases_for_source(
-        repo,
-        source=source,
-        now_ms=1_000,
-        apply_changes=True,
-        settlement_collector=collector,
-        seal_sink=later_seals.append,
-    )
-    third = mod.reconcile_due_lifecycle_cases_for_source(
-        repo,
-        source=source,
-        now_ms=1_000,
-        apply_changes=True,
-        settlement_collector=collector,
-        seal_sink=later_seals.append,
-    )
+    second = _run_due(source, repo=repo, collector=collector, seal_sink=later_seals.append)
+    third = _run_due(source, repo=repo, collector=collector, seal_sink=later_seals.append)
 
     assert failed["seal_status"] == "seal_persist_failed"
     assert failed["seal_error_class"] == "OSError"
@@ -1027,30 +969,12 @@ def test_control_clock_is_independent_from_business_observation_time(
             )
 
     collector = _ClaimInspectingCollector(supported=True)
-    first = mod.reconcile_due_lifecycle_cases_for_source(
-        _RuntimeAuditRepo(),
-        source=source,
-        now_ms=9_000_000,
-        apply_changes=True,
-        settlement_collector=collector,
-    )
+    first = _run_due(source, now_ms=9_000_000, collector=collector)
     counts["control_now_ms"] = 61_000
-    future_business_tick = mod.reconcile_due_lifecycle_cases_for_source(
-        _RuntimeAuditRepo(),
-        source=source,
-        now_ms=99_000_000,
-        apply_changes=True,
-        settlement_collector=collector,
-    )
+    future_business_tick = _run_due(source, now_ms=99_000_000, collector=collector)
     counts["control_now_ms"] = 301_000
     historical_business_tick = (
-        mod.reconcile_due_lifecycle_cases_for_source(
-        _RuntimeAuditRepo(),
-            source=source,
-            now_ms=1,
-            apply_changes=True,
-            settlement_collector=collector,
-        )
+        _run_due(source, now_ms=1, collector=collector)
     )
 
     assert len(observed_claim_until) == 2
@@ -1131,13 +1055,7 @@ def test_each_provider_case_is_claimed_immediately_before_its_call(
             )
 
     collector = _SlowFirstCollector()
-    result = mod.reconcile_due_lifecycle_cases_for_source(
-        _RuntimeAuditRepo(),
-        source=source,
-        now_ms=1_000,
-        apply_changes=True,
-        settlement_collector=collector,
-    )
+    result = _run_due(source, collector=collector)
     assert competing_claim_acquired is True
     assert collector.case_calls == ["provider-1"]
     assert result["provider_claim_count"] == 1
@@ -1160,13 +1078,7 @@ def test_active_batch_leader_blocks_fallthrough_account_snapshot(
     )
     source = _runtime_source(tmp_path)
     collector = _Collector(supported=True)
-    initial = mod.reconcile_due_lifecycle_cases_for_source(
-        _RuntimeAuditRepo(),
-        source=source,
-        now_ms=1_000,
-        apply_changes=True,
-        settlement_collector=collector,
-    )
+    initial = _run_due(source, collector=collector)
     reads_before_overlap = counts["account_reads"]
     calls_before_overlap = collector.calls
     leader_state = get_settlement_attempt_state(
@@ -1191,13 +1103,7 @@ def test_active_batch_leader_blocks_fallthrough_account_snapshot(
         now_ms=301_000,
         lease_ms=120_000,
     )
-    overlapped = mod.reconcile_due_lifecycle_cases_for_source(
-        _RuntimeAuditRepo(),
-        source=source,
-        now_ms=301_000,
-        apply_changes=True,
-        settlement_collector=collector,
-    )
+    overlapped = _run_due(source, now_ms=301_000, collector=collector)
     second_state = get_settlement_attempt_state(
         source["inbox_path"],
         source_id="lx",
@@ -1228,13 +1134,7 @@ def test_failed_batch_leader_claim_does_not_fall_through_to_next_case(
     )
     source = _runtime_source(tmp_path)
     collector = _Collector(supported=True)
-    mod.reconcile_due_lifecycle_cases_for_source(
-        _RuntimeAuditRepo(),
-        source=source,
-        now_ms=1_000,
-        apply_changes=True,
-        settlement_collector=collector,
-    )
+    _run_due(source, collector=collector)
     reads_before_overlap = counts["account_reads"]
     calls_before_overlap = collector.calls
     attempted_claims: list[str] = []
@@ -1249,13 +1149,7 @@ def test_failed_batch_leader_claim_does_not_fall_through_to_next_case(
         "reserve_settlement_attempt_invocation",
         reject_leader_claim,
     )
-    overlapped = mod.reconcile_due_lifecycle_cases_for_source(
-        _RuntimeAuditRepo(),
-        source=source,
-        now_ms=301_000,
-        apply_changes=True,
-        settlement_collector=collector,
-    )
+    overlapped = _run_due(source, now_ms=301_000, collector=collector)
 
     assert attempted_claims == ["provider-1"]
     assert overlapped["provider_attempt_count"] == 0
@@ -1289,13 +1183,7 @@ def test_batch_lease_survives_leader_completion_until_all_cases_finish(
         completed = original_reconcile(*args, **kwargs)
         if kwargs["case_id"] == "provider-1" and not overlap_started:
             overlap_started = True
-            overlap_result = mod.reconcile_due_lifecycle_cases_for_source(
-                _RuntimeAuditRepo(),
-                source=source,
-                now_ms=1_000,
-                apply_changes=True,
-                settlement_collector=overlapping_collector,
-            )
+            overlap_result = _run_due(source, collector=overlapping_collector)
         return completed
 
     monkeypatch.setattr(
@@ -1303,13 +1191,7 @@ def test_batch_lease_survives_leader_completion_until_all_cases_finish(
         "reconcile_settlement_attempt_invocation",
         reconcile_then_overlap,
     )
-    result = mod.reconcile_due_lifecycle_cases_for_source(
-        _RuntimeAuditRepo(),
-        source=source,
-        now_ms=1_000,
-        apply_changes=True,
-        settlement_collector=outer_collector,
-    )
+    result = _run_due(source, collector=outer_collector)
 
     assert overlap_started is True
     assert overlap_result is not None
@@ -1382,13 +1264,7 @@ def test_running_provider_batch_renews_before_expiry(
             )
             return super().collect_outcome(lifecycle_case, read_model)
 
-    result = mod.reconcile_due_lifecycle_cases_for_source(
-        _RuntimeAuditRepo(),
-        source=source,
-        now_ms=1_000,
-        apply_changes=True,
-        settlement_collector=_SlowCollector(supported=True),
-    )
+    result = _run_due(source, collector=_SlowCollector(supported=True))
 
     assert competing_batch_acquired is False
     assert result["control_status"] == "ok"
@@ -1428,13 +1304,7 @@ def test_batch_release_ownership_loss_does_not_delete_new_owner(
         "release_settlement_provider_batch_claim",
         steal_then_release,
     )
-    result = mod.reconcile_due_lifecycle_cases_for_source(
-        _RuntimeAuditRepo(),
-        source=source,
-        now_ms=1_000,
-        apply_changes=True,
-        settlement_collector=_Collector(supported=True),
-    )
+    result = _run_due(source, collector=_Collector(supported=True))
 
     assert ownership_changed is True
     assert result["control_status"] == "claim_ownership_lost"
@@ -1542,13 +1412,7 @@ def test_preparation_guard_renews_leader_before_snapshot_handoff(
             claim_until_at_provider = int(state["claim_until_ms"])
             return super().collect_outcome(lifecycle_case, read_model)
 
-    result = mod.reconcile_due_lifecycle_cases_for_source(
-        _RuntimeAuditRepo(),
-        source=source,
-        now_ms=1_000,
-        apply_changes=True,
-        settlement_collector=_InspectingCollector(supported=True),
-    )
+    result = _run_due(source, collector=_InspectingCollector(supported=True))
 
     assert competing_claim_acquired is False
     assert claim_until_at_provider >= 242_000
@@ -1583,13 +1447,7 @@ def test_preparation_ownership_loss_skips_snapshot_and_provider(
         lose_before_preparation,
     )
     collector = _Collector(supported=True)
-    result = mod.reconcile_due_lifecycle_cases_for_source(
-        _RuntimeAuditRepo(),
-        source=source,
-        now_ms=1_000,
-        apply_changes=True,
-        settlement_collector=collector,
-    )
+    result = _run_due(source, collector=collector)
     state = get_settlement_attempt_state(
         source["inbox_path"],
         source_id="lx",
@@ -1688,13 +1546,7 @@ def test_running_provider_call_with_frozen_clock_renews_before_expiry(
             )
 
     collector = _SlowCollector()
-    result = mod.reconcile_due_lifecycle_cases_for_source(
-        _RuntimeAuditRepo(),
-        source=source,
-        now_ms=1_000,
-        apply_changes=True,
-        settlement_collector=collector,
-    )
+    result = _run_due(source, collector=collector)
     completed = get_settlement_attempt_state(
         source["inbox_path"],
         source_id="lx",
@@ -1784,13 +1636,7 @@ def test_lost_lease_skips_canonical_write_and_reports_typed_status(
             )
 
     collector = _ObservedCollector()
-    result = mod.reconcile_due_lifecycle_cases_for_source(
-        _RuntimeAuditRepo(),
-        source=source,
-        now_ms=1_000,
-        apply_changes=True,
-        settlement_collector=collector,
-    )
+    result = _run_due(source, collector=collector)
     current = get_settlement_attempt_state(
         source["inbox_path"],
         source_id="lx",
@@ -1877,13 +1723,7 @@ def test_inbox_reconcile_failure_recovers_exact_without_duplicate_audit(
     )
 
     collector = _ObservedCollector(supported=True)
-    first = mod.reconcile_due_lifecycle_cases_for_source(
-        repo,
-        source=source,
-        now_ms=1_000,
-        apply_changes=True,
-        settlement_collector=collector,
-    )
+    first = _run_due(source, repo=repo, collector=collector)
     pending = get_settlement_attempt_state(
         source["inbox_path"],
         source_id="lx",
@@ -1892,13 +1732,7 @@ def test_inbox_reconcile_failure_recovers_exact_without_duplicate_audit(
     )
 
     counts["control_now_ms"] = 200_000
-    restarted = mod.reconcile_due_lifecycle_cases_for_source(
-        repo,
-        source=source,
-        now_ms=200_000,
-        apply_changes=True,
-        settlement_collector=collector,
-    )
+    restarted = _run_due(source, repo=repo, now_ms=200_000, collector=collector)
     committed = get_settlement_attempt_state(
         source["inbox_path"],
         source_id="lx",
@@ -1942,13 +1776,7 @@ def test_terminal_summary_failure_returns_control_status(
         ),
     )
 
-    result = mod.reconcile_due_lifecycle_cases_for_source(
-        _RuntimeAuditRepo(),
-        source=source,
-        now_ms=1_000,
-        apply_changes=True,
-        settlement_collector=_Collector(supported=True),
-    )
+    result = _run_due(source, collector=_Collector(supported=True))
 
     assert result["control_status"] == "control_store_unavailable"
     assert result["control_error_class"] == "OperationalError"
@@ -2055,13 +1883,7 @@ def test_runtime_only_permanently_blocks_legacy_semantic_failure(
     )
     source = _runtime_source(tmp_path)
     repo = _RuntimeAuditRepo()
-    result = mod.reconcile_due_lifecycle_cases_for_source(
-        repo,
-        source=source,
-        now_ms=1_000,
-        apply_changes=True,
-        settlement_collector=_ObservedCollector(supported=True),
-    )
+    result = _run_due(source, repo=repo, collector=_ObservedCollector(supported=True))
     state = get_settlement_attempt_state(
         source["inbox_path"],
         source_id="lx",
@@ -2125,20 +1947,8 @@ def test_preclaimed_preparation_failure_completes_claim_without_provider(
     source = _runtime_source(tmp_path)
     collector = _Collector(supported=True)
 
-    result = mod.reconcile_due_lifecycle_cases_for_source(
-        _RuntimeAuditRepo(),
-        source=source,
-        now_ms=1_000,
-        apply_changes=True,
-        settlement_collector=collector,
-    )
-    repeated = mod.reconcile_due_lifecycle_cases_for_source(
-        _RuntimeAuditRepo(),
-        source=source,
-        now_ms=2_000,
-        apply_changes=True,
-        settlement_collector=collector,
-    )
+    result = _run_due(source, collector=collector)
+    repeated = _run_due(source, now_ms=2_000, collector=collector)
     state = get_settlement_attempt_state(
         source["inbox_path"],
         source_id="lx",
@@ -2187,13 +1997,7 @@ def test_collector_contract_exception_completes_claim_with_backoff(
 
     source = _runtime_source(tmp_path)
     collector = _FailingCollector(supported=True)
-    result = mod.reconcile_due_lifecycle_cases_for_source(
-        _RuntimeAuditRepo(),
-        source=source,
-        now_ms=1_000,
-        apply_changes=True,
-        settlement_collector=collector,
-    )
+    result = _run_due(source, collector=collector)
     state = get_settlement_attempt_state(
         source["inbox_path"],
         source_id="lx",
@@ -2256,13 +2060,7 @@ def test_unexpected_reconciliation_exception_completes_claim_with_backoff(
         ),
     )
     source = _runtime_source(tmp_path)
-    result = mod.reconcile_due_lifecycle_cases_for_source(
-        _RuntimeAuditRepo(),
-        source=source,
-        now_ms=1_000,
-        apply_changes=True,
-        settlement_collector=_ObservedCollector(supported=True),
-    )
+    result = _run_due(source, collector=_ObservedCollector(supported=True))
     state = get_settlement_attempt_state(
         source["inbox_path"],
         source_id="lx",
@@ -2337,13 +2135,7 @@ def test_post_write_refresh_exception_completes_claim_with_backoff(
         },
     )
     source = _runtime_source(tmp_path)
-    result = mod.reconcile_due_lifecycle_cases_for_source(
-        _RuntimeAuditRepo(),
-        source=source,
-        now_ms=1_000,
-        apply_changes=True,
-        settlement_collector=_ObservedCollector(supported=True),
-    )
+    result = _run_due(source, collector=_ObservedCollector(supported=True))
     state = get_settlement_attempt_state(
         source["inbox_path"],
         source_id="lx",
@@ -2383,13 +2175,7 @@ def test_initial_lease_guard_start_failure_completes_without_provider(
     source = _runtime_source(tmp_path)
     collector = _Collector(supported=True)
 
-    result = mod.reconcile_due_lifecycle_cases_for_source(
-        _RuntimeAuditRepo(),
-        source=source,
-        now_ms=1_000,
-        apply_changes=True,
-        settlement_collector=collector,
-    )
+    result = _run_due(source, collector=collector)
     state = get_settlement_attempt_state(
         source["inbox_path"],
         source_id="lx",
@@ -2436,13 +2222,7 @@ def test_post_refresh_guard_start_failure_completes_owned_claim(
     )
     source = _runtime_source(tmp_path)
     collector = _Collector(supported=True)
-    result = mod.reconcile_due_lifecycle_cases_for_source(
-        _RuntimeAuditRepo(),
-        source=source,
-        now_ms=1_000,
-        apply_changes=True,
-        settlement_collector=collector,
-    )
+    result = _run_due(source, collector=collector)
     state = get_settlement_attempt_state(
         source["inbox_path"],
         source_id="lx",
@@ -2503,13 +2283,7 @@ def test_completion_update_failure_uses_minimal_owned_fallback(
             )
 
     source = _runtime_source(tmp_path)
-    result = mod.reconcile_due_lifecycle_cases_for_source(
-        _RuntimeAuditRepo(),
-        source=source,
-        now_ms=1_000,
-        apply_changes=True,
-        settlement_collector=_PreCallCollector(supported=True),
-    )
+    result = _run_due(source, collector=_PreCallCollector(supported=True))
     state = get_settlement_attempt_state(
         source["inbox_path"],
         source_id="lx",
@@ -2544,21 +2318,9 @@ def test_restart_preserves_backoff_and_control_row_loss_allows_one_extra_call(
     source = _runtime_source(tmp_path)
 
     first_collector = _Collector(supported=True)
-    first = mod.reconcile_due_lifecycle_cases_for_source(
-        _RuntimeAuditRepo(),
-        source=source,
-        now_ms=1_000,
-        apply_changes=True,
-        settlement_collector=first_collector,
-    )
+    first = _run_due(source, collector=first_collector)
     restarted_collector = _Collector(supported=True)
-    restarted = mod.reconcile_due_lifecycle_cases_for_source(
-        _RuntimeAuditRepo(),
-        source=source,
-        now_ms=61_000,
-        apply_changes=True,
-        settlement_collector=restarted_collector,
-    )
+    restarted = _run_due(source, now_ms=61_000, collector=restarted_collector)
 
     with sqlite3.connect(source["inbox_path"]) as conn:
         conn.execute(
@@ -2570,20 +2332,8 @@ def test_restart_preserves_backoff_and_control_row_loss_allows_one_extra_call(
         )
 
     recreated_collector = _Collector(supported=True)
-    recreated = mod.reconcile_due_lifecycle_cases_for_source(
-        _RuntimeAuditRepo(),
-        source=source,
-        now_ms=121_000,
-        apply_changes=True,
-        settlement_collector=recreated_collector,
-    )
-    bounded = mod.reconcile_due_lifecycle_cases_for_source(
-        _RuntimeAuditRepo(),
-        source=source,
-        now_ms=181_000,
-        apply_changes=True,
-        settlement_collector=recreated_collector,
-    )
+    recreated = _run_due(source, now_ms=121_000, collector=recreated_collector)
+    bounded = _run_due(source, now_ms=181_000, collector=recreated_collector)
 
     assert first["provider_attempt_count"] == 1
     assert restarted["provider_attempt_count"] == 0
@@ -2623,13 +2373,7 @@ def test_control_store_failure_fails_provider_closed_but_runs_local_plan(
         source="test",
     )
 
-    result = mod.reconcile_due_lifecycle_cases_for_source(
-        _RuntimeAuditRepo(),
-        source=source,
-        now_ms=1_000,
-        apply_changes=True,
-        settlement_collector=collector,
-    )
+    result = _run_due(source, collector=collector)
 
     assert result["control_status"] == "control_store_unavailable"
     assert result["local_reconciliation"]["case_count"] == 2
@@ -2671,13 +2415,7 @@ def test_pre_provider_control_write_failure_fails_closed_after_local_plan(
         ),
     )
 
-    result = mod.reconcile_due_lifecycle_cases_for_source(
-        _RuntimeAuditRepo(),
-        source=source,
-        now_ms=1_000,
-        apply_changes=True,
-        settlement_collector=collector,
-    )
+    result = _run_due(source, collector=collector)
 
     assert result["control_status"] == "control_store_unavailable"
     assert result["local_reconciliation"]["case_count"] == 1
@@ -2701,10 +2439,4 @@ def test_whole_inbox_corruption_remains_service_fatal(
     source["inbox_path"].write_text("not a sqlite database")
 
     with pytest.raises(sqlite3.DatabaseError):
-        mod.reconcile_due_lifecycle_cases_for_source(
-        _RuntimeAuditRepo(),
-            source=source,
-            now_ms=1_000,
-            apply_changes=True,
-            settlement_collector=_Collector(supported=True),
-        )
+        _run_due(source, collector=_Collector(supported=True))

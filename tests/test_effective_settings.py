@@ -12,6 +12,13 @@ from src.application.settings import (
 )
 
 
+def _env_file(tmp_path, text: str):
+    """Write ``text`` verbatim to the env-file path these tests share."""
+    path = tmp_path / "options-monitor.env"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
 def test_bootstrap_skips_secret_values_unless_env_backend_is_explicit(monkeypatch, tmp_path) -> None:
     env_file = tmp_path / "settings.env"
     env_file.write_text(
@@ -65,17 +72,10 @@ def test_bootstrap_skips_registered_hmac_secret_with_secure_backend(
 
 
 def test_effective_env_file_overlays_process_env_with_source(tmp_path) -> None:
-    env_file = tmp_path / "options-monitor.env"
-    env_file.write_text(
-        "\n".join(
-            [
-                'OM_FEISHU_BOT_APP_SECRET="from_file"',
-                "OM_FEISHU_BOT_USER_OPEN_ID=ou_file # local comment",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
+    env_file = _env_file(tmp_path, "\n".join([
+        'OM_FEISHU_BOT_APP_SECRET="from_file"',
+        "OM_FEISHU_BOT_USER_OPEN_ID=ou_file # local comment",
+    ]) + "\n")
 
     effective = build_effective_env(
         environ={
@@ -92,11 +92,7 @@ def test_effective_env_file_overlays_process_env_with_source(tmp_path) -> None:
 
 
 def test_settings_inspect_redacts_secret_values(tmp_path) -> None:
-    env_file = tmp_path / "options-monitor.env"
-    env_file.write_text(
-        'OM_FEISHU_BOT_APP_ID="cli_1"\nOM_FEISHU_BOT_APP_SECRET="secret_1"\n',
-        encoding="utf-8",
-    )
+    env_file = _env_file(tmp_path, 'OM_FEISHU_BOT_APP_ID="cli_1"\nOM_FEISHU_BOT_APP_SECRET="secret_1"\n')
 
     out = inspect_effective_settings(environ={}, env_file=env_file)
 
@@ -108,8 +104,7 @@ def test_settings_inspect_redacts_secret_values(tmp_path) -> None:
 
 
 def test_settings_explain_accepts_public_alias(tmp_path) -> None:
-    env_file = tmp_path / "options-monitor.env"
-    env_file.write_text('OM_FEISHU_BOT_USER_OPEN_ID="ou_1234567890"\n', encoding="utf-8")
+    env_file = _env_file(tmp_path, 'OM_FEISHU_BOT_USER_OPEN_ID="ou_1234567890"\n')
 
     out = explain_effective_setting("feishu.bot.user_open_id", environ={}, env_file=env_file)
 
@@ -122,8 +117,7 @@ def test_settings_explain_accepts_public_alias(tmp_path) -> None:
 
 
 def test_settings_inspect_and_explain_cover_llm_api_key(tmp_path) -> None:
-    env_file = tmp_path / "options-monitor.env"
-    env_file.write_text('OM_LLM_API_KEY="sk-secret"\n', encoding="utf-8")
+    env_file = _env_file(tmp_path, 'OM_LLM_API_KEY="sk-secret"\n')
 
     inspected = inspect_effective_settings(environ={}, env_file=env_file)
     assert inspected["entries"]["OM_LLM_API_KEY"]["configured"] is True
@@ -177,8 +171,7 @@ def test_effective_env_loads_repo_local_env_file_when_enabled(tmp_path) -> None:
 
 
 def test_bootstrap_process_env_loads_selected_env_file(monkeypatch, tmp_path) -> None:
-    env_file = tmp_path / "options-monitor.env"
-    env_file.write_text("OM_RUNTIME_ROOT=/tmp/runtime-from-bootstrap\n", encoding="utf-8")
+    env_file = _env_file(tmp_path, "OM_RUNTIME_ROOT=/tmp/runtime-from-bootstrap\n")
     old_runtime_root = os.environ.get("OM_RUNTIME_ROOT")
     old_env_file = os.environ.get("OM_ENV_FILE")
     monkeypatch.delenv("OM_RUNTIME_ROOT", raising=False)
@@ -202,19 +195,12 @@ def test_bootstrap_process_env_loads_selected_env_file(monkeypatch, tmp_path) ->
 
 
 def test_settings_doctor_reports_deprecated_env_without_secret_values(tmp_path) -> None:
-    env_file = tmp_path / "options-monitor.env"
-    env_file.write_text(
-        "\n".join(
-            [
-                "OM_FEISHU_BOT_APP_ID=cli_1",
-                "OM_FEISHU_BOT_APP_SECRET=secret_1",
-                "OM_FEISHU_BOT_ALLOWED_OPEN_IDS=ou_1,ou_2",
-                "OM_FEISHU_ACK_REACTION=SMILE",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
+    env_file = _env_file(tmp_path, "\n".join([
+        "OM_FEISHU_BOT_APP_ID=cli_1",
+        "OM_FEISHU_BOT_APP_SECRET=secret_1",
+        "OM_FEISHU_BOT_ALLOWED_OPEN_IDS=ou_1,ou_2",
+        "OM_FEISHU_ACK_REACTION=SMILE",
+    ]) + "\n")
 
     out = diagnose_effective_settings(environ={}, env_file=env_file)
     checks = {item["name"]: item for item in out["checks"]}
@@ -227,20 +213,13 @@ def test_settings_doctor_reports_deprecated_env_without_secret_values(tmp_path) 
 
 
 def test_settings_doctor_reports_deprecated_ack_duplicate_conflict(tmp_path) -> None:
-    env_file = tmp_path / "options-monitor.env"
-    env_file.write_text(
-        "\n".join(
-            [
-                "OM_FEISHU_BOT_APP_ID=cli_1",
-                "OM_FEISHU_BOT_APP_SECRET=secret_1",
-                "OM_FEISHU_BOT_ALLOWED_OPEN_IDS=ou_1",
-                "OM_FEISHU_ACK_REACTION=SMILE",
-                'OM_FEISHU_ACK_REACTION="thumbsup"',
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
+    env_file = _env_file(tmp_path, "\n".join([
+        "OM_FEISHU_BOT_APP_ID=cli_1",
+        "OM_FEISHU_BOT_APP_SECRET=secret_1",
+        "OM_FEISHU_BOT_ALLOWED_OPEN_IDS=ou_1",
+        "OM_FEISHU_ACK_REACTION=SMILE",
+        'OM_FEISHU_ACK_REACTION="thumbsup"',
+    ]) + "\n")
 
     out = diagnose_effective_settings(environ={}, env_file=env_file)
     checks = {item["name"]: item for item in out["checks"]}
@@ -256,18 +235,11 @@ def test_settings_doctor_reports_deprecated_ack_duplicate_conflict(tmp_path) -> 
 
 
 def test_settings_doctor_reports_inbound_trade_write_gate_readiness(tmp_path) -> None:
-    env_file = tmp_path / "options-monitor.env"
-    env_file.write_text(
-        "\n".join(
-            [
-                "OM_FEISHU_BOT_APP_ID=cli_1",
-                "OM_FEISHU_BOT_APP_SECRET=secret_1",
-                "OM_FEISHU_BOT_ALLOWED_OPEN_IDS=ou_1",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
+    env_file = _env_file(tmp_path, "\n".join([
+        "OM_FEISHU_BOT_APP_ID=cli_1",
+        "OM_FEISHU_BOT_APP_SECRET=secret_1",
+        "OM_FEISHU_BOT_ALLOWED_OPEN_IDS=ou_1",
+    ]) + "\n")
 
     out = diagnose_effective_settings(environ={}, env_file=env_file)
     checks = {item["name"]: item for item in out["checks"]}
@@ -290,8 +262,7 @@ def test_settings_doctor_reports_inbound_trade_write_gate_readiness(tmp_path) ->
 def test_cli_settings_explain_outputs_redacted_json(tmp_path, capsys) -> None:
     from src.interfaces.cli.main import main
 
-    env_file = tmp_path / "options-monitor.env"
-    env_file.write_text('OM_FEISHU_BOT_APP_SECRET="secret_1"\n', encoding="utf-8")
+    env_file = _env_file(tmp_path, 'OM_FEISHU_BOT_APP_SECRET="secret_1"\n')
 
     rc = main(["settings", "explain", "--key", "feishu.bot.app_secret", "--env-file", str(env_file)])
 
@@ -305,8 +276,7 @@ def test_cli_settings_explain_outputs_redacted_json(tmp_path, capsys) -> None:
 def test_cli_settings_doctor_outputs_summary(tmp_path, capsys) -> None:
     from src.interfaces.cli.main import main
 
-    env_file = tmp_path / "options-monitor.env"
-    env_file.write_text('OM_FEISHU_BOT_APP_ID="cli_1"\n', encoding="utf-8")
+    env_file = _env_file(tmp_path, 'OM_FEISHU_BOT_APP_ID="cli_1"\n')
 
     rc = main(["settings", "doctor", "--env-file", str(env_file)])
 

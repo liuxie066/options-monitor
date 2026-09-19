@@ -28,6 +28,7 @@ from .writer_common import (
     terminal_event_id_for,
     valid_void_target_event_id,
 )
+from src.application.payload_helpers import positive_integer as _combo_contract_count
 
 def _existing_combo_adoption_leg(
     *,
@@ -114,23 +115,6 @@ def _existing_combo_adoption_leg(
         "strike": float(contract_key.strike),
         "expiration_ymd": contract_key.expiration_ymd,
     }
-
-def _combo_contract_count(value: Any) -> int | None:
-    if isinstance(value, bool):
-        return None
-    try:
-        numeric = Decimal(str(value))
-        parsed = int(numeric)
-    except (
-        InvalidOperation,
-        TypeError,
-        ValueError,
-        OverflowError,
-    ):
-        return None
-    if not numeric.is_finite() or parsed <= 0 or numeric != parsed:
-        return None
-    return parsed
 
 def _combo_nonnegative_contract_count(value: Any) -> int | None:
     if isinstance(value, bool):

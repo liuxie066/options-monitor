@@ -10,6 +10,8 @@ from typing import Any
 import pytest  # pyright: ignore[reportMissingImports]
 
 from domain.domain.ledger import ContractKey, TradeEvent, fee_fact_for_event
+from src.application.trades.normalizer import NormalizedTradeDeal
+from tests.ledger_legacy_helpers import LegacyTradeEvent
 import src.application.ledger.bootstrap as bootstrap
 import src.application.ledger.bootstrap as ledger_bootstrap
 import src.application.ledger.interventions as ledger_interventions
@@ -52,6 +54,192 @@ def _write_data_config(
             if sidecar.exists():
                 shutil.copy2(sidecar, standard_db.with_name(standard_db.name + suffix))
     return path
+
+
+def _contract_key(**overrides: Any) -> ContractKey:
+    base: dict[str, Any] = {
+        "broker": "富途",
+        "account": "lx",
+        "underlying_symbol": "NVDA",
+        "option_type": "put",
+        "strike": 100,
+        "expiration_ymd": "2026-08-21",
+    }
+    base.update(overrides)
+    return ContractKey.from_values(**base)
+
+
+def _trade_event(**overrides: Any) -> TradeEvent:
+    base: dict[str, Any] = {
+        "event_id": "open-aapl",
+        "event_type": "open",
+        "event_time_ms": 1000,
+        "contract_key": _contract_key(),
+        "contracts": 1,
+        "price": 1.0,
+        "currency": "USD",
+        "source": "test",
+        "multiplier": 100,
+        "lot_id": "lot-aapl",
+        # §9.2 step 3: the default event is a short put open, so the side
+        # travels in raw_payload.
+        "raw_payload": {"side": "sell"},
+    }
+    base.update(overrides)
+    return TradeEvent(**base)
+
+
+def _seed_fields(**overrides: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "broker": "富途",
+        "account": "lx",
+        "symbol": "AAPL",
+        "option_type": "put",
+        "side": "short",
+        "contracts": 1,
+        "contracts_open": 1,
+        "contracts_closed": 0,
+        "status": "open",
+        "currency": "USD",
+        "strike": 150.0,
+        "expiration": 1781827200000,
+        "opened_at": 1000,
+        "last_action_at": 1000,
+        "position_key": "AAPL_20260619_150P_short",
+        "note": "exp=2026-06-19;premium_per_share=1.0",
+        "premium": 1.0,
+    }
+    base.update(overrides)
+    return base
+
+
+def _legacy_event(**overrides: Any) -> LegacyTradeEvent:
+    base: dict[str, Any] = {
+        "event_id": "open-1",
+        "source_type": "broker_trade_event",
+        "source_name": "opend_push",
+        "broker": "富途",
+        "account": "lx",
+        "symbol": "AAPL",
+        "option_type": "put",
+        "side": "sell",
+        "position_effect": "open",
+        "contracts": 1,
+        "price": 1.0,
+        "strike": 150.0,
+        "multiplier": 100,
+        "expiration_ymd": "2026-06-19",
+        "currency": "USD",
+        "trade_time_ms": 1000,
+        "order_id": "order-1",
+        "multiplier_source": "payload",
+        "raw_payload": {"deal_id": "open-1"},
+    }
+    base.update(overrides)
+    return LegacyTradeEvent(**base)
+
+
+def _bootstrap_event(**overrides: Any) -> LegacyTradeEvent:
+    base: dict[str, Any] = {
+        "event_id": "bootstrap:lx:seed",
+        "source_type": "bootstrap_snapshot",
+        "source_name": "feishu_bootstrap",
+        "broker": "富途",
+        "account": "lx",
+        "symbol": "AAPL",
+        "option_type": "put",
+        "side": "sell",
+        "position_effect": "open",
+        "contracts": 1,
+        "price": 1.0,
+        "strike": 150.0,
+        "multiplier": 100,
+        "expiration_ymd": "2026-06-19",
+        "currency": "USD",
+        "trade_time_ms": 1000,
+        "order_id": None,
+        "multiplier_source": "bootstrap_snapshot",
+        "raw_payload": {"lot_record_id": "rec_lx_seed", "fields": _seed_fields()},
+    }
+    base.update(overrides)
+    return LegacyTradeEvent(**base)
+
+
+def _manual_close_event(**overrides: Any) -> LegacyTradeEvent:
+    base: dict[str, Any] = {
+        "event_id": "manual-close-rec-lx-seed",
+        "source_type": "manual_trade_event",
+        "source_name": "cli_manual_close",
+        "broker": "富途",
+        "account": "lx",
+        "symbol": "AAPL",
+        "option_type": "put",
+        "side": "buy",
+        "position_effect": "close",
+        "contracts": 1,
+        "price": 0.0,
+        "strike": 150.0,
+        "multiplier": 100,
+        "expiration_ymd": "2026-06-19",
+        "currency": "USD",
+        "trade_time_ms": 2000,
+        "order_id": None,
+        "multiplier_source": "payload",
+        "raw_payload": {
+            "source": "option_positions.py",
+            "mode": "manual_close",
+            "record_id": "rec_lx_seed",
+            "close_reason": "expired",
+        },
+    }
+    base.update(overrides)
+    return LegacyTradeEvent(**base)
+
+
+def _open_kwargs(**overrides: Any) -> dict[str, Any]:
+    """Keyword arguments for ``persist_manual_open_event`` (its retired command object is gone)."""
+
+    base: dict[str, Any] = {
+        "broker": "富途",
+        "account": "lx",
+        "symbol": "NVDA",
+        "option_type": "put",
+        "side": "short",
+        "contracts": 1,
+        "currency": "USD",
+        "strike": 100.0,
+        "multiplier": 100,
+        "expiration_ymd": "2026-06-19",
+        "premium_per_share": 2.5,
+        "opened_at_ms": 1000,
+    }
+    base.update(overrides)
+    return base
+
+
+def _deal(**overrides: Any) -> NormalizedTradeDeal:
+    base: dict[str, Any] = {
+        "broker": "富途",
+        "futu_account_id": "REAL_1",
+        "internal_account": "lx",
+        "deal_id": "deal-open-1",
+        "order_id": "order-1",
+        "symbol": "0700.HK",
+        "option_type": "put",
+        "side": "sell",
+        "position_effect": "open",
+        "contracts": 2,
+        "price": 3.93,
+        "strike": 480.0,
+        "multiplier": 100,
+        "multiplier_source": "payload",
+        "expiration_ymd": "2026-04-29",
+        "currency": "HKD",
+        "trade_time_ms": 1000,
+        "raw_payload": {"deal_id": "deal-open-1"},
+    }
+    base.update(overrides)
+    return NormalizedTradeDeal(**base)
 
 
 def test_resolve_ledger_store_ignores_sqlite_path_for_standard_runtime_config(tmp_path: Path) -> None:
@@ -108,18 +296,15 @@ def test_ledger_store_write_guard_fails_when_active_empty_but_systemd_default_po
     )
     ledger_manual_trades.persist_manual_open_event(
         repo,
-        broker="富途",
-        account="lx",
-        symbol="0700.HK",
-        option_type="call",
-        side="short",
-        contracts=2,
-        currency="HKD",
-        strike=510.0,
-        multiplier=100,
-        expiration_ymd="2026-05-28",
-        premium_per_share=1.2,
-        opened_at_ms=1000,
+        **_open_kwargs(
+            symbol="0700.HK",
+            option_type="call",
+            contracts=2,
+            currency="HKD",
+            strike=510.0,
+            expiration_ymd="2026-05-28",
+            premium_per_share=1.2,
+        ),
     )
 
     guard = ledger_store_write_guard(data_config)
@@ -130,7 +315,6 @@ def test_ledger_store_write_guard_fails_when_active_empty_but_systemd_default_po
 
 
 def test_load_option_positions_repo_ignores_retired_feishu_bootstrap_opt_in(tmp_path: Path) -> None:
-
     data_config = _write_data_config(
         tmp_path / "data.json",
         sqlite_path=tmp_path / "option_positions.sqlite3",
@@ -147,7 +331,6 @@ def test_load_option_positions_repo_ignores_retired_feishu_bootstrap_opt_in(tmp_
 
 
 def test_load_option_positions_repo_does_not_bootstrap_from_feishu_by_default(tmp_path: Path) -> None:
-
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
     repo = ledger_bootstrap.load_option_positions_repo(data_config)
 
@@ -158,7 +341,6 @@ def test_load_option_positions_repo_does_not_bootstrap_from_feishu_by_default(tm
 
 
 def test_normalize_bootstrap_records_accepts_market_only_rows() -> None:
-
     records = bootstrap._normalize_bootstrap_records(  # type: ignore[attr-defined]
         [
             {
@@ -180,7 +362,6 @@ def test_normalize_bootstrap_records_accepts_market_only_rows() -> None:
 
 
 def test_normalize_bootstrap_records_skips_incomplete_option_rows() -> None:
-
     records = bootstrap._normalize_bootstrap_records(  # type: ignore[attr-defined]
         [
             {
@@ -221,7 +402,6 @@ def test_normalize_bootstrap_records_skips_incomplete_option_rows() -> None:
 
 
 def test_bootstrap_trade_events_skips_invalid_timestamp_rows_without_degrading_bootstrap() -> None:
-
     events = bootstrap._bootstrap_trade_events(  # type: ignore[attr-defined]
         [
             {
@@ -267,7 +447,6 @@ def test_bootstrap_trade_events_skips_invalid_timestamp_rows_without_degrading_b
 
 
 def test_load_option_positions_repo_skips_legacy_rows_without_broker_or_market(tmp_path: Path) -> None:
-
     db_path = tmp_path / "option_positions.sqlite3"
     repo = ledger_repository.SQLiteOptionPositionsRepository(db_path)
     with repo._connect() as conn:  # type: ignore[attr-defined]
@@ -305,7 +484,6 @@ def test_load_option_positions_repo_skips_legacy_rows_without_broker_or_market(t
 
 
 def test_load_option_positions_repo_does_not_migrate_legacy_rows_by_default(tmp_path: Path) -> None:
-
     db_path = tmp_path / "option_positions.sqlite3"
     repo = ledger_repository.SQLiteOptionPositionsRepository(db_path)
     with repo._connect() as conn:  # type: ignore[attr-defined]
@@ -367,7 +545,6 @@ def test_load_option_positions_repo_does_not_migrate_legacy_rows_by_default(tmp_
 
 
 def test_migrate_legacy_sqlite_imports_legacy_option_positions_explicitly(tmp_path: Path) -> None:
-
     db_path = tmp_path / "option_positions.sqlite3"
     repo = ledger_repository.SQLiteOptionPositionsRepository(db_path)
     with repo._connect() as conn:  # type: ignore[attr-defined]
@@ -429,29 +606,15 @@ def test_migrate_legacy_sqlite_imports_legacy_option_positions_explicitly(tmp_pa
 
 
 def test_migrate_legacy_sqlite_prefers_legacy_trade_events_explicitly(tmp_path: Path) -> None:
-    from tests.ledger_legacy_helpers import LegacyTradeEvent as TradeEvent
-
     legacy_db = tmp_path / "legacy" / "option_positions.sqlite3"
     legacy_repo = ledger_repository.SQLiteOptionPositionsRepository(legacy_db)
-    legacy_event = TradeEvent(
+    legacy_event = _legacy_event(
         event_id="deal-open-legacy",
-        source_type="broker_trade_event",
         source_name="legacy_sqlite",
-        broker="富途",
         account="sy",
-        symbol="AAPL",
-        option_type="put",
-        side="sell",
-        position_effect="open",
         contracts=2,
         price=1.25,
-        strike=150.0,
-        multiplier=100,
-        expiration_ymd="2026-06-19",
-        currency="USD",
-        trade_time_ms=1000,
         order_id="order-legacy",
-        multiplier_source="payload",
         raw_payload={"deal_id": "deal-open-legacy"},
     )
     with legacy_repo._connect() as conn:  # type: ignore[attr-defined]
@@ -542,7 +705,6 @@ def test_migrate_legacy_sqlite_reports_missing_legacy_sqlite_explicitly(tmp_path
 
 
 def test_load_option_positions_repo_reports_position_lots_without_trade_events(tmp_path: Path) -> None:
-
     db_path = tmp_path / "option_positions.sqlite3"
     repo = ledger_repository.SQLiteOptionPositionsRepository(db_path)
     repo.replace_position_lots(
@@ -585,30 +747,20 @@ def test_load_option_positions_repo_reports_position_lots_without_trade_events(t
 
 
 def test_canonical_seed_lot_survives_later_trade_event_projection(tmp_path: Path) -> None:
-    from src.application.trades.normalizer import NormalizedTradeDeal
-
     db_path = tmp_path / "output_shared" / "state" / "option_positions.sqlite3"
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=db_path, with_feishu=False)
     repo = ledger_bootstrap.load_option_positions_repo(data_config)
     ledger_writer.persist_trade_event_object(
         repo,
-        TradeEvent(
+        _trade_event(
             event_id="seed-rec-sy",
-            event_type="open",
-            event_time_ms=1000,
-            contract_key=ContractKey.from_values(
-                broker="富途",
+            contract_key=_contract_key(
                 account="sy",
                 underlying_symbol="AAPL",
-                option_type="put",
                 strike=150.0,
                 expiration_ymd="2026-06-19",
-                        ),
-            contracts=1,
-            price=1.0,
-            currency="USD",
+            ),
             source="test_seed_open_lot",
-            multiplier=100,
             lot_id="rec_sy_seed",
             # §9.2 step 3: the short put side travels as the trade side.
             raw_payload={"side": "sell"},
@@ -616,23 +768,12 @@ def test_canonical_seed_lot_survives_later_trade_event_projection(tmp_path: Path
     )
 
     assert repo.count_trade_events() == 1
-    open_deal = NormalizedTradeDeal(
-        broker="富途",
-        futu_account_id="REAL_1",
-        internal_account="lx",
+    open_deal = _deal(
         deal_id="deal-open-2",
         order_id="order-2",
-        symbol="0700.HK",
-        option_type="put",
-        side="sell",
-        position_effect="open",
         contracts=1,
         price=3.2,
         strike=420.0,
-        multiplier=100,
-        multiplier_source="payload",
-        expiration_ymd="2026-04-29",
-        currency="HKD",
         trade_time_ms=2000,
         raw_payload={"deal_id": "deal-open-2"},
     )
@@ -646,7 +787,6 @@ def test_canonical_seed_lot_survives_later_trade_event_projection(tmp_path: Path
 
 
 def test_load_option_positions_repo_supports_sqlite_only_mode(tmp_path: Path) -> None:
-
     data_config = _write_data_config(
         tmp_path / "data.json",
         sqlite_path=tmp_path / "option_positions.sqlite3",
@@ -655,18 +795,7 @@ def test_load_option_positions_repo_supports_sqlite_only_mode(tmp_path: Path) ->
     repo = ledger_bootstrap.load_option_positions_repo(data_config)
     created = ledger_manual_trades.persist_manual_open_event(
         repo,
-        broker="富途",
-        account="lx",
-        symbol="TSLA",
-        option_type="put",
-        side="short",
-        contracts=1,
-        currency="USD",
-        strike=100.0,
-        multiplier=100,
-        expiration_ymd="2026-06-19",
-        premium_per_share=1.23,
-        opened_at_ms=1000,
+        **_open_kwargs(symbol="TSLA", premium_per_share=1.23),
     )
 
     records = repo.list_records(page_size=10)
@@ -677,8 +806,6 @@ def test_load_option_positions_repo_supports_sqlite_only_mode(tmp_path: Path) ->
 
 
 def test_load_option_positions_repo_treats_holdings_only_feishu_as_sqlite_only(tmp_path: Path) -> None:
-    import json
-
     data_config = tmp_path / "data.json"
     data_config.write_text(
         json.dumps(
@@ -704,7 +831,6 @@ def test_load_option_positions_repo_treats_holdings_only_feishu_as_sqlite_only(t
 
 
 def test_load_option_positions_repo_does_not_degrade_when_retired_feishu_bootstrap_config_exists(tmp_path: Path) -> None:
-
     data_config = _write_data_config(
         tmp_path / "data.json",
         sqlite_path=tmp_path / "option_positions.sqlite3",
@@ -757,7 +883,6 @@ def test_load_option_positions_repo_does_not_validate_position_lots_without_trad
 
 
 def test_sqlite_repo_enables_wal_and_busy_timeout(tmp_path: Path) -> None:
-
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     with repo._connect() as conn:  # type: ignore[attr-defined]
         journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
@@ -769,30 +894,8 @@ def test_sqlite_repo_enables_wal_and_busy_timeout(tmp_path: Path) -> None:
 
 def test_sqlite_trade_event_upsert_is_idempotent_and_rejects_conflicting_payload(tmp_path: Path) -> None:
     from dataclasses import replace
-    from tests.ledger_legacy_helpers import LegacyTradeEvent as TradeEvent
-
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    event = TradeEvent(
-        event_id="deal-open-1",
-        source_type="broker_trade_event",
-        source_name="opend_push",
-        broker="富途",
-        account="lx",
-        symbol="AAPL",
-        option_type="put",
-        side="sell",
-        position_effect="open",
-        contracts=1,
-        price=1.0,
-        strike=150.0,
-        multiplier=100,
-        expiration_ymd="2026-06-19",
-        currency="USD",
-        trade_time_ms=1000,
-        order_id="order-1",
-        multiplier_source="payload",
-        raw_payload={"deal_id": "deal-open-1"},
-    )
+    event = _legacy_event(event_id="deal-open-1", raw_payload={"deal_id": "deal-open-1"})
 
     assert repo.upsert_trade_event(event) is True
     assert repo.upsert_trade_event(event) is False
@@ -806,46 +909,15 @@ def test_sqlite_trade_event_upsert_is_idempotent_and_rejects_conflicting_payload
 
 
 def test_persist_trade_event_builds_position_lots_projection(tmp_path: Path) -> None:
-    from src.application.trades.normalizer import NormalizedTradeDeal
-
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    open_deal = NormalizedTradeDeal(
-        broker="富途",
-        futu_account_id="REAL_1",
-        internal_account="lx",
-        deal_id="deal-open-1",
-        order_id="order-1",
-        symbol="0700.HK",
-        option_type="put",
-        side="sell",
-        position_effect="open",
-        contracts=2,
-        price=3.93,
-        strike=480.0,
-        multiplier=100,
-        multiplier_source="payload",
-        expiration_ymd="2026-04-29",
-        currency="HKD",
-        trade_time_ms=1000,
-        raw_payload={"deal_id": "deal-open-1"},
-    )
-    close_deal = NormalizedTradeDeal(
-        broker="富途",
-        futu_account_id="REAL_1",
-        internal_account="lx",
+    open_deal = _deal()
+    close_deal = _deal(
         deal_id="deal-close-1",
         order_id="order-2",
-        symbol="0700.HK",
-        option_type="put",
         side="buy",
         position_effect="close",
         contracts=1,
         price=1.2,
-        strike=480.0,
-        multiplier=100,
-        multiplier_source="payload",
-        expiration_ymd="2026-04-29",
-        currency="HKD",
         trade_time_ms=2000,
         raw_payload={"deal_id": "deal-close-1"},
     )
@@ -887,43 +959,20 @@ def test_persist_trade_event_builds_position_lots_projection(tmp_path: Path) -> 
 
 def test_generic_event_writer_rolls_back_event_when_projection_is_invalid(tmp_path: Path) -> None:
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    key = ContractKey.from_values(
-        broker="富途",
-        account="lx",
-        underlying_symbol="AAPL",
-        option_type="put",
-        strike=150.0,
-        expiration_ymd="2026-06-19",
-        )
+    key = _contract_key(underlying_symbol="AAPL", strike=150.0, expiration_ymd="2026-06-19")
     ledger_writer.persist_trade_event_object(
         repo,
-        TradeEvent(
-            event_id="open-aapl",
-            event_type="open",
-            event_time_ms=1000,
-            contract_key=key,
-            contracts=1,
-            price=1.0,
-            currency="USD",
-            source="test",
-            multiplier=100,
-            lot_id="lot-aapl",
-            # §9.2 step 3: the short put side travels as the trade side.
-            raw_payload={"side": "sell"},
-        ),
+        _trade_event(contract_key=key),
     )
     ledger_writer.persist_trade_event_object(
         repo,
-        TradeEvent(
+        _trade_event(
             event_id="close-aapl",
             event_type="close",
             event_time_ms=2000,
             contract_key=key,
-            contracts=1,
             price=0.5,
-            currency="USD",
-            source="test",
-            multiplier=100,
+            lot_id=None,
             target_lot_id="lot-aapl",
             # §9.2 step 3: the short put side travels as the trade side.
             raw_payload={"side": "buy"},
@@ -933,16 +982,13 @@ def test_generic_event_writer_rolls_back_event_when_projection_is_invalid(tmp_pa
     with pytest.raises(ValueError, match="target_lot_already_closed"):
         ledger_writer.persist_trade_event_object(
             repo,
-            TradeEvent(
+            _trade_event(
                 event_id="duplicate-close-aapl",
                 event_type="close",
                 event_time_ms=3000,
                 contract_key=key,
-                contracts=1,
                 price=0.4,
-                currency="USD",
-                source="test",
-                multiplier=100,
+                lot_id=None,
                 target_lot_id="lot-aapl",
                 # §9.2 step 3: the short put side travels as the trade side.
                 raw_payload={"side": "buy"},
@@ -958,43 +1004,21 @@ def test_generic_event_writer_rolls_back_event_when_projection_is_invalid(tmp_pa
 
 def test_rebuild_preserves_existing_lots_when_event_history_is_invalid(tmp_path: Path) -> None:
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    key = ContractKey.from_values(
-        broker="富途",
-        account="lx",
-        underlying_symbol="AAPL",
-        option_type="put",
-        strike=150.0,
-        expiration_ymd="2026-06-19",
-        )
+    key = _contract_key(underlying_symbol="AAPL", strike=150.0, expiration_ymd="2026-06-19")
     ledger_writer.persist_trade_event_object(
         repo,
-        TradeEvent(
-            event_id="open-aapl",
-            event_type="open",
-            event_time_ms=1000,
-            contract_key=key,
-            contracts=1,
-            price=1.0,
-            currency="USD",
-            source="test",
-            multiplier=100,
-            lot_id="lot-aapl",
-            # §9.2 step 3: the short put side travels as the trade side.
-            raw_payload={"side": "sell"},
-        ),
+        _trade_event(contract_key=key),
     )
     original_lots = repo.list_position_lots()
     repo.upsert_trade_event(
-        TradeEvent(
+        _trade_event(
             event_id="orphan-close-aapl",
             event_type="close",
             event_time_ms=2000,
             contract_key=key,
-            contracts=1,
             price=0.5,
-            currency="USD",
             source="legacy-corruption-fixture",
-            multiplier=100,
+            lot_id=None,
             target_lot_id="lot-missing",
             # §9.2 step 3: the short put side travels as the trade side.
             raw_payload={"side": "buy"},
@@ -1010,27 +1034,15 @@ def test_rebuild_preserves_existing_lots_when_event_history_is_invalid(tmp_path:
 def test_persist_trade_event_keys_api_deals_by_account_and_futu_account(tmp_path: Path) -> None:
     from dataclasses import replace
 
-    from src.application.trades.normalizer import NormalizedTradeDeal
-
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    base_deal = NormalizedTradeDeal(
-        broker="富途",
-        futu_account_id="REAL_1",
-        internal_account="lx",
+    base_deal = _deal(
         deal_id="same-deal-id",
-        order_id="order-1",
         symbol="NVDA",
-        option_type="put",
-        side="sell",
-        position_effect="open",
         contracts=1,
         price=1.2,
         strike=100.0,
-        multiplier=100,
-        multiplier_source="payload",
         expiration_ymd="2026-06-19",
         currency="USD",
-        trade_time_ms=1000,
         raw_payload={"deal_id": "same-deal-id"},
     )
 
@@ -1128,82 +1140,14 @@ def test_sqlite_repo_adds_position_lot_contract_columns_without_startup_backfill
 
 
 def test_rebuild_position_lots_applies_legacy_manual_close_to_bootstrap_seed(tmp_path: Path) -> None:
-    from tests.ledger_legacy_helpers import LegacyTradeEvent as TradeEvent
-
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     ledger_writer.persist_trade_event_object(
         repo,
-        TradeEvent(
-            event_id="bootstrap:lx:seed",
-            source_type="bootstrap_snapshot",
-            source_name="feishu_bootstrap",
-            broker="富途",
-            account="lx",
-            symbol="AAPL",
-            option_type="put",
-            side="sell",
-            position_effect="open",
-            contracts=1,
-            price=1.0,
-            strike=150.0,
-            multiplier=100,
-            expiration_ymd="2026-06-19",
-            currency="USD",
-            trade_time_ms=1000,
-            order_id=None,
-            multiplier_source="bootstrap_snapshot",
-            raw_payload={
-                "lot_record_id": "rec_lx_seed",
-                "fields": {
-                    "broker": "富途",
-                    "account": "lx",
-                    "symbol": "AAPL",
-                    "option_type": "put",
-                    "side": "short",
-                    "contracts": 1,
-                    "contracts_open": 1,
-                    "contracts_closed": 0,
-                    "status": "open",
-                    "currency": "USD",
-                    "strike": 150.0,
-                    "expiration": 1781827200000,
-                    "opened_at": 1000,
-                    "last_action_at": 1000,
-                    "position_key": "AAPL_20260619_150P_short",
-                    "note": "exp=2026-06-19;premium_per_share=1.0",
-                    "premium": 1.0,
-                },
-            },
-        )
+        _bootstrap_event()
     )
     ledger_writer.persist_trade_event_object(
         repo,
-        TradeEvent(
-            event_id="manual-close-rec-lx-seed",
-            source_type="manual_trade_event",
-            source_name="cli_manual_close",
-            broker="富途",
-            account="lx",
-            symbol="AAPL",
-            option_type="put",
-            side="buy",
-            position_effect="close",
-            contracts=1,
-            price=0.0,
-            strike=150.0,
-            multiplier=100,
-            expiration_ymd="2026-06-19",
-            currency="USD",
-            trade_time_ms=2000,
-            order_id=None,
-            multiplier_source="payload",
-            raw_payload={
-                "source": "option_positions.py",
-                "mode": "manual_close",
-                "record_id": "rec_lx_seed",
-                "close_reason": "expired",
-            },
-        )
+        _manual_close_event()
     )
 
     result = ledger_writer.rebuild_position_lots_from_trade_events(repo)
@@ -1222,75 +1166,14 @@ def test_rebuild_position_lots_applies_legacy_manual_close_to_bootstrap_seed(tmp
 def test_rebuild_position_lots_closes_bootstrap_seed_by_record_id_even_if_live_projection_source_event_id_drifted(
     tmp_path: Path,
 ) -> None:
-    from tests.ledger_legacy_helpers import LegacyTradeEvent as TradeEvent
-
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     ledger_writer.persist_trade_event_object(
         repo,
-        TradeEvent(
-            event_id="bootstrap:lx:seed",
-            source_type="bootstrap_snapshot",
-            source_name="feishu_bootstrap",
-            broker="富途",
-            account="lx",
-            symbol="AAPL",
-            option_type="put",
-            side="sell",
-            position_effect="open",
-            contracts=1,
-            price=1.0,
-            strike=150.0,
-            multiplier=100,
-            expiration_ymd="2026-06-19",
-            currency="USD",
-            trade_time_ms=1000,
-            order_id=None,
-            multiplier_source="bootstrap_snapshot",
-            raw_payload={
-                "lot_record_id": "rec_lx_seed",
-                "fields": {
-                    "broker": "富途",
-                    "account": "lx",
-                    "symbol": "AAPL",
-                    "option_type": "put",
-                    "side": "short",
-                    "contracts": 1,
-                    "contracts_open": 1,
-                    "contracts_closed": 0,
-                    "status": "open",
-                    "currency": "USD",
-                    "strike": 150.0,
-                    "expiration": 1781827200000,
-                    "opened_at": 1000,
-                    "last_action_at": 1000,
-                    "position_key": "AAPL_20260619_150P_short",
-                    "note": "exp=2026-06-19;premium_per_share=1.0",
-                    "premium": 1.0,
-                },
-            },
-        ),
+        _bootstrap_event(),
     )
     ledger_writer.persist_trade_event_object(
         repo,
-        TradeEvent(
-            event_id="manual-close-rec-lx-seed",
-            source_type="manual_trade_event",
-            source_name="cli_manual_close",
-            broker="富途",
-            account="lx",
-            symbol="AAPL",
-            option_type="put",
-            side="buy",
-            position_effect="close",
-            contracts=1,
-            price=0.0,
-            strike=150.0,
-            multiplier=100,
-            expiration_ymd="2026-06-19",
-            currency="USD",
-            trade_time_ms=2000,
-            order_id=None,
-            multiplier_source="payload",
+        _manual_close_event(
             raw_payload={
                 "source": "option_positions.py",
                 "mode": "manual_close",
@@ -1322,70 +1205,21 @@ def test_rebuild_position_lots_closes_bootstrap_seed_by_record_id_even_if_live_p
 
 
 def test_close_projection_does_not_cross_match_other_account_seed_lot(tmp_path: Path) -> None:
-    from tests.ledger_legacy_helpers import LegacyTradeEvent as TradeEvent, project_position_lot_records
+    from tests.ledger_legacy_helpers import project_position_lot_records
 
     events = [
-        TradeEvent(
+        _bootstrap_event(
             event_id="bootstrap:sy:seed",
-            source_type="bootstrap_snapshot",
-            source_name="feishu_bootstrap",
-            broker="富途",
             account="sy",
-            symbol="AAPL",
-            option_type="put",
-            side="sell",
-            position_effect="open",
-            contracts=1,
-            price=1.0,
-            strike=150.0,
-            multiplier=100,
-            expiration_ymd="2026-06-19",
-            currency="USD",
-            trade_time_ms=1000,
-            order_id=None,
-            multiplier_source="bootstrap_snapshot",
-            raw_payload={
-                "lot_record_id": "rec_sy_seed",
-                "fields": {
-                    "broker": "富途",
-                    "account": "sy",
-                    "symbol": "AAPL",
-                    "option_type": "put",
-                    "side": "short",
-                    "contracts": 1,
-                    "contracts_open": 1,
-                    "contracts_closed": 0,
-                    "status": "open",
-                    "currency": "USD",
-                    "strike": 150.0,
-                    "expiration": 1781827200000,
-                    "opened_at": 1000,
-                    "last_action_at": 1000,
-                    "position_key": "AAPL_20260619_150P_short",
-                    "note": "exp=2026-06-19;premium_per_share=1.0",
-                    "premium": 1.0,
-                },
-            },
+            raw_payload={"lot_record_id": "rec_sy_seed", "fields": _seed_fields(account="sy")},
         ),
-        TradeEvent(
+        _legacy_event(
             event_id="deal-close-lx-only",
-            source_type="broker_trade_event",
-            source_name="opend_push",
-            broker="富途",
-            account="lx",
-            symbol="AAPL",
-            option_type="put",
             side="buy",
             position_effect="close",
-            contracts=1,
             price=0.5,
-            strike=150.0,
-            multiplier=100,
-            expiration_ymd="2026-06-19",
-            currency="USD",
             trade_time_ms=2000,
             order_id="order-close-lx",
-            multiplier_source="payload",
             raw_payload={"deal_id": "deal-close-lx-only"},
         ),
     ]
@@ -1401,70 +1235,24 @@ def test_close_projection_does_not_cross_match_other_account_seed_lot(tmp_path: 
 
 
 def test_close_projection_prefers_structured_expiration_over_missing_note_exp() -> None:
-    from tests.ledger_legacy_helpers import LegacyTradeEvent as TradeEvent, project_position_lot_records
+    from tests.ledger_legacy_helpers import project_position_lot_records
 
     events = [
-        TradeEvent(
-            event_id="bootstrap:lx:seed",
-            source_type="bootstrap_snapshot",
+        _bootstrap_event(
             source_name="sqlite_position_lots",
-            broker="富途",
-            account="lx",
-            symbol="AAPL",
-            option_type="put",
-            side="sell",
-            position_effect="open",
             contracts=2,
-            price=1.0,
-            strike=150.0,
-            multiplier=100,
-            expiration_ymd="2026-06-19",
-            currency="USD",
-            trade_time_ms=1000,
-            order_id=None,
-            multiplier_source="bootstrap_snapshot",
             raw_payload={
                 "lot_record_id": "rec_lx_seed",
-                "fields": {
-                    "broker": "富途",
-                    "account": "lx",
-                    "symbol": "AAPL",
-                    "option_type": "put",
-                    "side": "short",
-                    "contracts": 2,
-                    "contracts_open": 2,
-                    "contracts_closed": 0,
-                    "status": "open",
-                    "currency": "USD",
-                    "strike": 150.0,
-                    "expiration": 1781827200000,
-                    "opened_at": 1000,
-                    "last_action_at": 1000,
-                    "position_key": "AAPL_20260619_150P_short",
-                    "note": "premium_per_share=1.0",
-                    "premium": 1.0,
-                },
+                "fields": _seed_fields(contracts=2, contracts_open=2, note="premium_per_share=1.0"),
             },
         ),
-        TradeEvent(
+        _legacy_event(
             event_id="deal-close-lx-exp-structured",
-            source_type="broker_trade_event",
-            source_name="opend_push",
-            broker="富途",
-            account="lx",
-            symbol="AAPL",
-            option_type="put",
             side="buy",
             position_effect="close",
-            contracts=1,
             price=0.5,
-            strike=150.0,
-            multiplier=100,
-            expiration_ymd="2026-06-19",
-            currency="USD",
             trade_time_ms=2000,
             order_id="order-close-lx-exp-structured",
-            multiplier_source="payload",
             raw_payload={"deal_id": "deal-close-lx-exp-structured", "record_id": "rec_lx_seed"},
         ),
     ]
@@ -1480,49 +1268,17 @@ def test_close_projection_prefers_structured_expiration_over_missing_note_exp() 
 
 def test_close_projection_buy_side_marks_buy_to_close_type() -> None:
     from domain.domain.option_position_lots import BUY_TO_CLOSE
-    from tests.ledger_legacy_helpers import LegacyTradeEvent as TradeEvent, project_position_lot_records
+    from tests.ledger_legacy_helpers import project_position_lot_records
 
     events = [
-        TradeEvent(
-            event_id="open-1",
-            source_type="broker_trade_event",
-            source_name="opend_push",
-            broker="富途",
-            account="lx",
-            symbol="AAPL",
-            option_type="put",
-            side="sell",
-            position_effect="open",
-            contracts=1,
-            price=1.0,
-            strike=150.0,
-            multiplier=100,
-            expiration_ymd="2026-06-19",
-            currency="USD",
-            trade_time_ms=1000,
-            order_id="order-open-1",
-            multiplier_source="payload",
-            raw_payload={"deal_id": "open-1"},
-        ),
-        TradeEvent(
+        _legacy_event(order_id="order-open-1"),
+        _legacy_event(
             event_id="close-1",
-            source_type="broker_trade_event",
-            source_name="opend_push",
-            broker="富途",
-            account="lx",
-            symbol="AAPL",
-            option_type="put",
             side="buy",
             position_effect="close",
-            contracts=1,
             price=0.5,
-            strike=150.0,
-            multiplier=100,
-            expiration_ymd="2026-06-19",
-            currency="USD",
             trade_time_ms=2000,
             order_id="order-close-1",
-            multiplier_source="payload",
             raw_payload={"deal_id": "close-1", "record_id": "lot_open-1"},
         ),
     ]
@@ -1536,77 +1292,18 @@ def test_close_projection_buy_side_marks_buy_to_close_type() -> None:
 
 
 def test_close_projection_matches_bootstrap_lot_by_legacy_record_id() -> None:
-    from tests.ledger_legacy_helpers import LegacyTradeEvent as TradeEvent, project_position_lot_records
+    from tests.ledger_legacy_helpers import project_position_lot_records
 
     events = [
-        TradeEvent(
-            event_id="bootstrap:lx:seed",
-            source_type="bootstrap_snapshot",
+        _bootstrap_event(
             source_name="sqlite_position_lots",
-            broker="富途",
-            account="lx",
-            symbol="AAPL",
-            option_type="put",
-            side="sell",
-            position_effect="open",
             contracts=2,
-            price=1.0,
-            strike=150.0,
-            multiplier=100,
-            expiration_ymd="2026-06-19",
-            currency="USD",
-            trade_time_ms=1000,
-            order_id=None,
-            multiplier_source="bootstrap_snapshot",
             raw_payload={
                 "lot_record_id": "rec_lx_seed",
-                "fields": {
-                    "broker": "富途",
-                    "account": "lx",
-                    "symbol": "AAPL",
-                    "option_type": "put",
-                    "side": "short",
-                    "contracts": 2,
-                    "contracts_open": 2,
-                    "contracts_closed": 0,
-                    "status": "open",
-                    "currency": "USD",
-                    "strike": 150.0,
-                    "expiration": 1781827200000,
-                    "opened_at": 1000,
-                    "last_action_at": 1000,
-                    "position_key": "AAPL_20260619_150P_short",
-                    "note": "premium_per_share=1.0",
-                    "premium": 1.0,
-                },
+                "fields": _seed_fields(contracts=2, contracts_open=2, note="premium_per_share=1.0"),
             },
         ),
-        TradeEvent(
-            event_id="manual-close-rec-lx-seed",
-            source_type="manual_trade_event",
-            source_name="cli_manual_close",
-            broker="富途",
-            account="lx",
-            symbol="AAPL",
-            option_type="put",
-            side="buy",
-            position_effect="close",
-            contracts=2,
-            price=0.0,
-            strike=150.0,
-            multiplier=100,
-            expiration_ymd="2026-06-19",
-            currency="USD",
-            trade_time_ms=2000,
-            order_id=None,
-            multiplier_source="payload",
-            raw_payload={
-                "source": "option_positions.py",
-                "mode": "manual_close",
-                "record_id": "rec_lx_seed",
-                "close_reason": "expired",
-            },
-        ),
+        _manual_close_event(contracts=2),
     ]
 
     lots = project_position_lot_records(events)
@@ -1620,70 +1317,20 @@ def test_close_projection_matches_bootstrap_lot_by_legacy_record_id() -> None:
 
 
 def test_close_projection_prefers_explicit_source_event_target() -> None:
-    from tests.ledger_legacy_helpers import LegacyTradeEvent as TradeEvent, project_position_lot_records
+    from tests.ledger_legacy_helpers import project_position_lot_records
 
     events = [
-        TradeEvent(
-            event_id="open-1",
-            source_type="broker_trade_event",
-            source_name="opend_push",
-            broker="富途",
-            account="lx",
-            symbol="AAPL",
-            option_type="put",
-            side="sell",
-            position_effect="open",
-            contracts=1,
-            price=1.0,
-            strike=150.0,
-            multiplier=100,
-            expiration_ymd="2026-06-19",
-            currency="USD",
-            trade_time_ms=1000,
-            order_id="order-1",
-            multiplier_source="payload",
-            raw_payload={"deal_id": "open-1"},
-        ),
-        TradeEvent(
+        _legacy_event(),
+        _legacy_event(
             event_id="open-2",
-            source_type="broker_trade_event",
-            source_name="opend_push",
-            broker="富途",
-            account="lx",
-            symbol="AAPL",
-            option_type="put",
-            side="sell",
-            position_effect="open",
-            contracts=1,
             price=1.1,
-            strike=150.0,
-            multiplier=100,
-            expiration_ymd="2026-06-19",
-            currency="USD",
             trade_time_ms=1100,
             order_id="order-2",
-            multiplier_source="payload",
             raw_payload={"deal_id": "open-2"},
         ),
-        TradeEvent(
+        _manual_close_event(
             event_id="manual-close-target-open-2",
-            source_type="manual_trade_event",
-            source_name="cli_manual_close",
-            broker="富途",
-            account="lx",
-            symbol="AAPL",
-            option_type="put",
-            side="buy",
-            position_effect="close",
-            contracts=1,
             price=0.2,
-            strike=150.0,
-            multiplier=100,
-            expiration_ymd="2026-06-19",
-            currency="USD",
-            trade_time_ms=2000,
-            order_id=None,
-            multiplier_source="payload",
             raw_payload={
                 "source": "option_positions.py",
                 "mode": "manual_close",
@@ -1705,49 +1352,13 @@ def test_close_projection_prefers_explicit_source_event_target() -> None:
 
 
 def test_close_projection_does_not_fallback_when_explicit_target_is_missing() -> None:
-    from tests.ledger_legacy_helpers import LegacyTradeEvent as TradeEvent, project_position_lot_records
+    from tests.ledger_legacy_helpers import project_position_lot_records
 
     events = [
-        TradeEvent(
-            event_id="open-1",
-            source_type="broker_trade_event",
-            source_name="opend_push",
-            broker="富途",
-            account="lx",
-            symbol="AAPL",
-            option_type="put",
-            side="sell",
-            position_effect="open",
-            contracts=1,
-            price=1.0,
-            strike=150.0,
-            multiplier=100,
-            expiration_ymd="2026-06-19",
-            currency="USD",
-            trade_time_ms=1000,
-            order_id="order-1",
-            multiplier_source="payload",
-            raw_payload={"deal_id": "open-1"},
-        ),
-        TradeEvent(
+        _legacy_event(),
+        _manual_close_event(
             event_id="manual-close-missing-target",
-            source_type="manual_trade_event",
-            source_name="cli_manual_close",
-            broker="富途",
-            account="lx",
-            symbol="AAPL",
-            option_type="put",
-            side="buy",
-            position_effect="close",
-            contracts=1,
             price=0.2,
-            strike=150.0,
-            multiplier=100,
-            expiration_ymd="2026-06-19",
-            currency="USD",
-            trade_time_ms=2000,
-            order_id=None,
-            multiplier_source="payload",
             raw_payload={
                 "source": "option_positions.py",
                 "mode": "manual_close",
@@ -1767,49 +1378,14 @@ def test_close_projection_does_not_fallback_when_explicit_target_is_missing() ->
 
 
 def test_close_projection_does_not_partially_apply_oversized_explicit_target() -> None:
-    from tests.ledger_legacy_helpers import LegacyTradeEvent as TradeEvent, project_position_lot_records
+    from tests.ledger_legacy_helpers import project_position_lot_records
 
     events = [
-        TradeEvent(
-            event_id="open-1",
-            source_type="broker_trade_event",
-            source_name="opend_push",
-            broker="富途",
-            account="lx",
-            symbol="AAPL",
-            option_type="put",
-            side="sell",
-            position_effect="open",
-            contracts=1,
-            price=1.0,
-            strike=150.0,
-            multiplier=100,
-            expiration_ymd="2026-06-19",
-            currency="USD",
-            trade_time_ms=1000,
-            order_id="order-1",
-            multiplier_source="payload",
-            raw_payload={"deal_id": "open-1"},
-        ),
-        TradeEvent(
+        _legacy_event(),
+        _manual_close_event(
             event_id="manual-close-oversized-target",
-            source_type="manual_trade_event",
-            source_name="cli_manual_close",
-            broker="富途",
-            account="lx",
-            symbol="AAPL",
-            option_type="put",
-            side="buy",
-            position_effect="close",
             contracts=2,
             price=0.2,
-            strike=150.0,
-            multiplier=100,
-            expiration_ymd="2026-06-19",
-            currency="USD",
-            trade_time_ms=2000,
-            order_id=None,
-            multiplier_source="payload",
             raw_payload={
                 "source": "option_positions.py",
                 "mode": "manual_close",
@@ -1830,70 +1406,20 @@ def test_close_projection_does_not_partially_apply_oversized_explicit_target() -
 
 
 def test_close_projection_uses_record_id_when_legacy_source_event_target_disagrees() -> None:
-    from tests.ledger_legacy_helpers import LegacyTradeEvent as TradeEvent, project_position_lot_records_with_diagnostics
+    from tests.ledger_legacy_helpers import project_position_lot_records_with_diagnostics
 
     events = [
-        TradeEvent(
-            event_id="open-1",
-            source_type="broker_trade_event",
-            source_name="opend_push",
-            broker="富途",
-            account="lx",
-            symbol="AAPL",
-            option_type="put",
-            side="sell",
-            position_effect="open",
-            contracts=1,
-            price=1.0,
-            strike=150.0,
-            multiplier=100,
-            expiration_ymd="2026-06-19",
-            currency="USD",
-            trade_time_ms=1000,
-            order_id="order-1",
-            multiplier_source="payload",
-            raw_payload={"deal_id": "open-1"},
-        ),
-        TradeEvent(
+        _legacy_event(),
+        _legacy_event(
             event_id="open-2",
-            source_type="broker_trade_event",
-            source_name="opend_push",
-            broker="富途",
-            account="lx",
-            symbol="AAPL",
-            option_type="put",
-            side="sell",
-            position_effect="open",
-            contracts=1,
             price=1.1,
-            strike=150.0,
-            multiplier=100,
-            expiration_ymd="2026-06-19",
-            currency="USD",
             trade_time_ms=1100,
             order_id="order-2",
-            multiplier_source="payload",
             raw_payload={"deal_id": "open-2"},
         ),
-        TradeEvent(
+        _manual_close_event(
             event_id="manual-close-conflict",
-            source_type="manual_trade_event",
-            source_name="cli_manual_close",
-            broker="富途",
-            account="lx",
-            symbol="AAPL",
-            option_type="put",
-            side="buy",
-            position_effect="close",
-            contracts=1,
             price=0.2,
-            strike=150.0,
-            multiplier=100,
-            expiration_ymd="2026-06-19",
-            currency="USD",
-            trade_time_ms=2000,
-            order_id=None,
-            multiplier_source="payload",
             raw_payload={
                 "source": "option_positions.py",
                 "mode": "manual_close",
@@ -1913,38 +1439,11 @@ def test_close_projection_uses_record_id_when_legacy_source_event_target_disagre
 
 
 def test_repository_rejects_unresolved_heuristic_close_contracts(tmp_path: Path) -> None:
-    from tests.ledger_legacy_helpers import LegacyTradeEvent as TradeEvent
-
-    def make_event(**overrides: object) -> TradeEvent:
-        payload: dict[str, Any] = {
-            "event_id": "open-1",
-            "source_type": "broker_trade_event",
-            "source_name": "opend_push",
-            "broker": "富途",
-            "account": "lx",
-            "symbol": "AAPL",
-            "option_type": "put",
-            "side": "sell",
-            "position_effect": "open",
-            "contracts": 1,
-            "price": 1.0,
-            "strike": 150.0,
-            "multiplier": 100,
-            "expiration_ymd": "2026-06-19",
-            "currency": "USD",
-            "trade_time_ms": 1000,
-            "order_id": "order-1",
-            "multiplier_source": "payload",
-            "raw_payload": {"deal_id": "open-1"},
-        }
-        payload.update(overrides)
-        return TradeEvent(**payload)  # type: ignore[arg-type]
-
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    repo.upsert_trade_event(make_event())
+    repo.upsert_trade_event(_legacy_event())
     with pytest.raises(ValueError, match="target_lot_id_required"):
         repo.upsert_trade_event(
-            make_event(
+            _legacy_event(
                 event_id="close-oversized-heuristic",
                 side="buy",
                 position_effect="close",
@@ -1958,22 +1457,17 @@ def test_repository_rejects_unresolved_heuristic_close_contracts(tmp_path: Path)
 
 
 def test_persist_manual_open_event_builds_position_lot(tmp_path: Path) -> None:
-
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     result = ledger_manual_trades.persist_manual_open_event(
         repo,
-        broker="富途",
-        account="lx",
-        symbol="0700.HK",
-        option_type="put",
-        side="short",
-        contracts=2,
-        currency="HKD",
-        strike=480.0,
-        multiplier=100,
-        expiration_ymd="2026-04-29",
-        premium_per_share=3.93,
-        opened_at_ms=1000,
+        **_open_kwargs(
+            symbol="0700.HK",
+            contracts=2,
+            currency="HKD",
+            strike=480.0,
+            expiration_ymd="2026-04-29",
+            premium_per_share=3.93,
+        ),
     )
 
     assert result.created is True
@@ -1990,16 +1484,11 @@ def test_persist_manual_open_event_is_idempotent_on_retry(tmp_path: Path) -> Non
     """Retrying manual-open with identical parameters must not create duplicate lots."""
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    command = dict(
-        broker="富途",
+    command = _open_kwargs(
         account="sy",
         symbol="9992.HK",
-        option_type="put",
-        side="short",
-        contracts=1,
         currency="HKD",
         strike=145.0,
-        multiplier=100,
         expiration_ymd="2026-07-30",
         premium_per_share=6.0,
         opened_at_ms=1_700_000_000_000,
@@ -2038,18 +1527,9 @@ def test_manual_open_request_id_is_stable_without_explicit_timestamp_and_rejects
     from src.application.ledger.commands import persist_manual_open_event_with_ledger
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    command = dict(
-        broker="富途",
-        account="lx",
-        symbol="NVDA",
-        option_type="put",
-        side="short",
-        contracts=1,
-        currency="USD",
-        strike=100.0,
-        multiplier=100,
+    command = _open_kwargs(
         expiration_ymd="2027-08-21",
-        premium_per_share=2.5,
+        opened_at_ms=None,
         strategy_snapshot=legacy_snapshot,
         request_id="manual-open-request-001",
     )
@@ -2100,16 +1580,11 @@ def test_manual_open_request_id_is_stable_without_explicit_timestamp_and_rejects
 
 def test_persist_manual_open_event_id_distinguishes_multiplier(tmp_path: Path) -> None:
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    command = dict(
-        broker="富途",
+    command = _open_kwargs(
         account="sy",
         symbol="9992.HK",
-        option_type="put",
-        side="short",
-        contracts=1,
         currency="HKD",
         strike=145.0,
-        multiplier=100,
         expiration_ymd="2026-07-30",
         premium_per_share=6.0,
         opened_at_ms=1_700_000_000_000,
@@ -2128,22 +1603,17 @@ def test_persist_manual_open_event_id_distinguishes_multiplier(tmp_path: Path) -
 
 
 def test_persist_manual_close_event_updates_position_lot(tmp_path: Path) -> None:
-
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     ledger_manual_trades.persist_manual_open_event(
         repo,
-        broker="富途",
-        account="lx",
-        symbol="0700.HK",
-        option_type="put",
-        side="short",
-        contracts=2,
-        currency="HKD",
-        strike=480.0,
-        multiplier=100,
-        expiration_ymd="2026-04-29",
-        premium_per_share=3.93,
-        opened_at_ms=1000,
+        **_open_kwargs(
+            symbol="0700.HK",
+            contracts=2,
+            currency="HKD",
+            strike=480.0,
+            expiration_ymd="2026-04-29",
+            premium_per_share=3.93,
+        ),
     )
 
     lot = repo.list_position_lots()[0]
@@ -2175,22 +1645,17 @@ def test_persist_manual_close_event_updates_position_lot(tmp_path: Path) -> None
 
 
 def test_persist_manual_close_event_is_idempotent_on_retry(tmp_path: Path) -> None:
-
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     ledger_manual_trades.persist_manual_open_event(
         repo,
-        broker="富途",
-        account="lx",
-        symbol="0700.HK",
-        option_type="put",
-        side="short",
-        contracts=2,
-        currency="HKD",
-        strike=480.0,
-        multiplier=100,
-        expiration_ymd="2026-04-29",
-        premium_per_share=3.93,
-        opened_at_ms=1000,
+        **_open_kwargs(
+            symbol="0700.HK",
+            contracts=2,
+            currency="HKD",
+            strike=480.0,
+            expiration_ymd="2026-04-29",
+            premium_per_share=3.93,
+        ),
     )
 
     lot = repo.list_position_lots()[0]
@@ -2223,7 +1688,6 @@ def test_persist_manual_close_event_is_idempotent_on_retry(tmp_path: Path) -> No
 
 
 def test_persist_manual_close_event_requires_broker_on_position_lot(tmp_path: Path) -> None:
-
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
 
     with pytest.raises(ValueError, match="position lot missing broker"):
@@ -2251,37 +1715,14 @@ def test_persist_manual_close_event_requires_broker_on_position_lot(tmp_path: Pa
 
 
 def test_persist_manual_close_event_rejects_mismatched_record_id_and_fields(tmp_path: Path) -> None:
-
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     ledger_manual_trades.persist_manual_open_event(
         repo,
-        broker="富途",
-        account="lx",
-        symbol="AAPL",
-        option_type="put",
-        side="short",
-        contracts=1,
-        currency="USD",
-        strike=150.0,
-        multiplier=100,
-        expiration_ymd="2026-06-19",
-        premium_per_share=1.0,
-        opened_at_ms=1000,
+        **_open_kwargs(symbol="AAPL", strike=150.0, premium_per_share=1.0),
     )
     ledger_manual_trades.persist_manual_open_event(
         repo,
-        broker="富途",
-        account="lx",
-        symbol="NVDA",
-        option_type="put",
-        side="short",
-        contracts=1,
-        currency="USD",
-        strike=100.0,
-        multiplier=100,
-        expiration_ymd="2026-06-19",
-        premium_per_share=1.1,
-        opened_at_ms=1100,
+        **_open_kwargs(premium_per_share=1.1, opened_at_ms=1100),
     )
     lots = repo.list_position_lots()
 
@@ -2304,18 +1745,7 @@ def test_lifecycle_close_rejects_resolution_quantity_mismatch_before_write(tmp_p
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     ledger_manual_trades.persist_manual_open_event(
         repo,
-        broker="富途",
-        account="lx",
-        symbol="NVDA",
-        option_type="put",
-        side="short",
-        contracts=2,
-        currency="USD",
-        strike=100.0,
-        multiplier=100,
-        expiration_ymd="2026-06-19",
-        premium_per_share=2.5,
-        opened_at_ms=1000,
+        **_open_kwargs(contracts=2),
     )
     selector = LotCloseSelector.from_values(
         broker="富途",
@@ -2417,23 +1847,14 @@ def test_stock_settlement_allocator_conserves_fees_and_provenance_per_evidence()
     assert sum(dust_fees) == Decimal("0.000002")
 
     def terminal_event(evidence_id: str, lot_id: str, contracts: int) -> TradeEvent:
-        return TradeEvent(
+        return _trade_event(
             event_id=f"terminal-{evidence_id}-{lot_id}",
             event_type="assignment",
             event_time_ms=2000,
-            contract_key=ContractKey.from_values(
-                broker="富途",
-                account="lx",
-                underlying_symbol="NVDA",
-                option_type="put",
-                strike=100,
-                expiration_ymd="2026-06-19",
-                        ),
+            contract_key=_contract_key(expiration_ymd="2026-06-19"),
             contracts=contracts,
             price=0,
-            currency="USD",
-            source="test",
-            multiplier=100,
+            lot_id=None,
             target_lot_id=lot_id,
             raw_payload={
                 # §9.2 step 3: the short put side travels as the trade side.
@@ -2487,18 +1908,7 @@ def test_multi_lot_assignment_rolls_back_all_settlement_events_on_second_write_f
     for opened_at_ms in (1000, 1100):
         ledger_manual_trades.persist_manual_open_event(
             repo,
-            broker="富途",
-            account="lx",
-            symbol="NVDA",
-            option_type="put",
-            side="short",
-            contracts=1,
-            currency="USD",
-            strike=100.0,
-            multiplier=100,
-            expiration_ymd="2026-06-19",
-            premium_per_share=2.5,
-            opened_at_ms=opened_at_ms,
+            **_open_kwargs(opened_at_ms=opened_at_ms),
         )
     resolution = resolve_fifo_close_targets(
         repo,
@@ -2568,18 +1978,7 @@ def test_single_lifecycle_assignment_rejects_multi_target_resolution_before_writ
     for opened_at_ms in (1000, 1100):
         ledger_manual_trades.persist_manual_open_event(
             repo,
-            broker="富途",
-            account="lx",
-            symbol="NVDA",
-            option_type="put",
-            side="short",
-            contracts=1,
-            currency="USD",
-            strike=100.0,
-            multiplier=100,
-            expiration_ymd="2026-06-19",
-            premium_per_share=2.5,
-            opened_at_ms=opened_at_ms,
+            **_open_kwargs(opened_at_ms=opened_at_ms),
         )
     selector = LotCloseSelector.from_values(
         broker="富途",
@@ -2608,22 +2007,10 @@ def test_single_lifecycle_assignment_rejects_multi_target_resolution_before_writ
 
 
 def test_persist_manual_void_event_removes_open_lot_from_projection(tmp_path: Path) -> None:
-
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     open_result = ledger_manual_trades.persist_manual_open_event(
         repo,
-        broker="富途",
-        account="lx",
-        symbol="TSLA",
-        option_type="put",
-        side="short",
-        contracts=1,
-        currency="USD",
-        strike=100.0,
-        multiplier=100,
-        expiration_ymd="2026-06-19",
-        premium_per_share=1.23,
-        opened_at_ms=1000,
+        **_open_kwargs(symbol="TSLA", premium_per_share=1.23),
     )
 
     void_result = ledger_interventions.persist_manual_void_event(
@@ -2642,22 +2029,10 @@ def test_persist_manual_void_event_removes_open_lot_from_projection(tmp_path: Pa
 
 
 def test_persist_manual_void_event_restores_lot_when_voiding_close_event(tmp_path: Path) -> None:
-
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     open_result = ledger_manual_trades.persist_manual_open_event(
         repo,
-        broker="富途",
-        account="lx",
-        symbol="TSLA",
-        option_type="put",
-        side="short",
-        contracts=2,
-        currency="USD",
-        strike=100.0,
-        multiplier=100,
-        expiration_ymd="2026-06-19",
-        premium_per_share=1.23,
-        opened_at_ms=1000,
+        **_open_kwargs(symbol="TSLA", contracts=2, premium_per_share=1.23),
     )
     lot = repo.list_position_lots()[0]
     close_result = ledger_manual_trades.persist_manual_close_event(
@@ -2686,22 +2061,10 @@ def test_persist_manual_void_event_restores_lot_when_voiding_close_event(tmp_pat
 
 
 def test_persist_manual_adjust_event_updates_position_lot_projection(tmp_path: Path) -> None:
-
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     ledger_manual_trades.persist_manual_open_event(
         repo,
-        broker="富途",
-        account="lx",
-        symbol="NVDA",
-        option_type="put",
-        side="short",
-        contracts=1,
-        currency="USD",
-        strike=100.0,
-        multiplier=100,
-        expiration_ymd="2026-06-19",
-        premium_per_share=2.5,
-        opened_at_ms=1000,
+        **_open_kwargs(),
     )
     lot = repo.list_position_lots()[0]
 
@@ -2740,23 +2103,11 @@ def test_manual_strategy_snapshot_adjustment_supersedes_retired_mode(tmp_path: P
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     repo.upsert_trade_event(
-        TradeEvent(
+        _trade_event(
             event_id="legacy-combo-open",
-            event_type="open",
-            event_time_ms=1000,
-            contract_key=ContractKey.from_values(
-                broker="富途",
-                account="lx",
-                underlying_symbol="NVDA",
-                option_type="put",
-                strike=100.0,
-                expiration_ymd="2026-06-19",
-                        ),
-            contracts=1,
+            contract_key=_contract_key(expiration_ymd="2026-06-19"),
             price=2.5,
-            currency="USD",
             source="legacy_import",
-            multiplier=100,
             lot_id="legacy-combo-lot",
             raw_payload={
                 "fields": {
@@ -2798,22 +2149,10 @@ def test_manual_strategy_snapshot_adjustment_supersedes_retired_mode(tmp_path: P
 
 
 def test_persist_manual_adjust_event_is_idempotent_on_retry(tmp_path: Path) -> None:
-
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     ledger_manual_trades.persist_manual_open_event(
         repo,
-        broker="富途",
-        account="lx",
-        symbol="NVDA",
-        option_type="put",
-        side="short",
-        contracts=1,
-        currency="USD",
-        strike=100.0,
-        multiplier=100,
-        expiration_ymd="2026-06-19",
-        premium_per_share=2.5,
-        opened_at_ms=1000,
+        **_open_kwargs(),
     )
     lot = repo.list_position_lots()[0]
 
@@ -2840,37 +2179,14 @@ def test_persist_manual_adjust_event_is_idempotent_on_retry(tmp_path: Path) -> N
 
 
 def test_persist_manual_adjust_event_rejects_mismatched_record_id_and_fields(tmp_path: Path) -> None:
-
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     ledger_manual_trades.persist_manual_open_event(
         repo,
-        broker="富途",
-        account="lx",
-        symbol="AAPL",
-        option_type="put",
-        side="short",
-        contracts=1,
-        currency="USD",
-        strike=150.0,
-        multiplier=100,
-        expiration_ymd="2026-06-19",
-        premium_per_share=1.0,
-        opened_at_ms=1000,
+        **_open_kwargs(symbol="AAPL", strike=150.0, premium_per_share=1.0),
     )
     ledger_manual_trades.persist_manual_open_event(
         repo,
-        broker="富途",
-        account="lx",
-        symbol="NVDA",
-        option_type="put",
-        side="short",
-        contracts=1,
-        currency="USD",
-        strike=100.0,
-        multiplier=100,
-        expiration_ymd="2026-06-19",
-        premium_per_share=1.1,
-        opened_at_ms=1100,
+        **_open_kwargs(premium_per_share=1.1, opened_at_ms=1100),
     )
     lots = repo.list_position_lots()
 
@@ -2885,22 +2201,10 @@ def test_persist_manual_adjust_event_rejects_mismatched_record_id_and_fields(tmp
 
 
 def test_voiding_adjust_event_restores_prior_projection_state(tmp_path: Path) -> None:
-
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     ledger_manual_trades.persist_manual_open_event(
         repo,
-        broker="富途",
-        account="lx",
-        symbol="NVDA",
-        option_type="put",
-        side="short",
-        contracts=1,
-        currency="USD",
-        strike=100.0,
-        multiplier=100,
-        expiration_ymd="2026-06-19",
-        premium_per_share=2.5,
-        opened_at_ms=1000,
+        **_open_kwargs(),
     )
     lot = repo.list_position_lots()[0]
     adjust_result = ledger_manual_trades.persist_manual_adjust_event(
@@ -2922,15 +2226,34 @@ def test_voiding_adjust_event_restores_prior_projection_state(tmp_path: Path) ->
     assert restored["contracts"] == 1
 
 
-def test_load_option_positions_repo_ignores_incomplete_feishu_config_when_bootstrap_disabled(tmp_path: Path) -> None:
-
+@pytest.mark.parametrize(
+    ("feishu", "retired_bootstrap", "expected_status"),
+    [
+        ({"app_id": "app_only"}, False, "sqlite_only_no_feishu_bootstrap"),
+        ({"app_id": "app_only"}, True, "sqlite_only_feishu_bootstrap_retired"),
+        ("invalid", False, "sqlite_only_no_feishu_bootstrap"),
+        ("invalid", True, "sqlite_only_feishu_bootstrap_retired"),
+    ],
+    ids=[
+        "incomplete_config-when_bootstrap_disabled",
+        "malformed_config-when_retired_bootstrap_enabled",
+        "non_object_config-when_bootstrap_disabled",
+        "non_object_config-when_retired_bootstrap_enabled",
+    ],
+)
+def test_load_option_positions_repo_ignores_incomplete_or_malformed_feishu_config(
+    tmp_path: Path,
+    feishu: object,
+    retired_bootstrap: bool,
+    expected_status: str,
+) -> None:
+    option_positions: dict[str, object] = {"sqlite_path": str(tmp_path / "option_positions.sqlite3")}
+    if retired_bootstrap:
+        option_positions["bootstrap_from_feishu"] = {"enabled": True}
     data_config = tmp_path / "data.json"
     data_config.write_text(
         json.dumps(
-            {
-                "option_positions": {"sqlite_path": str(tmp_path / "option_positions.sqlite3")},
-                "feishu": {"app_id": "app_only"},
-            },
+            {"option_positions": option_positions, "feishu": feishu},
             ensure_ascii=False,
             indent=2,
         )
@@ -2940,111 +2263,32 @@ def test_load_option_positions_repo_ignores_incomplete_feishu_config_when_bootst
 
     repo = ledger_bootstrap.load_option_positions_repo(data_config)
 
-    assert repo.bootstrap_status == "sqlite_only_no_feishu_bootstrap"
+    assert repo.bootstrap_status == expected_status
 
 
-def test_load_option_positions_repo_ignores_malformed_feishu_config_when_retired_bootstrap_enabled(tmp_path: Path) -> None:
-
-    data_config = tmp_path / "data.json"
-    data_config.write_text(
-        json.dumps(
-            {
-                "option_positions": {
-                    "sqlite_path": str(tmp_path / "option_positions.sqlite3"),
-                    "bootstrap_from_feishu": {"enabled": True},
-                },
-                "feishu": {"app_id": "app_only"},
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-    repo = ledger_bootstrap.load_option_positions_repo(data_config)
-
-    assert repo.bootstrap_status == "sqlite_only_feishu_bootstrap_retired"
-
-
-def test_load_option_positions_repo_ignores_non_object_feishu_config_when_bootstrap_disabled(tmp_path: Path) -> None:
-
-    data_config = tmp_path / "data.json"
-    data_config.write_text(
-        json.dumps(
-            {
-                "option_positions": {"sqlite_path": str(tmp_path / "option_positions.sqlite3")},
-                "feishu": "invalid",
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-    repo = ledger_bootstrap.load_option_positions_repo(data_config)
-
-    assert repo.bootstrap_status == "sqlite_only_no_feishu_bootstrap"
-
-
-def test_load_option_positions_repo_ignores_non_object_feishu_config_when_retired_bootstrap_enabled(tmp_path: Path) -> None:
-
-    data_config = tmp_path / "data.json"
-    data_config.write_text(
-        json.dumps(
-            {
-                "option_positions": {
-                    "sqlite_path": str(tmp_path / "option_positions.sqlite3"),
-                    "bootstrap_from_feishu": {"enabled": True},
-                },
-                "feishu": "invalid",
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-    repo = ledger_bootstrap.load_option_positions_repo(data_config)
-
-    assert repo.bootstrap_status == "sqlite_only_feishu_bootstrap_retired"
-
-
-def test_option_positions_bootstrap_from_feishu_enabled_defaults_false(tmp_path: Path) -> None:
-
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-
-    assert ledger_repository.option_positions_bootstrap_from_feishu_enabled(data_config) is False
-
-
-def test_option_positions_bootstrap_from_feishu_enabled_reads_boolean(tmp_path: Path) -> None:
-
+@pytest.mark.parametrize(
+    ("bootstrap_from_feishu", "with_feishu"),
+    [
+        ({"enabled": False}, True),
+        ({"enabled": True}, True),
+        ({"enabled": "yes"}, False),
+    ],
+    ids=["defaults_false", "reads_boolean", "ignores_retired_config_shape"],
+)
+def test_option_positions_bootstrap_from_feishu_enabled_stays_disabled(
+    tmp_path: Path,
+    bootstrap_from_feishu: object,
+    with_feishu: bool,
+) -> None:
     data_config = _write_data_config(
         tmp_path / "data.json",
         sqlite_path=tmp_path / "option_positions.sqlite3",
-        bootstrap_from_feishu_enabled=True,
+        with_feishu=with_feishu,
     )
-
-    assert ledger_repository.option_positions_bootstrap_from_feishu_enabled(data_config) is False
-
-
-def test_option_positions_bootstrap_from_feishu_enabled_ignores_retired_config_shape(tmp_path: Path) -> None:
-
-    data_config = tmp_path / "data.json"
+    payload = json.loads(data_config.read_text(encoding="utf-8"))
+    payload["option_positions"]["bootstrap_from_feishu"] = bootstrap_from_feishu
     data_config.write_text(
-        json.dumps(
-            {
-                "option_positions": {
-                    "sqlite_path": str(tmp_path / "option_positions.sqlite3"),
-                    "bootstrap_from_feishu": {"enabled": "yes"},
-                }
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-        + "\n",
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
 
@@ -3052,7 +2296,6 @@ def test_option_positions_bootstrap_from_feishu_enabled_ignores_retired_config_s
 
 
 def test_replace_position_lots_rejects_incomplete_option_lots_atomically(tmp_path: Path) -> None:
-
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     repo.replace_position_lots(
         [
@@ -3139,13 +2382,11 @@ def test_replace_position_lots_requires_typed_position_lot_records(tmp_path: Pat
 
 def test_projection_replay_fixture_closes_lot_and_excludes_it_from_open_context(tmp_path: Path) -> None:
     from src.application.positions.context_builder import build_context
-    from tests.ledger_legacy_helpers import LegacyTradeEvent as TradeEvent
-
     fixture_path = BASE / "tests" / "fixtures" / "option_positions_projection_replay_case.json"
     fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     for raw_event in fixture["events"]:
-        ledger_writer.persist_trade_event_object(repo, TradeEvent(**raw_event))
+        ledger_writer.persist_trade_event_object(repo, LegacyTradeEvent(**raw_event))
 
     rebuild_result = ledger_writer.rebuild_position_lots_from_trade_events(repo)
 
@@ -3162,70 +2403,27 @@ def test_projection_replay_fixture_closes_lot_and_excludes_it_from_open_context(
 
 
 def test_projection_matches_explicit_close_with_legacy_hk_symbol_alias() -> None:
-    from tests.ledger_legacy_helpers import LegacyTradeEvent as TradeEvent, project_position_lot_records_with_diagnostics
+    from tests.ledger_legacy_helpers import project_position_lot_records_with_diagnostics
 
     events = [
-        TradeEvent(
+        _bootstrap_event(
             event_id="bootstrap:hk:legacy-700",
-            source_type="bootstrap_snapshot",
-            source_name="feishu_bootstrap",
-            broker="富途",
-            account="lx",
             symbol="00700.HK",
-            option_type="put",
-            side="sell",
-            position_effect="open",
-            contracts=1,
-            price=1.0,
             strike=480.0,
-            multiplier=100,
             expiration_ymd="2026-04-29",
             currency="HKD",
-            trade_time_ms=1000,
-            order_id=None,
-            multiplier_source="bootstrap_snapshot",
             raw_payload={
                 "lot_record_id": "rec_legacy_700",
-                "fields": {
-                    "broker": "富途",
-                    "account": "lx",
-                    "symbol": "00700.HK",
-                    "option_type": "put",
-                    "side": "short",
-                    "contracts": 1,
-                    "contracts_open": 1,
-                    "contracts_closed": 0,
-                    "status": "open",
-                    "currency": "HKD",
-                    "strike": 480.0,
-                    "expiration": 1777420800000,
-                    "opened_at": 1000,
-                    "last_action_at": 1000,
-                    "position_key": "00700.HK_20260429_480P_short",
-                    "note": "exp=2026-04-29;premium_per_share=1.0",
-                    "premium": 1.0,
-                },
+                "fields": _seed_fields(symbol="00700.HK", currency="HKD", strike=480.0, expiration=1777420800000, position_key="00700.HK_20260429_480P_short", note="exp=2026-04-29;premium_per_share=1.0"),
             },
         ),
-        TradeEvent(
+        _manual_close_event(
             event_id="manual-close-legacy-700",
-            source_type="manual_trade_event",
-            source_name="cli_manual_close",
-            broker="富途",
-            account="lx",
             symbol="00700.HK",
-            option_type="put",
-            side="buy",
-            position_effect="close",
-            contracts=1,
             price=0.2,
             strike=480.0,
-            multiplier=100,
             expiration_ymd="2026-04-29",
             currency="HKD",
-            trade_time_ms=2000,
-            order_id=None,
-            multiplier_source="payload",
             raw_payload={
                 "source": "option_positions.py",
                 "mode": "manual_close",
@@ -3247,35 +2445,20 @@ def test_ledger_api_exposes_economic_allocations(tmp_path: Path) -> None:
     from src.application.ledger.api import trade_event_economic_allocations
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "economic_allocations.sqlite3")
-    key = ContractKey.from_values(
-        broker="futu",
-        account="lx",
-        underlying_symbol="NVDA",
-        option_type="put",
-        strike=100,
-        expiration_ymd="2026-08-21",
-        )
-    open_event = TradeEvent(
+    key = _contract_key(broker="futu")
+    open_event = _trade_event(
         event_id="open-economic",
-        event_type="open",
-        event_time_ms=1000,
         contract_key=key,
-        contracts=1,
         price=2,
-        currency="USD",
-        source="test",
         lot_id="lot-economic",
         raw_payload={"side": "sell", "fee_provenance": {"basis": "actual", "source": "test"}},
     )
-    close_event = TradeEvent(
+    close_event = _trade_event(
         event_id="close-economic",
         event_type="close",
         event_time_ms=2000,
         contract_key=key,
-        contracts=1,
-        price=1,
-        currency="USD",
-        source="test",
+        lot_id=None,
         target_lot_id="lot-economic",
         raw_payload={"side": "buy", "fee_provenance": {"basis": "actual", "source": "test"}},
     )
@@ -3291,26 +2474,13 @@ def test_ledger_api_exposes_economic_allocations(tmp_path: Path) -> None:
 def test_event_codec_preserves_top_level_fee_provenance_for_compatibility() -> None:
     from src.application.ledger.event_codec import import_stored_trade_events
 
-    key = ContractKey.from_values(
-        broker="futu",
-        account="lx",
-        underlying_symbol="NVDA",
-        option_type="put",
-        strike=100,
-        expiration_ymd="2026-08-21",
-        )
-    payload = TradeEvent(
+    key = _contract_key(broker="futu")
+    payload = _trade_event(
         event_id="open-fee",
-        event_type="open",
-        event_time_ms=1000,
         contract_key=key,
-        contracts=1,
-        price=1.0,
-        currency="USD",
         source="manual",
-        multiplier=100,
-        fees=0.0,
         lot_id="lot-open-fee",
+        fees=0.0,
         # §9.2 step 3: the short put side travels as the trade side.
         raw_payload={"side": "sell"},
     ).to_dict()
@@ -3326,45 +2496,31 @@ def test_multi_lot_close_writer_conserves_frozen_formula_fee_across_allocations(
     from src.application.ledger.api import trade_event_economic_allocations
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "multi_lot_close_fees.sqlite3")
-    key = ContractKey.from_values(
-        broker="futu",
-        account="lx",
-        underlying_symbol="NVDA",
-        option_type="put",
-        strike=100,
-        expiration_ymd="2026-08-21",
-        )
+    key = _contract_key(broker="futu")
     for index in (1, 2):
         ledger_writer.persist_trade_event_object(
             repo,
-            TradeEvent(
+            _trade_event(
                 event_id=f"open-fee-{index}",
-                event_type="open",
                 event_time_ms=1000 + index,
                 contract_key=key,
-                contracts=1,
                 price=2,
-                currency="USD",
-                source="test",
-                multiplier=100,
-                fees=0,
                 lot_id=f"lot-fee-{index}",
+                fees=0,
+                # §9.2 step 3: the short put side travels as the trade side.
                 raw_payload={"side": "sell"},
             ),
         )
 
     ledger_writer.persist_trade_event_object(
         repo,
-        TradeEvent(
+        _trade_event(
             event_id="close-fee-both",
             event_type="close",
             event_time_ms=2000,
             contract_key=key,
             contracts=2,
-            price=1,
-            currency="USD",
-            source="test",
-            multiplier=100,
+            lot_id=None,
             fees=0,
             raw_payload={"side": "buy"},
         ),
@@ -3381,27 +2537,16 @@ def test_multi_lot_close_writer_conserves_frozen_formula_fee_across_allocations(
 
 def test_multi_lot_close_writer_allocates_one_trusted_actual_total(tmp_path: Path) -> None:
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "multi-lot-actual.sqlite3")
-    key = ContractKey.from_values(
-        broker="富途",
-        account="lx",
-        underlying_symbol="NVDA",
-        option_type="put",
-        strike=100,
-        expiration_ymd="2026-08-21",
-        )
+    key = _contract_key()
     for index in (1, 2):
         ledger_writer.persist_trade_event_object(
             repo,
-            TradeEvent(
+            _trade_event(
                 event_id=f"open-actual-{index}",
-                event_type="open",
                 event_time_ms=1000 + index,
                 contract_key=key,
-                contracts=1,
                 price=2,
-                currency="USD",
                 source="manual",
-                multiplier=100,
                 lot_id=f"lot-actual-{index}",
                 # §9.2 step 3: the short put side travels as the trade side.
                 raw_payload={"side": "sell"},
@@ -3410,16 +2555,14 @@ def test_multi_lot_close_writer_allocates_one_trusted_actual_total(tmp_path: Pat
 
     ledger_writer.persist_trade_event_object(
         repo,
-        TradeEvent(
+        _trade_event(
             event_id="close-actual-both",
             event_type="close",
             event_time_ms=2000,
             contract_key=key,
             contracts=2,
-            price=1,
-            currency="USD",
             source="opend_push",
-            multiplier=100,
+            lot_id=None,
             raw_payload={
                 # §9.2 step 3: the short put side travels as the trade side.
                 "side": "buy",
@@ -3453,27 +2596,15 @@ def test_atomic_close_split_without_expected_contract_evidence_keeps_fee_missing
     tmp_path: Path,
 ) -> None:
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "missing-split-size.sqlite3")
-    key = ContractKey.from_values(
-        broker="富途",
-        account="lx",
-        underlying_symbol="NVDA",
-        option_type="put",
-        strike=100,
-        expiration_ymd="2026-08-21",
-        )
+    key = _contract_key()
     for index in (1, 2):
         ledger_writer.persist_trade_event_object(
             repo,
-            TradeEvent(
+            _trade_event(
                 event_id=f"open-missing-size-{index}",
-                event_type="open",
                 event_time_ms=1000 + index,
                 contract_key=key,
-                contracts=1,
                 price=2,
-                currency="USD",
-                source="test",
-                multiplier=100,
                 lot_id=f"lot-missing-size-{index}",
                 # §9.2 step 3: the short put side travels as the trade side.
                 raw_payload={"side": "sell"},
@@ -3482,16 +2613,12 @@ def test_atomic_close_split_without_expected_contract_evidence_keeps_fee_missing
     ledger_writer.persist_trade_event_objects_atomically(
         repo,
         [
-            TradeEvent(
+            _trade_event(
                 event_id=f"close-missing-size-{index}",
                 event_type="close",
                 event_time_ms=2000,
                 contract_key=key,
-                contracts=1,
-                price=1,
-                currency="USD",
-                source="test",
-                multiplier=100,
+                lot_id=None,
                 target_lot_id=f"lot-missing-size-{index}",
                 raw_payload={"side": "buy", "source_deal_id": "deal-missing-size"},
             )
@@ -3512,43 +2639,26 @@ def test_close_writer_preserves_invalid_explicit_fee_amount_as_missing(tmp_path:
     from src.application.ledger.api import trade_event_economic_allocations
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "invalid_close_fee.sqlite3")
-    key = ContractKey.from_values(
-        broker="futu",
-        account="lx",
-        underlying_symbol="NVDA",
-        option_type="put",
-        strike=100,
-        expiration_ymd="2026-08-21",
-        )
+    key = _contract_key(broker="futu")
     ledger_writer.persist_trade_event_object(
         repo,
-        TradeEvent(
+        _trade_event(
             event_id="open-invalid-close-fee",
-            event_type="open",
-            event_time_ms=1000,
             contract_key=key,
-            contracts=1,
             price=2,
-            currency="USD",
-            source="test",
-            multiplier=100,
-            fees=0,
             lot_id="lot-invalid-close-fee",
+            fees=0,
             raw_payload={"side": "sell", "fee_provenance": {"basis": "actual", "source": "test"}},
         ),
     )
     ledger_writer.persist_trade_event_object(
         repo,
-        TradeEvent(
+        _trade_event(
             event_id="close-invalid-fee",
             event_type="close",
             event_time_ms=2000,
             contract_key=key,
-            contracts=1,
-            price=1,
-            currency="USD",
-            source="test",
-            multiplier=100,
+            lot_id=None,
             fees=1,
             raw_payload={"side": "buy", "fee_provenance": {"basis": "actual", "amount": "bad", "source": "test"}},
         ),
@@ -3599,25 +2709,13 @@ def test_writer_admits_only_consistent_actual_fee_candidates_from_trusted_broker
     expected: Decimal,
 ) -> None:
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "actual-fee.sqlite3")
-    event = TradeEvent(
+    event = _trade_event(
         event_id="trusted-actual",
-        event_type="open",
-        event_time_ms=1000,
-        contract_key=ContractKey.from_values(
-            broker="富途",
-            account="lx",
-            underlying_symbol="NVDA",
-            option_type="put",
-            strike=100,
-            expiration_ymd="2026-08-21",
-                ),
-        contracts=1,
+        contract_key=_contract_key(),
         price=2,
-        currency="USD",
         source="opend_push",
-        multiplier=100,
-        fees=fees,
         lot_id="trusted-actual-lot",
+        fees=fees,
         raw_payload={
             # §9.2 step 3: the short put side travels as the trade side.
             "side": "sell",
@@ -3642,25 +2740,13 @@ def test_writer_marks_conflicting_trusted_actual_candidates_missing_without_bloc
     tmp_path: Path,
 ) -> None:
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "actual-fee-conflict.sqlite3")
-    event = TradeEvent(
+    event = _trade_event(
         event_id="trusted-conflict",
-        event_type="open",
-        event_time_ms=1000,
-        contract_key=ContractKey.from_values(
-            broker="富途",
-            account="lx",
-            underlying_symbol="NVDA",
-            option_type="put",
-            strike=100,
-            expiration_ymd="2026-08-21",
-                ),
-        contracts=1,
+        contract_key=_contract_key(),
         price=2,
-        currency="USD",
         source="opend_push",
-        multiplier=100,
-        fees=2,
         lot_id="trusted-conflict-lot",
+        fees=2,
         raw_payload={
             # §9.2 step 3: the short put side travels as the trade side.
             "side": "sell",
@@ -3689,27 +2775,15 @@ def test_writer_marks_conflicting_trusted_actual_candidates_missing_without_bloc
 def test_writer_recomputes_incoming_estimate_and_rejects_manual_actual(
     tmp_path: Path,
 ) -> None:
-    key = ContractKey.from_values(
-        broker="富途",
-        account="lx",
-        underlying_symbol="NVDA",
-        option_type="put",
-        strike=100,
-        expiration_ymd="2026-08-21",
-        )
+    key = _contract_key()
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "fee-admission.sqlite3")
     ledger_writer.persist_trade_event_object(
         repo,
-        TradeEvent(
+        _trade_event(
             event_id="incoming-estimate",
-            event_type="open",
-            event_time_ms=1000,
             contract_key=key,
-            contracts=1,
             price=2,
-            currency="USD",
             source="manual",
-            multiplier=100,
             lot_id="incoming-estimate-lot",
             raw_payload={
                 # §9.2 step 3: the short put side travels as the trade side.
@@ -3720,18 +2794,14 @@ def test_writer_recomputes_incoming_estimate_and_rejects_manual_actual(
     )
     ledger_writer.persist_trade_event_object(
         repo,
-        TradeEvent(
+        _trade_event(
             event_id="manual-actual",
-            event_type="open",
             event_time_ms=2000,
             contract_key=key,
-            contracts=1,
             price=2,
-            currency="USD",
             source="manual",
-            multiplier=100,
-            fees=2,
             lot_id="manual-actual-lot",
+            fees=2,
             # §9.2 step 3: the short put side travels as the trade side.
             raw_payload={"side": "sell"},
         ),
@@ -3758,18 +2828,7 @@ def test_manual_assignment_request_retry_returns_original_result_after_lot_close
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     ledger_manual_trades.persist_manual_open_event(
         repo,
-        broker="富途",
-        account="lx",
-        symbol="TIGR",
-        option_type="put",
-        side="short",
-        contracts=1,
-        currency="USD",
-        strike=6.0,
-        multiplier=100,
-        expiration_ymd="2026-08-21",
-        premium_per_share=0.2,
-        opened_at_ms=1000,
+        **_open_kwargs(symbol="TIGR", strike=6.0, expiration_ymd="2026-08-21", premium_per_share=0.2),
     )
     lot_id = str(repo.list_position_lots()[0]["record_id"])
     kwargs = {
@@ -3839,18 +2898,15 @@ def test_manual_multi_lot_terminal_persists_conserved_settlement_and_replays_sou
     for opened_at_ms in (1000, 1100):
         ledger_manual_trades.persist_manual_open_event(
             repo,
-            broker="富途",
-            account="lx",
-            symbol="TIGR",
-            option_type=option_type,
-            side=position_side,
-            contracts=1,
-            currency="USD",
-            strike=6.0,
-            multiplier=100,
-            expiration_ymd="2026-08-21",
-            premium_per_share=0.2,
-            opened_at_ms=opened_at_ms,
+            **_open_kwargs(
+                symbol="TIGR",
+                option_type=option_type,
+                side=position_side,
+                strike=6.0,
+                expiration_ymd="2026-08-21",
+                premium_per_share=0.2,
+                opened_at_ms=opened_at_ms,
+            ),
         )
     kwargs = {
         "lot_id": None,

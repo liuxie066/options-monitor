@@ -8,24 +8,45 @@ from pathlib import Path
 import pytest
 
 
-def test_watchlist_whitelist_filters_symbols() -> None:
+def _pipeline(cfg: dict, *, process_symbol_fn, symbols_arg: str | None = None, **overrides):
+    """Call ``run_watchlist_pipeline`` with this file's default call shape.
+
+    Every default below is copied verbatim from the inline literal the call
+    sites used before; ``overrides`` carries the per-test differences.
+    """
     from src.application.pipeline_watchlist import run_watchlist_pipeline
 
-    calls: list[str] = []
+    kwargs = {
+        'py': 'python',
+        'base': Path('.'),
+        'cfg': cfg,
+        'report_dir': Path('.'),
+        'is_scheduled': True,
+        'top_n': 3,
+        'symbol_timeout_sec': 1,
+        'portfolio_timeout_sec': 1,
+        'want_scan': True,
+        'no_context': True,
+        'symbols_arg': symbols_arg,
+        'log': lambda _: None,
+        'want_fn': lambda _: True,
+        'apply_profiles_fn': lambda item, _profiles: dict(item),
+        'process_symbol_fn': process_symbol_fn,
+        'build_pipeline_context_fn': lambda **_: ({}, None, None, None),
+        'build_symbols_summary_fn': lambda *_args, **_kwargs: None,
+        'build_symbols_digest_fn': lambda *_args, **_kwargs: None,
+    }
+    kwargs.update(overrides)
+    return run_watchlist_pipeline(**kwargs)
 
-    def _apply_profiles(item: dict, profiles: dict) -> dict:
-        return dict(item)
+
+def test_watchlist_whitelist_filters_symbols() -> None:
+    calls: list[str] = []
 
     def _process_symbol(*args, **kwargs):
         item = args[2]
         calls.append(str(item.get('symbol')))
         return [{'symbol': str(item.get('symbol')), 'strategy': 'sell_put', 'candidate_count': 0}]
-
-    def _build_ctx(**kwargs):
-        return ({}, None, None, None)
-
-    def _noop(*args, **kwargs):
-        return None
 
     cfg = {
         'symbols': [
@@ -36,34 +57,13 @@ def test_watchlist_whitelist_filters_symbols() -> None:
         'runtime': {},
     }
 
-    out = run_watchlist_pipeline(
-        py='python',
-        base=Path('.'),
-        cfg=cfg,
-        report_dir=Path('.'),
-        is_scheduled=True,
-        top_n=3,
-        symbol_timeout_sec=1,
-        portfolio_timeout_sec=1,
-        want_scan=True,
-        no_context=True,
-        symbols_arg='0700.HK',
-        log=lambda _: None,
-        want_fn=lambda _: True,
-        apply_profiles_fn=_apply_profiles,
-        process_symbol_fn=_process_symbol,
-        build_pipeline_context_fn=_build_ctx,
-        build_symbols_summary_fn=_noop,
-        build_symbols_digest_fn=_noop,
-    )
+    out = _pipeline(cfg, symbols_arg='0700.HK', process_symbol_fn=_process_symbol)
 
     assert calls == ['0700.HK']
     assert len(out) == 1
 
 
 def test_watchlist_reuses_one_required_data_batch_for_all_symbols() -> None:
-    from src.application.pipeline_watchlist import run_watchlist_pipeline
-
     batch = object()
     received: list[object] = []
 
@@ -85,25 +85,9 @@ def test_watchlist_reuses_one_required_data_batch_for_all_symbols() -> None:
         "templates": {},
         "runtime": {},
     }
-    run_watchlist_pipeline(
-        py="python",
-        base=Path("."),
-        cfg=cfg,
-        report_dir=Path("."),
-        is_scheduled=True,
-        top_n=3,
-        symbol_timeout_sec=1,
-        portfolio_timeout_sec=1,
-        want_scan=True,
-        no_context=True,
-        symbols_arg=None,
-        log=lambda _: None,
-        want_fn=lambda _: True,
-        apply_profiles_fn=lambda item, _profiles: dict(item),
+    _pipeline(
+        cfg,
         process_symbol_fn=_process_symbol,
-        build_pipeline_context_fn=lambda **_: ({}, None, None, None),
-        build_symbols_summary_fn=lambda *_: None,
-        build_symbols_digest_fn=lambda *_: None,
         required_data_snapshot_manifest=Path("manifest.json"),
         required_data_snapshot_batch=batch,
     )
@@ -169,13 +153,9 @@ def test_watchlist_default_propagates_batch_initialization_failure_once(
 
 
 def test_watchlist_combo_sink_receives_typed_evidence(tmp_path: Path) -> None:
-    from src.application.pipeline_watchlist import run_watchlist_pipeline
     from src.application.strategy_scan_status import publish_strategy_scan_status
 
     received: list[dict] = []
-
-    def _apply_profiles(item: dict, profiles: dict) -> dict:
-        return dict(item)
 
     def _process_symbol(*args, **kwargs):
         report_dir = tmp_path / "reports"
@@ -204,12 +184,6 @@ def test_watchlist_combo_sink_receives_typed_evidence(tmp_path: Path) -> None:
             )
         return [{'symbol': 'NVDA', 'strategy': 'combo_yield', 'candidate_count': 1}]
 
-    def _build_ctx(**kwargs):
-        return ({}, None, None, None)
-
-    def _noop(*args, **kwargs):
-        return None
-
     def _combo_sink(payload: dict) -> None:
         received.append(dict(payload))
 
@@ -222,27 +196,14 @@ def test_watchlist_combo_sink_receives_typed_evidence(tmp_path: Path) -> None:
         'portfolio': {'account': 'lx'},
     }
 
-    run_watchlist_pipeline(
-        py='python',
+    _pipeline(
+        cfg,
         base=tmp_path,
-        cfg=cfg,
         report_dir=tmp_path / 'reports',
-        is_scheduled=True,
-        top_n=3,
-        symbol_timeout_sec=1,
-        portfolio_timeout_sec=1,
-        want_scan=True,
-        no_context=True,
         symbols_arg='NVDA',
-        log=lambda _: None,
-        want_fn=lambda _: True,
-        apply_profiles_fn=_apply_profiles,
         process_symbol_fn=_process_symbol,
-        build_pipeline_context_fn=_build_ctx,
-        build_symbols_summary_fn=_noop,
-        build_symbols_digest_fn=_noop,
         source_producer_run_id='run-1',
-        candidate_capture_status_sink_fn=_noop,
+        candidate_capture_status_sink_fn=lambda *_args, **_kwargs: None,
         required_data_snapshot_manifest=tmp_path / 'required.json',
         account_config_sha256='a' * 64,
         combo_evidence_sink_fn=_combo_sink,
@@ -259,8 +220,6 @@ def test_watchlist_combo_sink_receives_typed_evidence(tmp_path: Path) -> None:
 
 
 def test_watchlist_symbol_timeout_covers_the_whole_processor() -> None:
-    from src.application.pipeline_watchlist import run_watchlist_pipeline
-
     calls: list[str] = []
 
     def _process_symbol(*args, **kwargs):
@@ -277,10 +236,8 @@ def test_watchlist_symbol_timeout_covers_the_whole_processor() -> None:
         ]
 
     started = time.monotonic()
-    out = run_watchlist_pipeline(
-        py="python",
-        base=Path("."),
-        cfg={
+    out = _pipeline(
+        {
             "symbols": [
                 {"symbol": "AAPL", "sell_put": {"enabled": True}},
                 {"symbol": "MSFT", "sell_put": {"enabled": True}},
@@ -288,21 +245,7 @@ def test_watchlist_symbol_timeout_covers_the_whole_processor() -> None:
             "templates": {},
             "runtime": {},
         },
-        report_dir=Path("."),
-        is_scheduled=True,
-        top_n=3,
-        symbol_timeout_sec=1,
-        portfolio_timeout_sec=1,
-        want_scan=True,
-        no_context=True,
-        symbols_arg=None,
-        log=lambda _: None,
-        want_fn=lambda _: True,
-        apply_profiles_fn=lambda item, _profiles: dict(item),
         process_symbol_fn=_process_symbol,
-        build_pipeline_context_fn=lambda **_kwargs: ({}, None, None, None),
-        build_symbols_summary_fn=lambda *_args, **_kwargs: None,
-        build_symbols_digest_fn=lambda *_args, **_kwargs: None,
     )
     elapsed = time.monotonic() - started
 
@@ -315,23 +258,12 @@ def test_watchlist_symbol_timeout_covers_the_whole_processor() -> None:
 
 
 def test_watchlist_whitelist_is_case_insensitive_and_trimmed() -> None:
-    from src.application.pipeline_watchlist import run_watchlist_pipeline
-
     calls: list[str] = []
-
-    def _apply_profiles(item: dict, profiles: dict) -> dict:
-        return dict(item)
 
     def _process_symbol(*args, **kwargs):
         item = args[2]
         calls.append(str(item.get('symbol')))
         return [{'symbol': str(item.get('symbol')), 'strategy': 'sell_put', 'candidate_count': 0}]
-
-    def _build_ctx(**kwargs):
-        return ({}, None, None, None)
-
-    def _noop(*args, **kwargs):
-        return None
 
     cfg = {
         'symbols': [
@@ -342,50 +274,20 @@ def test_watchlist_whitelist_is_case_insensitive_and_trimmed() -> None:
         'runtime': {},
     }
 
-    out = run_watchlist_pipeline(
-        py='python',
-        base=Path('.'),
-        cfg=cfg,
-        report_dir=Path('.'),
-        is_scheduled=True,
-        top_n=3,
-        symbol_timeout_sec=1,
-        portfolio_timeout_sec=1,
-        want_scan=True,
-        no_context=True,
-        symbols_arg=' 0700.hk ',
-        log=lambda _: None,
-        want_fn=lambda _: True,
-        apply_profiles_fn=_apply_profiles,
-        process_symbol_fn=_process_symbol,
-        build_pipeline_context_fn=_build_ctx,
-        build_symbols_summary_fn=_noop,
-        build_symbols_digest_fn=_noop,
-    )
+    out = _pipeline(cfg, symbols_arg=' 0700.hk ', process_symbol_fn=_process_symbol)
 
     assert calls == ['0700.HK']
     assert len(out) == 1
 
 
 def test_watchlist_global_liquidity_excludes_underwriting_income_threshold() -> None:
-    from src.application.pipeline_watchlist import run_watchlist_pipeline
-
     seen: dict[str, dict] = {}
-
-    def _apply_profiles(item: dict, profiles: dict) -> dict:
-        return dict(item)
 
     def _process_symbol(*args, **kwargs):
         item = args[2]
         seen['put'] = dict(item.get('_global_sell_put_liquidity') or {})
         seen['call'] = dict(item.get('_global_sell_call_liquidity') or {})
         return [{'symbol': str(item.get('symbol')), 'strategy': 'sell_put', 'candidate_count': 0}]
-
-    def _build_ctx(**kwargs):
-        return ({}, None, None, None)
-
-    def _noop(*args, **kwargs):
-        return None
 
     cfg = {
         'symbols': [
@@ -400,49 +302,19 @@ def test_watchlist_global_liquidity_excludes_underwriting_income_threshold() -> 
         'runtime': {},
     }
 
-    run_watchlist_pipeline(
-        py='python',
-        base=Path('.'),
-        cfg=cfg,
-        report_dir=Path('.'),
-        is_scheduled=True,
-        top_n=3,
-        symbol_timeout_sec=1,
-        portfolio_timeout_sec=1,
-        want_scan=True,
-        no_context=True,
-        symbols_arg=None,
-        log=lambda _: None,
-        want_fn=lambda _: True,
-        apply_profiles_fn=_apply_profiles,
-        process_symbol_fn=_process_symbol,
-        build_pipeline_context_fn=_build_ctx,
-        build_symbols_summary_fn=_noop,
-        build_symbols_digest_fn=_noop,
-    )
+    _pipeline(cfg, process_symbol_fn=_process_symbol)
 
     assert seen['put'] == {'min_open_interest': 50}
     assert seen['call'] == {'min_volume': 12}
 
 
 def test_watchlist_passes_runtime_config_to_symbol_processor() -> None:
-    from src.application.pipeline_watchlist import run_watchlist_pipeline
-
     seen: list[dict] = []
-
-    def _apply_profiles(item: dict, profiles: dict) -> dict:
-        return dict(item)
 
     def _process_symbol(*args, **kwargs):
         seen.append(dict(kwargs.get("runtime_config") or {}))
         item = args[2]
         return [{"symbol": str(item.get("symbol")), "strategy": "sell_put", "candidate_count": 0}]
-
-    def _build_ctx(**kwargs):
-        return ({}, None, None, None)
-
-    def _noop(*args, **kwargs):
-        return None
 
     cfg = {
         "symbols": [
@@ -452,33 +324,12 @@ def test_watchlist_passes_runtime_config_to_symbol_processor() -> None:
         "runtime": {"option_chain_fetch": {"max_calls": 7}},
     }
 
-    run_watchlist_pipeline(
-        py="python",
-        base=Path("."),
-        cfg=cfg,
-        report_dir=Path("."),
-        is_scheduled=True,
-        top_n=3,
-        symbol_timeout_sec=1,
-        portfolio_timeout_sec=1,
-        want_scan=True,
-        no_context=True,
-        symbols_arg=None,
-        log=lambda _: None,
-        want_fn=lambda _: True,
-        apply_profiles_fn=_apply_profiles,
-        process_symbol_fn=_process_symbol,
-        build_pipeline_context_fn=_build_ctx,
-        build_symbols_summary_fn=_noop,
-        build_symbols_digest_fn=_noop,
-    )
+    _pipeline(cfg, process_symbol_fn=_process_symbol)
 
     assert seen == [cfg]
 
 
 def test_watchlist_forwards_opening_candidate_decision_sink() -> None:
-    from src.application.pipeline_watchlist import run_watchlist_pipeline
-
     captured: list[dict] = []
     observed_option_contexts: list[dict] = []
     decision = {"opening_decision": {"accepted": False}}
@@ -494,10 +345,8 @@ def test_watchlist_forwards_opening_candidate_decision_sink() -> None:
             }
         ]
 
-    run_watchlist_pipeline(
-        py="python",
-        base=Path("."),
-        cfg={
+    _pipeline(
+        {
             "symbols": [
                 {
                     "symbol": "NVDA",
@@ -508,21 +357,7 @@ def test_watchlist_forwards_opening_candidate_decision_sink() -> None:
             "templates": {},
             "runtime": {},
         },
-        report_dir=Path("."),
-        is_scheduled=True,
-        top_n=3,
-        symbol_timeout_sec=1,
-        portfolio_timeout_sec=1,
-        want_scan=True,
-        no_context=True,
-        symbols_arg=None,
-        log=lambda _: None,
-        want_fn=lambda _: True,
-        apply_profiles_fn=lambda item, _profiles: dict(item),
         process_symbol_fn=_process_symbol,
-        build_pipeline_context_fn=lambda **_kwargs: ({}, None, None, None),
-        build_symbols_summary_fn=lambda *_args, **_kwargs: None,
-        build_symbols_digest_fn=lambda *_args, **_kwargs: None,
         source_producer_run_id="run-1",
         candidate_capture_status_sink_fn=lambda _row: None,
         opening_candidate_decisions_sink_fn=(
@@ -548,13 +383,8 @@ def test_watchlist_forwards_opening_candidate_decision_sink() -> None:
 
 
 def test_watchlist_fetch_stage_preserves_strategy_config_but_skips_scan_output() -> None:
-    from src.application.pipeline_watchlist import run_watchlist_pipeline
-
     seen: list[tuple[bool, bool, bool]] = []
     summary_called: list[bool] = []
-
-    def _apply_profiles(item: dict, profiles: dict) -> dict:
-        return dict(item)
 
     def _process_symbol(*args, **kwargs):
         item = args[2]
@@ -579,21 +409,10 @@ def test_watchlist_fetch_stage_preserves_strategy_config_but_skips_scan_output()
         "runtime": {},
     }
 
-    out = run_watchlist_pipeline(
-        py="python",
-        base=Path("."),
-        cfg=cfg,
-        report_dir=Path("."),
-        is_scheduled=True,
-        top_n=3,
-        symbol_timeout_sec=1,
-        portfolio_timeout_sec=1,
+    out = _pipeline(
+        cfg,
         want_scan=False,
-        no_context=True,
-        symbols_arg=None,
-        log=lambda _: None,
         want_fn=lambda name: name == "fetch",
-        apply_profiles_fn=_apply_profiles,
         process_symbol_fn=_process_symbol,
         build_pipeline_context_fn=_build_ctx,
         build_symbols_summary_fn=lambda rows: summary_called.append(True),

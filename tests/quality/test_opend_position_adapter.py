@@ -31,6 +31,42 @@ def _config() -> dict:
     }
 
 
+def _position(code: str, **overrides: object) -> dict:
+    row = {"code": code, "qty": -1, "position_side": "SHORT", "sec_type": "DRVT"}
+    row.update(overrides)
+    return row
+
+
+def _snapshot_row(code: str, **overrides: object) -> dict:
+    row = {
+        "code": code,
+        "stock_owner": "US.NVDA",
+        "option_type": "PUT",
+        "strike_time": "2026-08-21",
+        "option_strike_price": 99.5,
+    }
+    row.update(overrides)
+    return row
+
+
+def _local_lot(record_id: str, **field_overrides: object) -> dict:
+    fields = {
+        "account": "lx",
+        "broker": "富途",
+        "symbol": "NVDA",
+        "option_type": "put",
+        "side": "short",
+        "contracts": 1,
+        "contracts_open": 1,
+        "strike": 100,
+        "multiplier": 100,
+        "expiration_ymd": "2026-07-17",
+        "status": "open",
+    }
+    fields.update(field_overrides)
+    return {"record_id": record_id, "fields": fields}
+
+
 class _Gateway:
     def __init__(
         self,
@@ -58,13 +94,21 @@ class _Gateway:
         self.closed = True
 
 
+def _wire(monkeypatch: pytest.MonkeyPatch, gateway: _Gateway) -> None:
+    monkeypatch.setattr(adapter_module, "build_ready_futu_broker_gateway", lambda **_kwargs: gateway)
+    monkeypatch.setattr(adapter_module, "build_ready_futu_quote_gateway", lambda **_kwargs: gateway)
+
+
+def _fetch(*, market: str = "us"):
+    return OpenDOptionPositionAdapter().fetch(cfg=_config(), account="lx", market=market)
+
+
 @pytest.mark.parametrize("response", [None, [None], [{"code": "US.NVDA", "qty": 100, "acc_id": "999"}], [{"code": "US.NVDA", "qty": 100, "trd_env": "SIMULATE"}]])
 def test_adapter_never_treats_unknown_or_wrong_account_response_as_empty(monkeypatch, response) -> None:
     gateway = _Gateway(positions=[], snapshots={})
     gateway.get_positions = lambda **kwargs: response
-    monkeypatch.setattr(adapter_module, "build_ready_futu_broker_gateway", lambda **kwargs: gateway)
-    monkeypatch.setattr(adapter_module, "build_ready_futu_quote_gateway", lambda **kwargs: gateway)
-    snapshot = OpenDOptionPositionAdapter().fetch(cfg=_config(), account="lx", market="us")
+    _wire(monkeypatch, gateway)
+    snapshot = _fetch(market="us")
     assert snapshot.complete is False
     assert snapshot.snapshot_input["completeness"] == "unknown"
     assert snapshot.snapshot_input["errors"]
@@ -75,54 +119,22 @@ def test_adapter_scopes_contract_term_snapshot_to_requested_market(
 ) -> None:
     gateway = _Gateway(
         positions=[
-            {
-                "code": "US.NVDA260821P100000",
-                "qty": -1,
-                "position_side": "SHORT",
-                "sec_type": "DRVT",
-            },
-            {
-                "code": "HK.BAD",
-                "qty": -2,
-                "position_side": "SHORT",
-                "sec_type": "DRVT",
-            },
-            {
-                "code": "HK.TCH260731P440000",
-                "qty": 0,
-                "position_side": "SHORT",
-                "sec_type": "DRVT",
-            },
+            _position("US.NVDA260821P100000"),
+            _position("HK.BAD", qty=-2),
+            _position("HK.TCH260731P440000", qty=0),
         ],
         snapshots={
-            "US.NVDA260821P100000": {
-                "code": "US.NVDA260821P100000",
-                "stock_owner": "US.NVDA",
-                "option_type": "PUT",
-                "strike_time": "2026-08-21",
-                "option_strike_price": 99.5,
-                "option_contract_multiplier": 100,
-                "option_valid": True,
-            },
+            "US.NVDA260821P100000": _snapshot_row(
+                "US.NVDA260821P100000",
+                option_contract_multiplier=100,
+                option_valid=True,
+            ),
         },
     )
-    monkeypatch.setattr(
-        adapter_module,
-        "build_ready_futu_broker_gateway",
-        lambda **_kwargs: gateway,
-    )
-    monkeypatch.setattr(
-        adapter_module,
-        "build_ready_futu_quote_gateway",
-        lambda **_kwargs: gateway,
-    )
+    _wire(monkeypatch, gateway)
     monkeypatch.setattr(adapter_module, "_MARKET_SNAPSHOT_BATCH_SIZE", 1)
 
-    snapshot = OpenDOptionPositionAdapter().fetch(
-        cfg=_config(),
-        account="lx",
-        market="us",
-    )
+    snapshot = _fetch(market="us")
 
     assert snapshot.complete is True
     assert [row.get("options_per_contract") for row in snapshot.rows] == [
@@ -143,33 +155,10 @@ def test_adapter_scopes_contract_term_snapshot_to_requested_market(
 def test_adapter_fails_closed_when_current_option_terms_are_missing(
     monkeypatch,
 ) -> None:
-    gateway = _Gateway(
-        positions=[
-            {
-                "code": "HK.POP260828P145000",
-                "qty": -1,
-                "position_side": "SHORT",
-                "sec_type": "DRVT",
-            }
-        ],
-        snapshots={},
-    )
-    monkeypatch.setattr(
-        adapter_module,
-        "build_ready_futu_broker_gateway",
-        lambda **_kwargs: gateway,
-    )
-    monkeypatch.setattr(
-        adapter_module,
-        "build_ready_futu_quote_gateway",
-        lambda **_kwargs: gateway,
-    )
+    gateway = _Gateway(positions=[_position("HK.POP260828P145000")], snapshots={})
+    _wire(monkeypatch, gateway)
 
-    snapshot = OpenDOptionPositionAdapter().fetch(
-        cfg=_config(),
-        account="lx",
-        market="hk",
-    )
+    snapshot = _fetch(market="hk")
 
     assert snapshot.complete is False
     assert snapshot.rows == []
@@ -183,33 +172,10 @@ def test_adapter_fails_closed_when_nonzero_option_market_is_ambiguous(
     monkeypatch,
     code,
 ) -> None:
-    gateway = _Gateway(
-        positions=[
-            {
-                "code": code,
-                "qty": -1,
-                "position_side": "SHORT",
-                "sec_type": "DRVT",
-            }
-        ],
-        snapshots={},
-    )
-    monkeypatch.setattr(
-        adapter_module,
-        "build_ready_futu_broker_gateway",
-        lambda **_kwargs: gateway,
-    )
-    monkeypatch.setattr(
-        adapter_module,
-        "build_ready_futu_quote_gateway",
-        lambda **_kwargs: gateway,
-    )
+    gateway = _Gateway(positions=[_position(code)], snapshots={})
+    _wire(monkeypatch, gateway)
 
-    snapshot = OpenDOptionPositionAdapter().fetch(
-        cfg=_config(),
-        account="lx",
-        market="us",
-    )
+    snapshot = _fetch(market="us")
 
     assert snapshot.complete is False
     assert snapshot.rows == []
@@ -223,43 +189,16 @@ def test_adapter_requires_explicit_boolean_option_valid(
     monkeypatch,
     option_valid,
 ) -> None:
-    snapshot_row = {
-        "code": "US.NVDA260821P100000",
-        "stock_owner": "US.NVDA",
-        "option_type": "PUT",
-        "strike_time": "2026-08-21",
-        "option_strike_price": 99.5,
-        "option_contract_size": 100,
-    }
+    snapshot_row = _snapshot_row("US.NVDA260821P100000", option_contract_size=100)
     if option_valid is not None:
         snapshot_row["option_valid"] = option_valid
     gateway = _Gateway(
-        positions=[
-            {
-                "code": "US.NVDA260821P100000",
-                "qty": -1,
-                "position_side": "SHORT",
-                "sec_type": "DRVT",
-            }
-        ],
+        positions=[_position("US.NVDA260821P100000")],
         snapshots={"US.NVDA260821P100000": snapshot_row},
     )
-    monkeypatch.setattr(
-        adapter_module,
-        "build_ready_futu_broker_gateway",
-        lambda **_kwargs: gateway,
-    )
-    monkeypatch.setattr(
-        adapter_module,
-        "build_ready_futu_quote_gateway",
-        lambda **_kwargs: gateway,
-    )
+    _wire(monkeypatch, gateway)
 
-    snapshot = OpenDOptionPositionAdapter().fetch(
-        cfg=_config(),
-        account="lx",
-        market="us",
-    )
+    snapshot = _fetch(market="us")
 
     assert snapshot.complete is False
     assert snapshot.rows == []
@@ -269,42 +208,16 @@ def test_adapter_requires_explicit_boolean_option_valid(
 def test_adapter_requires_snapshot_stock_owner_without_code_fallback(
     monkeypatch,
 ) -> None:
+    code = "US.NVDA260821P100000"
+    missing_owner = _snapshot_row(code, option_contract_size=100, option_valid=True)
+    missing_owner.pop("stock_owner")
     gateway = _Gateway(
-        positions=[
-            {
-                "code": "US.NVDA260821P100000",
-                "qty": -1,
-                "position_side": "SHORT",
-                "sec_type": "DRVT",
-            }
-        ],
-        snapshots={
-            "US.NVDA260821P100000": {
-                "code": "US.NVDA260821P100000",
-                "option_type": "PUT",
-                "strike_time": "2026-08-21",
-                "option_strike_price": 99.5,
-                "option_contract_size": 100,
-                "option_valid": True,
-            }
-        },
+        positions=[_position(code)],
+        snapshots={code: missing_owner},
     )
-    monkeypatch.setattr(
-        adapter_module,
-        "build_ready_futu_broker_gateway",
-        lambda **_kwargs: gateway,
-    )
-    monkeypatch.setattr(
-        adapter_module,
-        "build_ready_futu_quote_gateway",
-        lambda **_kwargs: gateway,
-    )
+    _wire(monkeypatch, gateway)
 
-    snapshot = OpenDOptionPositionAdapter().fetch(
-        cfg=_config(),
-        account="lx",
-        market="us",
-    )
+    snapshot = _fetch(market="us")
 
     assert snapshot.complete is False
     assert snapshot.rows == []
@@ -315,41 +228,20 @@ def test_adapter_fails_closed_when_current_option_multiplier_is_missing(
     monkeypatch,
 ) -> None:
     gateway = _Gateway(
-        positions=[
-            {
-                "code": "HK.POP260828P145000",
-                "qty": -1,
-                "position_side": "SHORT",
-                "sec_type": "DRVT",
-            }
-        ],
+        positions=[_position("HK.POP260828P145000")],
         snapshots={
-            "HK.POP260828P145000": {
-                "code": "HK.POP260828P145000",
-                "stock_owner": "HK.09992",
-                "option_type": "PUT",
-                "strike_time": "2026-08-28",
-                "option_strike_price": 144.5,
-                "option_valid": True,
-            }
+            "HK.POP260828P145000": _snapshot_row(
+                "HK.POP260828P145000",
+                stock_owner="HK.09992",
+                strike_time="2026-08-28",
+                option_strike_price=144.5,
+                option_valid=True,
+            )
         },
     )
-    monkeypatch.setattr(
-        adapter_module,
-        "build_ready_futu_broker_gateway",
-        lambda **_kwargs: gateway,
-    )
-    monkeypatch.setattr(
-        adapter_module,
-        "build_ready_futu_quote_gateway",
-        lambda **_kwargs: gateway,
-    )
+    _wire(monkeypatch, gateway)
 
-    snapshot = OpenDOptionPositionAdapter().fetch(
-        cfg=_config(),
-        account="lx",
-        market="hk",
-    )
+    snapshot = _fetch(market="hk")
 
     assert snapshot.complete is False
     assert snapshot.rows == []
@@ -362,43 +254,19 @@ def test_adapter_fails_closed_when_current_option_multiplier_fields_conflict(
     monkeypatch,
 ) -> None:
     gateway = _Gateway(
-        positions=[
-            {
-                "code": "US.NVDA260821P100000",
-                "qty": -1,
-                "position_side": "SHORT",
-                "sec_type": "DRVT",
-            }
-        ],
+        positions=[_position("US.NVDA260821P100000")],
         snapshots={
-            "US.NVDA260821P100000": {
-                "code": "US.NVDA260821P100000",
-                "stock_owner": "US.NVDA",
-                "option_type": "PUT",
-                "strike_time": "2026-08-21",
-                "option_strike_price": 99.5,
-                "option_contract_multiplier": 100,
-                "option_contract_size": 95,
-                "option_valid": True,
-            }
+            "US.NVDA260821P100000": _snapshot_row(
+                "US.NVDA260821P100000",
+                option_contract_multiplier=100,
+                option_contract_size=95,
+                option_valid=True,
+            )
         },
     )
-    monkeypatch.setattr(
-        adapter_module,
-        "build_ready_futu_broker_gateway",
-        lambda **_kwargs: gateway,
-    )
-    monkeypatch.setattr(
-        adapter_module,
-        "build_ready_futu_quote_gateway",
-        lambda **_kwargs: gateway,
-    )
+    _wire(monkeypatch, gateway)
 
-    snapshot = OpenDOptionPositionAdapter().fetch(
-        cfg=_config(),
-        account="lx",
-        market="us",
-    )
+    snapshot = _fetch(market="us")
 
     assert snapshot.complete is False
     assert snapshot.rows == []
@@ -411,21 +279,14 @@ def test_adapter_fails_closed_when_current_option_multiplier_fields_conflict(
 def test_adapter_snapshot_contract_drift_blocks_dataset_immediately(monkeypatch, strike, multiplier) -> None:
     code = "US.NVDA260717P100000"
     gateway = _Gateway(
-        positions=[{"code": code, "qty": -1, "position_side": "SHORT", "sec_type": "DRVT"}],
-        snapshots={code: {
-            "code": code, "stock_owner": "US.NVDA", "option_type": "PUT",
-            "strike_time": "2026-07-17", "option_strike_price": strike,
-            "option_contract_multiplier": multiplier, "option_valid": True,
-        }},
+        positions=[_position(code)],
+        snapshots={code: _snapshot_row(
+            code, strike_time="2026-07-17", option_strike_price=strike,
+            option_contract_multiplier=multiplier, option_valid=True)},
     )
-    monkeypatch.setattr(adapter_module, "build_ready_futu_broker_gateway", lambda **kwargs: gateway)
-    monkeypatch.setattr(adapter_module, "build_ready_futu_quote_gateway", lambda **kwargs: gateway)
-    snapshot = OpenDOptionPositionAdapter().fetch(cfg=_config(), account="lx", market="us")
-    local_lot = {"record_id": "lot-nvda", "fields": {
-        "account": "lx", "broker": "富途", "symbol": "NVDA", "option_type": "put",
-        "side": "short", "contracts": 1, "contracts_open": 1, "contracts_closed": 0,
-        "strike": 100, "multiplier": 100, "expiration_ymd": "2026-07-17", "status": "open",
-    }}
+    _wire(monkeypatch, gateway)
+    snapshot = _fetch(market="us")
+    local_lot = _local_lot("lot-nvda", contracts_closed=0)
 
     dataset, _ = build_position_dataset(
         snapshot=snapshot, local_lots=[local_lot], account="lx", market="us",
@@ -449,25 +310,18 @@ def test_adapter_snapshot_contract_drift_blocks_dataset_immediately(monkeypatch,
 @pytest.mark.parametrize("deliverable", [None, {}, {"symbol": "NVDA", "quantity": "10", "cash": "9000"}])
 def test_adapter_snapshot_rejects_unsupported_deliverable_before_dataset_comparison(monkeypatch, deliverable) -> None:
     code = "US.NVDA260717P100000"
-    position = {"code": code, "qty": -1, "position_side": "SHORT", "sec_type": "DRVT"}
+    position = _position(code)
     if deliverable is not None:
         position["deliverable"] = deliverable
     gateway = _Gateway(
         positions=[position],
-        snapshots={code: {
-            "code": code, "stock_owner": "US.NVDA", "option_type": "PUT",
-            "strike_time": "2026-07-17", "option_strike_price": "100",
-            "option_contract_multiplier": "100", "option_valid": True,
-        }},
+        snapshots={code: _snapshot_row(
+            code, strike_time="2026-07-17", option_strike_price="100",
+            option_contract_multiplier="100", option_valid=True)},
     )
-    monkeypatch.setattr(adapter_module, "build_ready_futu_broker_gateway", lambda **kwargs: gateway)
-    monkeypatch.setattr(adapter_module, "build_ready_futu_quote_gateway", lambda **kwargs: gateway)
-    snapshot = OpenDOptionPositionAdapter().fetch(cfg=_config(), account="lx", market="us")
-    local = {"record_id": "ordinary-lot", "fields": {
-        "account": "lx", "broker": "富途", "symbol": "NVDA", "option_type": "put",
-        "side": "short", "contracts": 1, "contracts_open": 1, "strike": 100,
-        "multiplier": 100, "expiration_ymd": "2026-07-17", "status": "open",
-    }}
+    _wire(monkeypatch, gateway)
+    snapshot = _fetch(market="us")
+    local = _local_lot("ordinary-lot")
     result, _ = build_position_dataset(
         snapshot=snapshot, local_lots=[local], account="lx", market="us",
         observed_at_utc=snapshot.observed_at_utc, now=datetime.now(timezone.utc), control_state={},

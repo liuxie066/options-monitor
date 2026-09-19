@@ -1,17 +1,78 @@
 from __future__ import annotations
 
-
-
-
-
 import pytest
+
+
+def _put_base_template() -> dict:
+    return {'sell_put': {'min_open_interest': 60, 'min_volume': 10, 'max_spread_ratio': 0.3}}
+
+
+def _put_base_symbol() -> dict:
+    return {
+        'symbol': 'AAPL',
+        'use': ['put_base'],
+        'sell_put': {
+            'enabled': True,
+            'min_dte': 7,
+            'max_dte': 45,
+            'min_strike': 10,
+            'max_strike': 200,
+        },
+        'sell_call': {'enabled': False},
+    }
+
+
+def _put_base_symbol_without_min_strike() -> dict:
+    return {
+        'symbol': 'AAPL',
+        'use': ['put_base'],
+        'sell_put': {
+            'enabled': True,
+            'min_dte': 7,
+            'max_dte': 45,
+            'max_strike': 200,
+        },
+        'sell_call': {'enabled': False},
+    }
+
+
+def _call_base_symbol() -> dict:
+    return {
+        'symbol': 'AAPL',
+        'use': ['call_base'],
+        'sell_put': {'enabled': False},
+        'sell_call': {
+            'enabled': True,
+            'min_dte': 7,
+            'max_dte': 45,
+            'min_strike': 10,
+            'max_strike': 200,
+        },
+    }
+
+
+def _inactive_symbol() -> dict:
+    return {
+        'symbol': 'AAPL',
+        'sell_put': {'enabled': False},
+        'sell_call': {'enabled': False},
+    }
+
+
+def _reject(cfg: dict) -> str:
+    from src.application.config_validator import validate_config
+
+    with pytest.raises(SystemExit) as _caught:
+        validate_config(cfg)
+    return str(_caught.value)
+
 
 def test_validate_config_rejects_symbol_level_strategy_filter_keys() -> None:
     from src.application.config_validator import validate_config
 
     cfg = {
         'templates': {
-            'put_base': {'sell_put': {'min_open_interest': 60, 'min_volume': 10, 'max_spread_ratio': 0.3}},
+            'put_base': _put_base_template(),
             'call_base': {'sell_call': {'min_open_interest': 50, 'min_volume': 10, 'max_spread_ratio': 0.3}},
         },
         'symbols': [
@@ -31,10 +92,7 @@ def test_validate_config_rejects_symbol_level_strategy_filter_keys() -> None:
         ],
     }
 
-    with pytest.raises(SystemExit) as _caught:
-        validate_config(cfg)
-    e = _caught.value
-    msg = str(e)
+    msg = _reject(cfg)
     assert '[CONFIG_ERROR]' in msg
     assert 'AAPL.sell_put' in msg
     assert 'min_iv' in msg
@@ -47,10 +105,7 @@ def test_validate_config_rejects_symbol_level_strategy_filter_keys() -> None:
         'min_strike': 120,
         'max_delta': 0.35,
     }
-    with pytest.raises(SystemExit) as _caught:
-        validate_config(cfg)
-    e = _caught.value
-    msg = str(e)
+    msg = _reject(cfg)
     assert '[CONFIG_ERROR]' in msg
     assert 'AAPL.sell_call' in msg
     assert 'max_delta' in msg
@@ -71,26 +126,10 @@ def test_validate_config_rejects_removed_global_strategy_filter_keys() -> None:
                 }
             }
         },
-        'symbols': [
-            {
-                'symbol': 'AAPL',
-                'use': ['put_base'],
-                'sell_put': {
-                    'enabled': True,
-                    'min_dte': 7,
-                    'max_dte': 45,
-                    'min_strike': 10,
-                    'max_strike': 200,
-                },
-                'sell_call': {'enabled': False},
-            }
-        ],
+        'symbols': [_put_base_symbol()],
     }
 
-    with pytest.raises(SystemExit) as _caught:
-        validate_config(cfg)
-    e = _caught.value
-    msg = str(e)
+    msg = _reject(cfg)
     assert '[CONFIG_ERROR]' in msg
     assert 'templates.put_base.sell_put' in msg
     assert 'only min_open_interest, min_volume, max_spread_ratio are allowed' in msg
@@ -147,9 +186,7 @@ def test_validate_config_rejects_candidate_score_weights() -> None:
         ],
     }
 
-    with pytest.raises(SystemExit) as _caught:
-        validate_config(cfg)
-    e = _caught.value
+    e = _reject(cfg)
     assert 'score_weights has been removed from opening config' in str(e)
 
 
@@ -193,24 +230,10 @@ def test_validate_config_rejects_opening_short_vol_strategy_value() -> None:
         'templates': {
             'put_base': {'sell_put': {'strategy': 'short_vol'}},
         },
-        'symbols': [
-            {
-                'symbol': 'AAPL',
-                'use': ['put_base'],
-                'sell_put': {
-                    'enabled': True,
-                    'min_dte': 7,
-                    'max_dte': 45,
-                    'max_strike': 200,
-                },
-                'sell_call': {'enabled': False},
-            }
-        ],
+        'symbols': [_put_base_symbol_without_min_strike()],
     }
 
-    with pytest.raises(SystemExit) as _caught:
-        validate_config(cfg)
-    e = _caught.value
+    e = _reject(cfg)
     assert 'templates.put_base.sell_put.strategy=short_vol is no longer supported' in str(e)
 
 
@@ -226,24 +249,10 @@ def test_validate_config_rejects_underwriting_score_weights() -> None:
                 }
             },
         },
-        'symbols': [
-            {
-                'symbol': 'AAPL',
-                'use': ['put_base'],
-                'sell_put': {
-                    'enabled': True,
-                    'min_dte': 7,
-                    'max_dte': 45,
-                    'max_strike': 200,
-                },
-                'sell_call': {'enabled': False},
-            }
-        ],
+        'symbols': [_put_base_symbol_without_min_strike()],
     }
 
-    with pytest.raises(SystemExit) as _caught:
-        validate_config(cfg)
-    e = _caught.value
+    e = _reject(cfg)
     assert 'templates.put_base.sell_put.score_weights has been removed from opening config' in str(e)
 
 
@@ -259,24 +268,10 @@ def test_validate_config_rejects_opening_concentration_config() -> None:
                 }
             },
         },
-        'symbols': [
-            {
-                'symbol': 'AAPL',
-                'use': ['put_base'],
-                'sell_put': {
-                    'enabled': True,
-                    'min_dte': 7,
-                    'max_dte': 45,
-                    'max_strike': 200,
-                },
-                'sell_call': {'enabled': False},
-            }
-        ],
+        'symbols': [_put_base_symbol_without_min_strike()],
     }
 
-    with pytest.raises(SystemExit) as _caught:
-        validate_config(cfg)
-    e = _caught.value
+    e = _reject(cfg)
     assert 'templates.put_base.sell_put.concentration has been removed from opening config' in str(e)
 
 
@@ -292,25 +287,10 @@ def test_validate_config_rejects_sell_put_short_vol_opening_config() -> None:
                 }
             },
         },
-        'symbols': [
-            {
-                'symbol': 'AAPL',
-                'use': ['put_base'],
-                'sell_put': {
-                    'enabled': True,
-                    'min_dte': 7,
-                    'max_dte': 45,
-                    'min_strike': 10,
-                    'max_strike': 200,
-                },
-                'sell_call': {'enabled': False},
-            }
-        ],
+        'symbols': [_put_base_symbol()],
     }
 
-    with pytest.raises(SystemExit) as _caught:
-        validate_config(cfg)
-    e = _caught.value
+    e = _reject(cfg)
     assert 'templates.put_base.sell_put.short_vol has been removed from opening config' in str(e)
 
 
@@ -326,25 +306,10 @@ def test_validate_config_rejects_sell_call_short_vol_opening_config() -> None:
                 }
             },
         },
-        'symbols': [
-            {
-                'symbol': 'AAPL',
-                'use': ['call_base'],
-                'sell_put': {'enabled': False},
-                'sell_call': {
-                    'enabled': True,
-                    'min_dte': 7,
-                    'max_dte': 45,
-                    'min_strike': 10,
-                    'max_strike': 200,
-                },
-            }
-        ],
+        'symbols': [_call_base_symbol()],
     }
 
-    with pytest.raises(SystemExit) as _caught:
-        validate_config(cfg)
-    e = _caught.value
+    e = _reject(cfg)
     assert 'templates.call_base.sell_call.short_vol has been removed from opening config' in str(e)
 
 
@@ -360,25 +325,10 @@ def test_validate_config_rejects_sell_call_short_vol_opening_config_even_when_le
                 }
             },
         },
-        'symbols': [
-            {
-                'symbol': 'AAPL',
-                'use': ['call_base'],
-                'sell_put': {'enabled': False},
-                'sell_call': {
-                    'enabled': True,
-                    'min_dte': 7,
-                    'max_dte': 45,
-                    'min_strike': 10,
-                    'max_strike': 200,
-                },
-            }
-        ],
+        'symbols': [_call_base_symbol()],
     }
 
-    with pytest.raises(SystemExit) as _caught:
-        validate_config(cfg)
-    e = _caught.value
+    e = _reject(cfg)
     assert 'templates.call_base.sell_call.short_vol has been removed from opening config' in str(e)
 
 
@@ -396,26 +346,10 @@ def test_validate_config_rejects_return_first_opening_strategy() -> None:
                 }
             },
         },
-        'symbols': [
-            {
-                'symbol': 'AAPL',
-                'use': ['put_base'],
-                'sell_put': {
-                    'enabled': True,
-                    'min_dte': 7,
-                    'max_dte': 45,
-                    'min_strike': 10,
-                    'max_strike': 200,
-                },
-                'sell_call': {'enabled': False},
-            }
-        ],
+        'symbols': [_put_base_symbol()],
     }
 
-    with pytest.raises(SystemExit) as _caught:
-        validate_config(cfg)
-    e = _caught.value
-    msg = str(e)
+    msg = _reject(cfg)
     assert 'templates.put_base.sell_put.strategy=return_first is no longer supported' in msg
 
 
@@ -430,34 +364,15 @@ def test_validate_config_rejects_removed_sell_put_min_otm_pct() -> None:
                 }
             },
         },
-        'symbols': [
-            {
-                'symbol': 'AAPL',
-                'use': ['put_base'],
-                'sell_put': {
-                    'enabled': True,
-                    'min_dte': 7,
-                    'max_dte': 45,
-                    'min_strike': 10,
-                    'max_strike': 200,
-                },
-                'sell_call': {'enabled': False},
-            }
-        ],
+        'symbols': [_put_base_symbol()],
     }
 
-    with pytest.raises(SystemExit) as _caught:
-        validate_config(cfg)
-    e = _caught.value
-    msg = str(e)
+    msg = _reject(cfg)
     assert 'templates.put_base.sell_put has removed OTM fields: min_otm_pct' in msg
 
     del cfg['templates']['put_base']['sell_put']['min_otm_pct']
     cfg['symbols'][0]['sell_put']['min_otm_pct'] = 0.05
-    with pytest.raises(SystemExit) as _caught:
-        validate_config(cfg)
-    e = _caught.value
-    msg = str(e)
+    msg = _reject(cfg)
     assert 'AAPL.sell_put has removed OTM fields: min_otm_pct' in msg
 
 
@@ -485,10 +400,7 @@ def test_validate_config_rejects_removed_legacy_sell_call_fetch_fields_in_templa
         ],
     }
 
-    with pytest.raises(SystemExit) as _caught:
-        validate_config(cfg)
-    e = _caught.value
-    msg = str(e)
+    msg = _reject(cfg)
     assert 'templates.call_base.sell_call' in msg
     assert 'removed legacy fetch planning keys' in msg
 
@@ -499,28 +411,12 @@ def test_validate_config_rejects_fees_config() -> None:
     cfg = {
         'fees': {'US': {'model': 'futu_us_simplified'}},
         'templates': {
-            'put_base': {'sell_put': {'min_open_interest': 60, 'min_volume': 10, 'max_spread_ratio': 0.3}},
+            'put_base': _put_base_template(),
         },
-        'symbols': [
-            {
-                'symbol': 'AAPL',
-                'use': ['put_base'],
-                'sell_put': {
-                    'enabled': True,
-                    'min_dte': 7,
-                    'max_dte': 45,
-                    'min_strike': 10,
-                    'max_strike': 200,
-                },
-                'sell_call': {'enabled': False},
-            }
-        ],
+        'symbols': [_put_base_symbol()],
     }
 
-    with pytest.raises(SystemExit) as _caught:
-        validate_config(cfg)
-    e = _caught.value
-    msg = str(e)
+    msg = _reject(cfg)
     assert '[CONFIG_ERROR]' in msg
     assert 'fees is no longer supported' in msg
 
@@ -535,7 +431,7 @@ def test_validate_config_rejects_invalid_close_advice_config() -> None:
             'notify_levels': ['strong'],
         },
         'templates': {
-            'put_base': {'sell_put': {'min_open_interest': 60, 'min_volume': 10, 'max_spread_ratio': 0.3}},
+            'put_base': _put_base_template(),
         },
         'symbols': [
             {
@@ -553,10 +449,7 @@ def test_validate_config_rejects_invalid_close_advice_config() -> None:
         ],
     }
 
-    with pytest.raises(SystemExit) as _caught:
-        validate_config(cfg)
-    e = _caught.value
-    msg = str(e)
+    msg = _reject(cfg)
     assert '[CONFIG_ERROR]' in msg
     assert 'close_advice.quote_source' in msg
 
@@ -569,10 +462,7 @@ def test_validate_config_rejects_close_advice_strategy_mode() -> None:
         'symbols': [{'symbol': 'AAPL', 'sell_put': {'enabled': False}, 'sell_call': {'enabled': False}}],
     }
 
-    with pytest.raises(SystemExit) as _caught:
-        validate_config(cfg)
-    e = _caught.value
-    msg = str(e)
+    msg = _reject(cfg)
     assert '[CONFIG_ERROR]' in msg
     assert 'close_advice.strategy is not supported' in msg
 
@@ -583,36 +473,22 @@ def test_validate_config_rejects_duplicate_normalized_account_labels() -> None:
     from src.application.config_validator import validate_config
 
     cfg = {
-        "symbols": [
-            {
-                "symbol": "AAPL",
-                "sell_put": {"enabled": False},
-                "sell_call": {"enabled": False},
-            }
-        ]
+        "symbols": [_inactive_symbol()]
     }
     cfg["accounts"] = ["lx", " LX "]
-    with pytest.raises(SystemExit) as exc:
-        validate_config(cfg)
-    assert "duplicate labels after trim + lowercase" in str(exc.value)
+    exc = _reject(cfg)
+    assert "duplicate labels after trim + lowercase" in exc
 
     cfg = {
-        "symbols": [
-            {
-                "symbol": "AAPL",
-                "sell_put": {"enabled": False},
-                "sell_call": {"enabled": False},
-            }
-        ]
+        "symbols": [_inactive_symbol()]
     }
     cfg["accounts"] = ["lx"]
     cfg["account_settings"] = {
         "lx": {"type": "futu", "futu": {"account_id": "123"}},
         " LX ": {"type": "futu", "futu": {"account_id": "123"}},
     }
-    with pytest.raises(SystemExit) as exc:
-        validate_config(cfg)
-    assert "account_settings contains duplicate labels" in str(exc.value)
+    exc = _reject(cfg)
+    assert "account_settings contains duplicate labels" in exc
 
 
 def test_validate_config_rejects_combo_yield_strategy_mode() -> None:
@@ -628,10 +504,7 @@ def test_validate_config_rejects_combo_yield_strategy_mode() -> None:
         ],
     }
 
-    with pytest.raises(SystemExit) as _caught:
-        validate_config(cfg)
-    e = _caught.value
-    msg = str(e)
+    msg = _reject(cfg)
     assert '[CONFIG_ERROR]' in msg
     assert 'combo_yield is isolated from sell_put.strategy' in msg
 
@@ -644,19 +517,10 @@ def test_validate_config_rejects_decimal_close_advice_max_items_per_account() ->
             'enabled': True,
             'max_items_per_account': 1.5,
         },
-        'symbols': [
-            {
-                'symbol': 'AAPL',
-                'sell_put': {'enabled': False},
-                'sell_call': {'enabled': False},
-            }
-        ],
+        'symbols': [_inactive_symbol()],
     }
 
-    with pytest.raises(SystemExit) as _caught:
-        validate_config(cfg)
-    e = _caught.value
-    msg = str(e)
+    msg = _reject(cfg)
     assert '[CONFIG_ERROR]' in msg
     assert 'close_advice.max_items_per_account must be an integer' in msg
 
@@ -670,13 +534,7 @@ def test_validate_config_ignores_removed_close_advice_threshold_keys(capsys) -> 
             'quote_max_age_sec': 1,
             'notify_levels': ['strong'],
         },
-        'symbols': [
-            {
-                'symbol': 'AAPL',
-                'sell_put': {'enabled': False},
-                'sell_call': {'enabled': False},
-            }
-        ],
+        'symbols': [_inactive_symbol()],
     }
 
     validate_config(cfg)
@@ -692,18 +550,10 @@ def test_validate_config_rejects_removed_position_advice_authority() -> None:
 
     cfg = {
         'close_advice': {'position_advice_authority': {'enabled': True}},
-        'symbols': [
-            {
-                'symbol': 'AAPL',
-                'sell_put': {'enabled': False},
-                'sell_call': {'enabled': False},
-            }
-        ],
+        'symbols': [_inactive_symbol()],
     }
 
-    with pytest.raises(SystemExit) as _caught:
-        validate_config(cfg)
-    exc = _caught.value
+    exc = _reject(cfg)
     assert 'there is no Position Advice v2 authority' in str(exc)
 
 
@@ -716,19 +566,10 @@ def test_validate_config_rejects_unknown_opend_rate_limit_endpoint() -> None:
                 'market_snapshots': {'max_calls': 10},
             },
         },
-        'symbols': [
-            {
-                'symbol': 'AAPL',
-                'sell_put': {'enabled': False},
-                'sell_call': {'enabled': False},
-            }
-        ],
+        'symbols': [_inactive_symbol()],
     }
 
-    with pytest.raises(SystemExit) as _caught:
-        validate_config(cfg)
-    e = _caught.value
-    msg = str(e)
+    msg = _reject(cfg)
     assert '[CONFIG_ERROR]' in msg
     assert 'runtime.opend_rate_limits.market_snapshots is not supported' in msg
     assert 'market_snapshot' in msg
@@ -746,13 +587,7 @@ def test_validate_config_accepts_supported_opend_rate_limit_endpoints() -> None:
                 'history_kline': {'max_calls': 60, 'window_sec': 30, 'max_wait_sec': 30},
             },
         },
-        'symbols': [
-            {
-                'symbol': 'AAPL',
-                'sell_put': {'enabled': False},
-                'sell_call': {'enabled': False},
-            }
-        ],
+        'symbols': [_inactive_symbol()],
     }
 
     validate_config(cfg)
@@ -777,22 +612,9 @@ def test_validate_config_accepts_external_holdings_account_settings() -> None:
             }
         },
         'templates': {
-            'put_base': {'sell_put': {'min_open_interest': 60, 'min_volume': 10, 'max_spread_ratio': 0.3}},
+            'put_base': _put_base_template(),
         },
-        'symbols': [
-            {
-                'symbol': 'AAPL',
-                'use': ['put_base'],
-                'sell_put': {
-                    'enabled': True,
-                    'min_dte': 7,
-                    'max_dte': 45,
-                    'min_strike': 10,
-                    'max_strike': 200,
-                },
-                'sell_call': {'enabled': False},
-            }
-        ],
+        'symbols': [_put_base_symbol()],
     }
 
     validate_config(cfg)
@@ -817,9 +639,7 @@ def test_validate_config_rejects_zero_strike_sentinels_and_removed_legacy_sell_c
         ],
     }
 
-    with pytest.raises(SystemExit) as _caught:
-        validate_config(cfg)
-    e = _caught.value
+    e = _reject(cfg)
     assert 'min_strike must be > 0' in str(e)
 
     cfg['symbols'][0]['sell_put']['min_strike'] = 360
@@ -829,9 +649,7 @@ def test_validate_config_rejects_zero_strike_sentinels_and_removed_legacy_sell_c
         'max_dte': 45,
         'target_otm_pct_min': 0.05,
     }
-    with pytest.raises(SystemExit) as _caught:
-        validate_config(cfg)
-    e = _caught.value
+    e = _reject(cfg)
     assert 'removed legacy fetch planning keys' in str(e)
 
 

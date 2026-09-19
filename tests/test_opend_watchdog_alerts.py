@@ -8,6 +8,21 @@ from types import SimpleNamespace
 from tests.notification_format_assertions import assert_mobile_flat_markdown
 
 
+def _adapter(send_fn):
+    """A clawbot delivery-adapter selector; asserts the guard picks that provider."""
+
+    def fake_select(provider):  # type: ignore[no-untyped-def]
+        assert provider == "wechat_clawbot"
+        return SimpleNamespace(send_fn=send_fn, normalize_fn=lambda **_: {}, failure_stage="send_wechat_clawbot_message")
+
+    return fake_select
+
+
+def _cfg(**overrides) -> dict:
+    """Notification config with the clawbot provider/target these tests share."""
+    return {"notifications": {"provider": "wechat_clawbot", "target": "test_target", **overrides}}
+
+
 def test_watchdog_error_code_mapping() -> None:
     import src.infrastructure.opend_watchdog as w
 
@@ -33,8 +48,7 @@ def test_watchdog_error_code_mapping() -> None:
 def test_opend_alert_rate_limit(tmp_path: Path) -> None:
     from src.application.multi_tick.opend_guard import should_send_opend_alert
 
-    td = tmp_path
-    base = Path(td)
+    base = Path(tmp_path)
 
     # First send for a code should pass.
     assert should_send_opend_alert(base, 'OPEND_RATE_LIMIT', cooldown_sec=600) is True
@@ -47,8 +61,7 @@ def test_opend_alert_rate_limit(tmp_path: Path) -> None:
 def test_opend_alert_family_dedupe_and_burst_limit(tmp_path: Path) -> None:
     from src.application.multi_tick.opend_guard import should_send_opend_alert
 
-    td = tmp_path
-    base = Path(td)
+    base = Path(tmp_path)
 
     # Same unhealthy family should dedupe even if concrete error code differs.
     assert should_send_opend_alert(base, 'OPEND_NOT_READY', cooldown_sec=600) is True
@@ -75,8 +88,7 @@ def test_opend_alert_routes_wechat_clawbot_through_delivery_adapter(monkeypatch,
     monkeypatch.setattr(opend_guard, "select_notification_delivery_adapter", fake_select)
     monkeypatch.setattr(opend_guard, "utc_now", lambda: "2026-07-21T08:30:00+00:00")
 
-    td = tmp_path
-    base = Path(td)
+    base = Path(tmp_path)
     cfg = {"notifications": {"channel": "wechat_clawbot", "target": "clawbot:test", "opend_alert_after_consecutive_failures": 1}}
     ok = opend_guard.send_opend_alert(
         base,
@@ -110,21 +122,12 @@ def test_send_opend_alert_no_send_does_not_consume_rate_limit(monkeypatch, tmp_p
         calls.append(dict(kwargs))
         return {"ok": True, "command_ok": True, "delivery_confirmed": True, "message_id": "msg_1"}
 
-    def fake_select(provider):  # type: ignore[no-untyped-def]
-        assert provider == "wechat_clawbot"
-        return SimpleNamespace(send_fn=fake_send, normalize_fn=lambda **_: {}, failure_stage="send_wechat_clawbot_message")
+    fake_select = _adapter(fake_send)
 
     monkeypatch.setattr(opend_guard, "select_notification_delivery_adapter", fake_select)
 
-    td = tmp_path
-    base = Path(td)
-    cfg = {
-        "notifications": {
-            "provider": "wechat_clawbot",
-            "target": "test_target",
-            "opend_alert_cooldown_sec": 600,
-        }
-    }
+    base = Path(tmp_path)
+    cfg = _cfg(opend_alert_cooldown_sec=600)
 
     dry_run = opend_guard.send_opend_alert(
         base,
@@ -162,21 +165,12 @@ def test_send_opend_alert_failed_send_does_not_consume_rate_limit(monkeypatch, t
         calls.append(dict(kwargs))
         return send_results.pop(0)
 
-    def fake_select(provider):  # type: ignore[no-untyped-def]
-        assert provider == "wechat_clawbot"
-        return SimpleNamespace(send_fn=fake_send, normalize_fn=lambda **_: {}, failure_stage="send_wechat_clawbot_message")
+    fake_select = _adapter(fake_send)
 
     monkeypatch.setattr(opend_guard, "select_notification_delivery_adapter", fake_select)
 
-    td = tmp_path
-    base = Path(td)
-    cfg = {
-        "notifications": {
-            "provider": "wechat_clawbot",
-            "target": "test_target",
-            "opend_alert_cooldown_sec": 600,
-        }
-    }
+    base = Path(tmp_path)
+    cfg = _cfg(opend_alert_cooldown_sec=600)
 
     failed = opend_guard.send_opend_alert(
         base,
@@ -319,8 +313,7 @@ def test_port_retry_loop_no_start_when_ensure_false(monkeypatch) -> None:
 def test_record_opend_failure_increments_count(tmp_path: Path) -> None:
     from src.application.multi_tick.opend_guard import record_opend_failure, record_opend_recovery
 
-    td = tmp_path
-    base = Path(td)
+    base = Path(tmp_path)
 
     assert record_opend_failure(base) == 1
     assert record_opend_failure(base) == 2
@@ -341,8 +334,7 @@ def test_record_opend_recovery_on_clean_state(tmp_path: Path) -> None:
     """record_opend_recovery on a fresh base returns 0 without error."""
     from src.application.multi_tick.opend_guard import record_opend_recovery
 
-    td = tmp_path
-    assert record_opend_recovery(Path(td)) == 0
+    assert record_opend_recovery(Path(tmp_path)) == 0
 
 
 def test_consecutive_threshold_gates_alert(tmp_path: Path) -> None:
@@ -356,20 +348,10 @@ def test_consecutive_threshold_gates_alert(tmp_path: Path) -> None:
         calls.append("send")
         return {"ok": True, "command_ok": True, "delivery_confirmed": True, "message_id": "msg_1"}
 
-    def fake_select(provider):  # type: ignore[no-untyped-def]
-        assert provider == "wechat_clawbot"
-        return SimpleNamespace(send_fn=fake_send, normalize_fn=lambda **_: {}, failure_stage="send_wechat_clawbot_message")
+    fake_select = _adapter(fake_send)
 
-    td = tmp_path
-    base = Path(td)
-    cfg = {
-        "notifications": {
-            "provider": "wechat_clawbot",
-            "target": "test_target",
-            "opend_alert_after_consecutive_failures": 3,
-            "opend_alert_cooldown_sec": 1,
-        }
-    }
+    base = Path(tmp_path)
+    cfg = _cfg(opend_alert_after_consecutive_failures=3, opend_alert_cooldown_sec=1)
 
     with (
         mock.patch.object(opend_guard, "select_notification_delivery_adapter", fake_select),
@@ -397,20 +379,10 @@ def test_consecutive_threshold_skip_gate_sends_immediately(tmp_path: Path) -> No
         calls.append("send")
         return {"ok": True, "command_ok": True, "delivery_confirmed": True, "message_id": "msg_1"}
 
-    def fake_select(provider):  # type: ignore[no-untyped-def]
-        assert provider == "wechat_clawbot"
-        return SimpleNamespace(send_fn=fake_send, normalize_fn=lambda **_: {}, failure_stage="send_wechat_clawbot_message")
+    fake_select = _adapter(fake_send)
 
-    td = tmp_path
-    base = Path(td)
-    cfg = {
-        "notifications": {
-            "provider": "wechat_clawbot",
-            "target": "test_target",
-            "opend_alert_after_consecutive_failures": 3,
-            "opend_alert_cooldown_sec": 1,
-        }
-    }
+    base = Path(tmp_path)
+    cfg = _cfg(opend_alert_after_consecutive_failures=3, opend_alert_cooldown_sec=1)
     with (
         mock.patch.object(opend_guard, "select_notification_delivery_adapter", fake_select),
         mock.patch.object(opend_guard, "utc_now", lambda: "2026-07-21T08:30:00+00:00"),
@@ -436,20 +408,10 @@ def test_send_opend_recovery_notice_after_threshold_failures(tmp_path: Path) -> 
         calls.append(dict(kwargs))
         return {"ok": True, "command_ok": True, "delivery_confirmed": True, "message_id": "msg_1"}
 
-    def fake_select(provider):  # type: ignore[no-untyped-def]
-        assert provider == "wechat_clawbot"
-        return SimpleNamespace(send_fn=fake_send, normalize_fn=lambda **_: {}, failure_stage="send_wechat_clawbot_message")
+    fake_select = _adapter(fake_send)
 
-    td = tmp_path
-    base = Path(td)
-    cfg = {
-        "notifications": {
-            "provider": "wechat_clawbot",
-            "target": "test_target",
-            "opend_alert_after_consecutive_failures": 3,
-            "opend_alert_send_recovery_notice": True,
-        }
-    }
+    base = Path(tmp_path)
+    cfg = _cfg(opend_alert_after_consecutive_failures=3, opend_alert_send_recovery_notice=True)
 
     with (
         mock.patch.object(opend_guard, "select_notification_delivery_adapter", fake_select),
@@ -487,15 +449,8 @@ def test_send_opend_recovery_notice_disabled_by_config(tmp_path: Path) -> None:
     from src.application.multi_tick import opend_guard
     import unittest.mock as mock
 
-    td = tmp_path
-    base = Path(td)
-    cfg = {
-        "notifications": {
-            "provider": "wechat_clawbot",
-            "target": "test_target",
-            "opend_alert_send_recovery_notice": False,
-        }
-    }
+    base = Path(tmp_path)
+    cfg = _cfg(opend_alert_send_recovery_notice=False)
     for _ in range(5):
         opend_guard.record_opend_failure(base)
 

@@ -19,6 +19,54 @@ def _keep_multiplier_resolution_offline(monkeypatch: pytest.MonkeyPatch) -> None
     )
 
 
+def _futu_option_code_payload(deal_id: str, **fields) -> dict:
+    """HK option deal carrying an explicit option code and a futu create_time.
+
+    `fields` carries the optional lookup keys a caller adds, in the position
+    they hold in the payload.
+    """
+    return {
+        "deal_id": deal_id,
+        "futu_account_id": "999000000000000001",
+        "code": "HK.POP260528P150000",
+        **fields,
+        "trd_side": "SELL_SHORT",
+        "qty": 1,
+        "price": 6.3,
+        "create_time": "2026-04-28 10:15:56",
+    }
+
+
+def _hk_pop_option_payload(deal_id: str, **fields) -> dict:
+    """Same HK option code under REAL_HK_1, without the futu create_time field."""
+    return {
+        "deal_id": deal_id,
+        "futu_account_id": "REAL_HK_1",
+        "code": "HK.POP260528P150000",
+        **fields,
+        "trd_side": "SELL_SHORT",
+        "qty": 1,
+        "price": 6.3,
+    }
+
+
+def _hk_owner_stock_payload(deal_id: str) -> dict:
+    """HK put deal described through the owner stock code instead of an option code."""
+    return {
+        "deal_id": deal_id,
+        "futu_account_id": "REAL_HK_1",
+        "owner_stock_code": "HK.09992",
+        "option_type": "PUT",
+        "position_effect": "OPEN",
+        "trade_side": "SELL",
+        "qty": 1,
+        "price": 6.3,
+        "strike": 150,
+        "expiry_date": "260528",
+        "currency": "HKD",
+    }
+
+
 def test_normalize_trade_deal_maps_core_fields() -> None:
     payload = {
         "deal_id": "deal-1",
@@ -164,16 +212,7 @@ def test_normalize_trade_deal_recognizes_additional_account_id_fields() -> None:
 
 def test_normalize_trade_deal_parses_futu_option_code_with_lookup_underlying_fields() -> None:
     deal = normalize_trade_deal(
-        {
-            "deal_id": "deal-4",
-            "futu_account_id": "999000000000000001",
-            "code": "HK.POP260528P150000",
-            "stock_name": "泡泡玛特",
-            "trd_side": "SELL_SHORT",
-            "qty": 1,
-            "price": 6.3,
-            "create_time": "2026-04-28 10:15:56",
-        },
+        _futu_option_code_payload("deal-4", stock_name="泡泡玛特"),
         futu_account_mapping={"999000000000000001": "lx"},
     )
 
@@ -189,16 +228,7 @@ def test_normalize_trade_deal_parses_futu_option_code_with_lookup_underlying_fie
 
 def test_normalize_trade_deal_accepts_futu_underlying_code_format() -> None:
     deal = normalize_trade_deal(
-        {
-            "deal_id": "deal-5",
-            "futu_account_id": "999000000000000001",
-            "code": "HK.POP260528P150000",
-            "owner_stock_code": "HK.09992",
-            "trd_side": "SELL_SHORT",
-            "qty": 1,
-            "price": 6.3,
-            "create_time": "2026-04-28 10:15:56",
-        },
+        _futu_option_code_payload("deal-5", owner_stock_code="HK.09992"),
         futu_account_mapping={"999000000000000001": "lx"},
     )
 
@@ -209,15 +239,7 @@ def test_normalize_trade_deal_accepts_futu_underlying_code_format() -> None:
 
 def test_normalize_trade_deal_falls_back_to_option_code_root_alias_for_symbol() -> None:
     deal = normalize_trade_deal(
-        {
-            "deal_id": "deal-6",
-            "futu_account_id": "999000000000000001",
-            "code": "HK.POP260528P150000",
-            "trd_side": "SELL_SHORT",
-            "qty": 1,
-            "price": 6.3,
-            "create_time": "2026-04-28 10:15:56",
-        },
+        _futu_option_code_payload("deal-6"),
         futu_account_mapping={"999000000000000001": "lx"},
     )
 
@@ -290,15 +312,7 @@ def test_normalize_trade_deal_uses_contract_metadata_multiplier_with_runtime_con
     monkeypatch.setattr("src.application.trades.normalizer.resolve_multiplier_with_source_and_diagnostics", _fake_resolver)
 
     deal = normalize_trade_deal(
-        {
-            "deal_id": "deal-8",
-            "futu_account_id": "REAL_HK_1",
-            "code": "HK.POP260528P150000",
-            "owner_stock_code": "HK.09992",
-            "trd_side": "SELL_SHORT",
-            "qty": 1,
-            "price": 6.3,
-        },
+        _hk_pop_option_payload("deal-8", owner_stock_code="HK.09992"),
         futu_account_mapping={"REAL_HK_1": "lx"},
         repo_base=tmp_path,
         config={"runtime": {"option_chain_fetch": {"max_calls": 7}}},
@@ -317,21 +331,9 @@ def test_normalize_trade_deal_uses_contract_metadata_multiplier_with_runtime_con
     assert deal.normalization_diagnostics["multiplier_resolution"]["selected_source"] == "cache"
 
 
-def test_normalize_trade_deal_ignores_retired_static_symbol_multiplier(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(
-        "src.application.multiplier_cache.refresh_via_opend",
-        lambda **_kwargs: SimpleNamespace(ok=False, multiplier=None, error="not available in test"),
-    )
-
+def test_normalize_trade_deal_ignores_retired_static_symbol_multiplier(tmp_path: Path) -> None:
     deal = normalize_trade_deal(
-        {
-            "deal_id": "deal-9",
-            "futu_account_id": "REAL_HK_1",
-            "code": "HK.POP260528P150000",
-            "trd_side": "SELL_SHORT",
-            "qty": 1,
-            "price": 6.3,
-        },
+        _hk_pop_option_payload("deal-9"),
         futu_account_mapping={"REAL_HK_1": "lx"},
         repo_base=tmp_path,
         config={"intake": {"multiplier_by_symbol": {"9992.HK": 1000}}},
@@ -345,26 +347,9 @@ def test_normalize_trade_deal_ignores_retired_static_symbol_multiplier(monkeypat
     assert deal.normalization_diagnostics["multiplier_resolution"]["message"] == "recognized 9992.HK but multiplier could not be resolved"
 
 
-def test_normalize_trade_deal_ignores_retired_market_default_multiplier(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(
-        "src.application.multiplier_cache.refresh_via_opend",
-        lambda **_kwargs: SimpleNamespace(ok=False, multiplier=None, error="not available in test"),
-    )
-
+def test_normalize_trade_deal_ignores_retired_market_default_multiplier(tmp_path: Path) -> None:
     hk_deal = normalize_trade_deal(
-        {
-            "deal_id": "deal-10",
-            "futu_account_id": "REAL_HK_1",
-            "owner_stock_code": "HK.09992",
-            "option_type": "PUT",
-            "position_effect": "OPEN",
-            "trade_side": "SELL",
-            "qty": 1,
-            "price": 6.3,
-            "strike": 150,
-            "expiry_date": "260528",
-            "currency": "HKD",
-        },
+        _hk_owner_stock_payload("deal-10"),
         futu_account_mapping={"REAL_HK_1": "lx"},
         repo_base=tmp_path,
         config={"intake": {"default_multiplier_hk": 1000}},
@@ -399,29 +384,12 @@ def test_normalize_trade_deal_ignores_retired_market_default_multiplier(monkeypa
 
 
 def test_normalize_trade_deal_ignores_repo_hk_intake_config_when_active_config_has_no_intake(
-    monkeypatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(
-        "src.application.multiplier_cache.refresh_via_opend",
-        lambda **_kwargs: SimpleNamespace(ok=False, multiplier=None, error="not available in test"),
-    )
     (tmp_path / "config.hk.json").write_text('{"intake":{"default_multiplier_hk":1000}}', encoding="utf-8")
 
     deal = normalize_trade_deal(
-        {
-            "deal_id": "deal-12",
-            "futu_account_id": "REAL_HK_1",
-            "owner_stock_code": "HK.09992",
-            "option_type": "PUT",
-            "position_effect": "OPEN",
-            "trade_side": "SELL",
-            "qty": 1,
-            "price": 6.3,
-            "strike": 150,
-            "expiry_date": "260528",
-            "currency": "HKD",
-        },
+        _hk_owner_stock_payload("deal-12"),
         futu_account_mapping={"REAL_HK_1": "lx"},
         repo_base=tmp_path,
         config={"trade_intake": {"mode": "dry-run"}},

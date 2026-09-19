@@ -1,7 +1,24 @@
 from __future__ import annotations
 
+from typing import Any
+
 from domain.domain.ledger import TradeEvent
 from domain.domain.trade_execution import futu_order_namespace_issue as futu_order_namespace_issue
+
+
+def option_contract_identity(event: TradeEvent) -> tuple[Any, ...]:
+    key = event.contract_key
+    return (
+        key.broker,
+        key.account,
+        key.underlying_symbol,
+        key.option_type,
+        event.position_side,
+        key.strike,
+        key.expiration_ymd,
+        event.currency,
+        event.multiplier,
+    )
 
 
 def is_unexecuted_expire_close(event: TradeEvent) -> bool:

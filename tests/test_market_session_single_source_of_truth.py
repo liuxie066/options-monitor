@@ -5,32 +5,29 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 
+def _run_window(start: str = '09:30', end: str = '16:00', breaks: list | None = None) -> dict:
+    return {'start': start, 'end': end, 'breaks': [] if breaks is None else breaks}
+
+
+def _schedule_block(**overrides: object) -> dict:
+    return {
+        'enabled': True,
+        'timezone': 'America/New_York',
+        'run_window': _run_window(),
+        **overrides,
+    }
+
+
 def test_select_markets_to_run_hk_break_respected() -> None:
     from domain.domain import select_markets_to_run
 
     cfg = {
-        'schedule_hk': {
-            'enabled': True,
-            'timezone': 'Asia/Hong_Kong',
-            'run_window': {
-                'start': '09:30',
-                'end': '16:00',
-                'breaks': [
-                    {'start': '12:00', 'end': '13:00'},
-                ],
-            },
-            'beijing_timezone': 'Asia/Shanghai',
-        },
-        'schedule': {
-            'enabled': True,
-            'timezone': 'America/New_York',
-            'run_window': {
-                'start': '09:30',
-                'end': '16:00',
-                'breaks': [],
-            },
-            'beijing_timezone': 'Asia/Shanghai',
-        },
+        'schedule_hk': _schedule_block(
+            timezone='Asia/Hong_Kong',
+            run_window=_run_window(breaks=[{'start': '12:00', 'end': '13:00'}]),
+            beijing_timezone='Asia/Shanghai',
+        ),
+        'schedule': _schedule_block(beijing_timezone='Asia/Shanghai'),
     }
 
     # 12:30 HKT => lunch break => should NOT select HK.
@@ -46,16 +43,10 @@ def test_select_markets_to_run_schedule_only_hk_timezone_resolves_to_hk() -> Non
 
     # Config with only `schedule` (no `schedule_hk`), HK timezone.
     cfg = {
-        'schedule': {
-            'enabled': True,
-            'timezone': 'Asia/Hong_Kong',
-            'run_window': {
-                'start': '09:30',
-                'end': '16:00',
-                'breaks': [],
-            },
-            'beijing_timezone': 'Asia/Shanghai',
-        },
+        'schedule': _schedule_block(
+            timezone='Asia/Hong_Kong',
+            beijing_timezone='Asia/Shanghai',
+        ),
     }
 
     # 13:00 HKT = 05:00 UTC (UTC+8). Inside HK market hours, no break.
@@ -72,17 +63,7 @@ def test_select_markets_to_run_schedule_only_hk_timezone_resolves_to_hk() -> Non
 def test_select_markets_to_run_schedule_only_us_timezone_resolves_to_us() -> None:
     from domain.domain import select_markets_to_run
 
-    cfg = {
-        'schedule': {
-            'enabled': True,
-            'timezone': 'America/New_York',
-            'run_window': {
-                'start': '09:30',
-                'end': '16:00',
-                'breaks': [],
-            },
-        },
-    }
+    cfg = {'schedule': _schedule_block()}
 
     t_in_hours = datetime(2026, 4, 1, 14, 0, 0, tzinfo=timezone.utc)
     out = select_markets_to_run(t_in_hours, cfg, 'auto')
@@ -93,15 +74,8 @@ def test_select_markets_to_run_us_beijing_gate_blocks_auto_after_cutoff() -> Non
     from domain.domain import select_markets_to_run
 
     cfg = {
-        'schedule': {
-            'enabled': True,
-            'timezone': 'America/New_York',
-            'run_window': {
-                'start': '09:30',
-                'end': '16:00',
-                'breaks': [],
-            },
-            'gates': [
+        'schedule': _schedule_block(
+            gates=[
                 {
                     'type': 'before',
                     'timezone': 'Asia/Shanghai',
@@ -109,7 +83,7 @@ def test_select_markets_to_run_us_beijing_gate_blocks_auto_after_cutoff() -> Non
                     'day_offset_from_window_start': 1,
                 },
             ],
-        },
+        ),
     }
 
     # Summer time: 13:00 EDT is 01:00 Beijing next day, still allowed.
@@ -142,24 +116,11 @@ def test_select_markets_to_run_prefers_schedule_hk_when_both_markets_are_open() 
     from domain.domain import select_markets_to_run
 
     cfg = {
-        'schedule_hk': {
-            'enabled': True,
-            'timezone': 'Asia/Hong_Kong',
-            'run_window': {
-                'start': '00:00',
-                'end': '23:59',
-                'breaks': [],
-            },
-        },
-        'schedule': {
-            'enabled': True,
-            'timezone': 'America/New_York',
-            'run_window': {
-                'start': '00:00',
-                'end': '23:59',
-                'breaks': [],
-            },
-        },
+        'schedule_hk': _schedule_block(
+            timezone='Asia/Hong_Kong',
+            run_window=_run_window(start='00:00', end='23:59'),
+        ),
+        'schedule': _schedule_block(run_window=_run_window(start='00:00', end='23:59')),
     }
 
     t_both_open = datetime(2026, 4, 1, 14, 0, 0, tzinfo=timezone.utc)
@@ -170,17 +131,7 @@ def test_select_markets_to_run_prefers_schedule_hk_when_both_markets_are_open() 
 def test_evaluate_auto_market_rules_makes_hk_us_resolution_explicit() -> None:
     from domain.domain import multi_tick as mod
 
-    cfg = {
-        'schedule': {
-            'enabled': True,
-            'timezone': 'Asia/Hong_Kong',
-            'run_window': {
-                'start': '09:30',
-                'end': '16:00',
-                'breaks': [],
-            },
-        },
-    }
+    cfg = {'schedule': _schedule_block(timezone='Asia/Hong_Kong')}
 
     t_in_hours = datetime(2026, 4, 1, 5, 0, 0, tzinfo=timezone.utc)
     rules = mod._evaluate_auto_market_rules(t_in_hours, cfg)

@@ -89,18 +89,8 @@ def _exposure(
 
 def _pair() -> list[dict]:
     return [
-        _lot(
-            "put-1",
-            option_type="put",
-            strike=100,
-            trade_time_ms=BASE_TIME_MS + 1_000,
-        ),
-        _lot(
-            "call-1",
-            option_type="call",
-            strike=110,
-            trade_time_ms=BASE_TIME_MS + 2_000,
-        ),
+        _lot("put-1", option_type="put", strike=100, trade_time_ms=BASE_TIME_MS + 1_000),
+        _lot("call-1", option_type="call", strike=110, trade_time_ms=BASE_TIME_MS + 2_000),
     ]
 
 
@@ -134,23 +124,11 @@ def test_long_call_first_waits_then_reconciles_without_arrival_state() -> None:
 
 def test_candidate_exposure_is_exact_only_when_it_precedes_both_fills() -> None:
     live = match_post_trade_combo_pairs(lots=_pair(), exposures=[_exposure()])
-    delivered = match_post_trade_combo_pairs(
-        lots=_pair(),
-        exposures=[_exposure(delivery_confirmed=True)],
-    )
+    delivered = match_post_trade_combo_pairs(lots=_pair(), exposures=[_exposure(delivery_confirmed=True)])
     future = match_post_trade_combo_pairs(
-        lots=_pair(),
-        exposures=[
-            _exposure(
-                generated_at_ms=BASE_TIME_MS + 1_500,
-                valid_until_ms=BASE_TIME_MS + 60_000,
-            )
-        ],
+        lots=_pair(), exposures=[_exposure(generated_at_ms=BASE_TIME_MS + 1_500, valid_until_ms=BASE_TIME_MS + 60_000)]
     )
-    expired = match_post_trade_combo_pairs(
-        lots=_pair(),
-        exposures=[_exposure(valid_until_ms=BASE_TIME_MS + 1_500)],
-    )
+    expired = match_post_trade_combo_pairs(lots=_pair(), exposures=[_exposure(valid_until_ms=BASE_TIME_MS + 1_500)])
 
     assert live["inferences"][0]["evidence_grade"] == EXACT_LIVE_CANDIDATE
     assert delivered["inferences"][0]["evidence_grade"] == EXACT_DELIVERED_CANDIDATE
@@ -173,25 +151,12 @@ def test_same_contract_multi_lot_is_ambiguous_without_sort_tie_break() -> None:
 
 def test_discrete_candidate_priority_can_outweigh_more_structural_pairs() -> None:
     put_one = _pair()[0]
-    put_two = {
-        **put_one,
-        "record_id": "put-2",
-        "open_event_id": "open-put-2",
-        "strike": 105,
-    }
+    put_two = {**put_one, "record_id": "put-2", "open_event_id": "open-put-2", "strike": 105}
     call_one = _pair()[1]
-    call_two = {
-        **call_one,
-        "record_id": "call-2",
-        "open_event_id": "open-call-2",
-        "strike": 120,
-    }
+    call_two = {**call_one, "record_id": "call-2", "open_event_id": "open-call-2", "strike": 120}
     exact = _exposure(delivery_confirmed=True)
 
-    result = match_post_trade_combo_pairs(
-        lots=[put_one, put_two, call_one, call_two],
-        exposures=[exact],
-    )
+    result = match_post_trade_combo_pairs(lots=[put_one, put_two, call_one, call_two], exposures=[exact])
 
     exact_edge = next(
         item
@@ -223,25 +188,13 @@ def test_partial_or_grouped_lot_fails_closed() -> None:
 
 
 def test_put_earlier_than_call_is_not_paired_but_cross_day_is_not() -> None:
-    put = _lot(
-        "put-1",
-        option_type="put",
-        strike=100,
-        expiration_ymd="2026-08-21",
-        trade_time_ms=BASE_TIME_MS + 1_000,
-    )
-    call = _lot(
-        "call-1",
-        option_type="call",
-        strike=110,
-        expiration_ymd="2026-09-18",
-        trade_time_ms=BASE_TIME_MS + 2_000,
-    )
+    put = _lot("put-1", option_type="put", strike=100, expiration_ymd="2026-08-21",
+               trade_time_ms=BASE_TIME_MS + 1_000)
+    call = _lot("call-1", option_type="call", strike=110, expiration_ymd="2026-09-18",
+                trade_time_ms=BASE_TIME_MS + 2_000)
 
     differing_expiry = match_post_trade_combo_pairs(lots=[put, call])
-    cross_day = match_post_trade_combo_pairs(
-        lots=[put, {**call, "market_date": "2026-08-01"}]
-    )
+    cross_day = match_post_trade_combo_pairs(lots=[put, {**call, "market_date": "2026-08-01"}])
 
     assert differing_expiry["inferences"] == []
     assert len(differing_expiry["waiting_for_counterpart"]) == 2
@@ -252,14 +205,8 @@ def test_put_earlier_than_call_is_not_paired_but_cross_day_is_not() -> None:
 def test_snapshot_hash_changes_when_alternatives_change() -> None:
     pair = _pair()
     unique = match_post_trade_combo_pairs(lots=pair)["inferences"][0]
-    another_call = {
-        **pair[1],
-        "record_id": "call-2",
-        "open_event_id": "open-call-2",
-    }
-    ambiguous = match_post_trade_combo_pairs(
-        lots=[*pair, another_call]
-    )["inferences"]
+    another_call = {**pair[1], "record_id": "call-2", "open_event_id": "open-call-2"}
+    ambiguous = match_post_trade_combo_pairs(lots=[*pair, another_call])["inferences"]
     same_pair = next(
         item
         for item in ambiguous

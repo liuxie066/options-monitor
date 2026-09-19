@@ -26,7 +26,7 @@ def _contract(
         option_type=option_type,
         strike=100 if option_type == "put" else 110,
         expiration_ymd="2026-08-21",
-        )
+    )
 
 
 def _open(
@@ -132,51 +132,34 @@ def _exact_events_and_lots() -> tuple[list[dict], list[dict]]:
     return (
         [
             _open("put-open", "lot-put"),
-            _open(
-                "call-open",
-                "lot-call",
-                option_type="call",
-                role="participation_call",
-            ),
+            _open("call-open", "lot-call", option_type="call", role="participation_call"),
         ],
         [
             _lot("lot-put", "put-open"),
-            _lot(
-                "lot-call",
-                "call-open",
-                role="participation_call",
-            ),
+            _lot("lot-call", "call-open", role="participation_call"),
         ],
     )
 
 
-def test_exact_membership_is_order_stable_and_allows_closed_identity() -> None:
-    events, lots = _exact_events_and_lots()
-    first = resolve_combo_group_membership(
+def _resolve(events: list[dict], lots: list[dict]):
+    return resolve_combo_group_membership(
         group_id=GROUP_ID,
         account="lx",
         expected_symbol="NVDA",
         trade_events=events,
         projected_position_lots=lots,
     )
+
+
+def test_exact_membership_is_order_stable_and_allows_closed_identity() -> None:
+    events, lots = _exact_events_and_lots()
+    first = _resolve(events, lots)
     closed_lots = [
         {**item, "fields": {**item["fields"], "contracts_open": 0}}
         for item in reversed(lots)
     ]
-    second = resolve_combo_group_membership(
-        group_id=GROUP_ID,
-        account="lx",
-        expected_symbol="NVDA",
-        trade_events=list(reversed(events)),
-        projected_position_lots=list(reversed(lots)),
-    )
-    closed = resolve_combo_group_membership(
-        group_id=GROUP_ID,
-        account="lx",
-        expected_symbol="NVDA",
-        trade_events=events,
-        projected_position_lots=closed_lots,
-    )
+    second = _resolve(list(reversed(events)), list(reversed(lots)))
+    closed = _resolve(events, closed_lots)
 
     assert first.fact == second.fact
     assert first.generation_hash == second.generation_hash
@@ -190,35 +173,15 @@ def test_closed_third_member_retagged_away_remains_history_conflict() -> None:
     events, lots = _exact_events_and_lots()
     events.extend(
         [
-            _open(
-                "third-open",
-                "lot-third",
-                event_time_ms=1_700_000_000_050,
-            ),
+            _open("third-open", "lot-third", event_time_ms=1_700_000_000_050),
             _adjust(
-                "third-retag",
-                "lot-third",
-                group_id="another-group",
-                event_time_ms=1_700_000_000_100,
+                "third-retag", "lot-third", group_id="another-group", event_time_ms=1_700_000_000_100
             ),
         ]
     )
-    lots.append(
-        _lot(
-            "lot-third",
-            "third-open",
-            group_id="another-group",
-            contracts_open=0,
-        )
-    )
+    lots.append(_lot("lot-third", "third-open", group_id="another-group", contracts_open=0))
 
-    resolved = resolve_combo_group_membership(
-        group_id=GROUP_ID,
-        account="lx",
-        expected_symbol="NVDA",
-        trade_events=events,
-        projected_position_lots=lots,
-    )
+    resolved = _resolve(events, lots)
 
     assert resolved.fact["status"] == "conflict"
     assert resolved.fact["global_current_member_count"] == 2
@@ -232,13 +195,7 @@ def test_voided_retag_does_not_enter_effective_history() -> None:
     retag = _adjust("retag", "lot-put", group_id="another-group")
     events.extend([retag, _void("void-retag", "retag")])
 
-    resolved = resolve_combo_group_membership(
-        group_id=GROUP_ID,
-        account="lx",
-        expected_symbol="NVDA",
-        trade_events=events,
-        projected_position_lots=lots,
-    )
+    resolved = _resolve(events, lots)
 
     assert resolved.fact["status"] == "exact"
     assert resolved.fact["retag_event_count"] == 0
@@ -248,29 +205,13 @@ def test_external_member_is_counted_but_identity_is_redacted() -> None:
     events, lots = _exact_events_and_lots()
     events.append(
         _open(
-            "external-open",
-            "secret-external-record",
-            account="sy",
-            symbol="TSLA",
-            event_time_ms=1_700_000_000_050,
+            "external-open", "secret-external-record", account="sy",
+            symbol="TSLA", event_time_ms=1_700_000_000_050,
         )
     )
-    lots.append(
-        _lot(
-            "secret-external-record",
-            "external-open",
-            account="sy",
-            symbol="TSLA",
-        )
-    )
+    lots.append(_lot("secret-external-record", "external-open", account="sy", symbol="TSLA"))
 
-    resolved = resolve_combo_group_membership(
-        group_id=GROUP_ID,
-        account="lx",
-        expected_symbol="NVDA",
-        trade_events=events,
-        projected_position_lots=lots,
-    )
+    resolved = _resolve(events, lots)
     encoded = json.dumps(resolved.fact, sort_keys=True)
 
     assert resolved.fact["status"] == "conflict"
@@ -282,13 +223,7 @@ def test_external_member_is_counted_but_identity_is_redacted() -> None:
 
 def test_membership_validator_rejects_tampered_hash() -> None:
     events, lots = _exact_events_and_lots()
-    fact = resolve_combo_group_membership(
-        group_id=GROUP_ID,
-        account="lx",
-        expected_symbol="NVDA",
-        trade_events=events,
-        projected_position_lots=lots,
-    ).fact
+    fact = _resolve(events, lots).fact
     tampered = {**fact, "global_historical_member_count": 3}
 
     validation = validate_combo_group_membership(tampered)
@@ -299,35 +234,19 @@ def test_membership_validator_rejects_tampered_hash() -> None:
 
 def test_membership_validator_rejects_duplicate_exact_roles() -> None:
     events, lots = _exact_events_and_lots()
-    fact = resolve_combo_group_membership(
-        group_id=GROUP_ID,
-        account="lx",
-        expected_symbol="NVDA",
-        trade_events=events,
-        projected_position_lots=lots,
-    ).fact
+    fact = _resolve(events, lots).fact
     duplicate_roles = {
         **fact,
         "member_bindings_for_current_account": [
-            {
-                **binding,
-                "role": "funding_put",
-            }
+            {**binding, "role": "funding_put"}
             for binding in fact["member_bindings_for_current_account"]
         ],
     }
     duplicate_roles["membership_hash"] = canonical_sha256(
-        {
-            key: value
-            for key, value in duplicate_roles.items()
-            if key != "membership_hash"
-        }
+        {key: value for key, value in duplicate_roles.items() if key != "membership_hash"}
     )
 
     validation = validate_combo_group_membership(duplicate_roles)
 
     assert validation.status == "conflict"
-    assert (
-        "combo_group_exact_membership_invalid"
-        in validation.reason_codes
-    )
+    assert "combo_group_exact_membership_invalid" in validation.reason_codes

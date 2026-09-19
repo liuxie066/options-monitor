@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import json
-import socket
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable
+
+from src.infrastructure.http_json import post_json
 
 
 DEFAULT_DEEPSEEK_CHAT_COMPLETIONS_URL = "https://api.deepseek.com/chat/completions"
@@ -89,55 +87,12 @@ def _post_json(
     tool_choice: str = "auto",
     timeout: int = 20,
 ) -> dict[str, Any]:
-    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(
+    return post_json(
         url,
-        data=data,
-        method="POST",
-        headers=dict(headers or {}),
+        payload,
+        headers=headers,
+        timeout=timeout,
+        error_cls=OpenAIChatCompletionsError,
+        error_label="chat completions API",
+        invalid_response_message="invalid chat completions JSON response",
     )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body_text = _decode_body(resp.read())
-            parsed = _try_parse_json(body_text)
-            if not isinstance(parsed, dict):
-                raise OpenAIChatCompletionsError(
-                    "invalid chat completions JSON response",
-                    http_status=getattr(resp, "status", None),
-                    response={"body": body_text},
-                )
-            return parsed
-    except urllib.error.HTTPError as exc:
-        body_text = ""
-        try:
-            body_text = _decode_body(exc.read())
-        except Exception:
-            body_text = ""
-        parsed = _try_parse_json(body_text)
-        response = parsed if isinstance(parsed, dict) else {"body": body_text}
-        message = _chat_completion_error_message(response) or f"chat completions API HTTP error {getattr(exc, 'code', None)}"
-        raise OpenAIChatCompletionsError(message, http_status=getattr(exc, "code", None), response=response) from exc
-    except (urllib.error.URLError, socket.timeout) as exc:
-        raise OpenAIChatCompletionsError(
-            f"chat completions API network error: {type(exc).__name__}: {exc}",
-            http_status=None,
-            response={"error_type": type(exc).__name__, "error": str(exc)},
-        ) from exc
-
-
-def _decode_body(raw: bytes) -> str:
-    return raw.decode("utf-8", errors="replace")
-
-
-def _try_parse_json(text: str) -> Any:
-    try:
-        return json.loads(text)
-    except Exception:
-        return None
-
-
-def _chat_completion_error_message(response: dict[str, Any]) -> str | None:
-    error = response.get("error")
-    if isinstance(error, dict) and str(error.get("message") or "").strip():
-        return str(error.get("message")).strip()
-    return None

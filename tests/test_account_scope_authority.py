@@ -10,6 +10,9 @@ import pytest
 from src.application.agent_tool_contracts import AgentToolError
 
 
+TODAY = date(2026, 8, 21)
+
+
 def _service_accounts(content: str, *, target: str) -> list[str]:
     if target == "launchd":
         argv = plistlib.loads(content.encode("utf-8"))["ProgramArguments"]
@@ -143,35 +146,15 @@ def test_assistant_parsers_use_configured_account_labels() -> None:
     from src.application.assistant.command_parser import parse_assistant_command
     from src.application.assistant.position_query import PositionQuery, parse_position_query_text
 
-    positions = parse_assistant_command(
-        "/positions christina",
-        now_fn=lambda: date(2026, 8, 21),
-        accounts=["christina"],
-    )
-    income = parse_assistant_command(
-        "/income christina ytd",
-        now_fn=lambda: date(2026, 8, 21),
-        accounts=["christina"],
-    )
-    monitor_run = parse_assistant_command(
-        "/monitor-run hk christina",
-        now_fn=lambda: date(2026, 8, 21),
-        accounts=["christina"],
-    )
+    positions = parse_assistant_command("/positions christina", now_fn=lambda: TODAY, accounts=["christina"])
+    income = parse_assistant_command("/income christina ytd", now_fn=lambda: TODAY, accounts=["christina"])
+    monitor_run = parse_assistant_command("/monitor-run hk christina", now_fn=lambda: TODAY, accounts=["christina"])
 
     assert positions is not None and positions.arguments["account"] == "christina"
     assert income is not None and income.arguments == {"account": "christina", "period": "ytd"}
     assert monitor_run is not None and monitor_run.arguments == {"market": "hk", "accounts": ["christina"]}
-    assert parse_position_query_text(
-        "christina 持仓",
-        today=date(2026, 8, 21),
-        accounts=["christina"],
-    ).account == "christina"
-    hyphen_account = parse_position_query_text(
-        "ops-team 持仓",
-        today=date(2026, 8, 21),
-        accounts=["ops", "ops-team"],
-    )
+    assert parse_position_query_text("christina 持仓", today=TODAY, accounts=["christina"]).account == "christina"
+    hyphen_account = parse_position_query_text("ops-team 持仓", today=TODAY, accounts=["ops", "ops-team"])
     assert hyphen_account.account == "ops-team"
     assert hyphen_account.symbol is None
     assert PositionQuery.from_payload({"account": "christina"}).account == "christina"

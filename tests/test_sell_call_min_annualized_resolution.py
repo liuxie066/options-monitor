@@ -18,6 +18,35 @@ def _available_portfolio_ctx() -> dict:
     }
 
 
+def _fx_converter():
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+    return CurrencyConverter(ExchangeRates(usd_per_cny=0.14, cny_per_hkd=0.92))
+
+
+def _scan_args(shares_locked: str = '0', *extra: str) -> list[str]:
+    return ['--symbols', 'AAPL', '--avg-cost', '100', '--shares', '100',
+            '--shares-can-sell', '100', '--shares-locked', shares_locked, *extra]
+
+
+def _run_scan_cli(shares_locked: str = '0', *extra: str):
+    return subprocess.run(
+        [str(VPY), '-m', 'src.application.scan_sell_call', *_scan_args(shares_locked, *extra)],
+        cwd=str(BASE), capture_output=True, text=True, check=False,
+    )
+
+
+def _scan_kwargs(tmp_path: Path, **overrides) -> dict:
+    return {
+        'symbol': 'AAPL',
+        'symbol_cfg': {'symbol': 'AAPL', 'sell_call': {}},
+        'cc': {'enabled': True},
+        'required_data_dir': tmp_path / 'required_data',
+        'stock': {'shares': 100, 'can_sell_qty': 100, 'avg_cost': 100},
+        **overrides,
+    }
+
+
 def test_symbol_sell_call_min_overrides_template() -> None:
     from domain.domain.sell_call_config import resolve_min_annualized_net_premium_return
 
@@ -89,27 +118,7 @@ def test_invalid_sell_call_min_raises() -> None:
 
 
 def test_scan_sell_call_requires_min_annualized_arg() -> None:
-    p = subprocess.run(
-        [
-            str(VPY),
-            '-m',
-            'src.application.scan_sell_call',
-            '--symbols',
-            'AAPL',
-            '--avg-cost',
-            '100',
-            '--shares',
-            '100',
-            '--shares-can-sell',
-            '100',
-            '--shares-locked',
-            '0',
-        ],
-        cwd=str(BASE),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    p = _run_scan_cli()
 
     assert p.returncode != 0
     assert '[ARG_ERROR]' in (p.stderr or '')
@@ -117,29 +126,7 @@ def test_scan_sell_call_requires_min_annualized_arg() -> None:
 
 
 def test_scan_sell_call_rejects_out_of_range_arg() -> None:
-    p = subprocess.run(
-        [
-            str(VPY),
-            '-m',
-            'src.application.scan_sell_call',
-            '--symbols',
-            'AAPL',
-            '--avg-cost',
-            '100',
-            '--shares',
-            '100',
-            '--shares-can-sell',
-            '100',
-            '--shares-locked',
-            '0',
-            '--min-annualized-net-return',
-            '1.2',
-        ],
-        cwd=str(BASE),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    p = _run_scan_cli('0', '--min-annualized-net-return', '1.2')
 
     assert p.returncode != 0
     assert '[ARG_ERROR]' in (p.stderr or '')
@@ -150,13 +137,7 @@ def test_scan_sell_call_rejects_out_of_range_arg() -> None:
 def test_scan_sell_call_requires_explicit_share_facts(missing_flag: str) -> None:
     from src.application.scan_sell_call import parse_args
 
-    argv = [
-        '--symbols', 'AAPL',
-        '--avg-cost', '100',
-        '--shares', '100',
-        '--shares-can-sell', '100',
-        '--shares-locked', '0',
-    ]
+    argv = _scan_args()
     offset = argv.index(missing_flag)
     del argv[offset:offset + 2]
 
@@ -166,29 +147,7 @@ def test_scan_sell_call_requires_explicit_share_facts(missing_flag: str) -> None
 
 @pytest.mark.parametrize('shares_locked', (-1, 101))
 def test_scan_sell_call_rejects_invalid_locked_share_facts(shares_locked: int) -> None:
-    p = subprocess.run(
-        [
-            str(VPY),
-            '-m',
-            'src.application.scan_sell_call',
-            '--symbols',
-            'AAPL',
-            '--avg-cost',
-            '100',
-            '--shares',
-            '100',
-            '--shares-can-sell',
-            '100',
-            '--shares-locked',
-            str(shares_locked),
-            '--min-annualized-net-return',
-            '0.1',
-        ],
-        cwd=str(BASE),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    p = _run_scan_cli(str(shares_locked), '--min-annualized-net-return', '0.1')
 
     assert p.returncode != 0
     assert '[ARG_ERROR]' in (p.stderr or '')
@@ -199,7 +158,6 @@ def test_sell_call_steps_defers_underwriting_thresholds_to_post_filter() -> None
 
     import src.application.sell_call_steps as steps
     import pandas as pd
-    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
     calls: list[dict] = []
     orig_run_sell_call_scan = steps.run_sell_call_scan
@@ -217,7 +175,7 @@ def test_sell_call_steps_defers_underwriting_thresholds_to_post_filter() -> None
             required_data_dir=BASE / 'output',
             stock={'shares': 300, 'can_sell_qty': 300, 'avg_cost': 100},
             portfolio_ctx=_available_portfolio_ctx(),
-            exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14, cny_per_hkd=0.92)),
+            exchange_rate_converter=_fx_converter(),
             locked_shares_status='available',
             locked_shares_by_symbol={'AAPL': 100},
             locked_shares_unavailable_by_symbol={},
@@ -241,7 +199,6 @@ def test_sell_call_steps_defers_underwriting_thresholds_to_post_filter() -> None
 def test_sell_call_steps_blocks_when_locked_shares_basis_unavailable(tmp_path: Path) -> None:
 
     import src.application.sell_call_steps as steps
-    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
     calls: list[dict] = []
     orig_run_sell_call_scan = steps.run_sell_call_scan
@@ -258,7 +215,7 @@ def test_sell_call_steps_blocks_when_locked_shares_basis_unavailable(tmp_path: P
             required_data_dir=tmp_path / 'required_data',
             stock={'shares': 500, 'can_sell_qty': 500, 'avg_cost': 400},
             portfolio_ctx=_available_portfolio_ctx(),
-            exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14, cny_per_hkd=0.92)),
+            exchange_rate_converter=_fx_converter(),
             locked_shares_status='available',
             locked_shares_by_symbol={},
             locked_shares_unavailable_by_symbol={'0700.HK': 'short_call_locked_shares_basis_missing'},
@@ -282,22 +239,15 @@ def test_sell_call_steps_fail_closed_on_invalid_locked_shares(
     reason: str,
 ) -> None:
     from src.application.sell_call_steps import run_sell_call_scan_and_summarize
-    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
-    out = run_sell_call_scan_and_summarize(
-        symbol='AAPL',
-        symbol_cfg={'symbol': 'AAPL', 'sell_call': {}},
-        cc={'enabled': True},
-        required_data_dir=tmp_path / 'required_data',
-        stock={'shares': 100, 'can_sell_qty': 100, 'avg_cost': 100},
+    out = run_sell_call_scan_and_summarize(**_scan_kwargs(
+        tmp_path,
         portfolio_ctx=_available_portfolio_ctx(),
-        exchange_rate_converter=CurrencyConverter(
-            ExchangeRates(usd_per_cny=0.14, cny_per_hkd=0.92)
-        ),
+        exchange_rate_converter=_fx_converter(),
         locked_shares_status='available',
         locked_shares_by_symbol={'AAPL': locked_shares},
         locked_shares_unavailable_by_symbol={},
-    )
+    ))
 
     assert out['_strategy_status'] == 'unavailable'
     assert out['_strategy_reason'] == reason
@@ -305,21 +255,14 @@ def test_sell_call_steps_fail_closed_on_invalid_locked_shares(
 
 def test_sell_call_steps_blocks_when_account_authority_is_missing(tmp_path: Path) -> None:
     from src.application.sell_call_steps import run_sell_call_scan_and_summarize
-    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
-    out = run_sell_call_scan_and_summarize(
-        symbol='AAPL',
-        symbol_cfg={'symbol': 'AAPL', 'sell_call': {}},
-        cc={'enabled': True},
-        required_data_dir=tmp_path / 'required_data',
-        stock={'shares': 100, 'can_sell_qty': 100, 'avg_cost': 100},
-        exchange_rate_converter=CurrencyConverter(
-            ExchangeRates(usd_per_cny=0.14, cny_per_hkd=0.92)
-        ),
+    out = run_sell_call_scan_and_summarize(**_scan_kwargs(
+        tmp_path,
+        exchange_rate_converter=_fx_converter(),
         locked_shares_status='available',
         locked_shares_by_symbol={},
         locked_shares_unavailable_by_symbol={},
-    )
+    ))
 
     assert out['_strategy_status'] == 'unavailable'
     assert out['_strategy_reason'] == 'physical_account_capacity_authority_unavailable'
@@ -327,19 +270,12 @@ def test_sell_call_steps_blocks_when_account_authority_is_missing(tmp_path: Path
 
 def test_sell_call_steps_blocks_when_locked_share_context_is_missing(tmp_path: Path) -> None:
     from src.application.sell_call_steps import run_sell_call_scan_and_summarize
-    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
-    out = run_sell_call_scan_and_summarize(
-        symbol='AAPL',
-        symbol_cfg={'symbol': 'AAPL', 'sell_call': {}},
-        cc={'enabled': True},
-        required_data_dir=tmp_path / 'required_data',
-        stock={'shares': 100, 'can_sell_qty': 100, 'avg_cost': 100},
+    out = run_sell_call_scan_and_summarize(**_scan_kwargs(
+        tmp_path,
         portfolio_ctx=_available_portfolio_ctx(),
-        exchange_rate_converter=CurrencyConverter(
-            ExchangeRates(usd_per_cny=0.14, cny_per_hkd=0.92)
-        ),
-    )
+        exchange_rate_converter=_fx_converter(),
+    ))
 
     assert out['_strategy_status'] == 'unavailable'
     assert out['_strategy_reason'] == 'option_positions_context_unavailable'
@@ -350,27 +286,20 @@ def test_sell_call_steps_blocks_when_option_context_is_globally_unavailable(
 ) -> None:
 
     import src.application.sell_call_steps as steps
-    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
     stale_path = tmp_path / "reports" / "aapl_sell_call_candidates.csv"
     stale_path.parent.mkdir(parents=True)
     stale_path.write_text("stale\n1\n", encoding="utf-8")
 
-    out = steps.run_sell_call_scan_and_summarize(
-        symbol="AAPL",
-        symbol_cfg={"symbol": "AAPL", "sell_call": {}},
-        cc={"enabled": True},
-        required_data_dir=tmp_path / "required_data",
-        stock={"shares": 100, "can_sell_qty": 100, "avg_cost": 100},
+    out = steps.run_sell_call_scan_and_summarize(**_scan_kwargs(
+        tmp_path,
         portfolio_ctx=_available_portfolio_ctx(),
-        exchange_rate_converter=CurrencyConverter(
-            ExchangeRates(usd_per_cny=0.14, cny_per_hkd=0.92)
-        ),
+        exchange_rate_converter=_fx_converter(),
         locked_shares_status="unavailable",
         locked_shares_unavailable_reason="option_positions_context_unavailable",
         locked_shares_by_symbol={},
         locked_shares_unavailable_by_symbol={},
-    )
+    ))
 
     assert out["_strategy_status"] == "unavailable"
     assert out["_strategy_reason"] == "option_positions_context_unavailable"

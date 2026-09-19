@@ -22,6 +22,106 @@ def _with_opening_evidence(frame: pd.DataFrame, *, mode: str) -> pd.DataFrame:
     return out
 
 
+_NVDA_CALL_ROW: dict[str, object] = {
+    "symbol": "NVDA",
+    "option_type": "call",
+    "expiration": "2026-06-19",
+    "dte": 44,
+    "contract_symbol": "NVDA_C110",
+    "strike": 110,
+    "spot": 100,
+    "bid": 0.24,
+    "ask": 0.25,
+    "mid": 1.45,
+    "volume": 65,
+    "open_interest": 980,
+    "currency": "USD",
+    "delta": 0.32,
+    "multiplier": 100,
+}
+
+_NVDA_PUT_ROW: dict[str, object] = {
+    "symbol": "NVDA",
+    "expiration": "2026-06-19",
+    "dte": 44,
+    "contract_symbol": "NVDA_P95",
+    "multiplier": 100,
+    "currency": "USD",
+    "strike": 95.0,
+    "spot": 100.0,
+    "bid": 3.0,
+    "ask": 3.2,
+    "mid": 3.1,
+    "open_interest": 1200,
+    "volume": 80,
+    "implied_volatility": 0.42,
+    "delta": -0.25,
+}
+
+_SHADOW_RANK_ROW: dict[str, object] = {
+    "put_contract_symbol": "NVDA_P95",
+    "call_contract_symbol": "NVDA_C110",
+    "funding_accepted": True,
+    "premium_funding_score": 1.0,
+    "net_credit_retention": 0.82,
+    "call_cost_to_put_credit": 0.18,
+    "call_delta": 0.15,
+    "call_spread_ratio": 0.10,
+    "call_open_interest": 500,
+    "put_assignment_margin_pct": 0.05,
+    "put_only_annualized_net_return": 0.12,
+    "combo_spread_ratio": 0.15,
+    "annualized_net_credit_yield": 0.09,
+    "residual_premium_ratio": 0.82,
+}
+
+
+def _nvda_call_frame(**overrides) -> pd.DataFrame:
+    return _with_opening_evidence(
+        pd.DataFrame([{**_NVDA_CALL_ROW, **overrides}]),
+        mode="call",
+    )
+
+
+def _nvda_put_frame(**overrides) -> pd.DataFrame:
+    return _with_opening_evidence(
+        pd.DataFrame([{**_NVDA_PUT_ROW, **overrides}]),
+        mode="put",
+    )
+
+
+def _shadow_rank_row(**overrides) -> dict[str, object]:
+    return {**_SHADOW_RANK_ROW, **overrides}
+
+
+def _write_nvda_pair_csv(
+    input_root: Path,
+    *,
+    puts: pd.DataFrame,
+    calls: pd.DataFrame,
+) -> None:
+    parsed = input_root / "parsed"
+    parsed.mkdir(parents=True)
+    pd.concat([puts, calls], ignore_index=True).to_csv(
+        parsed / "NVDA_required_data.csv",
+        index=False,
+    )
+
+
+def _sell_put_cfg(**overrides) -> dict[str, object]:
+    return {
+        "enabled": True,
+        "strategy": "insurance_underwriting",
+        "min_dte": 20,
+        "max_dte": 60,
+        **overrides,
+    }
+
+
+def _combo_yield_cfg(**overrides) -> dict[str, object]:
+    return {"enabled": True, "min_open_interest": 100, "min_volume": 5, **overrides}
+
+
 def test_combo_yield_defaults_match_system_template() -> None:
     from src.application.combo_yield_config import combo_yield_defaults_for_market
 
@@ -131,13 +231,7 @@ def test_combo_yield_pair_engine_uses_hk_liquidity_defaults(tmp_path: Path) -> N
         symbol="0700.HK",
         input_root=tmp_path,
         combo_yield_cfg=cfg,
-        sell_put_cfg={
-            "enabled": True,
-            "strategy": "insurance_underwriting",
-            "min_dte": 20,
-            "max_dte": 60,
-            "max_strike": 450.0,
-        },
+        sell_put_cfg=_sell_put_cfg(min_dte=20, max_dte=60, max_strike=450.0),
     )
 
     assert len(pairs) == 1
@@ -282,17 +376,8 @@ def test_combo_yield_pair_preserves_funding_put_earnings_evidence(
         ),
         symbol="NVDA",
         input_root=tmp_path,
-        combo_yield_cfg={
-            "enabled": True,
-            "min_open_interest": 100,
-            "min_volume": 5,
-        },
-        sell_put_cfg={
-            "enabled": True,
-            "strategy": "insurance_underwriting",
-            "min_dte": 20,
-            "max_dte": 60,
-        },
+        combo_yield_cfg=_combo_yield_cfg(),
+        sell_put_cfg=_sell_put_cfg(),
     )
 
     assert len(pairs) == 1
@@ -308,76 +393,28 @@ def test_combo_yield_selects_best_call_and_builds_rank_shadow(tmp_path: Path) ->
         select_best_combo_yield_pairs,
     )
 
-    parsed = tmp_path / "parsed"
-    parsed.mkdir(parents=True)
-    calls = _with_opening_evidence(pd.DataFrame(
+    calls = pd.concat(
         [
-            {
-                "symbol": "NVDA",
-                "option_type": "call",
-                "expiration": "2026-06-19",
-                "dte": 44,
-                "contract_symbol": "NVDA_C110",
-                "strike": 110,
-                "spot": 100,
-                "bid": 1.4,
-                "ask": 1.5,
-                "last_price": 1.45,
-                "mid": 1.45,
-                "volume": 65,
-                "open_interest": 980,
-                "implied_volatility": 0.40,
-                "currency": "USD",
-                "delta": 0.32,
-                "multiplier": 100,
-            },
-            {
-                "symbol": "NVDA",
-                "option_type": "call",
-                "expiration": "2026-06-19",
-                "dte": 44,
-                "contract_symbol": "NVDA_C112",
-                "strike": 112,
-                "spot": 100,
-                "bid": 0.95,
-                "ask": 1.0,
-                "last_price": 0.98,
-                "mid": 0.975,
-                "volume": 70,
-                "open_interest": 1200,
-                "implied_volatility": 0.39,
-                "currency": "USD",
-                "delta": 0.24,
-                "multiplier": 100,
-            },
-        ]
-    ), mode="call")
-
-    df = _with_opening_evidence(pd.DataFrame(
-        [
-            {
-                "symbol": "NVDA",
-                "expiration": "2026-06-19",
-                "dte": 44,
-                "contract_symbol": "NVDA_P95",
-                "multiplier": 100,
-                "currency": "USD",
-                "strike": 95.0,
-                "spot": 100.0,
-                "bid": 3.0,
-                "ask": 3.2,
-                "mid": 3.1,
-                "open_interest": 1200,
-                "volume": 80,
-                "implied_volatility": 0.42,
-                "delta": -0.25,
-            }
-        ]
-    ), mode="put")
-    pd.concat([df, calls], ignore_index=True).to_csv(
-        parsed / "NVDA_required_data.csv",
-        index=False,
+            _nvda_call_frame(
+                bid=1.4, ask=1.5, last_price=1.45, mid=1.45, implied_volatility=0.40
+            ),
+            _nvda_call_frame(
+                contract_symbol="NVDA_C112",
+                strike=112,
+                bid=0.95,
+                ask=1.0,
+                last_price=0.98,
+                mid=0.975,
+                volume=70,
+                open_interest=1200,
+                implied_volatility=0.39,
+                delta=0.24,
+            ),
+        ],
+        ignore_index=True,
     )
+    df = _nvda_put_frame()
+    _write_nvda_pair_csv(tmp_path, puts=df, calls=calls)
 
     pairs = find_sell_put_combo_yield_pairs(
         df_candidates=df,
@@ -422,65 +459,16 @@ def test_combo_yield_selects_best_call_and_builds_rank_shadow(tmp_path: Path) ->
 def test_combo_yield_does_not_require_iv_for_funding_decision(tmp_path: Path) -> None:
     from src.application.sell_put_call_helper import find_sell_put_combo_yield_pairs
 
-    parsed = tmp_path / "parsed"
-    parsed.mkdir(parents=True)
-    calls = _with_opening_evidence(pd.DataFrame(
-        [
-            {
-                "symbol": "NVDA",
-                "option_type": "call",
-                "expiration": "2026-06-19",
-                "dte": 44,
-                "contract_symbol": "NVDA_C110",
-                "strike": 110,
-                "spot": 100,
-                "bid": 0.24,
-                "ask": 0.25,
-                "mid": 1.45,
-                "volume": 65,
-                "open_interest": 980,
-                "currency": "USD",
-                "delta": 0.32,
-                "multiplier": 100,
-            }
-        ]
-    ), mode="call")
-
-    df = _with_opening_evidence(pd.DataFrame(
-        [
-            {
-                "symbol": "NVDA",
-                "expiration": "2026-06-19",
-                "dte": 44,
-                "contract_symbol": "NVDA_P95",
-                "multiplier": 100,
-                "currency": "USD",
-                "strike": 95.0,
-                "spot": 100.0,
-                "bid": 3.0,
-                "ask": 3.2,
-                "mid": 3.1,
-                "open_interest": 1200,
-                "volume": 80,
-                "delta": -0.25,
-            }
-        ]
-    ), mode="put")
-    pd.concat([df, calls], ignore_index=True).to_csv(
-        parsed / "NVDA_required_data.csv",
-        index=False,
-    )
+    calls = _nvda_call_frame()
+    # This case is about a call leg with no implied volatility at all.
+    df = _nvda_put_frame().drop(columns=["implied_volatility"])
+    _write_nvda_pair_csv(tmp_path, puts=df, calls=calls)
 
     pairs = find_sell_put_combo_yield_pairs(
         df_candidates=df,
         symbol="NVDA",
         input_root=tmp_path,
-        combo_yield_cfg={
-            "enabled": True,
-            "min_open_interest": 100,
-            "min_volume": 5,
-            "call": {"max_delta": 0.45},
-        },
+        combo_yield_cfg=_combo_yield_cfg(min_open_interest=100, min_volume=5, call={"max_delta": 0.45}),
         sell_put_cfg={"enabled": True, "strategy": "insurance_underwriting", "min_dte": 20, "max_dte": 60},
     )
 
@@ -495,66 +483,15 @@ def test_combo_yield_does_not_require_iv_for_funding_decision(tmp_path: Path) ->
 def test_combo_yield_rejects_unfunded_call_by_default(tmp_path: Path) -> None:
     from src.application.sell_put_call_helper import find_sell_put_combo_yield_pairs
 
-    parsed = tmp_path / "parsed"
-    parsed.mkdir(parents=True)
-    calls = _with_opening_evidence(pd.DataFrame(
-        [
-            {
-                "symbol": "NVDA",
-                "option_type": "call",
-                "expiration": "2026-06-19",
-                "dte": 44,
-                "contract_symbol": "NVDA_C110",
-                "strike": 110,
-                "spot": 100,
-                "bid": 3.9,
-                "ask": 4.0,
-                "mid": 3.95,
-                "volume": 65,
-                "open_interest": 980,
-                "implied_volatility": 0.40,
-                "currency": "USD",
-                "delta": 0.32,
-                "multiplier": 100,
-            }
-        ]
-    ), mode="call")
-
-    df = _with_opening_evidence(pd.DataFrame(
-        [
-            {
-                "symbol": "NVDA",
-                "expiration": "2026-06-19",
-                "dte": 44,
-                "contract_symbol": "NVDA_P95",
-                "multiplier": 100,
-                "currency": "USD",
-                "strike": 95.0,
-                "spot": 100.0,
-                "bid": 3.0,
-                "ask": 3.2,
-                "mid": 3.1,
-                "open_interest": 1200,
-                "volume": 80,
-                "implied_volatility": 0.42,
-                "delta": -0.25,
-            }
-        ]
-    ), mode="put")
-    pd.concat([df, calls], ignore_index=True).to_csv(
-        parsed / "NVDA_required_data.csv",
-        index=False,
-    )
+    calls = _nvda_call_frame(bid=3.9, ask=4.0, mid=3.95, implied_volatility=0.40)
+    df = _nvda_put_frame()
+    _write_nvda_pair_csv(tmp_path, puts=df, calls=calls)
 
     pairs = find_sell_put_combo_yield_pairs(
         df_candidates=df,
         symbol="NVDA",
         input_root=tmp_path,
-        combo_yield_cfg={
-            "enabled": True,
-            "min_open_interest": 100,
-            "min_volume": 5,
-        },
+        combo_yield_cfg=_combo_yield_cfg(),
         sell_put_cfg={"enabled": True, "strategy": "insurance_underwriting", "min_dte": 20, "max_dte": 60},
     )
 
@@ -564,66 +501,20 @@ def test_combo_yield_rejects_unfunded_call_by_default(tmp_path: Path) -> None:
 def test_combo_yield_accepts_premium_funded_call_with_clear_upside(tmp_path: Path) -> None:
     from src.application.sell_put_call_helper import find_sell_put_combo_yield_pairs
 
-    parsed = tmp_path / "parsed"
-    parsed.mkdir(parents=True)
-    calls = _with_opening_evidence(pd.DataFrame(
-        [
-            {
-                "symbol": "NVDA",
-                "option_type": "call",
-                "expiration": "2026-06-19",
-                "dte": 44,
-                "contract_symbol": "NVDA_C110_LOW",
-                "strike": 110,
-                "spot": 100,
-                "bid": 0.24,
-                "ask": 0.25,
-                "mid": 0.245,
-                "volume": 65,
-                "open_interest": 980,
-                "implied_volatility": 0.40,
-                "currency": "USD",
-                "delta": 0.20,
-                "multiplier": 100,
-            }
-        ]
-    ), mode="call")
-
-    df = _with_opening_evidence(pd.DataFrame(
-        [
-            {
-                "symbol": "NVDA",
-                "expiration": "2026-06-19",
-                "dte": 44,
-                "contract_symbol": "NVDA_P95",
-                "multiplier": 100,
-                "currency": "USD",
-                "strike": 95.0,
-                "spot": 100.0,
-                "bid": 3.0,
-                "ask": 3.2,
-                "mid": 3.1,
-                "open_interest": 1200,
-                "volume": 80,
-                "implied_volatility": 0.42,
-                "delta": -0.25,
-            }
-        ]
-    ), mode="put")
-    pd.concat([df, calls], ignore_index=True).to_csv(
-        parsed / "NVDA_required_data.csv",
-        index=False,
+    calls = _nvda_call_frame(
+        contract_symbol="NVDA_C110_LOW",
+        mid=0.245,
+        implied_volatility=0.40,
+        delta=0.20,
     )
+    df = _nvda_put_frame()
+    _write_nvda_pair_csv(tmp_path, puts=df, calls=calls)
 
     pairs = find_sell_put_combo_yield_pairs(
         df_candidates=df,
         symbol="NVDA",
         input_root=tmp_path,
-        combo_yield_cfg={
-            "enabled": True,
-            "min_open_interest": 100,
-            "min_volume": 5,
-        },
+        combo_yield_cfg=_combo_yield_cfg(),
         sell_put_cfg={"enabled": True, "strategy": "insurance_underwriting", "min_dte": 20, "max_dte": 60},
     )
 
@@ -658,7 +549,7 @@ def test_combo_yield_does_not_inherit_underwriting_call_funding(tmp_path: Path) 
         df_candidates=_single_put_df(dte=44, implied_volatility=0.80),
         symbol="NVDA",
         input_root=tmp_path,
-        combo_yield_cfg={"enabled": True, "min_open_interest": 100, "min_volume": 5},
+        combo_yield_cfg=_combo_yield_cfg(),
         sell_put_cfg={"enabled": True, "strategy": "insurance_underwriting", "min_dte": 20, "max_dte": 60},
     )
 
@@ -733,7 +624,7 @@ def test_combo_yield_policy_accepts_income_upside_pair(tmp_path: Path) -> None:
         df_candidates=_single_put_df(dte=44, implied_volatility=0.80),
         symbol="NVDA",
         input_root=tmp_path,
-        combo_yield_cfg={"enabled": True, "min_open_interest": 100, "min_volume": 5},
+        combo_yield_cfg=_combo_yield_cfg(),
         sell_put_cfg={"enabled": True, "strategy": "insurance_underwriting", "min_dte": 20, "max_dte": 60},
     )
 
@@ -783,11 +674,7 @@ def test_combo_yield_pair_filter_inherits_sell_put_dte(tmp_path: Path) -> None:
         df_candidates=_single_put_df(dte=10),
         symbol="NVDA",
         input_root=tmp_path,
-        combo_yield_cfg={
-            "enabled": True,
-            "min_open_interest": 100,
-            "min_volume": 5,
-        },
+        combo_yield_cfg=_combo_yield_cfg(),
         sell_put_cfg={"enabled": True, "strategy": "insurance_underwriting", "min_dte": 7, "max_dte": 45},
     )
 
@@ -901,13 +788,8 @@ def test_combo_yield_exposes_put_only_counterfactual_and_tail_payoff(tmp_path: P
         ),
         symbol="NVDA",
         input_root=tmp_path,
-        combo_yield_cfg={"enabled": True, "min_open_interest": 100, "min_volume": 5},
-        sell_put_cfg={
-            "enabled": True,
-            "strategy": "insurance_underwriting",
-            "min_dte": 20,
-            "max_dte": 60,
-        },
+        combo_yield_cfg=_combo_yield_cfg(),
+        sell_put_cfg=_sell_put_cfg(),
     )
 
     assert len(pairs) == 1
@@ -942,38 +824,19 @@ def test_combo_yield_shadow_rank_tolerates_missing_expected_move() -> None:
 
     rows = pd.DataFrame(
         [
-            {
-                "put_contract_symbol": "NVDA_P95",
-                "call_contract_symbol": "NVDA_C110",
-                "funding_accepted": True,
-                "premium_funding_score": 1.0,
-                "net_credit_retention": 0.82,
-                "call_cost_to_put_credit": 0.18,
-                "call_delta": 0.15,
-                "call_spread_ratio": 0.10,
-                "call_open_interest": 500,
-                "put_assignment_margin_pct": 0.05,
-                "put_only_annualized_net_return": 0.12,
-                "combo_spread_ratio": 0.15,
-                "annualized_net_credit_yield": 0.09,
-                "residual_premium_ratio": 0.82,
-            },
-            {
-                "put_contract_symbol": "NVDA_P95",
-                "call_contract_symbol": "NVDA_C115",
-                "funding_accepted": True,
-                "premium_funding_score": 1.1,
-                "net_credit_retention": 0.85,
-                "call_cost_to_put_credit": 0.15,
-                "call_delta": 0.10,
-                "call_spread_ratio": 0.08,
-                "call_open_interest": 800,
-                "put_assignment_margin_pct": 0.05,
-                "put_only_annualized_net_return": 0.12,
-                "combo_spread_ratio": 0.12,
-                "annualized_net_credit_yield": 0.10,
-                "residual_premium_ratio": 0.85,
-            },
+            _shadow_rank_row(),
+            _shadow_rank_row(
+                call_contract_symbol="NVDA_C115",
+                premium_funding_score=1.1,
+                net_credit_retention=0.85,
+                call_cost_to_put_credit=0.15,
+                call_delta=0.10,
+                call_spread_ratio=0.08,
+                call_open_interest=800,
+                combo_spread_ratio=0.12,
+                annualized_net_credit_yield=0.10,
+                residual_premium_ratio=0.85,
+            ),
         ]
     )
 
@@ -988,44 +851,24 @@ def test_combo_yield_shadow_rank_orders_selected_pairs_by_put_quality() -> None:
 
     rows = pd.DataFrame(
         [
-            {
-                "put_contract_symbol": "NVDA_P95",
-                "call_contract_symbol": "NVDA_C110",
-                "funding_accepted": True,
-                "premium_funding_score": 2.0,
-                "net_credit_retention": 0.82,
-                "call_cost_to_put_credit": 0.18,
-                "call_delta": 0.15,
-                "call_payoff_multiple_at_1_5_sigma": 2.0,
-                "call_payoff_multiple_at_2_0_sigma": 5.0,
-                "call_spread_ratio": 0.10,
-                "call_open_interest": 500,
-                "put_assignment_margin_pct": 0.05,
-                "put_only_annualized_net_return": 0.14,
-                "put_only_period_net_return": 0.14,
-                "combo_spread_ratio": 0.15,
-                "annualized_net_credit_yield": 0.10,
-                "residual_premium_ratio": 0.82,
-            },
-            {
-                "put_contract_symbol": "NVDA_P90",
-                "call_contract_symbol": "NVDA_C112",
-                "funding_accepted": True,
-                "premium_funding_score": 1.0,
-                "net_credit_retention": 0.82,
-                "call_cost_to_put_credit": 0.18,
-                "call_delta": 0.15,
-                "call_payoff_multiple_at_1_5_sigma": 2.0,
-                "call_payoff_multiple_at_2_0_sigma": 5.0,
-                "call_spread_ratio": 0.10,
-                "call_open_interest": 500,
-                "put_assignment_margin_pct": 0.10,
-                "put_only_annualized_net_return": 0.12,
-                "put_only_period_net_return": 0.12,
-                "combo_spread_ratio": 0.15,
-                "annualized_net_credit_yield": 0.10,
-                "residual_premium_ratio": 0.82,
-            },
+            _shadow_rank_row(
+                premium_funding_score=2.0,
+                call_payoff_multiple_at_1_5_sigma=2.0,
+                call_payoff_multiple_at_2_0_sigma=5.0,
+                put_only_annualized_net_return=0.14,
+                put_only_period_net_return=0.14,
+                annualized_net_credit_yield=0.10,
+            ),
+            _shadow_rank_row(
+                put_contract_symbol="NVDA_P90",
+                call_contract_symbol="NVDA_C112",
+                call_payoff_multiple_at_1_5_sigma=2.0,
+                call_payoff_multiple_at_2_0_sigma=5.0,
+                put_assignment_margin_pct=0.10,
+                put_only_annualized_net_return=0.12,
+                put_only_period_net_return=0.12,
+                annualized_net_credit_yield=0.10,
+            ),
         ]
     )
 
@@ -1043,46 +886,39 @@ def test_combo_yield_rank_shadow_emits_nullable_int_ranks() -> None:
 
     rows = pd.DataFrame(
         [
-            {
-                "symbol": "NVDA",
-                "candidate_pair_id": "combo_yield:NVDA:NVDA_P100:NVDA_C110",
-                "put_contract_symbol": "NVDA_P100",
-                "call_contract_symbol": "NVDA_C110",
-                "funding_accepted": True,
-                "premium_funding_score": 0.9,
-                "net_credit_retention": 0.80,
-                "call_cost_to_put_credit": 0.20,
-                "call_delta": 0.18,
-                "call_spread_ratio": 0.12,
-                "call_open_interest": 500,
-                "call_payoff_multiple_at_1_5_sigma": 1.8,
-                "call_payoff_multiple_at_2_0_sigma": 4.0,
-                "put_assignment_margin_pct": 0.05,
-                "put_only_annualized_net_return": 0.14,
-                "combo_spread_ratio": 0.20,
-                "annualized_net_credit_yield": 0.09,
-                "residual_premium_ratio": 0.80,
-            },
-            {
-                "symbol": "NVDA",
-                "candidate_pair_id": "combo_yield:NVDA:NVDA_P100:NVDA_C115",
-                "put_contract_symbol": "NVDA_P100",
-                "call_contract_symbol": "NVDA_C115",
-                "funding_accepted": True,
-                "premium_funding_score": 1.1,
-                "net_credit_retention": 0.88,
-                "call_cost_to_put_credit": 0.12,
-                "call_delta": 0.10,
-                "call_spread_ratio": 0.08,
-                "call_open_interest": 900,
-                "call_payoff_multiple_at_1_5_sigma": 1.0,
-                "call_payoff_multiple_at_2_0_sigma": 3.0,
-                "put_assignment_margin_pct": 0.05,
-                "put_only_annualized_net_return": 0.14,
-                "combo_spread_ratio": 0.15,
-                "annualized_net_credit_yield": 0.11,
-                "residual_premium_ratio": 0.88,
-            },
+            _shadow_rank_row(
+                symbol="NVDA",
+                candidate_pair_id="combo_yield:NVDA:NVDA_P100:NVDA_C110",
+                put_contract_symbol="NVDA_P100",
+                premium_funding_score=0.9,
+                net_credit_retention=0.80,
+                call_cost_to_put_credit=0.20,
+                call_delta=0.18,
+                call_spread_ratio=0.12,
+                call_payoff_multiple_at_1_5_sigma=1.8,
+                call_payoff_multiple_at_2_0_sigma=4.0,
+                put_only_annualized_net_return=0.14,
+                combo_spread_ratio=0.20,
+                annualized_net_credit_yield=0.09,
+                residual_premium_ratio=0.80,
+            ),
+            _shadow_rank_row(
+                symbol="NVDA",
+                candidate_pair_id="combo_yield:NVDA:NVDA_P100:NVDA_C115",
+                put_contract_symbol="NVDA_P100",
+                call_contract_symbol="NVDA_C115",
+                premium_funding_score=1.1,
+                net_credit_retention=0.88,
+                call_cost_to_put_credit=0.12,
+                call_delta=0.10,
+                call_spread_ratio=0.08,
+                call_open_interest=900,
+                call_payoff_multiple_at_1_5_sigma=1.0,
+                call_payoff_multiple_at_2_0_sigma=3.0,
+                put_only_annualized_net_return=0.14,
+                annualized_net_credit_yield=0.11,
+                residual_premium_ratio=0.88,
+            ),
         ]
     )
     shadow = build_combo_yield_rank_shadow(rows)
@@ -1107,16 +943,12 @@ def test_combo_yield_rejects_crossed_call_quote(tmp_path: Path) -> None:
         df_candidates=_single_put_df(dte=44),
         symbol="NVDA",
         input_root=tmp_path,
+        # Deliberately no liquidity gates: only the crossed quote may reject this pair.
         combo_yield_cfg={
             "enabled": True,
             "call": {"min_delta": 0.10, "max_delta": 0.45},
         },
-        sell_put_cfg={
-            "enabled": True,
-            "strategy": "insurance_underwriting",
-            "min_dte": 20,
-            "max_dte": 60,
-        },
+        sell_put_cfg=_sell_put_cfg(),
     )
 
     assert pairs.empty

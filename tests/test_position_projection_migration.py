@@ -127,6 +127,29 @@ def _acceptance(shadow: dict[str, object]) -> dict[str, object]:
     )
 
 
+def _migrated(tmp_path: Path) -> Path:
+    path = _legacy_store(tmp_path)
+    _apply(path)
+    return path
+
+
+def _shadow(path: Path) -> dict[str, object]:
+    return module.verify_position_projection_migration(path, shadow=True)
+
+
+def _activate(
+    path: Path,
+    *,
+    acceptance: dict[str, object],
+    shadow: dict[str, object],
+) -> dict[str, object]:
+    return module.activate_position_projection_checkpoints(
+        path,
+        acceptance_manifest=acceptance,
+        shadow_manifest=shadow,
+    )
+
+
 def test_migration_write_connection_fails_closed_when_wal_is_unavailable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -416,8 +439,7 @@ def test_apply_fails_closed_on_stored_event_account_conflict(
 
 
 def test_verify_detects_lot_drift(tmp_path: Path) -> None:
-    path = _legacy_store(tmp_path)
-    _apply(path)
+    path = _migrated(tmp_path)
     with sqlite3.connect(path) as conn:
         row = conn.execute(
             "SELECT fields_json FROM position_lots WHERE record_id='lot-1'"
@@ -435,16 +457,11 @@ def test_verify_detects_lot_drift(tmp_path: Path) -> None:
 
 
 def test_activation_binds_exact_store_and_deactivate_preserves_rows(tmp_path: Path) -> None:
-    path = _legacy_store(tmp_path)
-    _apply(path)
-    shadow = module.verify_position_projection_migration(path, shadow=True)
+    path = _migrated(tmp_path)
+    shadow = _shadow(path)
     acceptance = _acceptance(shadow)
 
-    activated = module.activate_position_projection_checkpoints(
-        path,
-        acceptance_manifest=acceptance,
-        shadow_manifest=shadow,
-    )
+    activated = _activate(path, acceptance=acceptance, shadow=shadow)
     assert activated["checkpoint_mode"] == "enabled"
     status = module.position_projection_migration_status(path)
     assert status["checkpoint_mode"] == "enabled"
@@ -464,83 +481,59 @@ def test_activation_binds_exact_store_and_deactivate_preserves_rows(tmp_path: Pa
 
 
 def test_activation_rejects_incomplete_acceptance_components(tmp_path: Path) -> None:
-    path = _legacy_store(tmp_path)
-    _apply(path)
-    shadow = module.verify_position_projection_migration(path, shadow=True)
+    path = _migrated(tmp_path)
+    shadow = _shadow(path)
     acceptance = _acceptance(shadow)
     acceptance.pop("manifest_hash")
     acceptance["components"]["lot_diff_publication"] = {"status": "fail"}
     acceptance = module._manifest(acceptance)
 
     with pytest.raises(ValueError, match="component gates"):
-        module.activate_position_projection_checkpoints(
-            path,
-            acceptance_manifest=acceptance,
-            shadow_manifest=shadow,
-        )
+        _activate(path, acceptance=acceptance, shadow=shadow)
 
 
 def test_activation_rejects_malformed_component_and_reference_host_evidence(
     tmp_path: Path,
 ) -> None:
-    path = _legacy_store(tmp_path)
-    _apply(path)
-    shadow = module.verify_position_projection_migration(path, shadow=True)
+    path = _migrated(tmp_path)
+    shadow = _shadow(path)
 
     malformed = _acceptance(shadow)
     malformed.pop("manifest_hash")
     malformed["components"]["lot_diff_publication"] = "pass"
     with pytest.raises(ValueError, match="component gates"):
-        module.activate_position_projection_checkpoints(
-            path,
-            acceptance_manifest=module._manifest(malformed),
-            shadow_manifest=shadow,
-        )
+        _activate(path, acceptance=module._manifest(malformed), shadow=shadow)
 
     wrong_host = _acceptance(shadow)
     wrong_host.pop("manifest_hash")
     wrong_host["reference_host"]["expected_fingerprint"] = "c" * 64
     with pytest.raises(ValueError, match="reference host"):
-        module.activate_position_projection_checkpoints(
-            path,
-            acceptance_manifest=module._manifest(wrong_host),
-            shadow_manifest=shadow,
-        )
+        _activate(path, acceptance=module._manifest(wrong_host), shadow=shadow)
 
 
 def test_activation_rejects_loaded_source_commit_drift(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    path = _legacy_store(tmp_path)
-    _apply(path)
-    shadow = module.verify_position_projection_migration(path, shadow=True)
+    path = _migrated(tmp_path)
+    shadow = _shadow(path)
     acceptance = _acceptance(shadow)
     monkeypatch.setattr(module, "_source_commit", lambda: "different-source-commit")
 
     with pytest.raises(ValueError, match="loaded source commit"):
-        module.activate_position_projection_checkpoints(
-            path,
-            acceptance_manifest=acceptance,
-            shadow_manifest=shadow,
-        )
+        _activate(path, acceptance=acceptance, shadow=shadow)
 
 
 def test_activation_rejects_stale_generation_binding(tmp_path: Path) -> None:
-    path = _legacy_store(tmp_path)
-    _apply(path)
-    shadow = module.verify_position_projection_migration(path, shadow=True)
+    path = _migrated(tmp_path)
+    shadow = _shadow(path)
     acceptance = _acceptance(shadow)
     event = _event("open-2", event_time_ms=2_000)
     repo = SQLiteOptionPositionsRepository(path)
     assert repo.upsert_trade_event(event) is True
 
     with pytest.raises(ValueError, match="verification|stale"):
-        module.activate_position_projection_checkpoints(
-            path,
-            acceptance_manifest=acceptance,
-            shadow_manifest=shadow,
-        )
+        _activate(path, acceptance=acceptance, shadow=shadow)
 
 
 @pytest.mark.parametrize(
@@ -556,24 +549,18 @@ def test_activation_rejects_projector_implementation_and_schema_cookie_drift(
     tmp_path: Path,
     mutation: str,
 ) -> None:
-    path = _legacy_store(tmp_path)
-    _apply(path)
-    shadow = module.verify_position_projection_migration(path, shadow=True)
+    path = _migrated(tmp_path)
+    shadow = _shadow(path)
     acceptance = _acceptance(shadow)
     with sqlite3.connect(path) as conn:
         conn.execute(mutation)
 
     with pytest.raises(ValueError, match="verification|stale"):
-        module.activate_position_projection_checkpoints(
-            path,
-            acceptance_manifest=acceptance,
-            shadow_manifest=shadow,
-        )
+        _activate(path, acceptance=acceptance, shadow=shadow)
 
 
 def test_status_reports_generation_mismatch_and_fails_closed(tmp_path: Path) -> None:
-    path = _legacy_store(tmp_path)
-    _apply(path)
+    path = _migrated(tmp_path)
     with sqlite3.connect(path) as conn:
         conn.execute(
             "UPDATE position_projection_heads SET built_source_generation=-1 "

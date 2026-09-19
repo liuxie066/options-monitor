@@ -21,6 +21,65 @@ def _open_port(monkeypatch):
     yield
 
 
+class _FakeHandlerBase:
+    pass
+
+
+def _install_fake_sdk(monkeypatch, context) -> None:
+    monkeypatch.setitem(
+        sys.modules,
+        "futu",
+        SimpleNamespace(OpenSecTradeContext=context, TradeDealHandlerBase=_FakeHandlerBase),
+    )
+
+
+def _health_context(get_global_state):
+    """Fake OpenSecTradeContext whose instance count and health answer are observable."""
+
+    class _Context:
+        instances = 0
+
+        def __init__(self, **_kwargs):
+            type(self).instances += 1
+
+        def set_sync_query_connect_timeout(self, timeout):
+            assert timeout == 2
+            self.connect_timeout = timeout
+
+        def set_handler(self, _handler):
+            return None
+
+        def start(self):
+            return None
+
+        def get_global_state(self):
+            return get_global_state()
+
+        def close(self):
+            return None
+
+    return _Context
+
+
+def _connection_reset():
+    raise ConnectionResetError("connection reset")
+
+
+def _blocking_context(release: threading.Event, *, log_phone_verification: bool = False):
+    """Fake OpenSecTradeContext whose constructor blocks until `release` is set."""
+
+    class _BlockingContext:
+        def __init__(self, **_kwargs):
+            if log_phone_verification:
+                logging.getLogger("FTConsoleLog").warning(
+                    "[open_context_base.py:407] _init_connect_sync: init connect fail: "
+                    "msg=需要手机验证码 context=<futu.trade.open_trade_context.OpenSecTradeContext object>"
+                )
+            release.wait(5)
+
+    return _BlockingContext
+
+
 def test_trade_push_listener_isolates_callback_exception(monkeypatch) -> None:
     class _FakeData:
         def to_dict(self, orient: str) -> list[dict]:
@@ -70,75 +129,22 @@ def test_trade_push_listener_isolates_callback_exception(monkeypatch) -> None:
 
 
 def test_trade_push_listener_health_uses_existing_trade_context(monkeypatch) -> None:
-    class _FakeHandlerBase:
-        pass
-
-    class _FakeContext:
-        instances = 0
-
-        def __init__(self, **_kwargs):
-            type(self).instances += 1
-
-        def set_sync_query_connect_timeout(self, timeout):
-            assert timeout == 2
-            self.connect_timeout = timeout
-
-        def set_handler(self, _handler):
-            return None
-
-        def start(self):
-            return None
-
-        def get_global_state(self):
-            return 0, {"program_status_type": "READY", "trd_logined": True, "qot_logined": False}
-
-        def close(self):
-            return None
-
-    monkeypatch.setitem(
-        sys.modules,
-        "futu",
-        SimpleNamespace(OpenSecTradeContext=_FakeContext, TradeDealHandlerBase=_FakeHandlerBase),
+    context = _health_context(
+        lambda: (0, {"program_status_type": "READY", "trd_logined": True, "qot_logined": False})
     )
+    _install_fake_sdk(monkeypatch, context)
     listener = OpenDTradePushListener(host="127.0.0.1", port=11111, on_deal=lambda _row: None)
 
     listener.start()
     listener.check_health()
 
-    assert _FakeContext.instances == 1
+    assert context.instances == 1
 
 
 def test_trade_push_listener_health_raises_terminal_phone_verification(monkeypatch) -> None:
     from src.infrastructure.futu_trade_push import TradeIntakeAuthRequired
 
-    class _FakeHandlerBase:
-        pass
-
-    class _FakeContext:
-        def __init__(self, **_kwargs):
-            return None
-
-        def set_sync_query_connect_timeout(self, timeout):
-            assert timeout == 2
-            self.connect_timeout = timeout
-
-        def set_handler(self, _handler):
-            return None
-
-        def start(self):
-            return None
-
-        def get_global_state(self):
-            return -1, "需要手机验证码"
-
-        def close(self):
-            return None
-
-    monkeypatch.setitem(
-        sys.modules,
-        "futu",
-        SimpleNamespace(OpenSecTradeContext=_FakeContext, TradeDealHandlerBase=_FakeHandlerBase),
-    )
+    _install_fake_sdk(monkeypatch, _health_context(lambda: (-1, "需要手机验证码")))
     listener = OpenDTradePushListener(host="127.0.0.1", port=11111, on_deal=lambda _row: None)
     listener.start()
 
@@ -150,34 +156,7 @@ def test_trade_push_listener_health_raises_terminal_phone_verification(monkeypat
 
 
 def test_trade_push_listener_health_keeps_disconnect_retryable(monkeypatch) -> None:
-    class _FakeHandlerBase:
-        pass
-
-    class _FakeContext:
-        def __init__(self, **_kwargs):
-            return None
-
-        def set_sync_query_connect_timeout(self, timeout):
-            assert timeout == 2
-            self.connect_timeout = timeout
-
-        def set_handler(self, _handler):
-            return None
-
-        def start(self):
-            return None
-
-        def get_global_state(self):
-            raise ConnectionResetError("connection reset")
-
-        def close(self):
-            return None
-
-    monkeypatch.setitem(
-        sys.modules,
-        "futu",
-        SimpleNamespace(OpenSecTradeContext=_FakeContext, TradeDealHandlerBase=_FakeHandlerBase),
-    )
+    _install_fake_sdk(monkeypatch, _health_context(_connection_reset))
     listener = OpenDTradePushListener(host="127.0.0.1", port=11111, on_deal=lambda _row: None)
     listener.start()
 
@@ -192,21 +171,8 @@ def test_trade_push_listener_detects_auth_while_constructor_blocks(monkeypatch) 
 
     release_constructor = threading.Event()
 
-    class _FakeHandlerBase:
-        pass
-
-    class _BlockingContext:
-        def __init__(self, **_kwargs):
-            logging.getLogger("FTConsoleLog").warning(
-                "[open_context_base.py:407] _init_connect_sync: init connect fail: "
-                "msg=需要手机验证码 context=<futu.trade.open_trade_context.OpenSecTradeContext object>"
-            )
-            release_constructor.wait(5)
-
-    monkeypatch.setitem(
-        sys.modules,
-        "futu",
-        SimpleNamespace(OpenSecTradeContext=_BlockingContext, TradeDealHandlerBase=_FakeHandlerBase),
+    _install_fake_sdk(
+        monkeypatch, _blocking_context(release_constructor, log_phone_verification=True)
     )
     sdk_logger = logging.getLogger("FTConsoleLog")
     handlers_before = list(sdk_logger.handlers)
@@ -227,18 +193,7 @@ def test_trade_push_listener_cancels_blocked_constructor_and_removes_handler(mon
 
     release_constructor = threading.Event()
 
-    class _FakeHandlerBase:
-        pass
-
-    class _BlockingContext:
-        def __init__(self, **_kwargs):
-            release_constructor.wait(5)
-
-    monkeypatch.setitem(
-        sys.modules,
-        "futu",
-        SimpleNamespace(OpenSecTradeContext=_BlockingContext, TradeDealHandlerBase=_FakeHandlerBase),
-    )
+    _install_fake_sdk(monkeypatch, _blocking_context(release_constructor))
     sdk_logger = logging.getLogger("FTConsoleLog")
     handlers_before = list(sdk_logger.handlers)
     cancel_event = threading.Event()
@@ -258,18 +213,11 @@ def test_trade_push_listener_cancels_blocked_constructor_and_removes_handler(mon
 
 
 def test_trade_push_listener_constructor_error_removes_handler(monkeypatch) -> None:
-    class _FakeHandlerBase:
-        pass
-
     class _FailingContext:
         def __init__(self, **_kwargs):
             raise ConnectionRefusedError("refused")
 
-    monkeypatch.setitem(
-        sys.modules,
-        "futu",
-        SimpleNamespace(OpenSecTradeContext=_FailingContext, TradeDealHandlerBase=_FakeHandlerBase),
-    )
+    _install_fake_sdk(monkeypatch, _FailingContext)
     sdk_logger = logging.getLogger("FTConsoleLog")
     handlers_before = list(sdk_logger.handlers)
     listener = OpenDTradePushListener(host="127.0.0.1", port=11111, on_deal=lambda _row: None)
@@ -287,11 +235,7 @@ def test_listener_raises_typed_unreachable_when_port_closed(monkeypatch) -> None
     from src.infrastructure.futu_gateway import FutuGatewayUnreachableError
 
     monkeypatch.setattr(mod, "port_open", lambda host, port: False)
-    monkeypatch.setitem(
-        sys.modules,
-        "futu",
-        SimpleNamespace(OpenSecTradeContext=object, TradeDealHandlerBase=object),
-    )
+    _install_fake_sdk(monkeypatch, object)
 
     listener = OpenDTradePushListener(host="127.0.0.9", port=11119, on_deal=lambda payload: None)
     with pytest.raises(FutuGatewayUnreachableError):

@@ -62,51 +62,64 @@ def _bool_query(payload: dict[str, Any], name: str, query: dict[str, str]) -> No
         query[name] = "true" if bool(payload[name]) else "false"
 
 
+# Per-view request scope.  Each entry declares, in order: the account selector
+# the view accepts ("none", "single", "list", or "list_or_single"), the payload
+# fields forwarded verbatim as query strings, and the boolean flags forwarded.
+_VIEW_SCOPE_SPECS: dict[str, tuple[str, tuple[str, ...], tuple[str, ...]]] = {
+    "accounts": ("none", (), ("include_default",)),
+    "overview": ("list", ("price_timeout",), ("include_details",)),
+    "holdings": ("single", (), ("include_cash", "group_by_market", "include_price")),
+    "cash": ("single", (), ()),
+    "nav": ("single", ("days",), ()),
+    "distribution": ("list_or_single", (), ("by_asset", "include_value", "group_cash")),
+    "full_report": ("single", ("price_timeout",), ()),
+}
+
+
 def _request_scope(view: str, payload: dict[str, Any]) -> tuple[dict[str, str], dict[str, Any]]:
     query: dict[str, str] = {}
     scope: dict[str, Any] = {"view": view}
+    spec = _VIEW_SCOPE_SPECS.get(view)
+    if spec is None:
+        return query, scope
 
-    if view == "accounts":
-        _bool_query(payload, "include_default", query)
-    elif view == "overview":
-        accounts = [str(item).strip() for item in payload.get("accounts") or [] if str(item).strip()]
-        if accounts:
-            query["accounts"] = ",".join(accounts)
-            scope["accounts"] = accounts
-        if "price_timeout" in payload:
-            query["price_timeout"] = str(payload["price_timeout"])
-        _bool_query(payload, "include_details", query)
-    elif view == "holdings":
-        query["account"] = str(payload["account"]).strip()
-        scope["account"] = query["account"]
-        for name in ("include_cash", "group_by_market", "include_price"):
-            _bool_query(payload, name, query)
-    elif view == "cash":
-        query["account"] = str(payload["account"]).strip()
-        scope["account"] = query["account"]
-    elif view == "nav":
-        query["account"] = str(payload["account"]).strip()
-        scope["account"] = query["account"]
-        if "days" in payload:
-            query["days"] = str(payload["days"])
-    elif view == "distribution":
-        account = str(payload.get("account") or "").strip()
-        accounts = [str(item).strip() for item in payload.get("accounts") or [] if str(item).strip()]
-        if accounts:
-            query["accounts"] = ",".join(accounts)
-            scope["accounts"] = accounts
-        elif account:
-            query["account"] = account
-            scope["account"] = account
-        for name in ("by_asset", "include_value", "group_cash"):
-            _bool_query(payload, name, query)
-    elif view == "full_report":
-        query["account"] = str(payload["account"]).strip()
-        scope["account"] = query["account"]
-        if "price_timeout" in payload:
-            query["price_timeout"] = str(payload["price_timeout"])
-
+    account_selector, forwarded_fields, bool_fields = spec
+    _apply_account_selector(account_selector, payload, query, scope)
+    for name in forwarded_fields:
+        if name in payload:
+            query[name] = str(payload[name])
+    for name in bool_fields:
+        _bool_query(payload, name, query)
     return query, scope
+
+
+def _apply_account_selector(
+    selector: str,
+    payload: dict[str, Any],
+    query: dict[str, str],
+    scope: dict[str, Any],
+) -> None:
+    if selector == "none":
+        return
+    if selector == "single":
+        _set_single_account(payload, query, scope)
+        return
+    accounts = [str(item).strip() for item in payload.get("accounts") or [] if str(item).strip()]
+    if accounts:
+        query["accounts"] = ",".join(accounts)
+        scope["accounts"] = accounts
+        return
+    if selector != "list_or_single":
+        return
+    account = str(payload.get("account") or "").strip()
+    if account:
+        query["account"] = account
+        scope["account"] = account
+
+
+def _set_single_account(payload: dict[str, Any], query: dict[str, str], scope: dict[str, Any]) -> None:
+    query["account"] = str(payload["account"]).strip()
+    scope["account"] = query["account"]
 
 
 def _validate_input(payload: dict[str, Any]) -> None:

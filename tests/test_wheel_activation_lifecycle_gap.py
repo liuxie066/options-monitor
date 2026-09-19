@@ -89,17 +89,12 @@ def test_publish_failure_preserves_historical_assignment_rules_and_same_request_
         "src.application.ledger.repository_assigned_stock.now_ms",
         return_value=500,
     ), pytest.raises(AgentToolError) as failure:
-        _call(
-            root,
-            apply=True,
-            sha=preview["expected_source_sha256"],
-        )
+        _call(root, apply=True, sha=preview["expected_source_sha256"])
 
     failed = failure.value.details
     durable_window = failed["window_receipt"]["expected_config_descriptor"]
     assert failed["latest_window"] == {
-        **durable_window,
-        "effective_policy_hash": durable_window["policy_sha256"],
+        **durable_window, "effective_policy_hash": durable_window["policy_sha256"],
         "policy_binding_revision": 0,
     }
     assert failed["failure_phase"] == "config_publish"
@@ -111,10 +106,7 @@ def test_publish_failure_preserves_historical_assignment_rules_and_same_request_
 
     repo = SQLiteOptionPositionsRepository(failed["paths"]["sqlite_path"])
     assignment, lot_id, _assignment_event = _persist_put_assignment(
-        repo,
-        prefix="publish-gap",
-        opened_at_ms=1_000,
-        assigned_at_ms=2_000,
+        repo, prefix="publish-gap", opened_at_ms=1_000, assigned_at_ms=2_000
     )
     wheel_events = repo.list_wheel_events(account="lx")
     assert assignment["wheel_event_id"] == wheel_events[0]["event_id"]
@@ -186,16 +178,8 @@ def test_publish_failure_preserves_historical_assignment_rules_and_same_request_
     )
     assert ended["lifecycle_status_after"] == "manual_ended"
 
-    monkeypatch.setattr(
-        publishing,
-        "publish_yaml_config_generation_locked",
-        publisher,
-    )
-    recovered = _call(
-        root,
-        apply=True,
-        sha=preview["expected_source_sha256"],
-    )
+    monkeypatch.setattr(publishing, "publish_yaml_config_generation_locked", publisher)
+    recovered = _call(root, apply=True, sha=preview["expected_source_sha256"])
     assert recovered["ready"] is True
     assert recovered["window_receipt"]["write_applied"] is False
     assert recovered["expected_config_descriptor"] == durable_window
@@ -205,36 +189,22 @@ def test_publish_failure_preserves_historical_assignment_rules_and_same_request_
         "src.application.ledger.repository_assigned_stock.now_ms",
         return_value=3_000,
     ):
-        disabled = _apply(
-            root,
-            action="disable",
-            generation=1,
-            request="publish-gap-disable",
-        )
+        disabled = _apply(root, action="disable", generation=1, request="publish-gap-disable")
     assert disabled["latest_window"]["deactivated_at_ms"] == 3_000
 
     with patch(
         "src.application.ledger.repository_assigned_stock.now_ms",
         return_value=5_000,
     ):
-        reenabled = _apply(
-            root,
-            generation=1,
-            request="publish-gap-reenable",
-        )
+        reenabled = _apply(root, generation=1, request="publish-gap-reenable")
     assert reenabled["latest_window"]["generation"] == 2
     assert reenabled["latest_window"]["activated_at_ms"] == 5_000
 
     late, _late_lot_id, _late_event = _persist_put_assignment(
-        repo,
-        prefix="late-active-window",
-        opened_at_ms=2_100,
-        assigned_at_ms=2_500,
+        repo, prefix="late-active-window", opened_at_ms=2_100, assigned_at_ms=2_500
     )
     late_branch_event = next(
-        event
-        for event in repo.list_wheel_events(account="lx")
-        if event["event_id"] == late["wheel_event_id"]
+        event for event in repo.list_wheel_events(account="lx") if event["event_id"] == late["wheel_event_id"]
     )
     assert late_branch_event["payload"]["activation_window"]["generation"] == 1
     assert (
@@ -244,10 +214,7 @@ def test_publish_failure_preserves_historical_assignment_rules_and_same_request_
 
     before_gap = repo.list_wheel_events(account="lx")
     gap, _gap_lot_id, gap_event = _persist_put_assignment(
-        repo,
-        prefix="closed-window-gap",
-        opened_at_ms=3_500,
-        assigned_at_ms=4_000,
+        repo, prefix="closed-window-gap", opened_at_ms=3_500, assigned_at_ms=4_000
     )
     assert gap.get("wheel_event_id") is None
     assert repo.list_wheel_events(account="lx") == before_gap

@@ -6,6 +6,22 @@ from typing import Any
 import pandas as pd
 
 
+class _ListGateway:
+    """Gateway whose snapshot feed returns a plain list, as the OpenD path does."""
+
+    def get_snapshot(self, codes):
+        return [{"code": list(codes)[0], "last_price": 10}]
+
+    def close(self):
+        pass
+
+
+def _refresh(mod, *, shares: float = 100, **kwargs):
+    return mod.refresh_assigned_stock_quote_snapshots(
+        [{"symbol": "NVDA", "shares_remaining": shares}], **kwargs
+    )
+
+
 def test_refresh_assigned_stock_quote_snapshots_reuses_gateway(monkeypatch, tmp_path: Path) -> None:
     import src.application.positions.assigned_stock_quotes as mod
 
@@ -29,19 +45,9 @@ def test_refresh_assigned_stock_quote_snapshots_reuses_gateway(monkeypatch, tmp_
 
     monkeypatch.setattr(mod, "build_ready_futu_quote_gateway", _build_gateway)
 
-    result = mod.refresh_assigned_stock_quote_snapshots(
-        [{"symbol": "NVDA", "shares_remaining": 100}],
-        cfg={
-            "symbols": [
-                {
-                    "symbol": "NVDA",
-                    "fetch": {"source": "futu", "host": "127.0.0.2", "port": 22222},
-                }
-            ]
-        },
-        base_dir=tmp_path,
-        now_ms=lambda: 1780000000000,
-    )
+    result = _refresh(mod, cfg={"symbols": [{"symbol": "NVDA",
+                                             "fetch": {"source": "futu", "host": "127.0.0.2", "port": 22222}}]},
+                      base_dir=tmp_path, now_ms=lambda: 1780000000000)
 
     assert calls[0]["gateway_kwargs"]["host"] == "127.0.0.2"
     assert calls[0]["gateway_kwargs"]["port"] == 22222
@@ -89,12 +95,8 @@ def test_refresh_assigned_stock_quote_snapshots_separates_alias_and_state_base_d
     monkeypatch.setattr(mod, "normalize_underlier", _normalize_underlier)
     monkeypatch.setattr(mod, "get_spot_opend", _get_spot_opend)
 
-    result = mod.refresh_assigned_stock_quote_snapshots(
-        [{"symbol": "NVDA", "shares_remaining": 100}],
-        cfg={"symbols": [{"symbol": "NVDA", "fetch": {"source": "futu"}}]},
-        base_dir=alias_base_dir,
-        state_base_dir=state_base_dir,
-    )
+    result = _refresh(mod, cfg={"symbols": [{"symbol": "NVDA", "fetch": {"source": "futu"}}]},
+                      base_dir=alias_base_dir, state_base_dir=state_base_dir)
 
     assert result.diagnostics["status"] == "ok"
     assert calls == [
@@ -115,11 +117,7 @@ def test_refresh_assigned_stock_quote_snapshots_degrades_when_price_missing(monk
 
     monkeypatch.setattr(mod, "build_ready_futu_quote_gateway", lambda **_kwargs: _Gateway())
 
-    result = mod.refresh_assigned_stock_quote_snapshots(
-        [{"symbol": "NVDA", "shares_remaining": 100}],
-        cfg={"symbols": [{"symbol": "NVDA", "fetch": {"source": "futu"}}]},
-        base_dir=tmp_path,
-    )
+    result = _refresh(mod, cfg={"symbols": [{"symbol": "NVDA", "fetch": {"source": "futu"}}]}, base_dir=tmp_path)
 
     assert result.quote_snapshots == []
     assert result.diagnostics["status"] == "missing_quote"
@@ -135,25 +133,12 @@ def test_assigned_stock_complete_explicit_override_does_not_require_canonical_ro
 
     calls: list[dict[str, Any]] = []
 
-    class _Gateway:
-        def get_snapshot(self, codes):
-            return [{"code": list(codes)[0], "last_price": 10}]
-
-        def close(self):
-            pass
-
     monkeypatch.setattr(
         mod,
         "build_ready_futu_quote_gateway",
-        lambda **kwargs: calls.append(kwargs) or _Gateway(),
+        lambda **kwargs: calls.append(kwargs) or _ListGateway(),
     )
-    result = mod.refresh_assigned_stock_quote_snapshots(
-        [{"symbol": "NVDA", "shares_remaining": 1}],
-        cfg={},
-        host="diagnostic",
-        port=22222,
-        base_dir=tmp_path,
-    )
+    result = _refresh(mod, shares=1, cfg={}, host="diagnostic", port=22222, base_dir=tmp_path)
 
     assert calls[0]["host"] == "diagnostic"
     assert calls[0]["port"] == 22222
@@ -165,24 +150,14 @@ def test_assigned_stock_partial_override_overlays_canonical_route(monkeypatch, t
 
     calls: list[dict[str, Any]] = []
 
-    class _Gateway:
-        def get_snapshot(self, codes):
-            return [{"code": list(codes)[0], "last_price": 10}]
-
-        def close(self):
-            pass
-
     monkeypatch.setattr(
         mod,
         "build_ready_futu_quote_gateway",
-        lambda **kwargs: calls.append(kwargs) or _Gateway(),
+        lambda **kwargs: calls.append(kwargs) or _ListGateway(),
     )
-    result = mod.refresh_assigned_stock_quote_snapshots(
-        [{"symbol": "NVDA", "shares_remaining": 1}],
-        cfg={"symbols": [{"symbol": "NVDA", "fetch": {"source": "futu", "host": "canonical", "port": 11111}}]},
-        port=33333,
-        base_dir=tmp_path,
-    )
+    result = _refresh(mod, shares=1, cfg={"symbols": [{"symbol": "NVDA", "fetch": {"source": "futu", "host": "canonical",
+                                                                                 "port": 11111}}]},
+                      port=33333, base_dir=tmp_path)
 
     assert calls[0]["host"] == "canonical"
     assert calls[0]["port"] == 33333

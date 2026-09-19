@@ -8,10 +8,8 @@ from datetime import datetime, timezone, timedelta
 import pytest
 
 
-def test_scan_scheduler_scan_is_per_account() -> None:
-    from src.application.scan_scheduler import decide
-
-    schedule_cfg = {
+def _schedule_cfg() -> dict:
+    return {
         'enabled': True,
         'timezone': 'Asia/Hong_Kong',
         'cron_interval_min': 10,
@@ -28,19 +26,27 @@ def test_scan_scheduler_scan_is_per_account() -> None:
         'beijing_timezone': 'Asia/Shanghai',
     }
 
-    t0 = datetime(2026, 4, 1, 1, 40, 0, tzinfo=timezone.utc)  # 09:40 HKT target
-    t1 = t0 + timedelta(minutes=10)
 
-    state = {
-        'last_run_utc_by_account': {
-            'lx': t0.isoformat(),
-        },
+def _state_last_run_lx(iso_utc: str) -> dict:
+    return {
+        'last_run_utc_by_account': {'lx': iso_utc},
         'last_notify_utc': None,
         'last_notify_utc_by_account': {},
     }
 
-    d_lx = decide(schedule_cfg, state, t1, account='lx', schedule_key='schedule_hk')
-    d_sy = decide(schedule_cfg, state, t1, account='sy', schedule_key='schedule_hk')
+
+T0 = datetime(2026, 4, 1, 1, 40, 0, tzinfo=timezone.utc)  # 09:40 HKT target
+T1 = T0 + timedelta(minutes=10)
+
+
+def test_scan_scheduler_scan_is_per_account() -> None:
+    from src.application.scan_scheduler import decide
+
+    schedule_cfg = _schedule_cfg()
+    state = _state_last_run_lx(T0.isoformat())
+
+    d_lx = decide(schedule_cfg, state, T1, account='lx', schedule_key='schedule_hk')
+    d_sy = decide(schedule_cfg, state, T1, account='sy', schedule_key='schedule_hk')
 
     assert d_lx.should_run_scan is False
     assert d_sy.should_run_scan is True
@@ -49,36 +55,18 @@ def test_scan_scheduler_scan_is_per_account() -> None:
 def test_scan_scheduler_reads_legacy_per_account_scan_state() -> None:
     from src.application.scan_scheduler import decide
 
-    schedule_cfg = {
-        'enabled': True,
-        'timezone': 'Asia/Hong_Kong',
-        'cron_interval_min': 10,
-        'run_window': {
-            'start': '09:30',
-            'end': '16:00',
-            'breaks': [],
-        },
-        'run_points': {
-            'start_plus_min': 10,
-            'hourly_minute': 0,
-            'end_minus_min': 10,
-        },
-        'beijing_timezone': 'Asia/Shanghai',
-    }
-
-    t0 = datetime(2026, 4, 1, 1, 40, 0, tzinfo=timezone.utc)  # 09:40 HKT target
-    t1 = t0 + timedelta(minutes=10)
+    schedule_cfg = _schedule_cfg()
     state = {
-        'last_scan_utc': t0.isoformat(),
+        'last_scan_utc': T0.isoformat(),
         'last_scan_utc_by_account': {
-            'lx': t0.isoformat(),
+            'lx': T0.isoformat(),
         },
         'last_notify_utc': None,
         'last_notify_utc_by_account': {},
     }
 
-    d_lx = decide(schedule_cfg, state, t1, account='lx', schedule_key='schedule_hk')
-    d_sy = decide(schedule_cfg, state, t1, account='sy', schedule_key='schedule_hk')
+    d_lx = decide(schedule_cfg, state, T1, account='lx', schedule_key='schedule_hk')
+    d_sy = decide(schedule_cfg, state, T1, account='sy', schedule_key='schedule_hk')
 
     assert d_lx.should_run_scan is False
     assert d_sy.should_run_scan is True
@@ -87,37 +75,10 @@ def test_scan_scheduler_reads_legacy_per_account_scan_state() -> None:
 def test_scheduler_decision_payload_uses_account_scan_clock(tmp_path) -> None:
     from src.application.scan_scheduler import build_scheduler_decision_payload
 
-    schedule_cfg = {
-        'enabled': True,
-        'timezone': 'Asia/Hong_Kong',
-        'cron_interval_min': 10,
-        'run_window': {
-            'start': '09:30',
-            'end': '16:00',
-            'breaks': [],
-        },
-        'run_points': {
-            'start_plus_min': 10,
-            'hourly_minute': 0,
-            'end_minus_min': 10,
-        },
-        'beijing_timezone': 'Asia/Shanghai',
-    }
-    t0 = datetime(2026, 4, 1, 1, 40, 0, tzinfo=timezone.utc)
-    t1 = t0 + timedelta(minutes=10)
     config = tmp_path / 'config.us.json'
     state = tmp_path / 'scheduler_state.json'
-    config.write_text(json.dumps({'schedule': schedule_cfg}), encoding='utf-8')
-    state.write_text(
-        json.dumps(
-            {
-                'last_run_utc_by_account': {'lx': t0.isoformat()},
-                'last_notify_utc': None,
-                'last_notify_utc_by_account': {},
-            }
-        ),
-        encoding='utf-8',
-    )
+    config.write_text(json.dumps({'schedule': _schedule_cfg()}), encoding='utf-8')
+    state.write_text(json.dumps(_state_last_run_lx(T0.isoformat())), encoding='utf-8')
 
     lx = build_scheduler_decision_payload(
         config=config,
@@ -125,7 +86,7 @@ def test_scheduler_decision_payload_uses_account_scan_clock(tmp_path) -> None:
         schedule_key='schedule',
         account='lx',
         base_dir=tmp_path,
-        now_utc=t1,
+        now_utc=T1,
     )
     sy = build_scheduler_decision_payload(
         config=config,
@@ -133,7 +94,7 @@ def test_scheduler_decision_payload_uses_account_scan_clock(tmp_path) -> None:
         schedule_key='schedule',
         account='sy',
         base_dir=tmp_path,
-        now_utc=t1,
+        now_utc=T1,
     )
 
     assert lx['should_run_scan'] is False

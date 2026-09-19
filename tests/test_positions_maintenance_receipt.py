@@ -16,6 +16,32 @@ from src.application.positions.maintenance_receipt import (
 )
 
 
+def _receipt_result(**overrides) -> dict:
+    values = {
+        "mode": "applied",
+        "account": "lx",
+        "broker": "富途",
+        "grace_days": 1,
+        "as_of_utc": "2026-05-15T16:10:00+00:00",
+        "applied_closed": 1,
+        "candidates_should_close": 1,
+        "errors": [],
+        "applied": [{"record_id": "rec_1", "position_key": "pos_1"}],
+    }
+    return {**values, **overrides}
+
+
+def _minimal_result() -> dict:
+    return {"mode": "applied", "account": "lx", "applied_closed": 1, "candidates_should_close": 1, "errors": []}
+
+
+def _sender(calls: list[dict], message_id: str):
+    def _send(**kwargs):
+        calls.append(dict(kwargs))
+        return {"command_ok": True, "delivery_confirmed": True, "message_id": message_id, "returncode": 0}
+    return _send
+
+
 def test_auto_close_receipt_decision_defaults_send_applied_and_failed() -> None:
     applied = decide_auto_close_receipt(
         receipt_config={},
@@ -66,17 +92,7 @@ def test_auto_close_receipt_config_defaults_retry_unconfirmed() -> None:
 def test_auto_close_receipt_decision_skips_confirmed_duplicate() -> None:
     identity = build_auto_close_receipt_identity(
         config={"schedule": {"timezone": "Asia/Hong_Kong"}},
-        result={
-            "mode": "applied",
-            "account": "lx",
-            "broker": "富途",
-            "grace_days": 1,
-            "as_of_utc": "2026-05-15T16:10:00+00:00",
-            "applied_closed": 1,
-            "candidates_should_close": 1,
-            "errors": [],
-            "applied": [{"record_id": "rec_1", "position_key": "pos_1"}],
-        },
+        result=_receipt_result(),
     )
 
     out = decide_auto_close_receipt(
@@ -117,27 +133,17 @@ def test_send_auto_close_receipt_skips_without_route(tmp_path: Path) -> None:
 
 def test_send_auto_close_receipt_uses_existing_route_and_sender(tmp_path: Path) -> None:
     calls: list[dict] = []
-
-    def _send(**kwargs):
-        calls.append(dict(kwargs))
-        return {"command_ok": True, "delivery_confirmed": True, "message_id": "msg-auto-1", "returncode": 0}
+    _send = _sender(calls, "msg-auto-1")
 
     out = send_auto_close_receipt(
         base=tmp_path,
         config={"notifications": {"provider": "wechat_clawbot", "target": "wechat:ops"}},
         receipt_config={},
         dry_run=False,
-        result={
-            "mode": "applied",
-            "account": "lx",
-            "broker": "富途",
-            "grace_days": 1,
-            "as_of_utc": "2026-05-03T00:00:00+00:00",
-            "applied_closed": 1,
-            "candidates_should_close": 1,
-            "errors": [],
-            "applied": [{"record_id": "rec_1", "position_key": "pos_1", "expiration_ymd": "2026-05-01"}],
-        },
+        result=_receipt_result(
+            as_of_utc="2026-05-03T00:00:00+00:00",
+            applied=[{"record_id": "rec_1", "position_key": "pos_1", "expiration_ymd": "2026-05-01"}],
+        ),
         send_fn=_send,
         normalize_fn=lambda send_result: send_result,
     )
@@ -158,23 +164,14 @@ def test_send_auto_close_receipt_uses_existing_route_and_sender(tmp_path: Path) 
 def test_send_auto_close_receipt_uses_feishu_bot_target(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_bot")
     calls: list[dict] = []
-
-    def _send(**kwargs):
-        calls.append(dict(kwargs))
-        return {"command_ok": True, "delivery_confirmed": True, "message_id": "msg-auto-1", "returncode": 0}
+    _send = _sender(calls, "msg-auto-1")
 
     out = send_auto_close_receipt(
         base=tmp_path,
         config={"notifications": {"provider": "feishu_app"}},
         receipt_config={},
         dry_run=False,
-        result={
-            "mode": "applied",
-            "account": "lx",
-            "applied_closed": 1,
-            "candidates_should_close": 1,
-            "errors": [],
-        },
+        result=_minimal_result(),
         send_fn=_send,
         normalize_fn=lambda send_result: send_result,
     )
@@ -186,10 +183,7 @@ def test_send_auto_close_receipt_uses_feishu_bot_target(monkeypatch, tmp_path: P
 
 def test_send_auto_close_receipt_increments_retry_attempt_count(tmp_path: Path) -> None:
     calls: list[dict] = []
-
-    def _send(**kwargs):
-        calls.append(dict(kwargs))
-        return {"command_ok": True, "delivery_confirmed": True, "message_id": "msg-auto-2", "returncode": 0}
+    _send = _sender(calls, "msg-auto-2")
 
     out = send_auto_close_receipt(
         base=tmp_path,
@@ -292,13 +286,7 @@ def test_auto_close_receipt_preserves_normalized_feishu_size_error(monkeypatch, 
         config={"notifications": {"provider": "feishu_app"}},
         receipt_config={},
         dry_run=False,
-        result={
-            "mode": "applied",
-            "account": "lx",
-            "applied_closed": 1,
-            "candidates_should_close": 1,
-            "errors": [],
-        },
+        result=_minimal_result(),
         send_fn=lambda **_kwargs: {
             "command_ok": False,
             "delivery_confirmed": False,

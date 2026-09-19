@@ -17,21 +17,33 @@ SNAPSHOT_LIMIT = OpenDEndpointRateLimit(
 )
 
 
+def _snapshot_row(code: str, *, last_price: float = 180.0) -> dict:
+    return {
+        "code": code,
+        "last_price": last_price,
+        "update_time": "2026-08-06 10:59:00",
+        "sec_status": "NORMAL",
+        "suspension": False,
+    }
+
+
+def _observations(gateway, codes, *, batch_size: int, base_dir, **kwargs):  # type: ignore[no-untyped-def]
+    return get_underlier_observations_opend(
+        gateway,
+        codes,
+        market="US",
+        base_dir=base_dir,
+        snapshot_limit=SNAPSHOT_LIMIT,
+        snapshot_batch_size=batch_size,
+        **kwargs,
+    )
+
+
 def test_underlier_observation_binds_snapshot_and_market_state(tmp_path: Path) -> None:
     class Gateway:
         def get_snapshot(self, codes):  # type: ignore[no-untyped-def]
             assert codes == ["US.NVDA"]
-            return pd.DataFrame(
-                [
-                    {
-                        "code": "US.NVDA",
-                        "last_price": 180.0,
-                        "update_time": "2026-08-06 10:59:00",
-                        "sec_status": "NORMAL",
-                        "suspension": False,
-                    }
-                ]
-            )
+            return pd.DataFrame([_snapshot_row("US.NVDA")])
 
         def get_market_state(self, codes):  # type: ignore[no-untyped-def]
             assert codes == ["US.NVDA"]
@@ -61,25 +73,10 @@ def test_underlier_observations_batch_and_reconcile_exact_codes(
     class Gateway:
         def get_snapshot(self, codes):  # type: ignore[no-untyped-def]
             calls.append(("snapshot", list(codes)))
-            rows = [
-                {
-                    "code": code,
-                    "last_price": 300.0,
-                    "update_time": "2026-08-06 10:59:00",
-                    "sec_status": "NORMAL",
-                    "suspension": False,
-                }
-                for code in codes
-            ]
+            rows = [_snapshot_row(code, last_price=300.0) for code in codes]
             if "US.NVDA" in codes:
                 rows = [
-                    {
-                        "code": "US.NVDA",
-                        "last_price": 180.0,
-                        "update_time": "2026-08-06 10:59:00",
-                        "sec_status": "NORMAL",
-                        "suspension": False,
-                    },
+                    _snapshot_row("US.NVDA"),
                     {"code": "US.AAPL", "last_price": 200.0},
                     {"code": "US.AAPL", "last_price": 201.0},
                     {"code": "US.UNRELATED", "last_price": 999.0},
@@ -92,13 +89,11 @@ def test_underlier_observations_batch_and_reconcile_exact_codes(
                 [{"code": code, "market_state": "MORNING"} for code in codes]
             )
 
-    observations = get_underlier_observations_opend(
+    observations = _observations(
         Gateway(),
         ["US.NVDA", "US.AAPL", "US.MSFT"],
-        market="US",
+        batch_size=2,
         base_dir=tmp_path,
-        snapshot_limit=SNAPSHOT_LIMIT,
-        snapshot_batch_size=2,
         rate_limited_call=lambda **kwargs: kwargs["call"](),
         now_utc=lambda: pd.Timestamp("2026-08-06T15:00:00Z").to_pydatetime(),
     )
@@ -125,18 +120,7 @@ def test_underlier_observations_index_each_response_once(tmp_path: Path) -> None
             self.to_dict_calls += 1
             return self.rows
 
-    snapshot = CountingFrame(
-        [
-            {
-                "code": code,
-                "last_price": 180.0,
-                "update_time": "2026-08-06 10:59:00",
-                "sec_status": "NORMAL",
-                "suspension": False,
-            }
-            for code in ("US.NVDA", "US.AAPL")
-        ]
-    )
+    snapshot = CountingFrame([_snapshot_row(code) for code in ("US.NVDA", "US.AAPL")])
     market_state = CountingFrame(
         [
             {"code": code, "market_state": "MORNING"}
@@ -151,13 +135,11 @@ def test_underlier_observations_index_each_response_once(tmp_path: Path) -> None
         def get_market_state(self, _codes):  # type: ignore[no-untyped-def]
             return market_state
 
-    observations = get_underlier_observations_opend(
+    observations = _observations(
         Gateway(),
         ["US.NVDA", "US.AAPL"],
-        market="US",
+        batch_size=2,
         base_dir=tmp_path,
-        snapshot_limit=SNAPSHOT_LIMIT,
-        snapshot_batch_size=2,
         rate_limited_call=lambda **kwargs: kwargs["call"](),
         now_utc=lambda: pd.Timestamp("2026-08-06T15:00:00Z").to_pydatetime(),
     )
@@ -183,13 +165,11 @@ def test_underlier_observations_attempt_endpoints_independently(
                 [{"code": "US.NVDA", "market_state": "MORNING"}]
             )
 
-    observations = get_underlier_observations_opend(
+    observations = _observations(
         Gateway(),
         ["US.NVDA"],
-        market="US",
+        batch_size=1,
         base_dir=tmp_path,
-        snapshot_limit=SNAPSHOT_LIMIT,
-        snapshot_batch_size=1,
         rate_limited_call=lambda **kwargs: kwargs["call"](),
     )
 
@@ -213,13 +193,11 @@ def test_underlier_observations_stop_before_next_endpoint_or_chunk(
             calls.append(("state", list(codes)))
             return pd.DataFrame()
 
-    observations = get_underlier_observations_opend(
+    observations = _observations(
         Gateway(),
         ["US.NVDA", "US.AAPL"],
-        market="US",
+        batch_size=1,
         base_dir=tmp_path,
-        snapshot_limit=SNAPSHOT_LIMIT,
-        snapshot_batch_size=1,
         stop_monotonic=1.0,
         monotonic=lambda: next(ticks),
         rate_limited_call=lambda **kwargs: (
@@ -253,13 +231,11 @@ def test_underlier_observations_do_not_call_provider_after_rate_limit_deadline(
         now[0] = 1.0
         return kwargs["call"]()
 
-    observations = get_underlier_observations_opend(
+    observations = _observations(
         Gateway(),
         ["US.NVDA"],
-        market="US",
+        batch_size=1,
         base_dir=tmp_path,
-        snapshot_limit=SNAPSHOT_LIMIT,
-        snapshot_batch_size=1,
         stop_monotonic=1.0,
         monotonic=lambda: now[0],
         rate_limited_call=cross_deadline_then_call,

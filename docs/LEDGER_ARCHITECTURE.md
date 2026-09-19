@@ -913,7 +913,7 @@ expiration；只把该 fixture 的时间改为 `1_850_000_000_500` ms，使其�
 - `src/application/ledger/commands.py`：batch 输入归一化、调用 batch preflight、组装兼容结果；
 - `src/application/ledger/preflight.py`：共享 adjustment 构造校验和一次 combined preview；
 - `src/application/ledger/manual_trades.py`：事务内 advisory/current exact-equality fence；
-- `scripts/benchmark_data_storage_projection.py`：只修正 synthetic special Combo event time；
+- `scripts/benchmark_support.py`：只修正 synthetic special Combo event time；
 - `tests/test_position_projection_runtime.py`、`tests/test_research_performance_baseline.py`：行为、计数、
   原子性、runtime characterization 和 fixture 回归。
 

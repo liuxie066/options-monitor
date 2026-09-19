@@ -2077,10 +2077,3 @@ def _required_broker_trade_time_ms(deal: Any) -> int:
         suffix = f" deal_id={deal_id}" if deal_id else ""
         raise ValueError(f"broker trade event requires positive trade_time_ms; refusing event_time_ms=0{suffix}")
     return value
-
-def _position_side_from_trade(*, effect: str, trade_side: str) -> str:
-    if effect == "open":
-        return "short" if trade_side == "sell" else "long"
-    if effect == "close":
-        return "short" if trade_side == "buy" else "long"
-    return trade_side

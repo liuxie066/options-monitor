@@ -6,13 +6,13 @@ from tests.ledger_legacy_helpers import LegacyTradeEvent as TradeEvent, project_
 
 
 def _event(
-    *,
     event_id: str,
     side: str,
     position_effect: str,
     contracts: int,
     price: float,
     trade_time_ms: int,
+    *,
     option_type: str = "call",
     strike: float = 500.0,
     expiration_ymd: str = "2026-04-29",
@@ -43,16 +43,7 @@ def _event(
 
 def test_projection_creates_long_lot_for_buy_open() -> None:
     result = project_position_lot_records_with_diagnostics(
-        [
-            _event(
-                event_id="evt-open-long-1",
-                side="buy",
-                position_effect="open",
-                contracts=2,
-                price=3.5,
-                trade_time_ms=1000,
-            )
-        ]
+        [_event("evt-open-long-1", "buy", "open", 2, 3.5, 1000)]
     )
 
     assert result.diagnostics == []
@@ -66,23 +57,9 @@ def test_projection_creates_long_lot_for_buy_open() -> None:
 def test_projection_sell_close_closes_long_lot() -> None:
     result = project_position_lot_records_with_diagnostics(
         [
-            _event(
-                event_id="evt-open-long-1",
-                side="buy",
-                position_effect="open",
-                contracts=2,
-                price=3.5,
-                trade_time_ms=1000,
-            ),
-            _event(
-                event_id="evt-close-long-1",
-                side="sell",
-                position_effect="close",
-                contracts=2,
-                price=4.2,
-                trade_time_ms=2000,
-                raw_payload={"record_id": "lot_evt-open-long-1"},
-            ),
+            _event("evt-open-long-1", "buy", "open", 2, 3.5, 1000),
+            _event("evt-close-long-1", "sell", "close", 2, 4.2, 2000,
+                   raw_payload={"record_id": "lot_evt-open-long-1"}),
         ]
     )
 
@@ -100,23 +77,9 @@ def test_projection_sell_close_closes_long_lot() -> None:
 def test_projection_buy_close_still_closes_short_lot() -> None:
     result = project_position_lot_records_with_diagnostics(
         [
-            _event(
-                event_id="evt-open-short-1",
-                side="sell",
-                position_effect="open",
-                contracts=1,
-                price=5.1,
-                trade_time_ms=1000,
-            ),
-            _event(
-                event_id="evt-close-short-1",
-                side="buy",
-                position_effect="close",
-                contracts=1,
-                price=2.2,
-                trade_time_ms=2000,
-                raw_payload={"record_id": "lot_evt-open-short-1"},
-            ),
+            _event("evt-open-short-1", "sell", "open", 1, 5.1, 1000),
+            _event("evt-close-short-1", "buy", "close", 1, 2.2, 2000,
+                   raw_payload={"record_id": "lot_evt-open-short-1"}),
         ]
     )
 
@@ -132,40 +95,13 @@ def test_projection_buy_close_still_closes_short_lot() -> None:
 def test_projection_explicit_close_does_not_cross_same_strike_different_expiry() -> None:
     result = project_position_lot_records_with_diagnostics(
         [
-            _event(
-                event_id="evt-open-may",
-                side="sell",
-                position_effect="open",
-                option_type="put",
-                strike=450.0,
-                expiration_ymd="2026-05-28",
-                contracts=6,
-                price=5.1,
-                trade_time_ms=1000,
-            ),
-            _event(
-                event_id="evt-open-jun",
-                side="sell",
-                position_effect="open",
-                option_type="put",
-                strike=450.0,
-                expiration_ymd="2026-06-29",
-                contracts=3,
-                price=8.2,
-                trade_time_ms=2000,
-            ),
-            _event(
-                event_id="evt-close-jun",
-                side="buy",
-                position_effect="close",
-                option_type="put",
-                strike=450.0,
-                expiration_ymd="2026-06-29",
-                contracts=3,
-                price=1.0,
-                trade_time_ms=3000,
-                raw_payload={"record_id": "lot_evt-open-jun"},
-            ),
+            _event("evt-open-may", "sell", "open", 6, 5.1, 1000, option_type="put",
+                   strike=450.0, expiration_ymd="2026-05-28"),
+            _event("evt-open-jun", "sell", "open", 3, 8.2, 2000, option_type="put",
+                   strike=450.0, expiration_ymd="2026-06-29"),
+            _event("evt-close-jun", "buy", "close", 3, 1.0, 3000, option_type="put",
+                   strike=450.0, expiration_ymd="2026-06-29",
+                   raw_payload={"record_id": "lot_evt-open-jun"}),
         ]
     )
 
@@ -180,29 +116,11 @@ def test_projection_explicit_close_does_not_cross_same_strike_different_expiry()
 def test_projection_explicit_target_mismatch_checks_strike_and_expiry() -> None:
     result = project_position_lot_records_with_diagnostics(
         [
-            _event(
-                event_id="evt-open-may",
-                side="sell",
-                position_effect="open",
-                option_type="put",
-                strike=450.0,
-                expiration_ymd="2026-05-28",
-                contracts=6,
-                price=5.1,
-                trade_time_ms=1000,
-            ),
-            _event(
-                event_id="evt-close-wrong-expiry",
-                side="buy",
-                position_effect="close",
-                option_type="put",
-                strike=450.0,
-                expiration_ymd="2026-06-29",
-                contracts=3,
-                price=1.0,
-                trade_time_ms=2000,
-                raw_payload={"record_id": "lot_evt-open-may"},
-            ),
+            _event("evt-open-may", "sell", "open", 6, 5.1, 1000, option_type="put",
+                   strike=450.0, expiration_ymd="2026-05-28"),
+            _event("evt-close-wrong-expiry", "buy", "close", 3, 1.0, 2000, option_type="put",
+                   strike=450.0, expiration_ymd="2026-06-29",
+                   raw_payload={"record_id": "lot_evt-open-may"}),
         ]
     )
 
