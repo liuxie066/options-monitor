@@ -40,9 +40,17 @@ missing an event" is never reported as "the projection is unfaithful":
   these are *not* ①②③.
 
 The four classes are a **partition** of the differing lot ids: ①②③ own every row
-the replay did not produce, ④ takes the rest, and a lot id is never counted in
-two classes. ``c_attribution.differing_lot_count`` is the divisor the four counts
-must add up to (the module asserts it).
+the replay did not produce, ④ takes every remaining differing lot, and a lot id is
+never counted in two classes. Each class count is incremented exactly once per
+attributed item, so ``c_attribution.differing_lot_count`` — the number of distinct
+ids ①②③④ cover — is what the four counts add up to. The module asserts the two
+facts that make that arithmetic hold: the attributed ids cover every differing id,
+and none is attributed twice (``run_lot_parity_probe``). Both sides of that check
+are built from the same expressions the attribution walks, so **no store shape can
+trip it**; it fires when an edit to the attribution code breaks the partition
+(proved by injecting such an edit — it names the source and the missing ids), and
+for the same reason the test module can bind it no more tightly than the fixtures
+of the four classes do.
 
 Duplicate identities are a face-C fact (``duplicate_identity``). Faces A and B
 compare the **first** row of each identity: the second row of a collapsed pair is
@@ -50,24 +58,32 @@ the same identity read twice, not a second opinion about the payload, so it is
 *reported* on face C (``comparator-spec.md`` §2 asks for the collapse to be
 detected) instead of silently entering the payload comparison.
 
-**Read-only by construction**: this module opens its own read-only connection with
-``PRAGMA query_only=ON`` (the same idiom as
+**Read-only by construction**: this module opens its own connection with
+``mode=ro`` (the same idiom as
 ``position_projection_migration._read_only_connection`` and
-``read_only_evidence._connect``) and never touches a write-capable repository
-object, so "zero writes" is a property of the connection, not an intention. The
-connection is opened as ``mode=ro``, and only for a settled store with no
-``-shm``/``-wal`` sidecars does it fall back to ``immutable=1`` (see
-``_read_only_connection``); both reads then run inside **one** transaction
-(``BEGIN``), so a concurrent commit cannot land between them.
+``read_only_evidence._connect``), sets ``PRAGMA query_only=ON`` on it, and never
+touches a write-capable repository object, so "zero writes" is a property of the
+connection, not an intention. It falls back to ``immutable=1`` only when that
+open failed with "unable to open database file" *and* the store has no
+``-shm``/``-wal`` sidecar. That guard is a **filename test and nothing more** — it
+does not detect writers, and no clause of it judges a ``-journal`` (see
+``_read_only_connection``: a hot journal is refused by SQLite's own error, and a
+live WAL writer whose sidecars are gone is *not* refused at all — measured). Every
+other failure — a lock, a rollback SQLite may not perform read-only — propagates,
+and the run is reported as "cannot run" rather than answered with a verdict. Both
+reads then run inside **one** transaction (``BEGIN``), so a concurrent commit
+cannot land between them.
 
 **Green** means exactly one thing: faces A, B and C are all empty. That is the
 criterion ``plan.md`` §"Slice 2" uses for its prerequisite (A/B empty *and* all
 four C classes zero), and it is deliberately not ``comparator-spec.md`` §7's
-allow-list — ``column_differs_known_dirty`` is a tier-2 concept and this tier-1
-report has no exempting list, so a known-dirty column difference is red here.
-Replay diagnostics (``projection_error_count``) are reported beside ``green`` and
-are not part of the definition, for the same reason the plan states the criterion
-as three faces.
+allow-list — ``column_differs_known_dirty`` is a tier-2 concept and this module
+implements no exempting list, so any column difference is a difference and red
+here (bound: ``test_probe_face_b_reports_a_column_difference``). Replay
+diagnostics (``projection_error_count``) are reported beside ``green`` and are
+not part of the definition — a run whose replay emitted an error but reproduced
+every row is green (bound:
+``test_probe_reports_replay_diagnostics_beside_green_without_changing_it``).
 
 The report lands outside ``output_shared/state/`` on purpose (plan ⑥): the
 running state tree belongs to the runtime artifacts, and mixing an operator
@@ -117,6 +133,13 @@ DERIVED_COLUMNS = ("account", "expiration", "strike", "multiplier", "source_even
 #: fail-fast for a payload the writer would refuse.
 WRITER_RAISES_KEY = "writer_raises"
 
+#: Extra key of a derivation result (not a column): the derived columns that
+#: refusal covers, one entry per column the writer's own message names. The
+#: writer's messages name one column (``account``) or several
+#: (``expiration``/``strike``); ``compare_column_face`` skips every one of them
+#: (they have no derivation to compare against) and reports the refusal once.
+WRITER_RAISES_COLUMNS_KEY = "writer_raises_columns"
+
 C_ATTRIBUTION_CLASSES = (
     "null_source_event_id",
     "ledger_missing_row",
@@ -126,21 +149,37 @@ C_ATTRIBUTION_CLASSES = (
 
 DEFAULT_SAMPLE_LIMIT = 20
 
-#: How many detail items ``probe_summary`` carries into the CLI report.
+#: How many detail items ``probe_summary`` carries into the CLI report — a display
+#: budget, and nothing asserts the number (the faces' own counts are the totals).
 CLI_SAMPLE_LIMIT = 3
 
 #: ``output_shared/state`` is the runtime state tree; probe reports must not land there.
 RUNTIME_STATE_PATH_PARTS = ("output_shared", "state")
 
 #: The read-only URI modes, and what each one promises. A *live* store keeps
-#: ``mode=ro``; a settled copy (no sidecars, no writer) may use ``immutable=1``.
+#: ``mode=ro``; a copy with nothing outstanding to recover may use ``immutable=1``.
 LIVE_READ_MODE = "ro"
 SETTLED_READ_MODE = "ro+immutable"
+
+#: The one ``mode=ro`` failure the immutable fallback exists for: a settled WAL
+#: store, which SQLite cannot open read-only because it may not create the
+#: shared-memory file. Every other ``OperationalError`` is a fact about the store
+#: — a writer holding a lock, a rollback the read-only connection cannot perform —
+#: and must reach the caller instead of being answered by a lock-free read.
+_CANNOT_OPEN_MARKER = "unable to open database file"
 
 _TOLERANCE = 1e-9
 
 
 def _has_wal_sidecars(resolved: Path) -> bool:
+    """Whether the store carries a ``-wal``/``-shm`` sidecar — a **filename test**.
+
+    That is the whole guard the fallback has, and this docstring says so on
+    purpose: it answers "does this store still have the two files a WAL writer's
+    lock lives on", not "is a writer attached". What it does *not* test is a
+    ``-journal``: a hot one is refused by SQLite's own error before this function
+    is consulted (see ``_read_only_connection``).
+    """
     return any(Path(f"{resolved}{suffix}").exists() for suffix in ("-wal", "-shm"))
 
 
@@ -171,21 +210,42 @@ def _read_only_connection(path: Path) -> Iterator[tuple[sqlite3.Connection, str]
     Two modes, chosen by what the store *is*:
 
     * a store that may still have writers is opened ``mode=ro``;
-    * a **settled** copy — the ``.backup`` file slice 1 is defined against, whose
-      ``-shm``/``-wal`` are gone — is opened ``mode=ro&immutable=1``.
+    * a copy with nothing outstanding to recover — the ``.backup`` file slice 1 is
+      defined against, whose ``-shm``/``-wal`` are gone — is opened
+      ``mode=ro&immutable=1``.
 
-    The second mode is not a preference, it is the only way in: a WAL database
-    cannot be opened read-only when SQLite is not allowed to create the
-    shared-memory file, and a settled store has no ``-shm`` to reuse, so
-    ``mode=ro`` fails with "unable to open database file" on exactly the input
-    this probe exists to read.
+    The second mode is not a preference, it is the only way in for that input: a
+    WAL database cannot be opened read-only when SQLite is not allowed to create
+    the shared-memory file, and such a copy has no ``-shm`` to reuse, so
+    ``mode=ro`` fails with "unable to open database file" — the one failure the
+    fallback is for.
 
-    ``immutable=1`` is only ever applied after ``mode=ro`` failed *and* no
-    ``-wal``/``-shm`` exists. Both halves of that guard matter: a writer attached
-    to a WAL store holds its ``-shm``, so sidecar-free means no live writer to
-    race; and a ``-wal`` file means committed data may live outside the main
-    database file, which ``immutable=1`` would read straight past. When the guard
-    does not hold, the original ``mode=ro`` failure is what propagates.
+    The fallback's trigger is a **condition, not a proof about writers**, and it
+    has exactly two clauses:
+
+    * only that one ``OperationalError`` falls through. "database is locked" (a
+      writer holds the store) and "attempt to write a readonly database" (SQLite
+      found a rollback it may not perform) are facts about the store, and a
+      lock-free ``immutable=1`` read would answer them with a *verdict* built on
+      state no writer would call settled;
+    * and no ``-wal``/``-shm`` sidecar exists (``_has_wal_sidecars``). That is a
+      file test: it does not detect writers, and it is **not** a test for a store
+      being settled — measured, a live WAL writer whose sidecars were unlinked
+      passes it and the run is answered with a verdict, because after that unlink
+      ``mode=ro`` fails with cannot-open rather than with the lock.
+
+    What the guard does *not* decide is a ``-journal``. A hot one is where SQLite
+    refuses first, and it refuses with "attempt to write a readonly database" —
+    not with the marker above — so that failure propagates and the journal is
+    never consulted here (measured: with the journal judgment removed entirely the
+    hot-journal control still refuses with the same error). The residual risk that
+    leaves is explicit: *if* a SQLite version worded a hot-journal open failure as
+    "unable to open database file", a store with a pending rollback would fall
+    through to ``immutable=1`` and be answered with a verdict. Nothing in this
+    module would catch that.
+
+    When either clause does not hold, the original ``mode=ro`` failure is what
+    propagates, and the caller reports "cannot run" instead of a judgement.
     """
     resolved = Path(path).resolve()
     if not resolved.exists():
@@ -193,7 +253,9 @@ def _read_only_connection(path: Path) -> Iterator[tuple[sqlite3.Connection, str]
     try:
         conn = _connect_read_only(resolved, immutable=False)
         mode = LIVE_READ_MODE
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
+        if _CANNOT_OPEN_MARKER not in str(exc):
+            raise
         if _has_wal_sidecars(resolved):
             raise
         conn = _connect_read_only(resolved, immutable=True)
@@ -379,33 +441,119 @@ def compare_payload_face(
     }
 
 
+def _safe_float(value: Any) -> float | None:
+    """``safe_float`` as the writer's guard uses it, restated.
+
+    Restated rather than imported: the writer reaches this helper through
+    ``repository_common`` (which is outside this slice's allowed files, and whose
+    copy comes from the Feishu infrastructure module), and this module's imports
+    stay inside ``src.application.ledger`` on purpose. Unlike the casts in
+    ``_position_lot_contract_scalars`` it has **no** note fallback, so a payload
+    that loses its ``strike`` key is still refused when the note carries one —
+    and ``tests/test_lot_parity_probe.py`` binds the two by comparing the probe's
+    refusal against the writer's own ``ValueError``.
+    """
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _missing_option_contract_fields(fields: dict[str, Any]) -> list[str]:
+    """``repository_common._validate_position_lot_fields``, restated.
+
+    The writer's **first** guard on a payload (``repository_common.py:216``,
+    before the two ``account`` rules), so its refusal is the one the writer would
+    hit first and the one this derivation has to carry.
+
+    Read it as the writer wrote it: only ``put``/``call`` payloads are validated
+    at all (anything else — a stock payload, a missing ``option_type`` — returns
+    early and is left to the ``account`` guards), the comparison is against the
+    raw ``expiration`` field, and ``strike`` goes through ``safe_float`` with no
+    note fallback.
+    """
+    option_type = str(fields.get("option_type") or "").strip().lower()
+    if option_type not in {"put", "call"}:
+        return []
+    missing: list[str] = []
+    if fields.get("expiration") in (None, ""):
+        missing.append("expiration")
+    if _safe_float(fields.get("strike")) is None:
+        missing.append("strike")
+    return missing
+
+
+def _writer_refusal(*, fields: dict[str, Any], account: str) -> tuple[str | None, tuple[str, ...]]:
+    """The first refusal ``_position_lot_storage_values`` would raise, and its columns.
+
+    The writer's order, restated: validate the option contract, then the
+    ``account`` rules. Precedence matters as much as the rules — a payload that
+    is both incomplete and account-less is refused for the incomplete contract,
+    and the probe has to say the same thing.
+
+    The writer embeds ``lot_id`` in both messages (``... lot {lot_id}: missing
+    strike``, ``... required: record_id={lot_id}``) and this derivation has none:
+    it is a function of a payload, and the row it belongs to already carries the
+    lot id on the face-B item. So the copies below drop the id, exactly as the
+    ``account`` copy always has.
+    """
+    missing = _missing_option_contract_fields(fields)
+    if missing:
+        return (
+            "incomplete option position lot: missing " + ", ".join(missing),
+            # The refusal names every missing field; the item is emitted once, on
+            # the first of them, and the rest are skipped so one refusal is not
+            # reported once per column it mentions.
+            tuple(missing),
+        )
+    if not account:
+        return "position lot account is required", ("account",)
+    if account != account.lower():
+        return "position lot account must be lowercase", ("account",)
+    return None, ()
+
+
 def derive_stored_row_columns(fields: dict[str, Any]) -> dict[str, Any]:
     """Re-derive the five columns from a payload the way the writer does.
 
     ``account`` and ``source_event_id`` come from the two sibling expressions in
     ``repository_common._position_lot_storage_values``; the other three come from
-    ``_position_lot_contract_scalars``. A payload whose ``account`` is missing or
-    not lowercase makes the *writer* raise ``ValueError``
-    (``repository_common.py``:218-221) — the one derived column comparator-spec
-    §4 calls "缺了就响".
+    ``_position_lot_contract_scalars``. A payload the *writer* refuses — the
+    option contract first (``_validate_position_lot_fields``), then ``account``
+    (``repository_common.py``:217-221), the one derived column comparator-spec §4
+    calls "缺了就响" — has no columns to derive at all.
 
     The probe must not raise (it has to keep walking the store) and it must not
     turn that fail-fast into equality either: a payload the writer refuses cannot
     be the payload the writer wrote, so the refusal travels back under
-    ``WRITER_RAISES_KEY`` and ``compare_column_face`` counts it as a face-B
-    difference. ``tests/test_lot_parity_probe.py`` binds this derivation to the
-    writer's own, column by column, so the two cannot drift apart silently.
+    ``WRITER_RAISES_KEY`` — with the columns it covers, under
+    ``WRITER_RAISES_COLUMNS_KEY`` — and ``compare_column_face`` counts it as one
+    face-B difference. ``tests/test_lot_parity_probe.py`` binds this derivation to
+    the writer's own for a payload set covering both guards, column by column, and
+    compares each refusal's message *and* its covered-column tuple against the
+    columns the writer's own ``ValueError`` names.
+
+    Two refusals of ``_position_lot_storage_values`` are deliberately outside what
+    this derivation models, and neither is reachable from a stored payload:
+
+    * the ``allow_nan=False`` serialization (``ValueError: Out of range float
+      values are not JSON compliant``) — SQLite's ``json_valid`` is 0 for a
+      payload containing ``NaN``/``Infinity``, so no such row can be in
+      ``fields_json`` for the probe to read;
+    * the ``TypeError`` for a record that is not a ``PositionLotRecord`` — the
+      probe holds a payload, not a record.
+
+    A payload that reaches storage therefore cannot be refused by either, which is
+    the sense in which "the writer refuses it" is modelled completely here.
     """
     expiration_ms, strike, multiplier = _position_lot_contract_scalars(fields)
     source_event_id = (
         str(fields.get("source_event_id")) if fields.get("source_event_id") else None
     )
     account = str(fields.get("account") or "").strip()
-    writer_error: str | None = None
-    if not account:
-        writer_error = "position lot account is required"
-    elif account != account.lower():
-        writer_error = "position lot account must be lowercase"
+    writer_error, writer_columns = _writer_refusal(fields=fields, account=account)
     return {
         "account": account or None,
         "expiration": int(expiration_ms) if expiration_ms is not None else None,
@@ -413,6 +561,7 @@ def derive_stored_row_columns(fields: dict[str, Any]) -> dict[str, Any]:
         "multiplier": float(multiplier) if multiplier is not None else None,
         "source_event_id": source_event_id,
         WRITER_RAISES_KEY: writer_error,
+        WRITER_RAISES_COLUMNS_KEY: writer_columns,
     }
 
 
@@ -421,22 +570,37 @@ def compare_column_face(
     stored_columns: dict[str, Any],
     derived_columns: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """Face B: stored column value vs the value re-derived from the stored payload."""
+    """Face B: stored column value vs the value re-derived from the stored payload.
+
+    A refusal is **one item** in the returned list — the columns its message names
+    are skipped, not compared against a derivation that does not exist — and the
+    item carries the whole ``WRITER_RAISES_COLUMNS_KEY`` tuple so the per-column
+    histogram does not have to read the refusal's wording to know which columns it
+    covers. Counting is therefore two different things on purpose: the items are
+    one per root cause, and ``run_lot_parity_probe``'s ``by_column`` is one per
+    column.
+    """
     writer_error = str(derived_columns.get(WRITER_RAISES_KEY) or "")
+    refused_columns = tuple(derived_columns.get(WRITER_RAISES_COLUMNS_KEY) or ())
     differences: list[dict[str, Any]] = []
     for column in DERIVED_COLUMNS:
-        if writer_error and column == "account":
+        if writer_error and column in refused_columns:
             # One difference per root cause: the writer refuses the whole
-            # payload, so comparing the column value as well would report the
-            # same rejection twice.
-            differences.append(
-                {
-                    "column": column,
-                    "stored": stored_columns.get(column),
-                    "derived_from_stored_payload": None,
-                    "writer_raises": writer_error,
-                }
-            )
+            # payload, so the columns its message names are reported once — as
+            # the refusal — instead of a second time as a column comparison
+            # against a derivation that does not exist. The item still names
+            # every column the refusal covers, because the histogram below counts
+            # columns: a message naming two of them is two column differences.
+            if column == refused_columns[0]:
+                differences.append(
+                    {
+                        "column": column,
+                        "stored": stored_columns.get(column),
+                        "derived_from_stored_payload": None,
+                        "writer_raises": writer_error,
+                        WRITER_RAISES_COLUMNS_KEY: list(refused_columns),
+                    }
+                )
             continue
         stored = stored_columns.get(column)
         derived = derived_columns.get(column)
@@ -675,19 +839,55 @@ def run_lot_parity_probe(
                 "source_event_id": None,
             }
         )
-    attributed_lot_count = sum(attribution_counts.values())
-    if attributed_lot_count != len(differing_lot_ids):
-        # A can't-happen guard on the one property the classes exist to have. Get
-        # this wrong and ③ stops meaning what slice 2 reads it as.
+    # The guard the four classes exist for. It used to read
+    # ``sum(attribution_counts.values()) != len(differing_lot_ids)`` — an
+    # identity: ``other_ids`` is ``differing_lot_ids`` minus ``extra_ids``, so the
+    # two sides agreed for every store shape, including ones where a whole input
+    # (``duplicate_ids``) had been dropped from the union on the way in. The three
+    # checks below are the ones that bite when the attribution code is edited: both
+    # sides are built from the same expressions, so no store shape can trip them,
+    # and an edit that drops an input from the union or appends an id twice does
+    # (``uncovered`` names the source, ``repeated`` the id).
+    #
+    # ``repeated`` is not a restatement of the coverage check: coverage stays
+    # intact when an id is appended by two different append points, and that is
+    # exactly the double-count the counts must never have. It is vacuous for the
+    # two append points as they stand (their id sets are disjoint by construction)
+    # — it guards the append points, not the store.
+    attributed_ids = [str(item["lot_id"]) for item in attribution_items]
+    attributed_id_set = set(attributed_ids)
+    uncovered = {
+        source: sorted(ids - attributed_id_set)
+        for source, ids in (
+            ("extra_in_store", set(extra_ids)),
+            ("missing_in_store", set(missing_ids)),
+            ("a_or_b_difference", differing_aligned_ids),
+            ("duplicate_identity", duplicate_ids),
+        )
+    }
+    uncovered = {source: ids for source, ids in uncovered.items() if ids}
+    repeated = sorted(
+        lot_id for lot_id in attributed_id_set if attributed_ids.count(lot_id) > 1
+    )
+    if uncovered or repeated or attributed_id_set != differing_lot_ids:
         raise AssertionError(
             "lot parity probe C attribution is not a partition: "
-            f"{attributed_lot_count} attributed lot ids for "
-            f"{len(differing_lot_ids)} differing lot ids"
+            f"{len(attributed_id_set)} attributed lot ids for "
+            f"{len(differing_lot_ids)} differing lot ids; "
+            f"unattributed={uncovered}; in two classes={repeated}"
         )
 
+    # The histogram counts **columns**, not root causes: a refusal whose message
+    # names two columns is one face-B difference (one item) but one entry against
+    # each of those two columns, so ``sum(by_column.values())`` can exceed
+    # ``difference_count``. Reading the histogram as "how many differences" is the
+    # mistake this comment exists to prevent; the counts that answer that question
+    # are ``difference_count`` and ``differing_lot_count``.
     b_by_column = {column: 0 for column in DERIVED_COLUMNS}
     for item in b_items:
-        b_by_column[item["column"]] += 1
+        covered = item.get(WRITER_RAISES_COLUMNS_KEY) or (item["column"],)
+        for column in covered:
+            b_by_column[column] += 1
 
     a_difference_count = a_key_set_difference_lot_count + a_value_difference_count
     b_difference_count = len(b_items)
@@ -720,9 +920,10 @@ def run_lot_parity_probe(
             "c_attribution classes ①②③④ are a partition of c_attribution.differing_lot_count",
             "c_attribution class 'other' is not a row-set gap: it is every differing lot that is not ①②③",
             "c_attribution reads a row's source_event_id from its column first, then its payload key",
-            "duplicate identities are a face-C fact; faces A and B compare the first row of each identity",
+            "duplicate identities are a face-C fact; faces A and B compare the first row of each identity in the read order",
             "the read-only connection takes one snapshot (BEGIN), so a concurrent commit cannot land between the two reads",
-            "the connection is mode=ro, or mode=ro&immutable=1 for a settled copy with no -wal/-shm (no writer to race)",
+            "the connection is mode=ro, or mode=ro&immutable=1 when mode=ro could not open a store that has no -wal/-shm sidecar (a filename test, not a test for writers; a -journal is not part of it)",
+            "b_columns.by_column counts columns, not root causes: a refusal naming two columns is one item and two column entries, so the histogram can sum to more than b_columns.difference_count",
         ],
         "event_count": len(events),
         "stored_lot_count": len(stored_rows),
@@ -845,7 +1046,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--db",
         required=True,
-        help="SQLite store path; opened read-only (mode=ro, or immutable=1 for a settled copy)",
+        help=(
+            "SQLite store path; opened read-only (mode=ro, or immutable=1 for a "
+            "copy with no -wal/-shm sidecar)"
+        ),
     )
     parser.add_argument(
         "--out",
@@ -902,6 +1106,7 @@ __all__ = [
     "RUNTIME_STATE_PATH_PARTS",
     "SCHEMA_KIND",
     "SETTLED_READ_MODE",
+    "WRITER_RAISES_COLUMNS_KEY",
     "WRITER_RAISES_KEY",
     "attribute_c_difference",
     "assert_report_path_outside_runtime_state",

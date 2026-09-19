@@ -19,10 +19,12 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import hashlib
+import importlib
 import json
 from pathlib import Path
 import sqlite3
 import sys
+import types
 
 import pytest
 
@@ -35,8 +37,10 @@ from src.application.ledger.lot_parity_probe import (
     DERIVED_COLUMNS,
     LIVE_READ_MODE,
     SETTLED_READ_MODE,
+    WRITER_RAISES_COLUMNS_KEY,
     WRITER_RAISES_KEY,
     assert_report_path_outside_runtime_state,
+    compare_column_face,
     derive_stored_row_columns,
     main as probe_main,
     run_lot_parity_probe,
@@ -70,6 +74,20 @@ def _build_green_store(tmp_path: Path) -> tuple[Path, Path]:
         opened_at_ms=1000,
     )
     return sqlite_path, data_config
+
+
+def _probe_module() -> types.ModuleType:
+    """The probe module object, for the controls that patch its globals.
+
+    Fetched dynamically rather than with a local ``import`` statement, because of
+    how this repository's generated dependency graph works: it counts **one edge
+    per import statement**, and this file already imports names from the probe
+    module at the top. A second, function-local spelling of that same import is
+    not a new dependency — it would only make ``docs/DEPENDENCY_GRAPH.md`` stale
+    (that generator documents that it does not see dynamic imports, which is the
+    property being used here).
+    """
+    return importlib.import_module("src.application.ledger.lot_parity_probe")
 
 
 def _stored_lot_id(sqlite_path: Path) -> str:
@@ -234,6 +252,95 @@ def _insert_stored_row(
     )
 
 
+def _stage_a_crashed_writer(sqlite_path: Path, *, strike: object) -> None:
+    """Leave the store exactly as a writer that died mid-commit leaves it.
+
+    Everything here is SQLite's own output: the pages in the main file are the
+    ones a real transaction wrote, and the ``-journal`` next to them is the
+    rollback log SQLite wrote for that same transaction, header magic included.
+    Nothing is hand-written — the "crash" is staged by copying the two files out
+    of the live transaction and putting them back, rather than racing a SIGKILL,
+    which makes the resulting state deterministic instead of timing-dependent.
+
+    Three details are load-bearing:
+
+    * the store is switched to ``journal_mode=DELETE`` and its ``-shm``/``-wal``
+      are unlinked first, so the shape under test is the journal and not a WAL
+      sidecar (which the probe already refuses to fall back around);
+    * ``cache_spill=ON`` and the churn table are what make the cache evict:
+      SQLite only finalizes the journal header (magic + record count) once it
+      starts writing pages into the main file, and a connection that keeps the
+      whole transaction in cache leaves a placeholder header that no reader would
+      call hot. The row count is what puts enough dirty pages in
+      the transaction to force that eviction (at 5000 rows SQLite still keeps the
+      whole update in cache and the header stays a placeholder, so the assertion
+      below would fire);
+    * the assertion below is that finalization, so a fixture that quietly stopped
+      producing a hot journal fails here instead of passing for the wrong reason.
+    """
+    sqlite_path = Path(sqlite_path)
+    journal = Path(f"{sqlite_path}-journal")
+    conn = sqlite3.connect(sqlite_path, isolation_level=None)
+    try:
+        conn.execute("PRAGMA journal_mode=DELETE")
+        for suffix in ("-wal", "-shm"):
+            Path(f"{sqlite_path}{suffix}").unlink(missing_ok=True)
+        conn.execute("PRAGMA cache_size=1")
+        conn.execute("PRAGMA cache_spill=ON")
+        conn.execute("CREATE TABLE IF NOT EXISTS probe_churn (id INTEGER PRIMARY KEY, v TEXT)")
+        conn.execute("DELETE FROM probe_churn")
+        conn.executemany(
+            "INSERT INTO probe_churn(v) VALUES (?)",
+            [(f"r{i:05d}",) for i in range(10000)],
+        )
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("UPDATE position_lots SET strike = ?", (strike,))
+        conn.execute("UPDATE probe_churn SET v = 'uncommitted'")
+        # Reading the table back is what forces the dirty pages out to the file.
+        conn.execute("SELECT count(*) FROM probe_churn WHERE v > 'r00000'")
+        assert journal.read_bytes()[:8] == bytes.fromhex("d9d505f920a163d7"), (
+            "the staged journal is not hot: SQLite did not reach the point where "
+            "it finalizes the header, so this fixture would pass for the wrong reason"
+        )
+        staged = (sqlite_path.read_bytes(), journal.read_bytes())
+    finally:
+        conn.close()
+    # The rollback that ``close()`` performs puts both files back to the committed
+    # state; the copies take their place, so what is on disk is the crash.
+    sqlite_path.write_bytes(staged[0])
+    journal.write_bytes(staged[1])
+
+
+def _leave_a_spent_persist_journal(sqlite_path: Path) -> None:
+    """A settled store with the journal ``journal_mode=PERSIST`` leaves behind.
+
+    PERSIST does not delete its journal at commit — it zeroes the header, which
+    is how it says "this log is spent". The file stays, non-empty, on a store no
+    writer is attached to, and it is the shape a blanket "any ``-journal`` blocks
+    the fallback" rule would turn into a false refusal.
+    """
+    sqlite_path = Path(sqlite_path)
+    conn = sqlite3.connect(sqlite_path, isolation_level=None)
+    try:
+        assert conn.execute("PRAGMA journal_mode=PERSIST").fetchone() == ("persist",)
+        conn.execute("PRAGMA cache_size=1")
+        conn.execute("PRAGMA cache_spill=ON")
+        conn.execute("CREATE TABLE IF NOT EXISTS probe_churn (id INTEGER PRIMARY KEY, v TEXT)")
+        conn.execute("DELETE FROM probe_churn")
+        conn.executemany(
+            "INSERT INTO probe_churn(v) VALUES (?)",
+            [(f"r{i:05d}",) for i in range(10000)],
+        )
+        conn.execute("UPDATE probe_churn SET v = 'settled'")
+    finally:
+        conn.close()
+    for suffix in ("-wal", "-shm"):
+        Path(f"{sqlite_path}{suffix}").unlink(missing_ok=True)
+    journal = Path(f"{sqlite_path}-journal")
+    assert journal.exists() and journal.stat().st_size > 0
+    assert journal.read_bytes()[:8] == b"\0" * 8
+
+
 def _attribution(report: dict[str, object]) -> dict[str, int]:
     attribution = report["c_attribution"]
     assert isinstance(attribution, dict)
@@ -271,6 +378,61 @@ def test_probe_is_green_on_an_untouched_store(tmp_path: Path) -> None:
         "projection_omission": 0,
         "other": 0,
     }
+
+
+def test_probe_reports_replay_diagnostics_beside_green_without_changing_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A replay error is a diagnostic, not a face difference.
+
+    ``green`` is the three faces and nothing else — the cadence's question is
+    "does the replay reproduce the stored rows", and a replay that emitted an
+    error while producing the same rows has not answered that question *no*. The
+    diagnostics are reported beside the verdict, so neither reading is lost.
+    """
+    probe_module = _probe_module()
+
+    sqlite_path, _config = _build_green_store(tmp_path)
+    real_projection = probe_module.project_stored_trade_events_to_position_lots
+
+    class _ErrorDiagnostic:
+        """The one attribute the probe reads off a diagnostic.
+
+        Deliberately not ``LedgerDiagnostic``: importing that domain type here
+        would add a ``tests -> domain`` edge to the generated dependency graph for
+        one attribute, and the probe's own read is a ``getattr(item, "severity")``.
+        """
+
+        severity = "error"
+
+    class _ProjectionWithAnError:
+        def __init__(self, projection: object) -> None:
+            self._projection = projection
+
+        @property
+        def lots(self) -> object:
+            return self._projection.lots  # type: ignore[attr-defined]
+
+        @property
+        def diagnostics(self) -> list[object]:
+            return [
+                *self._projection.diagnostics,  # type: ignore[attr-defined]
+                _ErrorDiagnostic(),
+            ]
+
+    monkeypatch.setattr(
+        probe_module,
+        "project_stored_trade_events_to_position_lots",
+        lambda events: _ProjectionWithAnError(real_projection(events)),
+    )
+
+    report = run_lot_parity_probe(sqlite_path=sqlite_path)
+
+    assert report["projection_error_count"] == 1
+    assert report["projection_diagnostic_count"] == 1
+    assert report["green"] is True
+    assert report["difference_count"] == 0
 
 
 # --- face A: payload ---------------------------------------------------------
@@ -384,6 +546,30 @@ def test_probe_does_not_shrug_at_a_projected_payload_that_is_not_an_object() -> 
 # --- face B: derived columns -------------------------------------------------
 
 
+def test_probe_column_comparison_uses_the_published_tolerance() -> None:
+    """``_TOLERANCE = 1e-9`` is a number the production readout leans on.
+
+    The readout's residual money cases differ in the last float bit (≤ 4.44e-16)
+    and are *not* face-B differences because of this constant; the plan states
+    that reading as the reason they are not a third bucket. Nothing else in this
+    file, or in the repository, mentions the constant: tightening it to exact
+    equality (or to 1e-18) leaves every other control green.
+    """
+    nothing_derived = {column: None for column in DERIVED_COLUMNS}
+    nothing_derived[WRITER_RAISES_KEY] = None
+    nothing_derived[WRITER_RAISES_COLUMNS_KEY] = ()
+    stored = dict(nothing_derived, strike=1.0)
+
+    below = dict(nothing_derived, strike=1.0 + 4.44e-16)
+    assert compare_column_face(stored_columns=stored, derived_columns=below) == []
+
+    above = dict(nothing_derived, strike=1.0 + 1e-6)
+    assert [
+        item["column"]
+        for item in compare_column_face(stored_columns=stored, derived_columns=above)
+    ] == ["strike"]
+
+
 def test_probe_face_b_reports_a_column_difference(tmp_path: Path) -> None:
     sqlite_path, _config = _build_green_store(tmp_path)
     _tamper(
@@ -423,6 +609,30 @@ def _writer_columns(fields: dict[str, object], *, lot_id: str) -> dict[str, obje
     }
 
 
+def _probe_side_of(message: str, *, lot_id: str) -> str:
+    """The writer's message as the probe states it — without the lot id it embeds.
+
+    The probe's derivation is a function of a payload, so it has no lot id to
+    name; both of its copies drop the id for the same reason, and the face-B item
+    carries the lot id anyway.
+    """
+    return message.replace(f": record_id={lot_id}", "").replace(f" {lot_id}", "")
+
+
+def _writer_named_columns(message: str, *, lot_id: str) -> tuple[str, ...]:
+    """The derived columns the writer's own refusal message names.
+
+    ``WRITER_RAISES_COLUMNS_KEY`` is the probe's restatement of the writer's
+    wording, and the writer exposes no column tuple to compare against: the only
+    thing it publishes is the message. So the binding is "the probe covers exactly
+    the columns the writer's message names" — the writer says "missing
+    expiration, strike" or "account is required", and both are read off the same
+    text the probe's message is already compared against.
+    """
+    text = _probe_side_of(message, lot_id=lot_id)
+    return tuple(column for column in DERIVED_COLUMNS if column in text)
+
+
 def test_probe_derivation_is_bound_to_the_writers_own_derivation(tmp_path: Path) -> None:
     """Face B must use the writer's derivation, not a second opinion that can drift.
 
@@ -430,9 +640,19 @@ def test_probe_derivation_is_bound_to_the_writers_own_derivation(tmp_path: Path)
     the shared function lives in ``repository_common.py`` (outside slice 1's
     allowed files). This test *is* the binding: for the same payload, the probe's
     derived columns must equal the values ``_position_lot_storage_values`` hands
-    the INSERT. A writer-side change that the probe does not follow fails here
-    instead of turning face B into either a wall of false differences or a column
-    that silently stops discriminating.
+    the INSERT, and where the writer **refuses** the payload the probe's refusal
+    must be the writer's own — message, precedence *and* the columns the message
+    names — instead of ``None``, which would compare equal to a NULL column.
+
+    The set is built to cover the writer's whole guard surface, not just the
+    ``account`` pair: the option-contract validation (``_validate_position_lot_fields``)
+    runs first, it applies only to ``put``/``call`` payloads, its ``strike`` read
+    has no note fallback, and a payload that is both incomplete and account-less
+    is refused for the contract — all of which the probe has to reproduce. The
+    three boundary payloads at the end are the ones where the writer's guard is a
+    truthiness test rather than a type test: ``expiration``/``strike`` of ``0``
+    and a boolean ``strike`` are *present* to ``in (None, "")``/``safe_float`` and
+    must be derived the same way on both sides.
     """
     sqlite_path, _config = _build_green_store(tmp_path)
     stored = _stored_fields(sqlite_path)
@@ -448,12 +668,80 @@ def test_probe_derivation_is_bound_to_the_writers_own_derivation(tmp_path: Path)
     no_source_event.pop("source_event_id", None)
     payloads["no source_event_id"] = no_source_event
 
+    missing_contract = dict(stored)
+    missing_contract.pop("strike")
+    missing_contract.pop("expiration")
+    payloads["call/put missing strike and expiration"] = missing_contract
+
+    missing_strike = dict(stored)
+    missing_strike.pop("strike")
+    payloads["call/put missing strike"] = missing_strike
+
+    missing_expiration = dict(stored)
+    missing_expiration.pop("expiration")
+    payloads["call/put missing expiration"] = missing_expiration
+
+    empty_expiration = dict(stored)
+    empty_expiration["expiration"] = ""
+    payloads["call/put with an empty expiration"] = empty_expiration
+
+    shouted = dict(missing_strike)
+    shouted["option_type"] = "  CALL  "
+    payloads["option type needing normalisation"] = shouted
+
+    note_strike = dict(missing_strike)
+    note_strike["note"] = "strike=100; multiplier=100"
+    payloads["missing strike with a strike in the note"] = note_strike
+
+    no_option_type = dict(missing_strike)
+    no_option_type.pop("option_type", None)
+    payloads["payload with no option type"] = no_option_type
+
+    stock = dict(missing_strike)
+    stock["option_type"] = "stock"
+    payloads["stock payload with no option contract"] = stock
+
+    contract_before_account = dict(missing_strike)
+    contract_before_account["account"] = ""
+    payloads["incomplete contract and no account"] = contract_before_account
+
+    account_missing = dict(stored)
+    account_missing.pop("account", None)
+    payloads["no account"] = account_missing
+
+    account_uppercase = dict(stored)
+    account_uppercase["account"] = "LX"
+    payloads["uppercase account"] = account_uppercase
+
+    zero_expiration = dict(stored)
+    zero_expiration["expiration"] = 0
+    payloads["expiration 0"] = zero_expiration
+
+    zero_strike = dict(stored)
+    zero_strike["strike"] = 0
+    payloads["strike 0"] = zero_strike
+
+    boolean_strike = dict(stored)
+    boolean_strike["strike"] = True
+    payloads["strike True"] = boolean_strike
+
+    # Keeping the ledger/derivation split honest: the payloads that pass the
+    # writer's guards must also match column by column, and the rest must match
+    # refusal by refusal — message and covered columns both.
     for label, payload in payloads.items():
         derived = derive_stored_row_columns(payload)
-        assert {column: derived[column] for column in DERIVED_COLUMNS} == _writer_columns(
-            payload, lot_id=lot_id
-        ), label
+        try:
+            writer_values = _writer_columns(payload, lot_id=lot_id)
+        except ValueError as exc:
+            refusal = derived[WRITER_RAISES_KEY]
+            assert isinstance(refusal, str), label
+            assert refusal == _probe_side_of(str(exc), lot_id=lot_id), label
+            assert derived[WRITER_RAISES_COLUMNS_KEY] == _writer_named_columns(
+                str(exc), lot_id=lot_id
+            ), label
+            continue
         assert derived[WRITER_RAISES_KEY] is None, label
+        assert {column: derived[column] for column in DERIVED_COLUMNS} == writer_values, label
 
 
 def test_probe_derivation_reports_the_writers_fail_fast_instead_of_equality(
@@ -518,6 +806,154 @@ def test_probe_face_b_reports_a_payload_the_writer_would_refuse(tmp_path: Path) 
     assert item["writer_raises"] == "position lot account is required"
 
 
+def test_probe_face_b_reports_an_incomplete_option_contract_as_a_refusal(
+    tmp_path: Path,
+) -> None:
+    """The writer's *first* refusal is the contract, and it is not an account fact.
+
+    A ``put``/``call`` payload that lost its ``strike`` is refused by
+    ``_validate_position_lot_fields`` before the account rules are reached. Face B
+    used to model only the account pair, so this row came out *equal* — the column
+    is NULL and the derivation answered ``None`` for the missing field — and the
+    report called green a row the writer could never have written.
+    """
+    sqlite_path, _config = _build_green_store(tmp_path)
+    fields = _stored_fields(sqlite_path)
+    fields.pop("strike")
+    # Only the payload loses the key: the column keeps the value the writer
+    # derived from it, which is the shape the old face B read as "nothing to say".
+    _tamper(
+        sqlite_path,
+        [
+            (
+                "UPDATE position_lots SET fields_json = ?",
+                (json.dumps(fields, ensure_ascii=False, sort_keys=True),),
+            )
+        ],
+    )
+
+    report = run_lot_parity_probe(sqlite_path=sqlite_path)
+
+    faces = _faces(report)
+    assert report["green"] is False
+    assert faces["b_columns"]["writer_raises_count"] == 1
+    # One refusal, one difference — and the columns it names are not compared a
+    # second time against a derivation that does not exist.
+    assert faces["b_columns"]["difference_count"] == 1
+    item = faces["b_columns"]["items"][0]
+    assert item["column"] == "strike"
+    assert item["stored"] == 100.0
+    assert item["derived_from_stored_payload"] is None
+    assert item["writer_raises"] == "incomplete option position lot: missing strike"
+
+
+def test_probe_derivation_names_the_columns_each_refusal_covers() -> None:
+    """``WRITER_RAISES_COLUMNS_KEY`` is read by the histogram: bind its value.
+
+    The key has one consumer (``compare_column_face`` skips the columns it names)
+    and one effect (``b_columns.by_column`` counts them), and neither is the
+    key's *value* — a tuple that answered ``()`` or ``("account",)`` for every
+    refusal would leave every other control in this file green.
+    """
+    missing_expiration = {"account": "lx", "option_type": "put", "strike": 100.0}
+    assert derive_stored_row_columns(missing_expiration)[WRITER_RAISES_COLUMNS_KEY] == (
+        "expiration",
+    )
+
+    missing_both = {"account": "lx", "option_type": "put"}
+    assert derive_stored_row_columns(missing_both)[WRITER_RAISES_COLUMNS_KEY] == (
+        "expiration",
+        "strike",
+    )
+
+    no_account = {"option_type": "put", "expiration": 1, "strike": 1.0}
+    assert derive_stored_row_columns(no_account)[WRITER_RAISES_COLUMNS_KEY] == ("account",)
+
+    # Nothing refused: the tuple is empty, so the histogram falls back to the
+    # item's own column.
+    assert derive_stored_row_columns(dict(no_account, account="lx"))[
+        WRITER_RAISES_COLUMNS_KEY
+    ] == ()
+
+
+def test_probe_face_b_counts_a_two_column_refusal_per_column(tmp_path: Path) -> None:
+    """A refusal naming two columns is one item and two column entries.
+
+    The writer's contract guard names every missing field in one message
+    (``missing expiration, strike``). Face B reports that as **one** difference —
+    one root cause, one item, and the detail list is one item per root cause on
+    purpose — but ``by_column`` is a histogram of columns: with the count read off
+    the item's own ``column`` alone, ``strike`` reported ``0`` for this shape
+    while the refusal plainly named it, so a reader of the histogram saw a column
+    the writer refused as clean.
+    """
+    sqlite_path, _config = _build_green_store(tmp_path)
+    fields = _stored_fields(sqlite_path)
+    fields.pop("strike")
+    fields.pop("expiration")
+    _tamper(
+        sqlite_path,
+        [
+            (
+                "UPDATE position_lots SET fields_json = ?",
+                (json.dumps(fields, ensure_ascii=False, sort_keys=True),),
+            )
+        ],
+    )
+
+    report = run_lot_parity_probe(sqlite_path=sqlite_path)
+
+    columns = _faces(report)["b_columns"]
+    assert columns["writer_raises_count"] == 1
+    assert columns["difference_count"] == 1
+    assert columns["by_column"] == {
+        "account": 0,
+        "expiration": 1,
+        "strike": 1,
+        "multiplier": 0,
+        "source_event_id": 0,
+    }
+    assert len(columns["items"]) == 1
+    item = columns["items"][0]
+    assert item["column"] == "expiration"
+    assert item["writer_raises"] == "incomplete option position lot: missing expiration, strike"
+    assert item[WRITER_RAISES_COLUMNS_KEY] == ["expiration", "strike"]
+
+
+def test_probe_face_b_does_not_refuse_a_payload_the_writer_leaves_alone(
+    tmp_path: Path,
+) -> None:
+    """Same missing ``strike``, no option contract: the writer does not validate it.
+
+    The contract guard returns early for anything that is not ``put``/``call``, so
+    a stock payload missing ``strike`` is the writer's business only through the
+    ``account`` guard. A probe that validated every payload would refuse rows the
+    writer happily writes.
+    """
+    sqlite_path, _config = _build_green_store(tmp_path)
+    fields = _stored_fields(sqlite_path)
+    fields.pop("strike")
+    fields["option_type"] = "stock"
+    _tamper(
+        sqlite_path,
+        [
+            (
+                "UPDATE position_lots SET fields_json = ?",
+                (json.dumps(fields, ensure_ascii=False, sort_keys=True),),
+            )
+        ],
+    )
+
+    report = run_lot_parity_probe(sqlite_path=sqlite_path)
+
+    faces = _faces(report)
+    assert faces["b_columns"]["writer_raises_count"] == 0
+    # The same missing key is still a face-B difference — the column was not
+    # re-derived — but it is a column difference, and nothing more.
+    assert faces["b_columns"]["by_column"]["strike"] == 1
+    assert "writer_raises" not in faces["b_columns"]["items"][0]
+
+
 # --- face C: row set ---------------------------------------------------------
 
 
@@ -540,6 +976,10 @@ def test_probe_face_c_reports_an_extra_stored_row(tmp_path: Path) -> None:
     assert faces["c_rows"]["missing_in_store_count"] == 0
     assert faces["c_rows"]["lot_id_set_difference_count"] == 1
     assert faces["c_rows"]["count_mismatch"] is True
+    # ``count_mismatch`` is a restatement of this count, not a third difference:
+    # one differing row reads ``c_rows=1``. Counting the boolean adds one, and no
+    # other control in this file notices.
+    assert faces["c_rows"]["difference_count"] == 1
     assert report["stored_lot_count"] == 2
     assert report["projected_lot_count"] == 1
 
@@ -615,6 +1055,30 @@ def test_probe_face_c_detects_a_duplicate_identity(tmp_path: Path) -> None:
         "occurrences": 2,
     }
     assert faces["c_rows"]["count_mismatch"] is True
+    # Two C differences — one extra identity and one collapse — and not three:
+    # the row count differs *because* of those two, and the boolean that says so
+    # is not counted again. Nothing else in this file reads this number.
+    assert faces["c_rows"]["difference_count"] == 2
+
+
+def test_probe_index_keeps_the_first_row_of_a_repeated_identity() -> None:
+    """Faces A and B compare the first row of a collapsed identity, not the last.
+
+    "The second row of a collapsed pair is the same identity read twice, not a
+    second opinion about the payload" is a *selection* rule, and a selection rule
+    nothing pins is a coin flip: every fixture in this file builds its collapsed
+    rows with the same payload, so swapping ``setdefault`` for an assignment
+    changes which payload is compared and no store-shaped control notices.
+    """
+    probe_module = _probe_module()
+
+    first = {"lot_id": "lot_x", "fields": {"premium": "1.23"}, "columns": {}}
+    second = {"lot_id": "lot_x", "fields": {"premium": "9.99"}, "columns": {}}
+
+    index, duplicates = probe_module._index_by_identity([first, second])
+
+    assert index == {"lot_x": first}
+    assert duplicates == [("lot_x", 2)]
 
 
 # --- C-face attribution: four classes, never conflated -----------------------
@@ -774,7 +1238,90 @@ def test_probe_c_attribution_counts_are_a_partition_of_the_differing_lots(
     # Not ③ + ④: the same lot id, counted once.
     assert attribution["other"] == 0
     assert report["c_attribution"]["differing_lot_count"] == 1
-    assert sum(attribution.values()) == report["c_attribution"]["differing_lot_count"]
+    # Read off the items, not off the counts: the counts are incremented as the
+    # items are appended, so "the four counts add up to the total" is a
+    # restatement of how they were built and no store shape can falsify it.
+    assert {
+        item["lot_id"] for item in report["c_attribution"]["items"]
+    } == {"lot_probe_dup"}
+
+
+def test_probe_attributes_a_duplicate_identity_that_is_on_both_sides(
+    tmp_path: Path,
+) -> None:
+    """A collapsed identity the replay *does* produce, so nothing else owns it.
+
+    Both other duplicate fixtures collapse rows the replay never produced, which
+    is why they reach ①②③: the extra row is the difference, and the duplicate is
+    a second fact about the same lot id. Here the identity is on both sides and
+    its representative row matches the replay, so the collapse is the **only**
+    reason the lot id differs — the ``duplicate_ids`` input to the partition, and
+    nothing else.
+
+    The rows are inserted with the carrier's unique index dropped because the
+    collision they describe is between two rows that *both* carry the identity
+    (the fallback half of the carrier-or-fallback rule is what makes them one
+    identity), which is the shape the read side has to describe whether or not
+    the index is still there to stop it.
+    """
+    sqlite_path, _config = _build_green_store(tmp_path)
+    lot_id = _stored_lot_id(sqlite_path)
+    fields = _stored_fields(sqlite_path)
+    conn = sqlite3.connect(sqlite_path)
+    try:
+        stored_row = conn.execute(
+            "SELECT account, source_event_id, expiration, strike, multiplier "
+            "FROM position_lots WHERE record_id = ?",
+            (lot_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert stored_row is not None
+    payload = json.dumps(fields, ensure_ascii=False, sort_keys=True)
+    _tamper(sqlite_path, [("DROP INDEX IF EXISTS idx_position_lots_lot_id", ())])
+    for record_id in ("probe_dup_both_a", "probe_dup_both_b"):
+        _tamper(
+            sqlite_path,
+            [
+                (
+                    """
+                    INSERT INTO position_lots (
+                        record_id, account, fields_json, source_event_id,
+                        expiration, strike, multiplier, updated_at_ms, lot_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
+                    """,
+                    (
+                        record_id,
+                        stored_row[0],  # account
+                        payload,
+                        stored_row[1],  # source_event_id
+                        stored_row[2],  # expiration
+                        stored_row[3],  # strike
+                        stored_row[4],  # multiplier
+                        lot_id,
+                    ),
+                )
+            ],
+        )
+
+    report = run_lot_parity_probe(sqlite_path=sqlite_path)
+
+    faces = _faces(report)
+    attribution = _attribution(report)
+    # Nothing else is wrong with this lot: same payload, same columns, present on
+    # both sides.
+    assert faces["a_payload"]["difference_count"] == 0
+    assert faces["b_columns"]["difference_count"] == 0
+    assert faces["c_rows"]["duplicate_identity_count"] == 1
+    assert faces["c_rows"]["extra_in_store_count"] == 0
+    assert faces["c_rows"]["missing_in_store_count"] == 0
+    assert faces["c_rows"]["count_mismatch"] is True
+    assert faces["c_rows"]["difference_count"] == 1
+    # ...so the collapse is the differing lot, and it is attributed exactly once.
+    assert report["c_attribution"]["differing_lot_count"] == 1
+    assert attribution["other"] == 1
+    assert attribution["projection_omission"] == 0
+    assert [item["lot_id"] for item in report["c_attribution"]["items"]] == [lot_id]
 
 
 def test_probe_refuses_a_ledger_row_that_is_not_an_object(tmp_path: Path) -> None:
@@ -1019,12 +1566,142 @@ def test_probe_opens_a_settled_copy_and_still_produces_its_verdict(tmp_path: Pat
     assert report["projected_lot_count"] == 1
 
 
-def test_probe_keeps_mode_ro_when_a_writer_may_still_be_attached(tmp_path: Path) -> None:
-    """``immutable=1`` is for a settled copy only — never for a store with writers.
+def test_probe_refuses_a_store_a_writer_is_holding_locked(tmp_path: Path) -> None:
+    """A lock is not a settled store: it must not be answered with a verdict.
 
-    A writer attached to a WAL store holds its ``-shm``, which is what makes the
-    fallback's guard meaningful: sidecars present means the store is opened
-    ``mode=ro`` and the writer's committed state stays visible.
+    ``mode=ro`` fails with "database is locked" — not with the
+    "unable to open database file" the fallback exists for. Falling back there
+    asked SQLite to read the store with no locks at all and handed back a full
+    green judgement, on a store a writer was in the middle of changing.
+    """
+    sqlite_path, _config = _build_green_store(tmp_path)
+    sqlite_path = Path(sqlite_path)
+    writer = sqlite3.connect(sqlite_path, isolation_level=None)
+    try:
+        writer.execute("PRAGMA journal_mode=DELETE")
+        for suffix in ("-wal", "-shm"):
+            Path(f"{sqlite_path}{suffix}").unlink(missing_ok=True)
+        writer.execute("BEGIN EXCLUSIVE")
+        writer.execute("UPDATE position_lots SET strike = 999.0")
+
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            run_lot_parity_probe(sqlite_path=sqlite_path)
+    finally:
+        writer.execute("ROLLBACK")
+        writer.close()
+
+
+def test_probe_refuses_a_store_with_a_hot_journal(tmp_path: Path) -> None:
+    """A rollback the read-only connection may not perform is not a green light.
+
+    The store was left by a writer that died mid-commit: the main file holds its
+    uncommitted page and the journal holds the image that page has to be rolled
+    back to. SQLite refuses the read-only open ("attempt to write a readonly
+    database"); reading anyway with ``immutable=1`` answers with a verdict built
+    on page contents that are, by definition, not the store's content.
+
+    The ``match`` is what makes this test say **which** branch refuses: it is
+    SQLite's READONLY, not the fallback's cannot-open marker, so the probe's own
+    fallback guard is never consulted for a hot journal (see
+    ``_read_only_connection``). Without the match this control passes whichever
+    of the two error wordings SQLite emits.
+    """
+    sqlite_path, _config = _build_green_store(tmp_path)
+    sqlite_path = Path(sqlite_path)
+    _stage_a_crashed_writer(sqlite_path, strike=555.0)
+    journal = Path(f"{sqlite_path}-journal")
+    assert journal.read_bytes()[:8] == bytes.fromhex("d9d505f920a163d7")
+
+    with pytest.raises(sqlite3.OperationalError, match="readonly database"):
+        run_lot_parity_probe(sqlite_path=sqlite_path)
+
+    # ...and the refused run left the crash for a reader that may roll back: the
+    # probe must not be the thing that consumes a pending recovery.
+    assert sqlite3.connect(sqlite_path).execute(
+        "SELECT strike FROM position_lots"
+    ).fetchone() == (100.0,)
+
+
+def test_probe_opens_a_store_with_a_spent_persist_journal(tmp_path: Path) -> None:
+    """The other side of the hot-journal judgement: a leftover that is not pending.
+
+    ``journal_mode=PERSIST`` leaves a non-empty journal with a zeroed header on
+    every settled store. Treating "a ``-journal`` exists" as "recovery is
+    pending" would refuse a normal store; the probe must open it, ``mode=ro``,
+    and produce its verdict.
+    """
+    sqlite_path, _config = _build_green_store(tmp_path)
+    sqlite_path = Path(sqlite_path)
+    _leave_a_spent_persist_journal(sqlite_path)
+
+    report = run_lot_parity_probe(sqlite_path=sqlite_path)
+
+    assert report["connection_mode"] == LIVE_READ_MODE
+    assert report["green"] is True
+
+
+@pytest.mark.parametrize("settled", [True, False])
+def test_probe_falls_back_only_when_the_sidecars_are_gone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    settled: bool,
+) -> None:
+    """The fallback's guard, tested on both sides of its one judgement.
+
+    ``mode=ro`` is made to fail the one way the fallback exists for — the
+    "unable to open database file" of a settled WAL copy — so that the guard, and
+    not the store, decides the outcome:
+
+    * with a ``-wal``/``-shm`` sidecar present the failure propagates: those two
+      files carry the lock a WAL writer holds, and ``immutable=1`` reads straight
+      past whatever the writer is in the middle of;
+    * with the sidecars gone (the ``.backup`` copy shape) the store opens
+      ``ro+immutable`` normally.
+
+    This is the whole guard, and it is the ``-wal``/``-shm`` **filename** test.
+    It is deliberately not parametrized on a ``-journal`` any more: a hot journal
+    fails ``mode=ro`` with SQLite's READONLY wording, which reaches the caller
+    before the guard is consulted (see the hot-journal control above), so no store
+    shape can put the guard in front of that decision.
+    """
+    import src.application.ledger.lot_parity_probe as probe_module
+
+    sqlite_path, _config = _build_green_store(tmp_path)
+    sqlite_path = Path(sqlite_path)
+    if settled:
+        _settle_store(sqlite_path)
+    # The fixture's own claim, so neither branch can pass for the wrong reason.
+    assert (
+        any(Path(f"{sqlite_path}{suffix}").exists() for suffix in ("-wal", "-shm"))
+        is not settled
+    )
+
+    real_connect = probe_module._connect_read_only
+
+    def _cannot_open(resolved: Path, *, immutable: bool) -> sqlite3.Connection:
+        if not immutable:
+            raise sqlite3.OperationalError("unable to open database file")
+        return real_connect(resolved, immutable=immutable)
+
+    monkeypatch.setattr(probe_module, "_connect_read_only", _cannot_open)
+
+    if not settled:
+        with pytest.raises(sqlite3.OperationalError, match="unable to open database file"):
+            run_lot_parity_probe(sqlite_path=sqlite_path)
+        return
+    report = run_lot_parity_probe(sqlite_path=sqlite_path)
+    assert report["connection_mode"] == SETTLED_READ_MODE
+    assert report["green"] is True
+
+
+def test_probe_keeps_mode_ro_when_a_writer_may_still_be_attached(tmp_path: Path) -> None:
+    """``immutable=1`` is for a copy with nothing pending — never for a live store.
+
+    A writer attached to a WAL store holds its ``-shm``, so the store keeps
+    ``mode=ro`` and the writer's committed state stays visible. That is what the
+    sidecar half of the guard buys: a *file* test, not a test for writers — which
+    is why the lock case has its own control above rather than being inferred
+    from this one.
     """
     sqlite_path, _config = _build_green_store(tmp_path)
     writer = sqlite3.connect(sqlite_path)
@@ -1052,6 +1729,37 @@ def test_probe_refuses_to_land_a_report_inside_the_runtime_state_tree(tmp_path: 
     assert assert_report_path_outside_runtime_state(allowed) == allowed.resolve()
     assert write_report({"green": True}, out_path=allowed) == allowed.resolve()
     assert json.loads(allowed.read_text(encoding="utf-8")) == {"green": True}
+
+
+def test_probe_sample_limit_truncates_items_but_never_counts(tmp_path: Path) -> None:
+    """``--sample-limit`` is a display budget: the counts stay totals.
+
+    Three extra rows and a limit of one: the items are cut, the counts are not,
+    and the C-side faces say which of the two happened (``items_truncated``). A
+    sample limit that quietly truncated the counts would make a red run look
+    small. Faces A and B carry the same flag, but this test does not assert it —
+    only the two collections it exercises are pinned here.
+    """
+    sqlite_path, _config = _build_green_store(tmp_path)
+    ledger_event_id = _ledger_event_id(sqlite_path)
+    for index in range(3):
+        _insert_stored_row(
+            sqlite_path,
+            record_id=f"lot_probe_extra_{index}",
+            source_event_id=ledger_event_id,
+        )
+
+    report = run_lot_parity_probe(sqlite_path=sqlite_path, sample_limit=1)
+
+    faces = _faces(report)
+    assert report["sample_limit"] == 1
+    assert faces["c_rows"]["extra_in_store_count"] == 3
+    assert faces["c_rows"]["lot_id_set_difference_count"] == 3
+    assert len(faces["c_rows"]["items"]) == 1
+    assert faces["c_rows"]["items_truncated"] is True
+    assert report["c_attribution"]["projection_omission"] == 3
+    assert len(report["c_attribution"]["items"]) == 1
+    assert report["c_attribution"]["items_truncated"] is True
 
 
 def test_probe_module_cli_writes_a_report_and_exits_non_zero_when_red(tmp_path: Path) -> None:
@@ -1139,7 +1847,12 @@ def test_verify_projection_adds_the_probe_under_a_new_key_without_touching_ok(
     # not restate it.
     assert payload["lot_parity_probe"]["green"] is True
     assert payload["lot_parity_probe"]["tier"] == "tier-1"
-    assert payload["lot_parity_probe"]["connection_mode"] in {"ro", "ro+immutable"}
+    # Pinned to the ONE mode this fixture can produce: it is a live store with
+    # its sidecars present, so a fallback to ``immutable=1`` here would be the
+    # regression the read-mode tests exist to catch. ``in {...}`` accepted either
+    # spelling and so could not fail. The settled-copy spelling is pinned by
+    # ``test_probe_opens_a_settled_copy_and_still_produces_its_verdict``.
+    assert payload["lot_parity_probe"]["connection_mode"] == "ro"
     assert "lot_parity_probe_green" not in payload
     assert "lot_parity_probe_error" not in payload
 
@@ -1411,3 +2124,53 @@ def test_probe_opens_its_own_connection_read_only(
 
     assert report["green"] is True
     assert uris == [f"{sqlite_path.resolve().as_uri()}?mode=ro"]
+
+
+def test_probe_sets_query_only_on_its_own_connection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``mode=ro`` and ``PRAGMA query_only=ON`` are two mechanisms, not one.
+
+    The URI test above pins the open; this one pins the pragma, which is the
+    second half of "zero writes is a property of the connection, not an
+    intention" and had no control at all: deleting the statement left the whole
+    file green. The connection is wrapped, not faked — every statement reaches
+    the real SQLite.
+    """
+    probe_module = _probe_module()
+
+    sqlite_path, _config = _build_green_store(tmp_path)
+    statements: list[str] = []
+
+    class _RecordingConnection:
+        def __init__(self, real: sqlite3.Connection) -> None:
+            self._real = real
+
+        @property
+        def row_factory(self) -> object:
+            return self._real.row_factory
+
+        @row_factory.setter
+        def row_factory(self, value: object) -> None:
+            self._real.row_factory = value  # type: ignore[assignment]
+
+        def execute(self, sql: str, *args: object) -> sqlite3.Cursor:
+            statements.append(sql)
+            return self._real.execute(sql, *args)
+
+        def close(self) -> None:
+            self._real.close()
+
+    real_connect = sqlite3.connect
+    shim = types.SimpleNamespace(
+        connect=lambda *args, **kwargs: _RecordingConnection(real_connect(*args, **kwargs)),
+        Row=sqlite3.Row,
+        OperationalError=sqlite3.OperationalError,
+    )
+    monkeypatch.setattr(probe_module, "sqlite3", shim)
+
+    report = run_lot_parity_probe(sqlite_path=sqlite_path)
+
+    assert report["green"] is True
+    assert "PRAGMA query_only=ON" in statements
