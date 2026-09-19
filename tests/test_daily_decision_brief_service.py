@@ -173,11 +173,7 @@ def test_brief_uses_explicit_candidate_snapshot(
 ) -> None:
     from src.application import daily_decision_brief_service as service
 
-    account_dir = _account_dir(tmp_path)
-    pd.DataFrame([_put_row()]).to_csv(
-        account_dir / "nvda_sell_put_candidates_labeled.csv",
-        index=False,
-    )
+    account_dir = _write_labeled_put_candidates(tmp_path)
     _materialize_opening_snapshot_fixture(tmp_path, market="US")
     _materialize_candidate_bundle_fixture(tmp_path)
     snapshot = json.loads(
@@ -775,6 +771,24 @@ def _put_row(
     return row
 
 
+def _write_labeled_put_candidates(
+    tmp_path: Path,
+    *,
+    header_only: bool = False,
+) -> Path:
+    account_dir = _account_dir(tmp_path)
+    frame = (
+        pd.DataFrame(columns=_put_row().keys())
+        if header_only
+        else pd.DataFrame([_put_row()])
+    )
+    frame.to_csv(
+        account_dir / "nvda_sell_put_candidates_labeled.csv",
+        index=False,
+    )
+    return account_dir
+
+
 def _earnings_evidence(
     *,
     event_date: str | None = None,
@@ -1199,10 +1213,7 @@ def test_brief_consumes_shared_capacity_without_raw_holdings_fallback(
 
 
 def test_assembler_projects_multicurrency_funds_from_run_scoped_context(tmp_path: Path) -> None:
-    account_dir = _account_dir(tmp_path)
-    pd.DataFrame(columns=_put_row().keys()).to_csv(
-        account_dir / "nvda_sell_put_candidates_labeled.csv", index=False
-    )
+    _write_labeled_put_candidates(tmp_path, header_only=True)
 
     brief = _assemble(tmp_path)
 
@@ -1219,10 +1230,7 @@ def test_assembler_projects_multicurrency_funds_from_run_scoped_context(tmp_path
 
 
 def test_funds_cny_totals_cover_secured_currency_without_cash(tmp_path: Path) -> None:
-    account_dir = _account_dir(tmp_path)
-    pd.DataFrame(columns=_put_row().keys()).to_csv(
-        account_dir / "nvda_sell_put_candidates_labeled.csv", index=False
-    )
+    account_dir = _write_labeled_put_candidates(tmp_path, header_only=True)
     state_dir = account_dir / "state"
     (state_dir / "portfolio_context.json").write_text(
         json.dumps(
@@ -1265,10 +1273,7 @@ def test_funds_cny_totals_cover_secured_currency_without_cash(tmp_path: Path) ->
 def test_unreliable_secured_usage_keeps_cash_but_does_not_invent_opening_funds(
     tmp_path: Path,
 ) -> None:
-    account_dir = _account_dir(tmp_path)
-    pd.DataFrame(columns=_put_row().keys()).to_csv(
-        account_dir / "nvda_sell_put_candidates_labeled.csv", index=False
-    )
+    account_dir = _write_labeled_put_candidates(tmp_path, header_only=True)
     state_dir = account_dir / "state"
     (state_dir / "option_positions_context.json").write_text(
         json.dumps(
@@ -1291,10 +1296,7 @@ def test_unreliable_secured_usage_keeps_cash_but_does_not_invent_opening_funds(
 
 
 def test_malformed_secured_reliability_flag_fails_opening_funds_closed(tmp_path: Path) -> None:
-    account_dir = _account_dir(tmp_path)
-    pd.DataFrame(columns=_put_row().keys()).to_csv(
-        account_dir / "nvda_sell_put_candidates_labeled.csv", index=False
-    )
+    account_dir = _write_labeled_put_candidates(tmp_path, header_only=True)
     (account_dir / "state" / "option_positions_context.json").write_text(
         json.dumps(
             {
@@ -1314,10 +1316,7 @@ def test_malformed_secured_reliability_flag_fails_opening_funds_closed(tmp_path:
 
 
 def test_missing_cash_context_blocks_snapshot_without_fabricating_zero(tmp_path: Path) -> None:
-    account_dir = _account_dir(tmp_path)
-    pd.DataFrame(columns=_put_row().keys()).to_csv(
-        account_dir / "nvda_sell_put_candidates_labeled.csv", index=False
-    )
+    account_dir = _write_labeled_put_candidates(tmp_path, header_only=True)
     (account_dir / "state" / "portfolio_context.json").unlink()
 
     brief = _assemble(tmp_path)
@@ -1430,10 +1429,7 @@ def test_candidate_index_uses_one_ranked_candidate_per_symbol_beyond_display_lim
 
 
 def test_noop_account_result_is_not_a_successful_snapshot(tmp_path: Path) -> None:
-    account_dir = _account_dir(tmp_path)
-    pd.DataFrame(columns=_put_row().keys()).to_csv(
-        account_dir / "nvda_sell_put_candidates_labeled.csv", index=False
-    )
+    _write_labeled_put_candidates(tmp_path, header_only=True)
 
     brief = _assemble(tmp_path, result=_result(ran_scan=False, reason="scheduler noop"))
 
@@ -1501,10 +1497,7 @@ def test_candidate_event_presence_mismatch_fails_closed(tmp_path: Path) -> None:
 
 
 def test_candidate_event_projection_confirms_complete_primary_absence(tmp_path: Path) -> None:
-    account_dir = _account_dir(tmp_path)
-    pd.DataFrame([_put_row()]).to_csv(
-        account_dir / "nvda_sell_put_candidates_labeled.csv", index=False
-    )
+    _write_labeled_put_candidates(tmp_path)
     brief = _assemble(tmp_path)
 
     assert brief["candidates"]["sell_put"][0]["event_risk"]["user_state"] == "confirmed_none"
@@ -1605,8 +1598,7 @@ def test_close_advice_preserves_lot_group_and_leg_identity(
     tmp_path: Path, option_type: str, group_id: str, leg_role: str,
     stock_lot_id: str, family: str,
 ) -> None:
-    account_dir = _account_dir(tmp_path)
-    pd.DataFrame(columns=_put_row().keys()).to_csv(account_dir / "nvda_sell_put_candidates_labeled.csv", index=False)
+    account_dir = _write_labeled_put_candidates(tmp_path, header_only=True)
     _write_close_report(
         account_dir,
         [
@@ -1664,11 +1656,7 @@ def test_close_advice_preserves_lot_group_and_leg_identity(
 def test_close_advice_daily_brief_selects_only_close_state(tmp_path: Path) -> None:
     from src.application.daily_decision_brief_renderer import render_full_brief
 
-    account_dir = _account_dir(tmp_path)
-    pd.DataFrame(columns=_put_row().keys()).to_csv(
-        account_dir / "nvda_sell_put_candidates_labeled.csv",
-        index=False,
-    )
+    account_dir = _write_labeled_put_candidates(tmp_path, header_only=True)
     close_rows = [
             {
                 "account": "lx",
@@ -1737,11 +1725,7 @@ def test_close_advice_daily_brief_selects_only_close_state(tmp_path: Path) -> No
 def test_close_advice_without_valid_manifest_cannot_enter_daily_brief(
     tmp_path: Path,
 ) -> None:
-    account_dir = _account_dir(tmp_path)
-    pd.DataFrame(columns=_put_row().keys()).to_csv(
-        account_dir / "nvda_sell_put_candidates_labeled.csv",
-        index=False,
-    )
+    account_dir = _write_labeled_put_candidates(tmp_path, header_only=True)
     pd.DataFrame(
         [
             {
@@ -1777,11 +1761,7 @@ def test_close_advice_without_valid_manifest_cannot_enter_daily_brief(
 def test_close_advice_mixed_account_report_cannot_enter_daily_brief(
     tmp_path: Path,
 ) -> None:
-    account_dir = _account_dir(tmp_path)
-    pd.DataFrame(columns=_put_row().keys()).to_csv(
-        account_dir / "nvda_sell_put_candidates_labeled.csv",
-        index=False,
-    )
+    account_dir = _write_labeled_put_candidates(tmp_path, header_only=True)
     common = {
         "position_lot_id": "lot-close",
         "symbol": "NVDA",
@@ -1873,11 +1853,7 @@ def test_close_advice_daily_brief_honors_ranked_account_limit(
 ) -> None:
     from src.application.daily_decision_brief_renderer import render_full_brief
 
-    account_dir = _account_dir(tmp_path)
-    pd.DataFrame(columns=_put_row().keys()).to_csv(
-        account_dir / "nvda_sell_put_candidates_labeled.csv",
-        index=False,
-    )
+    account_dir = _write_labeled_put_candidates(tmp_path, header_only=True)
     close_rows = [
             {
                 "account": "lx",
@@ -2025,11 +2001,7 @@ def test_combo_snapshot_partial_status_warns_without_csv_authority(
 ) -> None:
     from src.application.daily_decision_brief_renderer import render_full_brief
 
-    account_dir = _account_dir(tmp_path)
-    pd.DataFrame([_put_row()]).to_csv(
-        account_dir / "nvda_sell_put_candidates_labeled.csv",
-        index=False,
-    )
+    _write_labeled_put_candidates(tmp_path)
     _seal_combo_status_snapshot(tmp_path, opening_status="partial_data")
 
     brief = _assemble(tmp_path)
@@ -2050,11 +2022,7 @@ def test_combo_snapshot_partial_status_warns_without_csv_authority(
 def test_combo_snapshot_data_unavailable_is_not_clean_no_candidate(
     tmp_path: Path,
 ) -> None:
-    account_dir = _account_dir(tmp_path)
-    pd.DataFrame([_put_row()]).to_csv(
-        account_dir / "nvda_sell_put_candidates_labeled.csv",
-        index=False,
-    )
+    _write_labeled_put_candidates(tmp_path)
     _seal_combo_status_snapshot(tmp_path, opening_status="data_unavailable")
 
     brief = _assemble(tmp_path)
@@ -2250,8 +2218,7 @@ def test_partial_frozen_scope_warns_without_erasing_valid_candidate(
 
 
 def test_header_only_and_empty_csv_are_readable_empty_decisions(tmp_path: Path) -> None:
-    account_dir = _account_dir(tmp_path)
-    pd.DataFrame(columns=_put_row().keys()).to_csv(account_dir / "nvda_sell_put_candidates_labeled.csv", index=False)
+    account_dir = _write_labeled_put_candidates(tmp_path, header_only=True)
     _write_close_report(account_dir, [])
 
     brief = _assemble(tmp_path)
@@ -2274,8 +2241,7 @@ def test_all_structured_sources_unavailable_blocks_account(tmp_path: Path) -> No
 
 
 def test_pipeline_failure_blocks_even_when_ran_scan_and_candidate_artifact_exist(tmp_path: Path) -> None:
-    account_dir = _account_dir(tmp_path)
-    pd.DataFrame([_put_row()]).to_csv(account_dir / "nvda_sell_put_candidates_labeled.csv", index=False)
+    _write_labeled_put_candidates(tmp_path)
 
     brief = _assemble(
         tmp_path,
@@ -2430,11 +2396,7 @@ def test_cc_lp_snapshot_is_not_required_without_enabled_current_market_cc_lp(
     tmp_path: Path,
     symbol_cfg: dict,
 ) -> None:
-    account_dir = _account_dir(tmp_path)
-    pd.DataFrame([_put_row()]).to_csv(
-        account_dir / "nvda_sell_put_candidates_labeled.csv",
-        index=False,
-    )
+    _write_labeled_put_candidates(tmp_path)
     config = _config()
     config["symbols"] = [symbol_cfg]
 
@@ -2472,11 +2434,7 @@ def test_cc_lp_applicability_comes_from_terminal_manifest_not_live_config(
     tmp_path: Path,
     config_overlay: dict,
 ) -> None:
-    account_dir = _account_dir(tmp_path)
-    pd.DataFrame([_put_row()]).to_csv(
-        account_dir / "nvda_sell_put_candidates_labeled.csv",
-        index=False,
-    )
+    _write_labeled_put_candidates(tmp_path)
     config = _config()
     config.update(config_overlay)
 
@@ -2491,11 +2449,7 @@ def test_cc_lp_applicability_comes_from_terminal_manifest_not_live_config(
 def test_symbol_override_can_disable_template_cc_lp_snapshot_requirement(
     tmp_path: Path,
 ) -> None:
-    account_dir = _account_dir(tmp_path)
-    pd.DataFrame([_put_row()]).to_csv(
-        account_dir / "nvda_sell_put_candidates_labeled.csv",
-        index=False,
-    )
+    _write_labeled_put_candidates(tmp_path)
     config = _config()
     config["templates"] = {
         "cc_lp_base": {
