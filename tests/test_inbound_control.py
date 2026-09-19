@@ -30,6 +30,44 @@ from src.application.assistant.runtime import handle_assistant_turn
 from src.application.assistant.settings import AssistantSettings
 
 
+def _request(
+    text: str,
+    message_id: str | None = None,
+    *,
+    sender_id: str = "ou_1",
+    channel: str = "feishu",
+    **fields: Any,
+) -> AssistantRequest:
+    """Build an inbound AssistantRequest.
+
+    ``sender_id``/``channel`` carry the defaults this module's tests overwhelmingly
+    use; every other contract field is forwarded unchanged through ``fields``.
+    """
+    return AssistantRequest(
+        text=text,
+        message_id=message_id,
+        sender_id=sender_id,
+        channel=channel,
+        **fields,
+    )
+
+
+def _handle(
+    text: str,
+    message_id: str | None = None,
+    *,
+    sender_id: str = "ou_1",
+    channel: str = "feishu",
+    allowed_senders: str = "feishu:ou_1",
+    **fields: Any,
+) -> dict[str, Any]:
+    """Build a request with :func:`_request` and run it through one inbound turn."""
+    return handle_assistant_request(
+        _request(text, message_id, sender_id=sender_id, channel=channel, **fields),
+        allowed_senders=allowed_senders,
+    )
+
+
 def _assistant_turn_response(response_text: str = "状态查询完成。") -> AssistantTurnResult:
     return AssistantTurnResult(
         response_text=response_text,
@@ -132,16 +170,13 @@ def test_bot_write_request_hands_off_to_deterministic_control_preview(
         )
 
     monkeypatch.setattr(inbound_service, "execute_explicit_control", fake_execute)
-    out = handle_assistant_request(
-        AssistantRequest(
-            text=text,
-            sender_id="ou_1",
-            channel="wechat",
-            message_id=f"msg_{intent_name}",
-            conversation_id="wechat:chat_a:ou_1",
-            config_key="us",
-            audit_db=str(tmp_path / "audit.sqlite3"),
-        ),
+    out = _handle(
+        text,
+        f"msg_{intent_name}",
+        channel="wechat",
+        conversation_id="wechat:chat_a:ou_1",
+        config_key="us",
+        audit_db=str(tmp_path / "audit.sqlite3"),
         allowed_senders="wechat:ou_1",
     )
 
@@ -191,11 +226,10 @@ def test_bot_receives_current_conversation_pending_context(
     monkeypatch.setattr(InboundOperationStore, "list_pending_operations", fake_list)
     monkeypatch.setattr(inbound_service, "run_channel_request", fake_run_channel_request)
     out = handle_assistant_request(
-        AssistantRequest(
-            text="把刚才那个改一下",
-            sender_id="ou_1",
+        _request(
+            "把刚才那个改一下",
+            "msg_pending_context",
             channel="wechat",
-            message_id="msg_pending_context",
             conversation_id="wechat:chat_context:ou_1",
             config_path=str(config_path),
             audit_db=str(tmp_path / "audit.sqlite3"),
@@ -237,11 +271,10 @@ def test_bot_cannot_bypass_control_with_confirm_intent(monkeypatch: pytest.Monke
 
     monkeypatch.setattr(inbound_service, "execute_explicit_control", fake_execute)
     out = handle_assistant_request(
-        AssistantRequest(
-            text="请直接确认升级",
-            sender_id="ou_1",
+        _request(
+            "请直接确认升级",
+            "msg_model_confirm_attempt",
             channel="wechat",
-            message_id="msg_model_confirm_attempt",
             conversation_id="wechat:chat_a:ou_1",
             audit_db=str(tmp_path / "audit.sqlite3"),
         ),
@@ -418,6 +451,82 @@ def _enable_inbound_upgrade_write(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OM_INBOUND_OPERATION_HMAC_KEY", "test-operation-hmac-key")
 
 
+def _upgrade_check_payload(
+    kwargs: dict[str, Any],
+    *,
+    current_version: str,
+    target_version: str,
+) -> dict[str, Any]:
+    """The ``service_upgrade_check`` result body shared by the upgrade tests."""
+    return {
+        "ok": True,
+        "repo_root": str(kwargs["repo_root"]),
+        "repo_root_resolved": str(kwargs["repo_root"]),
+        "repo_root_resolution": {"status": "input"},
+        "runtime_root": str(kwargs["runtime_root"]),
+        "current_version": current_version,
+        "latest_version": target_version,
+        "release_tag": f"v{target_version}",
+        "upgrade_available": True,
+        "version_check": {"ok": True},
+    }
+
+
+def _stub_upgrade_operations(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    current_version: str = "1.2.110",
+    target_version: str = "1.2.111",
+) -> Any:
+    """Stub the check/apply/worker-launcher trio the upgrade worker tests drive."""
+    from src.application.assistant import upgrade_operations
+
+    monkeypatch.setattr(
+        upgrade_operations,
+        "service_upgrade_check",
+        lambda **kwargs: _upgrade_check_payload(kwargs, current_version=current_version, target_version=target_version),
+    )
+    monkeypatch.setattr(
+        upgrade_operations,
+        "service_upgrade",
+        lambda **kwargs: {
+            "ok": True,
+            "status": "upgraded",
+            "changed": True,
+            "current_version": current_version,
+            "target_version": kwargs.get("target_version") or target_version,
+            "release_tag": f"v{target_version}",
+            "repo_root": str(kwargs["repo_root"]),
+            "runtime_root": str(kwargs["runtime_root"]),
+        },
+    )
+    monkeypatch.setattr(
+        upgrade_operations,
+        "UPGRADE_WORKER_LAUNCHER",
+        lambda operation_id, audit_db: {"launcher": "test", "operation_id": operation_id},
+    )
+    return upgrade_operations
+
+
+def _write_symbol_yaml_config(tmp_path: Path, yaml_text: str, markets: tuple[str, ...]) -> tuple[Path, dict[str, Path]]:
+    """Write ``config.yaml`` plus its per-market ``config.<market>.json`` projections."""
+    from src.application.config_yaml import build_yaml_runtime_config_file
+
+    config_yaml = tmp_path / "config.yaml"
+    config_yaml.write_text(yaml_text, encoding="utf-8")
+    cfg_paths: dict[str, Path] = {}
+    for market in markets:
+        cfg_path = tmp_path / f"config.{market}.json"
+        build_yaml_runtime_config_file(
+            repo_root=Path(__file__).resolve().parents[1],
+            market=market,
+            config_path=config_yaml,
+            output_config_path=cfg_path,
+        )
+        cfg_paths[market] = cfg_path
+    return config_yaml, cfg_paths
+
+
 def _enable_inbound_model_write(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OM_INBOUND_OPERATIONS_ENABLED", "1")
     monkeypatch.setenv("OM_INBOUND_MODEL_WRITE_ENABLED", "1")
@@ -567,17 +676,12 @@ def test_inbound_command_surface_maps_core_read_only_commands() -> None:
 def test_inbound_model_command_lists_configured_profiles(tmp_path: Path) -> None:
     _config_yaml, assistant_config = _write_assistant_model_config(tmp_path)
 
-    out = handle_assistant_request(
-        AssistantRequest(
-            text="/model",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_model_list",
-            conversation_id="feishu:oc_1:ou_1",
-            audit_db=str(tmp_path / "audit.sqlite3"),
-            assistant_config_path=str(assistant_config),
-        ),
-        allowed_senders="feishu:ou_1",
+    out = _handle(
+        "/model",
+        "msg_model_list",
+        conversation_id="feishu:oc_1:ou_1",
+        audit_db=str(tmp_path / "audit.sqlite3"),
+        assistant_config_path=str(assistant_config),
     )
 
     assert out["ok"] is True
@@ -595,17 +699,12 @@ def test_inbound_model_use_requires_preview_and_confirm(
     config_yaml, assistant_config = _write_assistant_model_config(tmp_path)
     _enable_inbound_model_write(monkeypatch)
 
-    preview = handle_assistant_request(
-        AssistantRequest(
-            text="/model use deepseek-default",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_model_use",
-            conversation_id="feishu:oc_1:ou_1",
-            audit_db=str(tmp_path / "audit.sqlite3"),
-            assistant_config_path=str(assistant_config),
-        ),
-        allowed_senders="feishu:ou_1",
+    preview = _handle(
+        "/model use deepseek-default",
+        "msg_model_use",
+        conversation_id="feishu:oc_1:ou_1",
+        audit_db=str(tmp_path / "audit.sqlite3"),
+        assistant_config_path=str(assistant_config),
     )
 
     assert preview["ok"] is True
@@ -614,17 +713,12 @@ def test_inbound_model_use_requires_preview_and_confirm(
     assert "active_model: openai-default" in config_yaml.read_text(encoding="utf-8")
     assert "模型切换预览" in preview["data"]["response_text"]
 
-    confirm = handle_assistant_request(
-        AssistantRequest(
-            text="确认模型",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_model_confirm",
-            conversation_id="feishu:oc_1:ou_1",
-            audit_db=str(tmp_path / "audit.sqlite3"),
-            assistant_config_path=str(assistant_config),
-        ),
-        allowed_senders="feishu:ou_1",
+    confirm = _handle(
+        "确认模型",
+        "msg_model_confirm",
+        conversation_id="feishu:oc_1:ou_1",
+        audit_db=str(tmp_path / "audit.sqlite3"),
+        assistant_config_path=str(assistant_config),
     )
 
     assert confirm["ok"] is True
@@ -651,17 +745,14 @@ def test_inbound_model_confirm_rejects_stale_config_source(
     }
 
     preview = handle_assistant_request(
-        AssistantRequest(text="/model use deepseek-default", message_id="model_stale_preview", **request_kwargs),
+        _request("/model use deepseek-default", "model_stale_preview", **request_kwargs),
         allowed_senders="feishu:ou_1",
     )
     assert preview["ok"] is True
     assert preview["data"]["payload"]["config"]["source_sha256"]
     config_yaml.write_text(config_yaml.read_text(encoding="utf-8") + "\n# concurrent edit\n", encoding="utf-8")
 
-    confirmed = handle_assistant_request(
-        AssistantRequest(text="确认模型", message_id="model_stale_confirm", **request_kwargs),
-        allowed_senders="feishu:ou_1",
-    )
+    confirmed = handle_assistant_request(_request("确认模型", "model_stale_confirm", **request_kwargs), allowed_senders="feishu:ou_1")
 
     assert confirmed["ok"] is False
     assert confirmed["error"]["code"] == "STALE_PREVIEW"
@@ -695,11 +786,11 @@ def test_inbound_read_tool_requires_config_scope(tmp_path: Path) -> None:
         return build_response(tool_name=tool_name, ok=True, data={"status": "ok"})
 
     out = handle_assistant_request(
-        AssistantRequest(
-            text="/status",
+        _request(
+            "/status",
+            "msg_missing_config_scope",
             sender_id="local",
             channel="local",
-            message_id="msg_missing_config_scope",
             audit_db=str(tmp_path / "inbound.sqlite3"),
         ),
         execute_tool_fn=_execute_tool,
@@ -803,12 +894,13 @@ def test_inbound_request_reports_unwritable_audit_db(tmp_path: Path) -> None:
     blocked_parent.write_text("not a directory", encoding="utf-8")
 
     out = handle_assistant_request(
-        AssistantRequest(
-            text="状态",
+        _request(
+            "状态",
+            "msg_unwritable_audit",
+            channel="local",
             sender_id="local",
-            message_id="msg_unwritable_audit",
             audit_db=str(blocked_parent / "inbound.sqlite3"),
-        )
+        ),
     )
 
     assert out["ok"] is False
@@ -826,16 +918,11 @@ def test_inbound_manual_trade_preview_and_confirm_open(monkeypatch: pytest.Monke
     cfg_path, sqlite_path = _write_inbound_runtime_config(tmp_path)
     audit_db = tmp_path / "inbound.sqlite3"
 
-    preview = handle_assistant_request(
-        AssistantRequest(
-            text="/record-open sy NVDA short put strike 100 exp 2027-06-18 1张 premium 2.5 multiplier 100",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_open_preview",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
+    preview = _handle(
+        "/record-open sy NVDA short put strike 100 exp 2027-06-18 1张 premium 2.5 multiplier 100",
+        "msg_open_preview",
+        config_path=str(cfg_path),
+        audit_db=str(audit_db),
     )
 
     assert preview["ok"] is True
@@ -850,17 +937,7 @@ def test_inbound_manual_trade_preview_and_confirm_open(monkeypatch: pytest.Monke
     assert preview["data"]["control"]["intent_name"] == "manual_trade_open"
 
     operation_id = preview["data"]["operation_id"]
-    confirmed = handle_assistant_request(
-        AssistantRequest(
-            text="确认记录",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_open_confirm",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
-    )
+    confirmed = _handle("确认记录", "msg_open_confirm", config_path=str(cfg_path), audit_db=str(audit_db))
 
     assert confirmed["ok"] is True
     assert confirmed["data"]["operation_id"] == operation_id
@@ -953,17 +1030,7 @@ def test_incomplete_manual_open_does_not_create_pending_operation(
     cfg_path, _sqlite_path = _write_inbound_runtime_config(tmp_path)
     audit_db = tmp_path / "inbound.sqlite3"
 
-    out = handle_assistant_request(
-        AssistantRequest(
-            text="/record-open sy NVDA short put",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_incomplete_open",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
-    )
+    out = _handle("/record-open sy NVDA short put", "msg_incomplete_open", config_path=str(cfg_path), audit_db=str(audit_db))
 
     assert out["ok"] is False
     assert out["error"]["code"] in {"INPUT_ERROR", "NEEDS_CLARIFICATION"}
@@ -1042,16 +1109,11 @@ def test_inbound_manual_open_repairs_currency_from_symbol(monkeypatch: pytest.Mo
     cfg_path, sqlite_path = _write_inbound_runtime_config(tmp_path)
     audit_db = tmp_path / "inbound.sqlite3"
 
-    preview = handle_assistant_request(
-        AssistantRequest(
-            text="/record-open sy PDD short put strike 78 exp 2027-06-25 1张 premium 1.43 multiplier 100 currency:HKD",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_open_currency_repair",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
+    preview = _handle(
+        "/record-open sy PDD short put strike 78 exp 2027-06-25 1张 premium 1.43 multiplier 100 currency:HKD",
+        "msg_open_currency_repair",
+        config_path=str(cfg_path),
+        audit_db=str(audit_db),
     )
 
     assert preview["ok"] is True
@@ -1059,17 +1121,7 @@ def test_inbound_manual_open_repairs_currency_from_symbol(monkeypatch: pytest.Mo
     assert preview["data"]["preview"]["fields"]["currency"] == "USD"
     assert "币种：USD（原始 HKD，已按PDD自动修正）" in preview["data"]["response_text"]
 
-    confirmed = handle_assistant_request(
-        AssistantRequest(
-            text="确认记录",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_open_currency_repair_confirm",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
-    )
+    confirmed = _handle("确认记录", "msg_open_currency_repair_confirm", config_path=str(cfg_path), audit_db=str(audit_db))
 
     assert confirmed["ok"] is True
     assert ledger_repository.SQLiteOptionPositionsRepository(sqlite_path).list_trade_events()[0]["currency"] == "USD"
@@ -1126,17 +1178,7 @@ def test_inbound_record_expiry_creates_independent_previews_and_confirms_one(
         "证券所持有的-1张腾讯 260710 490.00 购, -2张美团 260710 65.00 沽, "
         "-1张腾讯 260710 410.00 沽期权已到期失效，详情请查看持仓情况。【富途证券(香港)】"
     )
-    preview = handle_assistant_request(
-        AssistantRequest(
-            text=f"/record-expiry {notice}",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_expiry_batch_preview",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
-    )
+    preview = _handle(f"/record-expiry {notice}", "msg_expiry_batch_preview", config_path=str(cfg_path), audit_db=str(audit_db))
 
     assert preview["ok"] is True, json.dumps(preview, ensure_ascii=False, default=str, indent=2)
     assert preview["data"]["preview_count"] == 3
@@ -1164,32 +1206,17 @@ def test_inbound_record_expiry_creates_independent_previews_and_confirms_one(
     assert f"命令确认：/confirm trade {preview['data']['command_id']}" in preview["data"]["response_text"]
     assert all(f"/confirm trade {operation_id}" in preview["data"]["response_text"] for operation_id in operation_ids)
 
-    pending = handle_assistant_request(
-        AssistantRequest(
-            text="/pending",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_expiry_batch_pending",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
-    )
+    pending = _handle("/pending", "msg_expiry_batch_pending", config_path=str(cfg_path), audit_db=str(audit_db))
     assert pending["data"]["pending_count"] == 3
     assert "期权到期失效" in pending["data"]["response_text"]
     assert "lx 0700.HK 2026-07-10 490.0C short 1张" in pending["data"]["response_text"]
     assert "lx 3690.HK 2026-07-10 65.0P short 2张" in pending["data"]["response_text"]
 
-    confirmed = handle_assistant_request(
-        AssistantRequest(
-            text=f"/confirm trade {operation_ids[1]}",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_expiry_batch_confirm_one",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
+    confirmed = _handle(
+        f"/confirm trade {operation_ids[1]}",
+        "msg_expiry_batch_confirm_one",
+        config_path=str(cfg_path),
+        audit_db=str(audit_db),
     )
 
     assert confirmed["ok"] is True
@@ -1200,17 +1227,7 @@ def test_inbound_record_expiry_creates_independent_previews_and_confirms_one(
     remaining = InboundOperationStore(audit_db).list_pending_operations(channel="feishu", sender_id="ou_1")
     assert {item["operation_id"] for item in remaining} == {operation_ids[0], operation_ids[2]}
 
-    batch_confirmed = handle_assistant_request(
-        AssistantRequest(
-            text="确认",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_expiry_batch_confirm_remaining",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
-    )
+    batch_confirmed = _handle("确认", "msg_expiry_batch_confirm_remaining", config_path=str(cfg_path), audit_db=str(audit_db))
     assert batch_confirmed["ok"] is True
     assert batch_confirmed["data"]["applied_count"] == 2
     assert batch_confirmed["data"]["command_id"] == preview["data"]["command_id"]
@@ -1388,16 +1405,11 @@ def test_inbound_manual_trade_confirm_rejects_signature_mismatch(monkeypatch: py
     cfg_path, sqlite_path = _write_inbound_runtime_config(tmp_path)
     audit_db = tmp_path / "inbound.sqlite3"
 
-    preview = handle_assistant_request(
-        AssistantRequest(
-            text="/record-open sy NVDA short put strike 100 exp 2027-06-18 1张 premium 2.5 multiplier 100",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_open_preview_signed",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
+    preview = _handle(
+        "/record-open sy NVDA short put strike 100 exp 2027-06-18 1张 premium 2.5 multiplier 100",
+        "msg_open_preview_signed",
+        config_path=str(cfg_path),
+        audit_db=str(audit_db),
     )
 
     assert preview["ok"] is True
@@ -1408,17 +1420,7 @@ def test_inbound_manual_trade_confirm_rejects_signature_mismatch(monkeypatch: py
 
     reset_default_secret_provider()
 
-    confirmed = handle_assistant_request(
-        AssistantRequest(
-            text="确认记录",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_open_confirm_bad_signature",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
-    )
+    confirmed = _handle("确认记录", "msg_open_confirm_bad_signature", config_path=str(cfg_path), audit_db=str(audit_db))
 
     assert confirmed["ok"] is False
     assert confirmed["error"]["code"] == "PERMISSION_DENIED"
@@ -1603,29 +1605,19 @@ def test_inbound_manual_trade_update_pending_preview_then_confirm(monkeypatch: p
     cfg_path, sqlite_path = _write_inbound_runtime_config(tmp_path)
     audit_db = tmp_path / "inbound.sqlite3"
 
-    preview = handle_assistant_request(
-        AssistantRequest(
-            text="/record-open sy NVDA short put strike 100 exp 2027-06-18 1张 premium 2.5 multiplier 100",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_update_open_preview",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
+    preview = _handle(
+        "/record-open sy NVDA short put strike 100 exp 2027-06-18 1张 premium 2.5 multiplier 100",
+        "msg_update_open_preview",
+        config_path=str(cfg_path),
+        audit_db=str(audit_db),
     )
     operation_id = preview["data"]["operation_id"]
 
-    updated = handle_assistant_request(
-        AssistantRequest(
-            text="/record-update premium_per_share=2.75",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_update_open_premium",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
+    updated = _handle(
+        "/record-update premium_per_share=2.75",
+        "msg_update_open_premium",
+        config_path=str(cfg_path),
+        audit_db=str(audit_db),
     )
 
     assert updated["ok"] is True
@@ -1638,17 +1630,7 @@ def test_inbound_manual_trade_update_pending_preview_then_confirm(monkeypatch: p
     repo = ledger_repository.SQLiteOptionPositionsRepository(sqlite_path)
     assert repo.list_trade_events() == []
 
-    confirmed = handle_assistant_request(
-        AssistantRequest(
-            text="确认记录",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_update_open_confirm",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
-    )
+    confirmed = _handle("确认记录", "msg_update_open_confirm", config_path=str(cfg_path), audit_db=str(audit_db))
 
     assert confirmed["ok"] is True
     events = repo.list_trade_events()
@@ -1662,30 +1644,20 @@ def test_inbound_pending_operations_lists_current_conversation(monkeypatch: pyte
     cfg_path = _write_symbols_runtime_config(tmp_path)
     audit_db = tmp_path / "inbound.sqlite3"
 
-    trade_preview = handle_assistant_request(
-        AssistantRequest(
-            text="/record-open sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_pending_trade_preview",
-            conversation_id="feishu:chat_a:ou_1",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
+    trade_preview = _handle(
+        "/record-open sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
+        "msg_pending_trade_preview",
+        conversation_id="feishu:chat_a:ou_1",
+        config_path=str(cfg_path),
+        audit_db=str(audit_db),
     )
 
-    pending = handle_assistant_request(
-        AssistantRequest(
-            text="/pending",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_pending_list_one",
-            conversation_id="feishu:chat_a:ou_1",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
+    pending = _handle(
+        "/pending",
+        "msg_pending_list_one",
+        conversation_id="feishu:chat_a:ou_1",
+        config_path=str(cfg_path),
+        audit_db=str(audit_db),
     )
 
     trade_id = trade_preview["data"]["operation_id"]
@@ -1701,29 +1673,19 @@ def test_inbound_pending_operations_lists_current_conversation(monkeypatch: pyte
     assert f"确认：/confirm trade {trade_id}" in pending["data"]["response_text"]
     assert f"取消：/cancel trade {trade_id}" in pending["data"]["response_text"]
 
-    symbol_preview = handle_assistant_request(
-        AssistantRequest(
-            text="/symbol add TIGR put",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_pending_symbol_preview",
-            conversation_id="feishu:chat_a:ou_1",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
+    symbol_preview = _handle(
+        "/symbol add TIGR put",
+        "msg_pending_symbol_preview",
+        conversation_id="feishu:chat_a:ou_1",
+        config_path=str(cfg_path),
+        audit_db=str(audit_db),
     )
-    pending_two = handle_assistant_request(
-        AssistantRequest(
-            text="/pending",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_pending_list_two",
-            conversation_id="feishu:chat_a:ou_1",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
+    pending_two = _handle(
+        "/pending",
+        "msg_pending_list_two",
+        conversation_id="feishu:chat_a:ou_1",
+        config_path=str(cfg_path),
+        audit_db=str(audit_db),
     )
 
     symbol_id = symbol_preview["data"]["operation_id"]
@@ -1782,18 +1744,9 @@ def test_inbound_upgrade_preview_and_confirm(monkeypatch: pytest.MonkeyPatch, tm
 
     def _fake_service_upgrade_check(**kwargs):  # type: ignore[no-untyped-def]
         calls.append({"check": True, **dict(kwargs)})
-        return {
-            "ok": True,
-            "repo_root": str(kwargs["repo_root"]),
-            "repo_root_resolved": str(kwargs["repo_root"]),
-            "repo_root_resolution": {"status": "input"},
-            "runtime_root": str(kwargs["runtime_root"]),
-            "current_version": "1.2.110",
-            "latest_version": "1.2.111",
-            "release_tag": "v1.2.111",
-            "upgrade_available": True,
-            "version_check": {"ok": True},
-        }
+        return _upgrade_check_payload(
+            kwargs, current_version="1.2.110", target_version="1.2.111"
+        )
 
     monkeypatch.setattr(upgrade_operations, "service_upgrade_check", _fake_service_upgrade_check)
     monkeypatch.setattr(upgrade_operations, "service_upgrade", _fake_service_upgrade)
@@ -1803,17 +1756,7 @@ def test_inbound_upgrade_preview_and_confirm(monkeypatch: pytest.MonkeyPatch, tm
         lambda operation_id, audit_db: {"launcher": "test", "operation_id": operation_id, "audit_db": str(audit_db)},
     )
 
-    preview = handle_assistant_request(
-        AssistantRequest(
-            text="/upgrade",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_upgrade_preview",
-            conversation_id="feishu:chat_a:ou_1",
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
-    )
+    preview = _handle("/upgrade", "msg_upgrade_preview", conversation_id="feishu:chat_a:ou_1", audit_db=str(audit_db))
 
     assert preview["ok"] is True
     assert preview["tool_name"] == "inbound.upgrade"
@@ -1826,17 +1769,7 @@ def test_inbound_upgrade_preview_and_confirm(monkeypatch: pytest.MonkeyPatch, tm
     assert calls[-1]["check"] is True
 
     operation_id = preview["data"]["operation_id"]
-    confirmed = handle_assistant_request(
-        AssistantRequest(
-            text="确认执行",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_upgrade_confirm",
-            conversation_id="feishu:chat_a:ou_1",
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
-    )
+    confirmed = _handle("确认执行", "msg_upgrade_confirm", conversation_id="feishu:chat_a:ou_1", audit_db=str(audit_db))
 
     assert confirmed["ok"] is True
     assert confirmed["data"]["operation_id"] == operation_id
@@ -1886,18 +1819,9 @@ def test_inbound_upgrade_cancel_persists_readback_trace(monkeypatch: pytest.Monk
 
     def _fake_service_upgrade_check(**kwargs):  # type: ignore[no-untyped-def]
         calls.append({"check": True, **dict(kwargs)})
-        return {
-            "ok": True,
-            "repo_root": str(kwargs["repo_root"]),
-            "repo_root_resolved": str(kwargs["repo_root"]),
-            "repo_root_resolution": {"status": "input"},
-            "runtime_root": str(kwargs["runtime_root"]),
-            "current_version": "1.2.110",
-            "latest_version": "1.2.111",
-            "release_tag": "v1.2.111",
-            "upgrade_available": True,
-            "version_check": {"ok": True},
-        }
+        return _upgrade_check_payload(
+            kwargs, current_version="1.2.110", target_version="1.2.111"
+        )
 
     monkeypatch.setattr(upgrade_operations, "service_upgrade_check", _fake_service_upgrade_check)
     monkeypatch.setattr(
@@ -1912,14 +1836,7 @@ def test_inbound_upgrade_cancel_persists_readback_trace(monkeypatch: pytest.Monk
     )
 
     preview = handle_assistant_response(
-        AssistantRequest(
-            text="/upgrade",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_upgrade_cancel_preview",
-            conversation_id="feishu:chat_a:ou_1",
-            audit_db=str(audit_db),
-        ),
+        _request("/upgrade", "msg_upgrade_cancel_preview", conversation_id="feishu:chat_a:ou_1", audit_db=str(audit_db)),
         allowed_senders="feishu:ou_1",
         settings=AssistantSettings(),
     )
@@ -1930,11 +1847,9 @@ def test_inbound_upgrade_cancel_persists_readback_trace(monkeypatch: pytest.Monk
     operation_id = preview["data"]["operation_id"]
 
     cancelled = handle_assistant_response(
-        AssistantRequest(
-            text=f"取消升级 {operation_id}",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_upgrade_cancel",
+        _request(
+            f"取消升级 {operation_id}",
+            "msg_upgrade_cancel",
             conversation_id="feishu:chat_a:ou_1",
             audit_db=str(audit_db),
         ),
@@ -1977,18 +1892,9 @@ def test_inbound_upgrade_confirm_receipt_uses_payload_and_version_check_fallback
     monkeypatch.setattr(
         upgrade_operations,
         "service_upgrade_check",
-        lambda **kwargs: {
-            "ok": True,
-            "repo_root": str(kwargs["repo_root"]),
-            "repo_root_resolved": str(kwargs["repo_root"]),
-            "repo_root_resolution": {"status": "input"},
-            "runtime_root": str(kwargs["runtime_root"]),
-            "current_version": "1.2.110",
-            "latest_version": "1.2.111",
-            "release_tag": "v1.2.111",
-            "upgrade_available": True,
-            "version_check": {"ok": True},
-        },
+        lambda **kwargs: _upgrade_check_payload(
+            kwargs, current_version="1.2.110", target_version="1.2.111"
+        ),
     )
     monkeypatch.setattr(
         upgrade_operations,
@@ -1996,17 +1902,7 @@ def test_inbound_upgrade_confirm_receipt_uses_payload_and_version_check_fallback
         lambda operation_id, audit_db: {"launcher": "test", "operation_id": operation_id},
     )
 
-    preview = handle_assistant_request(
-        AssistantRequest(
-            text="/upgrade",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_upgrade_preview",
-            conversation_id="feishu:chat_a:ou_1",
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
-    )
+    preview = _handle("/upgrade", "msg_upgrade_preview", conversation_id="feishu:chat_a:ou_1", audit_db=str(audit_db))
     operation_id = preview["data"]["operation_id"]
     payload = preview["data"]["payload"]
     assert payload["arguments"]["target_version"] == "1.2.111"
@@ -2027,17 +1923,7 @@ def test_inbound_upgrade_confirm_receipt_uses_payload_and_version_check_fallback
         },
     )
 
-    confirmed = handle_assistant_request(
-        AssistantRequest(
-            text=f"确认升级 {operation_id}",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_upgrade_confirm",
-            conversation_id="feishu:chat_a:ou_1",
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
-    )
+    confirmed = _handle(f"确认升级 {operation_id}", "msg_upgrade_confirm", conversation_id="feishu:chat_a:ou_1", audit_db=str(audit_db))
 
     response_text = confirmed["data"]["response_text"]
     assert confirmed["ok"] is True
@@ -2049,8 +1935,6 @@ def test_inbound_upgrade_confirm_receipt_uses_payload_and_version_check_fallback
 
 
 def test_inbound_upgrade_worker_retries_final_receipt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from src.application.assistant import upgrade_operations
-
     _enable_inbound_upgrade_write(monkeypatch)
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path / "runtime"))
     monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "cli_test_app")
@@ -2059,66 +1943,12 @@ def test_inbound_upgrade_worker_retries_final_receipt(monkeypatch: pytest.Monkey
     sleeps: list[float] = []
     reply_attempts: list[dict[str, object]] = []
 
-    monkeypatch.setattr(
-        upgrade_operations,
-        "service_upgrade_check",
-        lambda **kwargs: {
-            "ok": True,
-            "repo_root": str(kwargs["repo_root"]),
-            "repo_root_resolved": str(kwargs["repo_root"]),
-            "repo_root_resolution": {"status": "input"},
-            "runtime_root": str(kwargs["runtime_root"]),
-            "current_version": "1.2.110",
-            "latest_version": "1.2.111",
-            "release_tag": "v1.2.111",
-            "upgrade_available": True,
-            "version_check": {"ok": True},
-        },
-    )
-    monkeypatch.setattr(
-        upgrade_operations,
-        "service_upgrade",
-        lambda **kwargs: {
-            "ok": True,
-            "status": "upgraded",
-            "changed": True,
-            "current_version": "1.2.110",
-            "target_version": kwargs.get("target_version") or "1.2.111",
-            "release_tag": "v1.2.111",
-            "repo_root": str(kwargs["repo_root"]),
-            "runtime_root": str(kwargs["runtime_root"]),
-        },
-    )
-    monkeypatch.setattr(
-        upgrade_operations,
-        "UPGRADE_WORKER_LAUNCHER",
-        lambda operation_id, audit_db: {"launcher": "test", "operation_id": operation_id},
-    )
+    upgrade_operations = _stub_upgrade_operations(monkeypatch)
     monkeypatch.setattr(upgrade_operations.time, "sleep", lambda seconds: sleeps.append(float(seconds)))
 
-    preview = handle_assistant_request(
-        AssistantRequest(
-            text="/upgrade",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_upgrade_preview",
-            conversation_id="feishu:chat_a:ou_1",
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
-    )
+    preview = _handle("/upgrade", "msg_upgrade_preview", conversation_id="feishu:chat_a:ou_1", audit_db=str(audit_db))
     operation_id = preview["data"]["operation_id"]
-    confirmed = handle_assistant_request(
-        AssistantRequest(
-            text=f"确认升级 {operation_id}",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_upgrade_confirm",
-            conversation_id="feishu:chat_a:ou_1",
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
-    )
+    confirmed = _handle(f"确认升级 {operation_id}", "msg_upgrade_confirm", conversation_id="feishu:chat_a:ou_1", audit_db=str(audit_db))
     assert confirmed["ok"] is True
 
     def _reply_fn(**kwargs):  # type: ignore[no-untyped-def]
@@ -2239,89 +2069,49 @@ def test_inbound_upgrade_worker_sends_wechat_clawbot_final_receipt(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    from src.application.assistant import upgrade_operations
-
     _enable_inbound_upgrade_write(monkeypatch)
     monkeypatch.setenv("OM_INBOUND_ADMIN_OPEN_IDS", "wechat:user_1")
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path / "runtime"))
     audit_db = tmp_path / "inbound.sqlite3"
     wechat_replies: list[dict[str, object]] = []
 
-    monkeypatch.setattr(
-        upgrade_operations,
-        "service_upgrade_check",
-        lambda **kwargs: {
-            "ok": True,
-            "repo_root": str(kwargs["repo_root"]),
-            "repo_root_resolved": str(kwargs["repo_root"]),
-            "repo_root_resolution": {"status": "input"},
-            "runtime_root": str(kwargs["runtime_root"]),
-            "current_version": "1.2.268",
-            "latest_version": "1.2.270",
-            "release_tag": "v1.2.270",
-            "upgrade_available": True,
-            "version_check": {"ok": True},
-        },
-    )
-    monkeypatch.setattr(
-        upgrade_operations,
-        "service_upgrade",
-        lambda **kwargs: {
-            "ok": True,
-            "status": "upgraded",
-            "changed": True,
-            "current_version": "1.2.268",
-            "target_version": kwargs.get("target_version") or "1.2.270",
-            "release_tag": "v1.2.270",
-            "repo_root": str(kwargs["repo_root"]),
-            "runtime_root": str(kwargs["runtime_root"]),
-        },
-    )
-    monkeypatch.setattr(
-        upgrade_operations,
-        "UPGRADE_WORKER_LAUNCHER",
-        lambda operation_id, audit_db: {"launcher": "test", "operation_id": operation_id},
-    )
+    upgrade_operations = _stub_upgrade_operations(monkeypatch, current_version="1.2.268", target_version="1.2.270")
 
-    preview = handle_assistant_request(
-        AssistantRequest(
-            text="/upgrade",
-            sender_id="user_1",
-            channel="wechat",
-            message_id="msg_upgrade_preview",
-            conversation_id="wechat:group_1",
-            audit_db=str(audit_db),
-            reply_context={
-                "provider": "wechat_clawbot",
-                "base": str(tmp_path),
-                "label": "ops",
-                "state_dir": str(tmp_path / "wechat-state"),
-                "to_user_id": "user_1",
-                "context_token": "ctx_preview",
-                "group_id": "group_1",
-            },
-        ),
+    preview = _handle(
+        "/upgrade",
+        "msg_upgrade_preview",
+        sender_id="user_1",
+        channel="wechat",
+        conversation_id="wechat:group_1",
+        audit_db=str(audit_db),
+        reply_context={
+            "provider": "wechat_clawbot",
+            "base": str(tmp_path),
+            "label": "ops",
+            "state_dir": str(tmp_path / "wechat-state"),
+            "to_user_id": "user_1",
+            "context_token": "ctx_preview",
+            "group_id": "group_1",
+        },
         allowed_senders="wechat:user_1",
     )
     operation_id = preview["data"]["operation_id"]
-    confirmed = handle_assistant_request(
-        AssistantRequest(
-            text=f"确认升级 {operation_id}",
-            sender_id="user_1",
-            channel="wechat",
-            message_id="msg_upgrade_confirm",
-            conversation_id="wechat:group_1",
-            audit_db=str(audit_db),
-            reply_context={
-                "provider": "wechat_clawbot",
-                "base": str(tmp_path),
-                "label": "ops",
-                "state_dir": str(tmp_path / "wechat-state"),
-                "to_user_id": "user_1",
-                "context_token": "ctx_confirm",
-                "group_id": "group_1",
-            },
-        ),
+    confirmed = _handle(
+        f"确认升级 {operation_id}",
+        "msg_upgrade_confirm",
+        sender_id="user_1",
+        channel="wechat",
+        conversation_id="wechat:group_1",
+        audit_db=str(audit_db),
+        reply_context={
+            "provider": "wechat_clawbot",
+            "base": str(tmp_path),
+            "label": "ops",
+            "state_dir": str(tmp_path / "wechat-state"),
+            "to_user_id": "user_1",
+            "context_token": "ctx_confirm",
+            "group_id": "group_1",
+        },
         allowed_senders="wechat:user_1",
     )
 
@@ -2396,17 +2186,7 @@ def test_inbound_upgrade_returns_no_upgrade_without_pending_operation(monkeypatc
         lambda operation_id, audit_db: pytest.fail(f"unexpected upgrade worker: {operation_id}"),
     )
 
-    preview = handle_assistant_request(
-        AssistantRequest(
-            text="/upgrade",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_upgrade_noop",
-            conversation_id="feishu:chat_a:ou_1",
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
-    )
+    preview = _handle("/upgrade", "msg_upgrade_noop", conversation_id="feishu:chat_a:ou_1", audit_db=str(audit_db))
 
     assert preview["ok"] is True
     assert preview["tool_name"] == "inbound.upgrade"
@@ -2416,17 +2196,7 @@ def test_inbound_upgrade_returns_no_upgrade_without_pending_operation(monkeypatc
     assert "operation_id" not in preview["data"]
     assert calls[-1]["check"] is True
 
-    pending = handle_assistant_request(
-        AssistantRequest(
-            text="/pending",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_upgrade_noop_pending",
-            conversation_id="feishu:chat_a:ou_1",
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
-    )
+    pending = _handle("/pending", "msg_upgrade_noop_pending", conversation_id="feishu:chat_a:ou_1", audit_db=str(audit_db))
 
     assert pending["ok"] is True
     assert pending["data"]["pending_count"] == 0
@@ -2468,16 +2238,11 @@ def test_inbound_upgrade_rejects_older_target_without_pending_operation(monkeypa
         lambda operation_id, audit_db: pytest.fail(f"unexpected upgrade worker: {operation_id}"),
     )
 
-    preview = handle_assistant_request(
-        AssistantRequest(
-            text="/upgrade v1.2.352",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_upgrade_older_target",
-            conversation_id="feishu:chat_a:ou_1",
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
+    preview = _handle(
+        "/upgrade v1.2.352",
+        "msg_upgrade_older_target",
+        conversation_id="feishu:chat_a:ou_1",
+        audit_db=str(audit_db),
     )
 
     assert preview["ok"] is True
@@ -2486,16 +2251,11 @@ def test_inbound_upgrade_rejects_older_target_without_pending_operation(monkeypa
     assert "确认执行" not in preview["data"]["response_text"]
     assert "operation_id" not in preview["data"]
 
-    pending = handle_assistant_request(
-        AssistantRequest(
-            text="/pending",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_upgrade_older_target_pending",
-            conversation_id="feishu:chat_a:ou_1",
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
+    pending = _handle(
+        "/pending",
+        "msg_upgrade_older_target_pending",
+        conversation_id="feishu:chat_a:ou_1",
+        audit_db=str(audit_db),
     )
 
     assert pending["ok"] is True
@@ -2512,18 +2272,9 @@ def test_inbound_upgrade_reconfirm_hides_internal_status(monkeypatch: pytest.Mon
     monkeypatch.setattr(
         upgrade_operations,
         "service_upgrade_check",
-        lambda **kwargs: {
-            "ok": True,
-            "repo_root": str(kwargs["repo_root"]),
-            "repo_root_resolved": str(kwargs["repo_root"]),
-            "repo_root_resolution": {"status": "input"},
-            "runtime_root": str(kwargs["runtime_root"]),
-            "current_version": "1.2.110",
-            "latest_version": "1.2.111",
-            "release_tag": "v1.2.111",
-            "upgrade_available": True,
-            "version_check": {"ok": True},
-        },
+        lambda **kwargs: _upgrade_check_payload(
+            kwargs, current_version="1.2.110", target_version="1.2.111"
+        ),
     )
     monkeypatch.setattr(
         upgrade_operations,
@@ -2531,42 +2282,22 @@ def test_inbound_upgrade_reconfirm_hides_internal_status(monkeypatch: pytest.Mon
         lambda operation_id, audit_db: {"launcher": "test", "operation_id": operation_id},
     )
 
-    preview = handle_assistant_request(
-        AssistantRequest(
-            text="/upgrade",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_upgrade_preview",
-            conversation_id="feishu:chat_a:ou_1",
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
-    )
+    preview = _handle("/upgrade", "msg_upgrade_preview", conversation_id="feishu:chat_a:ou_1", audit_db=str(audit_db))
     operation_id = preview["data"]["operation_id"]
 
-    first = handle_assistant_request(
-        AssistantRequest(
-            text=f"确认升级 {operation_id}",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_upgrade_confirm_1",
-            conversation_id="feishu:chat_a:ou_1",
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
+    first = _handle(
+        f"确认升级 {operation_id}",
+        "msg_upgrade_confirm_1",
+        conversation_id="feishu:chat_a:ou_1",
+        audit_db=str(audit_db),
     )
     assert first["ok"] is True
 
-    second = handle_assistant_request(
-        AssistantRequest(
-            text=f"确认升级 {operation_id}",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_upgrade_confirm_2",
-            conversation_id="feishu:chat_a:ou_1",
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
+    second = _handle(
+        f"确认升级 {operation_id}",
+        "msg_upgrade_confirm_2",
+        conversation_id="feishu:chat_a:ou_1",
+        audit_db=str(audit_db),
     )
 
     assert second["ok"] is False
@@ -2658,40 +2389,20 @@ def test_inbound_manual_trade_bare_confirm_requires_unique_pending(monkeypatch: 
     cfg_path, sqlite_path = _write_inbound_runtime_config(tmp_path)
     audit_db = tmp_path / "inbound.sqlite3"
 
-    first = handle_assistant_request(
-        AssistantRequest(
-            text="/record-open sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_ambiguous_open_1",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
+    first = _handle(
+        "/record-open sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
+        "msg_ambiguous_open_1",
+        config_path=str(cfg_path),
+        audit_db=str(audit_db),
     )
-    second = handle_assistant_request(
-        AssistantRequest(
-            text="/record-open sy NVDA short put strike 101 exp 2026-06-19 1张 premium 2.4 multiplier 100",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_ambiguous_open_2",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
+    second = _handle(
+        "/record-open sy NVDA short put strike 101 exp 2026-06-19 1张 premium 2.4 multiplier 100",
+        "msg_ambiguous_open_2",
+        config_path=str(cfg_path),
+        audit_db=str(audit_db),
     )
 
-    out = handle_assistant_request(
-        AssistantRequest(
-            text="确认记录",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_ambiguous_confirm",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
-    )
+    out = _handle("确认记录", "msg_ambiguous_confirm", config_path=str(cfg_path), audit_db=str(audit_db))
 
     assert out["ok"] is False
     assert out["error"]["code"] == "NEEDS_CLARIFICATION"
@@ -2714,39 +2425,24 @@ def test_inbound_manual_trade_update_requires_unique_pending(monkeypatch: pytest
     cfg_path, sqlite_path = _write_inbound_runtime_config(tmp_path)
     audit_db = tmp_path / "inbound.sqlite3"
 
-    first = handle_assistant_request(
-        AssistantRequest(
-            text="/record-open sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_ambiguous_update_open_1",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
+    first = _handle(
+        "/record-open sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
+        "msg_ambiguous_update_open_1",
+        config_path=str(cfg_path),
+        audit_db=str(audit_db),
     )
-    second = handle_assistant_request(
-        AssistantRequest(
-            text="/record-open sy NVDA short put strike 101 exp 2026-06-19 1张 premium 2.4 multiplier 100",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_ambiguous_update_open_2",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
+    second = _handle(
+        "/record-open sy NVDA short put strike 101 exp 2026-06-19 1张 premium 2.4 multiplier 100",
+        "msg_ambiguous_update_open_2",
+        config_path=str(cfg_path),
+        audit_db=str(audit_db),
     )
 
-    out = handle_assistant_request(
-        AssistantRequest(
-            text="/record-update premium_per_share=2.75",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_ambiguous_update",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
+    out = _handle(
+        "/record-update premium_per_share=2.75",
+        "msg_ambiguous_update",
+        config_path=str(cfg_path),
+        audit_db=str(audit_db),
     )
 
     assert out["ok"] is False
@@ -2772,30 +2468,15 @@ def test_inbound_bare_symbol_confirm_does_not_confirm_manual_trade(monkeypatch: 
     cfg_path, sqlite_path = _write_inbound_runtime_config(tmp_path)
     audit_db = tmp_path / "inbound.sqlite3"
 
-    preview = handle_assistant_request(
-        AssistantRequest(
-            text="/record-open sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_cross_family_trade_preview",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
+    preview = _handle(
+        "/record-open sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
+        "msg_cross_family_trade_preview",
+        config_path=str(cfg_path),
+        audit_db=str(audit_db),
     )
     assert preview["ok"] is True
 
-    out = handle_assistant_request(
-        AssistantRequest(
-            text="确认监控",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_cross_family_symbol_confirm",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
-    )
+    out = _handle("确认监控", "msg_cross_family_symbol_confirm", config_path=str(cfg_path), audit_db=str(audit_db))
 
     assert out["ok"] is False
     assert out["error"]["code"] == "NEEDS_CLARIFICATION"
@@ -2811,78 +2492,53 @@ def test_inbound_bare_confirm_is_scoped_to_conversation(monkeypatch: pytest.Monk
     cfg_path, sqlite_path = _write_inbound_runtime_config(tmp_path)
     audit_db = tmp_path / "inbound.sqlite3"
 
-    preview = handle_assistant_request(
-        AssistantRequest(
-            text="/record-open sy NVDA short put strike 100 exp 2027-06-18 1张 premium 2.5 multiplier 100",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_conversation_preview",
-            conversation_id="feishu:chat_a:ou_1",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
+    preview = _handle(
+        "/record-open sy NVDA short put strike 100 exp 2027-06-18 1张 premium 2.5 multiplier 100",
+        "msg_conversation_preview",
+        conversation_id="feishu:chat_a:ou_1",
+        config_path=str(cfg_path),
+        audit_db=str(audit_db),
     )
     assert preview["ok"] is True
 
-    wrong_chat_pending = handle_assistant_request(
-        AssistantRequest(
-            text="/pending",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_conversation_wrong_chat_pending",
-            conversation_id="feishu:chat_b:ou_1",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
+    wrong_chat_pending = _handle(
+        "/pending",
+        "msg_conversation_wrong_chat_pending",
+        conversation_id="feishu:chat_b:ou_1",
+        config_path=str(cfg_path),
+        audit_db=str(audit_db),
     )
     assert wrong_chat_pending["ok"] is True
     assert wrong_chat_pending["data"]["pending_count"] == 0
     assert wrong_chat_pending["data"]["response_text"] == "当前对话没有待确认操作。"
 
-    right_chat_pending = handle_assistant_request(
-        AssistantRequest(
-            text="/pending",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_conversation_right_chat_pending",
-            conversation_id="feishu:chat_a:ou_1",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
+    right_chat_pending = _handle(
+        "/pending",
+        "msg_conversation_right_chat_pending",
+        conversation_id="feishu:chat_a:ou_1",
+        config_path=str(cfg_path),
+        audit_db=str(audit_db),
     )
     assert right_chat_pending["ok"] is True
     assert right_chat_pending["data"]["pending_count"] == 1
     assert right_chat_pending["data"]["pending_operations"][0]["operation_id"] == preview["data"]["operation_id"]
 
-    wrong_chat = handle_assistant_request(
-        AssistantRequest(
-            text="确认记录",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_conversation_wrong_chat",
-            conversation_id="feishu:chat_b:ou_1",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
+    wrong_chat = _handle(
+        "确认记录",
+        "msg_conversation_wrong_chat",
+        conversation_id="feishu:chat_b:ou_1",
+        config_path=str(cfg_path),
+        audit_db=str(audit_db),
     )
     assert wrong_chat["ok"] is False
     assert "没有可确认的交易记录" in wrong_chat["data"]["response_text"]
 
-    confirmed = handle_assistant_request(
-        AssistantRequest(
-            text="确认记录",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_conversation_right_chat",
-            conversation_id="feishu:chat_a:ou_1",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
+    confirmed = _handle(
+        "确认记录",
+        "msg_conversation_right_chat",
+        conversation_id="feishu:chat_a:ou_1",
+        config_path=str(cfg_path),
+        audit_db=str(audit_db),
     )
     assert confirmed["ok"] is True
     assert confirmed["data"]["operation_id"] == preview["data"]["operation_id"]
@@ -2900,16 +2556,11 @@ def test_inbound_manual_trade_preview_canonicalizes_symbol_and_keeps_diagnostics
 
     monkeypatch.setattr("src.application.assistant.manual_trade_parser.resolve_multiplier_with_source_and_diagnostics", _fake_resolve)
 
-    preview = handle_assistant_request(
-        AssistantRequest(
-            text="/record-open sy 腾讯 short put strike 450 exp 2026-05-28 6张 premium 2.35",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_open_tencent_preview",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
+    preview = _handle(
+        "/record-open sy 腾讯 short put strike 450 exp 2026-05-28 6张 premium 2.35",
+        "msg_open_tencent_preview",
+        config_path=str(cfg_path),
+        audit_db=str(audit_db),
     )
 
     payload = preview["data"]["payload"]
@@ -2932,40 +2583,20 @@ def test_inbound_manual_trade_preview_and_confirm_close(monkeypatch: pytest.Monk
     cfg_path, sqlite_path = _write_inbound_runtime_config(tmp_path)
     audit_db = tmp_path / "inbound.sqlite3"
 
-    open_preview = handle_assistant_request(
-        AssistantRequest(
-            text="/record-open sy 0700.HK short put strike 450 exp 2027-06-18 2张 premium 2.5 multiplier 500",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_close_open_preview",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
+    open_preview = _handle(
+        "/record-open sy 0700.HK short put strike 450 exp 2027-06-18 2张 premium 2.5 multiplier 500",
+        "msg_close_open_preview",
+        config_path=str(cfg_path),
+        audit_db=str(audit_db),
     )
     open_id = open_preview["data"]["operation_id"]
-    handle_assistant_request(
-        AssistantRequest(
-            text=f"确认记录 {open_id}",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_close_open_confirm",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
-    )
+    _handle(f"确认记录 {open_id}", "msg_close_open_confirm", config_path=str(cfg_path), audit_db=str(audit_db))
 
-    close_preview = handle_assistant_request(
-        AssistantRequest(
-            text="/record-close sy HK.00700 short put strike 450 exp 2027-06-18 1张 close 1.0",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_close_preview",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
+    close_preview = _handle(
+        "/record-close sy HK.00700 short put strike 450 exp 2027-06-18 1张 close 1.0",
+        "msg_close_preview",
+        config_path=str(cfg_path),
+        audit_db=str(audit_db),
     )
     assert close_preview["ok"] is True
     assert close_preview["data"]["response_text"].startswith("交易记录预览：平仓")
@@ -2974,17 +2605,7 @@ def test_inbound_manual_trade_preview_and_confirm_close(monkeypatch: pytest.Monk
     assert close_preview["data"]["payload"]["diagnostics"]["canonical_symbol"] == "0700.HK"
 
     close_id = close_preview["data"]["operation_id"]
-    confirmed = handle_assistant_request(
-        AssistantRequest(
-            text=f"确认记录 {close_id}",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_close_confirm",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
-    )
+    confirmed = _handle(f"确认记录 {close_id}", "msg_close_confirm", config_path=str(cfg_path), audit_db=str(audit_db))
 
     assert confirmed["ok"] is True
     assert "交易已写入 OM 本地账本：平仓" in confirmed["data"]["response_text"]
@@ -2997,62 +2618,50 @@ def test_inbound_symbol_add_edit_remove_preview_and_confirm(monkeypatch: pytest.
     cfg_path = _write_symbols_runtime_config(tmp_path)
     audit_db = tmp_path / "inbound.sqlite3"
 
-    listed = handle_assistant_request(
-        AssistantRequest(text="/symbols", sender_id="ou_1", channel="feishu", message_id="msg_symbol_list", config_path=str(cfg_path), audit_db=str(audit_db)),
-        allowed_senders="feishu:ou_1",
-    )
+    listed = _handle("/symbols", "msg_symbol_list", config_path=str(cfg_path), audit_db=str(audit_db))
     assert listed["ok"] is True
     assert listed["tool_name"] == "inbound.symbols"
     assert "当前监控标的" in listed["data"]["response_text"]
 
-    add_preview = handle_assistant_request(
-        AssistantRequest(text="/symbol add 700 put", sender_id="ou_1", channel="feishu", message_id="msg_symbol_add", config_path=str(cfg_path), audit_db=str(audit_db)),
-        allowed_senders="feishu:ou_1",
-    )
+    add_preview = _handle("/symbol add 700 put", "msg_symbol_add", config_path=str(cfg_path), audit_db=str(audit_db))
     assert add_preview["ok"] is True
     assert "校准为：0700.HK" in add_preview["data"]["response_text"]
     add_id = add_preview["data"]["operation_id"]
-    add_confirm = handle_assistant_request(
-        AssistantRequest(text="确认监控", sender_id="ou_1", channel="feishu", message_id="msg_symbol_add_confirm", config_path=str(cfg_path), audit_db=str(audit_db)),
-        allowed_senders="feishu:ou_1",
-    )
+    add_confirm = _handle("确认监控", "msg_symbol_add_confirm", config_path=str(cfg_path), audit_db=str(audit_db))
     assert add_confirm["ok"] is True
     assert add_confirm["data"]["operation_id"] == add_id
     assert add_confirm["data"]["operation_resolution"] == "explicit"
     assert add_confirm["data"]["resolved_operation_id"] == add_id
 
-    edit_preview = handle_assistant_request(
-        AssistantRequest(text="/symbol edit HK.00700 sell_put.max_strike=480", sender_id="ou_1", channel="feishu", message_id="msg_symbol_edit", config_path=str(cfg_path), audit_db=str(audit_db)),
-        allowed_senders="feishu:ou_1",
+    edit_preview = _handle(
+        "/symbol edit HK.00700 sell_put.max_strike=480",
+        "msg_symbol_edit",
+        config_path=str(cfg_path),
+        audit_db=str(audit_db),
     )
     edit_id = edit_preview["data"]["operation_id"]
-    edit_confirm = handle_assistant_request(
-        AssistantRequest(text=f"确认监控 {edit_id}", sender_id="ou_1", channel="feishu", message_id="msg_symbol_edit_confirm", config_path=str(cfg_path), audit_db=str(audit_db)),
-        allowed_senders="feishu:ou_1",
-    )
+    edit_confirm = _handle(f"确认监控 {edit_id}", "msg_symbol_edit_confirm", config_path=str(cfg_path), audit_db=str(audit_db))
     assert edit_confirm["ok"] is True
 
-    covered_call_preview = handle_assistant_request(
-        AssistantRequest(text="/symbol edit NVDA sell_call.enabled=true sell_call.min_strike=140 ensure_use=call_base", sender_id="ou_1", channel="feishu", message_id="msg_symbol_covered_call", config_path=str(cfg_path), audit_db=str(audit_db)),
-        allowed_senders="feishu:ou_1",
+    covered_call_preview = _handle(
+        "/symbol edit NVDA sell_call.enabled=true sell_call.min_strike=140 ensure_use=call_base",
+        "msg_symbol_covered_call",
+        config_path=str(cfg_path),
+        audit_db=str(audit_db),
     )
     assert covered_call_preview["ok"] is True
     covered_call_id = covered_call_preview["data"]["operation_id"]
-    covered_call_confirm = handle_assistant_request(
-        AssistantRequest(text=f"确认监控 {covered_call_id}", sender_id="ou_1", channel="feishu", message_id="msg_symbol_covered_call_confirm", config_path=str(cfg_path), audit_db=str(audit_db)),
-        allowed_senders="feishu:ou_1",
+    covered_call_confirm = _handle(
+        f"确认监控 {covered_call_id}",
+        "msg_symbol_covered_call_confirm",
+        config_path=str(cfg_path),
+        audit_db=str(audit_db),
     )
     assert covered_call_confirm["ok"] is True
 
-    remove_preview = handle_assistant_request(
-        AssistantRequest(text="/symbol remove 腾讯", sender_id="ou_1", channel="feishu", message_id="msg_symbol_remove", config_path=str(cfg_path), audit_db=str(audit_db)),
-        allowed_senders="feishu:ou_1",
-    )
+    remove_preview = _handle("/symbol remove 腾讯", "msg_symbol_remove", config_path=str(cfg_path), audit_db=str(audit_db))
     remove_id = remove_preview["data"]["operation_id"]
-    remove_confirm = handle_assistant_request(
-        AssistantRequest(text=f"确认监控 {remove_id}", sender_id="ou_1", channel="feishu", message_id="msg_symbol_remove_confirm", config_path=str(cfg_path), audit_db=str(audit_db)),
-        allowed_senders="feishu:ou_1",
-    )
+    remove_confirm = _handle(f"确认监控 {remove_id}", "msg_symbol_remove_confirm", config_path=str(cfg_path), audit_db=str(audit_db))
     assert remove_confirm["ok"] is True
 
     current = json.loads(cfg_path.read_text(encoding="utf-8"))
@@ -3078,21 +2687,14 @@ def test_inbound_symbol_confirm_rejects_stale_config_source(
     }
 
     preview = handle_assistant_request(
-        AssistantRequest(
-            text="/symbol edit NVDA sell_put.max_strike=90",
-            message_id="symbol_stale_preview",
-            **request_kwargs,
-        ),
+        _request("/symbol edit NVDA sell_put.max_strike=90", "symbol_stale_preview", **request_kwargs),
         allowed_senders="feishu:ou_1",
     )
     assert preview["ok"] is True
     assert preview["data"]["payload"]["config"]["source_sha256"]
     config_yaml.write_text(config_yaml.read_text(encoding="utf-8") + "\n# concurrent edit\n", encoding="utf-8")
 
-    confirmed = handle_assistant_request(
-        AssistantRequest(text="确认监控", message_id="symbol_stale_confirm", **request_kwargs),
-        allowed_senders="feishu:ou_1",
-    )
+    confirmed = handle_assistant_request(_request("确认监控", "symbol_stale_confirm", **request_kwargs), allowed_senders="feishu:ou_1")
 
     assert confirmed["ok"] is False
     assert confirmed["error"]["code"] == "STALE_PREVIEW"
@@ -3123,16 +2725,11 @@ def test_inbound_symbol_write_uses_symbol_market_over_default_us_config(monkeypa
         )
     audit_db = tmp_path / "inbound.sqlite3"
 
-    preview = handle_assistant_request(
-        AssistantRequest(
-            text="/symbol edit HK.00700 sell_put.max_strike=480",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_symbol_hk_edit",
-            config_path=str(us_cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
+    preview = _handle(
+        "/symbol edit HK.00700 sell_put.max_strike=480",
+        "msg_symbol_hk_edit",
+        config_path=str(us_cfg_path),
+        audit_db=str(audit_db),
     )
 
     assert preview["ok"] is True
@@ -3142,17 +2739,7 @@ def test_inbound_symbol_write_uses_symbol_market_over_default_us_config(monkeypa
     assert "校准为：0700.HK" in preview["data"]["response_text"]
     assert f"配置：{config_yaml}" in preview["data"]["response_text"]
 
-    confirmed = handle_assistant_request(
-        AssistantRequest(
-            text="确认监控",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_symbol_hk_edit_confirm",
-            config_path=str(us_cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
-    )
+    confirmed = _handle("确认监控", "msg_symbol_hk_edit_confirm", config_path=str(us_cfg_path), audit_db=str(audit_db))
 
     assert confirmed["ok"] is True
     current_us = json.loads(us_cfg_path.read_text(encoding="utf-8"))
@@ -3163,11 +2750,9 @@ def test_inbound_symbol_write_uses_symbol_market_over_default_us_config(monkeypa
 
 
 def test_inbound_symbol_setting_writes_yaml_and_rebuilds_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from src.application.config_yaml import build_yaml_runtime_config_file
-
     _enable_inbound_symbol_write(monkeypatch)
-    config_yaml = tmp_path / "config.yaml"
-    config_yaml.write_text(
+    config_yaml, cfg_paths = _write_symbol_yaml_config(
+        tmp_path,
         """\
 accounts:
   lx:
@@ -3181,24 +2766,17 @@ markets:
     accounts: [lx]
     symbols: ["0700.HK"]
 """,
-        encoding="utf-8",
+        ("us", "hk"),
     )
-    us_cfg_path = tmp_path / "config.us.json"
-    hk_cfg_path = tmp_path / "config.hk.json"
-    build_yaml_runtime_config_file(repo_root=Path(__file__).resolve().parents[1], market="us", config_path=config_yaml, output_config_path=us_cfg_path)
-    build_yaml_runtime_config_file(repo_root=Path(__file__).resolve().parents[1], market="hk", config_path=config_yaml, output_config_path=hk_cfg_path)
+    us_cfg_path = cfg_paths["us"]
+    hk_cfg_path = cfg_paths["hk"]
     audit_db = tmp_path / "inbound.sqlite3"
 
-    preview = handle_assistant_request(
-        AssistantRequest(
-            text="/symbol edit 09898 sell_call.enabled=true sell_call.min_strike=85 ensure_use=call_base",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_yaml_symbol_setting",
-            config_path=str(us_cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
+    preview = _handle(
+        "/symbol edit 09898 sell_call.enabled=true sell_call.min_strike=85 ensure_use=call_base",
+        "msg_yaml_symbol_setting",
+        config_path=str(us_cfg_path),
+        audit_db=str(audit_db),
     )
 
     assert preview["ok"] is True
@@ -3209,17 +2787,7 @@ markets:
     assert f"配置：{config_yaml}" in preview["data"]["response_text"]
     assert "9898.HK" not in config_yaml.read_text(encoding="utf-8")
 
-    confirmed = handle_assistant_request(
-        AssistantRequest(
-            text="确认监控",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_yaml_symbol_setting_confirm",
-            config_path=str(us_cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
-    )
+    confirmed = _handle("确认监控", "msg_yaml_symbol_setting_confirm", config_path=str(us_cfg_path), audit_db=str(audit_db))
 
     assert confirmed["ok"] is True
     updated_yaml = config_yaml.read_text(encoding="utf-8")
@@ -3232,11 +2800,9 @@ markets:
 
 
 def test_inbound_symbol_setting_writes_yaml_sell_put_max_strike(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from src.application.config_yaml import build_yaml_runtime_config_file
-
     _enable_inbound_symbol_write(monkeypatch)
-    config_yaml = tmp_path / "config.yaml"
-    config_yaml.write_text(
+    config_yaml, cfg_paths = _write_symbol_yaml_config(
+        tmp_path,
         """\
 accounts:
   lx:
@@ -3252,22 +2818,16 @@ markets:
           enabled: true
           max_strike: 120
 """,
-        encoding="utf-8",
+        ("us",),
     )
-    us_cfg_path = tmp_path / "config.us.json"
-    build_yaml_runtime_config_file(repo_root=Path(__file__).resolve().parents[1], market="us", config_path=config_yaml, output_config_path=us_cfg_path)
+    us_cfg_path = cfg_paths["us"]
     audit_db = tmp_path / "inbound.sqlite3"
 
-    preview = handle_assistant_request(
-        AssistantRequest(
-            text="/symbol edit FUTU sell_put.max_strike=90",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_yaml_symbol_sell_put_max_strike",
-            config_path=str(us_cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
+    preview = _handle(
+        "/symbol edit FUTU sell_put.max_strike=90",
+        "msg_yaml_symbol_sell_put_max_strike",
+        config_path=str(us_cfg_path),
+        audit_db=str(audit_db),
     )
 
     assert preview["ok"] is True
@@ -3277,17 +2837,7 @@ markets:
     assert "markets.us.overrides.FUTU.sell_put.max_strike" in preview["data"]["response_text"]
     assert "max_strike: 120" in config_yaml.read_text(encoding="utf-8")
 
-    confirmed = handle_assistant_request(
-        AssistantRequest(
-            text="确认监控",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_yaml_symbol_sell_put_max_strike_confirm",
-            config_path=str(us_cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
-    )
+    confirmed = _handle("确认监控", "msg_yaml_symbol_sell_put_max_strike_confirm", config_path=str(us_cfg_path), audit_db=str(audit_db))
 
     assert confirmed["ok"] is True
     assert "max_strike: 90" in config_yaml.read_text(encoding="utf-8")
@@ -3297,11 +2847,9 @@ markets:
 
 
 def test_inbound_symbol_setting_writes_yaml_combo_yield_enabled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from src.application.config_yaml import build_yaml_runtime_config_file
-
     _enable_inbound_symbol_write(monkeypatch)
-    config_yaml = tmp_path / "config.yaml"
-    config_yaml.write_text(
+    config_yaml, cfg_paths = _write_symbol_yaml_config(
+        tmp_path,
         """\
 accounts:
   lx:
@@ -3320,22 +2868,16 @@ markets:
         combo_yield:
           enabled: false
 """,
-        encoding="utf-8",
+        ("hk",),
     )
-    hk_cfg_path = tmp_path / "config.hk.json"
-    build_yaml_runtime_config_file(repo_root=Path(__file__).resolve().parents[1], market="hk", config_path=config_yaml, output_config_path=hk_cfg_path)
+    hk_cfg_path = cfg_paths["hk"]
     audit_db = tmp_path / "inbound.sqlite3"
 
-    preview = handle_assistant_request(
-        AssistantRequest(
-            text="/symbol edit 3690.HK combo_yield.enabled=true",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_yaml_symbol_combo_yield",
-            config_path=str(hk_cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
+    preview = _handle(
+        "/symbol edit 3690.HK combo_yield.enabled=true",
+        "msg_yaml_symbol_combo_yield",
+        config_path=str(hk_cfg_path),
+        audit_db=str(audit_db),
     )
 
     assert preview["ok"] is True
@@ -3343,17 +2885,7 @@ markets:
     assert "markets.hk.overrides.3690.HK.combo_yield.enabled" in preview["data"]["response_text"]
     assert "enabled: false" in config_yaml.read_text(encoding="utf-8")
 
-    confirmed = handle_assistant_request(
-        AssistantRequest(
-            text="确认监控",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_yaml_symbol_combo_yield_confirm",
-            config_path=str(hk_cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
-    )
+    confirmed = _handle("确认监控", "msg_yaml_symbol_combo_yield_confirm", config_path=str(hk_cfg_path), audit_db=str(audit_db))
 
     assert confirmed["ok"] is True
     doc = yaml.safe_load(config_yaml.read_text(encoding="utf-8"))
@@ -3383,17 +2915,7 @@ def test_inbound_monitor_run_preview_requires_run_specific_confirmation(
 
     monkeypatch.setattr("src.application.assistant.monitor_run_operations.MONITOR_RUNNER", _runner)
 
-    preview = handle_assistant_request(
-        AssistantRequest(
-            text="/monitor-run hk",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_monitor_run_preview",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
-    )
+    preview = _handle("/monitor-run hk", "msg_monitor_run_preview", config_path=str(cfg_path), audit_db=str(audit_db))
 
     assert preview["ok"] is True
     assert preview["tool_name"] == "inbound.monitor_run"
@@ -3405,34 +2927,14 @@ def test_inbound_monitor_run_preview_requires_run_specific_confirmation(
     assert "命令：./om run tick-cron --market hk --accounts sy --timeout 600" in preview["data"]["response_text"]
     assert calls == []
 
-    wrong_confirm = handle_assistant_request(
-        AssistantRequest(
-            text="确认监控",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_monitor_run_wrong_confirm",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
-    )
+    wrong_confirm = _handle("确认监控", "msg_monitor_run_wrong_confirm", config_path=str(cfg_path), audit_db=str(audit_db))
 
     assert wrong_confirm["ok"] is False
     assert wrong_confirm["error"]["code"] == "NEEDS_CLARIFICATION"
     assert "监控标的变更" in wrong_confirm["error"]["message"]
     assert calls == []
 
-    confirmed = handle_assistant_request(
-        AssistantRequest(
-            text="确认运行监控",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_monitor_run_confirm",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
-    )
+    confirmed = _handle("确认运行监控", "msg_monitor_run_confirm", config_path=str(cfg_path), audit_db=str(audit_db))
 
     assert confirmed["ok"] is True
     assert confirmed["data"]["status"] == "applied"
@@ -3450,16 +2952,11 @@ def test_inbound_monitor_run_rejects_account_outside_target_market(
     _enable_inbound_monitor_run(monkeypatch)
     cfg_path = _write_symbols_runtime_config(tmp_path)
 
-    response = handle_assistant_request(
-        AssistantRequest(
-            text="/monitor-run hk accounts=lx",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_monitor_run_unknown_account",
-            config_path=str(cfg_path),
-            audit_db=str(tmp_path / "inbound.sqlite3"),
-        ),
-        allowed_senders="feishu:ou_1",
+    response = _handle(
+        "/monitor-run hk accounts=lx",
+        "msg_monitor_run_unknown_account",
+        config_path=str(cfg_path),
+        audit_db=str(tmp_path / "inbound.sqlite3"),
     )
 
     assert response["ok"] is False
@@ -3479,29 +2976,19 @@ def test_inbound_monitor_run_cancel_does_not_execute_runner(monkeypatch: pytest.
 
     monkeypatch.setattr("src.application.assistant.monitor_run_operations.MONITOR_RUNNER", _runner)
 
-    preview = handle_assistant_request(
-        AssistantRequest(
-            text="/monitor-run hk accounts=sy timeout=900",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_monitor_run_cancel_preview",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
+    preview = _handle(
+        "/monitor-run hk accounts=sy timeout=900",
+        "msg_monitor_run_cancel_preview",
+        config_path=str(cfg_path),
+        audit_db=str(audit_db),
     )
     operation_id = preview["data"]["operation_id"]
 
-    cancelled = handle_assistant_request(
-        AssistantRequest(
-            text=f"/cancel monitor-run {operation_id}",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_monitor_run_cancel",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
+    cancelled = _handle(
+        f"/cancel monitor-run {operation_id}",
+        "msg_monitor_run_cancel",
+        config_path=str(cfg_path),
+        audit_db=str(audit_db),
     )
 
     assert cancelled["ok"] is True
@@ -3515,39 +3002,14 @@ def test_inbound_write_operations_are_disabled_by_default(tmp_path: Path) -> Non
     cfg_path = _write_symbols_runtime_config(tmp_path)
     audit_db = tmp_path / "inbound.sqlite3"
 
-    trade_out = handle_assistant_request(
-        AssistantRequest(
-            text="/record-open sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_disabled_trade",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
+    trade_out = _handle(
+        "/record-open sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
+        "msg_disabled_trade",
+        config_path=str(cfg_path),
+        audit_db=str(audit_db),
     )
-    symbol_out = handle_assistant_request(
-        AssistantRequest(
-            text="/symbol add 700 put",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_disabled_symbol",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
-    )
-    monitor_run_out = handle_assistant_request(
-        AssistantRequest(
-            text="/monitor-run hk",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_disabled_monitor_run",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
-    )
+    symbol_out = _handle("/symbol add 700 put", "msg_disabled_symbol", config_path=str(cfg_path), audit_db=str(audit_db))
+    monitor_run_out = _handle("/monitor-run hk", "msg_disabled_monitor_run", config_path=str(cfg_path), audit_db=str(audit_db))
 
     assert trade_out["ok"] is False
     assert trade_out["error"]["code"] == "PERMISSION_DENIED"
@@ -3569,14 +3031,7 @@ def test_inbound_handle_executes_read_only_tool_and_replays_duplicate_message(tm
             data={"summary": [{"month": "2026-05", "account": "sy", "currency": "HKD"}]},
         )
 
-    request = AssistantRequest(
-        text="/income sy ytd",
-        sender_id="ou_1",
-        channel="feishu",
-        message_id="msg_1",
-        config_key="us",
-        audit_db=str(audit_db),
-    )
+    request = _request("/income sy ytd", "msg_1", config_key="us", audit_db=str(audit_db))
 
     first = handle_assistant_request(request, execute_tool_fn=_execute_tool, allowed_senders="feishu:ou_1")
     second = handle_assistant_request(request, execute_tool_fn=_execute_tool, allowed_senders="feishu:ou_1")
@@ -3623,38 +3078,17 @@ def test_inbound_handle_omits_account_filter_when_account_not_provided(tmp_path:
         return build_response(tool_name=tool_name, ok=True, data={"summary": []})
 
     income = handle_assistant_request(
-        AssistantRequest(
-            text="/income ytd",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_income",
-            config_key="us",
-            audit_db=str(audit_db),
-        ),
+        _request("/income ytd", "msg_income", config_key="us", audit_db=str(audit_db)),
         execute_tool_fn=_execute_tool,
         allowed_senders="feishu:ou_1",
     )
     natural_month_income = handle_assistant_request(
-        AssistantRequest(
-            text="/income 2026-05",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_natural_month_income",
-            config_key="us",
-            audit_db=str(audit_db),
-        ),
+        _request("/income 2026-05", "msg_natural_month_income", config_key="us", audit_db=str(audit_db)),
         execute_tool_fn=_execute_tool,
         allowed_senders="feishu:ou_1",
     )
     positions = handle_assistant_request(
-        AssistantRequest(
-            text="/positions",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_positions",
-            config_key="us",
-            audit_db=str(audit_db),
-        ),
+        _request("/positions", "msg_positions", config_key="us", audit_db=str(audit_db)),
         execute_tool_fn=_execute_tool,
         allowed_senders="feishu:ou_1",
     )
@@ -3699,13 +3133,7 @@ def test_inbound_handle_without_message_id_generates_fresh_command_id(tmp_path: 
         calls.append((tool_name, payload))
         return build_response(tool_name=tool_name, ok=True, data={"status": "ok"})
 
-    request = AssistantRequest(
-        text="/status",
-        sender_id="local",
-        channel="local",
-        config_key="us",
-        audit_db=str(audit_db),
-    )
+    request = _request("/status", sender_id="local", channel="local", config_key="us", audit_db=str(audit_db))
 
     first = handle_assistant_request(request, execute_tool_fn=_execute_tool, allowed_senders="local:local")
     second = handle_assistant_request(request, execute_tool_fn=_execute_tool, allowed_senders="local:local")
@@ -3735,14 +3163,7 @@ def test_inbound_audit_schema_uses_single_control_record(tmp_path: Path) -> None
     audit_db = tmp_path / "inbound.sqlite3"
 
     out = handle_assistant_request(
-        AssistantRequest(
-            text="/status",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_audit_schema",
-            config_key="us",
-            audit_db=str(audit_db),
-        ),
+        _request("/status", "msg_audit_schema", config_key="us", audit_db=str(audit_db)),
         execute_tool_fn=lambda tool_name, payload: build_response(tool_name=tool_name, ok=True, data={"status": "ok"}),
         allowed_senders="feishu:ou_1",
     )
@@ -4138,14 +3559,7 @@ def test_inbound_audit_keeps_income_diagnostics(tmp_path: Path) -> None:
         )
 
     out = handle_assistant_request(
-        AssistantRequest(
-            text="/income sy mtd",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_diag",
-            config_key="us",
-            audit_db=str(audit_db),
-        ),
+        _request("/income sy mtd", "msg_diag", config_key="us", audit_db=str(audit_db)),
         execute_tool_fn=_execute_tool,
         allowed_senders="feishu:ou_1",
     )
@@ -4167,12 +3581,12 @@ def test_inbound_duplicate_message_from_other_sender_is_denied_and_marked(tmp_pa
         return build_response(tool_name=tool_name, ok=True, data={"summary": []})
 
     first = handle_assistant_request(
-        AssistantRequest(text="/income sy", sender_id="ou_1", channel="feishu", message_id="msg_1", config_key="us", audit_db=str(audit_db)),
+        _request("/income sy", "msg_1", config_key="us", audit_db=str(audit_db)),
         execute_tool_fn=_execute_tool,
         allowed_senders="feishu:ou_1,feishu:ou_2",
     )
     second = handle_assistant_request(
-        AssistantRequest(text="/income sy", sender_id="ou_2", channel="feishu", message_id="msg_1", config_key="us", audit_db=str(audit_db)),
+        _request("/income sy", "msg_1", sender_id="ou_2", config_key="us", audit_db=str(audit_db)),
         execute_tool_fn=_execute_tool,
         allowed_senders="feishu:ou_1,feishu:ou_2",
     )
@@ -4198,13 +3612,7 @@ def test_inbound_handle_denies_unknown_remote_sender_and_audits(tmp_path: Path) 
         return build_response(tool_name=tool_name, ok=True, data={})
 
     out = handle_assistant_request(
-        AssistantRequest(
-            text="/positions sy",
-            sender_id="ou_bad",
-            channel="feishu",
-            message_id="msg_bad",
-            audit_db=str(audit_db),
-        ),
+        _request("/positions sy", "msg_bad", sender_id="ou_bad", audit_db=str(audit_db)),
         execute_tool_fn=_execute_tool,
         allowed_senders="feishu:ou_good",
     )
@@ -4244,16 +3652,14 @@ def test_feishu_payload_adapter_extracts_text_message_and_calls_inbound(tmp_path
         )
 
     request = feishu_payload_to_inbound_request(payload, audit_db=str(tmp_path / "audit.sqlite3"), received_monotonic=123.25)
-    assert request == AssistantRequest(
-        text="/income sy ytd",
-        reply_context={},
-        received_monotonic=123.25,
-        sender_id="ou_1",
-        channel="feishu",
-        message_id="om_1",
-        conversation_id="feishu:oc_1:ou_1",
-        audit_db=str(tmp_path / "audit.sqlite3"),
-    )
+    assert request == _request(
+                          "/income sy ytd",
+                          "om_1",
+                          reply_context={},
+                          received_monotonic=123.25,
+                          conversation_id="feishu:oc_1:ou_1",
+                          audit_db=str(tmp_path / "audit.sqlite3"),
+                      )
 
     out = handle_feishu_payload(
         payload,
@@ -4441,12 +3847,10 @@ def test_assistant_cli_handle_wires_request(monkeypatch, capsys, tmp_path: Path)
     assert payload["tool_name"] == "assistant.handle"
     assert seen[0].received_monotonic is not None
     assert seen == [
-        AssistantRequest(
-            text="状态",
+        _request(
+            "状态",
+            "msg_1",
             received_monotonic=seen[0].received_monotonic,
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_1",
             conversation_id="feishu:oc_1:ou_1",
             config_key="us",
             audit_db=str(tmp_path / "audit.sqlite3"),
@@ -4567,17 +3971,12 @@ def test_assistant_cli_pending_and_audit_diagnostics(monkeypatch: pytest.MonkeyP
     _enable_inbound_trade_write(monkeypatch)
     cfg_path, _sqlite_path = _write_inbound_runtime_config(tmp_path)
     audit_db = tmp_path / "inbound.sqlite3"
-    preview = handle_assistant_request(
-        AssistantRequest(
-            text="/record-open sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_cli_pending_preview",
-            conversation_id="feishu:oc_1:ou_1",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
+    preview = _handle(
+        "/record-open sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
+        "msg_cli_pending_preview",
+        conversation_id="feishu:oc_1:ou_1",
+        config_path=str(cfg_path),
+        audit_db=str(audit_db),
     )
     capsys.readouterr()
 

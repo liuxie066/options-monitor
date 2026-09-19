@@ -222,18 +222,65 @@ def _public_cfg_with_external_holdings(data_config_ref: str, *, market: str = "u
     return cfg
 
 
-def _write_healthcheck_config(tmp_path: Path) -> Path:
-    cfg_path = tmp_path / "config.us.json"
+def _write_healthcheck_config(
+    tmp_path: Path,
+    *,
+    cfg: dict[str, Any] | None = None,
+    data_config: dict[str, Any] | None = None,
+    file_name: str = "config.us.json",
+) -> Path:
+    """Write the runtime data config plus the market config the tool reads.
+
+    The defaults reproduce, byte for byte, the literal fixtures the healthcheck
+    tests used to build inline.
+    """
     data_cfg_path = tmp_path / "portfolio.runtime.json"
     data_cfg_path.write_text(
-        json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
+        json.dumps(
+            data_config
+            if data_config is not None
+            else {"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}},
+            ensure_ascii=False,
+            indent=2,
+        ),
         encoding="utf-8",
     )
+    cfg_path = tmp_path / file_name
     cfg_path.write_text(
-        json.dumps(_public_cfg_with_futu("portfolio.runtime.json"), ensure_ascii=False, indent=2),
+        json.dumps(cfg if cfg is not None else _public_cfg_with_futu("portfolio.runtime.json"), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     return cfg_path
+
+
+def _write_close_advice_config(tmp_path: Path, *, cfg: dict[str, Any] | None = None) -> Path:
+    """Write the futu runtime config the close-advice input tests exercise."""
+    if cfg is None:
+        cfg = _public_cfg_with_futu("portfolio.runtime.json")
+    cfg["close_advice"] = {"enabled": True}
+    return _write_healthcheck_config(tmp_path, cfg=cfg)
+
+
+def _open_positions_context_stub(open_positions_min: list[dict[str, Any]]):
+    """Build a ``load_option_positions_context`` stub carrying the given rows."""
+
+    def _fake_load_option_positions_context(**kwargs):  # type: ignore[no-untyped-def]
+        return ({"open_positions_min": open_positions_min}, True)
+
+    return _fake_load_option_positions_context
+
+
+def _required_data_csv_stub(csv_text: str):
+    """Build a ``save_required_data_opend`` stub that writes ``csv_text``."""
+
+    def _fake_save_required_data_opend(base, symbol, payload, *, output_root):  # type: ignore[no-untyped-def]
+        parsed = output_root / "parsed"
+        parsed.mkdir(parents=True, exist_ok=True)
+        csv_path = parsed / f"{symbol}_required_data.csv"
+        csv_path.write_text(csv_text, encoding="utf-8")
+        return output_root / "raw" / f"{symbol}_required_data.json", csv_path
+
+    return _fake_save_required_data_opend
 
 
 def _futu_doctor_ok(**kwargs: Any) -> dict[str, Any]:
@@ -288,18 +335,7 @@ def _patch_healthcheck_dependencies(monkeypatch, **overrides: Any) -> None:
 def test_healthcheck_works_with_explicit_config_path(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
-    cfg_path = tmp_path / "config.us.json"
-    secrets_dir = tmp_path / "secrets"
-    secrets_dir.mkdir()
-    data_cfg_path = tmp_path / "portfolio.runtime.json"
-    data_cfg_path.write_text(
-        json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    cfg_path.write_text(
-        json.dumps(_public_cfg_with_futu("portfolio.runtime.json"), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    cfg_path = _write_healthcheck_config(tmp_path)
 
     _patch_healthcheck_dependencies(monkeypatch)
 
@@ -677,16 +713,9 @@ def test_healthcheck_warns_when_feishu_latest_sender_not_allowed(monkeypatch, tm
 def test_healthcheck_rejects_placeholder_futu_mapping(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
-    cfg_path = tmp_path / "config.us.json"
-    secrets_dir = tmp_path / "secrets"
-    secrets_dir.mkdir()
-    (tmp_path / "portfolio.runtime.json").write_text(
-        json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
     cfg = _public_cfg_with_futu("portfolio.runtime.json")
     cfg["account_settings"]["user1"]["futu"]["account_id"] = "REAL_12345678"
-    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    cfg_path = _write_healthcheck_config(tmp_path, cfg=cfg)
 
     _patch_healthcheck_dependencies(monkeypatch)
 
@@ -703,17 +732,7 @@ def test_healthcheck_rejects_placeholder_futu_mapping(monkeypatch, tmp_path: Pat
 def test_healthcheck_accepts_futu_auto_source_without_fallback_checks(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
-    cfg_path = tmp_path / "config.us.json"
-    secrets_dir = tmp_path / "secrets"
-    secrets_dir.mkdir()
-    (tmp_path / "portfolio.runtime.json").write_text(
-        json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    cfg_path.write_text(
-        json.dumps(_public_cfg_with_futu_auto_source("portfolio.runtime.json"), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    cfg_path = _write_healthcheck_config(tmp_path, cfg=_public_cfg_with_futu_auto_source("portfolio.runtime.json"))
 
     _patch_healthcheck_dependencies(monkeypatch)
 
@@ -732,16 +751,9 @@ def test_healthcheck_accepts_futu_auto_source_without_fallback_checks(monkeypatc
 def test_healthcheck_accepts_account_settings_futu_account_id_without_trade_mapping(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
-    cfg_path = tmp_path / "config.us.json"
-    secrets_dir = tmp_path / "secrets"
-    secrets_dir.mkdir()
-    (tmp_path / "portfolio.runtime.json").write_text(
-        json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
     cfg = _public_cfg_with_futu("portfolio.runtime.json")
     cfg["account_settings"]["user1"]["futu"] = {"account_id": "999999999999999999"}
-    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    cfg_path = _write_healthcheck_config(tmp_path, cfg=cfg)
 
     _patch_healthcheck_dependencies(monkeypatch)
 
@@ -760,30 +772,20 @@ def test_healthcheck_accepts_account_settings_futu_account_id_without_trade_mapp
 def test_healthcheck_accepts_external_holdings_account_without_futu_mapping(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
-    cfg_path = tmp_path / "config.us.json"
-    secrets_dir = tmp_path / "secrets"
-    secrets_dir.mkdir()
     monkeypatch.setenv("OM_FEISHU_APP_ID", "cli_xxx")
     monkeypatch.setenv("OM_FEISHU_APP_SECRET", "secret_xxx")
     monkeypatch.setenv("OM_FEISHU_HOLDINGS_TABLE", "app_token/table_id")
-    (tmp_path / "portfolio.runtime.json").write_text(
-        json.dumps(
-            {
-                "option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"},
-                "feishu": {
-                    "app_id_env": "OM_FEISHU_APP_ID",
-                    "app_secret_env": "OM_FEISHU_APP_SECRET",
-                    "tables": {"holdings_env": "OM_FEISHU_HOLDINGS_TABLE"},
-                },
+    cfg_path = _write_healthcheck_config(
+        tmp_path,
+        cfg=_public_cfg_with_external_holdings("portfolio.runtime.json"),
+        data_config={
+            "option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"},
+            "feishu": {
+                "app_id_env": "OM_FEISHU_APP_ID",
+                "app_secret_env": "OM_FEISHU_APP_SECRET",
+                "tables": {"holdings_env": "OM_FEISHU_HOLDINGS_TABLE"},
             },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-    cfg_path.write_text(
-        json.dumps(_public_cfg_with_external_holdings("portfolio.runtime.json"), ensure_ascii=False, indent=2),
-        encoding="utf-8",
+        },
     )
 
     _patch_healthcheck_dependencies(monkeypatch)
@@ -805,17 +807,7 @@ def test_healthcheck_accepts_external_holdings_account_without_futu_mapping(monk
 def test_healthcheck_missing_ledger_is_read_only_and_never_bootstraps(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
-    cfg_path = tmp_path / "config.us.json"
-    secrets_dir = tmp_path / "secrets"
-    secrets_dir.mkdir()
-    (tmp_path / "portfolio.runtime.json").write_text(
-        json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    cfg_path.write_text(
-        json.dumps(_public_cfg_with_futu("portfolio.runtime.json"), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    cfg_path = _write_healthcheck_config(tmp_path)
 
     sqlite_path = tmp_path / "output_shared" / "state" / "option_positions.sqlite3"
 
@@ -837,17 +829,7 @@ def test_healthcheck_missing_ledger_is_read_only_and_never_bootstraps(monkeypatc
 def test_healthcheck_inspects_existing_ledger_sqlite_read_only(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
-    cfg_path = tmp_path / "config.us.json"
-    secrets_dir = tmp_path / "secrets"
-    secrets_dir.mkdir()
-    (tmp_path / "portfolio.runtime.json").write_text(
-        json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    cfg_path.write_text(
-        json.dumps(_public_cfg_with_futu("portfolio.runtime.json"), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    cfg_path = _write_healthcheck_config(tmp_path)
 
     sqlite_path = tmp_path / "output_shared" / "state" / "option_positions.sqlite3"
     sqlite_path.parent.mkdir(parents=True)
@@ -875,12 +857,6 @@ def test_healthcheck_inspects_existing_ledger_sqlite_read_only(monkeypatch, tmp_
 def test_healthcheck_warns_on_notification_placeholder_values(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
-    cfg_path = tmp_path / "config.us.json"
-    data_cfg_path = tmp_path / "portfolio.runtime.json"
-    data_cfg_path.write_text(
-        json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
     monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "cli_xxx")
     monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "xxx")
     monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_xxx")
@@ -888,7 +864,7 @@ def test_healthcheck_warns_on_notification_placeholder_values(monkeypatch, tmp_p
     cfg["notifications"] = {
         "provider": "feishu_app",
     }
-    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    cfg_path = _write_healthcheck_config(tmp_path, cfg=cfg)
 
     _patch_healthcheck_dependencies(monkeypatch)
 
@@ -1003,27 +979,9 @@ def test_get_portfolio_context_rejects_stale_external_holdings_cache_for_wrong_a
     import src.application.pipeline_context as pipeline_context
     import src.application.portfolio_context_service as pcs
 
-    cfg_path = tmp_path / "config.hk.json"
-    secrets_dir = tmp_path / "secrets"
-    secrets_dir.mkdir()
     monkeypatch.setenv("OM_FEISHU_APP_ID", "cli_xxx")
     monkeypatch.setenv("OM_FEISHU_APP_SECRET", "secret_xxx")
     monkeypatch.setenv("OM_FEISHU_HOLDINGS_TABLE", "app_token/table_id")
-    (tmp_path / "portfolio.runtime.json").write_text(
-        json.dumps(
-            {
-                "option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"},
-                "feishu": {
-                    "app_id_env": "OM_FEISHU_APP_ID",
-                    "app_secret_env": "OM_FEISHU_APP_SECRET",
-                    "tables": {"holdings_env": "OM_FEISHU_HOLDINGS_TABLE"},
-                },
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
     cfg = _public_cfg_with_futu("portfolio.runtime.json", market="hk")
     cfg["accounts"] = ["lx", "sy"]
     cfg["account_settings"]["lx"] = {"type": "futu"}
@@ -1031,7 +989,19 @@ def test_get_portfolio_context_rejects_stale_external_holdings_cache_for_wrong_a
     cfg["portfolio"]["account"] = "sy"
     cfg["portfolio"]["source"] = "auto"
     cfg["portfolio"]["source_by_account"] = {"lx": "futu", "sy": "holdings"}
-    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    cfg_path = _write_healthcheck_config(
+        tmp_path,
+        cfg=cfg,
+        data_config={
+            "option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"},
+            "feishu": {
+                "app_id_env": "OM_FEISHU_APP_ID",
+                "app_secret_env": "OM_FEISHU_APP_SECRET",
+                "tables": {"holdings_env": "OM_FEISHU_HOLDINGS_TABLE"},
+            },
+        },
+        file_name="config.hk.json",
+    )
 
     shared_ctx = {
         "as_of_utc": "2026-04-14T00:00:00+00:00",
@@ -4307,16 +4277,7 @@ def test_close_advice_requires_cached_inputs(tmp_path: Path) -> None:
 def test_prepare_close_advice_inputs_builds_context_and_required_data(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
-    cfg_path = tmp_path / "config.us.json"
-    secrets_dir = tmp_path / "secrets"
-    secrets_dir.mkdir()
-    (tmp_path / "portfolio.runtime.json").write_text(
-        json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    cfg = _public_cfg_with_futu("portfolio.runtime.json")
-    cfg["close_advice"] = {"enabled": True}
-    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    cfg_path = _write_close_advice_config(tmp_path)
 
     def _fake_load_option_positions_context(**kwargs):  # type: ignore[no-untyped-def]
         assert kwargs["account"] == "user1"
@@ -4335,17 +4296,11 @@ def test_prepare_close_advice_inputs_builds_context_and_required_data(monkeypatc
         assert kwargs["max_strike"] == 120
         return {"rows": [{"symbol": "NVDA"}], "expiration_count": 2}
 
-    def _fake_save_required_data_opend(base, symbol, payload, *, output_root):  # type: ignore[no-untyped-def]
-        parsed = output_root / "parsed"
-        parsed.mkdir(parents=True, exist_ok=True)
-        csv_path = parsed / f"{symbol}_required_data.csv"
-        csv_path.write_text(
+    _fake_save_required_data_opend = _required_data_csv_stub(
             "symbol,option_type,expiration,strike\n"
             "NVDA,put,2026-06-19,100\n"
             "NVDA,call,2026-07-17,120\n",
-            encoding="utf-8",
-        )
-        return output_root / "raw" / f"{symbol}_required_data.json", csv_path
+    )
 
     _patch_agent_tool_dependencies(
         monkeypatch,
@@ -4370,16 +4325,7 @@ def test_prepare_close_advice_inputs_reuses_cached_required_data_when_coverage_i
         publish_quote_cache_metadata,
     )
 
-    cfg_path = tmp_path / "config.us.json"
-    secrets_dir = tmp_path / "secrets"
-    secrets_dir.mkdir()
-    (tmp_path / "portfolio.runtime.json").write_text(
-        json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    cfg = _public_cfg_with_futu("portfolio.runtime.json")
-    cfg["close_advice"] = {"enabled": True}
-    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    cfg_path = _write_close_advice_config(tmp_path)
 
     required_root = (tmp_path / "output_shared" / "agent_tools" / "required_data" / "parsed")
     required_root.mkdir(parents=True, exist_ok=True)
@@ -4396,13 +4342,12 @@ def test_prepare_close_advice_inputs_reuses_cached_required_data_when_coverage_i
         source_run_id="cached-test-run",
     )
 
-    def _fake_load_option_positions_context(**kwargs):  # type: ignore[no-untyped-def]
-        return ({
-            "open_positions_min": [
+    _fake_load_option_positions_context = _open_positions_context_stub(
+        [
                 {"symbol": "NVDA", "option_type": "put", "strike": 100, "expiration": "2026-06-19"},
                 {"symbol": "NVDA", "option_type": "call", "strike": 120, "expiration": "2026-07-17"},
-            ]
-        }, True)
+        ]
+    )
 
     def _fail_fetch_symbol_opend(*args, **kwargs):  # type: ignore[no-untyped-def]
         raise AssertionError("fetch_symbol_opend should not be called when cached coverage is complete")
@@ -4430,42 +4375,27 @@ def test_prepare_close_advice_inputs_reuses_cached_required_data_when_coverage_i
 def test_prepare_close_advice_inputs_reports_missing_required_expirations(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
-    cfg_path = tmp_path / "config.us.json"
-    secrets_dir = tmp_path / "secrets"
-    secrets_dir.mkdir()
-    (tmp_path / "portfolio.runtime.json").write_text(
-        json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
     cfg = _public_cfg_with_futu("portfolio.runtime.json")
     cfg["symbols"][0]["symbol"] = "9992.HK"
     cfg["symbols"][0]["fetch"]["limit_expirations"] = 1
-    cfg["close_advice"] = {"enabled": True}
-    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    cfg_path = _write_close_advice_config(tmp_path, cfg=cfg)
 
-    def _fake_load_option_positions_context(**kwargs):  # type: ignore[no-untyped-def]
-        return ({
-            "open_positions_min": [
+    _fake_load_option_positions_context = _open_positions_context_stub(
+        [
                 {"symbol": "9992.HK", "option_type": "put", "strike": 135, "expiration": "2026-04-29"},
                 {"symbol": "9992.HK", "option_type": "call", "strike": 200, "expiration": "2026-06-29"},
-            ]
-        }, True)
+        ]
+    )
 
     def _fake_fetch_symbol_opend(symbol, **kwargs):  # type: ignore[no-untyped-def]
         assert symbol == "9992.HK"
         assert kwargs["explicit_expirations"] == ["2026-04-29", "2026-06-29"]
         return {"rows": [{"symbol": "9992.HK"}], "expiration_count": 1}
 
-    def _fake_save_required_data_opend(base, symbol, payload, *, output_root):  # type: ignore[no-untyped-def]
-        parsed = output_root / "parsed"
-        parsed.mkdir(parents=True, exist_ok=True)
-        csv_path = parsed / f"{symbol}_required_data.csv"
-        csv_path.write_text(
+    _fake_save_required_data_opend = _required_data_csv_stub(
             "symbol,option_type,expiration,strike\n"
             "9992.HK,put,2026-05-28,135\n",
-            encoding="utf-8",
-        )
-        return output_root / "raw" / f"{symbol}_required_data.json", csv_path
+    )
 
     _patch_agent_tool_dependencies(
         monkeypatch,
@@ -4485,39 +4415,24 @@ def test_prepare_close_advice_inputs_reports_missing_required_expirations(monkey
 def test_prepare_close_advice_inputs_reports_expiration_near_miss_without_silent_rewrite(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
-    cfg_path = tmp_path / "config.us.json"
-    secrets_dir = tmp_path / "secrets"
-    secrets_dir.mkdir()
-    (tmp_path / "portfolio.runtime.json").write_text(
-        json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
     cfg = _public_cfg_with_futu("portfolio.runtime.json")
     cfg["symbols"][0]["symbol"] = "0700.HK"
-    cfg["close_advice"] = {"enabled": True}
-    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    cfg_path = _write_close_advice_config(tmp_path, cfg=cfg)
 
-    def _fake_load_option_positions_context(**kwargs):  # type: ignore[no-untyped-def]
-        return ({
-            "open_positions_min": [
+    _fake_load_option_positions_context = _open_positions_context_stub(
+        [
                 {"symbol": "0700.HK", "option_type": "put", "strike": 450, "expiration": "2026-05-27"},
-            ]
-        }, True)
+        ]
+    )
 
     def _fake_fetch_symbol_opend(symbol, **kwargs):  # type: ignore[no-untyped-def]
         assert kwargs["chain_cache_force_refresh"] is True
         return {"rows": [{"symbol": "0700.HK"}], "expiration_count": 1}
 
-    def _fake_save_required_data_opend(base, symbol, payload, *, output_root):  # type: ignore[no-untyped-def]
-        parsed = output_root / "parsed"
-        parsed.mkdir(parents=True, exist_ok=True)
-        csv_path = parsed / f"{symbol}_required_data.csv"
-        csv_path.write_text(
+    _fake_save_required_data_opend = _required_data_csv_stub(
             "symbol,option_type,expiration,strike\n"
             "0700.HK,put,2026-05-28,450\n",
-            encoding="utf-8",
-        )
-        return output_root / "raw" / f"{symbol}_required_data.json", csv_path
+    )
 
     _patch_agent_tool_dependencies(
         monkeypatch,
@@ -4554,42 +4469,27 @@ def test_prepare_close_advice_inputs_reports_expiration_near_miss_without_silent
 def test_prepare_close_advice_inputs_normalizes_timestamp_expirations(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
-    cfg_path = tmp_path / "config.us.json"
-    secrets_dir = tmp_path / "secrets"
-    secrets_dir.mkdir()
-    (tmp_path / "portfolio.runtime.json").write_text(
-        json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
     cfg = _public_cfg_with_futu("portfolio.runtime.json")
     cfg["symbols"][0]["symbol"] = "FUTU"
-    cfg["close_advice"] = {"enabled": True}
-    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    cfg_path = _write_close_advice_config(tmp_path, cfg=cfg)
 
-    def _fake_load_option_positions_context(**kwargs):  # type: ignore[no-untyped-def]
-        return ({
-            "open_positions_min": [
+    _fake_load_option_positions_context = _open_positions_context_stub(
+        [
                 {"symbol": "FUTU", "option_type": "put", "strike": 120, "expiration": 1777420800000},
                 {"symbol": "FUTU", "option_type": "call", "strike": 130, "expiration": 1781740800},
-            ]
-        }, True)
+        ]
+    )
 
     def _fake_fetch_symbol_opend(symbol, **kwargs):  # type: ignore[no-untyped-def]
         assert symbol == "FUTU"
         assert kwargs["explicit_expirations"] == ["2026-04-29", "2026-06-18"]
         return {"rows": [{"symbol": "FUTU"}], "expiration_count": 2}
 
-    def _fake_save_required_data_opend(base, symbol, payload, *, output_root):  # type: ignore[no-untyped-def]
-        parsed = output_root / "parsed"
-        parsed.mkdir(parents=True, exist_ok=True)
-        csv_path = parsed / f"{symbol}_required_data.csv"
-        csv_path.write_text(
+    _fake_save_required_data_opend = _required_data_csv_stub(
             "symbol,option_type,expiration,strike\n"
             "FUTU,put,2026-04-29,120\n"
             "FUTU,call,2026-06-18,130\n",
-            encoding="utf-8",
-        )
-        return output_root / "raw" / f"{symbol}_required_data.json", csv_path
+    )
 
     _patch_agent_tool_dependencies(
         monkeypatch,
@@ -4606,24 +4506,15 @@ def test_prepare_close_advice_inputs_normalizes_timestamp_expirations(monkeypatc
 def test_prepare_close_advice_inputs_uses_expiration_ymd_for_position_requirements(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
-    cfg_path = tmp_path / "config.us.json"
-    secrets_dir = tmp_path / "secrets"
-    secrets_dir.mkdir()
-    (tmp_path / "portfolio.runtime.json").write_text(
-        json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
     cfg = _public_cfg_with_futu("portfolio.runtime.json")
     cfg["symbols"][0]["symbol"] = "FUTU"
-    cfg["close_advice"] = {"enabled": True}
-    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    cfg_path = _write_close_advice_config(tmp_path, cfg=cfg)
 
-    def _fake_load_option_positions_context(**kwargs):  # type: ignore[no-untyped-def]
-        return ({
-            "open_positions_min": [
+    _fake_load_option_positions_context = _open_positions_context_stub(
+        [
                 {"symbol": "FUTU", "option_type": "put", "strike": 120, "expiration": None, "expiration_ymd": "2026-04-29"},
-            ]
-        }, True)
+        ]
+    )
 
     def _fake_fetch_symbol_opend(symbol, **kwargs):  # type: ignore[no-untyped-def]
         assert symbol == "FUTU"
@@ -4633,16 +4524,10 @@ def test_prepare_close_advice_inputs_uses_expiration_ymd_for_position_requiremen
         assert kwargs["max_strike"] == 120
         return {"rows": [{"symbol": "FUTU"}], "expiration_count": 1}
 
-    def _fake_save_required_data_opend(base, symbol, payload, *, output_root):  # type: ignore[no-untyped-def]
-        parsed = output_root / "parsed"
-        parsed.mkdir(parents=True, exist_ok=True)
-        csv_path = parsed / f"{symbol}_required_data.csv"
-        csv_path.write_text(
+    _fake_save_required_data_opend = _required_data_csv_stub(
             "symbol,option_type,expiration,strike\n"
             "FUTU,put,2026-04-29,120\n",
-            encoding="utf-8",
-        )
-        return output_root / "raw" / f"{symbol}_required_data.json", csv_path
+    )
 
     _patch_agent_tool_dependencies(
         monkeypatch,
