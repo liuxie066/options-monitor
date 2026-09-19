@@ -6,6 +6,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
+_AFTER_PLANNING_WINDOW = datetime(2026, 7, 19, 21, 0, tzinfo=timezone.utc)
+
+
 def _brief(*, valid_until: str = "2026-07-19T20:00:00+00:00", run_id: str = "run-tool") -> dict:
     return {
         "market": "US",
@@ -30,33 +33,21 @@ def _brief(*, valid_until: str = "2026-07-19T20:00:00+00:00", run_id: str = "run
     }
 
 
-def test_read_view_supports_latest_day_revision_and_effective_planning_only(
-    tmp_path: Path,
-) -> None:
+def test_read_view_supports_latest_day_revision_and_effective_planning_only(tmp_path: Path) -> None:
     from src.application.agent_tools.daily_brief import read_daily_brief_view
     from src.application.daily_decision_brief_repository import persist_daily_decision_brief_success
 
     lifecycle = persist_daily_decision_brief_success(base=tmp_path, brief=_brief())
     latest = read_daily_brief_view(
-        base=tmp_path,
-        account="LX",
-        market="us",
-        now_utc=datetime(2026, 7, 19, 21, 0, tzinfo=timezone.utc),
+        base=tmp_path, account="LX", market="us", now_utc=_AFTER_PLANNING_WINDOW,
     )
     by_day = read_daily_brief_view(
-        base=tmp_path,
-        account="lx",
-        market="US",
-        market_trading_date="2026-07-19",
-        now_utc=datetime(2026, 7, 19, 21, 0, tzinfo=timezone.utc),
+        base=tmp_path, account="lx", market="US", market_trading_date="2026-07-19",
+        now_utc=_AFTER_PLANNING_WINDOW,
     )
     exact = read_daily_brief_view(
-        base=tmp_path,
-        account="lx",
-        market="US",
-        market_trading_date="2026-07-19",
-        revision=lifecycle["brief"]["revision"],
-        now_utc=datetime(2026, 7, 19, 21, 0, tzinfo=timezone.utc),
+        base=tmp_path, account="lx", market="US", market_trading_date="2026-07-19",
+        revision=lifecycle["brief"]["revision"], now_utc=_AFTER_PLANNING_WINDOW,
     )
 
     assert latest["available"] is True
@@ -66,9 +57,7 @@ def test_read_view_supports_latest_day_revision_and_effective_planning_only(
     assert latest["brief"]["actionability"] == "live_actionable"
 
 
-def test_read_view_strips_retired_ai_overlay_from_historical_brief(
-    tmp_path: Path,
-) -> None:
+def test_read_view_strips_retired_ai_overlay_from_historical_brief(tmp_path: Path) -> None:
     import json
 
     from src.application.agent_tools.daily_brief import read_daily_brief_view
@@ -77,26 +66,15 @@ def test_read_view_strips_retired_ai_overlay_from_historical_brief(
     )
 
     lifecycle = persist_daily_decision_brief_success(base=tmp_path, brief=_brief())
-    for path in (
-        lifecycle["paths"]["revision"],
-        lifecycle["paths"]["current"],
-    ):
+    for path in (lifecycle["paths"]["revision"], lifecycle["paths"]["current"]):
         historical = json.loads(path.read_text(encoding="utf-8"))
         historical["ai_decision_advice"] = {
-            "status": "completed",
-            "summary": "AI建议-RETIRED-MUST-NOT-LEAK",
+            "status": "completed", "summary": "AI建议-RETIRED-MUST-NOT-LEAK",
         }
-        historical["ai_decision_advice_evidence_index"] = {
-            "source": "RETIRED-EVIDENCE-MUST-NOT-LEAK"
-        }
+        historical["ai_decision_advice_evidence_index"] = {"source": "RETIRED-EVIDENCE-MUST-NOT-LEAK"}
         path.write_text(json.dumps(historical), encoding="utf-8")
 
-    view = read_daily_brief_view(
-        base=tmp_path,
-        account="lx",
-        market="us",
-        now_utc=datetime(2026, 7, 19, 21, 0, tzinfo=timezone.utc),
-    )
+    view = read_daily_brief_view(base=tmp_path, account="lx", market="us", now_utc=_AFTER_PLANNING_WINDOW)
 
     assert view["available"] is True
     assert "ai_decision_advice" not in view["brief"]
@@ -127,10 +105,7 @@ def test_agent_tool_is_pure_read_and_returns_structured_contract(monkeypatch, tm
     import src.application.agent_tools.daily_brief as mod
     from src.application.daily_decision_brief_repository import persist_daily_decision_brief_success
 
-    persist_daily_decision_brief_success(
-        base=tmp_path,
-        brief=_brief(valid_until="2026-07-20T20:00:00+00:00"),
-    )
+    persist_daily_decision_brief_success(base=tmp_path, brief=_brief(valid_until="2026-07-20T20:00:00+00:00"))
     monkeypatch.setattr(mod, "repo_base", lambda: tmp_path)
     monkeypatch.delenv("OM_RUNTIME_ROOT", raising=False)
     monkeypatch.delenv("OM_ENV_FILE", raising=False)
@@ -142,21 +117,14 @@ def test_agent_tool_is_pure_read_and_returns_structured_contract(monkeypatch, tm
     assert data["available"] is True
     assert data["brief"]["revision"] == 0
     assert data["coverage"] == {
-        "status": "ready",
-        "reason": "ok",
-        "action_count": 0,
-        "position_count": 0,
-        "data_gap_count": 0,
-        "source_artifact_count": 0,
+        "status": "ready", "reason": "ok", "action_count": 0,
+        "position_count": 0, "data_gap_count": 0, "source_artifact_count": 0,
     }
     assert data["source"]["state_path"] == ".../daily_decision_brief.US.current.json"
     assert data["freshness"]["effective_actionability"] == "planning_only"
     assert str(tmp_path) not in str(data)
     assert warnings == []
-    assert meta == {
-        "read_only": True,
-        "state_path": ".../daily_decision_brief.US.current.json",
-    }
+    assert meta == {"read_only": True, "state_path": ".../daily_decision_brief.US.current.json"}
 
 
 def test_agent_tool_rejects_invalid_revision_contract() -> None:
@@ -194,14 +162,10 @@ def test_agent_tool_masks_state_invalid_source_path(monkeypatch, tmp_path: Path)
 
     raw_path = tmp_path / "private" / "daily_decision_brief.US.current.json"
     monkeypatch.setattr(
-        mod,
-        "read_latest_daily_decision_brief",
+        mod, "read_latest_daily_decision_brief",
         lambda **_kwargs: {
-            "available": False,
-            "reason": "state_invalid",
-            "error": f"invalid state at {raw_path}",
-            "brief": None,
-            "path": raw_path,
+            "available": False, "reason": "state_invalid",
+            "error": f"invalid state at {raw_path}", "brief": None, "path": raw_path,
         },
     )
 
@@ -222,18 +186,13 @@ def test_agent_tool_reads_env_runtime_root_then_repo_fallback(monkeypatch, tmp_p
     runtime_root = tmp_path / "runtime"
     persist_daily_decision_brief_success(base=repo_root, brief=_brief(run_id="repo-r0"))
     persist_daily_decision_brief_success(base=runtime_root, brief=_brief(run_id="runtime-r0"))
-    runtime_r1 = persist_daily_decision_brief_success(
-        base=runtime_root,
-        brief=_brief(run_id="runtime-r1"),
-    )
+    runtime_r1 = persist_daily_decision_brief_success(base=runtime_root, brief=_brief(run_id="runtime-r1"))
     monkeypatch.setattr(mod, "repo_base", lambda: repo_root)
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime_root))
     monkeypatch.delenv("OM_ENV_FILE", raising=False)
 
     payload = {
-        "account": "lx",
-        "market": "US",
-        "date": "2026-07-19",
+        "account": "lx", "market": "US", "date": "2026-07-19",
         "revision": runtime_r1["brief"]["revision"],
     }
     runtime_data, runtime_warnings, _runtime_meta = mod.DAILY_DECISION_BRIEF_READ_TOOL.call(payload)
@@ -249,10 +208,7 @@ def test_agent_tool_reads_env_runtime_root_then_repo_fallback(monkeypatch, tmp_p
     assert repo_warnings == []
 
 
-def test_latest_query_aggregates_enabled_scopes_and_never_writes_delivery_state(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
+def test_latest_query_aggregates_enabled_scopes_and_never_writes_delivery_state(monkeypatch, tmp_path: Path) -> None:
     from copy import deepcopy
 
     import src.application.agent_tools.daily_brief as mod
@@ -265,8 +221,7 @@ def test_latest_query_aggregates_enabled_scopes_and_never_writes_delivery_state(
         brief["funds"] = {
             "cash_total_by_currency": {"HKD" if market == "HK" else "USD": 100_000.0},
             "option_opening_available_by_currency": {"HKD" if market == "HK" else "USD": 60_000.0},
-            "available": True,
-            "reason": "ok",
+            "available": True, "reason": "ok",
         }
         persist_daily_decision_brief_success(base=tmp_path, brief=brief)
 
@@ -274,29 +229,22 @@ def test_latest_query_aggregates_enabled_scopes_and_never_writes_delivery_state(
     delivery_path.write_bytes(b'{"sentinel":true}\n')
     before = delivery_path.read_bytes()
     monkeypatch.setattr(
-        mod,
-        "_enabled_daily_brief_scopes",
+        mod, "_enabled_daily_brief_scopes",
         lambda **_kwargs: [("lx", "HK"), ("lx", "US"), ("sy", "US")],
     )
 
     data = mod.read_daily_brief_view(
-        base=tmp_path,
-        now_utc=datetime(2026, 7, 19, 14, 0, tzinfo=timezone.utc),
+        base=tmp_path, now_utc=datetime(2026, 7, 19, 14, 0, tzinfo=timezone.utc),
     )
 
     assert data["available"] is True
     assert data["reason"] == "partial"
     assert [(item["query"]["account"], item["query"]["market"]) for item in data["sections"]] == [
-        ("lx", "HK"),
-        ("lx", "US"),
-        ("sy", "US"),
+        ("lx", "HK"), ("lx", "US"), ("sy", "US"),
     ]
     assert data["coverage"] == {
-        "status": "partial",
-        "reason": "partial",
-        "section_count": 3,
-        "available_section_count": 2,
-        "unavailable_section_count": 1,
+        "status": "partial", "reason": "partial", "section_count": 3,
+        "available_section_count": 2, "unavailable_section_count": 1,
     }
     assert data["rendered_markdown"].count("## OM · 决策简报 · lx") == 2
     assert "## OM · 决策简报 · sy" in data["rendered_markdown"]

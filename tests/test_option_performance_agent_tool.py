@@ -14,69 +14,36 @@ from src.application.performance.service import OptionPerformanceReadError
 def _report(*, include_rows: bool = False) -> dict[str, Any]:
     value: dict[str, Any] = {
         "period": {
-            "kind": "mtd",
-            "start_date": "2026-09-01",
-            "as_of_date": "2026-09-02",
-            "start_at_ms": 1788192000000,
-            "end_exclusive_at_ms": 1788364800000,
-            "statistic_days": 2,
-            "reporting_timezone": "Asia/Shanghai",
+            "kind": "mtd", "start_date": "2026-09-01", "as_of_date": "2026-09-02",
+            "start_at_ms": 1788192000000, "end_exclusive_at_ms": 1788364800000,
+            "statistic_days": 2, "reporting_timezone": "Asia/Shanghai",
             "freshness_status": "historical",
         },
-        "scope": {
-            "config_key": "us",
-            "accounts": ["lx"],
-            "brokers": ["富途"],
-        },
+        "scope": {"config_key": "us", "accounts": ["lx"], "brokers": ["富途"]},
         "coverage": {
-            "status": "complete",
-            "complete_for": "full_query",
-            "included_count": 1,
-            "total_count": 1,
-            "omitted_count": 0,
+            "status": "complete", "complete_for": "full_query",
+            "included_count": 1, "total_count": 1, "omitted_count": 0,
         },
-        "freshness": {
-            "status": "historical",
-            "as_of": "2026-09-02T23:59:59.999+08:00",
-        },
+        "freshness": {"status": "historical", "as_of": "2026-09-02T23:59:59.999+08:00"},
         "option_net_cashflow": {
             "by_currency": {},
-            "cny_total": {
-                "currency": "CNY",
-                "amount": 0,
-                "status": "observed",
-                "missing": [],
-            },
+            "cny_total": {"currency": "CNY", "amount": 0, "status": "observed", "missing": []},
         },
         "sell_option_win_rate": {
-            "winning_contracts": 0,
-            "eligible_contracts": 0,
-            "rate": None,
-            "status": "not_applicable",
-            "missing": [],
+            "winning_contracts": 0, "eligible_contracts": 0, "rate": None,
+            "status": "not_applicable", "missing": [],
         },
         "buy_option_win_rate": {
-            "winning_contracts": 0,
-            "eligible_contracts": 0,
-            "rate": None,
-            "status": "not_applicable",
-            "missing": [],
+            "winning_contracts": 0, "eligible_contracts": 0, "rate": None,
+            "status": "not_applicable", "missing": [],
         },
         "option_return": {"by_currency": {}},
         "breakdowns": {
-            "opening_years": [],
-            "opening_months": [],
-            "accounts": [],
-            "currencies": [],
-            "leg_types": [],
-            "attribution_strategies": [],
-            "parent_universes": [],
-            "symbols": [],
+            "opening_years": [], "opening_months": [], "accounts": [], "currencies": [],
+            "leg_types": [], "attribution_strategies": [], "parent_universes": [], "symbols": [],
         },
         "quality": {
-            "status": "observed",
-            "missing": [],
-            "diagnostics": [],
+            "status": "observed", "missing": [], "diagnostics": [],
             "ledger_input_hash": "a" * 64,
         },
     }
@@ -85,11 +52,11 @@ def _report(*, include_rows: bool = False) -> dict[str, Any]:
     return value
 
 
-def _patch_dependencies(
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    report: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+def _call(payload: dict[str, Any]):
+    return positions.OPTION_PERFORMANCE_REPORT_TOOL.call(payload)
+
+
+def _patch_dependencies(monkeypatch: pytest.MonkeyPatch, *, report: dict[str, Any] | None = None) -> dict[str, Any]:
     calls: dict[str, Any] = {}
     monkeypatch.setattr(
         positions,
@@ -133,30 +100,16 @@ def test_option_performance_report_is_the_canonical_payload_without_legacy_prese
 ) -> None:
     calls = _patch_dependencies(monkeypatch)
 
-    data, warnings, meta = positions.OPTION_PERFORMANCE_REPORT_TOOL.call(
-        {
-            "config_key": "us",
-            "account": " LX ",
-            "broker": " FUTU ",
-            "period": "mtd",
-            "as_of_date": "2026-09-02",
-            "include_rows": True,
-        }
-    )
+    data, warnings, meta = _call({
+        "config_key": "us", "account": " LX ", "broker": " FUTU ", "period": "mtd",
+        "as_of_date": "2026-09-02", "include_rows": True,
+    })
 
     assert warnings == []
     assert set(data) == {
-        "period",
-        "scope",
-        "coverage",
-        "freshness",
-        "option_net_cashflow",
-        "sell_option_win_rate",
-        "buy_option_win_rate",
-        "option_return",
-        "breakdowns",
-        "quality",
-        "rows",
+        "period", "scope", "coverage", "freshness", "option_net_cashflow",
+        "sell_option_win_rate", "buy_option_win_rate", "option_return",
+        "breakdowns", "quality", "rows",
     }
     assert calls["account"] == "lx"
     assert calls["broker"] == "富途"
@@ -173,9 +126,7 @@ def test_option_performance_report_omitted_scope_is_configured_aggregate(
 ) -> None:
     calls = _patch_dependencies(monkeypatch)
 
-    data, _warnings, _meta = positions.OPTION_PERFORMANCE_REPORT_TOOL.call(
-        {"period": "ytd", "as_of_date": "2026-09-02"}
-    )
+    data, _warnings, _meta = _call({"period": "ytd", "as_of_date": "2026-09-02"})
 
     assert calls["account"] is None
     assert calls["broker"] is None
@@ -202,7 +153,7 @@ def test_option_performance_report_rejects_removed_inputs(
     _patch_dependencies(monkeypatch)
 
     with pytest.raises(AgentToolError) as caught:
-        positions.OPTION_PERFORMANCE_REPORT_TOOL.call(payload)
+        _call(payload)
 
     assert caught.value.code == "INPUT_ERROR"
 
@@ -212,16 +163,12 @@ def test_option_performance_report_accepts_natural_periods(
 ) -> None:
     calls = _patch_dependencies(monkeypatch)
 
-    positions.OPTION_PERFORMANCE_REPORT_TOOL.call(
-        {"period": "month", "month": "2026-08", "include_rows": True}
-    )
+    _call({"period": "month", "month": "2026-08", "include_rows": True})
     assert calls["period"].kind == "month"
     assert calls["period"].requested_end_date == "2026-08-31"
     assert calls["include_rows"] is True
 
-    positions.OPTION_PERFORMANCE_REPORT_TOOL.call(
-        {"period": "year", "year": 2025}
-    )
+    _call({"period": "year", "year": 2025})
     assert calls["period"].kind == "year"
     assert calls["period"].requested_end_date == "2025-12-31"
 
@@ -240,7 +187,7 @@ def test_option_performance_report_translates_only_stable_read_reasons(
 
     monkeypatch.setattr(positions, "build_option_period_performance", _raise)
     with pytest.raises(AgentToolError) as caught:
-        positions.OPTION_PERFORMANCE_REPORT_TOOL.call({"period": "mtd"})
+        _call({"period": "mtd"})
 
     assert caught.value.code == "READ_ERROR"
     assert caught.value.details == {
@@ -270,7 +217,7 @@ def test_option_performance_report_classifies_dependency_resolution_failure(
     )
 
     with pytest.raises(AgentToolError) as caught:
-        positions.OPTION_PERFORMANCE_REPORT_TOOL.call({"period": "mtd"})
+        _call({"period": "mtd"})
 
     assert caught.value.code == "READ_ERROR"
     assert caught.value.details == {"reason_codes": ["ledger_read_failed"]}
@@ -297,31 +244,18 @@ def test_option_performance_tool_schema_exposes_only_the_frozen_inputs() -> None
     tool = positions.OPTION_PERFORMANCE_REPORT_TOOL
 
     assert set(tool.input_schema) == {
-        "config_key",
-        "config_path",
-        "data_config",
-        "account",
-        "broker",
-        "period",
-        "as_of_date",
-        "month",
-        "year",
+        "config_key", "config_path", "data_config", "account", "broker", "period",
+        "as_of_date", "month", "year",
         "include_rows", "view", "group_by", "symbol", "limit", "cursor",
     }
     assert tool.input_schema["period"]["enum"] == ["mtd", "ytd", "month", "year"]
     assert set(tool.bot_input_fields) == {
-        "config_key",
-        "account",
-        "broker",
-        "period",
-        "as_of_date",
-        "month",
-        "year", "view", "group_by", "symbol", "limit", "cursor",
+        "config_key", "account", "broker", "period", "as_of_date", "month", "year",
+        "view", "group_by", "symbol", "limit", "cursor",
     }
 
     payload, error = bot_tools.build_tool_payload(
-        "option_performance_report",
-        {"period": "month", "month": "2026-08", "include_rows": True},
+        "option_performance_report", {"period": "month", "month": "2026-08", "include_rows": True}
     )
     assert payload is None
     assert "include_rows" in str(error)
