@@ -175,7 +175,7 @@ activation descriptor，命中时返回 `wheel_policy_drift` 与一条人类可�
 - **内部标识**：`wheel`
 - **文档性质**：当前产品、安全与 owner 合同；第 13 节为双向实现合同
 
-当前实现位于 `domain/domain/wheel.py`、`src/application/wheel/`、相关 ledger/tick owner 和
+当前实现位于 `domain/domain/wheel/`、`src/application/wheel/`、相关 ledger/tick owner 和
 `src/interfaces/cli/wheel.py`。第 1～12 节保留单向 Call 合同和兼容语义，第 13 节补充双向扩展；
 运行行为以当前源码、配置验证器和测试为准。源码实现不表示已提交、发布或生产启用。
 
@@ -646,7 +646,7 @@ Wheel 区块每个批次最小展示：
 
 | 责任 | 权威 owner |
 |---|---|
-| Wheel 规则、事件身份、intent、归属、生命周期投影和候选排序 | `domain/domain/wheel.py` |
+| Wheel 规则、事件身份、intent、归属、生命周期投影和候选排序 | `domain/domain/wheel/` |
 | 账户配置 | `src/application/wheel/config.py` 和现有配置构建、验证链路 |
 | 一致性生命周期读模型 | `src/application/wheel/read_model.py` |
 | 手动结束、intent 和归属事务 | `src/application/wheel/workflows.py` |
@@ -1026,7 +1026,7 @@ data unavailable，不新增 scheduler 或通知通道。
 
 | 责任 | 设计 owner |
 |---|---|
-| 分支事件、状态、经济分摊、Call/Put 策略和排序 | `domain/domain/wheel.py` |
+| 分支事件、状态、经济分摊、Call/Put 策略和排序 | `domain/domain/wheel/` |
 | 普通 CC/CSP canonical membership 与冲突识别 | `domain/domain/strategy_membership.py` |
 | 事件表/activation windows 迁移、append、读取和原子 trade companion | `src/application/ledger/repository_core.py`、`src/application/ledger/repository_assigned_stock.py`、`src/application/ledger/wheel_trade_companions.py` |
 | 两条 trade writer 的账户启用 policy 与事务重校验 | `src/application/ledger/writer_trade_events.py`、`src/application/ledger/writer_lifecycle_allocation.py`、共享 companion hook |
