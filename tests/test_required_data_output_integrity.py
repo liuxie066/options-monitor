@@ -41,6 +41,21 @@ CONTRACT_CODE = "NVDA260821P00100000"
 CALL_CONTRACT_CODE = "NVDA260821C00120000"
 
 
+def _as_dict(value: object) -> dict[str, object]:
+    assert isinstance(value, dict)
+    return value
+
+
+def _as_list(value: object) -> list[object]:
+    assert isinstance(value, list)
+    return value
+
+
+def _as_dicts(value: object) -> list[dict[str, object]]:
+    assert isinstance(value, list)
+    return [_as_dict(item) for item in value]
+
+
 def _term_matched_rv_fixture(
     *,
     expiration: str = "2026-08-21",
@@ -317,25 +332,15 @@ def _filtered_empty_candidate(
 ) -> tuple[dict[str, object], dict[str, object]]:
     plan = _fetch_plan()
     plan["require_realized_volatility"] = require_realized_volatility
-    side_plans = plan["side_plans"]
-    requests = plan["merged_requests"]
-    assert isinstance(side_plans, list)
-    assert isinstance(requests, list)
-    for side_plan in side_plans:
-        assert isinstance(side_plan, dict)
+    for side_plan in _as_dicts(plan["side_plans"]):
         side_plan["required_exact_strikes_by_expiration"] = {}
-    for request in requests:
-        assert isinstance(request, dict)
+    for request in _as_dicts(plan["merged_requests"]):
         request["include_realized_volatility"] = require_realized_volatility
-        request_side_plans = request["side_plans"]
-        assert isinstance(request_side_plans, list)
-        for side_plan in request_side_plans:
-            assert isinstance(side_plan, dict)
+        for side_plan in _as_dicts(request["side_plans"]):
             side_plan["required_exact_strikes_by_expiration"] = {}
     payload = _payload()
     payload["rows"] = []
-    meta = payload["meta"]
-    assert isinstance(meta, dict)
+    meta = _as_dict(payload["meta"])
     meta.update(
         {
             "source_outcome": "success_empty",
@@ -387,8 +392,7 @@ def _no_expirations_candidate() -> tuple[dict[str, object], dict[str, object]]:
             "projected_expirations": [],
         }
     )
-    discovery = plan["expiration_discovery"]
-    assert isinstance(discovery, dict)
+    discovery = _as_dict(plan["expiration_discovery"])
     discovery.update(
         {
             "outcome": "success_empty",
@@ -398,8 +402,7 @@ def _no_expirations_candidate() -> tuple[dict[str, object], dict[str, object]]:
     )
     payload = _payload()
     payload.update({"expiration_count": 0, "expirations": [], "rows": []})
-    meta = payload["meta"]
-    assert isinstance(meta, dict)
+    meta = _as_dict(payload["meta"])
     meta.update(
         {
             "source_outcome": "success_empty",
@@ -481,12 +484,9 @@ def _receipt_paths(root: Path) -> list[Path]:
 def _valid_multi_child_candidate() -> tuple[dict[str, object], dict[str, object]]:
     payload = _multi_request_payload()
     plan = _fetch_plan(request_count=2)
-    requests = plan["merged_requests"]
-    assert isinstance(requests, list)
-    meta = payload["meta"]
-    assert isinstance(meta, dict)
-    realized_volatility = meta["realized_volatility"]
-    assert isinstance(realized_volatility, dict)
+    requests = _as_list(plan["merged_requests"])
+    meta = _as_dict(payload["meta"])
+    realized_volatility = _as_dict(meta["realized_volatility"])
     payload["meta"]["request_count"] = 2
     payload["meta"]["requests"] = [
         {
@@ -576,16 +576,10 @@ def _valid_multi_child_candidate() -> tuple[dict[str, object], dict[str, object]
 
 def test_validator_accepts_typed_expiry_scoped_rv_unavailability() -> None:
     payload = _payload()
-    rows = payload["rows"]
-    meta = payload["meta"]
-    assert isinstance(rows, list) and isinstance(rows[0], dict)
-    assert isinstance(meta, dict)
-    rv_meta = meta["realized_volatility"]
-    assert isinstance(rv_meta, dict)
-    terms = rv_meta["term_matched"]
-    assert isinstance(terms, dict)
-    term = terms["2026-08-21"]
-    assert isinstance(term, dict)
+    row = _as_dict(_as_list(payload["rows"])[0])
+    rv_meta = _as_dict(_as_dict(payload["meta"])["realized_volatility"])
+    terms = _as_dict(rv_meta["term_matched"])
+    term = _as_dict(terms["2026-08-21"])
     term.update(
         {
             "status": "data_unavailable",
@@ -606,7 +600,7 @@ def test_validator_accepts_typed_expiry_scoped_rv_unavailability() -> None:
             "reason": "term_matched_rv_incomplete",
         }
     )
-    rows[0].update(
+    row.update(
         {
             "term_matched_rv": None,
             "term_matched_rv_status": "data_unavailable",
@@ -627,12 +621,8 @@ def test_validator_accepts_typed_expiry_scoped_rv_unavailability() -> None:
 
 def test_validator_accepts_term_matched_rv_when_legacy_estimate_is_unavailable() -> None:
     payload = _payload()
-    rows = payload["rows"]
-    meta = payload["meta"]
-    assert isinstance(rows, list) and isinstance(rows[0], dict)
-    assert isinstance(meta, dict)
-    rv_meta = meta["realized_volatility"]
-    assert isinstance(rv_meta, dict)
+    row = _as_dict(_as_list(payload["rows"])[0])
+    rv_meta = _as_dict(_as_dict(payload["meta"])["realized_volatility"])
     rv_meta.update(
         {
             "sample_count": 39,
@@ -641,7 +631,7 @@ def test_validator_accepts_term_matched_rv_when_legacy_estimate_is_unavailable()
             "realized_volatility_estimate": None,
         }
     )
-    rows[0].update(
+    row.update(
         {
             "realized_volatility_60": None,
             "realized_volatility_120": None,
@@ -657,9 +647,8 @@ def test_validator_accepts_term_matched_rv_when_legacy_estimate_is_unavailable()
 
 def test_validator_rejects_missing_legacy_estimate_when_dte_policy_can_compute_it() -> None:
     payload = _payload()
-    rows = payload["rows"]
-    assert isinstance(rows, list) and isinstance(rows[0], dict)
-    rows[0]["realized_volatility_estimate"] = None
+    row = _as_dict(_as_list(payload["rows"])[0])
+    row["realized_volatility_estimate"] = None
 
     with pytest.raises(
         SourceReceiptError,
@@ -698,8 +687,7 @@ def test_merge_accepts_proven_empty_child_and_uses_nonempty_child_rv() -> None:
     nonempty = _payload()
     empty = deepcopy(_payload())
     empty["rows"] = []
-    empty_meta = empty["meta"]
-    assert isinstance(empty_meta, dict)
+    empty_meta = _as_dict(empty["meta"])
     empty_meta.update(
         {
             "source_outcome": "success_rows",
@@ -738,8 +726,7 @@ def test_merge_accepts_proven_empty_child_and_uses_nonempty_child_rv() -> None:
         merged_payload=merged, payloads=[nonempty, empty]
     )
 
-    merged_meta = merged["meta"]
-    assert isinstance(merged_meta, dict)
+    merged_meta = _as_dict(merged["meta"])
     assert merged_meta["status"] == "ok"
     assert merged_meta["source_outcome"] == "success_rows"
     assert merged_meta["realized_volatility"] == nonempty["meta"][
@@ -749,10 +736,8 @@ def test_merge_accepts_proven_empty_child_and_uses_nonempty_child_rv() -> None:
 
 def test_multi_request_payload_accepts_proven_empty_child() -> None:
     payload, _contract_unused = _valid_multi_child_candidate()
-    rows = payload["rows"]
-    meta = payload["meta"]
-    assert isinstance(rows, list) and isinstance(meta, dict)
-    rows.pop()
+    _as_list(payload["rows"]).pop()
+    meta = _as_dict(payload["meta"])
     meta.update(
         {
             "snapshot_requested_codes": 1,
@@ -761,10 +746,8 @@ def test_multi_request_payload_accepts_proven_empty_child() -> None:
             "snapshot_returned_code_set": [CONTRACT_CODE],
         }
     )
-    children = meta["requests"]
-    assert isinstance(children, list)
-    empty_child = children[1]
-    assert isinstance(empty_child, dict)
+    children = _as_list(meta["requests"])
+    empty_child = _as_dict(children[1])
     empty_child.update(
         {
             "snapshot_requested_codes": 0,
@@ -790,15 +773,11 @@ def test_multi_request_payload_accepts_proven_empty_child() -> None:
         }
     )
     plan = _fetch_plan(request_count=2)
-    top_side_plans = plan["side_plans"]
-    requests = plan["merged_requests"]
-    assert isinstance(top_side_plans, list) and isinstance(requests, list)
-    call_request = requests[1]
-    assert isinstance(call_request, dict)
-    call_side_plans = call_request["side_plans"]
-    assert isinstance(call_side_plans, list)
-    for side_plan in (top_side_plans[1], call_side_plans[0]):
-        assert isinstance(side_plan, dict)
+    top_side_plans = _as_list(plan["side_plans"])
+    requests = _as_list(plan["merged_requests"])
+    call_request = _as_dict(requests[1])
+    call_side_plans = _as_list(call_request["side_plans"])
+    for side_plan in _as_dicts([top_side_plans[1], call_side_plans[0]]):
         side_plan["required_exact_strikes_by_expiration"] = {}
     empty_child["planned_request_sha256"] = required_data_request_sha256(
         call_request
@@ -842,25 +821,48 @@ def _assert_fresh_finalizer_rejects_without_artifacts(
     assert not (tmp_path / "parsed" / "NVDA_required_data.csv").exists()
 
 
+def _assert_aggregate_rejected(
+    payload: dict[str, object],
+    tmp_path: Path,
+    match: str,
+) -> None:
+    """The single-request contract every aggregate-payload rejection case uses."""
+
+    _assert_fresh_finalizer_rejects_without_artifacts(
+        tmp_path=tmp_path,
+        payload=payload,
+        expected_fetch_contract=_contract(),
+        match=match,
+    )
+
+
+def _assert_child_payload_rejected(
+    payload: dict[str, object],
+    tmp_path: Path,
+    expected_fetch_contract: dict[str, object],
+    match: str,
+) -> None:
+    _assert_fresh_finalizer_rejects_without_artifacts(
+        tmp_path=tmp_path,
+        payload=payload,
+        expected_fetch_contract=expected_fetch_contract,
+        match=match,
+    )
+
+
 @pytest.mark.parametrize("trading_date", [None, "2026-08-05"])
 def test_finalizer_rejects_missing_or_wrong_aggregate_trading_date_without_artifacts(
     tmp_path: Path,
     trading_date: str | None,
 ) -> None:
     payload = _payload()
-    meta = payload["meta"]
-    assert isinstance(meta, dict)
+    meta = _as_dict(payload["meta"])
     if trading_date is None:
         meta.pop("trading_date")
     else:
         meta["trading_date"] = trading_date
 
-    _assert_fresh_finalizer_rejects_without_artifacts(
-        tmp_path=tmp_path,
-        payload=payload,
-        expected_fetch_contract=_contract(),
-        match="trading date mismatch",
-    )
+    _assert_aggregate_rejected(payload, tmp_path, "trading date mismatch")
 
 
 @pytest.mark.parametrize("trading_date", [None, "2026-08-05"])
@@ -869,41 +871,26 @@ def test_finalizer_rejects_missing_or_differing_child_trading_date_without_artif
     trading_date: str | None,
 ) -> None:
     payload, contract = _valid_multi_child_candidate()
-    meta = payload["meta"]
-    assert isinstance(meta, dict)
-    children = meta["requests"]
-    assert isinstance(children, list)
-    child = children[1]
-    assert isinstance(child, dict)
+    meta = _as_dict(payload["meta"])
+    children = _as_list(meta["requests"])
+    child = _as_dict(children[1])
     if trading_date is None:
         child.pop("trading_date")
     else:
         child["trading_date"] = trading_date
 
-    _assert_fresh_finalizer_rejects_without_artifacts(
-        tmp_path=tmp_path,
-        payload=payload,
-        expected_fetch_contract=contract,
-        match="trading date mismatch",
-    )
+    _assert_child_payload_rejected(payload, tmp_path, contract, "trading date mismatch")
 
 
 def test_finalizer_rejects_boolean_required_rv_without_artifacts(
     tmp_path: Path,
 ) -> None:
     payload = _payload()
-    meta = payload["meta"]
-    assert isinstance(meta, dict)
-    rv_meta = meta["realized_volatility"]
-    assert isinstance(rv_meta, dict)
+    meta = _as_dict(payload["meta"])
+    rv_meta = _as_dict(meta["realized_volatility"])
     rv_meta["realized_volatility_estimate"] = True
 
-    _assert_fresh_finalizer_rejects_without_artifacts(
-        tmp_path=tmp_path,
-        payload=payload,
-        expected_fetch_contract=_contract(),
-        match="lacks required realized volatility",
-    )
+    _assert_aggregate_rejected(payload, tmp_path, "lacks required realized volatility")
 
 
 def test_validated_required_data_row_reaches_candidate_engine_with_canonical_rv_status() -> None:
@@ -914,8 +901,7 @@ def test_validated_required_data_row_reaches_candidate_engine_with_canonical_rv_
     )
     rows = payload["rows"]
     assert isinstance(rows, list) and len(rows) == 1
-    raw = rows[0]
-    assert isinstance(raw, dict)
+    raw = _as_dict(rows[0])
     contract = CandidateContractInput.from_row(
         phase2_opening_row(raw),
         mode="put",
@@ -935,18 +921,11 @@ def test_finalizer_rejects_meta_and_row_rv_mismatch_without_artifacts(
     tmp_path: Path,
 ) -> None:
     payload = _payload()
-    meta = payload["meta"]
-    assert isinstance(meta, dict)
-    rv_meta = meta["realized_volatility"]
-    assert isinstance(rv_meta, dict)
+    meta = _as_dict(payload["meta"])
+    rv_meta = _as_dict(meta["realized_volatility"])
     rv_meta["realized_volatility_20"] = 0.2
 
-    _assert_fresh_finalizer_rejects_without_artifacts(
-        tmp_path=tmp_path,
-        payload=payload,
-        expected_fetch_contract=_contract(),
-        match="contradict canonical realized volatility",
-    )
+    _assert_aggregate_rejected(payload, tmp_path, "contradict canonical realized volatility")
 
 
 @pytest.mark.parametrize(
@@ -962,18 +941,11 @@ def test_finalizer_rejects_meta_and_row_rv_window_mismatch_without_artifacts(
     field: str,
 ) -> None:
     payload = _payload()
-    meta = payload["meta"]
-    assert isinstance(meta, dict)
-    rv_meta = meta["realized_volatility"]
-    assert isinstance(rv_meta, dict)
+    meta = _as_dict(payload["meta"])
+    rv_meta = _as_dict(meta["realized_volatility"])
     rv_meta[field] = 9.99
 
-    _assert_fresh_finalizer_rejects_without_artifacts(
-        tmp_path=tmp_path,
-        payload=payload,
-        expected_fetch_contract=_contract(),
-        match="contradict canonical realized volatility",
-    )
+    _assert_aggregate_rejected(payload, tmp_path, "contradict canonical realized volatility")
 
 
 @pytest.mark.parametrize(
@@ -991,39 +963,24 @@ def test_finalizer_rejects_invalid_rv_window_evidence_without_artifacts(
     replacement: object,
 ) -> None:
     payload = _payload()
-    meta = payload["meta"]
-    assert isinstance(meta, dict)
-    rv_meta = meta["realized_volatility"]
-    assert isinstance(rv_meta, dict)
-    row = payload["rows"][0]
-    assert isinstance(row, dict)
+    meta = _as_dict(payload["meta"])
+    rv_meta = _as_dict(meta["realized_volatility"])
+    row = _as_dict(payload["rows"][0])
     evidence = rv_meta if target == "meta" else row
     evidence[field] = replacement
 
-    _assert_fresh_finalizer_rejects_without_artifacts(
-        tmp_path=tmp_path,
-        payload=payload,
-        expected_fetch_contract=_contract(),
-        match="required realized volatility",
-    )
+    _assert_aggregate_rejected(payload, tmp_path, "required realized volatility")
 
 
 def test_finalizer_rejects_missing_explicit_rv_window_without_artifacts(
     tmp_path: Path,
 ) -> None:
     payload = _payload()
-    meta = payload["meta"]
-    assert isinstance(meta, dict)
-    rv_meta = meta["realized_volatility"]
-    assert isinstance(rv_meta, dict)
+    meta = _as_dict(payload["meta"])
+    rv_meta = _as_dict(meta["realized_volatility"])
     rv_meta.pop("realized_volatility_120")
 
-    _assert_fresh_finalizer_rejects_without_artifacts(
-        tmp_path=tmp_path,
-        payload=payload,
-        expected_fetch_contract=_contract(),
-        match="lacks required realized volatility",
-    )
+    _assert_aggregate_rejected(payload, tmp_path, "lacks required realized volatility")
 
 
 @pytest.mark.parametrize("field", ["source_observed_at", "completed_at_utc"])
@@ -1032,16 +989,10 @@ def test_finalizer_rejects_timezone_naive_timestamps_without_artifacts(
     field: str,
 ) -> None:
     payload = _payload()
-    meta = payload["meta"]
-    assert isinstance(meta, dict)
+    meta = _as_dict(payload["meta"])
     meta[field] = datetime(2026, 8, 4, 2, 0).isoformat()
 
-    _assert_fresh_finalizer_rejects_without_artifacts(
-        tmp_path=tmp_path,
-        payload=payload,
-        expected_fetch_contract=_contract(),
-        match="stable observation timestamps",
-    )
+    _assert_aggregate_rejected(payload, tmp_path, "stable observation timestamps")
 
 
 @pytest.mark.parametrize("port", [11111.0, True])
@@ -1050,16 +1001,10 @@ def test_finalizer_rejects_non_integer_raw_fetch_port_without_artifacts(
     port: object,
 ) -> None:
     payload = _payload()
-    meta = payload["meta"]
-    assert isinstance(meta, dict)
+    meta = _as_dict(payload["meta"])
     meta["port"] = port
 
-    _assert_fresh_finalizer_rejects_without_artifacts(
-        tmp_path=tmp_path,
-        payload=payload,
-        expected_fetch_contract=_contract(),
-        match="payload port is invalid",
-    )
+    _assert_aggregate_rejected(payload, tmp_path, "payload port is invalid")
 
 
 @pytest.mark.parametrize(
@@ -1294,14 +1239,10 @@ def test_multi_request_payload_accepts_exact_stable_child_timestamps_and_rv() ->
 )
 def test_multi_request_payload_rejects_scope_coverage_tampering(case: str) -> None:
     payload, contract = _valid_multi_child_candidate()
-    children = payload["meta"]["requests"]
-    assert isinstance(children, list)
-    scope_evidence = children[1]["option_chain_scope_coverage"]
-    assert isinstance(scope_evidence, dict)
-    scopes = scope_evidence["scopes"]
-    assert isinstance(scopes, list)
-    scope = scopes[0]
-    assert isinstance(scope, dict)
+    children = _as_list(payload["meta"]["requests"])
+    scope_evidence = _as_dict(children[1]["option_chain_scope_coverage"])
+    scopes = _as_list(scope_evidence["scopes"])
+    scope = _as_dict(scopes[0])
     if case == "missing":
         children[1].pop("option_chain_scope_coverage")
     elif case == "wrong_schema":
@@ -1326,25 +1267,16 @@ def test_finalizer_rejects_invalid_child_required_rv_without_artifacts(
     case: str,
 ) -> None:
     payload, contract = _valid_multi_child_candidate()
-    meta = payload["meta"]
-    assert isinstance(meta, dict)
-    children = meta["requests"]
-    assert isinstance(children, list)
-    child = children[1]
-    assert isinstance(child, dict)
+    meta = _as_dict(payload["meta"])
+    children = _as_list(meta["requests"])
+    child = _as_dict(children[1])
     if case == "missing":
         child.pop("realized_volatility")
     else:
-        rv_meta = child["realized_volatility"]
-        assert isinstance(rv_meta, dict)
+        rv_meta = _as_dict(child["realized_volatility"])
         rv_meta["status"] = "error"
 
-    _assert_fresh_finalizer_rejects_without_artifacts(
-        tmp_path=tmp_path,
-        payload=payload,
-        expected_fetch_contract=contract,
-        match="required realized volatility",
-    )
+    _assert_child_payload_rejected(payload, tmp_path, contract, "required realized volatility")
 
 
 @pytest.mark.parametrize(
@@ -1361,22 +1293,13 @@ def test_finalizer_rejects_child_required_rv_drift_without_artifacts(
     field: str,
 ) -> None:
     payload, contract = _valid_multi_child_candidate()
-    meta = payload["meta"]
-    assert isinstance(meta, dict)
-    children = meta["requests"]
-    assert isinstance(children, list)
-    child = children[1]
-    assert isinstance(child, dict)
-    rv_meta = child["realized_volatility"]
-    assert isinstance(rv_meta, dict)
+    meta = _as_dict(payload["meta"])
+    children = _as_list(meta["requests"])
+    child = _as_dict(children[1])
+    rv_meta = _as_dict(child["realized_volatility"])
     rv_meta[field] = 9.99
 
-    _assert_fresh_finalizer_rejects_without_artifacts(
-        tmp_path=tmp_path,
-        payload=payload,
-        expected_fetch_contract=contract,
-        match="child request realized volatility mismatch",
-    )
+    _assert_child_payload_rejected(payload, tmp_path, contract, "child request realized volatility mismatch")
 
 
 def test_finalizer_accepts_matching_child_required_rv_with_none_window(
@@ -1397,8 +1320,7 @@ def test_finalizer_accepts_matching_child_required_rv_with_none_window(
         row["realized_volatility_120"] = None
     for child in children:
         assert isinstance(child, dict)
-        child_rv = child["realized_volatility"]
-        assert isinstance(child_rv, dict)
+        child_rv = _as_dict(child["realized_volatility"])
         child_rv["realized_volatility_120"] = None
 
     result = finalize_required_data_quote_candidate(
@@ -1433,8 +1355,7 @@ def test_multi_request_payload_rejects_child_identity_or_outcome_drift(
     case: str,
 ) -> None:
     payload, contract = _valid_multi_child_candidate()
-    children = payload["meta"]["requests"]
-    assert isinstance(children, list)
+    children = _as_list(payload["meta"]["requests"])
     if case == "wrong_hash":
         children[0]["planned_request_sha256"] = "0" * 64
     elif case == "duplicate_hash":
@@ -1468,8 +1389,7 @@ def _apply_child_coverage_drift(
     rows = payload["rows"]
     assert isinstance(meta, dict)
     assert isinstance(rows, list)
-    children = meta["requests"]
-    assert isinstance(children, list)
+    children = _as_list(meta["requests"])
     first = children[0]
     second = children[1]
     assert isinstance(first, dict)
@@ -1559,10 +1479,8 @@ def test_multi_request_payload_accepts_quarantined_unexpected_code() -> None:
 
 def test_multi_request_payload_accepts_child_list_reordering() -> None:
     payload, contract = _valid_multi_child_candidate()
-    meta = payload["meta"]
-    assert isinstance(meta, dict)
-    children = meta["requests"]
-    assert isinstance(children, list)
+    meta = _as_dict(payload["meta"])
+    children = _as_list(meta["requests"])
     children.reverse()
 
     validate_required_data_payload_candidate(
@@ -1588,8 +1506,7 @@ def test_child_scope_drift_has_scope_identity_reason(case: str) -> None:
 
 def test_child_hash_drift_has_scope_identity_reason() -> None:
     payload, contract = _valid_multi_child_candidate()
-    children = payload["meta"]["requests"]
-    assert isinstance(children, list)
+    children = _as_list(payload["meta"]["requests"])
     children[0]["planned_request_sha256"] = "0" * 64
 
     with pytest.raises(
@@ -1604,8 +1521,7 @@ def test_child_hash_drift_has_scope_identity_reason() -> None:
 
 def test_child_index_swap_has_internal_contract_reason() -> None:
     payload, contract = _valid_multi_child_candidate()
-    children = payload["meta"]["requests"]
-    assert isinstance(children, list)
+    children = _as_list(payload["meta"]["requests"])
     children[0]["request_index"] = 1
     children[1]["request_index"] = 0
 
@@ -1654,14 +1570,10 @@ def test_direct_publisher_rejects_child_rv_drift_without_receipt(
     tmp_path: Path,
 ) -> None:
     payload, contract = _valid_multi_child_candidate()
-    meta = payload["meta"]
-    assert isinstance(meta, dict)
-    children = meta["requests"]
-    assert isinstance(children, list)
-    child = children[1]
-    assert isinstance(child, dict)
-    child_rv = child["realized_volatility"]
-    assert isinstance(child_rv, dict)
+    meta = _as_dict(payload["meta"])
+    children = _as_list(meta["requests"])
+    child = _as_dict(children[1])
+    child_rv = _as_dict(child["realized_volatility"])
     child_rv["realized_volatility_estimate"] = 0.88
     raw_path, csv_path = save_outputs(
         tmp_path,
