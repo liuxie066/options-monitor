@@ -211,11 +211,9 @@ def test_request_identity_changes_are_rejected_without_rewriting(tmp_path, monke
     args[changed] = "another" if changed == "actor" else 1
     with pytest.raises(AgentToolError, match="identity conflict"):
         workflows.change_wheel_activation(**args)
+    descriptor = first["expected_config_descriptor"]
     assert _call(root, action="status")["current_window"] == {
-        **first["expected_config_descriptor"],
-        "effective_policy_hash": first["expected_config_descriptor"]["policy_sha256"],
-        "policy_binding_revision": 0,
-    }
+        **descriptor, "effective_policy_hash": descriptor["policy_sha256"], "policy_binding_revision": 0}
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS inherited ACL integration")
