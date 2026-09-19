@@ -74,7 +74,7 @@ jobs:
       - name: Full regression
         if: ${{ github.event_name == 'pull_request' || steps.release.outputs.tag != '' }}
         run: |
-          ./.venv/bin/python -m pytest -n 2 --dist loadfile --max-worker-restart=0 --durations=25
+          ./.venv/bin/python -m pytest -n 4 --dist loadfile --max-worker-restart=0 --durations=25
 
   release:
     needs: guardrails
