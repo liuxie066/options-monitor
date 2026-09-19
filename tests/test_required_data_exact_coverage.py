@@ -42,9 +42,7 @@ def _side_plan(
         "option_type": option_type,
         "min_dte": min_dte,
         "max_dte": max_dte,
-        "explicit_expirations": list(
-            [EXPIRATION] if expirations is None else expirations
-        ),
+        "explicit_expirations": list([EXPIRATION] if expirations is None else expirations),
         "strike_window": {
             "min_strike": minimum,
             "max_strike": maximum,
@@ -54,9 +52,7 @@ def _side_plan(
             "base_min_strike": base_minimum,
             "base_max_strike": base_maximum,
         },
-        "required_exact_strikes_by_expiration": dict(
-            exact_strikes_by_expiration or {}
-        ),
+        "required_exact_strikes_by_expiration": dict(exact_strikes_by_expiration or {}),
     }
 
 
@@ -73,9 +69,7 @@ def _request(
     require_rv: object = False,
     exact_strikes_by_expiration: dict[str, list[object]] | None = None,
 ) -> dict[str, object]:
-    request_expirations = list(
-        [EXPIRATION] if expirations is None else expirations
-    )
+    request_expirations = list([EXPIRATION] if expirations is None else expirations)
     return {
         "symbol": "NVDA",
         "host": "127.0.0.1",
@@ -132,6 +126,32 @@ def _plan(*, requests: list[dict[str, object]] | None = None) -> dict[str, objec
     }
 
 
+def _row(
+    *,
+    option_type: str = "put",
+    expiration: str = EXPIRATION,
+    dte: object = 25,
+    strike: object = 100.0,
+    spot: object = 110.0,
+) -> dict[str, object]:
+    return {
+        "option_type": option_type,
+        "expiration": expiration,
+        "dte": dte,
+        "strike": strike,
+        "spot": spot,
+    }
+
+
+def _window_request(
+    *,
+    minimum: object,
+    maximum: object,
+    **overrides: object,
+) -> dict[str, object]:
+    return _request(minimum=minimum, maximum=maximum, base_minimum=minimum, base_maximum=maximum, **overrides)
+
+
 def _frame(
     *,
     strike: object = 100.0,
@@ -139,13 +159,7 @@ def _frame(
     spot: object = 110.0,
     rv: object | None = None,
 ) -> pd.DataFrame:
-    row: dict[str, object] = {
-        "option_type": "put",
-        "expiration": EXPIRATION,
-        "dte": dte,
-        "strike": strike,
-        "spot": spot,
-    }
+    row = _row(strike=strike, dte=dte, spot=spot)
     if rv is not None:
         row["term_matched_rv"] = rv
         row["term_matched_rv_status"] = "ok"
@@ -184,12 +198,8 @@ def _scope_evidence(
                     "option_type": option_type,
                     "expiration": expiration,
                     "chain_status": (statuses or {}).get(expiration, "cache"),
-                    "filtered_contract_codes": codes_by_scope.get(
-                        (option_type, expiration), []
-                    ),
-                    "filtered_contract_count": len(
-                        codes_by_scope.get((option_type, expiration), [])
-                    ),
+                    "filtered_contract_codes": codes_by_scope.get((option_type, expiration), []),
+                    "filtered_contract_count": len(codes_by_scope.get((option_type, expiration), [])),
                 }
                 for option_type in option_types
                 for expiration in expirations
@@ -277,10 +287,7 @@ def test_exact_coverage_rejects_empty_executable_child() -> None:
         require_rv=False,
     )
 
-    assert not required_data_frame_covers_fetch_plan_debug(
-        _frame(),
-        _plan(requests=[_request(), empty_child]),
-    )
+    assert not required_data_frame_covers_fetch_plan_debug(_frame(), _plan(requests=[_request(), empty_child]))
 
 
 @pytest.mark.parametrize(
@@ -302,10 +309,7 @@ def test_exact_coverage_rejects_rv_authority_drift_or_non_bool(
     plan = _plan(requests=[request])
     plan["require_realized_volatility"] = plan_rv
 
-    assert not required_data_frame_covers_fetch_plan_debug(
-        _frame(rv=0.24),
-        plan,
-    )
+    assert not required_data_frame_covers_fetch_plan_debug(_frame(rv=0.24), plan)
 
 def test_exact_coverage_uses_position_strike_when_base_bounds_are_none() -> None:
     position_request = _request(
@@ -319,23 +323,11 @@ def test_exact_coverage_uses_position_strike_when_base_bounds_are_none() -> None
     )
     plan = _plan(requests=[position_request])
 
-    assert not required_data_frame_covers_fetch_plan_debug(
-        _frame(strike=90.0),
-        plan,
-    )
-    assert required_data_frame_covers_fetch_plan_debug(
-        _frame(strike=100.0),
-        plan,
-    )
+    assert not required_data_frame_covers_fetch_plan_debug(_frame(strike=90.0), plan)
+    assert required_data_frame_covers_fetch_plan_debug(_frame(strike=100.0), plan)
 
 
-@pytest.mark.parametrize(
-    ("minimum", "maximum"),
-    [
-        (None, 100.0),
-        (100.0, None),
-    ],
-)
+@pytest.mark.parametrize(("minimum", "maximum"), [(None, 100.0), (100.0, None)])
 def test_exact_coverage_accepts_exact_strike_with_one_unbounded_side(
     minimum: float | None,
     maximum: float | None,
@@ -350,10 +342,7 @@ def test_exact_coverage_accepts_exact_strike_with_one_unbounded_side(
         exact_strikes_by_expiration={EXPIRATION: [100.0]},
     )
 
-    assert required_data_frame_covers_fetch_plan_debug(
-        _frame(strike=100.0),
-        _plan(requests=[request]),
-    )
+    assert required_data_frame_covers_fetch_plan_debug(_frame(strike=100.0), _plan(requests=[request]))
     assert required_data_frame_covers_fetch_plan(
         df=_frame(strike=100.0),
         fetch_plan=_typed_plan(
@@ -380,10 +369,7 @@ def test_exact_coverage_rejects_nonpositive_exact_strike(
         },
     )
 
-    assert not required_data_frame_covers_fetch_plan_debug(
-        _frame(strike=100.0),
-        _plan(requests=[request]),
-    )
+    assert not required_data_frame_covers_fetch_plan_debug(_frame(strike=100.0), _plan(requests=[request]))
     assert not required_data_frame_covers_fetch_plan(
         df=_frame(strike=100.0),
         fetch_plan=_typed_plan(
@@ -403,23 +389,9 @@ def test_exact_coverage_requires_interior_position_strike_independently_of_range
         max_dte=60,
         exact_strikes_by_expiration={EXPIRATION: [100.0]},
     )
-    rows = pd.DataFrame(
-        [
-            {
-                "option_type": "put",
-                "expiration": EXPIRATION,
-                "dte": 25,
-                "strike": strike,
-                "spot": 110.0,
-            }
-            for strike in (80.0, 120.0)
-        ]
-    )
+    rows = pd.DataFrame([_row(strike=strike) for strike in (80.0, 120.0)])
 
-    assert not required_data_frame_covers_fetch_plan_debug(
-        rows,
-        _plan(requests=[request]),
-    )
+    assert not required_data_frame_covers_fetch_plan_debug(rows, _plan(requests=[request]))
 
 
 def test_exact_coverage_accepts_complete_provider_strike_grid_without_numeric_edges() -> None:
@@ -433,26 +405,14 @@ def test_exact_coverage_accepts_complete_provider_strike_grid_without_numeric_ed
     )
     frame = _frame(strike=100.0).assign(contract_symbol="NVDA-C1")
     plan = _plan(requests=[request])
-    evidence = _scope_evidence(
-        request=request,
-        codes_by_scope={("put", EXPIRATION): ["NVDA-C1"]},
-    )
+    evidence = _scope_evidence(request=request, codes_by_scope={("put", EXPIRATION): ["NVDA-C1"]})
 
     assert not required_data_frame_covers_fetch_plan_debug(frame, plan)
-    assert required_data_frame_covers_fetch_plan_debug(
-        frame,
-        plan,
-        option_chain_evidence=evidence,
-    )
+    assert required_data_frame_covers_fetch_plan_debug(frame, plan, option_chain_evidence=evidence)
 
 
 def test_exact_coverage_keeps_legacy_global_chain_evidence_strict() -> None:
-    request = _request(
-        minimum=80.0,
-        maximum=120.0,
-        base_minimum=80.0,
-        base_maximum=120.0,
-    )
+    request = _window_request(minimum=80.0, maximum=120.0)
     frame = _frame(strike=100.0).assign(contract_symbol="NVDA-P1")
     legacy_evidence = {
         "status": "ok",
@@ -472,16 +432,8 @@ def test_exact_coverage_keeps_legacy_global_chain_evidence_strict() -> None:
 
 
 def test_exact_coverage_accepts_globally_proven_filtered_empty_plan() -> None:
-    request = _request(
-        minimum=80.0,
-        maximum=120.0,
-        base_minimum=80.0,
-        base_maximum=120.0,
-    )
-    evidence = _scope_evidence(
-        request=request,
-        codes_by_scope={("put", EXPIRATION): []},
-    )
+    request = _window_request(minimum=80.0, maximum=120.0)
+    evidence = _scope_evidence(request=request, codes_by_scope={("put", EXPIRATION): []})
 
     result = evaluate_required_data_frame_fetch_plan_debug(
         pd.DataFrame(),
@@ -513,14 +465,7 @@ def test_exact_coverage_accepts_futu_scope_order_independent_of_plan_order() -> 
     )
     frame = pd.DataFrame(
         [
-            {
-                "option_type": "call",
-                "expiration": expiration,
-                "dte": dte,
-                "strike": strike,
-                "spot": 110.0,
-                "contract_symbol": code,
-            }
+            {**_row(option_type="call", expiration=expiration, dte=dte, strike=strike), "contract_symbol": code}
             for expiration, dte, strike, code in (
                 (EXPIRATION, 25, 120.0, "NVDA-C-AUG"),
                 (second_expiration, 53, 125.0, "NVDA-C-SEP"),
@@ -552,10 +497,7 @@ def test_exact_coverage_accepts_futu_scope_order_independent_of_plan_order() -> 
 
 def test_exact_coverage_classifies_missing_snapshot_as_provider_incomplete() -> None:
     request = _request(minimum=80.0, maximum=120.0)
-    evidence = _scope_evidence(
-        request=request,
-        codes_by_scope={("put", EXPIRATION): ["NVDA-P1"]},
-    )
+    evidence = _scope_evidence(request=request, codes_by_scope={("put", EXPIRATION): ["NVDA-P1"]})
     evidence.update(
         {
             "snapshot_returned_codes": 0,
@@ -578,10 +520,7 @@ def test_exact_coverage_classifies_missing_snapshot_as_provider_incomplete() -> 
 
 def test_exact_coverage_warns_on_quarantined_unexpected_snapshot_code() -> None:
     request = _request(minimum=80.0, maximum=120.0)
-    evidence = _scope_evidence(
-        request=request,
-        codes_by_scope={("put", EXPIRATION): ["NVDA-P1"]},
-    )
+    evidence = _scope_evidence(request=request, codes_by_scope={("put", EXPIRATION): ["NVDA-P1"]})
     evidence.update(
         {
             "snapshot_returned_codes": 2,
@@ -603,10 +542,7 @@ def test_exact_coverage_warns_on_quarantined_unexpected_snapshot_code() -> None:
 
 def test_exact_coverage_classifies_snapshot_count_drift_as_internal_error() -> None:
     request = _request(minimum=80.0, maximum=120.0)
-    evidence = _scope_evidence(
-        request=request,
-        codes_by_scope={("put", EXPIRATION): ["NVDA-P1"]},
-    )
+    evidence = _scope_evidence(request=request, codes_by_scope={("put", EXPIRATION): ["NVDA-P1"]})
     evidence["snapshot_requested_codes"] = 2
 
     result = evaluate_required_data_frame_fetch_plan_debug(
@@ -636,10 +572,7 @@ def test_structured_coverage_classifies_malformed_plan_as_internal_error(
         plan[field] = invalid
     else:
         request["side_plans"][0][field] = invalid
-    evidence = _scope_evidence(
-        request=request,
-        codes_by_scope={("put", EXPIRATION): ["NVDA-P1"]},
-    )
+    evidence = _scope_evidence(request=request, codes_by_scope={("put", EXPIRATION): ["NVDA-P1"]})
 
     result = evaluate_required_data_frame_fetch_plan_debug(
         _frame(strike=100.0).assign(contract_symbol="NVDA-P1"),
@@ -653,14 +586,7 @@ def test_structured_coverage_classifies_malformed_plan_as_internal_error(
 
 def test_exact_coverage_accepts_proven_partial_empty_expiration() -> None:
     second_expiration = "2026-09-18"
-    request = _request(
-        expirations=[EXPIRATION, second_expiration],
-        minimum=80.0,
-        maximum=120.0,
-        base_minimum=80.0,
-        base_maximum=120.0,
-        max_dte=60,
-    )
+    request = _window_request(minimum=80.0, maximum=120.0, expirations=[EXPIRATION, second_expiration], max_dte=60)
     frame = _frame(strike=100.0).assign(contract_symbol="NVDA-P1")
     evidence = _scope_evidence(
         request=request,
@@ -670,38 +596,16 @@ def test_exact_coverage_accepts_proven_partial_empty_expiration() -> None:
         },
     )
 
-    assert required_data_frame_covers_fetch_plan_debug(
-        frame, _plan(requests=[request]), option_chain_evidence=evidence
-    )
+    assert required_data_frame_covers_fetch_plan_debug(frame, _plan(requests=[request]), option_chain_evidence=evidence)
 
 
 def test_exact_coverage_accepts_proven_empty_child_when_another_child_has_rows() -> None:
-    put_request = _request(
-        option_type="put",
-        minimum=80.0,
-        maximum=100.0,
-        base_minimum=80.0,
-        base_maximum=100.0,
-    )
-    call_request = _request(
-        option_type="call",
-        minimum=120.0,
-        maximum=140.0,
-        base_minimum=120.0,
-        base_maximum=140.0,
-    )
+    put_request = _window_request(option_type="put", minimum=80.0, maximum=100.0)
+    call_request = _window_request(option_type="call", minimum=120.0, maximum=140.0)
     frame = _frame(strike=90.0).assign(contract_symbol="NVDA-P90")
-    put_evidence = _scope_evidence(
-        request=put_request,
-        codes_by_scope={("put", EXPIRATION): ["NVDA-P90"]},
-    )
-    call_evidence = _scope_evidence(
-        request=call_request,
-        codes_by_scope={("call", EXPIRATION): []},
-    )
-    for index, (request, child) in enumerate(
-        ((put_request, put_evidence), (call_request, call_evidence))
-    ):
+    put_evidence = _scope_evidence(request=put_request, codes_by_scope={("put", EXPIRATION): ["NVDA-P90"]})
+    call_evidence = _scope_evidence(request=call_request, codes_by_scope={("call", EXPIRATION): []})
+    for index, (request, child) in enumerate(((put_request, put_evidence), (call_request, call_evidence))):
         child["request_index"] = index
         child["planned_request_sha256"] = required_data_request_sha256(request)
     evidence = deepcopy(put_evidence)
@@ -728,42 +632,17 @@ def test_exact_coverage_accepts_proven_empty_child_when_another_child_has_rows()
 
 
 def test_exact_coverage_scopes_same_side_multi_request_rows_by_proven_codes() -> None:
-    lower_request = _request(
-        minimum=80.0,
-        maximum=100.0,
-        base_minimum=80.0,
-        base_maximum=100.0,
-    )
-    upper_request = _request(
-        minimum=110.0,
-        maximum=130.0,
-        base_minimum=110.0,
-        base_maximum=130.0,
-    )
+    lower_request = _window_request(minimum=80.0, maximum=100.0)
+    upper_request = _window_request(minimum=110.0, maximum=130.0)
     frame = pd.DataFrame(
         [
-            {
-                "option_type": "put",
-                "expiration": EXPIRATION,
-                "dte": 25,
-                "strike": strike,
-                "spot": 110.0,
-                "contract_symbol": code,
-            }
+            {**_row(strike=strike), "contract_symbol": code}
             for strike, code in ((90.0, "NVDA-P90"), (120.0, "NVDA-P120"))
         ]
     )
-    lower_evidence = _scope_evidence(
-        request=lower_request,
-        codes_by_scope={("put", EXPIRATION): ["NVDA-P90"]},
-    )
-    upper_evidence = _scope_evidence(
-        request=upper_request,
-        codes_by_scope={("put", EXPIRATION): ["NVDA-P120"]},
-    )
-    for index, (request, child) in enumerate(
-        ((lower_request, lower_evidence), (upper_request, upper_evidence))
-    ):
+    lower_evidence = _scope_evidence(request=lower_request, codes_by_scope={("put", EXPIRATION): ["NVDA-P90"]})
+    upper_evidence = _scope_evidence(request=upper_request, codes_by_scope={("put", EXPIRATION): ["NVDA-P120"]})
+    for index, (request, child) in enumerate(((lower_request, lower_evidence), (upper_request, upper_evidence))):
         child["request_index"] = index
         child["planned_request_sha256"] = required_data_request_sha256(request)
     evidence = deepcopy(lower_evidence)
@@ -789,13 +668,9 @@ def test_exact_coverage_scopes_same_side_multi_request_rows_by_proven_codes() ->
 
 def test_exact_coverage_rejects_empty_scope_with_required_exact_strike() -> None:
     second_expiration = "2026-09-18"
-    request = _request(
-        expirations=[EXPIRATION, second_expiration],
-        minimum=80.0,
-        maximum=120.0,
-        base_minimum=80.0,
-        base_maximum=120.0,
-        max_dte=60,
+    request = _window_request(
+        minimum=80.0, maximum=120.0,
+        expirations=[EXPIRATION, second_expiration], max_dte=60,
         exact_strikes_by_expiration={second_expiration: [100.0]},
     )
     frame = _frame(strike=100.0).assign(contract_symbol="NVDA-P1")
@@ -820,14 +695,7 @@ def test_exact_coverage_rejects_empty_scope_with_required_exact_strike() -> None
 @pytest.mark.parametrize("status", ["empty", "stale_cache", "error", ""])
 def test_exact_coverage_rejects_unreliable_empty_scope_status(status: str) -> None:
     second_expiration = "2026-09-18"
-    request = _request(
-        expirations=[EXPIRATION, second_expiration],
-        minimum=80.0,
-        maximum=120.0,
-        base_minimum=80.0,
-        base_maximum=120.0,
-        max_dte=60,
-    )
+    request = _window_request(minimum=80.0, maximum=120.0, expirations=[EXPIRATION, second_expiration], max_dte=60)
     frame = _frame(strike=100.0).assign(contract_symbol="NVDA-P1")
     evidence = _scope_evidence(
         request=request,
@@ -844,12 +712,7 @@ def test_exact_coverage_rejects_unreliable_empty_scope_status(status: str) -> No
 
 
 def test_exact_coverage_classifies_stale_scope_as_stale_data() -> None:
-    request = _request(
-        minimum=80.0,
-        maximum=120.0,
-        base_minimum=80.0,
-        base_maximum=120.0,
-    )
+    request = _window_request(minimum=80.0, maximum=120.0)
     frame = _frame(strike=100.0).assign(contract_symbol="NVDA-P1")
     evidence = _scope_evidence(
         request=request,
@@ -882,13 +745,7 @@ def test_exact_coverage_is_expiration_local() -> None:
     )
     rows = pd.DataFrame(
         [
-            {
-                "option_type": "put",
-                "expiration": expiration,
-                "dte": dte,
-                "strike": 100.0,
-                "spot": 110.0,
-            }
+            _row(expiration=expiration, dte=dte)
             for expiration, dte in (
                 (EXPIRATION, 25),
                 (second_expiration, 53),
@@ -896,10 +753,7 @@ def test_exact_coverage_is_expiration_local() -> None:
         ]
     )
 
-    assert not required_data_frame_covers_fetch_plan_debug(
-        rows,
-        _plan(requests=[request]),
-    )
+    assert not required_data_frame_covers_fetch_plan_debug(rows, _plan(requests=[request]))
 
 
 @pytest.mark.parametrize(
@@ -928,17 +782,11 @@ def test_typed_and_debug_exact_coverage_share_fixed_absolute_tolerance(
     )
 
     assert (
-        required_data_frame_covers_fetch_plan(
-            df=frame,
-            fetch_plan=_typed_plan(exact_strike=expected_strike),
-        )
+        required_data_frame_covers_fetch_plan(df=frame, fetch_plan=_typed_plan(exact_strike=expected_strike))
         is covered
     )
     assert (
-        required_data_frame_covers_fetch_plan_debug(
-            frame,
-            _plan(requests=[debug_request]),
-        )
+        required_data_frame_covers_fetch_plan_debug(frame, _plan(requests=[debug_request]))
         is covered
     )
 
@@ -959,14 +807,8 @@ def test_exact_coverage_recomputes_dte_from_discovery_trading_date() -> None:
 
     assert required_data_frame_covers_fetch_plan_debug(_frame(dte=25), plan)
     wrong_dte_frame = _frame(dte=999)
-    assert not required_data_frame_covers_fetch_plan(
-        df=wrong_dte_frame,
-        fetch_plan=_typed_plan(exact_strike=100.0),
-    )
-    assert not required_data_frame_covers_fetch_plan_debug(
-        wrong_dte_frame,
-        plan,
-    )
+    assert not required_data_frame_covers_fetch_plan(df=wrong_dte_frame, fetch_plan=_typed_plan(exact_strike=100.0))
+    assert not required_data_frame_covers_fetch_plan_debug(wrong_dte_frame, plan)
 
     request_outside_declared_range = _request(min_dte=26, max_dte=30)
     assert not required_data_frame_covers_fetch_plan_debug(
@@ -1016,10 +858,7 @@ def test_exact_coverage_rejects_reversed_strike_and_dte_ranges() -> None:
         _request(minimum=110.0, maximum=100.0),
         _request(min_dte=30, max_dte=20),
     ):
-        assert not required_data_frame_covers_fetch_plan_debug(
-            _frame(),
-            _plan(requests=[request]),
-        )
+        assert not required_data_frame_covers_fetch_plan_debug(_frame(), _plan(requests=[request]))
 
 
 @pytest.mark.parametrize(
@@ -1044,15 +883,9 @@ def test_exact_coverage_rejects_invalid_row_values(
 ) -> None:
     kwargs = {column: invalid}
     frame = _frame(**kwargs)
-    assert not required_data_frame_covers_fetch_plan_debug(
-        frame,
-        _plan(),
-    )
+    assert not required_data_frame_covers_fetch_plan_debug(frame, _plan())
     if column == "dte":
-        assert not required_data_frame_covers_fetch_plan(
-            df=frame,
-            fetch_plan=_typed_plan(exact_strike=100.0),
-        )
+        assert not required_data_frame_covers_fetch_plan(df=frame, fetch_plan=_typed_plan(exact_strike=100.0))
 
 
 @pytest.mark.parametrize("option_type", ["OUTPUT", "RECALL"])
@@ -1061,19 +894,13 @@ def test_exact_coverage_rejects_non_exact_option_type(option_type: str) -> None:
     frame["option_type"] = option_type
 
     assert not required_data_frame_covers_fetch_plan_debug(frame, _plan())
-    assert not required_data_frame_covers_fetch_plan(
-        df=frame,
-        fetch_plan=_typed_plan(exact_strike=100.0),
-    )
+    assert not required_data_frame_covers_fetch_plan(df=frame, fetch_plan=_typed_plan(exact_strike=100.0))
 
 
 def test_typed_and_debug_coverage_reject_missing_dte_column() -> None:
     frame = _frame().drop(columns=["dte"])
 
-    assert not required_data_frame_covers_fetch_plan(
-        df=frame,
-        fetch_plan=_typed_plan(exact_strike=100.0),
-    )
+    assert not required_data_frame_covers_fetch_plan(df=frame, fetch_plan=_typed_plan(exact_strike=100.0))
     assert not required_data_frame_covers_fetch_plan_debug(frame, _plan())
 
 
@@ -1083,16 +910,10 @@ def test_exact_coverage_rejects_nonfinite_nonpositive_or_bool_rv(
 ) -> None:
     plan = _plan(requests=[_request(require_rv=True)])
 
-    assert not required_data_frame_covers_fetch_plan_debug(
-        _frame(rv=invalid_rv),
-        plan,
-    )
+    assert not required_data_frame_covers_fetch_plan_debug(_frame(rv=invalid_rv), plan)
 
 
 def test_exact_coverage_accepts_required_finite_positive_rv() -> None:
     plan = _plan(requests=[_request(require_rv=True)])
 
-    assert required_data_frame_covers_fetch_plan_debug(
-        _frame(rv=0.24),
-        plan,
-    )
+    assert required_data_frame_covers_fetch_plan_debug(_frame(rv=0.24), plan)
