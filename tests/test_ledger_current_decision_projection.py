@@ -85,7 +85,6 @@ def _contract_key(**overrides: Any) -> ContractKey:
         "account": "lx",
         "underlying_symbol": "NVDA",
         "option_type": "put",
-        "position_side": "short",
         "strike": 100,
         "expiration_ymd": "2026-06-19",
     }
@@ -163,6 +162,8 @@ def _event(
         source="test",
         multiplier=100,
         lot_id=lot_id or f"lot-{account}",
+        # §9.2 step 3: the short put side now travels as the trade side.
+        raw_payload={"side": "sell"},
     )
 
 
@@ -733,6 +734,64 @@ def test_projection_codec_reader_oracle_and_corruption_are_fail_closed(
     assert unavailable["payload"] is None
 
 
+def test_read_only_surfaces_serve_a_store_that_predates_the_lot_id_carrier(
+    tmp_path: Path,
+) -> None:
+    """The identity carrier is an addition, not a precondition, on the read side.
+
+    ``_init_db`` adds ``lot_id`` to any store a writer opens, but the read-only
+    evidence surface cannot — it opens ``mode=ro`` by construction and must
+    still serve a store that predates the column, which is the state the real
+    production store is in. Selecting ``lot_id`` unconditionally made
+    ``current_decision_runtime.read_current_decision_projection`` raise
+    ``no such column`` inside its ``except Exception``, so the *whole*
+    current-decision read degraded to ``data_unavailable`` with
+    ``reason="current_decision_read_failed"`` — an identity column the reader
+    does not strictly need, taking down the payload with it.
+    """
+
+    repo = _repo(tmp_path)
+    _bootstrap(repo, "lx")
+    baseline = read_current_decision_projection(repo, account="lx", now_ms=20_000)
+    assert baseline["status"] == "trusted"
+    # The fallback identity is the row's own record_id, so the fingerprint the
+    # reader recomputes is unchanged by dropping the column and "trusted" is a
+    # statement about the column probe alone.
+    with sqlite3.connect(repo.db_path) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM position_lots WHERE lot_id IS NOT record_id"
+        ).fetchone()[0] == 0
+        conn.execute("DROP INDEX IF EXISTS idx_position_lots_lot_id")
+        conn.execute("ALTER TABLE position_lots DROP COLUMN lot_id")
+        # The DDL bumps ``PRAGMA schema_version`` and the trust predicate compares
+        # the stored cookie against it, so re-align the cookie the way the
+        # projection runtime does on a schema change (``repository_projection_schema``
+        # step 745). Otherwise this test would be measuring the cookie guard
+        # instead of the column probe.
+        conn.execute(
+            "UPDATE position_projection_source_state SET sqlite_schema_cookie = ?",
+            (int(conn.execute("PRAGMA schema_version").fetchone()[0]),),
+        )
+        conn.commit()
+
+    read_only = open_trade_reconciliation_evidence_repo(repo.db_path)
+    # ``read_current_decision_projection_inputs_from_conn`` is the exact call
+    # that raised; the runtime above is the impact it had.
+    inputs = read_only.read_current_decision_projection_inputs("lx")
+    assert [row["lot_id"] for row in inputs["lots"]] == ["lot-lx"]
+    assert [row["record_id"] for row in inputs["lots"]] == ["lot-lx"]
+
+    degraded = read_current_decision_projection(read_only, account="lx", now_ms=20_000)
+    assert degraded["status"] == "trusted"
+    assert degraded["payload"] == baseline["payload"]
+
+    # Same dual-key contract on the evidence surface's own lot reader.
+    [lot] = read_only.list_position_lots()
+    assert lot["record_id"] == "lot-lx"
+    assert lot["lot_id"] == "lot-lx"
+    assert lot["fields"] == inputs["lots"][0]["fields"]
+
+
 def test_lifecycle_evidence_filters_before_json_decode_and_preserves_query_contract(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -959,6 +1018,11 @@ def test_legacy_snapshot_attaches_bounded_current_consumer_shadow(
     }
     assert "note" not in CURRENT_DECISION_POSITION_FIELDS
     assert "pairing_until_ms" not in CURRENT_DECISION_LIFECYCLE_FIELDS
+    # §7.1: ``position_id`` is retired in favour of the derived ``position_key``.
+    # Both halves are asserted so the allowlist cannot silently carry both keys,
+    # or neither, without a test noticing.
+    assert "position_key" in CURRENT_DECISION_POSITION_FIELDS
+    assert "position_id" not in CURRENT_DECISION_POSITION_FIELDS
 
     tampered = deepcopy(current)
     tampered["position_lots"][0]["fields"]["contracts_open"] = 9
@@ -1442,6 +1506,8 @@ def test_assigned_stock_lot_adapter_preserves_retired_adjustment_mode() -> None:
                 raw_payload={
                     "strategy": "combo_yield",
                     "strategy_group_id": "combo-yield:lx:mixed-version",
+                    # §9.2 step 3: the short put side now travels as the trade side.
+                    "side": "sell",
                 },
             ),
             TradeEvent(
@@ -1604,6 +1670,7 @@ def test_hkd_settlement_fee_and_embedded_time_match_legacy_oracle() -> None:
         currency="HKD",
         raw_payload={
             "close_type": "assignment",
+            "side": "buy",
             "stock_settlement": dict(transition["stock_settlement"]),
         },
     )
@@ -2075,7 +2142,7 @@ def test_combo_facts_use_retained_terminal_lots(
         )
     lots = [
         {
-            "record_id": record_id,
+            "record_id": lot_id,
             "fields": {
                 "status": "open" if contracts_open else "closed",
                 "contracts_open": contracts_open,
@@ -2086,7 +2153,7 @@ def test_combo_facts_use_retained_terminal_lots(
                 "leg_role": role,
             },
         }
-        for record_id, open_event_id, role, contracts_open in (
+        for lot_id, open_event_id, role, contracts_open in (
             ("put-lot", "put-open", "funding_put", put_open),
             ("call-lot", "call-open", "participation_call", call_open),
         )
@@ -2099,8 +2166,8 @@ def test_combo_facts_use_retained_terminal_lots(
     )["current_groups"]
     assert groups[0]["status"] == expected
     assert [row["record_id"] for row in groups[0]["active_member_bindings"]] == sorted(
-        record_id
-        for record_id, contracts_open in (("put-lot", put_open), ("call-lot", call_open))
+        lot_id
+        for lot_id, contracts_open in (("put-lot", put_open), ("call-lot", call_open))
         if contracts_open
     )
 
@@ -2499,7 +2566,7 @@ def test_incremental_owner_fact_surfaces_match_the_frozen_matrix() -> None:
             "_finish_lifecycle_decision_projection",
         ),
         manual_trades.persist_manual_adjust_events: (
-            "current_by_record_id",
+            "current_by_lot_id",
             "run_position_projection_in_transaction",
             "_finish_trade_event_decision_projection",
         ),
@@ -2668,6 +2735,7 @@ def test_assignment_event_owner_advances_compact_stock_without_history(
         raw_payload={
             "record_id": "lot-lx",
             "target_lot_id": "lot-lx",
+            "side": "buy",
             "stock_settlement": {
                 "side": "buy",
                 "shares": 100,
@@ -2705,6 +2773,7 @@ def test_trade_event_adapter_rejects_invalid_settlement_time(
         event_id="assignment-backdated",
         event_time_ms=event_time_ms,
         raw_payload={
+            "side": "buy",
             "stock_settlement": {
                 "side": "buy",
                 "shares": 100,
@@ -2738,6 +2807,7 @@ def test_assigned_stock_sale_owner_publishes_partial_full_and_rolls_back(
         repo,
         _assignment_event(
             raw_payload={
+                "side": "buy",
                 "stock_settlement": {
                     "side": "buy",
                     "shares": 100,

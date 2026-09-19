@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict, is_dataclass
-from typing import Any, cast
+from typing import Any, Mapping, cast
 
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.symbol_identity import canonical_symbol
@@ -121,6 +121,20 @@ FIELD_LABELS = {
     "close_price": "平仓价",
     "close_reason": "平仓原因",
 }
+
+
+def _application_args(args: Mapping[str, Any]) -> dict[str, Any]:
+    """Translate the tool schema's target key to the application's declaration.
+
+    The assistant's argument schema is a published interface and keeps naming
+    the target ``record_id`` (``MANUAL_*_MODEL_FIELDS``); the application entry
+    points declare that same lot as ``lot_id``.  The two are bridged here
+    rather than by moving the published name.
+    """
+    out = dict(args)
+    if "record_id" in out:
+        out["lot_id"] = out.pop("record_id")
+    return out
 
 
 def handle_manual_trade_operation(
@@ -779,11 +793,8 @@ def _build_operation_payload(
 def _payload_with_preview_locked_values(payload: dict[str, Any], preview: dict[str, Any]) -> dict[str, Any]:
     if payload.get("operation_type") != "manual_open":
         return payload
-    command = preview.get("command")
-    command_payload = _json_safe(command)
-    if not isinstance(command_payload, dict):
-        return payload
-    opened_at_ms = command_payload.get("opened_at_ms")
+    preview_fields = preview.get("fields") or {}
+    opened_at_ms = preview_fields.get("opened_at")
     if opened_at_ms is None:
         return payload
     out = dict(payload)
@@ -800,13 +811,13 @@ def _preview_operation(payload: dict[str, Any]) -> dict[str, Any]:
         if payload.get("operation_type") == "manual_open":
             out = execute_manual_open(repo, dry_run=True, **args)
         elif payload.get("operation_type") == "manual_close":
-            out = execute_manual_close(repo, dry_run=True, **args)
+            out = execute_manual_close(repo, dry_run=True, **_application_args(args))
         elif payload.get("operation_type") == "manual_assignment":
             out = execute_manual_assignment(
                 repo,
                 dry_run=True,
                 runtime_config=cfg,
-                **args,
+                **_application_args(args),
             )
         elif payload.get("operation_type") == "manual_expiry":
             preview_args = dict(args)
@@ -828,13 +839,13 @@ def _apply_operation(payload: dict[str, Any]) -> dict[str, Any]:
         if payload.get("operation_type") == "manual_open":
             out = execute_manual_open(repo, dry_run=False, **args)
         elif payload.get("operation_type") == "manual_close":
-            out = execute_manual_close(repo, dry_run=False, **args)
+            out = execute_manual_close(repo, dry_run=False, **_application_args(args))
         elif payload.get("operation_type") == "manual_assignment":
             out = execute_manual_assignment(
                 repo,
                 dry_run=False,
                 runtime_config=cfg,
-                **args,
+                **_application_args(args),
             )
         elif payload.get("operation_type") == "manual_expiry":
             out = record_lifecycle_expire_close(
@@ -1035,11 +1046,11 @@ def render_manual_trade_response(
         title = "交易记录预览已更新：平仓" if status == "updated" else ("交易记录预览：平仓" if status == "previewed" else "交易已写入 OM 本地账本：平仓")
         raw_match = preview_map.get("match")
         match = cast(dict[str, Any], raw_match) if isinstance(raw_match, dict) else {}
-        preview_record_id = preview_map.get("record_id")
-        record_id = str(match.get("record_id") or args.get("record_id") or preview_record_id or "")
+        preview_lot_id = preview_map.get("record_id")
+        lot_id = str(match.get("record_id") or args.get("record_id") or preview_lot_id or "")
         lines = [
             title,
-            f"record_id：{record_id or '-'}",
+            f"record_id：{lot_id or '-'}",
             f"账户：{fields.get('account') or args.get('account') or '-'}",
             f"合约：{fields.get('symbol') or args.get('symbol') or '-'} {fields.get('expiration_ymd') or args.get('expiration_ymd') or '-'} {fields.get('strike') or args.get('strike') or '-'}",
             f"平仓数量：{args.get('contracts_to_close') or '-'} 张",

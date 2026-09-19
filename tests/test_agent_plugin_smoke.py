@@ -1298,7 +1298,7 @@ def test_trade_event_pagination_errors_explain_the_next_user_action(
 
 def test_option_positions_read_open_assigned_stock_includes_partially_sold(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
-    from domain.domain.option_position_lots import OpenPositionCommand, parse_exp_to_ms
+    from domain.domain.option_position_lots import parse_exp_to_ms
     from src.application.ledger.commands import record_manual_assignment
     from src.application.positions.workflows import execute_manual_assigned_stock_sale
 
@@ -1323,25 +1323,23 @@ def test_option_positions_read_open_assigned_stock_includes_partially_sold(monke
     repo = ledger_repository.SQLiteOptionPositionsRepository(sqlite_path)
     ledger_manual_trades.persist_manual_open_event(
         repo,
-        OpenPositionCommand(
-            broker="富途",
-            account="user1",
-            symbol="NVDA",
-            option_type="put",
-            side="short",
-            contracts=1,
-            currency="USD",
-            strike=100.0,
-            multiplier=100,
-            expiration_ymd="2026-06-19",
-            premium_per_share=2.5,
-            opened_at_ms=_ms("2026-04-03"),
-        ),
+        broker="富途",
+        account="user1",
+        symbol="NVDA",
+        option_type="put",
+        side="short",
+        contracts=1,
+        currency="USD",
+        strike=100.0,
+        multiplier=100,
+        expiration_ymd="2026-06-19",
+        premium_per_share=2.5,
+        opened_at_ms=_ms("2026-04-03"),
     )
     lot = repo.list_position_lots()[0]
     record_manual_assignment(
         repo,
-        record_id=str(lot["record_id"]),
+        lot_id=str(lot["record_id"]),
         contracts_to_close=1,
         stock_side="buy",
         stock_qty=100,
@@ -1349,10 +1347,10 @@ def test_option_positions_read_open_assigned_stock_includes_partially_sold(monke
         as_of_ms=_ms("2026-05-15"),
     )
     assignment_event = [item for item in repo.list_trade_events() if item.get("event_type") == "assignment"][0]
-    stock_lot_id = f"assigned-stock-{assignment_event['event_id']}"
+    lot_id = f"assigned-stock-{assignment_event['event_id']}"
     execute_manual_assigned_stock_sale(
         repo,
-        target_stock_lot_id=stock_lot_id,
+        target_lot_id=lot_id,
         account="user1",
         broker="富途",
         symbol="NVDA",
@@ -1398,7 +1396,7 @@ def test_option_positions_read_open_assigned_stock_includes_partially_sold(monke
     assert open_rows["ok"] is True
     assert open_rows["data"]["row_count"] == 1
     open_row = open_rows["data"]["rows"][0]
-    assert open_row["stock_lot_id"] == stock_lot_id
+    assert open_row["stock_lot_id"] == lot_id
     assert open_row["status"] == "partially_sold"
     assert open_row["shares_remaining"] == 60
     assert open_row["shares_sold"] == 40

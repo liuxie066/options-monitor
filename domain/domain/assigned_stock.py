@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping, Sequence
@@ -14,6 +15,7 @@ from domain.domain.ledger import (
     fee_fact_from_persisted_evidence,
 )
 from domain.domain.ledger.events import validate_trade_event
+from domain.domain.money import canonical_decimal_text, quantize_money, to_decimal
 from domain.domain.ledger.position_fields import (
     LEGACY_POSITION_LOT_PATCH_FIELDS,
     POSITION_LOT_STRATEGY_PATCH_FIELDS,
@@ -98,8 +100,36 @@ def parse_event_at_ms(value: Any) -> int | None:
 def month_from_ms(ms: int) -> str:
     return datetime.fromtimestamp(int(ms) / 1000, tz=timezone.utc).strftime("%Y-%m")
 
+def _money_decimal(value: Any) -> Decimal:
+    """Round one assigned-stock amount to the project's money quantum.
+
+    §7.4 gives money a single rule (``MONEY_QUANTUM``, ROUND_HALF_UP). The
+    ``round(float(value), 6)`` this replaced rounded a *binary* value with
+    banker's rounding, so it agreed with the rule only by luck.
+    """
+    return quantize_money(0 if value in (None, "") else value)
+
+
+def _money_text(value: Any) -> str:
+    """Render one assigned-stock amount as §7.4 decimal text for the authority.
+
+    ``cost_basis_total`` and ``realized_pnl`` travel from here into the stock
+    ``PositionLot``. §7.4 asks the authority for ``Decimal`` and JSON for decimal
+    text, so the lifecycle hands over text rather than a float -- the bridge used
+    to rebuild those Decimals from a float and could only ever reproduce the
+    float's own value.
+    """
+    return canonical_decimal_text(_money_decimal(value))
+
+
+def _lot_money(lot: Mapping[str, Any], key: str) -> Decimal:
+    """Read one money key that is §7.4 decimal text (or a legacy float)."""
+    return _money_decimal(lot.get(key))
+
+
 def _round_money(value: float | int | None) -> float:
-    return round(float(value or 0.0), 6)
+    """The float projection of :func:`_money_decimal`, for display consumers."""
+    return float(_money_decimal(value))
 
 def _event_payload(event: dict[str, Any]) -> dict[str, Any]:
     payload = event.get("raw_payload")
@@ -213,7 +243,6 @@ def _valid_void_target_event_id(event: dict[str, Any]) -> str | None:
                 account=raw_contract_key.get("account"),
                 underlying_symbol=raw_contract_key.get("underlying_symbol") or raw_contract_key.get("symbol"),
                 option_type=raw_contract_key.get("option_type"),
-                position_side=raw_contract_key.get("position_side") or raw_contract_key.get("side"),
                 strike=raw_contract_key.get("strike"),
                 expiration_ymd=raw_contract_key.get("expiration_ymd") or raw_contract_key.get("expiration"),
             ),
@@ -251,7 +280,7 @@ def _passes_report_filter(event: dict[str, Any], account_norm: str | None, broke
         return False
     return True
 
-def _assigned_stock_lot_id(event_id: str) -> str:
+def _assigned_lot_id(event_id: str) -> str:
     stable = str(event_id or "").strip()
     return f"assigned-stock-{stable}" if stable else "assigned-stock-unknown"
 
@@ -528,7 +557,7 @@ def _summarize_fee_facts(facts: list[dict[str, Any]]) -> dict[str, Any]:
         ],
     }
 
-def _explicit_stock_lot_id(event: dict[str, Any]) -> str | None:
+def _explicit_lot_id(event: dict[str, Any]) -> str | None:
     payload = _event_payload(event)
     for source in (event, payload):
         for key in ("stock_lot_id", "target_stock_lot_id", "source_stock_lot_id"):
@@ -546,17 +575,17 @@ def _lot_shares_at(lot: dict[str, Any], at_ms: int) -> int:
 
 def _active_reserved_shares(
     reservations: dict[str, list[tuple[int, int, int]]],
-    stock_lot_id: str,
+    lot_id: str,
     at_ms: int,
 ) -> int:
-    return sum(shares for start, end, shares in reservations.get(stock_lot_id, []) if start <= at_ms < end)
+    return sum(shares for start, end, shares in reservations.get(lot_id, []) if start <= at_ms < end)
 
 
 def _minimum_available_shares(
     lot: dict[str, Any],
     reservations: dict[str, list[tuple[int, int, int]]],
     *,
-    stock_lot_id: str,
+    lot_id: str,
     start_ms: int,
     end_ms: int,
 ) -> int:
@@ -565,14 +594,14 @@ def _minimum_available_shares(
         sale_at = int(sale.get("event_at") or 0)
         if start_ms <= sale_at < end_ms:
             checkpoints.add(sale_at)
-    for reserved_start, reserved_end, _shares in reservations.get(stock_lot_id, []):
+    for reserved_start, reserved_end, _shares in reservations.get(lot_id, []):
         if start_ms <= reserved_start < end_ms:
             checkpoints.add(reserved_start)
         if start_ms < reserved_end < end_ms:
             checkpoints.add(reserved_end)
     return min(
         _lot_shares_at(lot, checkpoint)
-        - _active_reserved_shares(reservations, stock_lot_id, checkpoint)
+        - _active_reserved_shares(reservations, lot_id, checkpoint)
         for checkpoint in checkpoints
     )
 
@@ -639,7 +668,7 @@ def _attribute_covered_calls(
             )
 
         key = (str(call.get("account") or ""), str(call.get("broker") or ""), str(call.get("symbol") or ""))
-        explicit_id = _explicit_stock_lot_id(open_event)
+        explicit_id = _explicit_lot_id(open_event)
         candidates = [
             lot
             for lot in lots_by_id.values()
@@ -731,7 +760,7 @@ def _attribute_covered_calls(
             if _minimum_available_shares(
                 lot,
                 staged_reservations,
-                stock_lot_id=lot_id,
+                lot_id=lot_id,
                 start_ms=opened_at,
                 end_ms=reservation_end,
             ) < allocated:
@@ -837,17 +866,30 @@ def _lifecycle_efficiency_summary(rows: list[dict[str, Any]]) -> list[dict[str, 
         )
     return sorted(out, key=lambda row: (row["account"], row["currency"], row["lifecycle_quality"]))
 
-def _lot_basis_per_share_with_fees(lot: dict[str, Any]) -> float:
+def _lot_basis_per_share_decimal(lot: Mapping[str, Any]) -> Decimal:
+    """The exact per-share basis of an assigned-stock lot, in Decimal.
+
+    ``stock_cost_basis_total`` is a fee-inclusive total over a share count that
+    need not divide it evenly, so the per-share basis is generally repeating --
+    ``197 / 3`` is ``65.666666666666666666666667``. Dividing in binary float first
+    is exactly the shape F5 fixed in ``lots.py``: the digits are gone before the
+    §7.4 quantum ever sees them.
+    """
     shares_opened = int(lot.get("shares_opened") or 0)
     if shares_opened <= 0:
-        return 0.0
-    return float(lot.get("stock_cost_basis_total") or 0.0) / float(shares_opened)
+        return Decimal(0)
+    return _lot_money(lot, "stock_cost_basis_total") / Decimal(shares_opened)
+
+
+def _lot_basis_per_share_with_fees(lot: Mapping[str, Any]) -> float:
+    """The float projection of :func:`_lot_basis_per_share_decimal`, for display."""
+    return float(_lot_basis_per_share_decimal(lot))
 
 def _assigned_stock_review_row(
     *,
     status: str,
     event_id: str | None = None,
-    stock_lot_id: str | None = None,
+    lot_id: str | None = None,
     stock_event_id: str | None = None,
     month: str | None = None,
     account: str | None = None,
@@ -859,7 +901,7 @@ def _assigned_stock_review_row(
     return {
         "status": status,
         "event_id": event_id,
-        "stock_lot_id": stock_lot_id,
+        "stock_lot_id": lot_id,
         "stock_event_id": stock_event_id,
         "month": month,
         "account": account,
@@ -889,8 +931,8 @@ def assigned_stock_trade_event_row(event: TradeEvent) -> dict[str, Any]:
     is_close = event.event_type in {"close", "expire_close", "assignment", "exercise"}
     side = (
         "sell"
-        if (is_open and event.contract_key.position_side == "short")
-        or (is_close and event.contract_key.position_side == "long")
+        if (is_open and event.position_side == "short")
+        or (is_close and event.position_side == "long")
         else "buy"
     )
     return {
@@ -909,13 +951,13 @@ def assigned_stock_trade_event_row(event: TradeEvent) -> dict[str, Any]:
             "open" if is_open else "close" if is_close else event.event_type
         ),
         "contracts": event.contracts,
-        "price": event.price,
-        "strike": event.contract_key.strike,
+        "price": float(event.price),
+        "strike": float(event.contract_key.strike),
         "expiration_ymd": event.contract_key.expiration_ymd,
         "currency": event.currency,
         "source": event.source,
         "multiplier": event.multiplier,
-        "fees": event.fees,
+        "fees": float(event.fees),
         "target_lot_id": event.target_lot_id,
         "raw_payload": dict(event.raw_payload or {}),
     }
@@ -940,6 +982,50 @@ def assigned_stock_allocation_row(
     }
 
 
+def assigned_stock_lot_to_position_lot(lot: Mapping[str, Any]) -> PositionLot:
+    """Bridge an assigned-stock lifecycle lot dict to a stock PositionLot.
+
+    The assigned-stock lifecycle only builds lots for buy-side settlements
+    (short-put assignment / long-call exercise), so every built lot is a long
+    stock position; sell-side settlements are routed to ``settlement_sales``
+    instead and never become a lot.
+    """
+    # §7.3/§7.4: every authority quantity this bridge builds is a Decimal, so read
+    # each one as a Decimal. ``safe_float`` put a binary float in the middle of the
+    # only path from the assigned-stock lifecycle into the authority.
+    shares_opened = to_decimal(lot.get("shares_opened") or 0, field_name="shares_opened")
+    raw_remaining = lot.get("shares_remaining")
+    shares_remaining = (
+        None
+        if raw_remaining in (None, "")
+        else to_decimal(raw_remaining, field_name="shares_remaining")
+    )
+    shares_sold = to_decimal(lot.get("shares_sold") or 0, field_name="shares_sold")
+    sale_event_ids = tuple(
+        str(event_id) for event_id in (lot.get("sale_event_ids") or []) if str(event_id)
+    )
+    position_lot = PositionLot.from_stock_settlement(
+        lot_id=str(lot.get("stock_lot_id") or "").strip(),
+        open_event_id=str(lot.get("source_assignment_event_id") or "").strip(),
+        broker=str(lot.get("broker") or ""),
+        account=str(lot.get("account") or ""),
+        symbol=str(lot.get("symbol") or ""),
+        position_side="long",
+        currency=str(lot.get("currency") or ""),
+        opened_at_ms=int(lot.get("assigned_at_ms") or lot.get("opened_at_ms") or 0),
+        shares_opened=shares_opened,
+        shares_open=shares_remaining if shares_remaining is not None else shares_opened,
+        shares_closed=shares_sold,
+        cost_basis_total=_lot_money(lot, "stock_cost_basis_total"),
+        # A missing ``shares_remaining`` still means "nothing left", matching the
+        # float-era ``(shares_remaining or 0.0) <= 0``.
+        status="close" if (shares_remaining or Decimal(0)) <= 0 else "open",
+        realized_pnl=_lot_money(lot, "assigned_stock_realized_pnl"),
+        last_event_id=sale_event_ids[-1] if sale_event_ids else None,
+    )
+    return replace(position_lot, close_event_ids=sale_event_ids)
+
+
 def assigned_stock_position_lot_row(
     lot: PositionLot,
     *,
@@ -955,13 +1041,13 @@ def assigned_stock_position_lot_row(
         "broker": lot.contract_key.broker,
         "symbol": lot.contract_key.underlying_symbol,
         "option_type": lot.contract_key.option_type,
-        "position_side": lot.contract_key.position_side,
+        "position_side": lot.position_side,
         "currency": lot.currency,
         "contracts": lot.contracts_opened,
         "remaining": lot.contracts_open,
-        "price": lot.premium_open,
+        "price": float(lot.premium_open),
         "multiplier": lot.multiplier,
-        "strike": lot.contract_key.strike,
+        "strike": float(lot.contract_key.strike),
         "expiration_ymd": lot.contract_key.expiration_ymd,
     }
     for field in (*POSITION_LOT_STRATEGY_PATCH_FIELDS, *LEGACY_POSITION_LOT_PATCH_FIELDS):
@@ -1004,7 +1090,7 @@ def assigned_stock_position_lot_row(
     mark_value = float(fact.price) * float(lot.multiplier) * int(lot.contracts_open)
     gross = (
         open_value - mark_value
-        if lot.contract_key.position_side == "short"
+        if lot.position_side == "short"
         else mark_value - open_value
     )
     row.update(
@@ -1055,9 +1141,9 @@ def project_assigned_stock_lifecycle(
             option_rows_by_event.setdefault(event_id, []).append(row)
     option_lots_by_id: dict[str, list[dict[str, Any]]] = {}
     for lot in option_open_lots:
-        record_id = str(lot.get("record_id") or "").strip()
-        if record_id:
-            option_lots_by_id.setdefault(record_id, []).append(lot)
+        option_lot_id = str(lot.get("record_id") or "").strip()
+        if option_lot_id:
+            option_lots_by_id.setdefault(option_lot_id, []).append(lot)
 
     lots_by_id: dict[str, dict[str, Any]] = {}
     review_rows: list[dict[str, Any]] = []
@@ -1246,7 +1332,7 @@ def project_assigned_stock_lifecycle(
             continue
         if expected_stock_side == "sell":
             payload = _event_payload(event)
-            target_stock_lot_id = next(
+            target_lot_id = next(
                 (
                     str(source.get(key) or "").strip()
                     for source in (stock, payload, event)
@@ -1268,7 +1354,7 @@ def project_assigned_stock_lifecycle(
                 {
                     "event_type": "sale",
                     "stock_event_id": event_id,
-                    "target_stock_lot_id": target_stock_lot_id,
+                    "target_stock_lot_id": target_lot_id,
                     "strategy_group_id": strategy_group_id,
                     "account": account,
                     "broker": broker,
@@ -1286,7 +1372,7 @@ def project_assigned_stock_lifecycle(
             )
             continue
         option_premium_attribution = _option_premium_attribution(option_rows)
-        stock_lot_id = _assigned_stock_lot_id(event_id)
+        lot_id = _assigned_lot_id(event_id)
         assigned_contracts = sum(int(row.get("contracts_closed") or 0) for row in option_rows)
         fee_facts: list[dict[str, Any]] = []
         source_open_event = event_by_id.get(str(_source_option_open_event_id(event, option_rows) or ""))
@@ -1355,10 +1441,17 @@ def project_assigned_stock_lifecycle(
             transaction_kind="assignment",
         )
         fee_facts.append(assignment_stock_fee)
-        assignment_fees = _round_money(assignment_stock_fee.get("amount"))
-        assignment_notional = _round_money(float(assignment_price) * shares_opened)
-        lots_by_id[stock_lot_id] = {
-            "stock_lot_id": stock_lot_id,
+        # §7.4: build the authority amount in Decimal from the exact inputs. The
+        # float pair below is the display projection the row's other fields use;
+        # ``stock_cost_basis_total`` is authority and is stored as decimal text.
+        assignment_fees_decimal = _money_decimal(assignment_stock_fee.get("amount"))
+        assignment_notional_decimal = _money_decimal(
+            to_decimal(assignment_price, field_name="assignment_price") * shares_opened
+        )
+        assignment_fees = float(assignment_fees_decimal)
+        assignment_notional = float(assignment_notional_decimal)
+        lots_by_id[lot_id] = {
+            "stock_lot_id": lot_id,
             "source_assignment_event_id": event_id,
             "source_option_lot_id": source_option_lot_id,
             **stock_strategy_fields,
@@ -1378,7 +1471,7 @@ def project_assigned_stock_lifecycle(
             "assignment_notional": assignment_notional,
             "assignment_fees": assignment_fees,
             "stock_cost_per_share": float(assignment_price),
-            "stock_cost_basis_total": _round_money(assignment_notional + assignment_fees),
+            "stock_cost_basis_total": _money_text(assignment_notional_decimal + assignment_fees_decimal),
             "stock_principal_basis_total": assignment_notional,
             "basis_policy": "assignment_stock_cost_basis",
             "option_premium_attribution": option_premium_attribution,
@@ -1386,7 +1479,7 @@ def project_assigned_stock_lifecycle(
             "stock_sale_cash_in_gross": 0.0,
             "stock_sale_fees": 0.0,
             "stock_cost_basis_sold": 0.0,
-            "assigned_stock_realized_pnl": 0.0,
+            "assigned_stock_realized_pnl": _money_text(0),
             "sale_event_ids": [],
             "sale_months": [],
             "_sale_rows": [],
@@ -1432,7 +1525,7 @@ def project_assigned_stock_lifecycle(
             )
             continue
         seen_stock_events.add(stock_event_id)
-        target_stock_lot_id = str(sale.get("target_stock_lot_id") or "").strip()
+        target_lot_id = str(sale.get("target_stock_lot_id") or "").strip()
         sale_account_filter = normalize_account(sale.get("account")) if sale.get("account") not in (None, "") else None
         sale_broker_filter = normalize_broker(sale.get("broker")) if sale.get("broker") not in (None, "") else None
         if account_norm and sale_account_filter != account_norm:
@@ -1442,7 +1535,7 @@ def project_assigned_stock_lifecycle(
         sale_month = _stock_event_month(sale)
         sale_at = _stock_event_time_ms(sale)
         shares = _stock_event_shares(sale)
-        if settlement_transition and not target_stock_lot_id:
+        if settlement_transition and not target_lot_id:
             group_id = str(sale.get("strategy_group_id") or "").strip()
             candidates = [
                 lot
@@ -1456,7 +1549,7 @@ def project_assigned_stock_lifecycle(
                 and (not group_id or lot.get("strategy_group_id") == group_id)
             ]
             if len(candidates) == 1:
-                target_stock_lot_id = str(candidates[0]["stock_lot_id"])
+                target_lot_id = str(candidates[0]["stock_lot_id"])
             else:
                 review_rows.append(
                     _assigned_stock_review_row(
@@ -1471,7 +1564,7 @@ def project_assigned_stock_lifecycle(
                     )
                 )
                 continue
-        lot = lots_by_id.get(target_stock_lot_id)
+        lot = lots_by_id.get(target_lot_id)
         if lot is None:
             review_rows.append(
                 _assigned_stock_review_row(
@@ -1481,7 +1574,7 @@ def project_assigned_stock_lifecycle(
                         else "manual_review_required"
                     ),
                     stock_event_id=stock_event_id,
-                    stock_lot_id=target_stock_lot_id or None,
+                    lot_id=target_lot_id or None,
                     month=sale_month,
                     account=normalize_account(sale.get("account")),
                     broker=normalize_broker(sale.get("broker")),
@@ -1532,7 +1625,7 @@ def project_assigned_stock_lifecycle(
                 _assigned_stock_review_row(
                     status="source_conflict",
                     stock_event_id=stock_event_id,
-                    stock_lot_id=target_stock_lot_id,
+                    lot_id=target_lot_id,
                     month=sale_month,
                     account=sale_account,
                     broker=sale_broker,
@@ -1544,9 +1637,16 @@ def project_assigned_stock_lifecycle(
             continue
         proceeds_gross = _round_money(float(price) * shares)
         proceeds_net = _round_money(proceeds_gross - fees)
-        cost_basis_sold = _round_money(_lot_basis_per_share_with_fees(lot) * shares)
+        # §7.4: the authority's realized P&L is built in Decimal from the exact
+        # per-share basis, and summed in Decimal below, so the value stored is the
+        # one the rule produces rather than a float that happens to round to it.
+        cost_basis_sold_decimal = _money_decimal(_lot_basis_per_share_decimal(lot) * shares)
+        realized_pnl_decimal = _money_decimal(
+            to_decimal(proceeds_net, field_name="proceeds_net") - cost_basis_sold_decimal
+        )
+        cost_basis_sold = float(cost_basis_sold_decimal)
+        realized_pnl = float(realized_pnl_decimal)
         principal_basis_sold = _round_money(float(lot.get("assignment_price") or 0.0) * shares)
-        realized_pnl = _round_money(proceeds_net - cost_basis_sold)
         lot["shares_remaining"] = int(lot.get("shares_remaining") or 0) - shares
         lot["shares_sold"] = int(lot.get("shares_sold") or 0) + shares
         lot["stock_sale_cash_in_net"] = _round_money(float(lot.get("stock_sale_cash_in_net") or 0.0) + proceeds_net)
@@ -1555,8 +1655,8 @@ def project_assigned_stock_lifecycle(
         )
         lot["stock_sale_fees"] = _round_money(float(lot.get("stock_sale_fees") or 0.0) + fees)
         lot["stock_cost_basis_sold"] = _round_money(float(lot.get("stock_cost_basis_sold") or 0.0) + cost_basis_sold)
-        lot["assigned_stock_realized_pnl"] = _round_money(
-            float(lot.get("assigned_stock_realized_pnl") or 0.0) + realized_pnl
+        lot["assigned_stock_realized_pnl"] = _money_text(
+            _lot_money(lot, "assigned_stock_realized_pnl") + realized_pnl_decimal
         )
         if not settlement_transition:
             lot["sale_event_ids"].append(stock_event_id)
@@ -1565,7 +1665,7 @@ def project_assigned_stock_lifecycle(
         lot["_fee_facts"].append(sale_fee_fact)
         sale_row = {
             "stock_event_id": stock_event_id,
-            "stock_lot_id": target_stock_lot_id,
+            "stock_lot_id": target_lot_id,
             "source_assignment_event_id": lot.get("source_assignment_event_id"),
             "account": sale_account,
             "broker": sale_broker,
@@ -1619,6 +1719,7 @@ def project_assigned_stock_lifecycle(
     lifecycle_rows: list[dict[str, Any]] = []
     sale_rows: list[dict[str, Any]] = []
     lot_rows: list[dict[str, Any]] = []
+    stock_position_lots: list[dict[str, Any]] = []
     for lot in lots_by_id.values():
         shares_remaining = int(lot.get("shares_remaining") or 0)
         status = "closed" if shares_remaining == 0 else ("partially_sold" if int(lot.get("shares_sold") or 0) > 0 else "open")
@@ -1769,7 +1870,7 @@ def project_assigned_stock_lifecycle(
                 _assigned_stock_review_row(
                     status="missing_quote",
                     event_id=str(lot.get("source_assignment_event_id") or ""),
-                    stock_lot_id=str(lot.get("stock_lot_id") or ""),
+                    lot_id=str(lot.get("stock_lot_id") or ""),
                     month=str(lot.get("opened_month") or ""),
                     account=str(lot.get("account") or ""),
                     broker=str(lot.get("broker") or ""),
@@ -1812,6 +1913,7 @@ def project_assigned_stock_lifecycle(
         lot_rows.append(row)
         lifecycle_rows.append(row)
         sale_rows.extend(lot.get("_sale_rows") or [])
+        stock_position_lots.append(assigned_stock_lot_to_position_lot(lot).to_dict())
 
     _append_holding_reconciliation_reviews(
         review_rows,
@@ -1826,6 +1928,13 @@ def project_assigned_stock_lifecycle(
     )
     return {
         "_all_assigned_stock_lots": sorted(lot_rows, key=_assigned_stock_row_sort_key),
+        "stock_position_lots": sorted(
+            stock_position_lots,
+            key=lambda row: (
+                int(row.get("opened_at_ms") or 0),
+                str(row.get("lot_id") or ""),
+            ),
+        ),
         "assigned_stock_lots": sorted(
             [row for row in lot_rows if _lifecycle_row_in_month(row, month)],
             key=_assigned_stock_row_sort_key,
@@ -1936,6 +2045,7 @@ __all__ = [
     "assigned_stock_allocation_row",
     "assigned_stock_event_time_ms",
     "assigned_stock_fee_fact",
+    "assigned_stock_lot_to_position_lot",
     "assigned_stock_position_lot_row",
     "assigned_stock_trade_event_row",
     "project_assigned_stock_lifecycle",

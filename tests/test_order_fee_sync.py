@@ -34,12 +34,13 @@ _WINDOW: dict[str, object] = {
     "end_exclusive_ms": EVENT_MS + 1,
 }
 
+# §9.2 step 3: the contract key no longer carries the position side, so the
+# short put side travels as the trade side on the raw payload.
 _NVDA_KEY = ContractKey.from_values(
     broker="富途",
     account="lx",
     underlying_symbol="NVDA",
     option_type="put",
-    position_side="short",
     strike=100,
     expiration_ymd="2026-06-19",
 )
@@ -49,7 +50,6 @@ _IBKR_KEY = ContractKey.from_values(
     account="lx",
     underlying_symbol="NVDA",
     option_type="put",
-    position_side="short",
     strike=100,
     expiration_ymd="2026-06-19",
 )
@@ -89,7 +89,11 @@ def _lifecycle_event(**overrides: object) -> TradeEvent:
 
 def _frozen_zero_provenance() -> dict:
     """The legacy 'already frozen as actual zero' payload these cases seed."""
-    return {"fee_provenance": {"basis": "actual", "amount": "0", "source": "test"}}
+    return {
+        # §9.2 step 3: the short put side travels as the trade side.
+        "side": "sell",
+        "fee_provenance": {"basis": "actual", "amount": "0", "source": "test"},
+    }
 
 
 def _repo_with_bare_option_event(
@@ -105,11 +109,15 @@ def _repo_with_bare_option_event(
             event_time_ms=event_time_ms,
             source="broker",
             lot_id="lot-1",
-            raw_payload=(
-                {"futu_account_id": "123", "order_id": "order-1"}
-                if with_identity
-                else {}
-            ),
+            raw_payload={
+                # §9.2 step 3: the short put side now travels as the trade side.
+                "side": "sell",
+                **(
+                    {"futu_account_id": "123", "order_id": "order-1"}
+                    if with_identity
+                    else {}
+                ),
+            },
         )
     )
     return repo
@@ -174,6 +182,9 @@ def _expiry_event(
     else:
         raw_payload = {"source_type": "system_trade_event"}
         source = "option_lifecycle_decision"
+    # §9.2 step 3: the contract key no longer carries the position side, so the
+    # short put side travels as the trade side (close of a short put -> buy).
+    raw_payload = {"side": "buy", **raw_payload}
     return _lifecycle_event(source=source, raw_payload=raw_payload)
 
 
@@ -182,6 +193,7 @@ def _assignment_event() -> TradeEvent:
         event_id="assignment-1",
         event_type="assignment",
         raw_payload={
+            "side": "buy",
             "stock_settlement": {
                 "side": "buy",
                 "shares": 100,
@@ -222,7 +234,7 @@ def test_fee_sync_dry_run_is_read_only_and_apply_persists_actual_fee(
     assert applied["migration"]["status_counts"] == {"committed": 1}
     assert fee.basis.value == "actual"
     assert str(fee.amount) == fee_amount
-    assert event.fees == float(fee_amount)
+    assert event.fees == Decimal(fee_amount)
     assert event.raw_payload["fee_provenance"]["source"] == "opend.order_fee_query"
     with repo._connect() as conn:  # noqa: SLF001 - audit proof
         assert conn.execute("SELECT COUNT(*) FROM broker_fee_enrichment_audit").fetchone()[0] == 1
@@ -323,7 +335,13 @@ def test_exact_fee_sync_changes_only_target_order_without_date_range(
             target,
             event_id="event-2",
             lot_id="lot-2",
-            raw_payload={"futu_account_id": "123", "order_id": "order-2"},
+            # §9.2 step 3: keep the trade side the source event declares; only
+            # the broker order identity is being overridden here.
+            raw_payload={
+                **target.raw_payload,
+                "futu_account_id": "123",
+                "order_id": "order-2",
+            },
         )
     )
     with repo._connect() as conn:  # noqa: SLF001 - byte-level isolation proof
@@ -500,6 +518,7 @@ def test_expiry_without_executed_order_is_frozen_as_actual_zero(
             event_time_ms=EVENT_MS - 1,
             source="manual",
             lot_id="lot-1",
+            raw_payload={"side": "sell"},
         ),
     )
 
@@ -531,6 +550,7 @@ def test_broker_settlement_expiry_is_frozen_as_actual_zero(tmp_path: Path) -> No
             event_time_ms=EVENT_MS - 1,
             source="manual",
             lot_id="lot-1",
+            raw_payload={"side": "sell"},
         ),
     )
 
@@ -711,7 +731,12 @@ def test_non_futu_event_stays_missing_and_never_reaches_provider(tmp_path: Path)
         contract_key=_IBKR_KEY,
         source="broker",
         lot_id="ibkr-lot",
-        raw_payload={"futu_account_id": "123", "order_id": "order-1"},
+        raw_payload={
+            # §9.2 step 3: the short put side travels as the trade side.
+            "side": "sell",
+            "futu_account_id": "123",
+            "order_id": "order-1",
+        },
     )
     persist_trade_event_object(repo, event)
     provider = _Provider()
@@ -902,6 +927,8 @@ def test_migration_receipt_counts_all_existing_fee_bases_by_event_kind(
                 fees=fees,
                 lot_id=f"lot-{event_id}",
                 raw_payload={
+                    # §9.2 step 3: the short put side travels as the trade side.
+                    "side": "sell",
                     "fee_provenance": {
                         "basis": basis,
                         "amount": "1.000000",

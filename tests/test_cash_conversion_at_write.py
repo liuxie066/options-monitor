@@ -15,7 +15,6 @@ from domain.domain.performance.cash_conversion import (
     MAX_HISTORICAL_CARRY_FORWARD_DISTANCE_MS,
     validate_observed_cash_conversion,
 )
-from domain.domain.option_position_lots import OpenPositionCommand
 from src.application.cash_conversion import build_cash_conversion
 from src.application.ledger import writer_trade_events as ledger_writer
 from src.application.ledger.commands import record_manual_assignment
@@ -37,12 +36,13 @@ def _ms(value: str) -> int:
 
 def _open_nvda_lot(repo) -> None:
     """Persist the short NVDA put this module opens before lifecycle assertions."""
-    persist_manual_open_event(repo, OpenPositionCommand(
+    persist_manual_open_event(
+        repo,
         broker="富途", account="lx", symbol="NVDA", option_type="put", side="short",
         contracts=1, currency="USD", strike=100, multiplier=100,
         expiration_ymd="2026-08-21", premium_per_share=2.5,
         opened_at_ms=_ms("2026-07-23T08:00:00"),
-    ))
+    )
 
 
 def _open_event(event_id: str, *, price: float) -> TradeEvent:
@@ -55,10 +55,9 @@ def _open_event(event_id: str, *, price: float) -> TradeEvent:
             account="lx",
             underlying_symbol="NVDA",
             option_type="put",
-            position_side="short",
             strike=100,
             expiration_ymd="2026-08-21",
-        ),
+                ),
         contracts=1,
         price=price,
         currency="USD",
@@ -66,7 +65,8 @@ def _open_event(event_id: str, *, price: float) -> TradeEvent:
         multiplier=100,
         fees=0.0,
         lot_id=f"lot-{event_id}",
-        raw_payload={},
+        # §9.2 step 3: the short put side travels as the trade side.
+        raw_payload={"side": "sell"},
     )
 
 
@@ -270,7 +270,7 @@ def test_assignment_and_assigned_stock_sale_store_their_own_cny_cash(
         event_time_ms=_ms("2026-07-24T09:00:00"), lot_id=None,
     ))
     request = dict(
-        record_id=lot["record_id"], contracts_to_close=1,
+        lot_id=lot["record_id"], contracts_to_close=1,
         stock_side="buy", stock_qty=100, stock_price=100.0,
         request_id="historical-assignment",
     )
@@ -287,10 +287,10 @@ def test_assignment_and_assigned_stock_sale_store_their_own_cny_cash(
     assert replay["result"]["created"] is False
     assert repo.list_trade_events() == events
     assert repo.list_trade_lifecycle_notifications() == notifications
-    stock_lot_id = f"assigned-stock-{assignment['event_id']}"
+    lot_id = f"assigned-stock-{assignment['event_id']}"
     execute_manual_assigned_stock_sale(
         repo,
-        target_stock_lot_id=stock_lot_id,
+        target_lot_id=lot_id,
         shares=100,
         price=105.0,
         trade_time_ms=_ms("2026-07-23T10:00:00"),
@@ -310,7 +310,7 @@ def _sale_fx_fixture(tmp_path: Path, monkeypatch, *, initialized: bool = True):
             # Represent an existing ledger from before FX evidence persistence.
             patch.setattr(ledger_writer, "load_cash_fx_payload", lambda *_args, **_kwargs: None)
         _open_nvda_lot(repo)
-        record_manual_assignment(repo, record_id=repo.list_position_lots()[0]["record_id"],
+        record_manual_assignment(repo, lot_id=repo.list_position_lots()[0]["record_id"],
             contracts_to_close=1, stock_side="buy", stock_qty=100, stock_price=100,
             as_of_ms=_ms("2026-07-23T09:00:00"))
     assignment = next(row for row in repo.list_trade_events() if row["event_type"] == "assignment")
@@ -331,7 +331,7 @@ def _write_sale_fx_cache(path: Path, rate: str) -> None:
 
 def _sale_request(repo, lot_id: str, *, broker: bool, dry_run: bool, identity: str = "sale-1", shares: int = 40):
     if not broker:
-        return execute_manual_assigned_stock_sale(repo, target_stock_lot_id=lot_id,
+        return execute_manual_assigned_stock_sale(repo, target_lot_id=lot_id,
             shares=shares, price=105, trade_time_ms=_ms("2026-07-23T11:00:00"),
             source_deal_id=identity, dry_run=dry_run)
     deal = normalize_trade_deal({

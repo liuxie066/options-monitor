@@ -74,24 +74,20 @@ def _open_position(
 ):
     """Persist one manual open event so the CLI has a lot to read back."""
 
-    from domain.domain.option_position_lots import OpenPositionCommand
-
     return ledger_manual_trades.persist_manual_open_event(
         repo,
-        OpenPositionCommand(
-            broker=broker,
-            account=account,
-            symbol=symbol,
-            option_type=option_type,
-            side=side,
-            contracts=contracts,
-            currency=currency,
-            strike=strike,
-            multiplier=multiplier,
-            expiration_ymd=expiration_ymd,
-            premium_per_share=premium_per_share,
-            opened_at_ms=opened_at_ms,
-        ),
+        broker=broker,
+        account=account,
+        symbol=symbol,
+        option_type=option_type,
+        side=side,
+        contracts=contracts,
+        currency=currency,
+        strike=strike,
+        multiplier=multiplier,
+        expiration_ymd=expiration_ymd,
+        premium_per_share=premium_per_share,
+        opened_at_ms=opened_at_ms,
     )
 
 
@@ -832,6 +828,38 @@ def test_option_positions_cli_list_filters_by_local_expiration(monkeypatch, tmp_
     assert rows[0]["expiration_ymd"] == near_exp
     assert rows[0]["strike"] == 100.0
     assert rows[0]["multiplier"] == 100.0
+
+
+def test_option_positions_cli_list_default_text_format_renders_lot_id(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """§7.1: the read model publishes ``lot_id``, not the retired ``record_id``.
+
+    The default ``--format`` is text, so this rendering path is the primary
+    user-facing listing; guard it independently of the JSON path so a
+    producer-side key rename cannot silently break it again.
+    """
+    import src.interfaces.cli.option_positions as cli_mod
+    from src.application.ledger.read_model import list_position_rows
+
+    near_exp = (datetime.now().date() + timedelta(days=1)).isoformat()
+    data_config, repo = _active_ledger_context(tmp_path)
+    _open_position(repo,
+        symbol="TSLA", currency="USD", strike=100.0, expiration_ymd=near_exp, premium_per_share=1.23, opened_at_ms=1000,
+    )
+
+    monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
+    _set_om_argv(monkeypatch, data_config, "list", "--account", "lx")
+
+    assert cli_mod.main() == 0
+
+    out = capsys.readouterr().out
+    assert "# position_lots" in out
+    rows = list_position_rows(repo, broker="富途", account="lx")
+    assert rows, "the manual open event should project a position lot"
+    lot_id = rows[0]["lot_id"]
+    assert lot_id, "the read model must publish lot_id (§7.1)"
+    assert lot_id in out
 
 
 def test_option_positions_cli_buy_close_auto_matches_unique_selector(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -1586,7 +1614,7 @@ def test_option_positions_cli_history_json_includes_related_events(monkeypatch, 
     lot = repo.list_position_lots()[0]
     close_result = ledger_manual_trades.persist_manual_close_event(
         repo,
-        record_id=lot["record_id"],
+        lot_id=lot["record_id"],
         fields=lot["fields"],
         contracts_to_close=1,
         close_price=1.0,
@@ -1595,7 +1623,7 @@ def test_option_positions_cli_history_json_includes_related_events(monkeypatch, 
     )
     adjust_result = ledger_manual_trades.persist_manual_adjust_event(
         repo,
-        record_id=lot["record_id"],
+        lot_id=lot["record_id"],
         fields=repo.get_position_lot_fields(lot["record_id"]),
         premium_per_share=3.1,
         as_of_ms=2000,
@@ -1649,7 +1677,7 @@ def test_option_positions_cli_history_reads_voided_open_tombstone(
         symbol="NVDA", currency="USD", strike=100.0, expiration_ymd="2026-08-21", premium_per_share=2.5,
         opened_at_ms=1000,
     )
-    lot_id = str(open_result.record_id)
+    lot_id = str(open_result.lot_id)
     ledger_interventions.persist_manual_void_event(
         repo,
         target_event_id=str(open_result.event_id),
@@ -1685,7 +1713,7 @@ def test_option_positions_cli_assigned_stock_sale_records_independent_event(monk
     lot = repo.list_position_lots()[0]
     record_manual_assignment(
         repo,
-        record_id=lot["record_id"],
+        lot_id=lot["record_id"],
         contracts_to_close=1,
         stock_side="buy",
         stock_qty=100,
@@ -1693,11 +1721,11 @@ def test_option_positions_cli_assigned_stock_sale_records_independent_event(monk
         as_of_ms=2000,
     )
     assignment_event = [item for item in repo.list_trade_events() if item.get("event_type") == "assignment"][0]
-    stock_lot_id = f"assigned-stock-{assignment_event['event_id']}"
+    lot_id = f"assigned-stock-{assignment_event['event_id']}"
 
     monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
     _set_om_argv(monkeypatch, data_config,
-        "assigned-stock-sale", "--target-stock-lot-id", stock_lot_id, "--account", "lx", "--symbol", "NVDA",
+        "assigned-stock-sale", "--target-stock-lot-id", lot_id, "--account", "lx", "--symbol", "NVDA",
         "--currency", "USD", "--shares", "100", "--price", "105", "--trade-time-ms", "3000", "--format", "json",
 )
 
@@ -1713,7 +1741,7 @@ def test_option_positions_cli_assigned_stock_sale_records_independent_event(monk
     assert repo.list_assigned_stock_events() == []
 
     _set_om_argv(monkeypatch, data_config,
-        "assigned-stock-sale", "--target-stock-lot-id", stock_lot_id, "--account", "lx", "--symbol", "NVDA",
+        "assigned-stock-sale", "--target-stock-lot-id", lot_id, "--account", "lx", "--symbol", "NVDA",
         "--currency", "USD", "--shares", "100", "--price", "105", "--trade-time-ms", "3000", "--confirm", "--format",
         "json",
 )
@@ -1727,9 +1755,9 @@ def test_option_positions_cli_assigned_stock_sale_records_independent_event(monk
     assert repo.list_assigned_stock_events()[0]["fee_provenance"]["basis"] == "estimated"
 
     report = build_assigned_stock_view(repo, broker="富途", account="lx", as_of_ms=3000)
-    lifecycle = [row for row in report["assigned_stock_lots"] if row["stock_lot_id"] == stock_lot_id][0]
+    lifecycle = [row for row in report["assigned_stock_lots"] if row["stock_lot_id"] == lot_id][0]
     assert lifecycle["status"] == "closed"
-    assert lifecycle["assigned_stock_realized_pnl"] == 497.4739
+    assert lifecycle["assigned_stock_realized_pnl"] == "497.4739"
     assert lifecycle["option_premium_attribution"] == 250.0
     assert lifecycle["assignment_lifecycle_pnl"] == 747.4739
 def test_option_positions_cli_adopt_combo_identity_dry_run(
@@ -1756,10 +1784,9 @@ def test_option_positions_cli_adopt_combo_identity_dry_run(
             account="lx",
             underlying_symbol="9992.HK",
             option_type=option_type,
-            position_side=side,
             strike=strike,
             expiration_ymd="2026-09-29",
-        )
+                )
         return TradeEvent(
             event_id=event_id,
             event_type="open",

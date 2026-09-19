@@ -11,7 +11,7 @@ from src.application.ledger.migration import (
 
 def _position_lot(
     *,
-    record_id: str,
+    lot_id: str,
     option_type: str,
     strike: float,
     expiration_ymd: str,
@@ -20,10 +20,10 @@ def _position_lot(
     exp_ms = parse_exp_to_ms(expiration_ymd)
     assert exp_ms is not None
     return {
-        "record_id": record_id,
+        "record_id": lot_id,
         "fields": {
-            "record_id": record_id,
-            "position_id": record_id,
+            "record_id": lot_id,
+            "position_key": lot_id,
             "status": "open",
             "contracts": contracts_open,
             "contracts_open": contracts_open,
@@ -46,9 +46,9 @@ def _position_lot(
 
 def test_shadow_replay_position_lot_snapshot_supports_0700_fixture() -> None:
     records = [
-        _position_lot(record_id="lot_call_may", option_type="call", strike=510, expiration_ymd="2026-05-28", contracts_open=2),
-        _position_lot(record_id="lot_put_may", option_type="put", strike=450, expiration_ymd="2026-05-28", contracts_open=6),
-        _position_lot(record_id="lot_put_jun", option_type="put", strike=450, expiration_ymd="2026-06-29", contracts_open=3),
+        _position_lot(lot_id="lot_call_may", option_type="call", strike=510, expiration_ymd="2026-05-28", contracts_open=2),
+        _position_lot(lot_id="lot_put_may", option_type="put", strike=450, expiration_ymd="2026-05-28", contracts_open=6),
+        _position_lot(lot_id="lot_put_jun", option_type="put", strike=450, expiration_ymd="2026-06-29", contracts_open=3),
     ]
 
     result = shadow_replay_position_lot_snapshot(records)
@@ -68,7 +68,7 @@ def test_shadow_replay_position_lot_snapshot_supports_0700_fixture() -> None:
 
 def test_reconciliation_reports_quantity_mismatch() -> None:
     records = [
-        _position_lot(record_id="lot_put_may", option_type="put", strike=450, expiration_ymd="2026-05-28", contracts_open=6)
+        _position_lot(lot_id="lot_put_may", option_type="put", strike=450, expiration_ymd="2026-05-28", contracts_open=6)
     ]
     result = shadow_replay_position_lot_snapshot(records)
     mismatched_lot = replace(result.projection.lots[0], contracts_open=5)

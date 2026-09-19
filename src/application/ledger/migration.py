@@ -13,6 +13,8 @@ from domain.domain.ledger.position_fields import (
     normalize_status,
     safe_float,
 )
+from domain.domain.option_position_identity import normalize_side
+from domain.domain.trade_contract_identity import derive_trade_side
 
 
 @dataclass(frozen=True)
@@ -119,13 +121,13 @@ def position_lot_snapshot_to_open_event(
     *,
     source: str,
 ) -> tuple[TradeEvent | None, list[LedgerDiagnostic]]:
-    record_id = str(item.get("record_id") or "").strip()
+    lot_id = str(item.get("lot_id") or item.get("record_id") or "").strip()
     fields = item.get("fields") if isinstance(item.get("fields"), dict) else item
     diagnostics: list[LedgerDiagnostic] = []
-    if not record_id or not isinstance(fields, dict):
+    if not lot_id or not isinstance(fields, dict):
         diagnostics.append(
             LedgerDiagnostic(
-                event_id=f"snapshot:{record_id}",
+                event_id=f"snapshot:{lot_id}",
                 severity="error",
                 code="snapshot_record_invalid",
                 message="position_lot snapshot record_id and fields are required",
@@ -136,8 +138,19 @@ def position_lot_snapshot_to_open_event(
         return None, diagnostics
     try:
         contract_key = _contract_key_from_position_fields(fields)
+        raw_payload: dict[str, Any] = {
+            "record_id": lot_id,
+            "fields": dict(fields),
+            "source": source,
+        }
+        # §9.2 step 3: the contract key no longer carries the position side, so the
+        # imported snapshot event must publish the trade side derived from the
+        # legacy lot ``side`` field instead.
+        snapshot_side = derive_trade_side("open", fields.get("side"))
+        if snapshot_side:
+            raw_payload["side"] = snapshot_side
         event = TradeEvent(
-            event_id=f"snapshot:{source}:{record_id}",
+            event_id=f"snapshot:{source}:{lot_id}",
             event_type="open",
             event_time_ms=int(fields.get("opened_at") or fields.get("last_action_at") or 0),
             contract_key=contract_key,
@@ -146,17 +159,17 @@ def position_lot_snapshot_to_open_event(
             currency=str(fields.get("currency") or ""),
             source=source,
             multiplier=float(effective_multiplier(fields) or 100),
-            lot_id=record_id,
-            raw_payload={"record_id": record_id, "fields": dict(fields), "source": source},
+            lot_id=lot_id,
+            raw_payload=raw_payload,
         )
     except Exception as exc:
         diagnostics.append(
             LedgerDiagnostic(
-                event_id=f"snapshot:{source}:{record_id}",
+                event_id=f"snapshot:{source}:{lot_id}",
                 severity="error",
                 code="snapshot_import_failed",
                 message="position_lot snapshot import failed",
-                details={"record_id": record_id, "error": str(exc)},
+                details={"record_id": lot_id, "error": str(exc)},
             )
         )
         return None, diagnostics
@@ -186,7 +199,9 @@ def reconcile_position_lot_snapshot(
                 )
             )
             continue
-        if lot.contract_key != legacy["contract_key"]:
+        if lot.contract_key != legacy["contract_key"] or (
+            legacy["position_side"] and lot.position_side != legacy["position_side"]
+        ):
             issues.append(
                 ReconciliationIssue(
                     code="identity_mismatch",
@@ -231,15 +246,16 @@ def reconcile_position_lot_snapshot(
 def _legacy_open_lots_by_id(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     for item in records:
-        record_id = str(item.get("record_id") or "").strip()
+        lot_id = str(item.get("lot_id") or item.get("record_id") or "").strip()
         fields = item.get("fields") if isinstance(item.get("fields"), dict) else item
-        if not record_id or not isinstance(fields, dict):
+        if not lot_id or not isinstance(fields, dict):
             continue
         if normalize_status(fields.get("status")) == "close" or effective_contracts_open(fields) <= 0:
             continue
         try:
-            out[record_id] = {
+            out[lot_id] = {
                 "contract_key": _contract_key_from_position_fields(fields),
+                "position_side": normalize_side(fields.get("side")),
                 "contracts_open": effective_contracts_open(fields),
             }
         except Exception:
@@ -253,7 +269,6 @@ def _contract_key_from_position_fields(fields: dict[str, Any]) -> ContractKey:
         account=fields.get("account"),
         underlying_symbol=fields.get("symbol"),
         option_type=fields.get("option_type"),
-        position_side=fields.get("side"),
         strike=effective_strike(fields),
         expiration_ymd=fields.get("expiration_ymd") or effective_expiration_ymd(fields),
     )

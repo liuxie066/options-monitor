@@ -52,10 +52,9 @@ def _event(
             account=account,
             underlying_symbol=symbol,
             option_type="put",
-            position_side="short",
             strike=100,
             expiration_ymd="2026-06-19",
-        ),
+                ),
         contracts=1,
         price=1.5,
         currency="USD",
@@ -65,9 +64,9 @@ def _event(
     )
 
 
-def _lot(record_id: str, *, account: str = "lx", contracts_open: int = 1) -> PositionLotRecord:
+def _lot(lot_id: str, *, account: str = "lx", contracts_open: int = 1) -> PositionLotRecord:
     return PositionLotRecord(
-        record_id=record_id,
+        lot_id=lot_id,
         fields={
             "account": account,
             "broker": "futu",
@@ -143,6 +142,7 @@ def test_projection_column_classification_is_closed(tmp_path: Path) -> None:
     }
     assert set(POSITION_LOTS_COLUMN_CLASSIFICATION) == {
         "record_id",
+        "lot_id",
         "account",
         "fields_json",
         "source_event_id",
@@ -271,7 +271,7 @@ def test_event_and_lot_guards_reject_legacy_or_conflicting_writes(tmp_path: Path
               record_id, fields_json, expiration, strike, multiplier, updated_at_ms
             ) VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (lot.record_id, fields_json, 1781827200000, 100, 100, 1),
+            (lot.lot_id, fields_json, 1781827200000, 100, 100, 1),
         )
         with pytest.raises(sqlite3.IntegrityError, match="conflicts"):
             conn.execute(
@@ -335,7 +335,7 @@ def test_lot_trigger_metadata_update_and_cross_account_replace(tmp_path: Path) -
             ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?)
             """,
             (
-                replacement.record_id,
+                replacement.lot_id,
                 "sy",
                 fields_json,
                 1781827200000,

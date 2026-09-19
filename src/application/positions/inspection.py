@@ -12,7 +12,8 @@ from domain.domain.ledger.position_fields import (
     normalize_broker,
     normalize_option_type,
 )
-from domain.domain.ledger.identity import ContractKey
+from domain.domain.ledger.identity import ContractKey, position_key_for
+from domain.domain.option_position_identity import normalize_side
 from domain.domain.trade_contract_identity import canonical_contract_symbol
 from src.application.ledger.api import (
     list_position_lot_snapshots,
@@ -94,7 +95,7 @@ def _event_record_refs(event: dict[str, object]) -> set[str]:
     return {item for item in refs if item}
 
 
-def _event_to_history_row(event: dict[str, object], *, fallback_record_id: str | None = None) -> dict[str, object]:
+def _event_to_history_row(event: dict[str, object], *, fallback_lot_id: str | None = None) -> dict[str, object]:
     payload = _event_payload(event)
     trade_time_ms = event.get("trade_time_ms")
     row = {
@@ -120,7 +121,7 @@ def _event_to_history_row(event: dict[str, object], *, fallback_record_id: str |
             payload.get("record_id")
             or payload.get("target_lot_id")
             or payload.get("lot_record_id")
-            or fallback_record_id
+            or fallback_lot_id
         ),
         "patch": payload.get("patch") if isinstance(payload.get("patch"), dict) else None,
     }
@@ -144,10 +145,10 @@ def _lot_with_beijing_time_fields(row: dict[str, object]) -> dict[str, object]:
     return out
 
 
-def _event_matches_lot(event: dict[str, object], *, record_id: str, fields: dict[str, object]) -> bool:
+def _event_matches_lot(event: dict[str, object], *, lot_id: str, fields: dict[str, object]) -> bool:
     source_event_id = str(fields.get("source_event_id") or "").strip()
     refs = _event_record_refs(event)
-    if str(record_id).strip() in refs or (source_event_id and source_event_id in refs):
+    if str(lot_id).strip() in refs or (source_event_id and source_event_id in refs):
         return True
     return _identity_matches_payload(
         event,
@@ -159,16 +160,16 @@ def _event_matches_lot(event: dict[str, object], *, record_id: str, fields: dict
     )
 
 
-def build_lot_event_history(repo, *, base: Path, record_id: str) -> list[dict[str, object]]:
+def build_lot_event_history(repo, *, base: Path, lot_id: str) -> list[dict[str, object]]:
     _ = base
-    requested_record_id = str(record_id or "").strip()
-    if not requested_record_id:
+    requested_lot_id = str(lot_id or "").strip()
+    if not requested_lot_id:
         raise ValueError("record_id is required")
     current = next(
         (
             item
             for item in list_position_lot_snapshots(repo)
-            if str(item.get("record_id") or "").strip() == requested_record_id
+            if str(item.get("record_id") or "").strip() == requested_lot_id
         ),
         None,
     )
@@ -176,16 +177,16 @@ def build_lot_event_history(repo, *, base: Path, record_id: str) -> list[dict[st
     if not isinstance(fields, dict):
         fields = {}
     history = [
-        _event_to_history_row(event, fallback_record_id=record_id)
+        _event_to_history_row(event, fallback_lot_id=lot_id)
         for event in trade_event_log(repo)
         if (
-            _event_matches_lot(event, record_id=requested_record_id, fields=fields)
+            _event_matches_lot(event, lot_id=requested_lot_id, fields=fields)
             if current is not None
-            else requested_record_id in _event_record_refs(event)
+            else requested_lot_id in _event_record_refs(event)
         )
     ]
     if not history:
-        raise ValueError(f"position lot or event history not found: {record_id}")
+        raise ValueError(f"position lot or event history not found: {lot_id}")
     history.sort(key=lambda row: (_safe_int(row.get("trade_time_ms")), str(row.get("event_id") or "")))
     return history
 
@@ -193,18 +194,18 @@ def build_lot_event_history(repo, *, base: Path, record_id: str) -> list[dict[st
 def _matches_lot_selector(
     row: dict[str, object],
     *,
-    record_id: str | None,
+    lot_id: str | None,
     account: str | None,
     symbol: str | None,
     option_type: str | None,
     strike: float | None,
     expiration_ymd: str | None,
 ) -> bool:
-    row_record_id = str(row.get("record_id") or "").strip()
+    row_lot_id = str(row.get("record_id") or "").strip()
     fields = row.get("fields") or {}
     if not isinstance(fields, dict):
         return False
-    if record_id and row_record_id != str(record_id).strip():
+    if lot_id and row_lot_id != str(lot_id).strip():
         return False
     if account and normalize_account(fields.get("account")) != normalize_account(account):
         return False
@@ -227,14 +228,14 @@ def _matches_lot_selector(
 def _matches_projected_selector(
     row: dict[str, object],
     *,
-    record_id: str | None,
+    lot_id: str | None,
     account: str | None,
     symbol: str | None,
     option_type: str | None,
     strike: float | None,
     expiration_ymd: str | None,
 ) -> bool:
-    if record_id and str(row.get("record_id") or "").strip() != str(record_id).strip():
+    if lot_id and str(row.get("record_id") or "").strip() != str(lot_id).strip():
         return False
     if account and normalize_account(row.get("account")) != normalize_account(account):
         return False
@@ -254,14 +255,14 @@ def _matches_projected_selector(
 def _matches_event_selector(
     event: dict[str, object],
     *,
-    record_id: str | None,
+    lot_id: str | None,
     account: str | None,
     symbol: str | None,
     option_type: str | None,
     strike: float | None,
     expiration_ymd: str | None,
 ) -> bool:
-    if record_id and str(record_id).strip() not in _event_record_refs(event):
+    if lot_id and str(lot_id).strip() not in _event_record_refs(event):
         return False
     if account and normalize_account(event.get("account")) != normalize_account(account):
         return False
@@ -285,13 +286,12 @@ def _canonical_position_key_from_fields(fields: dict[str, object]) -> str | None
             account=fields.get("account"),
             underlying_symbol=fields.get("symbol") or fields.get("underlying_symbol"),
             option_type=fields.get("option_type"),
-            position_side=fields.get("side") or fields.get("position_side"),
             strike=effective_strike(fields),
             expiration_ymd=fields.get("expiration_ymd") or effective_expiration_ymd(fields),
         )
     except Exception:
         return None
-    return key.position_key
+    return position_key_for(key, normalize_side(fields.get("side") or fields.get("position_side")))
 
 
 def _projected_lot_view(row: Any) -> dict[str, object]:
@@ -341,7 +341,7 @@ def inspect_projection_state(
     repo,
     *,
     base: Path,
-    record_id: str | None = None,
+    lot_id: str | None = None,
     account: str | None = None,
     symbol: str | None = None,
     option_type: str | None = None,
@@ -358,7 +358,7 @@ def inspect_projection_state(
         for row in current_rows
         if _matches_lot_selector(
             row,
-            record_id=record_id,
+            lot_id=lot_id,
             account=account,
             symbol=symbol,
             option_type=option_type,
@@ -366,7 +366,7 @@ def inspect_projection_state(
             expiration_ymd=expiration_ymd,
         )
     ]
-    matched_record_ids = {str(row.get("record_id") or "").strip() for row in matched_current if str(row.get("record_id") or "").strip()}
+    matched_lot_ids = {str(row.get("record_id") or "").strip() for row in matched_current if str(row.get("record_id") or "").strip()}
     matched_position_keys = {str(_lot_fields(row).get("position_key") or "").strip() for row in matched_current}
     matched_position_keys.update(
         key
@@ -382,7 +382,7 @@ def inspect_projection_state(
             str(row.get("position_key") or "").strip() in matched_position_keys
             or _matches_projected_selector(
                 row,
-                record_id=record_id,
+                lot_id=lot_id,
                 account=account,
                 symbol=symbol,
                 option_type=option_type,
@@ -395,7 +395,7 @@ def inspect_projection_state(
     baseline_lots: list[dict[str, object]] = []
     has_event_selector = any(
         value is not None and str(value).strip()
-        for value in (record_id, account, symbol, option_type, expiration_ymd)
+        for value in (lot_id, account, symbol, option_type, expiration_ymd)
     ) or strike is not None
     related_events = [
         _event_to_history_row(event)
@@ -403,7 +403,7 @@ def inspect_projection_state(
         if any(
             _event_matches_lot(
                 event,
-                record_id=str(row.get("record_id") or ""),
+                lot_id=str(row.get("record_id") or ""),
                 fields=_lot_fields(row),
             )
             for row in matched_current
@@ -412,7 +412,7 @@ def inspect_projection_state(
             has_event_selector
             and _matches_event_selector(
                 event,
-                record_id=record_id,
+                lot_id=lot_id,
                 account=account,
                 symbol=symbol,
                 option_type=option_type,
@@ -427,10 +427,10 @@ def inspect_projection_state(
         item.to_dict()
         for item in projection.diagnostics
         if str(item.event_id or "").strip() in {str(event.get("event_id") or "").strip() for event in related_events}
-        or str((item.details or {}).get("target_lot_id") or "").strip() in set(matched_record_ids)
-        or str((item.details or {}).get("lot_id") or "").strip() in set(matched_record_ids)
+        or str((item.details or {}).get("target_lot_id") or "").strip() in set(matched_lot_ids)
+        or str((item.details or {}).get("lot_id") or "").strip() in set(matched_lot_ids)
     ]
-    matched_report_keys = set(matched_position_keys) | set(matched_record_ids)
+    matched_report_keys = set(matched_position_keys) | set(matched_lot_ids)
     projection_verify_state = position_projection_verify_state(base)
     projection_verify_report = projection_verify_state.get("latest_projection_verify_report")
     latest_projection_verify_report = None
@@ -442,14 +442,14 @@ def inspect_projection_state(
     )
     return {
         "selectors": {
-            "record_id": record_id,
+            "record_id": lot_id,
             "account": account,
             "symbol": symbol,
             "option_type": option_type,
             "strike": strike,
             "expiration_ymd": expiration_ymd,
         },
-        "matched_record_ids": sorted(matched_record_ids),
+        "matched_record_ids": sorted(matched_lot_ids),
         "current_lots": [_lot_with_beijing_time_fields(row) for row in matched_current],
         "projected_lots": matched_projected,
         "projection_verify_checkpoint_id": projection_verify_checkpoint_id,

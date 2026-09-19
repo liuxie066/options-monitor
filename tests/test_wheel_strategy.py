@@ -8,7 +8,6 @@ import pytest
 
 import src.application.ledger.manual_trades as ledger_manual_trades
 from domain.domain.ledger import ContractKey, TradeEvent
-from domain.domain.option_position_lots import OpenPositionCommand
 from domain.domain.wheel import (
     WHEEL_EVENT_TYPES,
     WHEEL_EVENT_SCHEMA_V1,
@@ -31,7 +30,7 @@ def _started_event(*, source_trade_event_id: str = "assign-put") -> dict:
         event_id="wheel-start-1",
         event_schema_version=WHEEL_EVENT_SCHEMA_V1,
         account="lx",
-        stock_lot_id="assigned-stock-assign-put",
+        lot_id="assigned-stock-assign-put",
         event_type="wheel_started",
         occurred_at_ms=2_000,
         recorded_at_ms=2_001,
@@ -171,25 +170,23 @@ def test_repository_appends_wheel_event_once_and_reads_it_in_same_snapshot(
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     ledger_manual_trades.persist_manual_open_event(
         repo,
-        OpenPositionCommand(
-            broker="富途",
-            account="lx",
-            symbol="NVDA",
-            option_type="put",
-            side="short",
-            contracts=1,
-            currency="USD",
-            strike=100,
-            multiplier=100,
-            expiration_ymd="2026-08-21",
-            premium_per_share=2.5,
-            opened_at_ms=1_000,
-        ),
+        broker="富途",
+        account="lx",
+        symbol="NVDA",
+        option_type="put",
+        side="short",
+        contracts=1,
+        currency="USD",
+        strike=100,
+        multiplier=100,
+        expiration_ymd="2026-08-21",
+        premium_per_share=2.5,
+        opened_at_ms=1_000,
     )
     lot = repo.list_position_lots()[0]
     record_manual_assignment(
         repo,
-        record_id=lot["record_id"],
+        lot_id=lot["record_id"],
         contracts_to_close=1,
         stock_side="buy",
         stock_qty=100,
@@ -199,12 +196,12 @@ def test_repository_appends_wheel_event_once_and_reads_it_in_same_snapshot(
     assignment = next(
         item for item in repo.list_trade_events() if item["event_type"] == "assignment"
     )
-    stock_lot_id = f"assigned-stock-{assignment['event_id']}"
+    lot_id = f"assigned-stock-{assignment['event_id']}"
     event = build_wheel_event(
         event_id=f"wheel-start-{assignment['event_id']}",
         event_schema_version=WHEEL_EVENT_SCHEMA_V1,
         account="lx",
-        stock_lot_id=stock_lot_id,
+        lot_id=lot_id,
         event_type="wheel_started",
         occurred_at_ms=2_000,
         recorded_at_ms=2_001,
@@ -222,8 +219,8 @@ def test_repository_appends_wheel_event_once_and_reads_it_in_same_snapshot(
 
     assert rows["account_wheel_events"] == [event]
     assert event["event_schema_version"] == "wheel_event.v1"
-    assert event["wheel_branch_id"] == stock_lot_id
-    assert model["batches"][0]["stock_lot_id"] == stock_lot_id
+    assert event["wheel_branch_id"] == lot_id
+    assert model["batches"][0]["stock_lot_id"] == lot_id
     assert model["batches"][0]["phase"] == "ready"
     with repo._connect() as conn, pytest.raises(sqlite3.IntegrityError):
         conn.execute(
@@ -242,10 +239,9 @@ def test_read_model_reprojects_position_lots_from_same_as_of_trade_subset(
         account="lx",
         underlying_symbol="NVDA",
         option_type="put",
-        position_side="short",
         strike=100,
         expiration_ymd="2026-08-21",
-    )
+        )
     events = [
         TradeEvent(
             event_id="put-open",
@@ -257,6 +253,8 @@ def test_read_model_reprojects_position_lots_from_same_as_of_trade_subset(
             currency="USD",
             source="test",
             lot_id="put-lot",
+            # §9.2 step 3: the short put side travels as the trade side.
+            raw_payload={"side": "sell"},
         ),
         TradeEvent(
             event_id="put-close",
@@ -268,6 +266,8 @@ def test_read_model_reprojects_position_lots_from_same_as_of_trade_subset(
             currency="USD",
             source="test",
             target_lot_id="put-lot",
+            # §9.2 step 3: closing the short put is a buy.
+            raw_payload={"side": "buy"},
         ),
         TradeEvent(
             event_id="void-put-close",
@@ -331,7 +331,7 @@ def test_repository_migrates_wheel_event_v1_without_changing_hash_or_facts(
         event_id="legacy-wheel-start",
         event_schema_version=WHEEL_EVENT_SCHEMA_V1,
         account="lx",
-        stock_lot_id="assigned-stock-legacy",
+        lot_id="assigned-stock-legacy",
         event_type="wheel_started",
         occurred_at_ms=2_000,
         recorded_at_ms=2_001,
@@ -424,7 +424,7 @@ def test_repository_appends_nullable_stock_wheel_event_v2_and_rejects_tamper(
         event_id="wheel-put-branch-created",
         account="lx",
         wheel_branch_id="wheel-put:branch-1",
-        stock_lot_id=None,
+        lot_id=None,
         event_type="wheel_branch_created",
         occurred_at_ms=2_000,
         recorded_at_ms=2_001,
@@ -450,7 +450,7 @@ def test_repository_rejects_wheel_v1_migration_when_hash_does_not_recompute(
         event_id="legacy-invalid-hash",
         event_schema_version=WHEEL_EVENT_SCHEMA_V1,
         account="lx",
-        stock_lot_id="assigned-stock-legacy",
+        lot_id="assigned-stock-legacy",
         event_type="wheel_started",
         occurred_at_ms=2_000,
         recorded_at_ms=2_001,
@@ -518,7 +518,7 @@ def test_position_lot_patch_accepts_first_class_stock_lot_link() -> None:
         },
         strategy="wheel",
         leg_role="wheel_call",
-        source_stock_lot_id="assigned-stock-assign-put",
+        source_lot_id="assigned-stock-assign-put",
         as_of_ms=3_000,
     )
 
@@ -540,8 +540,8 @@ def test_wheel_candidate_uses_batch_cost_floor_and_lifecycle_pnl() -> None:
         "spot": 100,
         "delta": 0.31,
         "multiplier": 100,
-        "net_premium": 190,
-        "net_premium_cny": 1_350,
+        "net_income": 190,
+        "net_income_cny": 1_350,
         "period_net_premium_return": 0.019,
         "annualized_net_premium_return": 0.16,
         "spread_ratio": 0.1,
@@ -603,7 +603,7 @@ def test_void_removes_intent_and_linkage_rejection_from_standalone_projections()
     intent = build_wheel_event(
         event_id="intent-created-1",
         account="lx",
-        stock_lot_id="stock-1",
+        lot_id="stock-1",
         event_type="wheel_call_intent_created",
         occurred_at_ms=2_000,
         recorded_at_ms=2_001,
@@ -613,7 +613,7 @@ def test_void_removes_intent_and_linkage_rejection_from_standalone_projections()
     rejection = build_wheel_event(
         event_id="linkage-rejected-1",
         account="lx",
-        stock_lot_id="stock-1",
+        lot_id="stock-1",
         event_type="wheel_call_linkage_rejected",
         occurred_at_ms=2_100,
         recorded_at_ms=2_101,
@@ -622,7 +622,7 @@ def test_void_removes_intent_and_linkage_rejection_from_standalone_projections()
     void_intent = build_wheel_event(
         event_id="void-intent-1",
         account="lx",
-        stock_lot_id="stock-1",
+        lot_id="stock-1",
         event_type="wheel_event_voided",
         occurred_at_ms=2_200,
         recorded_at_ms=2_201,
@@ -631,7 +631,7 @@ def test_void_removes_intent_and_linkage_rejection_from_standalone_projections()
     void_rejection = build_wheel_event(
         event_id="void-rejection-1",
         account="lx",
-        stock_lot_id="stock-1",
+        lot_id="stock-1",
         event_type="wheel_event_voided",
         occurred_at_ms=2_300,
         recorded_at_ms=2_301,
@@ -641,7 +641,7 @@ def test_void_removes_intent_and_linkage_rejection_from_standalone_projections()
     assert project_wheel_call_intents(
         [intent, void_intent],
         account="lx",
-        stock_lot_id="stock-1",
+        lot_id="stock-1",
         as_of_ms=3_000,
     ) == []
     candidates = project_wheel_call_linkage_candidates(
@@ -693,7 +693,7 @@ def test_wheel_put_candidate_enforces_principal_spot_and_abs_delta() -> None:
         "delta": -0.30,
         "multiplier": 100,
         "currency": "USD",
-        "net_premium": 180,
+        "net_income": 180,
         "period_net_premium_return": 0.018,
         "annualized_net_premium_return": 0.15,
         "spread_ratio": 0.1,
@@ -746,7 +746,7 @@ def test_wheel_put_candidate_fails_closed_and_ranks_remainder_first() -> None:
             "delta": -0.30,
             "multiplier": 100,
             "currency": "USD",
-            "net_premium": 180,
+            "net_income": 180,
         },
         {"min_abs_delta": 0.25, "max_abs_delta": 0.35},
         {"basis": "estimated", "amount": 10},

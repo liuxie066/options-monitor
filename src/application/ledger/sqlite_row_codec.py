@@ -20,8 +20,27 @@ def position_lot_row_to_record(row: Any) -> dict[str, Any]:
     if fields.get("multiplier") is None and row["multiplier"] is not None:
         raw_multiplier = float(row["multiplier"])
         fields["multiplier"] = int(raw_multiplier) if raw_multiplier.is_integer() else raw_multiplier
+    # ``or ""`` rather than a bare ``str()``: a NULL record_id would otherwise
+    # become the string "None", a fabricated identity that differs from the ""
+    # the read-only evidence surface emits for the same row.
+    stored_record_id = str(row["record_id"] or "")
+    # Both identity keys are emitted so consumers can converge on lot_id without
+    # a coupled rename. Two row shapes legitimately fall back to record_id: a
+    # legacy row whose carrier is still NULL, and a narrower SELECT that predates
+    # the carrier. The gated backfill fills the column in.
+    #
+    # The two keys stay separate facts: ``record_id`` is the stored column and
+    # ``lot_id`` is the carrier-or-fallback. Today the carrier is only ever
+    # backfilled from that column, which masks the difference; once the carrier
+    # is independently authoritative the same row has two distinct identities,
+    # and this key must not follow the carrier, because the read-only evidence
+    # surface (``read_only_evidence._read_position_lots``) and the persisted
+    # position fingerprint both read ``record_id`` from the column.
+    raw_lot_id = row["lot_id"] if "lot_id" in row.keys() else None
+    lot_id = str(raw_lot_id).strip() if raw_lot_id not in (None, "") else stored_record_id
     return {
-        "record_id": str(row["record_id"]),
+        "record_id": stored_record_id,
+        "lot_id": lot_id,
         "fields": fields,
     }
 
@@ -52,11 +71,23 @@ def read_current_decision_projection_inputs_from_conn(
         "SELECT * FROM current_decision_projections WHERE account = ?",
         (account_value,),
     ).fetchone()
+    # This reader is reached both from the write path (where ``_init_db`` has
+    # already ensured the carrier) and from the read-only evidence surface, which
+    # by construction cannot add a column and must still serve a store that
+    # predates it. Selecting ``lot_id`` unconditionally made the second case
+    # raise ``no such column``, which the current-decision runtime converts into
+    # a blanket ``data_unavailable``. Same probe idiom as
+    # ``read_only_evidence._read_position_lots``.
+    lot_columns = {
+        str(item["name"])
+        for item in conn.execute("PRAGMA table_info(position_lots)").fetchall()
+    }
+    carrier = "lot_id" if "lot_id" in lot_columns else "NULL AS lot_id"
     lots = [
         position_lot_row_to_record(row)
         for row in conn.execute(
-            """
-            SELECT record_id, fields_json, expiration, strike, multiplier
+            f"""
+            SELECT record_id, {carrier}, fields_json, expiration, strike, multiplier
             FROM position_lots
             WHERE account = ?
             ORDER BY record_id ASC

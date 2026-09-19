@@ -309,7 +309,7 @@ def test_push_lookup_persists_only_exact_deal_economics_once(tmp_path, monkeypat
     events = repo.list_trade_events()
     assert len(events) == 1
     assert events[0]["contracts"] == 2
-    assert events[0]["price"] == 2.5
+    assert events[0]["price"] == "2.5"
     assert events[0]["event_time_ms"] == int(datetime(2026, 9, 7, 2, 30, 1, tzinfo=timezone.utc).timestamp() * 1000)
 
 

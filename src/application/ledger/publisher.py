@@ -14,18 +14,17 @@ from domain.domain.ledger import (
     project_resumable_trade_events,
 )
 from domain.domain.ledger.events import LedgerDiagnostic
-from domain.domain.ledger.lots import PositionLot
+from domain.domain.ledger.lots import PositionLot, lot_is_stock
 from domain.domain.ledger.position_fields import (
     BUY_TO_CLOSE,
     EXPIRE_AUTO_CLOSE,
     SELL_TO_CLOSE,
-    OpenPositionCommand,
     apply_strategy_metadata_patch,
-    build_position_id,
     build_position_lot_fields,
     parse_exp_to_ms,
     strategy_metadata_fields_from_payload,
 )
+from domain.domain.money import canonical_decimal_text, quantize_money
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.trade_contract_identity import normalize_trade_side
 from src.application.ledger.event_codec import (
@@ -423,20 +422,20 @@ def _fold_resumable_publication(
             ),
             legacy_by_event_id=legacy_by_event_id,
         )
-        if record.record_id not in touched_by_lot_id:
-            touched_order.append(record.record_id)
-        touched_by_lot_id[record.record_id] = record
+        if record.lot_id not in touched_by_lot_id:
+            touched_order.append(record.lot_id)
+        touched_by_lot_id[record.lot_id] = record
         if transition.lot_before is None:
-            auto_close_baselines[record.record_id] = {
+            auto_close_baselines[record.lot_id] = {
                 key: deepcopy(record.fields[key])
                 for key in _AUTO_CLOSE_FIELD_KEYS
                 if key in record.fields
             }
         if transition.finalized and publication_state is not None:
-            fields_by_lot_id.pop(record.record_id, None)
-            auto_close_baselines.pop(record.record_id, None)
+            fields_by_lot_id.pop(record.lot_id, None)
+            auto_close_baselines.pop(record.lot_id, None)
         else:
-            fields_by_lot_id[record.record_id] = deepcopy(record.fields)
+            fields_by_lot_id[record.lot_id] = deepcopy(record.fields)
 
     active_lot_ids = {
         item.lot_id
@@ -460,7 +459,7 @@ def _fold_resumable_publication(
         auto_close_baseline_by_lot_id=auto_close_baselines,
     )
     active_records = tuple(
-        PositionLotRecord(record_id=lot_id, fields=deepcopy(fields))
+        PositionLotRecord(lot_id=lot_id, fields=deepcopy(fields))
         for lot_id, fields in next_publication_state.fields_by_lot_id.items()
     )
     return ResumablePublishedPositionLotProjection(
@@ -514,7 +513,7 @@ def _position_lot_to_legacy_record(
     close_event = ledger_by_event_id.get(lot.close_event_ids[-1]) if lot.close_event_ids else None
     if close_event is not None:
         fields.update(_close_fields(close_event, legacy_by_event_id=legacy_by_event_id, lot=lot))
-    return PositionLotRecord(record_id=lot.lot_id, fields=fields)
+    return PositionLotRecord(lot_id=lot.lot_id, fields=fields)
 
 
 def _fold_publication_transition(
@@ -569,7 +568,7 @@ def _fold_publication_transition(
                 lot=lot,
             )
         )
-    return PositionLotRecord(record_id=lot.lot_id, fields=fields)
+    return PositionLotRecord(lot_id=lot.lot_id, fields=fields)
 
 
 def _apply_strategy_patch_fields(
@@ -606,6 +605,110 @@ def _apply_strategy_patch_payload(
     return out
 
 
+#: Published keys that only describe an option contract. A stock lot is
+#: published in the §7.3 shares vocabulary and must not carry these forward from
+#: a stored ``fields`` snapshot.
+_OPTION_ONLY_FIELD_KEYS = (
+    "strike",
+    "expiration",
+    "expiration_ymd",
+    "premium",
+    "cash_secured_amount",
+    "underlying_share_locked",
+)
+
+
+#: Published keys that carry a §7.4 amount or price in the option vocabulary.
+#: ``close_price`` is in the list although ``_close_fields`` writes it, because a
+#: legacy snapshot can carry it into a row that is not being closed right now.
+_OPTION_MONEY_FIELD_KEYS = (
+    "strike",
+    "premium",
+    "close_price",
+    "cash_secured_amount",
+)
+
+
+def _published_money_text(value: Any, *, field_name: str) -> str:
+    """Render one §7.4 money/price value for the published ``fields_json``.
+
+    §7.4 keeps the authority in ``Decimal`` and asks JSON to carry it as decimal
+    text. Rounding goes through ``quantize_money`` so the stored row follows the
+    project's single money rule (6 places, ROUND_HALF_UP) instead of whatever a
+    binary float happened to land on.
+
+    Quantities are a different vocabulary: ``shares_*`` stay on
+    ``canonical_decimal_text`` because §7.3 makes them a Decimal share count, not
+    an amount.
+    """
+    return canonical_decimal_text(quantize_money(value), field_name=field_name)
+
+
+def _normalize_published_money_values(fields: dict[str, Any]) -> dict[str, Any]:
+    """Re-render a stored snapshot's money keys as §7.4 decimal text.
+
+    A snapshot taken before this rule existed carries money as a float, and only
+    the keys this publisher re-derives are overwritten. Normalizing here is what
+    keeps a legacy row from publishing a float next to a decimal string.
+    """
+    for key in _OPTION_MONEY_FIELD_KEYS:
+        value = fields.get(key)
+        if value is None or value == "":
+            continue
+        fields[key] = _published_money_text(value, field_name=key)
+    return fields
+
+
+def _stock_lot_fields(
+    lot: PositionLot,
+    *,
+    note: str | None = None,
+    last_action_at: int | None = None,
+) -> dict[str, Any]:
+    """Publish a stock lot in the §7.3 quantity vocabulary.
+
+    ``build_position_lot_fields`` treats ``strike``/``expiration_ymd``/
+    ``premium_per_share`` as required, which a stock lot cannot supply: §7.3
+    gives it ``shares_*`` and ``cost_basis_total`` instead. Building the option
+    shape regardless is what made a stock event fail deep inside the write
+    transaction with an error about ``option_type``.
+    """
+    opened_at = int(lot.opened_at_ms)
+    return {
+        "broker": lot.contract_key.broker,
+        "account": lot.contract_key.account,
+        "symbol": lot.contract_key.underlying_symbol,
+        "asset_type": "stock",
+        "quantity_unit": "share",
+        "option_type": "",
+        "side": lot.position_side,
+        "currency": normalize_currency(lot.currency),
+        "status": str(lot.status),
+        "contracts": 0,
+        "contracts_open": 0,
+        "contracts_closed": 0,
+        "shares_opened": canonical_decimal_text(
+            lot.shares_opened, field_name="shares_opened"
+        ),
+        "shares_open": canonical_decimal_text(
+            lot.shares_open, field_name="shares_open"
+        ),
+        "shares_closed": canonical_decimal_text(
+            lot.shares_closed, field_name="shares_closed"
+        ),
+        "cost_basis_total": _published_money_text(
+            lot.cost_basis_total, field_name="cost_basis_total"
+        ),
+        "multiplier": 0,
+        "position_key": lot.position_key,
+        "opened_at": opened_at,
+        "last_action_at": int(
+            opened_at if last_action_at is None else last_action_at
+        ),
+        "note": note or None,
+    }
+
+
 def _base_fields_for_lot(
     lot: PositionLot,
     *,
@@ -615,7 +718,7 @@ def _base_fields_for_lot(
     raw_payload = _event_payload(legacy_open_event)
     snapshot_fields = raw_payload.get("fields")
     if isinstance(snapshot_fields, dict):
-        fields = dict(snapshot_fields)
+        fields = _normalize_published_money_values(dict(snapshot_fields))
     else:
         source_name = str(legacy_open_event.get("source_name") or (open_event.source if open_event else "")).strip()
         order_id = str(legacy_open_event.get("order_id") or "").strip()
@@ -626,13 +729,15 @@ def _base_fields_for_lot(
             f"order_id={order_id} "
             f"multiplier_source={multiplier_source}"
         ).strip()
-        fields = build_position_lot_fields(
-            OpenPositionCommand(
+        if lot_is_stock(lot):
+            fields = _stock_lot_fields(lot, note=note)
+        else:
+            fields = build_position_lot_fields(
                 broker=lot.contract_key.broker,
                 account=lot.contract_key.account,
                 symbol=lot.contract_key.underlying_symbol,
                 option_type=lot.contract_key.option_type,
-                side=lot.contract_key.position_side,
+                side=lot.position_side,
                 contracts=int(lot.contracts_opened),
                 currency=normalize_currency(lot.currency),
                 strike=float(lot.contract_key.strike),
@@ -643,7 +748,6 @@ def _base_fields_for_lot(
                 opened_at_ms=int(lot.opened_at_ms),
                 strategy_snapshot=_strategy_snapshot_from_payload(raw_payload),
             )
-        ).to_dict()
     fields.update(strategy_metadata_fields_from_payload(raw_payload, include_legacy=True))
     fields["source_event_id"] = lot.open_event_id
     fields["event_source_type"] = str(legacy_open_event.get("source_type") or "").strip()
@@ -658,6 +762,22 @@ def _apply_lot_state_fields(
     ledger_by_event_id: dict[str, TradeEvent],
 ) -> dict[str, Any]:
     out = dict(fields)
+    # §7.1: ``position_id`` is retired. ``_base_fields_for_lot`` seeds from the
+    # open event's stored ``fields`` snapshot, so a legacy row's ``position_id``
+    # would otherwise be carried forward into newly published fields_json.
+    out.pop("position_id", None)
+    last_action_at = int(_last_action_at(lot, ledger_by_event_id=ledger_by_event_id))
+    if lot_is_stock(lot):
+        # §7.3: a stock lot publishes shares, not contracts. Drop any option-only
+        # key a stored snapshot carried so the published row has one shape.
+        for key in _OPTION_ONLY_FIELD_KEYS:
+            out.pop(key, None)
+        stock_fields = _stock_lot_fields(lot, last_action_at=last_action_at)
+        # The option path leaves ``note`` to the base fields; do the same here so
+        # a re-published stock lot does not lose the note it was opened with.
+        stock_fields["note"] = out.get("note") or stock_fields["note"]
+        out.update(stock_fields)
+        return out
     expiration_ms = parse_exp_to_ms(lot.contract_key.expiration_ymd)
     out.update(
         {
@@ -665,35 +785,34 @@ def _apply_lot_state_fields(
             "account": lot.contract_key.account,
             "symbol": lot.contract_key.underlying_symbol,
             "option_type": lot.contract_key.option_type,
-            "side": lot.contract_key.position_side,
+            "side": lot.position_side,
             "contracts": int(lot.contracts_opened),
             "contracts_open": int(lot.contracts_open),
             "contracts_closed": int(lot.contracts_closed),
             "currency": normalize_currency(lot.currency),
             "status": lot.status,
-            "strike": float(lot.contract_key.strike),
+            "strike": _published_money_text(lot.contract_key.strike, field_name="strike"),
             "expiration_ymd": lot.contract_key.expiration_ymd,
             "multiplier": _compact_number(lot.multiplier),
-            "premium": float(lot.premium_open),
+            "premium": _published_money_text(lot.premium_open, field_name="premium"),
             "opened_at": int(lot.opened_at_ms),
-            "last_action_at": int(_last_action_at(lot, ledger_by_event_id=ledger_by_event_id)),
-            "position_id": build_position_id(
-                symbol=lot.contract_key.underlying_symbol,
-                expiration_ymd=lot.contract_key.expiration_ymd,
-                strike=lot.contract_key.strike,
-                option_type=lot.contract_key.option_type,
-                side=lot.contract_key.position_side,
-                contracts=int(lot.contracts_opened),
-            ),
-            "position_key": lot.contract_key.position_key,
+            "last_action_at": last_action_at,
+            "position_key": lot.position_key,
         }
     )
     if expiration_ms is not None:
         out["expiration"] = int(expiration_ms)
-    if lot.contract_key.position_side == "short" and lot.contract_key.option_type == "put":
-        out["cash_secured_amount"] = float(lot.contract_key.strike) * float(lot.multiplier) * int(lot.contracts_opened)
-    if lot.contract_key.position_side == "short" and lot.contract_key.option_type == "call":
-        out["underlying_share_locked"] = int(float(lot.multiplier) * int(lot.contracts_opened))
+    if lot.position_side == "short" and lot.contract_key.option_type == "put":
+        # §7.4: compute the amount in Decimal, then store decimal text. The float
+        # product this replaced could land one ulp off the exact value -- e.g.
+        # ``5.001 * 100 * 3`` is ``1500.3000000000002``, and 3-decimal strikes like
+        # ``5.001`` are reachable because ``PRICE_DECIMAL_PLACES`` is 3.
+        out["cash_secured_amount"] = _published_money_text(
+            lot.contract_key.strike * lot.multiplier * lot.contracts_opened,
+            field_name="cash_secured_amount",
+        )
+    if lot.position_side == "short" and lot.contract_key.option_type == "call":
+        out["underlying_share_locked"] = int(lot.multiplier) * int(lot.contracts_opened)
     return out
 
 
@@ -716,7 +835,7 @@ def _close_fields(
         elif trade_side == "sell":
             close_type = SELL_TO_CLOSE
         else:
-            close_type = BUY_TO_CLOSE if event.contract_key.position_side == "short" else SELL_TO_CLOSE
+            close_type = BUY_TO_CLOSE if event.position_side == "short" else SELL_TO_CLOSE
     else:
         close_type = EXPIRE_AUTO_CLOSE
 
@@ -732,7 +851,7 @@ def _close_fields(
     fields: dict[str, Any] = {
         "close_type": close_type,
         "close_reason": reason,
-        "close_price": float(event.price),
+        "close_price": _published_money_text(event.price, field_name="close_price"),
         "last_close_event_id": event.event_id,
         "last_action_at": int(event.event_time_ms),
     }

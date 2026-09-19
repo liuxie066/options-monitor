@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Mapping, Sequence
 
@@ -21,7 +21,7 @@ from src.application.cash_conversion import (
     attach_assigned_stock_sale_cash_conversions,
     build_cash_conversion,
 )
-from src.application.ledger.event_codec import encode_trade_event_for_storage, import_stored_trade_events
+from src.application.ledger.event_codec import import_stored_trade_events
 from src.application.ledger.repository import SQLiteOptionPositionsRepository, with_sqlite_repo_transaction
 from src.infrastructure.performance_evidence_sqlite import PerformanceEvidenceSQLiteRepository
 
@@ -253,6 +253,56 @@ def _migrate_cash_conversions(
     )
 
 
+def _stored_trade_event_json_by_id(
+    repo: SQLiteOptionPositionsRepository,
+    *,
+    conn: Any | None = None,
+) -> dict[str, str]:
+    """Read the trade-event payloads exactly as they are stored.
+
+    ``list_trade_events`` hands back decoded domain objects, which cannot be
+    re-encoded back into the bytes that are on disk: the §7.4 canonicalization
+    renders ``contract_key.strike`` as decimal text and drops retired keys, so a
+    re-encode is a contract-key transition. The stored text is the only thing
+    the compare-and-swap in ``_apply_plan`` may compare against, and the only
+    safe base to patch.
+    """
+    reader = getattr(repo, "list_position_projection_event_rows", None)
+    if not callable(reader):
+        raise TypeError(
+            "cash conversion migration requires raw trade-event storage access"
+        )
+    return {
+        str(row["event_id"]): str(row["event_json"])
+        for row in reader(conn=conn)
+    }
+
+
+def _patched_stored_trade_event_json(
+    stored_json: str,
+    *,
+    event_id: str,
+    conversions: Mapping[str, Any],
+) -> str:
+    """Set ``raw_payload.cash_conversions`` on the stored payload text.
+
+    Everything else in the event is carried through verbatim, so the migration
+    writes only the field it owns and cannot perturb an unrelated one.
+    """
+    payload = json.loads(stored_json)
+    if not isinstance(payload, dict):
+        raise ValueError(
+            f"cash conversion migration requires a trade event object: {event_id}"
+        )
+    raw_payload = payload.get("raw_payload")
+    if not isinstance(raw_payload, dict):
+        raise ValueError(
+            f"cash conversion migration requires a trade event raw payload: {event_id}"
+        )
+    raw_payload["cash_conversions"] = dict(conversions)
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
 def _build_plan(
     repo: SQLiteOptionPositionsRepository,
     *,
@@ -262,6 +312,7 @@ def _build_plan(
     replace_superseded: bool = False,
     conn: Any | None = None,
 ) -> _Plan:
+    stored_event_json = _stored_trade_event_json_by_id(repo, conn=conn)
     raw_trade_events = repo.list_trade_events(conn=conn)
     trade_events, diagnostics = import_stored_trade_events(raw_trade_events)
     decode_errors = {
@@ -389,15 +440,27 @@ def _build_plan(
                 )
             )
         if conversion_changes:
-            raw_payload = dict(event.raw_payload or {})
-            raw_payload["cash_conversions"] = conversions
-            updated = replace(event, raw_payload=raw_payload)
+            stored_json = stored_event_json.get(str(event.event_id))
+            if stored_json is None:
+                unresolved.append(
+                    _unresolved(
+                        "trade_event",
+                        event.event_id,
+                        None,
+                        "trade_event_storage_row_missing",
+                    )
+                )
+                continue
             event_changes.append(
                 _EventChange(
                     event_kind="trade_event",
                     event_id=event.event_id,
-                    previous_json=encode_trade_event_for_storage(event).event_json,
-                    new_json=encode_trade_event_for_storage(updated).event_json,
+                    previous_json=stored_json,
+                    new_json=_patched_stored_trade_event_json(
+                        stored_json,
+                        event_id=str(event.event_id),
+                        conversions=conversions,
+                    ),
                     conversion_changes=tuple(conversion_changes),
                 )
             )

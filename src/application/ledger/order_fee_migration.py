@@ -825,7 +825,7 @@ def _estimated_option_changes(
             item.currency,
             item.price,
             item.multiplier,
-            item.contract_key.position_side,
+            item.position_side,
             item.event_type,
         )
         for item in ordered
@@ -839,9 +839,9 @@ def _estimated_option_changes(
             contracts=sum(item.contracts for item in ordered),
             multiplier=int(first.multiplier),
             is_sell=(
-                first.contract_key.position_side == "short"
+                first.position_side == "short"
                 if first.event_type == "open"
-                else first.contract_key.position_side == "long"
+                else first.position_side == "long"
             ),
         )
     except (TypeError, ValueError):

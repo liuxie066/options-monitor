@@ -24,15 +24,14 @@ def _contract(
         account=account,
         underlying_symbol=symbol,
         option_type=option_type,
-        position_side="short" if option_type == "put" else "long",
         strike=100 if option_type == "put" else 110,
         expiration_ymd="2026-08-21",
-    )
+        )
 
 
 def _open(
     event_id: str,
-    record_id: str,
+    lot_id: str,
     *,
     group_id: str = GROUP_ID,
     account: str = "lx",
@@ -55,7 +54,7 @@ def _open(
         price=2,
         currency="USD",
         source="test",
-        lot_id=record_id,
+        lot_id=lot_id,
         raw_payload={
             "fields": {
                 "account": account,
@@ -70,7 +69,7 @@ def _open(
 
 def _adjust(
     event_id: str,
-    record_id: str,
+    lot_id: str,
     *,
     group_id: str | None,
     option_type: str = "put",
@@ -85,7 +84,7 @@ def _adjust(
         price=0,
         currency="USD",
         source="test",
-        target_lot_id=record_id,
+        target_lot_id=lot_id,
         raw_payload={"patch": {"strategy_group_id": group_id}},
     ).to_dict()
 
@@ -105,7 +104,7 @@ def _void(event_id: str, target_event_id: str) -> dict:
 
 
 def _lot(
-    record_id: str,
+    lot_id: str,
     open_event_id: str,
     *,
     group_id: str = GROUP_ID,
@@ -115,7 +114,7 @@ def _lot(
     contracts_open: int = 2,
 ) -> dict:
     return {
-        "record_id": record_id,
+        "record_id": lot_id,
         "fields": {
             "account": account,
             "symbol": symbol,
@@ -183,7 +182,7 @@ def test_exact_membership_is_order_stable_and_allows_closed_identity() -> None:
     assert first.generation_hash == second.generation_hash
     assert first.fact["status"] == "exact"
     assert closed.fact["status"] == "exact"
-    assert closed.global_live_record_ids == ()
+    assert closed.global_live_lot_ids == ()
     assert validate_combo_group_membership(first.fact).status == "valid"
 
 
@@ -225,7 +224,7 @@ def test_closed_third_member_retagged_away_remains_history_conflict() -> None:
     assert resolved.fact["global_current_member_count"] == 2
     assert resolved.fact["global_historical_member_count"] == 3
     assert resolved.fact["retag_event_count"] == 1
-    assert "lot-third" in resolved.global_historical_record_ids
+    assert "lot-third" in resolved.global_historical_lot_ids
 
 
 def test_voided_retag_does_not_enter_effective_history() -> None:

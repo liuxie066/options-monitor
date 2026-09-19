@@ -115,10 +115,10 @@ def _open_positions_for_account(
             continue
         if effective_contracts_open(fields) <= 0:
             continue
-        record_id = str(item.get("record_id") or fields.get("record_id") or "").strip()
+        lot_id = str(item.get("record_id") or fields.get("record_id") or "").strip()
         row = dict(fields)
-        if record_id:
-            row["record_id"] = record_id
+        if lot_id:
+            row["record_id"] = lot_id
         out.append(row)
     return out
 
@@ -181,11 +181,11 @@ def _mark_manual_expiry_review_required(
 def _requires_expiry_assignment_quote(
     fields: dict[str, Any],
     *,
-    eligible_record_ids: set[str] | None = None,
+    eligible_lot_ids: set[str] | None = None,
 ) -> bool:
-    if eligible_record_ids is not None:
-        record_id = str(fields.get("record_id") or "").strip()
-        if record_id not in eligible_record_ids:
+    if eligible_lot_ids is not None:
+        lot_id = str(fields.get("record_id") or "").strip()
+        if lot_id not in eligible_lot_ids:
             return False
     if str(fields.get("_auto_close_skip_reason") or "").strip():
         return False
@@ -198,14 +198,14 @@ def _requires_expiry_assignment_quote(
 def _expiry_assignment_quote_symbols(
     positions: list[dict[str, Any]],
     *,
-    eligible_record_ids: set[str] | None = None,
+    eligible_lot_ids: set[str] | None = None,
 ) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
     for item in positions:
         if not isinstance(item, dict) or not _requires_expiry_assignment_quote(
             item,
-            eligible_record_ids=eligible_record_ids,
+            eligible_lot_ids=eligible_lot_ids,
         ):
             continue
         symbol = str(item.get("symbol") or "").strip()
@@ -221,12 +221,12 @@ def _enrich_positions_with_assignment_quotes(
     quote_by_symbol: dict[str, dict[str, Any]],
     missing_symbols: set[str],
     *,
-    eligible_record_ids: set[str] | None = None,
+    eligible_lot_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for item in positions:
         row = dict(item)
-        if _requires_expiry_assignment_quote(row, eligible_record_ids=eligible_record_ids):
+        if _requires_expiry_assignment_quote(row, eligible_lot_ids=eligible_lot_ids):
             symbol = str(row.get("symbol") or "").strip()
             quote = quote_by_symbol.get(symbol)
             if quote:
@@ -248,9 +248,9 @@ def _refresh_expiry_assignment_quote_evidence(
     cfg: dict[str, Any],
     account: str | None,
     base: Path,
-    eligible_record_ids: set[str] | None = None,
+    eligible_lot_ids: set[str] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    symbols = _expiry_assignment_quote_symbols(positions, eligible_record_ids=eligible_record_ids)
+    symbols = _expiry_assignment_quote_symbols(positions, eligible_lot_ids=eligible_lot_ids)
     diagnostics: dict[str, Any] = {
         "enabled": True,
         "quote_source": "opend_realtime",
@@ -278,7 +278,7 @@ def _refresh_expiry_assignment_quote_evidence(
             positions,
             {},
             set(symbols),
-            eligible_record_ids=eligible_record_ids,
+            eligible_lot_ids=eligible_lot_ids,
         ), diagnostics
     effective_host = str(quote_route.host)
     effective_port = int(quote_route.port or 0)
@@ -307,7 +307,7 @@ def _refresh_expiry_assignment_quote_evidence(
             positions,
             {},
             set(symbols),
-            eligible_record_ids=eligible_record_ids,
+            eligible_lot_ids=eligible_lot_ids,
         ), diagnostics
 
     quote_by_symbol: dict[str, dict[str, Any]] = {}
@@ -368,7 +368,7 @@ def _refresh_expiry_assignment_quote_evidence(
         positions,
         quote_by_symbol,
         missing_symbols,
-        eligible_record_ids=eligible_record_ids,
+        eligible_lot_ids=eligible_lot_ids,
     ), diagnostics
 
 
@@ -423,7 +423,7 @@ def format_auto_close_summary(result: dict[str, Any]) -> str:
             if not isinstance(item, dict):
                 continue
             lines.append(
-                f"- {item.get('record_id')} | {item.get('position_id')} | "
+                f"- {item.get('record_id')} | {item.get('position_key')} | "
                 f"exp={item.get('expiration_ymd') or item.get('expiration_ms')}"
             )
     if review_required:
@@ -433,7 +433,7 @@ def format_auto_close_summary(result: dict[str, Any]) -> str:
             if not isinstance(item, dict) or not item.get("skip_reason"):
                 continue
             lines.append(
-                f"- {item.get('record_id')} | {item.get('position_id')} | "
+                f"- {item.get('record_id')} | {item.get('position_key')} | "
                 f"skip={item.get('skip_reason')} | exp={item.get('expiration_ymd') or item.get('expiration_ms')}"
             )
     if grace_pending:
@@ -443,7 +443,7 @@ def format_auto_close_summary(result: dict[str, Any]) -> str:
             if not isinstance(item, dict) or item.get("skip_reason") != "grace_period_pending":
                 continue
             lines.append(
-                f"- {item.get('record_id')} | {item.get('position_id')} | "
+                f"- {item.get('record_id')} | {item.get('position_key')} | "
                 f"eligible_after={item.get('eligible_after_utc') or item.get('eligible_after_ms')}"
             )
 
@@ -503,7 +503,7 @@ def _expired_close_run_payloads(value: Any) -> tuple[list[dict[str, Any]], list[
     )
 
 
-def _missing_assignment_spot_record_ids(decisions: list[dict[str, Any]]) -> set[str]:
+def _missing_assignment_spot_lot_ids(decisions: list[dict[str, Any]]) -> set[str]:
     out: set[str] = set()
     for item in decisions:
         if not isinstance(item, dict):
@@ -513,9 +513,9 @@ def _missing_assignment_spot_record_ids(decisions: list[dict[str, Any]]) -> set[
         assignment_review = item.get("assignment_review")
         if not isinstance(assignment_review, dict) or assignment_review.get("status") != "missing_spot":
             continue
-        record_id = str(item.get("record_id") or "").strip()
-        if record_id:
-            out.add(record_id)
+        lot_id = str(item.get("record_id") or "").strip()
+        if lot_id:
+            out.add(lot_id)
     return out
 
 
@@ -623,7 +623,7 @@ def run_expired_position_maintenance_for_account(
         cfg=cfg,
         account=account,
         base=base,
-        eligible_record_ids=_missing_assignment_spot_record_ids(initial_decisions),
+        eligible_lot_ids=_missing_assignment_spot_lot_ids(initial_decisions),
     )
     _emit_auto_close_stage(account, "assignment_quote_refresh_finished")
     if dry_run:

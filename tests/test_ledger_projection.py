@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from decimal import Decimal
+
 from domain.domain.ledger import ContractKey, TradeEvent, project_trade_events
+from domain.domain.ledger.identity import position_key_for
 from domain.domain.option_position_lots import parse_exp_to_ms
+from domain.domain.trade_contract_identity import derive_trade_side
 
 
 def _key(
@@ -9,7 +13,6 @@ def _key(
     account: str = "sy",
     symbol: str = "0700.HK",
     option_type: str = "put",
-    side: str = "short",
     strike: float = 450.0,
     expiration_ymd: str = "2026-05-28",
 ) -> ContractKey:
@@ -18,10 +21,9 @@ def _key(
         account=account,
         underlying_symbol=symbol,
         option_type=option_type,
-        position_side=side,
         strike=strike,
         expiration_ymd=expiration_ymd,
-    )
+        )
 
 
 def _event(
@@ -35,6 +37,7 @@ def _event(
     lot_id: str | None = None,
     target_lot_id: str | None = None,
     target_event_id: str | None = None,
+    position_side: str = "short",
 ) -> TradeEvent:
     return TradeEvent(
         event_id=event_id,
@@ -49,6 +52,9 @@ def _event(
         lot_id=lot_id,
         target_lot_id=target_lot_id,
         target_event_id=target_event_id,
+        # §9.2 step 3: the contract key no longer carries the position side, so the
+        # event must declare the trade side it is derived from.
+        raw_payload={"side": derive_trade_side(event_type, position_side) or ""},
     )
 
 
@@ -109,7 +115,7 @@ def test_projection_view_keeps_multiple_same_contract_lots_as_read_only_aggregat
     lots = {item.lot_id: item for item in result.lots}
     assert lots["lot_a"].status == "close"
     assert lots["lot_b"].status == "open"
-    assert result.views[0].position_key == key.position_key
+    assert result.views[0].position_key == position_key_for(key, "short")
     assert result.views[0].total_contracts_open == 6
     assert result.views[0].lot_ids == ("lot_b",)
 
@@ -311,7 +317,7 @@ def test_projection_applies_adjust_patch_to_target_lot_state() -> None:
     assert lot.contracts_opened == 2
     assert lot.contracts_open == 2
     assert lot.contracts_closed == 0
-    assert lot.premium_open == 3.1
+    assert lot.premium_open == Decimal("3.1")
     assert lot.currency == "USD"
     assert lot.opened_at_ms == 2000
     assert lot.last_event_id == "adjust-nvda"
@@ -351,3 +357,215 @@ def test_projection_rejects_adjust_patch_with_unsupported_field() -> None:
     assert [item.code for item in result.diagnostics] == ["adjust_patch_invalid"]
     assert "unsupported fields: free_form_field" in result.diagnostics[0].details["error"]
     assert result.lots[0].contracts_opened == 1
+
+
+def test_projection_applies_legacy_adjust_patch_carrying_retired_position_id() -> None:
+    """§7.1 retired ``position_id``, but stored adjust events still carry it.
+
+    The patch decoder rejects unknown fields, and the projection only logs an
+    ``adjust_patch_invalid`` diagnostic while leaving the lot untouched — so a
+    historical adjustment whose patch was written before the retirement would be
+    dropped silently. The retired key must be tolerated and discarded, without
+    blunting the decoder for genuinely unknown fields.
+    """
+    key = _key()
+    result = project_trade_events(
+        [
+            _event(
+                event_id="open-a",
+                event_type="open",
+                contract_key=key,
+                contracts=1,
+                event_time_ms=1000,
+                lot_id="lot_a",
+            ),
+            TradeEvent(
+                event_id="adjust-a",
+                event_type="adjust",
+                event_time_ms=2000,
+                contract_key=key,
+                contracts=0,
+                price=0.0,
+                currency="HKD",
+                source="test",
+                multiplier=100,
+                target_lot_id="lot_a",
+                # Exactly what a pre-§7.1 writer stored: the real fields plus the
+                # then-current ``position_id`` alongside them.
+                raw_payload={
+                    "patch": {
+                        "contracts": 2,
+                        "position_id": "futu|sy|0700.HK|2026-05-28|450P|short",
+                    }
+                },
+            ),
+        ]
+    )
+
+    assert result.diagnostics == []
+    assert result.lots[0].contracts_opened == 2
+
+    # The tolerance is narrow: a real unknown key is still rejected, so the
+    # decoder did not become a no-op.
+    unknown = project_trade_events(
+        [
+            _event(
+                event_id="open-b",
+                event_type="open",
+                contract_key=key,
+                contracts=1,
+                event_time_ms=1000,
+                lot_id="lot_b",
+            ),
+            TradeEvent(
+                event_id="adjust-b",
+                event_type="adjust",
+                event_time_ms=2000,
+                contract_key=key,
+                contracts=0,
+                price=0.0,
+                currency="HKD",
+                source="test",
+                multiplier=100,
+                target_lot_id="lot_b",
+                raw_payload={
+                    "patch": {
+                        "contracts": 2,
+                        "position_id": "retired",
+                        "free_form_field": "bad",
+                    }
+                },
+            ),
+        ]
+    )
+
+    assert [item.code for item in unknown.diagnostics] == ["adjust_patch_invalid"]
+    assert "unsupported fields: free_form_field" in unknown.diagnostics[0].details["error"]
+    assert "position_id" not in unknown.diagnostics[0].details["error"]
+    assert unknown.lots[0].contracts_opened == 1
+
+
+def _stock_key(*, symbol: str = "AAPL", account: str = "sy") -> ContractKey:
+    return ContractKey.from_values(
+        broker="futu",
+        account=account,
+        underlying_symbol=symbol,
+        option_type="",
+        strike=0.0,
+        expiration_ymd="",
+        asset_type="stock",
+        )
+
+
+def _stock_event(
+    *,
+    event_id: str,
+    event_type: str,
+    contract_key: ContractKey,
+    contracts: int,
+    event_time_ms: int,
+    price: float = 1.0,
+    lot_id: str | None = None,
+    target_lot_id: str | None = None,
+) -> TradeEvent:
+    return TradeEvent(
+        event_id=event_id,
+        event_type=event_type,
+        event_time_ms=event_time_ms,
+        contract_key=contract_key,
+        contracts=contracts,
+        price=price,
+        currency="USD",
+        source="test",
+        lot_id=lot_id,
+        target_lot_id=target_lot_id,
+        asset_type="stock",
+        raw_payload={"side": derive_trade_side(event_type, "long") or ""},
+    )
+
+
+def test_projection_projects_stock_lot_with_shares_lifecycle() -> None:
+    key = _stock_key()
+    result = project_trade_events(
+        [
+            _stock_event(event_id="open-stock", event_type="open", contract_key=key, contracts=100, event_time_ms=1000, lot_id="lot_stock", price=45.5),
+            _stock_event(event_id="close-stock", event_type="close", contract_key=key, contracts=60, event_time_ms=2000, target_lot_id="lot_stock", price=50.0),
+        ]
+    )
+
+    assert result.diagnostics == []
+    assert result.allocations == []
+    lots = {item.lot_id: item for item in result.lots}
+    lot = lots["lot_stock"]
+    assert lot.asset_type == "stock"
+    assert lot.contracts_opened == 0
+    assert lot.contracts_open == 0
+    assert lot.contracts_closed == 0
+    assert lot.shares_opened == 100.0
+    assert lot.shares_open == 40.0
+    assert lot.shares_closed == 60.0
+    assert lot.premium_open == 0.0
+    assert lot.multiplier == 0.0
+    assert lot.status == "open"
+    assert lot.realized_pnl == Decimal("270.0")  # (50 - 45.5) * 60
+    # §7.4: ``Decimal("270.0") == 270.0`` is True, so the comparison above is
+    # also satisfied by a ``float`` field; assert the type explicitly.
+    assert isinstance(lot.realized_pnl, Decimal)
+    assert isinstance(lot.shares_opened, Decimal)
+
+
+def test_projection_stock_full_close_finalizes_and_realizes_pnl() -> None:
+    key = _stock_key()
+    result = project_trade_events(
+        [
+            _stock_event(event_id="open-stock", event_type="open", contract_key=key, contracts=100, event_time_ms=1000, lot_id="lot_stock", price=45.5),
+            _stock_event(event_id="close-stock", event_type="close", contract_key=key, contracts=100, event_time_ms=2000, target_lot_id="lot_stock", price=50.0),
+        ]
+    )
+
+    assert result.diagnostics == []
+    lots = {item.lot_id: item for item in result.lots}
+    lot = lots["lot_stock"]
+    assert lot.status == "close"
+    assert lot.shares_open == 0.0
+    assert lot.shares_closed == 100.0
+    assert lot.realized_pnl == Decimal("450.0")  # (50 - 45.5) * 100
+    assert isinstance(lot.realized_pnl, Decimal)
+    assert result.views == []
+
+
+def test_projection_stock_risk_view_reports_shares_open() -> None:
+    key = _stock_key()
+    result = project_trade_events(
+        [
+            _stock_event(event_id="open-stock", event_type="open", contract_key=key, contracts=100, event_time_ms=1000, lot_id="lot_stock", price=45.5),
+        ]
+    )
+
+    assert result.diagnostics == []
+    assert len(result.views) == 1
+    view = result.views[0]
+    assert view.contract_key == key
+    assert view.position_key == position_key_for(key, "long")
+    assert view.total_contracts_open == 0
+    assert view.total_shares_open == 100.0
+    assert view.lot_ids == ("lot_stock",)
+    assert view.earliest_expiration_ymd == ""
+    assert view.cash_secured_amount == 0.0
+    assert view.underlying_share_locked == 0.0
+
+
+def test_projection_stock_rejects_oversized_close_without_partial_mutation() -> None:
+    key = _stock_key()
+    result = project_trade_events(
+        [
+            _stock_event(event_id="open-stock", event_type="open", contract_key=key, contracts=100, event_time_ms=1000, lot_id="lot_stock", price=45.5),
+            _stock_event(event_id="close-stock", event_type="close", contract_key=key, contracts=150, event_time_ms=2000, target_lot_id="lot_stock", price=50.0),
+        ]
+    )
+
+    assert [item.code for item in result.diagnostics] == ["close_contracts_exceed_open"]
+    lots = {item.lot_id: item for item in result.lots}
+    assert lots["lot_stock"].status == "open"
+    assert lots["lot_stock"].shares_open == 100.0
+    assert lots["lot_stock"].shares_closed == 0.0

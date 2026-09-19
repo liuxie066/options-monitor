@@ -272,7 +272,6 @@ def _synthetic_event(
         account=f"bench{account_index:02d}",
         underlying_symbol="NVDA",
         option_type="call" if phase_3a_call else "put",
-        position_side="long" if phase_3a_call else "short",
         strike=(20.0 if phase_3a_call else 10.0) + (lot_index * 0.01),
         expiration_ymd="2028-12-15",
     )
@@ -594,7 +593,6 @@ def _phase_3a_tail_events(*, count: int, payload_bytes: int = 256) -> list[dict[
         account="bench00",
         underlying_symbol="NVDA",
         option_type="put",
-        position_side="short",
         strike=10,
         expiration_ymd="2028-12-15",
     )

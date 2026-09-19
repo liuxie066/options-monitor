@@ -97,7 +97,7 @@ def _phase_3a_batch_adjustments(
 ) -> list[dict[str, Any]]:
     return [
         {
-            "record_id": module._phase_3a_record_id(spec, index),
+            "record_id": module._phase_3a_lot_id(spec, index),
             "premium_per_share": 1.25 + index,
             "as_of_ms": 1_850_000_000_100,
         }
@@ -1164,7 +1164,7 @@ def test_phase_3a_batch_adjust_full_prefix_reads_are_bounded(
 
     assert counters["full_prefix_reader_calls"] == expected_full_reads
     assert [result.ledger_preflight.target_lot_id for result in results] == [
-        module._phase_3a_record_id(spec, index) for index in range(cardinality)
+        module._phase_3a_lot_id(spec, index) for index in range(cardinality)
     ]
 
 

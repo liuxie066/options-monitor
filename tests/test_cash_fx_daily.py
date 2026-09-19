@@ -36,9 +36,14 @@ def observation(rate: str = "7.2", *, quote: str = "2026-09-07T02:00:00+00:00", 
 def event(identity: str, at_ms: int) -> TradeEvent:
     return TradeEvent(
         event_id=identity, event_type="open", event_time_ms=at_ms,
-        contract_key=ContractKey.from_values(broker="富途", account="lx", underlying_symbol="NVDA", option_type="put", position_side="short", strike=100, expiration_ymd="2026-09-18"),
+        contract_key=ContractKey.from_values(broker="富途", account="lx", underlying_symbol="NVDA", option_type="put", strike=100, expiration_ymd="2026-09-18"),
         contracts=1, price=2, currency="USD", source="broker", multiplier=100, lot_id=f"lot-{identity}",
-        raw_payload={"futu_account_id": "123", "order_id": identity},
+        raw_payload={
+            # §9.2 step 3: the short put side travels as the trade side.
+            "side": "sell",
+            "futu_account_id": "123",
+            "order_id": identity,
+        },
     )
 
 
@@ -132,7 +137,7 @@ def test_public_fx_value_failure_keeps_native_cash_but_storage_failure_aborts(tm
     else:
         persist_trade_event_object(repo, incoming)
         stored = repo.list_trade_events()[0]
-        assert stored["price"] == 2
+        assert stored["price"] == "2"
         assert stored["raw_payload"]["cash_conversions"]["option_trade_cash_gross"]["status"] == "pending"
 
 

@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 
-from domain.domain.option_position_lots import OpenPositionCommand
 from src.application.ledger.manual_trades import persist_manual_open_event
 from src.application.ledger.repository import (
     SQLiteOptionPositionsRepository,
@@ -145,20 +144,18 @@ def _open_position(
 ) -> None:
     persist_manual_open_event(
         repo,
-        OpenPositionCommand(
-            broker="富途",
-            account=account,
-            symbol=symbol,
-            option_type=option_type,
-            side=side,
-            contracts=contracts,
-            currency="USD",
-            strike=strike,
-            multiplier=100,
-            expiration_ymd=expiry,
-            premium_per_share=2.0,
-            opened_at_ms=opened_at_ms,
-        ),
+        broker="富途",
+        account=account,
+        symbol=symbol,
+        option_type=option_type,
+        side=side,
+        contracts=contracts,
+        currency="USD",
+        strike=strike,
+        multiplier=100,
+        expiration_ymd=expiry,
+        premium_per_share=2.0,
+        opened_at_ms=opened_at_ms,
     )
 
 

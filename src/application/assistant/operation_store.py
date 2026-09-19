@@ -910,8 +910,8 @@ def _manual_open_summary(args: dict[str, Any]) -> str:
 
 
 def _manual_close_summary(args: dict[str, Any]) -> str:
-    record_id = str(args.get("record_id") or "").strip()
-    base = f"record_id {record_id}" if record_id else " ".join(
+    lot_id = str(args.get("record_id") or "").strip()
+    base = f"record_id {lot_id}" if lot_id else " ".join(
         part
         for part in (
             str(args.get("account") or "-"),

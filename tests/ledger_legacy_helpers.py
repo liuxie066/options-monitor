@@ -33,14 +33,12 @@ class LegacyTradeEvent:
     def to_dict(self) -> dict[str, Any]:
         if self.position_effect == "open":
             event_type = "open"
-            position_side = "short" if self.side == "sell" else "long"
         elif self.position_effect == "close":
             event_type = (
                 "expire_close"
                 if self.raw_payload.get("close_type") == "expire_auto_close"
                 else "close"
             )
-            position_side = "short" if self.side == "buy" else "long"
         else:
             raise AssertionError(f"unsupported test position_effect: {self.position_effect}")
         target_lot_id = str(
@@ -53,6 +51,8 @@ class LegacyTradeEvent:
             or self.raw_payload.get("lot_id")
             or f"lot_{self.event_id}"
         ).strip()
+        raw_payload = dict(self.raw_payload)
+        raw_payload.setdefault("side", self.side)
         return TradeEvent(
             event_id=self.event_id,
             event_type=event_type,
@@ -62,7 +62,6 @@ class LegacyTradeEvent:
                 account=self.account,
                 underlying_symbol=self.symbol,
                 option_type=self.option_type,
-                position_side=position_side,
                 strike=self.strike,
                 expiration_ymd=self.expiration_ymd,
             ),
@@ -79,7 +78,7 @@ class LegacyTradeEvent:
                 or ""
             ).strip() or None,
             lot_id=lot_id,
-            raw_payload=dict(self.raw_payload),
+            raw_payload=raw_payload,
         ).to_dict()
 
     def to_legacy_dict(self) -> dict[str, Any]:

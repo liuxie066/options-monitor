@@ -35,7 +35,7 @@ def test_position_maintenance_filters_account_and_broker_in_dry_run(monkeypatch,
     captured: dict[str, Any] = {}
 
     records = [
-        _lot("rec_keep", account="lx", position_id="pos_keep"),
+        _lot("rec_keep", account="lx", position_key="pos_keep"),
         _lot("rec_other_account"),
         _lot("rec_other_broker", broker="other", account="lx"),
     ]
@@ -50,7 +50,7 @@ def test_position_maintenance_filters_account_and_broker_in_dry_run(monkeypatch,
         return [
             {
                 "record_id": "rec_keep",
-                "position_id": "pos_keep",
+                "position_key": "pos_keep",
                 "should_close": True,
                 "expiration_ymd": "2026-05-01",
             }
@@ -94,7 +94,7 @@ def test_position_maintenance_filters_account_and_broker_in_dry_run(monkeypatch,
 
 
 @pytest.mark.parametrize(
-    ("market", "expected_record_ids"),
+    ("market", "expected_lot_ids"),
     [
         ("us", ["rec_us"]),
         ("hk", ["rec_hk"]),
@@ -104,7 +104,7 @@ def test_position_maintenance_filters_runtime_market_in_dry_run(
     monkeypatch,
     tmp_path: Path,
     market: str,
-    expected_record_ids: list[str],
+    expected_lot_ids: list[str],
 ) -> None:
     from src.application.positions import maintenance as mod
 
@@ -114,8 +114,8 @@ def test_position_maintenance_filters_runtime_market_in_dry_run(
     fake_repo = object()
     captured: dict[str, Any] = {}
     records = [
-        _lot("rec_us", symbol="PDD", position_id="PDD_20260618_85P_short"),
-        _lot("rec_hk", symbol="0700.HK", position_id="0700_HK_20260618_420P_short"),
+        _lot("rec_us", symbol="PDD", position_key="PDD_20260618_85P_short"),
+        _lot("rec_hk", symbol="0700.HK", position_key="0700_HK_20260618_420P_short"),
     ]
 
     monkeypatch.setattr(mod, "resolve_data_config_path", lambda **_kwargs: data_config)
@@ -128,7 +128,7 @@ def test_position_maintenance_filters_runtime_market_in_dry_run(
         return [
             {
                 "record_id": item["record_id"],
-                "position_id": item["position_id"],
+                "position_key": item["position_key"],
                 "should_close": True,
                 "expiration_ymd": "2026-06-18",
             }
@@ -157,8 +157,8 @@ def test_position_maintenance_filters_runtime_market_in_dry_run(
     )
 
     assert result["market_filter"] == market.upper()
-    assert [p["record_id"] for p in captured["positions"]] == expected_record_ids
-    assert [item["record_id"] for item in result["decision_items"]] == expected_record_ids
+    assert [p["record_id"] for p in captured["positions"]] == expected_lot_ids
+    assert [item["record_id"] for item in result["decision_items"]] == expected_lot_ids
 
 
 def test_position_maintenance_refreshes_assignment_quote_before_dry_run(
@@ -198,7 +198,7 @@ def test_position_maintenance_refreshes_assignment_quote_before_dry_run(
                 contracts=2,
                 contracts_open=2,
                 expiration=exp_ms,
-                position_id="0700_HK_20260618_420P_short",
+                position_key="0700_HK_20260618_420P_short",
             )
         ],
     )
@@ -265,7 +265,7 @@ def test_position_maintenance_waits_for_assignment_when_assignment_quote_unavail
                 contracts=2,
                 contracts_open=2,
                 expiration=exp_ms,
-                position_id="PDD_20260618_85P_short",
+                position_key="PDD_20260618_85P_short",
             )
         ],
     )
@@ -315,7 +315,7 @@ def test_position_maintenance_surfaces_grace_pending_expired_positions(monkeypat
         mod,
         "_load_expiry_close_position_lots",
         lambda _repo: [
-            _lot("rec_wait", account="lx", contracts=2, contracts_open=2, position_id="0700_20260605_440P_short")
+            _lot("rec_wait", account="lx", contracts=2, contracts_open=2, position_key="0700_20260605_440P_short")
         ],
     )
     monkeypatch.setattr(
@@ -324,7 +324,7 @@ def test_position_maintenance_surfaces_grace_pending_expired_positions(monkeypat
         lambda *_args, **_kwargs: [
             {
                 "record_id": "rec_wait",
-                "position_id": "0700_20260605_440P_short",
+                "position_key": "0700_20260605_440P_short",
                 "should_close": False,
                 "skip_reason": "grace_period_pending",
                 "expiration_ymd": "2026-06-05",
@@ -371,7 +371,7 @@ def test_position_maintenance_external_account_requires_manual_expiry_review(mon
         mod,
         "_load_expiry_close_position_lots",
         lambda _repo: [
-            _lot("lot_tigr", contracts=10, contracts_open=10, position_id="pos_tigr", expiration=expiration)
+            _lot("lot_tigr", contracts=10, contracts_open=10, position_key="pos_tigr", expiration=expiration)
         ],
     )
 
@@ -485,16 +485,17 @@ def test_position_maintenance_reuses_startup_projection_recovery_once(
                 account="lx",
                 underlying_symbol="NVDA",
                 option_type="put",
-                position_side="long",
                 strike=100,
                 expiration_ymd="2026-08-28",
-            ),
+                        ),
             contracts=1,
             price=1.0,
             currency="USD",
             source="test_startup_recovery",
             multiplier=100,
             lot_id="lot_startup_recovery",
+            # §9.2 step 3: the short put side travels as the trade side.
+            raw_payload={"side": "sell"},
         )
     )
     assert seed_repo.count_trade_events() == 1
@@ -598,7 +599,7 @@ def test_position_maintenance_attaches_receipt_after_apply(monkeypatch, tmp_path
         mod,
         "_load_expiry_close_position_lots",
         lambda _repo: [
-            _lot("rec_1", account="lx", position_id="pos_1")
+            _lot("rec_1", account="lx", position_key="pos_1")
         ],
     )
     monkeypatch.setattr(
@@ -609,7 +610,7 @@ def test_position_maintenance_attaches_receipt_after_apply(monkeypatch, tmp_path
                 "decisions": [
                     {
                         "record_id": "rec_1",
-                        "position_id": "pos_1",
+                        "position_key": "pos_1",
                         "should_close": True,
                         "expiration_ymd": "2026-05-01",
                     }
@@ -617,7 +618,7 @@ def test_position_maintenance_attaches_receipt_after_apply(monkeypatch, tmp_path
                 "applied": [
                     {
                         "record_id": "rec_1",
-                        "position_id": "pos_1",
+                        "position_key": "pos_1",
                         "should_close": True,
                         "expiration_ymd": "2026-05-01",
                     }
@@ -669,8 +670,8 @@ def test_position_maintenance_skips_receipt_in_no_send_mode(monkeypatch, tmp_pat
         "record_expired_position_closes",
         lambda *_args, **_kwargs: SimpleNamespace(
             to_payload=lambda: {
-                "decisions": [{"record_id": "rec_1", "position_id": "pos_1", "should_close": True}],
-                "applied": [{"record_id": "rec_1", "position_id": "pos_1", "should_close": True}],
+                "decisions": [{"record_id": "rec_1", "position_key": "pos_1", "should_close": True}],
+                "applied": [{"record_id": "rec_1", "position_key": "pos_1", "should_close": True}],
                 "errors": [],
             }
         ),

@@ -8,7 +8,11 @@ import pytest  # pyright: ignore[reportMissingImports]
 from domain.domain.ledger import ContractKey, TradeEvent
 from tests.ledger_legacy_helpers import LegacyTradeEvent
 from src.application.ledger import repository as ledger_repository
-from src.application.ledger.event_codec import encode_trade_event_for_storage, import_stored_trade_events
+from src.application.ledger.event_codec import (
+    encode_trade_event_for_storage,
+    import_stored_trade_events,
+    stored_trade_event_to_ledger_event,
+)
 from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
 
 
@@ -18,10 +22,21 @@ def _contract_key() -> ContractKey:
         account="lx",
         underlying_symbol="AAPL",
         option_type="put",
-        position_side="short",
         strike=150.0,
         expiration_ymd="2026-06-19",
-    )
+        )
+
+
+def _stock_contract_key() -> ContractKey:
+    return ContractKey.from_values(
+        broker="富途",
+        account="lx",
+        underlying_symbol="AAPL",
+        option_type="",
+        strike=0.0,
+        expiration_ymd="",
+        asset_type="stock",
+        )
 
 
 def test_event_codec_rejects_legacy_trade_event_payloads() -> None:
@@ -66,6 +81,8 @@ def test_sqlite_repo_stores_canonical_event_json_and_returns_compat_payload(tmp_
         source="manual",
         multiplier=100,
         lot_id="lot_open-aapl",
+        # §9.2 step 3: the short put side travels as the trade side.
+        raw_payload={"side": "sell"},
     )
 
     assert repo.upsert_trade_event(event) is True
@@ -98,6 +115,8 @@ def test_publisher_rejects_mixed_canonical_and_legacy_stored_events() -> None:
         source="manual",
         multiplier=100,
         lot_id="lot_open-aapl",
+        # §9.2 step 3: the short put side travels as the trade side.
+        raw_payload={"side": "sell"},
     ).to_dict()
     legacy_close = LegacyTradeEvent(
         event_id="close-aapl",
@@ -128,7 +147,7 @@ def test_publisher_rejects_mixed_canonical_and_legacy_stored_events() -> None:
     projection = project_stored_trade_events_to_position_lots([canonical_open, legacy_payload])
 
     assert [item.code for item in projection.diagnostics] == ["non_canonical_trade_event_schema"]
-    assert projection.lots[0].record_id == "lot_open-aapl"
+    assert projection.lots[0].lot_id == "lot_open-aapl"
     assert projection.lots[0].fields["contracts_open"] == 2
 
 
@@ -160,3 +179,93 @@ def test_encode_rejects_event_values_that_cannot_form_a_publishable_lot() -> Non
             match="trade event could not be encoded|trade event failed validation",
         ):
             encode_trade_event_for_storage(TradeEvent(**(base | overrides)))
+
+
+def test_codec_persists_asset_type_and_quantity_unit() -> None:
+    option_event = TradeEvent(
+        event_id="open-aapl-opt",
+        event_type="open",
+        event_time_ms=1000,
+        contract_key=_contract_key(),
+        contracts=1,
+        price=1.0,
+        currency="USD",
+        source="manual",
+        multiplier=100,
+        lot_id="lot_open-aapl-opt",
+        asset_type="option",
+    )
+    stock_event = TradeEvent(
+        event_id="open-aapl-stk",
+        event_type="open",
+        event_time_ms=1000,
+        contract_key=_stock_contract_key(),
+        contracts=50,
+        price=45.5,
+        currency="USD",
+        source="manual",
+        lot_id="lot_open-aapl-stk",
+        asset_type="stock",
+    )
+    encoded_opt = encode_trade_event_for_storage(option_event)
+    encoded_stk = encode_trade_event_for_storage(stock_event)
+    assert encoded_opt.payload["asset_type"] == "option"
+    assert encoded_opt.payload["quantity_unit"] == "contract"
+    assert encoded_stk.payload["asset_type"] == "stock"
+    assert encoded_stk.payload["quantity_unit"] == "share"
+    stored_stk = json.loads(encoded_stk.event_json)
+    assert stored_stk["asset_type"] == "stock"
+    assert stored_stk["quantity_unit"] == "share"
+
+
+def test_legacy_canonical_payload_without_asset_type_defaults_to_option() -> None:
+    contract_key = _contract_key().to_dict()
+    contract_key.pop("asset_type", None)
+    legacy_payload = {
+        "event_id": "legacy-open-1",
+        "event_type": "open",
+        "event_time_ms": 1000,
+        "contract_key": contract_key,
+        "contracts": 2,
+        "price": 1.0,
+        "currency": "USD",
+        "source": "manual",
+        "multiplier": 100,
+        "lot_id": "lot_legacy_open-1",
+    }
+    event, diagnostics = stored_trade_event_to_ledger_event(legacy_payload)
+    assert diagnostics == []
+    assert event is not None
+    assert event.asset_type == "option"
+    assert event.quantity_unit == "contract"
+    # 旧事件重写后 asset_type/quantity_unit 被显式持久化
+    reencoded = encode_trade_event_for_storage(legacy_payload)
+    assert reencoded.payload["asset_type"] == "option"
+    assert reencoded.payload["quantity_unit"] == "contract"
+
+
+def test_sqlite_repo_stores_stock_event_asset_type_and_quantity_unit(tmp_path: Path) -> None:
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    stock_event = TradeEvent(
+        event_id="open-aapl-stk",
+        event_type="open",
+        event_time_ms=1000,
+        contract_key=_stock_contract_key(),
+        contracts=50,
+        price=45.5,
+        currency="USD",
+        source="manual",
+        lot_id="lot_open-aapl-stk",
+        asset_type="stock",
+    )
+    assert repo.upsert_trade_event(stock_event) is True
+    with repo._connect() as conn:  # type: ignore[attr-defined]
+        row = conn.execute(
+            "SELECT event_json FROM trade_events WHERE event_id = ?", ("open-aapl-stk",)
+        ).fetchone()
+    stored = json.loads(str(row["event_json"]))
+    assert stored["asset_type"] == "stock"
+    assert stored["quantity_unit"] == "share"
+    listed = repo.list_trade_events()
+    assert listed[0]["asset_type"] == "stock"
+    assert listed[0]["quantity_unit"] == "share"

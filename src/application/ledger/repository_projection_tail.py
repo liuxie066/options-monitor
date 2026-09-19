@@ -38,7 +38,7 @@ class PositionProjectionTailRepositoryMixin:
     ) -> PositionLotDiff:
         desired: dict[
             str,
-            tuple[str, str, str, str | None, int | None, float | None, float | None],
+            tuple[str, str, str, str | None, int | None, float | None, float | None, str],
         ] = {}
         for record in records:
             values = _position_lot_storage_values(record)
@@ -109,6 +109,13 @@ class PositionProjectionTailRepositoryMixin:
                 if old_account:
                     touched_accounts.add(old_account)
 
+            # The loop key is the storage key this diff looks rows up and binds
+            # ``WHERE record_id = ?`` with, so it is ``desired``'s key (values[0])
+            # and not the trailing carrier slot (values[7]). Those slots happen to
+            # hold one value today because ``_position_lot_storage_values``
+            # dual-writes both from one source; that is a write convention, not a
+            # guarantee, and unpacking the carrier into the loop key silently
+            # retargets the lookup and the WHERE bind onto another row.
             for record_id, values in desired.items():
                 (
                     _record_id,
@@ -118,6 +125,7 @@ class PositionProjectionTailRepositoryMixin:
                     expiration_ms,
                     strike,
                     multiplier,
+                    lot_id,
                 ) = values
                 current = current_by_id.get(record_id)
                 if current is None:
@@ -125,8 +133,8 @@ class PositionProjectionTailRepositoryMixin:
                         """
                         INSERT INTO position_lots (
                           record_id, account, fields_json, source_event_id,
-                          expiration, strike, multiplier, updated_at_ms
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                          expiration, strike, multiplier, lot_id, updated_at_ms
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (*values, ts),
                     )
@@ -163,7 +171,8 @@ class PositionProjectionTailRepositoryMixin:
                     """
                     UPDATE position_lots
                     SET account = ?, fields_json = ?, source_event_id = ?,
-                        expiration = ?, strike = ?, multiplier = ?, updated_at_ms = ?
+                        expiration = ?, strike = ?, multiplier = ?, lot_id = ?,
+                        updated_at_ms = ?
                     WHERE record_id = ?
                     """,
                     (
@@ -173,6 +182,7 @@ class PositionProjectionTailRepositoryMixin:
                         expiration_ms,
                         strike,
                         multiplier,
+                        lot_id,
                         ts,
                         record_id,
                     ),
@@ -299,7 +309,7 @@ class PositionProjectionTailRepositoryMixin:
         with self._optional_conn(conn) as active_conn:
             cursor = active_conn.execute(
                 """
-                SELECT record_id, fields_json, expiration, strike, multiplier
+                SELECT record_id, lot_id, fields_json, expiration, strike, multiplier
                 FROM position_lots
                 WHERE account = ?
                 ORDER BY record_id ASC
@@ -742,7 +752,7 @@ class PositionProjectionTailRepositoryMixin:
         with self._optional_conn(conn) as active_conn:
             rows = active_conn.execute(
                 """
-                SELECT record_id, fields_json, expiration, strike, multiplier
+                SELECT record_id, lot_id, fields_json, expiration, strike, multiplier
                 FROM position_lots
                 WHERE account = ?
                   AND json_extract(fields_json, '$.status') = 'open'
@@ -754,18 +764,18 @@ class PositionProjectionTailRepositoryMixin:
 
     def get_position_lots_by_ids(
         self,
-        record_ids: Sequence[str],
+        lot_ids: Sequence[str],
         *,
         conn: sqlite3.Connection | None = None,
     ) -> list[dict[str, Any]]:
-        normalized = tuple(dict.fromkeys(str(item or "").strip() for item in record_ids))
+        normalized = tuple(dict.fromkeys(str(item or "").strip() for item in lot_ids))
         if not normalized or any(not item for item in normalized):
             return []
         placeholders = ",".join("?" for _item in normalized)
         with self._optional_conn(conn) as active_conn:
             rows = active_conn.execute(
                 f"""
-                SELECT record_id, fields_json, expiration, strike, multiplier
+                SELECT record_id, lot_id, fields_json, expiration, strike, multiplier
                 FROM position_lots
                 WHERE record_id IN ({placeholders})
                 ORDER BY record_id ASC
@@ -778,7 +788,7 @@ class PositionProjectionTailRepositoryMixin:
         with self._optional_conn(conn) as active_conn:
             rows = active_conn.execute(
                 """
-                SELECT record_id, fields_json, expiration, strike, multiplier
+                SELECT record_id, lot_id, fields_json, expiration, strike, multiplier
                 FROM position_lots
                 ORDER BY record_id DESC
                 """
@@ -787,25 +797,25 @@ class PositionProjectionTailRepositoryMixin:
 
     def get_position_lot_fields(
         self,
-        record_id: str,
+        lot_id: str,
         *,
         conn: sqlite3.Connection | None = None,
     ) -> dict[str, Any]:
         with self._optional_conn(conn) as active_conn:
             row = active_conn.execute(
                 """
-                SELECT record_id, fields_json, expiration, strike, multiplier
+                SELECT record_id, lot_id, fields_json, expiration, strike, multiplier
                 FROM position_lots
                 WHERE record_id = ?
                 """,
-                (str(record_id),),
+                (str(lot_id),),
             ).fetchone()
         if row is None:
-            raise ValueError(f"position lot not found: {record_id}")
+            raise ValueError(f"position lot not found: {lot_id}")
         return position_lot_row_to_record(row)["fields"]
 
     def list_records(self, *, page_size: int = 500) -> list[dict[str, Any]]:
         return self.list_position_lots()
 
-    def get_record_fields(self, record_id: str) -> dict[str, Any]:
-        return self.get_position_lot_fields(record_id)
+    def get_record_fields(self, lot_id: str) -> dict[str, Any]:
+        return self.get_position_lot_fields(lot_id)

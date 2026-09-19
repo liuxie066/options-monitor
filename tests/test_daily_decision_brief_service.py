@@ -1587,7 +1587,7 @@ def test_candidate_priority_does_not_change_sealed_candidate_order(tmp_path: Pat
 
 
 @pytest.mark.parametrize(
-    ("option_type", "group_id", "leg_role", "stock_lot_id", "family"),
+    ("option_type", "group_id", "leg_role", "lot_id", "family"),
     [
         ("put", "group-1", "funding_put", "", "sell_put"),
         ("call", "", "wheel_call", "stock-1", "covered_call"),
@@ -1596,7 +1596,7 @@ def test_candidate_priority_does_not_change_sealed_candidate_order(tmp_path: Pat
 )
 def test_close_advice_preserves_lot_group_and_leg_identity(
     tmp_path: Path, option_type: str, group_id: str, leg_role: str,
-    stock_lot_id: str, family: str,
+    lot_id: str, family: str,
 ) -> None:
     account_dir = _write_labeled_put_candidates(tmp_path, header_only=True)
     _write_close_report(
@@ -1607,7 +1607,7 @@ def test_close_advice_preserves_lot_group_and_leg_identity(
                 "position_lot_id": "lot-put",
                 "strategy_group_id": group_id,
                 "leg_role": leg_role,
-                "source_stock_lot_id": stock_lot_id,
+                "source_stock_lot_id": lot_id,
                 "strategy_family": family,
                 "symbol": "NVDA",
                 "option_type": option_type,
@@ -1638,11 +1638,11 @@ def test_close_advice_preserves_lot_group_and_leg_identity(
     assert action["position_lot_id"] == "lot-put"
     assert action["strategy_group_id"] == group_id
     assert action["leg_role"] == leg_role
-    assert action["source_stock_lot_id"] == stock_lot_id
+    assert action["source_stock_lot_id"] == lot_id
     assert action["strategy_family"] == family
     assert action["recommendation_state"] == "close"
     assert brief["positions"][0]["position_lot_id"] == "lot-put"
-    assert brief["positions"][0]["source_stock_lot_id"] == (stock_lot_id or None)
+    assert brief["positions"][0]["source_stock_lot_id"] == (lot_id or None)
     assert brief["positions"][0]["metrics"] == {
         "ask": 0.54,
         "remaining_term_ratio": 0.60,

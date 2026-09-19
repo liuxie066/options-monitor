@@ -79,14 +79,14 @@ def normalize_wheel_event(event: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError(
             f"unsupported wheel event schema: {event_schema_version}"
         )
-    stock_lot_id = str(event.get("stock_lot_id") or "").strip() or None
-    if event_schema_version == WHEEL_EVENT_SCHEMA_V1 and stock_lot_id is None:
+    lot_id = str(event.get("stock_lot_id") or "").strip() or None
+    if event_schema_version == WHEEL_EVENT_SCHEMA_V1 and lot_id is None:
         raise ValueError("wheel event requires stock_lot_id")
     wheel_branch_id = str(event.get("wheel_branch_id") or "").strip()
     if event_schema_version == WHEEL_EVENT_SCHEMA_V1:
-        if wheel_branch_id and wheel_branch_id != stock_lot_id:
+        if wheel_branch_id and wheel_branch_id != lot_id:
             raise ValueError("wheel_event.v1 branch must equal stock_lot_id")
-        wheel_branch_id = str(stock_lot_id)
+        wheel_branch_id = str(lot_id)
     else:
         wheel_branch_id = _required_text(wheel_branch_id, "wheel_branch_id")
     event_type = _required_text(event.get("event_type"), "event_type").lower()
@@ -126,7 +126,7 @@ def normalize_wheel_event(event: Mapping[str, Any]) -> dict[str, Any]:
         "event_schema_version": event_schema_version,
         "account": account,
         "wheel_branch_id": wheel_branch_id,
-        "stock_lot_id": stock_lot_id,
+        "stock_lot_id": lot_id,
         "event_type": event_type,
         "occurred_at_ms": occurred_at_ms,
         "recorded_at_ms": recorded_at_ms,
@@ -146,7 +146,7 @@ def build_wheel_event(
     *,
     event_id: str,
     account: str,
-    stock_lot_id: str | None,
+    lot_id: str | None,
     wheel_branch_id: str | None = None,
     event_schema_version: str = WHEEL_EVENT_SCHEMA_V2,
     event_type: str,
@@ -161,8 +161,8 @@ def build_wheel_event(
             "event_id": event_id,
             "event_schema_version": event_schema_version,
             "account": account,
-            "wheel_branch_id": wheel_branch_id or stock_lot_id,
-            "stock_lot_id": stock_lot_id,
+            "wheel_branch_id": wheel_branch_id or lot_id,
+            "stock_lot_id": lot_id,
             "event_type": event_type,
             "occurred_at_ms": occurred_at_ms,
             "recorded_at_ms": recorded_at_ms,
@@ -213,7 +213,7 @@ def build_wheel_branch_created_event(
     principal_anchor: str | None,
     principal_anchor_reason: str | None = None,
     principal_anchor_fact_ids: Sequence[str] = (),
-    stock_lot_id: str | None = None,
+    lot_id: str | None = None,
     parent_branch_id: str | None = None,
     lifecycle_status: str = "active",
     activation_window: Mapping[str, Any] | None = None,
@@ -229,7 +229,7 @@ def build_wheel_branch_created_event(
         source_assignment_event_id,
         "source_assignment_event_id",
     )
-    stock_lot_value = str(stock_lot_id or "").strip() or None
+    stock_lot_value = str(lot_id or "").strip() or None
     if direction_value == "call" and stock_lot_value is None:
         raise ValueError("Wheel Call branch requires stock_lot_id")
     branch_id = (
@@ -279,7 +279,7 @@ def build_wheel_branch_created_event(
         event_schema_version=WHEEL_EVENT_SCHEMA_V2,
         account=account_value,
         wheel_branch_id=branch_id,
-        stock_lot_id=stock_lot_value,
+        lot_id=stock_lot_value,
         event_type="wheel_branch_created",
         occurred_at_ms=occurred_at_ms,
         recorded_at_ms=recorded_at_ms,

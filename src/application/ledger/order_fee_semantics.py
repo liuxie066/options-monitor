@@ -13,7 +13,7 @@ def option_contract_identity(event: TradeEvent) -> tuple[Any, ...]:
         key.account,
         key.underlying_symbol,
         key.option_type,
-        key.position_side,
+        event.position_side,
         key.strike,
         key.expiration_ymd,
         event.currency,

@@ -174,7 +174,7 @@ def _option_amount(event: TradeEvent) -> tuple[Decimal | None, str | None]:
         gross = quantize_money(price * multiplier * Decimal(event.contracts))
     except (TypeError, ValueError) as exc:
         return None, f"option cash unavailable: {exc}"
-    positive = (event.contract_key.position_side == "short") == (event.event_type == "open")
+    positive = (event.position_side == "short") == (event.event_type == "open")
     return (gross if positive else -gross), None
 
 

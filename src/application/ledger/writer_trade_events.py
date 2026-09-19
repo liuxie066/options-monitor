@@ -44,9 +44,11 @@ from .writer_common import (
     json,
     load_cash_fx_payload,
     normalize_broker,
+    normalize_asset_type,
     normalize_contract_expiration,
     normalize_currency,
     normalize_position_effect,
+    normalize_quantity_unit,
     normalize_trade_side,
     project_stored_trade_events_to_position_lots,
     projection_diagnostics_summary,
@@ -66,7 +68,7 @@ from .writer_common import (
 from .writer_decision import (
     _begin_lifecycle_decision_projection,
     _defer_lifecycle_decision_projection,
-    _event_position_record_id,
+    _event_position_lot_id,
     _finish_lifecycle_decision_projection,
     _finish_trade_event_decision_projection,
     _lifecycle_resolution_after_allocations,
@@ -161,7 +163,7 @@ def persist_trade_event_object(repo: Any, event: Any) -> LedgerWriteResult:
         )
         result = {
             "event_id": storage_events[0].event_id,
-            "record_id": _event_position_record_id(storage_events[0]),
+            "record_id": _event_position_lot_id(storage_events[0]),
             "created": any(runtime.created_flags),
             "position_lot_count": int(runtime.position_lot_count),
             "decision_projection": _finish_trade_event_decision_projection(
@@ -279,7 +281,7 @@ def persist_trade_event_with_combo_identity(
         )
         _assert_combo_membership_exact(
             membership,
-            expected_record_ids={
+            expected_lot_ids={
                 str(identity["funding_put_record_id"]),
                 str(identity["participation_call_record_id"]),
             },
@@ -330,9 +332,9 @@ def adopt_existing_combo_identity_atomically(
     repo: Any,
     *,
     group_id: str,
-    funding_put_record_id: str,
+    funding_put_lot_id: str,
     funding_put_open_event_id: str,
-    participation_call_record_id: str,
+    participation_call_lot_id: str,
     participation_call_open_event_id: str,
     expected_contracts: int,
     apply_changes: bool = False,
@@ -394,7 +396,7 @@ def adopt_existing_combo_identity_atomically(
         funding_put = _existing_combo_adoption_leg(
             records_by_id=records_by_id,
             events_by_id=events_by_id,
-            record_id=funding_put_record_id,
+            lot_id=funding_put_lot_id,
             open_event_id=funding_put_open_event_id,
             group_id=group_value,
             expected_contracts=expected,
@@ -406,7 +408,7 @@ def adopt_existing_combo_identity_atomically(
         participation_call = _existing_combo_adoption_leg(
             records_by_id=records_by_id,
             events_by_id=events_by_id,
-            record_id=participation_call_record_id,
+            lot_id=participation_call_lot_id,
             open_event_id=participation_call_open_event_id,
             group_id=group_value,
             expected_contracts=expected,
@@ -451,7 +453,7 @@ def adopt_existing_combo_identity_atomically(
         )
         _assert_combo_membership_exact(
             membership,
-            expected_record_ids={
+            expected_lot_ids={
                 str(identity["funding_put_record_id"]),
                 str(identity["participation_call_record_id"]),
             },
@@ -628,7 +630,7 @@ def _source_deal_group_problem(events: Sequence[TradeEvent]) -> str | None:
             event.contract_key.broker,
             event.contract_key.account,
             event.currency,
-            event.contract_key.position_side,
+            event.position_side,
             event.price,
             event.multiplier,
         )
@@ -706,7 +708,7 @@ def _freeze_formula_fee_group(
         ]
     first = rows[0]
     comparable = {
-        (event.currency, event.price, event.multiplier, event.contract_key.position_side)
+        (event.currency, event.price, event.multiplier, event.position_side)
         for event in rows
     }
     if len(comparable) != 1:
@@ -721,7 +723,7 @@ def _freeze_formula_fee_group(
             first.price,
             contracts=total_contracts,
             multiplier=int(first.multiplier),
-            is_sell=first.contract_key.position_side == "long",
+            is_sell=first.position_side == "long",
         )
     except (TypeError, ValueError):
         return [
@@ -834,9 +836,9 @@ def _freeze_new_event_fee(event: TradeEvent, *, frozen_at_ms: int) -> TradeEvent
             contracts=int(event.contracts),
             multiplier=int(event.multiplier),
             is_sell=(
-                event.contract_key.position_side == "short"
+                event.position_side == "short"
                 if event.event_type == "open"
-                else event.contract_key.position_side == "long"
+                else event.position_side == "long"
             ),
         )
     except (TypeError, ValueError):
@@ -1206,8 +1208,8 @@ def _normal_close_notification_intent(
         "futu_account_id": futu_account_id,
         "symbol": first.contract_key.underlying_symbol,
         "option_type": first.contract_key.option_type,
-        "position_side": first.contract_key.position_side,
-        "strike": first.contract_key.strike,
+        "position_side": first.position_side,
+        "strike": canonical_decimal_text(first.contract_key.strike),
         "expiration_ymd": first.contract_key.expiration_ymd,
         "execution_time_ms": int(first.event_time_ms or 0),
         "currency": first.currency,
@@ -1230,7 +1232,7 @@ def _normal_close_notification_intent(
             "contract": {
                 "symbol": first.contract_key.underlying_symbol,
                 "option_type": first.contract_key.option_type,
-                "position_side": first.contract_key.position_side,
+                "position_side": first.position_side,
                 "strike": canonical_decimal_text(
                     first.contract_key.strike
                 ),
@@ -1796,11 +1798,14 @@ def _events_for_storage(
             if not matching:
                 raise ValueError("trade_execution_target_conflict")
             return [_canonical_storage_event(row) for row in matching]
-    if hasattr(event, "event_type") and not hasattr(event, "position_effect"):
+    if isinstance(event, TradeEvent):
+        # Canonical ledger events carry contract identity directly; only an
+        # untargeted close still needs FIFO target resolution.
         if bool(getattr(event, "is_close", False)) and not getattr(event, "target_lot_id", None):
             return _canonical_close_events_for_storage(repo, event, conn=conn)
         return [event]
-    if str(event.position_effect or "").strip().lower() != "close":
+    # Legacy flat event objects expose ``position_effect`` instead of ``event_type``.
+    if str(getattr(event, "position_effect", "") or "").strip().lower() != "close":
         return [event]
     payload = dict(event.raw_payload or {})
     if str(payload.get("record_id") or payload.get("target_lot_id") or "").strip():
@@ -1827,12 +1832,12 @@ def _events_for_storage(
     out: list[TradeEvent] = []
     resolution_payload = resolution.to_dict()
     for index, match in enumerate(resolution.matches):
-        event_id = event.event_id if index == 0 else f"{event.event_id}:target:{match.record_id}"
+        event_id = event.event_id if index == 0 else f"{event.event_id}:target:{match.lot_id}"
         match_payload = {
             **payload,
             "fee_order_group_id": event.event_id,
-            "record_id": match.record_id,
-            "target_lot_id": match.record_id,
+            "record_id": match.lot_id,
+            "target_lot_id": match.lot_id,
             "close_target_resolution": resolution_payload,
         }
         if execution_id:
@@ -1875,7 +1880,7 @@ def _canonical_close_events_for_storage(
         account=event.contract_key.account,
         symbol=event.contract_key.underlying_symbol,
         option_type=event.contract_key.option_type,
-        position_side=event.contract_key.position_side,
+        position_side=event.position_side,
         strike=event.contract_key.strike,
         expiration_ymd=event.contract_key.expiration_ymd,
         contracts_to_close=event.contracts,
@@ -1892,12 +1897,12 @@ def _canonical_close_events_for_storage(
     out: list[TradeEvent] = []
     resolution_payload = resolution.to_dict()
     for index, match in enumerate(resolution.matches):
-        event_id = event.event_id if index == 0 else f"{event.event_id}:target:{match.record_id}"
+        event_id = event.event_id if index == 0 else f"{event.event_id}:target:{match.lot_id}"
         raw_payload = {
             **dict(event.raw_payload or {}),
             "fee_order_group_id": event.event_id,
-            "record_id": match.record_id,
-            "target_lot_id": match.record_id,
+            "record_id": match.lot_id,
+            "target_lot_id": match.lot_id,
             "close_target_resolution": resolution_payload,
         }
         if execution_identity_from_input(raw_payload.get("execution_input")):
@@ -1916,11 +1921,30 @@ def _canonical_close_events_for_storage(
                 event,
                 event_id=event_id,
                 contracts=int(match.contracts_to_close),
-                target_lot_id=match.record_id,
+                target_lot_id=match.lot_id,
                 raw_payload=raw_payload,
             )
         )
     return out
+
+def _quantity_is_fractional(value: Any) -> bool:
+    """Was a quantity present *and* carrying a fractional part?
+
+    ``NormalizedTradeDeal.contracts`` is an ``int``, and ``normalize_optional_int``
+    answers ``None`` both for an absent quantity and for a present-but-fractional
+    one. Collapsing that ``None`` to ``0`` here would make an unrepresentable size
+    indistinguishable from no size at all, so ``_trade_event_from_normalized_deal``
+    refuses instead of writing a silently different number.
+    """
+
+    if value in (None, ""):
+        return False
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return False
+    return number != number.to_integral_value()
+
 
 def _trade_event_from_normalized_deal(deal: Any) -> TradeEvent:
     trade_side = normalize_trade_side(getattr(deal, "side", None)) or ""
@@ -1945,7 +1969,6 @@ def _trade_event_from_normalized_deal(deal: Any) -> TradeEvent:
     source_deal_id = str(getattr(deal, "deal_id", "") or "").strip()
     event_id = broker_external_event_key(deal)
     event_type = _event_type_from_position_effect(position_effect, raw_payload=raw_payload)
-    position_side = _position_side_from_trade(effect=position_effect, trade_side=trade_side)
     raw_payload.setdefault("source_type", "broker_trade_event")
     raw_payload.setdefault("source", "api")
     if source_deal_id:
@@ -1982,21 +2005,40 @@ def _trade_event_from_normalized_deal(deal: Any) -> TradeEvent:
             if evidence_hash:
                 raw_payload.setdefault("multiplier_evidence_hash", evidence_hash)
     event_time_ms = _required_broker_trade_time_ms(deal)
+    asset_type = "option"
+    quantity_unit = None
+    _execution_payload = getattr(deal, "execution_input", None) or raw_payload.get("execution_input")
+    if isinstance(_execution_payload, Mapping):
+        _instrument_ref = _execution_payload.get("instrument_ref")
+        if isinstance(_instrument_ref, Mapping):
+            asset_type = normalize_asset_type(_instrument_ref.get("asset_type")) or "option"
+        quantity_unit = normalize_quantity_unit(_execution_payload.get("quantity_unit"))
     contract_key = ContractKey.from_values(
         broker=getattr(deal, "broker", None) or "富途",
         account=getattr(deal, "internal_account", None) or "",
         underlying_symbol=canonical_contract_symbol(getattr(deal, "symbol", "")),
         option_type=getattr(deal, "option_type", None) or "",
-        position_side=position_side,
         strike=getattr(deal, "strike", None),
         expiration_ymd=normalize_contract_expiration(getattr(deal, "expiration_ymd", None)),
+        asset_type=asset_type,
     )
+    raw_contracts = getattr(deal, "contracts", None)
+    if raw_contracts is None:
+        # ``contracts`` is an int, but a stock size is a Decimal (§7.3): a fractional
+        # quantity reaches here already dropped rather than truncated. Name it, so it
+        # cannot masquerade as "no quantity" and surface as a misleading
+        # ``contracts must be > 0`` (or, for event types that skip that rule, as a
+        # silently stored ``0``).
+        execution_input = getattr(deal, "execution_input", None)
+        quantity = execution_input.get("quantity") if isinstance(execution_input, Mapping) else None
+        if _quantity_is_fractional(quantity):
+            raise ValueError(f"trade_execution_quantity_not_representable:{quantity}")
     return TradeEvent(
         event_id=event_id,
         event_type=event_type,
         event_time_ms=event_time_ms,
         contract_key=contract_key,
-        contracts=int(getattr(deal, "contracts", 0) or 0),
+        contracts=int(raw_contracts or 0),
         price=float(getattr(deal, "price", 0.0) or 0.0),
         currency=normalize_currency(getattr(deal, "currency", None)),
         source="opend_push",
@@ -2004,6 +2046,8 @@ def _trade_event_from_normalized_deal(deal: Any) -> TradeEvent:
         fees=0.0,
         target_lot_id=str(raw_payload.get("target_lot_id") or raw_payload.get("record_id") or "").strip() or None,
         raw_payload=raw_payload,
+        asset_type=asset_type,
+        quantity_unit=quantity_unit,
     )
 
 def _event_type_from_position_effect(position_effect: str, *, raw_payload: dict[str, Any] | None = None) -> str:

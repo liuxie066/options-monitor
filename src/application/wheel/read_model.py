@@ -41,8 +41,8 @@ def _event_time_ms(row: Mapping[str, Any], field: str) -> int:
 
 def _branch_from_legacy_batch(batch: Mapping[str, Any]) -> dict[str, Any]:
     branch = dict(batch)
-    stock_lot_id = str(branch.get("stock_lot_id") or "").strip()
-    branch.setdefault("wheel_branch_id", stock_lot_id)
+    lot_id = str(branch.get("stock_lot_id") or "").strip()
+    branch.setdefault("wheel_branch_id", lot_id)
     branch.setdefault("parent_branch_id", None)
     branch.setdefault("direction", "call")
     return branch
@@ -110,7 +110,7 @@ def _attach_candidates(
 ) -> None:
     for projection in projections:
         branch_id = str(projection.get("wheel_branch_id") or "").strip()
-        stock_lot_id = str(projection.get("stock_lot_id") or "").strip()
+        lot_id = str(projection.get("stock_lot_id") or "").strip()
         matches = [
             item
             for item in candidates
@@ -124,9 +124,9 @@ def _attach_candidates(
                     == branch_id
                 )
                 or (
-                    stock_lot_id
+                    lot_id
                     and str(item.get("stock_lot_id") or "").strip()
-                    == stock_lot_id
+                    == lot_id
                 )
             )
         ]
@@ -169,7 +169,7 @@ def build_wheel_read_model_from_rows(
         "trade_events": trade_events,
         "account_wheel_events": wheel_events,
         "account_position_lots": [
-            {"record_id": item.record_id, "fields": dict(item.fields)}
+            {"record_id": item.lot_id, "fields": dict(item.fields)}
             for item in projected.lots
         ],
     }
@@ -225,7 +225,7 @@ def build_wheel_read_model_from_rows(
         scoped_rows["account_position_lots"],
         wheel_events,
     )
-    unresolved_stock_lot_ids = {
+    unresolved_lot_ids = {
         str(item.get("stock_lot_id") or "").strip()
         for item in linkage_candidates
         if str(item.get("stock_lot_id") or "").strip()
@@ -233,7 +233,7 @@ def build_wheel_read_model_from_rows(
     for projection in [*batches, *wheel_branches]:
         if (
             str(projection.get("stock_lot_id") or "").strip()
-            in unresolved_stock_lot_ids
+            in unresolved_lot_ids
             and projection.get("lifecycle_status") == "active"
         ):
             projection["phase"] = "linkage_unresolved"

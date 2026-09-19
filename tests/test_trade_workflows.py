@@ -29,10 +29,10 @@ def test_preview_trade_open_keeps_optional_note_values_out_of_string_none() -> N
     )
     command = preview.command
 
-    assert command.symbol == "NVDA"
-    assert command.currency == "USD"
-    assert command.strike == 100.0
-    assert command.multiplier == 100
-    assert command.expiration_ymd == "2026-06-19"
-    assert "multiplier_source=" in str(command.note)
-    assert "None" not in str(command.note)
+    assert command["symbol"] == "NVDA"
+    assert command["currency"] == "USD"
+    assert command["strike"] == 100.0
+    assert command["multiplier"] == 100
+    assert command["expiration_ymd"] == "2026-06-19"
+    assert "multiplier_source=" in str(command["note"])
+    assert "None" not in str(command["note"])

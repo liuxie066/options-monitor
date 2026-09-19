@@ -28,7 +28,7 @@ from domain.domain.ledger.position_fields import (
 )
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.symbol_identity import symbol_market
-from domain.domain.trade_contract_identity import canonical_contract_symbol
+from domain.domain.trade_contract_identity import canonical_contract_symbol, derive_trade_side
 from src.application.ledger.errors import LedgerPreflightError
 from src.application.ledger.lifecycle import persist_lifecycle_expire_close_events_atomically
 from src.application.ledger.lot_resolver import (
@@ -87,7 +87,7 @@ def _close_event_trade_time_ms(repo: Any, *, target_source_event_id: str, as_of_
 def persist_expire_auto_close_event(
     repo: Any,
     *,
-    record_id: str,
+    lot_id: str,
     fields: dict[str, Any],
     contracts_to_close: int,
     close_reason: str,
@@ -98,10 +98,10 @@ def persist_expire_auto_close_event(
 ) -> LedgerWriteResult:
     broker = normalize_broker(fields.get("broker"))
     if not broker:
-        raise ValueError(f"position lot missing broker: {record_id}")
+        raise ValueError(f"position lot missing broker: {lot_id}")
     fields = assert_position_lot_target_matches_current_state(
         repo,
-        record_id=record_id,
+        lot_id=lot_id,
         fields=fields,
         operation="expire_auto_close",
     )
@@ -114,7 +114,7 @@ def persist_expire_auto_close_event(
         as_of_ms=as_of_ms,
     )
     event = TradeEvent(
-        event_id=f"auto-close-{record_id}-{uuid.uuid4().hex}",
+        event_id=f"auto-close-{lot_id}-{uuid.uuid4().hex}",
         event_type="expire_close",
         event_time_ms=trade_time_ms,
         contract_key=ContractKey.from_values(
@@ -122,7 +122,6 @@ def persist_expire_auto_close_event(
             account=normalize_account(fields.get("account")),
             underlying_symbol=_canonical_trade_symbol(fields.get("symbol")),
             option_type=str(fields.get("option_type") or ""),
-            position_side=str(fields.get("side") or "").strip().lower(),
             strike=(float(strike) if strike is not None else None),
             expiration_ymd=effective_expiration_ymd(fields),
         ),
@@ -131,13 +130,13 @@ def persist_expire_auto_close_event(
         currency=normalize_currency(fields.get("currency")),
         source="auto_close_expired_positions",
         multiplier=(float(multiplier) if multiplier is not None else 100.0),
-        target_lot_id=str(record_id),
+        target_lot_id=str(lot_id),
         raw_payload={
             "source": "om option-positions",
             "source_type": "system_trade_event",
             "mode": EXPIRE_AUTO_CLOSE,
-            "record_id": str(record_id),
-            "target_lot_id": str(record_id),
+            "record_id": str(lot_id),
+            "target_lot_id": str(lot_id),
             "close_target_source_event_id": target_source_event_id,
             "close_target_account": normalize_account(fields.get("account")),
             "close_target_broker": broker,
@@ -146,6 +145,7 @@ def persist_expire_auto_close_event(
             "auto_close_exp_src": str(exp_source or ""),
             "auto_close_grace_days": int(grace_days) if grace_days is not None else None,
             "close_target_resolution": close_target_resolution,
+            "side": derive_trade_side("expire_close", fields.get("side")),
         },
     )
     return persist_trade_event_object(repo, event)
@@ -330,13 +330,15 @@ def build_expired_close_decisions(
 
     for item in positions:
         fields = dict(item)
-        record_id = str(fields.get("record_id") or "").strip()
-        position_id = str(fields.get("position_id") or "").strip() or "(no position_id)"
-        if not record_id:
+        lot_id = str(fields.get("record_id") or "").strip()
+        # §7.1: ``position_id`` is retired; the display/aggregation key is
+        # ``position_key`` (contract identity + derived side).
+        position_key = str(fields.get("position_key") or "").strip() or "(no position_key)"
+        if not lot_id:
             decisions.append(
                 ExpiredCloseDecision(
-                    record_id="",
-                    position_id=position_id,
+                    lot_id="",
+                    position_key=position_key,
                     expiration_ms=None,
                     effective_exp_source="none",
                     should_close=False,
@@ -349,8 +351,8 @@ def build_expired_close_decisions(
         if str(fields.get("_auto_close_skip_reason") or "") == "not_current_position_lot":
             decisions.append(
                 ExpiredCloseDecision(
-                    record_id=record_id,
-                    position_id=position_id,
+                    lot_id=lot_id,
+                    position_key=position_key,
                     expiration_ms=None,
                     effective_exp_source="none",
                     should_close=False,
@@ -369,8 +371,8 @@ def build_expired_close_decisions(
         }:
             decisions.append(
                 ExpiredCloseDecision(
-                    record_id=record_id,
-                    position_id=position_id,
+                    lot_id=lot_id,
+                    position_key=position_key,
                     expiration_ms=None,
                     effective_exp_source="none",
                     should_close=False,
@@ -390,8 +392,8 @@ def build_expired_close_decisions(
         if normalize_status(fields.get("status")) == "close" or contracts_open <= 0:
             decisions.append(
                 ExpiredCloseDecision(
-                    record_id=record_id,
-                    position_id=position_id,
+                    lot_id=lot_id,
+                    position_key=position_key,
                     expiration_ms=int(exp_ms) if exp_ms is not None else None,
                     raw_expiration_ms=raw_exp_ms,
                     expiration_ymd=exp_ymd,
@@ -407,8 +409,8 @@ def build_expired_close_decisions(
         if exp_ms is None:
             decisions.append(
                 ExpiredCloseDecision(
-                    record_id=record_id,
-                    position_id=position_id,
+                    lot_id=lot_id,
+                    position_key=position_key,
                     expiration_ms=None,
                     effective_exp_source="none",
                     should_close=False,
@@ -430,8 +432,8 @@ def build_expired_close_decisions(
         if should_close and manual_skip_reason:
             decisions.append(
                 ExpiredCloseDecision(
-                    record_id=record_id,
-                    position_id=position_id,
+                    lot_id=lot_id,
+                    position_key=position_key,
                     expiration_ms=int(exp_ms),
                     raw_expiration_ms=raw_exp_ms,
                     expiration_ymd=exp_ymd,
@@ -450,8 +452,8 @@ def build_expired_close_decisions(
             reason_prefix = "expired but waiting grace cutoff" if expired_but_waiting else "not expired"
             decisions.append(
                 ExpiredCloseDecision(
-                    record_id=record_id,
-                    position_id=position_id,
+                    lot_id=lot_id,
+                    position_key=position_key,
                     expiration_ms=int(exp_ms),
                     raw_expiration_ms=raw_exp_ms,
                     expiration_ymd=exp_ymd,
@@ -479,8 +481,8 @@ def build_expired_close_decisions(
         if assignment_review and bool(assignment_review.get("block_auto_close")):
             decisions.append(
                 ExpiredCloseDecision(
-                    record_id=record_id,
-                    position_id=position_id,
+                    lot_id=lot_id,
+                    position_key=position_key,
                     expiration_ms=int(exp_ms),
                     raw_expiration_ms=raw_exp_ms,
                     expiration_ymd=exp_ymd,
@@ -513,8 +515,8 @@ def build_expired_close_decisions(
         )
         decisions.append(
             ExpiredCloseDecision(
-                record_id=record_id,
-                position_id=position_id,
+                lot_id=lot_id,
+                position_key=position_key,
                 expiration_ms=int(exp_ms),
                 raw_expiration_ms=raw_exp_ms,
                 expiration_ymd=exp_ymd,
@@ -555,7 +557,7 @@ def _fresh_auto_close_positions(repo: Any, positions: list[dict[str, Any]]) -> l
         current_lot_source_available = True
     except Exception:
         current_lots = []
-    current_by_record_id: dict[str, dict[str, Any]] = {}
+    current_by_lot_id: dict[str, dict[str, Any]] = {}
     if isinstance(current_lots, list):
         for lot in current_lots:
             if not isinstance(lot, dict):
@@ -563,12 +565,12 @@ def _fresh_auto_close_positions(repo: Any, positions: list[dict[str, Any]]) -> l
             fields = lot.get("fields") if isinstance(lot.get("fields"), dict) else lot
             if not isinstance(fields, dict):
                 continue
-            record_id = str(lot.get("record_id") or fields.get("record_id") or "").strip()
-            if not record_id:
+            lot_id = str(lot.get("record_id") or fields.get("record_id") or "").strip()
+            if not lot_id:
                 continue
             row = dict(fields)
-            row["record_id"] = record_id
-            current_by_record_id[record_id] = row
+            row["record_id"] = lot_id
+            current_by_lot_id[lot_id] = row
 
     get_record_fields = getattr(repo, "get_record_fields", None)
 
@@ -577,23 +579,23 @@ def _fresh_auto_close_positions(repo: Any, positions: list[dict[str, Any]]) -> l
         if not isinstance(item, dict):
             continue
         original = dict(item)
-        record_id = str(original.get("record_id") or "").strip()
-        if not record_id:
+        lot_id = str(original.get("record_id") or "").strip()
+        if not lot_id:
             out.append(original)
             continue
         if current_lot_source_available:
-            current_lot = current_by_record_id.get(record_id)
+            current_lot = current_by_lot_id.get(lot_id)
             if current_lot is None:
                 stale = dict(original)
                 stale["_auto_close_skip_reason"] = "not_current_position_lot"
                 out.append(stale)
                 continue
-            if current_lot.get("position_id") in (None, "") and original.get("position_id") not in (None, ""):
+            if current_lot.get("position_key") in (None, "") and original.get("position_key") not in (None, ""):
                 current_lot = dict(current_lot)
-                current_lot["position_id"] = original.get("position_id")
+                current_lot["position_key"] = original.get("position_key")
             out.append(
                 _fresh_auto_close_position(
-                    record_id=record_id,
+                    lot_id=lot_id,
                     current=current_lot,
                     selected=original,
                 )
@@ -603,7 +605,7 @@ def _fresh_auto_close_positions(repo: Any, positions: list[dict[str, Any]]) -> l
             out.append(_unavailable_auto_close_position(original))
             continue
         try:
-            raw_current = get_record_fields(record_id)
+            raw_current = get_record_fields(lot_id)
         except Exception:
             out.append(_unavailable_auto_close_position(original))
             continue
@@ -611,12 +613,12 @@ def _fresh_auto_close_positions(repo: Any, positions: list[dict[str, Any]]) -> l
             out.append(_unavailable_auto_close_position(original))
             continue
         current = dict(raw_current)
-        current["record_id"] = record_id
-        if current.get("position_id") in (None, "") and original.get("position_id") not in (None, ""):
-            current["position_id"] = original.get("position_id")
+        current["record_id"] = lot_id
+        if current.get("position_key") in (None, "") and original.get("position_key") not in (None, ""):
+            current["position_key"] = original.get("position_key")
         out.append(
             _fresh_auto_close_position(
-                record_id=record_id,
+                lot_id=lot_id,
                 current=current,
                 selected=original,
             )
@@ -640,17 +642,17 @@ def _unavailable_auto_close_position(selected: dict[str, Any]) -> dict[str, Any]
 
 def _fresh_auto_close_position(
     *,
-    record_id: str,
+    lot_id: str,
     current: dict[str, Any],
     selected: dict[str, Any],
 ) -> dict[str, Any]:
     if not _same_auto_close_position_identity(
-        record_id=record_id,
+        lot_id=lot_id,
         current=current,
         selected=selected,
     ):
         stale = dict(current)
-        stale["record_id"] = record_id
+        stale["record_id"] = lot_id
         stale["_auto_close_skip_reason"] = "position_lot_identity_changed"
         stale["_auto_close_skip_message"] = (
             "position lot identity changed after auto-close selection; "
@@ -662,15 +664,15 @@ def _fresh_auto_close_position(
 
 def _same_auto_close_position_identity(
     *,
-    record_id: str,
+    lot_id: str,
     current: dict[str, Any],
     selected: dict[str, Any],
 ) -> bool:
     selected_candidate = normalize_close_candidate(
-        {"record_id": record_id, "fields": selected}
+        {"record_id": lot_id, "fields": selected}
     )
     current_candidate = normalize_close_candidate(
-        {"record_id": record_id, "fields": current}
+        {"record_id": lot_id, "fields": current}
     )
     return not (
         selected_candidate is None
@@ -1001,7 +1003,7 @@ def auto_close_expired_positions(
 
     fresh_positions = _fresh_auto_close_positions(repo, positions)
     decisions = build_expired_close_decisions(fresh_positions, as_of_ms=as_of_ms, grace_days=grace_days)
-    to_close_indexes = [idx for idx, decision in enumerate(decisions) if decision.should_close and decision.record_id]
+    to_close_indexes = [idx for idx, decision in enumerate(decisions) if decision.should_close and decision.lot_id]
     applied: list[ExpiredCloseApplyResult] = []
     errors: list[str] = []
     if len(to_close_indexes) > int(max_close):
@@ -1022,11 +1024,11 @@ def auto_close_expired_positions(
     for index in to_close_indexes:
         decision = decisions[index]
         try:
-            record_id = str(decision.record_id)
-            fields = repo.get_record_fields(record_id)
+            lot_id = str(decision.lot_id)
+            fields = repo.get_record_fields(lot_id)
             contracts_to_close = effective_contracts_open(fields)
             if not _same_auto_close_position_identity(
-                record_id=record_id,
+                lot_id=lot_id,
                 current=fields,
                 selected=fresh_positions[index],
             ):
@@ -1059,7 +1061,7 @@ def auto_close_expired_positions(
                 continue
             close_target_resolution = resolve_explicit_close_target(
                 repo,
-                record_id=record_id,
+                lot_id=lot_id,
                 contracts_to_close=contracts_to_close,
                 source="auto_close_expired",
                 fields=fields,
@@ -1068,7 +1070,7 @@ def auto_close_expired_positions(
             decisions[index] = decision
             ledger_preflight = preflight_expire_auto_close(
                 repo,
-                record_id=record_id,
+                lot_id=lot_id,
                 fields=close_target_resolution.single_candidate.raw_fields,
                 contracts_to_close=contracts_to_close,
                 as_of_ms=as_of_ms,
@@ -1101,7 +1103,7 @@ def auto_close_expired_positions(
             else:
                 result = persist_expire_auto_close_event(
                     repo,
-                    record_id=record_id,
+                    lot_id=lot_id,
                     fields=close_target_resolution.single_candidate.raw_fields,
                     contracts_to_close=contracts_to_close,
                     close_reason="expired",
@@ -1110,17 +1112,17 @@ def auto_close_expired_positions(
                     grace_days=grace_days,
                     close_target_resolution=close_target_resolution.to_dict(),
                 )
-            updated_fields = repo.get_record_fields(record_id)
+            updated_fields = repo.get_record_fields(lot_id)
             if effective_contracts_open(updated_fields) > 0 or normalize_status(updated_fields.get("status")) != "close":
-                errors.append(f"{record_id} {decision.position_id}: auto-close event did not close target lot")
+                errors.append(f"{lot_id} {decision.position_key}: auto-close event did not close target lot")
                 continue
             if normalize_close_type(updated_fields.get("close_type")) != EXPIRE_AUTO_CLOSE:
-                errors.append(f"{record_id} {decision.position_id}: auto-close projected wrong close_type")
+                errors.append(f"{lot_id} {decision.position_key}: auto-close projected wrong close_type")
                 continue
             applied.append(ExpiredCloseApplyResult(decision=decision, result=result))
         except Exception as exc:
             if decision.ledger_preflight is None:
                 decision = decision.with_ledger_preflight(_ledger_preflight_error_payload(exc))
                 decisions[index] = decision
-            errors.append(f"{decision.record_id} {decision.position_id}: {exc}")
+            errors.append(f"{decision.lot_id} {decision.position_key}: {exc}")
     return ExpiredCloseRunResult(decisions=decisions, applied=applied, errors=errors)

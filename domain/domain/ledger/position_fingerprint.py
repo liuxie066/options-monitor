@@ -11,25 +11,28 @@ POSITION_LOTS_FINGERPRINT_SCHEMA = "position_lots_fingerprint.v1"
 
 def _record_parts(record: Any) -> tuple[str, Mapping[str, Any]]:
     if isinstance(record, tuple) and len(record) == 2:
-        record_id, fields = record
+        lot_id, fields = record
     elif isinstance(record, Mapping):
-        record_id = record.get("record_id")
+        lot_id = record.get("record_id")
         fields = record.get("fields")
     else:
-        record_id = getattr(record, "record_id", None)
+        # A declared record object, not a persisted row: its field converged
+        # onto ``lot_id``, so the object branch reads that name while the
+        # Mapping branch above keeps the stored ``record_id`` key.
+        lot_id = getattr(record, "lot_id", None)
         fields = getattr(record, "fields", None)
 
-    normalized_record_id = str(record_id or "")
-    if not normalized_record_id or normalized_record_id != normalized_record_id.strip():
+    normalized_lot_id = str(lot_id or "")
+    if not normalized_lot_id or normalized_lot_id != normalized_lot_id.strip():
         raise ValueError("position lot fingerprint requires a canonical record_id")
     if not isinstance(fields, Mapping):
         raise TypeError("position lot fingerprint fields must be an object")
-    return normalized_record_id, fields
+    return normalized_lot_id, fields
 
 
-def _canonical_record_bytes(record_id: str, fields: Mapping[str, Any]) -> bytes:
+def _canonical_record_bytes(lot_id: str, fields: Mapping[str, Any]) -> bytes:
     payload = {
-        "record_id": record_id,
+        "record_id": lot_id,
         "fields": dict(fields),
     }
     return json.dumps(
@@ -46,17 +49,17 @@ def ordered_position_lots_fingerprint(records: Iterable[Any]) -> str:
 
     digest = hashlib.sha256()
     digest.update(b"[")
-    previous_record_id: str | None = None
+    previous_lot_id: str | None = None
     first = True
     for record in records:
-        record_id, fields = _record_parts(record)
-        if previous_record_id is not None and record_id <= previous_record_id:
+        lot_id, fields = _record_parts(record)
+        if previous_lot_id is not None and lot_id <= previous_lot_id:
             raise ValueError("position lot fingerprint rows must have unique ascending record_id values")
         if not first:
             digest.update(b",")
-        digest.update(_canonical_record_bytes(record_id, fields))
+        digest.update(_canonical_record_bytes(lot_id, fields))
         first = False
-        previous_record_id = record_id
+        previous_lot_id = lot_id
     digest.update(b"]")
     return digest.hexdigest()
 

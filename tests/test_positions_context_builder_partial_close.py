@@ -62,7 +62,7 @@ def test_raw_option_context_validator_rejects_missing_or_foreign_account(
         )
 
 
-def test_build_context_preserves_record_id_without_position_id() -> None:
+def test_build_context_preserves_record_id_without_position_key() -> None:
     records = [
         {
             "record_id": "rec_1",
@@ -84,8 +84,8 @@ def test_build_context_preserves_record_id_without_position_id() -> None:
 
     ctx = build_context(records, broker="富途", account="lx", rates={"USDCNY": 7.2})
 
-    assert ctx["open_positions_min"][0]["record_id"] == "rec_1"
-    assert ctx["open_positions_min"][0]["position_id"] is None
+    assert ctx["open_positions_min"][0]["lot_id"] == "rec_1"
+    assert ctx["open_positions_min"][0]["position_key"] is None
     assert ctx["open_positions_min"][0]["broker"] == "富途"
     assert ctx["open_positions_min"][0]["account"] == "lx"
     assert ctx["open_positions_min"][0]["option_type"] == "put"
@@ -122,9 +122,9 @@ def test_position_lot_risk_view_is_typed_context_read_model() -> None:
     snapshot = position_lot_snapshot(record)
     view = position_lot_risk_view(record)
 
-    assert snapshot.record_id == "rec_1"
+    assert snapshot.lot_id == "rec_1"
     assert isinstance(view, RiskPositionView)
-    assert view.as_shadow_record() == {"record_id": "rec_1", "fields": snapshot.fields}
+    assert view.as_shadow_record() == {"lot_id": "rec_1", "fields": snapshot.fields}
     assert view.as_open_position_min(as_of_date=expiration_business_today())["symbol"] == "0700.HK"
 
 
@@ -277,7 +277,9 @@ def test_build_context_exposes_expiration_ymd_and_days_to_expiration() -> None:
     ctx = build_context(records, broker="富途", account="lx", rates={"USDCNY": 7.2})
 
     row = ctx["open_positions_min"][0]
-    assert row["expiration"] == expiration_ms
+    # §7.2: the ms ``expiration`` is no longer a read-model field; the legacy ms
+    # input above is still read through into ``expiration_ymd``.
+    assert "expiration" not in row
     assert row["expiration_ymd"] == "2026-05-03"
     assert row["days_to_expiration"] == as_of_days
     assert row["strike"] == 120.0
@@ -418,14 +420,14 @@ def test_build_context_scales_cash_secured_for_partial_close() -> None:
 def test_build_context_excludes_expired_put_after_one_day_settlement_buffer() -> None:
     observed_at = datetime(2026, 9, 4, 1, 40, tzinfo=timezone.utc)
     records = []
-    for record_id, expiration, secured in (
+    for lot_id, expiration, secured in (
         ("expired", "2026-03-30", 10_000),
         ("expired-yesterday", "2026-09-03", 11_000),
         ("expires-today", "2026-09-04", 12_000),
     ):
         records.append(
             {
-                "record_id": record_id,
+                "record_id": lot_id,
                 "fields": {
                     "broker": "富途",
                     "account": "lx",
@@ -455,7 +457,7 @@ def test_build_context_excludes_expired_put_after_one_day_settlement_buffer() ->
         observed_at=observed_at,
     )
 
-    assert [row["record_id"] for row in ctx["open_positions_min"]] == [
+    assert [row["lot_id"] for row in ctx["open_positions_min"]] == [
         "expired",
         "expired-yesterday",
         "expires-today",
@@ -737,7 +739,7 @@ def test_list_position_rows_requires_broker_on_persisted_rows() -> None:
 
     rows = list_position_rows(_Repo(), broker="富途", account="lx", status="open", limit=10)
 
-    assert [row["record_id"] for row in rows] == ["lot_1"]
+    assert [row["lot_id"] for row in rows] == ["lot_1"]
     assert rows[0]["broker"] == "富途"
 
 
@@ -781,7 +783,7 @@ def test_list_open_short_assignment_rows_is_strict_and_excludes_long_options() -
 
     rows = list_open_short_assignment_rows(_Repo(), accounts=["lx"])
 
-    assert [row["record_id"] for row in rows] == ["short-put"]
+    assert [row["lot_id"] for row in rows] == ["short-put"]
     assert rows[0]["account"] == "lx"
     assert rows[0]["option_type"] == "put"
     assert rows[0]["side"] == "short"
@@ -801,7 +803,7 @@ def test_list_open_short_assignment_rows_propagates_repository_failure() -> None
 def test_build_context_exposes_quantity_aware_combo_yield_groups() -> None:
     group_id = "combo_yield:lx:combo_yield|PDD|PDD_P80_AUG|PDD_C100_SEP"
     records = []
-    for record_id, option_type, side, contracts, expiration, leg_role in (
+    for lot_id, option_type, side, contracts, expiration, leg_role in (
         ("put-1", "put", "short", 2, "2026-09-18", "sell_put"),
         ("call-1", "call", "long", 1, "2026-09-18", "enhancement_call"),
         ("call-2", "call", "long", 1, "2026-09-18", "enhancement_call"),
@@ -809,7 +811,7 @@ def test_build_context_exposes_quantity_aware_combo_yield_groups() -> None:
         expiration_ms = int(datetime.fromisoformat(expiration).replace(tzinfo=timezone.utc).timestamp() * 1000)
         records.append(
             {
-                "record_id": record_id,
+                "record_id": lot_id,
                 "fields": {
                     "broker": "富途",
                     "account": "lx",

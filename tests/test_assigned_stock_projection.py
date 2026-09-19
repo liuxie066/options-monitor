@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -9,6 +10,7 @@ import pytest
 from domain.domain.assigned_stock import (
     _option_fee_fact,
     _stock_fee_fact,
+    assigned_stock_lot_to_position_lot,
     project_assigned_stock_lifecycle,
 )
 
@@ -181,6 +183,150 @@ def test_projection_tracks_partial_sale_principal_basis_and_missing_quote() -> N
     assert sale_row["assigned_stock_realized_pnl"] == 398
     assert missing["assigned_stock_lots"][0]["assigned_stock_unrealized_pnl_gross"] is None
     assert missing["assigned_stock_review_rows"][0]["status"] == "missing_quote"
+
+
+def test_projection_emits_stock_position_lots_as_first_class() -> None:
+    result = _base_projection()
+    lots = result["stock_position_lots"]
+    assert len(lots) == 1
+    lot = lots[0]
+    assert lot["lot_id"] == "assigned-stock-assign-put"
+    assert lot["asset_type"] == "stock"
+    # §7.3/§7.4: share quantities and amounts serialize as decimal strings.
+    assert lot["shares_opened"] == "100"
+    assert lot["shares_open"] == "100"
+    assert lot["shares_closed"] == "0"
+    assert lot["cost_basis_total"] == "10000"
+    assert lot["contracts_opened"] == 0
+    assert lot["premium_open"] == "0"
+    assert lot["multiplier"] == 0.0
+    key = lot["contract_key"]
+    assert key["asset_type"] == "stock"
+    assert key["option_type"] == ""
+    assert key["strike"] == "0"
+    assert key["expiration_ymd"] == ""
+    # §9.2 step 3: the aggregation key lives on the lot, not on the contract key.
+    assert lot["position_side"] == "long"
+    assert lot["position_key"] == (
+        f"{key['broker']}|{key['account']}|{key['underlying_symbol']}|stock|long"
+    )
+
+
+def test_stock_position_lot_tracks_partial_sale_state() -> None:
+    sale = {
+        "event_type": "sale",
+        "stock_event_id": "sale-1",
+        "target_stock_lot_id": "assigned-stock-assign-put",
+        "account": "lx",
+        "broker": "富途",
+        "symbol": "NVDA",
+        "side": "sell",
+        "shares": 40,
+        "price": 110,
+        "currency": "USD",
+        "fees": 2,
+        "fee_provenance": {"basis": "actual", "source": "test"},
+        "trade_time_ms": _ms("2026-06-15T10:00:00"),
+    }
+    result = _base_projection(assigned_stock_events=[sale])
+    lot = result["stock_position_lots"][0]
+    # §7.3/§7.4: share quantities and amounts serialize as decimal strings.
+    assert lot["shares_opened"] == "100"
+    assert lot["shares_open"] == "60"
+    assert lot["shares_closed"] == "40"
+    assert lot["status"] == "open"
+    assert lot["close_event_ids"] == ["sale-1"]
+    assert lot["last_event_id"] == "sale-1"
+    # §7.4: authority-layer amounts serialize as decimal strings.
+    assert lot["realized_pnl"] == "398"
+
+
+def test_stock_lot_to_position_lot_bridge_roundtrips_identity() -> None:
+    lot = assigned_stock_lot_to_position_lot(
+        {
+            "stock_lot_id": "assigned-stock-evt",
+            "source_assignment_event_id": "evt",
+            "broker": "富途",
+            "account": "lx",
+            "symbol": "NVDA",
+            "currency": "USD",
+            "assigned_at_ms": 1_700_000_000_000,
+            "shares_opened": 100,
+            "shares_remaining": 100,
+            "shares_sold": 0,
+            "stock_cost_basis_total": 10_000.0,
+            "assigned_stock_realized_pnl": 0.0,
+            "sale_event_ids": [],
+        }
+    )
+    assert lot.asset_type == "stock"
+    assert lot.lot_id == "assigned-stock-evt"
+    assert lot.open_event_id == "evt"
+    assert lot.position_side == "long"
+    assert lot.position_key == "富途|lx|NVDA|stock|long"
+    assert lot.shares_opened == 100.0
+    assert lot.cost_basis_total == 10_000.0
+    # §7.4: the bridge yields the authority-layer ``PositionLot``, whose money
+    # fields are ``Decimal``. Both values above are binary-exact, so ``==`` alone
+    # is also satisfied by a ``float`` field and proves nothing about the type.
+    assert isinstance(lot.shares_opened, Decimal)
+    assert isinstance(lot.cost_basis_total, Decimal)
+    assert isinstance(lot.realized_pnl, Decimal)
+
+
+def test_stock_lot_bridge_applies_money_quantum_to_authority_amounts() -> None:
+    lot = assigned_stock_lot_to_position_lot(
+        {
+            "stock_lot_id": "assigned-stock-evt",
+            "source_assignment_event_id": "evt",
+            "broker": "富途",
+            "account": "lx",
+            "symbol": "NVDA",
+            "currency": "USD",
+            "assigned_at_ms": 1_700_000_000_000,
+            "shares_opened": 100,
+            "shares_remaining": 100,
+            "shares_sold": 0,
+            # §7.4 decimal text, deliberately carrying more places than the quantum.
+            "stock_cost_basis_total": "10000.12345678",
+            "assigned_stock_realized_pnl": "1.0000005",
+            "sale_event_ids": [],
+        }
+    )
+    # §7.4 gives money one rule: ``MONEY_QUANTUM``, ROUND_HALF_UP. The bridge is the
+    # only place it can be applied on this path -- ``PositionLot.from_stock_settlement``
+    # runs ``to_decimal`` alone, so an unquantized basis would reach the authority.
+    assert lot.cost_basis_total == Decimal("10000.123457")
+    # ``1.0000005`` sits exactly on the 6th-place boundary, so ROUND_HALF_UP carries.
+    assert lot.realized_pnl == Decimal("1.000001")
+
+
+def test_projection_publishes_assigned_stock_authority_money_as_decimal_text() -> None:
+    # §7.4: ``stock_cost_basis_total`` and ``assigned_stock_realized_pnl`` are the
+    # two keys §4.3.3 maps onto the authority ``cost_basis_total`` / ``realized_pnl``
+    # (the other assigned-stock amounts are wheel-projection-only). The bridge reads
+    # them back into ``Decimal``, so the lifecycle must hand over decimal text.
+    opened = _base_projection()["assigned_stock_lots"][0]
+    assert opened["stock_cost_basis_total"] == "10000"
+    assert opened["assigned_stock_realized_pnl"] == "0"
+
+    sale = {
+        "event_type": "sale",
+        "stock_event_id": "sale-1",
+        "target_stock_lot_id": "assigned-stock-assign-put",
+        "account": "lx",
+        "broker": "富途",
+        "symbol": "NVDA",
+        "side": "sell",
+        "shares": 40,
+        "price": 110,
+        "currency": "USD",
+        "fees": 2,
+        "fee_provenance": {"basis": "actual", "source": "test"},
+        "trade_time_ms": _ms("2026-06-15T10:00:00"),
+    }
+    sold = _base_projection(assigned_stock_events=[sale])["assigned_stock_lots"][0]
+    assert sold["assigned_stock_realized_pnl"] == "398"
 
 
 def test_projection_rejects_assignment_or_exercise_stock_side_mismatch() -> None:
@@ -514,11 +660,11 @@ def test_partial_call_close_releases_only_closed_coverage(reuse: bool, delay_ms:
     opened_at = _ms("2026-05-05T10:00:00")
     closed_at = _ms("2026-05-20T10:00:00")
     cutoff = _ms("2026-06-30T16:00:00")
-    stock_lot_id = "assigned-stock-assign-put"
+    lot_id = "assigned-stock-assign-put"
     call = _event(
         "call-a", option_type="call", side="sell", position_effect="open",
         at="2026-05-05T10:00:00", price=2, strike=110,
-        raw_payload={"stock_lot_id": stock_lot_id, "fee_provenance": {"basis": "actual", "source": "test"}},
+        raw_payload={"stock_lot_id": lot_id, "fee_provenance": {"basis": "actual", "source": "test"}},
     )
     call.update(contracts=2, fees=2)
     close = _event(
@@ -541,7 +687,7 @@ def test_partial_call_close_releases_only_closed_coverage(reuse: bool, delay_ms:
                          opened_at=closed_at + delay_ms, contracts=1, unrealized_pnl_gross=5))
     else:
         sales.append({
-            "event_type": "sale", "stock_event_id": "sale-released", "target_stock_lot_id": stock_lot_id,
+            "event_type": "sale", "stock_event_id": "sale-released", "target_stock_lot_id": lot_id,
             "account": "lx", "broker": "富途", "symbol": "NVDA", "currency": "USD",
             "side": "sell", "shares": 100, "price": 105, "fees": 0,
             "fee_provenance": {"basis": "actual", "source": "test"}, "trade_time_ms": closed_at + delay_ms,

@@ -427,8 +427,6 @@ def _frozen_workspace(
     position_fields: dict[str, object] | None = None,
     ledger_wheel: bool = False,
 ) -> _FrozenWorkspace:
-    from domain.domain.option_position_lots import OpenPositionCommand
-
     from src.application.ledger import api as ledger_api
     from src.application.close_advice_required_data import (
         PLAN_FILE_NAME,
@@ -465,25 +463,23 @@ def _frozen_workspace(
         repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
         ledger_api.record_manual_position_open(
             repo,
-            OpenPositionCommand(
-                broker="富途",
-                account="lx",
-                symbol="NVDA",
-                option_type="put",
-                side="short",
-                contracts=2,
-                currency="USD",
-                strike=100,
-                multiplier=100,
-                expiration_ymd="2026-08-21",
-                premium_per_share=2,
-                opened_at_ms=1_000,
-            ),
+            broker="富途",
+            account="lx",
+            symbol="NVDA",
+            option_type="put",
+            side="short",
+            contracts=2,
+            currency="USD",
+            strike=100,
+            multiplier=100,
+            expiration_ymd="2026-08-21",
+            premium_per_share=2,
+            opened_at_ms=1_000,
         )
         put_id = repo.list_position_lots()[0]["record_id"]
         ledger_api.record_manual_assignment(
             repo,
-            record_id=put_id,
+            lot_id=put_id,
             contracts_to_close=2,
             stock_side="buy",
             stock_qty=200,
@@ -497,25 +493,23 @@ def _frozen_workspace(
         )["assigned_stock_lots"][0]["stock_lot_id"]
         ledger_api.record_manual_position_open(
             repo,
-            OpenPositionCommand(
-                broker="富途",
-                account="lx",
-                symbol="NVDA",
-                option_type="call",
-                side="short",
-                contracts=2,
-                currency="USD",
-                strike=110,
-                multiplier=100,
-                expiration_ymd="2026-07-29",
-                premium_per_share=2,
-                opened_at_ms=3_000,
-                strategy_snapshot={
-                    "strategy": "wheel",
-                    "leg_role": "wheel_call",
-                    "source_stock_lot_id": stock_id,
-                },
-            ),
+            broker="富途",
+            account="lx",
+            symbol="NVDA",
+            option_type="call",
+            side="short",
+            contracts=2,
+            currency="USD",
+            strike=110,
+            multiplier=100,
+            expiration_ymd="2026-07-29",
+            premium_per_share=2,
+            opened_at_ms=3_000,
+            strategy_snapshot={
+                "strategy": "wheel",
+                "leg_role": "wheel_call",
+                "source_stock_lot_id": stock_id,
+            },
         )
         position_records = repo.list_position_lots()
         assigned = build_assigned_stock_view(

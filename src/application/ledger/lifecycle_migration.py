@@ -6,6 +6,7 @@ from typing import Any
 from domain.domain.lifecycle_allocation import resolve_allocations
 from domain.domain.option_lifecycle import build_lifecycle_case
 from domain.domain.symbol_identity import canonical_symbol, symbol_market
+from domain.domain.trade_contract_identity import derive_position_side
 from src.application.ledger.event_codec import valid_void_target_event_id
 from src.application.ledger.notification_outbox import (
     build_notification_intent,
@@ -1696,6 +1697,17 @@ def _event_matches_explicit_contract(
         if isinstance(event.get("contract_key"), dict)
         else {}
     )
+    # §9.2 step 3: the contract key no longer carries the position side, so
+    # derive it from the trade side the event declares (the lot-side check
+    # below reads the same way).
+    event_position_side = (
+        str(event_contract.get("position_side") or "").strip().lower()
+        or derive_position_side(
+            str(event.get("position_effect") or "").strip().lower(),
+            event.get("side"),
+        )
+        or ""
+    )
     return (
         str(event_contract.get("account") or "").strip().lower()
         == str(contract.get("account") or "")
@@ -1710,10 +1722,7 @@ def _event_matches_explicit_contract(
         .strip()
         .lower()
         == contract.get("option_type")
-        and str(event_contract.get("position_side") or "")
-        .strip()
-        .lower()
-        == contract.get("position_side")
+        and event_position_side == contract.get("position_side")
         and str(event_contract.get("expiration_ymd") or "").strip()
         == contract.get("expiration_ymd")
         and _decimal_equal(

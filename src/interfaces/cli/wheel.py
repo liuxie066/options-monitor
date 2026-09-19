@@ -72,7 +72,7 @@ def _add_branch_identity(parser: argparse.ArgumentParser) -> None:
     identity = parser.add_mutually_exclusive_group(required=True)
     identity.add_argument("--wheel-branch-id")
     identity.add_argument("--stock-lot-id")
-    parser.add_argument("--expected-branch-generation-hash", required=True)
+    parser.add_argument("--expected-batch-generation-hash", required=True)
     parser.add_argument("--request-id", required=True)
     parser.add_argument("--actor", required=True)
 
@@ -84,9 +84,9 @@ def _add_neutral_identity(parser: argparse.ArgumentParser) -> None:
     identity.add_argument("--stock-lot-id")
     parser.add_argument("--direction", choices=("call", "put"), default="call")
     parser.add_argument(
-        "--expected-branch-generation-hash",
         "--expected-batch-generation-hash",
-        dest="expected_branch_generation_hash",
+        "--expected-batch-generation-hash",
+        dest="expected_batch_generation_hash",
         required=True,
     )
     parser.add_argument("--request-id", required=True)
@@ -255,14 +255,14 @@ def _write_requested(args: argparse.Namespace) -> bool:
     )
 
 
-def _batch(model: dict[str, Any], stock_lot_id: str) -> dict[str, Any]:
+def _batch(model: dict[str, Any], lot_id: str) -> dict[str, Any]:
     matches = [
         item
         for item in model.get("batches") or []
-        if item.get("stock_lot_id") == stock_lot_id
+        if item.get("stock_lot_id") == lot_id
     ]
     if len(matches) != 1:
-        raise ValueError(f"Wheel batch must resolve uniquely: {stock_lot_id}")
+        raise ValueError(f"Wheel batch must resolve uniquely: {lot_id}")
     return matches[0]
 
 
@@ -270,10 +270,10 @@ def _branch(
     model: dict[str, Any],
     *,
     wheel_branch_id: str | None,
-    stock_lot_id: str | None,
+    lot_id: str | None,
 ) -> dict[str, Any]:
     branch_id = str(wheel_branch_id or "").strip()
-    lot_id = str(stock_lot_id or "").strip()
+    lot_id = str(lot_id or "").strip()
     if bool(branch_id) == bool(lot_id):
         raise ValueError("Exactly one of wheel_branch_id or stock_lot_id is required")
     matches = [
@@ -430,13 +430,13 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         branch = _branch(
             model,
             wheel_branch_id=args.wheel_branch_id,
-            stock_lot_id=args.stock_lot_id,
+            lot_id=args.stock_lot_id,
         )
         branch_args: dict[str, Any] = {
             "account": args.account,
             "wheel_branch_id": branch["wheel_branch_id"],
             "decision": args.branch_action,
-            "expected_branch_generation_hash": args.expected_branch_generation_hash,
+            "expected_batch_generation_hash": args.expected_batch_generation_hash,
             "request_id": args.request_id,
             "actor": args.actor,
             "market": args.config_key,
@@ -460,7 +460,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         return end_wheel_lifecycle(
             repo,
             account=args.account,
-            stock_lot_id=args.stock_lot_id,
+            lot_id=args.stock_lot_id,
             expected_batch_generation_hash=args.expected_batch_generation_hash,
             request_id=args.request_id,
             actor=args.actor,
@@ -479,7 +479,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
     branch = _branch(
         model,
         wheel_branch_id=args.wheel_branch_id,
-        stock_lot_id=args.stock_lot_id,
+        lot_id=args.stock_lot_id,
     )
     if branch.get("direction") != args.direction:
         raise ValueError("Wheel branch direction mismatch")
@@ -487,7 +487,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         "account": args.account,
         "wheel_branch_id": branch["wheel_branch_id"],
         "direction": args.direction,
-        "expected_branch_generation_hash": args.expected_branch_generation_hash,
+        "expected_batch_generation_hash": args.expected_batch_generation_hash,
         "request_id": args.request_id,
         "actor": args.actor,
         "market": args.config_key,
@@ -581,7 +581,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         return confirm_wheel_linkage(
             repo,
             **common,
-            option_record_id=args.option_record_id,
+            option_lot_id=args.option_record_id,
             linkage_candidate_id=args.linkage_candidate_id,
             expected_input_hash=args.expected_input_hash,
             capacity_fact=capacity_fact,
@@ -589,7 +589,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
     return reject_wheel_linkage(
         repo,
         **common,
-        option_record_id=args.option_record_id,
+        option_lot_id=args.option_record_id,
         linkage_candidate_id=args.linkage_candidate_id,
         expected_input_hash=args.expected_input_hash,
         reason=args.reason,

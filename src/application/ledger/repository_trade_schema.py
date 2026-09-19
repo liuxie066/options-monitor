@@ -93,6 +93,20 @@ TRADE_EVENT_PAGINATION_TRIGGERS = (
 
 _OPEND_TRADE_TIME_CORRECTION_SCHEMA = "opend_trade_time_correction.v1"
 
+# Marker embedded in the pagination projection guards. Names alone cannot tell a
+# current definition from a stale one. A store created before the §7.4 change used
+# to keep the old ``typeof(strike)`` whitelist for two reasons at once: the guards
+# were published with ``CREATE TRIGGER IF NOT EXISTS``, a no-op once the name
+# exists, and the open path returned on readiness alone without reaching the
+# publish. Both are fixed — the publish now drops and recreates, and readiness no
+# longer decides on its own — but a store whose rows still lack the pagination
+# fields is handed to the migration path with its stale guards untouched, so this
+# marker is what separates a stale definition from a current one. Bump it whenever
+# the guard definition changes;
+# ``_trade_event_pagination_guard_definitions_current`` compares it against
+# ``sqlite_master.sql``.
+_TRADE_EVENT_PAGINATION_GUARD_SCHEMA = "trade_event_pagination_guard.v2"
+
 _TRADE_EVENT_PAGINATION_MISSING = """
     ingest_seq IS NULL
     OR typeof(ingest_seq) != 'integer' OR ingest_seq < 1
@@ -203,6 +217,67 @@ def _trade_event_pagination_schema_ready(conn: sqlite3.Connection) -> bool:
         *(('trigger', name) for name in TRADE_EVENT_PAGINATION_TRIGGERS),
     }
     return required.issubset(present) and _trade_event_pagination_missing_row(conn) is None
+
+
+def _trade_event_ingest_seq_is_duplicated(conn: sqlite3.Connection) -> bool:
+    """Do two stored rows share an ``ingest_seq``?
+
+    ``idx_trade_events_ingest_seq`` is unique, so a store holding duplicates can
+    only have been left without that index — and creating it over those rows
+    would abort. Callers reach this only once
+    ``_trade_event_pagination_missing_row`` has reported no offending row, so
+    every ``ingest_seq`` visible here is a whole number and none is ``NULL``. The
+    SQL alone does not give that: ``GROUP BY`` treats ``NULL`` as equal, so two
+    ``NULL`` rows would group and be reported as duplicates. The precondition
+    above is what keeps them out.
+    """
+
+    return (
+        conn.execute(
+            """
+            SELECT 1
+            FROM trade_events
+            GROUP BY ingest_seq
+            HAVING COUNT(*) > 1
+            LIMIT 1
+            """
+        ).fetchone()
+        is not None
+    )
+
+
+def _trade_event_pagination_guard_definitions_current(conn: sqlite3.Connection) -> bool:
+    """Do the stored pagination guards carry the current definition?
+
+    ``_trade_event_pagination_schema_ready`` checks that the guards exist by name
+    and type and reads the stored rows, but it never looks at *how* they are defined.
+    A store created before the §7.4 change therefore keeps the old
+    ``typeof(strike) NOT IN ('integer', 'real')`` whitelist until something
+    republishes the definition, and the first write of a decimal-text strike is
+    aborted with a misleading ``trade event pagination query fields are incomplete``.
+    Opening such a store is what republishes it; a store whose rows still lack the
+    pagination fields is left to the migration path instead, so its guards keep the
+    old whitelist until that runs. Compare a marker
+    embedded in the definition instead, mirroring
+    ``_ensure_opend_trade_time_correction_guard``.
+    """
+
+    rows = conn.execute(
+        """
+        SELECT sql
+        FROM sqlite_master
+        WHERE type = 'trigger' AND name IN (?, ?)
+        """,
+        (
+            "trg_trade_events_pagination_projection_insert_guard",
+            "trg_trade_events_pagination_projection_update_guard",
+        ),
+    ).fetchall()
+    if len(rows) != 2:
+        return False
+    return all(
+        _TRADE_EVENT_PAGINATION_GUARD_SCHEMA in str(row["sql"] or "") for row in rows
+    )
 
 
 def _publish_trade_event_query_projection_immutable_trigger(
@@ -317,7 +392,19 @@ def _ensure_opend_trade_time_correction_guard(conn: sqlite3.Connection) -> None:
     if row is None or _OPEND_TRADE_TIME_CORRECTION_SCHEMA not in str(row["sql"] or ""):
         _publish_trade_event_query_projection_immutable_trigger(conn)
 
-def _publish_trade_event_pagination_schema(conn: sqlite3.Connection) -> None:
+def _publish_trade_event_pagination_schema(
+    conn: sqlite3.Connection, *, with_unique_ingest_seq_index: bool = True
+) -> None:
+    """Write the pagination definitions, including the unique ``ingest_seq`` index.
+
+    ``with_unique_ingest_seq_index`` is false only for a store whose rows already
+    share an ``ingest_seq``: that index cannot be built over them, but everything
+    else here — the keyset indexes and the projection guards — can, and leaving
+    the guards stale is what turns a duplicate-bearing store into one where every
+    write aborts with a message about query fields. Readiness still reports the
+    gap because ``idx_trade_events_ingest_seq`` stays absent.
+    """
+
     missing = _trade_event_pagination_missing_row(conn)
     if missing is not None:
         raise ValueError(
@@ -331,10 +418,11 @@ def _publish_trade_event_pagination_schema(conn: sqlite3.Connection) -> None:
         WHERE {_TRADE_EVENT_PAGINATION_MISSING}
         """
     )
-    conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_events_ingest_seq "
-        "ON trade_events(ingest_seq)"
-    )
+    if with_unique_ingest_seq_index:
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_events_ingest_seq "
+            "ON trade_events(ingest_seq)"
+        )
     for index_name, columns in (
         (
             "idx_trade_events_market_keyset",
@@ -367,7 +455,8 @@ def _publish_trade_event_pagination_schema(conn: sqlite3.Connection) -> None:
         """
     )
     _publish_trade_event_query_projection_immutable_trigger(conn)
-    projection_guard = """
+    projection_guard = f"""
+      -- {_TRADE_EVENT_PAGINATION_GUARD_SCHEMA}
       SELECT CASE
         WHEN json_valid(NEW.event_json) != 1
           OR json_type(NEW.event_json) IS NOT 'object'
@@ -393,7 +482,7 @@ def _publish_trade_event_pagination_schema(conn: sqlite3.Connection) -> None:
           ) IS NOT 'text'
           OR json_type(NEW.event_json, '$.contract_key.option_type') IS NOT 'text'
           OR json_type(NEW.event_json, '$.contract_key.strike')
-             NOT IN ('integer', 'real')
+             NOT IN ('integer', 'real', 'text')
           OR json_type(
             NEW.event_json, '$.contract_key.expiration_ymd'
           ) IS NOT 'text'
@@ -426,9 +515,18 @@ def _publish_trade_event_pagination_schema(conn: sqlite3.Connection) -> None:
           THEN RAISE(ABORT, 'trade event position-effect projection conflicts')
       END;
     """
+    # The guards must be replaced rather than skipped when their definition
+    # changed: ``CREATE TRIGGER IF NOT EXISTS`` would keep a stale definition
+    # (e.g. the pre-§7.4 ``typeof(strike)`` whitelist) that rejects every write.
+    # Mirrors ``_publish_trade_event_query_projection_immutable_trigger``.
+    for trigger_name in (
+        "trg_trade_events_pagination_projection_insert_guard",
+        "trg_trade_events_pagination_projection_update_guard",
+    ):
+        conn.execute(f"DROP TRIGGER IF EXISTS {trigger_name}")
     conn.execute(
         f"""
-        CREATE TRIGGER IF NOT EXISTS trg_trade_events_pagination_projection_insert_guard
+        CREATE TRIGGER trg_trade_events_pagination_projection_insert_guard
         BEFORE INSERT ON trade_events
         BEGIN
           {projection_guard}
@@ -449,7 +547,7 @@ def _publish_trade_event_pagination_schema(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         f"""
-        CREATE TRIGGER IF NOT EXISTS trg_trade_events_pagination_projection_update_guard
+        CREATE TRIGGER trg_trade_events_pagination_projection_update_guard
         BEFORE UPDATE OF event_id, event_json, trade_time_ms, ingest_seq,
           account, market, position_effect ON trade_events
         BEGIN
@@ -466,6 +564,86 @@ def _publish_trade_event_pagination_schema(conn: sqlite3.Connection) -> None:
         END
         """
     )
+
+
+def _try_publish_trade_event_pagination_schema(
+    conn: sqlite3.Connection, *, with_unique_ingest_seq_index: bool = True
+) -> bool:
+    """Publish the pagination schema, or leave the store exactly as it was found.
+
+    Returns whether the publish was applied. A failure that was undone to the
+    savepoint returns ``False``; anything the undo cannot answer for propagates
+    instead, because the store is then not guaranteed to be back the way it was
+    found and the caller has to abort. Two such failures reach the caller. One has
+    already destroyed the caller's transaction, and the savepoint went with it, so
+    no undo runs at all: the original failure arrives with ``__cause__`` ``None``,
+    and with ``__context__`` ``None`` as well unless the caller is already handling
+    an exception when it gets here, in which case that one becomes the context. The
+    other has an undo that cannot complete, and
+    there the original failure is re-raised as the message, with the undo's own
+    error chained behind it as ``__context__`` rather than raised in its place. That
+    second arm also covers an undo that ran but could not release — the store *is*
+    back the way it was found and only the savepoint is left behind — and since
+    which of the two happened is not read back, both propagate the same way.
+
+    Statements in ``_publish_trade_event_pagination_schema`` can fail for reasons
+    no precondition at the call site models, and guessing at them one by one is
+    what this replaces. The one an open path actually meets is a table or view
+    already owning an index name: SQLite treats ``CREATE INDEX IF NOT EXISTS`` as
+    a no-op only when the name belongs to an *index*, so a shadowed name raises
+    instead of skipping. Letting that escape is worse than the gap it reports —
+    ``_ensure_trade_event_pagination_schema`` runs from every ``__init__``, so the
+    exception takes the whole ledger with it and a store that opened before this
+    branch existed never opens again.
+
+    Undoing to the savepoint restores the store's contents, and readiness is read
+    from the store rather than remembered — it needs the object names and types
+    *and* stored rows whose pagination projection is complete, all of which the undo
+    puts back — so it reports what it reported before the attempt. On the shadowed
+    store this branch exists for the index name is absent, so that is ``False`` and
+    the pagination entry points report the gap through
+    ``TradeEventPaginationUnavailable``. That message says a migration is required;
+    it does not name the missing object. A store that already carried every name and
+    only needed stale definitions refreshed keeps readiness true, and whatever its
+    stale definition refuses stays refused until those definitions are published.
+    """
+
+    conn.execute("SAVEPOINT trade_event_pagination_publish")
+    try:
+        _publish_trade_event_pagination_schema(
+            conn, with_unique_ingest_seq_index=with_unique_ingest_seq_index
+        )
+    except sqlite3.Error as failure:
+        if not conn.in_transaction:
+            # The failure already took the whole transaction with it, and the
+            # savepoint went with it. There is nothing left to undo to, and
+            # swallowing here is worse than the gap it would report: the caller gets
+            # back a connection with no transaction at all, so ``_init_db`` keeps
+            # issuing DDL in autocommit and commits a partial schema one statement
+            # at a time, then dies on the first statement that references a
+            # rolled-back object -- naming that missing object instead of the
+            # failure that actually happened. Re-raise so the caller aborts and its
+            # own rollback path runs, as it did before this helper existed.
+            raise
+        try:
+            conn.execute("ROLLBACK TO trade_event_pagination_publish")
+            conn.execute("RELEASE trade_event_pagination_publish")
+        except sqlite3.Error:
+            # The undo did not complete. Usually the savepoint is gone while the
+            # transaction is not, so there was nothing to roll back to; it also
+            # covers a rollback that ran but could not release, where the store is
+            # back the way it was found and only the savepoint is left for the
+            # caller's own rollback to discard. Which of the two happened is not
+            # read back: either way the store is not *guaranteed* to be as it was
+            # found, so the original failure propagates and the caller aborts.
+            # Letting the undo's own ``no such savepoint`` escape instead would hand
+            # the caller a cause that says nothing about what actually went wrong --
+            # the same misleading-cause failure the branch above exists to avoid.
+            raise failure
+        return False
+    conn.execute("RELEASE trade_event_pagination_publish")
+    return True
+
 
 def _backfill_trade_event_pagination_schema(conn: sqlite3.Connection) -> int:
     invalid_created_at = conn.execute(
@@ -658,7 +836,28 @@ def _backfill_trade_event_pagination_schema(conn: sqlite3.Connection) -> int:
     return updated
 
 def _ensure_trade_event_pagination_schema(conn: sqlite3.Connection) -> None:
-    """Declare pagination schema; non-empty legacy stores require controlled migration."""
+    """Declare pagination schema; non-empty stores with unmigrated rows require controlled migration.
+
+    Existing guards are refreshed in place when their definitions are stale — they
+    are pure query-shape guards, so republishing rewrites no rows and is safe once
+    the stored rows already satisfy the pagination projection. A store holding
+    duplicate ``ingest_seq`` values receives everything but the unique index over
+    them, and a publish that fails while the caller's transaction survives is undone
+    to its savepoint rather than allowed to abort the open, so the store opens
+    carrying the gap instead of going unopenable. (A publish that destroys the
+    transaction does abort the open, exactly as it did before this helper existed.)
+    What readiness reports afterwards is what it reported before the undo — it is
+    read from the store's object names and types and from the stored rows, both of
+    which the undo restores — so the shadowed store this exists for stays ``False``
+    and its gap is still reported by the pagination entry points, while a store that
+    already carried every name and only needed stale definitions refreshed keeps
+    readiness true and receives those definitions refreshed in place. A stale
+    definition therefore only keeps refusing if the publish replacing it is undone —
+    or on the one store that reaches no publish at all, the store whose rows
+    still lack the pagination fields, which is left to the explicit migration path
+    with its stale guards in place. Anything the undo cannot answer for propagates,
+    since the store is then not guaranteed to be back the way it was found.
+    """
 
     _add_column_if_missing(conn, "trade_events", "ingest_seq", "INTEGER")
     _add_column_if_missing(conn, "trade_events", "market", "TEXT")
@@ -671,17 +870,60 @@ def _ensure_trade_event_pagination_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    # Seed from the stored rows rather than a literal: a store that lost this row
+    # (a partial restore, say) must not restart at 1 and re-issue values the rows
+    # already carry, which is what leaves duplicate ``ingest_seq`` behind once no
+    # unique index is in place to refuse them. Only whole, non-negative values may
+    # seed it — the readiness check below has not run yet, so a ``TEXT`` or
+    # negative ``ingest_seq`` is still visible here, and either would violate the
+    # ``last_value`` constraint (or poison it with a non-integer).
     conn.execute(
         """
-        INSERT OR IGNORE INTO trade_event_ingest_sequence (singleton_id, last_value)
-        VALUES (1, 0)
+        INSERT INTO trade_event_ingest_sequence (singleton_id, last_value)
+        VALUES (
+          1,
+          MAX(
+            0,
+            COALESCE(
+              (
+                SELECT MAX(ingest_seq)
+                FROM trade_events
+                WHERE typeof(ingest_seq) = 'integer'
+              ),
+              0
+            )
+          )
+        )
+        ON CONFLICT(singleton_id) DO UPDATE SET
+          last_value = MAX(last_value, excluded.last_value)
         """
     )
-    if _trade_event_pagination_schema_ready(conn):
+    if _trade_event_pagination_schema_ready(conn) and (
+        _trade_event_pagination_guard_definitions_current(conn)
+    ):
+        return
+    if _trade_event_pagination_missing_row(conn) is None:
+        # The stored rows already satisfy the pagination projection and only the
+        # definitions are stale (e.g. a guard written before the §7.4 decimal-text
+        # strike), so refreshing them is safe and rewrites no rows. This is the
+        # same precondition ``_publish_trade_event_pagination_schema`` asserts.
+        # Without it an upgraded store keeps a guard that aborts every write.
+        #
+        # ``CREATE UNIQUE INDEX`` cannot succeed while two rows share an
+        # ``ingest_seq``, so that one index is skipped rather than the whole
+        # publish: a stale guard would otherwise abort every write on a store that
+        # stays readable, reporting query fields rather than the real cause. The
+        # gap is still announced — readiness needs that index, so it stays false
+        # and ``TradeEventPaginationUnavailable`` reports it. That message says a
+        # migration is required; it does not name the missing object.
+        _try_publish_trade_event_pagination_schema(
+            conn,
+            with_unique_ingest_seq_index=not _trade_event_ingest_seq_is_duplicated(conn),
+        )
         return
     has_rows = conn.execute("SELECT 1 FROM trade_events LIMIT 1").fetchone()
     if has_rows is None:
-        _publish_trade_event_pagination_schema(conn)
+        _try_publish_trade_event_pagination_schema(conn)
 
 def _create_index_if_table_empty(
     conn: sqlite3.Connection,

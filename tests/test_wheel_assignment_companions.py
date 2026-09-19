@@ -10,6 +10,7 @@ import pytest
 from conftest import phase2_opening_row
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.ledger import ContractKey, TradeEvent
+from domain.domain.trade_contract_identity import derive_trade_side
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.ledger.writer import persist_trade_event_objects_atomically
 from src.application.wheel.read_model import build_wheel_read_model
@@ -50,7 +51,6 @@ def _put_event(
             account="lx",
             underlying_symbol="NVDA",
             option_type="put",
-            position_side="short",
             strike=100,
             expiration_ymd="2026-08-21",
         ),
@@ -61,7 +61,9 @@ def _put_event(
         multiplier=multiplier,
         lot_id="put-lot" if event_type == "open" else None,
         target_lot_id="put-lot" if event_type == "assignment" else None,
-        raw_payload=raw_payload,
+        # §9.2 step 3: the contract key no longer carries the position side, so the
+        # short put side travels as the trade side instead.
+        raw_payload={**raw_payload, "side": derive_trade_side(event_type, "short") or ""},
     )
 
 
@@ -187,16 +189,15 @@ def test_ordinary_covered_call_assignment_bootstraps_active_put_branch(tmp_path)
             raw_payload=_assignment_payload(100),
         )],
     )
-    stock_lot_id = "assigned-stock-stock-source-assignment"
+    lot_id = "assigned-stock-stock-source-assignment"
     call_key = ContractKey.from_values(
         broker="富途",
         account="lx",
         underlying_symbol="NVDA",
         option_type="call",
-        position_side="short",
         strike=110,
         expiration_ymd="2026-09-18",
-    )
+        )
     persist_trade_event_objects_atomically(
         repo,
         [TradeEvent(
@@ -214,7 +215,8 @@ def test_ordinary_covered_call_assignment_bootstraps_active_put_branch(tmp_path)
                 "covered-call-open",
                 strategy="cc",
                 leg_role="covered_call",
-                source_stock_lot_id=stock_lot_id,
+                source_stock_lot_id=lot_id,
+                side="sell",
             ),
         )],
     )
@@ -234,6 +236,7 @@ def test_ordinary_covered_call_assignment_bootstraps_active_put_branch(tmp_path)
             multiplier=100,
             target_lot_id="covered-call-lot",
             raw_payload={
+                "side": "buy",
                 "target_lot_id": "covered-call-lot",
                 "stock_settlement": {
                     "side": "sell",
@@ -343,10 +346,9 @@ def test_ordinary_call_on_active_wheel_stock_requires_manual_review(tmp_path) ->
         account="lx",
         underlying_symbol="NVDA",
         option_type="call",
-        position_side="short",
         strike=110,
         expiration_ymd="2026-09-18",
-    )
+        )
     persist_trade_event_objects_atomically(
         repo,
         [TradeEvent(
@@ -365,6 +367,7 @@ def test_ordinary_call_on_active_wheel_stock_requires_manual_review(tmp_path) ->
                 strategy="cc",
                 leg_role="covered_call",
                 source_stock_lot_id="assigned-stock-put-assignment",
+                side="sell",
             ),
         )],
     )
@@ -383,6 +386,7 @@ def test_ordinary_call_on_active_wheel_stock_requires_manual_review(tmp_path) ->
             multiplier=10,
             target_lot_id="ordinary-call-lot",
             raw_payload={
+                "side": "buy",
                 "target_lot_id": "ordinary-call-lot",
                 "stock_settlement": {
                     "side": "sell",
@@ -542,29 +546,12 @@ def test_arbitrary_multiplier_source_is_not_trusted(tmp_path) -> None:
 
 def test_fractional_multiplier_is_rejected_before_assignment(tmp_path) -> None:
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
-    persist_trade_event_objects_atomically(
-        repo,
-        [
-            _put_event(
-                event_id="put-open",
-                event_type="open",
-                multiplier=10.5,
-                raw_payload=_trusted_multiplier_payload("put-open"),
-            )
-        ],
-    )
-
-    with pytest.raises(ValueError, match="positive integer"):
-        persist_trade_event_objects_atomically(
-            repo,
-            [
-                _put_event(
-                    event_id="put-assignment",
-                    event_type="assignment",
-                    multiplier=10.5,
-                    raw_payload=_assignment_payload(10.5),
-                )
-            ],
+    with pytest.raises(ValueError, match="whole number"):
+        _put_event(
+            event_id="put-assignment",
+            event_type="assignment",
+            multiplier=10.5,
+            raw_payload=_assignment_payload(10.5),
         )
 
     assert not any(
@@ -599,16 +586,15 @@ def test_batched_legacy_call_assignments_use_rolling_stock_state(tmp_path) -> No
             )
         ],
     )
-    stock_lot_id = "assigned-stock-put-assignment"
+    lot_id = "assigned-stock-put-assignment"
     call_key = ContractKey.from_values(
         broker="富途",
         account="lx",
         underlying_symbol="NVDA",
         option_type="call",
-        position_side="short",
         strike=110,
         expiration_ymd="2026-09-18",
-    )
+        )
     persist_trade_event_objects_atomically(
         repo,
         [
@@ -627,7 +613,8 @@ def test_batched_legacy_call_assignments_use_rolling_stock_state(tmp_path) -> No
                     f"call-open-{index}",
                     strategy="wheel",
                     leg_role="wheel_call",
-                    source_stock_lot_id=stock_lot_id,
+                    source_stock_lot_id=lot_id,
+                    side="sell",
                 ),
             )
             for index in (1, 2)
@@ -651,6 +638,7 @@ def test_batched_legacy_call_assignments_use_rolling_stock_state(tmp_path) -> No
                 raw_payload={
                     "case_id": "call-assignment-case",
                     "evidence_id": "call-assignment-evidence",
+                    "side": "buy",
                     "target_lot_id": f"call-lot-{index}",
                     "stock_settlement_source": {
                         "side": "sell",

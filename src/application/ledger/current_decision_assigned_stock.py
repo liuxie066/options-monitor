@@ -29,6 +29,8 @@ from .current_decision_lifecycle import (
     _ASSIGNED_REVIEW_KEYS,
 )
 
+from domain.domain.trade_contract_identity import derive_position_side
+
 def _sale_fact_chain(event_ids: Iterable[str]) -> tuple[int, str]:
     chain = bytes(32)
     count = 0
@@ -325,8 +327,8 @@ def validate_assigned_stock_fact(payload: Mapping[str, Any]) -> dict[str, Any]:
             raise CurrentDecisionProjectionError("covered call allocation shape is invalid")
         allocation = dict(raw)
         open_event_id = _text(allocation["open_event_id"], field="open_event_id")
-        stock_lot_id = _text(allocation["stock_lot_id"], field="stock_lot_id")
-        if stock_lot_id not in lot_id_set:
+        lot_id = _text(allocation["stock_lot_id"], field="stock_lot_id")
+        if lot_id not in lot_id_set:
             raise CurrentDecisionProjectionError("covered call allocation lot is missing")
         if _text(allocation["account"], field="allocation account", lower=True) != account:
             raise CurrentDecisionProjectionError("covered call allocation account mismatch")
@@ -346,7 +348,7 @@ def validate_assigned_stock_fact(payload: Mapping[str, Any]) -> dict[str, Any]:
             raise CurrentDecisionProjectionError(
                 "covered call linkage basis is invalid"
             )
-        allocation_keys.append((open_event_id, stock_lot_id, start))
+        allocation_keys.append((open_event_id, lot_id, start))
     if allocation_keys != sorted(set(allocation_keys)):
         raise CurrentDecisionProjectionError("covered call allocations are not canonical")
 
@@ -644,13 +646,13 @@ def update_assigned_stock_fact(
             settlement=settled,
         )
         stock = settled["stock_settlement"]
-        stock_lot_id = f"assigned-stock-{settled['terminal_event_id']}"
+        lot_id = f"assigned-stock-{settled['terminal_event_id']}"
         price = Decimal(str(stock["price"]))
         shares = int(stock["shares"])
         fees = Decimal(str(stock["fees"]))
         _count, empty_chain = _sale_fact_chain(())
         next_lot = {
-            "stock_lot_id": stock_lot_id,
+            "stock_lot_id": lot_id,
             "source_assignment_event_id": settled["terminal_event_id"],
             "source_option_lot_id": settled["target_option_lot_id"],
             "account": settled["account"],
@@ -670,28 +672,28 @@ def update_assigned_stock_fact(
             "sale_fact_count": 0,
             "sale_fact_chain_sha256": empty_chain,
         }
-        existing = lots_by_id.get(stock_lot_id)
+        existing = lots_by_id.get(lot_id)
         if existing is not None:
             if existing == next_lot:
                 return item
             raise CurrentDecisionProjectionError(
                 "assigned-stock deterministic lot conflict"
             )
-        lots_by_id[stock_lot_id] = next_lot
+        lots_by_id[lot_id] = next_lot
         return _assigned_fact_with(item, lots=lots_by_id.values())
 
     if kind == "sell_settlement":
         settlement_input = dict(transition)
-        stock_lot_id_raw = settlement_input.pop("stock_lot_id", None)
+        lot_id_raw = settlement_input.pop("stock_lot_id", None)
         settled = _settlement_transition(settlement_input, expected_side="sell")
-        if stock_lot_id_raw is None:
+        if lot_id_raw is None:
             raise CurrentDecisionProjectionError(
                 "assigned-stock sell transition shape is invalid"
             )
-        stock_lot_id = _text(
-            stock_lot_id_raw, field="stock_lot_id"
+        lot_id = _text(
+            lot_id_raw, field="stock_lot_id"
         )
-        prior_lot = lots_by_id.get(stock_lot_id)
+        prior_lot = lots_by_id.get(lot_id)
         if prior_lot is None or prior_lot["account"] != settled["account"]:
             raise CurrentDecisionProjectionError(
                 "assigned-stock sell lot binding is missing"
@@ -718,7 +720,7 @@ def update_assigned_stock_fact(
                 "assigned-stock sell exceeds remaining shares"
             )
         if remaining == 0:
-            lots_by_id.pop(stock_lot_id)
+            lots_by_id.pop(lot_id)
         else:
             prior_basis = Decimal(str(prior_lot["remaining_cost_basis"]))
             prior_remaining = int(prior_lot["shares_remaining"])
@@ -727,7 +729,7 @@ def update_assigned_stock_fact(
                 round(float(prior_basis * remaining / prior_remaining), 6),
                 field="remaining_cost_basis",
             )
-            lots_by_id[stock_lot_id] = prior_lot
+            lots_by_id[lot_id] = prior_lot
         active_open_event_ids = {
             str(fields.get("source_event_id") or fields.get("open_event_id") or "")
             for fields in _position_lot_fields(current_position_lots).values()
@@ -762,14 +764,14 @@ def update_assigned_stock_fact(
         stock_event_id = _text(
             transition["stock_event_id"], field="stock_event_id"
         )
-        stock_lot_id = _text(
+        lot_id = _text(
             transition["stock_lot_id"], field="stock_lot_id"
         )
         shares = _integer(transition["shares"], field="sale shares", minimum=1)
         trade_time_ms = _integer(
             transition["trade_time_ms"], field="sale trade_time_ms", minimum=1
         )
-        prior_lot = lots_by_id.get(stock_lot_id)
+        prior_lot = lots_by_id.get(lot_id)
         if prior_lot is None or trade_time_ms < int(prior_lot["assigned_at_ms"]):
             raise CurrentDecisionProjectionError(
                 "assigned-stock sale lot is missing or backdated"
@@ -785,7 +787,7 @@ def update_assigned_stock_fact(
                 raise CurrentDecisionProjectionError(
                     "closed assigned-stock sale after-view mismatch"
                 )
-            lots_by_id.pop(stock_lot_id)
+            lots_by_id.pop(lot_id)
         else:
             if not isinstance(supplied_after, Mapping):
                 raise CurrentDecisionProjectionError(
@@ -810,11 +812,11 @@ def update_assigned_stock_fact(
                 raise CurrentDecisionProjectionError(
                     "assigned-stock sale after-view mismatch"
                 )
-            lots_by_id[stock_lot_id] = next_lot
+            lots_by_id[lot_id] = next_lot
         if sum(
             int(row["shares"])
             for row in item["covered_call_allocations"]
-            if row["stock_lot_id"] == stock_lot_id
+            if row["stock_lot_id"] == lot_id
         ) > remaining:
             raise CurrentDecisionProjectionError(
                 "assigned-stock sale conflicts with covered-call allocation"
@@ -881,13 +883,13 @@ def update_assigned_stock_fact(
             shares_by_open_event[open_event_id] = (
                 shares_by_open_event.get(open_event_id, 0) + shares
             )
-            stock_lot_id = str(row["stock_lot_id"])
-            shares_by_stock_lot[stock_lot_id] = (
-                shares_by_stock_lot.get(stock_lot_id, 0) + shares
+            lot_id = str(row["stock_lot_id"])
+            shares_by_stock_lot[lot_id] = (
+                shares_by_stock_lot.get(lot_id, 0) + shares
             )
         if any(
-            shares > int(lots_by_id[stock_lot_id]["shares_remaining"])
-            for stock_lot_id, shares in shares_by_stock_lot.items()
+            shares > int(lots_by_id[lot_id]["shares_remaining"])
+            for lot_id, shares in shares_by_stock_lot.items()
         ):
             raise CurrentDecisionProjectionError(
                 "covered-call linkage stock quantity mismatch"
@@ -984,6 +986,16 @@ def _settlement_transition_from_event(
         field="stock shares",
         minimum=1,
     )
+    # §9.2 step 3: the contract key no longer carries the position side, so fall
+    # back to deriving it from the trade side the event declares.
+    position_side = str(
+        _trade_event_field(event, "position_side")
+        or contract.get("position_side")
+        or contract.get("side")
+        or ""
+    ).strip().lower() or (
+        derive_position_side(event_type, _trade_event_field(event, "side")) or ""
+    )
     expected_side = {
         ("assignment", "put", "short"): "buy",
         ("assignment", "call", "short"): "sell",
@@ -993,9 +1005,7 @@ def _settlement_transition_from_event(
         (
             event_type,
             str(contract.get("option_type") or "").strip().lower(),
-            str(contract.get("position_side") or contract.get("side") or "")
-            .strip()
-            .lower(),
+            position_side,
         )
     )
     if expected_side is None:
@@ -1035,7 +1045,7 @@ def _settlement_transition_from_event(
             contract.get("option_type"), field="option_type", lower=True
         ),
         "position_side": _text(
-            contract.get("position_side") or contract.get("side"),
+            position_side,
             field="position_side",
             lower=True,
         ),
@@ -1106,7 +1116,7 @@ def _settlement_transition_from_event(
             "assigned-stock settlement option binding is invalid"
         )
 
-    explicit_stock_lot_id = next(
+    explicit_lot_id = next(
         (
             str(source.get(key) or "").strip()
             for source in (stock, payload)
@@ -1131,9 +1141,9 @@ def _settlement_transition_from_event(
         and int(row["assigned_at_ms"]) <= event_time_ms
         and (not group_id or row["strategy_group_id"] == group_id)
     ]
-    if explicit_stock_lot_id is not None:
+    if explicit_lot_id is not None:
         candidates = [
-            row for row in candidates if row["stock_lot_id"] == explicit_stock_lot_id
+            row for row in candidates if row["stock_lot_id"] == explicit_lot_id
         ]
     if len(candidates) != 1:
         raise CurrentDecisionProjectionError(
@@ -1172,7 +1182,7 @@ def _sync_covered_call_allocations(
             ] = explicit
 
     active_calls: list[tuple[str, str, dict[str, Any]]] = []
-    for record_id, fields in _position_lot_fields(current_position_lots).items():
+    for call_lot_id, fields in _position_lot_fields(current_position_lots).items():
         if (
             str(fields.get("status") or "").strip().lower() == "open"
             and int(fields.get("contracts_open") or 0) > 0
@@ -1183,7 +1193,7 @@ def _sync_covered_call_allocations(
                 fields.get("source_event_id") or fields.get("open_event_id") or ""
             ).strip()
             if open_event_id:
-                active_calls.append((open_event_id, record_id, fields))
+                active_calls.append((open_event_id, call_lot_id, fields))
     active_calls.sort(
         key=lambda row: (
             int(row[2].get("opened_at") or 0),
@@ -1218,7 +1228,7 @@ def _sync_covered_call_allocations(
             )
             del candidates[2:]
     remaining_by_call: dict[str, int] = {}
-    for open_event_id, _record_id, fields in active_calls:
+    for open_event_id, _lot_id, fields in active_calls:
         remaining_by_call[open_event_id] = (
             _integer(fields.get("contracts_open"), field="covered call contracts")
             * _positive_integral_number(
@@ -1230,7 +1240,7 @@ def _sync_covered_call_allocations(
         prior_linkages.setdefault(str(row["open_event_id"]), []).append(row)
 
     allocations: list[dict[str, Any]] = []
-    for open_event_id, _record_id, fields in active_calls:
+    for open_event_id, _lot_id, fields in active_calls:
         required = remaining_by_call[open_event_id]
         explicit = explicit_by_open_event.get(open_event_id)
         group_id = str(fields.get("strategy_group_id") or "").strip()
@@ -1316,15 +1326,15 @@ def _sync_covered_call_allocations(
             raise CurrentDecisionProjectionError(
                 "covered-call linkage identity is not unique"
             )
-        stock_lot_id = str(candidates[0]["stock_lot_id"])
-        if remaining_by_stock[stock_lot_id] < required:
+        lot_id = str(candidates[0]["stock_lot_id"])
+        if remaining_by_stock[lot_id] < required:
             raise CurrentDecisionProjectionError(
                 "covered-call linkage stock quantity mismatch"
             )
         allocations.append(
             {
                 "open_event_id": open_event_id,
-                "stock_lot_id": stock_lot_id,
+                "stock_lot_id": lot_id,
                 "account": str(fields.get("account") or "").strip().lower(),
                 "broker": str(fields.get("broker") or "").strip().lower(),
                 "symbol": str(fields.get("symbol") or "").strip().upper(),
@@ -1336,7 +1346,7 @@ def _sync_covered_call_allocations(
                 "linkage_basis": linkage_basis,
             }
         )
-        remaining_by_stock[stock_lot_id] -= required
+        remaining_by_stock[lot_id] -= required
         remaining_by_call[open_event_id] = 0
     updated = update_assigned_stock_fact(
         item,

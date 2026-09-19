@@ -5,8 +5,6 @@ import pytest
 from domain.domain.ledger.position_fields import (
     BUY_TO_CLOSE,
     EXPIRE_AUTO_CLOSE,
-    OpenPositionCommand,
-    PositionLotFields,
     PositionLotPatch,
     build_buy_to_close_patch,
     build_close_patch_contract,
@@ -14,7 +12,6 @@ from domain.domain.ledger.position_fields import (
     build_open_adjustment_patch_contract,
     build_expire_auto_close_patch,
     build_expire_auto_close_patch_contract,
-    build_open_fields,
     build_position_lot_fields,
     effective_expiration_ymd,
     exp_ms_to_ymd,
@@ -31,13 +28,15 @@ from domain.domain.option_position_identity import (
 )
 
 
-def _cmd(**overrides: object) -> OpenPositionCommand:
-    """Build an ``OpenPositionCommand``.
+def _cmd(**overrides: object) -> dict[str, object]:
+    """Build the flat keyword arguments for ``build_position_lot_fields``.
 
-    The defaults are the AAPL short call this module repeats most often, so a
-    call site spells out only the fields that differ from it.
+    The command-object layer (``OpenPositionCommand``/``build_open_fields``) is
+    retired, so the shared builder hands back the keyword dict itself. The
+    defaults are the AAPL short call this module repeats most often, so a call
+    site spells out only the fields that differ from it.
     """
-    base = {
+    base: dict[str, object] = {
         "broker": "富途",
         "account": "sy",
         "symbol": "aapl",
@@ -52,7 +51,7 @@ def _cmd(**overrides: object) -> OpenPositionCommand:
         "opened_at_ms": 1000,
     }
     base.update(overrides)
-    return OpenPositionCommand(**base)
+    return base
 
 
 def test_normalize_broker_maps_futu_aliases() -> None:
@@ -105,8 +104,8 @@ def test_strict_enum_normalization_rejects_invalid_values() -> None:
 
 
 def test_build_open_fields_for_short_put_sets_open_contracts_and_cash() -> None:
-    fields = build_open_fields(
-        _cmd(
+    fields = build_position_lot_fields(
+        **_cmd(
             broker="富途证券（香港）",
             account="LX",
             symbol="nvda",
@@ -123,7 +122,9 @@ def test_build_open_fields_for_short_put_sets_open_contracts_and_cash() -> None:
     assert fields["account"] == "lx"
     assert fields["broker"] == "富途"
     assert "market" not in fields
-    assert fields["position_id"] == "NVDA_20260417_100P_short"
+    # §7.1: ``position_id`` is retired; ``build_position_lot_fields`` no longer
+    # emits a display id (``position_key`` comes from ``PositionLot``).
+    assert "position_id" not in fields
     assert fields["symbol"] == "NVDA"
     assert fields["option_type"] == "put"
     assert fields["side"] == "short"
@@ -145,29 +146,29 @@ def test_build_open_fields_for_short_put_sets_open_contracts_and_cash() -> None:
 
 
 def test_build_position_lot_fields_returns_typed_open_contract() -> None:
-    command = _cmd(
-        broker="富途证券（香港）",
-        account="LX",
-        symbol="nvda",
-        option_type="认沽",
-        side="Sell To Open",
-        contracts=2,
-        currency="美元",
-        strike=100,
-        expiration_ymd="2026-04-17",
-        premium_per_share=1.235,
+    fields = build_position_lot_fields(
+        **_cmd(
+            broker="富途证券（香港）",
+            account="LX",
+            symbol="nvda",
+            option_type="认沽",
+            side="Sell To Open",
+            contracts=2,
+            currency="美元",
+            strike=100,
+            expiration_ymd="2026-04-17",
+            premium_per_share=1.235,
+        )
     )
 
-    fields = build_position_lot_fields(command)
-
-    assert isinstance(fields, PositionLotFields)
-    assert fields.position_id == "NVDA_20260417_100P_short"
-    assert fields.to_dict() == build_open_fields(command)
+    assert isinstance(fields, dict)
+    # §7.1: ``position_id`` is retired.
+    assert "position_id" not in fields
 
 
 def test_build_open_fields_preserves_strategy_snapshot() -> None:
-    fields = build_open_fields(
-        _cmd(
+    fields = build_position_lot_fields(
+        **_cmd(
             account="lx",
             symbol="NVDA",
             option_type="put",
@@ -194,8 +195,8 @@ def test_build_open_fields_preserves_strategy_snapshot() -> None:
 
 
 def test_build_open_fields_canonicalizes_alias_symbol() -> None:
-    fields = build_open_fields(
-        _cmd(
+    fields = build_position_lot_fields(
+        **_cmd(
             account="lx",
             symbol="POP",
             option_type="put",
@@ -208,12 +209,13 @@ def test_build_open_fields_canonicalizes_alias_symbol() -> None:
     )
 
     assert fields["symbol"] == "9992.HK"
-    assert fields["position_id"] == "9992_HK_20260429_135P_short"
+    # §7.1: ``position_id`` is retired.
+    assert "position_id" not in fields
 
 
 def test_build_open_fields_infers_currency_from_symbol_when_missing() -> None:
-    hk_fields = build_open_fields(
-        _cmd(
+    hk_fields = build_position_lot_fields(
+        **_cmd(
             account="lx",
             symbol="0700.HK",
             option_type="put",
@@ -224,14 +226,15 @@ def test_build_open_fields_infers_currency_from_symbol_when_missing() -> None:
             premium_per_share=1.23,
         )
     )
-    us_fields = build_open_fields(
-        _cmd(
+    us_fields = build_position_lot_fields(
+        **_cmd(
             account="lx",
             symbol="PLTR",
             option_type="put",
             contracts=1,
             currency=None,
             strike=30,
+            expiration_ymd="2026-05-15",
             premium_per_share=1.23,
         )
     )
@@ -241,8 +244,8 @@ def test_build_open_fields_infers_currency_from_symbol_when_missing() -> None:
 
 
 def test_build_open_fields_symbol_currency_repairs_mismatched_input() -> None:
-    fields = build_open_fields(
-        _cmd(
+    fields = build_position_lot_fields(
+        **_cmd(
             account="lx",
             symbol="0700.HK",
             option_type="put",
@@ -257,7 +260,7 @@ def test_build_open_fields_symbol_currency_repairs_mismatched_input() -> None:
 
 
 def test_build_open_fields_for_short_call_sets_locked_shares() -> None:
-    fields = build_open_fields(_cmd(premium_per_share=1.23))
+    fields = build_position_lot_fields(**_cmd(premium_per_share=1.23))
 
     assert fields["underlying_share_locked"] == 300
     assert fields["contracts_open"] == 3
@@ -268,33 +271,31 @@ def test_build_open_fields_enforces_core_write_rules() -> None:
     command = _cmd(side="long", contracts=1)
 
     invalid_cases = (
-        (command.__class__(**{**command.__dict__, "broker": ""}), "broker is required"),
-        (command.__class__(**{**command.__dict__, "account": ""}), "account is required"),
-        (command.__class__(**{**command.__dict__, "symbol": ""}), "symbol is required"),
-        (command.__class__(**{**command.__dict__, "option_type": ""}), "option_type must be one of"),
-        (command.__class__(**{**command.__dict__, "side": ""}), "side must be one of"),
-        (command.__class__(**{**command.__dict__, "contracts": 0}), "contracts must be > 0"),
-        (command.__class__(**{**command.__dict__, "contracts": 1.5}), "contracts must be an integer"),
-        (command.__class__(**{**command.__dict__, "strike": 0}), "strike must be > 0"),
-        (command.__class__(**{**command.__dict__, "multiplier": 0}), "multiplier must be > 0"),
+        ({**command, "broker": ""}, "broker is required"),
+        ({**command, "account": ""}, "account is required"),
+        ({**command, "symbol": ""}, "symbol is required"),
+        ({**command, "option_type": ""}, "option_type must be one of"),
+        ({**command, "side": ""}, "side must be one of"),
+        ({**command, "contracts": 0}, "contracts must be > 0"),
+        ({**command, "contracts": 1.5}, "contracts must be an integer"),
+        ({**command, "strike": 0}, "strike must be > 0"),
+        ({**command, "multiplier": 0}, "multiplier must be > 0"),
     )
     for bad_command, expected in invalid_cases:
         with pytest.raises(ValueError) as _caught:
-            build_open_fields(bad_command)
+            build_position_lot_fields(**bad_command)
         exc = _caught.value
         assert expected in str(exc)
 
 
 def test_build_open_fields_enforces_risk_field_write_rules() -> None:
     short_call = _cmd()
-    long_call = short_call.__class__(**{**short_call.__dict__, "side": "long"})
-    short_put = short_call.__class__(**{**short_call.__dict__, "option_type": "put"})
+    long_call = {**short_call, "side": "long"}
+    short_put = {**short_call, "option_type": "put"}
 
-    explicit_locked = build_open_fields(
-        short_call.__class__(**{**short_call.__dict__, "underlying_share_locked": 300})
-    )
-    no_risk_lock = build_open_fields(long_call)
-    short_put_fields = build_open_fields(short_put)
+    explicit_locked = build_position_lot_fields(**{**short_call, "underlying_share_locked": 300})
+    no_risk_lock = build_position_lot_fields(**long_call)
+    short_put_fields = build_position_lot_fields(**short_put)
 
     assert explicit_locked["underlying_share_locked"] == 300
     assert "underlying_share_locked" not in no_risk_lock
@@ -304,17 +305,17 @@ def test_build_open_fields_enforces_risk_field_write_rules() -> None:
 
     invalid_cases = (
         (
-            short_call.__class__(**{**short_call.__dict__, "underlying_share_locked": 299}),
+            {**short_call, "underlying_share_locked": 299},
             "underlying_share_locked must equal contracts * multiplier for short call",
         ),
         (
-            short_put.__class__(**{**short_put.__dict__, "underlying_share_locked": 300}),
+            {**short_put, "underlying_share_locked": 300},
             "underlying_share_locked only applies to short call",
         ),
     )
     for bad_command, expected in invalid_cases:
         with pytest.raises(ValueError) as _caught:
-            build_open_fields(bad_command)
+            build_position_lot_fields(**bad_command)
         exc = _caught.value
         assert expected in str(exc)
 
@@ -354,7 +355,7 @@ def test_build_open_fields_requires_option_strike_and_expiration() -> None:
         ),
     ):
         with pytest.raises(ValueError) as _caught:
-            build_open_fields(command)
+            build_position_lot_fields(**command)
         exc = _caught.value
         assert expected in str(exc)
 
@@ -362,23 +363,23 @@ def test_build_open_fields_requires_option_strike_and_expiration() -> None:
 def test_build_open_fields_requires_premium_and_multiplier_and_preserves_three_decimal_premium() -> None:
     command = _cmd(side="long", contracts=1)
 
-    fields = build_open_fields(command)
+    fields = build_position_lot_fields(**command)
 
     assert fields["premium"] == 1.235
 
     invalid_cases = (
-        (command.__class__(**{**command.__dict__, "premium_per_share": None}), "premium_per_share is required"),
-        (command.__class__(**{**command.__dict__, "premium_per_share": 0}), "premium_per_share must be > 0"),
-        (command.__class__(**{**command.__dict__, "premium_per_share": -1}), "premium_per_share must be > 0"),
+        ({**command, "premium_per_share": None}, "premium_per_share is required"),
+        ({**command, "premium_per_share": 0}, "premium_per_share must be > 0"),
+        ({**command, "premium_per_share": -1}, "premium_per_share must be > 0"),
         (
-            command.__class__(**{**command.__dict__, "premium_per_share": 1.2345}),
+            {**command, "premium_per_share": 1.2345},
             "premium_per_share supports at most 3 decimal places",
         ),
-        (command.__class__(**{**command.__dict__, "multiplier": None}), "call option requires multiplier"),
+        ({**command, "multiplier": None}, "call option requires multiplier"),
     )
     for bad_command, expected in invalid_cases:
         with pytest.raises(ValueError) as _caught:
-            build_open_fields(bad_command)
+            build_position_lot_fields(**bad_command)
         exc = _caught.value
         assert expected in str(exc)
 
@@ -397,15 +398,15 @@ def test_build_open_fields_accepts_float_transport_noise_without_relaxing_price_
         opened_at_ms=1_786_512_490_000,
     )
 
-    fields = build_open_fields(command)
+    fields = build_position_lot_fields(**command)
 
     assert fields["premium"] == 1.57
     assert normalize_trade_price(1.5700000000000003) == 1.57
 
     for precise_value in (1.2345, "1.2345", 5e-324):
-        bad_command = command.__class__(**{**command.__dict__, "premium_per_share": precise_value})
+        bad_command = {**command, "premium_per_share": precise_value}
         with pytest.raises(ValueError) as _caught:
-            build_open_fields(bad_command)
+            build_position_lot_fields(**bad_command)
         exc = _caught.value
         assert "premium_per_share supports at most 3 decimal places" in str(exc)
 
@@ -579,7 +580,8 @@ def test_build_open_adjustment_patch_updates_key_open_fields() -> None:
     assert patch["opened_at"] == 2000
     assert patch["last_action_at"] == 3000
     assert patch["cash_secured_amount"] == 31500.0
-    assert patch["position_id"] == "NVDA_20260717_105P_short"
+    # §7.1: ``position_id`` is retired from the adjust patch too.
+    assert "position_id" not in patch
     assert "exp=" not in patch["note"]
     assert "strike=" not in patch["note"]
     assert "multiplier=" not in patch["note"]

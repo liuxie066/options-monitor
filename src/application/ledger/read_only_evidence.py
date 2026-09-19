@@ -91,9 +91,15 @@ class _ReadOnlyTradeReconciliationEvidenceRepository:
     ) -> list[dict[str, Any]]:
         if not self._table_exists(conn, "position_lots"):
             return []
+        # This surface opens the store read-only, so it cannot add the identity
+        # carrier itself and must also work against a store that predates it.
+        # NULL AS lot_id keeps the emitted shape stable either way; the caller
+        # below falls back to record_id.
+        columns = {str(item["name"]) for item in conn.execute("PRAGMA table_info(position_lots)").fetchall()}
+        carrier = "lot_id" if "lot_id" in columns else "NULL AS lot_id"
         rows = conn.execute(
-            """
-            SELECT record_id, fields_json
+            f"""
+            SELECT record_id, {carrier}, fields_json
             FROM position_lots
             ORDER BY updated_at_ms DESC, record_id DESC
             """
@@ -111,9 +117,18 @@ class _ReadOnlyTradeReconciliationEvidenceRepository:
                     raise ValueError("stored ledger position lot JSON value must be an object")
                 else:
                     continue
+            lot_id = str(row["record_id"] or "")
+            # Same dual-key contract as position_lot_row_to_record, ``or ""`` on a
+            # NULL identity included, so the two surfaces agree on both keys'
+            # values and a legacy row whose carrier is still NULL falls back to
+            # record_id in both. The codec additionally heals expiration/strike/
+            # multiplier from their columns and this surface does not, so the two
+            # agree on keys and identities rather than being byte-identical.
+            raw_lot_id = row["lot_id"] if "lot_id" in row.keys() else None
             out.append(
                 {
-                    "record_id": str(row["record_id"] or ""),
+                    "record_id": lot_id,
+                    "lot_id": str(raw_lot_id).strip() if raw_lot_id not in (None, "") else lot_id,
                     "fields": fields,
                 }
             )

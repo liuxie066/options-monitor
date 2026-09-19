@@ -364,7 +364,7 @@ def _branch_args(action: str, *extra: str):
             "lx",
             "--stock-lot-id",
             "assigned-stock-1",
-            "--expected-branch-generation-hash",
+            "--expected-batch-generation-hash",
             "branch-generation-1",
             "--request-id",
             "request-1",
@@ -387,7 +387,7 @@ def _put_linkage_args(action: str, *extra: str):
         "wheel-put-1",
         "--direction",
         "put",
-        "--expected-branch-generation-hash",
+        "--expected-batch-generation-hash",
         "generation-1",
         "--request-id",
         "request-1",
@@ -451,7 +451,7 @@ def test_wheel_cli_end_previews_by_default(monkeypatch: pytest.MonkeyPatch, tmp_
 
     assert wheel_cli.execute(_end_args()) == {"dry_run": True, "write_applied": False}
     assert calls[0]["apply_changes"] is False
-    assert calls[0]["stock_lot_id"] == "assigned-stock-1"
+    assert calls[0]["lot_id"] == "assigned-stock-1"
 
 
 def test_wheel_cli_requires_apply_with_confirmation() -> None:
@@ -500,7 +500,7 @@ def test_wheel_cli_branch_resolves_legacy_call_alias_and_previews(
             "account": "lx",
             "wheel_branch_id": "wheel-call-1",
             "decision": "start",
-            "expected_branch_generation_hash": "branch-generation-1",
+            "expected_batch_generation_hash": "branch-generation-1",
             "request_id": "request-1",
             "actor": "tester",
             "market": "us",
@@ -525,7 +525,7 @@ def test_wheel_cli_branch_identity_is_exactly_one() -> None:
                 "branch-1",
                 "--stock-lot-id",
                 "lot-1",
-                "--expected-branch-generation-hash",
+                "--expected-batch-generation-hash",
                 "generation-1",
                 "--request-id",
                 "request-1",
@@ -1392,13 +1392,13 @@ def test_wheel_cli_put_linkage_reject_previews_canonical_branch(
         "account": "lx",
         "wheel_branch_id": "wheel-put-1",
         "direction": "put",
-        "expected_branch_generation_hash": "generation-1",
+        "expected_batch_generation_hash": "generation-1",
         "request_id": "request-1",
         "actor": "tester",
         "market": "us",
         "apply_changes": False,
         "as_of_ms": calls[0]["as_of_ms"],
-        "option_record_id": "put-lot-1",
+        "option_lot_id": "put-lot-1",
         "linkage_candidate_id": "candidate-1",
         "expected_input_hash": "input-1",
         "reason": "not this cycle",

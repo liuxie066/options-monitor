@@ -819,7 +819,7 @@ def _processed_payload_from_ledger(
 ) -> dict[str, Any]:
     raw = ledger_event.get("raw_payload")
     raw_payload = raw if isinstance(raw, dict) else {}
-    record_id = str(ledger_event.get("target_lot_id") or raw_payload.get("record_id") or "").strip()
+    lot_id = str(ledger_event.get("target_lot_id") or raw_payload.get("record_id") or "").strip()
     event_type = str(ledger_event.get("event_type") or "").strip()
     action = str(state_item.get("action") or "").strip() or _action_from_event_type(event_type)
     return {
@@ -827,7 +827,7 @@ def _processed_payload_from_ledger(
         "status": "reconciled",
         "action": action or None,
         "account": state_item.get("account") or ledger_event.get("account"),
-        "applied_record_ids": [record_id] if record_id else [],
+        "applied_record_ids": [lot_id] if lot_id else [],
         "reason": "ledger_event_already_recorded",
         "diagnostics": {
             **dict(state_item.get("diagnostics") or {}),
@@ -849,7 +849,7 @@ def _processed_payload_from_assigned_stock_event(
     assigned_stock_event: dict[str, Any],
 ) -> dict[str, Any]:
     event_id = str(assigned_stock_event.get("stock_event_id") or assigned_stock_event.get("event_id") or "").strip()
-    stock_lot_id = str(assigned_stock_event.get("target_stock_lot_id") or assigned_stock_event.get("stock_lot_id") or "").strip()
+    lot_id = str(assigned_stock_event.get("target_stock_lot_id") or assigned_stock_event.get("stock_lot_id") or "").strip()
     action = str(state_item.get("action") or "").strip() or "assigned_stock_sale"
     return {
         **state_item,
@@ -857,14 +857,14 @@ def _processed_payload_from_assigned_stock_event(
         "action": action,
         "account": state_item.get("account") or assigned_stock_event.get("account"),
         "applied_record_ids": ([row["target_stock_lot_id"] for row in assigned_stock_event["sale_allocations"]]
-                               if assigned_stock_event.get("sale_allocations") else [stock_lot_id] if stock_lot_id else []),
+                               if assigned_stock_event.get("sale_allocations") else [lot_id] if lot_id else []),
         "reason": "assigned_stock_sale_event_recorded",
         "diagnostics": {
             **dict(state_item.get("diagnostics") or {}),
             "reconciled_from_bucket": from_bucket,
             "reconciled_assigned_stock_event_id": event_id,
             "reconciled_source_deal_id": deal_id,
-            "reconciled_target_stock_lot_id": stock_lot_id or None,
+            "reconciled_target_stock_lot_id": lot_id or None,
             "previous_status": state_item.get("status"),
             "previous_reason": state_item.get("reason"),
         },

@@ -19,9 +19,9 @@ from domain.domain.ledger.economics import (
     build_option_economic_allocation,
     fee_fact_for_event,
 )
-from domain.domain.ledger.identity import ContractKey
+from domain.domain.ledger.identity import ContractKey, position_key_for
 from domain.domain.ledger.invariants import check_position_lot_invariants
-from domain.domain.ledger.lots import PositionLot
+from domain.domain.ledger.lots import PositionLot, lot_is_stock, lot_open_quantity
 from domain.domain.ledger.position_fields import (
     POSITION_LOT_STRATEGY_PATCH_FIELDS,
     apply_strategy_metadata_patch,
@@ -44,9 +44,10 @@ class RiskPositionView:
     underlying_share_locked: float
     earliest_expiration_ymd: str
     diagnostics: tuple[str, ...] = ()
+    total_shares_open: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "position_key": self.position_key,
             "contract_key": self.contract_key.to_dict(),
             "total_contracts_open": self.total_contracts_open,
@@ -56,6 +57,9 @@ class RiskPositionView:
             "earliest_expiration_ymd": self.earliest_expiration_ymd,
             "diagnostics": list(self.diagnostics),
         }
+        if self.total_shares_open is not None:
+            result["total_shares_open"] = self.total_shares_open
+        return result
 
 
 @dataclass(frozen=True)
@@ -288,7 +292,7 @@ def project_resumable_trade_events(
         finalized_lot_ids = tuple(
             lot_id
             for lot_id in retained_order
-            if retained_by_id[lot_id].contracts_open == 0
+            if lot_open_quantity(retained_by_id[lot_id]) <= 0
         )
         effective_open_events = tuple(
             accumulator.open_events_by_lot_id[lot_id]
@@ -312,7 +316,7 @@ def project_resumable_trade_events(
     active_lots = tuple(
         replace(accumulator.lots_by_id[lot_id], close_event_ids=())
         for lot_id in sorted(accumulator.lots_by_id)
-        if accumulator.lots_by_id[lot_id].contracts_open > 0
+        if lot_open_quantity(accumulator.lots_by_id[lot_id]) > 0
     )
     retained_lots = (
         tuple(
@@ -458,26 +462,46 @@ def _append_target_event_graph_diagnostics(
 
 
 def build_risk_position_views(lots: list[PositionLot]) -> list[RiskPositionView]:
-    grouped: dict[ContractKey, list[PositionLot]] = {}
+    grouped: dict[tuple[ContractKey, str], list[PositionLot]] = {}
     for lot in lots:
-        if lot.contracts_open <= 0:
+        if lot_open_quantity(lot) <= 0:
             continue
-        grouped.setdefault(lot.contract_key, []).append(lot)
+        grouped.setdefault((lot.contract_key, lot.position_side), []).append(lot)
 
     views: list[RiskPositionView] = []
-    for contract_key, group in grouped.items():
+    for (contract_key, position_side), group in grouped.items():
         ordered = sorted(group, key=lambda item: (item.opened_at_ms, item.lot_id))
+        if contract_key.asset_type == "stock":
+            views.append(
+                RiskPositionView(
+                    position_key=position_key_for(contract_key, position_side),
+                    contract_key=contract_key,
+                    total_contracts_open=0,
+                    lot_ids=tuple(item.lot_id for item in ordered),
+                    cash_secured_amount=0.0,
+                    underlying_share_locked=0.0,
+                    earliest_expiration_ymd="",
+                    diagnostics=("multiple_lots",) if len(ordered) > 1 else (),
+                    total_shares_open=sum(
+                        float(item.shares_open or 0.0) for item in ordered
+                    ),
+                )
+            )
+            continue
         total_open = sum(int(item.contracts_open) for item in ordered)
         cash_secured = 0.0
         locked_shares = 0.0
-        if contract_key.position_side == "short" and contract_key.option_type == "put":
-            cash_secured = sum(item.contracts_open * contract_key.strike * item.multiplier for item in ordered)
-        if contract_key.position_side == "short" and contract_key.option_type == "call":
+        if position_side == "short" and contract_key.option_type == "put":
+            cash_secured = sum(
+                item.contracts_open * float(contract_key.strike) * item.multiplier
+                for item in ordered
+            )
+        if position_side == "short" and contract_key.option_type == "call":
             locked_shares = sum(item.contracts_open * item.multiplier for item in ordered)
         diagnostics = ("multiple_lots",) if len(ordered) > 1 else ()
         views.append(
             RiskPositionView(
-                position_key=contract_key.position_key,
+                position_key=position_key_for(contract_key, position_side),
                 contract_key=contract_key,
                 total_contracts_open=total_open,
                 lot_ids=tuple(item.lot_id for item in ordered),
@@ -537,7 +561,7 @@ def _apply_event_transition(
         )
         lot_after = accumulator.lots_by_id.get(target_lot_id)
         applied = lot_before is not None and lot_after != lot_before
-        finalized = bool(applied and lot_after and lot_after.contracts_open == 0)
+        finalized = bool(applied and lot_after and lot_open_quantity(lot_after) <= 0)
         if applied:
             accumulator.last_close_event_id_by_lot_id[target_lot_id] = (
                 event.event_id
@@ -593,7 +617,7 @@ def _apply_event_transition(
                             strategy_patch=strategy_patch,
                         )
                     )
-        finalized = bool(applied and lot_after and lot_after.contracts_open == 0)
+        finalized = bool(applied and lot_after and lot_open_quantity(lot_after) <= 0)
         transition = ProjectionTransition(
             event=event,
             lot_before=lot_before,
@@ -650,7 +674,7 @@ def _resumable_state_from_accumulator(
             ),
         )
         for lot_id in sorted(accumulator.lots_by_id)
-        if accumulator.lots_by_id[lot_id].contracts_open > 0
+        if lot_open_quantity(accumulator.lots_by_id[lot_id]) > 0
     )
 
 
@@ -707,6 +731,7 @@ def _project_effective_economic_allocations(
             event.event_id in applied_event_ids
             or event.event_type == "adjust"
         )
+        and event.asset_type != "stock"
     ]
     opens = {
         lot_id_for_open_event(event): event
@@ -1052,7 +1077,7 @@ def _valid_combo_pair(
     valid = (
         put_key.option_type == "put"
         and call_key.option_type == "call"
-        and (put_key.position_side, call_key.position_side) == expected_sides
+        and (put.position_side, call.position_side) == expected_sides
         and put.contracts_opened == call.contracts_opened > 0
         and put_key.broker == call_key.broker
         and put_key.account == call_key.account
@@ -1196,7 +1221,9 @@ def _apply_close_event(
             )
         )
         return None
-    if lot.contract_key != event.contract_key:
+    if lot.contract_key != event.contract_key or (
+        event.position_side is not None and lot.position_side != event.position_side
+    ):
         diagnostics.append(
             LedgerDiagnostic(
                 event_id=event.event_id,
@@ -1211,7 +1238,7 @@ def _apply_close_event(
             )
         )
         return None
-    if lot.contracts_open <= 0:
+    if lot_open_quantity(lot) <= 0:
         diagnostics.append(
             LedgerDiagnostic(
                 event_id=event.event_id,
@@ -1222,7 +1249,7 @@ def _apply_close_event(
             )
         )
         return None
-    if event.contracts > lot.contracts_open:
+    if event.contracts > lot_open_quantity(lot):
         diagnostics.append(
             LedgerDiagnostic(
                 event_id=event.event_id,
@@ -1232,7 +1259,7 @@ def _apply_close_event(
                 details={
                     "target_lot_id": target_lot_id,
                     "contracts_requested": event.contracts,
-                    "contracts_open": lot.contracts_open,
+                    "contracts_open": lot_open_quantity(lot),
                 },
             )
         )
@@ -1253,7 +1280,7 @@ def _apply_close_event(
     allocated_before = allocated_open_fee_by_lot_id.get(target_lot_id, Decimal(0))
     allocated_after = allocated_before
     sequence = int(allocation_sequence_by_close_event.get(event.event_id, 0))
-    if allocate_economics:
+    if allocate_economics and not lot_is_stock(lot):
         unit_mismatch = _economic_unit_mismatch(lot, event)
         if unit_mismatch:
             diagnostics.append(

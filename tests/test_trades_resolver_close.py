@@ -7,6 +7,7 @@ import src.application.ledger.repository as ledger_repository
 import pytest
 
 from domain.domain.ledger import ContractKey, TradeEvent
+from domain.domain.trade_contract_identity import derive_trade_side
 from domain.domain.ledger.position_fields import effective_expiration_ymd
 from domain.domain.option_lifecycle import expiration_observation_start_ms
 from src.application.ledger.api import (
@@ -45,22 +46,22 @@ class FakeRepo:
     def list_trade_events(self) -> list[dict]:
         return [_open_event_from_record(item) for item in self.records]
 
-    def get_record_fields(self, record_id: str) -> dict:
+    def get_record_fields(self, lot_id: str) -> dict:
         for item in self.records:
-            if item["record_id"] == record_id:
+            if item["record_id"] == lot_id:
                 return dict(item["fields"])
-        raise KeyError(record_id)
+        raise KeyError(lot_id)
 
-    def update_record(self, record_id: str, fields: dict) -> dict:
-        self.updated.append({"record_id": record_id, "fields": fields})
-        return {"record": {"record_id": record_id}}
+    def update_record(self, lot_id: str, fields: dict) -> dict:
+        self.updated.append({"record_id": lot_id, "fields": fields})
+        return {"record": {"record_id": lot_id}}
 
 
-def _record(record_id: str, opened_at: int, contracts_open: int) -> dict:
+def _record(lot_id: str, opened_at: int, contracts_open: int) -> dict:
     return {
-        "record_id": record_id,
+        "record_id": lot_id,
         "fields": {
-            "record_id": record_id,
+            "record_id": lot_id,
             "broker": "富途",
             "account": "lx",
             "symbol": "0700.HK",
@@ -90,28 +91,32 @@ def _open_event_from_record(record: dict) -> dict:
             account=fields.get("account"),
             underlying_symbol=fields.get("symbol"),
             option_type=fields.get("option_type"),
-            position_side=fields.get("side"),
             strike=fields.get("strike"),
             expiration_ymd=effective_expiration_ymd(fields),
-        ),
+                ),
         contracts=int(fields.get("contracts") or fields.get("contracts_open") or 0),
         price=1.0,
         currency=str(fields.get("currency") or "HKD"),
         source="test_seed_open_lot",
         multiplier=float(fields.get("multiplier") or 100),
         lot_id=str(record["record_id"]),
-        raw_payload={"source_type": "test_seed"},
+        raw_payload={
+            # §9.2 step 3: the contract key no longer carries the position
+            # side, so translate the record's side into the trade side.
+            "side": derive_trade_side("open", fields.get("side")) or "",
+            "source_type": "test_seed",
+        },
     ).to_dict()
 
 
-def _record_with_expiration(record_id: str, opened_at: int, contracts_open: int, expiration: int) -> dict:
-    row = _record(record_id, opened_at, contracts_open)
+def _record_with_expiration(lot_id: str, opened_at: int, contracts_open: int, expiration: int) -> dict:
+    row = _record(lot_id, opened_at, contracts_open)
     row["fields"]["expiration"] = expiration
     return row
 
 
-def _long_record(record_id: str, opened_at: int, contracts_open: int) -> dict:
-    row = _record(record_id, opened_at, contracts_open)
+def _long_record(lot_id: str, opened_at: int, contracts_open: int) -> dict:
+    row = _record(lot_id, opened_at, contracts_open)
     row["fields"]["side"] = "long"
     return row
 
@@ -122,8 +127,6 @@ def _persist_lot(repo: object, **overrides: object) -> None:
     The defaults are the TIGR short put this module repeats most often, so a
     call site spells out only the fields that differ from it.
     """
-    from domain.domain.option_position_lots import OpenPositionCommand
-
     base: dict[str, object] = {
         "broker": "富途",
         "account": "lx",
@@ -139,7 +142,7 @@ def _persist_lot(repo: object, **overrides: object) -> None:
         "opened_at_ms": 1779129617118,
     }
     base.update(overrides)
-    ledger_manual_trades.persist_manual_open_event(repo, OpenPositionCommand(**base))
+    ledger_manual_trades.persist_manual_open_event(repo, **base)
 
 
 def _open_lot(tmp_path, **overrides: object):
@@ -181,7 +184,7 @@ def test_match_close_positions_uses_fifo() -> None:
 
     matches = match_close_positions(repo, _deal())
 
-    assert [(m.record_id, m.contracts_to_close) for m in matches] == [("rec1", 1), ("rec2", 2)]
+    assert [(m.lot_id, m.contracts_to_close) for m in matches] == [("rec1", 1), ("rec2", 2)]
 
 
 def test_match_close_targets_exposes_strict_resolution_contract() -> None:
@@ -192,7 +195,7 @@ def test_match_close_targets_exposes_strict_resolution_contract() -> None:
     assert resolution.source == "broker_trade_close"
     assert resolution.strategy == "strict_exact_fifo"
     assert resolution.selector["expiration_ymd"] == "2026-04-29"
-    assert resolution.record_ids == ("rec1", "rec2")
+    assert resolution.lot_ids == ("rec1", "rec2")
     assert resolution.to_dict()["contracts_to_close"] == 3
 
 
@@ -218,7 +221,7 @@ def test_broker_close_target_resolution_does_not_cross_same_strike_different_exp
 
     resolution = match_close_targets(repo, _deal(contracts=1, expiration_ymd="2026-04-29"))
 
-    assert resolution.record_ids == ("may_put",)
+    assert resolution.lot_ids == ("may_put",)
     assert resolution.to_dict()["targets"][0]["candidate"]["expiration_ymd"] == "2026-04-29"
 
 
@@ -230,7 +233,7 @@ def test_match_close_positions_ignores_market_only_persisted_rows() -> None:
 
     matches = match_close_positions(repo, _deal())
 
-    assert [(m.record_id, m.contracts_to_close) for m in matches] == [("rec2", 3)]
+    assert [(m.lot_id, m.contracts_to_close) for m in matches] == [("rec2", 3)]
 
 
 def test_match_close_positions_canonicalizes_candidate_and_deal_symbols() -> None:
@@ -240,7 +243,7 @@ def test_match_close_positions_canonicalizes_candidate_and_deal_symbols() -> Non
 
     matches = match_close_positions(repo, _deal(symbol="HK.09992", contracts=1))
 
-    assert [(m.record_id, m.contracts_to_close) for m in matches] == [("rec-pop", 1)]
+    assert [(m.lot_id, m.contracts_to_close) for m in matches] == [("rec-pop", 1)]
 
 
 def test_ledger_close_helpers_canonicalize_aliases_and_summarize_candidates() -> None:
@@ -406,7 +409,7 @@ def test_resolve_trade_close_apply_updates_records(side, close_action) -> None:
     )
 
     assert result.status == "applied"
-    assert [row.record_id for row in result.operations] == ["rec1", "rec2"]
+    assert [row.lot_id for row in result.operations] == ["rec1", "rec2"]
     assert [row.action for row in result.operations] == [close_action, close_action]
     assert result.diagnostics["close_target_resolution"]["strategy"] == "strict_exact_fifo"
     assert repo.updated == []
@@ -422,7 +425,6 @@ def test_resolve_trade_long_close_apply_updates_records() -> None:
 
 
 def test_resolve_trade_close_apply_persists_per_lot_target_events(tmp_path) -> None:
-    from domain.domain.option_position_lots import OpenPositionCommand
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     for opened_at, contracts in ((100, 1), (200, 2)):
@@ -446,7 +448,7 @@ def test_resolve_trade_close_apply_persists_per_lot_target_events(tmp_path) -> N
     )
 
     assert result.status == "applied"
-    assert [row.record_id for row in result.operations] == open_lot_ids
+    assert [row.lot_id for row in result.operations] == open_lot_ids
     assert [row.contracts_to_close for row in result.operations] == [1, 2]
     assert {row.ledger_preflight.event_type for row in result.operations} == {"close"}
     close_events = [item for item in repo.list_trade_events() if item["position_effect"] == "close"]
@@ -474,7 +476,6 @@ def test_multi_lot_broker_close_rolls_back_every_split_when_second_write_fails(
     tmp_path,
     monkeypatch,
 ) -> None:
-    from domain.domain.option_position_lots import OpenPositionCommand
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     for opened_at, contracts in ((100, 1), (200, 2)):
@@ -519,7 +520,6 @@ def test_multi_lot_broker_close_rolls_back_every_split_when_second_write_fails(
 
 
 def test_multi_lot_broker_close_declares_complete_deal_split_metadata(tmp_path) -> None:
-    from domain.domain.option_position_lots import OpenPositionCommand
     from src.application.trades.deal_identity import completed_ledger_deal_ids
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
@@ -574,10 +574,9 @@ def test_late_zero_price_evidence_does_not_adopt_unbound_expire_close(
                 account="lx",
                 underlying_symbol="TIGR",
                 option_type="put",
-                position_side="short",
                 strike=6.0,
                 expiration_ymd="2026-05-22",
-            ),
+                        ),
             contracts=1,
             price=0.0,
             currency="USD",
@@ -1548,10 +1547,9 @@ def test_resolve_trade_lifecycle_late_assignment_does_not_adopt_unbound_expire_c
                 account="lx",
                 underlying_symbol="TIGR",
                 option_type="put",
-                position_side="short",
                 strike=6.0,
                 expiration_ymd="2026-05-22",
-            ),
+                        ),
             contracts=10,
             price=0.0,
             currency="USD",
@@ -1617,9 +1615,6 @@ def test_resolve_trade_lifecycle_late_assignment_does_not_adopt_unbound_expire_c
 def test_stock_evidence_same_key_economic_drift_fails_closed(
     tmp_path,
 ) -> None:
-    from domain.domain.option_position_lots import (
-        OpenPositionCommand,
-    )
 
     repo = _open_lot(tmp_path, contracts=1)
     first = _deal(
@@ -1701,9 +1696,6 @@ def test_processed_lifecycle_replay_audits_economic_hash() -> None:
 def test_push_stock_after_expire_close_reaches_conflict_writer(
     tmp_path,
 ) -> None:
-    from domain.domain.option_position_lots import (
-        OpenPositionCommand,
-    )
 
     repo = _open_lot(tmp_path, contracts=1)
     lot_id = repo.list_position_lots()[0]["record_id"]
@@ -1785,9 +1777,6 @@ def test_push_stock_after_expire_close_reaches_conflict_writer(
 def test_option_anchor_cannot_rebind_case_to_other_futu_account(
     tmp_path,
 ) -> None:
-    from domain.domain.option_position_lots import (
-        OpenPositionCommand,
-    )
 
     repo = _open_lot(tmp_path, contracts=1)
     first = _deal(
@@ -1884,9 +1873,9 @@ def test_resolve_trade_close_reports_failed_when_post_write_projection_does_not_
     lot_id = repo.list_position_lots()[0]["record_id"]
 
     def _persist_bad_zero_time_close(repo, deal):  # type: ignore[no-untyped-def]
-        record_id = str((deal.raw_payload or {}).get("record_id") or "")
+        lot_id = str((deal.raw_payload or {}).get("record_id") or "")
         event = TradeEvent(
-            event_id=f"{deal.deal_id}:close:{record_id}",
+            event_id=f"{deal.deal_id}:close:{lot_id}",
             event_type="close",
             event_time_ms=0,
             contract_key=ContractKey.from_values(
@@ -1894,17 +1883,16 @@ def test_resolve_trade_close_reports_failed_when_post_write_projection_does_not_
                 account=deal.internal_account,
                 underlying_symbol=deal.symbol,
                 option_type=deal.option_type,
-                position_side="short",
                 strike=deal.strike,
                 expiration_ymd=deal.expiration_ymd,
-            ),
+                        ),
             contracts=int(deal.contracts or 0),
             price=float(deal.price or 0),
             currency=deal.currency,
             source="opend_push",
             multiplier=float(deal.multiplier or 100),
-            target_lot_id=record_id,
-            raw_payload={"record_id": record_id, "target_lot_id": record_id},
+            target_lot_id=lot_id,
+            raw_payload={"record_id": lot_id, "target_lot_id": lot_id},
         )
         return persist_trade_event_object(repo, event)
 
@@ -1942,7 +1930,7 @@ def test_match_close_positions_matches_long_lots_for_sell_close() -> None:
 
     matches = match_close_positions(repo, _deal(side="sell"))
 
-    assert [(m.record_id, m.contracts_to_close) for m in matches] == [("rec1", 1), ("rec2", 2)]
+    assert [(m.lot_id, m.contracts_to_close) for m in matches] == [("rec1", 1), ("rec2", 2)]
 
 
 def test_load_close_candidate_records_prefers_position_lots_projection() -> None:

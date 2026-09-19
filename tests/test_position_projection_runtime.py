@@ -9,6 +9,7 @@ import tracemalloc
 import pytest
 
 from domain.domain.ledger import ContractKey, TradeEvent
+from domain.domain.trade_contract_identity import derive_trade_side
 from src.application.ledger.position_projection_publication import (
     read_current_position_projection,
 )
@@ -38,10 +39,9 @@ def _key(*, account: str = "lx", symbol: str = "NVDA") -> ContractKey:
         account=account,
         underlying_symbol=symbol,
         option_type="put",
-        position_side="short",
         strike=100,
         expiration_ymd="2026-06-19",
-    )
+        )
 
 
 def _event(
@@ -58,6 +58,10 @@ def _event(
     price: float = 1.5,
     raw_payload: dict[str, object] | None = None,
 ) -> TradeEvent:
+    # §9.2 step 3: the contract key no longer carries the position side, so the
+    # event must expose the trade side it was derived from.
+    payload = dict(raw_payload or {})
+    payload.setdefault("side", derive_trade_side(event_type, "short") or "")
     return TradeEvent(
         event_id=event_id,
         event_type=event_type,
@@ -71,7 +75,7 @@ def _event(
         lot_id=lot_id,
         target_lot_id=target_lot_id,
         target_event_id=target_event_id,
-        raw_payload=dict(raw_payload or {}),
+        raw_payload=payload,
     )
 
 
@@ -299,7 +303,7 @@ def test_public_single_writer_and_fifo_use_bounded_fast_runtime_when_enabled(
     )
 
     assert result.created is True
-    assert result.record_id == "lot-a"
+    assert result.lot_id == "lot-a"
     assert result.position_lot_count == 1
     assert result.details["projection_diagnostics"] == []
 
@@ -325,7 +329,7 @@ def test_public_close_preflight_uses_bounded_resumed_preview_when_enabled(
     )
     result = preflight_manual_close(
         repo,
-        record_id="lot-a",
+        lot_id="lot-a",
         fields=fields,
         contracts_to_close=1,
         close_price=0.5,
@@ -1185,7 +1189,7 @@ def test_historical_close_persists_after_void_and_newer_unrelated_event(
 
     monkeypatch.setattr(writer_trade_events, "run_position_projection_in_transaction", capture)
     result = persist_manual_close_event_with_ledger(
-        repo, record_id="lot-a", contracts_to_close=1, close_price=0.5,
+        repo, lot_id="lot-a", contracts_to_close=1, close_price=0.5,
         close_reason="historical repair", as_of_ms=2_000,
     )
     assert result.ledger_preflight.event_time_ms == 2_000
@@ -1222,7 +1226,7 @@ def test_invalid_historical_close_preserves_events_and_lots(
     before_events, before_lots = repo.list_trade_events(), repo.list_position_lots()
     with pytest.raises(LedgerPreflightError) as exc:
         persist_manual_close_event_with_ledger(
-            repo, record_id="lot-a", contracts_to_close=2 if scenario == "over_close" else 1,
+            repo, lot_id="lot-a", contracts_to_close=2 if scenario == "over_close" else 1,
             close_price=0.5, close_reason="invalid history",
             as_of_ms=500 if scenario == "before_open" else 2_000,
         )
@@ -1245,10 +1249,10 @@ def test_close_rejects_invalid_explicit_time_at_public_boundaries(
     before_events, before_lots = repo.list_trade_events(), repo.list_position_lots()
     with pytest.raises(LedgerPreflightError) as exc:
         if entry == "preflight":
-            preflight_manual_close(repo, record_id="lot-a", contracts_to_close=1,
+            preflight_manual_close(repo, lot_id="lot-a", contracts_to_close=1,
                 close_price=0.5, close_reason="invalid time", as_of_ms=as_of_ms)
         elif entry == "manual_assignment":
-            record_manual_assignment(repo, record_id="lot-a", contracts_to_close=1,
+            record_manual_assignment(repo, lot_id="lot-a", contracts_to_close=1,
                 stock_side="buy", stock_qty=100, stock_price=100, as_of_ms=as_of_ms)
         else:
             record_lifecycle_assignment(repo, broker="futu", account="lx", symbol="NVDA",
@@ -1264,6 +1268,6 @@ def test_close_without_explicit_time_keeps_monotonic_default(tmp_path: Path, mon
     repo = _repo(tmp_path)
     run_position_projection_forced_full(repo, [_event("open", "open", 3_000, lot_id="lot-a")])
     monkeypatch.setattr("src.application.ledger.preflight.now_ms", lambda: 1_000)
-    result = preflight_manual_close(repo, record_id="lot-a", contracts_to_close=1,
+    result = preflight_manual_close(repo, lot_id="lot-a", contracts_to_close=1,
         close_price=0.5, close_reason="default time")
     assert result.event_time_ms == 3_001

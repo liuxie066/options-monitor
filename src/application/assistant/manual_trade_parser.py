@@ -237,7 +237,7 @@ def _build_close_draft(
         or _parse_position_side(text)
     )
     args: dict[str, Any] = {
-        "record_id": labeled.get("record_id") or _extract_record_id(text),
+        "record_id": labeled.get("record_id") or _extract_lot_id(text),
         "account": labeled.get("account") or fill.get("account") or _extract_account(text, accounts=accounts),
         "symbol": canonical or raw_symbol,
         "option_type": _parse_option_type(str(labeled.get("option_type") or "")) or fill.get("option_type") or _parse_option_type(text),
@@ -321,7 +321,7 @@ def _build_assignment_draft(
     if contracts is not None and multiplier:
         stock_qty = int(contracts) * int(multiplier)
     args: dict[str, Any] = {
-        "record_id": labeled.get("record_id") or _extract_record_id(text),
+        "record_id": labeled.get("record_id") or _extract_lot_id(text),
         "broker": notice.get("broker"),
         "account": labeled.get("account") or notice.get("account") or _extract_account(text, accounts=accounts),
         "symbol": canonical or raw_symbol,
@@ -724,7 +724,7 @@ def _extract_symbol(text: str, *, accounts: list[str] | tuple[str, ...] | None) 
     return None
 
 
-def _extract_record_id(text: str) -> str | None:
+def _extract_lot_id(text: str) -> str | None:
     for match in re.finditer(r"\b(lot|evt|rec|record)[A-Za-z0-9_.:-]*\b", text, flags=re.IGNORECASE):
         token = match.group(0)
         if token.lower() not in {"lot", "evt", "rec", "record"}:

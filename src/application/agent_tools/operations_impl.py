@@ -171,12 +171,12 @@ def _assigned_stock_row_matches(
     row: dict[str, Any],
     *,
     symbol: str | None,
-    stock_lot_id: str | None,
+    lot_id: str | None,
     status: str | None,
 ) -> bool:
     if symbol and str(row.get("symbol") or "").strip().upper() != symbol:
         return False
-    if stock_lot_id and str(row.get("stock_lot_id") or "") != stock_lot_id:
+    if lot_id and str(row.get("stock_lot_id") or "") != lot_id:
         return False
     if status:
         row_status = str(row.get("status") or "").strip().lower()
@@ -697,7 +697,7 @@ def _assigned_stock_action(
     account = normalize_account(payload.get("account")) if payload.get("account") else None
     symbol = _optional_text(payload.get("symbol"))
     symbol = symbol.upper() if symbol else None
-    stock_lot_id = _optional_text(payload.get("stock_lot_id") or payload.get("target_stock_lot_id"))
+    lot_id = _optional_text(payload.get("stock_lot_id") or payload.get("target_stock_lot_id"))
     status = _optional_text(payload.get("status"))
     status = status.lower() if status else None
     if status == "all":
@@ -727,7 +727,7 @@ def _assigned_stock_action(
         row
         for row in (report.get("assigned_stock_lots") or [])
         if isinstance(row, dict)
-        and _assigned_stock_row_matches(row, symbol=symbol, stock_lot_id=stock_lot_id, status=status)
+        and _assigned_stock_row_matches(row, symbol=symbol, lot_id=lot_id, status=status)
     ]
     quote_refresh: dict[str, Any] = {"enabled": False}
     quote_refresh_warnings: list[str] = []
@@ -790,7 +790,7 @@ def _assigned_stock_action(
                         and _assigned_stock_row_matches(
                             row,
                             symbol=symbol,
-                            stock_lot_id=stock_lot_id,
+                            lot_id=lot_id,
                             status=status,
                         )
                     ]
@@ -824,8 +824,8 @@ def _assigned_stock_action(
             if isinstance(branch, dict)
             and (not symbol or str(branch.get("symbol") or "").strip().upper() == symbol)
             and (
-                not stock_lot_id
-                or str(branch.get("stock_lot_id") or "").strip() == stock_lot_id
+                not lot_id
+                or str(branch.get("stock_lot_id") or "").strip() == lot_id
             )
         )
     rows = []
@@ -841,12 +841,12 @@ def _assigned_stock_action(
     sale_rows = _assigned_stock_related_rows(
         report.get("assigned_stock_sale_rows"),
         selected_lot_rows=selected_report_rows,
-        stock_lot_id=stock_lot_id,
+        lot_id=lot_id,
     )
     review_rows = _assigned_stock_related_rows(
         report.get("assigned_stock_review_rows"),
         selected_lot_rows=selected_report_rows,
-        stock_lot_id=stock_lot_id,
+        lot_id=lot_id,
     )
     return {
         "schema_version": "option_positions_read.output.v3",
@@ -861,7 +861,7 @@ def _assigned_stock_action(
             "broker": broker,
             "account": account,
             "symbol": symbol,
-            "stock_lot_id": stock_lot_id,
+            "stock_lot_id": lot_id,
             "status": status,
             "as_of_ms": as_of_ms,
             "refresh_quotes": refresh_quotes,
@@ -878,7 +878,7 @@ def _assigned_stock_related_rows(
     raw_rows: Any,
     *,
     selected_lot_rows: list[dict[str, Any]],
-    stock_lot_id: str | None,
+    lot_id: str | None,
 ) -> list[dict[str, Any]]:
     if not selected_lot_rows:
         return []
@@ -909,7 +909,7 @@ def _assigned_stock_related_rows(
             if row_lot_id in selected_lot_ids:
                 out.append(row)
             continue
-        if stock_lot_id:
+        if lot_id:
             continue
         scope_key = (
             str(row.get("account") or "").strip().lower(),
@@ -1083,11 +1083,11 @@ def option_positions_read_tool(
             refresh_assigned_stock_quotes=refresh_assigned_stock_quotes,
         )
     elif action == "history":
-        record_id = _optional_text(payload.get("record_id"))
-        if not record_id:
+        lot_id = _optional_text(payload.get("record_id"))
+        if not lot_id:
             raise AgentToolError(code="INPUT_ERROR", message="record_id is required for option_positions_read history")
         try:
-            history = build_lot_event_history(repo, base=repo_base(), record_id=record_id)
+            history = build_lot_event_history(repo, base=repo_base(), lot_id=lot_id)
         except ValueError as exc:
             if not str(exc).startswith("position lot or event history not found:"):
                 raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
@@ -1097,7 +1097,7 @@ def option_positions_read_tool(
             raise AgentToolError(code="PERMISSION_DENIED", message="Lot history is outside the authorized account scope")
         data = {
             "action": action,
-            "record_id": record_id,
+            "record_id": lot_id,
             "events": history,
             "event_count": len(history),
             "read_status": "ok" if history else "not_found",
@@ -1105,7 +1105,7 @@ def option_positions_read_tool(
                          "total_count": len(history), "omitted_count": 0, "has_more": False},
             "pagination": {"total_count": len(history), "matched_count": len(history), "returned_count": len(history),
                            "scanned_count": len(history), "has_more": False},
-            "scope": {"account": account, "accounts": sorted(allowed_accounts), "record_id": record_id},
+            "scope": {"account": account, "accounts": sorted(allowed_accounts), "record_id": lot_id},
         }
     else:
         selectors = {
@@ -1118,7 +1118,16 @@ def option_positions_read_tool(
         }
         if not any(value not in (None, "") for value in selectors.values()):
             raise AgentToolError(code="INPUT_ERROR", message="inspect requires at least one selector")
-        inspected = inspect_projection_state(repo, base=repo_base(), **selectors)
+        # `selectors` doubles as the tool's "scope" output payload (see below and
+        # the sibling branch above), whose key is the external `record_id`. Split
+        # it rather than rename it, so the boundary spelling stays put while the
+        # callee keeps the converged `lot_id` parameter.
+        inspected = inspect_projection_state(
+            repo,
+            base=repo_base(),
+            lot_id=selectors.get("record_id"),
+            **{key: value for key, value in selectors.items() if key != "record_id"},
+        )
         allowed_accounts = {account} if account else set(resolve_configured_accounts(cfg))
         scope_rows = [(row.get("fields") or {}) for row in inspected.get("current_lots") or []]
         scope_rows.extend(inspected.get("projected_lots") or [])

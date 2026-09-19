@@ -96,6 +96,7 @@ TRADE_EVENTS_COLUMN_CLASSIFICATION = {
 
 POSITION_LOTS_COLUMN_CLASSIFICATION = {
     "record_id": "integrity/identity",
+    "lot_id": "integrity/identity",
     "account": "projection-affecting",
     "fields_json": "projection-affecting",
     "source_event_id": "projection-affecting",
@@ -182,7 +183,7 @@ def resolve_option_positions_sqlite_path(data_config: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
 
-def _validate_position_lot_fields(*, record_id: str, fields: dict[str, Any]) -> None:
+def _validate_position_lot_fields(*, lot_id: str, fields: dict[str, Any]) -> None:
     option_type = str(fields.get("option_type") or "").strip().lower()
     if option_type not in {"put", "call"}:
         return
@@ -195,7 +196,7 @@ def _validate_position_lot_fields(*, record_id: str, fields: dict[str, Any]) -> 
         missing.append("strike")
     if missing:
         joined = ", ".join(missing)
-        raise ValueError(f"incomplete option position lot {record_id}: missing {joined}")
+        raise ValueError(f"incomplete option position lot {lot_id}: missing {joined}")
 
 def _position_lot_contract_scalars(fields: dict[str, Any]) -> tuple[int | None, float | None, float | None]:
     expiration_ms, _ = effective_expiration(fields)
@@ -207,17 +208,17 @@ def _position_lot_contract_scalars(fields: dict[str, Any]) -> tuple[int | None, 
 
 def _position_lot_storage_values(
     record: PositionLotRecord,
-) -> tuple[str, str, str, str | None, int | None, float | None, float | None]:
+) -> tuple[str, str, str, str | None, int | None, float | None, float | None, str]:
     if not isinstance(record, PositionLotRecord):
         raise TypeError("replace_position_lots requires PositionLotRecord records")
-    record_id = record.record_id
+    lot_id = record.lot_id
     fields = record.fields
-    _validate_position_lot_fields(record_id=record_id, fields=fields)
+    _validate_position_lot_fields(lot_id=lot_id, fields=fields)
     account = str(fields.get("account") or "").strip()
     if not account:
-        raise ValueError(f"position lot account is required: record_id={record_id}")
+        raise ValueError(f"position lot account is required: record_id={lot_id}")
     if account != account.lower():
-        raise ValueError(f"position lot account must be lowercase: record_id={record_id}")
+        raise ValueError(f"position lot account must be lowercase: record_id={lot_id}")
     fields_json = json.dumps(
         fields,
         ensure_ascii=False,
@@ -227,13 +228,18 @@ def _position_lot_storage_values(
     expiration_ms, strike, multiplier = _position_lot_contract_scalars(fields)
     source_event_id = str(fields.get("source_event_id")) if fields.get("source_event_id") else None
     return (
-        record_id,
+        lot_id,
         account,
         fields_json,
         source_event_id,
         int(expiration_ms) if expiration_ms is not None else None,
         float(strike) if strike is not None else None,
         float(multiplier) if multiplier is not None else None,
+        # Dual-write carrier: lot_id is the canonical identity name, record_id is
+        # the legacy storage name. Both are written from the same source here so
+        # that the eventual rename is data-neutral. Trailing position keeps the
+        # pre-existing tuple indexes (values[0], values[1]) stable.
+        lot_id,
     )
 
 def _canonical_existing_fields_json(raw: Any) -> str | None:

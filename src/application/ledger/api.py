@@ -148,6 +148,11 @@ from src.application.ledger.store_resolution import (
     resolve_ledger_store,
 )
 from src.application.ledger.projection_verify import compare_projection_lots
+from src.application.ledger.lot_identity_migration import (
+    apply_lot_identity_migration,
+    build_lot_identity_migration_inventory,
+    verify_lot_identity_migration,
+)
 from src.application.ledger.position_projection_migration import (
     ACCEPTANCE_SCHEMA as POSITION_PROJECTION_ACCEPTANCE_SCHEMA,
     activate_position_projection_checkpoints,
@@ -336,7 +341,9 @@ __all__ = [
     "compute_projector_implementation_fingerprint",
     "activate_position_projection_checkpoints",
     "apply_position_projection_migration",
+    "apply_lot_identity_migration",
     "build_position_projection_migration_inventory",
+    "build_lot_identity_migration_inventory",
     "decision_state_snapshot",
     "decision_state_snapshot_from_rows",
     "deactivate_position_projection_checkpoints",
@@ -494,6 +501,7 @@ __all__ = [
     "verify_current_decision_projection_migration",
     "verify_lifecycle_attempt_run_seal",
     "verify_position_lot_projection",
+    "verify_lot_identity_migration",
     "verify_position_projection_migration",
     "verify_current_decision_projection",
     "with_sqlite_repo_transaction",

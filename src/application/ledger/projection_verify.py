@@ -64,7 +64,7 @@ def _lot_dict(row: Any) -> dict[str, Any]:
         return {"record_id": "", "fields": {}}
     fields = payload.get("fields")
     return {
-        "record_id": str(payload.get("record_id") or "").strip(),
+        "record_id": str(payload.get("lot_id") or payload.get("record_id") or "").strip(),
         "fields": dict(fields) if isinstance(fields, dict) else {},
     }
 
@@ -138,26 +138,26 @@ def compare_projection_lots(*, projected_lots: list[Any], current_lots: list[Any
     current_by_id = {str(item.get("record_id") or ""): item for item in current}
 
     items: list[dict[str, Any]] = _projection_error_items(diagnostics)
-    for record_id in sorted(set(projected_by_id) | set(current_by_id)):
-        projected_item = projected_by_id.get(record_id)
-        current_item = current_by_id.get(record_id)
+    for lot_id in sorted(set(projected_by_id) | set(current_by_id)):
+        projected_item = projected_by_id.get(lot_id)
+        current_item = current_by_id.get(lot_id)
         if projected_item is None:
-            items.append({"status": "extra_in_position_lots", "record_id": record_id, "current": current_item})
+            items.append({"status": "extra_in_position_lots", "record_id": lot_id, "current": current_item})
             continue
         if current_item is None:
-            items.append({"status": "missing_in_position_lots", "record_id": record_id, "projected": projected_item})
+            items.append({"status": "missing_in_position_lots", "record_id": lot_id, "projected": projected_item})
             continue
         if _canonical_payload(projected_item.get("fields")) != _canonical_payload(current_item.get("fields")):
             items.append(
                 {
                     "status": "field_mismatch",
-                    "record_id": record_id,
+                    "record_id": lot_id,
                     "projected_fields": projected_item.get("fields"),
                     "current_fields": current_item.get("fields"),
                 }
             )
             continue
-        items.append({"status": "matched", "record_id": record_id})
+        items.append({"status": "matched", "record_id": lot_id})
 
     summary: dict[str, int] = {}
     for item in items:

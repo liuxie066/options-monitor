@@ -635,7 +635,7 @@ def _load_lots(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         position_lot_row_to_record(row)
         for row in conn.execute(
             """
-            SELECT record_id, fields_json, expiration, strike, multiplier
+            SELECT record_id, lot_id, fields_json, expiration, strike, multiplier
             FROM position_lots ORDER BY record_id
             """
         )

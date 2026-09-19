@@ -42,7 +42,8 @@ CURRENT_DECISION_POSITION_FIELDS = frozenset(
         "multiplier",
         "opened_at",
         "option_type",
-        "position_id",
+        # §7.1: ``position_id`` is retired in favour of ``position_key``.
+        "position_key",
         "premium",
         "side",
         "source_event_id",
@@ -728,11 +729,11 @@ def _position_consumer_view(rows: Sequence[Any]) -> dict[str, dict[str, Any]]:
     for raw in rows:
         if not isinstance(raw, Mapping):
             raise ValueError("position lot must be an object")
-        record_id = str(raw.get("record_id") or "").strip()
+        lot_id = str(raw.get("record_id") or "").strip()
         fields = raw.get("fields")
-        if not record_id or not isinstance(fields, Mapping) or record_id in out:
+        if not lot_id or not isinstance(fields, Mapping) or lot_id in out:
             raise ValueError("position lot identity is invalid")
-        out[record_id] = {
+        out[lot_id] = {
             field: fields.get(field)
             for field in sorted(CURRENT_DECISION_POSITION_FIELDS)
         }

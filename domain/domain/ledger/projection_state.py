@@ -51,15 +51,20 @@ _LOT_KEYS = {
     "open_event",
     "allocated_open_fee",
 }
+_STOCK_LOT_KEYS = {
+    "shares_opened",
+    "shares_open",
+    "shares_closed",
+    "cost_basis_total",
+}
 _CONTRACT_KEY_KEYS = {
     "broker",
     "account",
     "underlying_symbol",
     "option_type",
-    "position_side",
     "strike",
     "expiration_ymd",
-    "position_key",
+    "asset_type",
 }
 _EVENT_KEYS = {
     "event_id",
@@ -76,6 +81,8 @@ _EVENT_KEYS = {
     "target_event_id",
     "lot_id",
     "raw_payload",
+    "asset_type",
+    "quantity_unit",
 }
 _ECONOMIC_STRATEGY_KEYS = tuple(
     key
@@ -87,36 +94,68 @@ _ECONOMIC_STRATEGY_KEYS = tuple(
 def _contract_key_from_dict(payload: Any) -> ContractKey:
     if not isinstance(payload, dict) or set(payload) != _CONTRACT_KEY_KEYS:
         raise ValueError("resumable lot contract_key fields differ from v1 schema")
-    contract_key = ContractKey.from_values(
+    return ContractKey.from_values(
         broker=payload.get("broker"),
         account=payload.get("account"),
         underlying_symbol=(
             payload.get("underlying_symbol") or payload.get("symbol")
         ),
         option_type=payload.get("option_type"),
-        position_side=(payload.get("position_side") or payload.get("side")),
         strike=payload.get("strike"),
         expiration_ymd=(
             payload.get("expiration_ymd") or payload.get("expiration")
         ),
+        asset_type=payload.get("asset_type"),
     )
-    if payload.get("position_key") != contract_key.position_key:
-        raise ValueError("resumable lot contract_key position_key mismatch")
-    return contract_key
 
 
-def _decimal_text(value: Decimal) -> str:
+def _decimal_text(value: Any, *, field_name: str = "allocated_open_fee") -> str:
     if not isinstance(value, Decimal) or not value.is_finite():
-        raise ValueError("allocated_open_fee must be a finite Decimal")
-    return canonical_decimal_text(value, field_name="allocated_open_fee")
+        raise ValueError(f"{field_name} must be a finite Decimal")
+    return canonical_decimal_text(value, field_name=field_name)
 
 
-def _parse_decimal(value: Any) -> Decimal:
+def _parse_decimal(value: Any, *, field_name: str = "allocated_open_fee") -> Decimal:
     try:
-        parsed = to_decimal(value, field_name="allocated_open_fee")
+        parsed = to_decimal(value, field_name=field_name)
     except (TypeError, ValueError) as exc:
-        raise ValueError("allocated_open_fee must be decimal text") from exc
+        raise ValueError(f"{field_name} must be decimal text") from exc
     return parsed
+
+
+def _parse_optional_decimal(value: Any, *, field_name: str) -> Decimal | None:
+    """Parse an optional §7.4 authority field, preserving the ``None`` sentinel."""
+    if value is None:
+        return None
+    return _parse_decimal(value, field_name=field_name)
+
+
+def _finite_decimal(
+    value: Any,
+    *,
+    field_name: str,
+    positive: bool = False,
+    nonnegative: bool = False,
+) -> Decimal:
+    """Validate a §7.4 authority value without ever leaving Decimal.
+
+    This checkpoint is a serialization cache rather than an authority, but it
+    has to carry the authority value unchanged: coercing through ``float`` here
+    is what made the ``Decimal -> float -> Decimal`` round trip lossy. A stored
+    float (an older checkpoint) is still accepted, since ``to_decimal`` reads it
+    through ``str`` and recovers the shortest exact decimal.
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be numeric")
+    try:
+        numeric = to_decimal(value, field_name=field_name)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be numeric") from exc
+    if positive and numeric <= 0:
+        raise ValueError(f"{field_name} must be > 0")
+    if nonnegative and numeric < 0:
+        raise ValueError(f"{field_name} must be >= 0")
+    return numeric
 
 
 def _finite_float(
@@ -162,6 +201,10 @@ def _resumable_open_event(event: TradeEvent) -> TradeEvent:
     resumable_payload: dict[str, Any] = {
         "fee_provenance": fee_provenance,
     }
+    # §9.2 step 3: lot identity now carries the position side, so the resumable
+    # open event must round-trip the trade side it is derived from.
+    if event.side:
+        resumable_payload["side"] = event.side
     strategy_metadata = resolve_strategy_metadata(
         raw_payload,
         source_id=event.event_id,
@@ -207,6 +250,8 @@ def _resumable_open_event(event: TradeEvent) -> TradeEvent:
         target_event_id=event.target_event_id,
         lot_id=event.lot_id,
         raw_payload=resumable_payload,
+        asset_type=event.asset_type,
+        quantity_unit=event.quantity_unit,
     )
 
 
@@ -220,14 +265,21 @@ class ResumableLotState:
     contracts_open: int
     contracts_closed: int
     status: str
-    premium_open: float
-    multiplier: float
+    # §7.4: money and stock quantities stay Decimal in the checkpoint too. The
+    # float schema this replaced silently truncated the authority value on every
+    # save/restore, so a resumed projection could differ from a full replay.
+    premium_open: Decimal
+    multiplier: int
     currency: str
-    realized_pnl: float
+    realized_pnl: Decimal
     last_event_id: str
     last_close_event_id: str | None
     open_event: TradeEvent
     allocated_open_fee: Decimal
+    shares_opened: Decimal | None = None
+    shares_open: Decimal | None = None
+    shares_closed: Decimal | None = None
+    cost_basis_total: Decimal | None = None
 
     def __post_init__(self) -> None:
         lot_id = str(self.lot_id or "").strip()
@@ -237,39 +289,82 @@ class ResumableLotState:
         if not lot_id or not open_event_id or not last_event_id:
             raise ValueError("resumable lot ids must be non-empty")
         opened_at_ms = _exact_int(self.opened_at_ms, field_name="opened_at_ms")
-        contracts_opened = _exact_int(
-            self.contracts_opened,
-            field_name="contracts_opened",
-        )
-        contracts_open = _exact_int(
-            self.contracts_open,
-            field_name="contracts_open",
-        )
-        contracts_closed = _exact_int(
-            self.contracts_closed,
-            field_name="contracts_closed",
-        )
         if opened_at_ms <= 0:
             raise ValueError("opened_at_ms must be > 0")
-        if contracts_opened <= 0:
-            raise ValueError("contracts_opened must be > 0")
-        if contracts_open <= 0 or str(self.status) != "open":
-            raise ValueError("resumable projection stores active lots only")
-        if contracts_closed < 0:
-            raise ValueError("contracts_closed must be >= 0")
-        if contracts_open + contracts_closed != contracts_opened:
-            raise ValueError("resumable lot contract balance is invalid")
-        premium_open = _finite_float(
-            self.premium_open,
-            field_name="premium_open",
-            nonnegative=True,
-        )
-        multiplier = _finite_float(
-            self.multiplier,
-            field_name="multiplier",
-            positive=True,
-        )
-        realized_pnl = _finite_float(
+
+        if self.contract_key.asset_type == "stock":
+            contracts_opened = 0
+            contracts_open = 0
+            contracts_closed = 0
+            premium_open = Decimal("0")
+            multiplier = 0
+            shares_opened = _finite_decimal(
+                self.shares_opened,
+                field_name="shares_opened",
+                positive=True,
+            )
+            shares_open = _finite_decimal(
+                self.shares_open,
+                field_name="shares_open",
+                positive=True,
+            )
+            shares_closed = _finite_decimal(
+                self.shares_closed,
+                field_name="shares_closed",
+                nonnegative=True,
+            )
+            cost_basis_total = _finite_decimal(
+                self.cost_basis_total,
+                field_name="cost_basis_total",
+                nonnegative=True,
+            )
+            if shares_closed > shares_opened:
+                raise ValueError("shares_closed must be <= shares_opened")
+            # Exact Decimal equality: the balance is an authority invariant, and
+            # a tolerance here would admit the very drift this cache used to add.
+            if shares_open + shares_closed != shares_opened:
+                raise ValueError("resumable lot share balance is invalid")
+            if str(self.status) != "open":
+                raise ValueError("resumable projection stores active lots only")
+        else:
+            contracts_opened = _exact_int(
+                self.contracts_opened,
+                field_name="contracts_opened",
+            )
+            contracts_open = _exact_int(
+                self.contracts_open,
+                field_name="contracts_open",
+            )
+            contracts_closed = _exact_int(
+                self.contracts_closed,
+                field_name="contracts_closed",
+            )
+            if contracts_opened <= 0:
+                raise ValueError("contracts_opened must be > 0")
+            if contracts_open <= 0 or str(self.status) != "open":
+                raise ValueError("resumable projection stores active lots only")
+            if contracts_closed < 0:
+                raise ValueError("contracts_closed must be >= 0")
+            if contracts_open + contracts_closed != contracts_opened:
+                raise ValueError("resumable lot contract balance is invalid")
+            premium_open = _finite_decimal(
+                self.premium_open,
+                field_name="premium_open",
+                nonnegative=True,
+            )
+            multiplier = int(
+                _finite_float(
+                    self.multiplier,
+                    field_name="multiplier",
+                    positive=True,
+                )
+            )
+            shares_opened = None
+            shares_open = None
+            shares_closed = None
+            cost_basis_total = None
+
+        realized_pnl = _finite_decimal(
             self.realized_pnl,
             field_name="realized_pnl",
         )
@@ -288,13 +383,12 @@ class ResumableLotState:
             "account",
             "underlying_symbol",
             "option_type",
-            "position_side",
         )
         if any(
             getattr(open_event.contract_key, field_name)
             != getattr(self.contract_key, field_name)
             for field_name in immutable_contract_fields
-        ):
+        ) or (open_event.position_side is None and self.contract_key.asset_type == "option"):
             raise ValueError("resumable lot immutable contract identity changed")
         if any(item.severity == "error" for item in validate_trade_event(open_event)):
             raise ValueError("resumable lot open_event is invalid")
@@ -317,6 +411,10 @@ class ResumableLotState:
         object.__setattr__(self, "last_event_id", last_event_id)
         object.__setattr__(self, "last_close_event_id", last_close_event_id)
         object.__setattr__(self, "open_event", open_event)
+        object.__setattr__(self, "shares_opened", shares_opened)
+        object.__setattr__(self, "shares_open", shares_open)
+        object.__setattr__(self, "shares_closed", shares_closed)
+        object.__setattr__(self, "cost_basis_total", cost_basis_total)
 
     @classmethod
     def from_position_lot(
@@ -344,6 +442,12 @@ class ResumableLotState:
             last_close_event_id=last_close_event_id,
             open_event=open_event,
             allocated_open_fee=allocated_open_fee,
+            # §7.4: hand the authority Decimals over untouched. The checkpoint is
+            # a cache, so it must be able to return exactly what it was given.
+            shares_opened=lot.shares_opened,
+            shares_open=lot.shares_open,
+            shares_closed=lot.shares_closed,
+            cost_basis_total=lot.cost_basis_total,
         )
 
     def to_position_lot(self) -> PositionLot:
@@ -351,6 +455,7 @@ class ResumableLotState:
             lot_id=self.lot_id,
             open_event_id=self.open_event_id,
             contract_key=self.contract_key,
+            position_side=self.open_event.position_side or "",
             opened_at_ms=self.opened_at_ms,
             contracts_opened=self.contracts_opened,
             contracts_open=self.contracts_open,
@@ -362,10 +467,15 @@ class ResumableLotState:
             realized_pnl=self.realized_pnl,
             last_event_id=self.last_event_id,
             close_event_ids=(),
+            asset_type=self.contract_key.asset_type,
+            shares_opened=self.shares_opened,
+            shares_open=self.shares_open,
+            shares_closed=self.shares_closed,
+            cost_basis_total=self.cost_basis_total,
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "lot_id": self.lot_id,
             "open_event_id": self.open_event_id,
             "contract_key": self.contract_key.to_dict(),
@@ -374,19 +484,36 @@ class ResumableLotState:
             "contracts_open": self.contracts_open,
             "contracts_closed": self.contracts_closed,
             "status": self.status,
-            "premium_open": self.premium_open,
+            "premium_open": _decimal_text(self.premium_open, field_name="premium_open"),
             "multiplier": self.multiplier,
             "currency": self.currency,
-            "realized_pnl": self.realized_pnl,
+            "realized_pnl": _decimal_text(self.realized_pnl, field_name="realized_pnl"),
             "last_event_id": self.last_event_id,
             "last_close_event_id": self.last_close_event_id,
             "open_event": self.open_event.to_dict(),
             "allocated_open_fee": _decimal_text(self.allocated_open_fee),
         }
+        if self.contract_key.asset_type == "stock":
+            result["shares_opened"] = _decimal_text(
+                self.shares_opened, field_name="shares_opened"
+            )
+            result["shares_open"] = _decimal_text(
+                self.shares_open, field_name="shares_open"
+            )
+            result["shares_closed"] = _decimal_text(
+                self.shares_closed, field_name="shares_closed"
+            )
+            result["cost_basis_total"] = _decimal_text(
+                self.cost_basis_total, field_name="cost_basis_total"
+            )
+        return result
 
     @classmethod
     def from_dict(cls, payload: Any) -> "ResumableLotState":
-        if not isinstance(payload, dict) or set(payload) != _LOT_KEYS:
+        if not isinstance(payload, dict):
+            raise ValueError("resumable lot fields differ from v1 schema")
+        keys = set(payload)
+        if keys != _LOT_KEYS and keys != (_LOT_KEYS | _STOCK_LOT_KEYS):
             raise ValueError("resumable lot fields differ from v1 schema")
         open_event = payload["open_event"]
         if not isinstance(open_event, dict) or set(open_event) != _EVENT_KEYS:
@@ -400,14 +527,26 @@ class ResumableLotState:
             contracts_open=payload["contracts_open"],
             contracts_closed=payload["contracts_closed"],
             status=str(payload["status"]),
-            premium_open=payload["premium_open"],
+            premium_open=_parse_decimal(payload["premium_open"], field_name="premium_open"),
             multiplier=payload["multiplier"],
             currency=str(payload["currency"]),
-            realized_pnl=payload["realized_pnl"],
+            realized_pnl=_parse_decimal(payload["realized_pnl"], field_name="realized_pnl"),
             last_event_id=payload["last_event_id"],
             last_close_event_id=payload["last_close_event_id"],
             open_event=TradeEvent.from_dict(open_event),
             allocated_open_fee=_parse_decimal(payload["allocated_open_fee"]),
+            shares_opened=_parse_optional_decimal(
+                payload.get("shares_opened"), field_name="shares_opened"
+            ),
+            shares_open=_parse_optional_decimal(
+                payload.get("shares_open"), field_name="shares_open"
+            ),
+            shares_closed=_parse_optional_decimal(
+                payload.get("shares_closed"), field_name="shares_closed"
+            ),
+            cost_basis_total=_parse_optional_decimal(
+                payload.get("cost_basis_total"), field_name="cost_basis_total"
+            ),
         )
 
 

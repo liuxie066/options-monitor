@@ -987,7 +987,7 @@ def _measure_storage_status_allocation(spec: Mapping[str, Any]) -> dict[str, Any
         }
 
 
-def _phase_3a_record_id(spec: Mapping[str, Any], index: int) -> str:
+def _phase_3a_lot_id(spec: Mapping[str, Any], index: int) -> str:
     slug = str(spec.get("key") or "").replace(".", "-").replace("_", "-")
     return f"lot-{slug}-{int(index):06d}"
 
@@ -1138,7 +1138,7 @@ def _phase_3a_operation(repo: Any, *, key: str, spec: Mapping[str, Any]) -> Any:
     if key == "single_combo_metadata_close":
         return record_manual_position_close(
             repo,
-            record_id=_phase_3a_record_id(spec, 0),
+            lot_id=_phase_3a_lot_id(spec, 0),
             contracts_to_close=1,
             close_price=0.5,
             close_reason="phase_3a_benchmark",
@@ -1150,7 +1150,7 @@ def _phase_3a_operation(repo: Any, *, key: str, spec: Mapping[str, Any]) -> Any:
             repo,
             [
                 {
-                    "record_id": _phase_3a_record_id(spec, index),
+                    "record_id": _phase_3a_lot_id(spec, index),
                     "strategy": "combo_yield",
                     "leg_role": role,
                     "strategy_group_id": group_id,
@@ -1168,7 +1168,6 @@ def _phase_3a_operation(repo: Any, *, key: str, spec: Mapping[str, Any]) -> Any:
             account="bench00",
             underlying_symbol="NVDA",
             option_type="put",
-            position_side="short",
             strike=10,
             expiration_ymd="2028-12-15",
         )
@@ -1177,7 +1176,6 @@ def _phase_3a_operation(repo: Any, *, key: str, spec: Mapping[str, Any]) -> Any:
             account="bench00",
             underlying_symbol="NVDA",
             option_type="call",
-            position_side="long",
             strike=25,
             expiration_ymd="2028-12-15",
         )
@@ -1193,6 +1191,7 @@ def _phase_3a_operation(repo: Any, *, key: str, spec: Mapping[str, Any]) -> Any:
             multiplier=100,
             lot_id="lot-phase3a-special-call",
             raw_payload={
+                "side": "buy",
                 "strategy": "combo_yield",
                 "leg_role": "participation_call",
                 "strategy_group_id": "bench-special-combo",
@@ -1207,7 +1206,7 @@ def _phase_3a_operation(repo: Any, *, key: str, spec: Mapping[str, Any]) -> Any:
                 "symbol": "NVDA",
                 "contracts": 1,
                 "open_event_id": _phase_3a_open_event_id(spec, 0),
-                "record_id": _phase_3a_record_id(spec, 0),
+                "record_id": _phase_3a_lot_id(spec, 0),
                 "contract_key": put_key.to_dict(),
             },
             second_leg={
@@ -2042,7 +2041,7 @@ def _canonical_output(
     canonical_lots = sorted(
         [
             {
-                "record_id": str(item.get("record_id") or ""),
+                "record_id": str(item.get("lot_id") or item.get("record_id") or ""),
                 "fields": dict(item.get("fields") or {}),
             }
             for item in lots

@@ -346,12 +346,12 @@ def project_wheel_call_intents(
     wheel_events: Sequence[Mapping[str, Any]],
     *,
     account: str,
-    stock_lot_id: str,
+    lot_id: str,
     as_of_ms: int,
     known_trade_event_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     account_value = _required_text(account, "account").lower()
-    stock_lot_value = _required_text(stock_lot_id, "stock_lot_id")
+    stock_lot_value = _required_text(lot_id, "stock_lot_id")
     instant = _positive_int(as_of_ms, "as_of_ms")
     events, _invalid = effective_wheel_events(
         [
@@ -409,7 +409,7 @@ def project_wheel_call_linkage_candidates(
             )
         ):
             continue
-        call_record_id = _required_text(row.get("record_id"), "call_record_id")
+        call_lot_id = _required_text(row.get("record_id"), "call_record_id")
         call_open_event_id = _required_text(
             fields.get("source_event_id"),
             "call_open_event_id",
@@ -417,14 +417,14 @@ def project_wheel_call_linkage_candidates(
         account = str(fields.get("account") or "").strip().lower()
         symbol = str(fields.get("symbol") or "").strip().upper()
         for batch in wheel_batches:
-            stock_lot_id = str(batch.get("stock_lot_id") or "").strip()
+            lot_id = str(batch.get("stock_lot_id") or "").strip()
             if (
                 batch.get("lifecycle_status") != "active"
                 or batch.get("integrity_status") != "trusted"
                 or batch.get("active_call_lot_ids")
                 or str(batch.get("account") or "").strip().lower() != account
                 or str(batch.get("symbol") or "").strip().upper() != symbol
-                or (call_open_event_id, stock_lot_id) in rejected
+                or (call_open_event_id, lot_id) in rejected
             ):
                 continue
             try:
@@ -439,7 +439,7 @@ def project_wheel_call_linkage_candidates(
             digest = canonical_sha256(
                 {
                     "call_open_event_id": call_open_event_id,
-                    "stock_lot_id": stock_lot_id,
+                    "stock_lot_id": lot_id,
                 }
             )[:24]
             stable_call = {
@@ -462,9 +462,9 @@ def project_wheel_call_linkage_candidates(
                     "linkage_candidate_id": f"wheel-call-linkage:{digest}",
                     "input_snapshot_hash": canonical_sha256(
                         {
-                            "call_record_id": call_record_id,
+                            "call_record_id": call_lot_id,
                             "call": stable_call,
-                            "stock_lot_id": stock_lot_id,
+                            "stock_lot_id": lot_id,
                             "batch_generation_hash": batch.get(
                                 "batch_generation_hash"
                             ),
@@ -472,9 +472,9 @@ def project_wheel_call_linkage_candidates(
                     ),
                     "account": account,
                     "symbol": symbol,
-                    "call_record_id": call_record_id,
+                    "call_record_id": call_lot_id,
                     "call_open_event_id": call_open_event_id,
-                    "stock_lot_id": stock_lot_id,
+                    "stock_lot_id": lot_id,
                     "contracts": _contracts_open(fields),
                     "multiplier": int(float(fields.get("multiplier") or 0)),
                     "required_shares": required_shares,
@@ -502,8 +502,7 @@ def project_wheel_linkage_candidates(
     call_branches = [
         {
             **row,
-            "batch_generation_hash": row.get("batch_generation_hash")
-            or row.get("branch_generation_hash"),
+            "batch_generation_hash": row.get("batch_generation_hash"),
         }
         for row in wheel_branches
         if str(row.get("direction") or "call").strip().lower() == "call"
@@ -523,7 +522,7 @@ def project_wheel_linkage_candidates(
             ),
             "option_record_id": item["call_record_id"],
             "option_open_event_id": item["call_open_event_id"],
-            "branch_generation_hash": item.get("batch_generation_hash"),
+            "batch_generation_hash": item.get("batch_generation_hash"),
         }
         for item in project_wheel_call_linkage_candidates(
             call_branches,
@@ -566,7 +565,7 @@ def project_wheel_linkage_candidates(
             )
         ):
             continue
-        record_id = _required_text(row.get("record_id"), "option_record_id")
+        lot_id = _required_text(row.get("record_id"), "option_record_id")
         open_event_id = _required_text(
             fields.get("source_event_id"),
             "option_open_event_id",
@@ -606,13 +605,13 @@ def project_wheel_linkage_candidates(
                     "wheel_branch_id": branch_id,
                 }
             )[:24]
-            generation_hash = str(branch.get("branch_generation_hash") or "")
+            generation_hash = str(branch.get("batch_generation_hash") or "")
             put_candidates.append(
                 {
                     "linkage_candidate_id": f"wheel-put-linkage:{digest}",
                     "input_snapshot_hash": canonical_sha256(
                         {
-                            "option_record_id": record_id,
+                            "option_record_id": lot_id,
                             "option": {
                                 key: fields.get(key)
                                 for key in (
@@ -629,13 +628,13 @@ def project_wheel_linkage_candidates(
                                 )
                             },
                             "wheel_branch_id": branch_id,
-                            "branch_generation_hash": generation_hash,
+                            "batch_generation_hash": generation_hash,
                         }
                     ),
                     "account": account,
                     "symbol": symbol,
                     "direction": "put",
-                    "option_record_id": record_id,
+                    "option_record_id": lot_id,
                     "option_open_event_id": open_event_id,
                     "wheel_branch_id": branch_id,
                     "contracts": contracts,
@@ -648,7 +647,7 @@ def project_wheel_linkage_candidates(
                     "cash_reservation_currency": str(
                         fields.get("currency") or branch.get("currency") or ""
                     ).strip().upper(),
-                    "branch_generation_hash": generation_hash,
+                    "batch_generation_hash": generation_hash,
                 }
             )
     return sorted(
@@ -705,7 +704,7 @@ def project_wheel_lifecycles(
     lots = [(str(row.get("record_id") or "").strip(), _lot_fields(row)) for row in position_lots]
     results: list[dict[str, Any]] = []
     for group in sorted(grouped):
-        account, stock_lot_id = group
+        account, lot_id = group
         batch_events = sorted(
             grouped[group],
             key=lambda item: (int(item["occurred_at_ms"]), str(item["event_id"])),
@@ -725,7 +724,7 @@ def project_wheel_lifecycles(
         if len(terminals) > 1:
             reasons.add("wheel_terminal_conflict")
 
-        stock_matches = stock_rows_by_id.get(stock_lot_id, [])
+        stock_matches = stock_rows_by_id.get(lot_id, [])
         stock_row = stock_matches[0] if len(stock_matches) == 1 else None
         if len(stock_matches) > 1:
             reasons.add("assigned_stock_lot_conflict")
@@ -744,10 +743,10 @@ def project_wheel_lifecycles(
             reasons.add("wheel_start_stock_lot_mismatch")
 
         linked_lots: list[tuple[str, dict[str, Any]]] = []
-        for record_id, fields in lots:
+        for call_lot_id, fields in lots:
             if str(fields.get("account") or "").strip().lower() != account:
                 continue
-            if str(fields.get("source_stock_lot_id") or "").strip() != stock_lot_id:
+            if str(fields.get("source_stock_lot_id") or "").strip() != lot_id:
                 continue
             if (
                 str(fields.get("strategy") or "").strip().lower() != "wheel"
@@ -758,9 +757,9 @@ def project_wheel_lifecycles(
             ):
                 reasons.add("wheel_call_linkage_conflict")
                 continue
-            linked_lots.append((record_id, fields))
+            linked_lots.append((call_lot_id, fields))
         active_call_lot_ids = sorted(
-            record_id for record_id, fields in linked_lots if _contracts_open(fields) > 0
+            call_lot_id for call_lot_id, fields in linked_lots if _contracts_open(fields) > 0
         )
 
         assignment_ids = {
@@ -768,7 +767,7 @@ def project_wheel_lifecycles(
             for row in active_trade_events
             if _event_type(row) == "assignment"
             and str(row.get("target_lot_id") or "").strip()
-            in {record_id for record_id, _fields in linked_lots}
+            in {call_lot_id for call_lot_id, _fields in linked_lots}
         }
         called_events = [item for item in terminals if item["event_type"] == "wheel_called_away"]
         manual_events = [item for item in terminals if item["event_type"] == "wheel_manual_ended"]
@@ -802,7 +801,7 @@ def project_wheel_lifecycles(
             reasons.add("contract_multiplier_unavailable")
 
         locked_shares = 0
-        for _record_id, fields in linked_lots:
+        for _lot_id, fields in linked_lots:
             if _contracts_open(fields) <= 0:
                 continue
             try:
@@ -817,7 +816,7 @@ def project_wheel_lifecycles(
             if item["event_type"] == "wheel_call_linkage_rejected"
         }
         unresolved_lots: list[tuple[str, dict[str, Any]]] = []
-        for record_id, fields in lots:
+        for call_lot_id, fields in lots:
             if (
                 str(fields.get("account") or "").strip().lower() != account
                 or str(fields.get("symbol") or "").strip().upper()
@@ -845,8 +844,8 @@ def project_wheel_lifecycles(
             except (TypeError, ValueError):
                 continue
             if shares_remaining is not None and 0 < required <= shares_remaining:
-                unresolved_lots.append((record_id, fields))
-        unresolved_call_lot_ids = sorted(record_id for record_id, _fields in unresolved_lots)
+                unresolved_lots.append((call_lot_id, fields))
+        unresolved_call_lot_ids = sorted(call_lot_id for call_lot_id, _fields in unresolved_lots)
         if manual_events and (active_call_lot_ids or active_intent_ids):
             reasons.add("manual_end_has_active_call_or_intent")
         if called_events and shares_remaining != 0:
@@ -855,7 +854,7 @@ def project_wheel_lifecycles(
             reasons.add("called_away_event_missing")
 
         for review in review_rows:
-            if str(review.get("stock_lot_id") or "").strip() != stock_lot_id:
+            if str(review.get("stock_lot_id") or "").strip() != lot_id:
                 continue
             if str(review.get("status") or "") in {
                 "source_conflict",
@@ -903,14 +902,14 @@ def project_wheel_lifecycles(
             phase = "ready"
 
         related_lot_ids = {
-            record_id for record_id, _fields in [*linked_lots, *unresolved_lots]
+            call_lot_id for call_lot_id, _fields in [*linked_lots, *unresolved_lots]
         }
         related_trade_ids = {
             start_trade_id,
             *assignment_ids,
             *{
                 str(fields.get("source_event_id") or "").strip()
-                for _record_id, fields in linked_lots
+                for _lot_id, fields in linked_lots
             },
             *{
                 str(item.get("source_trade_event_id") or "").strip()
@@ -926,7 +925,7 @@ def project_wheel_lifecycles(
         generation_payload = {
             "schema_version": WHEEL_PROJECTION_SCHEMA,
             "account": account,
-            "stock_lot_id": stock_lot_id,
+            "stock_lot_id": lot_id,
             "wheel_events": [
                 {
                     key: event.get(key)
@@ -945,8 +944,8 @@ def project_wheel_lifecycles(
                 for event in batch_events
             ],
             "position_lots": [
-                {"record_id": record_id, "fields": fields}
-                for record_id, fields in [*linked_lots, *unresolved_lots]
+                {"record_id": call_lot_id, "fields": fields}
+                for call_lot_id, fields in [*linked_lots, *unresolved_lots]
             ],
             "trade_events": related_trades,
             "assigned_stock": _stable_stock_fact(stock_row),
@@ -959,7 +958,7 @@ def project_wheel_lifecycles(
             "account": account,
             "market": str(symbol_market(symbol) or "").strip().lower() or None,
             "symbol": symbol,
-            "stock_lot_id": stock_lot_id,
+            "stock_lot_id": lot_id,
             "lifecycle_status": lifecycle_status,
             "phase": phase,
             "integrity_status": integrity_status,
@@ -1034,7 +1033,7 @@ def project_wheel_branches(
                 "lifecycle_status": lifecycle_status,
                 "phase": phase,
                 "monitoring_gate": gate,
-                "branch_generation_hash": batch["batch_generation_hash"],
+                "batch_generation_hash": batch["batch_generation_hash"],
                 "legacy_call_adapter": True,
             }
         )
@@ -1258,8 +1257,8 @@ def project_wheel_branches(
             lifecycle_status = "converted"
 
         linked_lots = [
-            (record_id, fields)
-            for record_id, fields in lots
+            (option_lot_id, fields)
+            for option_lot_id, fields in lots
             if str(fields.get("account") or "").strip().lower() == account
             and str(fields.get("source_wheel_branch_id") or "").strip() == branch_id
         ]
@@ -1267,13 +1266,13 @@ def project_wheel_branches(
         if direction == "put":
             realized_net = Decimal(0)
             realized_net_available = allocation_projection_available
-            for record_id, fields in linked_lots:
+            for option_lot_id, fields in linked_lots:
                 try:
                     closed_contracts = int(fields.get("contracts_closed") or 0)
                 except (TypeError, ValueError):
                     realized_net_available = False
                     break
-                allocations = allocations_by_lot.get(record_id, [])
+                allocations = allocations_by_lot.get(option_lot_id, [])
                 if closed_contracts < 0 or sum(item.contracts for item in allocations) != closed_contracts:
                     realized_net_available = False
                     break
@@ -1289,12 +1288,12 @@ def project_wheel_branches(
             else:
                 reasons.add("realized_put_net_pnl_unavailable")
         active_lot_ids = sorted(
-            record_id
-            for record_id, fields in linked_lots
+            option_lot_id
+            for option_lot_id, fields in linked_lots
             if _contracts_open(fields) > 0
         )
         expected_role = f"wheel_{direction}"
-        for _record_id, fields in linked_lots:
+        for _lot_id, fields in linked_lots:
             if (
                 str(fields.get("strategy") or "").strip().lower() != "wheel"
                 or str(fields.get("leg_role") or "").strip().lower() != expected_role
@@ -1343,8 +1342,8 @@ def project_wheel_branches(
                         "account": account,
                         "wheel_branch_id": branch_id,
                         "intent_id": summary["intent_id"],
-                        "branch_generation_hash": intent_payload.get(
-                            "branch_generation_hash"
+                        "batch_generation_hash": intent_payload.get(
+                            "batch_generation_hash"
                         ),
                         "capacity_identity_hash": capacity_hash,
                         "currency": currency,
@@ -1355,8 +1354,8 @@ def project_wheel_branches(
                         "remaining_contracts": remaining,
                     }
                 )
-        stock_lot_id = str(created.get("stock_lot_id") or "").strip() or None
-        stock_row = stock_by_id.get(stock_lot_id or "")
+        lot_id = str(created.get("stock_lot_id") or "").strip() or None
+        stock_row = stock_by_id.get(lot_id or "")
         if direction == "call" and stock_row is None:
             reasons.add("assigned_stock_lot_unavailable")
 
@@ -1404,8 +1403,8 @@ def project_wheel_branches(
                 key=lambda item: item["event_id"],
             ),
             "position_lots": [
-                {"record_id": record_id, "fields": fields}
-                for record_id, fields in linked_lots
+                {"record_id": option_lot_id, "fields": fields}
+                for option_lot_id, fields in linked_lots
             ],
             "assigned_stock": _stable_stock_fact(stock_row),
             "realized_put_net_pnl_in_current_stage": realized_put_net_pnl,
@@ -1417,7 +1416,7 @@ def project_wheel_branches(
                 "currency": currency,
             },
         }
-        branch_generation_hash = canonical_sha256(generation_payload)
+        batch_generation_hash = canonical_sha256(generation_payload)
         branch = {
             "account": account,
             "market": market or None,
@@ -1425,7 +1424,7 @@ def project_wheel_branches(
             "wheel_branch_id": branch_id,
             "parent_branch_id": str(payload.get("parent_branch_id") or "").strip() or None,
             "direction": direction,
-            "stock_lot_id": stock_lot_id,
+            "stock_lot_id": lot_id,
             "source_assignment_event_id": source_assignment_event_id,
             "lifecycle_status": lifecycle_status,
             "phase": phase,
@@ -1458,14 +1457,14 @@ def project_wheel_branches(
                 if item.get("status") == "active"
             ),
             "active_intent_reservations": active_intent_reservations,
-            "branch_generation_hash": branch_generation_hash,
+            "batch_generation_hash": batch_generation_hash,
             "legacy_call_adapter": False,
             "candidate": None,
         }
         branch["projection_hash"] = canonical_sha256(
             {
                 "schema_version": WHEEL_PROJECTION_SCHEMA,
-                "branch_generation_hash": branch_generation_hash,
+                "batch_generation_hash": batch_generation_hash,
                 "as_of_ms": instant,
                 "derived": branch,
             }

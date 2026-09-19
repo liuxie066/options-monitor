@@ -17,6 +17,7 @@ from domain.domain.lifecycle_allocation import (
 )
 from domain.domain.option_lifecycle import derive_lifecycle_read_model
 from domain.domain.symbol_identity import canonical_symbol, symbol_market
+from domain.domain.trade_contract_identity import derive_trade_side
 from src.application.ledger.api import (
     discover_expired_lifecycle_cases,
     LifecycleAttemptAuditEnvelope,
@@ -1514,16 +1515,17 @@ def _terminal_event(
         account=lifecycle_case.get("account") or fields.get("account"),
         underlying_symbol=lifecycle_case.get("symbol") or fields.get("symbol"),
         option_type=lifecycle_case.get("option_type") or fields.get("option_type"),
-        position_side=(
-            lifecycle_case.get("position_side")
-            or fields.get("position_side")
-            or fields.get("side")
-        ),
         strike=lifecycle_case.get("strike") or fields.get("strike"),
         expiration_ymd=(
             lifecycle_case.get("expiration_ymd")
             or fields.get("expiration_ymd")
         ),
+    )
+    trade_side = derive_trade_side(
+        terminal_type,
+        lifecycle_case.get("position_side")
+        or fields.get("position_side")
+        or fields.get("side"),
     )
     contracts = int(allocation.get("contracts_allocated") or 0)
     event_price = (
@@ -1567,6 +1569,7 @@ def _terminal_event(
             "contracts": contracts,
             "source_type": str(evidence.get("source_type") or ""),
             "source_event_id": str(evidence.get("source_event_id") or ""),
+            "side": trade_side,
             "stock_settlement": dict(
                 stock_settlement
                 if stock_settlement is not None

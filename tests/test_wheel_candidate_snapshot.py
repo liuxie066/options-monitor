@@ -52,7 +52,7 @@ def _batch(*, final: bool = True) -> dict:
         "stock_lot_id": "stock-1",
         "wheel_branch_id": "branch-call-1",
         "direction": "call",
-        "branch_generation_hash": "1" * 64,
+        "batch_generation_hash": "1" * 64,
         "projection_hash": "2" * 64,
         "reason_codes": [],
         "raw_candidates": [{key: value for key, value in candidate.items() if key != "final_candidate_id"}],
@@ -210,9 +210,9 @@ def test_wheel_candidate_snapshot_loader_adapts_legacy_file_location(
             **{
                 key: value
                 for key, value in row.items()
-                if key not in {"direction", "wheel_branch_id", "branch_generation_hash"}
+                if key not in {"direction", "wheel_branch_id", "batch_generation_hash"}
             },
-            "batch_generation_hash": row["branch_generation_hash"],
+            "batch_generation_hash": row["batch_generation_hash"],
         }
         for row in legacy["batches"]
     ]
@@ -334,7 +334,7 @@ def test_wheel_candidate_snapshot_v2_binds_put_cash_allocation(
                 "symbol": "NVDA",
                 "wheel_branch_id": "branch-put-1",
                 "direction": "put",
-                "branch_generation_hash": "1" * 64,
+                "batch_generation_hash": "1" * 64,
                 "projection_hash": "2" * 64,
                 "raw_candidates": [
                     {key: value for key, value in candidate.items() if key != "final_candidate_id"}

@@ -34,7 +34,7 @@ def _position(
     expiration: str = EXPIRATION,
     strategy_group_id: str | None = None,
     leg_role: str | None = None,
-    source_stock_lot_id: str | None = None,
+    source_lot_id: str | None = None,
 ) -> dict:
     return {
         "record_id": lot_id,
@@ -52,7 +52,7 @@ def _position(
         "expiration": expiration,
         "strategy_group_id": strategy_group_id,
         "leg_role": leg_role,
-        "source_stock_lot_id": source_stock_lot_id,
+        "source_stock_lot_id": source_lot_id,
         "opened_at": OPENED_AT_MS,
     }
 
@@ -361,7 +361,7 @@ def test_lifecycle_not_evaluable_row_preserves_wheel_stock_relationship(
                 option_type="call",
                 expiration=BUSINESS_DATE.isoformat(),
                 leg_role="wheel_call",
-                source_stock_lot_id="stock-lot-1",
+                source_lot_id="stock-lot-1",
             )
         ],
         quotes=[],

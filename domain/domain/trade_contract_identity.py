@@ -6,7 +6,7 @@ import math
 from typing import Any
 
 from domain.domain.expiration_dates import expiration_timestamp_to_ymd
-from domain.domain.option_position_identity import normalize_option_type
+from domain.domain.option_position_identity import normalize_option_type, normalize_side
 from domain.domain.symbol_identity import canonical_symbol
 
 
@@ -69,6 +69,50 @@ def normalize_trade_side(value: Any) -> str | None:
     return _alias_lookup(aliases, compact)
 
 
+def normalize_asset_type(value: Any) -> str | None:
+    compact = _compact_choice(value)
+    if compact in {"stock", "equity", "etf", "share"}:
+        return "stock"
+    if compact in {"option", "option_contract", "optioncontract"}:
+        return "option"
+    return None
+
+
+def normalize_quantity_unit(value: Any) -> str | None:
+    compact = _compact_choice(value)
+    if compact in {"share", "shares"}:
+        return "share"
+    if compact in {"contract", "contracts"}:
+        return "contract"
+    return None
+
+
+def derive_position_side(position_effect: Any, side: Any) -> str | None:
+    effect = normalize_position_effect(position_effect)
+    side_value = normalize_trade_side(side)
+    if effect == "open":
+        return {"buy": "long", "sell": "short"}.get(side_value)
+    if effect == "close":
+        return {"buy": "short", "sell": "long"}.get(side_value)
+    return None
+
+
+def derive_trade_side(position_effect: Any, position_side: Any) -> str | None:
+    """Inverse of :func:`derive_position_side`: long/short + effect → buy/sell.
+
+    Used to backfill the trade side for events (notably system-generated
+    lifecycle closes) that carry only the position side, so ``position_side``
+    can be uniformly re-derived from ``side`` + ``position_effect``.
+    """
+    effect = normalize_position_effect(position_effect)
+    side_value = normalize_side(position_side)
+    if effect == "open":
+        return {"long": "buy", "short": "sell"}.get(side_value)
+    if effect == "close":
+        return {"long": "sell", "short": "buy"}.get(side_value)
+    return None
+
+
 def normalize_position_effect(value: Any) -> str | None:
     compact = _compact_choice(value)
     aliases = {
@@ -107,6 +151,10 @@ def normalize_position_effect(value: Any) -> str | None:
         "買平": "close",
         "卖平": "close",
         "賣平": "close",
+        "expire_close": "close",
+        "expireclose": "close",
+        "assignment": "close",
+        "exercise": "close",
         "void": "void",
         "voided": "void",
         "cancel": "void",

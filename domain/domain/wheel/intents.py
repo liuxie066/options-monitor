@@ -48,7 +48,7 @@ def plan_wheel_branch_decision(
         expected_generation_hash,
         "expected_generation_hash",
     )
-    if expected != str(branch.get("branch_generation_hash") or ""):
+    if expected != str(branch.get("batch_generation_hash") or ""):
         raise ValueError("Wheel branch generation changed")
     account = _required_text(branch.get("account"), "account").lower()
     branch_id = _required_text(branch.get("wheel_branch_id"), "wheel_branch_id")
@@ -66,7 +66,7 @@ def plan_wheel_branch_decision(
         event_schema_version=WHEEL_EVENT_SCHEMA_V2,
         account=account,
         wheel_branch_id=branch_id,
-        stock_lot_id=str(branch.get("stock_lot_id") or "").strip() or None,
+        lot_id=str(branch.get("stock_lot_id") or "").strip() or None,
         event_type="wheel_branch_decided",
         occurred_at_ms=occurred_at_ms,
         recorded_at_ms=recorded_at_ms,
@@ -104,7 +104,10 @@ def _trade_event_fact(event: Any) -> dict[str, Any]:
         "account": key.get("account"),
         "symbol": key.get("underlying_symbol"),
         "option_type": key.get("option_type"),
-        "position_side": key.get("position_side"),
+        # §9.2 step 3: the contract key no longer carries the position side, so
+        # read it off the event (derived from the trade side) and keep the legacy
+        # key as a fallback for persisted rows.
+        "position_side": getattr(event, "position_side", None) or key.get("position_side"),
         "strike": key.get("strike"),
         "expiration_ymd": key.get("expiration_ymd"),
         "contracts": getattr(event, "contracts", None),
@@ -159,12 +162,12 @@ def wheel_started_event_from_assignment(
         stock.get("event_time_ms") or event.get("event_time_ms"),
         "assignment occurred_at_ms",
     )
-    stock_lot_id = f"assigned-stock-{event_id}"
+    lot_id = f"assigned-stock-{event_id}"
     return build_wheel_event(
         event_id=f"wheel-started:{event_id}",
         event_schema_version=WHEEL_EVENT_SCHEMA_V1,
         account=account,
-        stock_lot_id=stock_lot_id,
+        lot_id=lot_id,
         event_type="wheel_started",
         occurred_at_ms=occurred_at_ms,
         recorded_at_ms=recorded_at_ms,
@@ -192,13 +195,13 @@ def wheel_called_away_event_from_call_assignment(
     fields = _lot_fields(source_call_lot)
     strategy = str(fields.get("strategy") or "").strip().lower()
     leg_role = str(fields.get("leg_role") or "").strip().lower()
-    stock_lot_id = str(fields.get("source_stock_lot_id") or "").strip()
-    if strategy != "wheel" and leg_role != "wheel_call" and not stock_lot_id:
+    lot_id = str(fields.get("source_stock_lot_id") or "").strip()
+    if strategy != "wheel" and leg_role != "wheel_call" and not lot_id:
         return None
     if (
         strategy != "wheel"
         or leg_role != "wheel_call"
-        or not stock_lot_id
+        or not lot_id
         or str(fields.get("strategy_group_id") or "").strip()
         or str(fields.get("option_type") or "").strip().lower() != "call"
         or str(fields.get("side") or fields.get("position_side") or "").strip().lower()
@@ -219,8 +222,8 @@ def wheel_called_away_event_from_call_assignment(
     if multiplier <= 0 or shares != contracts * multiplier:
         raise ValueError("Wheel Call assignment settlement quantity is invalid")
     if (
-        str((stock_lot_before or {}).get("stock_lot_id") or "") != stock_lot_id
-        or str((stock_lot_after or {}).get("stock_lot_id") or "") != stock_lot_id
+        str((stock_lot_before or {}).get("stock_lot_id") or "") != lot_id
+        or str((stock_lot_after or {}).get("stock_lot_id") or "") != lot_id
         or before - after != shares
         or after < 0
     ):
@@ -237,10 +240,10 @@ def wheel_called_away_event_from_call_assignment(
         "assignment occurred_at_ms",
     )
     return build_wheel_event(
-        event_id=f"wheel-called-away:{source_event_id}:{stock_lot_id}",
+        event_id=f"wheel-called-away:{source_event_id}:{lot_id}",
         event_schema_version=WHEEL_EVENT_SCHEMA_V1,
         account=account,
-        stock_lot_id=stock_lot_id,
+        lot_id=lot_id,
         event_type="wheel_called_away",
         occurred_at_ms=occurred_at_ms,
         recorded_at_ms=recorded_at_ms,
@@ -261,7 +264,7 @@ def plan_wheel_manual_end(
     recorded_at_ms: int,
     account: str,
 ) -> dict[str, Any]:
-    stock_lot_id = _required_text(wheel_batch.get("stock_lot_id"), "stock_lot_id")
+    lot_id = _required_text(wheel_batch.get("stock_lot_id"), "stock_lot_id")
     if wheel_batch.get("lifecycle_status") != "active":
         raise ValueError("Wheel lifecycle is not active")
     if wheel_batch.get("integrity_status") != "trusted":
@@ -276,7 +279,7 @@ def plan_wheel_manual_end(
     event_digest = canonical_sha256(
         {
             "account": account_value,
-            "stock_lot_id": stock_lot_id,
+            "stock_lot_id": lot_id,
             "request_id": request,
         }
     )[:24]
@@ -288,7 +291,7 @@ def plan_wheel_manual_end(
             else WHEEL_EVENT_SCHEMA_V2
         ),
         account=account_value,
-        stock_lot_id=stock_lot_id,
+        lot_id=lot_id,
         event_type="wheel_manual_ended",
         occurred_at_ms=occurred_at_ms,
         recorded_at_ms=recorded_at_ms,
@@ -345,8 +348,8 @@ def build_wheel_intent_capacity_binding(
         "wheel_branch_id",
     )
     generation_hash = _required_text(
-        branch.get("branch_generation_hash") or branch.get("batch_generation_hash"),
-        "branch_generation_hash",
+        branch.get("batch_generation_hash"),
+        "batch_generation_hash",
     )
     contracts = _positive_int(
         final_candidate.get("granted_contracts"),
@@ -365,8 +368,7 @@ def build_wheel_intent_capacity_binding(
     if str(final_candidate.get("symbol") or "").strip().upper() != symbol:
         raise ValueError("Wheel candidate symbol mismatch")
     candidate_generation = str(
-        final_candidate.get("branch_generation_hash")
-        or final_candidate.get("batch_generation_hash")
+        final_candidate.get("batch_generation_hash")
         or ""
     ).strip()
     if candidate_generation and candidate_generation != generation_hash:
@@ -392,7 +394,7 @@ def build_wheel_intent_capacity_binding(
         return {
             "direction": direction,
             "wheel_branch_id": branch_id,
-            "branch_generation_hash": generation_hash,
+            "batch_generation_hash": generation_hash,
             "capacity_identity_hash": capacity_identity_hash,
             "reserved_amount": contracts * multiplier,
             "reservation_unit": "shares",
@@ -425,7 +427,7 @@ def build_wheel_intent_capacity_binding(
     return {
         "direction": direction,
         "wheel_branch_id": branch_id,
-        "branch_generation_hash": generation_hash,
+        "batch_generation_hash": generation_hash,
         "capacity_identity_hash": capacity_identity_hash,
         "reserved_amount": reserved_amount,
         "reservation_unit": "cash",
@@ -512,11 +514,11 @@ def _plan_intent_create(
         {"account": account, identity_field: intent_owner_id, "request_id": request}
     )[:24]
     call_side = direction == "call"
-    generation_key = "batch_generation_hash" if call_side else "branch_generation_hash"
+    generation_key = "batch_generation_hash"
     generation_hash = (
         str(source.get("batch_generation_hash") or "")
         if call_side
-        else binding["branch_generation_hash"]
+        else binding["batch_generation_hash"]
     )
     capacity_identity_hash = (
         str(capacity_fact.get("capacity_identity_hash") or "").strip()
@@ -552,7 +554,7 @@ def _plan_intent_create(
         ),
         account=account,
         wheel_branch_id=None if call_side else intent_owner_id,
-        stock_lot_id=(
+        lot_id=(
             intent_owner_id
             if call_side
             else str(source.get("stock_lot_id") or "").strip() or None
@@ -682,7 +684,7 @@ def _plan_intent_cancel(
             "request_id": request,
         }
     )[:24]
-    generation_key = "batch_generation_hash" if direction == "call" else "branch_generation_hash"
+    generation_key = "batch_generation_hash"
     cancellation_payload = {
         "schema_version": f"wheel_{direction}_intent_cancelled.v1",
         "market": _wheel_market(source),
@@ -712,7 +714,7 @@ def _plan_intent_cancel(
         ),
         account=account,
         wheel_branch_id=None if direction == "call" else intent_owner_id,
-        stock_lot_id=(
+        lot_id=(
             intent_owner_id
             if direction == "call"
             else str(source.get("stock_lot_id") or "").strip() or None
@@ -859,7 +861,7 @@ def _plan_intent_consume(
         ),
         account=account,
         wheel_branch_id=None if direction == "call" else intent_owner_id,
-        stock_lot_id=(
+        lot_id=(
             intent_owner_id
             if direction == "call"
             else str(source.get("stock_lot_id") or "").strip() or None

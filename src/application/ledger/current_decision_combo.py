@@ -83,8 +83,8 @@ def build_current_combo_facts(
         put_terminal = 0
         call_terminal = 0
         original_contracts = int(identity["original_contracts"])
-        for record_id, expected_event_id, expected_role in expected:
-            fields = lots_by_id.get(record_id)
+        for lot_id, expected_event_id, expected_role in expected:
+            fields = lots_by_id.get(lot_id)
             if fields is None:
                 continue
             contracts_open = _integer(
@@ -116,7 +116,7 @@ def build_current_combo_facts(
             if contracts_open > 0:
                 bindings.append(
                     {
-                        "record_id": record_id,
+                        "record_id": lot_id,
                         "role": role,
                         "open_event_id": open_event_id,
                         "account": account_value,

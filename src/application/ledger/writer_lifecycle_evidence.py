@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections import Counter
 
 from domain.domain.assigned_stock import assigned_stock_sale_allocations
+from domain.domain.ledger.identity import position_key_for
+from domain.domain.option_position_identity import normalize_side
 
 from src.application.cash_conversion import (
     attach_assigned_stock_sale_cash_conversions,
@@ -104,13 +106,13 @@ def _assigned_stock_final_cutoff_ms(
 def _assigned_stock_sale_ids(
     report: dict[str, Any],
     *,
-    stock_lot_id: str,
+    lot_id: str,
 ) -> set[str]:
     return {
         str(row.get("stock_event_id") or row.get("event_id") or "").strip()
         for row in report.get("assigned_stock_sale_rows") or []
         if isinstance(row, dict)
-        and str(row.get("stock_lot_id") or "").strip() == stock_lot_id
+        and str(row.get("stock_lot_id") or "").strip() == lot_id
         and str(row.get("stock_event_id") or row.get("event_id") or "").strip()
     }
 
@@ -118,7 +120,7 @@ def _assigned_stock_sale_ids(
 def _assigned_stock_coverage_intervals(
     report: dict[str, Any],
     *,
-    stock_lot_id: str,
+    lot_id: str,
 ) -> Counter[tuple[Any, ...]]:
     return Counter(
         (
@@ -132,7 +134,7 @@ def _assigned_stock_coverage_intervals(
         )
         for row in report.get("covered_call_allocations") or []
         if isinstance(row, dict)
-        and str(row.get("stock_lot_id") or "").strip() == stock_lot_id
+        and str(row.get("stock_lot_id") or "").strip() == lot_id
     )
 
 
@@ -140,11 +142,11 @@ def _require_preserved_assigned_stock_facts(
     before: dict[str, Any],
     after: dict[str, Any],
     *,
-    stock_lot_id: str,
+    lot_id: str,
     stock_event_id: str,
 ) -> None:
-    before_sales = _assigned_stock_sale_ids(before, stock_lot_id=stock_lot_id)
-    after_sales = _assigned_stock_sale_ids(after, stock_lot_id=stock_lot_id)
+    before_sales = _assigned_stock_sale_ids(before, lot_id=lot_id)
+    after_sales = _assigned_stock_sale_ids(after, lot_id=lot_id)
     if not before_sales.issubset(after_sales):
         raise ValueError(
             "assigned stock sale validation failed: invalidates_subsequent_sale"
@@ -156,11 +158,11 @@ def _require_preserved_assigned_stock_facts(
 
     before_coverage = _assigned_stock_coverage_intervals(
         before,
-        stock_lot_id=stock_lot_id,
+        lot_id=lot_id,
     )
     after_coverage = _assigned_stock_coverage_intervals(
         after,
-        stock_lot_id=stock_lot_id,
+        lot_id=lot_id,
     )
     if not before_coverage <= after_coverage:
         raise ValueError(
@@ -174,7 +176,7 @@ def record_assigned_stock_event_atomically(
     sale_event: dict[str, Any] | None = None,
     assigned_stock_after: dict[str, Any] | None = None,
     account: str | None = None,
-    target_stock_lot_id: str | None = None,
+    target_lot_id: str | None = None,
     trade_time_ms: int | None = None,
     prepare_sale: Any = None,
     identity_execution: dict[str, Any] | None = None,
@@ -184,7 +186,7 @@ def record_assigned_stock_event_atomically(
     event_seed = dict(sale_event or {})
     account_hint = str(account or event_seed.get("account") or "").strip().lower()
     stock_lot_hint = str(
-        target_stock_lot_id
+        target_lot_id
         or event_seed.get("target_stock_lot_id")
         or event_seed.get("stock_lot_id")
         or ""
@@ -284,22 +286,22 @@ def record_assigned_stock_event_atomically(
         event_time = int(event.get("trade_time_ms") or 0)
         if event_time != trade_time_hint:
             raise ValueError("assigned stock event trade time mismatch")
-        stock_lot_id = str(
+        lot_id = str(
             event.get("target_stock_lot_id") or event.get("stock_lot_id") or ""
         ).strip()
-        if stock_lot_hint and stock_lot_id != stock_lot_hint:
+        if stock_lot_hint and lot_id != stock_lot_hint:
             raise ValueError("assigned stock event target lot mismatch")
         before_lot = next(
             (
                 dict(row)
                 for row in before_report.get("_all_assigned_stock_lots") or []
                 if isinstance(row, dict)
-                and str(row.get("stock_lot_id") or "") == stock_lot_id
+                and str(row.get("stock_lot_id") or "") == lot_id
             ),
             None,
         )
         if before_lot is None:
-            raise ValueError(f"assigned stock lot not found: {stock_lot_id}")
+            raise ValueError(f"assigned stock lot not found: {lot_id}")
         source_event_id = str(
             before_lot.get("source_assignment_event_id") or ""
         ).strip()
@@ -457,7 +459,7 @@ def record_assigned_stock_event_atomically(
                 for allocation in sale_allocations:
                     _require_preserved_assigned_stock_facts(
                         before_final_report, final_report,
-                        stock_lot_id=allocation["target_stock_lot_id"],
+                        lot_id=allocation["target_stock_lot_id"],
                         stock_event_id=allocation["stock_event_id"],
                     )
         prepared["stock_lot_after"] = next(
@@ -465,7 +467,7 @@ def record_assigned_stock_event_atomically(
                 dict(row)
                 for row in after_report.get("_all_assigned_stock_lots") or []
                 if isinstance(row, dict)
-                and str(row.get("stock_lot_id") or "") == stock_lot_id
+                and str(row.get("stock_lot_id") or "") == lot_id
             ),
             None,
         )
@@ -575,12 +577,12 @@ def accept_option_close_evidence_atomically(
         if not price.is_finite() or price != 0:
             raise ValueError("option close evidence must have exact zero price")
 
+        position_side = normalize_side(identity.get("position_side"))
         contract_key = ContractKey.from_values(
             broker=identity.get("broker"),
             account=account,
             underlying_symbol=identity.get("symbol"),
             option_type=identity.get("option_type"),
-            position_side=identity.get("position_side"),
             strike=identity.get("strike"),
             expiration_ymd=identity.get("expiration_ymd"),
         )
@@ -626,6 +628,7 @@ def accept_option_close_evidence_atomically(
                 existing=existing_evidence,
                 incoming=evidence_payload,
                 contract_key=contract_key,
+                position_side=position_side,
                 contracts=contracts,
             )
             expected_claim = build_source_consumption_claim(
@@ -670,7 +673,7 @@ def accept_option_close_evidence_atomically(
             if str(item.get("schema_version") or "").strip()
             == "lifecycle_case.v2"
             and str(item.get("contract_key") or "").strip()
-            == contract_key.position_key
+            == position_key_for(contract_key, position_side)
         ]
         if len(cases) > 1:
             raise ValueError("multiple_lifecycle_cases_for_contract")
@@ -680,6 +683,7 @@ def accept_option_close_evidence_atomically(
         matching_lots = _matching_lifecycle_lots(
             position_lots,
             contract_key=contract_key,
+            position_side=position_side,
         )
         if lifecycle_case is None:
             if not matching_lots:
@@ -692,8 +696,8 @@ def accept_option_close_evidence_atomically(
                 **build_lifecycle_case(
                     account=account,
                     broker=contract_key.broker,
-                    contract_key=contract_key.position_key,
-                    position_side=contract_key.position_side,
+                    contract_key=position_key_for(contract_key, position_side),
+                    position_side=position_side,
                     expiration_ymd=contract_key.expiration_ymd,
                     market=str(identity.get("market") or ""),
                     target_contracts_by_lot=target_contracts_by_lot,
@@ -702,7 +706,7 @@ def accept_option_close_evidence_atomically(
                 "market": str(identity.get("market") or "").strip().upper(),
                 "symbol": contract_key.underlying_symbol,
                 "option_type": contract_key.option_type,
-                "strike": contract_key.strike,
+                "strike": float(contract_key.strike),
                 "currency": normalize_currency(identity.get("currency")),
                 "multiplier": float(identity.get("multiplier") or 100),
             }
@@ -779,8 +783,8 @@ def accept_option_close_evidence_atomically(
             "account": account,
             "symbol": contract_key.underlying_symbol,
             "option_type": contract_key.option_type,
-            "position_side": contract_key.position_side,
-            "strike": contract_key.strike,
+            "position_side": position_side,
+            "strike": float(contract_key.strike),
             "expiration_ymd": contract_key.expiration_ymd,
             "contracts": contracts,
             "price": "0",
@@ -972,10 +976,10 @@ def discover_expired_lifecycle_cases_atomically(
                     account=lot_account,
                     underlying_symbol=fields.get("symbol"),
                     option_type=fields.get("option_type"),
-                    position_side=fields.get("side"),
                     strike=strike,
                     expiration_ymd=expiration_ymd,
                 )
+                position_side = normalize_side(fields.get("side"))
             except (TypeError, ValueError):
                 continue
             market = str(symbol_market(contract_key.underlying_symbol) or "").strip().upper()
@@ -998,9 +1002,10 @@ def discover_expired_lifecycle_cases_atomically(
                 skipped_targeted_lot_ids.append(lot_id)
                 continue
             group = eligible_groups.setdefault(
-                contract_key.position_key,
+                position_key_for(contract_key, position_side),
                 {
                     "contract_key": contract_key,
+                    "position_side": position_side,
                     "market": market,
                     "currency": normalize_currency(fields.get("currency")),
                     "multiplier": float(multiplier or 100.0),
@@ -1038,12 +1043,13 @@ def discover_expired_lifecycle_cases_atomically(
         discovered_case_ids: list[str] = []
         for position_key, group in sorted(eligible_groups.items()):
             contract_key = group["contract_key"]
+            position_side = group["position_side"]
             lifecycle_case = {
                 **build_lifecycle_case(
                     account=contract_key.account,
                     broker=contract_key.broker,
                     contract_key=position_key,
-                    position_side=contract_key.position_side,
+                    position_side=position_side,
                     expiration_ymd=contract_key.expiration_ymd,
                     market=group["market"],
                     target_contracts_by_lot=group["target_contracts_by_lot"],
@@ -1051,7 +1057,7 @@ def discover_expired_lifecycle_cases_atomically(
                 "market": group["market"],
                 "symbol": contract_key.underlying_symbol,
                 "option_type": contract_key.option_type,
-                "strike": contract_key.strike,
+                "strike": float(contract_key.strike),
                 "currency": group["currency"],
                 "multiplier": group["multiplier"],
             }

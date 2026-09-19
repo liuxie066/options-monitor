@@ -293,7 +293,7 @@ _OPTION_POSITIONS_ASSIGNED_STOCK_OUTPUT_CONTRACT: dict[str, Any] = {
         "wheel_branches[].active_option_lot_ids",
         "wheel_branches[].active_intent_ids",
         "wheel_branches[].active_intent_reserved_contracts",
-        "wheel_branches[].branch_generation_hash",
+        "wheel_branches[].batch_generation_hash",
         "wheel_branches[].projection_hash",
         "wheel_branches[].legacy_call_adapter",
         "wheel_branches[].candidate",
@@ -504,8 +504,8 @@ def _wheel_runtime(payload: dict[str, Any]) -> tuple[Path, dict[str, Any], Any, 
     }
 
 
-def _wheel_batch(model: Mapping[str, Any], stock_lot_id: Any) -> dict[str, Any]:
-    lot_id = str(stock_lot_id or "").strip()
+def _wheel_batch(model: Mapping[str, Any], lot_id: Any) -> dict[str, Any]:
+    lot_id = str(lot_id or "").strip()
     matches = [
         dict(item)
         for item in model.get("batches") or []
@@ -523,10 +523,10 @@ def _wheel_branch(
     model: Mapping[str, Any],
     *,
     wheel_branch_id: Any,
-    stock_lot_id: Any,
+    lot_id: Any,
 ) -> dict[str, Any]:
     branch_id = str(wheel_branch_id or "").strip()
-    lot_id = str(stock_lot_id or "").strip()
+    lot_id = str(lot_id or "").strip()
     if bool(branch_id) == bool(lot_id):
         raise AgentToolError(
             code="INPUT_ERROR",
@@ -597,9 +597,13 @@ def _wheel_cash_capacity(
 
 
 def _wheel_common(payload: Mapping[str, Any], *, instant: int) -> dict[str, Any]:
+    # This dict is splatted into the wheel workflows as keyword arguments, so
+    # its keys must be the callees' *declared* parameter names -- `lot_id`.
+    # The *input* key stays `stock_lot_id`: it is the published tool schema
+    # (`tests/test_agent_plugin_contract.py` pins it), not a declaration.
     return {
         "account": str(payload.get("account") or ""),
-        "stock_lot_id": str(payload.get("stock_lot_id") or ""),
+        "lot_id": str(payload.get("stock_lot_id") or ""),
         "expected_batch_generation_hash": str(
             payload.get("expected_batch_generation_hash") or ""
         ),
@@ -698,7 +702,7 @@ def _wheel_call_linkage_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], l
         common = _wheel_common(payload, instant=instant)
         args = {
             **common,
-            "call_record_id": str(payload.get("call_record_id") or ""),
+            "call_lot_id": str(payload.get("call_record_id") or ""),
             "linkage_candidate_id": str(payload.get("linkage_candidate_id") or ""),
             "expected_input_hash": str(payload.get("expected_input_hash") or ""),
         }
@@ -744,7 +748,7 @@ def _neutral_wheel_context(
             market=str(payload.get("config_key") or ""),
         ),
         wheel_branch_id=payload.get("wheel_branch_id"),
-        stock_lot_id=payload.get("stock_lot_id"),
+        lot_id=payload.get("stock_lot_id"),
     )
     if branch.get("direction") != direction:
         raise AgentToolError(
@@ -755,8 +759,8 @@ def _neutral_wheel_context(
         "account": account,
         "wheel_branch_id": branch["wheel_branch_id"],
         "direction": direction,
-        "expected_branch_generation_hash": str(
-            payload.get("expected_branch_generation_hash") or ""
+        "expected_batch_generation_hash": str(
+            payload.get("expected_batch_generation_hash") or ""
         ),
         "request_id": str(payload.get("request_id") or ""),
         "actor": str(payload.get("actor") or ""),
@@ -844,7 +848,7 @@ def _wheel_linkage_tool(
         )
         args = {
             **common,
-            "option_record_id": str(payload.get("option_record_id") or ""),
+            "option_lot_id": str(payload.get("option_record_id") or ""),
             "linkage_candidate_id": str(payload.get("linkage_candidate_id") or ""),
             "expected_input_hash": str(payload.get("expected_input_hash") or ""),
         }
@@ -885,15 +889,15 @@ def _wheel_branch_decision_tool(
                 market=str(payload.get("config_key") or ""),
             ),
             wheel_branch_id=payload.get("wheel_branch_id"),
-            stock_lot_id=payload.get("stock_lot_id"),
+            lot_id=payload.get("stock_lot_id"),
         )
         action = str(payload.get("action") or "")
         args: dict[str, Any] = {
             "account": account,
             "wheel_branch_id": branch["wheel_branch_id"],
             "decision": action,
-            "expected_branch_generation_hash": str(
-                payload.get("expected_branch_generation_hash") or ""
+            "expected_batch_generation_hash": str(
+                payload.get("expected_batch_generation_hash") or ""
             ),
             "request_id": str(payload.get("request_id") or ""),
             "actor": str(payload.get("actor") or ""),
@@ -1313,7 +1317,7 @@ _WHEEL_NEUTRAL_INPUT: dict[str, Any] = {
     },
     "wheel_branch_id": "canonical Wheel branch id; mutually exclusive with stock_lot_id",
     "stock_lot_id": "legacy Call-only alias; mutually exclusive with wheel_branch_id",
-    "expected_branch_generation_hash": {
+    "expected_batch_generation_hash": {
         "type": "string",
         "minLength": 1,
         "required": True,
@@ -1341,7 +1345,7 @@ _WHEEL_NEUTRAL_WRITE_OUTPUT: dict[str, Any] = {
         "audit_id",
     ],
     "missing_data_fields": [],
-    "freshness_fields": ["expected_branch_generation_hash"],
+    "freshness_fields": ["expected_batch_generation_hash"],
 }
 
 _WHEEL_BRANCH_INPUT: dict[str, Any] = {
@@ -1362,7 +1366,7 @@ _WHEEL_BRANCH_INPUT: dict[str, Any] = {
     },
     "wheel_branch_id": "canonical Wheel branch id; mutually exclusive with stock_lot_id",
     "stock_lot_id": "legacy Call branch alias; mutually exclusive with wheel_branch_id",
-    "expected_branch_generation_hash": {
+    "expected_batch_generation_hash": {
         "type": "string",
         "minLength": 1,
         "required": True,
@@ -1486,7 +1490,7 @@ def _validate_neutral_wheel_linkage(payload: dict[str, Any]) -> None:
 def _validate_wheel_branch_decision(payload: dict[str, Any]) -> None:
     _require_wheel_fields(
         payload,
-        "expected_branch_generation_hash",
+        "expected_batch_generation_hash",
         "request_id",
         "actor",
     )
@@ -1703,7 +1707,7 @@ WHEEL_BRANCH_DECISION_TOOL = build_agent_tool(
             "event_id",
             "request_id",
             "market",
-            "expected_branch_generation_hash",
+            "expected_batch_generation_hash",
             "lifecycle_status_after",
             "status",
             "dry_run",
@@ -1711,7 +1715,7 @@ WHEEL_BRANCH_DECISION_TOOL = build_agent_tool(
             "audit_id",
         ],
         "missing_data_fields": [],
-        "freshness_fields": ["expected_branch_generation_hash"],
+        "freshness_fields": ["expected_batch_generation_hash"],
     },
     allow_additional_input=False,
 )

@@ -6,7 +6,6 @@ from typing import Any
 from domain.domain.ledger import ContractKey, TradeEvent, project_trade_events
 from domain.domain.ledger.position_fields import (
     EXPIRE_AUTO_CLOSE,
-    OpenPositionCommand,
     build_open_adjustment_patch_contract,
     build_position_lot_fields,
     effective_contracts_open,
@@ -22,7 +21,9 @@ from domain.domain.ledger.position_fields import (
     strip_retired_strategy_metadata,
     strategy_metadata_fields_from_payload,
 )
-from domain.domain.option_position_identity import normalize_currency
+from domain.domain.option_position_identity import normalize_currency, normalize_side
+from domain.domain.trade_contract_identity import derive_trade_side
+from domain.domain.ledger.identity import position_key_for
 from src.application.ledger.errors import LedgerPreflightError
 from src.application.ledger.event_codec import effective_import_diagnostics, import_stored_trade_events
 from src.application.ledger.external_event_key import broker_external_event_key
@@ -36,9 +37,41 @@ from src.application.ledger.results import LedgerPreflightResult, ManualAdjustPr
 def preflight_manual_open(
     repo: Any,
     *,
-    command: OpenPositionCommand,
+    broker: str,
+    account: str,
+    symbol: str,
+    option_type: str,
+    side: str,
+    contracts: int,
+    currency: str | None = None,
+    strike: float | None = None,
+    multiplier: float | None = None,
+    expiration_ymd: str | None = None,
+    premium_per_share: float | None = None,
+    underlying_share_locked: int | None = None,
+    note: str | None = None,
+    opened_at_ms: int | None = None,
+    strategy_snapshot: dict[str, Any] | None = None,
+    request_id: str | None = None,
 ) -> LedgerPreflightResult:
-    _resolved_command, _fields, event = _manual_open_ledger_inputs(command)
+    _fields, event = _manual_open_ledger_inputs(
+        broker=broker,
+        account=account,
+        symbol=symbol,
+        option_type=option_type,
+        side=side,
+        contracts=contracts,
+        currency=currency,
+        strike=strike,
+        multiplier=multiplier,
+        expiration_ymd=expiration_ymd,
+        premium_per_share=premium_per_share,
+        underlying_share_locked=underlying_share_locked,
+        note=note,
+        opened_at_ms=opened_at_ms,
+        strategy_snapshot=strategy_snapshot,
+        request_id=request_id,
+    )
     return _preflight_open_event(
         repo,
         event=event,
@@ -96,7 +129,7 @@ def preflight_manual_repair(
 def preflight_manual_adjust(
     repo: Any,
     *,
-    record_id: str,
+    lot_id: str,
     fields: dict[str, Any] | None = None,
     contracts: int | None = None,
     strike: float | None = None,
@@ -112,7 +145,7 @@ def preflight_manual_adjust(
 ) -> LedgerPreflightResult:
     result = _preflight_lot_adjust(
         repo,
-        record_id=record_id,
+        lot_id=lot_id,
         fields=fields,
         contracts=contracts,
         strike=strike,
@@ -134,7 +167,7 @@ def preflight_manual_adjust(
 def preflight_manual_close(
     repo: Any,
     *,
-    record_id: str,
+    lot_id: str,
     fields: dict[str, Any] | None = None,
     contracts_to_close: int,
     close_price: float | None,
@@ -144,7 +177,7 @@ def preflight_manual_close(
     del close_reason
     return _preflight_lot_close(
         repo,
-        record_id=record_id,
+        lot_id=lot_id,
         fields=fields,
         contracts_to_close=contracts_to_close,
         close_price=close_price,
@@ -158,7 +191,7 @@ def preflight_manual_close(
 def preflight_expire_auto_close(
     repo: Any,
     *,
-    record_id: str,
+    lot_id: str,
     fields: dict[str, Any] | None = None,
     contracts_to_close: int,
     as_of_ms: int | None = None,
@@ -167,7 +200,7 @@ def preflight_expire_auto_close(
 ) -> LedgerPreflightResult:
     result = _preflight_lot_close(
         repo,
-        record_id=record_id,
+        lot_id=lot_id,
         fields=fields,
         contracts_to_close=contracts_to_close,
         close_price=0.0,
@@ -186,7 +219,7 @@ def preflight_expire_auto_close(
 def preflight_broker_trade_close(
     repo: Any,
     *,
-    record_id: str,
+    lot_id: str,
     fields: dict[str, Any] | None = None,
     contracts_to_close: int,
     close_price: float | None,
@@ -195,7 +228,7 @@ def preflight_broker_trade_close(
 ) -> LedgerPreflightResult:
     return _preflight_lot_close(
         repo,
-        record_id=record_id,
+        lot_id=lot_id,
         fields=fields,
         contracts_to_close=contracts_to_close,
         close_price=close_price,
@@ -441,12 +474,12 @@ def _preflight_open_event(
     matching_before = sum(
         int(lot.contracts_open)
         for lot in before_lots
-        if lot.contract_key == event.contract_key and int(lot.contracts_open) > 0
+        if lot.position_key == event.position_key and int(lot.contracts_open) > 0
     )
     matching_after = sum(
         int(lot.contracts_open)
         for lot in after_lots
-        if lot.contract_key == event.contract_key and int(lot.contracts_open) > 0
+        if lot.position_key == event.position_key and int(lot.contracts_open) > 0
     )
     return LedgerPreflightResult(
         status="ok",
@@ -456,7 +489,7 @@ def _preflight_open_event(
         event_id=event.event_id,
         event_type="open",
         contract_key=event.contract_key.to_dict(),
-        position_key=event.contract_key.position_key,
+        position_key=event.position_key,
         contracts_open_before=int(matching_before),
         contracts_to_open=int(event.contracts),
         contracts_open_after=int(target_lot.contracts_open),
@@ -473,7 +506,7 @@ def _preflight_open_event(
 def _preflight_lot_close(
     repo: Any,
     *,
-    record_id: str,
+    lot_id: str,
     fields: dict[str, Any] | None,
     contracts_to_close: int,
     close_price: float | None,
@@ -482,14 +515,14 @@ def _preflight_lot_close(
     source: str,
     operation_label: str,
 ) -> LedgerPreflightResult:
-    resolved_record_id = str(record_id or "").strip()
-    if not resolved_record_id:
+    resolved_lot_id = str(lot_id or "").strip()
+    if not resolved_lot_id:
         raise LedgerPreflightError("record_id_required", f"{operation_label} ledger preflight requires record_id")
     if int(contracts_to_close) <= 0:
         raise LedgerPreflightError(
             "invalid_quantity",
             f"{operation_label} ledger preflight requires contracts_to_close > 0",
-            details={"record_id": resolved_record_id, "contracts_to_close": int(contracts_to_close)},
+            details={"record_id": resolved_lot_id, "contracts_to_close": int(contracts_to_close)},
         )
     try:
         normalized_close_price = normalize_trade_price(
@@ -501,13 +534,13 @@ def _preflight_lot_close(
         raise LedgerPreflightError(
             "invalid_close_price",
             f"{operation_label} ledger preflight requires valid close_price",
-            details={"record_id": resolved_record_id, "close_price": close_price, "error": str(exc)},
+            details={"record_id": resolved_lot_id, "close_price": close_price, "error": str(exc)},
         ) from exc
 
-    current_fields = _current_record_fields(repo, record_id=resolved_record_id)
+    current_fields = _current_record_fields(repo, lot_id=resolved_lot_id)
     if fields is not None:
         _assert_fields_match_current(
-            record_id=resolved_record_id,
+            lot_id=resolved_lot_id,
             fields=fields,
             current_fields=current_fields,
             operation_label=operation_label,
@@ -518,40 +551,40 @@ def _preflight_lot_close(
         raise LedgerPreflightError(
             "target_lot_not_open",
             f"{operation_label} ledger preflight target lot is not open",
-            details={"record_id": resolved_record_id, "contracts_open": current_open},
+            details={"record_id": resolved_lot_id, "contracts_open": current_open},
         )
 
     current = _preview_append_projection(
         repo,
         events=[],
         operation_label=operation_label,
-        details={"record_id": resolved_record_id},
+        details={"record_id": resolved_lot_id},
     )
     target_lots = [
         lot
         for lot in _preview_lots(current)
-        if lot.lot_id == resolved_record_id and lot.contracts_open > 0
+        if lot.lot_id == resolved_lot_id and lot.contracts_open > 0
     ]
     if not target_lots:
         raise LedgerPreflightError(
             "target_lot_not_found",
             f"{operation_label} ledger preflight target lot is missing from current projection",
-            details={"record_id": resolved_record_id},
+            details={"record_id": resolved_lot_id},
         )
     if len(target_lots) > 1:
         raise LedgerPreflightError(
             "duplicate_target_lot",
             f"{operation_label} ledger preflight found duplicate target lot ids",
-            details={"record_id": resolved_record_id, "count": len(target_lots)},
+            details={"record_id": resolved_lot_id, "count": len(target_lots)},
         )
 
     target_lot = target_lots[0]
-    if target_lot.contract_key != current_key:
+    if target_lot.position_key != position_key_for(current_key, normalize_side(current_fields.get("side"))):
         raise LedgerPreflightError(
             "target_contract_mismatch",
             f"{operation_label} ledger preflight target identity differs from current record fields",
             details={
-                "record_id": resolved_record_id,
+                "record_id": resolved_lot_id,
                 "current_contract_key": current_key.to_dict(),
                 "projection_contract_key": target_lot.contract_key.to_dict(),
             },
@@ -561,7 +594,7 @@ def _preflight_lot_close(
             "close_contracts_exceed_open",
             f"{operation_label} ledger preflight close quantity exceeds open contracts",
             details={
-                "record_id": resolved_record_id,
+                "record_id": resolved_lot_id,
                 "contracts_to_close": int(contracts_to_close),
                 "contracts_open": int(target_lot.contracts_open),
             },
@@ -578,7 +611,7 @@ def _preflight_lot_close(
         else max(now_ms(), current.latest_event_time_ms + 1)
     )
     close_event = TradeEvent(
-        event_id=f"preflight:{source}:{resolved_record_id}:{event_time_ms}",
+        event_id=f"preflight:{source}:{resolved_lot_id}:{event_time_ms}",
         event_type=event_type,
         event_time_ms=event_time_ms,
         contract_key=current_key,
@@ -587,21 +620,29 @@ def _preflight_lot_close(
         currency=normalize_currency(current_fields.get("currency")),
         source=source,
         multiplier=float(effective_multiplier(current_fields) or 100),
-        target_lot_id=resolved_record_id,
-        raw_payload={"record_id": resolved_record_id},
+        target_lot_id=resolved_lot_id,
+        raw_payload={
+            "record_id": resolved_lot_id,
+            # §9.2 step 3: the close side is no longer implied by the contract
+            # key, so publish the trade side the projection derives it from.
+            "side": derive_trade_side(
+                event_type, current_fields.get("side")
+            )
+            or "",
+        },
     )
     after = _preview_append_projection(
         repo,
         events=[close_event],
         operation_label=operation_label,
-        details={"record_id": resolved_record_id},
+        details={"record_id": resolved_lot_id},
         candidate_error=(
             "close_projection_invalid",
             f"{operation_label} ledger preflight rejected projected close event",
         ),
     )
     projected_target = next(
-        (lot for lot in _preview_lots(after) if lot.lot_id == resolved_record_id),
+        (lot for lot in _preview_lots(after) if lot.lot_id == resolved_lot_id),
         None,
     )
     after_open = int(projected_target.contracts_open) if projected_target is not None else 0
@@ -609,7 +650,7 @@ def _preflight_lot_close(
         status="ok",
         read_model="ledger_shadow",
         fail_closed=False,
-        target_lot_id=resolved_record_id,
+        target_lot_id=resolved_lot_id,
         event_type=event_type,
         contract_key=current_key.to_dict(),
         contracts_open_before=int(target_lot.contracts_open),
@@ -627,7 +668,7 @@ def _preflight_lot_close(
 def _preflight_lot_adjust(
     repo: Any,
     *,
-    record_id: str,
+    lot_id: str,
     fields: dict[str, Any] | None,
     contracts: int | None,
     strike: float | None,
@@ -646,7 +687,7 @@ def _preflight_lot_adjust(
     result, adjust_event = _build_lot_adjust_preflight_candidate(
         repo,
         current=None,
-        record_id=record_id,
+        lot_id=lot_id,
         fields=fields,
         contracts=contracts,
         strike=strike,
@@ -666,7 +707,7 @@ def _preflight_lot_adjust(
         repo,
         events=[adjust_event],
         operation_label=operation_label,
-        details={"record_id": str(record_id or "").strip()},
+        details={"record_id": str(lot_id or "").strip()},
         candidate_error=(
             "adjust_projection_invalid",
             f"{operation_label} ledger preflight rejected projected adjust event",
@@ -685,22 +726,22 @@ def _preflight_lot_adjustments(
     if not adjustments:
         raise ValueError("manual adjustment batch requires at least one adjustment")
 
-    record_ids = [str(item.get("record_id") or "").strip() for item in adjustments]
+    lot_ids = [str(item.get("record_id") or "").strip() for item in adjustments]
     current = _preview_append_projection(
         repo,
         events=[],
         operation_label=operation_label,
-        details={"record_ids": record_ids},
+        details={"record_ids": lot_ids},
     )
     results: list[ManualAdjustPreflightResult] = []
     candidate_events: list[TradeEvent] = []
     for raw in adjustments:
         item = dict(raw)
-        record_id = str(item.pop("record_id", "") or "").strip()
+        lot_id = str(item.pop("record_id", "") or "").strip()
         result, candidate_event = _build_lot_adjust_preflight_candidate(
             repo,
             current=current,
-            record_id=record_id,
+            lot_id=lot_id,
             source=source,
             operation_label=operation_label,
             **item,
@@ -712,7 +753,7 @@ def _preflight_lot_adjustments(
         repo,
         events=candidate_events,
         operation_label=operation_label,
-        details={"record_ids": record_ids},
+        details={"record_ids": lot_ids},
         candidate_error=(
             "adjust_projection_invalid",
             f"{operation_label} ledger preflight rejected projected adjust events",
@@ -725,7 +766,7 @@ def _build_lot_adjust_preflight_candidate(
     repo: Any,
     *,
     current: ProjectionPreviewResult | None,
-    record_id: str,
+    lot_id: str,
     fields: dict[str, Any] | None,
     contracts: int | None,
     strike: float | None,
@@ -741,14 +782,14 @@ def _build_lot_adjust_preflight_candidate(
     strategy_group_id: str | None = None,
     strategy_snapshot: dict[str, Any] | None = None,
 ) -> tuple[ManualAdjustPreflightResult, TradeEvent]:
-    resolved_record_id = str(record_id or "").strip()
-    if not resolved_record_id:
+    resolved_lot_id = str(lot_id or "").strip()
+    if not resolved_lot_id:
         raise LedgerPreflightError("record_id_required", f"{operation_label} ledger preflight requires record_id")
 
-    current_fields = _current_record_fields(repo, record_id=resolved_record_id)
+    current_fields = _current_record_fields(repo, lot_id=resolved_lot_id)
     if fields is not None:
         _assert_fields_match_current(
-            record_id=resolved_record_id,
+            lot_id=resolved_lot_id,
             fields=fields,
             current_fields=current_fields,
             operation_label=operation_label,
@@ -759,7 +800,7 @@ def _build_lot_adjust_preflight_candidate(
         raise LedgerPreflightError(
             "target_lot_not_open",
             f"{operation_label} ledger preflight target lot is not open",
-            details={"record_id": resolved_record_id, "contracts_open": current_open},
+            details={"record_id": resolved_lot_id, "contracts_open": current_open},
         )
 
     if current is None:
@@ -767,32 +808,32 @@ def _build_lot_adjust_preflight_candidate(
             repo,
             events=[],
             operation_label=operation_label,
-            details={"record_id": resolved_record_id},
+            details={"record_id": resolved_lot_id},
         )
     target_lots = [
         lot
         for lot in _preview_lots(current)
-        if lot.lot_id == resolved_record_id and lot.contracts_open > 0
+        if lot.lot_id == resolved_lot_id and lot.contracts_open > 0
     ]
     if not target_lots:
         raise LedgerPreflightError(
             "target_lot_not_found",
             f"{operation_label} ledger preflight target lot is missing from current projection",
-            details={"record_id": resolved_record_id},
+            details={"record_id": resolved_lot_id},
         )
     if len(target_lots) > 1:
         raise LedgerPreflightError(
             "duplicate_target_lot",
             f"{operation_label} ledger preflight found duplicate target lot ids",
-            details={"record_id": resolved_record_id, "count": len(target_lots)},
+            details={"record_id": resolved_lot_id, "count": len(target_lots)},
         )
     target_lot = target_lots[0]
-    if target_lot.contract_key != current_key:
+    if target_lot.position_key != position_key_for(current_key, normalize_side(current_fields.get("side"))):
         raise LedgerPreflightError(
             "target_contract_mismatch",
             f"{operation_label} ledger preflight target identity differs from current record fields",
             details={
-                "record_id": resolved_record_id,
+                "record_id": resolved_lot_id,
                 "current_contract_key": current_key.to_dict(),
                 "projection_contract_key": target_lot.contract_key.to_dict(),
             },
@@ -818,7 +859,7 @@ def _build_lot_adjust_preflight_candidate(
     adjusted_fields.update(patch)
     adjusted_key = _contract_key_from_fields(adjusted_fields)
     adjust_event = TradeEvent(
-        event_id=f"preflight:{source}:{resolved_record_id}:{event_time_ms}",
+        event_id=f"preflight:{source}:{resolved_lot_id}:{event_time_ms}",
         event_type="adjust",
         event_time_ms=event_time_ms,
         contract_key=current_key,
@@ -827,9 +868,9 @@ def _build_lot_adjust_preflight_candidate(
         currency=normalize_currency(adjusted_fields.get("currency") or current_fields.get("currency")),
         source=source,
         multiplier=float(effective_multiplier(adjusted_fields) or effective_multiplier(current_fields) or 100),
-        target_lot_id=resolved_record_id,
+        target_lot_id=resolved_lot_id,
         raw_payload={
-            "record_id": resolved_record_id,
+            "record_id": resolved_lot_id,
             "adjust_target_source_event_id": str(current_fields.get("source_event_id") or "").strip() or None,
             "patch": patch,
         },
@@ -842,7 +883,7 @@ def _build_lot_adjust_preflight_candidate(
                 status="ok",
                 read_model="ledger_shadow",
                 fail_closed=False,
-                target_lot_id=resolved_record_id,
+                target_lot_id=resolved_lot_id,
                 event_type="adjust",
                 contract_key=current_key.to_dict(),
                 contracts_open_before=int(target_lot.contracts_open),
@@ -865,19 +906,19 @@ def _build_lot_adjust_preflight_candidate(
 def _split_close_deal_for_target(
     deal: Any,
     *,
-    record_id: str,
+    lot_id: str,
     fields: dict[str, Any],
     contracts_to_close: int,
     close_target_resolution: dict[str, Any] | None = None,
 ) -> Any:
     source_deal_id = str(getattr(deal, "deal_id", "") or "").strip()
-    event_id = f"{source_deal_id}:close:{record_id}" if source_deal_id else f"close:{record_id}"
+    event_id = f"{source_deal_id}:close:{lot_id}" if source_deal_id else f"close:{lot_id}"
     raw_payload = dict(getattr(deal, "raw_payload", {}) or {})
     raw_payload.update(
         {
             "source_deal_id": source_deal_id or None,
-            "record_id": str(record_id),
-            "target_lot_id": str(record_id),
+            "record_id": str(lot_id),
+            "target_lot_id": str(lot_id),
             "close_target_source_event_id": str(fields.get("source_event_id") or "").strip() or None,
             "close_target_account": normalize_account(fields.get("account")),
             "close_target_broker": normalize_broker(fields.get("broker") or fields.get("market")),
@@ -893,74 +934,123 @@ def _split_close_deal_for_target(
     )
 
 
-def _manual_open_ledger_inputs(command: OpenPositionCommand) -> tuple[OpenPositionCommand, dict[str, Any], TradeEvent]:
+def _manual_open_ledger_inputs(
+    *,
+    broker: str,
+    account: str,
+    symbol: str,
+    option_type: str,
+    side: str,
+    contracts: int,
+    currency: str | None,
+    strike: float | None,
+    multiplier: float | None,
+    expiration_ymd: str | None,
+    premium_per_share: float | None,
+    underlying_share_locked: int | None,
+    note: str | None,
+    opened_at_ms: int | None,
+    strategy_snapshot: dict[str, Any] | None,
+    request_id: str | None,
+) -> tuple[dict[str, Any], TradeEvent]:
     from src.application.ledger.manual_trades import (
         _manual_open_event_id,
         manual_open_request_intent_hash,
     )
 
-    event_time_ms = int(command.opened_at_ms or now_ms())
-    resolved_command = replace(command, opened_at_ms=event_time_ms)
-    fields = build_position_lot_fields(resolved_command).to_dict()
+    event_time_ms = int(opened_at_ms or now_ms())
+    fields = build_position_lot_fields(
+        broker=broker,
+        account=account,
+        symbol=symbol,
+        option_type=option_type,
+        side=side,
+        contracts=contracts,
+        currency=currency,
+        strike=strike,
+        multiplier=multiplier,
+        expiration_ymd=expiration_ymd,
+        premium_per_share=premium_per_share,
+        underlying_share_locked=underlying_share_locked,
+        note=note,
+        opened_at_ms=event_time_ms,
+        strategy_snapshot=strategy_snapshot,
+    )
     fields.update(
         strategy_metadata_fields_from_payload(
             {
                 "strategy_snapshot": (
-                    dict(resolved_command.strategy_snapshot)
-                    if isinstance(resolved_command.strategy_snapshot, dict)
-                    else None
+                    dict(strategy_snapshot) if isinstance(strategy_snapshot, dict) else None
                 )
             }
         )
     )
     contract_key = _contract_key_from_fields(fields)
-    trade_side = "sell" if str(resolved_command.side or "").strip().lower() == "short" else "buy"
-    currency = resolve_open_currency(fields.get("symbol"), fields.get("currency"))
+    trade_side = "sell" if str(side or "").strip().lower() == "short" else "buy"
+    currency_resolved = resolve_open_currency(fields.get("symbol"), fields.get("currency"))
     event_id = _manual_open_event_id(
-        broker=str(resolved_command.broker),
-        account=str(resolved_command.account),
+        broker=str(broker),
+        account=str(account),
         symbol=contract_key.underlying_symbol,
-        option_type=str(resolved_command.option_type),
+        option_type=str(option_type),
         side=trade_side,
-        contracts=int(resolved_command.contracts),
+        contracts=int(contracts),
         price=float(fields["premium"]),
         strike=effective_strike(fields),
         multiplier=effective_multiplier(fields),
-        expiration_ymd=str(resolved_command.expiration_ymd or "").strip() or None,
-        currency=currency,
+        expiration_ymd=str(expiration_ymd or "").strip() or None,
+        currency=currency_resolved,
         trade_time_ms=event_time_ms,
-        request_id=resolved_command.request_id,
+        request_id=request_id,
     )
-    request_id = str(resolved_command.request_id or "").strip()
-    intent_hash = manual_open_request_intent_hash(resolved_command, fields=fields)
+    request_id_value = str(request_id or "").strip()
+    intent_hash = manual_open_request_intent_hash(
+        broker=broker,
+        account=account,
+        symbol=symbol,
+        option_type=option_type,
+        side=side,
+        contracts=contracts,
+        currency=currency,
+        strike=strike,
+        multiplier=multiplier,
+        expiration_ymd=expiration_ymd,
+        premium_per_share=premium_per_share,
+        underlying_share_locked=underlying_share_locked,
+        note=note,
+        opened_at_ms=event_time_ms,
+        strategy_snapshot=strategy_snapshot,
+        fields=fields,
+    )
     event = TradeEvent(
         event_id=event_id,
         event_type="open",
         event_time_ms=event_time_ms,
         contract_key=contract_key,
-        contracts=int(resolved_command.contracts),
+        contracts=int(contracts),
         price=float(fields["premium"]),
-        currency=currency,
+        currency=currency_resolved,
         source="cli_manual_open",
         multiplier=float(effective_multiplier(fields) or 100),
         lot_id=f"lot_{event_id}",
         raw_payload={
             "source": "om option-positions",
             "mode": "manual_open",
-            "manual_request_id": request_id or None,
-            "manual_request_intent_hash": intent_hash if request_id else None,
+            # §9.2 step 3: the contract key no longer carries the position side,
+            # so publish the trade side the projection derives it from.
+            "side": derive_trade_side("open", side) or "",
+            "manual_request_id": request_id_value or None,
+            "manual_request_intent_hash": intent_hash if request_id_value else None,
             **strategy_metadata_fields_from_payload(
                 {
                     "strategy_snapshot": (
-                        dict(resolved_command.strategy_snapshot)
-                        if isinstance(resolved_command.strategy_snapshot, dict)
-                        else None
+                        dict(strategy_snapshot) if isinstance(strategy_snapshot, dict) else None
                     )
                 }
             ),
         },
     )
-    return resolved_command, fields, event
+    return fields, event
 
 
 def _trade_open_ledger_inputs(deal: Any) -> tuple[Any, dict[str, Any], TradeEvent]:
@@ -970,8 +1060,45 @@ def _trade_open_ledger_inputs(deal: Any) -> tuple[Any, dict[str, Any], TradeEven
     )
     raw_payload.pop("fields", None)
     resolved_deal = replace(deal, trade_time_ms=event_time_ms, raw_payload=raw_payload)
-    command = _open_command_from_trade_deal(resolved_deal)
-    fields = build_position_lot_fields(command).to_dict()
+    side = str(getattr(resolved_deal, "side", "") or "").strip().lower()
+    # §9.2 step 3: the position side is derived from the trade side stored on the
+    # event, so legacy payloads that only carried ``trd_side`` must publish it.
+    if side:
+        raw_payload.setdefault("side", side)
+    fields = build_position_lot_fields(
+        broker=str(getattr(resolved_deal, "broker", None) or "富途"),
+        account=str(getattr(resolved_deal, "internal_account", "") or ""),
+        symbol=str(getattr(resolved_deal, "symbol", "") or ""),
+        option_type=str(getattr(resolved_deal, "option_type", "") or ""),
+        side="short" if side == "sell" else "long",
+        contracts=int(getattr(resolved_deal, "contracts", 0) or 0),
+        currency=str(getattr(resolved_deal, "currency", "") or ""),
+        strike=(
+            float(getattr(resolved_deal, "strike"))
+            if getattr(resolved_deal, "strike", None) is not None
+            else None
+        ),
+        multiplier=(
+            float(getattr(resolved_deal, "multiplier"))
+            if getattr(resolved_deal, "multiplier", None) is not None
+            else None
+        ),
+        expiration_ymd=(str(getattr(resolved_deal, "expiration_ymd", "") or "").strip() or None),
+        premium_per_share=(
+            float(getattr(resolved_deal, "price"))
+            if getattr(resolved_deal, "price", None) not in (None, "")
+            else None
+        ),
+        note=(
+            f"source=opend_push "
+            f"deal_id={getattr(resolved_deal, 'deal_id', '') or ''} "
+            f"order_id={getattr(resolved_deal, 'order_id', '') or ''} "
+            f"multiplier_source={getattr(resolved_deal, 'multiplier_source', '') or ''} "
+            f"trade_time_ms={getattr(resolved_deal, 'trade_time_ms', '') or ''}"
+        ).strip(),
+        opened_at_ms=getattr(resolved_deal, "trade_time_ms", None),
+        strategy_snapshot=_strategy_snapshot_from_raw_payload(getattr(resolved_deal, "raw_payload", None)),
+    )
     fields.update(strategy_metadata_fields_from_payload(getattr(resolved_deal, "raw_payload", None)))
     contract_key = _contract_key_from_fields(fields)
     event_id = broker_external_event_key(resolved_deal)
@@ -991,44 +1118,6 @@ def _trade_open_ledger_inputs(deal: Any) -> tuple[Any, dict[str, Any], TradeEven
     return resolved_deal, fields, event
 
 
-def _open_command_from_trade_deal(deal: Any) -> OpenPositionCommand:
-    side = str(getattr(deal, "side", "") or "").strip().lower()
-    return OpenPositionCommand(
-        broker=str(getattr(deal, "broker", None) or "富途"),
-        account=str(getattr(deal, "internal_account", "") or ""),
-        symbol=str(getattr(deal, "symbol", "") or ""),
-        option_type=str(getattr(deal, "option_type", "") or ""),
-        side="short" if side == "sell" else "long",
-        contracts=int(getattr(deal, "contracts", 0) or 0),
-        currency=str(getattr(deal, "currency", "") or ""),
-        strike=(
-            float(getattr(deal, "strike"))
-            if getattr(deal, "strike", None) is not None
-            else None
-        ),
-        multiplier=(
-            float(getattr(deal, "multiplier"))
-            if getattr(deal, "multiplier", None) is not None
-            else None
-        ),
-        expiration_ymd=(str(getattr(deal, "expiration_ymd", "") or "").strip() or None),
-        premium_per_share=(
-            float(getattr(deal, "price"))
-            if getattr(deal, "price", None) not in (None, "")
-            else None
-        ),
-        note=(
-            f"source=opend_push "
-            f"deal_id={getattr(deal, 'deal_id', '') or ''} "
-            f"order_id={getattr(deal, 'order_id', '') or ''} "
-            f"multiplier_source={getattr(deal, 'multiplier_source', '') or ''} "
-            f"trade_time_ms={getattr(deal, 'trade_time_ms', '') or ''}"
-        ).strip(),
-        opened_at_ms=getattr(deal, "trade_time_ms", None),
-        strategy_snapshot=_strategy_snapshot_from_raw_payload(getattr(deal, "raw_payload", None)),
-    )
-
-
 def _strategy_snapshot_from_raw_payload(raw_payload: Any) -> dict[str, Any] | None:
     if not isinstance(raw_payload, dict):
         return None
@@ -1045,11 +1134,11 @@ def _duplicate_open_preflight(*, event: TradeEvent, result: dict[str, Any]) -> L
         event_id=result.get("event_id") or event.event_id,
         event_type="open",
         contract_key=event.contract_key.to_dict(),
-        position_key=event.contract_key.position_key,
+        position_key=event.position_key,
     )
 
 
-def _existing_open_event_result(repo: Any, *, event_id: str, record_id: str | None) -> dict[str, Any] | None:
+def _existing_open_event_result(repo: Any, *, event_id: str, lot_id: str | None) -> dict[str, Any] | None:
     candidate = getattr(repo, "primary_repo", repo)
     getter = getattr(candidate, "get_trade_events_by_ids", None)
     rows = (
@@ -1065,19 +1154,19 @@ def _existing_open_event_result(repo: Any, *, event_id: str, record_id: str | No
         return None
     return {
         "event_id": str(event_id),
-        "record_id": str(record_id).strip() if record_id else None,
+        "record_id": str(lot_id).strip() if lot_id else None,
         "created": False,
         "position_lot_count": int(candidate.count_position_lots()),
     }
 
 
-def _current_record_fields(repo: Any, *, record_id: str) -> dict[str, Any]:
+def _current_record_fields(repo: Any, *, lot_id: str) -> dict[str, Any]:
     get_record_fields = getattr(repo, "get_record_fields", None)
     if not callable(get_record_fields):
         raise TypeError("option_positions repo does not expose get_record_fields")
-    fields = get_record_fields(str(record_id))
+    fields = get_record_fields(str(lot_id))
     if not isinstance(fields, dict):
-        raise TypeError(f"option_positions repo returned non-dict fields for record_id={record_id}")
+        raise TypeError(f"option_positions repo returned non-dict fields for record_id={lot_id}")
     return dict(fields)
 
 
@@ -1098,7 +1187,6 @@ def _contract_key_from_fields(fields: dict[str, Any]) -> ContractKey:
         account=fields.get("account"),
         underlying_symbol=fields.get("symbol"),
         option_type=fields.get("option_type"),
-        position_side=fields.get("side"),
         strike=effective_strike(fields),
         expiration_ymd=fields.get("expiration_ymd") or effective_expiration_ymd(fields),
     )
@@ -1106,7 +1194,7 @@ def _contract_key_from_fields(fields: dict[str, Any]) -> ContractKey:
 
 def _assert_fields_match_current(
     *,
-    record_id: str,
+    lot_id: str,
     fields: dict[str, Any],
     current_fields: dict[str, Any],
     operation_label: str,
@@ -1126,7 +1214,7 @@ def _assert_fields_match_current(
         raise LedgerPreflightError(
             "target_fields_mismatch",
             f"{operation_label} ledger preflight target fields do not match current lot state",
-            details={"record_id": record_id, "mismatches": mismatches},
+            details={"record_id": lot_id, "mismatches": mismatches},
         )
 
 

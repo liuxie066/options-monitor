@@ -45,6 +45,13 @@ POSITION_LOT_STRATEGY_PATCH_FIELDS = (
 )
 LEGACY_POSITION_LOT_PATCH_FIELDS = ("yield_enhancement_mode",)
 
+# §7.1: ``position_id`` is retired, so it is not a patch field and must never be
+# re-emitted. Adjust events written before the retirement still carry it (the
+# writer stored it alongside the real fields), and rejecting the whole payload
+# would silently drop those historical adjustments — the projection only logs an
+# ``adjust_patch_invalid`` diagnostic and keeps going. Tolerate and discard it.
+RETIRED_POSITION_LOT_PATCH_FIELDS = ("position_id",)
+
 POSITION_LOT_PATCH_FIELDS = (
     "contracts_open",
     "contracts_closed",
@@ -63,12 +70,19 @@ POSITION_LOT_PATCH_FIELDS = (
     "opened_at",
     "cash_secured_amount",
     "underlying_share_locked",
-    "position_id",
     "currency",
     "note",
     *POSITION_LOT_STRATEGY_PATCH_FIELDS,
     *LEGACY_POSITION_LOT_PATCH_FIELDS,
 )
+
+#: Persisted payload key -> declared field name, for the keys whose stored
+#: spelling is a boundary the convergence batch must not move.  This tuple is
+#: the *storage* key list (``decode_position_lot_patch`` rejects anything outside
+#: it), so a field whose declared name converged onto ``lot_id`` still stores its
+#: original key.  Mirrors the translation already written out longhand in
+#: ``decode_position_lot_patch``; every other key is its own field name.
+PATCH_STORAGE_KEY_TO_FIELD = {"source_stock_lot_id": "source_lot_id"}
 
 
 def safe_float(value: Any) -> float | None:
@@ -275,104 +289,11 @@ def effective_multiplier(fields: dict[str, Any]) -> float | None:
     return safe_float(parse_note_kv(fields.get("note") or "", "multiplier"))
 
 
-def _fmt_strike(value: float | None) -> str:
-    if value is None:
-        return "NA"
-    if float(value).is_integer():
-        return str(int(value))
-    return str(value).replace(".", "p")
-
-
-def build_position_id(
-    *,
-    symbol: str,
-    expiration_ymd: str | None,
-    strike: float | None,
-    option_type: str,
-    side: str,
-    contracts: int,
-) -> str:
-    sym = norm_symbol(symbol)
-    exp_compact = str(expiration_ymd or "").replace("-", "") or "NA"
-    pc = "P" if str(option_type).strip().lower() == "put" else "C"
-    base = sym.replace(".", "_")
-    return f"{base}_{exp_compact}_{_fmt_strike(strike)}{pc}_{str(side).strip().lower()}"
-
-
-@dataclass(frozen=True)
-class OpenPositionCommand:
-    broker: str
-    account: str
-    symbol: str
-    option_type: str
-    side: str
-    contracts: int
-    currency: str | None
-    strike: float | None = None
-    multiplier: float | None = None
-    expiration_ymd: str | None = None
-    premium_per_share: float | None = None
-    underlying_share_locked: int | None = None
-    note: str | None = None
-    opened_at_ms: int | None = None
-    strategy_snapshot: dict[str, Any] | None = None
-    request_id: str | None = None
-
-
-@dataclass(frozen=True)
-class PositionLotFields:
-    position_id: str
-    broker: str
-    account: str
-    symbol: str
-    option_type: str
-    side: str
-    contracts: int
-    contracts_open: int
-    contracts_closed: int
-    currency: str
-    status: str
-    note: str | None
-    opened_at: int
-    last_action_at: int
-    strike: float
-    expiration: int
-    premium: float | None = None
-    multiplier: int | float | None = None
-    underlying_share_locked: int | None = None
-    cash_secured_amount: float | None = None
-    strategy_snapshot: dict[str, Any] | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "position_id": self.position_id,
-            "broker": self.broker,
-            "account": self.account,
-            "symbol": self.symbol,
-            "option_type": self.option_type,
-            "side": self.side,
-            "contracts": self.contracts,
-            "contracts_open": self.contracts_open,
-            "contracts_closed": self.contracts_closed,
-            "currency": self.currency,
-            "status": self.status,
-            "note": self.note,
-            "opened_at": self.opened_at,
-            "last_action_at": self.last_action_at,
-            "strike": self.strike,
-            "expiration": self.expiration,
-        }
-        if self.premium is not None:
-            payload["premium"] = self.premium
-        if self.multiplier is not None:
-            payload["multiplier"] = self.multiplier
-        if self.underlying_share_locked is not None:
-            payload["underlying_share_locked"] = self.underlying_share_locked
-        if self.cash_secured_amount is not None:
-            payload["cash_secured_amount"] = self.cash_secured_amount
-        if self.strategy_snapshot is not None:
-            payload["strategy_snapshot"] = dict(self.strategy_snapshot)
-        return payload
+# §7.1: ``build_position_id`` and its ``_fmt_strike`` helper are retired. The
+# position display/aggregation key is ``position_key`` (contract identity +
+# derived side, §9.2 step 3), produced by ``PositionLot.position_key``; the
+# retired ``position_id`` was a second, contract-count-bearing display id that
+# duplicated that concept with a different string.
 
 
 @dataclass(frozen=True)
@@ -394,13 +315,12 @@ class PositionLotPatch:
     opened_at: _PatchValue = _UNSET
     cash_secured_amount: _PatchValue = _UNSET
     underlying_share_locked: _PatchValue = _UNSET
-    position_id: _PatchValue = _UNSET
     currency: _PatchValue = _UNSET
     note: _PatchValue = _UNSET
     strategy: _PatchValue = _UNSET
     leg_role: _PatchValue = _UNSET
     strategy_group_id: _PatchValue = _UNSET
-    source_stock_lot_id: _PatchValue = _UNSET
+    source_lot_id: _PatchValue = _UNSET
     source_wheel_branch_id: _PatchValue = _UNSET
     strategy_snapshot: _PatchValue = _UNSET
     yield_enhancement_mode: _PatchValue = _UNSET
@@ -408,7 +328,7 @@ class PositionLotPatch:
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {}
         for key in POSITION_LOT_PATCH_FIELDS:
-            value = getattr(self, key)
+            value = getattr(self, PATCH_STORAGE_KEY_TO_FIELD.get(key, key))
             if value is _UNSET:
                 continue
             payload[key] = value
@@ -417,12 +337,12 @@ class PositionLotPatch:
     def has(self, key: str) -> bool:
         if key not in POSITION_LOT_PATCH_FIELDS:
             raise KeyError(f"unsupported position lot patch field: {key}")
-        return getattr(self, key) is not _UNSET
+        return getattr(self, PATCH_STORAGE_KEY_TO_FIELD.get(key, key)) is not _UNSET
 
     def value(self, key: str) -> int | float | str | dict[str, Any] | None:
         if key not in POSITION_LOT_PATCH_FIELDS:
             raise KeyError(f"unsupported position lot patch field: {key}")
-        value = getattr(self, key)
+        value = getattr(self, PATCH_STORAGE_KEY_TO_FIELD.get(key, key))
         if value is _UNSET:
             raise KeyError(f"position lot patch field is unset: {key}")
         return value
@@ -431,7 +351,12 @@ class PositionLotPatch:
 def decode_position_lot_patch(payload: Any) -> PositionLotPatch:
     if not isinstance(payload, dict) or not payload:
         raise ValueError("adjust event requires non-empty raw_payload.patch")
-    unsupported = sorted(str(key) for key in payload if str(key) not in POSITION_LOT_PATCH_FIELDS)
+    retired = frozenset(RETIRED_POSITION_LOT_PATCH_FIELDS)
+    unsupported = sorted(
+        str(key)
+        for key in payload
+        if str(key) not in POSITION_LOT_PATCH_FIELDS and str(key) not in retired
+    )
     if unsupported:
         raise ValueError(f"adjust patch contains unsupported fields: {', '.join(unsupported)}")
     return PositionLotPatch(
@@ -452,51 +377,67 @@ def decode_position_lot_patch(payload: Any) -> PositionLotPatch:
         opened_at=payload.get("opened_at", _UNSET),
         cash_secured_amount=payload.get("cash_secured_amount", _UNSET),
         underlying_share_locked=payload.get("underlying_share_locked", _UNSET),
-        position_id=payload.get("position_id", _UNSET),
         currency=payload.get("currency", _UNSET),
         note=payload.get("note", _UNSET),
         strategy=payload.get("strategy", _UNSET),
         leg_role=payload.get("leg_role", _UNSET),
         strategy_group_id=payload.get("strategy_group_id", _UNSET),
-        source_stock_lot_id=payload.get("source_stock_lot_id", _UNSET),
+        source_lot_id=payload.get("source_stock_lot_id", _UNSET),
         source_wheel_branch_id=payload.get("source_wheel_branch_id", _UNSET),
         strategy_snapshot=payload.get("strategy_snapshot", _UNSET),
         yield_enhancement_mode=payload.get("yield_enhancement_mode", _UNSET),
     )
 
 
-def build_position_lot_fields(cmd: OpenPositionCommand) -> PositionLotFields:
-    sym = norm_symbol(cmd.symbol)
-    broker = normalize_broker(cmd.broker)
-    account = normalize_account(cmd.account)
+def build_position_lot_fields(
+    *,
+    broker: str,
+    account: str,
+    symbol: str,
+    option_type: str,
+    side: str,
+    contracts: int,
+    currency: str | None = None,
+    strike: float | None = None,
+    multiplier: float | None = None,
+    expiration_ymd: str | None = None,
+    premium_per_share: float | None = None,
+    underlying_share_locked: int | None = None,
+    note: str | None = None,
+    opened_at_ms: int | None = None,
+    strategy_snapshot: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    sym = norm_symbol(symbol)
+    broker = normalize_broker(broker)
+    account = normalize_account(account)
     _required_text(broker, "broker")
     _required_text(account, "account")
     _required_text(sym, "symbol")
-    side = normalize_side(cmd.side, strict=True)
-    option_type = normalize_option_type(cmd.option_type, strict=True)
-    currency = resolve_open_currency(sym, cmd.currency)
-    contracts = _required_positive_int(cmd.contracts, "contracts")
+    side = normalize_side(side, strict=True)
+    option_type = normalize_option_type(option_type, strict=True)
+    currency = resolve_open_currency(sym, currency)
+    contracts = _required_positive_int(contracts, "contracts")
 
-    if cmd.strike is None:
+    if strike is None:
         raise ValueError(f"{option_type} option requires strike")
-    strike = _required_positive_float(cmd.strike, "strike")
-    exp_ms = parse_exp_to_ms(cmd.expiration_ymd)
+    strike = _required_positive_float(strike, "strike")
+    exp_ms = parse_exp_to_ms(expiration_ymd)
     if exp_ms is None:
         raise ValueError(f"{option_type} option requires expiration_ymd")
-    premium = normalize_trade_price(cmd.premium_per_share, "premium_per_share")
+    premium = normalize_trade_price(premium_per_share, "premium_per_share")
 
-    if cmd.multiplier is None:
+    if multiplier is None:
         raise ValueError(f"{option_type} option requires multiplier")
-    multiplier = _required_positive_float(cmd.multiplier, "multiplier")
+    multiplier = _required_positive_float(multiplier, "multiplier")
     cash_secured = None
     if side == "short" and option_type == "put":
         cash_secured = calc_cash_secured(strike, multiplier, contracts)
 
     underlying_locked = None
-    if cmd.underlying_share_locked not in (None, ""):
+    if underlying_share_locked not in (None, ""):
         if side != "short" or option_type != "call":
             raise ValueError("underlying_share_locked only applies to short call")
-        underlying_locked = _required_positive_int(cmd.underlying_share_locked, "underlying_share_locked")
+        underlying_locked = _required_positive_int(underlying_share_locked, "underlying_share_locked")
     if side == "short" and option_type == "call":
         expected_locked = _short_call_locked_shares(multiplier, contracts)
         if underlying_locked is None:
@@ -506,46 +447,43 @@ def build_position_lot_fields(cmd: OpenPositionCommand) -> PositionLotFields:
 
     note_kv: dict[str, str] = {}
 
-    opened_at = int(cmd.opened_at_ms or now_ms())
+    opened_at = int(opened_at_ms or now_ms())
     normalized_multiplier = None
     if multiplier is not None:
         normalized_multiplier = int(float(multiplier)) if float(multiplier).is_integer() else float(multiplier)
-    return PositionLotFields(
-        position_id=build_position_id(
-            symbol=sym,
-            expiration_ymd=cmd.expiration_ymd,
-            strike=strike,
-            option_type=option_type,
-            side=side,
-            contracts=contracts,
-        ),
-        broker=broker,
-        account=account,
-        symbol=sym,
-        option_type=option_type,
-        side=side,
-        contracts=contracts,
-        contracts_open=contracts,
-        contracts_closed=0,
-        currency=currency,
-        status="open",
-        note=merge_note(cmd.note, note_kv) or None,
-        opened_at=opened_at,
-        last_action_at=opened_at,
-        strike=strike,
-        expiration=int(exp_ms),
-        premium=premium,
-        multiplier=normalized_multiplier,
-        underlying_share_locked=(int(underlying_locked) if underlying_locked is not None else None),
-        cash_secured_amount=(float(cash_secured) if cash_secured is not None else None),
-        strategy_snapshot=(strip_retired_strategy_metadata(cmd.strategy_snapshot) or None)
-        if isinstance(cmd.strategy_snapshot, dict)
-        else None,
+    strategy_snapshot_value = (
+        strip_retired_strategy_metadata(strategy_snapshot) or None
+        if isinstance(strategy_snapshot, dict)
+        else None
     )
-
-
-def build_open_fields(cmd: OpenPositionCommand) -> dict[str, Any]:
-    return build_position_lot_fields(cmd).to_dict()
+    payload: dict[str, Any] = {
+        "broker": broker,
+        "account": account,
+        "symbol": sym,
+        "option_type": option_type,
+        "side": side,
+        "contracts": contracts,
+        "contracts_open": contracts,
+        "contracts_closed": 0,
+        "currency": currency,
+        "status": "open",
+        "note": merge_note(note, note_kv) or None,
+        "opened_at": opened_at,
+        "last_action_at": opened_at,
+        "strike": strike,
+        "expiration": int(exp_ms),
+    }
+    if premium is not None:
+        payload["premium"] = premium
+    if normalized_multiplier is not None:
+        payload["multiplier"] = normalized_multiplier
+    if underlying_locked is not None:
+        payload["underlying_share_locked"] = int(underlying_locked)
+    if cash_secured is not None:
+        payload["cash_secured_amount"] = float(cash_secured)
+    if strategy_snapshot_value is not None:
+        payload["strategy_snapshot"] = strategy_snapshot_value
+    return payload
 
 
 def strategy_metadata_fields_from_payload(
@@ -682,7 +620,7 @@ def build_open_adjustment_patch_contract(
     strategy: str | None = None,
     leg_role: str | None = None,
     strategy_group_id: str | None = None,
-    source_stock_lot_id: str | None = None,
+    source_lot_id: str | None = None,
     source_wheel_branch_id: str | None = None,
     strategy_snapshot: dict[str, Any] | None = None,
     as_of_ms: int | None = None,
@@ -701,7 +639,7 @@ def build_open_adjustment_patch_contract(
             strategy,
             leg_role,
             strategy_group_id,
-            source_stock_lot_id,
+            source_lot_id,
             source_wheel_branch_id,
             strategy_snapshot,
         )
@@ -746,14 +684,13 @@ def build_open_adjustment_patch_contract(
     patch_opened_at: _PatchValue = _UNSET
     patch_cash_secured: _PatchValue = _UNSET
     patch_underlying_locked: _PatchValue = _UNSET
-    patch_position_id: _PatchValue = _UNSET
     patch_note: _PatchValue = _UNSET
     canonical_strategy = strip_retired_strategy_metadata({"strategy": strategy}).get("strategy")
     patch_strategy = _optional_patch_text(canonical_strategy, "strategy")
     patch_leg_role = _optional_patch_text(leg_role, "leg_role")
     patch_strategy_group_id = _optional_patch_text(strategy_group_id, "strategy_group_id")
-    patch_source_stock_lot_id = _optional_patch_text(
-        source_stock_lot_id,
+    patch_source_lot_id = _optional_patch_text(
+        source_lot_id,
         "source_stock_lot_id",
     )
     patch_source_wheel_branch_id = _optional_patch_text(
@@ -802,16 +739,6 @@ def build_open_adjustment_patch_contract(
             raise ValueError("short call adjustment requires multiplier")
         patch_underlying_locked = _short_call_locked_shares(float(next_multiplier), next_contracts)
 
-    if any(value is not None for value in (contracts, strike, expiration_ymd)):
-        patch_position_id = build_position_id(
-            symbol=symbol,
-            expiration_ymd=next_expiration_ymd,
-            strike=next_strike,
-            option_type=option_type,
-            side=side,
-            contracts=next_contracts,
-        )
-
     if note_updates:
         patch_note = upsert_note_kv(fields.get("note"), note_updates)
     return PositionLotPatch(
@@ -826,12 +753,11 @@ def build_open_adjustment_patch_contract(
         opened_at=patch_opened_at,
         cash_secured_amount=patch_cash_secured,
         underlying_share_locked=patch_underlying_locked,
-        position_id=patch_position_id,
         note=patch_note,
         strategy=patch_strategy,
         leg_role=patch_leg_role,
         strategy_group_id=patch_strategy_group_id,
-        source_stock_lot_id=patch_source_stock_lot_id,
+        source_lot_id=patch_source_lot_id,
         source_wheel_branch_id=patch_source_wheel_branch_id,
         strategy_snapshot=patch_strategy_snapshot,
     )
@@ -849,7 +775,7 @@ def build_open_adjustment_patch(
     strategy: str | None = None,
     leg_role: str | None = None,
     strategy_group_id: str | None = None,
-    source_stock_lot_id: str | None = None,
+    source_lot_id: str | None = None,
     source_wheel_branch_id: str | None = None,
     strategy_snapshot: dict[str, Any] | None = None,
     as_of_ms: int | None = None,
@@ -865,7 +791,7 @@ def build_open_adjustment_patch(
         strategy=strategy,
         leg_role=leg_role,
         strategy_group_id=strategy_group_id,
-        source_stock_lot_id=source_stock_lot_id,
+        source_lot_id=source_lot_id,
         source_wheel_branch_id=source_wheel_branch_id,
         strategy_snapshot=strategy_snapshot,
         as_of_ms=as_of_ms,

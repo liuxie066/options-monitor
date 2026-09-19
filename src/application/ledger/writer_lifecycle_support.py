@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from domain.domain.lifecycle_allocation import validate_stock_settlement_allocation_group
+from domain.domain.ledger.identity import position_key_for
+from domain.domain.option_position_identity import normalize_side
 
 from .writer_common import (
     Any,
@@ -32,7 +34,7 @@ def _existing_combo_adoption_leg(
     *,
     records_by_id: dict[str, Any],
     events_by_id: dict[str, dict[str, Any]],
-    record_id: str,
+    lot_id: str,
     open_event_id: str,
     group_id: str,
     expected_contracts: int,
@@ -41,7 +43,7 @@ def _existing_combo_adoption_leg(
     accepted_roles: set[str],
     require_fully_open: bool,
 ) -> dict[str, Any]:
-    record_value = str(record_id or "").strip()
+    record_value = str(lot_id or "").strip()
     event_value = str(open_event_id or "").strip()
     record = records_by_id.get(record_value)
     event = events_by_id.get(event_value)
@@ -80,7 +82,6 @@ def _existing_combo_adoption_leg(
         account=fields.get("account"),
         underlying_symbol=fields.get("symbol"),
         option_type=option_type,
-        position_side=position_side,
         strike=fields.get("strike"),
         expiration_ymd=fields.get("expiration_ymd"),
     )
@@ -89,7 +90,6 @@ def _existing_combo_adoption_leg(
         account=event_contract.get("account"),
         underlying_symbol=event_contract.get("underlying_symbol"),
         option_type=event_contract.get("option_type"),
-        position_side=event_contract.get("position_side"),
         strike=event_contract.get("strike"),
         expiration_ymd=event_contract.get("expiration_ymd"),
     )
@@ -136,22 +136,22 @@ def _combo_nonnegative_contract_count(value: Any) -> int | None:
 def _assert_combo_membership_exact(
     membership: ComboMembershipResolution,
     *,
-    expected_record_ids: set[str],
+    expected_lot_ids: set[str],
     require_fully_open: bool,
 ) -> None:
-    expected = tuple(sorted(expected_record_ids))
+    expected = tuple(sorted(expected_lot_ids))
     if (
         membership.fact.get("status") != "exact"
-        or membership.global_current_record_ids != expected
-        or membership.global_historical_record_ids != expected
+        or membership.global_current_lot_ids != expected
+        or membership.global_historical_lot_ids != expected
         or membership.retag_events
         or (
             require_fully_open
-            and membership.global_live_record_ids != expected
+            and membership.global_live_lot_ids != expected
         )
         or any(
-            record_id not in expected_record_ids
-            for record_id in membership.global_live_record_ids
+            lot_id not in expected_lot_ids
+            for lot_id in membership.global_live_lot_ids
         )
     ):
         reasons = ",".join(membership.fact.get("reason_codes") or ())
@@ -167,15 +167,15 @@ def _combo_leg_from_projected_record(
     records_by_open_event: dict[str, Any],
 ) -> dict[str, Any]:
     event_id = str(intent.get(f"{prefix}_open_event_id") or "").strip()
-    expected_record_id = str(intent.get(f"{prefix}_expected_record_id") or "").strip()
+    expected_lot_id = str(intent.get(f"{prefix}_expected_record_id") or "").strip()
     role = str(intent.get(f"{prefix}_role") or "").strip().lower()
     record = records_by_open_event.get(event_id)
-    record_id = (
+    lot_id = (
         str(record.get("record_id") or "").strip()
         if isinstance(record, dict)
-        else str(getattr(record, "record_id", "") or "").strip()
+        else str(getattr(record, "lot_id", "") or "").strip()
     )
-    if record is None or record_id != expected_record_id:
+    if record is None or lot_id != expected_lot_id:
         raise ValueError(f"combo identity {prefix} projected record mismatch")
     fields = dict(
         record.get("fields", {})
@@ -207,7 +207,7 @@ def _combo_leg_from_projected_record(
         "leg_role": role,
         "contracts": expected_contracts,
         "open_event_id": event_id,
-        "record_id": record_id,
+        "record_id": lot_id,
         "contract_key": contract_key,
     }
 
@@ -309,13 +309,13 @@ def _projected_remaining_by_lot(
     wanted = {str(item or "").strip() for item in target_lot_ids}
     remaining: dict[str, int] = {}
     for record in projection_lots:
-        record_id = str(
+        lot_id = str(
             record.get("record_id")
             if isinstance(record, dict)
-            else getattr(record, "record_id", "")
+            else getattr(record, "lot_id", "")
             or ""
         ).strip()
-        if record_id not in wanted:
+        if lot_id not in wanted:
             continue
         fields = dict(
             record.get("fields", {})
@@ -323,7 +323,7 @@ def _projected_remaining_by_lot(
             else getattr(record, "fields", {})
             or {}
         )
-        remaining[record_id] = int(fields.get("contracts_open") or 0)
+        remaining[lot_id] = int(fields.get("contracts_open") or 0)
     missing = sorted(wanted - set(remaining))
     if missing:
         raise ValueError(
@@ -817,8 +817,10 @@ def _matching_lifecycle_lots(
     position_lots: Sequence[dict[str, Any]],
     *,
     contract_key: ContractKey,
+    position_side: str,
 ) -> list[tuple[str, int, int]]:
     matches: list[tuple[str, int, int]] = []
+    target_key = position_key_for(contract_key, normalize_side(position_side))
     for item in position_lots:
         if not isinstance(item, dict):
             continue
@@ -833,13 +835,12 @@ def _matching_lifecycle_lots(
                 account=fields.get("account"),
                 underlying_symbol=fields.get("symbol"),
                 option_type=fields.get("option_type"),
-                position_side=fields.get("side"),
                 strike=effective_strike(fields),
                 expiration_ymd=effective_expiration_ymd(fields),
             )
         except (TypeError, ValueError):
             continue
-        if candidate_key.position_key != contract_key.position_key:
+        if position_key_for(candidate_key, normalize_side(fields.get("side"))) != target_key:
             continue
         try:
             opened_at = int(fields.get("opened_at") or 0)
@@ -878,6 +879,7 @@ def _validate_existing_zero_price_evidence(
     existing: dict[str, Any],
     incoming: dict[str, Any],
     contract_key: ContractKey,
+    position_side: str,
     contracts: int,
 ) -> None:
     for field in ("evidence_id", "source_type", "source_event_id", "evidence_type"):
@@ -894,8 +896,8 @@ def _validate_existing_zero_price_evidence(
         != contract_key.underlying_symbol
         or str(existing.get("option_type") or "").strip().lower()
         != contract_key.option_type
-        or str(existing.get("position_side") or "").strip().lower()
-        != contract_key.position_side
+        or normalize_side(existing.get("position_side"))
+        != normalize_side(position_side)
         or Decimal(str(existing.get("strike"))) != Decimal(contract_key.strike)
         or str(existing.get("expiration_ymd") or "").strip()
         != contract_key.expiration_ymd
@@ -971,7 +973,7 @@ def _validate_lifecycle_event_allocation_plan(
             or event.contracts != contracts
             or str(event.target_lot_id or "") != lot_id
             or event.event_type != terminal_type
-            or event.contract_key.position_key != case_contract_key
+            or event.position_key != case_contract_key
         ):
             raise ValueError("lifecycle allocation and terminal event mismatch")
         raw_payload = dict(event.raw_payload or {})

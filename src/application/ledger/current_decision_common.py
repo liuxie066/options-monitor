@@ -348,9 +348,9 @@ def _position_lot_fields(
     for raw in current_position_lots:
         if not isinstance(raw, Mapping):
             raise CurrentDecisionProjectionError("current position lot must be an object")
-        record_id = str(raw.get("record_id") or raw.get("lot_id") or "").strip()
+        lot_id = str(raw.get("record_id") or raw.get("lot_id") or "").strip()
         fields = raw.get("fields")
-        if not record_id or not isinstance(fields, Mapping) or record_id in out:
+        if not lot_id or not isinstance(fields, Mapping) or lot_id in out:
             raise CurrentDecisionProjectionError("current position lot identity is invalid")
-        out[record_id] = dict(fields)
+        out[lot_id] = dict(fields)
     return out

@@ -10,10 +10,10 @@ from src.application.ledger.repository import SQLiteOptionPositionsRepository
 BASE_TIME_MS = 1_785_312_000_000
 
 
-def _lot(record_id: str, *, option_type: str, strike: int, trade_time_ms: int) -> dict:
+def _lot(lot_id: str, *, option_type: str, strike: int, trade_time_ms: int) -> dict:
     return {
-        "record_id": record_id,
-        "open_event_id": f"open-{record_id}",
+        "record_id": lot_id,
+        "open_event_id": f"open-{lot_id}",
         "account": "lx",
         "broker": "futu",
         "runtime_environment": "test",
@@ -22,7 +22,7 @@ def _lot(record_id: str, *, option_type: str, strike: int, trade_time_ms: int) -
         "symbol": "NVDA",
         "option_type": option_type,
         "position_side": "short" if option_type == "put" else "long",
-        "contracts_original": 1,
+        "contracts_opened": 1,
         "contracts_open": 1,
         "currency": "USD",
         "multiplier": 100,
@@ -41,10 +41,9 @@ def _event(lot: dict) -> TradeEvent:
         account="lx",
         underlying_symbol="NVDA",
         option_type=lot["option_type"],
-        position_side=lot["position_side"],
         strike=lot["strike"],
         expiration_ymd=lot["expiration_ymd"],
-    )
+        )
     return TradeEvent(
         event_id=lot["open_event_id"],
         event_type="open",

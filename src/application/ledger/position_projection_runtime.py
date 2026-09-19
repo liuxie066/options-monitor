@@ -547,7 +547,7 @@ def compare_full_and_resumed_position_projection(repo: Any) -> dict[str, Any]:
             "full_source_generation": full.source_generation,
         }
     full_rows = {
-        item.record_id: dict(item.fields)
+        item.lot_id: dict(item.fields)
         for item in full.projection.lots
     }
     full_active_state = full.projection.resumable_publication_state
@@ -566,14 +566,14 @@ def compare_full_and_resumed_position_projection(repo: Any) -> dict[str, Any]:
         for lot_id, fields in resumed.projection.publication_state.fields_by_lot_id.items()
     }
     stored_mismatch_ids = {
-        record_id
-        for record_id in set(full_rows) | set(stored_rows)
-        if full_rows.get(record_id) != stored_rows.get(record_id)
+        lot_id
+        for lot_id in set(full_rows) | set(stored_rows)
+        if full_rows.get(lot_id) != stored_rows.get(lot_id)
     }
     active_mismatch_ids = {
-        record_id
-        for record_id in set(full_active_rows) | set(resumed_rows)
-        if full_active_rows.get(record_id) != resumed_rows.get(record_id)
+        lot_id
+        for lot_id in set(full_active_rows) | set(resumed_rows)
+        if full_active_rows.get(lot_id) != resumed_rows.get(lot_id)
     }
     mismatch_ids = sorted(stored_mismatch_ids | active_mismatch_ids)
     return {

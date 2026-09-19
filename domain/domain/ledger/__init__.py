@@ -8,7 +8,6 @@ from domain.domain.ledger.economics import (
 from domain.domain.ledger.events import TradeEvent
 from domain.domain.ledger.identity import ContractKey
 from domain.domain.ledger.lots import PositionLot
-from domain.domain.ledger.position_fields import OpenPositionCommand
 from domain.domain.ledger.position_fingerprint import (
     POSITION_LOTS_FINGERPRINT_SCHEMA,
     ordered_position_lots_fingerprint,
@@ -31,7 +30,6 @@ from domain.domain.ledger.projection_state import (
 
 __all__ = [
     "ContractKey",
-    "OpenPositionCommand",
     "OptionEconomicAllocation",
     "PositionLot",
     "POSITION_LOTS_FINGERPRINT_SCHEMA",

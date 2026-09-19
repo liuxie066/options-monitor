@@ -10,7 +10,6 @@ import pytest
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.ledger import ContractKey, TradeEvent
-from domain.domain.option_position_lots import OpenPositionCommand
 from src.application.ledger.manual_trades import persist_manual_open_event
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.ledger.writer import persist_trade_event_objects_atomically
@@ -85,21 +84,19 @@ def test_prepared_context_uses_generation_fence_for_active_wheel(
     )
     persist_manual_open_event(
         repo,
-        OpenPositionCommand(
-            broker="富途",
-            account="acct_a",
-            symbol="NVDA",
-            option_type="put",
-            side="short",
-            contracts=1,
-            currency="USD",
-            strike=100,
-            multiplier=100,
-            expiration_ymd="2099-08-21",
-            premium_per_share=2,
-            opened_at_ms=1_000,
-            request_id="wheel-tick-manual-open",
-        ),
+        broker="富途",
+        account="acct_a",
+        symbol="NVDA",
+        option_type="put",
+        side="short",
+        contracts=1,
+        currency="USD",
+        strike=100,
+        multiplier=100,
+        expiration_ymd="2099-08-21",
+        premium_per_share=2,
+        opened_at_ms=1_000,
+        request_id="wheel-tick-manual-open",
     )
     put_lot_id = str(repo.list_position_lots()[0]["record_id"])
     with patch(
@@ -131,10 +128,9 @@ def test_prepared_context_uses_generation_fence_for_active_wheel(
                     account="acct_a",
                     underlying_symbol="NVDA",
                     option_type="put",
-                    position_side="short",
                     strike=100,
                     expiration_ymd="2099-08-21",
-                ),
+                                ),
                 contracts=1,
                 price=0,
                 currency="USD",
@@ -142,6 +138,8 @@ def test_prepared_context_uses_generation_fence_for_active_wheel(
                 multiplier=100,
                 target_lot_id=put_lot_id,
                 raw_payload={
+                    # §9.2 step 3: closing the assigned short put is a buy.
+                    "side": "buy",
                     "target_lot_id": put_lot_id,
                     "stock_settlement": {
                         "side": "buy",

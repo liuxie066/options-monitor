@@ -248,7 +248,7 @@ def _fact_payload(fact: WeightedOptionFact) -> dict[str, Any]:
         "leg_type": fact.leg_type,
         "attribution_strategy": fact.attribution_strategy,
         "strategy_group_id": fact.strategy_group_id,
-        "source_stock_lot_id": fact.source_stock_lot_id,
+        "source_stock_lot_id": fact.source_lot_id,
         "opened_at_ms": fact.opened_at_ms,
         "terminal_at_ms": fact.terminal_at_ms,
         "expiration_ymd": fact.expiration_ymd,

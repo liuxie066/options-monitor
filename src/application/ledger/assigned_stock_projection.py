@@ -88,7 +88,7 @@ def project_assigned_stock_lifecycle_from_rows(
     ]
     published = project_trade_event_log(selected_rows)
     projection = published.ledger_projection
-    current_fields = {item.record_id: item.fields for item in published.lots}
+    current_fields = {item.lot_id: item.fields for item in published.lots}
     selected_ids = {
         str(row.get("event_id") or "").strip()
         for row in selected_rows

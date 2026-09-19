@@ -5,14 +5,14 @@ import src.application.ledger.repository as ledger_repository
 from domain.domain.combo_yield_lifecycle import build_full_group_lifecycle, build_option_group_inventory
 
 
-def _lot(record_id: str, *, option_type: str, side: str, opened: int, open_count: int, expiration: str, group_id: str | None, structure: str | None = "same_expiry", structure_mode: str | None = None) -> dict:
+def _lot(lot_id: str, *, option_type: str, side: str, opened: int, open_count: int, expiration: str, group_id: str | None, structure: str | None = "same_expiry", structure_mode: str | None = None) -> dict:
     snapshot: dict = {}
     if structure is not None:
         snapshot["expiry_structure"] = structure
     if structure_mode is not None:
         snapshot["structure_mode"] = structure_mode
     return {
-        "record_id": record_id,
+        "record_id": lot_id,
         "account": "lx",
         "symbol": "PDD",
         "option_type": option_type,

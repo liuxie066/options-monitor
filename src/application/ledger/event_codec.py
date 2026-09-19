@@ -7,6 +7,7 @@ from typing import Any
 
 from domain.domain.ledger import ContractKey, TradeEvent
 from domain.domain.ledger.events import LedgerDiagnostic, validate_trade_event
+from domain.domain.trade_contract_identity import derive_trade_side
 
 
 @dataclass(frozen=True)
@@ -177,13 +178,21 @@ def _canonical_payload_to_ledger_event(payload: dict[str, Any]) -> tuple[TradeEv
     event_id = str(payload.get("event_id") or "").strip()
     diagnostics: list[LedgerDiagnostic] = []
     try:
-        contract_key = _contract_key_from_payload(payload.get("contract_key"))
+        raw_contract_key = payload.get("contract_key")
+        contract_key = _contract_key_from_payload(raw_contract_key)
+        event_type = str(payload.get("event_type") or "").strip()
         raw_payload = dict(payload.get("raw_payload") or {})
         if isinstance(payload.get("fee_provenance"), dict) and "fee_provenance" not in raw_payload:
             raw_payload["fee_provenance"] = dict(payload["fee_provenance"])
+        if "side" not in raw_payload and isinstance(raw_contract_key, dict):
+            stored_position_side = raw_contract_key.get("position_side") or raw_contract_key.get("side")
+            if stored_position_side:
+                trade_side = derive_trade_side(event_type, stored_position_side)
+                if trade_side:
+                    raw_payload["side"] = trade_side
         event = TradeEvent(
             event_id=event_id,
-            event_type=str(payload.get("event_type") or "").strip(),
+            event_type=event_type,
             event_time_ms=int(payload.get("event_time_ms") or 0),
             contract_key=contract_key,
             contracts=int(payload.get("contracts") or 0),
@@ -196,6 +205,8 @@ def _canonical_payload_to_ledger_event(payload: dict[str, Any]) -> tuple[TradeEv
             target_event_id=_optional_id(payload.get("target_event_id")),
             lot_id=_optional_id(payload.get("lot_id")),
             raw_payload=raw_payload,
+            asset_type=payload.get("asset_type"),
+            quantity_unit=payload.get("quantity_unit"),
         )
     except Exception as exc:
         diagnostics.append(
@@ -222,9 +233,9 @@ def _contract_key_from_payload(raw: Any) -> ContractKey:
         account=raw.get("account"),
         underlying_symbol=raw.get("underlying_symbol") or raw.get("symbol"),
         option_type=raw.get("option_type"),
-        position_side=raw.get("position_side") or raw.get("side"),
         strike=raw.get("strike"),
         expiration_ymd=raw.get("expiration_ymd") or raw.get("expiration"),
+        asset_type=raw.get("asset_type"),
     )
 
 
@@ -240,7 +251,7 @@ def _canonical_event_to_application_payload(event: TradeEvent, *, stored_payload
     out.setdefault("option_type", contract_key.option_type)
     out.setdefault("side", _legacy_trade_side(event))
     out.setdefault("position_effect", trade_event_position_effect(event.event_type))
-    out.setdefault("strike", contract_key.strike)
+    out.setdefault("strike", float(contract_key.strike))
     out.setdefault("multiplier", event.multiplier)
     out.setdefault("expiration_ymd", contract_key.expiration_ymd)
     if isinstance(event.raw_payload.get("fee_provenance"), dict):
@@ -252,7 +263,7 @@ def _legacy_trade_side(event: TradeEvent) -> str:
     raw_side = str(event.raw_payload.get("side") or "").strip().lower()
     if raw_side:
         return raw_side
-    position_side = event.contract_key.position_side
+    position_side = event.position_side
     if event.event_type == "open":
         return "sell" if position_side == "short" else "buy"
     if event.event_type in {"close", "expire_close", "assignment", "exercise"}:

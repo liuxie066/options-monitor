@@ -10,8 +10,8 @@ import re
 from typing import Any, Iterable
 
 from domain.domain.trade_contract_identity import (
-    canonical_contract_symbol, normalize_contract_expiration, normalize_contract_option_type,
-    normalize_position_effect, normalize_trade_side,
+    canonical_contract_symbol, derive_position_side, normalize_contract_expiration,
+    normalize_contract_option_type, normalize_position_effect, normalize_trade_side,
 )
 from domain.domain.trade_account_identity import extract_primary_account_id
 from domain.domain.option_position_identity import normalize_broker
@@ -771,13 +771,20 @@ def ledger_event_economic_fingerprint(event: dict[str, Any]) -> tuple[Any, ...]:
     """Compare allocated event economics independently of the per-lot quantity."""
     key = event.get("contract_key") if isinstance(event.get("contract_key"), dict) else {}
     raw = event.get("raw_payload") if isinstance(event.get("raw_payload"), dict) else {}
+    position_side = event.get("position_side") or key.get("position_side")
+    if not position_side:
+        # §9.2 step 3: contract keys no longer carry the position side (only
+        # legacy persisted rows still do), so derive it from the trade side.
+        position_side = derive_position_side(
+            event.get("event_type"), event.get("side") or raw.get("side")
+        )
     return (
         str(event.get("event_type") or "").lower(),
         str(event.get("broker") or key.get("broker") or "").lower(),
         str(event.get("account") or key.get("account") or raw.get("internal_account") or "").lower(),
         str(event.get("symbol") or key.get("underlying_symbol") or "").upper(),
         str(event.get("option_type") or key.get("option_type") or "").lower(),
-        str(event.get("position_side") or key.get("position_side") or "").lower(),
+        str(position_side or "").lower(),
         str(event.get("side") or raw.get("side") or "").lower(),
         _finite_decimal(event.get("strike", key.get("strike"))),
         str(event.get("expiration_ymd") or key.get("expiration_ymd") or ""),
@@ -808,6 +815,10 @@ def _source_economics_match_event(event: dict[str, Any]) -> bool:
         effect = "close"
     if effect in {"open", "close"}:
         position_side = actual.get("position_side")
+        if position_side not in {"long", "short"}:
+            # §9.2 step 3: stored contract keys no longer carry the position side,
+            # so derive it from the trade side this event declares.
+            position_side = derive_position_side(effect, actual["side"])
         if position_side not in {"long", "short"}:
             return False
         expected_side = {("open", "short"): "sell", ("open", "long"): "buy",

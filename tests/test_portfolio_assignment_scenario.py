@@ -64,7 +64,7 @@ def _quote(
 
 
 def _option(
-    record_id,
+    lot_id,
     *,
     option_type,
     contracts=1,
@@ -76,7 +76,7 @@ def _option(
     status="open",
 ):
     return {
-        "record_id": record_id,
+        "record_id": lot_id,
         "account": "lx",
         "broker": "富途证券(香港)",
         "symbol": symbol,

@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import random
+from decimal import Decimal
 
 import pytest
 
 from domain.domain.ledger import (
     ContractKey,
+    PositionLot,
+    ResumableLotState,
     ResumableProjectionState,
     TradeEvent,
     project_resumable_trade_events,
@@ -15,6 +18,7 @@ from domain.domain.ledger import (
 from domain.domain.performance.period import PeriodWindow
 from domain.domain.performance.weighted_reducer import reduce_option_performance
 from domain.domain.strategy_membership import resolve_strategy_metadata
+from domain.domain.trade_contract_identity import derive_trade_side
 from src.application.ledger.publisher import (
     ResumablePublicationState,
     project_stored_trade_events_to_position_lots,
@@ -28,17 +32,15 @@ def _key(
     symbol: str = "NVDA",
     strike: float = 100.0,
     option_type: str = "put",
-    side: str = "short",
 ) -> ContractKey:
     return ContractKey.from_values(
         broker="futu",
         account=account,
         underlying_symbol=symbol,
         option_type=option_type,
-        position_side=side,
         strike=strike,
         expiration_ymd="2026-06-19",
-    )
+        )
 
 
 def _event(
@@ -55,6 +57,7 @@ def _event(
     fees: float = 0.0,
     patch: dict[str, object] | None = None,
     raw_payload: dict[str, object] | None = None,
+    position_side: str = "short",
 ) -> TradeEvent:
     """Build one trade event; the defaults are the values this module repeats most.
 
@@ -64,6 +67,9 @@ def _event(
     payload = dict(raw_payload or {})
     if patch is not None:
         payload["patch"] = dict(patch)
+    # §9.2 step 3: the contract key no longer carries the position side, so the
+    # event must declare the trade side it is derived from.
+    payload.setdefault("side", derive_trade_side(event_type, position_side) or "")
     return TradeEvent(
         event_id=event_id,
         event_type=event_type,
@@ -89,7 +95,6 @@ def _sequence() -> list[TradeEvent]:
         symbol="AAPL",
         strike=200,
         option_type="call",
-        side="long",
     )
     return [
         _event(
@@ -112,6 +117,7 @@ def _sequence() -> list[TradeEvent]:
             price=1.2,
             fees=0.44,
             lot_id="lot-sy",
+            position_side="long",
             raw_payload={"strategy": "combo_yield", "leg_role": "enhancement_call"},
         ),
         _event(
@@ -135,7 +141,17 @@ def _sequence() -> list[TradeEvent]:
             target_lot_id="lot-lx",
             patch={"strategy": "yield_enhancement", "leg_role": "funding_put", "note": "resumed"},
         ),
-        _event("close-sy", "close", 5_000, key=sy_call, contracts=2, price=2.1, fees=0.3, target_lot_id="lot-sy"),
+        _event(
+            "close-sy",
+            "close",
+            5_000,
+            key=sy_call,
+            contracts=2,
+            price=2.1,
+            fees=0.3,
+            target_lot_id="lot-sy",
+            position_side="long",
+        ),
         _event("close-lx-2", "close", 6_000, key=lx_put, fees=0.1, target_lot_id="lot-lx"),
     ]
 
@@ -146,7 +162,7 @@ def _lots_payload(lots: object) -> list[dict[str, object]]:
 
 def _records_by_id(records: object) -> dict[str, dict[str, object]]:
     return {
-        item.record_id: item.to_dict()  # type: ignore[union-attr]
+        item.lot_id: item.to_dict()  # type: ignore[union-attr]
         for item in records  # type: ignore[union-attr]
     }
 
@@ -638,7 +654,7 @@ def test_full_publisher_preserves_open_order_and_legacy_close_adjust_precedence(
     ]
     projection = project_stored_trade_events_to_position_lots(events)
     assert projection.diagnostics == []
-    assert [item.record_id for item in projection.lots] == ["lot-z", "lot-a"]
+    assert [item.lot_id for item in projection.lots] == ["lot-z", "lot-a"]
     fields = projection.lots[0].fields
     assert fields["last_close_event_id"] == "normal-partial"
     assert fields["last_action_at"] == 4
@@ -872,7 +888,7 @@ def test_tail_control_events_force_full(event_type: str) -> None:
 
 
 def test_full_resumable_publisher_matches_void_expire_and_field_clear() -> None:
-    key = _key(option_type="call", side="long")
+    key = _key(option_type="call")
     events = [
         _event(
             "open",
@@ -881,6 +897,7 @@ def test_full_resumable_publisher_matches_void_expire_and_field_clear() -> None:
             key=key,
             contracts=2,
             lot_id="lot-a",
+            position_side="long",
             raw_payload={"strategy": "combo_yield", "leg_role": "call"},
         ),
         _event(
@@ -912,6 +929,7 @@ def test_full_resumable_publisher_matches_void_expire_and_field_clear() -> None:
             contracts=2,
             price=0,
             target_lot_id="lot-a",
+            position_side="long",
             raw_payload={
                 "close_type": "expire_auto_close",
                 "auto_close_exp_src": "contract",
@@ -943,3 +961,197 @@ def test_domain_layer_has_no_application_or_sqlite_dependency() -> None:
         assert "import sqlite3" not in source
         assert "from src." not in source
         assert "import src." not in source
+
+
+def _stock_key(
+    *,
+    account: str = "lx",
+    symbol: str = "AAPL",
+) -> ContractKey:
+    return ContractKey.from_values(
+        broker="futu",
+        account=account,
+        underlying_symbol=symbol,
+        option_type="",
+        strike=0.0,
+        expiration_ymd="",
+        asset_type="stock",
+        )
+
+
+def _stock_event(
+    event_id: str,
+    event_type: str,
+    event_time_ms: int,
+    *,
+    key: ContractKey,
+    contracts: int,
+    price: float,
+    lot_id: str | None = None,
+    target_lot_id: str | None = None,
+) -> TradeEvent:
+    return TradeEvent(
+        event_id=event_id,
+        event_type=event_type,
+        event_time_ms=event_time_ms,
+        contract_key=key,
+        contracts=contracts,
+        price=price,
+        currency="USD",
+        source="test",
+        lot_id=lot_id,
+        target_lot_id=target_lot_id,
+        asset_type="stock",
+        raw_payload={"side": derive_trade_side(event_type, "long") or ""},
+    )
+
+
+def test_stock_resumable_state_round_trips_canonically() -> None:
+    key = _stock_key()
+    prefix = project_resumable_trade_events(
+        [
+            _stock_event("open-stock", "open", 1_000, key=key, contracts=100, price=45.5, lot_id="lot-stock"),
+            _stock_event("close-partial", "close", 2_000, key=key, contracts=60, price=50.0, target_lot_id="lot-stock"),
+        ],
+        entry_mode="full",
+    )
+    assert prefix.eligible is True
+    assert prefix.state is not None
+    payload = prefix.state.to_json_bytes()
+    assert b"shares_opened" in payload
+    assert b'"asset_type":"stock"' in payload
+
+    restored = ResumableProjectionState.from_json_bytes(payload)
+    assert restored == prefix.state
+    lot = restored.active_lots[0]
+    assert lot.contract_key.asset_type == "stock"
+    assert lot.contracts_open == 0
+    assert lot.premium_open == 0.0
+    assert lot.multiplier == 0.0
+    assert lot.shares_opened == 100.0
+    assert lot.shares_open == 40.0
+    assert lot.shares_closed == 60.0
+    assert lot.cost_basis_total == 4550.0
+    assert lot.realized_pnl == 270.0
+
+
+def test_stock_full_then_tail_matches_full_and_evicts_final() -> None:
+    key = _stock_key()
+    events = [
+        _stock_event("open-stock", "open", 1_000, key=key, contracts=100, price=45.5, lot_id="lot-stock"),
+        _stock_event("close-partial", "close", 2_000, key=key, contracts=60, price=50.0, target_lot_id="lot-stock"),
+        _stock_event("close-final", "close", 3_000, key=key, contracts=40, price=52.0, target_lot_id="lot-stock"),
+    ]
+    full = project_resumable_trade_events(events, entry_mode="full")
+    assert full.eligible is True
+    assert full.state is not None
+    assert full.state.active_lots == ()
+
+    prefix = project_resumable_trade_events(events[:2], entry_mode="full")
+    assert prefix.state is not None
+    resumed = project_resumable_trade_events(
+        events[2:],
+        initial_state=ResumableProjectionState.from_json_bytes(
+            prefix.state.to_json_bytes()
+        ),
+        entry_mode="tail",
+    )
+    assert resumed.eligible is True
+    assert resumed.state == full.state
+    assert resumed.active_lots == ()
+    assert [item.to_dict() for item in resumed.views] == [item.to_dict() for item in full.views]
+
+
+def test_resumable_state_preserves_decimal_authority_exactly() -> None:
+    """§7.4: the checkpoint must hand back the authority value unchanged.
+
+    A stock cost basis is not always a whole multiple of the share count: an
+    assigned-stock lot carries its fees inside ``cost_basis_total``, so the
+    per-share division is non-terminating and ``realized_pnl`` needs more
+    significant digits than a double can hold. The float schema this replaced
+    quantized the value on every save, so a resumed projection could disagree
+    with a full replay on money.
+    """
+    key = _stock_key()
+    open_event = _stock_event(
+        "open-stock", "open", 1_000, key=key, contracts=3, price=1.0, lot_id="lot-stock"
+    )
+    close_event = _stock_event(
+        "close-stock",
+        "close",
+        2_000,
+        key=key,
+        contracts=1,
+        price=50.0,
+        target_lot_id="lot-stock",
+    )
+    lot = PositionLot.from_stock_settlement(
+        lot_id="lot-stock",
+        open_event_id="open-stock",
+        broker="futu",
+        account="lx",
+        symbol="AAPL",
+        position_side="long",
+        currency="USD",
+        opened_at_ms=1_000,
+        shares_opened=3,
+        # 197 / 3 == 65.666...: the fee-bearing basis the projection cannot build
+        # from ``price * shares``, and the shape the review measured.
+        cost_basis_total=Decimal("197"),
+    ).apply_close(close_event, actual_fee_amount=0.0)
+
+    authoritative = lot.realized_pnl
+    # Precondition: this really is a value a float cannot round-trip.
+    assert authoritative == Decimal("50") - Decimal("197") / Decimal("3")
+    assert Decimal(str(float(authoritative))) != authoritative
+
+    state = ResumableLotState.from_position_lot(
+        lot,
+        open_event=open_event,
+        allocated_open_fee=Decimal("0"),
+        last_close_event_id="close-stock",
+    )
+    # ``Decimal("270.0") == 270.0`` is True, so every equality below is also
+    # satisfied by a float field; assert the type before the value, because a
+    # float field loses the digits the equality is meant to protect.
+    authority_fields = (
+        "realized_pnl",
+        "premium_open",
+        "shares_opened",
+        "shares_open",
+        "shares_closed",
+        "cost_basis_total",
+    )
+    for field_name in authority_fields:
+        assert isinstance(getattr(state, field_name), Decimal), field_name
+
+    restored = ResumableProjectionState.from_json_bytes(
+        ResumableProjectionState(active_lots=(state,)).to_json_bytes()
+    ).active_lots[0]
+
+    assert restored.realized_pnl == authoritative
+    assert restored.cost_basis_total == Decimal("197")
+    for field_name in authority_fields:
+        assert isinstance(getattr(restored, field_name), Decimal), field_name
+
+
+def test_stock_resumable_state_rejects_share_balance_mismatch() -> None:
+    key = _stock_key()
+    seed = project_resumable_trade_events(
+        [
+            _stock_event("open-stock", "open", 1_000, key=key, contracts=100, price=45.5, lot_id="lot-stock"),
+        ],
+        entry_mode="full",
+    )
+    assert seed.state is not None
+    invalid = seed.state.to_dict()
+    invalid["active_lots"][0]["shares_closed"] = 40.0
+    invalid_bytes = json.dumps(
+        invalid,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode()
+    with pytest.raises(ValueError, match="share balance"):
+        ResumableProjectionState.from_json_bytes(invalid_bytes)

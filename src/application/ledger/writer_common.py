@@ -47,8 +47,10 @@ from domain.domain.symbol_identity import canonical_symbol, symbol_market
 
 from domain.domain.trade_contract_identity import (
     canonical_contract_symbol,
+    normalize_asset_type,
     normalize_contract_expiration,
     normalize_position_effect,
+    normalize_quantity_unit,
     normalize_trade_side,
 )
 

@@ -32,7 +32,7 @@ def evaluate_wheel_call_candidate(
     strike = _finite_float(result.get("strike"))
     spot = _finite_float(result.get("spot"))
     net_premium_per_contract = _finite_float(
-        result.get("net_premium", result.get("net_income"))
+        result.get("net_income")
     )
     shares_remaining = _finite_float(batch.get("shares_remaining"))
     remaining_basis = _finite_float(batch.get("remaining_stock_cost_basis"))
@@ -168,7 +168,7 @@ def evaluate_wheel_put_candidate(
     strike = _finite_float(result.get("strike"))
     spot = _finite_float(result.get("spot"))
     net_premium_per_contract = _finite_float(
-        result.get("net_premium", result.get("net_income"))
+        result.get("net_income")
     )
     principal_anchor_total = _finite_float(
         branch.get(

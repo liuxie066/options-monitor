@@ -85,7 +85,7 @@ def test_standard_execution_namespace_never_joins_futu_provider_order(tmp_path):
     rows = repo.list_trade_events()
     assert next(row for row in rows if row["event_id"] == foreign["event_id"]) == foreign
     actual = next(row for row in rows if row["event_id"].endswith(":futu"))
-    assert actual["fees"] == 1.23
+    assert actual["fees"] == "1.23"
     assert actual["raw_payload"]["fee_provenance"]["basis"] == "actual"
 
 

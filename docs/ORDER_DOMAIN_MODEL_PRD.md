@@ -105,10 +105,27 @@ Combo / Wheel 投影 & 元数据 ── 策略层（只读投影，不重复声�
 | A5 | 订单归组不变（S2） | 一笔多成交订单 + 订单级费用 | `order_fee_sync` 仍按 `order_id` 归组摊派，结果与迁移前一致 | 跑 `tests/test_order_fee_sync.py`、`test_order_fee_settlement.py`、`test_order_fee_namespace.py` | 本地 venv | 费用归组逻辑可纯函数化 | 订单/成交/费用 fixture | planned |
 | A6 | 旧记录层退役（S4） | 投影与读模型路径 | 读模型以 `PositionLot.to_dict()` 为准，`PositionLotFields`/`OpenPositionCommand` 不再作为权威 | 读 `src/application/ledger/read_model.py`；跑 `tests/test_ledger_module_facades.py`、`test_position_projection_facade_inventory.py` | 本地 venv | 读模型字段映射回归 | 同上 | planned |
 | A7 | 跨界校验收敛（S6） | 设计文档 §10.3 的 5 家族约 37 行号引用 | ①`contracts × multiplier` 收敛为单一换算函数；<br>②`stock_settlement` 的 `expected_side` 映射 + `shares==multiplier×contracts` 不变式收敛为单一校验器；<br>③执行身份/经济冲突仲裁收敛为单一仲裁器；<br>④无 `get(a) or get(b)` 双名回退残留（兼容读集中到归一化层）；<br>⑤费用/币种仲裁收敛到费用语义层 | 读设计文档 §10.3 落点文件（`lifecycle_allocation.py`/`writer_lifecycle_support.py`/`deal_identity.py`/`trade_execution.py` 等）；grep 校验无业务层散落乘法与双名回退；跑相关回归测试 | 本地 venv | 静态收敛断言 + 回归；跨界换算需 assignment 定向用例 | 同上 | planned |
+| A8 | 列退役不产生「不可用」库（D1/D2） | 一个旧形状 store，含非空 `position_lots` | 重建后列合同判定闭合，无 `column_contract_open`，head 不落 `untrusted` | 在旧形状 fixture 上开库，读列分类合同（`repository_common.py:99-108`）与 head 状态（`repository_projection_tail.py:438`） | 本地 venv | 需构造旧形状 store；无真实生产副本时用 fixture 重建 | 设计文档 §12.3 的重建配方落地 | planned |
+| A9 | 重建的原子性与校验（D1/D2） | 重建中途注入失败 | 行数、读回等值、`foreign_key_check` 任一不通过则整体回滚，旧表原样保留 | 照 `repository_core.py:191-255` 的四道校验复跑（参照 `tests/test_wheel_strategy.py:444`） | 本地 venv | 失败点可注入；生产形态不可注入 | 同上 | planned |
+| A10 | payload 重写可回滚（D3/D4） | 一次遍历重写全部 `position_lots.fields_json` | 重写后读模型输出与重写前等价，且可用窗口内 `.backup` 副本逐行比对 | 演练窗口流程：`.backup` → 重写 → 逐行比对 → `integrity_check` | 本地 venv + 受控窗口 | 需生产规模 store；演练窗口属生产操作，需单独授权 | §7.1 第 2 条 | planned |
+| A11 | 迁移形态与门控（全批次） | 一次升级重启 | 改写 payload 的动作不由开库路径隐式触发；结构动作按裁定形态执行 | 读 `service_upgrade.py:2527` 起的步骤与所用形态的实现 | 本地 venv | 形态已定（B，操作者门控），不是产品待决项 | 设计文档 §9.5 M1/M5 | planned |
 
 ## 7. 存量数据处理
 
 存量 SQLite ledger 中无 `asset_type` 的旧期权事件，通过兼容读缺省推导 `option` 处理；不迁移、不改写历史事件，只在新代码读取时补缺省。迁移后新事件一律显式 `asset_type`。旧记录层（`PositionLotFields`/`OpenPositionCommand`）随读模型切换退役，不保留双写。
+
+以上「不迁移、不改写」的定界适用于**代码语义收敛批次**（已随 #311 合入 main）。**列退役批次（D1–D4）另行改写存量**，见下节。
+
+### 7.1 列退役批次的存量处理要求（D1–D4）
+
+本批次是唯一会改写已持久化数据的批次，需求侧的四条硬要求：
+
+1. **生产方式不得依赖「升级即自动改库」。** 本仓的升级流程只切 symlink + 重启（`service_upgrade.py:2527` 起），改库发生在重启后首次开库的 bootstrap 事务里，**该路径没有 dry-run 门、也没有备份**。因此全部改动必须由操作者显式触发并可先备份——已裁定 **D1–D4 一律走「声明即止 + 显式命令迁移」**（设计文档 §9.5 M1），并必须提供 preview/dry-run（§9.5 M5）。
+2. **必须有可回滚的窗口流程。** 备份用 SQLite `.backup` API（禁止裸 `cp`）、`integrity_check` 必须为 `ok`、源库原样保留作为回滚证据；窗口内停**所有**账本写入方。流程沿用 `docs/DEPLOY_LINUX_MAC.md:403-438`，不新造。
+3. **结构改动与列分类合同必须同批改。** `POSITION_LOTS_COLUMN_CLASSIFICATION`（`repository_common.py:99-108`）是开库合同的一部分；漏改会让重建成功但库停在 `untrusted`，即「改成功了却不可用」。
+4. **迁移的权威仍是 `fields_json`。** D1 退役的 `position_lots.expiration` 是派生镜像，D2 改的是身份列名；两者的数据真源都在 payload，迁移不得引入第二个真源。
+
+执行设计（机制事实、形态对照、重建配方、逐项落点、⑥ 的前置判定）见设计文档 §12；**执行决策（形态/D2 改法/⑥ 顺序/身份同一性/dry-run/落地顺序）已收口于设计文档 §9.5 M1–M6**。
 
 ## 8. 未决问题
 
@@ -126,15 +143,22 @@ Combo / Wheel 投影 & 元数据 ── 策略层（只读投影，不重复声�
 | 三个口径落定 | 「继续解决三个待确认」后于本会话定稿（§5 第 4/5/6 条） |
 | 用 prdflow 落需求 | 「先用prdflow落需求」 |
 | 跨界校验收敛为 5 家族；两文档审查精简 | 「扩大范围再找找，还有没有类似wheel校验的代码块没有被考虑进来？」→「要补，要统一领域模型」→「看看现在的prd有没有可以优化，简化的地方」「看看设计文档」→「全部执行」 |
+| 修 round-9 的 6 条 finding 并提交 | 「修 F1…F6 和 tests:712，然后提交」 |
+| 推送分支并开 PR | 「推送分支，开 PR」 |
+| 合并 PR #311 进 main | 「合入 main」 |
+| 改 PR 描述 | 「改 PR 描述」 |
+| 开列退役批次，先落需求与设计 | 「开迁移批次」→ AskUserQuestion 选「先落需求+设计文档」 |
+| 迁移批次执行决策五条（形态/D2 改法/⑥ 顺序/身份同一性/dry-run） | 「你的建议是啥」→「按建议，落进 §9 已定决策」 |
 
 ## 10. devflow 交接
 
 - 根目标：全库一个权威的订单/成交/持仓字段定义。
-- `prd_doc`：本文（未落盘 git 提交，工作区新文件）。
+- `prd_doc`：本文（已随 #311 合入 main）。
 - `design_doc`：`docs/ORDER_DOMAIN_MODEL_DESIGN.md`（已存在，技术实现参考；本文是需求真源）。
-- 已获准：落需求、编写设计文档、需求收口（本文）；未经授权：commit/push/merge、发布、部署、生产配置或生产写入、启动 devflow 实现。
-- 下一未授权动作：进入 devflow（Brainstorm/实现设计）需用户明确启动；实现按「原地优化、不搞 v2」三步迁移，见设计文档 §8。
-- 待 Devflow 决定：实现细节与验收测试的落点（§8）。
+- 交付状态：**代码语义收敛批次已完成并合入 main**（PR #311 → 合并提交 `540b37a5`，2026-09-18）；**列退役批次（D1–D4）已落需求（§7.1、§6 的 A8–A11）、设计（设计文档 §12）与执行决策（设计文档 §9.5 M1–M6），尚未实施**。
+- 已获准：落需求、编写设计文档、需求收口（本文）；未经授权：迁移实施、生产迁移窗口、生产写入、commit/push、发布、升级、部署。
+- 执行决策已收口于设计文档 §9.5：形态一律 B（M1）、D2 拆两步（M2）、⑥ 非前置且落库并入同一窗口（M3）、`record_id` 与 `stock_lot_id` 同一身份已查实（M4）、提供 `inventory`/`verify`/`apply`（M5）、落地顺序（M6）。**上述决策尚未实施，实施需另行授权。**
+- 实现细节与验收测试的落点：§12.3 的重建配方、§12.4 的逐项落点、§9.5 M6 的落地顺序。
 
 ## 附录：prdflow-gate 记录
 

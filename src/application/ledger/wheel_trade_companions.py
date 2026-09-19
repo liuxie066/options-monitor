@@ -96,16 +96,16 @@ def _event_time_ms(event: Any) -> int:
     return int(getattr(event, "event_time_ms", 0) or 0)
 
 
-def _stock_lot(report: Mapping[str, Any], stock_lot_id: str) -> dict[str, Any] | None:
+def _stock_lot(report: Mapping[str, Any], lot_id: str) -> dict[str, Any] | None:
     rows = report.get("_all_assigned_stock_lots") or report.get("assigned_stock_lots") or []
     matches = [
         dict(item)
         for item in rows
         if isinstance(item, Mapping)
-        and str(item.get("stock_lot_id") or "").strip() == stock_lot_id
+        and str(item.get("stock_lot_id") or "").strip() == lot_id
     ]
     if len(matches) > 1:
-        raise ValueError(f"assigned stock lot is not unique: {stock_lot_id}")
+        raise ValueError(f"assigned stock lot is not unique: {lot_id}")
     return matches[0] if matches else None
 
 
@@ -345,6 +345,7 @@ def plan_wheel_assignment_companion(
         return None, reason
     membership = resolve_option_strategy_membership(
         getattr(event, "contract_key"),
+        getattr(event, "position_side"),
         fields,
         source_id=str(source_open.get("event_id") or ""),
     )
@@ -365,7 +366,7 @@ def plan_wheel_assignment_companion(
         activation_window = None
         parent_branch_id = str(
             membership.source_wheel_branch_id
-            or membership.source_stock_lot_id
+            or membership.source_lot_id
             or ""
         ).strip()
         if not parent_branch_id:
@@ -385,7 +386,7 @@ def plan_wheel_assignment_companion(
             reason = "wheel_parent_branch_not_unique"
             return None, reason
     else:
-        if membership.strategy == "cc" and membership.source_stock_lot_id:
+        if membership.strategy == "cc" and membership.source_lot_id:
             overlaps = [
                 branch
                 for branch in _wheel_branches_from_rows(
@@ -394,7 +395,7 @@ def plan_wheel_assignment_companion(
                     as_of_ms=_event_time_ms(event),
                 )
                 if branch.get("lifecycle_status") == "active"
-                and branch.get("stock_lot_id") == membership.source_stock_lot_id
+                and branch.get("stock_lot_id") == membership.source_lot_id
             ]
             if overlaps:
                 reason = (
@@ -451,7 +452,7 @@ def plan_wheel_assignment_companion(
     if isinstance(settlement_shares, bool) or contracts <= 0 or settlement_shares != contracts * multiplier:
         reason = "assignment_quantity_inconsistent"
         return None, reason
-    stock_lot_id = (
+    lot_id = (
         f"assigned-stock-{event_id}" if direction == "call" else None
     )
     companion = build_wheel_branch_created_event(
@@ -472,7 +473,7 @@ def plan_wheel_assignment_companion(
         principal_anchor=principal_anchor,
         principal_anchor_reason=principal_anchor_reason,
         principal_anchor_fact_ids=principal_anchor_fact_ids,
-        stock_lot_id=stock_lot_id,
+        lot_id=lot_id,
         parent_branch_id=parent_branch_id,
         lifecycle_status="pending_decision" if internal else "active",
         activation_window=activation_window,
@@ -530,15 +531,15 @@ def append_wheel_trade_companions(
             review_reason_by_trade[event_id] = review_reason
         if companion is None:
             continue
-        membership = resolve_option_strategy_membership(event.contract_key, fields)
+        membership = resolve_option_strategy_membership(event.contract_key, event.position_side, fields)
         internal = membership.strategy == "wheel"
         direction = companion["payload"]["direction"]
         settlement_shares = event.raw_payload["stock_settlement"]["shares"]
         legacy_terminal = None
-        stock_lot_id = str(fields.get("source_stock_lot_id") or "").strip()
+        lot_id = str(fields.get("source_stock_lot_id") or "").strip()
         if internal and not membership.source_wheel_branch_id and direction == "put":
             instant = _event_time_ms(event)
-            key = (account, stock_lot_id)
+            key = (account, lot_id)
             stock_lot_before = rolling_stock_lots.get(key)
             if stock_lot_before is None:
                 before_projection = project_assigned_stock_lifecycle_from_rows(
@@ -546,7 +547,7 @@ def append_wheel_trade_companions(
                     account=account,
                     as_of_ms=instant,
                 )
-                stock_lot_before = _stock_lot(before_projection, stock_lot_id)
+                stock_lot_before = _stock_lot(before_projection, lot_id)
             stock_lot_after = dict(stock_lot_before or {})
             stock_lot_after["shares_remaining"] = int(
                 (stock_lot_before or {}).get("shares_remaining") or 0
@@ -565,13 +566,13 @@ def append_wheel_trade_companions(
         if legacy_terminal is not None:
             repo.append_wheel_event_once(legacy_terminal, conn=conn)
 
-    for (account, stock_lot_id), expected in rolling_stock_lots.items():
+    for (account, lot_id), expected in rolling_stock_lots.items():
         actual_projection = project_assigned_stock_lifecycle_from_rows(
             after_rows[account],
             account=account,
-            as_of_ms=rolling_stock_as_of[(account, stock_lot_id)],
+            as_of_ms=rolling_stock_as_of[(account, lot_id)],
         )
-        actual = _stock_lot(actual_projection, stock_lot_id)
+        actual = _stock_lot(actual_projection, lot_id)
         if int((actual or {}).get("shares_remaining") or 0) != int(
             expected.get("shares_remaining") or 0
         ):
@@ -610,7 +611,7 @@ def prepare_wheel_intent_open_event(
         str(getattr(event, "event_type", "") or "").strip().lower() != "open"
         or str(getattr(getattr(event, "contract_key", None), "option_type", ""))
         != "call"
-        or str(getattr(getattr(event, "contract_key", None), "position_side", ""))
+        or str(getattr(event, "position_side", "") or "")
         != "short"
     ):
         return event, None, "not_short_call_open"
@@ -641,7 +642,7 @@ def prepare_wheel_intent_open_event(
         summaries = project_wheel_call_intents(
             rows.get("account_wheel_events") or [],
             account=account,
-            stock_lot_id=batch["stock_lot_id"],
+            lot_id=batch["stock_lot_id"],
             as_of_ms=instant,
             known_trade_event_ids=known_trade_ids,
         )
@@ -731,7 +732,7 @@ def append_and_verify_wheel_intent_consumption(
     ]
     summaries = project_wheel_call_intents(
         rows.get("account_wheel_events") or [], account=account,
-        stock_lot_id=str(intent_event["stock_lot_id"]),
+        lot_id=str(intent_event["stock_lot_id"]),
         as_of_ms=max(_event_time_ms(linked_event), 1),
         known_trade_event_ids={str(row.get("event_id") or "") for row in rows.get("trade_events") or []},
     )

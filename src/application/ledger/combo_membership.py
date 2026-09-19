@@ -18,9 +18,9 @@ COMBO_GROUP_MEMBERSHIP_SCHEMA = "account_combo_group_membership.v1"
 @dataclass(frozen=True)
 class ComboMembershipResolution:
     fact: dict[str, Any]
-    global_current_record_ids: tuple[str, ...]
-    global_live_record_ids: tuple[str, ...]
-    global_historical_record_ids: tuple[str, ...]
+    global_current_lot_ids: tuple[str, ...]
+    global_live_lot_ids: tuple[str, ...]
+    global_historical_lot_ids: tuple[str, ...]
     retag_events: tuple[tuple[str, str, str, str], ...]
     generation_hash: str
 
@@ -49,13 +49,13 @@ def resolve_combo_group_membership(
     history = _effective_group_history(trade_events)
     current_rows = _current_lot_rows(projected_position_lots)
     current_members = {
-        record_id: item
-        for record_id, item in current_rows.items()
+        lot_id: item
+        for lot_id, item in current_rows.items()
         if _group_id(item.get("strategy_group_id")) == group_value
     }
     live_ids = {
-        record_id
-        for record_id, item in current_members.items()
+        lot_id
+        for lot_id, item in current_members.items()
         if _nonnegative_integer(item.get("contracts_open")) not in (None, 0)
     }
     historical_ids = set(history.historical_by_group.get(group_value, ()))
@@ -64,26 +64,26 @@ def resolve_combo_group_membership(
     )
     known_rows = {**history.open_bindings, **current_rows}
     current_account_ids = sorted(
-        record_id
-        for record_id, item in current_members.items()
+        lot_id
+        for lot_id, item in current_members.items()
         if _text(item.get("account"), lower=True) == account_value
     )
     occurrence_ids = set(current_members) | historical_ids
     external_ids = sorted(
-        record_id
-        for record_id in occurrence_ids
-        if _text((known_rows.get(record_id) or {}).get("account"), lower=True)
+        lot_id
+        for lot_id in occurrence_ids
+        if _text((known_rows.get(lot_id) or {}).get("account"), lower=True)
         != account_value
     )
     cross_symbol = any(
         symbol_value
-        and _text((known_rows.get(record_id) or {}).get("symbol"), upper=True)
+        and _text((known_rows.get(lot_id) or {}).get("symbol"), upper=True)
         != symbol_value
-        for record_id in occurrence_ids
+        for lot_id in occurrence_ids
     )
     bindings = [
-        _allowlisted_binding(record_id, current_members[record_id])
-        for record_id in current_account_ids
+        _allowlisted_binding(lot_id, current_members[lot_id])
+        for lot_id in current_account_ids
     ]
     bindings.sort(
         key=lambda item: (
@@ -124,11 +124,11 @@ def resolve_combo_group_membership(
 
     external_tuples = sorted(
         (
-            record_id,
-            _text((known_rows.get(record_id) or {}).get("account"), lower=True),
-            _text((known_rows.get(record_id) or {}).get("symbol"), upper=True),
+            lot_id,
+            _text((known_rows.get(lot_id) or {}).get("account"), lower=True),
+            _text((known_rows.get(lot_id) or {}).get("symbol"), upper=True),
         )
-        for record_id in external_ids
+        for lot_id in external_ids
     )
     fact = {
         "membership_schema_version": COMBO_GROUP_MEMBERSHIP_SCHEMA,
@@ -158,9 +158,9 @@ def resolve_combo_group_membership(
     }
     return ComboMembershipResolution(
         fact=fact,
-        global_current_record_ids=tuple(sorted(current_members)),
-        global_live_record_ids=tuple(sorted(live_ids)),
-        global_historical_record_ids=tuple(sorted(historical_ids)),
+        global_current_lot_ids=tuple(sorted(current_members)),
+        global_live_lot_ids=tuple(sorted(live_ids)),
+        global_historical_lot_ids=tuple(sorted(historical_ids)),
         retag_events=retag_events,
         generation_hash=canonical_sha256(generation_payload),
     )
@@ -183,8 +183,8 @@ def resolve_account_combo_memberships(
         if _text(item.get("account"), lower=True) == account_value
         and _group_id(item.get("group_id"))
     }
-    for record_id, item in _current_lot_rows(lots).items():
-        del record_id
+    for lot_id, item in _current_lot_rows(lots).items():
+        del lot_id
         if _text(item.get("account"), lower=True) != account_value:
             continue
         group_value = _group_id(item.get("strategy_group_id"))
@@ -234,10 +234,10 @@ def validate_combo_group_membership(
     group_id = item.get("group_id")
     if not isinstance(group_id, str) or not group_id or group_id != group_id.strip():
         reasons.add("combo_group_id_invalid")
-    record_ids = item.get("current_account_member_record_ids")
+    lot_ids = item.get("current_account_member_record_ids")
     bindings = item.get("member_bindings_for_current_account")
     reason_codes = item.get("reason_codes")
-    if not _canonical_text_list(record_ids):
+    if not _canonical_text_list(lot_ids):
         reasons.add("combo_group_member_ids_noncanonical")
     if not _canonical_text_list(reason_codes):
         reasons.add("combo_group_reason_codes_noncanonical")
@@ -291,12 +291,12 @@ def validate_combo_group_membership(
             for binding in canonical_bindings
         ):
             reasons.add("combo_group_binding_values_invalid")
-        binding_record_ids = [
+        binding_lot_ids = [
             binding["record_id"] for binding in canonical_bindings
         ]
         if (
-            not isinstance(record_ids, list)
-            or binding_record_ids != record_ids
+            not isinstance(lot_ids, list)
+            or binding_lot_ids != lot_ids
         ):
             reasons.add("combo_group_binding_record_ids_mismatch")
         if len(
@@ -355,8 +355,8 @@ def validate_combo_group_membership(
             or item.get("retag_event_count") != 0
             or item.get("cross_account_member_present") is not False
             or item.get("cross_symbol_member_present") is not False
-            or not isinstance(record_ids, list)
-            or len(record_ids) != 2
+            or not isinstance(lot_ids, list)
+            or len(lot_ids) != 2
             or not isinstance(bindings, list)
             or len(bindings) != 2
             or len(funding_bindings) != 1
@@ -431,7 +431,7 @@ def _effective_group_history(
         raw = item.get("raw_payload")
         payload = dict(raw) if isinstance(raw, Mapping) else {}
         if event_type == "open":
-            record_id = _text(
+            lot_id = _text(
                 item.get("lot_id")
                 or payload.get("record_id")
                 or f"lot_{event_id}"
@@ -447,7 +447,7 @@ def _effective_group_history(
                 else {}
             )
             binding = {
-                "record_id": record_id,
+                "record_id": lot_id,
                 "open_event_id": event_id,
                 "account": _text(
                     fields.get("account") or contract.get("account"),
@@ -471,33 +471,33 @@ def _effective_group_history(
                     lower=True,
                 ),
             }
-            open_bindings[record_id] = binding
+            open_bindings[lot_id] = binding
             group_value = _group_id(
                 fields.get("strategy_group_id")
                 or payload.get("strategy_group_id")
                 or _snapshot_value(payload, "strategy_group_id")
             )
-            group_by_record[record_id] = group_value
+            group_by_record[lot_id] = group_value
             if group_value:
-                historical.setdefault(group_value, set()).add(record_id)
+                historical.setdefault(group_value, set()).add(lot_id)
             continue
         if event_type != "adjust":
             continue
-        record_id = _text(
+        lot_id = _text(
             item.get("target_lot_id") or payload.get("target_lot_id")
         )
         patch = payload.get("patch")
-        if not record_id or not isinstance(patch, Mapping):
+        if not lot_id or not isinstance(patch, Mapping):
             continue
         if "strategy_group_id" not in patch:
             continue
-        before = group_by_record.get(record_id, "")
+        before = group_by_record.get(lot_id, "")
         after = _group_id(patch.get("strategy_group_id"))
-        group_by_record[record_id] = after
+        group_by_record[lot_id] = after
         if after:
-            historical.setdefault(after, set()).add(record_id)
+            historical.setdefault(after, set()).add(lot_id)
         if before and after and before != after:
-            occurrence = (event_id, record_id, before, after)
+            occurrence = (event_id, lot_id, before, after)
             retags.setdefault(before, []).append(occurrence)
             retags.setdefault(after, []).append(occurrence)
     return _GroupHistory(
@@ -513,7 +513,7 @@ def _current_lot_rows(
     out: dict[str, dict[str, Any]] = {}
     for raw in projected_position_lots:
         if isinstance(raw, Mapping):
-            record_id = _text(raw.get("record_id") or raw.get("lot_id"))
+            lot_id = _text(raw.get("record_id") or raw.get("lot_id"))
             fields_raw = raw.get("fields")
             fields = (
                 dict(fields_raw)
@@ -521,25 +521,25 @@ def _current_lot_rows(
                 else dict(raw)
             )
         else:
-            record_id = _text(
+            lot_id = _text(
                 getattr(raw, "record_id", None)
                 or getattr(raw, "lot_id", None)
             )
             fields = dict(getattr(raw, "fields", {}) or {})
-        if not record_id:
+        if not lot_id:
             raise ValueError("projected combo membership lot requires record_id")
-        if record_id in out:
-            raise ValueError(f"duplicate projected combo lot: {record_id}")
-        out[record_id] = fields
+        if lot_id in out:
+            raise ValueError(f"duplicate projected combo lot: {lot_id}")
+        out[lot_id] = fields
     return out
 
 
 def _allowlisted_binding(
-    record_id: str,
+    lot_id: str,
     fields: Mapping[str, Any],
 ) -> dict[str, Any]:
     return {
-        "record_id": record_id,
+        "record_id": lot_id,
         "role": _text(fields.get("leg_role"), lower=True),
         "open_event_id": _text(fields.get("source_event_id")),
         "strategy": _text(fields.get("strategy"), lower=True),

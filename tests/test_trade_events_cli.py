@@ -15,25 +15,22 @@ import src.application.ledger.repository as ledger_repository
 
 
 def _repo_with_open_event(tmp_path: Path):
-    from domain.domain.option_position_lots import OpenPositionCommand
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     ledger_manual_trades.persist_manual_open_event(
         repo,
-        OpenPositionCommand(
-            broker="富途",
-            account="lx",
-            symbol="0700.HK",
-            option_type="put",
-            side="short",
-            contracts=1,
-            currency="HKD",
-            strike=480.0,
-            multiplier=100,
-            expiration_ymd="2026-04-29",
-            premium_per_share=3.93,
-            opened_at_ms=1000,
-        ),
+        broker="富途",
+        account="lx",
+        symbol="0700.HK",
+        option_type="put",
+        side="short",
+        contracts=1,
+        currency="HKD",
+        strike=480.0,
+        multiplier=100,
+        expiration_ymd="2026-04-29",
+        premium_per_share=3.93,
+        opened_at_ms=1000,
     )
     event_id = repo.list_trade_events()[0]["event_id"]
     return repo, event_id
@@ -44,31 +41,28 @@ def _repo_with_assignment(
     *,
     wheel_start_enabled: bool = False,
 ):
-    from domain.domain.option_position_lots import OpenPositionCommand
     from src.application.ledger.commands import record_manual_assignment
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     ledger_manual_trades.persist_manual_open_event(
         repo,
-        OpenPositionCommand(
-            broker="富途",
-            account="lx",
-            symbol="NVDA",
-            option_type="put",
-            side="short",
-            contracts=1,
-            currency="USD",
-            strike=100.0,
-            multiplier=100,
-            expiration_ymd="2026-08-21",
-            premium_per_share=2.5,
-            opened_at_ms=1_000,
-        ),
+        broker="富途",
+        account="lx",
+        symbol="NVDA",
+        option_type="put",
+        side="short",
+        contracts=1,
+        currency="USD",
+        strike=100.0,
+        multiplier=100,
+        expiration_ymd="2026-08-21",
+        premium_per_share=2.5,
+        opened_at_ms=1_000,
     )
     put_lot_id = str(repo.list_position_lots()[0]["record_id"])
     result = record_manual_assignment(
         repo,
-        record_id=put_lot_id,
+        lot_id=put_lot_id,
         contracts_to_close=1,
         stock_side="buy",
         stock_qty=100,
@@ -118,14 +112,14 @@ def _durable_ledger_state(repo) -> dict:
 def _append_assigned_stock_sale(
     repo,
     *,
-    stock_lot_id: str,
+    lot_id: str,
     source_deal_id: str,
 ) -> dict:
     from src.application.positions.workflows import execute_manual_assigned_stock_sale
 
     preview = execute_manual_assigned_stock_sale(
         repo,
-        target_stock_lot_id=stock_lot_id,
+        target_lot_id=lot_id,
         shares=100,
         price=105.0,
         trade_time_ms=3_000,
@@ -249,7 +243,7 @@ def _persist_manual_close(repo, *, lot) -> None:
     """Close ``lot`` through the manual close path with this module's default terms."""
     ledger_manual_trades.persist_manual_close_event(
         repo,
-        record_id=lot["record_id"],
+        lot_id=lot["record_id"],
         fields=lot["fields"],
         contracts_to_close=1,
         close_price=1.2,
@@ -437,7 +431,7 @@ def test_trade_events_repair_dry_run_does_not_mutate(monkeypatch, tmp_path: Path
     assert out["backup_path"] is None
     assert out["audit_id"].startswith("audit_")
     assert out["target_event"]["event_id"] == event_id
-    assert out["repair_event"]["contract_key"]["strike"] == 500.0
+    assert out["repair_event"]["contract_key"]["strike"] == "500"
     assert out["repair_event"]["raw_payload"]["futu_account_id"] == "123"
     assert out["repair_event"]["raw_payload"]["order_id"] == "order-1"
     assert out["ledger_preflight"]["status"] == "ok"
@@ -446,7 +440,7 @@ def test_trade_events_repair_dry_run_does_not_mutate(monkeypatch, tmp_path: Path
     assert out["projection_preview"]["position_lot_count"] == 1
     assert out["projection_preview"]["projection_diagnostic_count"] == 0
     assert len(repo.list_trade_events()) == 1
-    assert repo.list_position_lots()[0]["fields"]["strike"] == 480.0
+    assert repo.list_position_lots()[0]["fields"]["strike"] == "480"
 
 
 def test_trade_events_repair_apply_voids_and_replaces_event(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -470,7 +464,7 @@ def test_trade_events_repair_apply_voids_and_replaces_event(monkeypatch, tmp_pat
     assert len(events) == 3
     lots = repo.list_position_lots()
     assert len(lots) == 1
-    assert lots[0]["fields"]["strike"] == 500.0
+    assert lots[0]["fields"]["strike"] == "500"
 
 
 @pytest.mark.parametrize("with_fx", [True, False])
@@ -504,11 +498,14 @@ def test_repair_preserves_fees_and_rebuilds_cash_conversion_identity(
         event_id="cnc-open", event_type="open", event_time_ms=event_time,
         contract_key=ContractKey.from_values(
             broker="富途", account="lx", underlying_symbol="CNC",
-            option_type="call", position_side="short", strike=30,
+            option_type="call", strike=30,
             expiration_ymd="2026-03-30",
-        ),
+                ),
         contracts=2, price=0.24, multiplier=100, currency="HKD", fees=20,
         source="opend_push", raw_payload={"source_type": "broker_trade_event",
+            # §9.2 step 3: the contract key no longer carries the position side,
+            # so the short call side travels as the trade side.
+            "side": "sell",
             "futu_account_id": "123", "order_id": "order-cnc", "fee_provenance": {
             "basis": "actual", "amount": "20", "source": "opend.order_fee_query",
         }},
@@ -520,17 +517,17 @@ def test_repair_preserves_fees_and_rebuilds_cash_conversion_identity(
             migrated_at_ms=event_time,
         )
     before = deepcopy(repo.list_trade_events())
-    assert before[0]["fees"] == 20, before[0]
+    assert before[0]["fees"] == "20", before[0]
     monkeypatch.setattr(cli, "resolve_option_positions_repo", lambda **kw: (tmp_path / "data.json", repo))
     args = ["repair", event.event_id, *overrides, "--format", "json"]
     assert cli.main([*args, "--dry-run"]) == 0
     preview = json.loads(capsys.readouterr().out)["repair_event"]
-    assert preview["fees"] == 20
+    assert preview["fees"] == "20"
     assert repo.list_trade_events() == before
     assert cli.main([*args, "--confirm"]) == 0
     applied = json.loads(capsys.readouterr().out)
     stored = next(row for row in repo.list_trade_events() if row["event_id"] == applied["repair_event_id"])
-    assert stored["fees"] == preview["fees"] == 20
+    assert stored["fees"] == preview["fees"] == "20"
     assert stored["raw_payload"]["fee_provenance"] == before[0]["raw_payload"]["fee_provenance"]
     for payload in (preview, stored):
         repaired = TradeEvent.from_dict(payload)
@@ -570,7 +567,7 @@ def test_trade_events_repair_rejects_second_repair(monkeypatch, tmp_path: Path, 
     assert len(repo.list_trade_events()) == 3
     lots = repo.list_position_lots()
     assert len(lots) == 1
-    assert lots[0]["fields"]["strike"] == 500.0
+    assert lots[0]["fields"]["strike"] == "500"
 
 
 def test_trade_events_repair_rejects_canonical_void_without_legacy_payload(
@@ -925,7 +922,6 @@ def test_trade_events_identity_repair_rejects_ineligible_state_without_writing(
     message: str,
 ) -> None:
     import src.interfaces.cli.trade_events as cli
-    from domain.domain.option_position_lots import OpenPositionCommand
     from src.application.ledger.interventions import persist_manual_order_identity_binding
 
     repo, event_id = _repo_with_open_event(tmp_path)
@@ -951,20 +947,18 @@ def test_trade_events_identity_repair_rejects_ineligible_state_without_writing(
     elif case == "duplicate":
         ledger_manual_trades.persist_manual_open_event(
             repo,
-            OpenPositionCommand(
-                broker="富途",
-                account="lx",
-                symbol="NVDA",
-                option_type="put",
-                side="short",
-                contracts=1,
-                currency="USD",
-                strike=100.0,
-                multiplier=100,
-                expiration_ymd="2026-04-29",
-                premium_per_share=2.0,
-                opened_at_ms=1100,
-            ),
+            broker="富途",
+            account="lx",
+            symbol="NVDA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=100.0,
+            multiplier=100,
+            expiration_ymd="2026-04-29",
+            premium_per_share=2.0,
+            opened_at_ms=1100,
         )
         other_event_id = next(
             item["event_id"] for item in repo.list_trade_events() if item["event_id"] != event_id
@@ -1082,30 +1076,27 @@ def test_trade_events_identity_repair_rejects_cas_conflict_without_writing(
 
 def test_trade_events_repair_close_record_id_updates_canonical_target_lot(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.trade_events as cli
-    from domain.domain.option_position_lots import OpenPositionCommand
 
     repo, _event_id = _repo_with_open_event(tmp_path)
     ledger_manual_trades.persist_manual_open_event(
         repo,
-        OpenPositionCommand(
-            broker="富途",
-            account="lx",
-            symbol="0700.HK",
-            option_type="put",
-            side="short",
-            contracts=1,
-            currency="HKD",
-            strike=480.0,
-            multiplier=100,
-            expiration_ymd="2026-04-29",
-            premium_per_share=4.0,
-            opened_at_ms=1100,
-        ),
+        broker="富途",
+        account="lx",
+        symbol="0700.HK",
+        option_type="put",
+        side="short",
+        contracts=1,
+        currency="HKD",
+        strike=480.0,
+        multiplier=100,
+        expiration_ymd="2026-04-29",
+        premium_per_share=4.0,
+        opened_at_ms=1100,
     )
     first_lot, second_lot = repo.list_position_lots()
     close_result = ledger_manual_trades.persist_manual_close_event(
         repo,
-        record_id=first_lot["record_id"],
+        lot_id=first_lot["record_id"],
         fields=first_lot["fields"],
         contracts_to_close=1,
         close_price=1.2,
@@ -1143,7 +1134,7 @@ def test_trade_events_repair_allows_open_when_downstream_close_was_canonical_voi
     lot = repo.list_position_lots()[0]
     close_result = ledger_manual_trades.persist_manual_close_event(
         repo,
-        record_id=lot["record_id"],
+        lot_id=lot["record_id"],
         fields=lot["fields"],
         contracts_to_close=1,
         close_price=1.2,
@@ -1163,7 +1154,7 @@ def test_trade_events_repair_allows_open_when_downstream_close_was_canonical_voi
     out = json.loads(capsys.readouterr().out)
     assert out["mode"] == "dry_run"
     assert out["ledger_preflight"]["status"] == "ok"
-    assert out["repair_event"]["contract_key"]["strike"] == 500.0
+    assert out["repair_event"]["contract_key"]["strike"] == "500"
     assert len(repo.list_trade_events()) == 3
 
 
@@ -1190,14 +1181,14 @@ def test_assignment_void_apply_rechecks_sale_created_after_preflight(
     import src.application.ledger.commands as ledger_commands
     import src.interfaces.cli.trade_events as cli
 
-    repo, assignment_event_id, stock_lot_id = _repo_with_assignment(tmp_path)
+    repo, assignment_event_id, lot_id = _repo_with_assignment(tmp_path)
     _bind_cli_repo(monkeypatch, cli, repo, tmp_path / "data.json")
     original_persist = ledger_commands.persist_manual_void_event
 
     def _persist_after_sale(*args, **kwargs):
         _append_assigned_stock_sale(
             repo,
-            stock_lot_id=stock_lot_id,
+            lot_id=lot_id,
             source_deal_id="sale-created-after-void-preflight",
         )
         state_after_sale = _durable_ledger_state(repo)
@@ -1224,14 +1215,14 @@ def test_assignment_repair_apply_rechecks_sale_created_after_preview(
     import src.application.ledger.interventions as interventions
     import src.interfaces.cli.trade_events as cli
 
-    repo, assignment_event_id, stock_lot_id = _repo_with_assignment(tmp_path)
+    repo, assignment_event_id, lot_id = _repo_with_assignment(tmp_path)
     _bind_cli_repo(monkeypatch, cli, repo, tmp_path / "data.json")
     original_transaction = interventions.with_sqlite_repo_transaction
 
     def _transaction_after_sale(repo_arg, fn, **kwargs):
         _append_assigned_stock_sale(
             repo,
-            stock_lot_id=stock_lot_id,
+            lot_id=lot_id,
             source_deal_id="sale-created-after-repair-preview",
         )
         state_after_sale = _durable_ledger_state(repo)
@@ -1260,10 +1251,10 @@ def test_assignment_void_and_repair_reject_historical_sale_with_stable_dependenc
 ) -> None:
     import src.interfaces.cli.trade_events as cli
 
-    repo, assignment_event_id, stock_lot_id = _repo_with_assignment(tmp_path)
+    repo, assignment_event_id, lot_id = _repo_with_assignment(tmp_path)
     sale = _append_assigned_stock_sale(
         repo,
-        stock_lot_id=stock_lot_id,
+        lot_id=lot_id,
         source_deal_id="historical-stock-sale",
     )
     sale_event_id = str(sale["stock_event_id"])
@@ -1277,7 +1268,7 @@ def test_assignment_void_and_repair_reject_historical_sale_with_stable_dependenc
             {
                 "event_id": sale_event_id,
                 "kind": "assigned_stock_sale",
-                "lot_id": stock_lot_id,
+                "lot_id": lot_id,
                 "status": "effective",
             }
         ],
@@ -1300,7 +1291,7 @@ def test_assignment_void_rejects_closed_covered_call_once_then_allows_legally_vo
     from domain.domain.ledger import ContractKey, TradeEvent
     from src.application.ledger.writer import persist_trade_event_objects_atomically
 
-    repo, assignment_event_id, stock_lot_id = _repo_with_assignment(tmp_path)
+    repo, assignment_event_id, lot_id = _repo_with_assignment(tmp_path)
     call_event_id = "historical-covered-call-open"
     persist_trade_event_objects_atomically(
         repo,
@@ -1314,17 +1305,17 @@ def test_assignment_void_rejects_closed_covered_call_once_then_allows_legally_vo
                     account="lx",
                     underlying_symbol="NVDA",
                     option_type="call",
-                    position_side="short",
                     strike=110,
                     expiration_ymd="2026-08-21",
-                ),
+                                ),
                 contracts=1,
                 price=2.0,
                 currency="USD",
                 source="test",
                 multiplier=100,
                 lot_id="historical-covered-call-lot",
-                raw_payload={"source_stock_lot_id": stock_lot_id},
+                # §9.2 step 3: the covered call is short, so it opens with a sell.
+                raw_payload={"side": "sell", "source_stock_lot_id": lot_id},
             )
         ],
     )
@@ -1333,7 +1324,7 @@ def test_assignment_void_rejects_closed_covered_call_once_then_allows_legally_vo
     )
     close_result = ledger_manual_trades.persist_manual_close_event(
         repo,
-        record_id=call_lot["record_id"],
+        lot_id=call_lot["record_id"],
         fields=call_lot["fields"],
         contracts_to_close=1,
         close_price=0.5,
@@ -1377,7 +1368,7 @@ def test_assignment_void_rejects_unresolved_explicit_stock_lot_reference(
     from domain.domain.ledger import ContractKey, TradeEvent
     from src.application.ledger.writer import persist_trade_event_objects_atomically
 
-    repo, assignment_event_id, stock_lot_id = _repo_with_assignment(tmp_path)
+    repo, assignment_event_id, lot_id = _repo_with_assignment(tmp_path)
     call_event_id = "unresolved-covered-call-open"
     persist_trade_event_objects_atomically(
         repo,
@@ -1391,10 +1382,9 @@ def test_assignment_void_rejects_unresolved_explicit_stock_lot_reference(
                     account="lx",
                     underlying_symbol="NVDA",
                     option_type="call",
-                    position_side="short",
                     strike=110,
                     expiration_ymd="2026-08-21",
-                ),
+                                ),
                 contracts=2,
                 price=2.0,
                 currency="USD",
@@ -1402,7 +1392,9 @@ def test_assignment_void_rejects_unresolved_explicit_stock_lot_reference(
                 multiplier=100,
                 lot_id="unresolved-covered-call-lot",
                 raw_payload={
-                    "strategy_snapshot": {"source_stock_lot_id": stock_lot_id}
+                    # §9.2 step 3: the covered call is short, so it opens with a sell.
+                    "side": "sell",
+                    "strategy_snapshot": {"source_stock_lot_id": lot_id}
                 },
             )
         ],
@@ -1418,7 +1410,7 @@ def test_assignment_void_rejects_unresolved_explicit_stock_lot_reference(
             {
                 "event_id": call_event_id,
                 "kind": "covered_call",
-                "lot_id": stock_lot_id,
+                "lot_id": lot_id,
                 "status": "unresolved",
             }
         ],
@@ -1437,7 +1429,7 @@ def test_assignment_void_rejects_ended_wheel_then_allows_legally_voided_wheel_hi
     from domain.domain.wheel import build_wheel_event
     from src.application.wheel import build_wheel_read_model, end_wheel_lifecycle
 
-    repo, assignment_event_id, stock_lot_id = _repo_with_assignment(
+    repo, assignment_event_id, lot_id = _repo_with_assignment(
         tmp_path,
         wheel_start_enabled=True,
     )
@@ -1445,7 +1437,7 @@ def test_assignment_void_rejects_ended_wheel_then_allows_legally_voided_wheel_hi
     ended = end_wheel_lifecycle(
         repo,
         account="lx",
-        stock_lot_id=stock_lot_id,
+        lot_id=lot_id,
         expected_batch_generation_hash=batch["batch_generation_hash"],
         request_id="end-wheel-before-intervention",
         actor="test",
@@ -1474,7 +1466,7 @@ def test_assignment_void_rejects_ended_wheel_then_allows_legally_voided_wheel_hi
         event = build_wheel_event(
             event_id=f"void-wheel-history-{index}",
             account="lx",
-            stock_lot_id=stock_lot_id,
+            lot_id=lot_id,
             event_type="wheel_event_voided",
             occurred_at_ms=4_000 + index,
             recorded_at_ms=4_000 + index,
@@ -1494,7 +1486,7 @@ def test_assignment_void_apply_preserves_ordinary_no_dependency_path(
 ) -> None:
     import src.interfaces.cli.trade_events as cli
 
-    repo, assignment_event_id, _stock_lot_id = _repo_with_assignment(tmp_path)
+    repo, assignment_event_id, _lot_id = _repo_with_assignment(tmp_path)
     _bind_cli_repo(monkeypatch, cli, repo, tmp_path / "data.json")
 
     assert cli.main(["void", assignment_event_id, "--dry-run", "--format", "json"]) == 0
@@ -1549,7 +1541,6 @@ def test_trade_events_replay_dry_run_reports_projection(monkeypatch, tmp_path: P
 
 def test_trade_events_replay_apply_ignores_deprecated_sqlite_path(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.trade_events as cli
-    from domain.domain.option_position_lots import OpenPositionCommand
 
     data_config = tmp_path / "data.json"
     data_config.write_text(
@@ -1559,20 +1550,18 @@ def test_trade_events_replay_apply_ignores_deprecated_sqlite_path(monkeypatch, t
     repo = ledger_bootstrap.load_option_positions_repo(data_config)
     ledger_manual_trades.persist_manual_open_event(
         repo,
-        OpenPositionCommand(
-            broker="富途",
-            account="lx",
-            symbol="0700.HK",
-            option_type="put",
-            side="short",
-            contracts=1,
-            currency="HKD",
-            strike=480.0,
-            multiplier=100,
-            expiration_ymd="2026-04-29",
-            premium_per_share=3.93,
-            opened_at_ms=1000,
-        ),
+        broker="富途",
+        account="lx",
+        symbol="0700.HK",
+        option_type="put",
+        side="short",
+        contracts=1,
+        currency="HKD",
+        strike=480.0,
+        multiplier=100,
+        expiration_ymd="2026-04-29",
+        premium_per_share=3.93,
+        opened_at_ms=1000,
     )
     monkeypatch.setattr(cli, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
 
@@ -1586,7 +1575,6 @@ def test_trade_events_replay_apply_ignores_deprecated_sqlite_path(monkeypatch, t
 
 def test_trade_events_replay_accepts_explicit_runtime_root(tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.trade_events as cli
-    from domain.domain.option_position_lots import OpenPositionCommand
 
     data_config = tmp_path / "release" / "portfolio.runtime.json"
     data_config.parent.mkdir(parents=True, exist_ok=True)
@@ -1597,20 +1585,18 @@ def test_trade_events_replay_accepts_explicit_runtime_root(tmp_path: Path, capsy
     )
     ledger_manual_trades.persist_manual_open_event(
         repo,
-        OpenPositionCommand(
-            broker="富途",
-            account="lx",
-            symbol="0700.HK",
-            option_type="put",
-            side="short",
-            contracts=1,
-            currency="HKD",
-            strike=480.0,
-            multiplier=100,
-            expiration_ymd="2026-04-29",
-            premium_per_share=3.93,
-            opened_at_ms=1000,
-        ),
+        broker="富途",
+        account="lx",
+        symbol="0700.HK",
+        option_type="put",
+        side="short",
+        contracts=1,
+        currency="HKD",
+        strike=480.0,
+        multiplier=100,
+        expiration_ymd="2026-04-29",
+        premium_per_share=3.93,
+        opened_at_ms=1000,
     )
 
     assert cli.main([
@@ -1632,7 +1618,6 @@ def test_trade_events_replay_accepts_explicit_runtime_root(tmp_path: Path, capsy
 
 def test_trade_events_repair_apply_outputs_explicit_runtime_root_store(tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.trade_events as cli
-    from domain.domain.option_position_lots import OpenPositionCommand
 
     data_config = tmp_path / "release" / "portfolio.runtime.json"
     data_config.parent.mkdir(parents=True, exist_ok=True)
@@ -1643,20 +1628,18 @@ def test_trade_events_repair_apply_outputs_explicit_runtime_root_store(tmp_path:
     )
     ledger_manual_trades.persist_manual_open_event(
         repo,
-        OpenPositionCommand(
-            broker="富途",
-            account="lx",
-            symbol="0700.HK",
-            option_type="put",
-            side="short",
-            contracts=1,
-            currency="HKD",
-            strike=480.0,
-            multiplier=100,
-            expiration_ymd="2026-04-29",
-            premium_per_share=3.93,
-            opened_at_ms=1000,
-        ),
+        broker="富途",
+        account="lx",
+        symbol="0700.HK",
+        option_type="put",
+        side="short",
+        contracts=1,
+        currency="HKD",
+        strike=480.0,
+        multiplier=100,
+        expiration_ymd="2026-04-29",
+        premium_per_share=3.93,
+        opened_at_ms=1000,
     )
     event_id = str(repo.list_trade_events()[0]["event_id"])
 
