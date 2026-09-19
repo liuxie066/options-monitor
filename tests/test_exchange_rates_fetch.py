@@ -7,21 +7,28 @@ from pathlib import Path
 import pytest
 
 
-def test_get_rates_or_fetch_latest_prefers_cache(tmp_path: Path) -> None:
-    from src.infrastructure.exchange_rates import get_exchange_rates_or_fetch_latest
+OPEND_SOURCE = "opend_account_funds_conversion"
 
-    cache_path = tmp_path / "rate_cache.json"
-    cache_path.write_text(
+
+def _write_cache(path: Path, rates: dict, source: str, *, timestamp: str | None = None) -> Path:
+    path.write_text(
         json.dumps(
             {
-                "rates": {"USDCNY": 7.2, "HKDCNY": 0.92},
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "source": "opend_account_funds_conversion",
+                "rates": rates,
+                "timestamp": timestamp or datetime.now(timezone.utc).isoformat(),
+                "source": source,
             },
             ensure_ascii=False,
         ),
         encoding="utf-8",
     )
+    return path
+
+
+def test_get_rates_or_fetch_latest_prefers_cache(tmp_path: Path) -> None:
+    from src.infrastructure.exchange_rates import get_exchange_rates_or_fetch_latest
+
+    cache_path = _write_cache(tmp_path / "rate_cache.json", {"USDCNY": 7.2, "HKDCNY": 0.92}, OPEND_SOURCE)
 
     out = get_exchange_rates_or_fetch_latest(
         cache_path=cache_path,
@@ -67,18 +74,11 @@ def test_get_rates_or_fetch_latest_falls_back_to_stale_cache(tmp_path: Path, mon
 
     cache_path = tmp_path / "state" / "rate_cache.json"
     cache_path.parent.mkdir(parents=True, exist_ok=True)
-    cache_path.write_text(
-        json.dumps(
-            {
-                "rates": {"USDCNY": 7.28, "HKDCNY": 0.94},
-                "timestamp": (
-                    datetime.now(timezone.utc) - timedelta(hours=25)
-                ).isoformat(),
-                "source": "tencent_quote",
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
+    cache_path = _write_cache(
+        cache_path,
+        {"USDCNY": 7.28, "HKDCNY": 0.94},
+        "tencent_quote",
+        timestamp=(datetime.now(timezone.utc) - timedelta(hours=25)).isoformat(),
     )
     messages: list[str] = []
     monkeypatch.setattr(exchange_rates, "fetch_market_exchange_rates", lambda: None)
@@ -129,18 +129,7 @@ def test_exchange_rate_observation_without_timestamp_is_stale() -> None:
 def test_load_exchange_rate_info_can_read_cache_without_fetch(tmp_path: Path) -> None:
     from src.infrastructure.exchange_rates import load_exchange_rate_info
 
-    cache_path = tmp_path / "rate_cache.json"
-    cache_path.write_text(
-        json.dumps(
-            {
-                "rates": {"USDCNY": 7.21},
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "source": "opend_account_funds_conversion",
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
+    cache_path = _write_cache(tmp_path / "rate_cache.json", {"USDCNY": 7.21}, OPEND_SOURCE)
 
     out = load_exchange_rate_info(cache_path=cache_path, fetch_latest_on_miss=False)
 
@@ -152,17 +141,7 @@ def test_load_exchange_rate_info_can_read_cache_without_fetch(tmp_path: Path) ->
 def test_exchange_rate_cache_rejects_non_opend_source(tmp_path: Path) -> None:
     from src.infrastructure.exchange_rates import get_cached_exchange_rates
 
-    cache_path = tmp_path / "rate_cache.json"
-    cache_path.write_text(
-        json.dumps(
-            {
-                "rates": {"USDCNY": 7.21, "HKDCNY": 0.92},
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "source": "legacy_provider",
-            }
-        ),
-        encoding="utf-8",
-    )
+    cache_path = _write_cache(tmp_path / "rate_cache.json", {"USDCNY": 7.21, "HKDCNY": 0.92}, "legacy_provider")
 
     assert (
         get_cached_exchange_rates(cache_path=cache_path, max_age_hours=24)
@@ -186,7 +165,7 @@ def test_exchange_rate_boundaries_reject_invalid_present_rate(
     payload = {
         "rates": {"USDCNY": invalid_rate},
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "source": "opend_account_funds_conversion",
+        "source": OPEND_SOURCE,
     }
     cache_path = tmp_path / "rate_cache.json"
     cache_path.write_text(json.dumps(payload), encoding="utf-8")

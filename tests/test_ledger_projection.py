@@ -58,6 +58,30 @@ def _event(
     )
 
 
+def _adjust_event(
+    *,
+    event_id: str,
+    contract_key: ContractKey,
+    target_lot_id: str,
+    patch: dict,
+    event_time_ms: int = 2000,
+    currency: str = "HKD",
+) -> TradeEvent:
+    return TradeEvent(
+        event_id=event_id,
+        event_type="adjust",
+        event_time_ms=event_time_ms,
+        contract_key=contract_key,
+        contracts=0,
+        price=0.0,
+        currency=currency,
+        source="test",
+        multiplier=100,
+        target_lot_id=target_lot_id,
+        raw_payload={"patch": patch},
+    )
+
+
 def test_projection_closes_same_expiry_0700_lots_without_crossing_later_expiry() -> None:
     may_call_510 = _key(option_type="call", strike=510.0, expiration_ymd="2026-05-28")
     may_put_450 = _key(option_type="put", strike=450.0, expiration_ymd="2026-05-28")
@@ -68,22 +92,8 @@ def test_projection_closes_same_expiry_0700_lots_without_crossing_later_expiry()
             _event(event_id="open-call-may", event_type="open", contract_key=may_call_510, contracts=2, event_time_ms=1000, lot_id="lot_call_may"),
             _event(event_id="open-put-may", event_type="open", contract_key=may_put_450, contracts=6, event_time_ms=2000, lot_id="lot_put_may"),
             _event(event_id="open-put-jun", event_type="open", contract_key=jun_put_450, contracts=3, event_time_ms=3000, lot_id="lot_put_jun"),
-            _event(
-                event_id="expire-call-may",
-                event_type="expire_close",
-                contract_key=may_call_510,
-                contracts=2,
-                event_time_ms=4000,
-                target_lot_id="lot_call_may",
-            ),
-            _event(
-                event_id="expire-put-may",
-                event_type="expire_close",
-                contract_key=may_put_450,
-                contracts=6,
-                event_time_ms=5000,
-                target_lot_id="lot_put_may",
-            ),
+            _event(event_id="expire-call-may", event_type="expire_close", contract_key=may_call_510, contracts=2, event_time_ms=4000, target_lot_id="lot_call_may"),
+            _event(event_id="expire-put-may", event_type="expire_close", contract_key=may_put_450, contracts=6, event_time_ms=5000, target_lot_id="lot_put_may"),
         ]
     )
 
@@ -190,14 +200,7 @@ def test_projection_ignores_invalid_void_when_deciding_voided_events() -> None:
         [
             _event(event_id="open-a", event_type="open", contract_key=key, contracts=1, event_time_ms=1000, lot_id="lot_a"),
             _event(event_id="open-b", event_type="open", contract_key=key, contracts=1, event_time_ms=2000, lot_id="lot_b"),
-            _event(
-                event_id="open-a",
-                event_type="void",
-                contract_key=key,
-                contracts=0,
-                event_time_ms=3000,
-                target_event_id="open-b",
-            ),
+            _event(event_id="open-a", event_type="void", contract_key=key, contracts=0, event_time_ms=3000, target_event_id="open-b"),
         ]
     )
 
@@ -210,38 +213,10 @@ def test_projection_rejects_missing_self_and_control_event_targets() -> None:
 
     result = project_trade_events(
         [
-            _event(
-                event_id="open-a",
-                event_type="open",
-                contract_key=key,
-                contracts=1,
-                event_time_ms=1000,
-                lot_id="lot_a",
-            ),
-            _event(
-                event_id="void-missing",
-                event_type="void",
-                contract_key=key,
-                contracts=0,
-                event_time_ms=2000,
-                target_event_id="missing",
-            ),
-            _event(
-                event_id="void-self",
-                event_type="void",
-                contract_key=key,
-                contracts=0,
-                event_time_ms=3000,
-                target_event_id="void-self",
-            ),
-            _event(
-                event_id="void-control",
-                event_type="void",
-                contract_key=key,
-                contracts=0,
-                event_time_ms=4000,
-                target_event_id="void-missing",
-            ),
+            _event(event_id="open-a", event_type="open", contract_key=key, contracts=1, event_time_ms=1000, lot_id="lot_a"),
+            _event(event_id="void-missing", event_type="void", contract_key=key, contracts=0, event_time_ms=2000, target_event_id="missing"),
+            _event(event_id="void-self", event_type="void", contract_key=key, contracts=0, event_time_ms=3000, target_event_id="void-self"),
+            _event(event_id="void-control", event_type="void", contract_key=key, contracts=0, event_time_ms=4000, target_event_id="void-missing"),
         ]
     )
 
@@ -273,38 +248,23 @@ def test_projection_applies_adjust_patch_to_target_lot_state() -> None:
 
     result = project_trade_events(
         [
-            _event(
-                event_id="open-nvda",
-                event_type="open",
-                contract_key=current_key,
-                contracts=1,
-                price=2.5,
-                event_time_ms=1000,
-                lot_id="lot_nvda",
-            ),
-            TradeEvent(
+            _event(event_id="open-nvda", event_type="open", contract_key=current_key, contracts=1, price=2.5, event_time_ms=1000, lot_id="lot_nvda"),
+            _adjust_event(
                 event_id="adjust-nvda",
-                event_type="adjust",
-                event_time_ms=3000,
                 contract_key=current_key,
-                contracts=0,
-                price=0.0,
-                currency="USD",
-                source="test",
-                multiplier=100,
                 target_lot_id="lot_nvda",
-                raw_payload={
-                    "patch": {
-                        "contracts": 2,
-                        "contracts_open": 2,
-                        "contracts_closed": 0,
-                        "strike": 105.0,
-                        "expiration": adjusted_exp_ms,
-                        "premium": 3.1,
-                        "currency": "USD",
-                        "opened_at": 2000,
-                        "last_action_at": 3000,
-                    }
+                event_time_ms=3000,
+                currency="USD",
+                patch={
+                    "contracts": 2,
+                    "contracts_open": 2,
+                    "contracts_closed": 0,
+                    "strike": 105.0,
+                    "expiration": adjusted_exp_ms,
+                    "premium": 3.1,
+                    "currency": "USD",
+                    "opened_at": 2000,
+                    "last_action_at": 3000,
                 },
             ),
         ]
@@ -330,26 +290,12 @@ def test_projection_rejects_adjust_patch_with_unsupported_field() -> None:
 
     result = project_trade_events(
         [
-            _event(
-                event_id="open-a",
-                event_type="open",
-                contract_key=key,
-                contracts=1,
-                event_time_ms=1000,
-                lot_id="lot_a",
-            ),
-            TradeEvent(
+            _event(event_id="open-a", event_type="open", contract_key=key, contracts=1, event_time_ms=1000, lot_id="lot_a"),
+            _adjust_event(
                 event_id="adjust-a",
-                event_type="adjust",
-                event_time_ms=2000,
                 contract_key=key,
-                contracts=0,
-                price=0.0,
-                currency="HKD",
-                source="test",
-                multiplier=100,
                 target_lot_id="lot_a",
-                raw_payload={"patch": {"contracts": 2, "free_form_field": "bad"}},
+                patch={"contracts": 2, "free_form_field": "bad"},
             ),
         ]
     )
@@ -371,32 +317,16 @@ def test_projection_applies_legacy_adjust_patch_carrying_retired_position_id() -
     key = _key()
     result = project_trade_events(
         [
-            _event(
-                event_id="open-a",
-                event_type="open",
-                contract_key=key,
-                contracts=1,
-                event_time_ms=1000,
-                lot_id="lot_a",
-            ),
-            TradeEvent(
+            _event(event_id="open-a", event_type="open", contract_key=key, contracts=1, event_time_ms=1000, lot_id="lot_a"),
+            # Exactly what a pre-§7.1 writer stored: the real fields plus the
+            # then-current ``position_id`` alongside them.
+            _adjust_event(
                 event_id="adjust-a",
-                event_type="adjust",
-                event_time_ms=2000,
                 contract_key=key,
-                contracts=0,
-                price=0.0,
-                currency="HKD",
-                source="test",
-                multiplier=100,
                 target_lot_id="lot_a",
-                # Exactly what a pre-§7.1 writer stored: the real fields plus the
-                # then-current ``position_id`` alongside them.
-                raw_payload={
-                    "patch": {
-                        "contracts": 2,
-                        "position_id": "futu|sy|0700.HK|2026-05-28|450P|short",
-                    }
+                patch={
+                    "contracts": 2,
+                    "position_id": "futu|sy|0700.HK|2026-05-28|450P|short",
                 },
             ),
         ]
@@ -409,31 +339,15 @@ def test_projection_applies_legacy_adjust_patch_carrying_retired_position_id() -
     # decoder did not become a no-op.
     unknown = project_trade_events(
         [
-            _event(
-                event_id="open-b",
-                event_type="open",
-                contract_key=key,
-                contracts=1,
-                event_time_ms=1000,
-                lot_id="lot_b",
-            ),
-            TradeEvent(
+            _event(event_id="open-b", event_type="open", contract_key=key, contracts=1, event_time_ms=1000, lot_id="lot_b"),
+            _adjust_event(
                 event_id="adjust-b",
-                event_type="adjust",
-                event_time_ms=2000,
                 contract_key=key,
-                contracts=0,
-                price=0.0,
-                currency="HKD",
-                source="test",
-                multiplier=100,
                 target_lot_id="lot_b",
-                raw_payload={
-                    "patch": {
-                        "contracts": 2,
-                        "position_id": "retired",
-                        "free_form_field": "bad",
-                    }
+                patch={
+                    "contracts": 2,
+                    "position_id": "retired",
+                    "free_form_field": "bad",
                 },
             ),
         ]
