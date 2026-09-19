@@ -6,6 +6,21 @@ import pytest
 
 from tests.notification_format_assertions import assert_mobile_flat_markdown
 
+from domain.domain.daily_decision_brief import build_daily_brief_candidate_identity
+from src.application.daily_decision_brief_renderer import (
+    build_daily_brief_user_view,
+    render_candidate_alert,
+    render_candidate_alert_card_markdown,
+    render_daily_brief_lifecycle,
+    render_delta_brief,
+    render_fixed_failure,
+    render_fixed_report,
+    render_fixed_report_card_markdown,
+    render_full_brief,
+    render_query_brief,
+    resolve_daily_brief_render_limits,
+)
+
 
 def _candidate(
     *,
@@ -176,6 +191,66 @@ def _scheduled_context() -> dict:
     }
 
 
+def _card_brief() -> dict:
+    """Brief shape shared by the fixed-report card tests (no capacity blocks)."""
+    brief = _brief()
+    for item in brief["candidates"]["sell_put"]:
+        item.pop("capacity", None)
+    return brief
+
+
+def _strategy_partial_data_gap(symbol: str, **overrides: object) -> dict:
+    """``data_gaps`` entry for a strategy whose candidate evidence is partial."""
+    row = {
+        "scope": "strategy",
+        "symbol": symbol,
+        "strategy_family": "sell_put",
+        "reason": "opening_candidate_strategy_partial_data",
+        "severity": "warning",
+        "actionable": False,
+    }
+    row.update(overrides)
+    return row
+
+
+def _nvda_candidate_action(**overrides: object) -> dict:
+    """Delta/event ``action`` literal for the NVDA put candidate."""
+    row = {
+        "action_id": "action-nvda-put",
+        "action_type": "open_candidate",
+        "strategy_family": "sell_put",
+        "symbol": "NVDA",
+        "option_type": "put",
+        "expiration": "2026-08-21",
+        "strike": 100,
+    }
+    row.update(overrides)
+    return row
+
+
+def _msft_candidate_action(**overrides: object) -> dict:
+    """Delta ``action`` literal for the MSFT put candidate."""
+    row = {
+        "action_type": "open_candidate",
+        "strategy_family": "sell_put",
+        "symbol": "MSFT",
+        "expiration": "2026-08-21",
+        "strike": 400,
+        "option_type": "put",
+    }
+    row.update(overrides)
+    return row
+
+
+def _render_card(brief: dict, **kwargs: object) -> str:
+    """Fixed-report card render against the shared scheduled context."""
+    return render_fixed_report_card_markdown(
+        brief,
+        context=_scheduled_context(),
+        **kwargs,
+    )
+
+
 def _assert_no_internal_leak(value: object) -> None:
     text = str(value)
     for forbidden in (
@@ -202,11 +277,6 @@ def _assert_no_internal_leak(value: object) -> None:
 
 
 def test_full_renderer_is_compact_human_readable_and_allowlisted() -> None:
-    from src.application.daily_decision_brief_renderer import (
-        build_daily_brief_user_view,
-        render_daily_brief_lifecycle,
-    )
-
     brief = _brief()
     lifecycle = {"brief": brief, "diff": {}, "delivery_kind": "full"}
     view = build_daily_brief_user_view(
@@ -242,8 +312,6 @@ def test_full_renderer_is_compact_human_readable_and_allowlisted() -> None:
 
 
 def test_fixed_report_renders_wheel_after_combo_yield() -> None:
-    from src.application.daily_decision_brief_renderer import render_fixed_report
-
     brief = _brief()
     brief["wheel_batches"] = [
         {
@@ -272,8 +340,6 @@ def test_fixed_report_renders_wheel_after_combo_yield() -> None:
 
 
 def test_fixed_report_renders_wheel_put_branch() -> None:
-    from src.application.daily_decision_brief_renderer import render_fixed_report
-
     brief = _brief()
     brief["wheel_batches"] = [
         {
@@ -303,12 +369,6 @@ def test_fixed_report_renders_wheel_put_branch() -> None:
 
 
 def test_candidate_alert_renders_only_selected_wheel_branch() -> None:
-    from domain.domain.daily_decision_brief import build_daily_brief_candidate_identity
-    from src.application.daily_decision_brief_renderer import (
-        render_candidate_alert,
-        render_candidate_alert_card_markdown,
-    )
-
     brief = _brief()
     brief["wheel_batches"] = [
         {
@@ -366,11 +426,6 @@ def test_candidate_alert_renders_only_selected_wheel_branch() -> None:
 
 
 def test_success_empty_warning_is_embedded_without_failure_wording() -> None:
-    from src.application.daily_decision_brief_renderer import (
-        build_daily_brief_user_view,
-        render_daily_brief_lifecycle,
-    )
-
     brief = _brief()
     brief["status"] = "degraded"
     brief["data_gaps"].append(
@@ -407,10 +462,6 @@ def test_success_empty_warning_is_embedded_without_failure_wording() -> None:
 
 
 def test_status_projection_mismatch_renders_only_a_local_reminder() -> None:
-    from src.application.daily_decision_brief_renderer import (
-        render_daily_brief_lifecycle,
-    )
-
     brief = _brief()
     brief["status"] = "degraded"
     brief["data_gaps"].append(
@@ -437,8 +488,6 @@ def test_status_projection_mismatch_renders_only_a_local_reminder() -> None:
 
 
 def test_hk_actionable_close_renders_price_locked_profit_and_remaining_yield() -> None:
-    from src.application.daily_decision_brief_renderer import render_full_brief
-
     brief = _brief()
     brief["market"] = "HK"
     brief["positions"] = [
@@ -482,8 +531,6 @@ def test_hk_actionable_close_renders_price_locked_profit_and_remaining_yield() -
 
 
 def test_strict_close_uses_one_action_label_for_every_close_state() -> None:
-    from src.application.daily_decision_brief_renderer import render_full_brief
-
     brief = _brief()
     brief["positions"] = [
         {
@@ -508,8 +555,6 @@ def test_strict_close_uses_one_action_label_for_every_close_state() -> None:
 
 
 def test_close_details_use_signed_pnl_and_degrade_without_inventing_values() -> None:
-    from src.application.daily_decision_brief_renderer import render_full_brief
-
     brief = _brief()
     brief["market"] = "HK"
     brief["positions"] = [
@@ -574,8 +619,6 @@ def test_close_details_use_signed_pnl_and_degrade_without_inventing_values() -> 
 
 
 def test_strict_close_position_is_independent_from_new_combo_candidates() -> None:
-    from src.application.daily_decision_brief_renderer import render_full_brief
-
     brief = _brief()
     brief["candidates"]["combo_yield"] = []
     message = render_full_brief(brief)
@@ -588,8 +631,6 @@ def test_strict_close_position_is_independent_from_new_combo_candidates() -> Non
 
 
 def test_blocked_renderer_is_short_safe_and_has_no_candidate_snapshot() -> None:
-    from src.application.daily_decision_brief_renderer import render_daily_brief_lifecycle
-
     brief = _brief()
     brief["actionability"] = "blocked"
     brief["status"] = "blocked"
@@ -597,7 +638,6 @@ def test_blocked_renderer_is_short_safe_and_has_no_candidate_snapshot() -> None:
         "symbol": "UNSAFE", "recommended_contracts": 1,
         "reason_codes": ["multiplier_unproven"],
     }]
-    from src.application.daily_decision_brief_renderer import render_fixed_report_card_markdown
     assert "UNSAFE" not in render_fixed_report_card_markdown(brief)
     message = render_daily_brief_lifecycle(
         {"brief": brief, "diff": {"changes": [{"change_type": "blocked"}]}, "delivery_kind": "full"},
@@ -616,8 +656,6 @@ def test_blocked_renderer_is_short_safe_and_has_no_candidate_snapshot() -> None:
 
 
 def test_delta_and_recovery_add_change_banner_but_keep_current_snapshot() -> None:
-    from src.application.daily_decision_brief_renderer import render_daily_brief_lifecycle
-
     brief = _brief()
     delta = render_daily_brief_lifecycle(
         {
@@ -627,28 +665,13 @@ def test_delta_and_recovery_add_change_banner_but_keep_current_snapshot() -> Non
                 "changes": [
                     {
                         "change_type": "candidate_added",
-                        "action": {
-                            "action_type": "open_candidate",
-                            "strategy_family": "sell_put",
-                            "symbol": "MSFT",
-                            "expiration": "2026-08-21",
-                            "strike": 400,
-                            "option_type": "put",
-                            "position_lot_id": "secret-in-diff",
-                        },
+                        "action": _msft_candidate_action(position_lot_id="secret-in-diff"),
                     },
                     {
                         "change_type": "candidate_capacity_changed",
                         "before": 1,
                         "after": 2,
-                        "action": {
-                            "action_type": "open_candidate",
-                            "strategy_family": "sell_put",
-                            "symbol": "MSFT",
-                            "expiration": "2026-08-21",
-                            "strike": 400,
-                            "option_type": "put",
-                        },
+                        "action": _msft_candidate_action(),
                     },
                 ]
             },
@@ -675,8 +698,6 @@ def test_delta_and_recovery_add_change_banner_but_keep_current_snapshot() -> Non
 
 
 def test_old_candidate_diff_vocabulary_is_not_mislabeled_as_position_change() -> None:
-    from src.application.daily_decision_brief_renderer import render_daily_brief_lifecycle
-
     message = render_daily_brief_lifecycle(
         {
             "brief": _brief(),
@@ -708,8 +729,6 @@ def test_old_candidate_diff_vocabulary_is_not_mislabeled_as_position_change() ->
 
 
 def test_position_statuses_use_safe_allowlisted_fallbacks() -> None:
-    from src.application.daily_decision_brief_renderer import render_full_brief
-
     brief = _brief()
     brief["positions"] = [
         {"symbol": "A", "strategy_family": "sell_put", "quote_status": "coverage_missing"},
@@ -737,8 +756,6 @@ def test_position_statuses_use_safe_allowlisted_fallbacks() -> None:
 
 
 def test_malformed_fields_and_unknown_enums_do_not_echo_raw_values() -> None:
-    from src.application.daily_decision_brief_renderer import render_full_brief
-
     brief = _brief()
     brief["market"] = "FUTURE_MARKET"
     brief["status"] = "FUTURE_STATE"
@@ -777,8 +794,6 @@ def test_malformed_fields_and_unknown_enums_do_not_echo_raw_values() -> None:
 
 
 def test_manual_trigger_omits_scheduled_batch_and_planning_is_plain_language() -> None:
-    from src.application.daily_decision_brief_renderer import render_full_brief
-
     brief = _brief()
     brief["actionability"] = "planning_only"
     message = render_full_brief(
@@ -796,8 +811,6 @@ def test_manual_trigger_omits_scheduled_batch_and_planning_is_plain_language() -
 
 
 def test_renderer_honors_section_limits() -> None:
-    from src.application.daily_decision_brief_renderer import render_full_brief
-
     brief = _brief()
     brief["positions"] = [
         {
@@ -847,8 +860,6 @@ def test_renderer_honors_section_limits() -> None:
 
 
 def test_material_candidates_break_soft_limit_and_keep_funds_in_sync() -> None:
-    from src.application.daily_decision_brief_renderer import render_delta_brief
-
     brief = _brief()
     brief["positions"] = []
     brief["candidates"] = {
@@ -899,8 +910,6 @@ def test_material_candidates_break_soft_limit_and_keep_funds_in_sync() -> None:
 
 
 def test_invalidated_candidate_banner_keeps_removed_contract_identifiable() -> None:
-    from src.application.daily_decision_brief_renderer import render_delta_brief
-
     brief = _brief()
     brief["positions"] = []
     brief["candidates"] = {"sell_put": [], "covered_call": [], "combo_yield": []}
@@ -928,8 +937,6 @@ def test_invalidated_candidate_banner_keeps_removed_contract_identifiable() -> N
 
 
 def test_material_position_uses_exact_lot_before_same_contract_siblings() -> None:
-    from src.application.daily_decision_brief_renderer import render_delta_brief
-
     brief = _brief()
     brief["candidates"] = {"sell_put": [], "covered_call": [], "combo_yield": []}
     brief["positions"] = [
@@ -979,8 +986,6 @@ def test_material_position_uses_exact_lot_before_same_contract_siblings() -> Non
 
 
 def test_renderer_honors_total_length_bound() -> None:
-    from src.application.daily_decision_brief_renderer import render_full_brief
-
     brief = _brief()
     brief["candidates"]["sell_put"] = [
         _candidate(
@@ -1003,19 +1008,10 @@ def test_renderer_honors_total_length_bound() -> None:
 
 
 def test_no_delivery_kind_renders_empty_message() -> None:
-    from src.application.daily_decision_brief_renderer import render_daily_brief_lifecycle
-
     assert render_daily_brief_lifecycle({"brief": deepcopy(_brief()), "delivery_kind": "none"}) == ""
 
 
 def test_notification_and_query_projections_use_plain_language_and_account_funds() -> None:
-    from src.application.daily_decision_brief_renderer import (
-        render_candidate_alert,
-        render_fixed_failure,
-        render_fixed_report,
-        render_query_brief,
-    )
-
     brief = deepcopy(_brief())
     brief["funds"] = {
         "cash_total_by_currency": {"USD": 180_000.0},
@@ -1108,8 +1104,6 @@ def test_notification_and_query_projections_use_plain_language_and_account_funds
 
 
 def test_funds_fall_back_to_per_currency_lines_when_cny_unavailable() -> None:
-    from src.application.daily_decision_brief_renderer import render_fixed_report
-
     brief = deepcopy(_brief())
     brief["funds"] = {
         "cash_total_by_currency": {"HKD": 480_000.0, "USD": 18_000.0},
@@ -1127,8 +1121,6 @@ def test_funds_fall_back_to_per_currency_lines_when_cny_unavailable() -> None:
 
 
 def test_funds_unknown_are_explicit_and_never_rendered_as_zero() -> None:
-    from src.application.daily_decision_brief_renderer import render_fixed_report
-
     brief = deepcopy(_brief())
     brief["funds"] = {
         "cash_total_by_currency": {},
@@ -1145,8 +1137,6 @@ def test_funds_unknown_are_explicit_and_never_rendered_as_zero() -> None:
 
 
 def test_render_limit_normalization_remains_bounded() -> None:
-    from src.application.daily_decision_brief_renderer import resolve_daily_brief_render_limits
-
     assert resolve_daily_brief_render_limits(
         {
             "max_actions_per_priority": 0,
@@ -1200,8 +1190,6 @@ def _render_event_risk(
 
 
 def test_candidate_event_lines_render_decision_semantics_without_raw_enums() -> None:
-    from src.application.daily_decision_brief_renderer import render_full_brief
-
     brief = _brief()
     brief["market_trading_date"] = "2026-07-21"
     brief["candidates"]["sell_put"][0]["event_risk"] = _render_event_risk(
@@ -1220,8 +1208,6 @@ def test_candidate_event_lines_render_decision_semantics_without_raw_enums() -> 
 
 
 def test_event_date_change_summary_names_candidate_and_expiry_relation() -> None:
-    from src.application.daily_decision_brief_renderer import render_delta_brief
-
     brief = _brief()
     brief["market_trading_date"] = "2026-07-21"
     brief["candidates"]["sell_put"][1]["event_risk"] = _render_event_risk(
@@ -1229,16 +1215,7 @@ def test_event_date_change_summary_names_candidate_and_expiry_relation() -> None
     )
     before = _render_event_risk("confirmed_event", date="2026-08-25", relation="after_expiration")
     after = _render_event_risk("confirmed_event", date="2026-08-05")
-    action = {
-        "action_id": "action-nvda-put",
-        "action_type": "open_candidate",
-        "strategy_family": "sell_put",
-        "symbol": "NVDA",
-        "option_type": "put",
-        "expiration": "2026-08-21",
-        "strike": 100,
-        "contract_symbol": "NVDA260821P00100000",
-    }
+    action = _nvda_candidate_action(contract_symbol="NVDA260821P00100000")
 
     message = render_delta_brief(
         brief,
@@ -1266,17 +1243,7 @@ def test_event_date_change_summary_names_candidate_and_expiry_relation() -> None
 
 
 def test_event_evidence_degradation_summary_does_not_claim_event_removal() -> None:
-    from src.application.daily_decision_brief_renderer import render_delta_brief
-
-    action = {
-        "action_id": "action-nvda-put",
-        "action_type": "open_candidate",
-        "strategy_family": "sell_put",
-        "symbol": "NVDA",
-        "option_type": "put",
-        "expiration": "2026-08-21",
-        "strike": 100,
-    }
+    action = _nvda_candidate_action()
     message = render_delta_brief(
         _brief(),
         {
@@ -1296,17 +1263,7 @@ def test_event_evidence_degradation_summary_does_not_claim_event_removal() -> No
 
 
 def test_data_recovery_keeps_candidate_event_change_summary() -> None:
-    from src.application.daily_decision_brief_renderer import render_delta_brief
-
-    action = {
-        "action_id": "action-nvda-put",
-        "action_type": "open_candidate",
-        "strategy_family": "sell_put",
-        "symbol": "NVDA",
-        "option_type": "put",
-        "expiration": "2026-08-21",
-        "strike": 100,
-    }
+    action = _nvda_candidate_action()
     message = render_delta_brief(
         _brief(),
         {
@@ -1327,11 +1284,6 @@ def test_data_recovery_keeps_candidate_event_change_summary() -> None:
 
 
 def test_retired_ai_overlay_is_ignored_by_fixed_report_and_card() -> None:
-    from src.application.daily_decision_brief_renderer import (
-        render_fixed_report,
-        render_fixed_report_card_markdown,
-    )
-
     brief = _brief()
     brief["candidates"]["sell_put"][1]["candidate_id"] = "put-rank2"
     rank_four = _candidate(
@@ -1362,11 +1314,7 @@ def test_retired_ai_overlay_is_ignored_by_fixed_report_and_card() -> None:
         limits={"max_candidates_per_strategy": 1},
         context=_scheduled_context(),
     )
-    card_message = render_fixed_report_card_markdown(
-        brief,
-        limits={"max_candidates_per_strategy": 1},
-        context=_scheduled_context(),
-    )
+    card_message = _render_card(brief, limits={"max_candidates_per_strategy": 1})
 
     for message in (text_message, card_message):
         assert "AI建议" not in message
@@ -1376,32 +1324,13 @@ def test_retired_ai_overlay_is_ignored_by_fixed_report_and_card() -> None:
 
 
 def test_fixed_report_card_compacts_status_and_hides_non_error_gaps() -> None:
-    from src.application.daily_decision_brief_renderer import (
-        render_fixed_report_card_markdown,
-    )
-
-    brief = _brief()
+    brief = _card_brief()
     brief["candidates"]["covered_call"] = []
-    for item in brief["candidates"]["sell_put"]:
-        item.pop("capacity", None)
     brief["data_gaps"].extend(
-        [
-            {
-                "scope": "strategy",
-                "symbol": symbol,
-                "strategy_family": "sell_put",
-                "reason": "opening_candidate_strategy_partial_data",
-                "severity": "warning",
-                "actionable": False,
-            }
-            for symbol in ("GOOGL", "NVDA")
-        ]
+        [_strategy_partial_data_gap(symbol) for symbol in ("GOOGL", "NVDA")]
     )
 
-    message = render_fixed_report_card_markdown(
-        brief,
-        context=_scheduled_context(),
-    )
+    message = _render_card(brief)
 
     assert "AI｜" not in message
     assert "AI建议" not in message
@@ -1416,23 +1345,10 @@ def test_fixed_report_card_compacts_status_and_hides_non_error_gaps() -> None:
 
 
 def test_fixed_report_card_reminds_only_for_confirmed_source_errors() -> None:
-    from src.application.daily_decision_brief_renderer import (
-        render_fixed_report_card_markdown,
-    )
-
-    brief = _brief()
-    for item in brief["candidates"]["sell_put"]:
-        item.pop("capacity", None)
+    brief = _card_brief()
     brief["data_gaps"].extend(
         [
-            {
-                "scope": "strategy",
-                "symbol": "GOOGL",
-                "strategy_family": "sell_put",
-                "reason": "opening_candidate_strategy_partial_data",
-                "severity": "warning",
-                "actionable": False,
-            },
+            _strategy_partial_data_gap("GOOGL"),
             {
                 "scope": "symbol",
                 "symbol": "GOOGL",
@@ -1448,10 +1364,7 @@ def test_fixed_report_card_reminds_only_for_confirmed_source_errors() -> None:
         ]
     )
 
-    message = render_fixed_report_card_markdown(
-        brief,
-        context=_scheduled_context(),
-    )
+    message = _render_card(brief)
 
     assert message.count("提醒｜") == 1
     assert "提醒｜NVDA：行情获取失败，本轮候选结果不完整" in message
@@ -1461,39 +1374,15 @@ def test_fixed_report_card_reminds_only_for_confirmed_source_errors() -> None:
 
 
 def test_fixed_report_card_keeps_specific_hard_evidence_gap() -> None:
-    from src.application.daily_decision_brief_renderer import (
-        render_fixed_report_card_markdown,
-    )
-
-    brief = _brief()
-    for item in brief["candidates"]["sell_put"]:
-        item.pop("capacity", None)
+    brief = _card_brief()
     brief["data_gaps"].extend(
         [
-            {
-                "scope": "strategy",
-                "symbol": "GOOGL",
-                "strategy_family": "sell_put",
-                "reason": "opening_candidate_strategy_partial_data",
-                "reason_code": "term_matched_rv_unavailable",
-                "severity": "warning",
-                "actionable": False,
-            },
-            {
-                "scope": "strategy",
-                "symbol": "NVDA",
-                "strategy_family": "sell_put",
-                "reason": "opening_candidate_strategy_partial_data",
-                "severity": "warning",
-                "actionable": False,
-            },
+            _strategy_partial_data_gap("GOOGL", reason_code="term_matched_rv_unavailable"),
+            _strategy_partial_data_gap("NVDA"),
         ]
     )
 
-    message = render_fixed_report_card_markdown(
-        brief,
-        context=_scheduled_context(),
-    )
+    message = _render_card(brief)
 
     assert message.count("提醒｜") == 1
     assert (
@@ -1504,13 +1393,6 @@ def test_fixed_report_card_keeps_specific_hard_evidence_gap() -> None:
 
 
 def test_candidate_alert_ignores_retired_ai_candidate_selection() -> None:
-    from domain.domain.daily_decision_brief import (
-        build_daily_brief_candidate_identity,
-    )
-    from src.application.daily_decision_brief_renderer import (
-        render_candidate_alert_card_markdown,
-    )
-
     brief = _brief()
     new_candidate = brief["candidates"]["sell_put"][0]
     old_candidate = brief["candidates"]["sell_put"][1]
@@ -1565,8 +1447,6 @@ def test_candidate_alert_ignores_retired_ai_candidate_selection() -> None:
 
 
 def test_fixed_report_card_renders_candidate_paragraphs_and_actionable_position_table() -> None:
-    from src.application.daily_decision_brief_renderer import render_fixed_report_card_markdown
-
     brief = _brief()
     brief["positions"][0].update(
         {
@@ -1604,10 +1484,7 @@ def test_fixed_report_card_renders_candidate_paragraphs_and_actionable_position_
         }
     )
 
-    message = render_fixed_report_card_markdown(
-        brief,
-        context=_scheduled_context(),
-    )
+    message = _render_card(brief)
 
     assert "| 优先 | 合约 | 权利金 / 净收入 | 年化 | 风险 / 容量 |" not in message
     assert "## CSP" in message
@@ -1645,26 +1522,18 @@ def test_fixed_report_card_renders_candidate_paragraphs_and_actionable_position_
     _assert_no_internal_leak(message)
 
 def test_combo_candidate_prices_are_explicit_when_leg_quotes_are_missing() -> None:
-    from src.application.daily_decision_brief_renderer import render_fixed_report_card_markdown
-
     brief = _brief()
     combo = brief["candidates"]["combo_yield"][0]
     combo.pop("put_sell_reference")
     combo.pop("call_buy_reference")
 
-    message = render_fixed_report_card_markdown(
-        brief,
-        context=_scheduled_context(),
-    )
+    message = _render_card(brief)
 
     assert "Put｜08-21 $300 Put｜推荐卖出价暂不可用" in message
     assert "Call｜09-18 $400 Call｜推荐买入价暂不可用" in message
 
 
 def test_candidate_alert_card_keeps_single_candidate_compact_and_events_explicit() -> None:
-    from domain.domain.daily_decision_brief import build_daily_brief_candidate_identity
-    from src.application.daily_decision_brief_renderer import render_candidate_alert_card_markdown
-
     brief = _brief()
     identity = build_daily_brief_candidate_identity(
         account="lx",
@@ -1703,8 +1572,6 @@ def test_candidate_alert_card_keeps_single_candidate_compact_and_events_explicit
 
 
 def test_evidence_hold_stays_in_candidate_summary_not_error_reminder() -> None:
-    from src.application.daily_decision_brief_renderer import render_fixed_report
-
     brief = _brief()
     brief["candidates"] = {
         "sell_put": [],
@@ -1747,8 +1614,6 @@ def test_evidence_hold_stays_in_candidate_summary_not_error_reminder() -> None:
     ],
 )
 def test_wheel_no_recommendation_status_is_readable(direction, reason, expected) -> None:
-    from src.application.daily_decision_brief_renderer import render_fixed_report
-
     brief = _brief()
     brief["wheel_batches"] = [{
         "wheel_branch_id": "wheel-status-1", "direction": direction,

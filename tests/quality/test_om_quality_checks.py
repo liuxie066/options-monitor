@@ -28,6 +28,18 @@ from src.application.quality.position_checks import (
 from src.application.quality.runtime_checks import build_runtime_checks
 from src.application.quality.opend_position_adapter import OpenDOptionSnapshot
 
+import test_trades_resolver_close
+from domain.domain.option_lifecycle import expiration_observation_start_ms
+from domain.domain.option_position_lots import OpenPositionCommand
+from domain.domain.trade_execution import execution_identity_from_input
+from src.application.ledger.api import project_trade_event_log, refresh_position_lot_projection
+from src.application.ledger.manual_trades import persist_manual_open_event
+from src.application.ledger.repository import SQLiteOptionPositionsRepository
+from src.application.trades.deal_identity import completed_ledger_deal_keys
+from src.application.trades.lifecycle_reconciliation import discover_lifecycle_cases
+from src.application.trades.resolver import resolve_trade_deal
+from test_trades_resolver_close import _deal
+
 
 def test_current_quality_datasets_fail_closed_without_history() -> None:
     ledger = build_current_ledger_dataset(
@@ -119,6 +131,29 @@ def _snapshot(*, qty: int = 1, trading_days: list[date] | None = None) -> OpenDO
     )
 
 
+def _position_dataset(
+    *,
+    snapshot: OpenDOptionSnapshot,
+    local_lots: list[dict] | None = None,
+    now: datetime | None = None,
+    **overrides: object,
+) -> tuple[dict, dict]:
+    # Shared preamble of the position-drift and position-lifecycle fixtures.
+    # `local_lots` is built per call so each caller gets a fresh lot dict.
+    return build_position_dataset(
+        **{
+            "snapshot": snapshot,
+            "local_lots": [_local_lot()] if local_lots is None else local_lots,
+            "account": "lx",
+            "market": "us",
+            "observed_at_utc": "2026-07-13T10:00:00Z",
+            "now": now if now is not None else datetime(2026, 7, 13, 10, tzinfo=timezone.utc),
+            "control_state": {"position_mismatches": {}},
+            **overrides,
+        }
+    )
+
+
 def test_public_source_snapshot_allowlists_internal_position_input() -> None:
     snapshot = replace(
         _snapshot(),
@@ -149,16 +184,7 @@ def test_public_source_snapshot_allowlists_internal_position_input() -> None:
 
 
 def test_position_convergence_matches_exact_identity_and_quantity() -> None:
-    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
-    dataset, state = build_position_dataset(
-        snapshot=_snapshot(),
-        local_lots=[_local_lot()],
-        account="lx",
-        market="us",
-        observed_at_utc="2026-07-13T10:00:00Z",
-        now=now,
-        control_state={"position_mismatches": {}},
-    )
+    dataset, state = _position_dataset(snapshot=_snapshot())
     assert dataset["status"] == "trusted"
     assert dataset["checks"][1]["reason_code"] == "POSITIONS_RECONCILED"
     assert state["position_mismatches"] == {}
@@ -166,24 +192,13 @@ def test_position_convergence_matches_exact_identity_and_quantity() -> None:
 
 def test_position_divergence_is_transient_then_persistent_without_rewrite() -> None:
     first = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
-    dataset, state = build_position_dataset(
-        snapshot=_snapshot(qty=2),
-        local_lots=[_local_lot()],
-        account="lx",
-        market="us",
-        observed_at_utc="2026-07-13T10:00:00Z",
-        now=first,
-        control_state={"position_mismatches": {}},
-    )
+    dataset, state = _position_dataset(snapshot=_snapshot(qty=2), now=first)
     assert dataset["status"] == "partial"
     assert dataset["checks"][1]["reason_code"] == "POSITION_DIVERGENCE_TRANSIENT"
     assert state["position_mismatches"]["us:lx"]["next_recheck_at_utc"] == "2026-07-13T10:01:00Z"
 
-    dataset, _state = build_position_dataset(
+    dataset, _state = _position_dataset(
         snapshot=replace(_snapshot(qty=2), observed_at_utc="2026-07-13T10:05:01Z"),
-        local_lots=[_local_lot()],
-        account="lx",
-        market="us",
         observed_at_utc="2026-07-13T10:05:01Z",
         now=first + timedelta(seconds=301),
         control_state=state,
@@ -194,7 +209,6 @@ def test_position_divergence_is_transient_then_persistent_without_rewrite() -> N
 
 
 def test_position_identity_errors_report_local_and_opend_sources() -> None:
-    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
     local = _local_lot()
     local["fields"].pop("multiplier")
     snapshot = _snapshot()
@@ -211,14 +225,8 @@ def test_position_identity_errors_report_local_and_opend_sources() -> None:
             "sec_type": "DRVT",
         }
     )
-    dataset, _state = build_position_dataset(
-        snapshot=snapshot,
-        local_lots=[local, hk_local],
-        account="lx",
-        market="us",
-        observed_at_utc="2026-07-13T10:00:00Z",
-        now=now,
-        control_state={"position_mismatches": {}},
+    dataset, _state = _position_dataset(
+        snapshot=snapshot, local_lots=[local, hk_local]
     )
 
     convergence = dataset["checks"][1]
@@ -232,20 +240,11 @@ def test_position_identity_errors_report_local_and_opend_sources() -> None:
 
 
 def test_position_market_filter_keeps_unknown_market_identity_errors() -> None:
-    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
     local = _local_lot()
     local["fields"]["symbol"] = ""
     snapshot = _snapshot()
     snapshot.rows[0]["code"] = ""
-    dataset, _state = build_position_dataset(
-        snapshot=snapshot,
-        local_lots=[local],
-        account="lx",
-        market="us",
-        observed_at_utc="2026-07-13T10:00:00Z",
-        now=now,
-        control_state={"position_mismatches": {}},
-    )
+    dataset, _state = _position_dataset(snapshot=snapshot, local_lots=[local])
 
     convergence = dataset["checks"][1]
     assert dataset["status"] == "unavailable"
@@ -312,7 +311,6 @@ def test_opend_current_terms_override_option_code_terms() -> None:
 
 
 def test_position_contract_terms_drift_blocks_consumers_immediately() -> None:
-    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
     snapshot = _snapshot()
     snapshot.rows[0].update(
         {
@@ -324,15 +322,7 @@ def test_position_contract_terms_drift_blocks_consumers_immediately() -> None:
         }
     )
 
-    dataset, state = build_position_dataset(
-        snapshot=snapshot,
-        local_lots=[_local_lot()],
-        account="lx",
-        market="us",
-        observed_at_utc="2026-07-13T10:00:00Z",
-        now=now,
-        control_state={"position_mismatches": {}},
-    )
+    dataset, state = _position_dataset(snapshot=snapshot)
 
     convergence = dataset["checks"][1]
     assert dataset["status"] == "untrusted"
@@ -360,7 +350,6 @@ def test_position_contract_terms_drift_blocks_consumers_immediately() -> None:
 
 
 def test_multi_strike_contract_terms_drift_uses_each_broker_code_lineage() -> None:
-    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
     second_lot = _local_lot(contracts=2)
     second_lot["record_id"] = "lot-nvda-110"
     second_lot["fields"]["strike"] = 110
@@ -387,14 +376,8 @@ def test_multi_strike_contract_terms_drift_uses_each_broker_code_lineage() -> No
         }
     )
 
-    dataset, _state = build_position_dataset(
-        snapshot=snapshot,
-        local_lots=[_local_lot(), second_lot],
-        account="lx",
-        market="us",
-        observed_at_utc="2026-07-13T10:00:00Z",
-        now=now,
-        control_state={"position_mismatches": {}},
+    dataset, _state = _position_dataset(
+        snapshot=snapshot, local_lots=[_local_lot(), second_lot]
     )
 
     convergence = dataset["checks"][1]
@@ -425,19 +408,10 @@ def test_multi_strike_contract_terms_drift_uses_each_broker_code_lineage() -> No
 
 
 def test_same_quantity_close_and_open_is_not_classified_as_contract_terms_drift() -> None:
-    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
     snapshot = _snapshot()
     snapshot.rows[0]["code"] = "US.NVDA260717P090000"
 
-    dataset, _state = build_position_dataset(
-        snapshot=snapshot,
-        local_lots=[_local_lot()],
-        account="lx",
-        market="us",
-        observed_at_utc="2026-07-13T10:00:00Z",
-        now=now,
-        control_state={"position_mismatches": {}},
-    )
+    dataset, _state = _position_dataset(snapshot=snapshot)
 
     assert dataset["status"] == "partial"
     assert dataset["checks"][1]["reason_code"] == (
@@ -469,16 +443,9 @@ def _pending_lifecycle_case(*, contracts: int = 1) -> tuple[dict, dict]:
 
 
 def test_position_lifecycle_exact_coverage_is_partial_but_non_blocking() -> None:
-    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
     lifecycle_case, read_model = _pending_lifecycle_case()
-    dataset, state = build_position_dataset(
+    dataset, state = _position_dataset(
         snapshot=_snapshot(qty=0),
-        local_lots=[_local_lot()],
-        account="lx",
-        market="us",
-        observed_at_utc="2026-07-13T10:00:00Z",
-        now=now,
-        control_state={"position_mismatches": {}},
         lifecycle_cases=[lifecycle_case],
         lifecycle_read_models_by_case={"case-nvda": read_model},
         day_end_strict=True,
@@ -497,7 +464,6 @@ def test_position_lifecycle_exact_coverage_is_partial_but_non_blocking() -> None
 
 
 def test_contract_terms_drift_precedes_active_lifecycle_coverage() -> None:
-    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
     lifecycle_case, read_model = _pending_lifecycle_case()
     snapshot = _snapshot()
     snapshot.rows[0].update(
@@ -509,14 +475,8 @@ def test_contract_terms_drift_precedes_active_lifecycle_coverage() -> None:
         }
     )
 
-    dataset, _state = build_position_dataset(
+    dataset, _state = _position_dataset(
         snapshot=snapshot,
-        local_lots=[_local_lot()],
-        account="lx",
-        market="us",
-        observed_at_utc="2026-07-13T10:00:00Z",
-        now=now,
-        control_state={"position_mismatches": {}},
         lifecycle_cases=[lifecycle_case],
         lifecycle_read_models_by_case={"case-nvda": read_model},
     )
@@ -529,15 +489,8 @@ def test_contract_terms_drift_precedes_active_lifecycle_coverage() -> None:
 
 
 def test_position_mismatch_fails_closed_when_coherent_lifecycle_read_is_unavailable() -> None:
-    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
-    dataset, state = build_position_dataset(
+    dataset, state = _position_dataset(
         snapshot=_snapshot(qty=0),
-        local_lots=[_local_lot()],
-        account="lx",
-        market="us",
-        observed_at_utc="2026-07-13T10:00:00Z",
-        now=now,
-        control_state={"position_mismatches": {}},
         lifecycle_coherent_read_available=False,
         day_end_strict=True,
     )
@@ -552,16 +505,10 @@ def test_position_mismatch_fails_closed_when_coherent_lifecycle_read_is_unavaila
 
 
 def test_position_lifecycle_partial_quantity_does_not_hide_divergence() -> None:
-    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
     lifecycle_case, read_model = _pending_lifecycle_case(contracts=1)
-    dataset, _state = build_position_dataset(
+    dataset, _state = _position_dataset(
         snapshot=_snapshot(qty=0),
         local_lots=[_local_lot(contracts=2)],
-        account="lx",
-        market="us",
-        observed_at_utc="2026-07-13T10:00:00Z",
-        now=now,
-        control_state={"position_mismatches": {}},
         lifecycle_cases=[lifecycle_case],
         lifecycle_read_models_by_case={"case-nvda": read_model},
         day_end_strict=True,
@@ -574,19 +521,12 @@ def test_position_lifecycle_partial_quantity_does_not_hide_divergence() -> None:
 
 
 def test_position_lifecycle_overdue_case_does_not_hide_divergence() -> None:
-    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
     lifecycle_case, read_model = _pending_lifecycle_case()
     read_model["pending_until_ms"] = int(
         datetime(2026, 7, 13, 9, tzinfo=timezone.utc).timestamp() * 1000
     )
-    dataset, _state = build_position_dataset(
+    dataset, _state = _position_dataset(
         snapshot=_snapshot(qty=0),
-        local_lots=[_local_lot()],
-        account="lx",
-        market="us",
-        observed_at_utc="2026-07-13T10:00:00Z",
-        now=now,
-        control_state={"position_mismatches": {}},
         lifecycle_cases=[lifecycle_case],
         lifecycle_read_models_by_case={"case-nvda": read_model},
         day_end_strict=True,
@@ -599,17 +539,10 @@ def test_position_lifecycle_overdue_case_does_not_hide_divergence() -> None:
 
 
 def test_position_lifecycle_conflict_does_not_hide_divergence() -> None:
-    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
     lifecycle_case, read_model = _pending_lifecycle_case()
     read_model["lifecycle_state"] = "conflict"
-    dataset, _state = build_position_dataset(
+    dataset, _state = _position_dataset(
         snapshot=_snapshot(qty=0),
-        local_lots=[_local_lot()],
-        account="lx",
-        market="us",
-        observed_at_utc="2026-07-13T10:00:00Z",
-        now=now,
-        control_state={"position_mismatches": {}},
         lifecycle_cases=[lifecycle_case],
         lifecycle_read_models_by_case={"case-nvda": read_model},
         day_end_strict=True,
@@ -1086,46 +1019,44 @@ def test_lifecycle_quality_conflict_never_gets_deadline_grace() -> None:
         ]
 
 
+def _runtime_checks(services: list[dict], **overrides: object) -> list[dict]:
+    # Shared preamble of the runtime service/timer fixtures.
+    return build_runtime_checks(
+        **{
+            "runtime_statuses": [
+                {
+                    "service_profile": {
+                        "loaded": True,
+                        "status_checked": True,
+                        "services": services,
+                    },
+                    "trade_intake": {"enabled": False},
+                }
+            ],
+            "observed_at_utc": "2026-07-13T10:00:00Z",
+            "now": datetime(2026, 7, 13, 10, tzinfo=timezone.utc),
+            **overrides,
+        }
+    )
+
+
 def test_runtime_service_and_timer_checks_require_checked_active_units() -> None:
-    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
-    checks = build_runtime_checks(
-        runtime_statuses=[
-            {
-                "service_profile": {
-                    "loaded": True,
-                    "status_checked": True,
-                    "services": [
-                        {"name": "options-monitor.service", "status": "ok"},
-                        {"name": "options-monitor-us.timer", "status": "ok"},
-                    ],
-                },
-                "trade_intake": {"enabled": False},
-            }
-        ],
-        observed_at_utc="2026-07-13T10:00:00Z",
-        now=now,
+    checks = _runtime_checks(
+        [
+            {"name": "options-monitor.service", "status": "ok"},
+            {"name": "options-monitor-us.timer", "status": "ok"},
+        ]
     )
     by_id = {item["check_id"]: item for item in checks}
     assert by_id["RT-OM-001"]["status"] == "pass"
     assert by_id["RT-OM-002"]["reason_code"] == "LISTENER_NOT_APPLICABLE"
     assert by_id["RT-OM-003"]["status"] == "pass"
 
-    failed = build_runtime_checks(
-        runtime_statuses=[
-            {
-                "service_profile": {
-                    "loaded": True,
-                    "status_checked": True,
-                    "services": [
-                        {"name": "options-monitor.service", "status": "warn"},
-                        {"name": "options-monitor-us.timer", "status": "warn"},
-                    ],
-                },
-                "trade_intake": {"enabled": False},
-            }
-        ],
-        observed_at_utc="2026-07-13T10:00:00Z",
-        now=now,
+    failed = _runtime_checks(
+        [
+            {"name": "options-monitor.service", "status": "warn"},
+            {"name": "options-monitor-us.timer", "status": "warn"},
+        ]
     )
     failed_by_id = {item["check_id"]: item for item in failed}
     assert failed_by_id["RT-OM-001"]["status"] == "fail"
@@ -1133,39 +1064,27 @@ def test_runtime_service_and_timer_checks_require_checked_active_units() -> None
 
 
 def test_runtime_service_check_accepts_inactive_timer_triggered_oneshot() -> None:
-    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
-    checks = build_runtime_checks(
-        runtime_statuses=[
+    checks = _runtime_checks(
+        [
             {
-                "service_profile": {
-                    "loaded": True,
-                    "status_checked": True,
-                    "services": [
-                        {
-                            "name": "options-monitor-quality-refresh.service",
-                            "status": "warn",
-                            "returncode": 3,
-                            "stdout": "inactive",
-                        },
-                        {
-                            "name": "options-monitor-quality-refresh.timer",
-                            "status": "ok",
-                            "returncode": 0,
-                            "stdout": "active",
-                        },
-                        {
-                            "name": "options-monitor-trade-intake.service",
-                            "status": "ok",
-                            "returncode": 0,
-                            "stdout": "active",
-                        },
-                    ],
-                },
-                "trade_intake": {"enabled": False},
-            }
-        ],
-        observed_at_utc="2026-07-13T10:00:00Z",
-        now=now,
+                "name": "options-monitor-quality-refresh.service",
+                "status": "warn",
+                "returncode": 3,
+                "stdout": "inactive",
+            },
+            {
+                "name": "options-monitor-quality-refresh.timer",
+                "status": "ok",
+                "returncode": 0,
+                "stdout": "active",
+            },
+            {
+                "name": "options-monitor-trade-intake.service",
+                "status": "ok",
+                "returncode": 0,
+                "stdout": "active",
+            },
+        ]
     )
 
     by_id = {item["check_id"]: item for item in checks}
@@ -1180,33 +1099,21 @@ def test_runtime_service_check_accepts_inactive_timer_triggered_oneshot() -> Non
 
 
 def test_runtime_service_check_rejects_failed_timer_triggered_oneshot() -> None:
-    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
-    checks = build_runtime_checks(
-        runtime_statuses=[
+    checks = _runtime_checks(
+        [
             {
-                "service_profile": {
-                    "loaded": True,
-                    "status_checked": True,
-                    "services": [
-                        {
-                            "name": "options-monitor-quality-refresh.service",
-                            "status": "warn",
-                            "returncode": 3,
-                            "stdout": "failed",
-                        },
-                        {
-                            "name": "options-monitor-quality-refresh.timer",
-                            "status": "ok",
-                            "returncode": 0,
-                            "stdout": "active",
-                        },
-                    ],
-                },
-                "trade_intake": {"enabled": False},
-            }
-        ],
-        observed_at_utc="2026-07-13T10:00:00Z",
-        now=now,
+                "name": "options-monitor-quality-refresh.service",
+                "status": "warn",
+                "returncode": 3,
+                "stdout": "failed",
+            },
+            {
+                "name": "options-monitor-quality-refresh.timer",
+                "status": "ok",
+                "returncode": 0,
+                "stdout": "active",
+            },
+        ]
     )
 
     by_id = {item["check_id"]: item for item in checks}
@@ -1215,33 +1122,21 @@ def test_runtime_service_check_rejects_failed_timer_triggered_oneshot() -> None:
 
 
 def test_runtime_service_check_accepts_activating_timer_triggered_oneshot() -> None:
-    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
-    checks = build_runtime_checks(
-        runtime_statuses=[
+    checks = _runtime_checks(
+        [
             {
-                "service_profile": {
-                    "loaded": True,
-                    "status_checked": True,
-                    "services": [
-                        {
-                            "name": "options-monitor-quality-refresh.service",
-                            "status": "warn",
-                            "returncode": 3,
-                            "stdout": "activating",
-                        },
-                        {
-                            "name": "options-monitor-quality-refresh.timer",
-                            "status": "ok",
-                            "returncode": 0,
-                            "stdout": "active",
-                        },
-                    ],
-                },
-                "trade_intake": {"enabled": False},
-            }
-        ],
-        observed_at_utc="2026-07-13T10:00:00Z",
-        now=now,
+                "name": "options-monitor-quality-refresh.service",
+                "status": "warn",
+                "returncode": 3,
+                "stdout": "activating",
+            },
+            {
+                "name": "options-monitor-quality-refresh.timer",
+                "status": "ok",
+                "returncode": 0,
+                "stdout": "active",
+            },
+        ]
     )
 
     by_id = {item["check_id"]: item for item in checks}
@@ -1249,50 +1144,67 @@ def test_runtime_service_check_accepts_activating_timer_triggered_oneshot() -> N
     assert by_id["RT-OM-001"]["reason_code"] == "OM_SERVICES_ACTIVE"
 
 
-def test_trade_intake_uses_embedded_state_for_pending_age(tmp_path: Path) -> None:
-    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
-    datasets = build_trade_intake_datasets(
-        runtime_statuses=[
-            {
-                "trade_intake": {
-                    "enabled": True,
-                    "sources": [
-                        {
-                            "id": "lx",
-                            "account": "lx",
-                            "enabled": True,
-                            "state": {
-                                "path": ".../trade_intake_state.json",
-                                "json": {
-                                    "unresolved_deal_ids": {
-                                        "deal-1": {
-                                            "updated_at": "2026-07-13T09:50:00+00:00"
-                                        },
-                                        "legacy-deal": {
-                                            "receipt": {
-                                                "updated_at": "2026-07-13T09:55:00+00:00"
-                                            }
-                                        }
-                                    }
-                                },
-                            },
-                            "summary": {
-                                "pending_count": 2,
-                                "failed_count": 0,
-                                "unresolved_count": 2,
-                                "reconciliation_preview_available": True,
-                                "pending_after_reconcile_count": 0,
-                            },
-                        }
-                    ],
+def _trade_intake_datasets(
+    *,
+    state: dict,
+    summary: dict,
+    tmp_path: Path,
+    **overrides: object,
+) -> list[dict]:
+    # Shared preamble of the trade-intake runtime fixtures.
+    return build_trade_intake_datasets(
+        **{
+            "runtime_statuses": [
+                {
+                    "trade_intake": {
+                        "enabled": True,
+                        "sources": [
+                            {
+                                "id": "lx",
+                                "account": "lx",
+                                "enabled": True,
+                                "state": state,
+                                "summary": summary,
+                            }
+                        ],
+                    }
                 }
-            }
-        ],
-        accounts=["lx"],
-        market="us",
-        repo_root=tmp_path,
-        observed_at_utc="2026-07-13T10:00:00Z",
-        now=now,
+            ],
+            "accounts": ["lx"],
+            "market": "us",
+            "repo_root": tmp_path,
+            "observed_at_utc": "2026-07-13T10:00:00Z",
+            "now": datetime(2026, 7, 13, 10, tzinfo=timezone.utc),
+            **overrides,
+        }
+    )
+
+
+def test_trade_intake_uses_embedded_state_for_pending_age(tmp_path: Path) -> None:
+    datasets = _trade_intake_datasets(
+        tmp_path=tmp_path,
+        state={
+            "path": ".../trade_intake_state.json",
+            "json": {
+                "unresolved_deal_ids": {
+                    "deal-1": {
+                        "updated_at": "2026-07-13T09:50:00+00:00"
+                    },
+                    "legacy-deal": {
+                        "receipt": {
+                            "updated_at": "2026-07-13T09:55:00+00:00"
+                        }
+                    }
+                }
+            },
+        },
+        summary={
+            "pending_count": 2,
+            "failed_count": 0,
+            "unresolved_count": 2,
+            "reconciliation_preview_available": True,
+            "pending_after_reconcile_count": 0,
+        },
     )
 
     pending = datasets[0]["checks"][0]
@@ -1304,51 +1216,32 @@ def test_trade_intake_uses_embedded_state_for_pending_age(tmp_path: Path) -> Non
 def test_trade_intake_does_not_trust_state_only_lifecycle_delegation(
     tmp_path: Path,
 ) -> None:
-    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
-    datasets = build_trade_intake_datasets(
-        runtime_statuses=[
-            {
-                "trade_intake": {
-                    "enabled": True,
-                    "sources": [
-                        {
-                            "id": "lx",
-                            "account": "lx",
-                            "enabled": True,
-                            "state": {
-                                "json": {
-                                    "unresolved_deal_ids": {
-                                        "deal-1": {
-                                            "reason": "waiting_settlement_evidence",
-                                            "updated_at": "2026-07-13T09:00:00+00:00",
-                                            "diagnostics": {
-                                                "broker_evidence_accepted": True,
-                                                "lifecycle_adoption": {
-                                                    "status": "accepted",
-                                                    "case_id": "case-1",
-                                                },
-                                            },
-                                        }
-                                    }
-                                }
+    datasets = _trade_intake_datasets(
+        tmp_path=tmp_path,
+        state={
+            "json": {
+                "unresolved_deal_ids": {
+                    "deal-1": {
+                        "reason": "waiting_settlement_evidence",
+                        "updated_at": "2026-07-13T09:00:00+00:00",
+                        "diagnostics": {
+                            "broker_evidence_accepted": True,
+                            "lifecycle_adoption": {
+                                "status": "accepted",
+                                "case_id": "case-1",
                             },
-                            "summary": {
-                                "pending_count": 1,
-                                "failed_count": 0,
-                                "unresolved_count": 1,
-                                "reconciliation_preview_available": True,
-                                "pending_after_reconcile_count": 1,
-                            },
-                        }
-                    ],
+                        },
+                    }
                 }
             }
-        ],
-        accounts=["lx"],
-        market="us",
-        repo_root=tmp_path,
-        observed_at_utc="2026-07-13T10:00:00Z",
-        now=now,
+        },
+        summary={
+            "pending_count": 1,
+            "failed_count": 0,
+            "unresolved_count": 1,
+            "reconciliation_preview_available": True,
+            "pending_after_reconcile_count": 1,
+        },
     )
 
     dataset = datasets[0]
@@ -1368,49 +1261,30 @@ def test_trade_intake_does_not_trust_state_only_lifecycle_delegation(
 def test_trade_intake_uses_bridge_aware_reconciliation_delegation(
     tmp_path: Path,
 ) -> None:
-    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
-    datasets = build_trade_intake_datasets(
-        runtime_statuses=[
-            {
-                "trade_intake": {
-                    "enabled": True,
-                    "sources": [
-                        {
-                            "id": "lx",
-                            "account": "lx",
-                            "enabled": True,
-                            "state": {
-                                "json": {
-                                    "unresolved_deal_ids": {
-                                        "futu:lx:1001:deal-legacy": {
-                                            "reason": "lifecycle_case_futu_account_mismatch",
-                                            "updated_at": "2026-07-13T09:00:00+00:00",
-                                        }
-                                    }
-                                }
-                            },
-                            "summary": {
-                                "pending_count": 1,
-                                "failed_count": 0,
-                                "unresolved_count": 1,
-                                "reconciliation_preview_available": True,
-                                "delegated_lifecycle_pending_count": 1,
-                                "delegated_lifecycle_pending_deal_ids": [
-                                    "futu:lx:1001:deal-legacy"
-                                ],
-                                "pending_after_reconcile_count": 1,
-                                "actionable_pending_after_reconcile_count": 0,
-                            },
-                        }
-                    ],
+    datasets = _trade_intake_datasets(
+        tmp_path=tmp_path,
+        state={
+            "json": {
+                "unresolved_deal_ids": {
+                    "futu:lx:1001:deal-legacy": {
+                        "reason": "lifecycle_case_futu_account_mismatch",
+                        "updated_at": "2026-07-13T09:00:00+00:00",
+                    }
                 }
             }
-        ],
-        accounts=["lx"],
-        market="us",
-        repo_root=tmp_path,
-        observed_at_utc="2026-07-13T10:00:00Z",
-        now=now,
+        },
+        summary={
+            "pending_count": 1,
+            "failed_count": 0,
+            "unresolved_count": 1,
+            "reconciliation_preview_available": True,
+            "delegated_lifecycle_pending_count": 1,
+            "delegated_lifecycle_pending_deal_ids": [
+                "futu:lx:1001:deal-legacy"
+            ],
+            "pending_after_reconcile_count": 1,
+            "actionable_pending_after_reconcile_count": 0,
+        },
     )
 
     dataset = datasets[0]
@@ -1460,8 +1334,6 @@ def _quality_split_events(*, quantities=(1, 2), account="lx", canonical=False):
 
 
 def _split_conservation_check(events, *, account="lx"):
-    from src.application.ledger.api import project_trade_event_log
-
     projected = project_trade_event_log(events)
     dataset = build_ledger_datasets(
         repo=_LedgerRepo(events, projected.lots), accounts=[account], market="us",
@@ -1586,8 +1458,6 @@ def test_legacy_single_alias_does_not_exempt_canonical_duplicate_group():
 @pytest.mark.parametrize("canonical", [False, True])
 @pytest.mark.parametrize("change", ["price", "quantity_missing", "multiplier", "strike", "side", "currency"])
 def test_split_quality_requires_source_economics_not_only_agreement_between_events(canonical, change):
-    from src.application.trades.deal_identity import completed_ledger_deal_keys
-
     events = _quality_split_events(canonical=canonical)
     for row in events[-2:]:
         raw = row["raw_payload"]
@@ -1613,8 +1483,6 @@ def test_split_quality_requires_source_economics_not_only_agreement_between_even
 
 
 def test_complete_split_with_conflicting_canonical_and_source_ids_remains_untrusted():
-    from src.application.trades.deal_identity import completed_ledger_deal_keys
-
     events = _quality_split_events(canonical=True)
     for row in events[-2:]:
         raw = row["raw_payload"]
@@ -1641,10 +1509,6 @@ def test_split_quality_treats_explicit_and_implicit_source_namespace_equally(nam
 
 @pytest.mark.parametrize("second_identity", ["same", "legacy", "physical", "namespace", "environment"])
 def test_persisted_split_quality_checks_physical_execution_before_account_scope(tmp_path, second_identity):
-    from domain.domain.trade_execution import execution_identity_from_input
-    from src.application.ledger.api import refresh_position_lot_projection
-    from src.application.ledger.repository import SQLiteOptionPositionsRepository
-
     # One physical account assigned to two internal labels represents historical
     # misattribution, not a supported account mapping. Distinct scope is a control.
     events = []
@@ -1689,14 +1553,6 @@ def test_persisted_split_quality_checks_physical_execution_before_account_scope(
 
 
 def _public_assignment_repo(tmp_path):
-    from domain.domain.option_position_lots import OpenPositionCommand
-    from domain.domain.option_lifecycle import expiration_observation_start_ms
-    from src.application.ledger.manual_trades import persist_manual_open_event
-    from src.application.ledger.repository import SQLiteOptionPositionsRepository
-    from src.application.trades.lifecycle_reconciliation import discover_lifecycle_cases
-    from src.application.trades.resolver import resolve_trade_deal
-    from test_trades_resolver_close import _deal
-
     repo = SQLiteOptionPositionsRepository(tmp_path / "assignment.sqlite3")
     for index, count in enumerate((1, 2)):
         persist_manual_open_event(repo, OpenPositionCommand(
@@ -1824,9 +1680,6 @@ def test_public_assignment_quality_rejects_unproven_or_changed_stock_group(tmp_p
     "test_resolve_trade_lifecycle_option_first_records_early_assignment_before_expiration",
 ])
 def test_public_lifecycle_settlement_quality_supports_existing_public_flows(tmp_path, fixture_name):
-    import test_trades_resolver_close
-    from src.application.ledger.repository import SQLiteOptionPositionsRepository
-
     getattr(test_trades_resolver_close, fixture_name)(tmp_path)
     repo = SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     assert _assignment_conservation(repo)["status"] == "pass"
