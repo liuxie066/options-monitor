@@ -27,6 +27,70 @@ from src.application.trades.order_fee_sync import recover_order_fee_targets, syn
 
 EVENT_MS = 1_780_000_000_000
 
+# The account and date window every fee entry point in this module is called with.
+_WINDOW: dict[str, object] = {
+    "account": "lx",
+    "start_ms": EVENT_MS - 1,
+    "end_exclusive_ms": EVENT_MS + 1,
+}
+
+_NVDA_KEY = ContractKey.from_values(
+    broker="富途",
+    account="lx",
+    underlying_symbol="NVDA",
+    option_type="put",
+    position_side="short",
+    strike=100,
+    expiration_ymd="2026-06-19",
+)
+
+_IBKR_KEY = ContractKey.from_values(
+    broker="IBKR",
+    account="lx",
+    underlying_symbol="NVDA",
+    option_type="put",
+    position_side="short",
+    strike=100,
+    expiration_ymd="2026-06-19",
+)
+
+
+def _trade_event(**overrides: object) -> TradeEvent:
+    """Build the bare 富途 NVDA short put trade literal this module repeats."""
+    base: dict[str, object] = {
+        "event_type": "open",
+        "contract_key": _NVDA_KEY,
+        "contracts": 1,
+        "price": 2.5,
+        "currency": "USD",
+        "multiplier": 100,
+    }
+    base.update(overrides)
+    return TradeEvent(**base)
+
+
+def _lifecycle_event(**overrides: object) -> TradeEvent:
+    """Build the zero-price lifecycle terminal event this module repeats."""
+    base: dict[str, object] = {
+        "event_id": "expiry-1",
+        "event_type": "expire_close",
+        "event_time_ms": EVENT_MS,
+        "contract_key": _NVDA_KEY,
+        "contracts": 1,
+        "price": 0,
+        "currency": "USD",
+        "source": "option_lifecycle_decision",
+        "multiplier": 100,
+        "target_lot_id": "lot-1",
+    }
+    base.update(overrides)
+    return TradeEvent(**base)
+
+
+def _frozen_zero_provenance() -> dict:
+    """The legacy 'already frozen as actual zero' payload these cases seed."""
+    return {"fee_provenance": {"basis": "actual", "amount": "0", "source": "test"}}
+
 
 def _repo_with_bare_option_event(
     tmp_path: Path,
@@ -35,32 +99,19 @@ def _repo_with_bare_option_event(
     event_time_ms: int = EVENT_MS,
 ) -> SQLiteOptionPositionsRepository:
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
-    event = TradeEvent(
-        event_id="event-1",
-        event_type="open",
-        event_time_ms=event_time_ms,
-        contract_key=ContractKey.from_values(
-            broker="富途",
-            account="lx",
-            underlying_symbol="NVDA",
-            option_type="put",
-            position_side="short",
-            strike=100,
-            expiration_ymd="2026-06-19",
-        ),
-        contracts=1,
-        price=2.5,
-        currency="USD",
-        source="broker",
-        multiplier=100,
-        lot_id="lot-1",
-        raw_payload=(
-            {"futu_account_id": "123", "order_id": "order-1"}
-            if with_identity
-            else {}
-        ),
+    repo.upsert_trade_event(
+        _trade_event(
+            event_id="event-1",
+            event_time_ms=event_time_ms,
+            source="broker",
+            lot_id="lot-1",
+            raw_payload=(
+                {"futu_account_id": "123", "order_id": "order-1"}
+                if with_identity
+                else {}
+            ),
+        )
     )
-    repo.upsert_trade_event(event)
     return repo
 
 
@@ -123,41 +174,13 @@ def _expiry_event(
     else:
         raw_payload = {"source_type": "system_trade_event"}
         source = "option_lifecycle_decision"
-    return TradeEvent(
-        event_id="expiry-1",
-        event_type="expire_close",
-        event_time_ms=EVENT_MS,
-        contract_key=ContractKey.from_values(
-            broker="富途",
-            account="lx",
-            underlying_symbol="NVDA",
-            option_type="put",
-            position_side="short",
-            strike=100,
-            expiration_ymd="2026-06-19",
-        ),
-        contracts=1,
-        price=0,
-        currency="USD",
-        source=source,
-        multiplier=100,
-        target_lot_id="lot-1",
-        raw_payload=raw_payload,
-    )
+    return _lifecycle_event(source=source, raw_payload=raw_payload)
 
 
 def _assignment_event() -> TradeEvent:
-    return TradeEvent(
+    return _lifecycle_event(
         event_id="assignment-1",
         event_type="assignment",
-        event_time_ms=EVENT_MS,
-        contract_key=_expiry_event().contract_key,
-        contracts=1,
-        price=0,
-        currency="USD",
-        source="option_lifecycle_decision",
-        multiplier=100,
-        target_lot_id="lot-1",
         raw_payload={
             "stock_settlement": {
                 "side": "buy",
@@ -176,10 +199,7 @@ def test_fee_sync_dry_run_is_read_only_and_apply_persists_actual_fee(
 ) -> None:
     repo = _repo_with_bare_option_event(tmp_path)
     provider = _Provider(fee_amount=fee_amount)
-    kwargs = {
-        "account": "lx",
-        "start_ms": EVENT_MS - 1,
-        "end_exclusive_ms": EVENT_MS + 1,
+    kwargs = _WINDOW | {
         "provider": provider,
         "observed_at_ms": EVENT_MS + 10,
         "futu_account_id": "123",
@@ -230,10 +250,7 @@ def test_bound_order_identity_flows_into_existing_fee_sync(tmp_path: Path) -> No
         overrides={"futu_account_id": "123", "order_id": "order-1"},
         repair_reason="OpenD manual evidence: deal-1",
     )
-    kwargs = {
-        "account": "lx",
-        "start_ms": EVENT_MS - 1,
-        "end_exclusive_ms": EVENT_MS + 1,
+    kwargs = _WINDOW | {
         "observed_at_ms": EVENT_MS + 10,
         "allowed_futu_account_ids": ("123",),
     }
@@ -288,14 +305,8 @@ def test_order_backed_expiry_reaches_actual_fee_provider(tmp_path: Path) -> None
     provider = _Provider(fee_amount="0.50")
 
     receipt = sync_order_fees(
-        repo,
-        account="lx",
-        start_ms=EVENT_MS - 1,
-        end_exclusive_ms=EVENT_MS + 1,
-        provider=provider,
-        apply=False,
-        observed_at_ms=EVENT_MS + 10,
-        allowed_futu_account_ids=("123",),
+        repo, **_WINDOW, provider=provider, apply=False,
+        observed_at_ms=EVENT_MS + 10, allowed_futu_account_ids=("123",),
     )
 
     assert receipt["actual_observation_count"] == 1
@@ -358,12 +369,8 @@ def test_exact_fee_sync_queries_complete_broker_day_for_millisecond_fill(
     provider = _Provider()
 
     sync_order_fees(
-        repo,
-        account="lx",
-        provider=provider,
-        apply=False,
-        observed_at_ms=event_time_ms + 10,
-        target_identity=("富途", "lx", "123", "order-1"),
+        repo, **_WINDOW, provider=provider, apply=False,
+        observed_at_ms=event_time_ms + 10, target_identity=("富途", "lx", "123", "order-1"),
     )
 
     assert provider.terminal_kwargs[0]["start"] == "2026-09-11 00:00:00"
@@ -385,12 +392,8 @@ def test_exact_fee_sync_uses_complete_order_group_across_dates(tmp_path: Path) -
     provider = _Provider(dealt_qty="2")
 
     receipt = sync_order_fees(
-        repo,
-        account="lx",
-        provider=provider,
-        apply=True,
-        observed_at_ms=EVENT_MS + 86_400_010,
-        target_identity=("富途", "lx", "123", "order-1"),
+        repo, **_WINDOW, provider=provider, apply=True,
+        observed_at_ms=EVENT_MS + 86_400_010, target_identity=("富途", "lx", "123", "order-1"),
     )
 
     events = [TradeEvent.from_dict(row) for row in repo.list_trade_events()]
@@ -404,22 +407,14 @@ def test_exact_fee_sync_skips_provider_when_target_is_already_actual(
 ) -> None:
     repo = _repo_with_bare_option_event(tmp_path)
     sync_order_fees(
-        repo,
-        account="lx",
-        provider=_Provider(),
-        apply=True,
-        observed_at_ms=EVENT_MS + 10,
-        target_identity=("富途", "lx", "123", "order-1"),
+        repo, **_WINDOW, provider=_Provider(), apply=True,
+        observed_at_ms=EVENT_MS + 10, target_identity=("富途", "lx", "123", "order-1"),
     )
     provider = _Provider()
 
     receipt = sync_order_fees(
-        repo,
-        account="lx",
-        provider=provider,
-        apply=True,
-        observed_at_ms=EVENT_MS + 20,
-        target_identity=("富途", "lx", "123", "order-1"),
+        repo, **_WINDOW, provider=provider, apply=True,
+        observed_at_ms=EVENT_MS + 20, target_identity=("富途", "lx", "123", "order-1"),
     )
 
     assert provider.terminal_calls == provider.fee_calls == 0
@@ -500,16 +495,10 @@ def test_expiry_without_executed_order_is_frozen_as_actual_zero(
     expiry = _expiry_event()
     persist_trade_event_object(
         repo,
-        TradeEvent(
+        _trade_event(
             event_id="open-for-expiry",
-            event_type="open",
             event_time_ms=EVENT_MS - 1,
-            contract_key=expiry.contract_key,
-            contracts=1,
-            price=2.5,
-            currency="USD",
             source="manual",
-            multiplier=100,
             lot_id="lot-1",
         ),
     )
@@ -537,16 +526,10 @@ def test_broker_settlement_expiry_is_frozen_as_actual_zero(tmp_path: Path) -> No
     expiry = _expiry_event(settlement_observation=True)
     persist_trade_event_object(
         repo,
-        TradeEvent(
+        _trade_event(
             event_id="open-for-settled-expiry",
-            event_type="open",
             event_time_ms=EVENT_MS - 1,
-            contract_key=expiry.contract_key,
-            contracts=1,
-            price=2.5,
-            currency="USD",
             source="manual",
-            multiplier=100,
             lot_id="lot-1",
         ),
     )
@@ -577,36 +560,17 @@ def test_legacy_assignment_migrates_to_actual_zero(tmp_path: Path) -> None:
     repo = SQLiteOptionPositionsRepository(tmp_path / "assignment-migration.sqlite3")
     assignment = _assignment_event()
     repo.upsert_trade_event(
-        TradeEvent(
+        _trade_event(
             event_id="open-for-assignment",
-            event_type="open",
             event_time_ms=EVENT_MS - 1,
-            contract_key=assignment.contract_key,
-            contracts=1,
-            price=2.5,
-            currency="USD",
             source="legacy",
-            multiplier=100,
             lot_id="lot-1",
-            raw_payload={
-                "fee_provenance": {
-                    "basis": "actual",
-                    "amount": "0",
-                    "source": "test",
-                }
-            },
+            raw_payload=_frozen_zero_provenance(),
         )
     )
     repo.upsert_trade_event(assignment)
 
-    receipt = enrich_order_fees(
-        repo,
-        account="lx",
-        start_ms=EVENT_MS - 1,
-        end_exclusive_ms=EVENT_MS + 1,
-        apply=True,
-        applied_at_ms=EVENT_MS + 10,
-    )
+    receipt = enrich_order_fees(repo, **_WINDOW, apply=True, applied_at_ms=EVENT_MS + 10)
 
     assert receipt["status_counts"] == {"committed": 1}
     event = next(
@@ -632,36 +596,17 @@ def test_legacy_expiry_without_executed_order_migrates_to_actual_zero(
     repo = SQLiteOptionPositionsRepository(tmp_path / "expiry-migration.sqlite3")
     expiry = _expiry_event()
     repo.upsert_trade_event(
-        TradeEvent(
+        _trade_event(
             event_id="legacy-open-for-expiry",
-            event_type="open",
             event_time_ms=EVENT_MS - 2,
-            contract_key=expiry.contract_key,
-            contracts=1,
-            price=2.5,
-            currency="USD",
             source="legacy",
-            multiplier=100,
             lot_id="lot-1",
-            raw_payload={
-                "fee_provenance": {
-                    "basis": "actual",
-                    "amount": "0",
-                    "source": "test",
-                }
-            },
+            raw_payload=_frozen_zero_provenance(),
         )
     )
     repo.upsert_trade_event(expiry)
 
-    receipt = enrich_order_fees(
-        repo,
-        account="lx",
-        start_ms=EVENT_MS - 1,
-        end_exclusive_ms=EVENT_MS + 1,
-        apply=True,
-        applied_at_ms=EVENT_MS + 10,
-    )
+    receipt = enrich_order_fees(repo, **_WINDOW, apply=True, applied_at_ms=EVENT_MS + 10)
 
     assert receipt["status_counts"] == {"committed": 1}
     assert receipt["basis_counts"] == {"actual": 1, "estimated": 0, "missing": 0}
@@ -686,24 +631,12 @@ def test_broker_expiry_without_order_identity_stays_missing(
     expiry = _expiry_event(broker_execution=True)
     writer_repo = SQLiteOptionPositionsRepository(tmp_path / "broker-expiry-writer.sqlite3")
     writer_repo.upsert_trade_event(
-        TradeEvent(
+        _trade_event(
             event_id="broker-open-for-expiry",
-            event_type="open",
             event_time_ms=EVENT_MS - 2,
-            contract_key=expiry.contract_key,
-            contracts=1,
-            price=2.5,
-            currency="USD",
             source="legacy",
-            multiplier=100,
             lot_id="lot-1",
-            raw_payload={
-                "fee_provenance": {
-                    "basis": "actual",
-                    "amount": "0",
-                    "source": "test",
-                }
-            },
+            raw_payload=_frozen_zero_provenance(),
         )
     )
 
@@ -719,14 +652,8 @@ def test_broker_expiry_without_order_identity_stays_missing(
     assert fee.reason == "broker_order_identity_missing"
     provider = _Provider()
     sync_receipt = sync_order_fees(
-        writer_repo,
-        account="lx",
-        start_ms=EVENT_MS - 1,
-        end_exclusive_ms=EVENT_MS + 1,
-        provider=provider,
-        apply=False,
-        observed_at_ms=EVENT_MS + 10,
-        allowed_futu_account_ids=("123",),
+        writer_repo, **_WINDOW, provider=provider, apply=False,
+        observed_at_ms=EVENT_MS + 10, allowed_futu_account_ids=("123",),
     )
     assert sync_receipt["reason_counts"] == {"order_identity_missing": 1}
     assert provider.terminal_calls == provider.fee_calls == 0
@@ -736,12 +663,7 @@ def test_broker_expiry_without_order_identity_stays_missing(
     )
     migration_repo.upsert_trade_event(expiry)
     migration_receipt = enrich_order_fees(
-        migration_repo,
-        account="lx",
-        start_ms=EVENT_MS - 1,
-        end_exclusive_ms=EVENT_MS + 1,
-        apply=True,
-        applied_at_ms=EVENT_MS + 10,
+        migration_repo, **_WINDOW, apply=True, applied_at_ms=EVENT_MS + 10,
     )
     assert migration_receipt["unit_count"] == 0
     migrated = TradeEvent.from_dict(migration_repo.list_trade_events()[0])
@@ -753,14 +675,8 @@ def test_fee_sync_rejects_quantity_mismatch_before_fee_query(tmp_path: Path) -> 
     provider = _Provider(dealt_qty="2.000000")
 
     receipt = sync_order_fees(
-        repo,
-        account="lx",
-        start_ms=EVENT_MS - 1,
-        end_exclusive_ms=EVENT_MS + 1,
-        provider=provider,
-        apply=False,
-        observed_at_ms=EVENT_MS + 10,
-        futu_account_id="123",
+        repo, **_WINDOW, provider=provider, apply=False,
+        observed_at_ms=EVENT_MS + 10, futu_account_id="123",
     )
 
     assert provider.terminal_calls == 1
@@ -772,26 +688,13 @@ def test_fee_sync_rejects_quantity_mismatch_before_fee_query(tmp_path: Path) -> 
 def test_formula_migration_groups_split_close_by_writer_order_group() -> None:
     from src.application.ledger.order_fee_migration import _formula_option_groups
 
-    key = ContractKey.from_values(
-        broker="富途",
-        account="lx",
-        underlying_symbol="NVDA",
-        option_type="put",
-        position_side="short",
-        strike=100,
-        expiration_ymd="2026-06-19",
-    )
     events = tuple(
-        TradeEvent(
+        _trade_event(
             event_id=f"close-{index}",
             event_type="close",
             event_time_ms=EVENT_MS,
-            contract_key=key,
-            contracts=1,
             price=1,
-            currency="USD",
             source="manual",
-            multiplier=100,
             raw_payload={"fee_order_group_id": "close-both"},
         )
         for index in (1, 2)
@@ -802,24 +705,11 @@ def test_formula_migration_groups_split_close_by_writer_order_group() -> None:
 
 def test_non_futu_event_stays_missing_and_never_reaches_provider(tmp_path: Path) -> None:
     repo = SQLiteOptionPositionsRepository(tmp_path / "non-futu.sqlite3")
-    event = TradeEvent(
+    event = _trade_event(
         event_id="ibkr-event",
-        event_type="open",
         event_time_ms=EVENT_MS,
-        contract_key=ContractKey.from_values(
-            broker="IBKR",
-            account="lx",
-            underlying_symbol="NVDA",
-            option_type="put",
-            position_side="short",
-            strike=100,
-            expiration_ymd="2026-06-19",
-        ),
-        contracts=1,
-        price=2.5,
-        currency="USD",
+        contract_key=_IBKR_KEY,
         source="broker",
-        multiplier=100,
         lot_id="ibkr-lot",
         raw_payload={"futu_account_id": "123", "order_id": "order-1"},
     )
@@ -827,14 +717,8 @@ def test_non_futu_event_stays_missing_and_never_reaches_provider(tmp_path: Path)
     provider = _Provider()
 
     receipt = sync_order_fees(
-        repo,
-        account="lx",
-        start_ms=EVENT_MS - 1,
-        end_exclusive_ms=EVENT_MS + 1,
-        provider=provider,
-        apply=False,
-        observed_at_ms=EVENT_MS + 10,
-        allowed_futu_account_ids=("123",),
+        repo, **_WINDOW, provider=provider, apply=False,
+        observed_at_ms=EVENT_MS + 10, allowed_futu_account_ids=("123",),
     )
 
     persisted = TradeEvent.from_dict(repo.list_trade_events()[0])
@@ -848,14 +732,8 @@ def test_fee_sync_only_queries_configured_provider_accounts(tmp_path: Path) -> N
     provider = _Provider()
 
     receipt = sync_order_fees(
-        repo,
-        account="lx",
-        start_ms=EVENT_MS - 1,
-        end_exclusive_ms=EVENT_MS + 1,
-        provider=provider,
-        apply=False,
-        observed_at_ms=EVENT_MS + 10,
-        allowed_futu_account_ids=("999",),
+        repo, **_WINDOW, provider=provider, apply=False,
+        observed_at_ms=EVENT_MS + 10, allowed_futu_account_ids=("999",),
     )
 
     assert receipt["selected_order_count"] == 0
@@ -908,14 +786,8 @@ def test_fee_sync_rate_limits_combined_provider_calls(tmp_path: Path, monkeypatc
 
     sleeps: list[float] = []
     receipt = sync_order_fees(
-        repo,
-        account="lx",
-        start_ms=EVENT_MS - 1,
-        end_exclusive_ms=EVENT_MS + 1,
-        provider=BatchProvider(),
-        apply=False,
-        observed_at_ms=EVENT_MS + 10,
-        allowed_futu_account_ids=("123",),
+        repo, **_WINDOW, provider=BatchProvider(), apply=False,
+        observed_at_ms=EVENT_MS + 10, allowed_futu_account_ids=("123",),
         sleep_fn=sleeps.append,
     )
 
@@ -951,13 +823,7 @@ def test_migration_rechecks_admitted_event_kind_and_quantity(
     }
 
     receipt = enrich_order_fees(
-        repo,
-        account="lx",
-        start_ms=EVENT_MS - 1,
-        end_exclusive_ms=EVENT_MS + 1,
-        actual_fees=(observation,),
-        apply=False,
-        applied_at_ms=EVENT_MS + 10,
+        repo, **_WINDOW, actual_fees=(observation,), apply=False, applied_at_ms=EVENT_MS + 10,
     )
 
     assert receipt["reason_counts"][reason] == 1
@@ -980,23 +846,11 @@ def test_migration_reports_idempotent_actual_noop_by_event_kind(tmp_path: Path) 
         "observed_at_ms": EVENT_MS + 10,
     }
     enrich_order_fees(
-        repo,
-        account="lx",
-        start_ms=EVENT_MS - 1,
-        end_exclusive_ms=EVENT_MS + 1,
-        actual_fees=(observation,),
-        apply=True,
-        applied_at_ms=EVENT_MS + 10,
+        repo, **_WINDOW, actual_fees=(observation,), apply=True, applied_at_ms=EVENT_MS + 10,
     )
 
     receipt = enrich_order_fees(
-        repo,
-        account="lx",
-        start_ms=EVENT_MS - 1,
-        end_exclusive_ms=EVENT_MS + 1,
-        actual_fees=(observation,),
-        apply=False,
-        applied_at_ms=EVENT_MS + 20,
+        repo, **_WINDOW, actual_fees=(observation,), apply=False, applied_at_ms=EVENT_MS + 20,
     )
 
     assert receipt["status_counts"] == {"no_op": 1}
@@ -1018,14 +872,7 @@ def test_migration_reports_idempotent_actual_noop_by_event_kind(tmp_path: Path) 
 def test_formula_preview_reports_effective_fee_basis_coverage(tmp_path: Path) -> None:
     repo = _repo_with_bare_option_event(tmp_path)
 
-    receipt = enrich_order_fees(
-        repo,
-        account="lx",
-        start_ms=EVENT_MS - 1,
-        end_exclusive_ms=EVENT_MS + 1,
-        apply=False,
-        applied_at_ms=EVENT_MS + 10,
-    )
+    receipt = enrich_order_fees(repo, **_WINDOW, apply=False, applied_at_ms=EVENT_MS + 10)
 
     assert receipt["fee_basis_event_counts_before"] == {
         "total": {"actual": 0, "estimated": 0, "missing": 1},
@@ -1043,30 +890,15 @@ def test_migration_receipt_counts_all_existing_fee_bases_by_event_kind(
     tmp_path: Path,
 ) -> None:
     repo = SQLiteOptionPositionsRepository(tmp_path / "mixed-bases.sqlite3")
-    key = ContractKey.from_values(
-        broker="富途",
-        account="lx",
-        underlying_symbol="NVDA",
-        option_type="put",
-        position_side="short",
-        strike=100,
-        expiration_ymd="2026-06-19",
-    )
     for event_id, basis, fees in (
         ("actual-option", "actual", 1.0),
         ("estimated-option", "estimated", 0.0),
     ):
         repo.upsert_trade_event(
-            TradeEvent(
+            _trade_event(
                 event_id=event_id,
-                event_type="open",
                 event_time_ms=EVENT_MS,
-                contract_key=key,
-                contracts=1,
-                price=2.5,
-                currency="USD",
                 source="test",
-                multiplier=100,
                 fees=fees,
                 lot_id=f"lot-{event_id}",
                 raw_payload={
@@ -1098,14 +930,7 @@ def test_migration_receipt_counts_all_existing_fee_bases_by_event_kind(
         }
     )
 
-    receipt = enrich_order_fees(
-        repo,
-        account="lx",
-        start_ms=EVENT_MS - 1,
-        end_exclusive_ms=EVENT_MS + 1,
-        apply=False,
-        applied_at_ms=EVENT_MS + 10,
-    )
+    receipt = enrich_order_fees(repo, **_WINDOW, apply=False, applied_at_ms=EVENT_MS + 10)
 
     expected = {
         "total": {"actual": 1, "estimated": 1, "missing": 1},
@@ -1125,36 +950,16 @@ def test_formula_migration_reports_unsupported_broker_instead_of_silent_skip(
 ) -> None:
     repo = SQLiteOptionPositionsRepository(tmp_path / "unsupported-formula.sqlite3")
     repo.upsert_trade_event(
-        TradeEvent(
+        _trade_event(
             event_id="ibkr-bare",
-            event_type="open",
             event_time_ms=EVENT_MS,
-            contract_key=ContractKey.from_values(
-                broker="IBKR",
-                account="lx",
-                underlying_symbol="NVDA",
-                option_type="put",
-                position_side="short",
-                strike=100,
-                expiration_ymd="2026-06-19",
-            ),
-            contracts=1,
-            price=2.5,
-            currency="USD",
+            contract_key=_IBKR_KEY,
             source="broker",
-            multiplier=100,
             lot_id="ibkr-bare-lot",
         )
     )
 
-    receipt = enrich_order_fees(
-        repo,
-        account="lx",
-        start_ms=EVENT_MS - 1,
-        end_exclusive_ms=EVENT_MS + 1,
-        apply=False,
-        applied_at_ms=EVENT_MS + 10,
-    )
+    receipt = enrich_order_fees(repo, **_WINDOW, apply=False, applied_at_ms=EVENT_MS + 10)
 
     assert receipt["unit_count"] == 0
     assert receipt["reason_counts"] == {"unsupported_broker_fee_schedule": 1}
@@ -1175,14 +980,7 @@ def test_migration_rollback_receipt_redacts_exception_message(
         ),
     )
 
-    receipt = enrich_order_fees(
-        repo,
-        account="lx",
-        start_ms=EVENT_MS - 1,
-        end_exclusive_ms=EVENT_MS + 1,
-        apply=True,
-        applied_at_ms=EVENT_MS + 10,
-    )
+    receipt = enrich_order_fees(repo, **_WINDOW, apply=True, applied_at_ms=EVENT_MS + 10)
 
     outcome = receipt["outcomes"][0]
     assert outcome["reason"] == "fee_enrichment_unit_rolled_back"

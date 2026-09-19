@@ -30,12 +30,31 @@ def _runtime_config(*, market: str) -> dict:
     }
 
 
+def _write_runtime_config(tmp_path: Path, *, market: str = "hk") -> Path:
+    """Write a generated runtime config for ``market`` and return its path."""
+    path = tmp_path / f"config.{market}.json"
+    path.write_text(json.dumps(_runtime_config(market=market)), encoding="utf-8")
+    return path
+
+
+def _run_scheduler_status(config_path: Path, **payload: object) -> dict:
+    """Execute the ``scheduler_status`` tool against ``config_path``.
+
+    Call sites pass only the payload fields that differ from the config path.
+    """
+    from src.application.tool_execution import execute_tool
+
+    return execute_tool(
+        "scheduler_status",
+        {"config_path": str(config_path), **payload},
+    )
+
+
 def test_scheduler_status_default_matches_production_runtime_and_hk_selection(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
     from src.application.agent_tools import config as config_tools
-    from src.application.tool_execution import execute_tool
 
     repo_root = tmp_path / "repo"
     runtime_root = tmp_path / "runtime"
@@ -43,8 +62,7 @@ def test_scheduler_status_default_matches_production_runtime_and_hk_selection(
     runtime_state = runtime_root / "output_shared" / "state"
     repo_state.mkdir(parents=True)
     runtime_state.mkdir(parents=True)
-    config_path = tmp_path / "config.hk.json"
-    config_path.write_text(json.dumps(_runtime_config(market="hk")), encoding="utf-8")
+    config_path = _write_runtime_config(tmp_path)
     (repo_state / "scheduler_state_hk.json").write_text(
         json.dumps({"last_run_utc_by_account": {"lx": "2026-01-01T00:00:00+00:00"}}),
         encoding="utf-8",
@@ -59,10 +77,7 @@ def test_scheduler_status_default_matches_production_runtime_and_hk_selection(
 
     monkeypatch.setattr(config_tools, "repo_base", lambda: repo_root)
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime_root))
-    result = execute_tool(
-        "scheduler_status",
-        {"config_path": str(config_path), "account": "lx"},
-    )
+    result = _run_scheduler_status(config_path, account="lx")
 
     assert result["ok"] is True
     assert result["data"]["filters"]["market"] == "hk"
@@ -82,10 +97,7 @@ def test_scheduler_status_distinguishes_state_and_account_availability(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    from src.application.tool_execution import execute_tool
-
-    config_path = tmp_path / "config.hk.json"
-    config_path.write_text(json.dumps(_runtime_config(market="hk")), encoding="utf-8")
+    config_path = _write_runtime_config(tmp_path)
     states = tmp_path / "states"
     states.mkdir()
     corrupt = states / "corrupt.json"
@@ -100,29 +112,15 @@ def test_scheduler_status_distinguishes_state_and_account_availability(
         encoding="utf-8",
     )
 
-    missing_result = execute_tool(
-        "scheduler_status",
-        {"config_path": str(config_path), "state": str(states / "missing.json"), "account": "lx"},
+    missing_result = _run_scheduler_status(
+        config_path, state=str(states / "missing.json"), account="lx"
     )
-    corrupt_result = execute_tool(
-        "scheduler_status",
-        {"config_path": str(config_path), "state": str(corrupt), "account": "lx"},
-    )
-    unreadable_result = execute_tool(
-        "scheduler_status",
-        {"config_path": str(config_path), "state": str(unreadable), "account": "lx"},
-    )
-    empty_result = execute_tool(
-        "scheduler_status",
-        {"config_path": str(config_path), "state": str(empty), "account": "lx"},
-    )
-    no_account_result = execute_tool(
-        "scheduler_status",
-        {"config_path": str(config_path), "state": str(empty)},
-    )
-    invalid_record_result = execute_tool(
-        "scheduler_status",
-        {"config_path": str(config_path), "state": str(invalid_record), "account": "lx"},
+    corrupt_result = _run_scheduler_status(config_path, state=str(corrupt), account="lx")
+    unreadable_result = _run_scheduler_status(config_path, state=str(unreadable), account="lx")
+    empty_result = _run_scheduler_status(config_path, state=str(empty), account="lx")
+    no_account_result = _run_scheduler_status(config_path, state=str(empty))
+    invalid_record_result = _run_scheduler_status(
+        config_path, state=str(invalid_record), account="lx"
     )
 
     assert missing_result["data"]["state"]["status"] == "missing"
@@ -141,8 +139,6 @@ def test_scheduler_status_distinguishes_state_and_account_availability(
 def test_scheduler_status_labels_explicit_and_force_preview(
     tmp_path: Path,
 ) -> None:
-    from src.application.tool_execution import execute_tool
-
     config = _runtime_config(market="hk")
     config["bad_schedule"] = []
     config_path = tmp_path / "config.hk.json"
@@ -150,38 +146,19 @@ def test_scheduler_status_labels_explicit_and_force_preview(
     state_path = tmp_path / "state.json"
     state_path.write_text("{}", encoding="utf-8")
 
-    missing = execute_tool(
-        "scheduler_status",
-        {
-            "config_path": str(config_path),
-            "state": str(state_path),
-            "schedule_key": "missing_schedule",
-        },
+    missing = _run_scheduler_status(
+        config_path, state=str(state_path), schedule_key="missing_schedule"
     )
-    invalid = execute_tool(
-        "scheduler_status",
-        {
-            "config_path": str(config_path),
-            "state": str(state_path),
-            "schedule_key": "bad_schedule",
-        },
+    invalid = _run_scheduler_status(
+        config_path, state=str(state_path), schedule_key="bad_schedule"
     )
-    forced = execute_tool(
-        "scheduler_status",
-        {
-            "config_path": str(config_path),
-            "state": str(state_path),
-            "schedule_key": "schedule_hk",
-            "force": True,
-        },
+    forced = _run_scheduler_status(
+        config_path, state=str(state_path), schedule_key="schedule_hk", force=True
     )
     state_dir = tmp_path / "state-dir"
     state_dir.mkdir()
     (state_dir / "scheduler_state_hk.json").write_text("{}", encoding="utf-8")
-    state_dir_selected = execute_tool(
-        "scheduler_status",
-        {"config_path": str(config_path), "state_dir": str(state_dir)},
-    )
+    state_dir_selected = _run_scheduler_status(config_path, state_dir=str(state_dir))
 
     assert missing["ok"] is False and missing["error"]["code"] == "INPUT_ERROR"
     assert invalid["ok"] is False and invalid["error"]["code"] == "CONFIG_ERROR"
@@ -205,10 +182,7 @@ def test_production_schedule_key_selector_keeps_market_list_semantics() -> None:
 def test_scheduler_status_rejects_unconfigured_account_before_state_projection(
     tmp_path: Path,
 ) -> None:
-    from src.application.tool_execution import execute_tool
-
-    config_path = tmp_path / "config.hk.json"
-    config_path.write_text(json.dumps(_runtime_config(market="hk")), encoding="utf-8")
+    config_path = _write_runtime_config(tmp_path)
     state = tmp_path / "state.json"
     hidden_timestamp = "2026-09-11T01:40:00+00:00"
     state.write_text(
@@ -216,10 +190,7 @@ def test_scheduler_status_rejects_unconfigured_account_before_state_projection(
         encoding="utf-8",
     )
 
-    response = execute_tool(
-        "scheduler_status",
-        {"config_path": str(config_path), "state": str(state), "account": "sy"},
-    )
+    response = _run_scheduler_status(config_path, state=str(state), account="sy")
 
     assert response["ok"] is False
     assert response["error"]["code"] == "INPUT_ERROR"
@@ -240,17 +211,11 @@ def test_scheduler_status_rejects_invalid_legacy_timestamps(
     tmp_path: Path,
     field: str,
 ) -> None:
-    from src.application.tool_execution import execute_tool
-
-    config_path = tmp_path / "config.hk.json"
-    config_path.write_text(json.dumps(_runtime_config(market="hk")), encoding="utf-8")
+    config_path = _write_runtime_config(tmp_path)
     state = tmp_path / "state.json"
     state.write_text(json.dumps({field: "not-a-time"}), encoding="utf-8")
 
-    response = execute_tool(
-        "scheduler_status",
-        {"config_path": str(config_path), "state": str(state)},
-    )
+    response = _run_scheduler_status(config_path, state=str(state))
 
     assert response["data"]["state"]["status"] == "corrupt"
     assert response["data"]["decision"]["status"] == "unknown"
@@ -260,17 +225,12 @@ def test_scheduler_status_accepts_legacy_none_and_config_validator_rejects_strin
     tmp_path: Path,
 ) -> None:
     from src.application.config_validator import validate_config
-    from src.application.tool_execution import execute_tool
 
-    config_path = tmp_path / "config.hk.json"
-    config_path.write_text(json.dumps(_runtime_config(market="hk")), encoding="utf-8")
+    config_path = _write_runtime_config(tmp_path)
     state = tmp_path / "state.json"
     state.write_text(json.dumps({"last_notify_utc": None}), encoding="utf-8")
 
-    response = execute_tool(
-        "scheduler_status",
-        {"config_path": str(config_path), "state": str(state)},
-    )
+    response = _run_scheduler_status(config_path, state=str(state))
 
     assert response["data"]["state"]["status"] == "available"
     assert response["data"]["decision"]["status"] == "available"
@@ -290,7 +250,6 @@ def test_scheduler_status_accepts_legacy_none_and_config_validator_rejects_strin
 ])
 def test_schedule_presence_and_explicit_empty_mapping_contract(tmp_path, monkeypatch, present, value, key, error):
     from src.application.agent_tools import config as config_tools
-    from src.application.tool_execution import execute_tool
     config = _runtime_config(market="us")
     if present:
         config["schedule"] = value
@@ -304,10 +263,10 @@ def test_schedule_presence_and_explicit_empty_mapping_contract(tmp_path, monkeyp
         calls.append(True)
         return real_decide(*args, **kwargs)
     monkeypatch.setattr(config_tools, "scheduler_decide", decide)
-    payload = {"config_path": str(path), "state": str(state)}
+    payload: dict[str, object] = {"state": str(state)}
     if key is not None:
         payload["schedule_key"] = key
-    response = execute_tool("scheduler_status", payload)
+    response = _run_scheduler_status(path, **payload)
     assert response["ok"] is (error is None)
     if error:
         assert response["error"]["code"] == error

@@ -31,6 +31,30 @@ from domain.domain.option_position_identity import (
 )
 
 
+def _cmd(**overrides: object) -> OpenPositionCommand:
+    """Build an ``OpenPositionCommand``.
+
+    The defaults are the AAPL short call this module repeats most often, so a
+    call site spells out only the fields that differ from it.
+    """
+    base = {
+        "broker": "富途",
+        "account": "sy",
+        "symbol": "aapl",
+        "option_type": "call",
+        "side": "short",
+        "contracts": 3,
+        "currency": "USD",
+        "strike": 200,
+        "multiplier": 100,
+        "expiration_ymd": "2026-05-15",
+        "premium_per_share": 1.235,
+        "opened_at_ms": 1000,
+    }
+    base.update(overrides)
+    return OpenPositionCommand(**base)
+
+
 def test_normalize_broker_maps_futu_aliases() -> None:
     assert normalize_broker("富途证券（香港）") == "富途"
     assert normalize_broker("富途證券(香港)") == "富途"
@@ -82,7 +106,7 @@ def test_strict_enum_normalization_rejects_invalid_values() -> None:
 
 def test_build_open_fields_for_short_put_sets_open_contracts_and_cash() -> None:
     fields = build_open_fields(
-        OpenPositionCommand(
+        _cmd(
             broker="富途证券（香港）",
             account="LX",
             symbol="nvda",
@@ -91,10 +115,8 @@ def test_build_open_fields_for_short_put_sets_open_contracts_and_cash() -> None:
             contracts=2,
             currency="美元",
             strike=100,
-            multiplier=100,
             expiration_ymd="2026-04-17",
             premium_per_share=1.235,
-            opened_at_ms=1000,
         )
     )
 
@@ -123,7 +145,7 @@ def test_build_open_fields_for_short_put_sets_open_contracts_and_cash() -> None:
 
 
 def test_build_position_lot_fields_returns_typed_open_contract() -> None:
-    command = OpenPositionCommand(
+    command = _cmd(
         broker="富途证券（香港）",
         account="LX",
         symbol="nvda",
@@ -132,10 +154,8 @@ def test_build_position_lot_fields_returns_typed_open_contract() -> None:
         contracts=2,
         currency="美元",
         strike=100,
-        multiplier=100,
         expiration_ymd="2026-04-17",
         premium_per_share=1.235,
-        opened_at_ms=1000,
     )
 
     fields = build_position_lot_fields(command)
@@ -147,18 +167,15 @@ def test_build_position_lot_fields_returns_typed_open_contract() -> None:
 
 def test_build_open_fields_preserves_strategy_snapshot() -> None:
     fields = build_open_fields(
-        OpenPositionCommand(
-            broker="富途",
+        _cmd(
             account="lx",
             symbol="NVDA",
             option_type="put",
-            side="short",
             contracts=1,
-            currency="USD",
             strike=100,
-            multiplier=100,
             expiration_ymd="2026-04-17",
             premium_per_share=1.0,
+            opened_at_ms=None,
             strategy_snapshot={
                 "strategy_family": "sell_put",
                 "strategy_profile": "short_vol",
@@ -178,19 +195,15 @@ def test_build_open_fields_preserves_strategy_snapshot() -> None:
 
 def test_build_open_fields_canonicalizes_alias_symbol() -> None:
     fields = build_open_fields(
-        OpenPositionCommand(
-            broker="富途",
+        _cmd(
             account="lx",
             symbol="POP",
             option_type="put",
-            side="short",
             contracts=1,
             currency="HKD",
             strike=135,
-            multiplier=100,
             expiration_ymd="2026-04-29",
             premium_per_share=1.23,
-            opened_at_ms=1000,
         )
     )
 
@@ -200,35 +213,26 @@ def test_build_open_fields_canonicalizes_alias_symbol() -> None:
 
 def test_build_open_fields_infers_currency_from_symbol_when_missing() -> None:
     hk_fields = build_open_fields(
-        OpenPositionCommand(
-            broker="富途",
+        _cmd(
             account="lx",
             symbol="0700.HK",
             option_type="put",
-            side="short",
             contracts=1,
             currency="",
             strike=510,
-            multiplier=100,
             expiration_ymd="2026-06-29",
             premium_per_share=1.23,
-            opened_at_ms=1000,
         )
     )
     us_fields = build_open_fields(
-        OpenPositionCommand(
-            broker="富途",
+        _cmd(
             account="lx",
             symbol="PLTR",
             option_type="put",
-            side="short",
             contracts=1,
             currency=None,
             strike=30,
-            multiplier=100,
-            expiration_ymd="2026-05-15",
             premium_per_share=1.23,
-            opened_at_ms=1000,
         )
     )
 
@@ -238,19 +242,14 @@ def test_build_open_fields_infers_currency_from_symbol_when_missing() -> None:
 
 def test_build_open_fields_symbol_currency_repairs_mismatched_input() -> None:
     fields = build_open_fields(
-        OpenPositionCommand(
-            broker="富途",
+        _cmd(
             account="lx",
             symbol="0700.HK",
             option_type="put",
-            side="short",
             contracts=1,
-            currency="USD",
             strike=510,
-            multiplier=100,
             expiration_ymd="2026-06-29",
             premium_per_share=1.23,
-            opened_at_ms=1000,
         )
     )
 
@@ -258,22 +257,7 @@ def test_build_open_fields_symbol_currency_repairs_mismatched_input() -> None:
 
 
 def test_build_open_fields_for_short_call_sets_locked_shares() -> None:
-    fields = build_open_fields(
-        OpenPositionCommand(
-            broker="富途",
-            account="sy",
-            symbol="aapl",
-            option_type="call",
-            side="short",
-            contracts=3,
-            currency="USD",
-            strike=200,
-            multiplier=100,
-            expiration_ymd="2026-05-15",
-            premium_per_share=1.23,
-            opened_at_ms=1000,
-        )
-    )
+    fields = build_open_fields(_cmd(premium_per_share=1.23))
 
     assert fields["underlying_share_locked"] == 300
     assert fields["contracts_open"] == 3
@@ -281,20 +265,7 @@ def test_build_open_fields_for_short_call_sets_locked_shares() -> None:
 
 
 def test_build_open_fields_enforces_core_write_rules() -> None:
-    command = OpenPositionCommand(
-        broker="富途",
-        account="sy",
-        symbol="aapl",
-        option_type="call",
-        side="long",
-        contracts=1,
-        currency="USD",
-        strike=200,
-        multiplier=100,
-        expiration_ymd="2026-05-15",
-        premium_per_share=1.235,
-        opened_at_ms=1000,
-    )
+    command = _cmd(side="long", contracts=1)
 
     invalid_cases = (
         (command.__class__(**{**command.__dict__, "broker": ""}), "broker is required"),
@@ -315,20 +286,7 @@ def test_build_open_fields_enforces_core_write_rules() -> None:
 
 
 def test_build_open_fields_enforces_risk_field_write_rules() -> None:
-    short_call = OpenPositionCommand(
-        broker="富途",
-        account="sy",
-        symbol="aapl",
-        option_type="call",
-        side="short",
-        contracts=3,
-        currency="USD",
-        strike=200,
-        multiplier=100,
-        expiration_ymd="2026-05-15",
-        premium_per_share=1.235,
-        opened_at_ms=1000,
-    )
+    short_call = _cmd()
     long_call = short_call.__class__(**{**short_call.__dict__, "side": "long"})
     short_put = short_call.__class__(**{**short_call.__dict__, "option_type": "put"})
 
@@ -364,42 +322,33 @@ def test_build_open_fields_enforces_risk_field_write_rules() -> None:
 def test_build_open_fields_requires_option_strike_and_expiration() -> None:
     for command, expected in (
         (
-            OpenPositionCommand(
-                broker="富途",
-                account="sy",
-                symbol="aapl",
-                option_type="call",
-                side="short",
+            _cmd(
                 contracts=1,
-                currency="USD",
-                expiration_ymd="2026-05-15",
+                strike=None,
+                multiplier=None,
+                premium_per_share=None,
+                opened_at_ms=None,
             ),
             "call option requires strike",
         ),
         (
-            OpenPositionCommand(
-                broker="富途",
-                account="sy",
-                symbol="aapl",
-                option_type="call",
-                side="short",
+            _cmd(
                 contracts=1,
-                currency="USD",
-                strike=200,
+                multiplier=None,
+                expiration_ymd=None,
+                premium_per_share=None,
+                opened_at_ms=None,
             ),
             "call option requires expiration_ymd",
         ),
         (
-            OpenPositionCommand(
-                broker="富途",
-                account="sy",
-                symbol="aapl",
+            _cmd(
                 option_type="put",
-                side="short",
                 contracts=1,
-                currency="USD",
-                strike=200,
+                multiplier=None,
                 expiration_ymd="not-a-date",
+                premium_per_share=None,
+                opened_at_ms=None,
             ),
             "put option requires expiration_ymd",
         ),
@@ -411,20 +360,7 @@ def test_build_open_fields_requires_option_strike_and_expiration() -> None:
 
 
 def test_build_open_fields_requires_premium_and_multiplier_and_preserves_three_decimal_premium() -> None:
-    command = OpenPositionCommand(
-        broker="富途",
-        account="sy",
-        symbol="aapl",
-        option_type="call",
-        side="long",
-        contracts=1,
-        currency="USD",
-        strike=200,
-        multiplier=100,
-        expiration_ymd="2026-05-15",
-        premium_per_share=1.235,
-        opened_at_ms=1000,
-    )
+    command = _cmd(side="long", contracts=1)
 
     fields = build_open_fields(command)
 
@@ -448,12 +384,10 @@ def test_build_open_fields_requires_premium_and_multiplier_and_preserves_three_d
 
 
 def test_build_open_fields_accepts_float_transport_noise_without_relaxing_price_precision() -> None:
-    command = OpenPositionCommand(
-        broker="富途",
+    command = _cmd(
         account="lx",
         symbol="3690.HK",
         option_type="put",
-        side="short",
         contracts=1,
         currency="HKD",
         strike=80,

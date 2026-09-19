@@ -6,9 +6,52 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from tests.candidate_evidence_helpers import seal_opening_candidate_fixture
+
+
+def _cleanup_payload(**overrides: Any) -> dict[str, Any]:
+    """Build one ``service.cleanup`` payload; call sites only ever replace ``data``."""
+    base: dict[str, Any] = {
+        "schema_version": "1.0",
+        "tool_name": "service.cleanup",
+        "ok": True,
+        "data": {
+            "output_runs_cleanup": {
+                "delete_runs": [{"path": "/var/lib/options-monitor/output_runs/run-1"}]
+            }
+        },
+    }
+    base.update(overrides)
+    return base
+
+
+def _completed(command: list[str], stdout: str = "dry\n") -> subprocess.CompletedProcess[str]:
+    """The successful fake runner result this module returns over and over."""
+    return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+
+def _nvda_scan_provider() -> dict[str, Any]:
+    """The single-row NVDA required-data provider this module publishes twice."""
+    return {
+        "symbol": "NVDA",
+        "rows": [
+            {
+                "symbol": "NVDA",
+                "option_type": "put",
+                "expiration": "2026-08-21",
+                "contract_symbol": "NVDA260821P00100000",
+                "strike": 100,
+                "multiplier": 100,
+            }
+        ],
+    }
+
+
+def _nvda_scan_columns() -> list[str]:
+    """The column list matching :func:`_nvda_scan_provider`."""
+    return ["symbol", "option_type", "expiration", "contract_symbol", "strike", "multiplier"]
 
 
 def _write_run(root: Path, run_id: str = "run-1") -> Path:
@@ -112,6 +155,34 @@ def _remote_inventory_payload(repo_root: Path, archive_root: Path) -> dict[str, 
     }
 
 
+def _prune_run_cmd(
+    calls: list[list[str]],
+    preview: dict[str, Any],
+    tmp_path: Path,
+    archive_root: Path,
+) -> Callable[..., subprocess.CompletedProcess[str]]:
+    """Fake remote runner the prune-guard tests share: inventory, then cleanup."""
+
+    def _run_cmd(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if "python3 -c" in command[-1]:
+            return _completed(command, json.dumps(_remote_inventory_payload(tmp_path, archive_root)))
+        if "--confirm" in command[-1]:
+            from src.application.research.archive import _validate_cleanup_preview
+
+            digest = _validate_cleanup_preview(
+                preview,
+                remote_runtime_root="/var/lib/options-monitor",
+            )["plan_sha256"]
+            confirmed = _cleanup_payload(
+                data={"status": "cleaned", "expected_output_runs_plan_sha256": digest}
+            )
+            return _completed(command, json.dumps(confirmed))
+        return _completed(command, json.dumps(preview))
+
+    return _run_cmd
+
+
 def test_archive_verify_writes_latest_inventory(tmp_path: Path) -> None:
     from src.application.research.archive import archive_verify
 
@@ -138,7 +209,7 @@ def test_archive_pull_defaults_to_rsync_dry_run_and_filters_local_runs(tmp_path:
 
     def _run_cmd(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
         calls.append(command)
-        return subprocess.CompletedProcess(command, 0, stdout="dry\n", stderr="")
+        return _completed(command)
 
     data = archive_pull(
         repo_root=tmp_path,
@@ -165,33 +236,11 @@ def test_archive_pull_syncs_only_selected_run_blob_refs(tmp_path: Path) -> None:
 
     source = tmp_path / "source"
     run_dir = _write_run(source, "run-1")
-    provider = {
-        "symbol": "NVDA",
-        "rows": [
-            {
-                "symbol": "NVDA",
-                "option_type": "put",
-                "expiration": "2026-08-21",
-                "contract_symbol": "NVDA260821P00100000",
-                "strike": 100,
-                "multiplier": 100,
-            }
-        ],
-    }
-    raw_bytes = (
-        json.dumps(provider, ensure_ascii=False, indent=2) + "\n"
-    ).encode("utf-8")
-    columns = [
-        "symbol",
-        "option_type",
-        "expiration",
-        "contract_symbol",
-        "strike",
-        "multiplier",
-    ]
+    provider = _nvda_scan_provider()
+    raw_bytes = (json.dumps(provider, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    columns = _nvda_scan_columns()
     csv_bytes = (
-        ",".join(columns)
-        + "\nNVDA,put,2026-08-21,NVDA260821P00100000,100,100\n"
+        ",".join(columns) + "\nNVDA,put,2026-08-21,NVDA260821P00100000,100,100\n"
     ).encode("utf-8")
     ref = publish_required_data_scan_blob(
         runtime_root=source,
@@ -209,7 +258,7 @@ def test_archive_pull_syncs_only_selected_run_blob_refs(tmp_path: Path) -> None:
 
     def _run_cmd(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
         calls.append(command)
-        return subprocess.CompletedProcess(command, 0, stdout="dry\n", stderr="")
+        return _completed(command)
 
     data = archive_pull(
         repo_root=tmp_path,
@@ -253,27 +302,8 @@ def test_archive_deduplicates_same_blob_with_runtime_local_publish_times(
     from src.application.required_data_blobs import publish_required_data_scan_blob
     from src.application.research.archive import _selected_scan_blob_refs
 
-    provider = {
-        "symbol": "NVDA",
-        "rows": [
-            {
-                "symbol": "NVDA",
-                "option_type": "put",
-                "expiration": "2026-08-21",
-                "contract_symbol": "NVDA260821P00100000",
-                "strike": 100,
-                "multiplier": 100,
-            }
-        ],
-    }
-    columns = [
-        "symbol",
-        "option_type",
-        "expiration",
-        "contract_symbol",
-        "strike",
-        "multiplier",
-    ]
+    provider = _nvda_scan_provider()
+    columns = _nvda_scan_columns()
     ref = publish_required_data_scan_blob(
         runtime_root=tmp_path,
         symbol="NVDA",
@@ -331,7 +361,7 @@ def test_archive_pull_filters_and_batches_explicit_remote_run_inventory(tmp_path
 
     def _run_cmd(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
         if command[0] != "ssh":
-            return subprocess.CompletedProcess(command, 0, stdout="dry\n", stderr="")
+            return _completed(command)
         selected = json.loads(shlex.split(command[-1])[-1])
         inventory_batches.append(selected)
         inventory = {
@@ -340,7 +370,7 @@ def test_archive_pull_filters_and_batches_explicit_remote_run_inventory(tmp_path
             "source_host": "prod.example",
             "runs": [{"run_id": run_id, "mtime": 1} for run_id in selected],
         }
-        return subprocess.CompletedProcess(command, 0, stdout=json.dumps(inventory), stderr="")
+        return _completed(command, json.dumps(inventory))
 
     data = archive_pull(
         repo_root=tmp_path,
@@ -361,8 +391,7 @@ def test_archive_pull_rejects_malformed_remote_inventory(tmp_path: Path) -> None
     from src.application.research.archive import archive_pull
 
     def _run_cmd(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
-        stdout = "not-json" if command[0] == "ssh" else "dry\n"
-        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+        return _completed(command, "not-json" if command[0] == "ssh" else "dry\n")
 
     data = archive_pull(
         repo_root=tmp_path,
@@ -392,7 +421,7 @@ def test_archive_pull_treats_missing_optional_remote_dirs_as_skipped(tmp_path: P
                 stdout="",
                 stderr='rsync: [Receiver] change_dir "/var/lib/options-monitor/output_shared/required_data" failed: No such file or directory (2)',
             )
-        return subprocess.CompletedProcess(command, 0, stdout="dry\n", stderr="")
+        return _completed(command)
 
     data = archive_pull(
         repo_root=tmp_path,
@@ -415,56 +444,23 @@ def test_archive_prune_remote_requires_verified_delete_runs(tmp_path: Path) -> N
     _write_run(archive_root, "run-1")
     _verify_remote_archive(tmp_path, archive_root)
     calls: list[list[str]] = []
-    preview = {
-        "schema_version": "1.0",
-        "tool_name": "service.cleanup",
-        "ok": True,
-        "data": {
+    preview = _cleanup_payload(
+        data={
             "output_runs_cleanup": {
                 "delete_runs": [
                     {"path": "/var/lib/options-monitor/output_runs/run-1"},
                     {"path": "/var/lib/options-monitor/output_runs/run-2"},
                 ]
             }
-        },
-    }
-
-    def _run_cmd(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
-        calls.append(command)
-        if "python3 -c" in command[-1]:
-            return subprocess.CompletedProcess(
-                command,
-                0,
-                stdout=json.dumps(_remote_inventory_payload(tmp_path, archive_root)),
-                stderr="",
-            )
-        if "--confirm" in command[-1]:
-            from src.application.research.archive import _validate_cleanup_preview
-
-            digest = _validate_cleanup_preview(
-                preview,
-                remote_runtime_root="/var/lib/options-monitor",
-            )["plan_sha256"]
-            confirmed = {
-                "schema_version": "1.0",
-                "tool_name": "service.cleanup",
-                "ok": True,
-                "data": {
-                    "status": "cleaned",
-                    "expected_output_runs_plan_sha256": digest,
-                },
-            }
-            return subprocess.CompletedProcess(
-                command, 0, stdout=json.dumps(confirmed), stderr=""
-            )
-        return subprocess.CompletedProcess(command, 0, stdout=json.dumps(preview), stderr="")
+        }
+    )
 
     data = archive_prune_remote(
         repo_root=tmp_path,
         archive_root=archive_root,
         ssh_target="deploy@example",
         confirm=True,
-        run_cmd=_run_cmd,
+        run_cmd=_prune_run_cmd(calls, preview, tmp_path, archive_root),
     )
 
     assert data["ok"] is False
@@ -483,53 +479,14 @@ def test_archive_prune_remote_runs_confirm_after_guard_passes(tmp_path: Path) ->
     _verify_remote_archive(tmp_path, archive_root)
     (kept_run / "state" / "last_run.json").write_text("changed", encoding="utf-8")
     calls: list[list[str]] = []
-    preview = {
-        "schema_version": "1.0",
-        "tool_name": "service.cleanup",
-        "ok": True,
-        "data": {
-            "output_runs_cleanup": {
-                "delete_runs": [{"path": "/var/lib/options-monitor/output_runs/run-1"}]
-            }
-        },
-    }
-
-    def _run_cmd(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
-        calls.append(command)
-        if "python3 -c" in command[-1]:
-            return subprocess.CompletedProcess(
-                command,
-                0,
-                stdout=json.dumps(_remote_inventory_payload(tmp_path, archive_root)),
-                stderr="",
-            )
-        if "--confirm" in command[-1]:
-            from src.application.research.archive import _validate_cleanup_preview
-
-            digest = _validate_cleanup_preview(
-                preview,
-                remote_runtime_root="/var/lib/options-monitor",
-            )["plan_sha256"]
-            confirmed = {
-                "schema_version": "1.0",
-                "tool_name": "service.cleanup",
-                "ok": True,
-                "data": {
-                    "status": "cleaned",
-                    "expected_output_runs_plan_sha256": digest,
-                },
-            }
-            return subprocess.CompletedProcess(
-                command, 0, stdout=json.dumps(confirmed), stderr=""
-            )
-        return subprocess.CompletedProcess(command, 0, stdout=json.dumps(preview), stderr="")
+    preview = _cleanup_payload()
 
     data = archive_prune_remote(
         repo_root=tmp_path,
         archive_root=archive_root,
         ssh_target="deploy@example",
         confirm=True,
-        run_cmd=_run_cmd,
+        run_cmd=_prune_run_cmd(calls, preview, tmp_path, archive_root),
     )
 
     assert data["ok"] is True
@@ -558,13 +515,8 @@ def test_archive_prune_remote_rejects_malformed_cleanup_preview(tmp_path: Path) 
     def _run_cmd(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
         calls.append(command)
         if "python3 -c" in command[-1]:
-            return subprocess.CompletedProcess(
-                command,
-                0,
-                stdout=json.dumps(_remote_inventory_payload(tmp_path, archive_root)),
-                stderr="",
-            )
-        return subprocess.CompletedProcess(command, 0, stdout="not-json", stderr="")
+            return _completed(command, json.dumps(_remote_inventory_payload(tmp_path, archive_root)))
+        return _completed(command, "not-json")
 
     data = archive_prune_remote(
         repo_root=tmp_path,
@@ -590,29 +542,13 @@ def test_archive_prune_remote_rechecks_current_remote_content(tmp_path: Path) ->
     _verify_remote_archive(tmp_path, archive_root)
     remote_inventory = _remote_inventory_payload(tmp_path, archive_root)
     remote_inventory["runs"][0]["content_digest"] = "changed"
-    preview = {
-        "schema_version": "1.0",
-        "tool_name": "service.cleanup",
-        "ok": True,
-        "data": {
-            "output_runs_cleanup": {
-                "delete_runs": [
-                    {"path": "/var/lib/options-monitor/output_runs/run-1"}
-                ]
-            }
-        },
-    }
+    preview = _cleanup_payload()
     calls: list[list[str]] = []
 
     def _run_cmd(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
         calls.append(command)
         payload = remote_inventory if "python3 -c" in command[-1] else preview
-        return subprocess.CompletedProcess(
-            command,
-            0,
-            stdout=json.dumps(payload),
-            stderr="",
-        )
+        return _completed(command, json.dumps(payload))
 
     data = archive_prune_remote(
         repo_root=tmp_path,
@@ -639,18 +575,7 @@ def test_archive_prune_remote_rechecks_current_local_copy(tmp_path: Path) -> Non
         "changed-after-verify\n",
         encoding="utf-8",
     )
-    preview = {
-        "schema_version": "1.0",
-        "tool_name": "service.cleanup",
-        "ok": True,
-        "data": {
-            "output_runs_cleanup": {
-                "delete_runs": [
-                    {"path": "/var/lib/options-monitor/output_runs/run-1"}
-                ]
-            }
-        },
-    }
+    preview = _cleanup_payload()
     calls: list[list[str]] = []
 
     def _run_cmd(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -660,12 +585,7 @@ def test_archive_prune_remote_rechecks_current_local_copy(tmp_path: Path) -> Non
             if "python3 -c" in command[-1]
             else preview
         )
-        return subprocess.CompletedProcess(
-            command,
-            0,
-            stdout=json.dumps(payload),
-            stderr="",
-        )
+        return _completed(command, json.dumps(payload))
 
     data = archive_prune_remote(
         repo_root=tmp_path,
