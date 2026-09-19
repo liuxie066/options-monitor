@@ -179,13 +179,7 @@ def test_sell_put_compute_metrics_uses_full_fee_formula() -> None:
 
     row = pd.Series(
         _formal_metric_row(
-            mode="put",
-            currency="USD",
-            bid=0.49,
-            ask=0.51,
-            strike=90.0,
-            spot=100.0,
-            dte=14,
+            mode="put", currency="USD", bid=0.49, ask=0.51, strike=90.0, spot=100.0, dte=14,
             snapshot_received_at_utc="2026-04-01T14:59:00Z",
         )
     )
@@ -202,13 +196,7 @@ def test_sell_call_compute_metrics_uses_full_fee_formula() -> None:
 
     row = pd.Series(
         _formal_metric_row(
-            mode="call",
-            currency="HKD",
-            bid=7.9,
-            ask=8.1,
-            strike=480.0,
-            spot=500.0,
-            dte=21,
+            mode="call", currency="HKD", bid=7.9, ask=8.1, strike=480.0, spot=500.0, dte=21
         )
     )
 
@@ -225,6 +213,11 @@ _STANDARD_FIXED_PLAN = {
     "commission_free": False,
     "platform_fee": 15.0,
     "fee_plan_ref": "futu_hk_standard_fixed",
+}
+_COMMISSION_FREE_PLAN = {
+    "commission_free": True,
+    "platform_fee": 15.0,
+    "fee_plan_ref": "futu_hk_commission_free",
 }
 _TERMINAL_RESULT_KEYS = {
     "kind",
@@ -252,14 +245,25 @@ def _assert_terminal_result_contract(out: dict) -> None:
         assert out["estimated_amount"] == round(sum(out["estimated_components"].values()), 6)
 
 
-def test_hk_terminal_assignment_standard_fixed_plan_hand_computed() -> None:
-    out = calc_futu_hk_terminal_fee(
-        "assignment",
-        order_price=450.0,
-        shares=100,
-        contracts=1,
-        account_fee_plan=_STANDARD_FIXED_PLAN,
+def _terminal(
+    kind: str = "assignment",
+    *,
+    order_price: float | None = 450.0,
+    shares: int = 100,
+    contracts: int = 1,
+    account_fee_plan: dict | None = _STANDARD_FIXED_PLAN,
+) -> dict:
+    return calc_futu_hk_terminal_fee(
+        kind,
+        order_price=order_price,
+        shares=shares,
+        contracts=contracts,
+        account_fee_plan=account_fee_plan,
     )
+
+
+def test_hk_terminal_assignment_standard_fixed_plan_hand_computed() -> None:
+    out = _terminal()
 
     assert out["complete"] is True
     assert out["basis"] == "estimated"
@@ -273,13 +277,7 @@ def test_hk_terminal_assignment_standard_fixed_plan_hand_computed() -> None:
 
 
 def test_hk_terminal_exercise_adds_two_hkd_per_contract() -> None:
-    out = calc_futu_hk_terminal_fee(
-        "exercise",
-        order_price=450.0,
-        shares=100,
-        contracts=1,
-        account_fee_plan=_STANDARD_FIXED_PLAN,
-    )
+    out = _terminal("exercise")
 
     assert out["complete"] is True
     assert out["amount"] == 81.215
@@ -288,11 +286,7 @@ def test_hk_terminal_exercise_adds_two_hkd_per_contract() -> None:
 
 
 def test_hk_terminal_expired_worthless_is_zero() -> None:
-    out = calc_futu_hk_terminal_fee(
-        "expired_worthless",
-        contracts=1,
-        account_fee_plan=_STANDARD_FIXED_PLAN,
-    )
+    out = _terminal("expired_worthless", order_price=None, shares=0)
 
     assert out["complete"] is True
     assert out["basis"] == "estimated"
@@ -303,17 +297,7 @@ def test_hk_terminal_expired_worthless_is_zero() -> None:
 
 
 def test_hk_terminal_assignment_commission_free_plan_zeroes_commission() -> None:
-    out = calc_futu_hk_terminal_fee(
-        "assignment",
-        order_price=450.0,
-        shares=100,
-        contracts=1,
-        account_fee_plan={
-            "commission_free": True,
-            "platform_fee": 15.0,
-            "fee_plan_ref": "futu_hk_commission_free",
-        },
-    )
+    out = _terminal(account_fee_plan=_COMMISSION_FREE_PLAN)
 
     assert out["complete"] is True
     # Standard fixed total 79.215 includes 13.5 commission; commission-free drops it.
@@ -332,13 +316,7 @@ def test_hk_terminal_missing_plan_facts_fail_closed_but_keep_estimate() -> None:
         {"commission_free": False, "fee_plan_ref": "x"},
         {"platform_fee": 15.0, "fee_plan_ref": "x"},
     ):
-        out = calc_futu_hk_terminal_fee(
-            "assignment",
-            order_price=450.0,
-            shares=100,
-            contracts=1,
-            account_fee_plan=plan,
-        )
+        out = _terminal(account_fee_plan=plan)
         assert out["complete"] is False
         assert out["basis"] == "missing"
         assert out["amount"] is None
@@ -363,11 +341,7 @@ def test_hk_terminal_rejects_lossy_or_nonfinite_economic_inputs() -> None:
     ):
         inputs = {"order_price": 450.0, "shares": 100, "contracts": 1}
         inputs[field] = value
-        out = calc_futu_hk_terminal_fee(
-            "assignment",
-            **inputs,
-            account_fee_plan=_STANDARD_FIXED_PLAN,
-        )
+        out = _terminal(**inputs)
         assert out["complete"] is False
         assert out["reason"] == "stock_fee_inputs_incomplete"
         assert out["amount"] is None
@@ -382,13 +356,7 @@ def test_hk_terminal_rejects_invalid_plan_fact_types() -> None:
         {"commission_free": False, "platform_fee": float("inf"), "fee_plan_ref": "x"},
         {"commission_free": False, "platform_fee": 15.0, "fee_plan_ref": 1},
     ):
-        out = calc_futu_hk_terminal_fee(
-            "assignment",
-            order_price=450.0,
-            shares=100,
-            contracts=1,
-            account_fee_plan=plan,
-        )
+        out = _terminal(account_fee_plan=plan)
         assert out["complete"] is False
         assert out["reason"] == "hk_account_fee_plan_missing"
         assert out["amount"] is None
@@ -398,13 +366,7 @@ def test_hk_terminal_rejects_invalid_plan_fact_types() -> None:
 
 def test_hk_terminal_rejects_unknown_kind() -> None:
     try:
-        calc_futu_hk_terminal_fee(
-            "sale",
-            order_price=1.0,
-            shares=1,
-            contracts=1,
-            account_fee_plan=_STANDARD_FIXED_PLAN,
-        )
+        _terminal("sale", order_price=1.0, shares=1)
     except ValueError:
         return
     raise AssertionError("expected ValueError for unsupported terminal kind")
