@@ -30,6 +30,27 @@ def _scope_errors(snapshot: dict, *, asset: str = "option") -> list[str]:
     return position_snapshot_scope_errors(snapshot, account_label="lx", environment="REAL", market="US", asset_type=asset, external_account_id="123", now_utc=NOW)
 
 
+class _FrozenDatetime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return NOW
+
+
+def _futu_snapshot(rows: list, *, asset_types: list | None = None) -> dict:
+    return build_futu_position_snapshot(
+        rows=rows, broker_account_ref=ACCOUNT, markets=["US"],
+        asset_types=asset_types or ["stock"], observed_at_utc=NOW.isoformat(), completeness="complete",
+    )
+
+
+def _portfolio_context(snapshot: dict, *, position_rows: list | None = None) -> dict:
+    return build_futu_portfolio_context(
+        balance_rows=[], position_rows=position_rows or [], account="lx", futu_account_id="123",
+        broker_account_identifiers=["123"], trd_env="REAL", capacity_market="us",
+        position_snapshot_input=snapshot,
+    )
+
+
 def _dataset(snapshot_input: dict, *, local_lots: list | None = None) -> dict:
     snapshot = OpenDOptionSnapshot(
         account="lx", market="us", environment="REAL", account_fingerprint="sha256:" + hashlib.sha256(b"123").hexdigest(),
@@ -129,14 +150,9 @@ def test_standard_snapshot_deliverable_blocks_consumers_and_preserves_evidence(d
 def test_stock_capacity_uses_snapshot_scope_and_preserves_source_cost(monkeypatch, invalid: str) -> None:
     import src.application.futu_portfolio_context as module
 
-    class FrozenDatetime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return NOW
-
-    monkeypatch.setattr(module, "datetime", FrozenDatetime)
+    monkeypatch.setattr(module, "datetime", _FrozenDatetime)
     raw_rows = [{"code": "US.NVDA", "qty": 100, "can_sell_qty": 100, "average_cost": 20, "cost_price": 1, "sec_type": "STOCK"}]
-    snapshot = build_futu_position_snapshot(rows=raw_rows, broker_account_ref=ACCOUNT, markets=["US"], asset_types=["stock"], observed_at_utc=NOW.isoformat(), completeness="complete")
+    snapshot = _futu_snapshot(raw_rows)
     if invalid == "partial":
         snapshot["completeness"] = "partial"
     elif invalid == "filtered":
@@ -147,11 +163,7 @@ def test_stock_capacity_uses_snapshot_scope_and_preserves_source_cost(monkeypatc
         snapshot["broker_account_ref"]["external_account_id"] = "456"
     else:
         snapshot["broker_account_ref"]["environment"] = "SIMULATE"
-    context = build_futu_portfolio_context(
-        balance_rows=[], position_rows=[{**raw_rows[0], "qty": 1000}], account="lx",
-        futu_account_id="123", broker_account_identifiers=["123"], trd_env="REAL",
-        capacity_market="us", position_snapshot_input=snapshot,
-    )
+    context = _portfolio_context(snapshot, position_rows=[{**raw_rows[0], "qty": 1000}])
     stock = context["stocks_by_symbol"]["NVDA"]
     assert stock["shares"] == 100
     assert stock["avg_cost"] == 20
@@ -161,12 +173,8 @@ def test_stock_capacity_uses_snapshot_scope_and_preserves_source_cost(monkeypatc
 
 
 def test_futu_snapshot_identifies_quantity_and_never_combines_physical_accounts() -> None:
-    kwargs = dict(broker_account_ref=ACCOUNT, markets=["US"], asset_types=["stock"], observed_at_utc=NOW.isoformat(), completeness="complete")
-    first = build_futu_position_snapshot(
-        rows=[{"code": "US.NVDA", "qty": 100, "provider_time": NOW}],
-        **kwargs,
-    )
-    second = build_futu_position_snapshot(rows=[{"code": "US.NVDA", "qty": 200}], **kwargs)
+    first = _futu_snapshot([{"code": "US.NVDA", "qty": 100, "provider_time": NOW}])
+    second = _futu_snapshot([{"code": "US.NVDA", "qty": 200}])
     assert first["snapshot_id"] != second["snapshot_id"]
     evidence = first["source_evidence"]
     assert first["evidence_refs"] == [evidence[0]["evidence_id"]]
@@ -177,7 +185,7 @@ def test_futu_snapshot_identifies_quantity_and_never_combines_physical_accounts(
     assert evidence[0]["data_type"] == "position"
     assert evidence[0]["source_record_identity"] == first["snapshot_id"]
     assert evidence[0]["adapter_version"] == "om.futu-opend-position.v1"
-    mixed = build_futu_position_snapshot(rows=[{"code": "US.NVDA", "qty": 100, "acc_id": "123"}, {"code": "US.NVDA", "qty": 200, "acc_id": "456"}], **kwargs)
+    mixed = _futu_snapshot([{"code": "US.NVDA", "qty": 100, "acc_id": "123"}, {"code": "US.NVDA", "qty": 200, "acc_id": "456"}])
     assert mixed["errors"] == ["position_row_account_mismatch:1"]
     assert mixed["rows"][0]["quantity"] == "100"
     assert len(mixed["source_payload"]["rows"]) == 2
@@ -187,22 +195,9 @@ def test_futu_snapshot_identifies_quantity_and_never_combines_physical_accounts(
 def test_complete_stock_snapshot_supplies_only_proven_whole_share_capacity(monkeypatch, quantity: str, whole_shares: int) -> None:
     import src.application.futu_portfolio_context as module
 
-    class FrozenDatetime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return NOW
-
-    monkeypatch.setattr(module, "datetime", FrozenDatetime)
-    snapshot = build_futu_position_snapshot(
-        rows=[{"code": "US.NVDA", "qty": quantity, "can_sell_qty": quantity, "average_cost": 20}],
-        broker_account_ref=ACCOUNT, markets=["US"], asset_types=["stock"],
-        observed_at_utc=NOW.isoformat(), completeness="complete",
-    )
-    context = build_futu_portfolio_context(
-        balance_rows=[], position_rows=[], account="lx", futu_account_id="123",
-        broker_account_identifiers=["123"], trd_env="REAL", capacity_market="us",
-        position_snapshot_input=snapshot,
-    )
+    monkeypatch.setattr(module, "datetime", _FrozenDatetime)
+    snapshot = _futu_snapshot([{"code": "US.NVDA", "qty": quantity, "can_sell_qty": quantity, "average_cost": 20}])
+    context = _portfolio_context(snapshot)
     assert context["position_snapshot_input"]["rows"][0]["quantity"] == quantity
     stock = context["stocks_by_symbol"]["NVDA"]
     assert stock["capacity_authority_status"] == "available"
@@ -228,10 +223,7 @@ def test_futu_available_contracts_preserve_direction_and_quantity_validation(
         'qty': quantity, 'can_sell_qty': sellable, 'option_strike_price': 100,
         'strike_time': '2026-09-18', 'option_contract_multiplier': 100,
     }
-    snapshot = build_futu_position_snapshot(
-        rows=[row], broker_account_ref=ACCOUNT, markets=['US'], asset_types=['option'],
-        observed_at_utc=NOW.isoformat(), completeness='complete',
-    )
+    snapshot = _futu_snapshot([row], asset_types=['option'])
     assert bool(snapshot['errors']) is not valid
     assert snapshot['rows'][0]['source_row'] == row
     if valid:

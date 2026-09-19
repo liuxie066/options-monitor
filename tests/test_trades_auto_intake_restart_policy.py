@@ -25,6 +25,31 @@ def _source(tmp_path: Path, *, reconnect_sec: int = 5) -> dict:
     }
 
 
+def _backoff_clock(monkeypatch, *, stop_when):
+    """Frozen monotonic clock plus the recording stop event the restart loop waits on."""
+    waits: list[float] = []
+    clock = [0.0]
+    monkeypatch.setattr(auto_intake.time, "monotonic", lambda: clock[0])
+
+    class _Stop:
+        stopped = False
+
+        def is_set(self):
+            return self.stopped
+
+        def set(self):
+            self.stopped = True
+
+        def wait(self, seconds):
+            waits.append(seconds)
+            clock[0] += seconds
+            if stop_when(seconds, clock[0]):
+                self.stopped = True
+            return self.stopped
+
+    return waits, _Stop()
+
+
 def _run(tmp_path: Path, monkeypatch, listener_type, *, reconnect_sec: int = 5, stop_event=None) -> int:
     monkeypatch.setattr(auto_intake, "OpenDTradePushListener", listener_type)
     return auto_intake._run_listener_source_loop(
@@ -70,25 +95,7 @@ def test_auth_required_stops_without_retry_and_writes_blocked_status(tmp_path: P
 
 
 def test_retryable_disconnect_recovers_and_resets_to_floor(tmp_path: Path, monkeypatch) -> None:
-    waits: list[float] = []
-    clock = [0.0]
-    monkeypatch.setattr(auto_intake.time, "monotonic", lambda: clock[0])
-
-    class _Stop:
-        stopped = False
-
-        def is_set(self):
-            return self.stopped
-
-        def set(self):
-            self.stopped = True
-
-        def wait(self, seconds):
-            waits.append(seconds)
-            clock[0] += seconds
-            if seconds == 0:
-                self.stopped = True
-            return self.stopped
+    waits, stop_event = _backoff_clock(monkeypatch, stop_when=lambda seconds, _total: seconds == 0)
 
     class _Listener:
         starts = 0
@@ -106,7 +113,7 @@ def test_retryable_disconnect_recovers_and_resets_to_floor(tmp_path: Path, monke
         def close(self):
             return None
 
-    rc = _run(tmp_path, monkeypatch, _Listener, reconnect_sec=5, stop_event=_Stop())
+    rc = _run(tmp_path, monkeypatch, _Listener, reconnect_sec=5, stop_event=stop_event)
 
     assert rc == 0
     assert _Listener.starts == 2
@@ -114,25 +121,7 @@ def test_retryable_disconnect_recovers_and_resets_to_floor(tmp_path: Path, monke
 
 
 def test_retry_backoff_is_capped_at_sixty_seconds(tmp_path: Path, monkeypatch) -> None:
-    waits: list[float] = []
-    clock = [0.0]
-    monkeypatch.setattr(auto_intake.time, "monotonic", lambda: clock[0])
-
-    class _Stop:
-        stopped = False
-
-        def is_set(self):
-            return self.stopped
-
-        def set(self):
-            self.stopped = True
-
-        def wait(self, seconds):
-            waits.append(seconds)
-            clock[0] += seconds
-            if clock[0] >= 100:
-                self.stopped = True
-            return self.stopped
+    waits, stop_event = _backoff_clock(monkeypatch, stop_when=lambda _seconds, total: total >= 100)
 
     class _Listener:
         def __init__(self, **_kwargs):
@@ -147,7 +136,7 @@ def test_retry_backoff_is_capped_at_sixty_seconds(tmp_path: Path, monkeypatch) -
         def close(self):
             return None
 
-    rc = _run(tmp_path, monkeypatch, _Listener, reconnect_sec=40, stop_event=_Stop())
+    rc = _run(tmp_path, monkeypatch, _Listener, reconnect_sec=40, stop_event=stop_event)
 
     assert rc == 0
     assert waits == [1] * 100
