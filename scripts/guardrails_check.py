@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import fnmatch
 import hashlib
+import json
 import re
 import subprocess
 import sys
@@ -169,6 +171,23 @@ ROOT_RUNTIME_CONFIG_PATTERNS = (
     "config.local*.json",
     "config.*.bak.*",
 )
+
+# Declared public surface. Only these roots are compared across revisions; a
+# module's surface is its ``__all__`` when that is statically resolvable, and
+# otherwise its own top-level public definitions and constants.
+PUBLIC_SURFACE_ROOTS = ("src", "domain", "scripts")
+PUBLIC_SURFACE_LEDGER = Path("docs/public_surface_retirements.json")
+PUBLIC_SURFACE_LEDGER_HEADING = "retirements"
+PUBLIC_SURFACE_LEDGER_KEYS = frozenset({"module", "name", "reason"})
+PUBLIC_SURFACE_WILDCARD = "*"
+PUBLIC_SURFACE_MIN_REASON_LENGTH = 20
+PUBLIC_SURFACE_SAMPLE_LIMIT = 12
+_PUBLIC_SURFACE_STATUSES = frozenset({"D", "M", "T"})
+_PUBLIC_SURFACE_CALLS = frozenset({"sorted", "list", "tuple", "set", "frozenset"})
+
+
+class PublicSurfaceUnavailable(Exception):
+    """Raised when a module's declared public surface is not statically readable."""
 
 
 class Violation:
@@ -557,6 +576,458 @@ def check_git_identity_privacy() -> list[Violation]:
     ]
 
 
+def _string_constant(node: ast.expr | None) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+def _module_all_value(tree: ast.Module) -> ast.expr | None:
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets = [target for target in node.targets if isinstance(target, ast.Name)]
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            targets = [node.target]
+        else:
+            continue
+        for target in targets:
+            if isinstance(target, ast.Name) and target.id == "__all__":
+                return node.value
+    return None
+
+
+def _module_literal_bindings(tree: ast.Module) -> dict[str, ast.expr]:
+    """Module-level single-name bindings, the only ones ``__all__`` may refer to."""
+    bindings: dict[str, ast.expr] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+        elif isinstance(node, ast.AnnAssign):
+            target = node.target
+        else:
+            continue
+        if isinstance(target, ast.Name) and target.id != "__all__":
+            bindings[target.id] = node.value
+    return bindings
+
+
+def _resolve_declared_sequence(
+    node: ast.expr,
+    bindings: dict[str, ast.expr],
+    seen: frozenset[str],
+) -> frozenset[str] | None:
+    """Resolve an expression that yields declared names, or ``None`` when it cannot be read."""
+    constant = _string_constant(node)
+    if constant is not None:
+        return frozenset({constant})
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        names: set[str] = set()
+        for element in node.elts:
+            resolved = _resolve_declared_sequence(element, bindings, seen)
+            if resolved is None:
+                return None
+            names |= resolved
+        return frozenset(names)
+    if isinstance(node, ast.Starred):
+        return _resolve_declared_sequence(node.value, bindings, seen)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _resolve_declared_sequence(node.left, bindings, seen)
+        right = _resolve_declared_sequence(node.right, bindings, seen)
+        if left is None or right is None:
+            return None
+        return left | right
+    if isinstance(node, ast.Dict):
+        keys: set[str] = set()
+        for key in node.keys:
+            text = _string_constant(key)
+            if text is None:
+                return None
+            keys.add(text)
+        return frozenset(keys)
+    if isinstance(node, ast.Call):
+        function = node.func
+        if isinstance(function, ast.Name) and function.id in _PUBLIC_SURFACE_CALLS and len(node.args) == 1:
+            return _resolve_declared_sequence(node.args[0], bindings, seen)
+        if isinstance(function, ast.Attribute) and function.attr == "keys" and not node.args:
+            return _resolve_declared_sequence(function.value, bindings, seen)
+        return None
+    if isinstance(node, ast.Name):
+        binding = bindings.get(node.id)
+        if binding is None or node.id in seen:
+            return None
+        return _resolve_declared_sequence(binding, bindings, seen | {node.id})
+    return None
+
+
+def _conventional_public_names(tree: ast.Module) -> frozenset[str]:
+    """Names a module declares without ``__all__``: its own top-level public definitions."""
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if not node.name.startswith("_"):
+                names.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and not target.id.startswith("_"):
+                    names.add(target.id)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            if not node.target.id.startswith("_"):
+                names.add(node.target.id)
+    return frozenset(names)
+
+
+def _parse_module(source: str) -> ast.Module:
+    try:
+        return ast.parse(source)
+    except SyntaxError as exc:
+        raise PublicSurfaceUnavailable(
+            f"module source does not parse ({exc.msg} at line {exc.lineno})"
+        ) from exc
+
+
+def _explicit_all_names(tree: ast.Module) -> frozenset[str] | None:
+    """Resolved ``__all__``, or ``None`` when the module does not declare one."""
+    explicit = _module_all_value(tree)
+    if explicit is None:
+        return None
+    resolved = _resolve_declared_sequence(explicit, _module_literal_bindings(tree), frozenset())
+    if resolved is None:
+        raise PublicSurfaceUnavailable(
+            "`__all__` is not statically resolvable; declare it as a literal list of names "
+            "so the public surface can be compared across revisions"
+        )
+    return resolved
+
+
+def _bound_names(tree: ast.Module) -> frozenset[str]:
+    """Every name the module binds at top level, whether by definition, assignment or import."""
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    names.add(target.id)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                names.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name != "*":
+                    names.add(alias.asname or alias.name)
+    return frozenset(names)
+
+
+def declared_public_names(source: str) -> frozenset[str]:
+    """Declared public names of one module.
+
+    ``__all__`` wins when it is a statically resolvable literal (including
+    starred references to module-level literals, ``dict.keys()`` and
+    ``sorted(...)``). A module without ``__all__`` declares the top-level names
+    it defines itself, so re-exports must be listed in ``__all__`` to be
+    protected. Anything else raises rather than guessing.
+    """
+    tree = _parse_module(source)
+    explicit = _explicit_all_names(tree)
+    return _conventional_public_names(tree) if explicit is None else explicit
+
+
+def present_public_names(source: str) -> frozenset[str]:
+    """Names the module still exposes, used to decide whether a declared name disappeared.
+
+    A module that declares ``__all__`` is held to it, so dropping a name from
+    ``__all__`` is a removal. Without ``__all__`` every top-level binding counts
+    -- imports included -- because a name re-exported by an alias is still
+    reachable even though the module no longer defines it.
+    """
+    tree = _parse_module(source)
+    explicit = _explicit_all_names(tree)
+    return _bound_names(tree) if explicit is None else explicit
+
+
+def _git_blob_text(spec: str) -> str | None:
+    """Text of ``git show <spec>``, or ``None`` when that object does not exist."""
+    result = subprocess.run(
+        ["git", "show", spec],
+        cwd=str(ROOT),
+        check=False,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.decode("utf-8", errors="ignore")
+
+
+def _head_file_text(relative: str, *, staged: bool) -> str | None:
+    if staged:
+        return _git_blob_text(f":{relative}")
+    path = ROOT / relative
+    if not path.is_file():
+        return None
+    return path.read_text(encoding="utf-8", errors="ignore")
+
+
+def _head_path_exists(relative: str, *, staged: bool) -> bool:
+    if staged:
+        return index_path_exists(Path(relative), {path.as_posix() for path in git_index_paths()})
+    return working_tree_path_exists(Path(relative))
+
+
+def _git_revision_exists(revision: str) -> bool:
+    result = subprocess.run(
+        ["git", "cat-file", "-e", f"{revision}^{{commit}}"],
+        cwd=str(ROOT),
+        check=False,
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
+def _public_surface_changed_paths(base_revision: str, *, staged: bool) -> list[tuple[str, str]]:
+    command = ["git", "diff", "--name-status", "--no-renames", "-z"]
+    if staged:
+        command.append("--cached")
+    command.append(base_revision)
+    command.append("--")
+    command.extend(f"{root}/" for root in PUBLIC_SURFACE_ROOTS)
+    result = subprocess.run(command, cwd=str(ROOT), check=False, capture_output=True)
+    if result.returncode != 0:
+        raise SystemExit(
+            "[guardrails] failed to diff the public surface against "
+            f"{base_revision}: {result.stderr.decode('utf-8', errors='ignore').strip()}"
+        )
+    fields = [
+        field.decode("utf-8", errors="surrogateescape")
+        for field in result.stdout.split(b"\0")
+        if field
+    ]
+    return [(fields[index], fields[index + 1]) for index in range(0, len(fields) - 1, 2)]
+
+
+def public_surface_removals(
+    base_revision: str,
+    *,
+    staged: bool,
+) -> tuple[list[tuple[str, str]], list[Violation]]:
+    """``[(module, name)]`` declared at ``base_revision`` and gone at head, plus read issues."""
+    removals: list[tuple[str, str]] = []
+    issues: list[Violation] = []
+    for status, relative in _public_surface_changed_paths(base_revision, staged=staged):
+        if status not in _PUBLIC_SURFACE_STATUSES or not relative.endswith(".py"):
+            continue
+        base_text = _git_blob_text(f"{base_revision}:{relative}")
+        if base_text is None:
+            if status != "D":
+                issues.append(
+                    Violation(
+                        Path(relative),
+                        1,
+                        "module is modified at the base revision but its content could not be read",
+                        status,
+                    )
+                )
+            continue
+        head_text = _head_file_text(relative, staged=staged)
+        try:
+            base_names = declared_public_names(base_text)
+        except PublicSurfaceUnavailable as exc:
+            issues.append(
+                Violation(
+                    Path(relative),
+                    1,
+                    "declared public surface cannot be read at the base revision",
+                    str(exc),
+                )
+            )
+            continue
+        try:
+            head_names = present_public_names(head_text) if head_text is not None else frozenset()
+        except PublicSurfaceUnavailable as exc:
+            issues.append(
+                Violation(
+                    Path(relative),
+                    1,
+                    "declared public surface cannot be read at the revision under review",
+                    str(exc),
+                )
+            )
+            continue
+        for name in sorted(base_names - head_names):
+            removals.append((relative, name))
+    return removals, issues
+
+
+def _retirement_entries(
+    source: str | None,
+    *,
+    label: str,
+) -> tuple[list[dict[str, str]], list[Violation]]:
+    if source is None:
+        return [], []
+    try:
+        payload = json.loads(source)
+    except json.JSONDecodeError as exc:
+        return [], [
+            Violation(PUBLIC_SURFACE_LEDGER, exc.lineno, f"{label}: retirement ledger is not valid JSON", exc.msg)
+        ]
+    if not isinstance(payload, dict) or not isinstance(payload.get(PUBLIC_SURFACE_LEDGER_HEADING), list):
+        return [], [
+            Violation(
+                PUBLIC_SURFACE_LEDGER,
+                1,
+                f"{label}: retirement ledger must be an object with a '{PUBLIC_SURFACE_LEDGER_HEADING}' list",
+                "<no retirements list>",
+            )
+        ]
+
+    entries: list[dict[str, str]] = []
+    issues: list[Violation] = []
+    for index, raw in enumerate(payload[PUBLIC_SURFACE_LEDGER_HEADING], start=1):
+        rendered = json.dumps(raw, ensure_ascii=False, sort_keys=True)
+        if not isinstance(raw, dict) or set(raw) != PUBLIC_SURFACE_LEDGER_KEYS:
+            issues.append(
+                Violation(
+                    PUBLIC_SURFACE_LEDGER,
+                    1,
+                    f"{label}: retirement entry #{index} must have exactly "
+                    f"{sorted(PUBLIC_SURFACE_LEDGER_KEYS)}",
+                    rendered,
+                )
+            )
+            continue
+        module = raw["module"]
+        name = raw["name"]
+        reason = raw["reason"]
+        if not all(isinstance(value, str) for value in (module, name, reason)):
+            issues.append(
+                Violation(
+                    PUBLIC_SURFACE_LEDGER,
+                    1,
+                    f"{label}: retirement entry #{index} must use string values",
+                    rendered,
+                )
+            )
+            continue
+        if not module.endswith(".py") or module.startswith("/") or ".." in Path(module).parts:
+            issues.append(
+                Violation(
+                    PUBLIC_SURFACE_LEDGER,
+                    1,
+                    f"{label}: retirement entry #{index} must name a repository-relative .py module",
+                    rendered,
+                )
+            )
+            continue
+        if not module.startswith(tuple(f"{root}/" for root in PUBLIC_SURFACE_ROOTS)):
+            issues.append(
+                Violation(
+                    PUBLIC_SURFACE_LEDGER,
+                    1,
+                    f"{label}: retirement entry #{index} names a module outside the checked roots "
+                    f"{list(PUBLIC_SURFACE_ROOTS)}",
+                    rendered,
+                )
+            )
+            continue
+        if name != PUBLIC_SURFACE_WILDCARD and not name.isidentifier():
+            issues.append(
+                Violation(
+                    PUBLIC_SURFACE_LEDGER,
+                    1,
+                    f"{label}: retirement entry #{index} must name a declared identifier "
+                    f"or '{PUBLIC_SURFACE_WILDCARD}' for a retired module",
+                    rendered,
+                )
+            )
+            continue
+        if len(reason.strip()) < PUBLIC_SURFACE_MIN_REASON_LENGTH:
+            issues.append(
+                Violation(
+                    PUBLIC_SURFACE_LEDGER,
+                    1,
+                    f"{label}: retirement entry #{index} must explain why the name is gone "
+                    f"(at least {PUBLIC_SURFACE_MIN_REASON_LENGTH} characters)",
+                    rendered,
+                )
+            )
+            continue
+        entries.append({"module": module, "name": name, "reason": reason})
+    return entries, issues
+
+
+def check_public_surface(base_revision: str, *, staged: bool = False) -> list[Violation]:
+    """Require every disappeared declared public name to be recorded in the retirement ledger."""
+    if not _git_revision_exists(base_revision):
+        raise SystemExit(
+            f"[guardrails] public-surface base revision {base_revision!r} is not available locally; "
+            "fetch it before running this check"
+        )
+    issues: list[Violation] = []
+    base_entries, base_issues = _retirement_entries(
+        _git_blob_text(f"{base_revision}:{PUBLIC_SURFACE_LEDGER.as_posix()}"),
+        label=f"base {base_revision[:12]}",
+    )
+    issues.extend(base_issues)
+    head_entries, head_issues = _retirement_entries(
+        _head_file_text(PUBLIC_SURFACE_LEDGER.as_posix(), staged=staged),
+        label="head",
+    )
+    issues.extend(head_issues)
+
+    head_keys = {(entry["module"], entry["name"]) for entry in head_entries}
+    base_keys = {(entry["module"], entry["name"]) for entry in base_entries}
+    for module, name in sorted(base_keys - head_keys):
+        issues.append(
+            Violation(
+                PUBLIC_SURFACE_LEDGER,
+                1,
+                "retirement ledger entries are append-only; this recorded retirement was dropped",
+                f"{module} :: {name}",
+            )
+        )
+
+    for entry in head_entries:
+        if entry["name"] != PUBLIC_SURFACE_WILDCARD:
+            continue
+        if _head_path_exists(entry["module"], staged=staged):
+            issues.append(
+                Violation(
+                    PUBLIC_SURFACE_LEDGER,
+                    1,
+                    f"a '{PUBLIC_SURFACE_WILDCARD}' retirement is only valid when the module itself is gone, "
+                    "and it still exists",
+                    entry["module"],
+                )
+            )
+
+    removals, removal_issues = public_surface_removals(base_revision, staged=staged)
+    issues.extend(removal_issues)
+    uncovered: dict[str, list[str]] = {}
+    for module, name in removals:
+        if (module, name) in head_keys:
+            continue
+        if (module, PUBLIC_SURFACE_WILDCARD) in head_keys and not _head_path_exists(module, staged=staged):
+            continue
+        uncovered.setdefault(module, []).append(name)
+    for module, names in sorted(uncovered.items()):
+        sample = ", ".join(names[:PUBLIC_SURFACE_SAMPLE_LIMIT])
+        if len(names) > PUBLIC_SURFACE_SAMPLE_LIMIT:
+            sample = f"{sample}, … {len(names) - PUBLIC_SURFACE_SAMPLE_LIMIT} more"
+        issues.append(
+            Violation(
+                Path(module),
+                1,
+                f"{len(names)} declared public name(s) disappeared without a retirement record in "
+                f"{PUBLIC_SURFACE_LEDGER.as_posix()}",
+                sample,
+            )
+        )
+    return issues
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Guardrails checks for docs and runtime config tracking")
     parser.add_argument("--check-doc-wording", action="store_true", help="check docs wording for runtime entry")
@@ -571,16 +1042,40 @@ def main() -> None:
         help="check tracked text for known private fingerprints and personal paths",
     )
     parser.add_argument(
+        "--check-public-surface",
+        action="store_true",
+        help="check that declared public names were not removed without a retirement ledger entry",
+    )
+    parser.add_argument(
+        "--public-surface-base",
+        metavar="REV",
+        default=None,
+        help=(
+            "base revision the declared public surface is compared against; "
+            "required by --check-public-surface, never defaulted"
+        ),
+    )
+    parser.add_argument(
         "--staged",
         action="store_true",
         help="check the staged index content of changed files instead of the working tree",
     )
     args = parser.parse_args()
 
+    if args.check_public_surface and not args.public_surface_base:
+        raise SystemExit(
+            "[guardrails] --check-public-surface requires --public-surface-base <revision>; "
+            "the comparison is never skipped silently"
+        )
+    if args.public_surface_base and not args.check_public_surface:
+        raise SystemExit(
+            "[guardrails] --public-surface-base is only meaningful together with --check-public-surface"
+        )
+
     run_doc = args.check_doc_wording
     run_tracking = args.check_runtime_config_tracking
     run_sensitive = args.check_sensitive_artifacts
-    if not run_doc and not run_tracking and not run_sensitive:
+    if not run_doc and not run_tracking and not run_sensitive and not args.check_public_surface:
         run_doc = True
         run_tracking = True
         run_sensitive = True
@@ -617,6 +1112,8 @@ def main() -> None:
     if run_sensitive:
         issues.extend(check_sensitive_repository_artifacts(files, line_reader=line_reader))
         issues.extend(check_git_identity_privacy())
+    if args.check_public_surface:
+        issues.extend(check_public_surface(args.public_surface_base, staged=args.staged))
 
     if issues:
         print(f"[guardrails] FAILED ({len(issues)} issue(s))")

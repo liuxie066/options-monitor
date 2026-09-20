@@ -37,6 +37,18 @@ jobs:
         run: |
           ./.venv/bin/python scripts/guardrails_check.py --check-doc-wording --check-runtime-config-tracking --check-sensitive-artifacts
 
+      - name: Public surface check
+        if: ${{ github.event_name == 'pull_request' }}
+        run: |
+          git fetch --no-tags --unshallow origin || true
+          base="$(git merge-base "origin/${{ github.event.pull_request.base.ref }}" HEAD)" || {
+            echo "::error::Unable to resolve the public-surface base revision"
+            exit 1
+          }
+          ./.venv/bin/python scripts/guardrails_check.py \
+            --check-public-surface \
+            --public-surface-base "${base}"
+
       - name: Standalone smoke
         run: |
           ./.venv/bin/python tests/run_smoke.py

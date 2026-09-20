@@ -25,6 +25,7 @@ Workflow: `.github/workflows/guardrails.yml`
 - Docs check: forbid treating `config.json` / `config.scheduled` / `config.market_*` as OM runtime entry, require the living-doc authority graph to remain present, and reject deterministic repository paths in indexed living docs when their owner is missing
 - Runtime config tracking check: forbid committing root runtime configs such as `config.us.json` / `config.hk.json`; commit only templates under `configs/examples/`
 - Sensitive artifact check: reject high-confidence provider credentials, private keys, credentialed URLs, known private runtime/financial/email fingerprints, and literal personal home or mounted-volume paths without printing the blocked value
+- Public surface check: compare the declared public names of `src/`, `domain/` and `scripts/` against the merge base of the pull request and reject any name that disappeared without a recorded retirement
 - Lint: run `python -m ruff check .`
 - Standalone smoke: run `tests/run_smoke.py`
 - Launcher spec smoke: render `./om-agent spec` through the public wrapper
@@ -41,6 +42,23 @@ The workflow uses pinned `pytest-xdist` and `pytest -n 2 --dist loadfile --max-w
 Rejected alternatives: test-impact selection would reduce required coverage; a GitHub matrix would duplicate environment setup and complicate the required-check and release aggregation contract; unbounded `-n auto` would make memory and process count depend on runner hardware. If the parallel run exposes a real shared-resource dependency, that resource must be isolated with a temporary path, dynamic port, worker-unique path, or cross-process lock before this contract can ship. This slice has no serial carve-out and must not skip or deselect a conflicting test.
 
 Implementation is one slice: declare `pytest-xdist` in `requirements/dev.txt`, pin its exact version in `constraints/dev.txt`, update the full-regression invocation, and extend the existing workflow contract test to enforce the exact command, dependency declaration, exact pin, and absence of `-k`, `--ignore`, `--deselect`, or test-path selection. Run that contract test, compare serial collection with the complete two-worker result, then use one real pull-request run for the timing acceptance above. The change affects development CI only; it does not alter runtime code, production data, notifications, releases, or deployment.
+
+### Declared public surface
+
+Every module under `src/`, `domain/` and `scripts/` declares a public surface, and the pull-request gate compares that surface against the merge base of the pull request (not against a checked-in expectation, which a deletion could update in the same commit). A declared name that disappears fails the gate unless `docs/public_surface_retirements.json` records it.
+
+- A module's surface is its `__all__` when that is statically resolvable — literal lists and tuples, starred references to module-level literals, `dict.keys()` and `sorted(...)`. A module without `__all__` declares the top-level public names it defines itself, so a re-export must be listed in `__all__` to be protected. An `__all__` that cannot be resolved statically is itself a failure: declare it as a literal list of names.
+- A name still counts as present when the module binds it at top level by any means, imports included, because `from x import utc_now as utc_now_iso` keeps the name reachable even though the module no longer defines it. When a module does declare `__all__`, that list is the surface, so narrowing it is a removal.
+- The ledger is append-only, and the gate rejects a change that drops a recorded entry. An entry is one object with exactly `module`, `name` and `reason`. The gate enforces that `reason` is a sentence rather than a placeholder (at least 20 characters); whether it is a *true* sentence is the reviewer's call, which is why the entry lands in the diff next to the deletion instead of in a separate bookkeeping file. `name` `*` retires a whole module and is valid only while that module is really gone — so a deleted module or a module split into a package costs one entry, not one per name.
+- Leaving a removal unrecorded fails, and so does deleting a recorded entry. Adding a name, or changing a symbol where it already lives, does not: the gate compares which names a module exposes, never how they are implemented. Moving a name to another module does fail for the module it left, unless that module still exposes it — an alias import counts.
+
+Run it locally against any revision:
+
+```sh
+./.venv/bin/python scripts/guardrails_check.py --check-public-surface --public-surface-base <rev>
+```
+
+The base revision is never defaulted: `--check-public-surface` without `--public-surface-base` fails instead of comparing nothing. The workflow runs this check on `pull_request` events and nowhere else — a push to `main` reuses the required pull-request result, which is the same policy the full regression already follows. The workflow passes a merge base, so a branch that trails `main` is not charged for deletions made on `main` itself.
 
 ## C) Symbol Canonicalization Rule
 

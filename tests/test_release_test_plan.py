@@ -311,6 +311,17 @@ def test_required_pr_and_release_guardrail_discovers_full_suite_after_smoke() ->
     assert "npm ci" not in text
     assert "./om-agent spec > /tmp/om-agent-spec.json" in text
     assert "if: ${{ github.event_name == 'pull_request' || steps.release.outputs.tag != '' }}" in text
+    assert (
+        text.index("--check-sensitive-artifacts")
+        < text.index("- name: Public surface check")
+        < text.index("tests/run_smoke.py")
+    )
+    surface_step = text.split("- name: Public surface check", 1)[1].split("- name: Standalone smoke", 1)[0]
+    assert "if: ${{ github.event_name == 'pull_request' }}" in surface_step
+    assert "git merge-base" in surface_step
+    assert "github.event.pull_request.base.ref" in surface_step
+    assert "--check-public-surface" in surface_step
+    assert "--public-surface-base" in surface_step
     assert pytest_commands == [full_command]
     assert not any(selector in full_command for selector in (" -k ", "--ignore", "--deselect", "tests/test_"))
     assert "tests/test_" not in text
