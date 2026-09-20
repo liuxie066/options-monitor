@@ -17,6 +17,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          # The public surface check compares against the merge base of the pull
+          # request, which a single-commit checkout cannot resolve honestly.
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -36,6 +40,18 @@ jobs:
       - name: Guardrails checks
         run: |
           ./.venv/bin/python scripts/guardrails_check.py --check-doc-wording --check-runtime-config-tracking --check-sensitive-artifacts
+
+      - name: Public surface check
+        if: ${{ github.event_name == 'pull_request' }}
+        run: |
+          base_ref="${{ github.event.pull_request.base.ref }}"
+          base="$(git merge-base "origin/${base_ref}" HEAD)" || {
+            echo "::error::Unable to resolve the public-surface base revision origin/${base_ref}"
+            exit 1
+          }
+          ./.venv/bin/python scripts/guardrails_check.py \
+            --check-public-surface \
+            --public-surface-base "${base}"
 
       - name: Standalone smoke
         run: |
