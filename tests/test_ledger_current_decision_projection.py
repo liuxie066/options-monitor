@@ -16,6 +16,10 @@ from domain.domain.assigned_stock import (
     project_assigned_stock_lifecycle,
 )
 from domain.domain.ledger import ContractKey, TradeEvent
+from domain.domain.wheel import (
+    lot_strategy_metadata_from_trade_events,
+    merge_lot_strategy_metadata,
+)
 from src.application.ledger import (
     combo_reconciliation,
     current_decision_combo,
@@ -1445,7 +1449,14 @@ def test_legacy_oracle_matches_all_incremental_settlement_transitions(
     ) == incremental
 
 
-def test_assigned_stock_lot_adapter_preserves_retired_adjustment_mode() -> None:
+def test_assigned_stock_lot_adapter_reads_retired_adjustment_mode_from_events() -> None:
+    """``yield_enhancement_mode`` is RECONSTRUCTIBLE: the adapter is fed it.
+
+    It left the lot payload in the convergence batch (``write-side-definition.md``
+    §2, plan item 7) and its home is the adjust event; the event-layer
+    strategy-metadata reader replays it and the projections fold it into the lot
+    fields they hand the adapter.
+    """
     key = ContractKey.from_values(
         broker="futu",
         account="lx",
@@ -1454,10 +1465,9 @@ def test_assigned_stock_lot_adapter_preserves_retired_adjustment_mode() -> None:
         strike=100,
         expiration_ymd="2026-06-19",
     )
-    projected = writer.project_stored_trade_events_to_position_lots(
-        [
-            TradeEvent(
-                event_id="mixed-open",
+    events = [
+        TradeEvent(
+            event_id="mixed-open",
                 event_type="open",
                 event_time_ms=1_000,
                 contract_key=key,
@@ -1489,12 +1499,16 @@ def test_assigned_stock_lot_adapter_preserves_retired_adjustment_mode() -> None:
                     "patch": {"yield_enhancement_mode": "vol_convexity_enhancement"}
                 },
             ),
-        ]
-    )
+    ]
+    projected = writer.project_stored_trade_events_to_position_lots(events)
     current = projected.lots[0]
+    assert "yield_enhancement_mode" not in current.fields
+    metadata = lot_strategy_metadata_from_trade_events(
+        [event.to_dict() for event in events]
+    )
     row = assigned_stock_position_lot_row(
         projected.ledger_projection.lots[0],
-        current_fields=current.fields,
+        current_fields=merge_lot_strategy_metadata(current.fields, metadata.get("mixed-lot", {})),
         at_ms=3_000,
     )
 

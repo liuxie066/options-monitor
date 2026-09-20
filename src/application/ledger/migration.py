@@ -140,7 +140,10 @@ def position_lot_snapshot_to_open_event(
         contract_key = _contract_key_from_position_fields(fields)
         raw_payload: dict[str, Any] = {
             "record_id": lot_id,
-            "fields": dict(fields),
+            # No legacy ``fields`` snapshot: the imported event carries the
+            # contract key and the quantities, and the published payload is a
+            # pure function of the projected lot (I-1). Seeding the historical
+            # row verbatim is what let legacy spellings reach a converged payload.
             "source": source,
         }
         # §9.2 step 3: the contract key no longer carries the position side, so the

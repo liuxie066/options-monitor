@@ -89,7 +89,12 @@ def test_partial_call_close_rebuild_and_sale_keep_current_coverage(
         contracts=2, currency="USD", strike=110, multiplier=100, expiration_ymd="2026-08-21",
         premium_per_share=2, opened_at_ms=3_000, strategy_snapshot={"source_stock_lot_id": stock_id},
     )
-    call_id = next(row["record_id"] for row in repo.list_position_lots() if row["fields"]["option_type"] == "call")
+    # The converged payload carries the contract under ``contract_key``.
+    call_id = next(
+        row["record_id"]
+        for row in repo.list_position_lots()
+        if row["fields"]["contract_key"]["option_type"] == "call"
+    )
     full = build_assigned_stock_view(repo, account="lx", as_of_ms=3_000)
     compact = ledger_api.compact_assigned_stock_view(
         full, account="lx", current_position_lots=repo.list_position_lots(), as_of_ms=3_000,

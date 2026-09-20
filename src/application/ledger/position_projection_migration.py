@@ -42,6 +42,25 @@ from src.application.ledger.repository import (
     _position_lot_contract_scalars,
 )
 from src.application.ledger.sqlite_row_codec import position_lot_row_to_record
+
+
+def _lot_account(fields: Any) -> str:
+    """A lot payload's account under its converged path, or ``""``.
+
+    ``account`` moved inside ``contract_key`` (``write-side-definition.md`` §2);
+    the retired flat sibling is read after it because this module's whole job is
+    to measure a store that may still hold rows written before the shape switch.
+    """
+    if not isinstance(fields, dict):
+        return ""
+    contract_key = fields.get("contract_key")
+    account = contract_key.get("account") if isinstance(contract_key, dict) else None
+    if account in (None, ""):
+        account = fields.get("account")
+    return "" if account in (None, "") else str(account)
+
+
+
 from src.application.ledger.repository_trade_schema import (
     EXECUTION_IDENTITY_INDEXES,
     _execution_identity_index_ready,
@@ -274,7 +293,7 @@ def _account_inventory(conn: sqlite3.Connection) -> dict[str, Any]:
             f"SELECT {','.join(selected)} FROM position_lots ORDER BY record_id"
         ):
             fields = _json_object(row["fields_json"])
-            canonical = str(fields.get("account") if isinstance(fields, dict) else "").strip()
+            canonical = _lot_account(fields).strip()
             stored = str(row["account"] or "").strip()
             if fields is None or not canonical or canonical != canonical.lower():
                 lot_invalid += 1
@@ -793,9 +812,9 @@ def _verify_from_conn(
             )
         }
         projected_accounts = {
-            str((item.get("fields") or {}).get("account") or "")
+            _lot_account(item.get("fields") or "").strip()
             for item in current_lots
-            if str((item.get("fields") or {}).get("account") or "")
+            if _lot_account(item.get("fields") or "").strip()
         }
         for account in sorted(set(heads) | projected_accounts):
             head = heads.get(account)

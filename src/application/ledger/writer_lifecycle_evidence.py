@@ -17,6 +17,10 @@ from src.application.ledger.current_decision_assigned_stock import (
     compact_assigned_stock_view,
 )
 from src.application.ledger.external_event_key import execution_identity_from_input
+from src.application.ledger.lot_resolver import (
+    contract_key_from_lot_fields,
+    lot_contract_value,
+)
 from src.application.ledger.writer_trade_events import (
     _enrich_execution_order_identity,
 )
@@ -961,25 +965,46 @@ def discover_expired_lifecycle_cases_atomically(
         for row in position_lots:
             lot_id = str(row.get("record_id") or "").strip()
             fields = dict(row.get("fields") or {})
-            lot_account = str(fields.get("account") or "").strip().lower()
+            # The converged payload carries the option contract under
+            # ``contract_key``; the flat ``account``/``broker``/``symbol``/
+            # ``option_type``/``strike``/``expiration_ymd``/``side`` siblings are
+            # retired, so every identity read below goes through the nested key
+            # (with the flat spelling kept readable for a pre-switch row).
+            lot_contract_key = contract_key_from_lot_fields(fields)
+            lot_account = str(
+                lot_contract_value(fields, lot_contract_key, "account", "account") or ""
+            ).strip().lower()
             if account_value and lot_account != account_value:
                 continue
             contracts_open = effective_contracts_open(fields)
             if not lot_id or contracts_open <= 0:
                 continue
-            expiration_ymd = effective_expiration_ymd(fields)
-            strike = effective_strike(fields)
+            expiration_ymd = lot_contract_value(fields, lot_contract_key, "expiration_ymd")
+            if expiration_ymd in (None, ""):
+                expiration_ymd = effective_expiration_ymd(fields)
+            strike = lot_contract_value(fields, lot_contract_key, "strike")
+            if strike in (None, ""):
+                strike = effective_strike(fields)
+            # ``multiplier`` keeps its top-level key in the converged payload.
             multiplier = effective_multiplier(fields)
             try:
                 contract_key = ContractKey.from_values(
-                    broker=fields.get("broker"),
+                    broker=lot_contract_value(fields, lot_contract_key, "broker", "broker"),
                     account=lot_account,
-                    underlying_symbol=fields.get("symbol"),
-                    option_type=fields.get("option_type"),
+                    underlying_symbol=lot_contract_value(
+                        fields, lot_contract_key, "underlying_symbol", "symbol"
+                    ),
+                    option_type=lot_contract_value(
+                        fields, lot_contract_key, "option_type", "option_type"
+                    ),
                     strike=strike,
                     expiration_ymd=expiration_ymd,
                 )
-                position_side = normalize_side(fields.get("side"))
+                position_side = normalize_side(
+                    lot_contract_value(
+                        fields, lot_contract_key, "position_side", "position_side", "side"
+                    )
+                )
             except (TypeError, ValueError):
                 continue
             market = str(symbol_market(contract_key.underlying_symbol) or "").strip().upper()

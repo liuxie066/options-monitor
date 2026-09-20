@@ -260,18 +260,13 @@ NOTE_KV_DISPOSITIONS = {
 
 #: ``structured`` note keys whose fact also survives in a table column that the
 #: rebuild keeps, so an empty *payload* field is not by itself the loss the
-#: §13.5 R6 rule is looking for. The store this batch targets proves the case:
-#: its rows carry ``multiplier=100`` in the note and no ``multiplier`` key in
-#: the payload, while the derived ``multiplier`` column holds 100.0
-#: (``repository_common._position_lot_contract_scalars`` reads that same note
-#: fallback), and the rebuild drops only ``expiration``/``record_id``.
-#: ``exp`` is deliberately absent: its column is the one D1 drops, so a
-#: note-only ``exp`` really has no surviving home and stays the R6 blocker that
-#: ``test_verify_fails_when_a_fact_lives_only_in_the_note`` pins.
-NOTE_KV_SURVIVING_COLUMNS = {
-    "multiplier": "multiplier",
-    "strike": "strike",
-}
+#: §13.5 R6 rule is looking for. This set is now empty: the note fallback that
+#: used to fill the ``multiplier``/``strike`` columns was retired
+#: (``repository_common._position_lot_contract_scalars`` reads the payload key
+#: and ``contract_key`` only), so a note-only scalar no longer survives the
+#: rebuild and is a genuine R6 blocker. ``exp`` is absent for the same reason:
+#: its column is the one D1 drops.
+NOTE_KV_SURVIVING_COLUMNS: dict[str, str] = {}
 
 #: Why a note that blocks nothing is not reported as ``carried``: D3 drops the
 #: ``note`` key itself, so no note text reaches the target shape. What survives
@@ -402,6 +397,41 @@ def _note_parts(note: Any) -> tuple[list[str], list[tuple[str, str]]]:
     return prose, pairs
 
 
+#: Where each ``NOTE_KV_DISPOSITIONS`` ``structured`` target lives in the
+#: converged payload (``write-side-definition.md`` §2). The table's own names are
+#: the pre-switch flat keys, which the row no longer carries; the retired sibling
+#: stays readable for a row written before the shape switch.
+#: ``(container, key)`` pairs, most-converged first: ``"contract"`` is the nested
+#: ``contract_key``, ``"payload"`` the top level. The last entry of each tuple is
+#: the retired flat key, so a row written before the shape switch still reads.
+_CONVERGED_STRUCTURED_TARGETS: dict[str, tuple[tuple[str, str], ...]] = {
+    "expiration": (("contract", "expiration_ymd"), ("payload", "expiration")),
+    "strike": (("contract", "strike"), ("payload", "strike")),
+    "option_type": (("contract", "option_type"), ("payload", "option_type")),
+    "side": (("payload", "position_side"), ("payload", "side")),
+    "status": (("payload", "status"),),
+    "premium": (("payload", "premium_open"), ("payload", "premium")),
+}
+
+
+def _structured_value(fields: Mapping[str, Any], target: str) -> Any:
+    """One ``structured`` target: the converged path first, the flat key after."""
+    contract_key = fields.get("contract_key")
+    contract_key = contract_key if isinstance(contract_key, Mapping) else {}
+    candidates = _CONVERGED_STRUCTURED_TARGETS.get(
+        target, (("payload", target),)
+    )
+    for container, key in candidates:
+        value = (
+            contract_key.get(key)
+            if container == "contract"
+            else fields.get(key)
+        )
+        if _non_empty(value):
+            return value
+    return None
+
+
 def _note_disposition(
     note: Any,
     fields: Mapping[str, Any],
@@ -439,7 +469,9 @@ def _note_disposition(
         if disposition is None:
             return f"note_kv_unmapped:{key}"
         kind, target = disposition
-        if kind != "structured" or _non_empty(fields.get(target)):
+        if kind != "structured" or _non_empty(
+            _structured_value(fields, target)
+        ):
             continue
         column = NOTE_KV_SURVIVING_COLUMNS.get(key)
         if column is None or not _non_empty(surviving_columns.get(column)):
@@ -559,7 +591,7 @@ def _scalar_carrier_distribution(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 fields = {}
             if _non_empty(row[name]):
                 column_present += 1
-            if _non_empty(fields.get(name)):
+            if _non_empty(_structured_value(fields, name)):
                 buckets["structured"] += 1
             elif _non_empty(parse_note_kv(fields.get("note") or "", note_keys[name])):
                 buckets["note_kv"] += 1

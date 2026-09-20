@@ -377,18 +377,38 @@ def revalidate_opening_share_coverage(
     locked = 0
     for raw in position_lots:
         fields = raw.get("fields") if isinstance(raw.get("fields"), Mapping) else raw
+        contract_key = fields.get("contract_key")
+        contract_key = contract_key if isinstance(contract_key, Mapping) else {}
+
+        def contract_value(nested_key: str, *flat_keys: str, _fields=fields, _key=contract_key) -> Any:
+            nested = _key.get(nested_key)
+            if nested not in (None, ""):
+                return nested
+            for flat_key in flat_keys:
+                flat = _fields.get(flat_key)
+                if flat not in (None, ""):
+                    return flat
+            return None
+
         if (
-            str(fields.get("account") or "").strip().lower() != account_value
-            or str(fields.get("symbol") or "").strip().upper() != symbol_value
-            or str(fields.get("option_type") or "").strip().lower() != "call"
-            or str(fields.get("side") or fields.get("position_side") or "").strip().lower()
+            str(contract_value("account", "account") or "").strip().lower()
+            != account_value
+            or str(contract_value("underlying_symbol", "symbol") or "").strip().upper()
+            != symbol_value
+            or str(contract_value("option_type", "option_type") or "").strip().lower()
+            != "call"
+            or str(
+                fields.get("position_side")
+                or fields.get("side")
+                or ""
+            ).strip().lower()
             != "short"
             or str(fields.get("status") or "").strip().lower() == "close"
         ):
             continue
         shares = compute_short_call_locked_shares(
-            contracts_open=fields.get("contracts_open", fields.get("contracts")),
-            contracts_total=fields.get("contracts"),
+            contracts_open=fields.get("contracts_open", fields.get("contracts_opened")),
+            contracts_total=fields.get("contracts_opened") or fields.get("contracts"),
             multiplier=fields.get("multiplier"),
             underlying_share_locked=fields.get("underlying_share_locked"),
         )

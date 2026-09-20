@@ -969,8 +969,13 @@ def _explicit_two_lot_sale(tmp_path):
         contracts=1, currency="USD", strike=110, multiplier=100,
         expiration_ymd="2026-06-19", premium_per_share=2, opened_at_ms=1100,
     )
-    # §7.4: the published row carries money as decimal text.
-    option = next(x for x in repo.list_position_lots() if x["fields"]["strike"] == "110")
+    # §7.4: the published row carries money as decimal text, and the contract
+    # identity now travels under ``contract_key``.
+    option = next(
+        x
+        for x in repo.list_position_lots()
+        if (x["fields"].get("contract_key") or {}).get("strike") == "110"
+    )
     api.record_manual_assignment(repo, lot_id=option["record_id"], contracts_to_close=1,
                                 stock_side="buy", stock_qty=100, stock_price=110, as_of_ms=2100)
     lots = build_assigned_stock_view(repo)["assigned_stock_lots"]

@@ -15,6 +15,10 @@ from domain.domain.ledger.position_fields import (
 )
 from domain.domain.symbol_identity import OPTION_CODE_RE, canonical_symbol, symbol_market
 from domain.domain.trade_contract_identity import normalize_contract_expiration
+from src.application.ledger.api import (
+    contract_key_from_lot_fields,
+    lot_contract_value,
+)
 from src.application.opend_normalize import normalize_opend_option_type
 from src.application.quality.model import (
     check_result,
@@ -92,16 +96,29 @@ def normalize_local_positions(
     errors: list[str] = []
     for row in rows:
         fields = row.get("fields") if isinstance(row.get("fields"), dict) else {}
-        if str(fields.get("account") or "").strip().lower() != account:
+        # The converged payload carries the contract under ``contract_key`` and the
+        # side under ``position_side`` (``write-side-definition.md`` §2); the retired
+        # flat siblings stay readable for a row written before the shape switch.
+        contract_key = contract_key_from_lot_fields(fields)
+        if (
+            str(lot_contract_value(fields, contract_key, "account", "account") or "")
+            .strip()
+            .lower()
+            != account
+        ):
             continue
         contracts = _decimal(effective_contracts_open(fields))
         if contracts is None or contracts == 0:
             continue
-        symbol = canonical_symbol(fields.get("symbol"))
+        symbol = canonical_symbol(
+            lot_contract_value(fields, contract_key, "underlying_symbol", "symbol")
+        )
         row_market = str(symbol_market(symbol) or "").lower()
         if market and row_market and row_market != market.lower():
             continue
-        option_type = str(fields.get("option_type") or "").strip().lower()
+        option_type = str(
+            lot_contract_value(fields, contract_key, "option_type", "option_type") or ""
+        ).strip().lower()
         expiration = str(
             effective_expiration_ymd(fields)
             or normalize_contract_expiration(fields.get("expiration_ymd"))
@@ -109,7 +126,12 @@ def normalize_local_positions(
         ).strip()
         strike = _decimal(effective_strike(fields))
         multiplier = _decimal(effective_multiplier(fields))
-        side = _position_side(fields.get("side"), qty=contracts)
+        side = _position_side(
+            lot_contract_value(
+                fields, contract_key, "position_side", "position_side", "side"
+            ),
+            qty=contracts,
+        )
         if not symbol or option_type not in {"put", "call"} or not expiration or strike is None or multiplier is None or side is None:
             errors.append(str(row.get("record_id") or "unknown"))
             continue

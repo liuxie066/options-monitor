@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 
 def _config(
@@ -596,7 +597,13 @@ def _frozen_workspace(
                 "source_stock_lot_id": stock_id,
             },
         )
-        position_records = repo.list_position_lots()
+        # The strategy family's home is the event layer
+        # (``write-side-definition.md`` §2), so the context is built from the
+        # read model's own loader -- the same one ``pipeline_context`` uses --
+        # rather than straight off the stored payload.
+        from src.application.ledger.read_model import load_position_lot_records
+
+        position_records = load_position_lot_records(repo)
         assigned = build_assigned_stock_view(
             repo,
             account="lx",
@@ -989,13 +996,10 @@ def test_frozen_close_advice_reads_only_sealed_snapshot(
     } == before
 
 
-def test_frozen_lifecycle_close_advice_preserves_wheel_stock_relationship(
-    tmp_path: Path,
-) -> None:
+def _run_frozen_wheel_close_advice(tmp_path: Path):
+    """Run frozen-snapshot close advice over the wheel ledger, read its report."""
+
     from src.application.close_advice_runner import run_close_advice
-    from src.application.daily_decision_brief_service import (
-        assemble_daily_decision_brief,
-    )
 
     (
         config,
@@ -1026,14 +1030,24 @@ def test_frozen_lifecycle_close_advice_preserves_wheel_stock_relationship(
     csv_path = output_dir / "close_advice.csv"
     row = pd.read_csv(csv_path).iloc[0]
     context = json.loads(context_path.read_text(encoding="utf-8"))
-    context_row = context["open_positions_min"][0]
+    return result, row, context["open_positions_min"][0], csv_path, config
+
+
+def test_frozen_lifecycle_close_advice_preserves_wheel_stock_relationship(
+    tmp_path: Path,
+) -> None:
+    from src.application.daily_decision_brief_service import (
+        assemble_daily_decision_brief,
+    )
+
+    result, row, _context_row, csv_path, config = _run_frozen_wheel_close_advice(
+        tmp_path
+    )
+
     assert result["snapshot_authority"] == "valid"
     assert result["quote_mode"] == "frozen_snapshot"
     assert row["recommendation_state"] == "not_evaluable"
     assert row["position_lifecycle_state"] == "expiry_day"
-    assert pd.isna(row["strategy_group_id"])
-    assert row["leg_role"] == "wheel_call"
-    assert row["source_stock_lot_id"] == context_row["source_stock_lot_id"]
     assert row["strategy_family"] == "covered_call"
     assert result["report_manifest"]["csv_sha256"] == hashlib.sha256(
         csv_path.read_bytes()
@@ -1052,6 +1066,56 @@ def test_frozen_lifecycle_close_advice_preserves_wheel_stock_relationship(
     )
     assert len(brief["positions"]) == 1
     assert brief["positions"][0]["position_lot_id"] == row["position_lot_id"]
+
+
+def test_frozen_lifecycle_close_advice_keeps_the_wheel_leg_relationship(
+    tmp_path: Path,
+) -> None:
+    """The wheel call's relationship has to survive into the close-advice report.
+
+    ``strategy_group_id`` / ``leg_role`` / ``source_stock_lot_id`` are
+    RECONSTRUCTIBLE lot keys (``write-side-definition.md`` §2) whose home is the
+    wheel open/adjust event's payload, while
+    ``close_advice_runner._position_relationship_fields`` reads them off the
+    position dict it is handed -- and that dict comes from the context's
+    ``open_positions_min``, which ``ledger/views.py:as_open_position_min`` builds
+    from the lot payload. The event side reaches that payload now
+    (``read_model.load_position_lot_records`` folds it onto the read model's
+    records), so the relationship is carried through instead of dropped.
+    """
+
+    from src.application.daily_decision_brief_service import (
+        assemble_daily_decision_brief,
+    )
+
+    _result, row, context_row, _csv_path, config = _run_frozen_wheel_close_advice(
+        tmp_path
+    )
+    # The event-side family reaches the context row the runner reads...
+    assert context_row["strategy"] == "wheel"
+    assert context_row["leg_role"] == "wheel_call"
+    assert context_row["source_stock_lot_id"]
+    # ...and is carried from there into the CSV the report publishes.
+    assert row["leg_role"] == "wheel_call"
+    assert row["source_stock_lot_id"] == context_row["source_stock_lot_id"]
+    assert (
+        row["strategy_group_id"] == context_row["strategy_group_id"]
+    ) or (
+        pd.isna(row["strategy_group_id"]) and context_row["strategy_group_id"] is None
+    )
+
+    brief = assemble_daily_decision_brief(
+        base=tmp_path,
+        run_id="run-1",
+        account="lx",
+        market="US",
+        scheduler_decision={"in_run_window": True},
+        account_result={"ran_scan": True, "reason": "ok"},
+        pipeline_succeeded=True,
+        config=config,
+        now_utc=datetime(2026, 7, 29, 14, tzinfo=timezone.utc),
+    )
+    assert len(brief["positions"]) == 1
     assert (
         brief["positions"][0]["source_stock_lot_id"]
         == row["source_stock_lot_id"]

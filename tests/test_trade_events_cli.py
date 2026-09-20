@@ -418,7 +418,7 @@ def test_trade_events_repair_dry_run_does_not_mutate(monkeypatch, tmp_path: Path
     assert out["projection_preview"]["position_lot_count"] == 1
     assert out["projection_preview"]["projection_diagnostic_count"] == 0
     assert len(repo.list_trade_events()) == 1
-    assert repo.list_position_lots()[0]["fields"]["strike"] == "480"
+    assert repo.list_position_lots()[0]["fields"]["contract_key"]["strike"] == "480"
 
 
 def test_trade_events_repair_apply_voids_and_replaces_event(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -445,7 +445,7 @@ def test_trade_events_repair_apply_voids_and_replaces_event(monkeypatch, tmp_pat
     assert len(events) == 3
     lots = repo.list_position_lots()
     assert len(lots) == 1
-    assert lots[0]["fields"]["strike"] == "500"
+    assert lots[0]["fields"]["contract_key"]["strike"] == "500"
 
 
 @pytest.mark.parametrize("with_fx", [True, False])
@@ -551,7 +551,7 @@ def test_trade_events_repair_rejects_second_repair(monkeypatch, tmp_path: Path, 
     assert len(repo.list_trade_events()) == 3
     lots = repo.list_position_lots()
     assert len(lots) == 1
-    assert lots[0]["fields"]["strike"] == "500"
+    assert lots[0]["fields"]["contract_key"]["strike"] == "500"
 
 
 def test_trade_events_repair_rejects_canonical_void_without_legacy_payload(
@@ -783,11 +783,12 @@ def test_trade_events_opend_time_correction_updates_in_place_with_downstream_and
     assert after_ingest_seq == before_ingest_seq
     assert after_generation == before_generation + 1
     assert len(repo.list_trade_events()) == 2
-    assert after_lots[0]["fields"]["opened_at"] == 900
+    # ``opened_at`` converged onto ``opened_at_ms`` (write-side-definition §2).
+    assert after_lots[0]["fields"]["opened_at_ms"] == 900
     before_without_time = deepcopy(before_lots)
     after_without_time = deepcopy(after_lots)
-    before_without_time[0]["fields"].pop("opened_at")
-    after_without_time[0]["fields"].pop("opened_at")
+    before_without_time[0]["fields"].pop("opened_at_ms")
+    after_without_time[0]["fields"].pop("opened_at_ms")
     assert after_without_time == before_without_time
     after_payload = json.loads(after_json)
     assert "cash_conversions" not in after_payload["raw_payload"]
@@ -1136,7 +1137,7 @@ def test_trade_events_repair_close_record_id_updates_canonical_target_lot(monkey
         "--record-id",
         second_lot["record_id"],
         "--close-target-source-event-id",
-        second_lot["fields"]["source_event_id"],
+        second_lot["fields"]["open_event_id"],
         "--dry-run",
         "--format",
         "json",

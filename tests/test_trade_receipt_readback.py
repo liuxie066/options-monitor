@@ -54,7 +54,7 @@ def test_receipt_readback_returns_application_events_and_published_lots(tmp_path
     assert len(evidence["position_lots"]) == 1
     lot = evidence["position_lots"][0]
     assert set(lot) == {"record_id", "lot_id", "fields"}
-    assert lot["fields"]["source_event_id"] == "deal-1"
+    assert lot["fields"]["open_event_id"] == "deal-1"
 
 
 def test_receipt_readback_agrees_with_the_published_lots_on_a_divergent_carrier(tmp_path: Path) -> None:
@@ -97,10 +97,10 @@ def test_receipt_readback_uses_one_query_only_snapshot_during_concurrent_commit(
     monkeypatch.setattr(reader, "_read_position_lots", commit_between_reads)
     evidence = reader.read_trade_receipt_evidence()
     assert [row["event_id"] for row in evidence["trade_events"]] == ["before"]
-    assert [row["fields"]["source_event_id"] for row in evidence["position_lots"]] == ["before"]
+    assert [row["fields"]["open_event_id"] for row in evidence["position_lots"]] == ["before"]
     later = reader.read_trade_receipt_evidence()
     assert {row["event_id"] for row in later["trade_events"]} == {"before", "after"}
-    assert {row["fields"]["source_event_id"] for row in later["position_lots"]} == {"before", "after"}
+    assert {row["fields"]["open_event_id"] for row in later["position_lots"]} == {"before", "after"}
 
 
 @pytest.mark.parametrize("missing", ["trade_events", "position_lots"])

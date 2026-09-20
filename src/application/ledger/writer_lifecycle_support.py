@@ -4,6 +4,11 @@ from domain.domain.lifecycle_allocation import validate_stock_settlement_allocat
 from domain.domain.ledger.identity import position_key_for
 from domain.domain.option_position_identity import normalize_side
 
+from src.application.ledger.lot_resolver import (
+    contract_key_from_lot_fields,
+    lot_contract_value,
+)
+
 from .writer_common import (
     Any,
     ComboMembershipResolution,
@@ -54,15 +59,74 @@ def _existing_combo_adoption_leg(
         else record.fields
     )
     event_contract = dict(event.get("contract_key") or {}) if isinstance(event.get("contract_key"), dict) else {}
-    option_type = str(fields.get("option_type") or "").strip().lower()
-    position_side = str(fields.get("side") or "").strip().lower()
-    role = str(fields.get("leg_role") or "").strip().lower()
-    original_contracts = _combo_contract_count(fields.get("contracts"))
+    # The converged payload carries the option contract under ``contract_key``
+    # and the side under ``position_side`` (``write-side-definition.md`` §2); the
+    # flat siblings stay readable for a row written before the shape switch.
+    lot_contract_key = contract_key_from_lot_fields(fields)
+    option_type = str(
+        lot_contract_value(fields, lot_contract_key, "option_type", "option_type") or ""
+    ).strip().lower()
+    position_side = str(
+        lot_contract_value(
+            fields, lot_contract_key, "position_side", "position_side", "side"
+        )
+        or ""
+    ).strip().lower()
+    # The strategy family left the lot payload (``write-side-definition.md`` §2
+    # RECONSTRUCTIBLE; §7 moves it to the strategy/event side). This leg's open
+    # event is the home: the writer spreads ``strategy`` / ``leg_role`` /
+    # ``strategy_group_id`` into ``raw_payload`` and the adjust patches carry
+    # them for a re-adoption. The retired flat lot keys stay as the last
+    # fallback for a row written before the shape switch.
+    event_raw_payload = (
+        dict(event.get("raw_payload") or {})
+        if isinstance(event.get("raw_payload"), dict)
+        else {}
+    )
+    seeded_fields = event_raw_payload.get("fields")
+    seeded_fields = dict(seeded_fields) if isinstance(seeded_fields, dict) else {}
+    strategy_snapshot = (
+        dict(
+            event_raw_payload.get("strategy_snapshot")
+            or seeded_fields.get("strategy_snapshot")
+            or {}
+        )
+        if isinstance(
+            event_raw_payload.get("strategy_snapshot")
+            or seeded_fields.get("strategy_snapshot"),
+            dict,
+        )
+        else {}
+    )
+    role = _combo_leg_text(
+        event_raw_payload,
+        strategy_snapshot,
+        fields,
+        "leg_role",
+    ).lower()
+    strategy = _combo_leg_text(
+        event_raw_payload,
+        strategy_snapshot,
+        fields,
+        "strategy",
+    ).lower()
+    event_group_id = _combo_leg_text(
+        event_raw_payload,
+        strategy_snapshot,
+        fields,
+        "strategy_group_id",
+    )
+    # ``contracts`` converged onto ``contracts_opened``; ``contracts_open`` kept
+    # its name, so only the opened total moves.
+    original_contracts = _combo_contract_count(
+        fields.get("contracts_opened") or fields.get("contracts")
+    )
     open_contracts = _combo_nonnegative_contract_count(
         fields.get("contracts_open")
     )
     if (
-        str(fields.get("source_event_id") or "").strip() != event_value
+        str(fields.get("open_event_id") or fields.get("source_event_id") or "").strip()
+        != event_value
         or str(event.get("event_type") or "").strip().lower() != "open"
         or _combo_contract_count(event.get("contracts")) != expected_contracts
         or original_contracts != expected_contracts
@@ -72,17 +136,21 @@ def _existing_combo_adoption_leg(
         or option_type != expected_option_type
         or position_side != expected_position_side
         or role not in accepted_roles
-        or str(fields.get("strategy") or "").strip().lower() != "combo_yield"
-        or str(fields.get("strategy_group_id") or "").strip() != group_id
+        or strategy != "combo_yield"
+        or event_group_id != group_id
     ):
         raise ValueError("combo identity adoption leg metadata mismatch")
     contract_key = ContractKey.from_values(
-        broker=fields.get("broker"),
-        account=fields.get("account"),
-        underlying_symbol=fields.get("symbol"),
+        broker=lot_contract_value(fields, lot_contract_key, "broker", "broker"),
+        account=lot_contract_value(fields, lot_contract_key, "account", "account"),
+        underlying_symbol=lot_contract_value(
+            fields, lot_contract_key, "underlying_symbol", "symbol"
+        ),
         option_type=option_type,
-        strike=fields.get("strike"),
-        expiration_ymd=fields.get("expiration_ymd"),
+        strike=lot_contract_value(fields, lot_contract_key, "strike", "strike"),
+        expiration_ymd=lot_contract_value(
+            fields, lot_contract_key, "expiration_ymd", "expiration_ymd"
+        ),
     )
     event_key = ContractKey.from_values(
         broker=event_contract.get("broker"),
@@ -114,6 +182,36 @@ def _existing_combo_adoption_leg(
         "strike": float(contract_key.strike),
         "expiration_ymd": contract_key.expiration_ymd,
     }
+
+def _combo_leg_text(
+    event_raw_payload: dict[str, Any],
+    strategy_snapshot: dict[str, Any],
+    fields: dict[str, Any],
+    key: str,
+) -> str:
+    """One leg of the strategy family: open event, snapshot, then the flat lot key.
+
+    The lot payload is no longer a carrier (``write-side-definition.md`` §2/§7),
+    so the open event's ``raw_payload`` answers first, the snapshot after it, and
+    the retired flat lot key last. ``raw_payload["fields"]`` is included because
+    it is where the pre-switch seed branch put the same family
+    (``write-side-definition.md`` §6) and historical open events still carry it.
+    An identifier's case is preserved; callers that compare against lower-case
+    constants fold it themselves.
+    """
+    seeded = event_raw_payload.get("fields")
+    seeded = dict(seeded) if isinstance(seeded, dict) else {}
+    for value in (
+        event_raw_payload.get(key),
+        seeded.get(key),
+        strategy_snapshot.get(key),
+        fields.get(key),
+    ):
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
 
 def _combo_contract_count(value: Any) -> int | None:
     if isinstance(value, bool):
@@ -200,7 +298,12 @@ def _combo_leg_from_projected_record(
         or {}
     )
     expected_contracts = int(intent.get("expected_contracts") or 0)
-    if int(fields.get("contracts") or 0) != expected_contracts:
+    # ``contracts`` converged onto ``contracts_opened``; the flat spelling is
+    # the fallback for a row written before the shape switch.
+    if (
+        int(fields.get("contracts_opened") or fields.get("contracts") or 0)
+        != expected_contracts
+    ):
         raise ValueError(f"combo identity {prefix} original quantity mismatch")
     if int(fields.get("contracts_open") or 0) != expected_contracts:
         raise ValueError(f"combo identity {prefix} is not fully open")
@@ -845,21 +948,38 @@ def _matching_lifecycle_lots(
         remaining = effective_contracts_open(fields)
         if not lot_id or remaining <= 0:
             continue
+        # The converged payload carries the option contract under
+        # ``contract_key`` (``write-side-definition.md`` §2); the flat siblings
+        # below are kept readable only for a row written before the switch.
+        lot_contract_key = contract_key_from_lot_fields(fields)
+        strike = lot_contract_value(fields, lot_contract_key, "strike")
+        if strike in (None, ""):
+            strike = effective_strike(fields)
+        expiration_ymd = lot_contract_value(fields, lot_contract_key, "expiration_ymd")
+        if expiration_ymd in (None, ""):
+            expiration_ymd = effective_expiration_ymd(fields)
         try:
             candidate_key = ContractKey.from_values(
-                broker=fields.get("broker"),
-                account=fields.get("account"),
-                underlying_symbol=fields.get("symbol"),
-                option_type=fields.get("option_type"),
-                strike=effective_strike(fields),
-                expiration_ymd=effective_expiration_ymd(fields),
+                broker=lot_contract_value(fields, lot_contract_key, "broker", "broker"),
+                account=lot_contract_value(fields, lot_contract_key, "account", "account"),
+                underlying_symbol=lot_contract_value(
+                    fields, lot_contract_key, "underlying_symbol", "symbol"
+                ),
+                option_type=lot_contract_value(
+                    fields, lot_contract_key, "option_type", "option_type"
+                ),
+                strike=strike,
+                expiration_ymd=expiration_ymd,
             )
         except (TypeError, ValueError):
             continue
-        if position_key_for(candidate_key, normalize_side(fields.get("side"))) != target_key:
+        candidate_side = lot_contract_value(
+            fields, lot_contract_key, "position_side", "position_side", "side"
+        )
+        if position_key_for(candidate_key, normalize_side(candidate_side)) != target_key:
             continue
         try:
-            opened_at = int(fields.get("opened_at") or 0)
+            opened_at = int(fields.get("opened_at_ms") or fields.get("opened_at") or 0)
         except (TypeError, ValueError):
             opened_at = 0
         matches.append((lot_id, remaining, opened_at))

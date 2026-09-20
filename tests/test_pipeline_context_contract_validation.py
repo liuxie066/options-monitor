@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from src.application.positions.context_builder import STRATEGY_FAMILY_SOURCE
+
 
 
 def test_load_portfolio_context_rejects_invalid_cached_contract() -> None:
@@ -45,6 +47,7 @@ def test_load_option_positions_context_rejects_invalid_cached_contract() -> None
             "as_of_utc": "2026-04-12T00:00:00+00:00",
             "locked_shares_by_symbol": [],
             "cash_secured_by_symbol_by_ccy": {},
+            "strategy_family_source": STRATEGY_FAMILY_SOURCE,
         }
         logs: list[str] = []
         out, refreshed = pc.load_option_positions_context(
@@ -93,6 +96,7 @@ def test_load_context_persists_source_snapshots_for_valid_cached_contracts() -> 
                 "as_of_utc": "2026-04-12T00:00:00+00:00",
                 "locked_shares_by_symbol": {"AAPL": 100},
                 "cash_secured_by_symbol_by_ccy": {"AAPL": {"USD": 1000.0}},
+                "strategy_family_source": STRATEGY_FAMILY_SOURCE,
             }
 
         pc.load_cached_json = _load_cached  # type: ignore[assignment]

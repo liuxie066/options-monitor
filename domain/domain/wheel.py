@@ -12,6 +12,10 @@ from domain.domain.ledger.cash_facts import (
     assignment_principal_anchor,
     broker_settlement_multiplier_evidence,
 )
+from domain.domain.ledger.position_fields import (
+    apply_strategy_metadata_patch,
+    strategy_metadata_fields_from_payload,
+)
 from domain.domain.symbol_identity import symbol_market
 from domain.domain.trade_execution import futu_order_namespace_issue
 
@@ -789,15 +793,16 @@ def wheel_started_event_from_assignment(
     if _event_type(event) != "assignment":
         return None
     fields = _lot_fields(source_put_lot)
+    contract_key = lot_contract_key(fields)
     if (
-        str(fields.get("option_type") or "").strip().lower() != "put"
-        or str(fields.get("side") or fields.get("position_side") or "").strip().lower()
+        str(contract_key.get("option_type") or "").strip().lower() != "put"
+        or str(fields.get("position_side") or "").strip().lower()
         != "short"
     ):
         return None
     event_id = _required_text(event.get("event_id"), "source_trade_event_id")
     account = _required_text(
-        event.get("account") or fields.get("account"),
+        event.get("account") or contract_key.get("account"),
         "account",
     ).lower()
     stock = _stock_settlement(event)
@@ -848,6 +853,7 @@ def wheel_called_away_event_from_call_assignment(
     if _event_type(event) != "assignment":
         return None
     fields = _lot_fields(source_call_lot)
+    contract_key = lot_contract_key(fields)
     strategy = str(fields.get("strategy") or "").strip().lower()
     leg_role = str(fields.get("leg_role") or "").strip().lower()
     lot_id = str(fields.get("source_stock_lot_id") or "").strip()
@@ -858,8 +864,8 @@ def wheel_called_away_event_from_call_assignment(
         or leg_role != "wheel_call"
         or not lot_id
         or str(fields.get("strategy_group_id") or "").strip()
-        or str(fields.get("option_type") or "").strip().lower() != "call"
-        or str(fields.get("side") or fields.get("position_side") or "").strip().lower()
+        or str(contract_key.get("option_type") or "").strip().lower() != "call"
+        or str(fields.get("position_side") or "").strip().lower()
         != "short"
     ):
         raise ValueError("Wheel Call assignment has incomplete or conflicting linkage")
@@ -887,7 +893,7 @@ def wheel_called_away_event_from_call_assignment(
         return None
     source_event_id = _required_text(event.get("event_id"), "source_trade_event_id")
     account = _required_text(
-        event.get("account") or fields.get("account"),
+        event.get("account") or contract_key.get("account"),
         "account",
     ).lower()
     occurred_at_ms = _positive_int(
@@ -1602,9 +1608,131 @@ def plan_wheel_put_intent_consume(
             "cash_reservation_currency": payload.get("cash_reservation_currency"),
         },
     )
+def lot_contract_key(fields: Mapping[str, Any]) -> Mapping[str, Any]:
+    """A lot payload's nested ``contract_key``, or ``{}`` when it is not one.
+
+    The converged payload (``PositionLot.to_dict()``) carries the option
+    contract under ``contract_key``; the six flat siblings it replaced
+    (``account``/``broker``/``symbol``/``option_type``/``strike``/
+    ``expiration_ymd``) are retired.
+    """
+    key = fields.get("contract_key")
+    return key if isinstance(key, Mapping) else {}
+
+
 def _lot_fields(row: Mapping[str, Any]) -> dict[str, Any]:
     fields = row.get("fields")
     return dict(fields) if isinstance(fields, Mapping) else dict(row)
+
+
+#: The strategy-metadata family (design §7.5). It left ``fields_json`` in the
+#: convergence batch -- the fact's home is the event layer -- so a reader that
+#: needs it for a lot replays that lot's events instead of the stored payload.
+STRATEGY_METADATA_KEYS = (
+    "strategy",
+    "leg_role",
+    "strategy_group_id",
+    "source_stock_lot_id",
+    "source_wheel_branch_id",
+    "strategy_snapshot",
+    "yield_enhancement_mode",
+)
+
+
+def lot_strategy_metadata_from_trade_events(
+    trade_events: Sequence[Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Per-lot strategy metadata rebuilt from the event layer (design §7.5).
+
+    Replays the open event's payload and every adjust patch in event order, the
+    same two sources the retired publisher assembly read before the family moved
+    out of the lot shape. Keyed by lot id; a lot with no strategy metadata is
+    absent from the mapping.
+    """
+    by_lot_id: dict[str, dict[str, Any]] = {}
+
+    def _lot_id_for(event: Mapping[str, Any]) -> str:
+        payload = event.get("raw_payload")
+        payload = payload if isinstance(payload, Mapping) else {}
+        explicit = str(event.get("lot_id") or payload.get("record_id") or "").strip()
+        event_id = str(event.get("event_id") or "").strip()
+        return explicit or (f"lot_{event_id}" if event_id else "")
+
+    for raw in trade_events:
+        if not isinstance(raw, Mapping):
+            continue
+        event_type = str(raw.get("event_type") or "").strip().lower()
+        payload = raw.get("raw_payload")
+        payload = payload if isinstance(payload, Mapping) else {}
+        if event_type == "open":
+            lot_id = _lot_id_for(raw)
+            if not lot_id:
+                continue
+            metadata = strategy_metadata_fields_from_payload(
+                dict(payload),
+                include_legacy=True,
+            )
+            if metadata:
+                by_lot_id.setdefault(lot_id, {}).update(metadata)
+            continue
+        if event_type != "adjust":
+            continue
+        lot_id = str(raw.get("target_lot_id") or payload.get("target_lot_id") or "").strip()
+        patch = payload.get("patch")
+        if not lot_id or not isinstance(patch, Mapping):
+            continue
+        if not any(key in patch for key in STRATEGY_METADATA_KEYS):
+            continue
+        merged = apply_strategy_metadata_patch(
+            by_lot_id.get(lot_id, {}),
+            dict(patch),
+            include_legacy=True,
+        )
+        by_lot_id[lot_id] = {
+            key: merged[key] for key in STRATEGY_METADATA_KEYS if key in merged
+        }
+    return by_lot_id
+
+
+def merge_lot_strategy_metadata(
+    fields: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Fold event-derived strategy metadata into a lot's fields.
+
+    Only keys the payload does not carry at all are filled, so an explicit
+    clear (``None``) a caller wrote stays a clear instead of being resurrected
+    from the events it was derived out of.
+    """
+    out = dict(fields)
+    for key, value in metadata.items():
+        if key not in out:
+            out[key] = value
+    return out
+
+
+def attach_lot_strategy_metadata(
+    row: Mapping[str, Any],
+    strategy_by_lot_id: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    """A lot row's fields with its event-derived strategy metadata folded in."""
+    fields = _lot_fields(row)
+    lot_id = str(row.get("record_id") or row.get("lot_id") or "").strip()
+    metadata = strategy_by_lot_id.get(lot_id)
+    if not lot_id or not metadata:
+        return fields
+    return merge_lot_strategy_metadata(fields, metadata)
+
+
+def lot_strategy_metadata_for_lot(
+    lot_id: Any,
+    trade_events: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """One lot's event-derived strategy metadata (design §7.5)."""
+    key = str(lot_id or "").strip()
+    if not key:
+        return {}
+    return dict(lot_strategy_metadata_from_trade_events(trade_events).get(key, {}))
 
 
 def _event_type(row: Mapping[str, Any]) -> str:
@@ -1668,7 +1796,10 @@ def _contracts_open(fields: Mapping[str, Any]) -> int:
     try:
         if str(fields.get("status") or "").strip().lower() == "close":
             return 0
-        return max(0, int(fields.get("contracts_open", fields.get("contracts", 0)) or 0))
+        return max(
+            0,
+            int(fields.get("contracts_open", fields.get("contracts_opened", 0)) or 0),
+        )
     except (TypeError, ValueError):
         return 0
 
@@ -1971,9 +2102,10 @@ def project_wheel_call_linkage_candidates(
     candidates: list[dict[str, Any]] = []
     for row in unlinked_short_call_lots:
         fields = _lot_fields(row)
+        contract_key = lot_contract_key(fields)
         if (
-            str(fields.get("option_type") or "").strip().lower() != "call"
-            or str(fields.get("side") or fields.get("position_side") or "").strip().lower()
+            str(contract_key.get("option_type") or "").strip().lower() != "call"
+            or str(fields.get("position_side") or "").strip().lower()
             != "short"
             or _contracts_open(fields) <= 0
             or any(
@@ -1989,11 +2121,11 @@ def project_wheel_call_linkage_candidates(
             continue
         call_lot_id = _required_text(row.get("record_id"), "call_record_id")
         call_open_event_id = _required_text(
-            fields.get("source_event_id"),
+            fields.get("open_event_id"),
             "call_open_event_id",
         )
-        account = str(fields.get("account") or "").strip().lower()
-        symbol = str(fields.get("symbol") or "").strip().upper()
+        account = str(contract_key.get("account") or "").strip().lower()
+        symbol = str(contract_key.get("underlying_symbol") or "").strip().upper()
         for batch in wheel_batches:
             lot_id = str(batch.get("stock_lot_id") or "").strip()
             if (
@@ -2023,16 +2155,21 @@ def project_wheel_call_linkage_candidates(
             stable_call = {
                 key: fields.get(key)
                 for key in (
-                    "account",
-                    "symbol",
-                    "option_type",
-                    "side",
+                    "lot_id",
+                    "open_event_id",
+                    "position_side",
                     "contracts_open",
+                    "multiplier",
+                )
+            }
+            stable_call["contract_key"] = {
+                key: contract_key.get(key)
+                for key in (
+                    "account",
+                    "underlying_symbol",
+                    "option_type",
                     "strike",
                     "expiration_ymd",
-                    "expiration",
-                    "multiplier",
-                    "source_event_id",
                 )
             }
             candidates.append(
@@ -2125,11 +2262,10 @@ def project_wheel_linkage_candidates(
     put_candidates: list[dict[str, Any]] = []
     for row in unlinked_short_option_lots:
         fields = _lot_fields(row)
+        contract_key = lot_contract_key(fields)
         if (
-            str(fields.get("option_type") or "").strip().lower() != "put"
-            or str(
-                fields.get("side") or fields.get("position_side") or ""
-            ).strip().lower()
+            str(contract_key.get("option_type") or "").strip().lower() != "put"
+            or str(fields.get("position_side") or "").strip().lower()
             != "short"
             or _contracts_open(fields) <= 0
             or any(
@@ -2145,11 +2281,11 @@ def project_wheel_linkage_candidates(
             continue
         lot_id = _required_text(row.get("record_id"), "option_record_id")
         open_event_id = _required_text(
-            fields.get("source_event_id"),
+            fields.get("open_event_id"),
             "option_open_event_id",
         )
-        account = str(fields.get("account") or "").strip().lower()
-        symbol = str(fields.get("symbol") or "").strip().upper()
+        account = str(contract_key.get("account") or "").strip().lower()
+        symbol = str(contract_key.get("underlying_symbol") or "").strip().upper()
         for branch in wheel_branches:
             branch_id = str(branch.get("wheel_branch_id") or "").strip()
             if (
@@ -2191,19 +2327,26 @@ def project_wheel_linkage_candidates(
                         {
                             "option_record_id": lot_id,
                             "option": {
-                                key: fields.get(key)
-                                for key in (
-                                    "account",
-                                    "symbol",
-                                    "option_type",
-                                    "side",
-                                    "contracts_open",
-                                    "strike",
-                                    "expiration_ymd",
-                                    "expiration",
-                                    "multiplier",
-                                    "source_event_id",
-                                )
+                                **{
+                                    key: fields.get(key)
+                                    for key in (
+                                        "lot_id",
+                                        "open_event_id",
+                                        "position_side",
+                                        "contracts_open",
+                                        "multiplier",
+                                    )
+                                },
+                                "contract_key": {
+                                    key: contract_key.get(key)
+                                    for key in (
+                                        "account",
+                                        "underlying_symbol",
+                                        "option_type",
+                                        "strike",
+                                        "expiration_ymd",
+                                    )
+                                },
                             },
                             "wheel_branch_id": branch_id,
                             "batch_generation_hash": generation_hash,
@@ -2218,7 +2361,7 @@ def project_wheel_linkage_candidates(
                     "contracts": contracts,
                     "multiplier": multiplier,
                     "cash_reservation_amount": float(
-                        fields.get("strike") or 0
+                        contract_key.get("strike") or 0
                     )
                     * multiplier
                     * contracts,
@@ -2279,7 +2422,14 @@ def project_wheel_lifecycles(
         if isinstance(row, Mapping)
     ]
 
-    lots = [(str(row.get("record_id") or "").strip(), _lot_fields(row)) for row in position_lots]
+    strategy_by_lot_id = lot_strategy_metadata_from_trade_events(active_trade_events)
+    lots = [
+        (
+            str(row.get("record_id") or "").strip(),
+            attach_lot_strategy_metadata(row, strategy_by_lot_id),
+        )
+        for row in position_lots
+    ]
     results: list[dict[str, Any]] = []
     for group in sorted(grouped):
         account, lot_id = group
@@ -2322,7 +2472,8 @@ def project_wheel_lifecycles(
 
         linked_lots: list[tuple[str, dict[str, Any]]] = []
         for call_lot_id, fields in lots:
-            if str(fields.get("account") or "").strip().lower() != account:
+            call_key = lot_contract_key(fields)
+            if str(call_key.get("account") or "").strip().lower() != account:
                 continue
             if str(fields.get("source_stock_lot_id") or "").strip() != lot_id:
                 continue
@@ -2330,8 +2481,8 @@ def project_wheel_lifecycles(
                 str(fields.get("strategy") or "").strip().lower() != "wheel"
                 or str(fields.get("leg_role") or "").strip().lower() != "wheel_call"
                 or str(fields.get("strategy_group_id") or "").strip()
-                or str(fields.get("option_type") or "").strip().lower() != "call"
-                or str(fields.get("side") or "").strip().lower() != "short"
+                or str(call_key.get("option_type") or "").strip().lower() != "call"
+                or str(fields.get("position_side") or "").strip().lower() != "short"
             ):
                 reasons.add("wheel_call_linkage_conflict")
                 continue
@@ -2395,12 +2546,13 @@ def project_wheel_lifecycles(
         }
         unresolved_lots: list[tuple[str, dict[str, Any]]] = []
         for call_lot_id, fields in lots:
+            call_key = lot_contract_key(fields)
             if (
-                str(fields.get("account") or "").strip().lower() != account
-                or str(fields.get("symbol") or "").strip().upper()
+                str(call_key.get("account") or "").strip().lower() != account
+                or str(call_key.get("underlying_symbol") or "").strip().upper()
                 != str((stock_row or {}).get("symbol") or _trade_symbol(start_trade or {}))
-                or str(fields.get("option_type") or "").strip().lower() != "call"
-                or str(fields.get("side") or "").strip().lower() != "short"
+                or str(call_key.get("option_type") or "").strip().lower() != "call"
+                or str(fields.get("position_side") or "").strip().lower() != "short"
                 or _contracts_open(fields) <= 0
                 or any(
                     str(fields.get(key) or "").strip()
@@ -2411,7 +2563,7 @@ def project_wheel_lifecycles(
                         "source_stock_lot_id",
                     )
                 )
-                or str(fields.get("source_event_id") or "").strip()
+                or str(fields.get("open_event_id") or "").strip()
                 in rejected_call_event_ids
             ):
                 continue
@@ -2486,7 +2638,7 @@ def project_wheel_lifecycles(
             start_trade_id,
             *assignment_ids,
             *{
-                str(fields.get("source_event_id") or "").strip()
+                str(fields.get("open_event_id") or "").strip()
                 for _lot_id, fields in linked_lots
             },
             *{
@@ -2663,8 +2815,12 @@ def project_wheel_branches(
         for item in stock_rows
         if isinstance(item, Mapping) and str(item.get("stock_lot_id") or "").strip()
     }
+    strategy_by_lot_id = lot_strategy_metadata_from_trade_events(active_trade_events)
     lots = [
-        (str(item.get("record_id") or "").strip(), _lot_fields(item))
+        (
+            str(item.get("record_id") or "").strip(),
+            attach_lot_strategy_metadata(item, strategy_by_lot_id),
+        )
         for item in position_lots
         if isinstance(item, Mapping)
     ]
@@ -2837,7 +2993,7 @@ def project_wheel_branches(
         linked_lots = [
             (option_lot_id, fields)
             for option_lot_id, fields in lots
-            if str(fields.get("account") or "").strip().lower() == account
+            if str(lot_contract_key(fields).get("account") or "").strip().lower() == account
             and str(fields.get("source_wheel_branch_id") or "").strip() == branch_id
         ]
         realized_put_net_pnl: float | None = None

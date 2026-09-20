@@ -126,8 +126,12 @@ def test_application_reconcile_is_post_trade_and_persists_only_inference_state(
     assert stored[0]["put_open_event_id"] == "put-open"
     assert stored[0]["call_open_event_id"] == "call-open"
     assert len(repo.list_trade_events()) == 2
-    assert all(
-        not item["fields"].get("strategy_group_id")
+    # The strategy family left the lot payload (``write-side-definition.md``
+    # §2/§7); "nothing is grouped yet" is the strategy group identity table's
+    # answer now, and the payload must not carry the retired keys at all.
+    assert repo.list_strategy_group_identities(account="lx") == []
+    assert not any(
+        {"strategy", "strategy_group_id", "leg_role"} & set(item["fields"])
         for item in repo.list_position_lots()
     )
 
@@ -608,8 +612,8 @@ def test_confirm_rolls_back_events_projection_identity_and_inference_on_failure(
     assert len(repo.list_trade_events()) == 2
     assert repo.list_strategy_group_identities(account="lx") == []
     assert repo.get_combo_pair_inference(proposal["inference_id"])["status"] == "proposal_ready"
-    assert all(
-        not item["fields"].get("strategy_group_id")
+    assert not any(
+        {"strategy", "strategy_group_id", "leg_role"} & set(item["fields"])
         for item in repo.list_position_lots()
     )
 
@@ -674,10 +678,16 @@ def test_supersede_rolls_back_both_voids_and_projection_on_failure(
 
     assert len(repo.list_trade_events()) == 4
     assert repo.get_combo_pair_inference(proposal["inference_id"])["status"] == "user_confirmed"
+    # The group binding lives in the strategy group identity table now (the lot
+    # payload no longer carries ``strategy_group_id``).
     assert {
-        item["fields"].get("strategy_group_id")
-        for item in repo.list_position_lots()
+        str(item.get("group_id") or "")
+        for item in repo.list_strategy_group_identities(account="lx")
     } == {proposal["strategy_group_id"]}
+    assert all(
+        item["fields"].get("contract_key")
+        for item in repo.list_position_lots()
+    )
 
 
 def test_two_confirmations_competing_for_one_leg_allow_only_one_commit(

@@ -629,10 +629,11 @@ def test_build_open_adjustment_patch_updates_key_open_fields() -> None:
     assert patch["cash_secured_amount"] == 31500.0
     # §7.1: ``position_id`` is retired from the adjust patch too.
     assert "position_id" not in patch
-    assert "exp=" not in patch["note"]
-    assert "strike=" not in patch["note"]
-    assert "multiplier=" not in patch["note"]
-    assert "premium_per_share=" not in patch["note"]
+    # ``note`` is not a payload key (``write-side-definition.md`` §2/§7), so the
+    # adjust patch no longer writes the KV-stripping note it used to carry; the
+    # legacy keys the input spelled as ``exp=`` / ``strike=`` / ``multiplier=`` /
+    # ``premium_per_share=`` are read from their columns instead.
+    assert "note" not in patch
 
 
 def test_build_open_adjustment_patch_contract_matches_legacy_dict_api() -> None:

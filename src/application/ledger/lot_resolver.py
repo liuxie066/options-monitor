@@ -4,7 +4,6 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from domain.domain.ledger.position_fields import (
-    effective_contracts,
     effective_contracts_open,
     effective_expiration_ymd,
     effective_strike,
@@ -185,28 +184,94 @@ def load_close_candidate_records(repo: Any) -> list[dict[str, Any]]:
     return rows if isinstance(rows, list) else []
 
 
+def contract_key_from_lot_fields(fields: dict[str, Any]) -> dict[str, Any]:
+    """The payload's nested ``contract_key``, or ``{}`` when it is not an object.
+
+    The converged payload (``PositionLot.to_dict()``) carries the option
+    contract under ``contract_key`` instead of as flat ``broker`` / ``account``
+    / ``symbol`` / ``option_type`` / ``strike`` / ``expiration_ymd`` siblings.
+    ``{}`` is the answer for a row that predates the shape switch, which keeps
+    the flat siblings readable for it -- the same "nested first, flat for legacy
+    rows" rule ``domain.domain.ledger.position_fields.effective_*`` states.
+    """
+    contract_key = fields.get("contract_key")
+    return contract_key if isinstance(contract_key, dict) else {}
+
+
+def lot_contract_value(
+    fields: dict[str, Any],
+    contract_key: dict[str, Any],
+    nested_key: str,
+    *flat_keys: str,
+) -> Any:
+    """One contract identity value: the nested key first, the flat siblings after.
+
+    A converged payload answers from ``contract_key``; a legacy flat row has no
+    non-empty nested value and falls through to its retired flat spelling.
+    """
+    value = contract_key.get(nested_key)
+    if value not in (None, ""):
+        return value
+    for flat_key in flat_keys:
+        value = fields.get(flat_key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def lot_payload_int(fields: dict[str, Any], *keys: str) -> int:
+    """The first non-empty numeric value among ``keys`` (converged name first)."""
+    for key in keys:
+        value = safe_float(fields.get(key))
+        if value is not None:
+            return int(value)
+    return 0
+
+
 def normalize_close_candidate(item: dict[str, Any]) -> LotCloseCandidate | None:
     lot_id = str(item.get("record_id") or item.get("id") or "").strip()
     fields = item.get("fields") or {}
     if not lot_id or not isinstance(fields, dict):
         return None
+    contract_key = contract_key_from_lot_fields(fields)
+    strike = safe_float(contract_key.get("strike"))
+    if strike is None:
+        strike = effective_strike(fields)
+    expiration_ymd = str(contract_key.get("expiration_ymd") or "").strip()
+    if not expiration_ymd:
+        expiration_ymd = effective_expiration_ymd(fields)
     return LotCloseCandidate(
         lot_id=lot_id,
-        broker=normalize_broker(fields.get("broker")),
-        account=normalize_account(fields.get("account")),
-        symbol=_canonical_selector_symbol(fields.get("symbol")),
-        option_type=normalize_option_type(fields.get("option_type")),
-        side=normalize_side(fields.get("side")),
+        # No flat ``market`` fallback: a market-only row was never a close
+        # candidate (``test_match_close_positions_ignores_market_only_persisted_rows``),
+        # and the converged payload carries the broker under ``contract_key``.
+        broker=normalize_broker(lot_contract_value(fields, contract_key, "broker", "broker")),
+        account=normalize_account(lot_contract_value(fields, contract_key, "account", "account")),
+        symbol=_canonical_selector_symbol(
+            lot_contract_value(fields, contract_key, "underlying_symbol", "symbol")
+        ),
+        option_type=normalize_option_type(
+            lot_contract_value(fields, contract_key, "option_type", "option_type")
+        ),
+        side=normalize_side(
+            lot_contract_value(fields, contract_key, "position_side", "position_side", "side")
+        ),
         status=normalize_status(fields.get("status")),
-        contracts=effective_contracts(fields),
+        # ``contracts`` converged onto ``contracts_opened`` (``effective_contracts``
+        # reads the retired flat spelling and would answer 0 on a converged row).
+        contracts=lot_payload_int(fields, "contracts_opened", "contracts"),
         contracts_open=effective_contracts_open(fields),
         contracts_closed=fields.get("contracts_closed"),
-        strike=effective_strike(fields),
-        expiration_ymd=effective_expiration_ymd(fields),
-        opened_at=int(safe_float(fields.get("opened_at")) or 0),
-        premium=fields.get("premium"),
+        strike=strike,
+        # Both sides of ``_exact_candidates``' comparison go through the same
+        # normalizer, so a nested ``expiration_ymd`` and a selector built from a
+        # deal's ``expiration_ymd`` compare equal without relying on either
+        # spelling already being canonical.
+        expiration_ymd=_normalize_selector_expiration(expiration_ymd),
+        opened_at=lot_payload_int(fields, "opened_at_ms", "opened_at"),
+        premium=fields.get("premium_open") or fields.get("premium"),
         currency=fields.get("currency"),
-        source_event_id=fields.get("source_event_id"),
+        source_event_id=fields.get("open_event_id") or fields.get("source_event_id"),
         raw_fields=dict(fields),
     )
 

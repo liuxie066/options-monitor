@@ -6,8 +6,6 @@ from typing import Any
 from domain.domain.ledger.position_fields import (
     effective_contracts_open,
     effective_expiration_ymd,
-    effective_strike,
-    exp_ms_to_ymd,
     normalize_account,
     normalize_broker,
     normalize_option_type,
@@ -66,6 +64,79 @@ def _identity_matches_payload(
         if current_expiration != str(expiration_ymd).strip():
             return False
     return True
+
+
+def _lot_contract_value(fields: dict[str, object], nested_key: str) -> object:
+    """One contract value from a lot payload: nested ``contract_key`` first.
+
+    The converged payload (``PositionLot.to_dict()``) carries the option contract
+    under ``contract_key``; the read model also publishes the same facts as flat
+    siblings, and a row written before the shape switch has only those, so the
+    flat spelling is read after the nested one. Trade *event* dicts are a
+    different layer: they carry the flat spellings, so callers read them
+    directly.
+    """
+    contract_key = fields.get("contract_key")
+    contract_key = contract_key if isinstance(contract_key, dict) else {}
+    value = contract_key.get(nested_key)
+    if value not in (None, ""):
+        return value
+    value = fields.get(nested_key)
+    if value not in (None, ""):
+        return value
+    for flat_key in _CONTRACT_FLAT_ALIASES.get(nested_key, ()):
+        value = fields.get(flat_key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+#: Nested ``contract_key`` member -> the flat spellings it replaced.
+_CONTRACT_FLAT_ALIASES: dict[str, tuple[str, ...]] = {
+    "broker": ("broker",),
+    "account": ("account",),
+    "underlying_symbol": ("symbol", "underlying_symbol"),
+    "option_type": ("option_type",),
+    "strike": ("strike",),
+    "expiration_ymd": ("expiration_ymd", "exp"),
+}
+
+
+def _lot_position_side(fields: dict[str, object]) -> str:
+    for key in ("position_side", "side"):
+        value = str(fields.get(key) or "").strip().lower()
+        if value:
+            return value
+    return ""
+
+
+def _lot_expiration_ymd(fields: dict[str, object]) -> str:
+    return str(_lot_contract_value(fields, "expiration_ymd") or "").strip()
+
+
+def _lot_last_close_event_id(fields: dict[str, object]) -> str | None:
+    """The lot's last close event id.
+
+    ``last_close_event_id`` converged onto ``close_event_ids`` /
+    ``last_event_id`` (``write-side-definition.md`` §2). ``close_event_ids`` is
+    the lot's own close pointer and is produced by the close transition itself,
+    so it is read first; ``last_event_id`` is the same fact for a lot the closing
+    event was the last to touch. The retired flat key stays the last resort for a
+    row written before the shape switch.
+    """
+    close_event_ids = fields.get("close_event_ids")
+    if isinstance(close_event_ids, (list, tuple)):
+        closed = [str(item or "").strip() for item in close_event_ids if str(item or "").strip()]
+        if closed:
+            return closed[-1]
+    # ``last_event_id`` is the same fact for a lot that its closing event was the
+    # last to touch, so it is read under the guard that nothing is left open --
+    # otherwise it would report the open (or an adjust) event as a close.
+    if effective_contracts_open(fields) <= 0:
+        last_event_id = str(fields.get("last_event_id") or "").strip()
+        if last_event_id:
+            return last_event_id
+    return str(fields.get("last_close_event_id") or "").strip() or None
 
 
 def _event_payload(event: dict[str, object]) -> dict[str, object]:
@@ -146,17 +217,19 @@ def _lot_with_beijing_time_fields(row: dict[str, object]) -> dict[str, object]:
 
 
 def _event_matches_lot(event: dict[str, object], *, lot_id: str, fields: dict[str, object]) -> bool:
-    source_event_id = str(fields.get("source_event_id") or "").strip()
+    # ``source_event_id`` converged onto ``open_event_id`` (write-side-definition
+    # §2): the lot's source open is the same fact under its new name.
+    source_event_id = str(fields.get("open_event_id") or "").strip()
     refs = _event_record_refs(event)
     if str(lot_id).strip() in refs or (source_event_id and source_event_id in refs):
         return True
     return _identity_matches_payload(
         event,
-        account=_optional_text(fields.get("account")),
-        symbol=_optional_text(fields.get("symbol")),
-        option_type=_optional_text(fields.get("option_type")),
-        strike=effective_strike(fields),
-        expiration_ymd=effective_expiration_ymd(fields),
+        account=_optional_text(_lot_contract_value(fields, "account")),
+        symbol=_optional_text(_lot_contract_value(fields, "underlying_symbol")),
+        option_type=_optional_text(_lot_contract_value(fields, "option_type")),
+        strike=_safe_float(_lot_contract_value(fields, "strike")),
+        expiration_ymd=_lot_expiration_ymd(fields) or None,
     )
 
 
@@ -207,20 +280,19 @@ def _matches_lot_selector(
         return False
     if lot_id and row_lot_id != str(lot_id).strip():
         return False
-    if account and normalize_account(fields.get("account")) != normalize_account(account):
+    if account and normalize_account(_lot_contract_value(fields, "account")) != normalize_account(account):
         return False
-    if symbol and canonical_contract_symbol(fields.get("symbol")) != canonical_contract_symbol(symbol):
+    if symbol and canonical_contract_symbol(_lot_contract_value(fields, "underlying_symbol")) != canonical_contract_symbol(symbol):
         return False
-    if option_type and str(fields.get("option_type") or "").strip().lower() != str(option_type).strip().lower():
+    if option_type and str(_lot_contract_value(fields, "option_type") or "").strip().lower() != str(option_type).strip().lower():
         return False
     if strike is not None:
-        current_strike = _safe_float(fields.get("strike"))
+        current_strike = _safe_float(_lot_contract_value(fields, "strike"))
         if current_strike is None or abs(current_strike - float(strike)) >= 1e-9:
             return False
     if expiration_ymd:
-        current_expiration = effective_expiration_ymd(fields) or exp_ms_to_ymd(fields.get("expiration")) or str(fields.get("expiration") or "")
-        current_note = str(fields.get("note") or "")
-        if expiration_ymd not in current_note and expiration_ymd not in current_expiration:
+        current_expiration = _lot_expiration_ymd(fields)
+        if str(expiration_ymd).strip() != current_expiration:
             return False
     return True
 
@@ -282,16 +354,16 @@ def _matches_event_selector(
 def _canonical_position_key_from_fields(fields: dict[str, object]) -> str | None:
     try:
         key = ContractKey.from_values(
-            broker=fields.get("broker") or fields.get("market"),
-            account=fields.get("account"),
-            underlying_symbol=fields.get("symbol") or fields.get("underlying_symbol"),
-            option_type=fields.get("option_type"),
-            strike=effective_strike(fields),
-            expiration_ymd=fields.get("expiration_ymd") or effective_expiration_ymd(fields),
+            broker=_lot_contract_value(fields, "broker"),
+            account=_lot_contract_value(fields, "account"),
+            underlying_symbol=_lot_contract_value(fields, "underlying_symbol"),
+            option_type=_lot_contract_value(fields, "option_type"),
+            strike=_safe_float(_lot_contract_value(fields, "strike")),
+            expiration_ymd=_lot_expiration_ymd(fields) or None,
         )
     except Exception:
         return None
-    return position_key_for(key, normalize_side(fields.get("side") or fields.get("position_side")))
+    return position_key_for(key, normalize_side(_lot_position_side(fields)))
 
 
 def _projected_lot_view(row: Any) -> dict[str, object]:
@@ -301,23 +373,28 @@ def _projected_lot_view(row: Any) -> dict[str, object]:
         row = {}
     fields = row.get("fields") if isinstance(row.get("fields"), dict) else {}
     fields = fields if isinstance(fields, dict) else {}
+    # The view keeps its own flat vocabulary (``_matches_projected_selector``
+    # and the ``inspect-projection`` report read it), so the converged payload's
+    # keys are re-pointed here rather than renamed.
+    symbol = str(_lot_contract_value(fields, "underlying_symbol") or "").strip() or None
+    account = str(_lot_contract_value(fields, "account") or "").strip() or None
     return {
         "record_id": str(row.get("record_id") or "").strip(),
         "position_key": str(fields.get("position_key") or _canonical_position_key_from_fields(fields) or "").strip(),
-        "broker": normalize_broker(fields.get("broker")),
-        "account": normalize_account(fields.get("account")) if fields.get("account") else None,
-        "symbol": fields.get("symbol"),
-        "option_type": fields.get("option_type"),
-        "side": fields.get("side"),
-        "expiration_ymd": fields.get("expiration_ymd") or effective_expiration_ymd(fields),
-        "strike": effective_strike(fields),
+        "broker": normalize_broker(_lot_contract_value(fields, "broker")) or None,
+        "account": normalize_account(account) if account else None,
+        "symbol": symbol,
+        "option_type": str(_lot_contract_value(fields, "option_type") or "").strip() or None,
+        "side": _lot_position_side(fields) or None,
+        "expiration_ymd": _lot_expiration_ymd(fields) or None,
+        "strike": _safe_float(_lot_contract_value(fields, "strike")),
         "currency": fields.get("currency"),
         "multiplier": fields.get("multiplier"),
         "baseline_contracts": None,
         "current_contracts": effective_contracts_open(fields),
         "status": fields.get("status"),
-        "source_event_id": fields.get("source_event_id"),
-        "last_close_event_id": fields.get("last_close_event_id"),
+        "source_event_id": str(_lot_contract_value(fields, "open_event_id") or "").strip() or None,
+        "last_close_event_id": _lot_last_close_event_id(fields),
     }
 
 

@@ -1,11 +1,80 @@
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
 
 from domain.domain.ledger import ContractKey, TradeEvent
+from domain.domain.ledger.lots import PositionLot
 from domain.domain.option_position_lots import parse_exp_to_ms
 from domain.domain.trade_contract_identity import derive_trade_side
 from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
+
+
+#: ``write-side-definition.md`` §2 RECONSTRUCTIBLE: the fact lives on the event or
+#: strategy side, so the published payload must not carry the key at all.
+RETIRED_LOT_KEYS = frozenset(
+    {
+        "auto_close_exp_src",
+        "auto_close_grace_days",
+        "cash_secured_amount",
+        "close_price",
+        "close_reason",
+        "close_type",
+        "closed_at",
+        "event_source_name",
+        "event_source_type",
+        "last_action_at",
+        "leg_role",
+        "source_stock_lot_id",
+        "source_wheel_branch_id",
+        "strategy",
+        "strategy_group_id",
+        "strategy_snapshot",
+        "underlying_share_locked",
+    }
+)
+
+#: §2 "CARRIED by asset type": ``asset_type`` plus ``shares_*`` say it, so the key
+#: itself is dropped.
+DROPPED_LOT_KEYS = frozenset({"quantity_unit"})
+
+#: §1/§3: the published key set is exactly ``PositionLot.to_dict()``'s -- a stock
+#: lot adds the four ``shares_*``/``cost_basis_total`` keys.
+OPTION_LOT_KEYS = frozenset(
+    {
+        "lot_id",
+        "open_event_id",
+        "contract_key",
+        "position_side",
+        "position_key",
+        "opened_at_ms",
+        "contracts_opened",
+        "contracts_open",
+        "contracts_closed",
+        "status",
+        "premium_open",
+        "multiplier",
+        "currency",
+        "realized_pnl",
+        "last_event_id",
+        "close_event_ids",
+        "asset_type",
+    }
+)
+STOCK_LOT_KEYS = OPTION_LOT_KEYS | {
+    "shares_opened",
+    "shares_open",
+    "shares_closed",
+    "cost_basis_total",
+}
+
+
+def _assert_converged_payload(fields: dict, *, stock: bool = False) -> None:
+    """§1: the published payload is the converged shape, no more and no less."""
+
+    assert set(fields) == (STOCK_LOT_KEYS if stock else OPTION_LOT_KEYS)
+    assert not (RETIRED_LOT_KEYS | DROPPED_LOT_KEYS) & set(fields)
 
 
 def _key(
@@ -79,19 +148,23 @@ def test_publisher_applies_adjust_patch_to_legacy_position_lot_fields() -> None:
     record = projection.lots[0]
     assert record.lot_id == "lot_open-nvda"
     fields = record.fields
-    assert fields["source_event_id"] == "open-nvda"
-    assert fields["contracts"] == 2
+    # §2 renames: ``source_event_id``→``open_event_id``, ``contracts``→
+    # ``contracts_opened``, ``premium``→``premium_open``, ``opened_at``→
+    # ``opened_at_ms``, and the contract moves under ``contract_key``.
+    assert fields["open_event_id"] == "open-nvda"
+    assert fields["contracts_opened"] == 2
     assert fields["contracts_open"] == 2
     # §7.4: the published row carries money as decimal text, not float.
-    assert fields["strike"] == "105"
-    assert fields["premium"] == "3.1"
-    assert fields["opened_at"] == 2000
-    assert fields["last_action_at"] == 3000
+    assert fields["contract_key"]["strike"] == "105"
+    assert fields["premium_open"] == "3.1"
+    assert fields["opened_at_ms"] == 2000
     assert fields["position_key"] == "富途|lx|NVDA|2026-07-17|105P|short"
-    assert fields["cash_secured_amount"] == "21000"
+    # §2 RECONSTRUCTIBLE: ``last_action_at`` and ``cash_secured_amount`` left the
+    # payload (the adjust patch still accepted them on the way in).
+    _assert_converged_payload(fields)
 
 
-def test_publisher_preserves_open_strategy_snapshot() -> None:
+def test_publisher_drops_open_strategy_snapshot() -> None:
     projection = project_stored_trade_events_to_position_lots(
         [
             TradeEvent(
@@ -121,15 +194,12 @@ def test_publisher_preserves_open_strategy_snapshot() -> None:
     )
 
     assert projection.diagnostics == []
-    assert projection.lots[0].fields["strategy_snapshot"] == {
-        "strategy_family": "sell_put",
-        "strategy_profile": "short_vol",
-        "strategy_source": "current_config",
-        "risk_model": "short_vol",
-    }
+    # §2/§7: the strategy family is no longer a payload carrier -- the open event's
+    # raw_payload keeps the snapshot and the strategy side reads it from there.
+    _assert_converged_payload(projection.lots[0].fields)
 
 
-def test_publisher_preserves_open_strategy_metadata_fields() -> None:
+def test_publisher_drops_open_strategy_metadata_fields() -> None:
     projection = project_stored_trade_events_to_position_lots(
         [
             TradeEvent(
@@ -159,14 +229,12 @@ def test_publisher_preserves_open_strategy_metadata_fields() -> None:
     )
 
     assert projection.diagnostics == []
-    fields = projection.lots[0].fields
-    assert fields["strategy"] == "combo_yield"
-    assert fields["leg_role"] == "enhancement_call"
-    assert fields["strategy_group_id"] == "combo_yield:lot_pdd_short_put"
-    assert fields["yield_enhancement_mode"] == "income_upside_enhancement"
+    # The open event still carries the family (it is the home §7 moves it to); the
+    # published payload must not.
+    _assert_converged_payload(projection.lots[0].fields)
 
 
-def test_publisher_applies_adjust_strategy_metadata_patch() -> None:
+def test_publisher_drops_adjust_strategy_metadata_patch() -> None:
     open_key = _key(
         strike=140.0,
         expiration_ymd="2026-06-19",
@@ -215,24 +283,22 @@ def test_publisher_applies_adjust_strategy_metadata_patch() -> None:
     )
 
     assert projection.diagnostics == []
-    fields = projection.lots[0].fields
-    assert fields["strategy"] == "yield_enhancement"
-    assert fields["leg_role"] == "enhancement_call"
-    assert fields["strategy_group_id"] == "ye_nvda_1"
-    assert fields["yield_enhancement_mode"] == "income_upside_enhancement"
+    # An adjust patch that names the family is accepted on the way in and dropped
+    # on the way out (§2 RECONSTRUCTIBLE / §7).
+    _assert_converged_payload(projection.lots[0].fields)
 
 
 @pytest.mark.parametrize(
-    ("snapshot", "expected_retired_mode"),
+    "snapshot",
     [
-        ({"strategy_family": "sell_put", "strategy_profile": "return_first"}, None),
-        ({"strategy_family": "sell_put", "strategy_profile": "return"}, None),
-        ({"structure_mode": "same_expiry_pair"}, "vol_convexity_enhancement"),
+        {"strategy_family": "sell_put", "strategy_profile": "return_first"},
+        {"strategy_family": "sell_put", "strategy_profile": "return"},
+        {"structure_mode": "same_expiry_pair"},
     ],
+    ids=["return_first", "return", "same_expiry_pair"],
 )
 def test_fallback_strategy_snapshot_patch_preserves_risk_semantics(
     snapshot: dict[str, str],
-    expected_retired_mode: str | None,
 ) -> None:
     key = _key(strike=100.0, expiration_ymd="2026-06-19")
     projection = project_stored_trade_events_to_position_lots(
@@ -285,8 +351,15 @@ def test_fallback_strategy_snapshot_patch_preserves_risk_semantics(
     )
 
     assert [item.code for item in projection.diagnostics] == ["target_lot_not_found"]
-    assert projection.lots[0].fields.get("yield_enhancement_mode") == expected_retired_mode
-    assert projection.lots[0].fields["strategy_snapshot"] == snapshot
+    fields = projection.lots[0].fields
+    # §2 RECONSTRUCTIBLE: the family the fallback path carries is no longer
+    # published, whatever shape the patch's snapshot has.
+    _assert_converged_payload(fields)
+    # The risk semantics the fallback exists for are the contract itself: the
+    # strike, multiplier and open quantity survive the patch untouched.
+    assert fields["contract_key"]["strike"] == "100"
+    assert fields["multiplier"] == 100
+    assert fields["contracts_open"] == 1
 
 
 def test_publisher_does_not_reapply_voided_adjust_strategy_patch() -> None:
@@ -557,23 +630,16 @@ def test_publisher_publishes_stock_lot_in_shares_vocabulary() -> None:
     assert len(projection.lots) == 1
     fields = projection.lots[0].fields
     assert fields["asset_type"] == "stock"
-    assert fields["quantity_unit"] == "share"
+    assert fields["contract_key"]["asset_type"] == "stock"
     assert fields["shares_opened"] == "5"
     assert fields["shares_open"] == "3"
     assert fields["shares_closed"] == "2"
     assert fields["cost_basis_total"] == "227.5"
     assert fields["position_key"] == "富途|lx|AAPL|stock|long"
-    assert fields["contracts"] == 0
-    # The option shape does not describe a stock lot, so it must not be published.
-    for option_only in (
-        "strike",
-        "expiration",
-        "expiration_ymd",
-        "premium",
-        "cash_secured_amount",
-        "underlying_share_locked",
-    ):
-        assert option_only not in fields, option_only
+    # §2 dropped ``quantity_unit`` (``asset_type`` plus ``shares_*`` say it) and §3
+    # puts the contract scalars under ``contract_key``, so a stock row publishes
+    # none of the flat option spellings.
+    _assert_converged_payload(fields, stock=True)
 
 
 def test_publisher_publishes_option_money_as_decimal_text() -> None:
@@ -608,14 +674,14 @@ def test_publisher_publishes_option_money_as_decimal_text() -> None:
 
     assert projection.diagnostics == []
     fields = projection.lots[0].fields
-    # Precondition: the product really does land off the exact value in floats, so
-    # the assertion below is about arithmetic and not only about rendering.
-    assert float(5.001) * 100 * 3 != 1500.3
-    assert fields["cash_secured_amount"] == "1500.3"
-    assert fields["strike"] == "5.001"
-    assert fields["premium"] == "0.125"
-    for money_key in ("strike", "premium", "cash_secured_amount"):
-        assert isinstance(fields[money_key], str), money_key
+    assert fields["contract_key"]["strike"] == "5.001"
+    assert fields["premium_open"] == "0.125"
+    assert isinstance(fields["contract_key"]["strike"], str)
+    assert isinstance(fields["premium_open"], str)
+    # §2 RECONSTRUCTIBLE: the derived ``cash_secured_amount`` is no longer a
+    # published key, so the 3-decimal strike itself is what has to survive the
+    # round trip as decimal text.
+    _assert_converged_payload(fields)
 
 
 def test_publisher_applies_money_quantum_to_patched_premium() -> None:
@@ -624,9 +690,12 @@ def test_publisher_applies_money_quantum_to_patched_premium() -> None:
     An adjust patch reaches ``premium_open`` through ``to_decimal`` with no
     decimal-place check, so a patched premium can carry more places than money
     admits -- the open path validates against ``PRICE_DECIMAL_PLACES``, the patch
-    path does not. Publishing it verbatim would put a 10-place price in the read
-    model; the project's money rule is ``MONEY_QUANTUM`` (6 places, ROUND_HALF_UP).
+    path does not. The project's money rule is ``MONEY_QUANTUM`` (6 places,
+    ROUND_HALF_UP), and it is applied at the write side's single money render
+    point (``PositionLot.to_dict()`` -> ``_money_text``), so a 10-place price
+    cannot reach the read model.
     """
+
     key = _key(strike=100.0, expiration_ymd="2026-06-19")
     projection = project_stored_trade_events_to_position_lots(
         [
@@ -663,7 +732,42 @@ def test_publisher_applies_money_quantum_to_patched_premium() -> None:
 
     assert projection.diagnostics == []
     fields = projection.lots[0].fields
-    assert fields["premium"] == "3.123457"
+    assert fields["premium_open"] == "3.123457"
+
+
+def test_position_lot_money_render_applies_the_money_quantum() -> None:
+    """§7.4: the money rule binds at the render point, not only on a patch.
+
+    ``PositionLot`` keeps ``Decimal`` authority values (an event price can carry
+    17 digits, and a computed ``realized_pnl`` is a product of price, multiplier
+    and contracts), so ``to_dict()`` -- the write side's only money render point,
+    and therefore every published ``fields_json`` -- is where ``MONEY_QUANTUM``
+    has to bind. The rendered text is what production rows are compared on, so a
+    text that keeps the raw scale is the failure this pins.
+    """
+    lot = PositionLot(
+        lot_id="lot-money",
+        open_event_id="open-money",
+        contract_key=_key(strike=100.0, expiration_ymd="2026-06-19"),
+        position_side="short",
+        opened_at_ms=1_000,
+        contracts_opened=1,
+        contracts_open=1,
+        contracts_closed=0,
+        status="open",
+        # A binary float that survives ``Decimal(str(...))`` with 17 digits.
+        premium_open=Decimal("1.8399999999999999"),
+        multiplier=100,
+        currency="USD",
+        # ``1.0000005`` sits exactly on the 6th-place boundary, so ROUND_HALF_UP carries.
+        realized_pnl=Decimal("1.0000005"),
+        last_event_id="open-money",
+    )
+
+    payload = lot.to_dict()
+
+    assert payload["premium_open"] == "1.84"
+    assert payload["realized_pnl"] == "1.000001"
 
 
 def test_publisher_normalizes_money_in_a_legacy_snapshot() -> None:
@@ -705,14 +809,10 @@ def test_publisher_normalizes_money_in_a_legacy_snapshot() -> None:
 
     assert projection.diagnostics == []
     fields = projection.lots[0].fields
-    assert fields["strike"] == "100"
-    assert fields["premium"] == "0.73"
-    assert fields["cash_secured_amount"] == "73000"
-    assert fields["close_price"] == "1.5"
-    for money_key in (
-        "strike",
-        "premium",
-        "cash_secured_amount",
-        "close_price",
-    ):
-        assert isinstance(fields[money_key], str), money_key
+    assert fields["contract_key"]["strike"] == "100"
+    assert fields["premium_open"] == "0.73"
+    assert isinstance(fields["contract_key"]["strike"], str)
+    assert isinstance(fields["premium_open"], str)
+    # §6/§2: a legacy snapshot's retired keys -- ``cash_secured_amount`` and
+    # ``close_price`` among them -- do not leak into the published row.
+    _assert_converged_payload(fields)

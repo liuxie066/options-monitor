@@ -7,6 +7,21 @@ from .repository_schema import (
     sqlite3,
 )
 
+
+def _lot_account(row: dict[str, Any]) -> str:
+    """A lot row's account, read from the converged payload shape.
+
+    ``fields_json`` now carries the contract under ``contract_key`` (the flat
+    ``account`` sibling is retired), so scoping lots to one account reads the
+    nested key.
+    """
+    fields = row.get("fields")
+    fields = fields if isinstance(fields, dict) else {}
+    contract_key = fields.get("contract_key")
+    contract_key = contract_key if isinstance(contract_key, dict) else {}
+    return str(contract_key.get("account") or "")
+
+
 class DecisionReadRepositoryMixin:
     def assert_foreign_keys_clean(self, *, conn: sqlite3.Connection | None = None) -> None:
         with self._optional_conn(conn) as active_conn:
@@ -185,7 +200,7 @@ class DecisionReadRepositoryMixin:
                 row
                 for row in lots
                 if str(
-                    (row.get("fields") or {}).get("account") or ""
+                    _lot_account(row) or ""
                 ).strip().lower()
                 == account_value
             ],

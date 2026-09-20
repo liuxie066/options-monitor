@@ -105,7 +105,17 @@ class PositionProjectionRepositoryMixin:
                     fields = json.loads(str(row["fields_json"] or "{}"))
                 except json.JSONDecodeError as exc:
                     raise ValueError(f"position lot JSON is invalid: record_id={row['record_id']}") from exc
-                account = str(fields.get("account") if isinstance(fields, dict) else "").strip()
+                contract_key = fields.get("contract_key") if isinstance(fields, dict) else None
+                contract_key = contract_key if isinstance(contract_key, dict) else {}
+                # The converged payload carries the account under ``contract_key``
+                # (``write-side-definition.md`` §2); the retired flat sibling is
+                # read after it, because this backfill's whole job is to serve a
+                # store whose rows may predate the shape switch.
+                account = str(
+                    contract_key.get("account")
+                    if contract_key.get("account") not in (None, "")
+                    else (fields.get("account") if isinstance(fields, dict) else "")
+                ).strip()
                 if not account or account != account.lower():
                     raise ValueError(f"position lot account cannot be normalized: record_id={row['record_id']}")
                 stored = str(row["account"] or "").strip()

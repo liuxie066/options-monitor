@@ -23,7 +23,11 @@ from domain.domain.ledger.position_fields import (
 )
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.trade_contract_identity import canonical_contract_symbol, derive_trade_side
-from src.application.ledger.lot_resolver import CloseTargetResolution
+from src.application.ledger.lot_resolver import (
+    CloseTargetResolution,
+    contract_key_from_lot_fields,
+    lot_contract_value,
+)
 from src.application.ledger.preflight import preflight_broker_trade_close
 from src.application.ledger.results import BrokerTradeOperation, LedgerWriteResult
 from src.application.ledger.writer import persist_trade_event_objects_atomically
@@ -446,7 +450,16 @@ def _lifecycle_close_event(
     manual_request_id: str | None = None,
     manual_request_intent_hash: str | None = None,
 ) -> TradeEvent:
-    strike = effective_strike(fields)
+    # The converged payload carries the contract under ``contract_key`` and the
+    # side under ``position_side`` (``write-side-definition.md`` §2); the retired
+    # flat siblings stay readable for a row written before the shape switch.
+    lot_contract_key = contract_key_from_lot_fields(fields)
+    raw_strike = lot_contract_value(fields, lot_contract_key, "strike", "strike")
+    strike = (
+        float(raw_strike)
+        if raw_strike is not None
+        else effective_strike(fields)
+    )
     multiplier = effective_multiplier(fields)
     canonical_event_id = str(event_id or "").strip() or f"{event_type}-{lot_id}-{uuid.uuid4().hex}"
     raw_close_type = EXPIRE_AUTO_CLOSE if event_type == "expire_close" else event_type
@@ -456,12 +469,30 @@ def _lifecycle_close_event(
         event_type=event_type,
         event_time_ms=int(event_time_ms),
         contract_key=ContractKey.from_values(
-            broker=normalize_broker(fields.get("broker")),
-            account=normalize_account(fields.get("account")),
-            underlying_symbol=canonical_contract_symbol(fields.get("symbol")),
-            option_type=str(fields.get("option_type") or ""),
+            broker=normalize_broker(
+                lot_contract_value(fields, lot_contract_key, "broker", "broker")
+            ),
+            account=normalize_account(
+                lot_contract_value(fields, lot_contract_key, "account", "account")
+            ),
+            underlying_symbol=canonical_contract_symbol(
+                lot_contract_value(
+                    fields, lot_contract_key, "underlying_symbol", "symbol"
+                )
+            ),
+            option_type=str(
+                lot_contract_value(
+                    fields, lot_contract_key, "option_type", "option_type"
+                )
+                or ""
+            ),
             strike=(float(strike) if strike is not None else None),
-            expiration_ymd=effective_expiration_ymd(fields),
+            expiration_ymd=(
+                lot_contract_value(
+                    fields, lot_contract_key, "expiration_ymd", "expiration_ymd"
+                )
+                or effective_expiration_ymd(fields)
+            ),
         ),
         contracts=int(contracts_to_close),
         price=0.0,
@@ -474,9 +505,17 @@ def _lifecycle_close_event(
             "source_type": "system_trade_event",
             "record_id": str(lot_id),
             "target_lot_id": str(lot_id),
-            "close_target_source_event_id": str(fields.get("source_event_id") or "").strip() or None,
-            "close_target_account": normalize_account(fields.get("account")),
-            "close_target_broker": normalize_broker(fields.get("broker")),
+            "close_target_source_event_id": str(
+                fields.get("open_event_id")
+                or fields.get("source_event_id")
+                or ""
+            ).strip() or None,
+            "close_target_account": normalize_account(
+                lot_contract_value(fields, lot_contract_key, "account", "account")
+            ),
+            "close_target_broker": normalize_broker(
+                lot_contract_value(fields, lot_contract_key, "broker", "broker")
+            ),
             "close_type": raw_close_type,
             "close_reason": str(close_reason or event_type),
             "case_id": case_id,
@@ -496,7 +535,12 @@ def _lifecycle_close_event(
             ),
             "close_target_resolution": dict(close_target_resolution),
             "contracts_open_before": effective_contracts_open(fields),
-            "side": derive_trade_side(event_type, str(fields.get("side") or "").strip().lower()),
+            "side": derive_trade_side(
+                event_type,
+                str(fields.get("position_side") or fields.get("side") or "")
+                .strip()
+                .lower(),
+            ),
             **strategy_payload,
         },
     )

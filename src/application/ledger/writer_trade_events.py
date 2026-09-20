@@ -241,11 +241,20 @@ def persist_trade_event_with_combo_identity(
             raise ValueError("identity_missing_for_existing_second_leg")
         events = sqlite_repo.list_trade_events(conn=conn)
         projected_lots = sqlite_repo.list_position_lots(conn=conn)
-        records_by_open_event = {
-            str((record.get("fields") or {}).get("source_event_id") or "").strip(): record
-            for record in projected_lots
-            if str((record.get("fields") or {}).get("source_event_id") or "").strip()
-        }
+        # ``source_event_id`` converged onto ``open_event_id``
+        # (``write-side-definition.md`` §2); the retired flat key stays readable
+        # for a row written before the shape switch, and a converged row has no
+        # flat spelling left for this lookup to key on.
+        records_by_open_event: dict[str, Any] = {}
+        for record in projected_lots:
+            record_fields = record.get("fields") or {}
+            record_open_event_id = str(
+                record_fields.get("open_event_id")
+                or record_fields.get("source_event_id")
+                or ""
+            ).strip()
+            if record_open_event_id:
+                records_by_open_event[record_open_event_id] = record
         first_leg = _combo_leg_from_projected_record(
             intent=intent,
             prefix="first_leg",

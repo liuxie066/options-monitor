@@ -437,6 +437,62 @@ def test_build_expired_close_decisions_skips_already_closed_or_zero_open() -> No
     assert decisions[0].to_payload()["patch"] is None
 
 
+def _converged_option_lot_fields(
+    *,
+    lot_id: str,
+    account: str,
+    symbol: str,
+    option_type: str,
+    position_side: str,
+    strike: float,
+    expiration_ymd: str,
+    contracts_open: int,
+    contracts_closed: int = 0,
+    status: str = "open",
+    currency: str = "USD",
+    multiplier: float = 100,
+    broker: str = "富途",
+) -> dict[str, object]:
+    """A lot payload in the converged shape (``PositionLot.to_dict()``).
+
+    ``position_lots.fields_json`` is exactly the lot's ``to_dict()`` after the
+    convergence batch (``write-side-definition.md`` §1): the contract is one
+    nested ``contract_key``, ``side`` is ``position_side``, and
+    ``contracts``/``premium``/``opened_at``/``source_event_id`` are
+    ``contracts_opened``/``premium_open``/``opened_at_ms``/``open_event_id``.
+    A helper writing the old flat spelling is refused by the writer's guards
+    (``repository_common._position_lot_storage_values``).
+    """
+    marker = "P" if option_type == "put" else "C"
+    return {
+        "lot_id": lot_id,
+        "open_event_id": f"open-{lot_id}",
+        "contract_key": {
+            "broker": broker,
+            "account": account,
+            "underlying_symbol": symbol,
+            "option_type": option_type,
+            "strike": str(strike),
+            "expiration_ymd": expiration_ymd,
+            "asset_type": "option",
+        },
+        "position_side": position_side,
+        "position_key": f"{symbol}_{expiration_ymd.replace('-', '')}_{int(strike)}{marker}_{position_side}",
+        "opened_at_ms": 1000,
+        "contracts_opened": int(contracts_open) + int(contracts_closed),
+        "contracts_open": int(contracts_open),
+        "contracts_closed": int(contracts_closed),
+        "status": status,
+        "premium_open": "1",
+        "multiplier": multiplier,
+        "currency": currency,
+        "realized_pnl": "0",
+        "last_event_id": f"open-{lot_id}",
+        "close_event_ids": [],
+        "asset_type": "option",
+    }
+
+
 def test_auto_close_expired_positions_uses_effective_contracts_open_fallback(tmp_path: Path) -> None:
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
@@ -483,12 +539,14 @@ def test_auto_close_expired_positions_uses_effective_contracts_open_fallback(tmp
     assert fields["status"] == "close"
     assert fields["contracts_open"] == 0
     assert fields["contracts_closed"] == 1
-    assert fields["close_type"] == EXPIRE_AUTO_CLOSE
-    assert fields["close_reason"] == "expired"
+    # ``close_type`` is RECONSTRUCTIBLE: it left the payload in the convergence
+    # batch and its home is the closing event's payload (asserted below).
+    assert "close_type" not in fields
     events = repo.list_trade_events()
     assert len(events) == 2
     assert events[-1]["source_name"] == "auto_close_expired_positions"
     assert events[-1]["raw_payload"]["close_type"] == EXPIRE_AUTO_CLOSE
+    assert events[-1]["raw_payload"]["close_reason"] == "expired"
 
 
 def test_auto_close_expired_positions_skips_stale_open_input_when_current_lot_closed(tmp_path: Path) -> None:
@@ -500,24 +558,18 @@ def test_auto_close_expired_positions_skips_stale_open_input_when_current_lot_cl
         [
             PositionLotRecord(
                 lot_id="rec_nvda",
-                fields={
-                    "record_id": "rec_nvda",
-                    "position_key": "NVDA_20260501_160P_short",
-                    "status": "close",
-                    "contracts": 1,
-                    "contracts_open": 0,
-                    "contracts_closed": 1,
-                    "broker": "富途",
-                    "account": "lx",
-                    "symbol": "NVDA",
-                    "option_type": "put",
-                    "side": "short",
-                    "currency": "USD",
-                    "strike": 160,
-                    "multiplier": 100,
-                    "expiration": expiration,
-                    "note": "",
-                },
+                fields=_converged_option_lot_fields(
+                    lot_id="rec_nvda",
+                    account="lx",
+                    symbol="NVDA",
+                    option_type="put",
+                    position_side="short",
+                    strike=160,
+                    expiration_ymd="2026-05-01",
+                    contracts_open=0,
+                    contracts_closed=1,
+                    status="close",
+                ),
             )
         ]
     )
@@ -570,24 +622,17 @@ def test_auto_close_expired_positions_skips_non_current_candidate_record_id(tmp_
         [
             PositionLotRecord(
                 lot_id="lot_0700_put_450_20260528",
-                fields={
-                    "record_id": "lot_0700_put_450_20260528",
-                    "position_key": "0700.HK_20260528_450P_short",
-                    "status": "open",
-                    "contracts": 6,
-                    "contracts_open": 6,
-                    "contracts_closed": 0,
-                    "broker": "富途",
-                    "account": "sy",
-                    "symbol": "0700.HK",
-                    "option_type": "put",
-                    "side": "short",
-                    "currency": "HKD",
-                    "strike": 450,
-                    "multiplier": 100,
-                    "expiration": expiration,
-                    "note": "",
-                },
+                fields=_converged_option_lot_fields(
+                    lot_id="lot_0700_put_450_20260528",
+                    account="sy",
+                    symbol="0700.HK",
+                    option_type="put",
+                    position_side="short",
+                    strike=450,
+                    expiration_ymd="2026-05-28",
+                    contracts_open=6,
+                    currency="HKD",
+                ),
             )
         ]
     )
@@ -698,11 +743,18 @@ def test_auto_close_skips_when_identity_changes_after_fresh_selection(
         def get_record_fields(self, lot_id):  # type: ignore[no-untyped-def]
             fields = super().get_record_fields(lot_id)
             if self.identity_changed:
+                # The contract identity lives under ``contract_key`` and the open
+                # event under ``open_event_id`` in the converged payload
+                # (``write-side-definition.md`` §2), so a repair that moves them
+                # is expressed there.
                 fields = {
                     **fields,
-                    "account": "sy",
-                    "symbol": "MSFT",
-                    "source_event_id": "repair-open",
+                    "contract_key": {
+                        **fields["contract_key"],
+                        "account": "sy",
+                        "underlying_symbol": "MSFT",
+                    },
+                    "open_event_id": "repair-open",
                 }
             return fields
 
@@ -1148,7 +1200,7 @@ def test_lifecycle_auto_expire_rejects_identity_change_after_outer_preflight(
     case = repo.get_trade_lifecycle_case("lc_tigr_expire")
     assert case is not None
     assert case["status"] == "waiting_settlement_evidence"
-    assert repo.get_record_fields(lot_id)["symbol"] == "MSFT"
+    assert repo.get_record_fields(lot_id)["contract_key"]["underlying_symbol"] == "MSFT"
 
 
 def test_lifecycle_auto_expire_rolls_back_event_lot_and_allocation_when_case_write_fails(
@@ -1343,7 +1395,10 @@ def test_auto_close_expired_positions_fail_closed_on_ledger_identity_mismatch(tm
             patched = []
             for row in rows:
                 fields = dict(row["fields"])
-                fields["strike"] = 451
+                # The contract is one nested object in the converged payload, so
+                # a snapshot that disagrees with the canonical lot on the strike
+                # disagrees under ``contract_key.strike``.
+                fields["contract_key"] = {**fields["contract_key"], "strike": 451}
                 patched.append({"record_id": row["record_id"], "fields": fields})
             return patched
 
@@ -1406,23 +1461,17 @@ def test_position_maintenance_requires_active_ledger_repair_before_closing_posit
             PositionLotRecord(
                 lot_id="rec_nvda",
                 fields={
-                    "record_id": "rec_nvda",
-                    "position_key": "NVDA_20260417_100P_short",
-                    "status": "open",
-                    "contracts": 1,
-                    "contracts_open": None,
-                    "contracts_closed": 0,
-                    "broker": "富途",
-                    "account": "lx",
-                    "symbol": "NVDA",
-                    "option_type": "put",
-                    "side": "short",
-                    "currency": "USD",
-                    "strike": 100,
-                    "multiplier": 100,
+                    **_converged_option_lot_fields(
+                        lot_id="rec_nvda",
+                        account="lx",
+                        symbol="NVDA",
+                        option_type="put",
+                        position_side="short",
+                        strike=100,
+                        expiration_ymd="2026-04-17",
+                        contracts_open=1,
+                    ),
                     "_auto_close_underlying_spot": 101,
-                    "expiration": parse_exp_to_ms("2026-04-17"),
-                    "note": "",
                 },
             )
         ]

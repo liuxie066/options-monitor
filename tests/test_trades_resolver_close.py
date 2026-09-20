@@ -146,6 +146,26 @@ def _deal(**overrides: object) -> NormalizedTradeDeal:
     return NormalizedTradeDeal(**base)
 
 
+def _lot_close_type(repo, lot_id: str) -> str:
+    """The lot's close type, read from its closing event's payload.
+
+    ``close_type`` left ``fields_json`` in the convergence batch
+    (``write-side-definition.md`` §2); its home is the closing trade event, and
+    the lot payload keeps only the id (``last_event_id``).
+    """
+    fields = repo.get_record_fields(lot_id)
+    wanted = str(fields.get("last_event_id") or "").strip()
+    for event in repo.list_trade_events():
+        if str(event.get("event_id") or "").strip() != wanted:
+            continue
+        return (
+            str((event.get("raw_payload") or {}).get("close_type") or "")
+            .strip()
+            .lower()
+        )
+    return ""
+
+
 def test_match_close_positions_uses_fifo() -> None:
     repo = FakeRepo([_record("rec1", 100, 1), _record("rec2", 200, 2)])
 
@@ -937,7 +957,7 @@ def test_resolve_trade_lifecycle_option_first_records_early_assignment_before_ex
     assert assignment_events[0]["raw_payload"]["stock_settlement"]["shares"] == 100
     assert assignment_events[0]["raw_payload"]["stock_settlement"]["price"] == 117.45
     assert repo.get_record_fields(lot_id)["contracts_open"] == 0
-    assert repo.get_record_fields(lot_id)["close_type"] == "assignment"
+    assert _lot_close_type(repo, lot_id) == "assignment"
 
 
 def test_resolve_trade_lifecycle_stock_first_records_early_assignment_before_expiration(tmp_path) -> None:
@@ -1080,7 +1100,7 @@ def test_resolve_trade_lifecycle_option_first_stock_settlement_records_assignmen
     assert assignment_events[0]["raw_payload"]["record_id"] == lot_id
     assert assignment_events[0]["raw_payload"]["stock_settlement"]["shares"] == 1000
     assert repo.get_record_fields(lot_id)["contracts_open"] == 0
-    assert repo.get_record_fields(lot_id)["close_type"] == "assignment"
+    assert _lot_close_type(repo, lot_id) == "assignment"
 
 
 def test_resolve_trade_lifecycle_option_and_stock_pair_uses_frozen_v2_case(tmp_path) -> None:
@@ -1172,7 +1192,7 @@ def test_resolve_trade_lifecycle_option_and_stock_pair_uses_frozen_v2_case(tmp_p
     assert v2_case is not None
     assert v2_case["status"] == "ledger_written"
     assert repo.get_record_fields(lot_id)["contracts_open"] == 0
-    assert repo.get_record_fields(lot_id)["close_type"] == "assignment"
+    assert _lot_close_type(repo, lot_id) == "assignment"
 
 
 def test_broker_lifecycle_adapter_accumulates_partial_stock_settlement(
@@ -1636,7 +1656,7 @@ def test_resolve_trade_lifecycle_long_call_exercise_records_exercise(tmp_path) -
     assert exercise_events[0]["raw_payload"]["record_id"] == lot_id
     assert exercise_events[0]["raw_payload"]["stock_settlement"]["shares"] == 200
     assert repo.get_record_fields(lot_id)["contracts_open"] == 0
-    assert repo.get_record_fields(lot_id)["close_type"] == "exercise"
+    assert _lot_close_type(repo, lot_id) == "exercise"
 
 
 def test_resolve_trade_lifecycle_stock_first_then_long_put_exercise_records_exercise(tmp_path) -> None:

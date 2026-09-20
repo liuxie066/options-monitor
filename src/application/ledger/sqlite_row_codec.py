@@ -10,16 +10,17 @@ from domain.domain.ledger.position_fingerprint import (
 
 
 def position_lot_row_to_record(row: Any) -> dict[str, Any]:
+    # No column heal. ``comparator-spec.md`` §2 rules that both sides of the
+    # parity comparison are normalized to one convention and that the columns are
+    # compared on their own face, so re-injecting ``expiration``/``strike``/
+    # ``multiplier`` from the row's columns made the store side carry two flat
+    # keys ``PositionLot.to_dict()`` does not have -- and ``projection_verify``'s
+    # exact dict comparison (``:153``) then reported ``field_mismatch`` for every
+    # option row while none of the slice's completion legs could see it. The
+    # columns still travel on face B (``lot_parity_probe`` reads them raw).
     fields = json.loads(str(row["fields_json"]) or "{}")
     if not isinstance(fields, dict):
         fields = {}
-    if fields.get("expiration") in (None, "") and row["expiration"] not in (None, ""):
-        fields["expiration"] = int(row["expiration"])
-    if fields.get("strike") is None and row["strike"] is not None:
-        fields["strike"] = float(row["strike"])
-    if fields.get("multiplier") is None and row["multiplier"] is not None:
-        raw_multiplier = float(row["multiplier"])
-        fields["multiplier"] = int(raw_multiplier) if raw_multiplier.is_integer() else raw_multiplier
     # ``or ""`` rather than a bare ``str()``: a NULL record_id would otherwise
     # become the string "None", a fabricated identity that differs from the ""
     # the read-only evidence surface emits for the same row.

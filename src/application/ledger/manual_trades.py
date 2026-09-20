@@ -37,12 +37,46 @@ from src.application.ledger.writer import (
     persist_trade_event_object,
     projection_diagnostics_summary,
 )
+from src.application.ledger.lot_resolver import (
+    contract_key_from_lot_fields,
+    lot_contract_value,
+)
 from src.application.ledger.repository import with_sqlite_repo_transaction
 from src.infrastructure.feishu_bitable import safe_float
 
 
 def _canonical_trade_symbol(value: Any) -> str:
     return canonical_contract_symbol(value)
+
+
+def _lot_identity(fields: dict[str, Any]) -> dict[str, Any]:
+    """The stored lot's contract identity, read from the converged shape.
+
+    ``broker``/``account``/``symbol``/``option_type``/``strike``/
+    ``expiration_ymd`` left the top level for ``contract_key`` and ``side``
+    became ``position_side`` (``write-side-definition.md`` §2); the retired flat
+    spellings stay readable for a row written before the shape switch.
+    """
+    contract_key = contract_key_from_lot_fields(fields)
+    return {
+        "broker": lot_contract_value(fields, contract_key, "broker", "broker"),
+        "account": lot_contract_value(fields, contract_key, "account", "account"),
+        "symbol": lot_contract_value(
+            fields, contract_key, "underlying_symbol", "symbol"
+        ),
+        "option_type": lot_contract_value(
+            fields, contract_key, "option_type", "option_type"
+        ),
+        "strike": lot_contract_value(fields, contract_key, "strike", "strike"),
+        "expiration_ymd": lot_contract_value(
+            fields, contract_key, "expiration_ymd", "expiration_ymd"
+        ),
+        "position_side": str(
+            fields.get("position_side") or fields.get("side") or ""
+        )
+        .strip()
+        .lower(),
+    }
 
 
 def _manual_open_event_id(
@@ -324,7 +358,8 @@ def existing_manual_close_event_result(
     close_price: float | None,
     close_reason: str,
 ) -> LedgerWriteResult | None:
-    broker = normalize_broker(fields.get("broker"))
+    identity = _lot_identity(fields)
+    broker = normalize_broker(identity["broker"])
     if not broker:
         raise ValueError(f"position lot missing broker: {lot_id}")
     normalized_close_price = normalize_trade_price(close_price, "close_price")
@@ -334,20 +369,32 @@ def existing_manual_close_event_result(
         fields=fields,
         operation="manual_close",
     )
+    current_identity = _lot_identity(current_fields)
     multiplier = effective_multiplier(current_fields)
-    strike = effective_strike(current_fields)
-    target_source_event_id = str(current_fields.get("source_event_id") or "").strip()
+    strike = (
+        float(current_identity["strike"])
+        if current_identity["strike"] is not None
+        else effective_strike(current_fields)
+    )
+    target_source_event_id = str(
+        current_fields.get("open_event_id")
+        or current_fields.get("source_event_id")
+        or ""
+    ).strip()
     event_id = _manual_close_event_id(
         broker=broker,
-        account=normalize_account(current_fields.get("account")),
-        symbol=_canonical_trade_symbol(current_fields.get("symbol")),
-        option_type=str(current_fields.get("option_type") or ""),
-        side="buy" if str(current_fields.get("side") or "").strip().lower() == "short" else "sell",
+        account=normalize_account(current_identity["account"]),
+        symbol=_canonical_trade_symbol(current_identity["symbol"]),
+        option_type=str(current_identity["option_type"] or ""),
+        side="buy" if current_identity["position_side"] == "short" else "sell",
         contracts_to_close=int(contracts_to_close),
         close_price=normalized_close_price,
         strike=(float(strike) if strike is not None else None),
         multiplier=(int(float(multiplier)) if multiplier is not None else None),
-        expiration_ymd=effective_expiration_ymd(current_fields),
+        expiration_ymd=(
+            current_identity["expiration_ymd"]
+            or effective_expiration_ymd(current_fields)
+        ),
         currency=normalize_currency(current_fields.get("currency")),
         lot_id=str(lot_id),
         target_source_event_id=target_source_event_id,
@@ -547,8 +594,8 @@ def persist_manual_close_event(
     close_reason: str,
     as_of_ms: int | None = None,
 ) -> LedgerWriteResult:
-    broker = normalize_broker(fields.get("broker"))
-    if not broker:
+    incoming_identity = _lot_identity(fields)
+    if not normalize_broker(incoming_identity["broker"]):
         raise ValueError(f"position lot missing broker: {lot_id}")
     normalized_close_price = normalize_trade_price(close_price, "close_price")
     fields = assert_position_lot_target_matches_current_state(
@@ -557,19 +604,27 @@ def persist_manual_close_event(
         fields=fields,
         operation="manual_close",
     )
+    identity = _lot_identity(fields)
+    broker = normalize_broker(identity["broker"])
     multiplier = effective_multiplier(fields)
-    strike = effective_strike(fields)
-    target_source_event_id = str(fields.get("source_event_id") or "").strip()
-    normalized_account = normalize_account(fields.get("account"))
-    canonical_symbol = _canonical_trade_symbol(fields.get("symbol"))
-    expiration_ymd = effective_expiration_ymd(fields)
+    strike = (
+        float(identity["strike"])
+        if identity["strike"] is not None
+        else effective_strike(fields)
+    )
+    target_source_event_id = str(
+        fields.get("open_event_id") or fields.get("source_event_id") or ""
+    ).strip()
+    normalized_account = normalize_account(identity["account"])
+    canonical_symbol = _canonical_trade_symbol(identity["symbol"])
+    expiration_ymd = identity["expiration_ymd"] or effective_expiration_ymd(fields)
     currency = normalize_currency(fields.get("currency"))
     event_id = _manual_close_event_id(
         broker=broker,
         account=normalized_account,
         symbol=canonical_symbol,
-        option_type=str(fields.get("option_type") or ""),
-        side="buy" if str(fields.get("side") or "").strip().lower() == "short" else "sell",
+        option_type=str(identity["option_type"] or ""),
+        side="buy" if identity["position_side"] == "short" else "sell",
         contracts_to_close=int(contracts_to_close),
         close_price=normalized_close_price,
         strike=(float(strike) if strike is not None else None),
@@ -599,7 +654,7 @@ def persist_manual_close_event(
             broker=broker,
             account=normalized_account,
             underlying_symbol=canonical_symbol,
-            option_type=str(fields.get("option_type") or ""),
+            option_type=str(identity["option_type"] or ""),
             strike=(float(strike) if strike is not None else None),
             expiration_ymd=expiration_ymd,
         ),
@@ -615,7 +670,7 @@ def persist_manual_close_event(
             "mode": "manual_close",
             "record_id": str(lot_id),
             "target_lot_id": str(lot_id),
-            "side": "buy" if str(fields.get("side") or "").strip().lower() == "short" else "sell",
+            "side": "buy" if identity["position_side"] == "short" else "sell",
             "close_target_source_event_id": target_source_event_id,
             "close_target_account": normalized_account,
             "close_target_broker": broker,
@@ -652,7 +707,10 @@ def _build_manual_adjust_event(
         operation="manual_adjust",
         current_fields=current_fields,
     )
-    target_source_event_id = str(fields.get("source_event_id") or "").strip()
+    identity = _lot_identity(fields)
+    target_source_event_id = str(
+        fields.get("open_event_id") or fields.get("source_event_id") or ""
+    ).strip()
     patch_contract = build_open_adjustment_patch_contract(
         fields,
         contracts=contracts,
@@ -671,14 +729,18 @@ def _build_manual_adjust_event(
     raw_multiplier = safe_float(fields.get("multiplier"))
     current_multiplier = int(float(raw_multiplier)) if raw_multiplier is not None else None
     event_id = _manual_adjust_event_id(
-        broker=normalize_broker(fields.get("broker")),
-        account=normalize_account(fields.get("account")),
-        symbol=_canonical_trade_symbol(fields.get("symbol")),
-        option_type=str(fields.get("option_type") or ""),
-        side=str(fields.get("side") or "").strip().lower(),
-        strike=(float(fields["strike"]) if fields.get("strike") is not None else None),
+        broker=normalize_broker(identity["broker"]),
+        account=normalize_account(identity["account"]),
+        symbol=_canonical_trade_symbol(identity["symbol"]),
+        option_type=str(identity["option_type"] or ""),
+        side=identity["position_side"],
+        strike=(
+            float(identity["strike"])
+            if identity["strike"] is not None
+            else None
+        ),
         multiplier=current_multiplier,
-        expiration_ymd=exp_ms_to_ymd(fields.get("expiration")),
+        expiration_ymd=identity["expiration_ymd"],
         currency=normalize_currency(fields.get("currency")),
         lot_id=str(lot_id),
         target_source_event_id=target_source_event_id,
@@ -689,12 +751,18 @@ def _build_manual_adjust_event(
         event_type="adjust",
         event_time_ms=int(as_of_ms or now_ms()),
         contract_key=ContractKey.from_values(
-            broker=normalize_broker(fields.get("broker")),
-            account=normalize_account(fields.get("account")),
-            underlying_symbol=_canonical_trade_symbol(fields.get("symbol")),
-            option_type=str(fields.get("option_type") or ""),
-            strike=(float(fields["strike"]) if fields.get("strike") is not None else None),
-            expiration_ymd=effective_expiration_ymd(fields),
+            broker=normalize_broker(identity["broker"]),
+            account=normalize_account(identity["account"]),
+            underlying_symbol=_canonical_trade_symbol(identity["symbol"]),
+            option_type=str(identity["option_type"] or ""),
+            strike=(
+                float(identity["strike"])
+                if identity["strike"] is not None
+                else None
+            ),
+            expiration_ymd=(
+                identity["expiration_ymd"] or effective_expiration_ymd(fields)
+            ),
         ),
         contracts=0,
         price=0.0,

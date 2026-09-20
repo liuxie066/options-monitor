@@ -524,6 +524,80 @@ def test_position_target_matching_lives_under_ledger_targets() -> None:
     assert [item for item in moved_defs if item not in targets_text] == []
 
 
+def test_position_target_matching_reads_nested_first_with_flat_fallback() -> None:
+    import pytest
+
+    from src.application.ledger.targets import assert_position_lot_target_matches_current_state
+
+    legacy_current = {
+        "broker": "futu",
+        "account": "lx",
+        "symbol": "NVDA",
+        "option_type": "put",
+        "side": "short",
+        "status": "open",
+        "currency": "USD",
+        "contracts_open": 1,
+        "strike": 100.0,
+        "expiration": 1781827200000,
+        "multiplier": 100,
+        "source_event_id": "evt-open-1",
+        "strategy_group_id": "grp-1",
+    }
+    converged = {
+        "contract_key": {
+            "broker": "futu",
+            "account": "lx",
+            "underlying_symbol": "NVDA",
+            "option_type": "put",
+            "strike": "100",
+            "expiration_ymd": "2026-06-19",
+            "asset_type": "option",
+        },
+        "position_side": "short",
+        "status": "open",
+        "currency": "USD",
+        "contracts_open": 1,
+        "multiplier": 100,
+        "open_event_id": "evt-open-1",
+        "strategy_group_id": "grp-1",
+    }
+
+    # The same lot stored in either vocabulary compares equal leg for leg; the
+    # manual close/adjust preflight must keep accepting stores that still hold
+    # legacy flat rows during the migration window.
+    assert (
+        assert_position_lot_target_matches_current_state(
+            None,
+            lot_id="lot-1",
+            fields=converged,
+            operation="close",
+            current_fields=legacy_current,
+        )
+        is legacy_current
+    )
+
+    drifted_account = {**converged, "contract_key": {**converged["contract_key"], "account": "ly"}}
+    with pytest.raises(ValueError, match="account"):
+        assert_position_lot_target_matches_current_state(
+            None,
+            lot_id="lot-1",
+            fields=drifted_account,
+            operation="close",
+            current_fields=legacy_current,
+        )
+
+    drifted_group = {**converged, "strategy_group_id": "grp-2"}
+    with pytest.raises(ValueError, match="strategy_group_id"):
+        assert_position_lot_target_matches_current_state(
+            None,
+            lot_id="lot-1",
+            fields=drifted_group,
+            operation="close",
+            current_fields=legacy_current,
+        )
+
+
 def test_auto_close_maintenance_lives_under_ledger_maintenance() -> None:
     maintenance_text = (REPO_ROOT / "src" / "application" / "ledger" / "maintenance.py").read_text(encoding="utf-8")
     moved_defs = (

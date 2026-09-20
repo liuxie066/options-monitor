@@ -288,13 +288,43 @@ def finalize_current_decision_projection(
             if event_assigned_after is not None
             else _decode_projection_row_payload(projection)["assigned_stock"]
         )
+        # ``strategy_group_id`` left the lot payload (``write-side-definition.md``
+        # §2 RECONSTRUCTIBLE; §7 moves the strategy family to the strategy side), so
+        # a converged option lot no longer names its group. The events that touch
+        # the account's lots carry it now -- the open event for a leg opened as part
+        # of a combo, the adjusting event for a leg adopted into one afterwards --
+        # so the group ids are read back from those events, bounded by the current
+        # lots. Scanning the identity table's own history is the one thing this
+        # finalizer must not do
+        # (``test_fence_finalizer_does_not_scan_unreferenced_combo_identity_history``).
+        # The assigned-stock fact rows still carry the flat key.
         group_ids = {
-            str(fields.get("strategy_group_id") or "").strip()
-            for fields in _position_lot_fields(list(inputs.get("lots") or [])).values()
-        } | {
             str(lot.get("strategy_group_id") or "").strip()
             for lot in combo_assigned["lots"]
         }
+        carrier_event_ids: set[str] = set()
+        for fields in _position_lot_fields(list(inputs.get("lots") or [])).values():
+            for key in ("open_event_id", "source_event_id", "last_event_id"):
+                event_id = str(fields.get(key) or "").strip()
+                if event_id:
+                    carrier_event_ids.add(event_id)
+        for event in repo.get_trade_events_by_ids(
+            sorted(carrier_event_ids), conn=conn
+        ):
+            payload = event.get("raw_payload") or {}
+            event_group_id = ""
+            for source in (
+                payload,
+                payload.get("patch"),
+                payload.get("fields"),
+            ):
+                if not isinstance(source, Mapping):
+                    continue
+                event_group_id = str(source.get("strategy_group_id") or "").strip()
+                if event_group_id:
+                    break
+            if event_group_id:
+                group_ids.add(event_group_id)
         inputs["identities"] = [
             identity
             for group_id in sorted(group_ids - {""})

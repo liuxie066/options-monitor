@@ -9,6 +9,7 @@ from domain.domain.risk_capacity import (
     compute_sell_put_effective_cash,
     compute_short_call_locked_shares,
     compute_short_put_cash_secured,
+    revalidate_opening_share_coverage,
     withdraw_opening_share_capacity_grants,
 )
 
@@ -669,3 +670,65 @@ def test_wheel_put_capacity_identity_changes_with_prior_claims_not_current_order
 
     assert first["capacity_identity_hash"] == reordered["capacity_identity_hash"]
     assert first["capacity_identity_hash"] != with_prior["capacity_identity_hash"]
+
+
+def test_revalidate_opening_share_coverage_scales_the_lock_for_legacy_flat_lots() -> None:
+    """A legacy flat lot carries the opened total in ``contracts``.
+
+    Without the ``contracts`` fallback the revalidator reads
+    ``contracts_total`` as 0 and returns the whole unscaled
+    ``underlying_share_locked`` for a partially closed lot, inflating the
+    lock. With it, the lock scales by the open share of the opened total and
+    matches the same lot stored converged.
+    """
+    coverage_fact = {
+        "account": "lx",
+        "symbol": "NVDA",
+        "status": "available",
+        "shares_eligible": 1000,
+        "shares_locked": 0,
+        "shares_reserved": 0,
+    }
+    legacy_lot = {
+        "fields": {
+            "account": "lx",
+            "symbol": "NVDA",
+            "option_type": "call",
+            "side": "short",
+            "status": "open",
+            "contracts": 2,
+            "contracts_open": 1,
+            "multiplier": 100,
+            "underlying_share_locked": 200,
+        }
+    }
+    converged_lot = {
+        "fields": {
+            "contract_key": {
+                "broker": "futu",
+                "account": "lx",
+                "underlying_symbol": "NVDA",
+                "option_type": "call",
+                "strike": "100",
+                "expiration_ymd": "2026-06-19",
+                "asset_type": "option",
+            },
+            "position_side": "short",
+            "status": "open",
+            "contracts_opened": 2,
+            "contracts_open": 1,
+            "multiplier": 100,
+            "underlying_share_locked": 200,
+        }
+    }
+
+    legacy = revalidate_opening_share_coverage(
+        coverage_fact, [legacy_lot], [], account="lx", symbol="NVDA"
+    )
+    converged = revalidate_opening_share_coverage(
+        coverage_fact, [converged_lot], [], account="lx", symbol="NVDA"
+    )
+
+    assert legacy["status"] == "available"
+    assert converged["status"] == "available"
+    assert legacy["shares_locked"] == converged["shares_locked"] == 100

@@ -433,8 +433,23 @@ def _ensure_position_projection_schema(conn: sqlite3.Connection) -> None:
         "coalesce(lower(trim(CAST(json_extract(NEW.event_json, "
         "'$.event_type') AS TEXT))), '')"
     )
-    lot_new_account = "coalesce(trim(CAST(json_extract(NEW.fields_json, '$.account') AS TEXT)), '')"
-    lot_old_account = "coalesce(trim(CAST(json_extract(OLD.fields_json, '$.account') AS TEXT)), '')"
+    # The converged payload carries the account under ``contract_key``. These two
+    # expressions feed both the account guards and the ``effective_*`` generation
+    # bodies (7 trigger bodies in all), so reading only the retired flat path
+    # would make every one of them see ``''`` -- the guard would stop refusing
+    # account-less rows and the generation triggers would stop naming an account.
+    # Nested reads first, the flat path stays as the legacy fallback, the same
+    # shape the event-side expressions above already use.
+    lot_new_account = (
+        "coalesce(nullif(trim(CAST(json_extract(NEW.fields_json, "
+        "'$.contract_key.account') AS TEXT)), ''), "
+        "trim(CAST(json_extract(NEW.fields_json, '$.account') AS TEXT)), '')"
+    )
+    lot_old_account = (
+        "coalesce(nullif(trim(CAST(json_extract(OLD.fields_json, "
+        "'$.contract_key.account') AS TEXT)), ''), "
+        "trim(CAST(json_extract(OLD.fields_json, '$.account') AS TEXT)), '')"
+    )
     effective_new_lot_account = f"coalesce(NEW.account, {lot_new_account})"
     effective_old_lot_account = f"coalesce(OLD.account, {lot_old_account})"
 
@@ -596,6 +611,21 @@ def _ensure_position_projection_schema(conn: sqlite3.Connection) -> None:
         END
         """
     )
+
+    # The lot-account guards must read ``contract_key.account`` (nested-first)
+    # on pre-existing stores too. ``CREATE TRIGGER IF NOT EXISTS`` is a no-op
+    # on a store that already materialized the flat-only body, so replace it
+    # once -- reopening a converged store must not churn the schema cookie.
+    for trigger_name in (
+        "trg_position_lots_account_insert_guard",
+        "trg_position_lots_account_update_guard",
+    ):
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+            (trigger_name,),
+        ).fetchone()
+        if row is not None and "$.contract_key.account" not in str(row["sql"] or ""):
+            conn.execute(f"DROP TRIGGER {trigger_name}")
 
     conn.execute(
         f"""

@@ -98,6 +98,7 @@ from src.application.ledger.queries import (
     PositionLotSnapshot,
     RiskPositionView,
     apply_position_ledger_runtime_config,
+    attach_event_strategy_metadata,
     format_position_cash_secured,
     format_position_money,
     list_canonical_position_lot_snapshots,
@@ -150,6 +151,10 @@ from src.application.ledger.projection_verify import compare_projection_lots
 from src.application.ledger.lot_parity_probe import (
     probe_summary as lot_parity_probe_summary,
     run_lot_parity_probe,
+)
+from src.application.ledger.lot_resolver import (
+    contract_key_from_lot_fields,
+    lot_contract_value,
 )
 from src.application.ledger.lot_identity_migration import (
     apply_lot_identity_migration,
@@ -296,6 +301,8 @@ from src.application.ledger.lifecycle_settlement_semantics import (
 )
 
 __all__ = [
+    "contract_key_from_lot_fields",
+    "lot_contract_value",
     "recover_wheel_assignment",
     "query_lifecycle_receipts", "encode_evidence_cursor", "decode_evidence_cursor",
     "MAX_TRADE_EVENT_PAGE_ROWS",
@@ -360,6 +367,7 @@ __all__ = [
     "PositionLotSnapshot",
     "RiskPositionView",
     "apply_position_ledger_runtime_config",
+    "attach_event_strategy_metadata",
     "format_position_cash_secured",
     "format_position_money",
     "inspect_ledger_stores",

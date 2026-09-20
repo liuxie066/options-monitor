@@ -40,6 +40,10 @@ from src.application.ledger.api import (
     record_lifecycle_exercise,
     record_lifecycle_observation_attempt_atomically,
 )
+from src.application.ledger.api import (
+    contract_key_from_lot_fields,
+    lot_contract_value,
+)
 from domain.domain.symbol_identity import symbol_market
 from src.application.trades.lifecycle_reconciliation import (
     reconcile_lifecycle_evidence,
@@ -1248,6 +1252,66 @@ def _find_contract_related_option_case(
     return None
 
 
+def _trade_events_by_id(repo: Any) -> dict[str, dict[str, Any]]:
+    """The repo's trade events keyed by ``event_id`` (empty on any failure)."""
+    list_fn = getattr(repo, "list_trade_events", None)
+    if not callable(list_fn):
+        return {}
+    try:
+        rows = list_fn()
+    except Exception:
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        event_id = str(row.get("event_id") or "").strip()
+        if event_id:
+            out[event_id] = row
+    return out
+
+
+def _lot_close_type(
+    fields: dict[str, Any],
+    events_by_id: dict[str, dict[str, Any]],
+) -> str:
+    """The lot's close type, read from its closing event's payload.
+
+    ``close_type`` was removed from the lot payload in the convergence batch
+    (``write-side-definition.md`` §2, ``lot_identity_migration.py:223``): its
+    home is the closing ``trade_event``'s payload and the lot keeps only the
+    closing ids (``close_event_ids`` / ``last_event_id``). The retired flat key
+    is still honoured so a row written before the shape switch reads the value
+    it always did.
+    """
+    legacy = str(fields.get("close_type") or "").strip().lower()
+    if legacy:
+        return legacy
+    ids: list[str] = []
+    close_event_ids = fields.get("close_event_ids")
+    if isinstance(close_event_ids, (list, tuple)):
+        ids.extend(
+            str(value).strip()
+            for value in close_event_ids
+            if str(value or "").strip()
+        )
+    last_event_id = str(fields.get("last_event_id") or "").strip()
+    if last_event_id and last_event_id not in ids:
+        ids.append(last_event_id)
+    for event_id in ids:
+        event = events_by_id.get(event_id)
+        if not isinstance(event, dict):
+            continue
+        payload = event.get("raw_payload")
+        payload = payload if isinstance(payload, dict) else {}
+        close_type = str(
+            payload.get("close_type") or payload.get("broker_close_type") or ""
+        ).strip().lower()
+        if close_type:
+            return close_type
+    return ""
+
+
 def _stock_settlement_has_lifecycle_context(repo: Any, *, stock_evidence: dict[str, Any]) -> bool:
     if _find_matching_option_cases(
         repo,
@@ -1286,31 +1350,61 @@ def _stock_settlement_has_lifecycle_context(repo: Any, *, stock_evidence: dict[s
         lots = list_lots()
     except Exception:
         return False
+    # Built at most once per call, and only when a lot actually needs its
+    # closing event's payload read.
+    events_by_id: dict[str, dict[str, Any]] | None = None
     for item in list(lots or []):
         if not isinstance(item, dict):
             continue
         fields = item.get("fields") if isinstance(item.get("fields"), dict) else item
         if not isinstance(fields, dict):
             continue
+        # The converged payload carries the option contract under
+        # ``contract_key`` and the side under ``position_side``
+        # (``write-side-definition.md`` §2); the flat siblings stay readable for
+        # a row written before the shape switch.
+        contract_key = contract_key_from_lot_fields(fields)
         status = str(fields.get("status") or "").strip().lower()
-        close_type = str(fields.get("close_type") or "").strip().lower()
+        if events_by_id is None:
+            events_by_id = _trade_events_by_id(repo)
+        close_type = _lot_close_type(fields, events_by_id)
         contracts = effective_contracts_open(fields)
         if status == "close" and close_type in {"expire_auto_close", "expire_close", "expiration_zero_close"}:
             try:
-                contracts = int(fields.get("contracts_closed") or fields.get("contracts") or 0)
+                contracts = int(
+                    fields.get("contracts_closed") or fields.get("contracts_opened") or 0
+                )
             except Exception:
                 contracts = 0
         elif status != "open":
             continue
         if contracts <= 0:
             continue
-        expiration_ymd = effective_expiration_ymd(fields)
+        expiration_ymd = lot_contract_value(fields, contract_key, "expiration_ymd")
+        if expiration_ymd in (None, ""):
+            expiration_ymd = effective_expiration_ymd(fields)
+        strike = lot_contract_value(fields, contract_key, "strike")
+        if strike in (None, ""):
+            strike = effective_strike(fields)
         case = {
-            "account": normalize_account(fields.get("account")),
-            "symbol": canonical_contract_symbol(fields.get("symbol")),
-            "option_type": normalize_option_type(fields.get("option_type")),
-            "position_side": str(fields.get("side") or "").strip().lower(),
-            "strike": effective_strike(fields),
+            "account": normalize_account(
+                lot_contract_value(fields, contract_key, "account", "account")
+            ),
+            "symbol": canonical_contract_symbol(
+                lot_contract_value(fields, contract_key, "underlying_symbol", "symbol")
+            ),
+            "option_type": normalize_option_type(
+                lot_contract_value(fields, contract_key, "option_type", "option_type")
+            ),
+            "position_side": str(
+                lot_contract_value(
+                    fields, contract_key, "position_side", "position_side", "side"
+                )
+                or ""
+            )
+            .strip()
+            .lower(),
+            "strike": strike,
             "expiration_ymd": expiration_ymd,
             "contracts": contracts,
             "multiplier": int(effective_multiplier(fields) or 100),

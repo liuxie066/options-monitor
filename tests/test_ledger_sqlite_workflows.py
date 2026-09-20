@@ -549,24 +549,34 @@ def test_load_option_positions_repo_reports_position_lots_without_trade_events(t
         [
             PositionLotRecord(
                 lot_id="rec_bootstrap_1",
+                # §1/§3: a seeded row carries the converged payload, contract under
+                # ``contract_key``.
                 fields={
-                    "account": "sy",
-                    "broker": "富途",
-                    "symbol": "TSLA",
-                    "option_type": "put",
-                    "side": "short",
-                    "contracts": 2,
+                    "lot_id": "rec_bootstrap_1",
+                    "open_event_id": "bootstrap:sy:rec_bootstrap_1",
+                    "contract_key": {
+                        "broker": "富途",
+                        "account": "sy",
+                        "underlying_symbol": "TSLA",
+                        "option_type": "put",
+                        "strike": "180",
+                        "expiration_ymd": "2026-06-19",
+                        "asset_type": "option",
+                    },
+                    "position_side": "short",
+                    "position_key": "富途|sy|TSLA|2026-06-19|180P|short",
+                    "opened_at_ms": 1000,
+                    "contracts_opened": 2,
                     "contracts_open": 2,
                     "contracts_closed": 0,
                     "status": "open",
                     "currency": "USD",
-                    "strike": 180.0,
-                    "expiration": 1781827200000,
-                    "opened_at": 1000,
-                    "last_action_at": 1000,
-                    "position_key": "TSLA_20260619_180P_short",
-                    "note": "exp=2026-06-19;premium_per_share=1.2",
-                    "premium": 1.2,
+                    "premium_open": "1.2",
+                    "multiplier": 100,
+                    "realized_pnl": "0",
+                    "last_event_id": "bootstrap:sy:rec_bootstrap_1",
+                    "close_event_ids": [],
+                    "asset_type": "option",
                 },
             )
         ]
@@ -581,7 +591,7 @@ def test_load_option_positions_repo_reports_position_lots_without_trade_events(t
     rows = loaded.list_position_lots()
     assert len(rows) == 1
     assert rows[0]["record_id"] == "rec_bootstrap_1"
-    assert rows[0]["fields"]["symbol"] == "TSLA"
+    assert rows[0]["fields"]["contract_key"]["underlying_symbol"] == "TSLA"
 
 
 def test_canonical_seed_lot_survives_later_trade_event_projection(tmp_path: Path) -> None:
@@ -671,7 +681,7 @@ def test_load_option_positions_repo_supports_sqlite_only_mode(tmp_path: Path) ->
 
     records = repo.list_records(page_size=10)
     assert len(records) == 1
-    assert records[0]["fields"]["symbol"] == "TSLA"
+    assert records[0]["fields"]["contract_key"]["underlying_symbol"] == "TSLA"
     assert created.created is True
     assert repo.bootstrap_status == "sqlite_only_no_feishu_bootstrap"
 
@@ -864,15 +874,21 @@ def test_persist_trade_event_builds_position_lots_projection(tmp_path: Path) -> 
     lots = repo.list_position_lots()
     assert len(lots) == 1
     fields = lots[0]["fields"]
-    assert fields["source_event_id"] == open_event_id
-    assert fields["contracts"] == 2
+    assert fields["open_event_id"] == open_event_id
+    assert fields["contracts_opened"] == 2
     assert fields["contracts_open"] == 1
     assert fields["contracts_closed"] == 1
     assert fields["status"] == "open"
-    assert fields["last_close_event_id"] == close_event_id
+    # §2: ``last_close_event_id`` converged onto ``close_event_ids`` /
+    # ``last_event_id``. The close transition itself retains the closing ids
+    # (``retain_close_event_ids=True``), so a partially closed lot publishes them
+    # and the retired flat spelling is not resurrected either way.
+    assert "last_close_event_id" not in fields
+    assert fields["close_event_ids"] == [close_event_id]
+    assert fields["last_event_id"] == close_event_id
     # §7.4: the published row carries money as decimal text.
-    assert fields["strike"] == "480"
-    assert fields["expiration"] == 1777420800000
+    assert fields["contract_key"]["strike"] == "480"
+    assert fields["contract_key"]["expiration_ymd"] == "2026-04-29"
     assert fields["multiplier"] == 100
     with repo._connect() as conn:  # type: ignore[attr-defined]
         row = conn.execute(
@@ -1055,6 +1071,19 @@ def test_persist_trade_event_keys_api_deals_by_account_and_futu_account(tmp_path
 
 
 def test_sqlite_repo_adds_position_lot_contract_columns_without_startup_backfill(tmp_path: Path) -> None:
+    """The columns are added empty, then filled by an explicit backfill.
+
+    A legacy flat payload migrates through the nested-first-plus-flat-fallback
+    read (``repository_common._position_lot_contract_scalars`` derives
+    ``expiration``/``strike`` from the flat siblings when ``contract_key`` is
+    absent). A note-only scalar does not migrate: ``note`` is display text, not
+    a fact source, so ``multiplier=100`` leaves the column NULL and the
+    migration gate flags the row as a blocker instead
+    (``tests/test_lot_identity_migration.py::test_a_note_only_scalar_blocks_even_with_a_populated_column``
+    pins that half). A converged row is unaffected
+    (``tests/test_position_projection_publication.py`` pins that half).
+    """
+
     import sqlite3
 
     db_path = tmp_path / "option_positions.sqlite3"
@@ -1124,7 +1153,105 @@ def test_sqlite_repo_adds_position_lot_contract_columns_without_startup_backfill
     assert migrated is not None
     assert migrated["expiration"] == 1781827200000
     assert migrated["strike"] == 100.0
-    assert migrated["multiplier"] == 100.0
+    assert migrated["multiplier"] is None
+
+
+def test_reopening_replaces_a_stale_flat_only_account_guard(tmp_path: Path) -> None:
+    """A pre-convergence account-guard body must not outlive a reopen.
+
+    ``CREATE TRIGGER IF NOT EXISTS`` is a no-op on a store that already
+    materialized the flat-only body, so without the drop-if-stale replacement
+    a converged payload (account only under ``contract_key``) makes the flat
+    extract coalesce to ``''`` and every write ABORTs with 'position lot
+    account is required' -- the deployment blocker the schema guard fixes.
+    """
+
+    converged_fields = json.dumps(
+        {
+            "contract_key": {
+                "broker": "futu",
+                "account": "lx",
+                "underlying_symbol": "TSLA",
+                "option_type": "put",
+                "strike": "100",
+                "expiration_ymd": "2026-06-18",
+                "asset_type": "option",
+            },
+            "position_side": "short",
+            "position_key": "futu:lx:TSLA:put:100:2026-06-18:short",
+            "status": "open",
+        },
+        ensure_ascii=False,
+    )
+    old_guard_body = """
+        CREATE TRIGGER trg_position_lots_account_insert_guard
+        BEFORE INSERT ON position_lots
+        BEGIN
+          SELECT CASE
+            WHEN json_valid(NEW.fields_json) = 0 THEN RAISE(ABORT, 'invalid position lot JSON')
+            WHEN coalesce(trim(CAST(json_extract(NEW.fields_json, '$.account') AS TEXT)), '') = ''
+              THEN RAISE(ABORT, 'position lot account is required')
+          END;
+        END
+    """
+    db_path = tmp_path / "option_positions.sqlite3"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE position_lots (
+              record_id TEXT PRIMARY KEY,
+              fields_json TEXT NOT NULL,
+              source_event_id TEXT,
+              updated_at_ms INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute(old_guard_body)
+        conn.commit()
+        # Pre-condition: the stale flat-only body rejects the converged payload.
+        with pytest.raises(sqlite3.IntegrityError, match="position lot account is required"):
+            conn.execute(
+                """
+                INSERT INTO position_lots (record_id, fields_json, source_event_id, updated_at_ms)
+                VALUES ('lot_new_1', ?, 'evt-open-1', 1000)
+                """,
+                (converged_fields,),
+            )
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(db_path)
+    with repo._connect() as conn:  # type: ignore[attr-defined]
+        body = str(
+            conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+                ("trg_position_lots_account_insert_guard",),
+            ).fetchone()["sql"]
+        )
+        assert "$.contract_key.account" in body
+        conn.execute(
+            """
+            INSERT INTO position_lots (record_id, fields_json, source_event_id, updated_at_ms)
+            VALUES ('lot_new_1', ?, 'evt-open-1', 1000)
+            """,
+            (converged_fields,),
+        )
+        # The same replacement covers the update guard: a converged rewrite passes.
+        update_body = str(
+            conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+                ("trg_position_lots_account_update_guard",),
+            ).fetchone()["sql"]
+        )
+        assert "$.contract_key.account" in update_body
+        conn.execute(
+            "UPDATE position_lots SET fields_json = ? WHERE record_id = 'lot_new_1'",
+            (converged_fields,),
+        )
+    # The replacement fires once: a second reopen of the converged store must
+    # not drop/recreate anything and leave the schema cookie untouched (the
+    # migration inventory fingerprint keys off it).
+    cookie = repo.position_projection_schema_cookie()
+    reopened = ledger_repository.SQLiteOptionPositionsRepository(db_path)
+    assert reopened.position_projection_schema_cookie() == cookie
 
 
 def test_rebuild_position_lots_applies_legacy_manual_close_to_bootstrap_seed(tmp_path: Path) -> None:
@@ -1215,7 +1342,7 @@ def test_rebuild_position_lots_applies_legacy_manual_close_to_bootstrap_seed(tmp
     assert lots[0]["fields"]["contracts_open"] == 0
     assert lots[0]["fields"]["contracts_closed"] == 1
     assert lots[0]["fields"]["status"] == "close"
-    assert lots[0]["fields"]["last_close_event_id"] == "manual-close-rec-lx-seed"
+    assert lots[0]["fields"]["last_event_id"] == "manual-close-rec-lx-seed"
     assert result.unmatched_explicit_close_count == 0
 
 
@@ -1394,7 +1521,7 @@ def test_close_projection_does_not_cross_match_other_account_seed_lot(tmp_path: 
 
     assert len(lots) == 1
     assert lots[0].lot_id == "rec_sy_seed"
-    assert lots[0].fields["account"] == "sy"
+    assert lots[0].fields["contract_key"]["account"] == "sy"
     assert lots[0].fields["contracts_open"] == 1
     assert lots[0].fields["contracts_closed"] == 0
     assert lots[0].fields["status"] == "open"
@@ -1475,11 +1602,10 @@ def test_close_projection_prefers_structured_expiration_over_missing_note_exp() 
     assert lots[0].lot_id == "rec_lx_seed"
     assert lots[0].fields["contracts_open"] == 1
     assert lots[0].fields["contracts_closed"] == 1
-    assert lots[0].fields["last_close_event_id"] == "deal-close-lx-exp-structured"
+    assert lots[0].fields["last_event_id"] == "deal-close-lx-exp-structured"
 
 
-def test_close_projection_buy_side_marks_buy_to_close_type() -> None:
-    from domain.domain.option_position_lots import BUY_TO_CLOSE
+def test_close_projection_buy_side_closes_the_lot_without_publishing_close_type() -> None:
     from tests.ledger_legacy_helpers import LegacyTradeEvent as TradeEvent, project_position_lot_records
 
     events = [
@@ -1531,8 +1657,13 @@ def test_close_projection_buy_side_marks_buy_to_close_type() -> None:
 
     assert len(lots) == 1
     assert lots[0].fields["contracts_open"] == 0
+    assert lots[0].fields["contracts_closed"] == 1
     assert lots[0].fields["status"] == "close"
-    assert lots[0].fields["close_type"] == BUY_TO_CLOSE
+    assert lots[0].fields["last_event_id"] == "close-1"
+    # §2 RECONSTRUCTIBLE: ``close_type`` left the payload; the close event's trade
+    # side is its home now (``normalize_close_type`` in
+    # ``tests/test_option_positions_domain.py`` pins the mapping itself).
+    assert "close_type" not in lots[0].fields
 
 
 def test_close_projection_matches_bootstrap_lot_by_legacy_record_id() -> None:
@@ -1616,7 +1747,7 @@ def test_close_projection_matches_bootstrap_lot_by_legacy_record_id() -> None:
     assert lots[0].fields["contracts_open"] == 0
     assert lots[0].fields["contracts_closed"] == 2
     assert lots[0].fields["status"] == "close"
-    assert lots[0].fields["last_close_event_id"] == "manual-close-rec-lx-seed"
+    assert lots[0].fields["last_event_id"] == "manual-close-rec-lx-seed"
 
 
 def test_close_projection_prefers_explicit_source_event_target() -> None:
@@ -1701,7 +1832,7 @@ def test_close_projection_prefers_explicit_source_event_target() -> None:
     assert lots_by_id["lot_open-1"]["contracts_closed"] == 0
     assert lots_by_id["lot_open-2"]["contracts_open"] == 0
     assert lots_by_id["lot_open-2"]["contracts_closed"] == 1
-    assert lots_by_id["lot_open-2"]["last_close_event_id"] == "manual-close-target-open-2"
+    assert lots_by_id["lot_open-2"]["last_event_id"] == "manual-close-target-open-2"
 
 
 def test_close_projection_does_not_fallback_when_explicit_target_is_missing() -> None:
@@ -2148,7 +2279,9 @@ def test_persist_manual_close_event_updates_position_lot(tmp_path: Path) -> None
 
     lot = repo.list_position_lots()[0]
     fields = dict(lot["fields"])
-    fields["account"] = " LX "
+    # The contract identity lives under ``contract_key`` now (§3); the dirty
+    # spellings below are what the close path has to normalize.
+    fields["contract_key"] = {**fields["contract_key"], "account": " LX "}
     fields["currency"] = "港币"
     result = ledger_manual_trades.persist_manual_close_event(
         repo,
@@ -2167,7 +2300,7 @@ def test_persist_manual_close_event_updates_position_lot(tmp_path: Path) -> None
     assert lots[0]["fields"]["contracts_closed"] == 1
     events = repo.list_trade_events()
     assert events[-1]["raw_payload"]["record_id"] == lot["record_id"]
-    assert events[-1]["raw_payload"]["close_target_source_event_id"] == lots[0]["fields"]["source_event_id"]
+    assert events[-1]["raw_payload"]["close_target_source_event_id"] == lots[0]["fields"]["open_event_id"]
     assert events[-1]["account"] == "lx"
     assert events[-1]["currency"] == "HKD"
     assert events[-1]["raw_payload"]["close_target_account"] == "lx"
@@ -2720,23 +2853,34 @@ def test_persist_manual_adjust_event_updates_position_lot_projection(tmp_path: P
 
     adjusted = repo.get_position_lot_fields(lot["record_id"])
     assert result.created is True
-    assert adjusted["contracts"] == 2
+    assert adjusted["contracts_opened"] == 2
     assert adjusted["contracts_open"] == 2
     # §7.4: the published row carries money as decimal text.
-    assert adjusted["strike"] == "105"
-    assert adjusted["premium"] == "3.1"
-    assert adjusted["opened_at"] == 2000
+    assert adjusted["contract_key"]["strike"] == "105"
+    assert adjusted["premium_open"] == "3.1"
+    assert adjusted["opened_at_ms"] == 2000
     # §7.1: ``position_id`` is retired; the adjust patch no longer carries a
     # display id, and the derived ``position_key`` is published instead. The
     # literal pins the derivation itself -- a truthiness check would pass on any
     # string, including one still keyed on the pre-adjust contract.
     assert "position_id" not in adjusted
     assert adjusted["position_key"] == "富途|lx|NVDA|2026-07-17|105P|short"
-    assert adjusted["cash_secured_amount"] == "21000"
+    # §2 RECONSTRUCTIBLE: the derived cash-secured amount is no longer a payload
+    # key -- it is recomputed from the contract under ``contract_key``.
+    assert "cash_secured_amount" not in adjusted
 
 
 def test_manual_strategy_snapshot_adjustment_supersedes_retired_mode(tmp_path: Path) -> None:
-    from src.application.strategy_policy import resolve_position_strategy
+    """§7: the snapshot the adjust writes lives on the event, not the payload.
+
+    The assertion this test used to make -- ``resolve_position_strategy`` reading
+    ``strategy_source == "position_snapshot"`` off the adjusted lot -- cannot hold
+    for a converged payload: the whole strategy family left ``fields_json``
+    (``write-side-definition.md`` §2 RECONSTRUCTIBLE), and ``strategy_policy``
+    still reads the retired flat keys off the payload it is handed, so it resolves
+    ``template_default`` instead. That read point is outside this pass's editable
+    surface; it is reported, and the payload half of the claim is pinned here.
+    """
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     repo.upsert_trade_event(
@@ -2791,8 +2935,47 @@ def test_manual_strategy_snapshot_adjustment_supersedes_retired_mode(tmp_path: P
     )
 
     adjusted = repo.get_position_lot_fields(lot["record_id"])
-    assert "yield_enhancement_mode" not in adjusted
-    resolution = resolve_position_strategy(position=adjusted, config=None)
+    # The legacy snapshot's retired family does not survive on the payload, and
+    # neither does the family the adjust patch carried.
+    for retired in (
+        "strategy",
+        "strategy_snapshot",
+        "leg_role",
+        "strategy_group_id",
+        "yield_enhancement_mode",
+    ):
+        assert retired not in adjusted, retired
+    # The adjust event's patch is the carrier now, and it is what supersedes the
+    # retired mode for the read points that have moved with it.
+    adjust_events = [
+        event
+        for event in repo.list_trade_events()
+        if event["event_id"] != "legacy-combo-open"
+    ]
+    assert len(adjust_events) == 1
+    assert adjust_events[0]["raw_payload"]["patch"]["strategy_snapshot"] == {
+        "strategy_family": "sell_put",
+        "strategy_profile": "return_first",
+    }
+
+    # And the read side follows: the ledger read model reconstructs the family
+    # from the events (``write-side-definition.md`` §2 RECONSTRUCTIBLE), so a
+    # consumer that resolves a strategy off the read-model payload finds the
+    # snapshot the adjust wrote instead of falling back to ``template_default``.
+    from src.application.ledger.read_model import (
+        canonicalize_position_lot_fields,
+        load_position_lot_records,
+    )
+    from src.application.strategy_policy import resolve_position_strategy
+
+    read_model_fields = canonicalize_position_lot_fields(
+        load_position_lot_records(repo)[0]["fields"]
+    )
+    assert read_model_fields["strategy_snapshot"] == {
+        "strategy_family": "sell_put",
+        "strategy_profile": "return_first",
+    }
+    resolution = resolve_position_strategy(position=read_model_fields, config=None)
     assert resolution.strategy_source == "position_snapshot"
     assert resolution.strategy_profile == "return_first"
 
@@ -2835,7 +3018,7 @@ def test_persist_manual_adjust_event_is_idempotent_on_retry(tmp_path: Path) -> N
     assert result1.created is True
     assert result2.created is False
     assert result1.event_id == result2.event_id
-    assert repo.get_position_lot_fields(lot["record_id"])["premium"] == "3.1"
+    assert repo.get_position_lot_fields(lot["record_id"])["premium_open"] == "3.1"
     assert len(repo.list_trade_events()) == 2
 
 
@@ -2918,8 +3101,8 @@ def test_voiding_adjust_event_restores_prior_projection_state(tmp_path: Path) ->
     )
 
     restored = repo.get_position_lot_fields(lot["record_id"])
-    assert restored["premium"] == "2.5"
-    assert restored["contracts"] == 1
+    assert restored["premium_open"] == "2.5"
+    assert restored["contracts_opened"] == 1
 
 
 def test_load_option_positions_repo_ignores_incomplete_feishu_config_when_bootstrap_disabled(tmp_path: Path) -> None:
@@ -3051,6 +3234,43 @@ def test_option_positions_bootstrap_from_feishu_enabled_ignores_retired_config_s
     assert ledger_repository.option_positions_bootstrap_from_feishu_enabled(data_config) is False
 
 
+def _converged_option_lot(
+    lot_id: str,
+    *,
+    strike: str | None,
+    expiration_ymd: str = "2026-06-29",
+) -> dict:
+    """A §1/§3 converged option payload: the contract under ``contract_key``."""
+
+    return {
+        "lot_id": lot_id,
+        "open_event_id": f"open-{lot_id}",
+        "contract_key": {
+            "broker": "富途",
+            "account": "lx",
+            "underlying_symbol": "0700.HK",
+            "option_type": "put",
+            "strike": strike,
+            "expiration_ymd": expiration_ymd,
+            "asset_type": "option",
+        },
+        "position_side": "short",
+        "position_key": f"富途|lx|0700.HK|{expiration_ymd}|{strike}P|short",
+        "opened_at_ms": 1000,
+        "contracts_opened": 1,
+        "contracts_open": 1,
+        "contracts_closed": 0,
+        "status": "open",
+        "currency": "HKD",
+        "premium_open": "1.2",
+        "multiplier": 100,
+        "realized_pnl": "0",
+        "last_event_id": f"open-{lot_id}",
+        "close_event_ids": [],
+        "asset_type": "option",
+    }
+
+
 def test_replace_position_lots_rejects_incomplete_option_lots_atomically(tmp_path: Path) -> None:
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
@@ -3058,17 +3278,7 @@ def test_replace_position_lots_rejects_incomplete_option_lots_atomically(tmp_pat
         [
             PositionLotRecord(
                 lot_id="lot_existing",
-                fields={
-                    "account": "lx",
-                    "broker": "富途",
-                    "symbol": "0700.HK",
-                    "option_type": "put",
-                    "side": "short",
-                    "contracts": 1,
-                    "contracts_open": 1,
-                    "expiration": 1782691200000,
-                    "strike": 470.0,
-                },
+                fields=_converged_option_lot("lot_existing", strike="470"),
             ),
         ]
     )
@@ -3078,31 +3288,15 @@ def test_replace_position_lots_rejects_incomplete_option_lots_atomically(tmp_pat
             [
                 PositionLotRecord(
                     lot_id="lot_bad_option",
-                    fields={
-                        "account": "lx",
-                        "broker": "富途",
-                        "symbol": "0700.HK",
-                        "option_type": "put",
-                        "side": "short",
-                        "contracts": 2,
-                        "contracts_open": 2,
-                        "expiration": "",
-                        "strike": None,
-                    },
+                    fields=_converged_option_lot(
+                        "lot_bad_option",
+                        strike=None,
+                        expiration_ymd="",
+                    ),
                 ),
                 PositionLotRecord(
                     lot_id="lot_good_option",
-                    fields={
-                        "account": "lx",
-                        "broker": "富途",
-                        "symbol": "0700.HK",
-                        "option_type": "put",
-                        "side": "short",
-                        "contracts": 2,
-                        "contracts_open": 2,
-                        "expiration": 1782691200000,
-                        "strike": 480.0,
-                    },
+                    fields=_converged_option_lot("lot_good_option", strike="480"),
                 ),
             ]
         )
@@ -3944,51 +4138,39 @@ def test_trade_event_repair_recovers_assignment_type_from_lifecycle_payload() ->
 
 
 def _identity_probe_lot(lot_id: str, *, contracts: int) -> PositionLotRecord:
+    """A minimal payload in the converged shape (``PositionLot.to_dict()``)."""
     return PositionLotRecord(
         lot_id=lot_id,
         fields={
-            "account": "lx",
-            "broker": "富途",
-            "symbol": "0700.HK",
-            "option_type": "put",
-            "side": "short",
-            "contracts": contracts,
+            "contract_key": {
+                "account": "lx",
+                "broker": "富途",
+                "underlying_symbol": "0700.HK",
+                "option_type": "put",
+                "strike": "470",
+                "expiration_ymd": "2026-06-30",
+            },
+            "position_side": "short",
             "contracts_open": contracts,
-            "expiration": 1782691200000,
-            "strike": 470.0,
+            "multiplier": 100,
+            "asset_type": "option",
         },
     )
 
 
-def _diverge_carrier_slot(monkeypatch: pytest.MonkeyPatch, carrier: str) -> None:
-    """Make the trailing storage slot disagree with the slot the diff iterates on.
+def test_apply_position_lot_diff_updates_the_row_its_loop_key_names(tmp_path: Path) -> None:
+    """The diff updates the row named by the one identity slot it iterates on.
 
-    ``_position_lot_storage_values`` writes both slots from ``record.lot_id``, so
-    no public record shape can make them differ. Its comment presents that as a
-    dual-write convention rather than a guarantee of the storage contract, so the
-    diff has to bind the key it iterates on even when the two slots disagree.
+    This pair used to diverge a second, trailing identity slot to prove the loop
+    key was not read off it. That slot is retired -- ``_position_lot_storage_values``
+    returns one identity -- so the divergence control has nothing left to model and
+    the property is pinned against the single slot instead.
     """
-
-    import src.application.ledger.repository_projection_tail as projection_tail
-
-    original = projection_tail._position_lot_storage_values
-
-    def divergent(record: PositionLotRecord) -> tuple[object, ...]:
-        values = original(record)
-        return (*values[:7], carrier)
-
-    monkeypatch.setattr(projection_tail, "_position_lot_storage_values", divergent)
-
-
-def test_apply_position_lot_diff_updates_the_row_its_loop_key_names(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
     database = tmp_path / "option_positions.sqlite3"
     repo = ledger_repository.SQLiteOptionPositionsRepository(database)
     repo.replace_position_lots(
         [_identity_probe_lot("lot-a", contracts=1), _identity_probe_lot("lot-b", contracts=3)]
     )
-    _diverge_carrier_slot(monkeypatch, "lot-b")
 
     diff = repo.apply_position_lot_diff([_identity_probe_lot("lot-a", contracts=2)])
 
@@ -3996,16 +4178,14 @@ def test_apply_position_lot_diff_updates_the_row_its_loop_key_names(
     with sqlite3.connect(database) as conn:
         rows = conn.execute("SELECT record_id, fields_json FROM position_lots ORDER BY record_id ASC").fetchall()
     assert [row[0] for row in rows] == ["lot-a"]
-    assert json.loads(rows[0][1])["contracts"] == 2
+    assert json.loads(rows[0][1])["contracts_open"] == 2
 
 
-def test_apply_position_lot_diff_looks_up_the_row_its_loop_key_names(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_apply_position_lot_diff_looks_up_the_row_its_loop_key_names(tmp_path: Path) -> None:
+    """Same, on the ``remove_missing=False`` lookup path."""
     database = tmp_path / "option_positions.sqlite3"
     repo = ledger_repository.SQLiteOptionPositionsRepository(database)
     repo.replace_position_lots([_identity_probe_lot("lot-a", contracts=1)])
-    _diverge_carrier_slot(monkeypatch, "carrier-unrelated")
 
     diff = repo.apply_position_lot_diff([_identity_probe_lot("lot-a", contracts=2)], remove_missing=False)
 
@@ -4013,4 +4193,4 @@ def test_apply_position_lot_diff_looks_up_the_row_its_loop_key_names(
     assert repo.count_position_lots() == 1
     with sqlite3.connect(database) as conn:
         fields_json = conn.execute("SELECT fields_json FROM position_lots").fetchone()[0]
-    assert json.loads(fields_json)["contracts"] == 2
+    assert json.loads(fields_json)["contracts_open"] == 2

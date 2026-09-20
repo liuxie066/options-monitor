@@ -24,7 +24,9 @@ from src.application.ledger.api import (
     assigned_stock_event_log,
     broker_external_event_key,
     broker_execution_identity,
+    contract_key_from_lot_fields,
     execution_identity_from_input,
+    lot_contract_value,
     LotCloseResolutionError,
     preview_manual_assignment,
     preview_manual_exercise,
@@ -60,6 +62,26 @@ def _ms_to_iso(value: int | None) -> str:
     if value is None:
         return datetime.now(timezone.utc).isoformat()
     return datetime.fromtimestamp(int(value) / 1000, tz=timezone.utc).isoformat()
+
+
+def _lot_contract_value(fields: Mapping[str, Any], nested_key: str, *flat_keys: str) -> Any:
+    """One lot-payload contract value: the nested ``contract_key`` key first, flat after.
+
+    The converged payload (``PositionLot.to_dict()``) carries the option contract
+    under ``contract_key``; the flat siblings it replaced stay readable for a row
+    written before the shape switch. A four-line wrapper rather than an import of
+    ``src/application/positions/maintenance``'s twin: ``src/application/positions``
+    may only reach the ledger through its public API
+    (``tests/test_option_positions_legacy_retirement.py``), so this goes through
+    the helpers ``src/application/ledger/api.py`` re-exports.
+    """
+    raw = dict(fields)
+    return lot_contract_value(
+        raw,
+        contract_key_from_lot_fields(raw),
+        nested_key,
+        *flat_keys,
+    )
 
 
 def _apply_result_payload(
@@ -920,8 +942,15 @@ def execute_manual_assignment(
         lot_ids = list(
             (preview.get("close_target_resolution") or {}).get("record_ids") or []
         )
+        # ``account`` moved under ``contract_key`` (``write-side-definition.md``
+        # §2); read it nested-first so every lot is not seen as account-less.
         target_accounts = {
-            str(repo.get_position_lot_fields(str(lot_id)).get("account") or "").strip()
+            str(
+                _lot_contract_value(
+                    repo.get_position_lot_fields(str(lot_id)), "account", "account"
+                )
+                or ""
+            ).strip()
             for lot_id in lot_ids
         }
         target_accounts.discard("")

@@ -31,7 +31,8 @@ def _account_from_event(event: dict[str, Any]) -> str:
 def _account_from_lot(row: Any) -> str:
     payload = row.to_dict() if hasattr(row, "to_dict") else row
     fields = payload.get("fields") if isinstance(payload, dict) and isinstance(payload.get("fields"), dict) else {}
-    return str(fields.get("account") or "").strip().lower()
+    contract_key = fields.get("contract_key") if isinstance(fields.get("contract_key"), dict) else {}
+    return str(contract_key.get("account") or fields.get("account") or "").strip().lower()
 
 
 def _lifecycle_stock_event(event: dict[str, Any]) -> bool:
@@ -185,17 +186,45 @@ def build_ledger_datasets(
             },
             artifact_ref=f"om-evidence:ledger-replay:{account}",
         )
-        replay_ok = mismatch_count == 0
+        # G-M3 guard: an account whose active events include an ``open`` must
+        # leave evidence on at least one side of the comparison -- ``open`` is
+        # the only lot-materializing event type, so empty-vs-empty against an
+        # active open is a vacuous 0/0 pass. Every other active type (close,
+        # adjust, verification, ...) only edits or observes a lot an open must
+        # have created, so an account holding just those compares empty-vs-empty
+        # legitimately. The base is ``active_events`` (voids excluded): a
+        # fully-voided account has no active open and both sides empty is then
+        # the correct, non-vacuous result.
+        vacuous_comparison = (
+            sum(
+                1
+                for item in active_events
+                if _account_from_event(item) == account
+                and str(item.get("event_type") or "").strip().lower() == "open"
+            )
+            > 0
+            and not projected_for_account
+            and not current_for_account
+        )
+        replay_ok = (not vacuous_comparison) and mismatch_count == 0
         replay_check = check_result(
             check_id="OM-LED-001",
             status="pass" if replay_ok else "fail",
             scope={"account": account, "market": market},
             observed_at_utc=observed_at_utc,
-            reason_code="LEDGER_REPLAY_MATCHED" if replay_ok else "LEDGER_REPLAY_MISMATCH",
+            reason_code=(
+                "LEDGER_REPLAY_MATCHED"
+                if replay_ok
+                else ("LEDGER_REPLAY_EMPTY" if vacuous_comparison else "LEDGER_REPLAY_MISMATCH")
+            ),
             message=(
                 "Full trade-event replay matches materialized position lots."
                 if replay_ok
-                else "Full trade-event replay does not match materialized position lots."
+                else (
+                    "Full trade-event replay produced no materialized evidence for this account."
+                    if vacuous_comparison
+                    else "Full trade-event replay does not match materialized position lots."
+                )
             ),
             observed={"mismatch_count": mismatch_count, "summary": comparison["summary"]},
             expected={"mismatch_count": 0},

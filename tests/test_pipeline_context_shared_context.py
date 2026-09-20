@@ -24,6 +24,11 @@ def _portfolio_ctx(account: str, *, usd_cash: float, shares: int) -> dict:
 
 
 def _option_ctx(account: str, *, locked: int) -> dict:
+    # Stands in for ``context_builder.build_context``'s payload, so it carries
+    # the vocabulary marker the cache check requires (the strategy family comes
+    # from the event layer).
+    from src.application.positions.context_builder import STRATEGY_FAMILY_SOURCE
+
     return {
         "as_of_utc": "2026-04-14T00:00:00+00:00",
         "filters": {"broker": "富途", "account": account},
@@ -34,6 +39,7 @@ def _option_ctx(account: str, *, locked: int) -> dict:
         "exchange_rates": {"rates": {"USDCNY": 7.2}},
         "raw_selected_count": 1,
         "open_positions_min": [],
+        "strategy_family_source": STRATEGY_FAMILY_SOURCE,
     }
 
 

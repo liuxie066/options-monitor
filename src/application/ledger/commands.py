@@ -1061,8 +1061,18 @@ def _validate_lifecycle_stock_settlement(
     strike: float | None = None
     for match in resolution.matches:
         fields = _current_record_fields(repo, lot_id=match.lot_id)
-        option_type = str(fields.get("option_type") or "").strip().lower()
-        position_side = str(fields.get("side") or "").strip().lower()
+        # The converged payload carries the contract under ``contract_key`` and
+        # the side under ``position_side`` (``write-side-definition.md`` §2); the
+        # retired flat siblings stay readable for a row written before the shape
+        # switch.
+        contract_key = fields.get("contract_key")
+        contract_key = contract_key if isinstance(contract_key, dict) else {}
+        option_type = str(
+            contract_key.get("option_type") or fields.get("option_type") or ""
+        ).strip().lower()
+        position_side = str(
+            fields.get("position_side") or fields.get("side") or ""
+        ).strip().lower()
         expected_position_side = "short" if normalized_lifecycle_type == "assignment" else "long"
         if position_side != expected_position_side:
             raise ValueError(f"manual {normalized_lifecycle_type} currently supports {expected_position_side} option lots only")
@@ -1077,7 +1087,12 @@ def _validate_lifecycle_stock_settlement(
         expected_stock_side = expected
         multiplier = effective_multiplier(fields) or 100
         expected_qty += int(match.contracts_to_close) * int(multiplier)
-        current_strike = float(fields.get("strike")) if fields.get("strike") is not None else None
+        raw_strike = (
+            contract_key.get("strike")
+            if contract_key.get("strike") is not None
+            else fields.get("strike")
+        )
+        current_strike = float(raw_strike) if raw_strike is not None else None
         if strike is None:
             strike = current_strike
         elif current_strike is not None and abs(float(strike) - float(current_strike)) > 1e-9:

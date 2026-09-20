@@ -18,6 +18,7 @@ labelled as such at the point of use.
 from __future__ import annotations
 
 from collections.abc import Callable
+from copy import deepcopy
 import hashlib
 import importlib
 import json
@@ -228,9 +229,12 @@ def _insert_stored_row(
     payload_source_event_id: object = None,
 ) -> None:
     """Insert a stored row the replay cannot produce, with a chosen source event id."""
-    fields: dict[str, object] = {"account": "lx", "status": "open", "symbol": "TSLA"}
+    fields: dict[str, object] = {
+        "contract_key": {"account": "lx", "underlying_symbol": "TSLA"},
+        "status": "open",
+    }
     if payload_source_event_id is not None:
-        fields["source_event_id"] = payload_source_event_id
+        fields["open_event_id"] = payload_source_event_id
     _tamper(
         sqlite_path,
         [
@@ -461,7 +465,7 @@ def test_probe_face_a_reports_a_value_difference(tmp_path: Path) -> None:
     sqlite_path, _config = _build_green_store(tmp_path)
 
     def _reprice(fields: dict[str, object]) -> None:
-        fields["premium"] = "9.99"
+        fields["premium_open"] = "9.99"
 
     _mutate_fields(sqlite_path, _reprice)
 
@@ -473,30 +477,33 @@ def test_probe_face_a_reports_a_value_difference(tmp_path: Path) -> None:
     assert faces["a_payload"]["value_difference_count"] == 1
     assert faces["b_columns"]["difference_count"] == 0
     difference = faces["a_payload"]["items"][0]["value_differences"][0]
-    assert difference["key"] == "premium"
+    assert difference["key"] == "premium_open"
     assert difference["stored"] == "9.99"
     assert difference["projected"] == "1.23"
 
 
 def test_probe_face_a_does_not_heal_the_stored_payload(tmp_path: Path) -> None:
-    """The existing codec's column-heal must not be applied to either side.
+    """The deleted column-heal must not be applied to either side.
 
-    ``strike`` leaves the payload while its column keeps the true value. A healed
-    stored side would put ``strike=100.0`` back and call face A matched; the probe
-    must instead report the key and leave the column to face B.
+    ``multiplier`` leaves the payload while its column keeps the true value. A
+    healed stored side would put ``multiplier=100`` back from the column and call
+    face A matched; the probe must instead report the key and leave the column to
+    face B. ``multiplier`` is the one derived scalar that stays a top-level key in
+    the converged shape (``strike``/``expiration`` moved under ``contract_key``),
+    so it is also the one whose absence face A can still see.
     """
     sqlite_path, _config = _build_green_store(tmp_path)
-    _mutate_fields(sqlite_path, lambda fields: fields.pop("strike"))
+    _mutate_fields(sqlite_path, lambda fields: fields.pop("multiplier"))
 
     report = run_lot_parity_probe(sqlite_path=sqlite_path)
 
     faces = _faces(report)
     assert faces["a_payload"]["key_set_difference_lot_count"] == 1
-    assert faces["a_payload"]["items"][0]["keys_only_in_projection"] == ["strike"]
+    assert faces["a_payload"]["items"][0]["keys_only_in_projection"] == ["multiplier"]
     # And the same fact is *also* a face B difference, because the column was
     # never re-derived: this is comparator-spec §6.3's "both", counted twice.
-    assert faces["b_columns"]["by_column"]["strike"] == 1
-    assert faces["b_columns"]["by_column"]["multiplier"] == 0
+    assert faces["b_columns"]["by_column"]["multiplier"] == 1
+    assert faces["b_columns"]["by_column"]["strike"] == 0
     assert faces["b_columns"]["items"][0]["stored"] == 100.0
     assert faces["b_columns"]["items"][0]["derived_from_stored_payload"] is None
 
@@ -598,8 +605,7 @@ def test_probe_face_b_reports_a_column_difference(tmp_path: Path) -> None:
 def _writer_columns(fields: dict[str, object], *, lot_id: str) -> dict[str, object]:
     """The five derived columns as **the writer** computes them, for the same payload."""
     values = _position_lot_storage_values(PositionLotRecord(lot_id=lot_id, fields=dict(fields)))
-    # (lot_id, account, fields_json, source_event_id, expiration, strike,
-    #  multiplier, carrier)
+    # (lot_id, account, fields_json, source_event_id, expiration, strike, multiplier)
     return {
         "account": values[1],
         "source_event_id": values[3],
@@ -633,26 +639,46 @@ def _writer_named_columns(message: str, *, lot_id: str) -> tuple[str, ...]:
     return tuple(column for column in DERIVED_COLUMNS if column in text)
 
 
+def _nested(payload: dict[str, object]) -> dict[str, object]:
+    """A deep-enough copy for editing the nested ``contract_key`` in place.
+
+    The ``dict(stored)`` copies the rest of this file uses are shallow: enough for
+    a top-level key, but editing ``copied["contract_key"]["strike"]`` would edit
+    the object the green store's payload is still sharing.
+    """
+    copied = deepcopy(payload)
+    contract = copied.get("contract_key")
+    if not isinstance(contract, dict):
+        copied["contract_key"] = {}
+    return copied
+
+
 def test_probe_derivation_is_bound_to_the_writers_own_derivation(tmp_path: Path) -> None:
     """Face B must use the writer's derivation, not a second opinion that can drift.
 
-    The probe restates ``account``/``source_event_id`` and the three casts because
-    the shared function lives in ``repository_common.py`` (outside slice 1's
-    allowed files). This test *is* the binding: for the same payload, the probe's
-    derived columns must equal the values ``_position_lot_storage_values`` hands
-    the INSERT, and where the writer **refuses** the payload the probe's refusal
-    must be the writer's own — message, precedence *and* the columns the message
-    names — instead of ``None``, which would compare equal to a NULL column.
+    The probe restates ``account``/``source_event_id`` and the three casts instead
+    of importing all of them. This test *is* the binding: for the same payload, the
+    probe's derived columns must equal the values ``_position_lot_storage_values``
+    hands the INSERT, and where the writer **refuses** the payload the probe's
+    refusal must be the writer's own — message, precedence *and* the columns the
+    message names — instead of ``None``, which would compare equal to a NULL
+    column.
+
+    Every payload here is in the converged shape (``PositionLot.to_dict()``): the
+    contract lives under ``contract_key`` (``account``/``option_type``/``strike``/
+    ``expiration_ymd``), the source event id is ``open_event_id``, and
+    ``multiplier`` is the only derived scalar still at the top level.
 
     The set is built to cover the writer's whole guard surface, not just the
     ``account`` pair: the option-contract validation (``_validate_position_lot_fields``)
     runs first, it applies only to ``put``/``call`` payloads, its ``strike`` read
     has no note fallback, and a payload that is both incomplete and account-less
     is refused for the contract — all of which the probe has to reproduce. The
-    three boundary payloads at the end are the ones where the writer's guard is a
-    truthiness test rather than a type test: ``expiration``/``strike`` of ``0``
+    boundary payloads at the end are the ones where the writer's guard is a
+    truthiness test rather than a type test: ``expiration_ymd``/``strike`` of ``0``
     and a boolean ``strike`` are *present* to ``in (None, "")``/``safe_float`` and
-    must be derived the same way on both sides.
+    must be derived the same way on both sides. And the note is read by neither
+    side any more: a note carrying ``multiplier=100`` no longer becomes a column.
     """
     sqlite_path, _config = _build_green_store(tmp_path)
     stored = _stored_fields(sqlite_path)
@@ -660,69 +686,70 @@ def test_probe_derivation_is_bound_to_the_writers_own_derivation(tmp_path: Path)
 
     payloads: dict[str, dict[str, object]] = {"stored payload": stored}
 
-    note_fallback = dict(stored)
-    note_fallback["note"] = f"multiplier={note_fallback.pop('multiplier', 100)}"
-    payloads["multiplier via the note fallback"] = note_fallback
+    note_only_scalars = dict(stored)
+    note_only_scalars["note"] = "exp=2026-06-19; multiplier=100; strike=100"
+    note_only_scalars.pop("multiplier", None)
+    payloads["multiplier only in the note (fallback retired)"] = note_only_scalars
 
     no_source_event = dict(stored)
-    no_source_event.pop("source_event_id", None)
-    payloads["no source_event_id"] = no_source_event
+    no_source_event.pop("open_event_id", None)
+    payloads["no open_event_id"] = no_source_event
 
-    missing_contract = dict(stored)
-    missing_contract.pop("strike")
-    missing_contract.pop("expiration")
+    missing_contract = _nested(stored)
+    missing_contract["contract_key"].pop("strike", None)
+    missing_contract["contract_key"].pop("expiration_ymd", None)
     payloads["call/put missing strike and expiration"] = missing_contract
 
-    missing_strike = dict(stored)
-    missing_strike.pop("strike")
+    missing_strike = _nested(stored)
+    missing_strike["contract_key"].pop("strike", None)
     payloads["call/put missing strike"] = missing_strike
 
-    missing_expiration = dict(stored)
-    missing_expiration.pop("expiration")
+    missing_expiration = _nested(stored)
+    missing_expiration["contract_key"].pop("expiration_ymd", None)
     payloads["call/put missing expiration"] = missing_expiration
 
-    empty_expiration = dict(stored)
-    empty_expiration["expiration"] = ""
+    empty_expiration = _nested(stored)
+    empty_expiration["contract_key"]["expiration_ymd"] = ""
     payloads["call/put with an empty expiration"] = empty_expiration
 
-    shouted = dict(missing_strike)
-    shouted["option_type"] = "  CALL  "
+    shouted = _nested(missing_strike)
+    shouted["contract_key"]["option_type"] = "  CALL  "
     payloads["option type needing normalisation"] = shouted
 
-    note_strike = dict(missing_strike)
+    note_strike = _nested(missing_strike)
     note_strike["note"] = "strike=100; multiplier=100"
     payloads["missing strike with a strike in the note"] = note_strike
 
-    no_option_type = dict(missing_strike)
-    no_option_type.pop("option_type", None)
-    payloads["payload with no option type"] = no_option_type
+    no_option_type = _nested(missing_strike)
+    no_option_type.pop("contract_key", None)
+    payloads["payload with no contract key"] = no_option_type
 
-    stock = dict(missing_strike)
-    stock["option_type"] = "stock"
+    stock = _nested(missing_strike)
+    stock["contract_key"]["option_type"] = "stock"
     payloads["stock payload with no option contract"] = stock
 
-    contract_before_account = dict(missing_strike)
-    contract_before_account["account"] = ""
+    contract_before_account = _nested(missing_strike)
+    contract_before_account["contract_key"]["account"] = ""
     payloads["incomplete contract and no account"] = contract_before_account
 
-    account_missing = dict(stored)
-    account_missing.pop("account", None)
+    account_missing = _nested(stored)
+    account_missing["contract_key"].pop("account", None)
     payloads["no account"] = account_missing
 
-    account_uppercase = dict(stored)
-    account_uppercase["account"] = "LX"
+    account_uppercase = _nested(stored)
+    account_uppercase["contract_key"]["account"] = "LX"
     payloads["uppercase account"] = account_uppercase
 
-    zero_expiration = dict(stored)
-    zero_expiration["expiration"] = 0
-    payloads["expiration 0"] = zero_expiration
+    zero_expiration = _nested(stored)
+    zero_expiration["contract_key"]["expiration_ymd"] = 0
+    payloads["expiration_ymd 0"] = zero_expiration
 
-    zero_strike = dict(stored)
-    zero_strike["strike"] = 0
+    zero_strike = _nested(stored)
+    zero_strike["contract_key"]["strike"] = 0
     payloads["strike 0"] = zero_strike
 
-    boolean_strike = dict(stored)
-    boolean_strike["strike"] = True
+    boolean_strike = _nested(stored)
+    boolean_strike["contract_key"]["strike"] = True
     payloads["strike True"] = boolean_strike
 
     # Keeping the ledger/derivation split honest: the payloads that pass the
@@ -757,10 +784,10 @@ def test_probe_derivation_reports_the_writers_fail_fast_instead_of_equality(
     stored = _stored_fields(sqlite_path)
     lot_id = _stored_lot_id(sqlite_path)
 
-    missing = dict(stored)
-    missing.pop("account", None)
-    uppercase = dict(stored)
-    uppercase["account"] = "LX"
+    missing = _nested(stored)
+    missing["contract_key"].pop("account", None)
+    uppercase = _nested(stored)
+    uppercase["contract_key"]["account"] = "LX"
 
     for payload in (missing, uppercase):
         with pytest.raises(ValueError):
@@ -781,8 +808,8 @@ def test_probe_face_b_reports_a_payload_the_writer_would_refuse(tmp_path: Path) 
     """
     sqlite_path, _config = _build_green_store(tmp_path)
     _drop_account_guards(sqlite_path)
-    fields = _stored_fields(sqlite_path)
-    fields.pop("account")
+    fields = _nested(_stored_fields(sqlite_path))
+    fields["contract_key"].pop("account", None)
     _tamper(
         sqlite_path,
         [
@@ -818,8 +845,8 @@ def test_probe_face_b_reports_an_incomplete_option_contract_as_a_refusal(
     report called green a row the writer could never have written.
     """
     sqlite_path, _config = _build_green_store(tmp_path)
-    fields = _stored_fields(sqlite_path)
-    fields.pop("strike")
+    fields = _nested(_stored_fields(sqlite_path))
+    fields["contract_key"].pop("strike", None)
     # Only the payload loses the key: the column keeps the value the writer
     # derived from it, which is the shape the old face B read as "nothing to say".
     _tamper(
@@ -855,25 +882,29 @@ def test_probe_derivation_names_the_columns_each_refusal_covers() -> None:
     key's *value* — a tuple that answered ``()`` or ``("account",)`` for every
     refusal would leave every other control in this file green.
     """
-    missing_expiration = {"account": "lx", "option_type": "put", "strike": 100.0}
+    missing_expiration = {
+        "contract_key": {"account": "lx", "option_type": "put", "strike": 100.0}
+    }
     assert derive_stored_row_columns(missing_expiration)[WRITER_RAISES_COLUMNS_KEY] == (
         "expiration",
     )
 
-    missing_both = {"account": "lx", "option_type": "put"}
+    missing_both = {"contract_key": {"account": "lx", "option_type": "put"}}
     assert derive_stored_row_columns(missing_both)[WRITER_RAISES_COLUMNS_KEY] == (
         "expiration",
         "strike",
     )
 
-    no_account = {"option_type": "put", "expiration": 1, "strike": 1.0}
+    no_account = {
+        "contract_key": {"option_type": "put", "expiration_ymd": "2026-06-19", "strike": 1.0}
+    }
     assert derive_stored_row_columns(no_account)[WRITER_RAISES_COLUMNS_KEY] == ("account",)
 
     # Nothing refused: the tuple is empty, so the histogram falls back to the
     # item's own column.
-    assert derive_stored_row_columns(dict(no_account, account="lx"))[
-        WRITER_RAISES_COLUMNS_KEY
-    ] == ()
+    assert derive_stored_row_columns(
+        {"contract_key": {**no_account["contract_key"], "account": "lx"}}
+    )[WRITER_RAISES_COLUMNS_KEY] == ()
 
 
 def test_probe_face_b_counts_a_two_column_refusal_per_column(tmp_path: Path) -> None:
@@ -888,9 +919,9 @@ def test_probe_face_b_counts_a_two_column_refusal_per_column(tmp_path: Path) -> 
     the writer refused as clean.
     """
     sqlite_path, _config = _build_green_store(tmp_path)
-    fields = _stored_fields(sqlite_path)
-    fields.pop("strike")
-    fields.pop("expiration")
+    fields = _nested(_stored_fields(sqlite_path))
+    fields["contract_key"].pop("strike", None)
+    fields["contract_key"].pop("expiration_ymd", None)
     _tamper(
         sqlite_path,
         [
@@ -931,9 +962,9 @@ def test_probe_face_b_does_not_refuse_a_payload_the_writer_leaves_alone(
     writer happily writes.
     """
     sqlite_path, _config = _build_green_store(tmp_path)
-    fields = _stored_fields(sqlite_path)
-    fields.pop("strike")
-    fields["option_type"] = "stock"
+    fields = _nested(_stored_fields(sqlite_path))
+    fields["contract_key"].pop("strike", None)
+    fields["contract_key"]["option_type"] = "stock"
     _tamper(
         sqlite_path,
         [
@@ -1154,7 +1185,7 @@ def test_probe_attributes_a_payload_difference_as_other(tmp_path: Path) -> None:
     sqlite_path, _config = _build_green_store(tmp_path)
 
     def _reprice(fields: dict[str, object]) -> None:
-        fields["premium"] = "9.99"
+        fields["premium_open"] = "9.99"
 
     _mutate_fields(sqlite_path, _reprice)
 
@@ -1171,7 +1202,11 @@ def test_probe_attributes_a_payload_difference_as_other(tmp_path: Path) -> None:
 def test_probe_reads_the_source_event_id_from_the_payload_when_the_column_is_empty(
     tmp_path: Path,
 ) -> None:
-    """A never-backfilled column must not masquerade as "no source event at all"."""
+    """A never-backfilled column must not masquerade as "no source event at all".
+
+    ``source_event_id``'s payload spelling converged onto ``open_event_id``, so the
+    fallback reads that key.
+    """
     sqlite_path, _config = _build_green_store(tmp_path)
     ledger_event_id = _ledger_event_id(sqlite_path)
     _insert_stored_row(

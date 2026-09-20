@@ -440,6 +440,87 @@ def test_fast_path_avoids_global_readiness_and_all_checkpoint_payload_reads(
     assert result.mode_used == "fast_tail"
 
 
+def test_normalized_columns_guard_reads_contract_key_first_with_flat_fallback(
+    tmp_path: Path,
+) -> None:
+    """The publish readiness guard keeps reading the converged payload.
+
+    Nested-first with the flat fallback for ``account``/``option_type``: a
+    converged row whose contract columns are populated is ready; the same row
+    with a missing column is not (a flat-only read fails open on converged
+    rows -- ``NULL IN ('put', 'call')`` is NULL); a legacy flat row does not
+    trip the guard through the fallback.
+    """
+
+    def _converged_fields() -> str:
+        return json.dumps(
+            {
+                "contract_key": {
+                    "broker": "futu",
+                    "account": "lx",
+                    "underlying_symbol": "TSLA",
+                    "option_type": "put",
+                    "strike": "100",
+                    "expiration_ymd": "2026-06-18",
+                    "asset_type": "option",
+                },
+                "position_side": "short",
+                "status": "open",
+            },
+            ensure_ascii=False,
+        )
+
+    def _insert(
+        conn: sqlite3.Connection,
+        record_id: str,
+        fields: str,
+        *,
+        columns: bool,
+    ) -> None:
+        conn.execute(
+            """
+            INSERT INTO position_lots (
+              record_id, fields_json, source_event_id, updated_at_ms,
+              account, expiration, strike, multiplier
+            ) VALUES (?, ?, 'evt', 1000, 'lx', ?, ?, ?)
+            """,
+            (
+                record_id,
+                fields,
+                1781827200000 if columns else None,
+                100.0 if columns else None,
+                100.0 if columns else None,
+            ),
+        )
+
+    repo = _repo(tmp_path)
+    with repo._connect() as conn:  # type: ignore[attr-defined]
+        _insert(conn, "lot_nested_ok", _converged_fields(), columns=True)
+    assert repo.position_projection_normalized_columns_ready() is True
+
+    with repo._connect() as conn:  # type: ignore[attr-defined]
+        _insert(conn, "lot_nested_missing_columns", _converged_fields(), columns=False)
+    assert repo.position_projection_normalized_columns_ready() is False
+
+    with repo._connect() as conn:  # type: ignore[attr-defined]
+        conn.execute("DELETE FROM position_lots WHERE record_id = 'lot_nested_missing_columns'")
+        _insert(
+            conn,
+            "lot_flat_ok",
+            json.dumps(
+                {
+                    "account": "lx",
+                    "option_type": "put",
+                    "strike": 100.0,
+                    "expiration": 1781827200000,
+                    "note": "multiplier=100",
+                }
+            ),
+            columns=True,
+        )
+    assert repo.position_projection_normalized_columns_ready() is True
+
+
 def test_runtime_uses_process_frozen_implementation_without_source_reads(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

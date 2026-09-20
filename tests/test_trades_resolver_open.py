@@ -282,8 +282,8 @@ def test_resolve_unknown_long_call_apply_preserves_independent_open(tmp_path: Pa
 
     assert call_result.status == "applied"
     lots = repo.list_position_lots()
-    call_lot = next(item for item in lots if item["fields"]["option_type"] == "call")
-    assert call_lot["fields"]["side"] == "long"
+    call_lot = next(item for item in lots if item["fields"]["contract_key"]["option_type"] == "call")
+    assert call_lot["fields"]["position_side"] == "long"
     assert "strategy" not in call_lot["fields"]
     assert "leg_role" not in call_lot["fields"]
     assert "strategy_group_id" not in call_lot["fields"]
@@ -332,8 +332,8 @@ def test_resolve_sell_put_open_after_long_call_keeps_both_lots_independent(tmp_p
 
     assert put_result.status == "applied"
     lots = repo.list_position_lots()
-    call_lot = next(item for item in lots if item["fields"]["option_type"] == "call")
-    put_lot = next(item for item in lots if item["fields"]["option_type"] == "put")
+    call_lot = next(item for item in lots if item["fields"]["contract_key"]["option_type"] == "call")
+    put_lot = next(item for item in lots if item["fields"]["contract_key"]["option_type"] == "put")
     assert "strategy_group_id" not in call_lot["fields"]
     assert "leg_role" not in call_lot["fields"]
     assert "strategy_group_id" not in put_lot["fields"]
@@ -568,8 +568,8 @@ def test_combo_yield_explicit_pair_intent_records_independent_lots(tmp_path: Pat
     assert put_result.status == "applied"
     assert call_result.status == "applied"
     lots = repo.list_position_lots()
-    put_lot = next(item for item in lots if item["fields"]["option_type"] == "put")
-    call_lot = next(item for item in lots if item["fields"]["option_type"] == "call")
+    put_lot = next(item for item in lots if item["fields"]["contract_key"]["option_type"] == "put")
+    call_lot = next(item for item in lots if item["fields"]["contract_key"]["option_type"] == "call")
     assert "strategy" not in put_lot["fields"]
     assert "leg_role" not in put_lot["fields"]
     assert "strategy_group_id" not in put_lot["fields"]

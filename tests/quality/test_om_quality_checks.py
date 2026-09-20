@@ -658,6 +658,93 @@ def test_full_replay_mismatch_blocks_position_consumers() -> None:
     assert "close_advice" in datasets[0]["blocked_consumers"]
 
 
+def _void_event(*, event_id: str, target_event_id: str) -> dict:
+    return TradeEvent(
+        event_id=event_id,
+        event_type="void",
+        event_time_ms=1_700_000_001_000,
+        contract_key=ContractKey.from_values(
+            broker="富途",
+            account="lx",
+            underlying_symbol="NVDA",
+            option_type="put",
+            strike=100,
+            expiration_ymd="2026-07-17",
+        ),
+        contracts=0,
+        price=0,
+        currency="USD",
+        source="futu",
+        target_event_id=target_event_id,
+    ).to_dict()
+
+
+def test_void_cleared_account_is_not_a_vacuous_replay_failure() -> None:
+    datasets = build_ledger_datasets(
+        repo=_LedgerRepo(
+            [
+                _open_event(event_id="event-1", deal_id="deal-1"),
+                _void_event(event_id="event-2", target_event_id="event-1"),
+            ],
+            [],
+        ),
+        accounts=["lx"],
+        market="us",
+        observed_at_utc="2026-07-13T10:00:00Z",
+    )
+    assert datasets[0]["status"] == "trusted"
+    assert datasets[0]["checks"][0]["status"] == "pass"
+    assert datasets[0]["checks"][0]["reason_code"] == "LEDGER_REPLAY_MATCHED"
+
+
+def test_non_lot_materializing_events_alone_do_not_fail_the_replay_check() -> None:
+    """``open`` is the only lot-materializing event type.
+
+    An account whose active events are only closes/adjustments/verifications
+    compares empty-vs-empty legitimately: those types edit or observe a lot an
+    open must have created. The vacuous guard must key off active opens, not
+    every active event, or it blocks position consumers for such accounts.
+    """
+    datasets = build_ledger_datasets(
+        repo=_LedgerRepo(
+            [
+                TradeEvent(
+                    event_id="event-verify-1",
+                    event_type="verification",
+                    event_time_ms=1_700_000_000_000,
+                    contract_key=ContractKey.from_values(
+                        broker="富途",
+                        account="lx",
+                        underlying_symbol="NVDA",
+                        option_type="put",
+                        strike=100,
+                        expiration_ymd="2026-07-17",
+                    ),
+                    contracts=0,
+                    price=0,
+                    currency="USD",
+                    source="futu",
+                    lot_id="lot-1",
+                    raw_payload={"deal_id": "deal-1"},
+                ).to_dict(),
+            ],
+            [],
+        ),
+        accounts=["lx"],
+        market="us",
+        observed_at_utc="2026-07-13T10:00:00Z",
+    )
+    # OM-LED-002 has its own verdict for a lone verification event; the replay
+    # check under test here must not be the one failing it.
+    replay = _replay_check(datasets[0])
+    assert replay["status"] == "pass"
+    assert replay["reason_code"] == "LEDGER_REPLAY_MATCHED"
+
+
+def _replay_check(dataset: dict) -> dict:
+    return next(item for item in dataset["checks"] if item["check_id"] == "OM-LED-001")
+
+
 def test_duplicate_broker_identity_with_economic_conflict_is_blocking() -> None:
     events = [
         _open_event(event_id="event-1", deal_id="same-deal", strike=100),

@@ -38,7 +38,7 @@ class PositionProjectionTailRepositoryMixin:
     ) -> PositionLotDiff:
         desired: dict[
             str,
-            tuple[str, str, str, str | None, int | None, float | None, float | None, str],
+            tuple[str, str, str, str | None, int | None, float | None, float | None],
         ] = {}
         for record in records:
             values = _position_lot_storage_values(record)
@@ -109,23 +109,22 @@ class PositionProjectionTailRepositoryMixin:
                 if old_account:
                     touched_accounts.add(old_account)
 
-            # The loop key is the storage key this diff looks rows up and binds
-            # ``WHERE record_id = ?`` with, so it is ``desired``'s key (values[0])
-            # and not the trailing carrier slot (values[7]). Those slots happen to
-            # hold one value today because ``_position_lot_storage_values``
-            # dual-writes both from one source; that is a write convention, not a
-            # guarantee, and unpacking the carrier into the loop key silently
-            # retargets the lookup and the WHERE bind onto another row.
+            # The loop key is ``values[0]``, the one identity slot
+            # ``_position_lot_storage_values`` returns. The dual-write convention
+            # that used to write the same value into a second, trailing slot is
+            # retired, so there is no second slot to unpack and no chance of the
+            # lookup retargeting onto another row. Both identity columns still
+            # receive that one value (see the INSERT/UPDATE below); the
+            # ``record_id`` column itself retires in the DDL step.
             for record_id, values in desired.items():
                 (
-                    _record_id,
+                    lot_id,
                     account,
                     fields_json,
                     source_event_id,
                     expiration_ms,
                     strike,
                     multiplier,
-                    lot_id,
                 ) = values
                 current = current_by_id.get(record_id)
                 if current is None:
@@ -136,7 +135,7 @@ class PositionProjectionTailRepositoryMixin:
                           expiration, strike, multiplier, lot_id, updated_at_ms
                         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (*values, ts),
+                        (*values, lot_id, ts),
                     )
                     added += 1
                     touched_accounts.add(account)
@@ -270,11 +269,19 @@ class PositionProjectionTailRepositoryMixin:
                 WHERE account IS NULL
                    OR account = ''
                    OR account != lower(account)
-                   OR account != trim(CAST(
-                        json_extract(fields_json, '$.account') AS TEXT
-                      ))
+                   OR account != coalesce(
+                        nullif(trim(CAST(json_extract(
+                          fields_json, '$.contract_key.account'
+                        ) AS TEXT)), ''),
+                        trim(CAST(json_extract(fields_json, '$.account') AS TEXT))
+                      )
                    OR (
-                        json_extract(fields_json, '$.option_type') IN ('put', 'call')
+                        coalesce(
+                          nullif(trim(CAST(json_extract(
+                            fields_json, '$.contract_key.option_type'
+                          ) AS TEXT)), ''),
+                          trim(CAST(json_extract(fields_json, '$.option_type') AS TEXT))
+                        ) IN ('put', 'call')
                         AND (expiration IS NULL OR strike IS NULL OR multiplier IS NULL)
                    )
                 LIMIT 1

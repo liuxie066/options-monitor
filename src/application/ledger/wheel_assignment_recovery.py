@@ -15,7 +15,12 @@ from domain.domain.ledger.events import CLOSE_EVENT_TYPES
 from domain.domain.ledger.position_fields import apply_strategy_metadata_patch
 from domain.domain.strategy_membership import resolve_option_strategy_membership
 from domain.domain.symbol_identity import symbol_market
-from domain.domain.wheel import normalize_wheel_event
+from domain.domain.wheel import (
+    attach_lot_strategy_metadata,
+    lot_contract_key,
+    lot_strategy_metadata_from_trade_events,
+    normalize_wheel_event,
+)
 from src.application.ledger.combo_membership import resolve_combo_group_membership
 from src.application.ledger.event_codec import stored_trade_event_to_ledger_event, valid_void_target_event_id
 from src.application.ledger.read_only_evidence import open_trade_reconciliation_evidence_repo
@@ -47,9 +52,21 @@ def _rows(reader: Any, conn: sqlite3.Connection, account: str) -> dict[str, Any]
         column="raw_json",
         strict=True,
     )
+    # The contract now travels under ``contract_key`` (write-side-definition
+    # §2), so the account scope reads the nested key rather than the retired
+    # flat sibling.
+    strategy_by_lot_id = lot_strategy_metadata_from_trade_events(events)
     return {
         "trade_events": events,
-        "account_position_lots": [r for r in lots if r["fields"].get("account") == account],
+        "account_position_lots": [
+            {
+                "record_id": str(r.get("record_id") or "").strip(),
+                "fields": attach_lot_strategy_metadata(r, strategy_by_lot_id),
+            }
+            for r in lots
+            if str(lot_contract_key(r.get("fields") or {}).get("account") or "")
+            == account
+        ],
         "account_wheel_events": [r for r in wheels if r["account"] == account],
         "account_assigned_stock_events": [r for r in stocks if (r.get("account") or (r.get("raw_payload") or {}).get("account")) == account],
         "account_strategy_group_identities": identities,
@@ -122,6 +139,18 @@ def _completed_combo_transition(
             "strategy_snapshot": None,
         },
     )
+    # ``apply_strategy_metadata_patch`` drops a cleared key entirely, which lets
+    # a later event-derived merge resurrect it. Keep the clear explicit (present
+    # as ``None``) so the lot reads as an ordinary CSP/CC from here on.
+    for cleared in (
+        "strategy",
+        "leg_role",
+        "strategy_group_id",
+        "source_stock_lot_id",
+        "source_wheel_branch_id",
+        "strategy_snapshot",
+    ):
+        ordinary_fields.setdefault(cleared, None)
     evidence = {
         "identity": identity,
         "membership_generation_hash": membership.generation_hash,
@@ -170,7 +199,9 @@ def _plan(reader: Any, conn: sqlite3.Connection, path: Path, account: str, marke
         )
     elif membership.issues or membership.strategy not in {"csp", "cc"}:
         raise ValueError("recovery requires ordinary CSP/CC membership")
-    source_id = fields.get("source_event_id")
+    # ``source_event_id`` converged onto ``open_event_id`` (write-side-definition
+    # §2): the lot's source open is the same fact under its new name.
+    source_id = fields.get("open_event_id")
     if any(valid_void_target_event_id(raw) in {assignment_event_id, source_id}
            for raw in rows["trade_events"]):
         raise ValueError("assignment or source open is void")

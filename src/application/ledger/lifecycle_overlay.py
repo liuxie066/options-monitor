@@ -1046,7 +1046,11 @@ def _lot_contract_capacity(lot: Mapping[str, Any]) -> int | None:
         if isinstance(lot.get("fields"), Mapping)
         else dict(lot)
     )
-    for key in ("original_contracts", "contracts"):
+    # ``contracts`` converged onto ``contracts_opened`` (``write-side-definition.md``
+    # §2): the payload keeps ``contracts_open`` as the *remaining* count, so a
+    # capacity read that only looked at the retired spelling answered ``None``
+    # and every target lot reported ``lifecycle_target_quantity_invalid``.
+    for key in ("original_contracts", "contracts_opened", "contracts"):
         value = _positive_integer(fields.get(key))
         if value is not None:
             return value

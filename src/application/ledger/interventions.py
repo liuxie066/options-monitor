@@ -101,6 +101,20 @@ def _event_position_side(event: dict[str, Any]) -> str | None:
     return None
 
 
+def _lot_opened_at_ms(fields: Mapping[str, Any]) -> int:
+    """The lot payload's opening instant.
+
+    ``opened_at`` converged onto ``opened_at_ms`` (``write-side-definition.md`` §2);
+    the retired flat key stays readable for a row written before the shape switch.
+    """
+    return int(fields.get("opened_at_ms") or fields.get("opened_at") or 0)
+
+
+#: Both spellings, so a payload-carried compare leaves no key behind: the
+#: membership comparison below is a whole-dict compare.
+_LOT_OPENED_AT_KEYS = ("opened_at_ms", "opened_at")
+
+
 def _contract_key_from_event_dict(event: dict[str, Any]) -> ContractKey:
     return ContractKey.from_values(
         broker=event.get("broker"),
@@ -1208,12 +1222,13 @@ def _assert_only_target_lot_opened_at_changed(
     after_fields = after_target.get("fields")
     if not isinstance(before_fields, dict) or not isinstance(after_fields, dict):
         raise ValueError("trade time correction target lot fields are invalid")
-    if int(before_fields.get("opened_at") or 0) != before_trade_time_ms:
+    if _lot_opened_at_ms(before_fields) != before_trade_time_ms:
         raise ValueError("trade time correction target lot has an unexpected opening time")
-    if int(after_fields.get("opened_at") or 0) != after_trade_time_ms:
+    if _lot_opened_at_ms(after_fields) != after_trade_time_ms:
         raise ValueError("trade time correction target lot opening time was not updated")
-    before_fields.pop("opened_at", None)
-    after_fields.pop("opened_at", None)
+    for key in _LOT_OPENED_AT_KEYS:
+        before_fields.pop(key, None)
+        after_fields.pop(key, None)
     if before_target != after_target:
         raise ValueError("trade time correction changed non-time position lot data")
 

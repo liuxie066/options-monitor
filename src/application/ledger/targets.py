@@ -18,6 +18,18 @@ def _canonical_trade_symbol(value: Any) -> str:
     return canonical_contract_symbol(value)
 
 
+def _contract_key(fields: dict[str, Any]) -> dict[str, Any]:
+    contract_key = fields.get("contract_key")
+    return contract_key if isinstance(contract_key, dict) else {}
+
+
+def _contract_value(fields: dict[str, Any], nested_key: str, flat_key: str | None = None) -> Any:
+    value = _contract_key(fields).get(nested_key)
+    if value not in (None, ""):
+        return value
+    return fields.get(flat_key or nested_key)
+
+
 def assert_position_lot_target_matches_current_state(
     repo: Any,
     *,
@@ -35,19 +47,19 @@ def assert_position_lot_target_matches_current_state(
             raise TypeError(f"option_positions repo returned non-dict fields for record_id={lot_id}")
         current_fields = raw_current_fields
     comparisons = (
-        ("broker", normalize_broker(current_fields.get("broker")), normalize_broker(fields.get("broker"))),
-        ("account", normalize_account(current_fields.get("account")), normalize_account(fields.get("account"))),
-        ("symbol", _canonical_trade_symbol(current_fields.get("symbol")), _canonical_trade_symbol(fields.get("symbol"))),
-        ("option_type", str(current_fields.get("option_type") or "").strip().lower(), str(fields.get("option_type") or "").strip().lower()),
-        ("side", str(current_fields.get("side") or "").strip().lower(), str(fields.get("side") or "").strip().lower()),
+        ("broker", normalize_broker(_contract_value(current_fields, "broker")), normalize_broker(_contract_value(fields, "broker"))),
+        ("account", normalize_account(_contract_value(current_fields, "account")), normalize_account(_contract_value(fields, "account"))),
+        ("symbol", _canonical_trade_symbol(_contract_value(current_fields, "underlying_symbol", "symbol")), _canonical_trade_symbol(_contract_value(fields, "underlying_symbol", "symbol"))),
+        ("option_type", str(_contract_value(current_fields, "option_type") or "").strip().lower(), str(_contract_value(fields, "option_type") or "").strip().lower()),
+        ("side", str(current_fields.get("position_side") or current_fields.get("side") or "").strip().lower(), str(fields.get("position_side") or fields.get("side") or "").strip().lower()),
         ("currency", normalize_currency(current_fields.get("currency")), normalize_currency(fields.get("currency"))),
         ("strike", effective_strike(current_fields), effective_strike(fields)),
         ("expiration_ymd", effective_expiration_ymd(current_fields), effective_expiration_ymd(fields)),
         ("multiplier", effective_multiplier(current_fields), effective_multiplier(fields)),
         (
-            "source_event_id",
-            str(current_fields.get("source_event_id") or "").strip(),
-            str(fields.get("source_event_id") or "").strip(),
+            "open_event_id",
+            str(current_fields.get("open_event_id") or current_fields.get("source_event_id") or "").strip(),
+            str(fields.get("open_event_id") or fields.get("source_event_id") or "").strip(),
         ),
         (
             "status",

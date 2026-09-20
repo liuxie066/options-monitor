@@ -8,10 +8,13 @@ Three faces are compared, and only these three:
 
 * **Face A (payload)** — the stored ``fields_json`` object against the ``fields``
   the replay produced. **Neither side is healed**: the stored side is read as
-  raw JSON, so the existing codec's column-heal (``position_lot_row_to_record``)
-  is deliberately *not* applied. Healing one side only would make face A's
-  red/green depend on the state of the columns, which is why the columns are
-  compared separately on face B (``comparator-spec.md`` §2).
+  raw JSON, so ``position_lot_row_to_record`` is deliberately *not* applied.
+  (That codec used to heal ``expiration``/``strike``/``multiplier`` back into the
+  decoded payload; slice 2 deleted the heal, which is the comparator-spec §2
+  convention "两侧都不 heal, 列单独进 B 面比" made real. This reader never went
+  through it either way.) Healing one side only would make face A's red/green
+  depend on the state of the columns, which is why the columns are compared
+  separately on face B (``comparator-spec.md`` §2).
 * **Face B (columns)** — the stored value of ``account`` / ``expiration`` /
   ``strike`` / ``multiplier`` / ``source_event_id`` against the value
   re-derived **from the stored payload** by the writer's own derivation
@@ -461,6 +464,17 @@ def _safe_float(value: Any) -> float | None:
         return None
 
 
+def _contract_key(fields: dict[str, Any]) -> dict[str, Any]:
+    """``repository_common._position_lot_contract_key``, restated.
+
+    The converged payload carries the option contract under ``contract_key``
+    instead of as flat siblings; the writer's guards read it from there, so the
+    probe's copies have to as well.
+    """
+    contract_key = fields.get("contract_key")
+    return contract_key if isinstance(contract_key, dict) else {}
+
+
 def _missing_option_contract_fields(fields: dict[str, Any]) -> list[str]:
     """``repository_common._validate_position_lot_fields``, restated.
 
@@ -470,17 +484,18 @@ def _missing_option_contract_fields(fields: dict[str, Any]) -> list[str]:
 
     Read it as the writer wrote it: only ``put``/``call`` payloads are validated
     at all (anything else — a stock payload, a missing ``option_type`` — returns
-    early and is left to the ``account`` guards), the comparison is against the
-    raw ``expiration`` field, and ``strike`` goes through ``safe_float`` with no
-    note fallback.
+    early and is left to the ``account`` guards), the absence test is against
+    ``contract_key.expiration_ymd`` (the column's source), and ``strike`` is read
+    from ``contract_key`` through ``safe_float`` with no note fallback.
     """
-    option_type = str(fields.get("option_type") or "").strip().lower()
+    contract_key = _contract_key(fields)
+    option_type = str(contract_key.get("option_type") or "").strip().lower()
     if option_type not in {"put", "call"}:
         return []
     missing: list[str] = []
-    if fields.get("expiration") in (None, ""):
+    if contract_key.get("expiration_ymd") in (None, ""):
         missing.append("expiration")
-    if _safe_float(fields.get("strike")) is None:
+    if _safe_float(contract_key.get("strike")) is None:
         missing.append("strike")
     return missing
 
@@ -518,12 +533,15 @@ def _writer_refusal(*, fields: dict[str, Any], account: str) -> tuple[str | None
 def derive_stored_row_columns(fields: dict[str, Any]) -> dict[str, Any]:
     """Re-derive the five columns from a payload the way the writer does.
 
-    ``account`` and ``source_event_id`` come from the two sibling expressions in
-    ``repository_common._position_lot_storage_values``; the other three come from
-    ``_position_lot_contract_scalars``. A payload the *writer* refuses — the
-    option contract first (``_validate_position_lot_fields``), then ``account``
-    (``repository_common.py``:217-221), the one derived column comparator-spec §4
-    calls "缺了就响" — has no columns to derive at all.
+    ``account`` and ``source_event_id`` are the two expressions that do **not**
+    follow an imported helper: the writer reads them from ``fields``
+    (``repository_common._position_lot_storage_values``) and this copy has to
+    name the same two keys — ``contract_key.account`` and ``open_event_id``
+    (``source_event_id``'s name converged onto ``open_event_id``). The other
+    three come from the imported ``_position_lot_contract_scalars``. A payload the
+    *writer* refuses — the option contract first (``_validate_position_lot_fields``),
+    then ``account`` (``repository_common.py``:217-221), the one derived column
+    comparator-spec §4 calls "缺了就响" — has no columns to derive at all.
 
     The probe must not raise (it has to keep walking the store) and it must not
     turn that fail-fast into equality either: a payload the writer refuses cannot
@@ -550,9 +568,10 @@ def derive_stored_row_columns(fields: dict[str, Any]) -> dict[str, Any]:
     """
     expiration_ms, strike, multiplier = _position_lot_contract_scalars(fields)
     source_event_id = (
-        str(fields.get("source_event_id")) if fields.get("source_event_id") else None
+        str(fields.get("open_event_id")) if fields.get("open_event_id") else None
     )
-    account = str(fields.get("account") or "").strip()
+    contract_key = _contract_key(fields)
+    account = str(contract_key.get("account") or "").strip()
     writer_error, writer_columns = _writer_refusal(fields=fields, account=account)
     return {
         "account": account or None,
@@ -656,15 +675,16 @@ def resolve_row_source_event_id(row: dict[str, Any]) -> tuple[str | None, str]:
     """The row's own ``source_event_id``, and where it came from.
 
     The column is the writer's derivation of the payload key
-    (``repository_common._position_lot_storage_values``:229), so it wins. The
-    payload is consulted only when the column is NULL/empty — a row whose column
-    was never backfilled must not be read as "no source event id at all", which
-    would hide a real ledger gap behind ①.
+    (``repository_common._position_lot_storage_values``); the payload key is
+    ``open_event_id`` since the name converged. The payload is consulted only when
+    the column is NULL/empty — a row whose column was never backfilled must not be
+    read as "no source event id at all", which would hide a real ledger gap
+    behind ①.
     """
     column = str(row["columns"]["source_event_id"] or "").strip()
     if column:
         return column, "column"
-    payload = str(row["fields"].get("source_event_id") or "").strip()
+    payload = str(row["fields"].get("open_event_id") or "").strip()
     if payload:
         return payload, "payload"
     return None, "absent"

@@ -13,6 +13,8 @@ from domain.domain.strategy_membership import resolve_option_strategy_membership
 from domain.domain.symbol_identity import symbol_market
 from domain.domain.wheel import (
     build_wheel_branch_created_event,
+    lot_strategy_metadata_for_lot,
+    merge_lot_strategy_metadata,
     plan_wheel_call_intent_consume,
     project_wheel_branches,
     project_wheel_call_intents,
@@ -113,7 +115,9 @@ def _source_open_event(
     rows: Mapping[str, Any],
     source_fields: Mapping[str, Any],
 ) -> tuple[dict[str, Any] | None, str | None]:
-    source_event_id = str(source_fields.get("source_event_id") or "").strip()
+    # ``open_event_id`` is the converged spelling of the lot's source open
+    # (``source_event_id`` is retired, write-side-definition §2).
+    source_event_id = str(source_fields.get("open_event_id") or "").strip()
     matches = [
         dict(item)
         for item in rows.get("trade_events") or []
@@ -346,7 +350,15 @@ def plan_wheel_assignment_companion(
     membership = resolve_option_strategy_membership(
         getattr(event, "contract_key"),
         getattr(event, "position_side"),
-        fields,
+        # The strategy-metadata family left ``fields_json`` in the convergence
+        # batch (design §7.5); resolve it from this lot's events instead.
+        merge_lot_strategy_metadata(
+            fields,
+            lot_strategy_metadata_for_lot(
+                fields.get("lot_id"),
+                rows.get("trade_events") or [],
+            ),
+        ),
         source_id=str(source_open.get("event_id") or ""),
     )
     if membership.issues:
@@ -516,6 +528,17 @@ def append_wheel_trade_companions(
         event_id = str(getattr(event, "event_id", "") or "").strip()
         account = _event_account(event)
         fields = source_fields.get(event_id)
+        if isinstance(fields, Mapping) and account in before_rows:
+            # The strategy-metadata family is read from the event layer now
+            # (design §7.5), so fold this lot's replayed metadata into the
+            # fields every downstream check below reads.
+            fields = merge_lot_strategy_metadata(
+                fields,
+                lot_strategy_metadata_for_lot(
+                    fields.get("lot_id"),
+                    before_rows[account].get("trade_events") or [],
+                ),
+            )
         symbol = str(event.contract_key.underlying_symbol)
         market = str(symbol_market(symbol) or "").lower()
         activation_window = repo.get_wheel_activation_window_for_event(
@@ -710,16 +733,22 @@ def append_and_verify_wheel_intent_consumption(
         or getattr(linked_event, "target_lot_id", "")
         or ""
     ).strip()
-    fields = repo.get_position_lot_fields(lot_id, conn=conn)
+    account = _event_account(linked_event)
+    rows = repo.read_lifecycle_account_rows(account=account, conn=conn)
+    # The strategy-metadata family lives on the event layer (design §7.5), so the
+    # linkage the adjust event just wrote is verified against the replayed
+    # metadata rather than against retired flat payload keys.
+    strategy_fields = lot_strategy_metadata_for_lot(
+        lot_id,
+        rows.get("trade_events") or [],
+    )
     if (
-        str(fields.get("strategy") or "") != "wheel"
-        or str(fields.get("leg_role") or "") != "wheel_call"
-        or str(fields.get("source_stock_lot_id") or "")
+        str(strategy_fields.get("strategy") or "") != "wheel"
+        or str(strategy_fields.get("leg_role") or "") != "wheel_call"
+        or str(strategy_fields.get("source_stock_lot_id") or "")
         != str(intent_event.get("stock_lot_id") or "")
     ):
         raise ValueError("Wheel Call intent linkage verification failed")
-    account = _event_account(linked_event)
-    rows = repo.read_lifecycle_account_rows(account=account, conn=conn)
     batches = _wheel_batches_from_rows(
         rows,
         account=account,

@@ -18,6 +18,7 @@ from pathlib import Path
 from src.application.account_config import build_account_portfolio_source_plan
 from src.application.config_loader import resolve_data_config_path
 from src.application.positions.context_builder import (
+    STRATEGY_FAMILY_SOURCE,
     build_context as build_option_positions_context,
     build_shared_context as build_shared_option_positions_context,
     validate_option_positions_context_account,
@@ -145,6 +146,18 @@ def load_option_positions_context(
                     account=account,
                     broker=market,
                 )
+                # The strategy family reaches ``combo_yield_groups`` from the
+                # event layer now (``write-side-definition.md`` §2), so a context
+                # cached before that re-pointing holds groups built from an empty
+                # family. The version travels in the payload; reject the earlier
+                # shape rather than serving its stale groups until the TTL lapses.
+                if context.get("strategy_family_source") != STRATEGY_FAMILY_SOURCE:
+                    raise ValueError(
+                        "context predates the event-layer strategy family "
+                        "(strategy_family_source="
+                        f"{context.get('strategy_family_source')!r}, expected "
+                        f"{STRATEGY_FAMILY_SOURCE!r})"
+                    )
                 return True
             except ValueError as exc:
                 log(

@@ -223,29 +223,49 @@ def test_build_context_preserves_canonical_strategy_relationships(
     ) == expected
 
 
-def test_build_context_reads_premium_from_note_fallback() -> None:
-    records = [
-        {
-            "record_id": "rec_1",
-            "fields": {
-                "broker": "富途",
-                "account": "lx",
-                "symbol": "NVDA",
-                "status": "open",
-                "side": "short",
-                "option_type": "put",
-                "contracts": 1,
-                "contracts_open": 1,
-                "cash_secured_amount": 1000,
-                "currency": "USD",
-                "note": "premium_per_share=0.88",
-            },
-        }
-    ]
+def test_build_context_reads_premium_from_its_key_and_not_from_the_note() -> None:
+    """§2/§7: ``note`` is not a payload key, so it supplies no ``premium``.
 
-    ctx = build_context(records, broker="富途", account="lx", rates={"USDCNY": 7.2})
+    ``premium_per_share=`` in the note used to be the last-resort fallback for a
+    lot whose payload had no ``premium``. The write side never publishes ``note``
+    (``PositionLot.to_dict()`` has no such key), so the fallback could only serve
+    rows the convergence batch retired; the premium is read from its own key.
+    """
+    fields = {
+        "broker": "富途",
+        "account": "lx",
+        "symbol": "NVDA",
+        "status": "open",
+        "side": "short",
+        "option_type": "put",
+        "contracts": 1,
+        "contracts_open": 1,
+        "cash_secured_amount": 1000,
+        "currency": "USD",
+        "premium_open": "0.88",
+        # Deliberately a different number: reading it would show up as ``1.23``.
+        "note": "premium_per_share=1.23",
+    }
+
+    ctx = build_context(
+        [{"record_id": "rec_1", "fields": fields}],
+        broker="富途",
+        account="lx",
+        rates={"USDCNY": 7.2},
+    )
 
     assert ctx["open_positions_min"][0]["premium"] == "0.88"
+
+    # And with no premium key at all, the note supplies nothing.
+    del fields["premium_open"]
+    ctx = build_context(
+        [{"record_id": "rec_1", "fields": fields}],
+        broker="富途",
+        account="lx",
+        rates={"USDCNY": 7.2},
+    )
+
+    assert ctx["open_positions_min"][0]["premium"] is None
 
 
 def test_build_context_exposes_expiration_ymd_and_days_to_expiration() -> None:

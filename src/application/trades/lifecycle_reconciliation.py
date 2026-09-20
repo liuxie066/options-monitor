@@ -8,6 +8,10 @@ from domain.domain.ledger import ContractKey, TradeEvent
 from domain.domain.ledger.position_fields import (
     strategy_metadata_fields_from_payload,
 )
+from src.application.ledger.api import (
+    contract_key_from_lot_fields,
+    lot_contract_value,
+)
 from domain.domain.lifecycle_allocation import (
     AllocationPlan,
     TERMINAL_TYPES,
@@ -1510,22 +1514,36 @@ def _terminal_event(
         raise ValueError(
             f"lifecycle target lot not found: {lot_id}"
         ) from exc
+    # The converged payload carries the option contract under ``contract_key``
+    # and the side under ``position_side`` (``write-side-definition.md`` §2); the
+    # flat siblings stay readable for a row written before the shape switch.
+    lot_contract_key = contract_key_from_lot_fields(fields)
     contract_key = ContractKey.from_values(
-        broker=lifecycle_case.get("broker") or fields.get("broker"),
-        account=lifecycle_case.get("account") or fields.get("account"),
-        underlying_symbol=lifecycle_case.get("symbol") or fields.get("symbol"),
-        option_type=lifecycle_case.get("option_type") or fields.get("option_type"),
-        strike=lifecycle_case.get("strike") or fields.get("strike"),
+        broker=lifecycle_case.get("broker")
+        or lot_contract_value(fields, lot_contract_key, "broker", "broker"),
+        account=lifecycle_case.get("account")
+        or lot_contract_value(fields, lot_contract_key, "account", "account"),
+        underlying_symbol=lifecycle_case.get("symbol")
+        or lot_contract_value(
+            fields, lot_contract_key, "underlying_symbol", "symbol"
+        ),
+        option_type=lifecycle_case.get("option_type")
+        or lot_contract_value(fields, lot_contract_key, "option_type", "option_type"),
+        strike=lifecycle_case.get("strike")
+        or lot_contract_value(fields, lot_contract_key, "strike", "strike"),
         expiration_ymd=(
             lifecycle_case.get("expiration_ymd")
-            or fields.get("expiration_ymd")
+            or lot_contract_value(
+                fields, lot_contract_key, "expiration_ymd", "expiration_ymd"
+            )
         ),
     )
     trade_side = derive_trade_side(
         terminal_type,
         lifecycle_case.get("position_side")
-        or fields.get("position_side")
-        or fields.get("side"),
+        or lot_contract_value(
+            fields, lot_contract_key, "position_side", "position_side", "side"
+        ),
     )
     contracts = int(allocation.get("contracts_allocated") or 0)
     event_price = (

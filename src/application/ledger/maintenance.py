@@ -13,9 +13,7 @@ from domain.domain.ledger.position_fields import (
     build_expire_auto_close_patch_contract,
     effective_contracts_open,
     effective_expiration,
-    effective_expiration_ymd,
     effective_multiplier,
-    effective_strike,
     exp_ms_to_datetime,
     exp_ms_to_ymd,
     normalize_account,
@@ -33,6 +31,8 @@ from src.application.ledger.errors import LedgerPreflightError
 from src.application.ledger.lifecycle import persist_lifecycle_expire_close_events_atomically
 from src.application.ledger.lot_resolver import (
     LotCloseResolutionError,
+    contract_key_from_lot_fields,
+    lot_contract_value,
     normalize_close_candidate,
     resolve_explicit_close_target,
     same_close_candidate_identity,
@@ -58,6 +58,137 @@ from src.application.ledger.writer import (
 
 def _canonical_trade_symbol(value: Any) -> str:
     return canonical_contract_symbol(value)
+
+
+def _lot_value(fields: dict[str, Any], nested_key: str, *flat_keys: str) -> Any:
+    """One lot-payload value: the nested key first, the retired flat keys after.
+
+    The converged payload (``PositionLot.to_dict()``) carries the option contract
+    under ``contract_key`` and the side under ``position_side``; the flat
+    siblings it replaced are read through the shared
+    ``lot_resolver.lot_contract_value`` rule so a row written before the shape
+    switch still answers the value it always did (the same rule
+    ``position_fields.effective_*`` states).
+    """
+    return lot_contract_value(
+        fields,
+        contract_key_from_lot_fields(fields),
+        nested_key,
+        *flat_keys,
+    )
+
+
+def _lot_account(fields: dict[str, Any]) -> str:
+    return normalize_account(_lot_value(fields, "account", "account"))
+
+
+def _lot_broker(fields: dict[str, Any]) -> str:
+    # No flat ``market`` fallback: ``market`` was never a lot-layer carrier of
+    # the contract's broker (write-side-definition.md §7 states the six market
+    # read points re-point at ``contract_key.broker``), and a market-only row
+    # was never an auto-close candidate.
+    return normalize_broker(_lot_value(fields, "broker", "broker"))
+
+
+def _lot_symbol(fields: dict[str, Any]) -> str:
+    return _canonical_trade_symbol(
+        _lot_value(fields, "underlying_symbol", "symbol", "underlying_symbol")
+    )
+
+
+def _lot_option_type(fields: dict[str, Any]) -> str:
+    return str(_lot_value(fields, "option_type", "option_type") or "").strip().lower()
+
+
+def _lot_position_side(fields: dict[str, Any]) -> str:
+    return str(
+        _lot_value(fields, "position_side", "position_side", "side") or ""
+    ).strip().lower()
+
+
+def _lot_strike(fields: dict[str, Any]) -> float | None:
+    return safe_float(_lot_value(fields, "strike", "strike"))
+
+
+def _lot_expiration_ymd(fields: dict[str, Any]) -> str | None:
+    text = str(_lot_value(fields, "expiration_ymd", "expiration_ymd") or "").strip()
+    return text or None
+
+
+def _lot_expiration_ms(fields: dict[str, Any]) -> int | None:
+    """The lot's expiry in ms.
+
+    The converged payload carries only ``contract_key.expiration_ymd``, rendered
+    with ``parse_exp_to_ms`` (midnight UTC) -- the same convention the derived
+    ``position_lots.expiration`` column uses, so the anchor and the column agree.
+    A row written before the shape switch keeps its flat ms ``expiration``.
+    """
+    exp_ymd = _lot_expiration_ymd(fields)
+    if exp_ymd is not None:
+        parsed = parse_exp_to_ms(exp_ymd)
+        if parsed is not None:
+            return int(parsed)
+    exp_ms, _source = effective_expiration(fields)
+    return int(exp_ms) if exp_ms is not None else None
+
+
+def _lot_open_event_id(fields: dict[str, Any]) -> str:
+    # ``source_event_id`` converged onto ``open_event_id`` (write-side-definition
+    # §2): the lot's source open is the same fact under its new name.
+    return str(
+        _lot_value(fields, "open_event_id", "open_event_id", "source_event_id") or ""
+    ).strip()
+
+
+def _lot_close_type(repo: Any, fields: dict[str, Any]) -> str:
+    """A lot's close type, read from its closing event.
+
+    ``close_type`` is one of the RECONSTRUCTIBLE keys the convergence batch
+    removed from ``fields_json`` (``write-side-definition.md`` §2/§5): its home
+    is the closing ``trade_event``'s payload and the lot keeps only the closing
+    ids (``close_event_ids`` / ``last_event_id``). Both ids are checked because
+    the tail/incremental path does not retain historical ``close_event_ids``.
+    The retired flat key stays readable for a row written before the shape
+    switch.
+    """
+    legacy = str(fields.get("close_type") or "").strip().lower()
+    if legacy:
+        return normalize_close_type(legacy)
+    close_ids = fields.get("close_event_ids")
+    wanted = {
+        str(item or "").strip()
+        for item in (close_ids if isinstance(close_ids, (list, tuple)) else ())
+        if str(item or "").strip()
+    }
+    last_event_id = str(fields.get("last_event_id") or "").strip()
+    if last_event_id:
+        wanted.add(last_event_id)
+    if not wanted:
+        return ""
+    candidate = getattr(repo, "primary_repo", repo)
+    list_events = getattr(candidate, "list_trade_events", None)
+    if not callable(list_events):
+        return ""
+    try:
+        rows = list_events()
+    except Exception:
+        return ""
+    for item in rows if isinstance(rows, list) else []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("event_id") or "").strip() not in wanted:
+            continue
+        raw_payload = item.get("raw_payload")
+        raw_payload = raw_payload if isinstance(raw_payload, dict) else {}
+        close_type = str(
+            raw_payload.get("close_type")
+            or raw_payload.get("broker_close_type")
+            or item.get("close_type")
+            or ""
+        ).strip().lower()
+        if close_type:
+            return normalize_close_type(close_type)
+    return ""
 
 
 def _close_event_trade_time_ms(repo: Any, *, target_source_event_id: str, as_of_ms: int | None) -> int:
@@ -96,7 +227,7 @@ def persist_expire_auto_close_event(
     grace_days: int | None = None,
     close_target_resolution: dict[str, Any] | None = None,
 ) -> LedgerWriteResult:
-    broker = normalize_broker(fields.get("broker"))
+    broker = _lot_broker(fields)
     if not broker:
         raise ValueError(f"position lot missing broker: {lot_id}")
     fields = assert_position_lot_target_matches_current_state(
@@ -106,8 +237,8 @@ def persist_expire_auto_close_event(
         operation="expire_auto_close",
     )
     multiplier = effective_multiplier(fields)
-    strike = effective_strike(fields)
-    target_source_event_id = str(fields.get("source_event_id") or "").strip()
+    strike = _lot_strike(fields)
+    target_source_event_id = _lot_open_event_id(fields)
     trade_time_ms = _close_event_trade_time_ms(
         repo,
         target_source_event_id=target_source_event_id,
@@ -119,11 +250,11 @@ def persist_expire_auto_close_event(
         event_time_ms=trade_time_ms,
         contract_key=ContractKey.from_values(
             broker=broker,
-            account=normalize_account(fields.get("account")),
-            underlying_symbol=_canonical_trade_symbol(fields.get("symbol")),
-            option_type=str(fields.get("option_type") or ""),
+            account=_lot_account(fields),
+            underlying_symbol=_lot_symbol(fields),
+            option_type=_lot_option_type(fields),
             strike=(float(strike) if strike is not None else None),
-            expiration_ymd=effective_expiration_ymd(fields),
+            expiration_ymd=_lot_expiration_ymd(fields),
         ),
         contracts=int(contracts_to_close),
         price=0.0,
@@ -138,32 +269,32 @@ def persist_expire_auto_close_event(
             "record_id": str(lot_id),
             "target_lot_id": str(lot_id),
             "close_target_source_event_id": target_source_event_id,
-            "close_target_account": normalize_account(fields.get("account")),
+            "close_target_account": _lot_account(fields),
             "close_target_broker": broker,
             "close_type": EXPIRE_AUTO_CLOSE,
             "close_reason": str(close_reason or "expired"),
             "auto_close_exp_src": str(exp_source or ""),
             "auto_close_grace_days": int(grace_days) if grace_days is not None else None,
             "close_target_resolution": close_target_resolution,
-            "side": derive_trade_side("expire_close", fields.get("side")),
+            "side": derive_trade_side("expire_close", fields.get("position_side")),
         },
     )
     return persist_trade_event_object(repo, event)
 
 
 def _auto_close_expiration_anchor(fields: dict[str, Any]) -> tuple[int | None, str, str | None, int | None]:
-    exp_ms, exp_source = effective_expiration(fields)
+    exp_ms = _lot_expiration_ms(fields)
     if exp_ms is None:
         return None, "none", None, None
     exp_ymd = exp_ms_to_ymd(exp_ms)
     normalized_ms = parse_exp_to_ms(exp_ymd) if exp_ymd else None
     if normalized_ms is None:
         normalized_ms = int(exp_ms)
-    return int(normalized_ms), exp_source, exp_ymd, int(exp_ms)
+    return int(normalized_ms), "expiration", exp_ymd, int(exp_ms)
 
 
 def _auto_close_market_timezone(fields: dict[str, Any]) -> tuple[str | None, ZoneInfo | timezone]:
-    market = symbol_market(fields.get("symbol"))
+    market = symbol_market(_lot_symbol(fields))
     if market == "US":
         return market, ZoneInfo("America/New_York")
     if market == "HK":
@@ -222,12 +353,12 @@ def _auto_close_underlying_spot(fields: dict[str, Any]) -> float | None:
 
 
 def _assignment_review_details(fields: dict[str, Any]) -> dict[str, Any] | None:
-    option_type = _normalize_assignment_option_type(fields.get("option_type"))
-    position_side = str(fields.get("side") or fields.get("position_side") or "").strip().lower()
+    option_type = _normalize_assignment_option_type(_lot_option_type(fields))
+    position_side = _lot_position_side(fields)
     if position_side != "short" or option_type not in {"put", "call"}:
         return None
 
-    strike = effective_strike(fields)
+    strike = _lot_strike(fields)
     spot = _auto_close_underlying_spot(fields)
     details: dict[str, Any] = {
         "position_side": position_side,
@@ -723,21 +854,21 @@ def _lifecycle_evidence_broker(evidence: dict[str, Any]) -> str:
 
 
 def _same_lifecycle_contract(fields: dict[str, Any], case: dict[str, Any]) -> bool:
-    if normalize_account(fields.get("account")) != normalize_account(case.get("account")):
+    if _lot_account(fields) != normalize_account(case.get("account")):
         return False
-    fields_broker = normalize_broker(fields.get("broker"))
+    fields_broker = _lot_broker(fields)
     case_broker = _lifecycle_case_broker(case)
     if not fields_broker or not case_broker or fields_broker != case_broker:
         return False
-    if _canonical_trade_symbol(fields.get("symbol")) != _canonical_trade_symbol(case.get("symbol")):
+    if _lot_symbol(fields) != _canonical_trade_symbol(case.get("symbol")):
         return False
-    if str(fields.get("option_type") or "").strip().lower() != str(case.get("option_type") or "").strip().lower():
+    if _lot_option_type(fields) != str(case.get("option_type") or "").strip().lower():
         return False
-    if str(fields.get("side") or "").strip().lower() != str(case.get("position_side") or "").strip().lower():
+    if _lot_position_side(fields) != str(case.get("position_side") or "").strip().lower():
         return False
-    if str(effective_expiration_ymd(fields) or "") != str(case.get("expiration_ymd") or ""):
+    if str(_lot_expiration_ymd(fields) or "") != str(case.get("expiration_ymd") or ""):
         return False
-    return _same_float(effective_strike(fields), case.get("strike"))
+    return _same_float(_lot_strike(fields), case.get("strike"))
 
 
 def _stock_evidence_matches_lifecycle_lot(
@@ -748,16 +879,16 @@ def _stock_evidence_matches_lifecycle_lot(
 ) -> bool:
     if str(evidence.get("evidence_type") or "") != "stock_settlement_leg":
         return False
-    if normalize_account(fields.get("account")) != normalize_account(evidence.get("account")):
+    if _lot_account(fields) != normalize_account(evidence.get("account")):
         return False
-    fields_broker = normalize_broker(fields.get("broker"))
+    fields_broker = _lot_broker(fields)
     evidence_broker = _lifecycle_evidence_broker(evidence)
     if not fields_broker or not evidence_broker or fields_broker != evidence_broker:
         return False
-    if _canonical_trade_symbol(fields.get("symbol")) != _canonical_trade_symbol(evidence.get("symbol")):
+    if _lot_symbol(fields) != _canonical_trade_symbol(evidence.get("symbol")):
         return False
-    option_type = str(fields.get("option_type") or "").strip().lower()
-    position_side = str(fields.get("side") or "").strip().lower()
+    option_type = _lot_option_type(fields)
+    position_side = _lot_position_side(fields)
     if position_side == "short":
         expected_side = "buy" if option_type == "put" else "sell" if option_type == "call" else ""
     elif position_side == "long":
@@ -774,7 +905,7 @@ def _stock_evidence_matches_lifecycle_lot(
     if expected_qty <= 0 or actual_qty != expected_qty:
         return False
     try:
-        strike = float(effective_strike(fields))
+        strike = float(_lot_strike(fields))
         price = float(evidence.get("stock_price"))
     except Exception:
         return False
@@ -827,8 +958,8 @@ def _matching_lifecycle_stock_evidence(
     if callable(list_evidence):
         try:
             evidence_rows = list_evidence(
-                account=normalize_account(fields.get("account")),
-                symbol=_canonical_trade_symbol(fields.get("symbol")),
+                account=_lot_account(fields),
+                symbol=_lot_symbol(fields),
             )
             for evidence in evidence_rows:
                 if not isinstance(evidence, dict):
@@ -837,8 +968,8 @@ def _matching_lifecycle_stock_evidence(
                 evidence_symbol = _canonical_trade_symbol(evidence.get("symbol"))
                 if (
                     str(evidence.get("evidence_type") or "") == "stock_settlement_leg"
-                    and evidence_account == normalize_account(fields.get("account"))
-                    and evidence_symbol == _canonical_trade_symbol(fields.get("symbol"))
+                    and evidence_account == _lot_account(fields)
+                    and evidence_symbol == _lot_symbol(fields)
                     and not _lifecycle_evidence_broker(evidence)
                 ):
                     return {
@@ -1116,7 +1247,7 @@ def auto_close_expired_positions(
             if effective_contracts_open(updated_fields) > 0 or normalize_status(updated_fields.get("status")) != "close":
                 errors.append(f"{lot_id} {decision.position_key}: auto-close event did not close target lot")
                 continue
-            if normalize_close_type(updated_fields.get("close_type")) != EXPIRE_AUTO_CLOSE:
+            if _lot_close_type(repo, updated_fields) != EXPIRE_AUTO_CLOSE:
                 errors.append(f"{lot_id} {decision.position_key}: auto-close projected wrong close_type")
                 continue
             applied.append(ExpiredCloseApplyResult(decision=decision, result=result))
