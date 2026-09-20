@@ -165,10 +165,15 @@ LIVE_READ_MODE = "ro"
 SETTLED_READ_MODE = "ro+immutable"
 
 #: The one ``mode=ro`` failure the immutable fallback exists for: a settled WAL
-#: store, which SQLite cannot open read-only because it may not create the
-#: shared-memory file. Every other ``OperationalError`` is a fact about the store
-#: — a writer holding a lock, a rollback the read-only connection cannot perform —
-#: and must reach the caller instead of being answered by a lock-free read.
+#: store this build will not open read-only. SQLite refuses that open when it may
+#: not create the shared-memory file — no readable sidecar and a directory that
+#: does not allow the creation (sqlite.org/wal.html, "Read-Only Databases", the
+#: rule relaxed in 3.22.0) — so the refusal belongs to the **build and the
+#: directory**, not to the store: measured, the CI runner opens the very same
+#: settled copy ``mode=ro``. Every other ``OperationalError`` is a fact about the
+#: store — a writer holding a lock, a rollback the read-only connection cannot
+#: perform — and must reach the caller instead of being answered by a lock-free
+#: read.
 _CANNOT_OPEN_MARKER = "unable to open database file"
 
 _TOLERANCE = 1e-9
@@ -210,18 +215,22 @@ def _connect_read_only(resolved: Path, *, immutable: bool) -> sqlite3.Connection
 def _read_only_connection(path: Path) -> Iterator[tuple[sqlite3.Connection, str]]:
     """Open the store read-only, in one snapshot, and say which mode it took.
 
-    Two modes, chosen by what the store *is*:
+    Two modes, chosen by what the store *is* and by which one the build can open:
 
     * a store that may still have writers is opened ``mode=ro``;
     * a copy with nothing outstanding to recover — the ``.backup`` file slice 1 is
-      defined against, whose ``-shm``/``-wal`` are gone — is opened
-      ``mode=ro&immutable=1``.
+      defined against, whose ``-shm``/``-wal`` are gone — is opened ``mode=ro`` as
+      well where the build can open one, and ``mode=ro&immutable=1`` where it
+      cannot.
 
-    The second mode is not a preference, it is the only way in for that input: a
-    WAL database cannot be opened read-only when SQLite is not allowed to create
-    the shared-memory file, and such a copy has no ``-shm`` to reuse, so
-    ``mode=ro`` fails with "unable to open database file" — the one failure the
-    fallback is for.
+    The second mode is the way in for that input on a build that refuses the
+    first. With no ``-shm`` to reuse, ``mode=ro`` has to create the shared-memory
+    file, which SQLite allows when the directory permits it and refuses otherwise
+    — refusing it with "unable to open database file", the one failure the
+    fallback is for. Which of the two a settled copy gets is therefore the
+    build's and the directory's decision rather than this module's preference
+    (measured: the development build here is refused and the CI runner is not),
+    and the report carries the mode that was taken.
 
     The fallback's trigger is a **condition, not a proof about writers**, and it
     has exactly two clauses:

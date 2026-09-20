@@ -13,6 +13,11 @@ on a store that still has its WAL sidecars, or that has never been degraded past
 what the write path itself permits. Those fixtures (a settled copy with no
 ``-shm``/``-wal``, a row the account guard would refuse) are built by hand and
 labelled as such at the point of use.
+
+Which of the two a **write path** hands over is the SQLite build's business, not
+the store's — measured, the last close leaves ``-shm``/``-wal`` behind on some
+builds and deletes them on others — so no fixture below inherits that shape: it
+either unlinks the sidecars or holds a connection open.
 """
 
 from __future__ import annotations
@@ -115,9 +120,13 @@ def _settle_store(sqlite_path: Path) -> None:
     """Leave the store as a ``.backup`` copy: contents in the file, no sidecars.
 
     This is the input slice 1 is defined against (``production-readout.md``:
-    ``.backup``, never a bare ``cp``) and the one the previous fixture could not
-    produce: every write-path connection in this file left ``-shm``/``-wal``
-    behind, so the probe never had to open a settled WAL store.
+    ``.backup``, never a bare ``cp``). The unlink is why this is a helper rather
+    than "write and walk away": whether a write path's last close leaves
+    ``-shm``/``-wal`` behind is a property of the SQLite build, not of the store
+    (sqlite.org/wal.html: the last connection checkpoints and deletes the WAL and
+    its shared-memory file) — measured, the development build here keeps them and
+    the CI runner deletes them — so a settled shape inherited from that close
+    would be describing the build.
     """
     conn = sqlite3.connect(sqlite_path)
     try:
@@ -1584,9 +1593,19 @@ def test_probe_reads_both_tables_from_one_snapshot(
 def test_probe_opens_a_settled_copy_and_still_produces_its_verdict(tmp_path: Path) -> None:
     """The acceptance input: a settled ``.backup`` copy with no ``-shm``/``-wal``.
 
-    This is the case the probe could not open at all: a WAL database cannot be
-    opened read-only when SQLite may not create the shared-memory file, and a
-    settled copy has no ``-shm`` to reuse.
+    That is the shape the immutable fallback was added for — the probe could not
+    answer it at all on a build that refuses the read-only open. With no ``-shm``
+    to reuse, the open is whatever the build can do: SQLite refuses it when it may
+    not create the shared-memory file and allows it when the directory permits
+    that creation (sqlite.org/wal.html, "Read-Only Databases"), so **which**
+    read-only mode a settled copy gets is the build's and the directory's
+    decision, not this module's. Both are read-only and the report carries the one
+    that was taken; measured, the development build here lands on ``ro+immutable``
+    and the CI runner on ``ro``.
+
+    The fallback itself is pinned deterministically — the cannot-open failure is
+    forced whatever the build would do — by
+    ``test_probe_falls_back_only_when_the_sidecars_are_gone``.
     """
     sqlite_path, _config = _build_green_store(tmp_path)
     _settle_store(sqlite_path)
@@ -1595,7 +1614,9 @@ def test_probe_opens_a_settled_copy_and_still_produces_its_verdict(tmp_path: Pat
 
     report = run_lot_parity_probe(sqlite_path=sqlite_path)
 
-    assert report["connection_mode"] == SETTLED_READ_MODE
+    # Which of the two read-only modes the copy gets is the build's call (see the
+    # docstring); the fallback's own side of that decision is the sibling control.
+    assert report["connection_mode"] in (LIVE_READ_MODE, SETTLED_READ_MODE)
     assert report["green"] is True
     assert report["stored_lot_count"] == 1
     assert report["projected_lot_count"] == 1
@@ -1698,33 +1719,53 @@ def test_probe_falls_back_only_when_the_sidecars_are_gone(
     fails ``mode=ro`` with SQLite's READONLY wording, which reaches the caller
     before the guard is consulted (see the hot-journal control above), so no store
     shape can put the guard in front of that decision.
+
+    Each arm **places** the filenames the guard reads instead of inheriting them
+    from the write path's exit, because that exit belongs to the build: here the
+    last close leaves ``-shm``/``-wal`` behind, on the CI runner it deletes them,
+    which is what the assertion below caught. So the un-settled arm holds a
+    connection open — a live connection carries the shared-memory file on either
+    build, and "sidecars present" is what the guard answers for — while the
+    settled arm unlinks both files by hand.
     """
     import src.application.ledger.lot_parity_probe as probe_module
 
     sqlite_path, _config = _build_green_store(tmp_path)
     sqlite_path = Path(sqlite_path)
+    holder: sqlite3.Connection | None = None
     if settled:
         _settle_store(sqlite_path)
-    # The fixture's own claim, so neither branch can pass for the wrong reason.
-    assert (
-        any(Path(f"{sqlite_path}{suffix}").exists() for suffix in ("-wal", "-shm"))
-        is not settled
-    )
+    else:
+        holder = sqlite3.connect(sqlite_path)
+        holder.execute("SELECT count(*) FROM position_lots").fetchone()
+    try:
+        # The fixture's own claim, so neither branch can pass for the wrong
+        # reason. It is asserted with the holder still attached, which is the
+        # state the probe is handed.
+        assert (
+            any(Path(f"{sqlite_path}{suffix}").exists() for suffix in ("-wal", "-shm"))
+            is not settled
+        )
 
-    real_connect = probe_module._connect_read_only
+        real_connect = probe_module._connect_read_only
 
-    def _cannot_open(resolved: Path, *, immutable: bool) -> sqlite3.Connection:
-        if not immutable:
-            raise sqlite3.OperationalError("unable to open database file")
-        return real_connect(resolved, immutable=immutable)
+        def _cannot_open(resolved: Path, *, immutable: bool) -> sqlite3.Connection:
+            if not immutable:
+                raise sqlite3.OperationalError("unable to open database file")
+            return real_connect(resolved, immutable=immutable)
 
-    monkeypatch.setattr(probe_module, "_connect_read_only", _cannot_open)
+        monkeypatch.setattr(probe_module, "_connect_read_only", _cannot_open)
 
-    if not settled:
-        with pytest.raises(sqlite3.OperationalError, match="unable to open database file"):
-            run_lot_parity_probe(sqlite_path=sqlite_path)
-        return
-    report = run_lot_parity_probe(sqlite_path=sqlite_path)
+        if not settled:
+            with pytest.raises(
+                sqlite3.OperationalError, match="unable to open database file"
+            ):
+                run_lot_parity_probe(sqlite_path=sqlite_path)
+            return
+        report = run_lot_parity_probe(sqlite_path=sqlite_path)
+    finally:
+        if holder is not None:
+            holder.close()
     assert report["connection_mode"] == SETTLED_READ_MODE
     assert report["green"] is True
 
