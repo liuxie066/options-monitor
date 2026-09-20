@@ -68,3 +68,16 @@ The base revision is never defaulted: `--check-public-surface` without `--public
 - Any entrypoint that accepts user-entered symbol, broker raw payload, or OpenD/Futu underlying identifier must canonicalize to the shared symbol format before business logic.
 - Canonical market symbols are values like `NVDA`, `0700.HK`, `9992.HK`; aliases such as `POP` must not be persisted as runtime symbol config or position symbols.
 - Shared alias handling lives in `src/application/opend_utils.py::resolve_underlier_alias`; new entrypoints should reuse it instead of adding ad hoc `upper()` or market-specific parsing branches.
+
+## D) Retired-Column SQL Registry
+
+The lot-identity retirement (slice 3) pins, instead of trusting, the set of live SQL that still names a retired column (`position_lots.expiration`, `position_lots.record_id`, `wheel_events.stock_lot_id`). `docs/retired_column_sql_registry.json` enumerates that set — SQL text, schema-helper call arguments, and standalone index-name constants, per scope — plus the f-string statements that cannot be judged from literals (recorded as `dynamic_sql`, pinned, not silently missed) and the modules exempt because their job is to name these columns (the migration tool and the parity probe; the exemption is asserted non-empty so a rename fails rather than hollows it out).
+
+Run it locally:
+
+```sh
+./.venv/bin/python scripts/retired_column_scan.py --check
+./.venv/bin/python scripts/retired_column_scan.py --write   # after an intended drift
+```
+
+Any drift — a statement added, repointed, or removed — fails `tests/quality/test_retired_column_sql_registry.py`; an intended change reruns `--write` in the same commit and the diff is the review. Repointing statements away from the retired columns is the slice 3 work itself; the registry going empty (outside the exemptions) is its completion signal.
