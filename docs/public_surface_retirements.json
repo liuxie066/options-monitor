@@ -1,4 +1,4 @@
 {
-  "description": "Declared public names that were deliberately retired from src/, domain/ and scripts/. Append-only: an entry is never deleted, because the gate reads this file to explain every name that disappeared between two revisions. See docs/GUARDRAILS.md section B.",
+  "description": "Declared public names that were deliberately retired from src/, domain/ and scripts/. Append-only: an entry is never deleted, because the gate reads this file to explain every name that disappeared between two revisions. The one exception is a \"*\" entry whose module has come back -- it is then false, and the gate only lets it be dropped, never rewritten. See docs/GUARDRAILS.md section B.",
   "retirements": []
 }
